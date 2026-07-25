@@ -178,10 +178,22 @@ def find_via_position(
     """
     pad_gx, pad_gy = coord.to_grid(pad.global_x, pad.global_y)
 
+    # In-pad candidates that FAIL the fill preference are remembered, not
+    # returned (#483 item 2): a via-in-pad on a predicted fill ISLAND taps
+    # the island -- a nearby main-fill via + short trace connects for real.
+    # They remain the final fallback (no trace needed) when nothing
+    # preferred exists anywhere.
+    _inpad_fallback = None
+
+    def _pref_ok(_x, _y):
+        return position_preference is None or position_preference(_x, _y)
+
     # Try pad center first - if not blocked, use it (no routing needed)
     if not obstacles.is_via_blocked(pad_gx, pad_gy):
         if position_filter is None or position_filter(pad.global_x, pad.global_y):
-            return (pad.global_x, pad.global_y)
+            if _pref_ok(pad.global_x, pad.global_y):
+                return (pad.global_x, pad.global_y)
+            _inpad_fallback = (pad.global_x, pad.global_y)
 
     # Then try other positions WITHIN the pad's own copper (still via-in-pad, no
     # trace needed): the exact centre can be blocked by nearby other-net copper
@@ -207,7 +219,10 @@ def find_via_position(
                 if position_filter is not None and not position_filter(bx, by):
                     continue  # e.g. outside the net's Voronoi cell (issue #287)
                 if not obstacles.is_via_blocked(gx, gy):
-                    return (bx, by)
+                    if _pref_ok(bx, by):
+                        return (bx, by)
+                    if _inpad_fallback is None:
+                        _inpad_fallback = (bx, by)
 
     # Spiral search outward
     max_radius_grid = coord.to_grid_dist(max_search_radius)
@@ -347,10 +362,17 @@ def find_via_position(
         valid_positions = pref + rest + tail
         n_preferred = len(pref)
 
-    # If no routing check needed, return closest valid position
+    # If no routing check needed, return closest valid position. A preferred
+    # external candidate beats the non-preferred in-pad fallback (that is the
+    # point of the preference); with no preferred candidate anywhere, the
+    # in-pad fallback wins over a non-preferred external one (no trace).
     if routing_obstacles is None or config is None:
+        if _inpad_fallback is not None and n_preferred == 0:
+            return _inpad_fallback
         if valid_positions:
             return valid_positions[0][1]
+        if _inpad_fallback is not None:
+            return _inpad_fallback
         if verbose:
             print(f"\n    DEBUG: No valid via positions found (all blocked in obstacle map)")
             print(f"    DEBUG: Searched {max_radius_grid} grid steps ({max_search_radius}mm) from pad center")
@@ -387,7 +409,7 @@ def find_via_position(
     if not source_cells:
         if verbose:
             print(f"[skipped {skipped_count}, no candidates left]", end=" ")
-        return None
+        return _inpad_fallback
 
     if router is None:
         router = GridRouter(
@@ -398,6 +420,11 @@ def find_via_position(
             layer_costs=config.get_layer_costs(),
             proximity_heuristic_cost=config.get_proximity_heuristic_cost()
         )
+
+    # No preferred candidate anywhere: the non-preferred in-pad fallback
+    # beats a non-preferred external via + trace (#483 item 2).
+    if _inpad_fallback is not None and n_preferred == 0:
+        return _inpad_fallback
 
     # Two-phase when a preference partitioned the candidates: seed the
     # PREFERRED cells alone first (a winning source is then guaranteed on the
@@ -445,7 +472,7 @@ def find_via_position(
     if verbose:
         print(f"\n    DEBUG: {len(source_cells)} unblocked via positions, none routed to the "
               f"pad on {pad_layer} (multi-source, {iterations}it)", end=" ")
-    return None  # No valid position with routable path
+    return _inpad_fallback  # in-pad needs no route; None when absent
 
 
 @dataclass

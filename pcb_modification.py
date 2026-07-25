@@ -1357,8 +1357,11 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
             _fvb = {}
             _zcv = make_real_fill_validator(pcb_data, net_id,
                                             shared_buckets=_fvb)
-            _zfa = make_real_fill_validator(pcb_data, net_id, margin=0.02,
-                                            shared_buckets=_fvb)
+            _zfa = make_model_fill_anchor(
+                pcb_data, net_id,
+                fallback=make_real_fill_validator(pcb_data, net_id,
+                                                  margin=0.02,
+                                                  shared_buckets=_fvb))
         anchor = []
         if keep_input_copper:
             # Input copper is read-only: anchor it (counts for degree/T-junction/
@@ -2570,6 +2573,37 @@ def weld_redundant_grazing_detours(results, pcb_data: PCBData, scope_net_ids=Non
         pcb_data.segments = [s for s in pcb_data.segments
                              if id(s) not in removed_routed_ids and id(s) not in orig_ids]
     return welded, len(nets), original_to_remove
+
+
+def make_model_fill_anchor(pcb_data, net_id, fallback=None):
+    """Fill-anchor for dead-end pruning backed by the (KiCad-parity)
+    ZoneFillModel (#483 item 4): an endpoint is anchored iff real fill
+    EXISTS there per the model. The old local-disc validator answered
+    "fill COULD exist here" -- generous by design when the model was
+    untrustworthy -- which kept stubs whose ends KiCad grades
+    track_dangling (no actual fill under them). Model false-positives
+    (~1%) only KEEP ends (safe); false-negatives (~0.1%) trim a stub the
+    real pour anchors, which is harmless same-net copper next to the pour
+    and still connectivity-gated. Falls back to `fallback` (or True) when
+    no model is available."""
+    try:
+        from plane_fill_model import get_fill_models
+        models = get_fill_models(pcb_data, net_id)
+    except Exception:
+        models = {}
+    if not models:
+        return fallback
+
+    def _anchor(x, y, layer):
+        ms = models.get(layer)
+        if not ms:
+            return fallback(x, y, layer) if fallback else False
+        for m in ms:
+            c = m.query_component(x, y, size=0.05)
+            if c is not None and c > 0:
+                return True
+        return False
+    return _anchor
 
 
 def drop_orphan_restore_pieces(keep_segs, keep_vias, net_id, pcb_data,
@@ -4319,8 +4353,11 @@ def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
             _fvb3 = {}
             _zcv3 = make_real_fill_validator(pcb_data, net_id,
                                              shared_buckets=_fvb3)
-            _zfa3 = make_real_fill_validator(pcb_data, net_id, margin=0.02,
-                                             shared_buckets=_fvb3)
+            _zfa3 = make_model_fill_anchor(
+                pcb_data, net_id,
+                fallback=make_real_fill_validator(pcb_data, net_id,
+                                                  margin=0.02,
+                                                  shared_buckets=_fvb3))
         _, removed = _safe_prune_net(
             net_id, prunable,
             [v for v in pcb_data.vias if v.net_id == net_id],
@@ -4467,8 +4504,11 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
             _fvb2 = {}
             _zcv2 = make_real_fill_validator(pcb_data, net_id,
                                              shared_buckets=_fvb2)
-            _zfa2 = make_real_fill_validator(pcb_data, net_id, margin=0.02,
-                                             shared_buckets=_fvb2)
+            _zfa2 = make_model_fill_anchor(
+                pcb_data, net_id,
+                fallback=make_real_fill_validator(pcb_data, net_id,
+                                                  margin=0.02,
+                                                  shared_buckets=_fvb2))
         kept_net, _ = _safe_prune_net(net_id, net_new, net_vias, net_pads, net_zones,
                                       zone_credit_validator=_zcv2,
                                       fill_anchor_validator=_zfa2,
