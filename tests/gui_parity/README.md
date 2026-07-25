@@ -8,6 +8,10 @@ chain's CLI steps run file-to-file.
   inside KiCad's bundled python (auto re-exec) driving the real tab apply
   methods on shimmed dialog instances. Prints a parity report; known
   deliberate divergences are listed in the module docstring.
+- `replay_plan_vs_run.py` — the same question asked of the REAL plugin: loads a
+  stress run's `<board>_plan.json` into a genuine headless `RoutingDialog` and
+  runs it with the genuine `PlanExecutor`, then diffs against the manifest
+  replayed at HEAD. See "Whole-plan replay" below.
 
 Workdir: `tests/gui_parity/work/` (gitignored).
 
@@ -183,6 +187,91 @@ skip cleanly without KiCad python). Run any directly:
   investigation harness that localized where the carry diverges (needs the set11
   corpus + kicad-cli; skips otherwise). `SYNC_PLANES=1` toggles the plane-step
   pcb_data resync.
+
+## Whole-plan replay through the real plugin (replay_plan_vs_run.py)
+
+Every stress board leaves a GUI-loadable plan beside its chain (`run_board.sh`
+→ `manifest_to_plan.py` → `<board>_plan.json`). This driver does what a user
+does with it — open the unrouted board, Claude tab → **Load...** → **Run All
+Selected Steps** — with no buttons and no LLM, then diffs the result against the
+CLI chain.
+
+    python3 tests/gui_parity/replay_plan_vs_run.py <rundir>
+    python3 tests/gui_parity/replay_plan_vs_run.py --set <runs_setN> [--boards a,b]
+
+Unlike `test_gui_engine_parity.py`, **nothing is mirrored**. The real
+`swig_gui.RoutingDialog` is constructed headless (`parent=None`, never shown —
+wx needs `WXSUPPRESS_SIZER_FLAGS_CHECK=1`, which the script sets, because
+`about_tab`'s `wxEXPAND|wxALIGN_*` sizer flags trip a debug assert) with its
+real tabs and controls, and the real `claude_plan.PlanExecutor` drives it inside
+a `wx.MainLoop`. So the whole `parse_plan_result` → `reset_params_to_defaults` →
+`apply_step_params` → `apply_step_selection` → `tab._on_*()` path is under test,
+including the two translation layers the engine harness cannot see (the
+converter and the apply side — the #361 class).
+
+**Two lessons are baked in; both were measured, not assumed.**
+
+1. **The reference is RE-RUN at HEAD, never read off disk.** Recorded corpus
+   boards carry their run-date engine. On nano_eeprom_prog the recorded
+   (2026-07-09) board has 419 segments and the *same manifest replayed at HEAD*
+   has 570 — so grading a HEAD GUI replay against the recorded board reports a
+   466-segment "divergence" that is entirely the router having moved on. The
+   default replays the pruned chain into `<workdir>/cli_head` with
+   `redo_stress_test.py` (same pruning ⇒ intermediate board names line up 1:1
+   with the plan's steps, which is what makes per-step pairing valid) and grades
+   the recorded board alongside, reported separately as *engine drift*.
+   `--cli-ref recorded` opts out and is only honest at the recording commit.
+
+2. **GUI copper is snapped to 1 µm, CLI copper is not.** Everything the GUI
+   applies goes through `pcbnew.FromMM(round(v, POSITION_DECIMALS))` with
+   `POSITION_DECIMALS = 3` (`kicad_parser.py`), so any point not already on a
+   1 µm boundary (diagonal joins, nudged vias) lands up to ~0.5 µm from the
+   CLI's full-precision text value — `167.609` vs `167.6094`. Bit-identical
+   copper is therefore impossible today for non-grid-aligned points. The
+   comparator reports a **tri-state** rather than hiding it: `IDENTICAL` (exact
+   multiset equality), `EQUIVALENT` (every leftover pairs within `--tol`, i.e.
+   only the apply rounding), `DIFFERS` (genuinely unmatched copper remains).
+   Related but separate: `--dp` defaults to 5 because pcbnew's integer-nm
+   storage vs decimal-mm text round-trips as `66.1` / `66.099999`, a 1 nm
+   artifact; dp=5 is the finest resolution at which both representations agree.
+
+Compared at four levels, on the finals **and after every step** (the GUI board
+is snapshotted per step, so the report names the FIRST step producing genuinely
+different copper): grade (router-attributable DRC + connectivity through
+`kicad_drc_compare.compare_board_data`, the corpus's own core, so the numbers
+are comparable by construction), segments, vias, zones, and footprint poses
+(`optimize_caps` moves parts — the #362 position-sync class).
+
+Exit codes: 0 same routing (IDENTICAL or EQUIVALENT), 1 copper genuinely
+differs, 2 grade differs, 3 replay failed.
+
+Note the cost: it runs **both** legs (CLI chain + GUI chain), so budget roughly
+twice a single replay per board.
+
+### First findings (2026-07-25, both legs at HEAD)
+
+Neither is root-caused; both are leads this driver produced on its first two
+runs, each localized to a single step.
+
+**nano_eeprom_prog** (set10, 3 steps) — grade parity (0 DRC, fully connected,
+both sides), **vias / zones / footprints identical**, and the route +
+plane-create steps match within tolerance. The `repair_planes` step adds
+**30 segments in the GUI that the CLI repair does not** (mostly +5V, 10 of them
+at 0.8 mm — a width both sides may legitimately pick, since both read
+`REPAIR_MAX_TRACK_WIDTH`).
+
+**eth_tap** (set10, 17 steps, ~19 min per leg) — grade parity (0 DRC; both
+sides equally not-fully-connected at HEAD), zones identical, but copper
+diverges massively (2175/7523 segments common). The per-step localization puts
+it at **step 1**, the very first BGA fanout: the CLI's `step1_U13_fanout` has
+**750 segments / 31 vias**, the GUI's has **110 segments / 34 vias**, from a
+board with zero pre-existing copper. Similar via count, ~7x the track copper —
+so it is not the usual rip-up cascade, it is the first step. Both fronts call
+the same `generate_bga_fanout` (`fanout_gui.py:1293`), so the suspect is a
+parameter reaching the engine differently (`layers` goes through
+`_apply_special` → `dialog.layer_checks`, `escape_method` through the BGA
+options panel), not a different entry point. `optimize_caps` also leaves
+21 footprints at different poses.
 
 ## Checked-in test inputs
 
