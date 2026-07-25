@@ -893,6 +893,53 @@ def oracle_reconnect(board_file: str, net_names, config,
                         break
                     result, used_width = wider, w
             if not result:
+                # ESCALATION (quickfeather U6-pocket class): the weld router
+                # runs at the step's nominal parameters, and a sub-mm link
+                # inside a dense escape field can be provably unroutable
+                # there (0.15 track at 0.09 clearance cannot pass a 0.5mm
+                # QFN pitch) while trivially routable at the rescue ladder's
+                # fine grid / escalated fab floor. Reuse net_rescue's scoped
+                # window machinery verbatim: bounded map, fenced A*, its own
+                # rung ladder. Below-nominal clearance goes to the ledger so
+                # check_drc grades at the true floor (#226).
+                _esc = None
+                try:
+                    from net_rescue import _attempt_edge
+                    _gap = (math.hypot(bx - ax, by - ay), ax, ay, bx, by)
+                    _esc, _esc_cfg = _attempt_edge(
+                        pcb_data, net_id, _gap, config, None)
+                except Exception as _ee:
+                    if verbose:
+                        print(f"    (weld escalation unavailable: {_ee})")
+                    _esc = None
+                if _esc and not _esc.get('failed'):
+                    _esegs = _esc.get('new_segments') or []
+                    _evias = _esc.get('new_vias') or []
+                    import clearance_ledger
+                    clearance_ledger.record(_esc_cfg.clearance)
+                    for _s in _esegs:
+                        new_sexprs.append(generate_segment_sexpr(
+                            (_s.start_x, _s.start_y), (_s.end_x, _s.end_y),
+                            _s.width, _s.layer, net_id,
+                            net_name if v10 else None))
+                        pcb_data.segments.append(_s)
+                        emitted_segments.append(_s)
+                    for _v in _evias:
+                        new_sexprs.append(generate_via_sexpr(
+                            _v.x, _v.y, _v.size, _v.drill,
+                            [routing_layers[0], routing_layers[-1]], net_id,
+                            net_name=net_name if v10 else None))
+                        pcb_data.vias.append(_v)
+                        emitted_vias.append(_v)
+                    print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
+                          f"<->({bx:.2f},{by:.2f})  OK (escalated: grid "
+                          f"{_esc_cfg.grid_step}, clearance "
+                          f"{_esc_cfg.clearance:.4g}, track "
+                          f"{_esc_cfg.track_width:.4g}; {len(_esegs)} "
+                          f"seg(s), {len(_evias)} via(s))")
+                    routed += 1
+                    progress = True
+                    continue
                 print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
                       f"<->({bx:.2f},{by:.2f})  FAILED")
                 failed += 1
