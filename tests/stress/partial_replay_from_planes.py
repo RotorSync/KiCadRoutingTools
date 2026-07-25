@@ -126,6 +126,10 @@ def main():
     ap.add_argument("--from-script", default="route_planes.py",
                     help="cut over at the first command running this script (default: route_planes.py)")
     ap.add_argument("--dry-run", action="store_true", help="print the partial manifest, do not run")
+    ap.add_argument("--extra-remap", action="append", default=[], metavar="OLD:NEW",
+                    help="Extra path-prefix rewrite for every replayed command. Manifests "
+                         "bake TOOL paths absolutely, so use this to point a replay at a git "
+                         "worktree: --extra-remap /repo/:/repo/.claude/worktrees/wt/")
     args = ap.parse_args()
     # Absolute paths: redo_stress_test runs every command in --workdir, and the
     # staging copies + fallback source dirs are resolved relative to these.
@@ -164,9 +168,12 @@ def main():
         with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False, dir=dst_dir) as tf:
             tf.write(text)
             pm = tf.name
+        extra = []
+        for r in args.extra_remap:
+            extra += ["--remap", r]
         rc = subprocess.run([sys.executable, os.path.join(_HERE, "redo_stress_test.py"),
-                             pm, "--remap", f"{run_dir}:{dst_dir}", "--workdir", dst_dir,
-                             "--continue-on-error"],
+                             pm, "--remap", f"{run_dir}:{dst_dir}"] + extra
+                            + ["--workdir", dst_dir, "--continue-on-error"],
                             capture_output=True, text=True)
         with open(os.path.join(dst_dir, "_partial_replay.log"), "w") as lf:
             lf.write(rc.stdout + rc.stderr)
