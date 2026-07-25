@@ -529,6 +529,69 @@ def _largest_track_component_points(pcb_data, net_id, max_pts: int = 40):
     return pts
 
 
+def _delete_stranded_link_fragment(pcb_data, net_id, pt_a, pt_b):
+    """When either link endpoint sits on a PAD-LESS copper cluster of the
+    net (per the authoritative connectivity graph, vias/zone credit
+    included), return (segments, vias) of that cluster for deletion; else
+    None. A pad-less cluster is invisible to our pads-only "connected"
+    verdict and protected as input copper by every cleanup, so KiCad
+    demands a link to it forever -- deleting the dead fragment IS the
+    resolution (no cluster, no ratsnest demand). Graphics-art components
+    are never touched."""
+    import math
+    from check_connected import check_net_connectivity
+    from geometry_utils import UnionFind
+    segs = [s for s in pcb_data.segments if s.net_id == net_id]
+    vias = [v for v in pcb_data.vias if v.net_id == net_id]
+    pads = pcb_data.pads_by_net.get(net_id, [])
+    zones = [z for z in (getattr(pcb_data, 'zones', None) or [])
+             if z.net_id == net_id]
+    if not segs or not pads:
+        return None
+    r = check_net_connectivity(net_id, segs, vias, pads, zones,
+                               return_graph=True, pcb_data=pcb_data)
+    g = r.get('graph')
+    if not g:
+        return None
+    uf = UnionFind()
+    for a, b in g.get('edges', []):
+        uf.union(a, b)
+    pad_roots = {uf.find(rep)
+                 for rep in (g.get('pad_index_repr') or {}).values()}
+    zone_roots = {uf.find(rep)
+                  for rep in (g.get('zone_index_repr') or {}).values()}
+    via_reprs = g.get('via_index_repr') or {}
+
+    def _cluster_at(pt):
+        px, py = pt
+        best, bd = None, 0.35
+        for i, s in enumerate(segs):
+            dx, dy = s.end_x - s.start_x, s.end_y - s.start_y
+            L2 = dx * dx + dy * dy
+            t = max(0.0, min(1.0, ((px - s.start_x) * dx
+                                   + (py - s.start_y) * dy) / L2)) \
+                if L2 else 0.0
+            d = math.hypot(px - (s.start_x + t * dx),
+                           py - (s.start_y + t * dy))
+            if d < bd:
+                best, bd = i, d
+        return None if best is None else uf.find(2 * best)
+
+    for pt in (pt_a, pt_b):
+        root = _cluster_at(pt)
+        if root is None or root in pad_roots or root in zone_roots:
+            continue
+        csegs = [s for i, s in enumerate(segs) if uf.find(2 * i) == root]
+        if any(getattr(s, 'graphic', False) for s in csegs):
+            continue
+        cvias = [v for j, v in enumerate(vias)
+                 if via_reprs.get(j) is not None
+                 and uf.find(via_reprs[j]) == root]
+        if csegs or cvias:
+            return csegs, cvias
+    return None
+
+
 def oracle_reconnect(board_file: str, net_names, config,
                      track_via_clearance: float,
                      hole_to_hole_clearance: float,
@@ -624,6 +687,7 @@ def oracle_reconnect(board_file: str, net_names, config,
             content = f.read()
         v10 = is_kicad_10(content)
         new_sexprs = []
+        content_dirty = False
         progress = False
 
         # Determinism (#365): kicad-cli's reported anchors jitter between
@@ -940,6 +1004,43 @@ def oracle_reconnect(board_file: str, net_names, config,
                     routed += 1
                     progress = True
                     continue
+                # STRANDED-FRAGMENT DELETION (quickfeather XTAL_O class):
+                # a link whose cluster is PAD-LESS copper (rip/reroute debris
+                # the connectivity verdict never counts -- "connected" is
+                # pads-only -- and cleanup never removes when it is input
+                # copper) can never be graded broken by our checker, so no
+                # router pass ever touches it, and KiCad demands the link
+                # forever. Deleting the dead fragment resolves the link
+                # exactly: no cluster, no ratsnest demand. Authoritative
+                # graph decides pad-less-ness (vias/zone credit included);
+                # graphics-art components are never touched.
+                _deleted = _delete_stranded_link_fragment(
+                    pcb_data, net_id, (ax, ay), (bx, by))
+                if _deleted:
+                    _dsegs, _dvias = _deleted
+                    from kicad_writer import (remove_segments_from_content,
+                                              remove_vias_from_content)
+                    content, _nrs = remove_segments_from_content(
+                        content, _dsegs,
+                        net_id_to_name={net_id: net_name} if v10 else None)
+                    if _dvias:
+                        content, _nrv = remove_vias_from_content(
+                            content, _dvias,
+                            net_id_to_name={net_id: net_name} if v10 else None)
+                    _ds_ids = {id(x) for x in _dsegs}
+                    _dv_ids = {id(x) for x in _dvias}
+                    pcb_data.segments[:] = [s for s in pcb_data.segments
+                                            if id(s) not in _ds_ids]
+                    pcb_data.vias[:] = [v for v in pcb_data.vias
+                                        if id(v) not in _dv_ids]
+                    content_dirty = True
+                    print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
+                          f"<->({bx:.2f},{by:.2f})  RESOLVED (deleted "
+                          f"stranded pad-less fragment: {len(_dsegs)} "
+                          f"seg(s), {len(_dvias)} via(s))")
+                    routed += 1
+                    progress = True
+                    continue
                 print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
                       f"<->({bx:.2f},{by:.2f})  FAILED")
                 failed += 1
@@ -1069,9 +1170,10 @@ def oracle_reconnect(board_file: str, net_names, config,
             routed += 1
             progress = True
 
-        if new_sexprs:
-            idx = content.rfind(')')
-            content = content[:idx] + ''.join(new_sexprs) + content[idx:]
+        if new_sexprs or content_dirty:
+            if new_sexprs:
+                idx = content.rfind(')')
+                content = content[:idx] + ''.join(new_sexprs) + content[idx:]
             with open(board_file, 'w', encoding='utf-8') as f:
                 f.write(content)
         if not progress:
@@ -1081,6 +1183,54 @@ def oracle_reconnect(board_file: str, net_names, config,
         links = kicad_unconnected(board_file, kicad_cli)
         if links is not None:
             remaining = len([l for l in links if l[0] in names])
+
+    # DEBRIS PASS (quickfeather XTAL_O class): remaining links on ANY net --
+    # including nets outside this pass's scope -- whose cluster is pad-less
+    # stranded copper. Deletion only, never routing (foreign nets belong to
+    # their own steps; deleting provably-dead copper is net-safe): the
+    # fragment is invisible to the pads-only "connected" verdict, protected
+    # as input copper by every cleanup, so nothing else will EVER touch it
+    # and KiCad demands the link on every future run.
+    if rounds and links:
+        _stranded_deleted = 0
+        _content2 = None
+        for lk in links:
+            _lnet = lk[0]
+            _lax, _lay = lk[1][0], lk[1][1]
+            _lbx, _lby = lk[2][0], lk[2][1]
+            _lnid = name_to_id.get(_lnet)
+            if _lnid is None:
+                continue
+            _del = _delete_stranded_link_fragment(
+                pcb_data, _lnid, (_lax, _lay), (_lbx, _lby))
+            if not _del:
+                continue
+            _dsegs, _dvias = _del
+            from kicad_writer import (remove_segments_from_content,
+                                      remove_vias_from_content)
+            if _content2 is None:
+                with open(board_file, 'r', encoding='utf-8') as f:
+                    _content2 = f.read()
+            _nm_map = {_lnid: _lnet} if v10 else None
+            _content2, _n1 = remove_segments_from_content(
+                _content2, _dsegs, net_id_to_name=_nm_map)
+            if _dvias:
+                _content2, _n2 = remove_vias_from_content(
+                    _content2, _dvias, net_id_to_name=_nm_map)
+            _ds = {id(x) for x in _dsegs}
+            _dv = {id(x) for x in _dvias}
+            pcb_data.segments[:] = [s for s in pcb_data.segments
+                                    if id(s) not in _ds]
+            pcb_data.vias[:] = [v for v in pcb_data.vias if id(v) not in _dv]
+            _stranded_deleted += 1
+            print(f"    {_lnet}: link resolved by deleting stranded "
+                  f"pad-less fragment ({len(_dsegs)} seg(s), "
+                  f"{len(_dvias)} via(s))")
+            if _lnet in names:
+                remaining = max(0, remaining - 1)
+        if _content2 is not None:
+            with open(board_file, 'w', encoding='utf-8') as f:
+                f.write(_content2)
 
     if rounds and remaining > 0:
         print(f"  KiCad-oracle recheck: {remaining} link(s) still "
