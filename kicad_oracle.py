@@ -206,18 +206,28 @@ def kicad_unconnected(board_file: str, kicad_cli: str,
 def _net_track_components(pcb_data, net_id):
     """Track+via components of a net, graded with NO zone-fill credit.
     Returns (comp_of_seg: list[root per segment], comp_of_via, segs, vias,
-    comp_len: {root: total_mm})."""
+    comp_len: {root: total_mm}).
+
+    The two label lists are ALWAYS parallel to segs/vias -- callers index
+    them by enumerate() position (`comp_of_via[j]`), so a short list is an
+    IndexError, not a graceful degradation. The no-component paths below
+    return `None` per item ("component unknown"), which every caller already
+    handles as "fall back to the single reported point". Returning bare []
+    crashed the oracle on any net whose copper is vias-only (no segments) --
+    usp_obc_v7's Net-(U5-GND), 2 vias + 2 pads, fed entirely by zone fill --
+    taking down both exact_clusters() and _cluster_points()'s own via scan.
+    """
     from check_connected import check_net_connectivity
     from geometry_utils import UnionFind
     from collections import defaultdict
     segs = [s for s in pcb_data.segments if s.net_id == net_id]
     vias = [v for v in pcb_data.vias if v.net_id == net_id]
     if not segs:
-        return [], [], segs, vias, {}
+        return [None] * len(segs), [None] * len(vias), segs, vias, {}
     r = check_net_connectivity(net_id, segs, vias, [], [], return_graph=True)
     graph = r.get('graph')
     if not graph:
-        return [], [], segs, vias, {}
+        return [None] * len(segs), [None] * len(vias), segs, vias, {}
     uf = UnionFind()
     for a, b in graph.get('edges', []):
         uf.union(a, b)
