@@ -126,11 +126,20 @@ class ZoneFillModel:
         self.x0, self.y0, self.cell = x0, y0, cell
         self.nx, self.ny = nx, ny
 
-        # Cell-center erosion: fill exists at a cell iff the cell center is
-        # >= (zc + mth/2) from every foreign edge (the mth/2 term is the
-        # min-thickness opening in cell-center form) and inside the outline.
+        # Cell-center erosion at the CLEARANCE boundary: fill can exist at a
+        # cell iff the cell center is >= zc from every foreign edge and
+        # inside the outline. The min-thickness rule is applied AFTERWARD as
+        # a morphological OPENING (erode by mth/2, dilate by mth/2) --
+        # KiCad's actual fill algorithm. The old form baked mth/2 into this
+        # guard, which models the fill SKELETON, not the fill: it loses a
+        # uniform mth/2 rim everywhere and, worse, under-connects -- two
+        # fills whose skeletons stay separate still TOUCH after KiCad's
+        # dilation whenever the free corridor is mth..2*mth wide
+        # (quickfeather: 5% of the real In1.Cu fill missing, U6.29's island
+        # falsely severed -> phantom pad repairs, doubled vias, a healthy
+        # net ripped and lost).
         free = np.ones((nx, ny), dtype=bool)
-        guard = zc + mth / 2.0
+        guard = zc
 
         cxs = x0 + (np.arange(nx) + 0.5) * cell   # cell-center coords
         cys = y0 + (np.arange(ny) + 0.5) * cell
@@ -169,6 +178,65 @@ class ZoneFillModel:
                             s.start_y + (s.end_y - s.start_y) * t / n,
                             s.width / 2.0)
 
+        def _stamp_capsule(x1, y1, x2, y2, r):
+            L = math.hypot(x2 - x1, y2 - y1)
+            n = max(1, int(L / (cell * 0.9)))
+            for t in range(n + 1):
+                _stamp_disc(x1 + (x2 - x1) * t / n,
+                            y1 + (y2 - y1) * t / n, r)
+
+        def _stamp_rot_rect(px, py, hx, hy, ang_deg):
+            # exact rotated-rect keep-out: rotate cell centers into the
+            # pad frame, then the same rounded-rect distance as _stamp_rect
+            R = guard
+            rad = math.radians(ang_deg)
+            ca, sa = math.cos(rad), math.sin(rad)
+            reach = math.hypot(hx, hy) + R
+            i0 = max(0, _gi(px - reach, x0))
+            i1 = min(nx, _gi(px + reach, x0) + 2)
+            j0 = max(0, _gi(py - reach, y0))
+            j1 = min(ny, _gi(py + reach, y0) + 2)
+            if i0 >= i1 or j0 >= j1:
+                return
+            dx = cxs[i0:i1, None] - px
+            dy = cys[None, j0:j1] - py
+            lx = dx * ca + dy * sa
+            ly = -dx * sa + dy * ca
+            ox = np.maximum(np.abs(lx) - hx, 0.0)
+            oy = np.maximum(np.abs(ly) - hy, 0.0)
+            free[i0:i1, j0:j1] &= (ox * ox + oy * oy) >= R * R
+
+        def _stamp_pad(p):
+            """Shape-faithful pad keep-out. The old bounding-RECT stamp
+            carved phantom corners on round pads -- a 3.3mm circle mounting
+            pad grew ~2.75mm^2 of false carve, and rings of those squares
+            walled off 9.4% of quickfeather's real In1.Cu fill (the pinch
+            false-negatives that drove phantom pad repairs, doubled vias,
+            and the /PDM.DATA rip). Circle -> disc, oval -> capsule (along
+            the pad's long axis, honoring rect_rotation), rect/roundrect ->
+            rect (rotated when rect_rotation is set; roundrect's corner
+            radius over-carves only micro-slivers). Custom pads keep the
+            bbox rect: their true outline is not modeled here (mic-ring
+            class) -- a documented over-approximation."""
+            px, py = p.global_x, p.global_y
+            hx, hy = p.size_x / 2.0, p.size_y / 2.0
+            rot = getattr(p, 'rect_rotation', 0.0) or 0.0
+            if p.shape == 'circle' or (p.shape == 'oval'
+                                       and abs(hx - hy) < 1e-9):
+                _stamp_disc(px, py, max(hx, hy))
+            elif p.shape == 'oval':
+                r = min(hx, hy)
+                ex, ey = (hx - r, 0.0) if hx >= hy else (0.0, hy - r)
+                if rot:
+                    rad = math.radians(rot)
+                    ca, sa = math.cos(rad), math.sin(rad)
+                    ex, ey = ex * ca - ey * sa, ex * sa + ey * ca
+                _stamp_capsule(px - ex, py - ey, px + ex, py + ey, r)
+            elif rot:
+                _stamp_rot_rect(px, py, hx, hy, rot)
+            else:
+                _stamp_rect(px, py, hx, hy)
+
         # Foreign copper on this layer + every via/through barrel.
         for v in pcb_data.vias:
             if v.net_id != net_id:
@@ -190,8 +258,7 @@ class ZoneFillModel:
                 if is_th and not on_layer:
                     _stamp_disc(p.global_x, p.global_y, (p.drill or 0) / 2.0)
                     continue
-                _stamp_rect(p.global_x, p.global_y,
-                            p.size_x / 2.0, p.size_y / 2.0)
+                _stamp_pad(p)
 
         # Copperpour keep-out areas (#477): KiCad's filler subtracts rule
         # areas marked (copperpour not_allowed) from the fill, so a keep-out
@@ -200,10 +267,11 @@ class ZoneFillModel:
         # stamp, so region repair never saw the splits and only the
         # kicad-oracle caught the resulting opens. Block cells whose center
         # falls inside such an area on this layer (even-odd over outline +
-        # holes, KiCad's rule), plus an mth/2 rim for the min-thickness
-        # opening at the boundary. No clearance term: fill lawfully touches
-        # a keep-out edge.
-        rim = mth / 2.0
+        # holes, KiCad's rule). No clearance term: fill lawfully touches a
+        # keep-out edge, and the global min-thickness OPENING below now
+        # handles the boundary rim (the old explicit mth/2 rim here would
+        # double-count it).
+        rim = 0.0
         for ko in (getattr(pcb_data.board_info, 'keepouts', None) or []):
             if ko.get('copper_pour_allowed', True):
                 continue
@@ -276,6 +344,45 @@ class ZoneFillModel:
                 crossings += (cxs < xc)
             inside[:, j] = (crossings % 2) == 1
         free &= inside
+
+        # Min-thickness OPENING (KiCad parity): erode by mth/2 then dilate
+        # by mth/2 -- exactly the filler's deflate-then-stroke. Regions
+        # whose eroded cores are separate but whose strokes overlap come out
+        # CONNECTED, as on the real board. Disc structuring element; the
+        # numpy fallback approximates it with an iterated 3x3 square
+        # (over-opens diagonal slivers by < one cell -- strictly the
+        # conservative direction).
+        r_cells = int(round((mth / 2.0) / cell))
+        if r_cells > 0:
+            if _HAS_SCIPY:
+                yy, xx = np.ogrid[-r_cells:r_cells + 1, -r_cells:r_cells + 1]
+                st = (xx * xx + yy * yy) <= r_cells * r_cells
+                free = _ndi.binary_dilation(
+                    _ndi.binary_erosion(free, structure=st),
+                    structure=st)
+            else:
+                er = free.copy()
+                for _ in range(r_cells):
+                    sh = np.zeros_like(er)
+                    sh[1:-1, 1:-1] = (er[1:-1, 1:-1]
+                                      & er[:-2, 1:-1] & er[2:, 1:-1]
+                                      & er[1:-1, :-2] & er[1:-1, 2:]
+                                      & er[:-2, :-2] & er[2:, 2:]
+                                      & er[:-2, 2:] & er[2:, :-2])
+                    er = sh
+                di = er
+                for _ in range(r_cells):
+                    sh = di.copy()
+                    sh[:-1, :] |= di[1:, :]
+                    sh[1:, :] |= di[:-1, :]
+                    sh[:, :-1] |= di[:, 1:]
+                    sh[:, 1:] |= di[:, :-1]
+                    sh[:-1, :-1] |= di[1:, 1:]
+                    sh[1:, 1:] |= di[:-1, :-1]
+                    sh[:-1, 1:] |= di[1:, :-1]
+                    sh[1:, :-1] |= di[:-1, 1:]
+                    di = sh
+                free = di
 
         # Label the free space into fill components. Two items are
         # fill-connected iff they touch the SAME component -- the whole
