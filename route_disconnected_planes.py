@@ -561,6 +561,55 @@ def route_planes(
 
     all_new_segments: List[Dict] = []
     all_new_vias: List[Dict] = []
+
+    def _consume_inner_strips(_rd, _label):
+        """Board == write model (#XTAL_O zombie class): an in-memory
+        batch_route's cleanup removes superseded/orphaned copper from
+        pcb_data AND reports it in segments_to_remove/vias_to_remove --
+        dropping that channel ships copper the board no longer has (the
+        write-list still carries it via the partial-restore emissions).
+        Remove matching write-list entries; casualty nets' input-file
+        copper is already wholly excluded by the writer, so coordinate
+        matching over the emissions is the complete consumption."""
+        _rs = _rd.get('segments_to_remove') or []
+        _rv = _rd.get('vias_to_remove') or []
+        if not _rs and not _rv:
+            return
+        _skeys = set()
+        for _s in _rs:
+            _a = (round(_s.start_x, 3), round(_s.start_y, 3))
+            _b = (round(_s.end_x, 3), round(_s.end_y, 3))
+            _skeys.add((_a, _b, _s.layer, _s.net_id))
+            _skeys.add((_b, _a, _s.layer, _s.net_id))
+        _vkeys = {(round(_v.x, 3), round(_v.y, 3), _v.net_id) for _v in _rv}
+        _n0 = len(all_new_segments) + len(all_new_vias)
+        if _skeys:
+            all_new_segments[:] = [
+                d for d in all_new_segments
+                if ((round(d['start'][0], 3), round(d['start'][1], 3)),
+                    (round(d['end'][0], 3), round(d['end'][1], 3)),
+                    d['layer'], d['net_id']) not in _skeys]
+        if _vkeys:
+            all_new_vias[:] = [
+                d for d in all_new_vias
+                if (round(d['x'], 3), round(d['y'], 3),
+                    d['net_id']) not in _vkeys]
+        # mirror out of pcb_data too (inner cleanup already removed its own
+        # objects; kept-piece duplicates re-added via partial_restores may
+        # remain)
+        pcb_data.segments[:] = [
+            s for s in pcb_data.segments
+            if ((round(s.start_x, 3), round(s.start_y, 3)),
+                (round(s.end_x, 3), round(s.end_y, 3)),
+                s.layer, s.net_id) not in _skeys]
+        pcb_data.vias[:] = [
+            v for v in pcb_data.vias
+            if (round(v.x, 3), round(v.y, 3), v.net_id) not in _vkeys]
+        _n1 = len(all_new_segments) + len(all_new_vias)
+        if _n0 != _n1:
+            print(f"  {_label}: consumed inner strip channel -- dropped "
+                  f"{_n0 - _n1} superseded write-list piece(s)")
+
     all_debug_lines: List[str] = []
     total_routes = 0
     total_regions = 0
@@ -947,6 +996,7 @@ def route_planes(
                     _vd(_v) for _v in (_rdata.get('all_swap_vias') or []))
                 all_new_segments.extend(
                     _sd(_s) for _s in (_rdata.get('all_swap_segments') or []))
+                _consume_inner_strips(_rdata, "reconnect")
                 # The reconnect mutated copper, and the plane fill models are
                 # cached on pcb_data (they subtract foreign-copper halos, so a
                 # reconnected blocker can re-pinch a fill they no longer see).
@@ -1352,6 +1402,7 @@ def route_planes(
                          'drill': _v.drill, 'layers': _v.layers,
                          'net_id': _v.net_id}
                         for _v in (_r.get('new_vias') or []))
+                _consume_inner_strips(_rdata3, "gate")
                 _gate_oracle_links[0] = None   # state changed; re-query for later nets
                 _r3b = _check3()
                 if _r3b.get('connected'):
