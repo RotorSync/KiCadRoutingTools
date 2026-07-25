@@ -852,7 +852,15 @@ def fitting_pad_via(pad_x: float, pad_y: float, net_id: int, pcb_data: PCBData,
     Deterministic pure function of board state: validate_swap and
     apply_stub_layer_switch both call it and get the same answer."""
     from fab_tiers import fab_floor_ladder, warn_fab_escalation
-    n_layers = len(pcb_data.board_info.copper_layers) or 2
+    # `or 2` is the documented "layer count unknown -> assume 2" default, but
+    # it was only reachable for an EMPTY copper_layers list: a PCBData whose
+    # board_info is absent raised AttributeError instead (c5509b7 gave this
+    # function a board_info dependency its callers never had). Reach the
+    # default for a missing board_info / copper_layers too -- the only thing
+    # n_layers selects is the fab tier's floor ladder, and 2 layers is the
+    # loosest (safest) tier to assume when the board does not say.
+    _bi = getattr(pcb_data, 'board_info', None)
+    n_layers = len(getattr(_bi, 'copper_layers', None) or []) or 2
     ladder = fab_floor_ladder(n_layers)
     candidates = [(config.via_size, config.via_drill)]
     candidates += [(f['via_diameter'], f['via_drill']) for f in ladder
