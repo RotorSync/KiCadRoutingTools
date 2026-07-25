@@ -2431,9 +2431,19 @@ def build_base_obstacles(
         if seg.net_id in exclude_net_ids:
             continue
         layer_idx = layer_map.get(seg.layer)
-        if layer_idx is None:
-            continue
         _seg_clr = config.obstacle_clearance(seg.net_id)  # #434 cross-class
+        if layer_idx is None:
+            # Copper on a layer OUTSIDE routing_layers (repair joins route on
+            # the plane layers only): tracks cannot go there, but a repair
+            # via is a THROUGH via whose annulus spans the whole stack, so it
+            # must still respect it (audit H8; obstacle_map.py grew the same
+            # guard for butterstick DQ11). Stamp the via keep-out only.
+            if seg.layer.endswith('.Cu'):
+                via_seg_expansion_mm = (config.via_size / 2 + seg.width / 2
+                                        + _seg_clr + cushion)
+                _block_segment_via_obstacle(obstacles, seg, coord,
+                                            via_seg_expansion_mm)
+            continue
         seg_expansion_mm = track_width / 2 + seg.width / 2 + _seg_clr + cushion
         _block_segment_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_mm)
         # Also block vias along this segment - must include segment width for proper clearance
@@ -2465,7 +2475,13 @@ def build_base_obstacles(
                     if pl in layer_map:
                         pad_layers_on.append(layer_map[pl])
 
-            if not pad_layers_on:
+            # A pad with copper only OUTSIDE routing_layers (an F.Cu SMD pad
+            # while repair joins route the inner plane layers) can't collide
+            # with tracks, but a repair THROUGH via's outer annulus can still
+            # land on it (audit H8) -- fall through to the via block below
+            # whenever the pad has copper anywhere on the stack.
+            if not pad_layers_on and not any(
+                    pl.endswith('.Cu') for pl in pad.layers):
                 continue
 
             # Block rectangular area around pad with clearance for track routing.
