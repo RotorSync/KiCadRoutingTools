@@ -277,6 +277,16 @@ def grade(pcb, clearance, baseline=None):
     return out
 
 
+# Extra "OLD:NEW" prefix rewrites appended to every board's replay (--remap on
+# redo_stress_test is append-able). The reason this exists: manifests bake the
+# TOOL paths absolutely, so a replay always runs whatever lives at the recorded
+# repo path -- which means a wave cannot exercise a git WORKTREE without
+# rewriting that prefix. Pass
+#   --extra-remap /path/to/repo/:/path/to/repo/.claude/worktrees/<wt>/
+# to A/B a branch without disturbing the main checkout.
+EXTRA_REMAPS = []
+
+
 def do_board(set_dir, out_dir, label, board):
     manifest = set_dir / board / "redo_commands.sh"
     src = str(set_dir / board)
@@ -290,10 +300,14 @@ def do_board(set_dir, out_dir, label, board):
         # --remap it makes redo_stress_test's clobber guard authoritative (a manifest
         # whose baked paths don't match `src` aborts loudly instead of overwriting the
         # original run dir -- the copied-set footgun).
+        _extra = []
+        for _r in EXTRA_REMAPS:
+            _extra += ["--remap", _r]
         rc = subprocess.run([sys.executable, str(REPO / "tests/stress/redo_stress_test.py"),
-                             str(manifest), "--remap", f"{src}:{dst}", "--workdir", dst,
-                             "--skip-checks", "--continue-on-error",
-                             "--timings-out", timings_path],
+                             str(manifest), "--remap", f"{src}:{dst}"] + _extra
+                            + ["--workdir", dst,
+                               "--skip-checks", "--continue-on-error",
+                               "--timings-out", timings_path],
                             stdout=log, stderr=subprocess.STDOUT).returncode
     # Per-step wall-clock (for A/B timing comparison): keep the raw per-command
     # list and a per-tool sum (route.py / route_planes.py / ... -- where the
@@ -560,7 +574,15 @@ def main():
                     help="Compare two wave summaries and print a regression table")
     ap.add_argument("--regrade", metavar="WAVE_DIR",
                     help="Re-grade an existing wave's finals (no re-routing) and rewrite its summary.json")
+    ap.add_argument("--extra-remap", action="append", default=[], metavar="OLD:NEW",
+                    help="Extra path-prefix rewrite for every replayed command. Manifests "
+                         "bake TOOL paths absolutely, so use this to point a wave at a git "
+                         "worktree: --extra-remap /repo/:/repo/.claude/worktrees/wt/")
     args = ap.parse_args()
+    for _r in args.extra_remap:
+        if ":" not in _r:
+            ap.error(f"--extra-remap needs OLD:NEW, got {_r!r}")
+    EXTRA_REMAPS[:] = args.extra_remap
 
     if args.compare:
         ok = compare(*args.compare)
