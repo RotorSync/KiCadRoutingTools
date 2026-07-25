@@ -185,6 +185,35 @@ class ZoneFillModel:
                 _stamp_disc(x1 + (x2 - x1) * t / n,
                             y1 + (y2 - y1) * t / n, r)
 
+        def _stamp_poly(ring):
+            """Polygon keep-out: block cell centers inside the ring (even-odd)
+            or within `guard` of an edge -- the same rule the copperpour
+            keep-out stamp uses, applied to a custom pad's real outline."""
+            rxs = [q[0] for q in ring]
+            rys = [q[1] for q in ring]
+            i0 = max(0, _gi(min(rxs) - guard, x0))
+            i1 = min(nx, _gi(max(rxs) + guard, x0) + 2)
+            j0 = max(0, _gi(min(rys) - guard, y0))
+            j1 = min(ny, _gi(max(rys) + guard, y0) + 2)
+            if i0 >= i1 or j0 >= j1:
+                return
+            sub_x = cxs[i0:i1]
+            for j in range(j0, j1):
+                yv = cys[j]
+                crossings = np.zeros(i1 - i0, dtype=np.int32)
+                for k in range(len(ring)):
+                    rx1, ry1 = ring[k]
+                    rx2, ry2 = ring[(k + 1) % len(ring)]
+                    if (ry1 > yv) == (ry2 > yv):
+                        continue
+                    xc = rx1 + (yv - ry1) * (rx2 - rx1) / (ry2 - ry1)
+                    crossings += (sub_x < xc)
+                free[i0:i1, j] &= (crossings % 2) == 0
+            for k in range(len(ring)):
+                rx1, ry1 = ring[k]
+                rx2, ry2 = ring[(k + 1) % len(ring)]
+                _stamp_capsule(rx1, ry1, rx2, ry2, 0.0)
+
         def _stamp_rot_rect(px, py, hx, hy, ang_deg):
             # exact rotated-rect keep-out: rotate cell centers into the
             # pad frame, then the same rounded-rect distance as _stamp_rect
@@ -221,6 +250,16 @@ class ZoneFillModel:
             px, py = p.global_x, p.global_y
             hx, hy = p.size_x / 2.0, p.size_y / 2.0
             rot = getattr(p, 'rect_rotation', 0.0) or 0.0
+            polys = getattr(p, 'polygons', None)
+            if polys:
+                # Custom pads: the parser provides the REAL copper outline(s)
+                # in board mm (#188) -- rasterize those instead of the bbox
+                # (the bbox walled off finger channels and, mic-ring class,
+                # entombed everything inside ring pads).
+                for ring in polys:
+                    if len(ring) >= 3:
+                        _stamp_poly(ring)
+                return
             if p.shape == 'circle' or (p.shape == 'oval'
                                        and abs(hx - hy) < 1e-9):
                 _stamp_disc(px, py, max(hx, hy))

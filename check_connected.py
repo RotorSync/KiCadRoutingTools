@@ -4,6 +4,7 @@ Connectivity Checker - Verify that tracks form fully connected routes from sourc
 from __future__ import annotations
 
 import sys
+import os
 import argparse
 import math
 import fnmatch
@@ -1332,6 +1333,36 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
         print(f"  {len(skipped_cross_board)} net(s) complete within each board "
               f"outline (only board-to-board links missing): "
               f"{', '.join(sorted(skipped_cross_board))}")
+
+    # KiCad reconciliation for ZONE-BACKED nets (quantization phantoms): the
+    # fill model's ~0.05mm raster provably cannot hold a legal fill corridor
+    # narrower than ~3 cells, so a pour-connected net can grade split here
+    # while KiCad's exact polygon fill connects it (quickfeather GND: one
+    # 0.17mm corridor). When kicad-cli is available and an incomplete net
+    # OWNS a zone, ask KiCad: zero unconnected links for that net =>
+    # reclassify as connected (reported, not silent). Signal nets keep pure
+    # copper grading. KICAD_NO_GRADE_RECONCILE=1 disables for A/B.
+    _zone_issue_ids = {i['net_id'] for i in issues
+                       if any(z.net_id == i['net_id'] for z in pcb_data.zones)}
+    if _zone_issue_ids and not os.environ.get('KICAD_NO_GRADE_RECONCILE'):
+        try:
+            from kicad_oracle import find_kicad_cli, kicad_unconnected
+            _cli = find_kicad_cli()
+            _links = kicad_unconnected(pcb_file, _cli) if _cli else None
+            if _links is not None:
+                _linked_nets = {lk[0] for lk in _links}
+                _reclass = [i for i in issues
+                            if i['net_id'] in _zone_issue_ids
+                            and i['net_name'] not in _linked_nets]
+                if _reclass:
+                    issues[:] = [i for i in issues if i not in _reclass]
+                    _names = ', '.join(i['net_name'] for i in _reclass)
+                    print(f"  {len(_reclass)} zone-backed net(s) reclassified "
+                          f"CONNECTED by KiCad refill (fill-model "
+                          f"quantization): {_names}")
+        except Exception as _re:
+            if not quiet:
+                print(f"  (KiCad grade reconciliation unavailable: {_re})")
 
     # Report results
     if quiet:

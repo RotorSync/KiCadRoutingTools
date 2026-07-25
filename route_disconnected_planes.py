@@ -1402,6 +1402,29 @@ def route_planes(
                          'drill': _v.drill, 'layers': _v.layers,
                          'net_id': _v.net_id}
                         for _v in (_r.get('new_vias') or []))
+                # Swap channels too (parity audit H1a): the inner route's
+                # stub-layer switches append swap copper to pcb_data; the
+                # post-gate check then reads a board whose load-bearing swap
+                # the write-list lacks -- phantom success. Mirror the adds;
+                # loudly flag the channels the plane writer cannot mirror.
+                all_new_segments.extend(
+                    {'start': (_s.start_x, _s.start_y),
+                     'end': (_s.end_x, _s.end_y),
+                     'width': _s.width, 'layer': _s.layer,
+                     'net_id': _s.net_id}
+                    for _s in (_rdata3.get('all_swap_segments') or []))
+                all_new_vias.extend(
+                    {'x': _v.x, 'y': _v.y, 'size': _v.size,
+                     'drill': _v.drill, 'layers': _v.layers,
+                     'net_id': _v.net_id}
+                    for _v in (_rdata3.get('all_swap_vias') or []))
+                for _ch in ('all_segment_modifications', 'pad_swaps',
+                            'single_ended_target_swap_info'):
+                    if _rdata3.get(_ch):
+                        print(f"  {RED}[{_nname}] gate: inner route produced "
+                              f"{len(_rdata3[_ch])} {_ch} entr(ies) the plane "
+                              f"writer cannot mirror -- board/file may "
+                              f"diverge here{RESET}")
                 _consume_inner_strips(_rdata3, "gate")
                 _gate_oracle_links[0] = None   # state changed; re-query for later nets
                 _r3b = _check3()
