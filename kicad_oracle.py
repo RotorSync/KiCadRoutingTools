@@ -592,41 +592,6 @@ def _delete_stranded_link_fragment(pcb_data, net_id, pt_a, pt_b):
     return None
 
 
-def _interior_seed_cells(poly, edge_samples, center, layer, track_half,
-                         radius=3.0, step=0.25):
-    """Grid points INSIDE `poly` within `radius` of `center` that keep a
-    track's half-width clear of the polygon edge. Fill-EDGE points are
-    illegal strap starts by construction: the fill edge sits exactly zone
-    clearance from the foreign copper that carved it, so a new track
-    centered there violates that clearance and the A* has no free source
-    cell. Falls back to the edge samples near `center` for sliver islands
-    with no interior at track width."""
-    import math as _m
-    from kicad_exact_fill import point_in_poly
-    cx, cy = center
-    near_edge = [(px, py) for px, py, *_ in edge_samples
-                 if abs(px - cx) <= radius + 1.0
-                 and abs(py - cy) <= radius + 1.0]
-    out = []
-    n = int(radius / step)
-    for i in range(-n, n + 1):
-        for j in range(-n, n + 1):
-            x, y = cx + i * step, cy + j * step
-            if _m.hypot(x - cx, y - cy) > radius:
-                continue
-            if not point_in_poly(x, y, poly):
-                continue
-            if near_edge:
-                d = min(_m.hypot(px - x, py - y) for px, py in near_edge)
-                if d < track_half + 0.05:
-                    continue
-            out.append((x, y, layer))
-    if not out:
-        out = [(px, py, layer) for px, py, *_ in edge_samples
-               if _m.hypot(px - cx, py - cy) <= radius][:200]
-    return out[:400]
-
-
 def _exact_fill_endpoints(pcb_data, net_id, net_name, A, B, exact_map,
                           track_half=0.1):
     """Strap endpoints from KiCad's EXACT fill (kicad_exact_fill): the two
@@ -769,16 +734,35 @@ def _exact_fill_endpoints(pcb_data, net_id, net_name, A, B, exact_map,
     if _m.hypot(pb[0] - pa[0], pb[1] - pa[1]) > 60.0:
         return None
 
+    # Seed WINDOW: the pinch corridor, pa..pb expanded 8mm each way. The
+    # geometric nearest approach can be walled (uhk: the carving /MOTION
+    # track's crossing is only legal 4mm south of the minimum-distance
+    # point) -- seeding the islands' full interiors within the window lets
+    # the A* pick ANY crossing along the facing boundary, not just the
+    # closest one. Interior cells (inset by the strap's half-width) because
+    # fill-EDGE points are illegal starts: the edge sits exactly zone
+    # clearance from the foreign copper that carved it.
+    from kicad_exact_fill import rasterize_interior
+    _win = (min(pa[0], pb[0]) - 8.0, min(pa[1], pb[1]) - 8.0,
+            max(pa[0], pb[0]) + 8.0, max(pa[1], pb[1]) + 8.0)
+
     def _side_seeds(pt, pts):
-        x, y = pt[0], pt[1]
         origin = pt[3]
         if origin is not None:
-            return _interior_seed_cells(
-                islands[origin][1], _samples(origin), (x, y),
-                islands[origin][0], track_half)
+            layer, poly = islands[origin]
+            cells = rasterize_interior(
+                poly, _win, 0.25, inset=track_half + 0.05,
+                edge_samples=_samples(origin))
+            if cells:
+                return [(x, y, layer) for x, y in cells][:1500]
+            # Sliver island with no interior at track width: edge samples.
+            return [(x, y, l) for x, y, l in _samples(origin)
+                    if _win[0] <= x <= _win[2]
+                    and _win[1] <= y <= _win[3]][:400]
         return [(px, py, pl) if pl else (px, py)
                 for px, py, pl, _o in pts
-                if _m.hypot(px - x, py - y) <= 3.0][:400]
+                if _win[0] <= px <= _win[2]
+                and _win[1] <= py <= _win[3]][:400]
 
     src = _side_seeds(pa, a_pts)
     tgt = _side_seeds(pb, b_pts)
@@ -1005,6 +989,119 @@ def oracle_reconnect(board_file: str, net_names, config,
             comps = _net_track_components(pcb_data, net_id)
             src, root_a = _cluster_points(pcb_data, net_id, ax, ay, al, comps)
             tgt, root_b = _cluster_points(pcb_data, net_id, bx, by, bl, comps)
+
+            def _try_exact_tier():
+                """EXACT-FILL TIER (last resort, reachable from BOTH failure
+                paths -- the not-routable tail and the degenerate raw-retry):
+                ask KiCad for its actual fill polygons (one refill per round,
+                cached) and strap the true nearest approach between the two
+                exact clusters. Fixes zero-length zone|zone pinch links (no
+                geometry to route) and island traces that walk through the
+                real split. Returns ('exempt'|'welded'|'route', payload) or
+                (None, None); 'route' payload = (result, cfg, obstacles) for
+                the shared emission path."""
+                nonlocal cross_board, routed, progress
+
+                def _plain_failed():
+                    print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
+                          f"<->({bx:.2f},{by:.2f})  FAILED")
+                    return None, None
+
+                _ex_map = _exact_islands_map()
+                if _ex_map is None:
+                    return _plain_failed()
+                try:
+                    _ex = _exact_fill_endpoints(
+                        pcb_data, net_id, net_name,
+                        (ax, ay, al, akind), (bx, by, bl, bkind),
+                        _ex_map, track_half=config.track_width / 2)
+                except Exception as _xe2:
+                    if verbose:
+                        print(f"    (exact-fill tier error: {_xe2})")
+                    return _plain_failed()
+                if _ex == 'cross-board':
+                    print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
+                          f"<->({bx:.2f},{by:.2f})  EXEMPT (clusters on "
+                          f"different board outlines -- board-to-board "
+                          f"link, no copper can join it)")
+                    attempted[_key] = 99  # never retry
+                    cross_board += 1
+                    return 'exempt', None
+                if _ex is None:
+                    return _plain_failed()
+                _esrc, _etgt, _pa, _pb, _elayer = _ex
+                print(f"    {net_name}: exact-fill tier: strapping "
+                      f"nearest approach ({_pa[0]:.2f},{_pa[1]:.2f})<->"
+                      f"({_pb[0]:.2f},{_pb[1]:.2f}) [{_elayer}]")
+                # Via ladder like the main path: nominal, then the fab-floor
+                # rung (a 0.71 via has nowhere to drop in a dense pocket).
+                for _vs, _vd in ((config.via_size, config.via_drill),
+                                 (0.45, 0.2)):
+                    if _vs > config.via_size:
+                        continue
+                    _ecfg = config if _vs == config.via_size else \
+                        replace(config, via_size=_vs, via_drill=_vd)
+                    _eobst = base_obstacles
+                    if _ecfg is not config:
+                        _eobst, _ = build_base_obstacles(
+                            exclude_net_ids={net_id},
+                            routing_layers=routing_layers,
+                            pcb_data=pcb_data,
+                            config=_ecfg,
+                            track_width=_ecfg.track_width,
+                            track_via_clearance=track_via_clearance,
+                            hole_to_hole_clearance=hole_to_hole_clearance)
+                    _eres, _ = route_plane_connection_wide(
+                        _esrc, _etgt,
+                        plane_layer_idx=layer_map.get(_elayer, anchor_layer),
+                        routing_layers=routing_layers,
+                        base_obstacles=_eobst,
+                        config=_ecfg,
+                        net_vias=net_vias,
+                        track_margin=0,
+                        max_iterations=max_iterations,
+                        verbose=verbose)
+                    if _eres and (len(_eres[0]) >= 2 or _eres[1]):
+                        return 'route', (_eres, _ecfg, _eobst)
+                # Rescue-ladder the approach gap (scoped window, fine grid,
+                # fab-floor escalation).
+                _esc2 = None
+                try:
+                    from net_rescue import _attempt_edge
+                    _gap2 = (math.hypot(_pb[0] - _pa[0], _pb[1] - _pa[1]),
+                             _pa[0], _pa[1], _pb[0], _pb[1])
+                    _esc2, _esc2_cfg = _attempt_edge(
+                        pcb_data, net_id, _gap2, config, None)
+                except Exception:
+                    _esc2 = None
+                if _esc2 and not _esc2.get('failed'):
+                    _e2segs = _esc2.get('new_segments') or []
+                    _e2vias = _esc2.get('new_vias') or []
+                    import clearance_ledger
+                    clearance_ledger.record(_esc2_cfg.clearance)
+                    for _s in _e2segs:
+                        new_sexprs.append(generate_segment_sexpr(
+                            (_s.start_x, _s.start_y), (_s.end_x, _s.end_y),
+                            _s.width, _s.layer, net_id,
+                            net_name if v10 else None))
+                        pcb_data.segments.append(_s)
+                        emitted_segments.append(_s)
+                    for _v in _e2vias:
+                        new_sexprs.append(generate_via_sexpr(
+                            _v.x, _v.y, _v.size, _v.drill,
+                            [routing_layers[0], routing_layers[-1]], net_id,
+                            net_name=net_name if v10 else None))
+                        pcb_data.vias.append(_v)
+                        emitted_vias.append(_v)
+                    print(f"    {net_name}: exact-fill strap OK (escalated: "
+                          f"{len(_e2segs)} seg(s), {len(_e2vias)} via(s))")
+                    routed += 1
+                    progress = True
+                    return 'welded', None
+                print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
+                      f"<->({bx:.2f},{by:.2f})  FAILED "
+                      f"(exact-fill strap unroutable)")
+                return None, None
 
             def _zone_expand(x, y, layer):
                 # A Zone endpoint is a whole fill island, wherever KiCad
@@ -1264,102 +1361,15 @@ def oracle_reconnect(board_file: str, net_names, config,
                     routed += 1
                     progress = True
                     continue
-                # EXACT-FILL TIER: every approximate actor has failed on
-                # this link. Ask KiCad for its actual fill polygons (one
-                # refill per round, cached) and strap the true nearest
-                # approach between the two exact clusters -- the fix for
-                # zero-length zone|zone pinch links (no geometry to route)
-                # and for island traces that walk through the real split.
-                _ex_map = _exact_islands_map()
-                _ex = None
-                if _ex_map is not None:
-                    try:
-                        _ex = _exact_fill_endpoints(
-                            pcb_data, net_id, net_name,
-                            (ax, ay, al, akind), (bx, by, bl, bkind),
-                            _ex_map, track_half=config.track_width / 2)
-                    except Exception as _xe2:
-                        if verbose:
-                            print(f"    (exact-fill tier error: {_xe2})")
-                        _ex = None
-                if _ex == 'cross-board':
-                    print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
-                          f"<->({bx:.2f},{by:.2f})  EXEMPT (clusters on "
-                          f"different board outlines -- board-to-board "
-                          f"link, no copper can join it)")
-                    attempted[_key] = 99  # never retry
-                    cross_board += 1
+                _outcome, _payload = _try_exact_tier()
+                if _outcome in ('exempt', 'welded'):
                     continue
-                if _ex is not None:
-                    _esrc, _etgt, _pa, _pb, _elayer = _ex
-                    print(f"    {net_name}: exact-fill tier: strapping "
-                          f"nearest approach ({_pa[0]:.2f},{_pa[1]:.2f})<->"
-                          f"({_pb[0]:.2f},{_pb[1]:.2f}) [{_elayer}]")
-                    _eres, _ = route_plane_connection_wide(
-                        _esrc, _etgt,
-                        plane_layer_idx=layer_map.get(_elayer, anchor_layer),
-                        routing_layers=routing_layers,
-                        base_obstacles=base_obstacles,
-                        config=config,
-                        net_vias=net_vias,
-                        track_margin=0,
-                        max_iterations=max_iterations,
-                        verbose=verbose)
-                    if _eres and (len(_eres[0]) >= 2 or _eres[1]):
-                        result = _eres
-                        rung_cfg = config
-                        rung_obstacles = base_obstacles
-                        used_via_size = config.via_size
-                        used_via_drill = config.via_drill
-                        # fall through to the shared emission path below
-                    else:
-                        # Rescue-ladder the short approach gap (scoped
-                        # window, fine grid, fab-floor escalation).
-                        _esc2 = None
-                        try:
-                            from net_rescue import _attempt_edge
-                            _gap2 = (math.hypot(_pb[0] - _pa[0],
-                                                _pb[1] - _pa[1]),
-                                     _pa[0], _pa[1], _pb[0], _pb[1])
-                            _esc2, _esc2_cfg = _attempt_edge(
-                                pcb_data, net_id, _gap2, config, None)
-                        except Exception:
-                            _esc2 = None
-                        if _esc2 and not _esc2.get('failed'):
-                            _e2segs = _esc2.get('new_segments') or []
-                            _e2vias = _esc2.get('new_vias') or []
-                            import clearance_ledger
-                            clearance_ledger.record(_esc2_cfg.clearance)
-                            for _s in _e2segs:
-                                new_sexprs.append(generate_segment_sexpr(
-                                    (_s.start_x, _s.start_y),
-                                    (_s.end_x, _s.end_y),
-                                    _s.width, _s.layer, net_id,
-                                    net_name if v10 else None))
-                                pcb_data.segments.append(_s)
-                                emitted_segments.append(_s)
-                            for _v in _e2vias:
-                                new_sexprs.append(generate_via_sexpr(
-                                    _v.x, _v.y, _v.size, _v.drill,
-                                    [routing_layers[0], routing_layers[-1]],
-                                    net_id,
-                                    net_name=net_name if v10 else None))
-                                pcb_data.vias.append(_v)
-                                emitted_vias.append(_v)
-                            print(f"    {net_name}: exact-fill strap OK "
-                                  f"(escalated: {len(_e2segs)} seg(s), "
-                                  f"{len(_e2vias)} via(s))")
-                            routed += 1
-                            progress = True
-                            continue
-                        print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
-                              f"<->({bx:.2f},{by:.2f})  FAILED "
-                              f"(exact-fill strap unroutable)")
-                        failed += 1
-                        continue
+                if _outcome == 'route':
+                    result, rung_cfg, rung_obstacles = _payload
+                    used_via_size = rung_cfg.via_size
+                    used_via_drill = rung_cfg.via_drill
+                    # fall through to the shared emission path below
                 else:
-                    print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
-                          f"<->({bx:.2f},{by:.2f})  FAILED")
                     failed += 1
                     continue
             route_points, via_positions = result
@@ -1385,10 +1395,24 @@ def oracle_reconnect(board_file: str, net_names, config,
                     result = result2
                     route_points, via_positions = result
                 else:
-                    print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
-                          f"<->({bx:.2f},{by:.2f})  FAILED (degenerate)")
-                    failed += 1
-                    continue
+                    # The degenerate path is how over-flooded island traces
+                    # die (source and target expansion overlap) -- exactly
+                    # the shape the exact-fill tier resolves. Try it before
+                    # giving up; previously this exit bypassed the tier
+                    # entirely (scalenode/corax56 never reached it).
+                    _outcome, _payload = _try_exact_tier()
+                    if _outcome in ('exempt', 'welded'):
+                        continue
+                    if _outcome == 'route':
+                        result, rung_cfg, rung_obstacles = _payload
+                        used_via_size = rung_cfg.via_size
+                        used_via_drill = rung_cfg.via_drill
+                        route_points, via_positions = result
+                    else:
+                        print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
+                              f"<->({bx:.2f},{by:.2f})  FAILED (degenerate)")
+                        failed += 1
+                        continue
             # Same-net drill guard (#282 class): the link's obstacle map
             # excludes the net's OWN copper, so a new via can land within
             # hole-to-hole of an existing same-net via (0.355mm overlaps on

@@ -203,6 +203,47 @@ def point_in_poly(x: float, y: float,
     return inside
 
 
+def rasterize_interior(poly: List[Tuple[float, float]],
+                       window: Tuple[float, float, float, float],
+                       step: float = 0.25, inset: float = 0.0,
+                       edge_samples=None) -> List[Tuple[float, float]]:
+    """Grid points inside `poly`, clipped to the `window` bbox, at least
+    `inset` from the boundary (distance to `edge_samples`). Row-vectorized
+    ray cast (numpy) -- pure-python point-in-poly over a window against a
+    10k-vertex island polygon is prohibitive."""
+    import numpy as np
+    x0, y0, x1, y1 = window
+    xs = np.arange(x0, x1 + step, step)
+    ys = np.arange(y0, y1 + step, step)
+    if not len(xs) or not len(ys):
+        return []
+    px = np.asarray([p[0] for p in poly])
+    py = np.asarray([p[1] for p in poly])
+    x2 = np.roll(px, -1)
+    y2 = np.roll(py, -1)
+    inside = np.zeros((len(xs), len(ys)), dtype=bool)
+    for j, yv in enumerate(ys):
+        mask = (py > yv) != (y2 > yv)
+        if not mask.any():
+            continue
+        xc = px[mask] + (yv - py[mask]) * (x2[mask] - px[mask]) \
+            / (y2[mask] - py[mask])
+        cnt = (xs[:, None] < xc[None, :]).sum(axis=1)
+        inside[:, j] = (cnt % 2) == 1
+    ii, jj = np.nonzero(inside)
+    pts = np.column_stack([xs[ii], ys[jj]])
+    if inset > 0 and edge_samples is not None and len(pts):
+        es = np.asarray([(p[0], p[1]) for p in edge_samples])
+        keep = np.ones(len(pts), dtype=bool)
+        chunk = 4000
+        for i0 in range(0, len(pts), chunk):
+            d2 = ((pts[i0:i0 + chunk, None, :] - es[None, :, :]) ** 2
+                  ).sum(axis=2).min(axis=1)
+            keep[i0:i0 + chunk] = d2 >= inset * inset
+        pts = pts[keep]
+    return [(float(x), float(y)) for x, y in pts]
+
+
 def sample_poly_edges(poly: List[Tuple[float, float]], step: float = 0.25,
                       cap: int = 4000) -> List[Tuple[float, float]]:
     """Points along the polygon boundary every ~`step` mm (vertices always
