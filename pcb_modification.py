@@ -2572,6 +2572,117 @@ def weld_redundant_grazing_detours(results, pcb_data: PCBData, scope_net_ids=Non
     return welded, len(nets), original_to_remove
 
 
+def drop_orphan_restore_pieces(keep_segs, keep_vias, net_id, pcb_data,
+                               eps=1e-3):
+    """Connectivity-filter a partial-restore keep-set (the XTAL_O debris
+    class): the collision filter drops restored pieces one by one and can
+    orphan the survivors -- the dropped pieces were their only bridges to
+    the trunk. Pad-less remnants then ship forever: the pads-only
+    "connected" verdict never flags them, every cleanup's input-copper
+    guard protects them, and KiCad demands a ratsnest link to the stranded
+    cluster on every future run (quickfeather Net-(U6-XTAL_O), 2 fragments).
+
+    A kept piece survives only if it reaches an ANCHOR -- a pad of the net,
+    or net copper already on the board (not part of this restore) --
+    transitively through other kept pieces. Contact tests are GENEROUS
+    (cap reach + circumscribed pad circle): over-keeping is harmless (the
+    oracle debris pass backstops), over-dropping would delete live copper.
+    Mutates both lists in place; returns the number of orphans dropped."""
+    import math as _m
+    if not keep_segs and not keep_vias:
+        return 0
+    n_s = len(keep_segs)
+    n_v = len(keep_vias)
+    parent = list(range(n_s + n_v + 1))
+    ANCHOR = n_s + n_v
+
+    def _find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def _union(a, b):
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    def _d_pt_seg(px, py, s):
+        dx, dy = s.end_x - s.start_x, s.end_y - s.start_y
+        L2 = dx * dx + dy * dy
+        t = max(0.0, min(1.0, ((px - s.start_x) * dx
+                               + (py - s.start_y) * dy) / L2)) if L2 else 0.0
+        return _m.hypot(px - (s.start_x + t * dx), py - (s.start_y + t * dy))
+
+    def _seg_touch(a, b):
+        if a.layer != b.layer:
+            return False
+        r = (a.width + b.width) / 2.0 + eps
+        return (_d_pt_seg(a.start_x, a.start_y, b) < r
+                or _d_pt_seg(a.end_x, a.end_y, b) < r
+                or _d_pt_seg(b.start_x, b.start_y, a) < r
+                or _d_pt_seg(b.end_x, b.end_y, a) < r)
+
+    def _via_seg_touch(v, s):
+        return _d_pt_seg(v.x, v.y, s) < v.size / 2.0 + s.width / 2.0 + eps
+
+    def _via_via_touch(a, b):
+        return _m.hypot(a.x - b.x, a.y - b.y) < (a.size + b.size) / 2.0 + eps
+
+    # intra-keep-set edges
+    for i in range(n_s):
+        for j in range(i + 1, n_s):
+            if _seg_touch(keep_segs[i], keep_segs[j]):
+                _union(i, j)
+        for j in range(n_v):
+            if _via_seg_touch(keep_vias[j], keep_segs[i]):
+                _union(i, n_s + j)
+    for i in range(n_v):
+        for j in range(i + 1, n_v):
+            if _via_via_touch(keep_vias[i], keep_vias[j]):
+                _union(n_s + i, n_s + j)
+
+    # anchors: pads of the net (circumscribed circle, generous)...
+    for p in pcb_data.pads_by_net.get(net_id, []):
+        pr = max(p.size_x, p.size_y) / 2.0
+        for i, s in enumerate(keep_segs):
+            if _d_pt_seg(p.global_x, p.global_y, s) < pr + s.width / 2.0 + eps:
+                _union(ANCHOR, i)
+        for j, v in enumerate(keep_vias):
+            if _m.hypot(p.global_x - v.x, p.global_y - v.y) \
+                    < pr + v.size / 2.0 + eps:
+                _union(ANCHOR, n_s + j)
+    # ...and net copper already on the board (trunk not part of this restore)
+    _keep_ids = {id(x) for x in keep_segs} | {id(x) for x in keep_vias}
+    for s in pcb_data.segments:
+        if s.net_id != net_id or id(s) in _keep_ids:
+            continue
+        for i, k in enumerate(keep_segs):
+            if _seg_touch(s, k):
+                _union(ANCHOR, i)
+        for j, v in enumerate(keep_vias):
+            if _via_seg_touch(v, s):
+                _union(ANCHOR, n_s + j)
+    for v in pcb_data.vias:
+        if v.net_id != net_id or id(v) in _keep_ids:
+            continue
+        for i, k in enumerate(keep_segs):
+            if _via_seg_touch(v, k):
+                _union(ANCHOR, i)
+        for j, kv in enumerate(keep_vias):
+            if _via_via_touch(v, kv):
+                _union(ANCHOR, n_s + j)
+
+    root = _find(ANCHOR)
+    ok_s = [s for i, s in enumerate(keep_segs) if _find(i) == root]
+    ok_v = [v for j, v in enumerate(keep_vias) if _find(n_s + j) == root]
+    dropped = (n_s - len(ok_s)) + (n_v - len(ok_v))
+    if dropped:
+        keep_segs[:] = ok_s
+        keep_vias[:] = ok_v
+    return dropped
+
+
 def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                            clearance: float = 0.1,
                            check_foreign_segments: bool = False,

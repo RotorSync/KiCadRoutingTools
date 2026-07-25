@@ -190,6 +190,9 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
                         dropped += 1
                     else:
                         keep_vias.append(v)
+                from pcb_modification import drop_orphan_restore_pieces
+                dropped += drop_orphan_restore_pieces(
+                    keep_segs, keep_vias, blocker, pcb_data)
                 if not keep_segs and not keep_vias:
                     # Nothing restorable: honest full rip for the reconnect pass.
                     if blocker not in ripped_net_ids:

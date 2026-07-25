@@ -439,6 +439,9 @@ def _settle_ripped_nets(ripped_data, pcb_data, via_obstacle_cache, obstacles,
                 dropped += 1
             else:
                 keep_vias.append(rv)
+        from pcb_modification import drop_orphan_restore_pieces
+        dropped += drop_orphan_restore_pieces(
+            keep_segs, keep_vias, blocker_id, pcb_data)
         if not keep_segs and not keep_vias:
             # Nothing restorable: leave fully ripped for the caller's honest
             # reroute handoff (net excluded from output + reported).

@@ -505,6 +505,8 @@ def run_casualty_reconcile(state) -> Dict:
                          {'new_segments': [], 'new_vias': [v]},
                          pcb_data, ripped_ids, config.clearance)]
         pn = _pair_name(net_id)
+        from pcb_modification import drop_orphan_restore_pieces
+        drop_orphan_restore_pieces(keep_segs, keep_vias, net_id, pcb_data)
         if keep_segs or keep_vias:
             dropped = (len(src.get('new_segments') or []) - len(keep_segs)
                        + len(src.get('new_vias') or []) - len(keep_vias))

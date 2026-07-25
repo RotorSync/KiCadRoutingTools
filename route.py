@@ -1265,6 +1265,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                          if not _saved_route_collides(
                              {'new_segments': [], 'new_vias': [v]},
                              pcb_data, [nid], config.clearance)]
+            from pcb_modification import drop_orphan_restore_pieces
+            drop_orphan_restore_pieces(keep_segs, keep_vias, nid, pcb_data)
             if not keep_segs and not keep_vias:
                 continue
             dropped = (len(saved.get('new_segments') or []) - len(keep_segs)
