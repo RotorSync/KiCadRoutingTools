@@ -779,7 +779,8 @@ def oracle_reconnect(board_file: str, net_names, config,
                      max_iterations: int = 1_000_000,
                      verbose: bool = False,
                      progress_callback=None,
-                     cancel_check=None) -> dict:
+                     cancel_check=None,
+                     project_from: str = None) -> dict:
     """Route the exact missing links kicad-cli reports for `net_names` on
     `board_file`, in place, until KiCad is satisfied or no progress.
 
@@ -844,7 +845,28 @@ def oracle_reconnect(board_file: str, net_names, config,
         if progress_callback:
             progress_callback(0, 0, f"KiCad-oracle: running kicad-cli DRC "
                                     f"(round {rnd + 1})...")
-        links = kicad_unconnected(board_file, kicad_cli)
+        links = None
+        # DETERMINISTIC link source (#490): kicad-cli DRC's threaded
+        # connectivity reported three different link sets on one unchanged
+        # board (rp2040); welds chased a different report each round and
+        # orangecrab's repair graded 103/65/92 across identical-input runs.
+        # pcbnew's ZONE_FILLER is measured-deterministic -- exact_unconnected
+        # clusters its fill truth reproducibly and anchors each link at the
+        # true nearest approach. KICAD_LEGACY_ORACLE=1 restores kicad-cli.
+        if not os.environ.get('KICAD_LEGACY_ORACLE'):
+            try:
+                from kicad_exact_fill import exact_unconnected
+                links = exact_unconnected(board_file, names,
+                                          project_from=project_from)
+                if links is not None and rnd == 0:
+                    print("  KiCad-oracle recheck: deterministic exact-fill "
+                          "link source (pcbnew refill)")
+            except Exception as _xe:
+                print(f"  (exact link source failed: {_xe}; falling back "
+                      f"to kicad-cli)")
+                links = None
+        if links is None:
+            links = kicad_unconnected(board_file, kicad_cli)
         if links is None:
             print("  KiCad-oracle recheck: kicad-cli DRC failed, skipping")
             break
@@ -1530,8 +1552,17 @@ def oracle_reconnect(board_file: str, net_names, config,
         if not progress:
             break
     else:
-        # ran all rounds; get the final count
-        links = kicad_unconnected(board_file, kicad_cli)
+        # ran all rounds; get the final count (same source as the rounds)
+        links = None
+        if not os.environ.get('KICAD_LEGACY_ORACLE'):
+            try:
+                from kicad_exact_fill import exact_unconnected
+                links = exact_unconnected(board_file, names,
+                                          project_from=project_from)
+            except Exception:
+                links = None
+        if links is None:
+            links = kicad_unconnected(board_file, kicad_cli)
         if links is not None:
             remaining = len([l for l in links if l[0] in names])
 

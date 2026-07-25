@@ -1277,10 +1277,6 @@ def route_planes(
         def _gate_oracle_query():
             import tempfile
             try:
-                from kicad_oracle import find_kicad_cli, kicad_unconnected
-                _cli = find_kicad_cli()
-                if not _cli:
-                    return False
                 _tmp = tempfile.NamedTemporaryFile(
                     suffix='.kicad_pcb', delete=False)
                 _tmp.close()
@@ -1291,7 +1287,33 @@ def route_planes(
                               all_new_vias, None,
                               net_id_to_name=_nm10,
                               exclude_net_ids=ripped_net_ids + partial_ids)
-                _links = kicad_unconnected(_tmp.name, _cli)
+                _links = None
+                # DETERMINISTIC gate source (#490): kicad-cli DRC's threaded
+                # connectivity gives different link reports run-to-run on
+                # marginal boards, and the gate's verdicts steer RIP
+                # decisions -- the top chaos lever in the repair. pcbnew's
+                # ZONE_FILLER is measured-deterministic; exact_unconnected
+                # clusters its fill truth reproducibly.
+                # KICAD_LEGACY_GATE_ORACLE=1 restores kicad-cli for A/B.
+                if not os.environ.get('KICAD_LEGACY_GATE_ORACLE'):
+                    try:
+                        from kicad_exact_fill import exact_unconnected
+                        _gnames = [pcb_data.nets[g].name
+                                   for g in unique_nets
+                                   if g in pcb_data.nets]
+                        _links = exact_unconnected(
+                            _tmp.name, _gnames, project_from=input_file)
+                    except Exception as _xe:
+                        print(f"  (exact gate source failed: {_xe}; "
+                              f"falling back to kicad-cli)")
+                        _links = None
+                if _links is None:
+                    from kicad_oracle import (find_kicad_cli,
+                                              kicad_unconnected)
+                    _cli = find_kicad_cli()
+                    if not _cli:
+                        return False
+                    _links = kicad_unconnected(_tmp.name, _cli)
                 try:
                     os.unlink(_tmp.name)
                 except OSError:
@@ -2286,7 +2308,8 @@ Examples:
         _orc = oracle_reconnect(args.output_file, net_names, _ocfg,
                                 track_via_clearance=args.track_via_clearance,
                                 hole_to_hole_clearance=args.hole_to_hole_clearance,
-                                verbose=args.verbose)
+                                verbose=args.verbose,
+                                project_from=args.input_file)
         try:
             import json as _json
             print('JSON_ORACLE: ' + _json.dumps(

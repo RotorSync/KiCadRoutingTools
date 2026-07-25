@@ -1502,8 +1502,16 @@ class PlanesTab(wx.Panel):
                 except Exception:
                     pass
 
+            # #490: the temp save has no sibling .kicad_pro; the exact-fill
+            # link source must stage the REAL project's netclasses or the
+            # refill runs at stock rules (phantom-divergence trap).
+            try:
+                _proj_from = board.GetFileName() or None
+            except Exception:
+                _proj_from = None
             orc = oracle_reconnect(
                 tmp, nets, ocfg,
+                project_from=_proj_from,
                 track_via_clearance=cfg_src.get(
                     'track_via_clearance',
                     defaults.PLANE_TRACK_VIA_CLEARANCE),
