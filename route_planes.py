@@ -2472,6 +2472,13 @@ def create_plane(
                           for nid, c in net_clearances.items()}
     if net_clearances:
         config.net_clearances = dict(net_clearances)
+    # Publish the SAME map to the fill model (#483 item 5): KiCad refills a
+    # zone at max(zone clearance, pairwise netclass), so on honor-classes
+    # chains a looser foreign class carves copper the model would otherwise
+    # predict as fill. Must precede every ZoneFillModel build on this board --
+    # models are cached, and a stale flat-zc model outlives the map.
+    from plane_fill_model import set_board_net_clearances
+    set_board_net_clearances(pcb_data, net_clearances)
     coord = GridCoord(grid_step)
 
     # Create reusable router for via-to-pad routing

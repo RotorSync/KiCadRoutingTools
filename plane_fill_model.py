@@ -29,6 +29,7 @@ cheaper than the old per-query bucket scan.
 from __future__ import annotations
 
 import math
+import os
 from typing import Optional
 
 import numpy as np
@@ -42,6 +43,16 @@ except ImportError:
     _HAS_SCIPY = False
 
 _CACHE_ATTR = '_plane_fill_models'
+
+# Board-level per-net class clearance map ({net_id: mm}), published by
+# whichever consumer resolved it (route_planes, the repair passes) and read by
+# EVERY model built for that board -- see set_board_net_clearances. It is a
+# board property rather than a constructor argument on purpose: models are
+# CACHED and shared across consumers (_CACHE_ATTR), and two of the six build
+# sites (check_connected's zone credit, pcb_modification's fill anchors) carry
+# no config at all, so a per-call argument would hand one consumer a model
+# stamped at a different clearance than the next consumer assumes.
+_NC_ATTR = '_plane_fill_net_clearances'
 
 # Zone-identity lookup: models built via get_zone_model/get_fill_models are
 # ALSO registered here, so consumers that only have the zone object (the
@@ -107,10 +118,22 @@ def _label_components(free):
 class ZoneFillModel:
     """Reached-fill bitmap for one zone (net + layer + outline)."""
 
-    def __init__(self, pcb_data, zone):
+    def __init__(self, pcb_data, zone, net_clearances=None):
         self.ok = False
         net_id = zone.net_id
         layer = zone.layer
+        # Per-net class clearances (#483 item 5). Explicit arg wins (tests /
+        # one-off probes); otherwise the board-level map. Absent net => 0.0,
+        # i.e. inert -- net_clearance_map_by_id records only NON-Default
+        # classes, and the Default class is already inside `zc`.
+        _nc = net_clearances if net_clearances is not None \
+            else (getattr(pcb_data, _NC_ATTR, None) or {})
+        # A/B kill-switches (same affordance as KICAD_NO_GATE_ORACLE): both
+        # fidelity terms below make the model predict LESS fill, and every
+        # consumer keys off that prediction, so being able to flip each one
+        # without a rebuild is how the corpus A/B attributes a delta.
+        if os.environ.get('KICAD_NO_FILL_NETCLASS'):
+            _nc = {}
         zc = zone.clearance if zone.clearance is not None \
             else defaults.PLANE_ZONE_CLEARANCE
         mth = zone.min_thickness if zone.min_thickness is not None \
@@ -140,15 +163,19 @@ class ZoneFillModel:
         # net ripped and lost).
         free = np.ones((nx, ny), dtype=bool)
         # `guard` is the clearance the CURRENT object is stamped at. Base =
-        # the zone clearance; the pad loop below raises it per-pad to honor a
-        # resolved local override (#326 / audit H2): KiCad's filler keeps
-        # max(zone clearance, pad override) from that pad, so stamping a
-        # 0.8mm fiducial keep-clear at a flat 0.2 zc over-credited fill the
-        # refill actually carves away. (Netclass pairwise terms are capped at
-        # the ceiling on clamped chains, so the pad override is the one live
-        # per-object term; class-aware stamping needs a net_clearances thread
-        # and stays a follow-up.)
-        guard_base = zc
+        # max(zone clearance, THIS zone's net class) -- the zone's own side of
+        # every pair, so each loop below only has to add the foreign side.
+        # Each loop raises it per-object to KiCad's real pairwise rule
+        # (#483 item 5 / audit H2), mirroring _neck_plane_segments'
+        # _pair_clearance: max(zc, class(zone net), class(foreign net),
+        # pad override). Two live per-object terms:
+        #   - pad local override (#326): a 0.8mm fiducial keep-clear stamped
+        #     at a flat 0.2 zc over-credits fill the refill carves away.
+        #   - foreign NET CLASS: on honor-classes chains (no --clearance
+        #     ceiling) a foreign net with a LOOSER class carves more than the
+        #     zone clearance alone, so the model predicted fill KiCad does not
+        #     produce. Inert on clamped chains, where the ceiling caps the map.
+        guard_base = max(zc, _nc.get(net_id, 0.0))
         guard = guard_base
 
         cxs = x0 + (np.arange(nx) + 0.5) * cell   # cell-center coords
@@ -286,13 +313,19 @@ class ZoneFillModel:
             else:
                 _stamp_rect(px, py, hx, hy)
 
-        # Foreign copper on this layer + every via/through barrel.
+        # Foreign copper on this layer + every via/through barrel. `guard` is
+        # rebound per object to the pairwise clearance and restored after each
+        # loop (the closure reads the CURRENT binding).
         for v in pcb_data.vias:
             if v.net_id != net_id:
+                guard = max(guard_base, _nc.get(v.net_id, 0.0))
                 _stamp_disc(v.x, v.y, v.size / 2.0)
+        guard = guard_base
         for s in pcb_data.segments:
             if s.net_id != net_id and s.layer == layer:
+                guard = max(guard_base, _nc.get(s.net_id, 0.0))
                 _stamp_seg(s)
+        guard = guard_base
         for plist in pcb_data.pads_by_net.values():
             for p in plist:
                 if p.net_id == net_id:
@@ -303,9 +336,10 @@ class ZoneFillModel:
                     continue
                 # Per-pad clearance override (#326): KiCad's filler (and its
                 # hole_clearance rule) honors it, so stamp this pad at
-                # max(zc, override). The closure guard is rebound for the
-                # stamps below and restored after the loop.
+                # max(zc, class pair, override). The closure guard is rebound
+                # for the stamps below and restored after the loop.
                 guard = max(guard_base,
+                            _nc.get(p.net_id, 0.0),
                             getattr(p, 'local_clearance', 0.0) or 0.0)
                 if p.pad_type == 'np_thru_hole':
                     _stamp_disc(p.global_x, p.global_y, (p.drill or 0) / 2.0)
@@ -315,6 +349,17 @@ class ZoneFillModel:
                     continue
                 _stamp_pad(p)
         guard = guard_base
+
+        # NOT MODELLED HERE: neighbour-zone pullback (#483 item 6). KiCad's
+        # filler also keeps zone-to-zone clearance, so a sibling pour on the
+        # same layer pushes this fill back from their shared boundary. That
+        # is real, but measuring it on a DETERMINISTIC grader (once the
+        # equal-priority UUID ambiguity was fixed, 9e6c48c) gave a mixed
+        # result over 8 boards: duet2_3dp improved (incomplete 2 -> 0) while
+        # scalenode_cm4 regressed (0 -> 1), 6 flat, aggregate -1 incomplete
+        # net. That is inside the known single-board noise floor, so it is
+        # held on branch plane-483-fill-fidelity pending a wave over all 60
+        # trigger boards rather than landed on an 8-board sample.
 
         # Copperpour keep-out areas (#477): KiCad's filler subtracts rule
         # areas marked (copperpour not_allowed) from the fill, so a keep-out
@@ -503,6 +548,36 @@ class ZoneFillModel:
             return 0
         # nearest labeled cell wins (ties: smallest label -- deterministic)
         return int(vals.min())
+
+
+def set_board_net_clearances(pcb_data, net_clearances):
+    """Publish the per-net class clearance map every fill model for this board
+    should stamp at (#483 item 5).
+
+    Call this once from whichever consumer resolved the map (route_planes and
+    the repair entry points do), BEFORE any model is built. Models are cached
+    and shared across consumers, so the map has to be a board property: two
+    build sites (check_connected's zone credit, pcb_modification's fill
+    anchors) have no config to thread it from, and they must not be handed a
+    model stamped under different rules than the one that built it assumed.
+
+    Changing an already-published map drops the model cache -- a model built
+    under the old clearances predicts the wrong fill. Publishing the same map
+    twice is free, so callers may call it unconditionally.
+    """
+    nc = {int(k): float(v) for k, v in (net_clearances or {}).items()
+          if v}
+    if (getattr(pcb_data, _NC_ATTR, None) or {}) == nc:
+        return
+    try:
+        setattr(pcb_data, _NC_ATTR, nc)
+    except Exception:
+        return          # slotted/frozen board object: models stay flat-zc
+    try:
+        delattr(pcb_data, _CACHE_ATTR)
+    except (AttributeError, TypeError):
+        pass
+    _MODELS_BY_ZONE_ID.clear()
 
 
 def get_fill_models(pcb_data, net_id):

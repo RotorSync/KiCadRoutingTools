@@ -520,6 +520,14 @@ def route_planes(
                           for nid, c in net_clearances.items()}
     if net_clearances:
         config.net_clearances = dict(net_clearances)
+    # Publish the SAME map to the fill model (#483 item 5): KiCad refills a
+    # zone at max(zone clearance, pairwise netclass), so on honor-classes
+    # chains a looser foreign class carves copper the model would otherwise
+    # predict as fill -- and every repair decision here (region discovery,
+    # zone credit, dead-end anchors, the gate) reads that prediction. Must
+    # precede every ZoneFillModel build on this board: models are cached.
+    from plane_fill_model import set_board_net_clearances
+    set_board_net_clearances(pcb_data, net_clearances)
 
     # Auto-detect routing layers if not specified
     if routing_layers is None:
