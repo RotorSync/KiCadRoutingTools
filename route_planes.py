@@ -2058,7 +2058,24 @@ def _resolve_zone_clearance(zone_clearance, clearance, min_thickness,
     """Resolve the pour clearance (see call site). None -> the routed
     clearance; then, if the densest BGA via lattice the pour must serve is
     tighter than 2*zc + min_thickness, escalate DOWN to what threads --
-    floored at the fab minimum clearance -- with a warning either way."""
+    floored at the fab minimum clearance -- with a warning either way.
+
+    The resolved value is recorded in the clearance ledger: a KiCad refill
+    regrows the pour at max(zone clearance, netclass), so a sub-nominal pour
+    clearance (escalated, or an explicit tight --zone-clearance) only
+    survives refill if the project floor drops with it. Without the record,
+    the .kicad_pro writeback kept the nominal floor and the refilled pour
+    sealed the very BGA corridors the escalation opened."""
+    zc = _resolve_zone_clearance_impl(
+        zone_clearance, clearance, min_thickness, pcb_data, via_size,
+        net_names)
+    import clearance_ledger
+    clearance_ledger.record(zc)
+    return zc
+
+
+def _resolve_zone_clearance_impl(zone_clearance, clearance, min_thickness,
+                                 pcb_data, via_size, net_names=None):
     from kicad_parser import find_components_by_type, detect_bga_pitch
     from list_nets import fab_floors
     explicit = zone_clearance is not None
