@@ -2014,15 +2014,15 @@ def _verify_broken_ripped_nets(output_file: str, ripped_net_ids: List[int],
 def _empty_plane_results(return_results: bool):
     """Zero-work create_plane result in the shape the caller expects (#382 E5).
 
-    The GUI (return_results=True) unpacks EXACTLY 8 values; the CLI unpacks 3.
+    The GUI (return_results=True) unpacks EXACTLY 9 values; the CLI unpacks 3.
     Every validation-error early return must go through here so a bad-input exit
-    can't hand the GUI a short (3/6/7) tuple it will ValueError on -- the bug
-    this consolidates. The 8-field shape mirrors the full return_results path:
+    can't hand the GUI a short tuple it will ValueError on -- the bug this
+    consolidates. The 9-field shape mirrors the full return_results path:
     (vias, traces, pads_needing, new_vias, new_segments, new_zones,
-     failed_pads, ripped_net_ids).
+     failed_pads, ripped_net_ids, reconnect_swap_data (#484 H3)).
     """
     if return_results:
-        return (0, 0, 0, [], [], [], 0, [])
+        return (0, 0, 0, [], [], [], 0, [], {})
     return (0, 0, 0)
 
 
@@ -3414,6 +3414,7 @@ def create_plane(
 
     if progress_callback:
         progress_callback(1, 1, "Plane creation complete")
+    reconnect_swap_data: dict = {}
     if return_results:
         # GUI parity with the CLI's in-run ripped-net reconnect (#347): the
         # file path above reroutes verified-broken casualties after writing;
@@ -3484,6 +3485,16 @@ def create_plane(
                         _vd(_v) for _v in (_rdata.get('all_swap_vias') or []))
                     all_new_segments.extend(
                         _sd(_s) for _s in (_rdata.get('all_swap_segments') or []))
+                    # #484 H3: target/pad swaps and segment layer mods from
+                    # the reroute can touch NON-ripped nets' copper (a target
+                    # swap exchanges stubs between two nets), which the
+                    # applier's whole-net delete does not cover -- forward
+                    # them so the GUI can apply_swaps_to_board.
+                    for _key in ('single_ended_target_swap_info',
+                                 'all_segment_modifications', 'pad_swaps'):
+                        if _rdata.get(_key):
+                            reconnect_swap_data.setdefault(_key, []).extend(
+                                _rdata[_key])
                     if _fail:
                         print(f"  {_fail} ripped net(s) could NOT be reconnected "
                               f"-- their board copper is deleted by the applier "
@@ -3498,7 +3509,7 @@ def create_plane(
         # emitted copies (duplicated restored copper).
         return (total_vias_placed, total_traces_added, total_pads_needing_vias,
                 all_new_vias, all_new_segments, all_zone_data, total_failed_pads,
-                all_ripped_net_ids)
+                all_ripped_net_ids, reconnect_swap_data)
     return (total_vias_placed, total_traces_added, total_pads_needing_vias)
 
 

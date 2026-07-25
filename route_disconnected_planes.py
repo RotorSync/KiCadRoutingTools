@@ -562,6 +562,9 @@ def route_planes(
     all_new_segments: List[Dict] = []
     all_new_vias: List[Dict] = []
 
+    file_strip_segments: List = []
+    file_strip_vias: List = []
+
     def _consume_inner_strips(_rd, _label):
         """Board == write model (#XTAL_O zombie class): an in-memory
         batch_route's cleanup removes superseded/orphaned copper from
@@ -575,6 +578,12 @@ def route_planes(
         _rv = _rd.get('vias_to_remove') or []
         if not _rs and not _rv:
             return
+        # Input copper of NON-excluded nets (#484): removing it from the
+        # write-list is not enough -- the writer re-emits input text, so
+        # these must also go to the writer's per-segment strip channel
+        # (and the GUI strip channel).
+        file_strip_segments.extend(_rs)
+        file_strip_vias.extend(_rv)
         _skeys = set()
         for _s in _rs:
             _a = (round(_s.start_x, 3), round(_s.start_y, 3))
@@ -1846,6 +1855,7 @@ def route_planes(
             _strip_segments = list(
                 {id(_s): _s for _s in _stripped.values()}.values())
             _strip_segments += list(getattr(_out, 'input_strip_vias', []) or [])
+            _strip_segments += file_strip_segments + file_strip_vias
         except Exception as _e:
             print(f"{RED}  in-memory plane cleanup failed: {_e}{RESET}")
         # The GUI deletes every returned net's old board copper before adding
@@ -1866,7 +1876,9 @@ def route_planes(
         # all_new_segments/all_new_vias (replacement).
         _write_output(input_file, output_file, all_new_segments, all_new_vias, all_debug_lines,
                       net_id_to_name=kv10_names,
-                      exclude_net_ids=ripped_net_ids + partial_ids)
+                      exclude_net_ids=ripped_net_ids + partial_ids,
+                      removed_segments=file_strip_segments,
+                      removed_vias=file_strip_vias)
         print(f"Output written to {output_file}")
         print("Note: Open in KiCad and press 'B' to refill zones")
     else:
@@ -1883,11 +1895,16 @@ def route_planes(
 
 def _write_output(input_file: str, output_file: str, segments: List[Dict], vias: List[Dict] = None,
                   debug_lines: List[str] = None, net_id_to_name: Dict = None,
-                  exclude_net_ids: List[int] = None):
+                  exclude_net_ids: List[int] = None,
+                  removed_segments: List = None, removed_vias: List = None):
     """Write the output PCB file with new segments, vias, and optional debug lines.
 
     exclude_net_ids: nets whose existing copper is stripped from the output (used
     for nets ripped to clear a blocked pad repair, which are re-routed separately).
+    removed_segments/removed_vias: SPECIFIC input-board copper to delete (#484
+    structural root: an in-memory pass can remove a NON-excluded net's input
+    copper from pcb_data, and without a per-segment strip channel the writer
+    re-emits it from the input text -- board != file).
     """
     with open(input_file, 'r', encoding='utf-8') as f:
         content = f.read()
@@ -1897,6 +1914,19 @@ def _write_output(input_file: str, output_file: str, segments: List[Dict], vias:
         names = ([net_id_to_name[n] for n in exclude_net_ids if net_id_to_name and n in net_id_to_name]
                  or None)
         content = filter_nets_from_content(content, exclude_net_ids, names)
+
+    if removed_segments:
+        from kicad_writer import remove_segments_from_content
+        content, _nrs = remove_segments_from_content(
+            content, removed_segments, net_id_to_name=net_id_to_name)
+        if _nrs:
+            print(f"  Stripped {_nrs} in-memory-removed input segment(s) from the output")
+    if removed_vias:
+        from kicad_writer import remove_vias_from_content
+        content, _nrv = remove_vias_from_content(
+            content, removed_vias, net_id_to_name=net_id_to_name)
+        if _nrv:
+            print(f"  Stripped {_nrv} in-memory-removed input via(s) from the output")
 
     # Generate segment S-expressions
     segment_sexprs = []

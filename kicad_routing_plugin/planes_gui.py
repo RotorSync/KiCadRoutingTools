@@ -1030,7 +1030,7 @@ class PlanesTab(wx.Panel):
         failed_pads = 0
         try:
             (vias, traces, pads_needing, new_vias, new_segments, new_zones,
-             failed_pads, ripped_net_ids) = create_plane(
+             failed_pads, ripped_net_ids, reconnect_swap_data) = create_plane(
                 input_file=self.board_filename,
                 output_file="",
                 net_names=expanded_nets,
@@ -1108,6 +1108,7 @@ class PlanesTab(wx.Panel):
             self._new_segments = new_segments
             self._new_zones = new_zones
             self._ripped_net_ids = ripped_net_ids
+            self._reconnect_swap_data = reconnect_swap_data or {}
 
             # Add GND return vias if enabled
             if config.get('add_gnd_vias', False):
@@ -1610,6 +1611,23 @@ class PlanesTab(wx.Panel):
                     removed += 1
             if removed:
                 print(f"Removed {removed} old track/via(s) of {len(ripped)} ripped net(s)")
+
+        # #484 H3: target/pad swaps and segment layer mods the in-memory
+        # ripped-net reconnect performed can touch NON-ripped nets' copper
+        # (a target swap exchanges stubs between two nets); the whole-net
+        # delete above does not cover those. Apply them like the route tab
+        # does, BEFORE adding new copper (the routes assume the swaps).
+        _swaps = getattr(self, '_reconnect_swap_data', None) or {}
+        if any(_swaps.get(k) for k in ('single_ended_target_swap_info',
+                                       'all_segment_modifications',
+                                       'pad_swaps')):
+            try:
+                from .board_swaps import apply_swaps_to_board
+                apply_swaps_to_board(board, _swaps)
+                print("Applied reconnect swap/modification channel(s) "
+                      "to the live board (#484)")
+            except Exception as _se:
+                print(f"WARNING: reconnect swaps could not be applied: {_se}")
 
         # Get layer name to ID mapping
         name_to_id = {}

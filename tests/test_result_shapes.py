@@ -52,12 +52,12 @@ def main():
     gui = route_planes.create_plane('x', '', ['GND'],
                                     ['In1.Cu', 'In2.Cu'], return_results=True)
     r.append(_ok("create_plane CLI error return is a 3-tuple", len(cli) == 3))
-    r.append(_ok("create_plane GUI error return is an 8-tuple", len(gui) == 8))
+    r.append(_ok("create_plane GUI error return is a 9-tuple", len(gui) == 9))
     try:
-        a, b, c, d, e, f, g, h = gui  # exactly how planes_gui unpacks it
-        r.append(_ok("create_plane GUI 8-unpack succeeds", True))
+        a, b, c, d, e, f, g, h, i = gui  # exactly how planes_gui unpacks it
+        r.append(_ok("create_plane GUI 9-unpack succeeds", True))
     except ValueError:
-        r.append(_ok("create_plane GUI 8-unpack succeeds", False))
+        r.append(_ok("create_plane GUI 9-unpack succeeds", False))
 
     passed = sum(r)
     print(f"\n{passed}/{len(r)} result-shape tests passed")

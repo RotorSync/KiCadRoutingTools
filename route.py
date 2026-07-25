@@ -2086,11 +2086,34 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _rdata.get('results', []))
                 results_data.setdefault('segments_to_remove', []).extend(
                     _s for _s in _inner_strips if id(_s) not in _strip_ours)
-                if _rdata.get('vias_to_remove'):
+                # #484 H2: mirror the segment "ours" de-dup for vias -- an
+                # inner strip naming a via THIS run emitted must drop it from
+                # our write-lists, not ride vias_to_remove (the GUI applier
+                # removes before adding, so a positional collision could
+                # leave the emitted via shipped un-removed).
+                _our_new_vias = set()
+                for _r in results_data.get('results', []):
+                    for _v in (_r.get('new_vias') or []):
+                        _our_new_vias.add(id(_v))
+                _inner_vstrips = _rdata.get('vias_to_remove') or []
+                _vstrip_ours = {id(_v) for _v in _inner_vstrips
+                                if id(_v) in _our_new_vias}
+                if _vstrip_ours:
+                    for _r in results_data.get('results', []):
+                        _r['new_vias'] = [
+                            _v for _v in (_r.get('new_vias') or [])
+                            if id(_v) not in _vstrip_ours]
+                if _inner_vstrips:
                     results_data.setdefault('vias_to_remove', []).extend(
-                        _rdata['vias_to_remove'])
+                        _v for _v in _inner_vstrips
+                        if id(_v) not in _vstrip_ours)
+                # #484 H2: pad_swaps / single_ended_target_swap_info were
+                # silently dropped -- a target/polarity swap performed by the
+                # reconciliation sub-run then never reached the GUI applier,
+                # and the reconciled net's stub pointed at the OLD net.
                 for _key in ('all_swap_vias', 'all_swap_segments',
-                             'all_segment_modifications',
+                             'all_segment_modifications', 'pad_swaps',
+                             'single_ended_target_swap_info',
                              'exclusion_zone_lines', 'boundary_debug_labels'):
                     if _rdata.get(_key):
                         results_data.setdefault(_key, []).extend(_rdata[_key])
