@@ -1275,6 +1275,16 @@ def oracle_reconnect(board_file: str, net_names, config,
                         verbose=verbose)
                     if not wider:
                         break
+                    # Seed cells are exemption-cleared (clone_fresh), so the
+                    # margin cannot protect upgraded copper anchored on them
+                    # -- verify the wide route's real geometry and refuse the
+                    # upgrade on any conflict (orangecrab RAM-via overlaps,
+                    # crkbd edge band). Narrow validated copper always wins.
+                    from plane_region_connector import wide_route_clear
+                    if not wide_route_clear(
+                            wider[0], w, pcb_data, net_id, rung_cfg,
+                            board_edge_clearance=rung_cfg.board_edge_clearance):
+                        break
                     result, used_width = wider, w
             if not result:
                 # ESCALATION (quickfeather U6-pocket class): the weld router

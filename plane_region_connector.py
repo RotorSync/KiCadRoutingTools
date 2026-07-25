@@ -1394,6 +1394,8 @@ def _try_route_between_regions(
     verbose: bool = False,
     router: Optional[GridRouter] = None,
     bounds: Optional[Tuple[float, float, float, float]] = None,
+    pcb_data=None,
+    net_id: Optional[int] = None,
 ) -> Tuple[Optional[Tuple[List[Tuple[float, float, str]], List[Tuple[float, float]]]], float, Optional[Tuple[float, float]]]:
     """
     Try to route between two regions, attempting multiple track widths.
@@ -1554,6 +1556,15 @@ def _try_route_between_regions(
                     f"w={try_width:.2f}mm many->few")
 
             if wider is not None:
+                # Seed cells are exemption-cleared (clone_fresh), so the
+                # width margin cannot protect upgraded copper anchored on
+                # them -- verify the wide route's real geometry (foreign
+                # copper, board edge, NPTH) and stop upgrading on conflict
+                # (crkbd: 22 repair straps 0.05mm inside the edge band).
+                if pcb_data is not None and net_id is not None and \
+                        not wide_route_clear(wider[0], try_width, pcb_data,
+                                             net_id, config):
+                    break
                 result = wider
                 track_width = try_width
             else:
@@ -1965,7 +1976,9 @@ def route_disconnected_regions(
                 max_iterations=max_iterations,
                 coord=coord,
                 verbose=verbose,
-                router=plane_router
+                router=plane_router,
+                pcb_data=pcb_data,
+                net_id=net_id,
             )
 
         # Try routing with multiple track widths using helper function
@@ -2002,7 +2015,9 @@ def route_disconnected_regions(
                 max_iterations=min(max_iterations * 5, 1_000_000),
                 coord=coord,
                 verbose=verbose,
-                router=plane_router
+                router=plane_router,
+                pcb_data=pcb_data,
+                net_id=net_id,
             )
 
         # Last resort (#217 castor +3.3VA): the corridor between two regions
@@ -2044,7 +2059,9 @@ def route_disconnected_regions(
                 max_iterations=min(max_iterations * 5, 1_000_000),
                 coord=coord,
                 verbose=verbose,
-                router=plane_router
+                router=plane_router,
+                pcb_data=pcb_data,
+                net_id=net_id,
             )
 
         if result is None:
@@ -2294,6 +2311,122 @@ def route_disconnected_regions(
         print(f"  {GREEN}Result: All {routes_added} route(s) succeeded{RESET}")
 
     return segments, vias, routes_added, previous_routes, connectivity_paths
+
+
+def wide_route_clear(route_points, width, pcb_data, net_id, config,
+                     board_edge_clearance=None):
+    """True iff every same-layer leg of `route_points`, emitted at `width`,
+    keeps the required clearance from foreign copper, the board edge, and
+    NPTH drills.
+
+    Why: the width UPGRADE re-routes an already-validated narrow strap at a
+    wider width with an obstacle margin -- but source/target seed cells are
+    exemption-cleared (clone_fresh), so upgraded copper anchored on a seed
+    can bulge into a keep-out the narrow route never touched (orangecrab:
+    0.8mm oracle straps overlapping RAM vias by 0.29mm; crkbd: 22 repair
+    straps 0.05mm inside the board edge band). The upgrade is OPTIONAL
+    copper -- callers reject it on any conflict and keep the narrow route.
+    Checks (same geometry as check_drc): foreign vias (all layers), foreign
+    same-layer segments, pads (exact rotated-rect distance + local
+    override), Edge.Cuts rings incl. cutouts, NPTH drill floors."""
+    import math
+    from check_drc import (segment_to_rect_distance, _into_pad_frame,
+                           board_edge_geometry,
+                           _segment_to_rings_distance)
+    from kicad_parser import pad_drill_circles
+    half = width / 2.0
+    EPS = 1e-4
+
+    def _seg_pt(x1, y1, x2, y2, px, py):
+        dx, dy = x2 - x1, y2 - y1
+        L2 = dx * dx + dy * dy
+        t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((px - x1) * dx
+                                                   + (py - y1) * dy) / L2))
+        return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+    def _seg_seg(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2):
+        return min(_seg_pt(ax1, ay1, ax2, ay2, bx1, by1),
+                   _seg_pt(ax1, ay1, ax2, ay2, bx2, by2),
+                   _seg_pt(bx1, by1, bx2, by2, ax1, ay1),
+                   _seg_pt(bx1, by1, bx2, by2, ax2, ay2))
+
+    legs = []
+    for k in range(len(route_points) - 1):
+        x1, y1, l1 = route_points[k]
+        x2, y2, l2 = route_points[k + 1]
+        if l1 != l2 or (abs(x1 - x2) < 1e-9 and abs(y1 - y2) < 1e-9):
+            continue
+        legs.append((x1, y1, x2, y2, l1))
+    if not legs:
+        return True
+
+    rings, _outer, _cuts = board_edge_geometry(pcb_data.board_info)
+    edge_clr = board_edge_clearance
+    if edge_clr is None:
+        edge_clr = getattr(config, 'board_edge_clearance', 0.0) or 0.0
+
+    for (x1, y1, x2, y2, layer) in legs:
+        bb = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+        for v in pcb_data.vias:
+            if v.net_id == net_id:
+                continue
+            req = half + v.size / 2.0 + config.obstacle_clearance(v.net_id)
+            if not (bb[0] - req <= v.x <= bb[2] + req
+                    and bb[1] - req <= v.y <= bb[3] + req):
+                continue
+            if _seg_pt(x1, y1, x2, y2, v.x, v.y) < req - EPS:
+                return False
+        for s in pcb_data.segments:
+            if s.net_id == net_id or s.layer != layer:
+                continue
+            req = half + s.width / 2.0 + config.obstacle_clearance(s.net_id)
+            if not (bb[0] - req <= max(s.start_x, s.end_x)
+                    and min(s.start_x, s.end_x) <= bb[2] + req
+                    and bb[1] - req <= max(s.start_y, s.end_y)
+                    and min(s.start_y, s.end_y) <= bb[3] + req):
+                continue
+            if _seg_seg(x1, y1, x2, y2, s.start_x, s.start_y,
+                        s.end_x, s.end_y) < req - EPS:
+                return False
+        for pnid, pads in pcb_data.pads_by_net.items():
+            if pnid == net_id:
+                continue
+            for p in pads:
+                on_layer = ('*.Cu' in p.layers or layer in p.layers)
+                is_th = bool(p.drill and p.drill > 0)
+                if p.pad_type != 'np_thru_hole' and (on_layer or is_th):
+                    clr = max(config.obstacle_clearance(pnid),
+                              getattr(p, 'local_clearance', 0.0) or 0.0)
+                    pext = max(p.size_x, p.size_y) / 2.0
+                    req = half + pext + clr
+                    if (bb[0] - req <= p.global_x <= bb[2] + req
+                            and bb[1] - req <= p.global_y <= bb[3] + req):
+                        sx, sy, ex, ey = x1, y1, x2, y2
+                        rot = getattr(p, 'rect_rotation', 0.0) or 0.0
+                        if rot:
+                            rad = math.radians(rot)
+                            cr, sr = math.cos(rad), math.sin(rad)
+                            sx, sy = _into_pad_frame(sx, sy, p, cr, sr)
+                            ex, ey = _into_pad_frame(ex, ey, p, cr, sr)
+                        d, _ = segment_to_rect_distance(
+                            sx, sy, ex, ey, p.global_x, p.global_y,
+                            p.size_x / 2.0, p.size_y / 2.0, 0.0)
+                        if d < half + clr - EPS:
+                            return False
+                if is_th:
+                    npth_clr = max(config.clearance,
+                                   defaults.NPTH_TO_TRACK_CLEARANCE) \
+                        if p.pad_type == 'np_thru_hole' else None
+                    if npth_clr is not None:
+                        for hx, hy, hdia in pad_drill_circles(p):
+                            req = half + hdia / 2.0 + npth_clr
+                            if _seg_pt(x1, y1, x2, y2, hx, hy) < req - EPS:
+                                return False
+        if rings and edge_clr > 0:
+            if _segment_to_rings_distance(x1, y1, x2, y2, rings) \
+                    < half + edge_clr - EPS:
+                return False
+    return True
 
 
 def build_base_obstacles(
