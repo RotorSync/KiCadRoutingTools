@@ -383,6 +383,20 @@ class ZoneFillModel:
                         free[ii0:ii1, jj0:jj1] &= \
                             (ddx * ddx + ddy * ddy) >= rim * rim
 
+        # Board CUTOUTS (crkbd class, #490): KiCad's filler pulls fill out
+        # of Edge.Cuts openings and keeps clearance from their rings, but the
+        # model only clipped to the ZONE polygon -- fill was predicted
+        # straight through crkbd's 72 key-switch holes, and the fill-aware
+        # via preference steered taps onto the phantom. Stamp each cutout as
+        # a keep-out at the zone-clearance guard. NOTE: only safe now that
+        # the obstacle-map cutout bands are honest (the a4e2ef6 cache-key
+        # fix); over broken maps, honest fill = more fragmentation = more
+        # repair copper through exactly the unguarded channels.
+        for _cut in (getattr(pcb_data.board_info, 'board_cutouts', None)
+                     or []):
+            if len(_cut) >= 3:
+                _stamp_poly(_cut)
+
         # Outline clip (polygon test, vectorized ray cast per row).
         poly = zone.polygon
         inside = np.zeros((nx, ny), dtype=bool)

@@ -50,7 +50,24 @@ def main():
     # Far corner unaffected either way (guard restored after the pad loop).
     assert m.query_component(1.0, 1.0)
 
-    print("PASS: fill model honors pad local clearance override (H2)")
+    test_cutouts()
+    print("PASS: fill model honors pad local clearance override (H2) "
+          "+ board cutouts (#490)")
+
+
+def test_cutouts():
+    """Board cutouts are keep-outs (crkbd #490): KiCad's filler pulls fill
+    out of Edge.Cuts openings; the model predicted fill straight through
+    them, and the fill-aware via preference steered taps onto the phantom."""
+    zone = make_zone()
+    pcb = make_pcb(0.0)
+    pcb.board_info.board_cutouts = [[(4.0, 4.0), (6.0, 4.0),
+                                     (6.0, 6.0), (4.0, 6.0)]]
+    m = ZoneFillModel(pcb, zone)
+    assert m.ok
+    assert not m.query_component(5.0, 5.0), "fill inside cutout"
+    assert not m.query_component(6.1, 5.0), "fill within guard of ring"
+    assert m.query_component(7.5, 5.0), "fill missing outside band"
 
 
 if __name__ == '__main__':
