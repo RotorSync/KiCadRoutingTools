@@ -141,7 +141,24 @@ Examples:
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
     else:
-        print("No caps moved; not writing output.")
+        # A no-op must still WRITE the output board (input copied verbatim,
+        # sibling .kicad_pro included): recorded chains reference this step's
+        # output by name, so skipping the write starves every later step
+        # (lpddr4: an all-perimeter BGA escape legitimately places 0 vias,
+        # the #445 via gate declines to move caps, and the whole chain died
+        # on the missing file). copy_board keeps the DRC-floor custody.
+        print("No caps moved; passing the board through unchanged.")
+        try:
+            from copy_board import copy_board
+            copy_board(args.input_file, args.output_file)
+        except Exception:
+            import shutil
+            shutil.copyfile(args.input_file, args.output_file)
+            _pro = os.path.splitext(args.input_file)[0] + '.kicad_pro'
+            if os.path.isfile(_pro):
+                shutil.copyfile(_pro, os.path.splitext(args.output_file)[0]
+                                + '.kicad_pro')
+        print(f"Wrote {args.output_file} (unchanged copy)")
 
 
 if __name__ == "__main__":
