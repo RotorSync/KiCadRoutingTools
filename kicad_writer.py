@@ -255,6 +255,199 @@ def generate_gr_text_sexpr(text: str, x: float, y: float, layer: str,
 	)'''
 
 
+def _polygon_area(poly) -> float:
+    """Unsigned shoelace area of a polygon given as [(x, y), ...]."""
+    a = 0.0
+    n = len(poly)
+    for i in range(n):
+        x1, y1 = poly[i][0], poly[i][1]
+        x2, y2 = poly[(i + 1) % n][0], poly[(i + 1) % n][1]
+        a += x1 * y2 - x2 * y1
+    return abs(a) / 2.0
+
+
+def _point_in_polygon(x: float, y: float, poly) -> bool:
+    """Even-odd ray cast. Boundary cases are don't-care here: this only feeds
+    the overlap test, and a zone grazing another's edge needs no tie-break."""
+    inside = False
+    n = len(poly)
+    for i in range(n):
+        x1, y1 = poly[i][0], poly[i][1]
+        x2, y2 = poly[(i + 1) % n][0], poly[(i + 1) % n][1]
+        if (y1 > y) != (y2 > y) and x < (x2 - x1) * (y - y1) / (y2 - y1) + x1:
+            inside = not inside
+    return inside
+
+
+def _segments_properly_cross(p1, p2, p3, p4) -> bool:
+    """True only when p1p2 and p3p4 cross TRANSVERSALLY. Collinear or merely
+    touching segments are excluded on purpose -- see _polygons_overlap."""
+    def orient(a, b, c):
+        v = ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
+        return (v > 1e-12) - (v < -1e-12)
+    d1, d2 = orient(p3, p4, p1), orient(p3, p4, p2)
+    d3, d4 = orient(p1, p2, p3), orient(p1, p2, p4)
+    return d1 * d2 < 0 and d3 * d4 < 0
+
+
+def _overlap_area(pa, pb, samples: int = 64) -> float:
+    """Approximate shared area (mm^2) of two outlines, by sampling a fixed grid
+    over their bounding-box intersection.
+
+    Deliberately NOT exact polygon clipping: all we need is "is the contested
+    region big enough to hold copper", and an exact clipper (shapely) is only
+    LAZILY importable here -- KiCad's bundled Python may not have it, and a
+    silent fallback would let the GUI and CLI assign DIFFERENT priorities,
+    which is the CLI/GUI drift this codebase keeps getting bitten by. A fixed
+    grid is pure Python, dependency-free and deterministic, so both front ends
+    always agree.
+    """
+    ax1 = min(p[0] for p in pa); ax2 = max(p[0] for p in pa)
+    ay1 = min(p[1] for p in pa); ay2 = max(p[1] for p in pa)
+    bx1 = min(p[0] for p in pb); bx2 = max(p[0] for p in pb)
+    by1 = min(p[1] for p in pb); by2 = max(p[1] for p in pb)
+    x1, x2 = max(ax1, bx1), min(ax2, bx2)
+    y1, y2 = max(ay1, by1), min(ay2, by2)
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    box = (x2 - x1) * (y2 - y1)
+    hits = 0
+    for i in range(samples):
+        x = x1 + (i + 0.5) * (x2 - x1) / samples
+        for j in range(samples):
+            y = y1 + (j + 0.5) * (y2 - y1) / samples
+            if _point_in_polygon(x, y, pa) and _point_in_polygon(x, y, pb):
+                hits += 1
+    return box * hits / float(samples * samples)
+
+
+def _polygons_overlap(pa, pb, eps: float = 0.02,
+                      min_area: float = 0.01) -> bool:
+    """True when two zone outlines contend for a MEANINGFUL patch of copper.
+
+    Two things must not count as overlap, and each bit us in turn:
+
+    * ADJACENCY. route_planes' Voronoi cells tile the board, so neighbours
+      share a boundary and their vertices lie exactly ON each other's edges --
+      where the even-odd rule is undefined, so a plain point-in-polygon test
+      calls adjacent pairs "overlapping".
+    * NUMERICAL SLIVERS. Those shared boundaries are floating point, so
+      neighbouring edges routinely cross by nanometres. Topology alone
+      (transversal crossing / vertex containment) flags those too: on
+      scalenode_cm4 it reported 31 contending pairs of which exactly ONE had
+      real area -- 29 were under 1e-4 mm^2. Re-prioritising those would have
+      changed the fill of zone pairs that were never ambiguous.
+
+    So: cheap topology first (bbox reject, transversal crossing, or a vertex
+    nudged INWARD toward its own centroid -- which catches nesting, where no
+    edges cross), then an AREA test. `min_area` = 0.01 mm^2 is a 0.1x0.1mm
+    patch, min_thickness scale: a thinner contested region is opened away by
+    the fill's own minimum-thickness rule, so who "wins" it cannot matter.
+    Measured corpus areas separate cleanly either side of it (noise <= 1e-4,
+    real >= 0.01), so the threshold is not near anything.
+    """
+    if not pa or not pb:
+        return False
+    ax1 = min(p[0] for p in pa); ax2 = max(p[0] for p in pa)
+    ay1 = min(p[1] for p in pa); ay2 = max(p[1] for p in pa)
+    bx1 = min(p[0] for p in pb); bx2 = max(p[0] for p in pb)
+    by1 = min(p[1] for p in pb); by2 = max(p[1] for p in pb)
+    if ax2 < bx1 or bx2 < ax1 or ay2 < by1 or by2 < ay1:
+        return False
+
+    na, nb = len(pa), len(pb)
+    topo = False
+    for i in range(na):
+        if topo:
+            break
+        a1, a2 = pa[i], pa[(i + 1) % na]
+        for j in range(nb):
+            if _segments_properly_cross(a1, a2, pb[j], pb[(j + 1) % nb]):
+                topo = True
+                break
+
+    if not topo:
+        def nudged_inside(poly, other):
+            cx = sum(p[0] for p in poly) / len(poly)
+            cy = sum(p[1] for p in poly) / len(poly)
+            for p in poly:
+                x, y = p[0], p[1]
+                dx, dy = cx - x, cy - y
+                n = (dx * dx + dy * dy) ** 0.5
+                if n < 1e-12:
+                    continue
+                if _point_in_polygon(x + dx / n * eps, y + dy / n * eps, other):
+                    return True
+            return False
+        topo = nudged_inside(pa, pb) or nudged_inside(pb, pa)
+
+    return topo and _overlap_area(pa, pb) >= min_area
+
+
+def zone_overlap_priorities(zones) -> List[int]:
+    """Priorities that make an overlapping set of zones fill DETERMINISTICALLY.
+
+    `zones` is a list of (layer, net_id, polygon_points); the return value is a
+    parallel list of priorities.
+
+    KiCad fills higher-priority zones first and only lower-priority zones pull
+    back, so overlapping zones left at the SAME priority have no defined winner
+    and KiCad falls back to KIID (UUID) order. We mint a fresh uuid4 for every
+    zone we write, so that made the fill -- and therefore island topology and
+    connectivity -- vary between runs over identical copper (usp_obc_v7: a
+    nested Net-(U5-GND) pour inside the GND pour, both priority 0 on In1.Cu,
+    graded "1 net unconnected" on 4 of 6 UUID rolls). Emitting distinct
+    priorities removes the ambiguity at the source.
+
+    SMALLER area wins (higher priority). A pour nested inside a bigger one is
+    there precisely because it must own that patch -- give the big pour the tie
+    and the small one gets carved up, which is the failure we started from.
+    Ties break on (net_id, index) so the result never depends on dict order.
+    Zones that overlap nothing keep priority 0, so boards that never had the
+    ambiguity are byte-for-byte unaffected.
+    """
+    n = len(zones)
+    prio = [0] * n
+    # Group by layer: zones on different layers never contend.
+    by_layer: Dict[str, List[int]] = {}
+    for i, (layer, _nid, _poly) in enumerate(zones):
+        by_layer.setdefault(layer, []).append(i)
+
+    for _layer, idxs in by_layer.items():
+        # Connected components of the "overlaps" relation: only zones that
+        # actually contend need separated priorities.
+        parent = {i: i for i in idxs}
+
+        def find(a):
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
+
+        for pos, i in enumerate(idxs):
+            for j in idxs[pos + 1:]:
+                if zones[i][1] == zones[j][1]:
+                    continue  # same net: overlap is harmless, they merge
+                if _polygons_overlap(zones[i][2], zones[j][2]):
+                    ri, rj = find(i), find(j)
+                    if ri != rj:
+                        parent[ri] = rj
+
+        groups: Dict[int, List[int]] = {}
+        for i in idxs:
+            groups.setdefault(find(i), []).append(i)
+
+        for members in groups.values():
+            if len(members) < 2:
+                continue  # no contention -> leave at 0
+            ordered = sorted(members,
+                             key=lambda i: (-_polygon_area(zones[i][2]),
+                                            zones[i][1], i))
+            for rank, i in enumerate(ordered):
+                prio[i] = rank
+    return prio
+
+
 def generate_zone_sexpr(
     net_id: int,
     net_name: str,
@@ -265,7 +458,8 @@ def generate_zone_sexpr(
     thermal_gap: float = 0.2,
     thermal_bridge_width: float = 0.2,
     direct_connect: bool = True,
-    use_net_name: bool = False
+    use_net_name: bool = False,
+    priority: int = 0
 ) -> str:
     """Generate KiCad S-expression for a filled copper zone.
 
@@ -280,6 +474,15 @@ def generate_zone_sexpr(
         thermal_bridge_width: Width of thermal bridges
         direct_connect: If True, use solid/direct pad connections; if False, use thermal relief
         use_net_name: If True, output KiCad 10 format (net "name") instead of (net id)
+        priority: Fill priority. KiCad fills HIGHER priority zones first and only
+            LOWER-priority zones pull back, so two OVERLAPPING zones left at the
+            same priority have no defined winner -- KiCad tie-breaks on the zones'
+            KIIDs, i.e. on their UUIDs. Since we mint a fresh uuid4 per run, that
+            made the FILL itself vary run to run over bit-identical copper:
+            usp_obc_v7 (a Net-(U5-GND) pour nested wholly inside the GND pour,
+            both priority 0 on In1.Cu) graded "1 net unconnected" on 4 of 6 UUID
+            rolls. Overlapping zones must therefore be emitted at DISTINCT
+            priorities -- see zone_overlap_priorities().
 
     Returns:
         S-expression string for the zone
@@ -321,11 +524,13 @@ def generate_zone_sexpr(
 		)'''
         extra_zone_props = '\n\t\t(filled_areas_thickness no)'
 
+    priority_str = f'\n\t\t(priority {int(priority)})' if priority else ''
+
     return f'''	(zone
 		{net_lines}
 		(layer "{layer}")
 		(uuid "{uuid.uuid4()}")
-		(hatch edge 0.5)
+		(hatch edge 0.5){priority_str}
 		{connect_pads_str}
 		(min_thickness {min_thickness}){extra_zone_props}
 		{fill_block}

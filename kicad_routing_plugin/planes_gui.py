@@ -1796,6 +1796,20 @@ class PlanesTab(wx.Panel):
                 for x, y in zone_data['polygon_points']:
                     outline.Append(pcbnew.FromMM(x), pcbnew.FromMM(y))
 
+                # Fill priority: overlapping zones MUST differ, or KiCad has no
+                # defined winner for the contested area and tie-breaks on KIID
+                # -- the fill then moves between runs (see
+                # kicad_writer.zone_overlap_priorities). The CLI writes
+                # (priority N) into the s-expr; this is the GUI's equivalent.
+                _zprio = int(zone_data.get('priority', 0) or 0)
+                if _zprio:
+                    # SetAssignedPriority is the KiCad 7+ name; older builds
+                    # expose SetPriority.
+                    _setter = (getattr(zone, 'SetAssignedPriority', None)
+                               or getattr(zone, 'SetPriority', None))
+                    if _setter:
+                        _setter(_zprio)
+
                 # Set zone properties
                 zone.SetLocalClearance(pcbnew.FromMM(zone_data.get('clearance', 0.2)))
                 zone.SetMinThickness(pcbnew.FromMM(zone_data.get('min_thickness', 0.1)))

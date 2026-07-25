@@ -23,7 +23,8 @@ run_all_checks()
 import numpy as np
 
 from kicad_parser import parse_kicad_pcb, PCBData, Pad, Via, Segment, KICAD_10_MIN_VERSION, pad_is_plated_through
-from kicad_writer import generate_zone_sexpr, generate_gr_line_sexpr
+from kicad_writer import (generate_zone_sexpr, generate_gr_line_sexpr,
+                          zone_overlap_priorities)
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import point_in_pad_rect, pad_rect_halfspan
 from route import batch_route, _dump_engine_config
@@ -1492,6 +1493,28 @@ def _generate_multinet_layer_zones(
         })
         return zone_sexprs, debug_line_sexprs, zone_data_list
 
+    # Voronoi cells are NOT guaranteed disjoint -- usp_obc_v7's In1.Cu came out
+    # with the whole Net-(U5-GND) pour nested inside the GND cell. Overlapping
+    # zones left at equal priority have no defined winner in KiCad, which then
+    # tie-breaks on UUID, so the FILL varied run to run over identical copper.
+    # Give contending zones distinct priorities before emitting any of them.
+    _flat = [(layer, nid, poly)
+             for nid, polys in zone_polygons.items() for poly in polys]
+    _prios = zone_overlap_priorities(_flat)
+    _prio_of = {}
+    _k = 0
+    for nid, polys in zone_polygons.items():
+        for poly_idx in range(len(polys)):
+            _prio_of[(nid, poly_idx)] = _prios[_k]
+            _k += 1
+    if any(_prios):
+        print(f"  Overlapping zones on {layer}: assigned fill priorities "
+              + ", ".join(
+                  f"{(pcb_data.nets.get(nid).name if pcb_data.nets.get(nid) else nid)}"
+                  f"[{pi}]={_prio_of[(nid, pi)]}"
+                  for (nid, pi) in sorted(_prio_of, key=lambda k: -_prio_of[k])
+                  if _prio_of[(nid, pi)]))
+
     # Generate zones for each net
     for net_id, polygons in zone_polygons.items():
         net = pcb_data.nets.get(net_id)
@@ -1509,7 +1532,8 @@ def _generate_multinet_layer_zones(
                 clearance=zone_clearance,
                 min_thickness=min_thickness,
                 direct_connect=True,
-                use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION
+                use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION,
+                priority=_prio_of.get((net_id, poly_idx), 0)
             )
             zone_sexprs.append(zone_sexpr)
             zone_data_list.append({
@@ -1519,6 +1543,10 @@ def _generate_multinet_layer_zones(
                 'polygon_points': polygon,
                 'clearance': zone_clearance,
                 'min_thickness': min_thickness,
+                # Carried for the GUI, which builds pcbnew ZONEs from this dict
+                # instead of the s-expr -- without it the plugin would re-emit
+                # the equal-priority ambiguity the CLI just resolved.
+                'priority': _prio_of.get((net_id, poly_idx), 0),
             })
 
     # Calculate and print resistance
