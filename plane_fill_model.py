@@ -139,7 +139,17 @@ class ZoneFillModel:
         # falsely severed -> phantom pad repairs, doubled vias, a healthy
         # net ripped and lost).
         free = np.ones((nx, ny), dtype=bool)
-        guard = zc
+        # `guard` is the clearance the CURRENT object is stamped at. Base =
+        # the zone clearance; the pad loop below raises it per-pad to honor a
+        # resolved local override (#326 / audit H2): KiCad's filler keeps
+        # max(zone clearance, pad override) from that pad, so stamping a
+        # 0.8mm fiducial keep-clear at a flat 0.2 zc over-credited fill the
+        # refill actually carves away. (Netclass pairwise terms are capped at
+        # the ceiling on clamped chains, so the pad override is the one live
+        # per-object term; class-aware stamping needs a net_clearances thread
+        # and stays a follow-up.)
+        guard_base = zc
+        guard = guard_base
 
         cxs = x0 + (np.arange(nx) + 0.5) * cell   # cell-center coords
         cys = y0 + (np.arange(ny) + 0.5) * cell
@@ -291,6 +301,12 @@ class ZoneFillModel:
                 on_layer = (layer in p.layers or '*.Cu' in p.layers)
                 if not is_th and not on_layer:
                     continue
+                # Per-pad clearance override (#326): KiCad's filler (and its
+                # hole_clearance rule) honors it, so stamp this pad at
+                # max(zc, override). The closure guard is rebound for the
+                # stamps below and restored after the loop.
+                guard = max(guard_base,
+                            getattr(p, 'local_clearance', 0.0) or 0.0)
                 if p.pad_type == 'np_thru_hole':
                     _stamp_disc(p.global_x, p.global_y, (p.drill or 0) / 2.0)
                     continue
@@ -298,6 +314,7 @@ class ZoneFillModel:
                     _stamp_disc(p.global_x, p.global_y, (p.drill or 0) / 2.0)
                     continue
                 _stamp_pad(p)
+        guard = guard_base
 
         # Copperpour keep-out areas (#477): KiCad's filler subtracts rule
         # areas marked (copperpour not_allowed) from the fill, so a keep-out
