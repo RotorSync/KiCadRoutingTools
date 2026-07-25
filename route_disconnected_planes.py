@@ -37,7 +37,7 @@ from plane_pad_tap import (find_unconnected_plane_pads, tap_pad_with_escalation,
                            SharedViaMaps)
 from plane_component_oracle import PlaneComponentOracle
 from plane_blocker_detection import find_route_blocker_from_frontier, find_via_position_blocker
-from terminal_colors import GREEN, RED, RESET
+from terminal_colors import GREEN, RED, YELLOW, RESET
 import routing_defaults as defaults
 import re
 
@@ -960,16 +960,149 @@ def route_planes(
                 LAST_RIPPED_RECONNECT = {'nets': _cnames,
                                          'successful': _ok, 'failed': _fail}
                 if _fail:
-                    print(f"{RED}  {_fail} ripped net(s) could NOT be reconnected "
-                          f"-- the board ships with them open{RESET}")
-                    _open = [i for i in _casualties
-                             if not any(s.net_id == i for s in pcb_data.segments)
-                             and not any(v.net_id == i for v in pcb_data.vias)]
-                    if _open:
-                        _report_unrouted_ripped_nets(pcb_data, _open)
+                    print(f"{RED}  {_fail} ripped net(s) could NOT be reconnected"
+                          f"{RESET}")
             except Exception as _e:
                 print(f"{RED}  ripped-net reconnect pass failed: {_e}{RESET}")
-                _report_unrouted_ripped_nets(pcb_data, _casualties)
+
+            # RESTORE-ON-FAILURE custody (#88 for the repair front): a ripped
+            # net whose reconnect failed must get its ORIGINAL copper back --
+            # shipping the partial reroute is strictly worse than the input
+            # (quickfeather /PDM.DATA: ripped for a pad repair, reconnect
+            # failed at R33, shipped broken behind a log line). In-memory and
+            # BEFORE the fill-aware sweep/gate, so every later check sees the
+            # true board. The restored net's conflicting NEW repair copper is
+            # dropped (the rip existed to clear that corridor); its pad may
+            # then re-grade disconnected -- the honest pre-existing state.
+            _still_open = []
+            for _cid in _casualties:
+                if _cid in pcb_data.nets:
+                    from check_connected import check_net_connectivity as _cnc_r
+                    _rr = _cnc_r(_cid,
+                                 [s for s in pcb_data.segments
+                                  if s.net_id == _cid],
+                                 [v for v in pcb_data.vias if v.net_id == _cid],
+                                 pcb_data.pads_by_net.get(_cid, []),
+                                 [z for z in (getattr(pcb_data, 'zones', None)
+                                              or []) if z.net_id == _cid],
+                                 pcb_data=pcb_data)
+                    if not _rr.get('connected'):
+                        _still_open.append(_cid)
+            if _still_open:
+                try:
+                    _orig = parse_kicad_pcb(input_file)
+                    for _cid in list(_still_open):
+                        _osegs = [s for s in _orig.segments
+                                  if s.net_id == _cid]
+                        _ovias = [v for v in _orig.vias if v.net_id == _cid]
+                        if not _osegs and not _ovias:
+                            continue  # nothing to restore
+                        _nm = pcb_data.nets[_cid].name \
+                            if _cid in pcb_data.nets else f"net_{_cid}"
+                        # drop the failed reroute (in-memory + write-list)
+                        pcb_data.segments[:] = [
+                            s for s in pcb_data.segments if s.net_id != _cid]
+                        pcb_data.vias[:] = [
+                            v for v in pcb_data.vias if v.net_id != _cid]
+                        all_new_segments[:] = [
+                            d for d in all_new_segments
+                            if d.get('net_id') != _cid]
+                        all_new_vias[:] = [
+                            d for d in all_new_vias if d.get('net_id') != _cid]
+                        # drop NEW repair copper that would short the restore
+                        def _collides(d, _is_via):
+                            import math as _m
+                            for _s in _osegs:
+                                _half = (d['size'] if _is_via
+                                         else d['width']) / 2.0
+                                if not _is_via \
+                                        and d['layer'] != _s.layer:
+                                    continue
+                                _dx = _s.end_x - _s.start_x
+                                _dy = _s.end_y - _s.start_y
+                                _L2 = _dx * _dx + _dy * _dy
+                                _px, _py = (d['x'], d['y']) if _is_via \
+                                    else d['start']
+                                _t = max(0.0, min(1.0, ((
+                                    (_px - _s.start_x) * _dx
+                                    + (_py - _s.start_y) * _dy) / _L2))) \
+                                    if _L2 else 0.0
+                                _dd = _m.hypot(
+                                    _px - (_s.start_x + _t * _dx),
+                                    _py - (_s.start_y + _t * _dy))
+                                if _dd < _half + _s.width / 2.0 + clearance:
+                                    return True
+                                if not _is_via:
+                                    _px2, _py2 = d['end']
+                                    _t2 = max(0.0, min(1.0, ((
+                                        (_px2 - _s.start_x) * _dx
+                                        + (_py2 - _s.start_y) * _dy) / _L2))) \
+                                        if _L2 else 0.0
+                                    _dd2 = _m.hypot(
+                                        _px2 - (_s.start_x + _t2 * _dx),
+                                        _py2 - (_s.start_y + _t2 * _dy))
+                                    if _dd2 < _half + _s.width / 2.0 \
+                                            + clearance:
+                                        return True
+                            for _v in _ovias:
+                                _px, _py = (d['x'], d['y']) if _is_via \
+                                    else d['start']
+                                _r = (d['size'] if _is_via
+                                      else d['width']) / 2.0
+                                if _m.hypot(_px - _v.x, _py - _v.y) \
+                                        < _r + _v.size / 2.0 + clearance:
+                                    return True
+                            return False
+                        _rm_v = [d for d in all_new_vias
+                                 if d.get('net_id') != _cid
+                                 and _collides(d, True)]
+                        _rm_s = [d for d in all_new_segments
+                                 if d.get('net_id') != _cid
+                                 and _collides(d, False)]
+                        _rmv_pos = {(round(d['x'], 3), round(d['y'], 3))
+                                    for d in _rm_v}
+                        _rms_key = {(round(d['start'][0], 3),
+                                     round(d['start'][1], 3),
+                                     round(d['end'][0], 3),
+                                     round(d['end'][1], 3), d['layer'])
+                                    for d in _rm_s}
+                        all_new_vias[:] = [d for d in all_new_vias
+                                           if d not in _rm_v]
+                        all_new_segments[:] = [d for d in all_new_segments
+                                               if d not in _rm_s]
+                        pcb_data.vias[:] = [
+                            v for v in pcb_data.vias
+                            if (round(v.x, 3), round(v.y, 3)) not in _rmv_pos]
+                        pcb_data.segments[:] = [
+                            s for s in pcb_data.segments
+                            if (round(s.start_x, 3), round(s.start_y, 3),
+                                round(s.end_x, 3), round(s.end_y, 3),
+                                s.layer) not in _rms_key]
+                        # restore the originals in-memory; the writer keeps
+                        # the file copper because the net leaves the exclude
+                        # lists below
+                        pcb_data.segments.extend(_osegs)
+                        pcb_data.vias.extend(_ovias)
+                        for _lst in (ripped_net_ids, partial_ids):
+                            while _cid in _lst:
+                                _lst.remove(_cid)
+                        _still_open.remove(_cid)
+                        print(f"  {YELLOW}RESTORED {_nm}: reconnect failed; "
+                              f"original copper reinstated (dropped "
+                              f"{len(_rm_v)} colliding new via(s), "
+                              f"{len(_rm_s)} segment(s)){RESET}")
+                    try:
+                        from plane_fill_model import \
+                            _CACHE_ATTR as _PFM_CACHE_R
+                        if hasattr(pcb_data, _PFM_CACHE_R):
+                            delattr(pcb_data, _PFM_CACHE_R)
+                    except Exception:
+                        pass
+                except Exception as _e:
+                    print(f"{RED}  restore-on-failure pass failed: "
+                          f"{_e}{RESET}")
+            if _still_open:
+                _report_unrouted_ripped_nets(pcb_data, _still_open)
 
     # Post-reconnect join round: the reconnect's copper subtracts from the
     # plane fill, so it can re-sever a region the round-1 joins had connected
@@ -1072,6 +1205,40 @@ def route_planes(
         for _z in (getattr(pcb_data, 'zones', None) or []):
             if getattr(_z, 'net_id', None) is not None:
                 _zbn3.setdefault(_z.net_id, []).append(_z)
+
+        # Lazy KiCad-oracle verdict for the gate (see the consult below):
+        # [None]=not yet queried, [False]=queried and unavailable, else the
+        # link list. One query serves every gate net; a gate repair that
+        # adds copper resets it.
+        _gate_oracle_links: list = [None]
+
+        def _gate_oracle_query():
+            import tempfile
+            try:
+                from kicad_oracle import find_kicad_cli, kicad_unconnected
+                _cli = find_kicad_cli()
+                if not _cli:
+                    return False
+                _tmp = tempfile.NamedTemporaryFile(
+                    suffix='.kicad_pcb', delete=False)
+                _tmp.close()
+                _nm10 = (pcb_data.net_id_to_name
+                         if pcb_data.kicad_version >= KICAD_10_MIN_VERSION
+                         else None)
+                _write_output(input_file, _tmp.name, all_new_segments,
+                              all_new_vias, None,
+                              net_id_to_name=_nm10,
+                              exclude_net_ids=ripped_net_ids + partial_ids)
+                _links = kicad_unconnected(_tmp.name, _cli)
+                try:
+                    os.unlink(_tmp.name)
+                except OSError:
+                    pass
+                return False if _links is None else _links
+            except Exception as _oe:
+                print(f"  (gate oracle unavailable: {_oe})")
+                return False
+
         for _nid, (_nname, _nlayers) in unique_nets.items():
             def _check3(_n=_nid):
                 return _cnc3(_n,
@@ -1082,6 +1249,33 @@ def route_planes(
             _r3 = _check3()
             if _r3.get('connected'):
                 continue
+            # ORACLE VERIFY (#quickfeather U6.29): our checker's fill model
+            # has a ~0.05mm quantization floor -- a legal fill corridor
+            # narrower than ~3 raster columns reads as a split that KiCad's
+            # exact polygon fill does not have. Acting on such a phantom is
+            # how healthy nets got ripped chasing repairs KiCad never asked
+            # for. Before routing anything, write the CURRENT state to a
+            # temp board and ask kicad-cli: if KiCad reports NO unconnected
+            # links for this net, the split is model quantization -- skip.
+            # Oracle unavailable (no kicad-cli / DRC failed) => behave as
+            # before. One DRC serves all gate nets (cached until a gate
+            # repair adds copper). KICAD_NO_GATE_ORACLE=1 disables for A/B.
+            if not os.environ.get('KICAD_NO_GATE_ORACLE'):
+                if _gate_oracle_links[0] is None:
+                    _gate_oracle_links[0] = _gate_oracle_query()
+                _gl = _gate_oracle_links[0]
+                if _gl is not False and _gl is not None:
+                    _net_links = [lk for lk in _gl if lk[0] == _nname]
+                    print(f"  [{_nname}] gate oracle: KiCad reports "
+                          f"{len(_net_links)} unconnected link(s) for this "
+                          f"net ({len(_gl)} total)")
+                    if not _net_links:
+                        print(f"  [{_nname}] guaranteed-join gate: checker "
+                              f"finds {_r3.get('num_components')} "
+                              f"component(s), but KiCad reports the net "
+                              f"complete (fill-model quantization) -- "
+                              f"skipping repair")
+                        continue
             _ncomp = _r3.get('num_components')
             print(f"\n[{_nname}] guaranteed-join gate: authoritative check "
                   f"finds {_ncomp} component(s) after repair -- routing the "
@@ -1155,6 +1349,7 @@ def route_planes(
                          'drill': _v.drill, 'layers': _v.layers,
                          'net_id': _v.net_id}
                         for _v in (_r.get('new_vias') or []))
+                _gate_oracle_links[0] = None   # state changed; re-query for later nets
                 _r3b = _check3()
                 if _r3b.get('connected'):
                     print(f"  {GREEN}[{_nname}] guaranteed-join gate: net now "
