@@ -34,7 +34,17 @@ def run_route():
            "--nets", "/IO_Banks/*",
            "--layers", "F.Cu", "In1.Cu", "In2.Cu", "B.Cu",
            "--clearance", "0.1", "--via-size", "0.3",
-           "--via-drill", "0.2", "--track-width", "0.1"]
+           "--via-drill", "0.2", "--track-width", "0.1",
+           # Ripup DISABLED so congested MST edges genuinely fail. The recipe
+           # originally relied on the router being unable to solve this block
+           # even with ripup; it since got good enough to route every net, so
+           # failed_multipoint went empty and the test silently stopped
+           # exercising #189 at all. Disabling ripup restores the condition
+           # and is far more stable against future routing improvements.
+           # Do NOT drop layers to force failures instead: at 2 layers
+           # nothing routes, routed_single is empty, and the disjointness
+           # check below passes trivially.
+           "--max-ripup", "0"]
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
     for ext in (".kicad_pcb", ".kicad_pro"):
         p = out[:-len(".kicad_pcb")] + ext
@@ -61,6 +71,12 @@ def main():
         # otherwise the test proves nothing.
         checks.append(("run produced at least one failed-edge multipoint net",
                        len(failed_mp) > 0))
+        # ...and some nets must actually ROUTE, or the disjointness check
+        # below is vacuous (an empty routed_single is trivially disjoint from
+        # anything). Guards against "fixing" this test by making the recipe
+        # so hard that nothing routes.
+        checks.append(("run also routed some nets (disjointness is not vacuous)",
+                       len(routed) > 0))
 
         # Issue #189: a net with disconnected pads must never be claimed routed.
         overlap = routed & failed_mp

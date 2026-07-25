@@ -230,8 +230,21 @@ def test_edge_clearance_338():
               abs(effective_board_edge_clearance(pcb_path, 0.0) - 0.5) < 1e-9)
         check("explicit larger flag wins",
               abs(effective_board_edge_clearance(pcb_path, 0.7) - 0.7) < 1e-9)
-        check("smaller flag loses to the board rule",
-              abs(effective_board_edge_clearance(pcb_path, 0.2) - 0.5) < 1e-9)
+        # 32d9434 (#441 follow-up) INVERTED this: an explicit
+        # --board-edge-clearance now overrides the board's own rule even
+        # DOWNWARD, so a CLI value can relax an aspirational board rule the
+        # way every other routing param does (#439's ceiling doctrine). The
+        # old assertion here ("smaller flag loses to the board rule") pinned
+        # the pre-32d9434 behavior and had simply not been updated.
+        check("smaller flag OVERRIDES the board rule (32d9434)",
+              abs(effective_board_edge_clearance(pcb_path, 0.2) - 0.2) < 1e-9)
+        # ...but only down to the fab floor: a sub-fab flag is pinned UP, so
+        # copper is never routed or graded against the milled edge (#441).
+        check("sub-fab flag is pinned up to the fab floor",
+              abs(effective_board_edge_clearance(pcb_path, 0.05) - 0.2) < 1e-9)
+        check("fab_floor=False leaves a sub-fab flag alone",
+              abs(effective_board_edge_clearance(pcb_path, 0.05,
+                                                 fab_floor=False) - 0.05) < 1e-9)
     finally:
         import shutil
         shutil.rmtree(d, ignore_errors=True)
