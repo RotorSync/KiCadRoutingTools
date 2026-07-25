@@ -1334,17 +1334,32 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
               f"outline (only board-to-board links missing): "
               f"{', '.join(sorted(skipped_cross_board))}")
 
-    # KiCad reconciliation for ZONE-BACKED nets (quantization phantoms): the
-    # fill model's ~0.05mm raster provably cannot hold a legal fill corridor
-    # narrower than ~3 cells, so a pour-connected net can grade split here
-    # while KiCad's exact polygon fill connects it (quickfeather GND: one
-    # 0.17mm corridor). When kicad-cli is available and an incomplete net
-    # OWNS a zone, ask KiCad: zero unconnected links for that net =>
-    # reclassify as connected (reported, not silent). Signal nets keep pure
-    # copper grading. KICAD_NO_GRADE_RECONCILE=1 disables for A/B.
+    # KiCad reconciliation for ZONE-BACKED nets, BOTH directions. Signal nets
+    # keep pure copper grading; KICAD_NO_GRADE_RECONCILE=1 disables for A/B.
+    #
+    # Forward (quantization phantoms): the fill model's ~0.05mm raster
+    # provably cannot hold a legal fill corridor narrower than ~3 cells, so a
+    # pour-connected net can grade split here while KiCad's exact polygon
+    # fill connects it (quickfeather GND: one 0.17mm corridor). An incomplete
+    # net that OWNS a zone with zero KiCad unconnected links is reclassified
+    # connected (reported, not silent).
+    #
+    # Reverse (refill divergence): a net this grading passed -- or never
+    # graded at all: a pour-only net has no tracks to enter the copper check
+    # -- while KiCad's refill still demands links. Causes: the refill
+    # regrowing at a looser clearance than the fill the router verified,
+    # pad-less copper clusters (a dangling via) invisible to pads-only
+    # grading (KiCad demands links between ALL copper clusters -- the
+    # island-semantics fixtures), or capsule-tolerance credit KiCad's exact
+    # geometry rejects. Eligible: owns a zone, or has copper on the board;
+    # the deliberate exemptions (cross-board links, auto-named no-connects)
+    # stay exempt. Without this direction those ship silently and only
+    # surface when the user opens KiCad (eth_tap BOOT0 class). The whole
+    # reconcile still gates on the board having zones at all, so zone-less
+    # synthetic/unit boards never pay the kicad-cli call.
     _zone_issue_ids = {i['net_id'] for i in issues
                        if any(z.net_id == i['net_id'] for z in pcb_data.zones)}
-    if _zone_issue_ids and not os.environ.get('KICAD_NO_GRADE_RECONCILE'):
+    if pcb_data.zones and not os.environ.get('KICAD_NO_GRADE_RECONCILE'):
         try:
             from kicad_oracle import find_kicad_cli, kicad_unconnected
             _cli = find_kicad_cli()
@@ -1360,6 +1375,59 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                     print(f"  {len(_reclass)} zone-backed net(s) reclassified "
                           f"CONNECTED by KiCad refill (fill-model "
                           f"quantization): {_names}")
+                # Reverse direction: KiCad-only unconnected, within the
+                # graded scope (pattern/component filters honored).
+                _issue_names = {i['net_name'] for i in issues}
+                _skip_names = set(skipped_cross_board)
+                _zone_net_ids = {_z.net_id for _z in pcb_data.zones}
+                _eligible = {}
+                for _nid, _n in pcb_data.nets.items():
+                    if _n.name and (_nid in _zone_net_ids
+                                    or _nid in segments_by_net
+                                    or _nid in vias_by_net):
+                        _eligible.setdefault(_n.name, _nid)
+                _rev = []
+                for _name, _nid in sorted(_eligible.items()):
+                    if (_name not in _linked_nets or _name in _issue_names
+                            or _name in _skip_names):
+                        continue
+                    if net_patterns and not matches_any_pattern(_name,
+                                                                net_patterns):
+                        continue
+                    if not net_patterns \
+                            and _name.lower().startswith('unconnected-'):
+                        continue
+                    if component_net_ids is not None \
+                            and _nid not in component_net_ids:
+                        continue
+                    _nl = [lk for lk in _links if lk[0] == _name]
+
+                    def _ep(e):
+                        _lyr = f" {e[2]}" if e[2] else ""
+                        return f"({e[0]:.3f}, {e[1]:.3f}){_lyr} {e[3]}"
+
+                    _rev.append({
+                        'net_id': _nid,
+                        'net_name': _name,
+                        'num_segments': len(segments_by_net.get(_nid, [])),
+                        'num_vias': len(vias_by_net.get(_nid, [])),
+                        'num_pads': len(pads_by_net.get(_nid, [])),
+                        'num_components': len(_nl) + 1,
+                        'disconnected_pads': [],
+                        'kicad_only': True,
+                        'message': ("KiCad refill reports "
+                                    f"{len(_nl)} unconnected link(s) copper "
+                                    "grading missed: "
+                                    + '; '.join(f"{_ep(lk[1])} <-> "
+                                                f"{_ep(lk[2])}"
+                                                for lk in _nl[:4])),
+                    })
+                if _rev:
+                    issues.extend(_rev)
+                    _names = ', '.join(i['net_name'] for i in _rev)
+                    print(f"  {len(_rev)} net(s) UNCONNECTED per KiCad "
+                          f"refill though copper grading passed them: "
+                          f"{_names}")
         except Exception as _re:
             if not quiet:
                 print(f"  (KiCad grade reconciliation unavailable: {_re})")

@@ -89,6 +89,19 @@ def main():
             assert n == 1, (
                 f"{name}: KiCad demands {n} link(s), expected exactly 1 -- "
                 f"island-link semantics changed?")
+
+    # Reverse grade-reconcile (audit A2): the via-only variant is the class
+    # the pad-oriented checker cannot see (single pad -> trivially complete;
+    # KiCad's demand is via-level). Full grading must now surface it as a
+    # kicad_only issue instead of shipping it silently.
+    if cli:
+        from check_connected import run_connectivity_check
+        issues = run_connectivity_check(
+            os.path.join(FIXTURES, 'two_islands_via_only.kicad_pcb'),
+            quiet=True)
+        assert len(issues) == 1 and issues[0].get('kicad_only'), (
+            f"via-only island not reverse-flagged: {issues}")
+
     suffix = "" if cli else " (kicad-cli unavailable: KiCad half skipped)"
     print(f"PASS: island-link semantics fixtures{suffix}")
 
