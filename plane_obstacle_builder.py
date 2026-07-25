@@ -617,7 +617,17 @@ def _board_edge_cell_mask_cached(pcb_data, coord: GridCoord, board_outline,
     if cache is None:
         cache = {}
         pcb_data._edge_mask_cache = cache
-    key = (round(coord.grid_step, 9), gmin_x, gmin_y, gmax_x, gmax_y,
+    # Outline identity in the key (same #490 lesson as _cutout_fingerprint):
+    # the cache dict rides along on make_local_window's shallow copies, and
+    # keys must never assume the caller's outline is the whole board's.
+    if not board_outline:
+        _ol_fp = None
+    elif isinstance(board_outline[0][0], (int, float)):
+        _ol_fp = _cutout_fingerprint(board_outline)  # single ring
+    else:
+        _ol_fp = tuple(_cutout_fingerprint(o)        # #304 multi-outline
+                       for o in board_outline)
+    key = (_ol_fp, round(coord.grid_step, 9), gmin_x, gmin_y, gmax_x, gmax_y,
            grid_margin, round(edge_clearance, 9))
     hit = cache.get(key)
     if hit is None:
@@ -627,16 +637,29 @@ def _board_edge_cell_mask_cached(pcb_data, coord: GridCoord, board_outline,
     return hit
 
 
+def _cutout_fingerprint(cutout):
+    """Geometry identity for the cutout-mask cache key. NEVER key by list
+    index: make_local_window FILTERS board_cutouts to the window, reindexing
+    from 0, and the cache dict rides along on the shallow copy -- so window A
+    cached cutout #56's mask under index 0 and window B (near cutout #12) hit
+    that key and stamped the WRONG cutout's band, leaving its real cutout
+    unguarded (crkbd: 105 tap grazes on the 72 key-switch cutouts, #490)."""
+    n = len(cutout)
+    return (n, cutout[0], cutout[n // 2], cutout[-1])
+
+
 def _rasterize_cutout_cached(pcb_data, cutout_idx: int, cutout, coord: GridCoord,
                              clearance: float):
     """Memoized cutout rasterization (same rationale as the edge-mask cache):
     board cutouts are static, but each obstacle build re-rasterized every one
-    per layer. Returns (cgx, cgy, cmask) with the clearance band applied."""
+    per layer. Returns (cgx, cgy, cmask) with the clearance band applied.
+    Keyed by geometry fingerprint, not list index (see _cutout_fingerprint)."""
     cache = getattr(pcb_data, '_cutout_mask_cache', None)
     if cache is None:
         cache = {}
         pcb_data._cutout_mask_cache = cache
-    key = (cutout_idx, round(coord.grid_step, 9), round(clearance, 9))
+    key = (_cutout_fingerprint(cutout), round(coord.grid_step, 9),
+           round(clearance, 9))
     hit = cache.get(key)
     if hit is None:
         cgx, cgy, c_inside, c_edge = _rasterize_polygon(cutout, coord, clearance)
