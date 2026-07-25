@@ -389,14 +389,21 @@ def _regions_from_fill_models(net_id, pcb_data, coord, plane_layer,
             uf.union(touched[0], touched[i])
 
     # Group anchors by island; anchors on no island stay singleton regions
-    # (an off-fill pad the join pass must still reach).
+    # (an off-fill pad the join pass must still reach). NEAR-EXACT query
+    # (size 0.15, not the 0.7 gate halo): a wide halo credits an anchor
+    # sitting ON one island to a NEIGHBOR island whose fill lies within
+    # reach, and the poisoned point set then makes the closest-pair scan
+    # find phantom sub-mm "gaps" inside a single island -- quickfeather's
+    # joins routed 0.28mm straps that started and ended on the same island
+    # (correctly rejected by endpoint verification, so the region never
+    # got its real join).
     groups: Dict[tuple, Dict] = {}
     singletons = []
     for (ax, ay) in anchor_points:
         k = None
         for layer in ([plane_layer] + [l for l in zone_layers
                                        if l != plane_layer]):
-            k = _comp_key_at(layer, ax, ay)
+            k = _comp_key_at(layer, ax, ay, size=0.15)
             if k is not None:
                 break
         if k is None:
@@ -413,12 +420,23 @@ def _regions_from_fill_models(net_id, pcb_data, coord, plane_layer,
 
     region_anchors: List[List[Tuple[float, float]]] = []
     region_cells: List[Set[Tuple[int, int]]] = []
+    # Per-region fill-island keys ((id(model), component)) so the join's
+    # endpoint verification can test landings against the MODEL itself --
+    # the coarse 0.5mm cell gather starves thin-but-real islands of cells,
+    # and a legitimate strap onto real fill then failed the material test
+    # (quickfeather U6.29's island joins died UNVERIFIED for exactly this).
+    region_islands: List[Set[tuple]] = []
+    islands_by_root: Dict[tuple, Set[tuple]] = {}
+    for ck in cells_by_comp:
+        islands_by_root.setdefault(uf.find(ck), set()).add(ck)
     for root, g in groups.items():
         region_anchors.append(g['anchors'])
         region_cells.append(g['cells'])
+        region_islands.append(islands_by_root.get(root, set()))
     for (ax, ay) in singletons:
         region_anchors.append([(ax, ay)])
         region_cells.append({coord.to_grid(ax, ay)})
+        region_islands.append(set())
 
     # Orphan policy follows the ZONE's island-removal mode: mode 0 (the
     # KiCad default, and what route_planes writes) DELETES pad-less islands
@@ -447,16 +465,18 @@ def _regions_from_fill_models(net_id, pcb_data, coord, plane_layer,
             if len(cset) >= min_patch_cells:
                 region_anchors.append([])
                 region_cells.append(cset)
+                region_islands.append(islands_by_root.get(root, set()))
 
     if len(region_anchors) < 2:
         n_anchors = len(region_anchors[0]) if region_anchors else 0
-        return [region_anchors[0] if region_anchors else []], \
-               [region_cells[0] if region_cells else set()]
+        return ([region_anchors[0] if region_anchors else []],
+                [region_cells[0] if region_cells else set()],
+                [region_islands[0] if region_islands else set()])
     print(f"  Region discovery from fill model: {len(region_anchors)} "
           f"region(s) ({len(cells_by_comp)} fill island(s), "
           f"{len(singletons)} off-fill anchor(s), "
           f"{sum(1 for a in region_anchors if not a)} orphan island(s))")
-    return region_anchors, region_cells
+    return region_anchors, region_cells, region_islands
 
 
 def find_disconnected_zone_regions(
@@ -574,7 +594,7 @@ def find_disconnected_zone_regions(
 
     if len(anchor_points) < 2:
         # Not enough anchors to have disconnected regions
-        return [anchor_points], [set(anchor_grid_points)], []
+        return [anchor_points], [set(anchor_grid_points)], [], None
 
     # Fill-model-based discovery (#479 duodyne over-joining): the coarse
     # 0.5mm raster floods below over-split badly relative to the real pour
@@ -593,7 +613,7 @@ def find_disconnected_zone_regions(
             _models_by_layer, anchor_points, zone_bounds,
             analysis_grid_step)
         if _res is not None:
-            return _res[0], _res[1], []
+            return _res[0], _res[1], [], _res[2]
 
     # Collect cross-layer connection points using helper function
     cross_layer_points = _collect_cross_layer_points(net_id, pcb_data, routing_layers)
@@ -948,7 +968,9 @@ def find_disconnected_zone_regions(
         region_anchors.append([])
         region_cells.append(patch)
 
-    return region_anchors, region_cells, debug_paths
+    # Raster path: no model island keys (endpoint verification falls back
+    # to cells/anchors).
+    return region_anchors, region_cells, debug_paths, None
 
 
 def _add_segment_cells(
@@ -1628,11 +1650,12 @@ def route_disconnected_regions(
     if progress_callback:
         progress_callback(0, 0, f"{net_name}: finding disconnected regions...")
     routing_layers = list(layer_map.keys())
-    region_anchors, region_cells, connectivity_paths = find_disconnected_zone_regions(
-        net_id, plane_layer, zone_bounds, pcb_data, config, zone_clearance,
-        analysis_grid_step, routing_layers, zone_layers, debug_connectivity,
-        zone_clearances=zone_clearances
-    )
+    region_anchors, region_cells, connectivity_paths, region_islands = \
+        find_disconnected_zone_regions(
+            net_id, plane_layer, zone_bounds, pcb_data, config, zone_clearance,
+            analysis_grid_step, routing_layers, zone_layers, debug_connectivity,
+            zone_clearances=zone_clearances
+        )
 
     n_regions = len(region_anchors)
     if n_regions < 2:
@@ -1681,6 +1704,18 @@ def route_disconnected_regions(
         for i in range(n_regions)}
     comp_strikes: Dict[int, int] = {}   # failed ladders per component
     comp_success: Dict[int, int] = {}   # successful joins per component
+    # Fill-island keys per component (fill-path discovery only): the
+    # endpoint verification tests strap landings against the MODEL, which
+    # sees thin real fill the coarse cell gather misses.
+    comp_islands: Dict[int, Set[tuple]] = {
+        i: set(region_islands[i]) if region_islands and i < len(region_islands)
+        else set()
+        for i in range(n_regions)}
+    try:
+        from plane_fill_model import get_fill_models as _gfm_join
+        _join_models = _gfm_join(pcb_data, net_id)
+    except Exception:
+        _join_models = {}
     comp_np: Dict[int, np.ndarray] = {}
     _PAIR_PTS_CAP = 2000   # bound the closest-pair matrices on merged blobs
 
@@ -2051,6 +2086,19 @@ def route_disconnected_regions(
         # strap vertex. An unverified join is a FAILED join: no copper is
         # emitted and the pair re-enters the retry policy.
         def _on_material(_root, _pt):
+            # Exact test first: does the landing point sit on one of the
+            # component's fill ISLANDS per the model? (The coarse cell sets
+            # below starve thin real islands -- quickfeather U6.29's joins
+            # died UNVERIFIED on legitimate landings.)
+            _keys = comp_islands.get(_root)
+            if _keys:
+                for _ms in _join_models.values():
+                    for _m in _ms:
+                        _c = _m.query_component(_pt[0], _pt[1],
+                                                size=min_track_width)
+                        if _c is not None and _c > 0 \
+                                and (id(_m), _c) in _keys:
+                            return True
             _gx, _gy = cell_coord.to_grid(_pt[0], _pt[1])
             _cs = comp_cells.get(_root, ())
             for _dx in (-1, 0, 1):
@@ -2073,8 +2121,13 @@ def route_disconnected_regions(
                          or (_on_material(root_i, _e1)
                              and _on_material(root_j, _e0)))
         if not _verified:
+            _e0, _e1 = (route_points[0], route_points[-1]) \
+                if len(route_points) >= 2 else (None, None)
+            def _efmt(_e):
+                return (f"({_e[0]:.2f},{_e[1]:.2f},{_e[2]})"
+                        if _e is not None else "None")
             print(f"{RED}UNVERIFIED{RESET} (strap end misses region material"
-                  f" -- treated as failed)")
+                  f" -- treated as failed; ends={_efmt(_e0)}/{_efmt(_e1)})")
             routes_failed += 1
             # Terminal for this pair: the A* DID find a path -- its seeds
             # just aren't on real material (relaxed-validity or open-space
@@ -2208,12 +2261,15 @@ def route_disconnected_regions(
                                + comp_success.get(root_j, 0) + 1)
         comp_strikes[_keep] = (comp_strikes.get(root_i, 0)
                                + comp_strikes.get(root_j, 0))
+        comp_islands[_keep] = (comp_islands.get(root_i, set())
+                               | comp_islands.get(root_j, set()))
         if _gone != _keep:
             comp_members.pop(_gone, None)
             comp_pts.pop(_gone, None)
             comp_cells.pop(_gone, None)
             comp_strikes.pop(_gone, None)
             comp_success.pop(_gone, None)
+            comp_islands.pop(_gone, None)
             comp_roots.discard(_gone)
         comp_np.pop(root_i, None)
         comp_np.pop(root_j, None)
