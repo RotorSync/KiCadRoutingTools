@@ -1377,6 +1377,67 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                           f"quantization): {_names}")
                 # Reverse direction: KiCad-only unconnected, within the
                 # graded scope (pattern/component filters honored).
+                #
+                # Multi-outline boards: a link whose two clusters lie on
+                # DIFFERENT outlines is board-to-board (Edge.Cuts clips the
+                # fill per sub-board; no copper can ever join it) -- the
+                # pad-based per-outline exemption never sees PAD-LESS pours
+                # (g474 Earth, len42 GND), so filter at the link level:
+                # distinct endpoints resolve by outline membership directly;
+                # a same-point zone|zone link needs KiCad's exact islands
+                # (one pcbnew refill, lazily, multi-outline boards only) to
+                # find which outline the anchor island and its partners are
+                # on. Unavailable exact fill keeps the flag (conservative).
+                _outl = pcb_data.board_info.board_outlines or []
+                _multi_out = len(_outl) >= 2
+                _exact_g = {'fetched': False, 'map': None}
+
+                def _out_of(x, y):
+                    for _oi, _o in enumerate(_outl):
+                        if point_in_polygon(x, y, _o):
+                            return _oi
+                    return None
+
+                def _link_cross_board(lk):
+                    if not _multi_out:
+                        return False
+                    _a, _b = lk[1], lk[2]
+                    if abs(_a[0] - _b[0]) > 1e-6 or abs(_a[1] - _b[1]) > 1e-6:
+                        _oa, _ob = _out_of(*_a[:2]), _out_of(*_b[:2])
+                        return (_oa is not None and _ob is not None
+                                and _oa != _ob)
+                    if not _exact_g['fetched']:
+                        _exact_g['fetched'] = True
+                        try:
+                            from kicad_exact_fill import refill_islands
+                            _exact_g['map'] = refill_islands(pcb_file)
+                        except Exception:
+                            _exact_g['map'] = None
+                    _m = _exact_g['map']
+                    if not _m:
+                        return False
+                    from kicad_exact_fill import point_in_poly
+                    _isl = [poly for (_n2, _ly), _polys in _m.items()
+                            if _n2 == lk[0] for poly in _polys]
+                    _cont = next((p for p in _isl
+                                  if point_in_poly(_a[0], _a[1], p)), None)
+                    if _cont is None:
+                        # Anchor ON the island boundary (KiCad anchors zone
+                        # links at fill vertices): nearest vertex within 1mm.
+                        _best = (1.0, None)
+                        for p in _isl:
+                            for vx, vy in p:
+                                _d = ((vx - _a[0]) ** 2
+                                      + (vy - _a[1]) ** 2) ** 0.5
+                                if _d < _best[0]:
+                                    _best = (_d, p)
+                        _cont = _best[1]
+                    if _cont is None:
+                        return False
+                    _ao = _out_of(*_cont[0])
+                    return not any(_out_of(*p[0]) == _ao
+                                   for p in _isl if p is not _cont)
+
                 _issue_names = {i['net_name'] for i in issues}
                 _skip_names = set(skipped_cross_board)
                 _zone_net_ids = {_z.net_id for _z in pcb_data.zones}
@@ -1400,7 +1461,12 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                     if component_net_ids is not None \
                             and _nid not in component_net_ids:
                         continue
-                    _nl = [lk for lk in _links if lk[0] == _name]
+                    _nl = [lk for lk in _links if lk[0] == _name
+                           and not _link_cross_board(lk)]
+                    if not _nl:
+                        print(f"  {_name}: KiCad link(s) span board "
+                              f"outlines only (board-to-board) -- exempt")
+                        continue
 
                     def _ep(e):
                         _lyr = f" {e[2]}" if e[2] else ""

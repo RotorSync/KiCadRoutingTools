@@ -592,6 +592,202 @@ def _delete_stranded_link_fragment(pcb_data, net_id, pt_a, pt_b):
     return None
 
 
+def _interior_seed_cells(poly, edge_samples, center, layer, track_half,
+                         radius=3.0, step=0.25):
+    """Grid points INSIDE `poly` within `radius` of `center` that keep a
+    track's half-width clear of the polygon edge. Fill-EDGE points are
+    illegal strap starts by construction: the fill edge sits exactly zone
+    clearance from the foreign copper that carved it, so a new track
+    centered there violates that clearance and the A* has no free source
+    cell. Falls back to the edge samples near `center` for sliver islands
+    with no interior at track width."""
+    import math as _m
+    from kicad_exact_fill import point_in_poly
+    cx, cy = center
+    near_edge = [(px, py) for px, py, *_ in edge_samples
+                 if abs(px - cx) <= radius + 1.0
+                 and abs(py - cy) <= radius + 1.0]
+    out = []
+    n = int(radius / step)
+    for i in range(-n, n + 1):
+        for j in range(-n, n + 1):
+            x, y = cx + i * step, cy + j * step
+            if _m.hypot(x - cx, y - cy) > radius:
+                continue
+            if not point_in_poly(x, y, poly):
+                continue
+            if near_edge:
+                d = min(_m.hypot(px - x, py - y) for px, py in near_edge)
+                if d < track_half + 0.05:
+                    continue
+            out.append((x, y, layer))
+    if not out:
+        out = [(px, py, layer) for px, py, *_ in edge_samples
+               if _m.hypot(px - cx, py - cy) <= radius][:200]
+    return out[:400]
+
+
+def _exact_fill_endpoints(pcb_data, net_id, net_name, A, B, exact_map,
+                          track_half=0.1):
+    """Strap endpoints from KiCad's EXACT fill (kicad_exact_fill): the two
+    clusters' nearest approach, as (src_seeds, tgt_seeds, pa, pb, layer).
+
+    The approximate island tracer fails on marginal pinches: it walks
+    straight through the very gap KiCad's polygon math splits, seeds both
+    sides as one island, and the weld bonds an island to itself. Exact
+    filled_polygon islands make the split unambiguous: a same-point
+    zone|zone link resolves to (its island) vs (every OTHER island + the
+    main track cluster); a distinct-endpoint link resolves each end to its
+    containing island when one exists. Returns None when exact geometry
+    cannot separate two clusters (both ends in one island = the refill
+    flicker class; no fill on this net; approach implausibly far), and the
+    string 'cross-board' when the two clusters lie on DIFFERENT board
+    outlines: on a multi-outline panel Edge.Cuts clips the fill per
+    sub-board, the link is board-to-board and no copper can ever join it
+    (g474's pad-less Earth pour, len42's per-board GND -- pad-less nets
+    never enter the pad-based per-outline grading, so they surface here).
+    Without the guard the A* burns its whole budget against the outline
+    gap (546k iterations on g474)."""
+    import math as _m
+    import numpy as np
+    from kicad_exact_fill import point_in_poly, sample_poly_edges
+    from check_connected import point_in_polygon as _pip
+    ax, ay, al, ak = A
+    bx, by, bl, bk = B
+    _outlines = pcb_data.board_info.board_outlines or []
+    _multi = len(_outlines) >= 2
+
+    def _outline_of(x, y):
+        if not _multi:
+            return None
+        for _oi, _o in enumerate(_outlines):
+            if _pip(x, y, _o):
+                return _oi
+        return None
+
+    islands = []
+    for (nn, layer), polys in exact_map.items():
+        if nn != net_name:
+            continue
+        for p in polys:
+            islands.append((layer, p))
+    if not islands:
+        return None
+
+    samples_cache = {}
+
+    def _samples(idx):
+        if idx not in samples_cache:
+            layer, poly = islands[idx]
+            samples_cache[idx] = [(x, y, layer)
+                                  for x, y in sample_poly_edges(poly)]
+        return samples_cache[idx]
+
+    def _containing(x, y, prefer):
+        best = None
+        for i, (layer, poly) in enumerate(islands):
+            if point_in_poly(x, y, poly):
+                if layer == prefer:
+                    return i
+                if best is None:
+                    best = i
+        if best is not None:
+            return best
+        # Edge quantization: the ratsnest anchor can sit ON the island
+        # boundary; take the island whose edge passes within 1mm, nearest
+        # first, preferring the anchor's layer.
+        cand = []
+        for i, (layer, poly) in enumerate(islands):
+            d = min((_m.hypot(px - x, py - y)
+                     for px, py, _ in _samples(i)), default=float('inf'))
+            if d <= 1.0:
+                cand.append((0 if layer == prefer else 1, d, i))
+        return min(cand)[2] if cand else None
+
+    same_pt = abs(ax - bx) < 1e-6 and abs(ay - by) < 1e-6
+    ia = _containing(ax, ay, al)
+    ib = None if same_pt else _containing(bx, by, bl)
+    if ia is None and ib is None:
+        return None
+    if not same_pt and ia is not None and ia == ib:
+        return None  # both ends inside ONE exact island: flicker class
+
+    def _island_outline(idx):
+        s = _samples(idx)
+        return _outline_of(s[0][0], s[0][1]) if s else None
+
+    # (x, y, layer, origin_island_or_None) point lists per side.
+    if same_pt:
+        if ia is None:
+            return None
+        a_pts = [(x, y, l, ia) for x, y, l in _samples(ia)]
+        a_out = _island_outline(ia)
+        b_pts = []
+        _dropped_cross = 0
+        for j in range(len(islands)):
+            if j == ia:
+                continue
+            if _multi and _island_outline(j) != a_out:
+                _dropped_cross += 1
+                continue
+            b_pts += [(x, y, l, j) for x, y, l in _samples(j)]
+        for x, y, l in _largest_track_component_points(pcb_data, net_id):
+            if _multi and _outline_of(x, y) != a_out:
+                continue
+            b_pts.append((x, y, l, None))
+        if not b_pts:
+            return 'cross-board' if _dropped_cross else None
+    else:
+        a_pts = [(x, y, l, ia) for x, y, l in _samples(ia)] \
+            if ia is not None else \
+            ([(ax, ay, al, None)] if al else [(ax, ay, None, None)])
+        b_pts = [(x, y, l, ib) for x, y, l in _samples(ib)] \
+            if ib is not None else \
+            ([(bx, by, bl, None)] if bl else [(bx, by, None, None)])
+        if _multi:
+            a_out = _island_outline(ia) if ia is not None \
+                else _outline_of(ax, ay)
+            b_out = _island_outline(ib) if ib is not None \
+                else _outline_of(bx, by)
+            if a_out is not None and b_out is not None and a_out != b_out:
+                return 'cross-board'
+    if not a_pts or not b_pts:
+        return None
+
+    aa = np.asarray([(p[0], p[1]) for p in a_pts])
+    bb = np.asarray([(p[0], p[1]) for p in b_pts])
+    best = (float('inf'), 0, 0)
+    chunk = 2000
+    for i0 in range(0, len(aa), chunk):
+        d = ((aa[i0:i0 + chunk, None, :] - bb[None, :, :]) ** 2).sum(axis=2)
+        jj = np.unravel_index(int(np.argmin(d)), d.shape)
+        dv = float(d[jj])
+        if dv < best[0]:
+            best = (dv, i0 + int(jj[0]), int(jj[1]))
+    _, i_best, j_best = best
+    pa, pb = a_pts[i_best], b_pts[j_best]
+    if _m.hypot(pb[0] - pa[0], pb[1] - pa[1]) > 60.0:
+        return None
+
+    def _side_seeds(pt, pts):
+        x, y = pt[0], pt[1]
+        origin = pt[3]
+        if origin is not None:
+            return _interior_seed_cells(
+                islands[origin][1], _samples(origin), (x, y),
+                islands[origin][0], track_half)
+        return [(px, py, pl) if pl else (px, py)
+                for px, py, pl, _o in pts
+                if _m.hypot(px - x, py - y) <= 3.0][:400]
+
+    src = _side_seeds(pa, a_pts)
+    tgt = _side_seeds(pb, b_pts)
+    if not src or not tgt:
+        return None
+    layer = pa[2] if pa[2] else (al or bl)
+    return src, tgt, (pa[0], pa[1]), (pb[0], pb[1]), layer
+
+
 def oracle_reconnect(board_file: str, net_names, config,
                      track_via_clearance: float,
                      hole_to_hole_clearance: float,
@@ -652,7 +848,7 @@ def oracle_reconnect(board_file: str, net_names, config,
         pass
 
     names = set(net_names)
-    routed = failed = rounds = 0
+    routed = failed = rounds = cross_board = 0
     remaining = -1
     emitted_segments = []  # parser objects, for callers that apply results
     emitted_vias = []      # to a live board instead of reading the file
@@ -683,6 +879,31 @@ def oracle_reconnect(board_file: str, net_names, config,
         name_to_id = {net.name: nid for nid, net in pcb_data.nets.items()}
         routing_layers = pcb_data.board_info.copper_layers
         layer_map = {name: i for i, name in enumerate(routing_layers)}
+
+        # EXACT-FILL cache (one pcbnew refill per round, fetched lazily only
+        # when some link exhausts the approximate tiers below): KiCad's own
+        # filled_polygon islands, for nearest-approach strapping.
+        _exact_cache = {'fetched': False, 'islands': None}
+
+        def _exact_islands_map():
+            if not _exact_cache['fetched']:
+                _exact_cache['fetched'] = True
+                if not os.environ.get('KICAD_NO_EXACT_FILL'):
+                    try:
+                        from kicad_exact_fill import refill_islands
+                        print("  KiCad-oracle recheck: fetching exact fill "
+                              "islands (pcbnew refill)...")
+                        _exact_cache['islands'] = refill_islands(
+                            board_file, verbose=verbose)
+                        if _exact_cache['islands'] is not None:
+                            _ni = sum(len(v) for v in
+                                      _exact_cache['islands'].values())
+                            print(f"    exact fill: {_ni} island(s) across "
+                                  f"{len(_exact_cache['islands'])} "
+                                  f"zone-layer(s)")
+                    except Exception as _xe:
+                        print(f"    (exact fill unavailable: {_xe})")
+            return _exact_cache['islands']
         with open(board_file, 'r', encoding='utf-8') as f:
             content = f.read()
         v10 = is_kicad_10(content)
@@ -746,6 +967,8 @@ def oracle_reconnect(board_file: str, net_names, config,
             _key = (net_name, round(ax, 2), round(ay, 2),
                     round(bx, 2), round(by, 2))
             _attempt = attempted.get(_key, 0)
+            if _attempt >= 99:
+                continue  # cross-board exempt: accounted once, stay silent
             if _attempt >= 2:
                 # Two strategies already spent (expanded, then raw): stacking
                 # more copper each round helps nobody. Leave it flagged.
@@ -1041,10 +1264,104 @@ def oracle_reconnect(board_file: str, net_names, config,
                     routed += 1
                     progress = True
                     continue
-                print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
-                      f"<->({bx:.2f},{by:.2f})  FAILED")
-                failed += 1
-                continue
+                # EXACT-FILL TIER: every approximate actor has failed on
+                # this link. Ask KiCad for its actual fill polygons (one
+                # refill per round, cached) and strap the true nearest
+                # approach between the two exact clusters -- the fix for
+                # zero-length zone|zone pinch links (no geometry to route)
+                # and for island traces that walk through the real split.
+                _ex_map = _exact_islands_map()
+                _ex = None
+                if _ex_map is not None:
+                    try:
+                        _ex = _exact_fill_endpoints(
+                            pcb_data, net_id, net_name,
+                            (ax, ay, al, akind), (bx, by, bl, bkind),
+                            _ex_map, track_half=config.track_width / 2)
+                    except Exception as _xe2:
+                        if verbose:
+                            print(f"    (exact-fill tier error: {_xe2})")
+                        _ex = None
+                if _ex == 'cross-board':
+                    print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
+                          f"<->({bx:.2f},{by:.2f})  EXEMPT (clusters on "
+                          f"different board outlines -- board-to-board "
+                          f"link, no copper can join it)")
+                    attempted[_key] = 99  # never retry
+                    cross_board += 1
+                    continue
+                if _ex is not None:
+                    _esrc, _etgt, _pa, _pb, _elayer = _ex
+                    print(f"    {net_name}: exact-fill tier: strapping "
+                          f"nearest approach ({_pa[0]:.2f},{_pa[1]:.2f})<->"
+                          f"({_pb[0]:.2f},{_pb[1]:.2f}) [{_elayer}]")
+                    _eres, _ = route_plane_connection_wide(
+                        _esrc, _etgt,
+                        plane_layer_idx=layer_map.get(_elayer, anchor_layer),
+                        routing_layers=routing_layers,
+                        base_obstacles=base_obstacles,
+                        config=config,
+                        net_vias=net_vias,
+                        track_margin=0,
+                        max_iterations=max_iterations,
+                        verbose=verbose)
+                    if _eres and (len(_eres[0]) >= 2 or _eres[1]):
+                        result = _eres
+                        rung_cfg = config
+                        rung_obstacles = base_obstacles
+                        used_via_size = config.via_size
+                        used_via_drill = config.via_drill
+                        # fall through to the shared emission path below
+                    else:
+                        # Rescue-ladder the short approach gap (scoped
+                        # window, fine grid, fab-floor escalation).
+                        _esc2 = None
+                        try:
+                            from net_rescue import _attempt_edge
+                            _gap2 = (math.hypot(_pb[0] - _pa[0],
+                                                _pb[1] - _pa[1]),
+                                     _pa[0], _pa[1], _pb[0], _pb[1])
+                            _esc2, _esc2_cfg = _attempt_edge(
+                                pcb_data, net_id, _gap2, config, None)
+                        except Exception:
+                            _esc2 = None
+                        if _esc2 and not _esc2.get('failed'):
+                            _e2segs = _esc2.get('new_segments') or []
+                            _e2vias = _esc2.get('new_vias') or []
+                            import clearance_ledger
+                            clearance_ledger.record(_esc2_cfg.clearance)
+                            for _s in _e2segs:
+                                new_sexprs.append(generate_segment_sexpr(
+                                    (_s.start_x, _s.start_y),
+                                    (_s.end_x, _s.end_y),
+                                    _s.width, _s.layer, net_id,
+                                    net_name if v10 else None))
+                                pcb_data.segments.append(_s)
+                                emitted_segments.append(_s)
+                            for _v in _e2vias:
+                                new_sexprs.append(generate_via_sexpr(
+                                    _v.x, _v.y, _v.size, _v.drill,
+                                    [routing_layers[0], routing_layers[-1]],
+                                    net_id,
+                                    net_name=net_name if v10 else None))
+                                pcb_data.vias.append(_v)
+                                emitted_vias.append(_v)
+                            print(f"    {net_name}: exact-fill strap OK "
+                                  f"(escalated: {len(_e2segs)} seg(s), "
+                                  f"{len(_e2vias)} via(s))")
+                            routed += 1
+                            progress = True
+                            continue
+                        print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
+                              f"<->({bx:.2f},{by:.2f})  FAILED "
+                              f"(exact-fill strap unroutable)")
+                        failed += 1
+                        continue
+                else:
+                    print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
+                          f"<->({bx:.2f},{by:.2f})  FAILED")
+                    failed += 1
+                    continue
             route_points, via_positions = result
             if len(route_points) < 2 and not via_positions:
                 # Degenerate 'success' (source and target expansion overlap:
@@ -1233,8 +1550,10 @@ def oracle_reconnect(board_file: str, net_names, config,
                 f.write(_content2)
 
     if rounds and remaining > 0:
+        _xb = f" ({cross_board} cross-board exempt)" if cross_board else ""
         print(f"  KiCad-oracle recheck: {remaining} link(s) still "
-              f"unconnected per KiCad after {rounds} round(s)")
+              f"unconnected per KiCad after {rounds} round(s){_xb}")
     return {'available': True, 'rounds': rounds, 'links_routed': routed,
             'links_failed': failed, 'remaining': remaining,
+            'cross_board': cross_board,
             'new_segments': emitted_segments, 'new_vias': emitted_vias}
