@@ -1625,8 +1625,14 @@ def _geometric_plane_verification(
     return results
 
 
-def _neck_plane_segments(all_new_segments, pcb_data, clearance, all_layers, min_width=0.1):
-    """Neck plane tap segments so they clear foreign vias AND pads by `clearance`.
+def _neck_plane_segments(all_new_segments, pcb_data, clearance, all_layers,
+                         min_width=0.1, net_clearances=None):
+    """Neck plane tap segments so they clear foreign vias AND pads by the
+    clearance KiCad will actually enforce for each pair: max(step clearance,
+    tap net's class, foreign net's class, the foreign pad's resolved local
+    override #326). A flat `clearance` under-necked against a pad with a
+    larger local_clearance or (no-ceiling mode) a looser foreign class, so
+    the neck survived our grading but KiCad flagged the graze.
 
     The tap router (route_via_to_pad) exempts its source/target cells from the
     obstacle map and appends an un-obstacle-checked stub to the pad centre, so a
@@ -1642,6 +1648,13 @@ def _neck_plane_segments(all_new_segments, pcb_data, clearance, all_layers, min_
     from check_drc import segment_to_rect_distance, _into_pad_frame  # reuse exact DRC geometry
     vias = [(v.x, v.y, v.size / 2.0, v.net_id, v.layers) for v in pcb_data.vias]
     EPS = 1e-4  # stay just inside the rule
+    _nc = net_clearances or {}
+
+    def _pair_clearance(tap_nid, foreign_nid, pad=None):
+        c = max(clearance, _nc.get(tap_nid, 0.0), _nc.get(foreign_nid, 0.0))
+        if pad is not None and getattr(pad, 'local_clearance', 0):
+            c = max(c, pad.local_clearance)
+        return c
 
     def pad_on_layer(pad, layer):
         return '*.Cu' in pad.layers or layer in pad.layers
@@ -1668,12 +1681,13 @@ def _neck_plane_segments(all_new_segments, pcb_data, clearance, all_layers, min_
                 continue
             if not (('F.Cu' in vlayers and 'B.Cu' in vlayers) or layer in vlayers):
                 continue
-            margin = half + vr + clearance
+            _cl = _pair_clearance(nid, vnid)
+            margin = half + vr + _cl
             if vx < minx - margin or vx > maxx + margin or vy < miny - margin or vy > maxy + margin:
                 continue
             t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((vx - x0) * dx + (vy - y0) * dy) / L2))
             d = math.hypot(vx - (x0 + t * dx), vy - (y0 + t * dy))
-            allowed = d - vr - clearance - EPS
+            allowed = d - vr - _cl - EPS
             if allowed < new_half:
                 new_half = allowed
         # foreign pads on this layer (edge-to-edge distance via the DRC geometry)
@@ -1683,8 +1697,9 @@ def _neck_plane_segments(all_new_segments, pcb_data, clearance, all_layers, min_
             for pad in pads:
                 if not pad_on_layer(pad, layer):
                     continue
+                _cl = _pair_clearance(nid, pnid, pad)
                 pext = max(pad.size_x, pad.size_y) / 2.0
-                margin = half + pext + clearance
+                margin = half + pext + _cl
                 if pad.global_x < minx - margin or pad.global_x > maxx + margin or \
                    pad.global_y < miny - margin or pad.global_y > maxy + margin:
                     continue
@@ -1698,7 +1713,7 @@ def _neck_plane_segments(all_new_segments, pcb_data, clearance, all_layers, min_
                                                 pad.global_x, pad.global_y,
                                                 pad.size_x / 2, pad.size_y / 2,
                                                 pad_corner_radius(pad))
-                allowed = d - clearance - EPS  # d is already edge-to-edge from the pad
+                allowed = d - _cl - EPS  # d is already edge-to-edge from the pad
                 if allowed < new_half:
                     new_half = allowed
         floor_half = min(base, min_width) / 2.0
@@ -1713,7 +1728,8 @@ def _neck_plane_segments(all_new_segments, pcb_data, clearance, all_layers, min_
 
 def _finalize_plane_copper(all_new_segments, all_new_vias, pcb_data, clearance,
                            all_layers, track_width, grid_step, via_size,
-                           via_drill, hole_to_hole_clearance):
+                           via_drill, hole_to_hole_clearance,
+                           net_clearances=None):
     """Run the full pre-write cleanup pipeline on plane tap copper and return the
     resulting all_new_segments.
 
@@ -1744,7 +1760,8 @@ def _finalize_plane_copper(all_new_segments, all_new_vias, pcb_data, clearance,
                               hole_to_hole_clearance)
 
     # 1. neck grazing taps (mutates all_new_segments in place)
-    _neck_plane_segments(all_new_segments, pcb_data, clearance, all_layers)
+    _neck_plane_segments(all_new_segments, pcb_data, clearance, all_layers,
+                         net_clearances=net_clearances)
 
     # 2. graze prune / nudge / dead-end sweep (returns a NEW list)
     if all_new_segments:
@@ -3338,7 +3355,8 @@ def create_plane(
         progress_callback(0, 0, "Cleaning up plane tap copper...")
     all_new_segments = _finalize_plane_copper(
         all_new_segments, all_new_vias, pcb_data, clearance, all_layers,
-        track_width, grid_step, via_size, via_drill, hole_to_hole_clearance)
+        track_width, grid_step, via_size, via_drill, hole_to_hole_clearance,
+        net_clearances=net_clearances)
 
     # Route trace (#482): emit the finalized plane-tap tracks/vias, grouped by
     # net so each plane's taps land as one animation event, then write
