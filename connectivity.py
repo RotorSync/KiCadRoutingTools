@@ -790,6 +790,51 @@ def get_net_endpoints_anchor_split(pcb_data: PCBData, net_id: int,
 
 def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                       use_stub_free_ends: bool = False) -> Tuple[List, List, str]:
+    """Deterministic wrapper: sort the endpoint lists by POSITION.
+
+    The candidate lists are built by walking pcb_data.segments / pads, so their
+    ORDER follows the order copper happens to sit in the board. Consumers take
+    `sources[0]` / `targets[0]` as the net's representative endpoint -- notably
+    layer_swap_optimization, which derives each net's src/tgt LAYER from them --
+    so a different segment order silently flipped which end is "source".
+
+    That is a real cross-front divergence, not a theoretical one. The GUI adds
+    copper to the live board in its own order while the CLI writer emits it in
+    another, so the same board (identical segment SET, 1159 of 1159) yields
+    different segment ORDER. Measured on eth_tap step 11:
+
+        /Thru Path/ETH0_MDC   run A: src=In1.Cu tgt=F.Cu
+                              run B: src=F.Cu  tgt=In1.Cu   (flipped)
+
+    which made the greedy swap-pair test `src1 == tgt2 and tgt1 == src2` match
+    for two extra pairs (7 applied vs 5), changed MPS crossing conflicts
+    (346 vs 348) and hence the routing order, and left 27 of 295 nets routed
+    differently -- 3486 segments vs the CLI's 3428. Every earlier comparison
+    used SETS, which is why the order difference stayed invisible.
+
+    Sorting by the endpoint tuple (grid x, grid y, layer index, x, y) makes the
+    representative a function of GEOMETRY rather than of board order, so both
+    fronts agree regardless of how the copper got there. This is a behaviour
+    change for the CLI too (its own order was equally arbitrary) and wants a
+    corpus A/B before being treated as settled.
+    """
+    sources, targets, err = _get_net_endpoints_ordered(
+        pcb_data, net_id, config, use_stub_free_ends)
+    if sources:
+        sources = sorted(sources)
+    if targets:
+        targets = sorted(targets)
+    # NOTE: role canonicalisation (swapping so sources[0] < targets[0]) was
+    # TRIED and REVERTED -- it regressed the case this fix repairs (3-step chain
+    # went from matching to 3526 vs 3538). Source and target are not
+    # interchangeable: which end the router starts from changes the result, so
+    # the roles must be left as the endpoint derivation assigned them. The
+    # residual role-flip is tracked separately.
+    return sources, targets, err
+
+
+def _get_net_endpoints_ordered(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
+                               use_stub_free_ends: bool = False) -> Tuple[List, List, str]:
     """
     Find source and target endpoints for a net, considering segments, pads, and existing vias.
 
