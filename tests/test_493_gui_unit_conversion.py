@@ -129,10 +129,48 @@ def test_helper_divides():
             print(f"  FAIL not used: {needle}")
 
 
+def test_plugin_sources_do_not_use_FromMM():
+    """Static guard: no plugin module may convert mm->IU with pcbnew.FromMM.
+
+    FromMM TRUNCATES. Measured on KiCad 10: FromMM(1.001) = 1000999 where the
+    correct value is 1001000 -- 24 of 2010 swept floor values come out 1 nm low,
+    all of them >= 1mm. kicad_parser.mm_to_iu rounds and is the project's
+    canonical mm->IU conversion.
+
+    Found in gui_utils.update_live_drc_floors, which stamped every live DRC
+    floor (including the copper-to-edge pin) through FromMM. Sub-millimetre
+    floors are unaffected, so no current corpus board shows it -- but a board
+    declaring e.g. a 1.27mm (50 mil) edge clearance would have its floor written
+    1 nm BELOW the copper that was routed to it, which is precisely the
+    phantom-violation class #493 exists to prevent.
+
+    The nm->mm guard above catches the other direction; this catches this one.
+    """
+    print("4. no kicad_routing_plugin module converts mm->IU with FromMM")
+    bad = []
+    for path in sorted(glob.glob(os.path.join(PLUGIN_DIR, '*.py'))):
+        try:
+            tree = ast.parse(open(path, encoding='utf-8').read())
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == 'FromMM'):
+                bad.append(f"{os.path.basename(path)}:{node.lineno}")
+    if bad:
+        for b in bad:
+            print(f"  FAIL pcbnew.FromMM at {b} -- use kicad_parser.mm_to_iu")
+        failures.append(f"{len(bad)} FromMM call(s) in the plugin: {bad}")
+    else:
+        print("  ok   none")
+
+
 def main():
     for t in (test_divide_is_exact_multiply_is_not,
               test_plugin_sources_do_not_multiply_by_1e_minus_6,
-              test_helper_divides):
+              test_helper_divides,
+              test_plugin_sources_do_not_use_FromMM):
         t()
     print()
     if failures:

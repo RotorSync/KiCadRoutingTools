@@ -3509,17 +3509,16 @@ class RoutingDialog(wx.Dialog):
         def add_line(start, end, layer_name, width_mm=0.05):
             nonlocal count
             layer_id = user_layers.get(layer_name, pcbnew.User_9)
+            # mm_to_iu, not FromMM: FromMM truncates (#493). These are debug
+            # overlay graphics rather than routed copper, but the project has
+            # ONE canonical mm->IU conversion and mixed converters are how the
+            # original #493 divergence arose.
+            from kicad_parser import mm_to_iu as _m2i
             shape = pcbnew.PCB_SHAPE(board)
             shape.SetShape(pcbnew.SHAPE_T_SEGMENT)
-            shape.SetStart(pcbnew.VECTOR2I(
-                pcbnew.FromMM(start[0]),
-                pcbnew.FromMM(start[1])
-            ))
-            shape.SetEnd(pcbnew.VECTOR2I(
-                pcbnew.FromMM(end[0]),
-                pcbnew.FromMM(end[1])
-            ))
-            shape.SetWidth(pcbnew.FromMM(width_mm))
+            shape.SetStart(pcbnew.VECTOR2I(_m2i(start[0]), _m2i(start[1])))
+            shape.SetEnd(pcbnew.VECTOR2I(_m2i(end[0]), _m2i(end[1])))
+            shape.SetWidth(_m2i(width_mm))
             shape.SetLayer(layer_id)
             board.Add(shape)
             count += 1

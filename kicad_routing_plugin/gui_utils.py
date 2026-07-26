@@ -306,6 +306,14 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
     Best-effort: never raises."""
     try:
         import pcbnew
+        # mm_to_iu, NOT pcbnew.FromMM: FromMM TRUNCATES (#493). Measured on this
+        # KiCad: FromMM(1.001) = 1000999 where the correct value is 1001000 --
+        # 24 of 2010 swept floor values are 1 nm low, all >= 1mm. Today's floors
+        # are sub-millimetre so nothing on the current corpus is affected, but a
+        # board declaring e.g. a 1.27mm (50 mil) edge clearance would have its
+        # DRC floor stamped 1 nm below what was routed, which is exactly the
+        # phantom-violation class #493 fixed elsewhere.
+        from kicad_parser import mm_to_iu
         bds = board.GetDesignSettings()
 
         # Actual board minima (copper tracks/vias only).
@@ -340,7 +348,7 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
         def lower(attr, mm, board_min_iu=None):
             if mm is None and board_min_iu is None:
                 return
-            iu = pcbnew.FromMM(float(mm)) if mm is not None else None
+            iu = mm_to_iu(float(mm)) if mm is not None else None
             if board_min_iu is not None:
                 iu = board_min_iu if iu is None else min(iu, board_min_iu)
             if getattr(bds, attr) > iu:
@@ -362,7 +370,7 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
         from fix_kicad_drc_settings import fab_edge_floor
         _edge_pin = max(edge_clearance or 0.0, fab_edge_floor())
         if _edge_pin > 0:
-            _pin_iu = pcbnew.FromMM(float(_edge_pin))
+            _pin_iu = mm_to_iu(float(_edge_pin))
             if getattr(bds, 'm_CopperEdgeClearance', 0) < _pin_iu:
                 bds.m_CopperEdgeClearance = _pin_iu
         try:
@@ -371,7 +379,7 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
                 def _nc_lower(get, set_, mm, board_min_iu=None):
                     if mm is None and board_min_iu is None:
                         return
-                    iu = pcbnew.FromMM(float(mm)) if mm is not None else None
+                    iu = mm_to_iu(float(mm)) if mm is not None else None
                     if board_min_iu is not None:
                         iu = board_min_iu if iu is None else min(iu, board_min_iu)
                     if get() > iu:

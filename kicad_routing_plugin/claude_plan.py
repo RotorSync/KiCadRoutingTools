@@ -1130,8 +1130,10 @@ class PlanExecutor:
                                     (_nc.GetDiffPairGap,
                                      _nc.SetDiffPairGap,
                                      floors.get('diff_pair_gap'))):
-                                if _mm and _get() > pcbnew.FromMM(_mm):
-                                    _set(pcbnew.FromMM(_mm))
+                                # mm_to_iu, not FromMM: FromMM truncates (#493)
+                                from kicad_parser import mm_to_iu as _m2i
+                                if _mm and _get() > _m2i(_mm):
+                                    _set(_m2i(_mm))
                     except Exception:
                         pass
                     self.log(f"Claude plan: live DRC settings updated "
