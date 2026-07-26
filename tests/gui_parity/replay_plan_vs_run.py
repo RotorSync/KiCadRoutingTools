@@ -525,10 +525,45 @@ def replay(info, steps, workdir, timeout=7200, verbose=False, snapshots=True):
         tee.progress(f"  replaying {len(steps)} step(s) "
                      f"(engine output -> {os.path.relpath(log_path, REPO)})")
         wx.CallAfter(executor.start)
-        wx.CallLater(int(timeout * 1000), on_timeout)
+        _timeout_timer = wx.CallLater(int(timeout * 1000), on_timeout)
         app.MainLoop()
     result['seconds'] = round(time.time() - t0, 1)
     result['log'] = state['log']
+
+    # Deterministic wx teardown. Without this the run segfaults AFTER finishing
+    # -- measured 2 of 3 runs exiting 139 on a 1-step replay, and one probe run
+    # died before printing its results, so a crash here can silently cost a
+    # measurement rather than just look untidy.
+    #
+    # Two causes, both "leave it to the interpreter":
+    #   * the wx.CallLater timeout timer was NEVER cancelled. On a normal finish
+    #     it is still pending (default deadline 7200s) holding a callback into
+    #     this frame, and wxWidgets tears it down at an arbitrary later point.
+    #   * the dialog was never Destroy()ed. Its C++ side then gets finalized
+    #     during interpreter shutdown, after the wx.App it belongs to is gone.
+    # Either way the heap is corrupt by the time CPython's GC next walks it,
+    # which is why the crash surfaces as SIGBUS/SIGSEGV inside visit_decref /
+    # dict_traverse / collect with a traceback pointing at unrelated code.
+    #
+    # Order matters: stop the timer first (so nothing can fire into a
+    # half-destroyed dialog), destroy the dialog, then let wx process the
+    # pending destroy events while the App is still alive.
+    try:
+        if _timeout_timer is not None and _timeout_timer.IsRunning():
+            _timeout_timer.Stop()
+    except Exception:
+        pass
+    try:
+        dialog.Destroy()
+    except Exception:
+        pass
+    try:
+        app.ProcessPendingEvents()
+    except Exception:
+        pass
+    dialog = None
+    app = None
+
     with open(os.path.join(workdir, 'replay_plan_log.txt'), 'w') as f:
         f.write("\n".join(state['log']))
     return result

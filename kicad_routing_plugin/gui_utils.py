@@ -239,10 +239,19 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
         for t in board.GetTracks():
             try:
                 if t.Type() == pcbnew.PCB_VIA_T:
+                    # GetFrontWidth() FIRST. On KiCad 10 a bare
+                    # PCB_VIA::GetWidth() trips a wxASSERT ("GetWidth called
+                    # without a layer argument") for EVERY via on the board. It
+                    # does not raise, so the old order hit the assert path
+                    # hundreds of times per call and then fell through to the
+                    # same answer -- pure noise in every headless log.
+                    # NOT the segfault: with this reversed the asserts are gone
+                    # (verified 0 in the log) and a 1-step replay still crashed
+                    # 4 runs in 6. Tidy-up only; see the open crash note.
                     try:
-                        w = t.GetWidth()
-                    except Exception:
                         w = t.GetFrontWidth()
+                    except Exception:
+                        w = t.GetWidth()
                     d = t.GetDrillValue()
                     min_via = w if min_via is None else min(min_via, w)
                     min_drill = d if min_drill is None else min(min_drill, d)
