@@ -567,6 +567,17 @@ def route_planes(
         print(f"Loading PCB from {input_file}...")
         pcb_data = parse_kicad_pcb(input_file)
 
+    # Canonicalise the starting copper ORDER, before anything reads it.
+    # This is the plane-repair twin of the same call in route.batch_route: the
+    # GUI adds tracks to a live pcbnew board and the CLI writer emits them from
+    # its own lists, so the two fronts hand this engine identical copper in
+    # different ORDER, and list position leaks into region/anchor selection.
+    # Adding it to batch_route alone took eth_tap steps 1-13 to an exact match
+    # and left ONLY repair_planes diverging (7548 vs 7557 segments), because
+    # this engine never got the same treatment.
+    from kicad_parser import canonicalize_pcb_data_order
+    canonicalize_pcb_data_order(pcb_data)
+
     # #493 item 3: snapshot the board's ORIGINAL copper IN MEMORY, now, before
     # anything mutates pcb_data. The rip-blocker casualty restore below needs
     # "what this net looked like before we touched it", and used to re-read

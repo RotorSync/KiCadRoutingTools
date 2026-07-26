@@ -2311,6 +2311,12 @@ def create_plane(
         print(f"Loading PCB from {input_file}...")
         pcb_data = parse_kicad_pcb(input_file)
 
+    # Same canonicalisation as route.batch_route and
+    # route_disconnected_planes: the two fronts hand this engine identical
+    # copper in different ORDER, and list position leaks into decisions.
+    from kicad_parser import canonicalize_pcb_data_order
+    canonicalize_pcb_data_order(pcb_data)
+
     # Route trace (#482): plane creation builds its tap tracks/vias as dicts in
     # all_new_segments/all_new_vias (never touching pcb_data.segments), so record
     # them from those dicts at the end. Local trace, baseline = the input copper.
