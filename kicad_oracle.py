@@ -502,6 +502,54 @@ def _merge_collinear(route_points, keep=frozenset()):
     return out
 
 
+def clamp_emitted_width(route_points, extra_conn, used_width, nominal_width,
+                        pcb_data, net_id, config, ladder=(0.2, 0.4, 0.8)):
+    """The widest width <= `used_width` at which the copper ABOUT TO BE WRITTEN
+    (`route_points` plus the same-net weld connectors `extra_conn`) actually
+    clears foreign copper, the board edge and NPTH drills. Floors at
+    `nominal_width`.
+
+    Issue #495/#496. The oracle's width upgrade validates the route the ladder
+    produced, but that is not always the route that ships:
+
+    * A DEGENERATE wide route (fewer than 2 points) has no same-layer legs, and
+      wide_route_clear returns True vacuously for a leg-less route -- so the
+      upgrade is accepted on an empty check. The caller then re-routes with
+      track_margin=0 (geometry sized for the NOMINAL width) and that real path
+      inherits the upgraded width. The exact-fill tier re-routes after the
+      ladder for the same reason.
+    * The weld connectors are synthesized after the ladder and were never
+      clearance-checked at all.
+
+    On rp2350_fpga_eensy that shipped 8 GND straps 0.026-0.361mm inside J1's
+    0.65mm USB-C mounting hole, emitted at 0.8mm against a map stamped for
+    0.0762. Stepping DOWN only ever declines the upgrade -- the nominal width is
+    what the route was planned at -- so this can never lose a link that would
+    otherwise have shipped.
+    """
+    if used_width <= nominal_width:
+        return used_width
+    from plane_region_connector import wide_route_clear
+    bec = getattr(config, 'board_edge_clearance', 0.0)
+
+    def _clear(w):
+        if not wide_route_clear(route_points, w, pcb_data, net_id, config,
+                                board_edge_clearance=bec):
+            return False
+        for (p1, p2, layer) in (extra_conn or []):
+            if not wide_route_clear([(p1[0], p1[1], layer), (p2[0], p2[1], layer)],
+                                    w, pcb_data, net_id, config,
+                                    board_edge_clearance=bec):
+                return False
+        return True
+
+    w = used_width
+    while w > nominal_width and not _clear(w):
+        lower = [c for c in (nominal_width,) + tuple(ladder) if c < w]
+        w = max(lower)
+    return w
+
+
 def _largest_track_component_points(pcb_data, net_id, max_pts: int = 40):
     """Sample points (x, y, layer) on the net's largest track+via copper
     component, graded WITHOUT any zone-fill credit. The biggest genuine
@@ -1502,6 +1550,13 @@ def oracle_reconnect(board_file: str, net_names, config,
             via_positions = _kept_vias
             _via_keys = {(round(vx, 3), round(vy, 3)) for vx, vy in via_positions}
             route_points = _merge_collinear(route_points, keep=_via_keys)
+            # #495/#496: the width ladder validates the route IT produced, which
+            # is not always the route that ships (degenerate re-route, exact-fill
+            # tier, unvalidated weld connectors). Re-check the exact copper about
+            # to be written and step the width back down if it does not clear.
+            used_width = clamp_emitted_width(
+                route_points, _extra_conn, used_width, config.track_width,
+                pcb_data, net_id, config)
             n_segs = 0
             for k in range(len(route_points) - 1):
                 x1, y1, l1 = route_points[k]

@@ -179,11 +179,22 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
     the candidate via sites, #329), never ripping a protected (plane) net.
 
     On SUCCESS the ripped net ids are appended to ripped_net_ids for the later
-    route.py reconnect pass. On FAILURE every ripped net's copper is RESTORED
-    (#329): nothing else routed while this pad's tap retried (a failed tap adds
-    no copper), so an immediate restore cannot create the #141 restore-shorts --
-    while shipping the rips destroyed whole nets the reconnect pass then could
-    not reroute (ottercast MIPI_SDA + Net-(C61-Pad1) ended at ZERO copper).
+    route.py reconnect pass. On FAILURE every ripped net's copper is restored
+    (#329) -- but PIECE BY PIECE, against the live board, exactly like the
+    success path above (#495/#496).
+
+    The old failure path restored unconditionally, on the reasoning that "a
+    failed tap adds no copper, so an immediate restore cannot create the #141
+    restore-shorts". That is false in general: earlier pads' taps and region
+    straps placed during this same repair DO land in the freed corridor, and
+    the blanket restore then put a failed net's stale copper back on top of
+    them (rp2350 /RP2354A/FPGA.MOSI: both RN2.2/RN2.3 taps failed and its via
+    went back over a GND strap, 0.114mm overlap at a 0.09 rule). That is
+    precisely the behaviour issue #141 removed and this module's own docstring
+    says was removed. Colliding pieces are left ripped for the mandated
+    follow-up route.py pass (the shared rip_up_reroute.restore_net contract);
+    non-colliding copper is still given back, so #329's zero-copper nets do
+    not come back either.
     Returns a successful TapResult, or None."""
     failure = first_failure
     ripped_local = []  # (net_id, segments, vias) in rip order
@@ -292,16 +303,60 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
             _plane_capture(pcb_data, 'plane-restore', net_id)  # restored non-conflicting pieces
             return result
         failure = result
-    # FINAL FAILURE: restore every ripped net's copper (#329).
+    # FINAL FAILURE: restore every ripped net's copper (#329), but only the
+    # pieces that do not collide with whatever is on the board NOW (#495/#496).
+    # Reuses the shared rip-up/restore collision test (rip_up_reroute, #134)
+    # rather than a private copy: a piece is refused exactly when foreign
+    # copper moved into the corridor while this net was ripped.
     if ripped_local:
+        from rip_up_reroute import _saved_route_collides
+        from pcb_modification import drop_orphan_restore_pieces
+        # All nets ripped in THIS transaction are "own": they coexisted on the
+        # input board, so a sibling's copper is not a collision to refuse (and
+        # siblings restored earlier in this loop must not fail the later ones).
+        _own = [b for b, _s, _v in ripped_local]
+        clr = tap_config.clearance
+        n_restored = 0
         for blocker, rsegs, rvias in reversed(ripped_local):
-            pcb_data.segments.extend(rsegs)
-            pcb_data.vias.extend(rvias)
+            keep_segs = [s for s in rsegs
+                         if not _saved_route_collides(
+                             {'new_segments': [s], 'new_vias': []},
+                             pcb_data, _own, clr)]
+            keep_vias = [v for v in rvias
+                         if not _saved_route_collides(
+                             {'new_segments': [], 'new_vias': [v]},
+                             pcb_data, _own, clr)]
+            dropped = (len(rsegs) - len(keep_segs)) + (len(rvias) - len(keep_vias))
+            dropped += drop_orphan_restore_pieces(
+                keep_segs, keep_vias, blocker, pcb_data)
+            if not keep_segs and not keep_vias:
+                # Nothing restorable: honest full rip for the reconnect pass.
+                if blocker not in ripped_net_ids:
+                    ripped_net_ids.append(blocker)
+                continue
+            pcb_data.segments.extend(keep_segs)
+            pcb_data.vias.extend(keep_vias)
             if shared_via_maps is not None:
                 shared_via_maps.note_net_restored(blocker)
-        print(f"(restored {len(ripped_local)} ripped net(s))", end=" ", flush=True)
+            n_restored += 1
+            if dropped:
+                # Partial: the writer must strip the net's input copper and
+                # emit the kept pieces (board==file); the reconnect pass closes
+                # the gap. Mirrors the success path above.
+                if partial_restores is not None:
+                    partial_restores.append((blocker, keep_segs, keep_vias, dropped))
+                    bn = pcb_data.nets[blocker].name if blocker in pcb_data.nets else blocker
+                    print(f"(partial restore {bn}: -{dropped} piece(s))", end=" ", flush=True)
+                elif blocker not in ripped_net_ids:
+                    # No partial channel (defensive): fall back to full rip.
+                    pcb_data.segments = [x for x in pcb_data.segments if x not in keep_segs]
+                    pcb_data.vias = [x for x in pcb_data.vias if x not in keep_vias]
+                    ripped_net_ids.append(blocker)
+                    n_restored -= 1
+        print(f"(restored {n_restored}/{len(ripped_local)} ripped net(s))",
+              end=" ", flush=True)
         from route_trace import plane_capture as _plane_capture
-        _plane_capture(pcb_data, 'plane-restore')  # tap failed: all ripped copper back
+        _plane_capture(pcb_data, 'plane-restore')  # tap failed: non-conflicting copper back
     return None
 
 

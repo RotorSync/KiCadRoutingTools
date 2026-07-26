@@ -59,6 +59,74 @@ def _grade(pcb, clr=0.09):
     return 0 if 'NO DRC' in r.stdout else (int(m.group(1)) if m else -1)
 
 
+def _cli_chain(work):
+    """Run the EQUIVALENT CLI file chain and grade each stage.
+
+    #495: this gate used to grade only the GUI stages and then assert, in its
+    failure message, that "the CLI file chain does not" introduce the DRC --
+    without ever running the CLI. That let a CLI-side defect (8 track-through-
+    NPTH-hole violations from the plane repair's oracle recheck) sit green here
+    while the board it grades was demonstrably dirty. Measure both fronts.
+
+    Runs under THIS interpreter (sys.executable, i.e. KiCad's python when the
+    gate re-execs into it) so the comparison is not contaminated by the
+    interpreter-dependent routing #493 fixed.
+    """
+    py = sys.executable
+    b0 = os.path.join(work, 'cli_start.kicad_pcb')
+    shutil.copy(START_BOARD, b0)
+    layers = ['F.Cu', 'In1.Cu', 'In2.Cu', 'In3.Cu', 'In4.Cu', 'B.Cu']
+    planes = os.path.join(work, 'cli_planes.kicad_pcb')
+    repair = os.path.join(work, 'cli_repair.kicad_pcb')
+    recon = os.path.join(work, 'cli_reconnect.kicad_pcb')
+    final = os.path.join(work, 'cli_final.kicad_pcb')
+    R = lambda s: os.path.join(REPO, s)
+    # Mirrors the GUI stages below (same nets/params, and the same grid_step
+    # 0.05 on the second repair that the GUI stage uses for runtime).
+    steps = [
+        ('create', planes, [py, '-X', 'utf8', R('route_planes.py'), b0, planes,
+                            '--nets', 'GND', '+3V3',
+                            '--plane-layers', 'In1.Cu', 'In4.Cu',
+                            '--via-size', '0.45', '--via-drill', '0.2',
+                            '--track-width', '0.09', '--clearance', '0.10',
+                            '--hole-to-hole-clearance', '0.2', '--grid-step', '0.05',
+                            '--power-nets', 'VIN', '--power-nets-widths', '0.3']),
+        ('repair', repair, [py, '-X', 'utf8', R('route_disconnected_planes.py'),
+                            planes, repair, '--nets', 'GND', '+3V3',
+                            '--clearance', '0.09', '--via-size', '0.25',
+                            '--via-drill', '0.15', '--track-width', '0.0762',
+                            '--grid-step', '0.05', '--hole-to-hole-clearance', '0.2',
+                            '--rip-blocker-nets',
+                            '--power-nets', 'VIN', '--power-nets-widths', '0.3']),
+        ('reconnect', recon, [py, '-X', 'utf8', R('route.py'), repair, recon,
+                              '--nets', '+1V1', '/T8F49I2X/PIN.5',
+                              '--layers'] + layers + [
+                              '--no-bga-zones', '--clearance', '0.09',
+                              '--track-width', '0.0762', '--via-size', '0.25',
+                              '--via-drill', '0.15', '--hole-to-hole-clearance', '0.2',
+                              '--grid-step', '0.025', '--max-ripup', '10',
+                              '--max-iterations', '1000000']),
+        ('final', final, [py, '-X', 'utf8', R('route_disconnected_planes.py'),
+                          recon, final, '--nets', 'GND', '+3V3',
+                          '--clearance', '0.09', '--via-size', '0.25',
+                          '--via-drill', '0.15', '--track-width', '0.0762',
+                          '--grid-step', '0.05', '--hole-to-hole-clearance', '0.2',
+                          '--rip-blocker-nets',
+                          '--power-nets', 'VIN', '--power-nets-widths', '0.3']),
+    ]
+    grades = {}
+    for tag, out, cmd in steps:
+        p = subprocess.run(cmd, capture_output=True, text=True, cwd=work)
+        if not os.path.exists(out):
+            print(f"  CLI stage {tag} produced no output (rc={p.returncode})")
+            print((p.stdout or '')[-1500:])
+            print((p.stderr or '')[-1500:])
+            grades[tag] = -1
+            break
+        grades[tag] = _grade(out)
+    return grades
+
+
 def main():
     start_board = START_BOARD
     if not os.path.exists(start_board):
@@ -140,19 +208,38 @@ def main():
                 grid_step=0.05, rip_blocker_nets=True, **GP))
     stages['final'] = stage('final')
 
-    print("rp2350 live-chain grade parity (GUI, DRC @ 0.09):")
-    bad = []
+    # #495: actually RUN the CLI chain instead of asserting it is clean.
+    print("\nrunning the equivalent CLI file chain for comparison...", flush=True)
+    cli = _cli_chain(work)
+
+    print("\nrp2350 live-chain grade parity (DRC @ 0.09):")
+    print(f"  {'stage':<12} {'GUI':>6} {'CLI':>6}")
+    gui_bad, cli_bad = [], []
     for tag, n in stages.items():
-        flag = 'OK' if n == 0 else 'FAIL'
-        print(f"  {tag:<12} DRC={n}  [{flag}]")
+        c = cli.get(tag, -1)
+        print(f"  {tag:<12} {n:>6} {c:>6}   "
+              f"[{'OK' if n == 0 else 'FAIL'}/{'OK' if c == 0 else 'FAIL'}]")
         if n != 0:
-            bad.append(tag)
+            gui_bad.append(tag)
+        if c != 0:
+            cli_bad.append(tag)
     shutil.rmtree(work, ignore_errors=True)
-    if bad:
-        print(f"\nFAIL: GUI live-chain introduced DRC at stage(s) {bad} that the "
-              f"CLI file chain does not (#362).")
-        return 1
-    print("\nPASS: GUI live-chain grades clean at every stage, matching the CLI.")
+
+    rc = 0
+    if cli_bad:
+        # Measured, not assumed: a CLI-side defect fails this gate on its own
+        # (#495 defect 1 -- the plane repair's oracle recheck shipped 8 GND
+        # straps through J1's NPTH mounting hole at an unvalidated width).
+        print(f"\nFAIL: the CLI file chain introduced DRC at stage(s) {cli_bad}.")
+        rc = 1
+    if gui_bad:
+        extra = [t for t in gui_bad if stages[t] > cli.get(t, 0)]
+        print(f"\nFAIL: GUI live-chain introduced DRC at stage(s) {gui_bad}"
+              + (f"; worse than the CLI at {extra} (#362)." if extra else "."))
+        rc = 1
+    if rc:
+        return rc
+    print("\nPASS: GUI and CLI chains both grade clean at every stage.")
     return 0
 
 
