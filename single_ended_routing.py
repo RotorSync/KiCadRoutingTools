@@ -3002,7 +3002,16 @@ def route_multipoint_main(
     # Sort MST edges by length (longest first), then let the corridor /
     # dense-first overrides pick which edge Phase 1 actually routes now
     # (everything else waits for Phase 3, AFTER all other nets' mains).
-    mst_edges = sorted(mst_edges, key=lambda e: -e[2])
+    # Tie-break on the pad indices, not on input order. Sorting by length alone
+    # is STABLE, so equal-length edges kept whatever order
+    # compute_component_mst_edges produced -- which follows pad/segment order,
+    # and the GUI and CLI hold copper in different orders. Measured on eth_tap:
+    # two edges both 2.10mm, one front picked "pads 0 and 3", the other
+    # "pads 3 and 1", and the whole multi-point route diverged from there.
+    # Pad indices are a stable geometric identity here (pads_by_net order is
+    # verified identical across fronts), so this is deterministic without
+    # changing which edge wins on length.
+    mst_edges = sorted(mst_edges, key=lambda e: (-e[2], e[0], e[1]))
     _edges_before = list(mst_edges)
     mst_edges = _select_multipoint_main_edge(pcb_data, pad_info,
                                              pad_components, mst_edges,

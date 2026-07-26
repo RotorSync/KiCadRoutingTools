@@ -482,8 +482,13 @@ def find_stub_free_ends(segments: List[Segment], pads: List[Pad],
             in_cluster = next(pi for pi in pis if pi // 2 == si)
             far = ((seg.end_x, seg.end_y) if in_cluster % 2 == 0
                    else (seg.start_x, seg.start_y))
+            # Deterministic tie-break: max() returns the FIRST maximal item,
+            # so two equidistant members were resolved by iteration order --
+            # i.e. by the order segments happen to sit in the board. Fold the
+            # point itself into the key so the winner is geometric.
             x, y, layer = max((points[pi] for pi in pis),
-                              key=lambda p: (p[0]-far[0])**2 + (p[1]-far[1])**2)
+                              key=lambda p: ((p[0]-far[0])**2 + (p[1]-far[1])**2,
+                                             p[0], p[1], p[2]))
             if not _near_pad(x, y):
                 free_ends.append((round(x, POSITION_DECIMALS),
                                   round(y, POSITION_DECIMALS), layer))
@@ -498,7 +503,11 @@ def find_stub_free_ends(segments: List[Segment], pads: List[Pad],
                     seen.add(key)
                     free_ends.append(key)
 
-    return free_ends
+    # Sort: clusters are walked in `members` insertion order, which follows the
+    # order segments sit in the board, so the free-end LIST order was
+    # board-order dependent. Consumers take [0] as the representative endpoint
+    # (see get_net_endpoints), so that leaked straight into routing decisions.
+    return sorted(free_ends)
 
 
 def get_stub_direction(segments: List[Segment], stub_x: float, stub_y: float, stub_layer: str,
@@ -824,12 +833,12 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
         sources = sorted(sources)
     if targets:
         targets = sorted(targets)
-    # NOTE: role canonicalisation (swapping so sources[0] < targets[0]) was
-    # TRIED and REVERTED -- it regressed the case this fix repairs (3-step chain
-    # went from matching to 3526 vs 3538). Source and target are not
-    # interchangeable: which end the router starts from changes the result, so
-    # the roles must be left as the endpoint derivation assigned them. The
-    # residual role-flip is tracked separately.
+    # Role assignment is left to the derivation below -- see the group-ordering
+    # note in _get_net_endpoints_ordered. A blanket "smallest coordinate wins"
+    # swap was tried TWICE and regressed both times (CLI 3538 vs GUI 3526/3516):
+    # it is deterministic but routing-hostile, because it makes "source" an
+    # arbitrary geometric corner and discards the meaning the derivation encodes
+    # (route FROM established copper TO the unconnected end).
     return sources, targets, err
 
 
@@ -904,8 +913,39 @@ def _get_net_endpoints_ordered(pcb_data: PCBData, net_id: int, config: GridRoute
                     if sources and targets:
                         return sources, targets, None
 
-            source_segs = groups[0]
-            target_segs = groups[1]
+            # Which group is the SOURCE must not depend on board order.
+            # find_connected_groups walks net_segments in order, so groups[0]
+            # was simply whichever group owned the earliest segment in the
+            # board -- and the GUI and CLI emit copper in different orders.
+            # Measured on eth_tap: identical copper, identical endpoint
+            # coordinates, but /Thru Path/ETH0_MDC read src=In1.Cu/tgt=F.Cu in
+            # one front and src=F.Cu/tgt=In1.Cu in the other. That flip fed the
+            # greedy swap-pair test and cascaded into a board-wide re-route.
+            #
+            # Rank by COPPER, not by coordinates. Routing extends from the
+            # established trunk toward the smaller stub: the bigger group offers
+            # more anchor points for the search to launch from, and the smaller
+            # one is a tighter, better-defined goal. Coordinates enter only as a
+            # last-resort tie-break, so the rule stays geometric but is never
+            # decided by an arbitrary corner (that variant was tried twice and
+            # regressed both fronts).
+            def _group_rank(g):
+                total = 0.0
+                anchor = None
+                for _sg in g:
+                    total += math.hypot(_sg.end_x - _sg.start_x,
+                                        _sg.end_y - _sg.start_y)
+                    a = (min((_sg.start_x, _sg.start_y), (_sg.end_x, _sg.end_y)),
+                         max((_sg.start_x, _sg.start_y), (_sg.end_x, _sg.end_y)),
+                         _sg.layer)
+                    if anchor is None or a < anchor:
+                        anchor = a
+                # more segments first, then more copper, then geometry
+                return (-len(g), -total, anchor)
+
+            _ranked = sorted(groups, key=_group_rank)
+            source_segs = _ranked[0]
+            target_segs = _ranked[1]
 
             if use_stub_free_ends:
                 # For diff pairs: use only stub free ends (tips not connected to pads)
