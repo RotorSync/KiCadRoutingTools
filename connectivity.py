@@ -1495,8 +1495,29 @@ def get_net_routing_endpoints(pcb_data: PCBData, net_id: int) -> List[Tuple[floa
     if len(net_segments) >= 2:
         groups = find_connected_groups(net_segments, vias=net_vias)
         if len(groups) >= 2:
+            # centroids[:2] took the first two groups in BOARD order, so a net
+            # with 3+ stub groups handed MPS a different pair of representative
+            # points per front. That feeds unit_distances, which orders every
+            # round: measured on eth_tap, /Thru Path/ETH0_A3V3 came out
+            # dist=6.075 on one front and 6.897 on the other with an IDENTICAL
+            # conflict graph. Rank by COPPER (more segments, then more length,
+            # geometry last) -- the same rule used for source/target selection
+            # -- so "the two main stub groups" is a property of the net.
+            def _grp_rank(g):
+                total = 0.0
+                anchor = None
+                for _s in g:
+                    total += math.hypot(_s.end_x - _s.start_x,
+                                        _s.end_y - _s.start_y)
+                    a = (min((_s.start_x, _s.start_y), (_s.end_x, _s.end_y)),
+                         max((_s.start_x, _s.start_y), (_s.end_x, _s.end_y)),
+                         _s.layer)
+                    if anchor is None or a < anchor:
+                        anchor = a
+                return (-len(g), -total, anchor)
+
             centroids = []
-            for group in groups:
+            for group in sorted(groups, key=_grp_rank):
                 points = []
                 for seg in group:
                     points.append((seg.start_x, seg.start_y))

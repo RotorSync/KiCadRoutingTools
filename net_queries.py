@@ -1072,9 +1072,27 @@ def get_unit_routing_info(
                         return pad
             return None
 
-        # Get pad for each group
+        # Get pad for each group.
+        #
+        # groups[:2] took whichever two groups owned the earliest segments in
+        # the board -- and the GUI and CLI hold identical copper in different
+        # order. Rank by COPPER first (more segments, then more length, geometry
+        # last) so "the two main stub groups" is a property of the net, not of
+        # the file. Same rule as the source/target ranking in
+        # connectivity.get_net_endpoints.
+        def _grp_rank(g):
+            total = 0.0
+            anchor = None
+            for _s in g:
+                total += math.hypot(_s.end_x - _s.start_x, _s.end_y - _s.start_y)
+                a = (min((_s.start_x, _s.start_y), (_s.end_x, _s.end_y)),
+                     max((_s.start_x, _s.start_y), (_s.end_x, _s.end_y)), _s.layer)
+                if anchor is None or a < anchor:
+                    anchor = a
+            return (-len(g), -total, anchor)
+
         group_pads = []
-        for group in groups[:2]:  # Only first two groups
+        for group in sorted(groups, key=_grp_rank)[:2]:
             pad = get_group_pad(group)
             if pad:
                 group_pads.append((pad.component_ref, group, pad))
@@ -1086,7 +1104,12 @@ def get_unit_routing_info(
 
         # Sort by component_ref alphabetically for consistent source/target assignment
         # First component (alphabetically) = source, second = target
-        group_pads.sort(key=lambda x: x[0])
+        # Tie-break beyond component_ref: both stubs of a net frequently land on
+        # the SAME component, so the alphabetical sort tied and fell back to the
+        # order the groups were discovered in -- board order again. Add the pad
+        # number and position so source/target assignment is geometric.
+        group_pads.sort(key=lambda x: (x[0], str(x[2].pad_number),
+                                       x[2].global_x, x[2].global_y))
         source_segs = group_pads[0][1]
         target_segs = group_pads[1][1]
         source_pad = group_pads[0][2]
