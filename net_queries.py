@@ -800,7 +800,11 @@ def expand_pad_layers(pad_layers: List[str], routing_layers: List[str]) -> List[
     # Remove duplicates while preserving routing_layers order (deterministic)
     unique = set(expanded)
     layer_order = {layer: i for i, layer in enumerate(routing_layers)}
-    return sorted(unique, key=lambda l: layer_order.get(l, len(routing_layers)))
+    # Tie-break on the layer NAME: every layer absent from routing_layers maps
+    # to the same fallback rank, so they tied and fell back to `unique` order --
+    # and `unique` is a set of STRINGS, whose order CPython randomizes per
+    # process. Layer order feeds pad expansion and per-layer passes.
+    return sorted(unique, key=lambda l: (layer_order.get(l, len(routing_layers)), l))
 
 
 def get_all_unrouted_net_ids(pcb_data: PCBData) -> List[int]:
@@ -1356,7 +1360,14 @@ def _greedy_order_mps_units(
     # Build ordered list, sort each round by distance
     ordered_units = []
     for round_winners, orig_round_num in all_rounds:
-        sorted_winners = sorted(round_winners, key=lambda uid: unit_distances.get(uid, 0))
+        # Tie-break on uid: sorting by distance alone is STABLE, so units at
+        # equal distance kept round_winners order. That order is itself
+        # deterministic, but any upstream wobble in a float distance flips
+        # neighbouring units and reorders the whole round -- and routing order
+        # is board-wide. uid is a stable identity, so equal-distance units now
+        # have one canonical order on both fronts.
+        sorted_winners = sorted(round_winners,
+                                key=lambda uid: (unit_distances.get(uid, 0), uid))
         ordered_units.extend(sorted_winners)
         if sorted_winners:
             winner_names = [unit_names.get(uid, f"Net {uid}") for uid in sorted_winners]

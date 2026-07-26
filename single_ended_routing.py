@@ -2045,7 +2045,11 @@ def _net_pads_near(pcb_data, net_id, cells, coord):
                 d = abs(p.global_x - x) + abs(p.global_y - y)
                 if id(p) not in found or d < found[id(p)][0]:
                     found[id(p)] = (d, p)
-    return [p for _d, p in sorted(found.values(), key=lambda t: t[0])]
+    # Geometric tie-break: equidistant pads fell back to `found` insertion
+    # order (the pad walk), which follows board order.
+    return [p for _d, p in sorted(found.values(),
+                                  key=lambda t: (t[0], t[1].global_x, t[1].global_y,
+                                                 str(t[1].pad_number)))]
 
 
 def _register_unblock_via(obstacles, vgx, vgy, layer_names):
@@ -2819,7 +2823,10 @@ def _select_multipoint_main_edge(pcb_data, pad_info, pad_components,
                 db0 = abs(pad_info[b][0] - p0[0]) + abs(pad_info[b][1] - p0[1])
                 db1 = abs(pad_info[b][0] - p1[0]) + abs(pad_info[b][1] - p1[1])
                 return min(da0 + db1, da1 + db0)
-            pos = min(range(len(mst_edges)), key=lambda k: span_score(mst_edges[k]))
+            # Tie-break on the edge's pad indices, not on position in the list.
+            pos = min(range(len(mst_edges)),
+                      key=lambda k: (span_score(mst_edges[k]),
+                                     mst_edges[k][0], mst_edges[k][1]))
             if pos != 0:
                 print(f"  Bus corridor: promoted corridor-nearest MST edge"
                       f" to main (was #{pos + 1} by length)")
@@ -3259,8 +3266,11 @@ def route_multipoint_main(
             from connectivity import get_terminal_component_info
             _comps, _copper, _ = get_terminal_component_info(
                 pcb_data, net_id, pad_info)
+            # Tie-break geometrically: equal-copper components fell back to
+            # the first pad index, i.e. to pad walk order.
             _best = max(range(len(pad_info)),
-                        key=lambda i: _copper.get(_comps.get(i), 0))
+                        key=lambda i: (_copper.get(_comps.get(i), 0),
+                                       -pad_info[i][0], -pad_info[i][1]))
             _best_copper = _copper.get(_comps.get(_best), 0)
             _base_comp = _comps.get(_best)
             _base_idx = [i for i in range(len(pad_info))

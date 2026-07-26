@@ -1610,10 +1610,17 @@ def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None,
         # leftover run and keeps the short live path. Multiple rounds until
         # a full pass accepts nothing (chains peel one end-piece per test,
         # so one pass in peel order usually suffices; rounds guarantee it).
+        # Geometric tie-break: equal-length segments fell back to index, i.e.
+        # to the order copper sits in the board, which differs between fronts.
         order = sorted(range(len(net_segs)),
-                       key=lambda i: -math.hypot(
+                       key=lambda i: (-math.hypot(
                            net_segs[i].end_x - net_segs[i].start_x,
-                           net_segs[i].end_y - net_segs[i].start_y))
+                           net_segs[i].end_y - net_segs[i].start_y),
+                           net_segs[i].layer,
+                           min((net_segs[i].start_x, net_segs[i].start_y),
+                               (net_segs[i].end_x, net_segs[i].end_y)),
+                           max((net_segs[i].start_x, net_segs[i].start_y),
+                               (net_segs[i].end_x, net_segs[i].end_y))))
         _rounds = 0
         while True:
             _rounds += 1
@@ -2898,7 +2905,11 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
         # the coincident chain); only remove when even the fab floor cannot
         # clear. Baseline joints (pre-existing) never block a removal.
         baseline_joints = _soft_joint_pairs(net_segs, net_vias, net_pads)
-        for s in sorted(grazing, key=lambda s: math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)):
+        # Geometric tie-break -- equal-length grazers fell back to board order.
+        for s in sorted(grazing, key=lambda s: (
+                math.hypot(s.end_x - s.start_x, s.end_y - s.start_y), s.layer,
+                min((s.start_x, s.start_y), (s.end_x, s.end_y)),
+                max((s.start_x, s.start_y), (s.end_x, s.end_y)))):
             if _prot_roots and _prot_uf is not None and \
                     _prot_uf.find(2 * seg_pos[id(s)]) in _prot_roots:
                 continue  # base-disconnected pad's component: off-limits
