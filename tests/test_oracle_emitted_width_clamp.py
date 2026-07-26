@@ -32,7 +32,7 @@ sys.path.insert(0, ROOT)
 
 from kicad_parser import Pad, PCBData, BoardInfo
 from routing_config import GridRouteConfig
-from kicad_oracle import clamp_emitted_width
+from kicad_oracle import clamp_emitted_width, emitted_copper_clear
 
 NOMINAL = 0.0762
 FAILURES = []
@@ -117,10 +117,26 @@ def main():
     _check("never widens past what was asked",
            clamp_emitted_width(strap, [], NOMINAL, NOMINAL, pcb, 2, cfg), NOMINAL)
 
+    # The nominal width is the floor, so a graze that survives every rung is
+    # still reported as NOT clear -- that is the signal the caller declines the
+    # link on, rather than shipping a short (rp2350's 25um +1V1 graze from a
+    # force_raw seed, which no width rung and no micro-shift can fix).
+    # Sits 0.45 from the hole centre; even at nominal the floor is
+    # 0.325 + 0.20 + 0.038 = 0.563, so no width clears it.
+    unfixable = [(151.39, 92.24, 'In1.Cu'), (153.0, 92.24, 'In1.Cu')]
+    _check("a graze surviving every rung is reported, not silently shipped",
+           emitted_copper_clear(unfixable, [], NOMINAL, pcb, 2, cfg), False)
+    _check("...and the clamp cannot rescue it either (stays at nominal)",
+           clamp_emitted_width(unfixable, [], 0.8, NOMINAL, pcb, 2, cfg), NOMINAL)
+    _check("clear copper at nominal reports clear",
+           emitted_copper_clear(far, [], NOMINAL, pcb, 2, cfg), True)
+    _check("an unvalidated weld alone is enough to report not-clear",
+           emitted_copper_clear(far, weld, NOMINAL, pcb, 2, cfg), False)
+
     if FAILURES:
         print(f"\nFAIL: {len(FAILURES)} case(s): {', '.join(FAILURES)}")
         return 1
-    print("\nPASS: emitted width is clamped to what the shipped copper clears.")
+    print("\nPASS: emitted width is clamped, and an unfixable graze is reported.")
     return 0
 
 
