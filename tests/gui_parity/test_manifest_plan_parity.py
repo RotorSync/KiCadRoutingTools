@@ -131,6 +131,32 @@ def _positional_pairs(argv):
     return out
 
 
+def _positional_nets(argv):
+    """The net names a route command passes POSITIONALLY.
+
+    Same shape as _positional_pairs, and the same defect: route.py accepts net
+    names positionally after the input/output boards (--nets is optional), the
+    converter read only lists['--nets'], and an empty list fell through to the
+    `or ['*']` default. So a step that retried three specific failed nets
+    converted to "route EVERY net on the board" -- the exact opposite of what
+    was recorded. eth_tap steps 12 and 16 are both positional retries.
+    """
+    tool_i = None
+    for i, a in enumerate(argv):
+        if os.path.basename(a) == 'route.py':
+            tool_i = i
+            break
+    if tool_i is None:
+        return []
+    out = []
+    for a in argv[tool_i + 1:]:
+        if a.startswith('-'):
+            break
+        if not a.endswith('.kicad_pcb'):
+            out.append(a)
+    return out
+
+
 def check_pair(argv, step):
     """Return list of (flag, reason) mismatches for one command/step pair."""
     params = step.get('params', {})
@@ -171,6 +197,19 @@ def check_pair(argv, step):
                 missing = [g for g in want_pairs if g not in got_pairs]
                 bad.append(('<positional pairs>',
                             f"want {want_pairs} got {got_pairs} "
+                            f"(missing {missing})"))
+
+    # Positional net names must survive into step['nets'] -- and must NOT be
+    # silently widened to the ['*'] catch-all.
+    if step.get('action') == 'route':
+        want_nets = _positional_nets(argv)
+        if want_nets:
+            got_nets = [str(x) for x in (step.get('nets') or [])]
+            n += 1
+            if not set(want_nets).issubset(set(got_nets)):
+                missing = [g for g in want_nets if g not in got_nets]
+                bad.append(('<positional nets>',
+                            f"want {want_nets} got {got_nets} "
                             f"(missing {missing})"))
 
     # --plane-layers must survive as the assignment layers

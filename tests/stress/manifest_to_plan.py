@@ -201,7 +201,18 @@ def parse_command(argv):
 
     nets = lists.get('--nets', [])
     if action in ('route',):
-        step['nets'] = [str(n) for n in nets] or ['*']
+        # route.py also takes net names POSITIONALLY, after the input and output
+        # boards -- --nets is optional:
+        #     route.py in.kicad_pcb out.kicad_pcb '/Mgmt/LED0' '/Mgmt/VSMPS' ...
+        # Same defect as the route_diff branch below: those positionals were
+        # collected and dropped, so the step converted to nets: ['*'] -- the
+        # exact OPPOSITE of what was recorded, routing every net on the board
+        # instead of the handful the CLI retried. eth_tap steps 12 and 16 are
+        # both positional retries of specific failed nets.
+        # Empty still legitimately means "all nets" (what the CLI does with no
+        # net args), so the ['*'] fallback stays for genuinely net-less steps.
+        net_globs = [p for p in positional if not p.endswith('.kicad_pcb')]
+        step['nets'] = [str(n) for n in (nets or net_globs)] or ['*']
     elif action == 'route_diff':
         # route_diff.py takes its pair patterns POSITIONALLY, after the input and
         # output boards -- there is no --pairs flag on the real CLI:
