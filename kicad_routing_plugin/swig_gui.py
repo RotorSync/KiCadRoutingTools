@@ -910,6 +910,7 @@ class RoutingDialog(wx.Dialog):
             ('stub_proximity_cost', 'Stub Prox. Cost:', defaults.STUB_PROXIMITY_COST, "Cost for routing near stubs of other nets"),
             ('neckdown_length', 'Neck-down (mm):', defaults.NECKDOWN_LENGTH, "Length of narrow track from the pad when a wide power route is necked down (issue #72)"),
             ('neckdown_taper_length', 'Neck Taper (mm):', defaults.NECKDOWN_TAPER_LENGTH, "Length of the stepped narrow-to-wide width taper on necked routes (0 = abrupt)"),
+            ('coplanar_gap', 'Coplanar Gap (mm):', defaults.COPLANAR_GAP, "#486: declare that impedance-controlled traces run through a same-layer ground pour this far away (edge to edge). >0 uses the coplanar-waveguide-over-ground model instead of microstrip -- a NARROWER trace for the same ohms. Pour the plane layers with a MATCHING zone clearance, then verify with check_impedance.py. 0 = plain microstrip."),
             ('via_proximity_cost', 'Via Prox. Multiplier:', defaults.VIA_PROXIMITY_COST, "Cost multiplier for placing vias near other vias"),
             ('track_proximity_distance', 'Track Prox. (mm):', defaults.TRACK_PROXIMITY_DISTANCE, "Distance to detect parallel tracks for bunching avoidance"),
             ('track_proximity_cost', 'Track Prox. Cost:', defaults.TRACK_PROXIMITY_COST, "Cost for routing parallel to existing tracks"),
@@ -1171,6 +1172,19 @@ class RoutingDialog(wx.Dialog):
         self.ask_claude_power_btn.Bind(wx.EVT_BUTTON, self._on_ask_claude_power_nets)
         power_sizer.Add(self.ask_claude_power_btn, 0)
         options_inner.Add(power_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
+        # Coplanar nets (#486): which nets the Coplanar Gap applies to.
+        coplanar_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        coplanar_sizer.Add(wx.StaticText(options_scroll, label="Coplanar Nets:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.coplanar_nets_ctrl = wx.TextCtrl(options_scroll)
+        self.coplanar_nets_ctrl.SetToolTip(
+            "Glob patterns for nets that run through a same-layer ground pour "
+            "(e.g., RF_* /USB/D*). Only meaningful with Coplanar Gap > 0 and "
+            "Impedance enabled: matching nets get their width from the "
+            "coplanar-waveguide-over-ground model, everyone else stays "
+            "microstrip. EMPTY = every net in this run is treated as coplanar.")
+        coplanar_sizer.Add(self.coplanar_nets_ctrl, 1, wx.EXPAND)
+        options_inner.Add(coplanar_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
         # Power net widths
         widths_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -2326,6 +2340,8 @@ class RoutingDialog(wx.Dialog):
         # Reset advanced parameters
         self.impedance_check.SetValue(False)
         self.impedance_value.SetValue(50.0)
+        self.coplanar_gap.SetValue(defaults.COPLANAR_GAP)
+        self.coplanar_nets_ctrl.SetValue("")
         self.max_iterations.SetValue(defaults.MAX_ITERATIONS)
         self.max_probe_iterations.SetValue(defaults.MAX_PROBE_ITERATIONS)
         self.heuristic_weight.SetValue(defaults.HEURISTIC_WEIGHT)
@@ -2606,6 +2622,8 @@ class RoutingDialog(wx.Dialog):
             'debug_lines': self.debug_lines_check.GetValue(),
             # Impedance routing
             'impedance': self.impedance_value.GetValue() if self.impedance_check.GetValue() else None,
+            'coplanar_gap': self.coplanar_gap.GetValue(),
+            'coplanar_nets': _split_net_list(self.coplanar_nets_ctrl.GetValue()) or None,
             # Advanced parameters
             'max_iterations': self.max_iterations.GetValue(),
             'max_probe_iterations': self.max_probe_iterations.GetValue(),
@@ -3046,6 +3064,8 @@ class RoutingDialog(wx.Dialog):
                     grid_step=config['grid_step'],
                     via_cost=config['via_cost'],
                     impedance=config.get('impedance'),
+                    coplanar_gap=config.get('coplanar_gap', 0.0),
+                    coplanar_nets=config.get('coplanar_nets'),
                     max_iterations=config['max_iterations'],
                     max_probe_iterations=config.get('max_probe_iterations', 5000),
                     heuristic_weight=config['heuristic_weight'],

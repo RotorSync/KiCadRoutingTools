@@ -9,10 +9,12 @@ Units: dimensions in mm, impedance in Ω, time in ps.
 ## Contents
 
 - [Closed-form formulas](#closed-form-formulas) (no board needed)
+- [Coplanar waveguide over ground](#coplanar-waveguide-over-ground) (#486)
 - [Width for a target impedance](#width-for-a-target-impedance)
 - [Stackup-aware calculations](#stackup-aware-calculations) (from a parsed board)
 - [Propagation delay](#propagation-delay)
 - [Reports](#reports)
+- [What the model assumes](#what-the-model-assumes) — **read this before trusting a number**
 
 ## Closed-form formulas
 
@@ -43,6 +45,78 @@ zdiff, zodd = differential_microstrip_z0(0.2, 0.15, 0.1, 0.035, 4.3)
 print(f"Zdiff = {zdiff:.1f} ohms (Zodd = {zodd:.1f})")
 ```
 
+## Coplanar waveguide over ground
+
+A trace running *through a ground pour on its own layer* is not a microstrip.
+The side copper adds capacitance and pulls Z0 down — hard. On a 0.2 mm
+dielectric a 0.36 mm trace is ~51 Ω as a microstrip but only ~34 Ω with ground
+0.1 mm away on each side. Routing a microstrip-derived width through a pour is
+the error #486 describes.
+
+```python
+cpwg_z0(w, s, h, t, er) -> float                    # grounded CPW (CBCPW)
+cpwg_epsilon_eff(w, s, h, t, er) -> float
+cpwg_applies(s, h, ratio_limit=3.0) -> bool
+differential_cpwg_z0(w, s_pair, s_gnd, h, t, er) -> (zdiff, zodd)
+complete_elliptic_k(k) -> float                     # K(k), by AGM
+```
+
+- `s` — **side gap**, trace edge to coplanar ground edge
+- `s_pair` / `s_gnd` — P-to-N spacing vs. the gap to coplanar ground
+
+The model is the standard conformal-mapping solution (Ghione & Naldi; Simons,
+*Coplanar Waveguide Circuits, Components and Systems*, ch. 3). Two limits fall
+straight out and are pinned by the unit tests: `h → ∞` (no plane below) gives
+the ungrounded-CPW value `(er+1)/2`, and `h → 0` gives `er`.
+
+```python
+from impedance import cpwg_z0, microstrip_z0, cpwg_applies
+
+for gap in (0.1, 0.2, 0.4, 1.0):
+    print(f"gap {gap}mm: Z0 = {cpwg_z0(0.36, gap, 0.2, 0.035, 4.3):5.1f} ohm"
+          f"  (coplanar-coupled: {cpwg_applies(gap, 0.2)})")
+print(f"microstrip:  Z0 = {microstrip_z0(0.36, 0.2, 0.035, 4.3):5.1f} ohm")
+```
+
+**Domain.** Accurate while the side gap is comparable to or smaller than `h`.
+As `s/h` grows the conformal map degrades — it does *not* converge cleanly to
+the microstrip answer but drifts toward `er_eff → er`. Use `cpwg_applies()`
+(default: `s ≤ 3h`) to decide which model governs rather than trusting
+`cpwg_z0` at a wide gap.
+
+`differential_cpwg_z0` is an **approximation**, in the same spirit as
+`differential_microstrip_z0`: single-ended CPWG impedance reduced by the
+edge-coupling factor for the pair spacing. A full treatment needs the coupled
+six-conductor map. It captures the first-order effect — coplanar ground pulls
+Zdiff down just as it pulls Z0 down.
+
+### Declaring coplanar routing
+
+Because the pour does not exist when `route.py` runs, the gap is a
+**declaration**, not something the router can measure:
+
+```bash
+# 1. route, declaring the intended gap (narrower trace than microstrip)
+python3 route.py board.kicad_pcb routed.kicad_pcb \
+    --impedance 50 --coplanar-gap 0.2 --coplanar-nets "RF_*"
+
+# 2. pour the plane with a MATCHING zone clearance
+python3 route_planes.py routed.kicad_pcb poured.kicad_pcb \
+    --nets GND GND --plane-layers F.Cu B.Cu --zone-clearance 0.2
+
+# 3. verify the declaration actually held
+python3 check_impedance.py poured.kicad_pcb --coplanar-gap 0.2
+```
+
+Omitting `--coplanar-nets` treats every net in the call as coplanar.
+`route_diff.py` takes `--coplanar-gap` but has no `--coplanar-nets`: the
+diff engine bakes one width per layer into the obstacle map, so split
+interfaces into separate calls to mix.
+
+Nothing enforces the gap during routing — a coplanar-declared net whose pour
+never arrives is simply routed at a width that assumes a ground it does not
+have. Step 3 is what catches that.
+
 ## Width for a target impedance
 
 Bisection solvers over the formulas above (search range 0.05–5.0 mm; return
@@ -57,6 +131,12 @@ differential_microstrip_width_for_z0(zdiff_target, s, h, t, er,
                                      tolerance=0.5, max_iterations=50) -> float
 differential_stripline_width_for_z0(zdiff_target, s, h, t, er,
                                     tolerance=0.5, max_iterations=50) -> float
+stripline_asymmetric_width_for_z0(z0_target, h1, h2, t, er,
+                                  tolerance=0.1, max_iterations=50) -> float
+cpwg_width_for_z0(z0_target, s, h, t, er,
+                  tolerance=0.1, max_iterations=50) -> float
+differential_cpwg_width_for_z0(zdiff_target, s_pair, s_gnd, h, t, er,
+                               tolerance=0.5, max_iterations=50) -> float
 ```
 
 ```python
@@ -65,10 +145,18 @@ w = microstrip_width_for_z0(50.0, h=0.2, t=0.035, er=4.3)
 print(f"50 ohm microstrip needs w = {w:.3f} mm")
 ```
 
-Note `IMPEDANCE_WIDTH_SCALE = 0.90`: the *stackup-aware* functions below
-multiply solved widths by 0.90, because the closed-form formulas
-systematically overestimate width compared to field solvers and online
-calculators. The raw `*_width_for_z0` solvers do **not** apply it.
+`IMPEDANCE_WIDTH_SCALE` is **1.0** as of #486. It used to be 0.90, described as
+compensating for formulas that "overestimate width". That diagnosis was
+backwards: `microstrip_z0`'s thickness correction applied the full *air-medium*
+width widening inside the dielectric, which under-reported Z0 and made the
+solver return traces ~12% too narrow on a 0.1 mm dielectric — and the 0.90
+scale then narrowed them another 10% in the **same** direction. Combined, a
+nominal 50 Ω trace came out at 0.144 mm where 0.181 mm is right (≈57 Ω).
+
+With the Hammerstad–Jensen correction in place, solved widths land within ~1%
+of the reference across h = 0.1–1.6 mm, so no fudge is warranted. The constant
+is kept as the documented knob for biasing widths to a fab's measured coupon
+data.
 
 ## Stackup-aware calculations
 
@@ -178,8 +266,49 @@ per-layer width plan for a target impedance (the same output `route.py
 - **No stackup → defaults.** Boards without a stackup section fall back to
   Er 4.0 and generic geometry; results are then rough. Run
   `/recommend-stackup` to set up a real stackup first.
-- **The 0.90 width scale** applies only in the stackup-aware
-  `calculate_*` functions, not the raw solvers.
+- **`IMPEDANCE_WIDTH_SCALE` is 1.0** (#486) and applies only in the
+  stackup-aware `calculate_*` functions, not the raw solvers.
 - **These are closed-form approximations** (IPC-2141 / Hammerstad), good to
   a few percent in normal geometries — fine for routing decisions, not a
   substitute for your fab's impedance calculator on critical interfaces.
+
+## What the model assumes
+
+Every number here rests on assumptions the formulas cannot check. #486 exists
+because two of them were silently wrong on real boards.
+
+- **The reference plane is ASSUMED, never verified.** Microstrip vs. stripline
+  is chosen purely by the trace's *index in the stackup*
+  (`get_layer_impedance_params`). Nothing confirms the adjacent layer actually
+  has copper **under the trace's path**. A trace crossing a gap or slot in its
+  reference plane still gets the ideal-plane number — the classic return-path
+  discontinuity, which inflates Z0, wrecks the return current and radiates.
+  `check_impedance.py` measures this on the routed board; the formulas here
+  cannot.
+- **The only ground in the microstrip/stripline model is the plane(s).** Side
+  copper on the trace's own layer is ignored unless you use the CPWG functions
+  and tell them the gap.
+- **Widths are resolved per LAYER, before routing.**
+  `calculate_layer_widths_for_impedance` returns a static `{layer: width}` dict,
+  so it cannot react to where a trace actually ends up. That is why the coplanar
+  gap is a declaration you then verify.
+- **Er comes from the stackup, at one frequency.** No dispersion, no
+  copper-roughness loss, no resin-content variation across the panel.
+- **Asymmetric stripline uses the harmonic mean** of the two plane distances,
+  and the solver and the verifier now agree on that choice
+  (`is_asymmetric_stripline` is the single source of truth). Before #486 the
+  solver bisected the *symmetric* model at the averaged height while the
+  verifier scored the asymmetric one, so a solved width did not reproduce its
+  own target — on hackrf_one's In1.Cu, 0.543 mm solved for 50 Ω verified at
+  31 Ω. The correct width there is 0.287 mm.
+
+Post-route verification lives in `check_impedance.py`:
+
+```bash
+python3 check_impedance.py routed.kicad_pcb            # reference-plane + side-gap audit
+python3 check_impedance.py routed.kicad_pcb --json report.json
+```
+
+It reports, per net: length over a reference-plane void, plane-split crossings,
+the measured coplanar side-gap distribution, and the implied Z0 error against
+what the route call assumed.

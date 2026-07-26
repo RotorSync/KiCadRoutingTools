@@ -527,6 +527,59 @@ Thread these into the plan:
 
 If no controlled-impedance nets are found, omit Step 2b.
 
+### Step 2b-i: Coplanar (CPW-over-ground) — decide this WITH the plane step (#486)
+
+An impedance trace on an **outer layer that will also carry a GND pour** is not a
+microstrip: the side ground pulls Z0 down hard, so hitting the target needs a
+**narrower** trace (e.g. 0.277 mm instead of 0.376 mm for 50 Ω on 0.2 mm FR4).
+Routing the microstrip width through a pour lands the trace well below target.
+
+The router cannot detect this — at route time the pour does not exist yet. So
+this is **your decision to make in the plan**, and it must be coordinated across
+two steps that run at different times.
+
+**Declare coplanar when ALL of these hold:**
+1. The impedance net routes on an **outer layer** (`F.Cu` / `B.Cu`). Inner layers
+   are stripline; the flag is ignored there.
+2. A `route_planes` step in this plan pours **GND on that same layer** — or the
+   board already has an outer-layer GND pour that will survive.
+3. You can name the gap: it is the pour's zone clearance.
+
+**If you are not pouring on the signal's own layer, do NOT pass `--coplanar-gap`.**
+A coplanar declaration whose pour never arrives leaves the trace too narrow, i.e.
+impedance too HIGH — the opposite error, equally wrong.
+
+**Coordination — one number, three places:**
+
+```bash
+# choose ONE gap G (the pour's clearance; near the fab floor, e.g. 0.2)
+# 1. route the impedance nets, declaring G
+python3 route.py in.kicad_pcb s2b.kicad_pcb --nets "RF*" \
+    --impedance 50 --coplanar-gap 0.2 --clearance 0.2
+
+# 2. pour GND on the SAME layer with a MATCHING zone clearance
+python3 route_planes.py s2b.kicad_pcb s5.kicad_pcb \
+    --nets GND GND --plane-layers F.Cu B.Cu --zone-clearance 0.2
+
+# 3. verify the declaration actually held
+python3 check_impedance.py s5.kicad_pcb --coplanar-gap 0.2 --nets "RF*"
+```
+
+- `--coplanar-nets "<patterns>"` narrows the declaration to some nets in a call;
+  omit it and every net in that call is treated as coplanar. Since Step 2b is
+  already a dedicated impedance pass over exactly those nets, omitting it is
+  usually right.
+- `route_diff.py` takes `--coplanar-gap` but has **no** `--coplanar-nets` (the
+  diff engine bakes one width per layer). Split interfaces into separate calls.
+- The gap must be **achievable**: it is a pour clearance, so it cannot be below
+  the fab floor, and near via antipads / pads the real gap will be wider. The
+  Step-3 audit reports how much of each net actually achieved it.
+
+**Report to the user** which nets you declared coplanar, the gap, and the plane
+step it is tied to — this is a coupled choice they may want to override. If the
+board has no outer-layer pour planned, say so explicitly and note that the
+impedance nets are being routed as plain microstrip.
+
 ## Step 5: Review Power and Ground Net Strategy (delegate to /recommend-plane-mappings)
 
 Which nets deserve planes and on which copper layers is the

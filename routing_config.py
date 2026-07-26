@@ -139,6 +139,19 @@ class GridRouteConfig:
     # Impedance-controlled routing
     impedance_target: Optional[float] = None  # Target impedance in ohms (None = use fixed track_width)
     layer_widths: Dict[str, float] = field(default_factory=dict)  # Per-layer widths for impedance control
+    # Coplanar-waveguide-over-ground declaration (#486). A trace running through
+    # a ground pour on its OWN layer is a CPW, not a microstrip: the side ground
+    # pulls Z0 down, so hitting the target needs a NARROWER trace. The pour does
+    # not exist yet at route time, so this is a DESIGN DECLARATION -- the plane
+    # step must be run with a matching zone clearance, and check_impedance.py
+    # verifies afterwards that the geometry actually came out that way.
+    coplanar_gap: float = 0.0  # Design trace-edge-to-pour-edge gap in mm (0 = not coplanar)
+    # Empty coplanar_net_ids with a non-zero gap means the WHOLE call is
+    # coplanar, and layer_widths already carries the CPW widths. A non-empty set
+    # means only these nets are, and coplanar_layer_widths holds their widths
+    # while layer_widths keeps the microstrip answer for everyone else.
+    coplanar_net_ids: set = field(default_factory=set)
+    coplanar_layer_widths: Dict[str, float] = field(default_factory=dict)
     # Obstacle-stamp reserve policy (#156). False (single-ended engine): stamps
     # reserve the NOMINAL track_width around obstacles and every net's extra
     # width (power override OR impedance layer width) rides its own fractional
@@ -317,8 +330,13 @@ class GridRouteConfig:
         for the widest possible track (e.g., when a via connects two layers
         with different impedance-controlled widths).
         """
-        if self.layer_widths:
-            return max(self.layer_widths.values(), default=self.track_width)
+        if self.layer_widths or self.coplanar_layer_widths:
+            # Both maps can be live at once when only SOME nets are coplanar
+            # (#486); the widest track on any layer is what via clearance has
+            # to cover, so take the max over both.
+            return max(list(self.layer_widths.values())
+                       + list(self.coplanar_layer_widths.values()),
+                       default=self.track_width)
         return self.track_width
 
     def get_net_track_width(self, net_id: int, layer: str) -> float:
@@ -329,8 +347,11 @@ class GridRouteConfig:
         2. Per-net netclass width (net_track_widths) -- the net's OWN class width,
            EXACTLY (may be narrower than the global track_width); floored at the fab
            minimum by the caller. Only populated when --track-width was omitted.
-        3. Layer-specific width (layer_widths, for impedance control)
-        4. Default track_width
+        3. Per-net COPLANAR impedance width (coplanar_layer_widths, #486) -- the
+           net was declared to run through a ground pour, so its width comes
+           from the CPW-over-ground model rather than microstrip.
+        4. Layer-specific width (layer_widths, for impedance control)
+        5. Default track_width
 
         Args:
             net_id: The net ID to get width for
@@ -345,6 +366,9 @@ class GridRouteConfig:
         if self.net_track_widths and net_id in self.net_track_widths:
             # #435 companion: route this net at its OWN class width (either direction).
             return self.net_track_widths[net_id]
+        if self.coplanar_net_ids and net_id in self.coplanar_net_ids \
+                and layer in self.coplanar_layer_widths:
+            return self.coplanar_layer_widths[layer]
         return self.get_track_width(layer)
 
     def get_net_clearance(self, net_id: int) -> float:

@@ -294,6 +294,17 @@ pairs** (the rest — handled by `route_diff.py --impedance`).
 > `/plan-pcb-routing` Step 2 / `/recommend-stackup`), the width will be wrong —
 > flag this and recommend running `/recommend-stackup` first.
 
+> **Coplanar check (#486).** `--impedance` alone assumes a plain microstrip: the
+> only ground is the plane *below*. If an outer-layer impedance net will also sit
+> in a **GND pour on its own layer**, it is a coplanar waveguide, needs a
+> **narrower** trace, and the plan must pass `--coplanar-gap <pour clearance>`
+> matched to the plane step's `--zone-clearance`. This matters most for exactly
+> the nets this skill finds — RF feeds are usually poured around. Note per net
+> whether an outer-layer pour is expected, and hand that to `/plan-pcb-routing`
+> Step 2b-i, which owns the decision. Do **not** recommend `--coplanar-gap`
+> unless a pour on that same layer is actually planned: declaring it without the
+> pour leaves the trace too narrow (impedance too high).
+
 ## Step 5: Trace High-Speed Signals Through Series Passives
 
 High-speed signals often pass through series components (termination resistors, AC coupling

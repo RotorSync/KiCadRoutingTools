@@ -82,6 +82,9 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 |-------|---------|---------|
 | `impedance_target` | `None` | Target Z0 in Ω; when set, per-layer widths come from `layer_widths` |
 | `layer_widths` | `{}` | Layer name → width (filled by `impedance.calculate_layer_widths_for_impedance`) |
+| `coplanar_gap` | `0.0` | #486 **declaration**: design gap (mm) from a controlled-impedance trace's edge to the same-layer ground pour. `> 0` means outer-layer widths came from the coplanar-waveguide-over-ground model rather than microstrip. Set from `route.py --coplanar-gap` / `route_diff.py --coplanar-gap` |
+| `coplanar_net_ids` | `set()` | #486: net ids the coplanar declaration applies to. **Empty with a non-zero `coplanar_gap` means the whole call is coplanar**, and `layer_widths` already holds the CPW widths. Non-empty means only these nets are, and their widths live in `coplanar_layer_widths` |
+| `coplanar_layer_widths` | `{}` | #486: layer name → CPW-derived width, used only for `coplanar_net_ids`. Lets one call mix coplanar and microstrip nets |
 | `reserve_layer_widths` | `False` | Obstacle-stamp reserve policy (#156): `False` = stamps reserve nominal `track_width`, wide/impedance nets ride per-net fractional `track_margin`; `True` (diff engine) = stamps bake the full per-layer width |
 | `power_net_widths` | `{}` | net_id → width override for power nets (never below `track_width`) |
 | `net_track_widths` | `{}` | net_id → the net's OWN netclass width (mm, #435), used EXACTLY (may be *narrower* than `track_width`); auto-read from the `.kicad_pro` only when `--track-width` is omitted, floored at the fab minimum by the caller. Lower priority than a manual `power_net_widths` override |
@@ -231,8 +234,17 @@ config.get_net_track_width(net_id, layer) -> float
 ```
 Net- and layer-aware width. Priority: `power_net_widths[net_id]` (floored up to
 `track_width`) → `net_track_widths[net_id]` (the net's own class width, used
-exactly, #435) → `layer_widths[layer]` → `track_width`. This is what obstacle
-expansion uses.
+exactly, #435) → `coplanar_layer_widths[layer]` when `net_id` is in
+`coplanar_net_ids` (#486) → `layer_widths[layer]` → `track_width`. This is what
+obstacle expansion uses.
+
+**The coplanar rung is a declaration, not a measurement.** At route time the
+pour does not exist yet, so `coplanar_gap` states what the plane step is going
+to do. Pour with a matching `route_planes --zone-clearance`, then verify the
+geometry actually came out that way with
+`check_impedance.py --coplanar-gap <same value>`. Nothing in the router enforces
+the gap — a coplanar-declared net whose pour never arrives is simply routed at a
+width that assumes a ground it does not have.
 
 ```python
 config.get_max_track_width() -> float

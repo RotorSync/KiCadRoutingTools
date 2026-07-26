@@ -85,6 +85,44 @@ for via in pcb.vias:
         # (ultra-high: 2.0mm, high: 3.0mm, medium: 5.0mm)
 ```
 
+## Step 3b: Impedance & Return-Path Audit (#486)
+
+A controlled-impedance trace whose reference plane has a **gap under its path**
+gets the ideal-plane impedance anyway — the classic return-path discontinuity.
+It is not a DRC violation and ships silent, so check it explicitly:
+
+```bash
+# every routed signal net (plane nets are skipped automatically)
+python3 check_impedance.py board.kicad_pcb --verbose
+
+# narrow to the controlled-impedance nets when you know them
+python3 check_impedance.py board.kicad_pcb --nets "RF*" "/DDR*"
+
+# if the route step declared a coplanar gap, AUDIT that promise
+python3 check_impedance.py board.kicad_pcb --coplanar-gap 0.2
+```
+
+Reports per net: length over a reference-plane **void**, plane **split**
+crossings (the return current cannot follow the trace across either), the
+measured coplanar side-gap distribution, and the implied Z0 error vs. what the
+route call assumed. Exits 1 when anything is found.
+
+How to read it:
+
+- **Length over void on a controlled-impedance net is the finding that matters.**
+  Report it with the net, the layer, and the offending location; recommend a
+  reroute onto intact plane, or a stitching via pair straddling the gap where
+  the crossing is unavoidable.
+- **A "reference layer carries NO filled pour" note** is a stackup/flow problem,
+  not a per-net defect — it means nothing was poured on that layer at all. Say
+  so once rather than listing every net.
+- **Void on a plain low-speed net is usually noise.** Only escalate for nets that
+  are genuinely impedance-controlled or high-speed.
+- **If `--coplanar-gap` was declared**, the audit's "NO ground beside" and "gap
+  off-target" lengths are the real result: that copper was routed at a width
+  assuming a ground that is not there. Some off-target length near via antipads
+  and pads is normal; a net that is mostly off-target is a genuine defect.
+
 ## Step 4: Differential Pair Review
 
 For each differential pair (from `list_nets.py --diff-pairs`):
