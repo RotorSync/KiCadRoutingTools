@@ -322,48 +322,47 @@ def _report_unrouted_ripped_nets(pcb_data, ripped_net_ids):
           f"{', '.join(ripped_names)}")
 
 
-def extract_zone_properties(input_file: str) -> Dict[Tuple[str, str], Dict]:
+def extract_zone_properties(pcb_data) -> Dict[Tuple[str, str], Dict]:
+    """Per-zone (clearance, min_thickness) keyed by (net_name, layer).
+
+    Reads ``pcb_data.zones`` -- the parser already parses these fields. This used
+    to re-implement zone parsing as a regex over the FILE, which had two
+    independent problems (#493 follow-up):
+
+    1. It was DEAD on every modern board. The pattern required
+       ``(zone\n (net <int>)`` and then looked up ``(net_name "...")``, but
+       KiCad 10 collapsed both into a single quoted ``(net "/GND")``. Every one
+       of the 406 corpus boards is the new format, so it returned {} for all 185
+       of them that carry zones (2651 zone stanzas, none matched). The caller
+       then fell back to the single ``zone_clearance`` for every zone, so the
+       fill model -- which decides what the pour already connects, and therefore
+       every repair decision -- ran on the wrong inset wherever a zone's real
+       clearance differed (measured on real boards: 0.2, 0.25, 0.508mm).
+       Self-generated chains mostly got away with it because route_planes.py
+       writes zones at the same clearance the repair falls back to; boards with
+       PRE-EXISTING pours (the GUI's normal case) did not.
+    2. It read ``input_file``. The GUI passes the live board's path, whose
+       on-disk content is whatever was last saved -- for a plan run, the
+       untouched input board.
+
+    Both go away by reading the already-parsed board. A zone whose clearance is
+    0/None is "not specified" in KiCad (use the net class), so it is omitted and
+    the caller's fallback applies. Where several zones share a (net, layer), the
+    LARGEST clearance wins -- the conservative fill estimate.
     """
-    Extract zone properties (clearance, min_thickness) from PCB file.
-
-    Returns:
-        Dict mapping (net_name, layer) -> {'clearance': float, 'min_thickness': float}
-    """
-    with open(input_file, 'r') as f:
-        content = f.read()
-
-    zone_props = {}
-    zone_pattern = r'\(zone\s*\n\s*\(net\s+\d+\)'
-    matches = list(re.finditer(zone_pattern, content))
-
-    for m in matches:
-        start = m.start()
-        depth = 0
-        end = start
-        for i, c in enumerate(content[start:]):
-            if c == '(':
-                depth += 1
-            elif c == ')':
-                depth -= 1
-                if depth == 0:
-                    end = start + i + 1
-                    break
-
-        zone_text = content[start:end]
-
-        net_name = re.search(r'\(net_name\s+"([^"]*)"\)', zone_text)
-        layer = re.search(r'\(layer\s+"([^"]+)"\)', zone_text)
-        clearance = re.search(r'\(clearance\s+([\d.]+)\)', zone_text)
-        min_thick = re.search(r'\(min_thickness\s+([\d.]+)\)', zone_text)
-
-        if net_name and layer:
-            key = (net_name.group(1), layer.group(1))
-            zone_props[key] = {
-                'clearance': float(clearance.group(1)) if clearance else 0.2,
-                'min_thickness': float(min_thick.group(1)) if min_thick else 0.1
-            }
-
-    return zone_props
+    props: Dict[Tuple[str, str], Dict] = {}
+    for z in (getattr(pcb_data, 'zones', None) or []):
+        if not z.net_name or not z.layer:
+            continue
+        clr = getattr(z, 'clearance', None)
+        if not clr or clr <= 0:
+            continue  # unspecified -> caller falls back to zone_clearance
+        mt = getattr(z, 'min_thickness', None) or 0.1
+        key = (z.net_name, z.layer)
+        prev = props.get(key)
+        if prev is None or clr > prev['clearance']:
+            props[key] = {'clearance': clr, 'min_thickness': mt}
+    return props
 
 
 def auto_detect_zones(
@@ -725,7 +724,7 @@ def route_planes(
     failed_repair_pads: List[str] = []
 
     # Extract per-zone clearances and min_thickness from PCB file
-    zone_props = extract_zone_properties(input_file)
+    zone_props = extract_zone_properties(pcb_data)
     if verbose:
         print(f"Zone properties:")
         for (net, layer), props in zone_props.items():
