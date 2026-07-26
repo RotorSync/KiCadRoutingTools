@@ -50,6 +50,36 @@ def split_net_patterns(patterns: List[str],
     return include_patterns, exclude_patterns
 
 
+def net_pattern_matches(net_name: str, pattern: str) -> bool:
+    """Match one net name against one fnmatch pattern, sheet-path aware (#493).
+
+    KiCad qualifies a net with the sheet it was declared on, so the board's net
+    is '/GND' or '/Management Interface/VSMPS', not 'GND'. A plain
+    `fnmatch(net_name, pattern)` therefore makes the unqualified spelling people
+    actually write -- `--nets '*' '!GND'` -- match NOTHING, so the exclusion
+    silently no-ops and the net gets routed anyway. That is issue #292
+    (core1106_cam routed its plane nets as traces) and it recurred on eth_tap,
+    whose step-1 fanout shipped 267 '/GND' + 171 '/3V3' segments out of 750 from
+    a command that asked to exclude both.
+
+    So: a pattern that names NO path ('GND', 'VCC*') is understood as naming the
+    net itself and is matched against the trailing path component as well. A
+    pattern that DOES carry a path ('/GND', '/Sheet/*') is taken literally and
+    only ever full-matched, so an explicit spelling stays exact.
+
+        net_pattern_matches('/GND', 'GND')                  -> True
+        net_pattern_matches('/Analog/GND', 'GND')           -> True
+        net_pattern_matches('/GND_A', 'GND')                -> False
+        net_pattern_matches('/GND', '/GND')                 -> True
+        net_pattern_matches('/Analog/GND', '/GND')          -> False  (path given)
+    """
+    if fnmatch.fnmatch(net_name, pattern):
+        return True
+    if '/' not in pattern and '/' in net_name:
+        return fnmatch.fnmatch(net_name.rsplit('/', 1)[-1], pattern)
+    return False
+
+
 def matches_net_filter(net_name: str, patterns: List[str]) -> bool:
     """
     Check if a net name matches a list of filter patterns.
@@ -89,13 +119,13 @@ def matches_net_filter(net_name: str, patterns: List[str]) -> bool:
     # Check exclusion first: if net matches any exclude pattern, reject it
     if exclude_patterns:
         for pattern in exclude_patterns:
-            if fnmatch.fnmatch(net_name, pattern):
+            if net_pattern_matches(net_name, pattern):
                 return False
 
     # Check inclusion: if there are include patterns, must match at least one
     if include_patterns:
         for pattern in include_patterns:
-            if fnmatch.fnmatch(net_name, pattern):
+            if net_pattern_matches(net_name, pattern):
                 return True
         return False  # Has include patterns but didn't match any
 
@@ -335,50 +365,59 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
             pattern = raw_pattern                          # include (covers literal "!FOO" nets)
 
         # Check for exclusion pattern (starts with !)
+        # Both branches below resolve through net_pattern_matches, so the
+        # unqualified spelling ('!GND') excludes the board's sheet-qualified
+        # '/GND' instead of silently matching nothing (#292/#493).
         if is_exclude:
             exclude_pattern = pattern[1:]  # Remove the !
-            if '*' in exclude_pattern or '?' in exclude_pattern:
-                # Wildcard exclusion
-                matches = [name for name in all_net_names if fnmatch.fnmatch(name, exclude_pattern)]
-                if matches:
-                    print(f"Exclusion pattern '!{exclude_pattern}' matched {len(matches)} nets")
-                else:
-                    print(f"WARNING: Exclusion pattern '!{exclude_pattern}' matched no nets"
-                          f"{_did_you_mean(exclude_pattern)}")
-                for name in matches:
-                    excluded.add(name)
-                    if name in seen:
-                        result.remove(name)
-                        seen.remove(name)
+            matches = [name for name in all_net_names
+                       if net_pattern_matches(name, exclude_pattern)]
+            is_wildcard = '*' in exclude_pattern or '?' in exclude_pattern
+            if matches:
+                label = (f"Exclusion pattern '!{exclude_pattern}'" if is_wildcard
+                         else f"Exclusion '!{exclude_pattern}'")
+                print(f"{label} matched {len(matches)} net(s): "
+                      f"{', '.join(sorted(matches)[:5])}"
+                      f"{' ...' if len(matches) > 5 else ''}")
             else:
-                # Literal exclusion
+                label = ("Exclusion pattern" if is_wildcard else "Exclusion")
+                print(f"WARNING: {label} '!{exclude_pattern}' matched no nets"
+                      f"{_did_you_mean(exclude_pattern)}")
+            if not is_wildcard:
+                # Keep the literal in `excluded` too, so a later literal include
+                # of the same spelling stays suppressed even when it named no net.
                 excluded.add(exclude_pattern)
-                if exclude_pattern in seen:
-                    result.remove(exclude_pattern)
-                    seen.remove(exclude_pattern)
-                    print(f"Excluded net '{exclude_pattern}'")
-                elif exclude_pattern not in known_net_names:
-                    print(f"WARNING: Exclusion '!{exclude_pattern}' names no net on this "
-                          f"board - it excludes nothing{_did_you_mean(exclude_pattern)}")
-        elif '*' in pattern or '?' in pattern:
-            # It's a wildcard pattern - find all matching nets
-            matches = sorted([name for name in all_net_names
-                            if fnmatch.fnmatch(name, pattern) and name not in excluded])
-            if not matches:
-                print(f"Warning: Pattern '{pattern}' matched no nets")
-            else:
-                print(f"Pattern '{pattern}' matched {len(matches)} nets")
             for name in matches:
-                if name not in seen:
-                    result.append(name)
-                    seen.add(name)
+                excluded.add(name)
+                if name in seen:
+                    result.remove(name)
+                    seen.remove(name)
         else:
-            # Literal net name - allow even if it would be excluded
-            # (user explicitly requested it), unless explicitly excluded
-            if pattern not in seen and pattern not in excluded:
-                result.append(pattern)
-                seen.add(pattern)
-                if pattern not in known_net_names:
+            matches = sorted([name for name in all_net_names
+                              if net_pattern_matches(name, pattern)
+                              and name not in excluded])
+            if '*' in pattern or '?' in pattern:
+                if not matches:
+                    print(f"Warning: Pattern '{pattern}' matched no nets")
+                else:
+                    print(f"Pattern '{pattern}' matched {len(matches)} nets")
+                for name in matches:
+                    if name not in seen:
+                        result.append(name)
+                        seen.add(name)
+            elif matches:
+                # Literal that resolves to real net(s) -- including the
+                # sheet-qualified form of an unqualified spelling.
+                for name in matches:
+                    if name not in seen:
+                        result.append(name)
+                        seen.add(name)
+            else:
+                # Literal naming no net: preserved as-is (callers may pass names
+                # this board does not carry) with the long-standing warning.
+                if pattern not in seen and pattern not in excluded:
+                    result.append(pattern)
+                    seen.add(pattern)
                     print(f"WARNING: Net '{pattern}' does not exist on this board"
                           f"{_did_you_mean(pattern)}")
 

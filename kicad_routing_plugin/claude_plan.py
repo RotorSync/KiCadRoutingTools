@@ -788,7 +788,7 @@ def _match_net_names(pcb_data, globs):
     Uses the shared split_net_patterns helper so a literal active-low net name
     like "!RESET" stays selectable rather than being read as an exclusion
     (issue #177)."""
-    from net_queries import split_net_patterns
+    from net_queries import split_net_patterns, net_pattern_matches
     known_names = {net.name for net in pcb_data.nets.values() if net.name}
     includes, excludes = split_net_patterns(globs, known_names)
     if not includes:
@@ -802,10 +802,17 @@ def _match_net_names(pcb_data, globs):
         # hand the net panel nets the CLI would never route.
         if net.name.lower().startswith('unconnected-'):
             continue
-        if any(fnmatch.fnmatch(net.name, g) for g in includes) and \
-                not any(fnmatch.fnmatch(net.name, g) for g in excludes):
+        # Sheet-path aware, like the CLI's expand_net_patterns (#493): an
+        # unqualified '!GND' must exclude the board's '/GND'.
+        if any(net_pattern_matches(net.name, g) for g in includes) and \
+                not any(net_pattern_matches(net.name, g) for g in excludes):
             names.append(net.name)
     return names
+
+
+def _net_pattern_matches(name, glob):
+    from net_queries import net_pattern_matches
+    return net_pattern_matches(name, glob)
 
 
 def _component_net_names(pcb_data, ref, globs):
@@ -814,7 +821,8 @@ def _component_net_names(pcb_data, ref, globs):
         return []
     names = set()
     for pad in footprint.pads:
-        if pad.net_id and pad.net_name and any(fnmatch.fnmatch(pad.net_name, g) for g in globs):
+        if pad.net_id and pad.net_name and any(
+                _net_pattern_matches(pad.net_name, g) for g in globs):
             names.add(pad.net_name)
     return sorted(names)
 
