@@ -71,22 +71,51 @@ def plane_tap_launch_layers(pad, zone_layers, routing_layers) -> List[str]:
     return [l for l in routing_layers if l in layers]
 
 
-def pad_still_floating(disconnected_pads, pad, tapped_layer) -> bool:
-    """True if `pad` is STILL unconnected on the layer a tap just landed
-    on -- the custody test that decides whether to keep the copper.
+def pad_floating_entries(disconnected_pads, pad) -> int:
+    """How many still-disconnected entries the authoritative check reports
+    for `pad`, across all layers."""
+    px, py = round(pad.global_x, 3), round(pad.global_y, 3)
+    return sum(1 for (x, y, _l, ref) in (disconnected_pads or [])
+               if ref == pad.component_ref
+               and round(x, 3) == px and round(y, 3) == py)
 
-    Per PAD-LAYER, not per pad (#494). check_net_connectivity lists a
-    plated through-hole pad once per copper layer, so a layer-less key let
-    any ONE of those entries veto the repair: a pad joined on B.Cu was
-    undone because its F.Cu entry was still listed. A plated barrel ties
-    every copper layer, so clearing the layer we tapped IS the pad
-    connected. An SMD pad has a single entry, making this identical to the
-    old test for everything that could be repaired before.
+
+def pad_repair_rejected(before_dp, after_dp, pad, legacy=False) -> bool:
+    """True if a just-added repair must be UNDONE.
+
+    `legacy=True` is the pre-#494 rule (any remaining entry for the pad
+    vetoes), kept so KICAD_NO_SWEEP_PLATED=1 reproduces main exactly and
+    the A/B differs by one switch. Otherwise: keep only on progress.
     """
-    key = (round(pad.global_x, 3), round(pad.global_y, 3), tapped_layer,
-           pad.component_ref)
-    return key in {(round(x, 3), round(y, 3), l, ref)
-                   for (x, y, l, ref) in (disconnected_pads or [])}
+    if legacy:
+        return pad_floating_entries(after_dp, pad) > 0
+    return not pad_repair_made_progress(
+        pad_floating_entries(before_dp, pad),
+        pad_floating_entries(after_dp, pad), pad)
+
+
+def pad_repair_made_progress(before, after, pad) -> bool:
+    """True if a just-added repair STRICTLY improved the authoritative
+    verdict for `pad` -- the custody test that decides whether to keep it.
+
+    Progress, not absence (#494). Two weaker rules both fail:
+
+    - Keying on the pad alone ("is it listed at all?") vetoes a genuine
+      repair on a PLATED pad: check_net_connectivity can list such a pad
+      once per copper layer, so a pad truly joined on B.Cu stays listed on
+      F.Cu and its good copper is thrown away.
+    - Keying on (pad, repaired layer) passes VACUOUSLY whenever the pad's
+      entry sits on a different layer than the one the tap launched from.
+      Measured on nrfmicro U1.24: its only entry is F.Cu, the sweep
+      repaired from B.Cu, so "no B.Cu entry" was trivially true and a via
+      that changed nothing (net stayed at 2 components / 1 floating pad)
+      was kept as dead copper.
+
+    Counting entries before vs after is immune to both: clearing one of a
+    plated pad's several entries counts as progress, while a repair that
+    leaves the verdict untouched does not.
+    """
+    return after < before
 
 
 
@@ -1614,6 +1643,11 @@ def route_planes(
             # and keeps the #373 track fallback off floating same-net copper.
             sweep_oracle = PlaneComponentOracle(pcb_data, net_id)
             reported = False
+            # Custody baseline (#494): the pad's floating-entry count from
+            # the most recent authoritative verdict, advanced as repairs
+            # are accepted. A repair is kept only if it STRICTLY reduces
+            # this pad's count -- see pad_repair_made_progress.
+            _cur_dp = res.get('disconnected_pads') or []
             for (fx, fy, _flayer, fref) in res.get('disconnected_pads', []):
                 pp = pad_by_key.get((round(fx, 3), round(fy, 3), fref))
                 if pp is None:
@@ -1704,9 +1738,11 @@ def route_planes(
                     _v_res = check_net_connectivity(net_id, _v_segs, _v_vias, net_pads,
                                                     zones_by_net.get(net_id, []),
                                                     pcb_data=pcb_data)
-                    # Custody per PAD-LAYER (#494) -- see pad_still_floating.
-                    if pad_still_floating(_v_res.get('disconnected_pads'),
-                                          pad, pad_layer):
+                    # Custody by PROGRESS (#494) -- see
+                    # pad_repair_made_progress.
+                    _dp_after = _v_res.get('disconnected_pads')
+                    if pad_repair_rejected(_cur_dp, _dp_after, pad,
+                                           legacy=_no_plated):
                         pcb_data.vias.remove(new_via_obj)
                         for seg_obj in new_seg_objs:
                             pcb_data.segments.remove(seg_obj)
@@ -1717,6 +1753,7 @@ def route_planes(
                               f"({result.via['x']:.2f}, {result.via['y']:.2f}) reaches "
                               f"no plane copper - removed){RESET}")
                         continue
+                    _cur_dp = _dp_after   # accepted: advance the baseline
                     all_new_vias.append(result.via)
                     total_vias += 1
                     for s in result.segments:
@@ -1770,12 +1807,14 @@ def route_planes(
                         _t_res = check_net_connectivity(net_id, _t_segs, _t_vias, net_pads,
                                                         zones_by_net.get(net_id, []),
                                                         pcb_data=pcb_data)
-                        # Custody per PAD-LAYER (#494).
-                        if pad_still_floating(_t_res.get('disconnected_pads'),
-                                              pad, _cand):
+                        # Custody by PROGRESS (#494).
+                        _dp_after = _t_res.get('disconnected_pads')
+                        if pad_repair_rejected(_cur_dp, _dp_after, pad,
+                                               legacy=_no_plated):
                             for seg_obj in new_seg_objs:
                                 pcb_data.segments.remove(seg_obj)
                             continue
+                        _cur_dp = _dp_after   # accepted: advance the baseline
                         connected = True
                         for s in track_res.segments:
                             all_new_segments.append(s)

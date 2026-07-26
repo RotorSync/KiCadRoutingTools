@@ -14,9 +14,15 @@ inert on plated pads:
   2. the launch-layer resolution, which required a CONCRETE copper layer, so
      a '*.Cu' through-hole pad resolved to None and was skipped anyway.
 
-Third: custody was per PAD, not per PAD-LAYER. check_net_connectivity lists
-a plated pad once per copper layer, so a layer-less key let any one entry
-veto a pad that was genuinely joined on the layer just repaired.
+Third, custody. The pre-#494 rule vetoed on ANY remaining entry for the pad,
+which throws away a genuine repair on a plated pad: check_net_connectivity
+can list such a pad once per copper layer, so one joined on B.Cu stays listed
+on F.Cu. Keying on (pad, repaired layer) instead is WORSE -- it passes
+vacuously whenever the pad's entry sits on a different layer than the tap
+launched from (measured: nrfmicro U1.24 kept a via that changed nothing).
+Custody is therefore PROGRESS: keep only if the pad's entry count strictly
+drops. The old rule stays reachable behind KICAD_NO_SWEEP_PLATED=1 so the
+A/B differs by exactly one variable.
 
 NPTH holes stay skipped -- no copper to tap at all (#328).
 
@@ -29,7 +35,9 @@ from types import SimpleNamespace
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from route_disconnected_planes import (plane_tap_launch_layers,  # noqa: E402
-                                       pad_still_floating)
+                                       pad_floating_entries,
+                                       pad_repair_made_progress,
+                                       pad_repair_rejected)
 
 LAYERS = ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']
 ZONES = ['In2.Cu']
@@ -98,29 +106,58 @@ def main():
                    plane_tap_launch_layers(_pad(['In7.Cu']), ZONES, LAYERS),
                    [])
 
-    # --- custody, per PAD-LAYER -----------------------------------------
+    # --- custody: PROGRESS, not absence ---------------------------------
     thru = _placed(131.11, 125.75, 'J4', ['*.Cu', '*.Mask'], drill=0.8,
                    pad_type='thru_hole')
-    fails += check("plated: another layer must not veto the repaired layer",
-                   pad_still_floating(
-                       [(131.11, 125.75, 'F.Cu', 'J4')], thru, 'B.Cu'),
-                   False)
-    fails += check("plated: repaired layer still floating -> undo",
-                   pad_still_floating(
-                       [(131.11, 125.75, 'B.Cu', 'J4')], thru, 'B.Cu'),
-                   True)
-
     smd = _placed(10.0, 20.0, 'C6', ['F.Cu'])
-    fails += check("smd: own layer still floating -> undo",
-                   pad_still_floating(
-                       [(10.0, 20.0, 'F.Cu', 'C6')], smd, 'F.Cu'),
-                   True)
-    fails += check("smd: cleared -> keep",
-                   pad_still_floating([], smd, 'F.Cu'), False)
-    fails += check("a different component does not match",
-                   pad_still_floating(
-                       [(10.0, 20.0, 'F.Cu', 'C7')], smd, 'F.Cu'),
-                   False)
+
+    # entry counting is per pad, across layers, and does not confuse
+    # a same-position pad of another component
+    fails += check("plated pad listed on two layers counts 2",
+                   pad_floating_entries(
+                       [(131.11, 125.75, 'F.Cu', 'J4'),
+                        (131.11, 125.75, 'B.Cu', 'J4'),
+                        (10.0, 20.0, 'F.Cu', 'C6')], thru),
+                   2)
+    fails += check("a different component is not counted",
+                   pad_floating_entries(
+                       [(10.0, 20.0, 'F.Cu', 'C7')], smd), 0)
+
+    # A plated pad genuinely joined on one layer: one of its two entries
+    # clears. That is progress -- keep the copper. (The old pad-keyed rule
+    # threw this away; nhyodyne_6809 J4, #492.)
+    fails += check("plated: one of two entries cleared -> keep",
+                   pad_repair_made_progress(2, 1, thru), True)
+
+    # THE nrfmicro U1.24 FALSE ACCEPT: the pad's only entry is on F.Cu and
+    # the sweep repaired from B.Cu. A (pad, repaired-layer) key passes
+    # vacuously; counting entries does not, because nothing changed.
+    fails += check("verdict unchanged -> undo (no vacuous pass)",
+                   pad_repair_made_progress(1, 1, thru), False)
+
+    fails += check("smd: entry cleared -> keep",
+                   pad_repair_made_progress(1, 0, smd), True)
+    fails += check("smd: still listed -> undo",
+                   pad_repair_made_progress(1, 1, smd), False)
+
+    # A repair that makes things WORSE is never kept.
+    fails += check("regression -> undo",
+                   pad_repair_made_progress(1, 2, thru), False)
+
+    # --- legacy dispatch, so KICAD_NO_SWEEP_PLATED=1 == main ------------
+    # The pre-#494 rule: ANY remaining entry for the pad vetoes. Keeping it
+    # behind the switch is what makes the A/B differ by one variable, and
+    # what lets the A/A check prove the refactor moved nothing else.
+    two = [(131.11, 125.75, 'F.Cu', 'J4'), (131.11, 125.75, 'B.Cu', 'J4')]
+    one = [(131.11, 125.75, 'F.Cu', 'J4')]
+    fails += check("legacy: one entry left still vetoes",
+                   pad_repair_rejected(two, one, thru, legacy=True), True)
+    fails += check("legacy: fully cleared -> keep",
+                   pad_repair_rejected(two, [], thru, legacy=True), False)
+    fails += check("new: same case is progress -> keep",
+                   pad_repair_rejected(two, one, thru, legacy=False), False)
+    fails += check("new: unchanged verdict -> undo",
+                   pad_repair_rejected(one, one, thru, legacy=False), True)
 
     if fails:
         print(f"\n{fails} FAILURE(S)")
