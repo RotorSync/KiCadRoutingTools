@@ -986,10 +986,52 @@ class PlanExecutor:
 
     # -- sequencing ----------------------------------------------------------
 
+    def _join_worker_threads(self, timeout=60.0):
+        """Wait for every tab's routing worker thread to be fully dead.
+
+        _poll_until_idle decides a step is done by polling a CONTROL's state
+        (plus the tab's _apply_pending latch); it never touches the thread. So
+        in principle _finish could run while a worker was still tearing down,
+        and everything after it would race that. This makes the guarantee
+        explicit instead of assumed. Bounded and best-effort: a stuck worker
+        must never hang the GUI, so a timeout is logged and execution
+        continues.
+
+        HONEST SCOPE: this does NOT fix the headless segfault, and in practice
+        it is usually a no-op -- the thread has already exited by the time the
+        control reports idle. Measured: with the join in place a 1-step replay
+        still crashed on run 1. Kept because polling a button to infer that a
+        thread is finished is a real (if currently latent) hazard, not because
+        it fixed anything. See the crash note in git history for what IS known.
+        """
+        import threading
+        me = threading.current_thread()
+        owners = [self.dialog]
+        for attr in ('differential_tab', 'planes_tab', 'fanout_tab'):
+            owner = getattr(self.dialog, attr, None)
+            if owner is not None:
+                owners.append(owner)
+        for owner in owners:
+            t = getattr(owner, '_routing_thread', None)
+            if t is None or t is me:
+                continue
+            try:
+                if not t.is_alive():
+                    continue
+                t.join(timeout)
+                if t.is_alive():
+                    self.log(f"Claude plan: worker thread on "
+                             f"{type(owner).__name__} still alive after "
+                             f"{timeout}s; continuing without it")
+            except Exception as e:
+                self.log(f"Claude plan: worker-thread join skipped ({e})")
+
     def _finish(self, aborted_reason):
         self._current_action = None
         self.dialog._suppress_plane_offer = False
         self.dialog._suppress_completion_popups = False
+        # Before any heavy Python work below (see _join_worker_threads).
+        self._join_worker_threads()
         self._write_drc_floors()
         # Prep the GUI for the NEXT step to run, so its params are shown (and
         # editable) after this batch finishes (Andy's requested behavior: run the
