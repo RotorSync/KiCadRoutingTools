@@ -1299,18 +1299,26 @@ class DifferentialTab(wx.Panel):
         if self.sync_pcb_data_callback:
             self.sync_pcb_data_callback()
 
-        return tracks_added, vias_added, tracks_removed
-
+        # Per-step live DRC floors (GUI twin of route_diff.py's per-step
+        # fix_project_for_output). This block used to sit AFTER the return
+        # below, so it never ran: the diff-pair tab was the one routing tab
+        # that never relaxed the floors, and on eth_tap the Default class sat
+        # at track_width 0.125 / via 0.5-0.25 for the whole chain while the CLI
+        # had tightened to 0.0889 / 0.25-0.15 by step 10. Every later step
+        # resolves its geometry from that class, so the two fronts routed with
+        # DIFFERENT parameters from step 11 on (GUI 3581 segments vs CLI 3428).
         from .gui_utils import update_live_drc_floors
         _cfg = getattr(self, '_diff_drc_config', {}) or {}
-        import pcbnew as _p
         update_live_drc_floors(
-            _p.GetBoard(),
+            board,
             clearance=_cfg.get('clearance'),
             track_width=_cfg.get('diff_pair_width') or _cfg.get('track_width'),
             via_size=_cfg.get('via_size'),
             via_drill=_cfg.get('via_drill'),
-            hole_to_hole=_cfg.get('hole_to_hole_clearance'))
+            hole_to_hole=_cfg.get('hole_to_hole_clearance'),
+            edge_clearance=_cfg.get('board_edge_clearance'))
+
+        return tracks_added, vias_added, tracks_removed
 
     def _add_via_to_board(self, board, via, get_layer_id):
         """Add a via to the pcbnew board."""

@@ -1075,9 +1075,12 @@ class PlanExecutor:
                         hole_to_hole=floors.get('hole_to_hole_clearance'),
                         edge_clearance=floors.get('board_edge_clearance'))
                     try:
-                        for _name, _nc in board.GetNetClasses().items():
-                            if _name != 'Default':
-                                continue
+                        # board.GetNetClasses() is EMPTY on KiCad 10 -- this
+                        # loop ran zero times, so the diff-pair floors were
+                        # never written. See gui_utils.default_netclass.
+                        from .gui_utils import default_netclass
+                        _nc = default_netclass(board)
+                        if _nc is not None:
                             for _get, _set, _mm in (
                                     (_nc.GetDiffPairWidth,
                                      _nc.SetDiffPairWidth,

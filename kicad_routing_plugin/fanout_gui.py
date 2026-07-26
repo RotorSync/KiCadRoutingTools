@@ -1506,6 +1506,27 @@ class FanoutTab(wx.Panel):
                 board, pcbnew, fanout_config or {})
             board.BuildConnectivity()
 
+        # Per-step live DRC floors (GUI twin of bga_fanout's per-step
+        # fix_project_for_output). The fanout tab had NO counterpart at all, so
+        # a plan whose first steps are fanouts left the Default class at stock
+        # values while the CLI had already tightened it: on eth_tap the CLI was
+        # at clearance 0.09 / via 0.25-0.15 after step 1, the GUI still at
+        # 0.125 / 0.5-0.25 after step 9. Later steps resolve their geometry
+        # from that class, so the fronts diverge from there.
+        _fcfg = fanout_config or {}
+        try:
+            from .gui_utils import update_live_drc_floors
+            update_live_drc_floors(
+                board,
+                clearance=_fcfg.get('clearance'),
+                track_width=_fcfg.get('track_width'),
+                via_size=_fcfg.get('via_size'),
+                via_drill=_fcfg.get('via_drill'),
+                hole_to_hole=_fcfg.get('hole_to_hole_clearance'),
+                edge_clearance=_fcfg.get('board_edge_clearance'))
+        except Exception as _e:
+            print(f"(live DRC floor update skipped: {_e})")
+
         # Refresh the view
         pcbnew.Refresh()
 

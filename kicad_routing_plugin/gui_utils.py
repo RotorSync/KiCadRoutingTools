@@ -181,6 +181,37 @@ def move_copper_graphics_to_silkscreen_board(board):
     return moved
 
 
+def default_netclass(board):
+    """The board's Default NETCLASS, or None.
+
+    `board.GetNetClasses()` returns an EMPTY map on KiCad 10 -- the Default
+    class moved to `GetDesignSettings().m_NetSettings.GetDefaultNetclass()`.
+    Every `for name, nc in board.GetNetClasses().items(): if name == 'Default'`
+    loop therefore iterated ZERO times, and because they all sit inside
+    `except Exception: pass`, the entire netclass half of the GUI's DRC-floor
+    writeback was a silent no-op. That is why a GUI plan run left the Default
+    class at stock values (eth_tap: 0.125 / via 0.5-0.25) while the CLI chain
+    tightened it per step (0.0889 / via 0.25-0.15) -- and every later step
+    resolves its geometry from that class, so the two fronts routed with
+    different parameters.
+
+    Tries the KiCad 10 accessor first, then the legacy map."""
+    try:
+        ns = board.GetDesignSettings().m_NetSettings
+        nc = ns.GetDefaultNetclass()
+        if nc is not None:
+            return nc
+    except Exception:
+        pass
+    try:
+        for _name, _nc in board.GetNetClasses().items():
+            if _name == 'Default':
+                return _nc
+    except Exception:
+        pass
+    return None
+
+
 def update_live_drc_floors(board, *, clearance=None, track_width=None,
                            via_size=None, via_drill=None,
                            hole_to_hole=None, edge_clearance=None,
@@ -252,9 +283,8 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
             if getattr(bds, 'm_CopperEdgeClearance', 0) < _pin_iu:
                 bds.m_CopperEdgeClearance = _pin_iu
         try:
-            for _name, _nc in board.GetNetClasses().items():
-                if _name != 'Default':
-                    continue
+            _nc = default_netclass(board)
+            if _nc is not None:
                 def _nc_lower(get, set_, mm, board_min_iu=None):
                     if mm is None and board_min_iu is None:
                         return

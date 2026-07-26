@@ -147,6 +147,51 @@ def _plugin_symbols():
     return toks
 
 
+_TERMINAL = (ast.Return, ast.Raise, ast.Continue, ast.Break)
+
+
+def _unreachable_calls():
+    """Calls that can NEVER execute because a return/raise/continue/break
+    precedes them in the same block.
+
+    Check B only asks whether a GUI counterpart SYMBOL EXISTS anywhere under
+    kicad_routing_plugin/ -- a textual presence test. That is satisfied by dead
+    code, and it was: differential_gui's update_live_drc_floors call sat AFTER
+    `return tracks_added, vias_added, tracks_removed`, so the diff-pair tab was
+    the one routing tab that never relaxed the DRC floors. The gate stayed
+    green while the GUI carried stock floors through an entire plan and every
+    step after the diff-pair one resolved its geometry differently from the CLI
+    (eth_tap: GUI 3581 segments vs CLI 3428 from step 11 on).
+
+    Returns [(file, lineno, symbol)].
+    """
+    out = []
+    for f in sorted(glob.glob(str(PLUGIN / "*.py"))):
+        try:
+            tree = ast.parse(Path(f).read_text())
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            for field in ('body', 'orelse', 'finalbody'):
+                stmts = getattr(node, field, None)
+                if not isinstance(stmts, list):
+                    continue
+                dead = False
+                for st in stmts:
+                    if dead:
+                        for sub in ast.walk(st):
+                            if isinstance(sub, ast.Call):
+                                fn = sub.func
+                                name = (getattr(fn, 'id', None)
+                                        or getattr(fn, 'attr', None))
+                                if name:
+                                    out.append((os.path.basename(f),
+                                                getattr(sub, 'lineno', 0), name))
+                    elif isinstance(st, _TERMINAL):
+                        dead = True
+    return out
+
+
 def main():
     plugin_syms = _plugin_symbols()
     postpass_funcs = set()
@@ -193,9 +238,26 @@ def main():
                 f"none of {guis} found under kicad_routing_plugin/. The GUI plan "
                 f"run will diverge from the CLI chain (Class-2 drift).")
 
+    # D. A registered GUI counterpart must be REACHABLE, not dead code.
+    # Check B is satisfied by a symbol appearing anywhere -- including after a
+    # return. Flag any unreachable call to a registered counterpart, and warn
+    # on unreachable calls generally (they are almost always a mistake).
+    counterparts = {g for guis in REGISTRY.values() for g in guis}
+    dead = _unreachable_calls()
+    for fname, lineno, sym in dead:
+        if sym in counterparts:
+            failures.append(
+                f"GUI counterpart '{sym}' is UNREACHABLE at {fname}:{lineno} "
+                f"(dead code after a return/raise). It satisfies the "
+                f"presence check in B but never runs, so the GUI silently "
+                f"skips a CLI post-pass.")
+        else:
+            warnings.append(f"unreachable call to '{sym}' at {fname}:{lineno}")
+
     print(f"CLI post-pass coverage: {len(REGISTRY)} registered, "
           f"{len(used)} in active CLI use, {len(acknowledged)} CLI-only "
-          f"acknowledged, {len(failures)} failure(s), {len(warnings)} warning(s).")
+          f"acknowledged, {len(dead)} unreachable call(s), "
+          f"{len(failures)} failure(s), {len(warnings)} warning(s).")
     for a in acknowledged:
         print(f"  CLI-ONLY: {a}")
     for w in warnings:
