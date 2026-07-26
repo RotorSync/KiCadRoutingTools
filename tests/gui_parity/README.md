@@ -79,21 +79,37 @@ pads landed ~0.3 nm apart -- enough to flip A* tie-breaks. `local_to_global`
 now snaps to the integer-nm grid. This board went from ~300/1200 segments
 common to 1305/1305.
 
-**The whole residual is now ONE bug, and it is real:** 73 GND plane-tap
+**The whole residual is a HARNESS ARTIFACT, not a GUI bug.** 73 GND plane-tap
 segments have identical endpoints on both sides but differ in WIDTH -- CLI
-0.127, GUI 0.3. Traced to step 2 (`route_planes`), the only step where
-NEITHER side passes a track width:
+0.127, GUI 0.3 -- at step 2 (`route_planes`), the only step where neither side
+passes an explicit track width.
 
-- the CLI chain is file-to-file, and step 1 (`route.py --track-width 0.127`)
-  WRITES a sibling `cli_step1.kicad_pro` carrying Default `track_width: 0.127`
-  (the DRC-floor writeback). Step 2 reads that back and taps at 0.127.
-- the GUI carries ONE live board in memory and never writes/reads a
-  `.kicad_pro` between steps, so the same resolution finds nothing and falls
-  back to the static `defaults.TRACK_WIDTH` = 0.3.
+The CLI chain is file-to-file: step 1 (`route.py --track-width 0.127`) writes a
+sibling `cli_step1.kicad_pro` carrying Default `track_width: 0.127`, and step 2
+resolves its omitted `--track-width` from that Default net class.
 
-So the CLI silently carries routing state across steps through a file the GUI
-has no equivalent of. `splitflap_driver.kicad_pcb` has no sibling `.kicad_pro`
-of its own, which is what exposes it. This is unfixed.
+The REAL GUI does the same thing. Measured on `work/cli_step1.kicad_pcb` with a
+genuine headless `RoutingDialog`:
+
+    board .kicad_pro Default track_width : 0.127
+    defaults.TRACK_WIDTH (shim fallback) : 0.3
+    track_width override checkbox        : False
+    raw control value                    : 0.3
+    _effective_track_width()             : 0.127   <-- board-derived
+    planes tab shared track_width        : 0.127   <-- what create_plane gets
+
+`_effective_geometry_floor` reads the board's Default net class whenever the
+override checkbox is unchecked (#439), and `planes_tab.get_shared_params()`
+passes that through. So the real GUI taps at 0.127, like the CLI.
+
+**The 0.3 is the shim.** `test_gui_engine_parity.py` hand-builds its step config
+(`PLANES = dict(nets=['GND'], layers=['B.Cu'], clearance=0.15, ...)` -- no
+track_width) and calls the engine directly, so `_effective_track_width()` never
+runs and the engine's own `config.get('track_width', defaults.TRACK_WIDTH)`
+fallback supplies 0.3. This is exactly the structural blind spot described
+above: **anything between a dialog CONTROL and the engine argument is never
+executed.** Treat this 73-segment delta as harness noise, not a defect -- and as
+one more argument for migrating these gates onto the real dialog.
 
 ## Command/input identity findings (2026-07-08)
 
