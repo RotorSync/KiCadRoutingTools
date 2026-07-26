@@ -130,10 +130,14 @@ picked up by both for free. The gaps appear at the edges:
   it to `reset_params_to_defaults` (the plan executor resets through
   that, or the param leaks between steps); (2) add the `--flag` →
   param-name mapping to `tests/stress/manifest_to_plan.py` `FLAG_PARAMS`
-  so recorded manifests convert to `*_plan.json` with the param intact;
-  (3) mirror it in `tests/gui_parity/test_gui_engine_parity.py`'s config
-  map. Verify with: convert a manifest carrying the flag and check the
-  plan JSON step params include it.
+  so recorded manifests convert to `*_plan.json` with the param intact.
+  Verify with: convert a manifest carrying the flag and check the plan
+  JSON step params include it. (There is **no longer a third step**: the
+  GUI-parity gates used to hand-mirror a config map in
+  `test_gui_engine_parity.py`, which had to be kept in sync by hand and
+  silently drifted. Both gates now drive the REAL dialog through a plan,
+  so a new param needs no mirroring — if it reaches the dialog control it
+  reaches the engine.)
 - **A changed default** must match in both places — the GUI sets its own
   values from UI controls and does not inherit argparse defaults.
 - **Parser/obstacle/writer fixes** in shared low-level modules are used by

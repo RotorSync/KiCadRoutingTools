@@ -8,22 +8,24 @@ chain's CLI steps run file-to-file.
   `<board>_plan.json` into a genuine headless `RoutingDialog` and runs it with
   the genuine `PlanExecutor`, then diffs against the manifest replayed at HEAD.
   Nothing is mirrored or mocked. See "Whole-plan replay" below.
-- `test_gui_engine_parity.py`, `test_gui_livechain_rp2350.py` — **legacy,
-  shim-based** (see below) but **still the only gates that run on IN-REPO
-  boards**, so they are kept, not deleted. `replay_plan_vs_run.py` supersedes
-  them technically and requires a corpus stress rundir, which makes it a dev
-  driver rather than a gate. Migrate these onto the real headless dialog (as
-  `test_plane_all_layers_parity.py` already was) rather than dropping them.
+- `test_gui_engine_parity.py`, `test_gui_livechain_rp2350.py` — **MIGRATED onto
+  the real dialog (2026-07-26)**, and the only gates that run on IN-REPO boards
+  (`splitflap_driver`, `rp2350_fpga_eensy_prePlane`). Each now expresses its GUI
+  leg as a Claude-tab **plan** and runs it through
+  `replay_plan_vs_run.replay()` — the same real `RoutingDialog` +
+  `PlanExecutor`. `replay()` touches its `info` argument only for
+  `input_board`, so the corpus driver works unchanged on a checked-in board;
+  that is the whole trick. Nothing is mirrored or shimmed any more.
   `diag_fullchain_carry_rp2350.py` was **deleted** — a corpus-only, one-off
   diagnostic for the #361 carry investigation, whose findings are recorded
   below.
 
-### The shim harnesses are superseded
+### Why the shims went (kept for the reasoning)
 
-The three shim-based harnesses predate the discovery that the REAL dialog
+The shim-based harnesses predated the discovery that the REAL dialog
 constructs headless (`parent=None`, never shown, with
-`WXSUPPRESS_SIZER_FLAGS_CHECK=1`). They bind real tab methods onto plain shim
-objects and hand-build the config the engine is called with, which has a
+`WXSUPPRESS_SIZER_FLAGS_CHECK=1`). They bound real tab methods onto plain shim
+objects and hand-built the config the engine is called with, which has a
 structural blind spot: **anything between a dialog CONTROL and the engine
 argument is never executed.**
 
@@ -41,9 +43,17 @@ scaffolding, not on the behaviour it guards (confirmed pre-existing at 75acd26,
 before the #493 work). A harness that mirrors an interface has to be maintained
 in lockstep with it; one that instantiates the real thing does not.
 
-Their findings are still recorded below and the working gates still run, but
-prefer the real-dialog path for new work, and treat a shim harness passing as
-weaker evidence than it looks.
+**And a shim does not only MISS bugs — it can INVENT them.** Because
+`test_gui_engine_parity`'s shim hand-built the plane step's config, it never ran
+`_effective_track_width()`, so the engine's own
+`config.get('track_width', defaults.TRACK_WIDTH)` fallback supplied 0.3 where
+the real dialog resolves the board's Default net class to 0.127. The gate
+reported 73 "divergent" GND plane-tap segments on splitflap, they were written
+up here as a real unfixed defect, and they do not exist in the real GUI (see the
+splitflap measurement above). That is what finally motivated the migration.
+
+Their findings are still recorded below. Both gates now use the real-dialog
+path; use it for new work too.
 
 Workdir: `tests/gui_parity/work/` (gitignored).
 
@@ -67,8 +77,14 @@ Workdir: `tests/gui_parity/work/` (gitignored).
 > 1 nm through `replay_plan_vs_run.py`. Kept for the history of how the forks
 > were found; do not quote the numbers as current.
 
-Current measurement on splitflap (2026-07-26, after 78f1731): grade PARITY,
-**geometry now IDENTICAL** -- 1305 common segments, 0 cli-only, 1 gui-only.
+**Current measurement on splitflap (2026-07-26, after 78f1731, through the REAL
+dialog): COPPER SETS IDENTICAL.**
+
+    CLI        conn_full=True conn_issues=0 drc=0 kicad_unconnected=0
+    GUI        conn_full=True conn_issues=0 drc=0 kicad_unconnected=0
+    segments:  CLI=1305 GUI=1305 common=1305 cli-only=0 gui-only=0
+    vias:      CLI=142  GUI=142  common=142  cli-only=0 gui-only=0
+    copper sets identical: True
 
 That "canonical PCBData representation shared by both fronts" the older note
 below called an open follow-up is **done**. It was not container ordering and
@@ -79,10 +95,10 @@ pads landed ~0.3 nm apart -- enough to flip A* tie-breaks. `local_to_global`
 now snaps to the integer-nm grid. This board went from ~300/1200 segments
 common to 1305/1305.
 
-**The whole residual is a HARNESS ARTIFACT, not a GUI bug.** 73 GND plane-tap
-segments have identical endpoints on both sides but differ in WIDTH -- CLI
-0.127, GUI 0.3 -- at step 2 (`route_planes`), the only step where neither side
-passes an explicit track width.
+The last 73 segments came off when the gate itself was migrated to the real
+dialog. They were a HARNESS ARTIFACT: 73 GND plane-tap segments with identical
+endpoints but different WIDTH (CLI 0.127, GUI 0.3) at step 2 (`route_planes`),
+the only step where neither side passes an explicit track width.
 
 The CLI chain is file-to-file: step 1 (`route.py --track-width 0.127`) writes a
 sibling `cli_step1.kicad_pro` carrying Default `track_width: 0.127`, and step 2

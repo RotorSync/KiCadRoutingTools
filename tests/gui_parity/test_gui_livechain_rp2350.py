@@ -12,6 +12,18 @@ route -> repair2) on ONE live pcbnew board -- exactly as the Claude-tab plan
 executor does, in-memory across steps -- starting from the recorded CLI
 pre-plane board, and asserts every stage grades 0 DRC like the CLI file chain.
 
+MIGRATED off the shim harness (2026-07-26). The GUI leg used to bind real tab
+methods onto plain shim objects and hand-build the engine config, which has a
+structural blind spot: anything between a dialog CONTROL and the engine
+argument never executes. That is not hypothetical -- the same shim style made
+test_gui_engine_parity report a phantom 73-segment plane-tap "divergence" on
+splitflap that does not exist in the real GUI (the shim never ran
+_effective_track_width(), so it passed defaults.TRACK_WIDTH 0.3 where the real
+dialog resolves the board's 0.127). Now it runs the REAL headless
+swig_gui.RoutingDialog driven by the REAL claude_plan.PlanExecutor, via
+replay_plan_vs_run.replay() -- the same machinery the corpus driver uses, which
+only needs {'input_board': path}, so it works on a checked-in board.
+
 It caught the swig_gui route-apply width-rounding bug (0.0762 -> 0.076 fab-floor
 violations, 42 of them at the reconnect route step; #362). Per-step isolation
 on CLI inputs did NOT catch it -- only chaining on a live board did, because
@@ -127,86 +139,74 @@ def _cli_chain(work):
     return grades
 
 
+# The GUI leg as a real Claude-tab PLAN -- the same JSON shape manifest_to_plan
+# emits and the plan executor consumes. Mirrors _cli_chain() step for step.
+# `grid_step` 0.05 on BOTH repairs: that stage is the #479 late-pinch guard (it
+# re-checks that the reconnect route did not sever the pour), not a test of grid
+# resolution, and halving the step quadruples the cell count for no extra
+# coverage -- measured 354s at 0.025 vs 118s at 0.05 on this board.
+PLANE_ASSIGNMENTS = [{'nets': ['GND'], 'layer': 'In1.Cu'},
+                     {'nets': ['+3V3'], 'layer': 'In4.Cu'}]
+_GP = {'power_nets': ['VIN'], 'power_nets_widths': [0.3],
+       'hole_to_hole_clearance': 0.2}
+STAGE_TAGS = ['create', 'repair', 'reconnect', 'final']
+PLAN = [
+    {'action': 'route_planes',
+     'params': dict(via_size=0.45, via_drill=0.2, clearance=0.10,
+                    track_width=0.09, grid_step=0.05, **_GP),
+     'assignments': PLANE_ASSIGNMENTS},
+    {'action': 'repair_planes',
+     'params': dict(clearance=0.09, via_size=0.25, via_drill=0.15,
+                    track_width=0.0762, grid_step=0.05,
+                    rip_blocker_nets=True, **_GP),
+     'assignments': PLANE_ASSIGNMENTS},
+    {'action': 'route',
+     'params': dict(clearance=0.09, track_width=0.0762, via_size=0.25,
+                    via_drill=0.15, grid_step=0.025, max_ripup=10,
+                    max_iterations=1000000, no_bga_zone=True,
+                    hole_to_hole_clearance=0.2,
+                    layers=['F.Cu', 'In1.Cu', 'In2.Cu', 'In3.Cu', 'In4.Cu', 'B.Cu']),
+     'nets': ['+1V1', '/T8F49I2X/PIN.5']},
+    {'action': 'repair_planes',
+     'params': dict(clearance=0.09, via_size=0.25, via_drill=0.15,
+                    track_width=0.0762, grid_step=0.05,
+                    rip_blocker_nets=True, **_GP),
+     'assignments': PLANE_ASSIGNMENTS},
+]
+
+
 def main():
     start_board = START_BOARD
     if not os.path.exists(start_board):
         print(f"SKIP: checked-in board not found at {start_board}")
         return 0
 
-    import pcbnew
-    import wx
-    from kicad_routing_plugin import planes_gui, swig_gui
-    import test_gui_engine_parity as H
-    try:
-        H._WX_APP = wx.App(False)
-    except Exception:
-        pass
-    wx.MessageBox = lambda *a, **k: None
-    from kicad_parser import build_pcb_data_from_board
-    from route import batch_route
+    # The REAL headless dialog + REAL PlanExecutor. replay() touches `info` only
+    # for input_board, so the corpus driver works unchanged on a repo board.
+    import replay_plan_vs_run as R
 
     work = tempfile.mkdtemp(prefix='rp2350_livechain_')
-    src = os.path.join(work, 'live.kicad_pcb')
-    shutil.copy(start_board, src)
-    board = pcbnew.LoadBoard(src)
-    pcbnew.GetBoard = lambda: board
+    print(f"running the GUI plan through the real dialog ({len(PLAN)} steps)...",
+          flush=True)
+    res = R.replay({'input_board': start_board}, PLAN, work, snapshots=True)
+    if res.get('aborted'):
+        print(f"FAIL: GUI plan aborted: {res['aborted']}")
+        shutil.rmtree(work, ignore_errors=True)
+        return 1
+    if res.get('completed', 0) != len(PLAN):
+        print(f"FAIL: GUI plan ran {res.get('completed')} of {len(PLAN)} steps.")
+        shutil.rmtree(work, ignore_errors=True)
+        return 1
 
-    def planes(cfg):
-        tab = H._make_planes_shim(planes_gui, board, src, build_pcb_data_from_board(board))
-        (tab._run_create_planes if cfg['mode'] == 'create' else tab._run_repair_planes)(cfg)
-        tab._apply_results_to_board()
-
-    def route(nets, clr, tw, vs, vd, gs):
-        pd = build_pcb_data_from_board(board)
-        c = H._gui_route_config(dict(nets=nets, clearance=clr, track_width=tw,
-            via_size=vs, via_drill=vd, grid_step=gs, max_iterations=1000000, max_ripup=10))
-        c['layers'] = list(pd.board_info.copper_layers)
-        s, f, t, rd = batch_route(
-            input_file=src, output_file="", net_names=H._resolve_nets(pd, nets),
-            layers=c['layers'], track_width=tw, clearance=clr, via_size=vs, via_drill=vd,
-            grid_step=gs, via_cost=c['via_cost'], max_iterations=1000000,
-            max_probe_iterations=c['max_probe_iterations'], heuristic_weight=c['heuristic_weight'],
-            proximity_heuristic_factor=c['proximity_heuristic_factor'], turn_cost=c['turn_cost'],
-            direction_preference_cost=c['direction_preference_cost'], max_rip_up_count=10,
-            ripup_abandon_metric=c['ripup_abandon_metric'], ordering_strategy=c['ordering_strategy'],
-            direction_order=c['direction'], stub_proximity_radius=c['stub_proximity_radius'],
-            stub_proximity_cost=c['stub_proximity_cost'], via_proximity_cost=c['via_proximity_cost'],
-            track_proximity_distance=c['track_proximity_distance'],
-            track_proximity_cost=c['track_proximity_cost'],
-            routing_clearance_margin=c['routing_clearance_margin'], hole_to_hole_clearance=0.2,
-            board_edge_clearance=c['board_edge_clearance'],
-            enable_layer_switch=c['enable_layer_switch'], return_results=True, pcb_data=pd)
-        shim = H._make_route_shim(swig_gui, board, src)
-        shim.pcb_data = pd
-        swig_gui.RoutingDialog._apply_results_to_board(shim, rd, s, f, t, c)
-
-    def stage(tag):
-        p = os.path.join(work, f'{tag}.kicad_pcb')
-        pcbnew.SaveBoard(p, board)
-        return _grade(p)
-
-    GP = dict(power_nets=['VIN'], power_nets_widths=[0.3], hole_to_hole_clearance=0.2)
+    # replay() snapshots each completed step as gui_stepNN.kicad_pcb.
     stages = {}
-    planes(dict(mode='create', assignments=[(['GND', '+3V3'], ['In1.Cu', 'In4.Cu'])],
-                via_size=0.45, via_drill=0.2, clearance=0.10, track_width=0.09,
-                grid_step=0.05, add_gnd_vias=False, **GP))
-    stages['create'] = stage('create')
-    planes(dict(mode='repair', assignments=[(['GND', '+3V3'], ['In1.Cu', 'In4.Cu'])],
-                clearance=0.09, via_size=0.25, via_drill=0.15, track_width=0.0762,
-                grid_step=0.05, rip_blocker_nets=True, **GP))
-    stages['repair'] = stage('repair')
-    route(['+1V1', '/T8F49I2X/PIN.5'], 0.09, 0.0762, 0.25, 0.15, 0.025)
-    stages['reconnect'] = stage('reconnect')
-    # grid_step 0.05, matching the first repair. This stage is the #479
-    # late-pinch guard -- it re-checks that the reconnect route above did not
-    # sever the pour -- not a test of grid resolution, and halving the step
-    # quadruples the cell count for no extra coverage. Measured on this board:
-    # the repair costs 354s at 0.025 vs 118s at 0.05, which was ~4 minutes of
-    # this gate's runtime on its own.
-    planes(dict(mode='repair', assignments=[(['GND', '+3V3'], ['In1.Cu', 'In4.Cu'])],
-                clearance=0.09, via_size=0.25, via_drill=0.15, track_width=0.0762,
-                grid_step=0.05, rip_blocker_nets=True, **GP))
-    stages['final'] = stage('final')
+    for i, tag in enumerate(STAGE_TAGS, 1):
+        snap = os.path.join(work, f'gui_step{i:02d}.kicad_pcb')
+        if not os.path.exists(snap):
+            print(f"FAIL: no GUI snapshot for stage {tag}")
+            shutil.rmtree(work, ignore_errors=True)
+            return 1
+        stages[tag] = _grade(snap)
 
     # #495: actually RUN the CLI chain instead of asserting it is clean.
     print("\nrunning the equivalent CLI file chain for comparison...", flush=True)

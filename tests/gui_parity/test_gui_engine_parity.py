@@ -8,13 +8,24 @@ on a real board without pressing buttons:
 
   CLI leg   -- runs the recorded chain's commands file->file (subprocesses),
                exactly like a stress replay.
-  GUI leg   -- inside KiCad's bundled python: loads the board with pcbnew,
-               builds PCBData via build_pcb_data_from_board, invokes the SAME
-               engine calls the tabs make (batch_route with the swig_gui
-               kwargs and pcb_data=..., create_plane / repair via the planes
-               tab's own worker + _apply_results_to_board on a shimmed tab
-               instance), rebuilding PCBData from the live board between
-               steps, then saves the board.
+  GUI leg   -- GUI_PLAN below, run through the REAL headless
+               swig_gui.RoutingDialog driven by the REAL
+               claude_plan.PlanExecutor (via replay_plan_vs_run.replay), on ONE
+               live board carried in memory across steps -- the same
+               parse_plan_result -> reset_params_to_defaults ->
+               apply_step_params -> tab._on_*() path the buttons run.
+
+MIGRATED off the shim harness (2026-07-26). The GUI leg used to bind real tab
+methods onto plain shim objects (_Shim/_Stub/_borrow) and hand-build the engine
+config. That has a structural blind spot -- **anything between a dialog CONTROL
+and the engine argument never executes** -- and it did not just miss bugs, it
+INVENTED one: because the shim hand-built the plane config it never ran
+_effective_track_width(), so the engine's own
+`config.get('track_width', defaults.TRACK_WIDTH)` fallback supplied 0.3 where
+the real dialog resolves the board's Default net class to 0.127, and this gate
+reported 73 phantom "divergent" GND plane-tap segments that do not exist in the
+real GUI. Nothing is mirrored now, so a converter/apply bug shows up as a board
+difference instead of being hidden or fabricated.
 
 Both finals are then graded (check_connected / check_drc / kicad-cli DRC
 unconnected) and the divergence is printed. This harness REPORTS the gap; it
@@ -24,7 +35,7 @@ reconciliation, .kicad_pro floor carryover, and plan-parameter whitelist).
 
 Needs pcbnew; re-execs into KiCad's python automatically.
 
-    python3 tests/test_gui_engine_parity.py [board.kicad_pcb] [--workdir DIR]
+    python3 tests/gui_parity/test_gui_engine_parity.py [board.kicad_pcb] [--workdir DIR]
 """
 import os
 import shutil
@@ -33,9 +44,7 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, REPO)
-
-
-_WX_APP = None
+sys.path.insert(0, os.path.join(REPO, 'tests', 'gui_parity'))  # replay_plan_vs_run
 
 KICAD_PYTHONS = [
     "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3",
@@ -45,23 +54,9 @@ KICAD_PYTHONS = [
 
 DEFAULT_BOARD = os.path.join(REPO, "kicad_files", "splitflap_driver.kicad_pcb")
 
-# The splitflap chain, expressed twice:
-#  - CLI: the recorded stress commands (what a stress replay runs);
-#  - GUI: what the claude plan CAN set on the tabs (track/clearance/via/
-#    power via apply_step_params) -- everything else stays at the GUI
-#    panels' defaults, exactly as a real "run selected steps" would.
-SIGNAL = dict(nets=['*', '!GND'], clearance=0.15, track_width=0.127,
-              via_size=0.45, via_drill=0.2,
-              power_nets=['+3V3', '+12V'], power_nets_widths=[0.4, 0.4],
-              max_iterations=1000000, max_ripup=10)
-GND_FIX = dict(nets=['GND'], clearance=0.127, track_width=0.127,
-               via_size=0.45, via_drill=0.2,
-               max_iterations=1000000, max_ripup=10)
-PLANES = dict(nets=['GND'], layers=['B.Cu'], clearance=0.15,
-              via_size=0.45, via_drill=0.2)
-REPAIR = dict(clearance=0.15, via_size=0.45, via_drill=0.2,
-              track_width=0.127, grid_step=0.1,
-              power_nets=['+3V3', '+12V'], power_nets_widths=[0.4, 0.4])
+# The splitflap chain is expressed twice below: run_cli_leg() as the recorded
+# stress commands, GUI_PLAN as the equivalent Claude-tab plan. They must stay
+# in step with each other.
 
 
 def _reexec_into_kicad():
@@ -115,262 +110,58 @@ def run_cli_leg(board, workdir):
     return s4
 
 
-class _Stub:
-    """Absorbs any UI attribute/method access with no-ops. Numeric/iteration
-    protocols return empty/zero so code like range(panel.GetCount()) or
-    iterating a list control degrades to a no-op."""
-    def __getattr__(self, name):
-        return _Stub()
-
-    def __call__(self, *a, **k):
-        return _Stub()
-
-    def __bool__(self):
-        return False
-
-    def __index__(self):
-        return 0
-
-    def __int__(self):
-        return 0
-
-    def __len__(self):
-        return 0
-
-    def __iter__(self):
-        return iter(())
-
-
-class _Shim:
-    pass
-
-
-def _borrow(shim, cls, names):
-    """Bind the REAL methods of the wx dialog class onto a plain shim (py3
-    functions have no isinstance check), so the harness runs the exact
-    board-apply code the buttons run -- without constructing a wx object."""
-    import types
-    for n in names:
-        setattr(shim, n, types.MethodType(getattr(cls, n), shim))
-
-
-def _make_route_shim(swig_gui, board, board_path):
-    d = _Shim()
-    d.board = board
-    d.board_filename = board_path
-    d.pcb_data = None
-    for name in ('net_panel', 'status_text', 'progress_bar', 'route_btn'):
-        setattr(d, name, _Stub())
-    _borrow(d, swig_gui.RoutingDialog,
-            [n for n in ('_add_via_to_board', '_sync_pcb_data_from_board',
-                         '_clear_user_layer_graphics',
-                         '_move_copper_text_to_silkscreen')
-             if hasattr(swig_gui.RoutingDialog, n)])
-    d._update_status_bar = lambda *a, **k: None
-    d._check_connectivity_with_progress = lambda *a, **k: None
-    d._add_debug_lines = lambda *a, **k: None
-    return d
-
-
-def _gui_route_config(step):
-    """The swig_gui _on_route config, at GUI-panel defaults except the
-    fields a plan step can set. Every default sourced from routing_defaults
-    exactly as the real panels initialize -- hardcoded copies here already
-    caused two phantom divergences (ordering 'inside_out', track proximity
-    cost 0.2)."""
-    import routing_defaults as defaults
-    return {
-        'layers': None,  # filled by caller from the board
-        'grid_step': step.get('grid_step', defaults.GRID_STEP),
-        'via_cost': defaults.VIA_COST,
-        'impedance': None,
-        'max_iterations': step.get('max_iterations',
-                                    defaults.MAX_ITERATIONS),
-        'max_probe_iterations': defaults.MAX_PROBE_ITERATIONS,
-        'heuristic_weight': defaults.HEURISTIC_WEIGHT,
-        'proximity_heuristic_factor': defaults.PROXIMITY_HEURISTIC_FACTOR,
-        'turn_cost': defaults.TURN_COST,
-        'direction_preference_cost': defaults.DIRECTION_PREFERENCE_COST,
-        'max_ripup': step.get('max_ripup', defaults.MAX_RIPUP),
-        'ripup_abandon_metric': step.get('ripup_abandon_metric',
-                                          defaults.RIPUP_ABANDON_METRIC),
-        'ripup_blocker_select': step.get('ripup_blocker_select', 'count'),
-        'ordering_strategy': step.get('ordering_strategy',
-                                      defaults.DEFAULT_ORDERING_STRATEGY),
-        'direction': None,
-        'stub_proximity_radius': defaults.STUB_PROXIMITY_RADIUS,
-        'stub_proximity_cost': defaults.STUB_PROXIMITY_COST,
-        'via_proximity_cost': defaults.VIA_PROXIMITY_COST,
-        'track_proximity_distance': defaults.TRACK_PROXIMITY_DISTANCE,
-        'track_proximity_cost': defaults.TRACK_PROXIMITY_COST,
-        'routing_clearance_margin': defaults.ROUTING_CLEARANCE_MARGIN,
-        'hole_to_hole_clearance': defaults.HOLE_TO_HOLE_CLEARANCE,
-        'board_edge_clearance': defaults.BOARD_EDGE_CLEARANCE,
-        'enable_layer_switch': True,
-        'keep_input_copper': step.get('keep_input_copper', False),
-        'debug_lines': False,
-        'verbose': False,
-        'power_nets': step.get('power_nets'),
-        'power_nets_widths': step.get('power_nets_widths'),
-    }
-
-
-def _resolve_nets(pcb_data, globs):
-    """Resolve the plan step's net globs to concrete names, the same way
-    apply_step_selection does before pressing the button."""
-    from kicad_routing_plugin.claude_plan import _match_net_names
-    return _match_net_names(pcb_data, globs)
-
-
-GUI_INPUT_MODE = os.environ.get('GUI_PARITY_INPUT', 'builder')
-
-
-def _gui_pcb_data(board, board_path):
-    """builder = the real GUI path (build_pcb_data_from_board).
-    parser = DIAGNOSTIC: temp-save the board and text-parse it, isolating
-    the input-representation fork from everything else."""
-    from kicad_parser import build_pcb_data_from_board, parse_kicad_pcb
-    if GUI_INPUT_MODE == 'parser':
-        import pcbnew
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix='.kicad_pcb',
-                                         delete=False) as f:
-            tmp = f.name
-        pcbnew.SaveBoard(tmp, board)
-        data = parse_kicad_pcb(tmp)
-        os.unlink(tmp)
-        return data
-    return build_pcb_data_from_board(board)
-
-
-def _gui_route_step(swig_gui, board, board_path, step):
-    from route import batch_route
-    pcb_data = _gui_pcb_data(board, board_path)
-    config = _gui_route_config(step)
-    config['layers'] = list(pcb_data.board_info.copper_layers)
-    step = dict(step, nets=_resolve_nets(pcb_data, step['nets']))
-    successful, failed, total_time, results_data = batch_route(
-        input_file=board_path,
-        output_file="",
-        net_names=step['nets'],
-        layers=config['layers'],
-        track_width=step['track_width'],
-        clearance=step['clearance'],
-        via_size=step['via_size'],
-        via_drill=step['via_drill'],
-        grid_step=config['grid_step'],
-        via_cost=config['via_cost'],
-        max_iterations=config['max_iterations'],
-        max_probe_iterations=config['max_probe_iterations'],
-        heuristic_weight=config['heuristic_weight'],
-        proximity_heuristic_factor=config['proximity_heuristic_factor'],
-        turn_cost=config['turn_cost'],
-        direction_preference_cost=config['direction_preference_cost'],
-        max_rip_up_count=config['max_ripup'],
-        ripup_abandon_metric=config['ripup_abandon_metric'],
-        ripup_blocker_select=config['ripup_blocker_select'],
-        ordering_strategy=config['ordering_strategy'],
-        direction_order=config['direction'],
-        stub_proximity_radius=config['stub_proximity_radius'],
-        stub_proximity_cost=config['stub_proximity_cost'],
-        via_proximity_cost=config['via_proximity_cost'],
-        track_proximity_distance=config['track_proximity_distance'],
-        track_proximity_cost=config['track_proximity_cost'],
-        routing_clearance_margin=config['routing_clearance_margin'],
-        hole_to_hole_clearance=config['hole_to_hole_clearance'],
-        board_edge_clearance=config['board_edge_clearance'],
-        enable_layer_switch=config['enable_layer_switch'],
-        keep_input_copper=config['keep_input_copper'],
-        power_nets=config['power_nets'],
-        power_nets_widths=config['power_nets_widths'],
-        return_results=True,
-        pcb_data=pcb_data,
-    )
-    shim = _make_route_shim(swig_gui, board, board_path)
-    shim.pcb_data = pcb_data
-    swig_gui.RoutingDialog._apply_results_to_board(
-        shim, results_data, successful, failed, total_time, config)
-    return successful, failed
-
-
-def _make_planes_shim(planes_gui, board, board_path, pcb_data):
-    tab = _Shim()
-    tab.board = board
-    tab.board_filename = board_path
-    tab.pcb_data = pcb_data
-    for name in ('status_text', 'progress_bar', 'action_btn', 'cancel_btn',
-                 'options_panel', 'repair_options', 'assignments_panel'):
-        setattr(tab, name, _Stub())
-    tab._cancel_requested = False
-    tab.sync_pcb_data_callback = None
-    cls = planes_gui.PlanesTab
-    # Borrow every underscore method the worker bodies might call -- the
-    # shim only stubs the UI widgets, the logic is all real.
-    import inspect
-    _borrow(tab, cls,
-            [n for n, f in vars(cls).items()
-             if callable(f) and not isinstance(f, (staticmethod, classmethod))
-             and n not in ('__init__', '_create_ui')])
-    return tab
-
-
-def _gui_planes_step(planes_gui, board, board_path, step, mode):
-    pcb_data = _gui_pcb_data(board, board_path)
-    tab = _make_planes_shim(planes_gui, board, board_path, pcb_data)
-    if mode == 'create':
-        config = {
-            'mode': 'create',
-            'assignments': [(list(step['nets']), list(step['layers']))],
-            'via_size': step['via_size'], 'via_drill': step['via_drill'],
-            'clearance': step['clearance'],
-            'add_gnd_vias': False,
-        }
-        tab._run_create_planes(config)
-    else:
-        config = {
-            'mode': 'repair',
-            'assignments': [(['GND'], ['B.Cu'])],
-            'clearance': step['clearance'], 'via_size': step['via_size'],
-            'via_drill': step['via_drill'], 'track_width': step['track_width'],
-            'grid_step': step.get('grid_step', 0.1),
-            'power_nets': step.get('power_nets'),
-            'power_nets_widths': step.get('power_nets_widths'),
-            'rip_blocker_nets': True,
-        }
-        tab._run_repair_planes(config)
-    tab._apply_results_to_board()
+# The GUI leg as a real Claude-tab PLAN -- same JSON shape manifest_to_plan
+# emits and the plan executor consumes. Mirrors run_cli_leg() step for step.
+#
+# NOTE what is deliberately ABSENT: the plane step carries no track_width,
+# exactly like its CLI command (`route_planes.py ... --clearance 0.15
+# --via-size 0.45 --via-drill 0.2`, no --track-width). Both fronts must then
+# resolve it from the board's Default net class. The OLD shim harness could not
+# express that -- it hand-built the config, so the engine's own
+# `config.get('track_width', defaults.TRACK_WIDTH)` fallback supplied 0.3 while
+# the CLI resolved 0.127, and this gate reported 73 phantom "divergent" GND
+# plane-tap segments for it. The real dialog runs _effective_track_width(),
+# which reads the board's Default class when the override checkbox is
+# unchecked, and lands on 0.127 like the CLI.
+GUI_PLAN = [
+    {'action': 'route',
+     'params': dict(clearance=0.15, track_width=0.127, via_size=0.45,
+                    via_drill=0.2, power_nets=['+3V3', '+12V'],
+                    power_nets_widths=[0.4, 0.4], max_ripup=10,
+                    max_iterations=1000000),
+     'nets': ['*', '!GND']},
+    {'action': 'route_planes',
+     'params': dict(clearance=0.15, via_size=0.45, via_drill=0.2),
+     'assignments': [{'nets': ['GND'], 'layer': 'B.Cu'}]},
+    {'action': 'repair_planes',
+     'params': dict(clearance=0.15, via_size=0.45, via_drill=0.2,
+                    track_width=0.127, grid_step=0.1,
+                    power_nets=['+3V3', '+12V'], power_nets_widths=[0.4, 0.4],
+                    rip_blocker_nets=True),
+     'assignments': [{'nets': ['GND'], 'layer': 'B.Cu'}]},
+    {'action': 'route',
+     'params': dict(clearance=0.127, track_width=0.127, via_size=0.45,
+                    via_drill=0.2, max_ripup=10, max_iterations=1000000),
+     'nets': ['GND']},
+]
 
 
 def run_gui_leg(board_path, workdir):
-    import pcbnew
-    import wx
-    from kicad_routing_plugin import swig_gui
-    from kicad_routing_plugin import planes_gui
-    gui_src = os.path.join(workdir, 'gui_input.kicad_pcb')
-    shutil.copy(board_path, gui_src)
-    board = pcbnew.LoadBoard(gui_src)
-    # Standalone harness stand-ins for the live-GUI environment: the apply
-    # methods fetch the open board via pcbnew.GetBoard() (None when
-    # headless), and error paths raise wx.MessageBox (needs an App).
-    global _WX_APP
-    try:
-        _WX_APP = wx.App(False)
-    except Exception:
-        _WX_APP = None
-    wx.MessageBox = lambda *a, **k: None  # headless: no popups
-    pcbnew.GetBoard = lambda: board
+    """Run GUI_PLAN through the REAL headless RoutingDialog + PlanExecutor.
 
-    print("[gui] step 1/4 route signals ...", flush=True)
-    _gui_route_step(swig_gui, board, gui_src, SIGNAL)
-    print("[gui] step 2/4 create planes ...", flush=True)
-    _gui_planes_step(planes_gui, board, gui_src, PLANES, 'create')
-    print("[gui] step 3/4 repair planes ...", flush=True)
-    _gui_planes_step(planes_gui, board, gui_src, REPAIR, 'repair')
-    print("[gui] step 4/4 route GND fix ...", flush=True)
-    _gui_route_step(swig_gui, board, gui_src, GND_FIX)
-
+    replay() touches its `info` argument only for input_board, so the corpus
+    driver runs unchanged on a checked-in board.
+    """
+    import replay_plan_vs_run as R
+    res = R.replay({'input_board': board_path}, GUI_PLAN, workdir,
+                   snapshots=True)
+    if res.get('aborted'):
+        raise RuntimeError(f"GUI plan aborted: {res['aborted']}")
+    if res.get('completed', 0) != len(GUI_PLAN):
+        raise RuntimeError(f"GUI plan ran {res.get('completed')} of "
+                           f"{len(GUI_PLAN)} steps")
     out = os.path.join(workdir, 'gui_final.kicad_pcb')
-    pcbnew.SaveBoard(out, board)
+    shutil.copy(res['live_board'], out)
     return out
 
 
