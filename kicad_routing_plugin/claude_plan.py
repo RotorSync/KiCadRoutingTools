@@ -654,10 +654,23 @@ def _precedes_first_plane_step(step, all_steps):
 
 def _drop_plane_nets(names, globs, plane_nets, notes, label):
     """Drop the plan's declared plane nets from a WILDCARD-matched selection;
-    a glob naming one verbatim keeps it (explicit override)."""
+    a glob naming one verbatim keeps it (explicit override).
+
+    This is a SAFETY NET for plans that never spelled the exclusion (an LLM-
+    authored plan, or the ottercast stub-clutter class). A plan converted from a
+    recorded chain normally carries `!GND` itself, and since #493 that exclusion
+    actually bites in both fronts -- so on a faithful replay this finds nothing
+    left to drop and the GUI and CLI select the same nets.
+    """
     if not plane_nets:
         return names
-    literal = {g for g in (globs or []) if g in plane_nets}
+    from net_queries import net_pattern_matches
+    # "Names it verbatim" is sheet-path aware too (#493): a plan that says 'GND'
+    # is explicitly asking for the board's '/GND'. Wildcards never count as
+    # explicit -- dropping wildcard-selected plane nets is the whole point.
+    literal = {n for n in plane_nets
+               for g in (globs or [])
+               if '*' not in g and '?' not in g and net_pattern_matches(n, g)}
     excluded = sorted(n for n in names if n in plane_nets and n not in literal)
     if excluded:
         notes.append(f"{label}: plan plane nets excluded {', '.join(excluded)}")
@@ -810,19 +823,25 @@ def _match_net_names(pcb_data, globs):
     return names
 
 
-def _net_pattern_matches(name, glob):
-    from net_queries import net_pattern_matches
-    return net_pattern_matches(name, glob)
-
-
 def _component_net_names(pcb_data, ref, globs):
+    """The component's nets that the step's globs select.
+
+    #493 item 2: this used to test `any(glob matches)` across the WHOLE glob
+    list, so a step's "!" exclusions were ignored outright -- '*' always matched
+    and pulled every net back in. A fanout step recorded as
+    `--nets '*' '!GND' '!3V3'` therefore fanned out GND/3V3 in the GUI, and only
+    looked correct on boards where _drop_plane_nets happened to remove the same
+    nets afterwards; any non-plane exclusion was silently a no-op. Use the shared
+    include/exclude semantics (matches_net_filter) so a replayed plan selects the
+    same nets the recorded CLI command did.
+    """
     footprint = pcb_data.footprints.get(ref)
     if footprint is None:
         return []
+    from net_queries import matches_net_filter
     names = set()
     for pad in footprint.pads:
-        if pad.net_id and pad.net_name and any(
-                _net_pattern_matches(pad.net_name, g) for g in globs):
+        if pad.net_id and pad.net_name and matches_net_filter(pad.net_name, globs):
             names.add(pad.net_name)
     return sorted(names)
 

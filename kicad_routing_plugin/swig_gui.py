@@ -51,6 +51,18 @@ def _build_layer_mappings():
     return name_to_id, id_to_name
 
 
+def _nm_to_mm(nm):
+    """KiCad's integer nanometres -> mm, without the one-ULP multiply error.
+
+    `nm * 1e-6` is NOT the same as `nm / 1e6`: 1e-6 has no exact binary
+    representation, so the multiply lands one ULP below the true value for some
+    magnitudes (200000 -> 0.19999999999999998, 450000 -> 0.44999999999999996).
+    Those values were handed to the routing engines as clearance / via size, so
+    the GUI routed against constraints a hair different from the CLI's (#493).
+    """
+    return nm / 1e6
+
+
 def _get_netclass_parameters(class_name):
     """Get routing parameters for a specific net class from pcbnew.
 
@@ -79,21 +91,28 @@ def _get_netclass_parameters(class_name):
         if not netclass:
             return None
 
-        # KiCad stores values in nanometers, convert to mm
-        nm_to_mm = 1e-6
-
+        # KiCad stores values in nanometers, convert to mm.
+        # DIVIDE by 1e6; never multiply by 1e-6 (#493 item 3). 1e-6 is not
+        # exactly representable, so `nm * 1e-6` lands one ULP BELOW the true
+        # value for some magnitudes -- 200000 -> 0.19999999999999998,
+        # 450000 -> 0.44999999999999996 (0.3/0.25/0.127/0.09 happen to be
+        # unaffected, which is why this only bit boards whose netclass used
+        # 0.2/0.45). Those epsilons reached the engine as the routing clearance
+        # and via size, so the GUI routed and repaired against constraints a hair
+        # off the CLI's and produced different copper. `nm / 1e6` is correctly
+        # rounded and reproduces the literal exactly.
         result = {
-            'track_width': netclass.GetTrackWidth() * nm_to_mm,
-            'clearance': netclass.GetClearance() * nm_to_mm,
-            'via_size': netclass.GetViaDiameter() * nm_to_mm,
-            'via_drill': netclass.GetViaDrill() * nm_to_mm,
+            'track_width': _nm_to_mm(netclass.GetTrackWidth()),
+            'clearance': _nm_to_mm(netclass.GetClearance()),
+            'via_size': _nm_to_mm(netclass.GetViaDiameter()),
+            'via_drill': _nm_to_mm(netclass.GetViaDrill()),
         }
 
         # Add differential pair parameters if available
         if hasattr(netclass, 'GetDiffPairWidth'):
-            result['diff_pair_width'] = netclass.GetDiffPairWidth() * nm_to_mm
+            result['diff_pair_width'] = _nm_to_mm(netclass.GetDiffPairWidth())
         if hasattr(netclass, 'GetDiffPairGap'):
-            result['diff_pair_gap'] = netclass.GetDiffPairGap() * nm_to_mm
+            result['diff_pair_gap'] = _nm_to_mm(netclass.GetDiffPairGap())
 
         return result
     except Exception:
@@ -117,22 +136,21 @@ def _get_board_minimum_constraints():
             return None
 
         ds = board.GetDesignSettings()
-        nm_to_mm = 1e-6
 
         result = {
-            'min_track_width': ds.m_TrackMinWidth * nm_to_mm,
-            'min_clearance': ds.m_MinClearance * nm_to_mm,
-            'min_via_size': ds.m_ViasMinSize * nm_to_mm,
-            'min_via_drill': ds.m_MinThroughDrill * nm_to_mm,
+            'min_track_width': _nm_to_mm(ds.m_TrackMinWidth),
+            'min_clearance': _nm_to_mm(ds.m_MinClearance),
+            'min_via_size': _nm_to_mm(ds.m_ViasMinSize),
+            'min_via_drill': _nm_to_mm(ds.m_MinThroughDrill),
         }
 
         # Try to get hole-to-hole clearance (may not be available in all versions)
         if hasattr(ds, 'm_HoleToHoleMin'):
-            result['min_hole_to_hole'] = ds.m_HoleToHoleMin * nm_to_mm
+            result['min_hole_to_hole'] = _nm_to_mm(ds.m_HoleToHoleMin)
 
         # Try to get copper-to-edge clearance
         if hasattr(ds, 'm_CopperEdgeClearance'):
-            result['min_copper_edge_clearance'] = ds.m_CopperEdgeClearance * nm_to_mm
+            result['min_copper_edge_clearance'] = _nm_to_mm(ds.m_CopperEdgeClearance)
 
         return result
     except Exception:
