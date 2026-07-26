@@ -8,8 +8,15 @@ chain's CLI steps run file-to-file.
   `<board>_plan.json` into a genuine headless `RoutingDialog` and runs it with
   the genuine `PlanExecutor`, then diffs against the manifest replayed at HEAD.
   Nothing is mirrored or mocked. See "Whole-plan replay" below.
-- `test_gui_engine_parity.py`, `test_gui_livechain_rp2350.py`,
-  `diag_fullchain_carry_rp2350.py` — **legacy, shim-based** (see below).
+- `test_gui_engine_parity.py`, `test_gui_livechain_rp2350.py` — **legacy,
+  shim-based** (see below) but **still the only gates that run on IN-REPO
+  boards**, so they are kept, not deleted. `replay_plan_vs_run.py` supersedes
+  them technically and requires a corpus stress rundir, which makes it a dev
+  driver rather than a gate. Migrate these onto the real headless dialog (as
+  `test_plane_all_layers_parity.py` already was) rather than dropping them.
+  `diag_fullchain_carry_rp2350.py` was **deleted** — a corpus-only, one-off
+  diagnostic for the #361 carry investigation, whose findings are recorded
+  below.
 
 ### The shim harnesses are superseded
 
@@ -60,15 +67,33 @@ Workdir: `tests/gui_parity/work/` (gitignored).
 > 1 nm through `replay_plan_vs_run.py`. Kept for the history of how the forks
 > were found; do not quote the numbers as current.
 
-Current measurement on splitflap: grade PARITY, copper sets DIFFER
-(~300/1200 segments common, same via count at different positions). The
-router is deterministic, so the fork is input-representation differences:
-the GUI leg routes PCBData built from pcbnew (float coordinates from nm
-conversion, container orderings) while the CLI parses the file text --
-A* tie-breaks diverge on the first sub-micron difference, and the .kicad_pro
-floor carryover differs per step. Both outputs are equally valid; making
-them bit-identical would require a canonical PCBData representation shared
-by both fronts (open follow-up).
+Current measurement on splitflap (2026-07-26, after 78f1731): grade PARITY,
+**geometry now IDENTICAL** -- 1305 common segments, 0 cli-only, 1 gui-only.
+
+That "canonical PCBData representation shared by both fronts" the older note
+below called an open follow-up is **done**. It was not container ordering and
+not a general float problem: pad globals are the ONLY PCBData value that is
+COMPUTED rather than read verbatim from the file, pcbnew composed them in
+integer nm while the text parser composed them in float mm, and 64 of 1699
+pads landed ~0.3 nm apart -- enough to flip A* tie-breaks. `local_to_global`
+now snaps to the integer-nm grid. This board went from ~300/1200 segments
+common to 1305/1305.
+
+**The whole residual is now ONE bug, and it is real:** 73 GND plane-tap
+segments have identical endpoints on both sides but differ in WIDTH -- CLI
+0.127, GUI 0.3. Traced to step 2 (`route_planes`), the only step where
+NEITHER side passes a track width:
+
+- the CLI chain is file-to-file, and step 1 (`route.py --track-width 0.127`)
+  WRITES a sibling `cli_step1.kicad_pro` carrying Default `track_width: 0.127`
+  (the DRC-floor writeback). Step 2 reads that back and taps at 0.127.
+- the GUI carries ONE live board in memory and never writes/reads a
+  `.kicad_pro` between steps, so the same resolution finds nothing and falls
+  back to the static `defaults.TRACK_WIDTH` = 0.3.
+
+So the CLI silently carries routing state across steps through a file the GUI
+has no equivalent of. `splitflap_driver.kicad_pcb` has no sibling `.kicad_pro`
+of its own, which is what exposes it. This is unfixed.
 
 ## Command/input identity findings (2026-07-08)
 
@@ -217,11 +242,12 @@ skip cleanly without KiCad python). Run any directly:
 - `test_plane_all_layers_parity.py` -- GUI create passes `all_layers` =
   outer+pour (the route_planes default), not all 6 copper layers (mocks
   create_plane to capture the kwarg).
-- `diag_fullchain_carry_rp2350.py` -- full GUI-carry reproduction: ONE board +
-  ONE shared pcb_data across all 10 plan steps, graded per stage vs the CLI. The
-  investigation harness that localized where the carry diverges (needs the set11
-  corpus + kicad-cli; skips otherwise). `SYNC_PLANES=1` toggles the plane-step
-  pcb_data resync.
+- `diag_fullchain_carry_rp2350.py` -- **DELETED 2026-07-26.** Was a full
+  GUI-carry reproduction (ONE board + ONE shared pcb_data across all 10 plan
+  steps, graded per stage vs the CLI) built to localize where the carry
+  diverges. A one-off diagnostic, not a gate: it needed the set11 corpus so it
+  skipped for anyone without it, and `replay_plan_vs_run.py` now does the same
+  carry through the real dialog. Its findings stay recorded above.
 
 ## Whole-plan replay through the real plugin (replay_plan_vs_run.py)
 
