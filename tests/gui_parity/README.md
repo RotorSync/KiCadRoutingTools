@@ -27,9 +27,16 @@ handing that to every engine as `clearance`. It reaches the engine through
 `batch_route(clearance=step['clearance'], ...)` with its own literal, so it
 could never have seen it. `replay_plan_vs_run.py` caught it on its first run.
 
-Their findings are still recorded below and their gates still run, but prefer
-the real-dialog path for new work, and treat a shim harness passing as weaker
-evidence than it looks.
+The shims also rot. `test_plane_all_layers_parity.py` currently dies with
+`AttributeError: 'Shim' object has no attribute '_cancel_requested'` — the tab
+grew a field the shim never modelled, so that gate has been failing on its own
+scaffolding, not on the behaviour it guards (confirmed pre-existing at 75acd26,
+before the #493 work). A harness that mirrors an interface has to be maintained
+in lockstep with it; one that instantiates the real thing does not.
+
+Their findings are still recorded below and the working gates still run, but
+prefer the real-dialog path for new work, and treat a shim harness passing as
+weaker evidence than it looks.
 
 Workdir: `tests/gui_parity/work/` (gitignored).
 
