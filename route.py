@@ -468,6 +468,23 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     else:
         print("Using provided PCB data...")
 
+    # Canonicalise the STARTING copper order, BEFORE any decision reads it.
+    # The GUI adds tracks to a live pcbnew board and the CLI writer emits them
+    # from its own lists, so the two fronts hand the engine identical copper in
+    # different ORDER (measured on eth_tap: the same 1159-segment set in three
+    # different orders across two GUI chains and the CLI). List position then
+    # leaks into decisions -- representative endpoints, connected-group order,
+    # stub free ends, MST terminal labelling, unit distances -- each of which
+    # was fixed individually before the next one surfaced. Doing it once, here,
+    # closes the class.
+    #
+    # Placement matters: this MUST precede apply_single_ended_layer_swaps and
+    # the MPS ordering (both far above the routing state setup). An earlier
+    # attempt sat next to create_routing_state and had NO effect, because the
+    # swap phase had already consumed the un-canonical order.
+    from kicad_parser import canonicalize_pcb_data_order
+    canonicalize_pcb_data_order(pcb_data)
+
     # Cross-class clearance: when no map was passed (net_clearances is None -- e.g.
     # the plane routers reroute ripped nets by calling batch_route directly), AUTO-
     # READ the board's non-Default netclasses from the sibling .kicad_pro. #439:

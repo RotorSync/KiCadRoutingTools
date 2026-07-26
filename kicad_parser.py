@@ -44,6 +44,54 @@ def mm_to_iu(mm):
     return int(round(float(mm) * IU_PER_MM))
 
 
+def canonicalize_pcb_data_order(pcb_data):
+    """Sort pcb_data.segments and .vias into a canonical GEOMETRIC order,
+    in place. Returns True if anything moved.
+
+    The GUI adds copper to a live pcbnew board and the CLI writer emits it from
+    its own lists, so the two fronts hold IDENTICAL copper in DIFFERENT order --
+    measured repeatedly on eth_tap: same 1159-segment set, three different
+    orders across two GUI chains and the CLI. Nothing downstream should depend
+    on that, but list position keeps leaking into decisions: representative
+    endpoint selection, connected-group ordering, stub free ends, MST terminal
+    labelling, unit distances. Each was fixed individually and another surfaced.
+
+    Canonicalising the order ONCE, at the engine entry, closes the whole class
+    instead of one consumer at a time. The key is pure geometry (layer, then the
+    unordered endpoint pair, then width / size), so it is identical on both
+    fronts and stable across runs.
+
+    This does NOT reorder anything the router later appends -- it only fixes the
+    starting state, which is what the two fronts disagree about.
+    """
+    def _segkey(s):
+        a = (s.start_x, s.start_y)
+        b = (s.end_x, s.end_y)
+        return (s.layer, s.net_id, min(a, b), max(a, b), s.width)
+
+    def _viakey(v):
+        return (v.x, v.y, v.net_id, getattr(v, 'size', 0.0) or 0.0,
+                getattr(v, 'drill', 0.0) or 0.0)
+
+    moved = False
+    try:
+        segs = getattr(pcb_data, 'segments', None)
+        if segs:
+            new = sorted(segs, key=_segkey)
+            if any(x is not y for x, y in zip(new, segs)):
+                moved = True
+            pcb_data.segments[:] = new
+        vias = getattr(pcb_data, 'vias', None)
+        if vias:
+            new = sorted(vias, key=_viakey)
+            if any(x is not y for x, y in zip(new, vias)):
+                moved = True
+            pcb_data.vias[:] = new
+    except Exception as e:
+        print(f"(pcb_data order canonicalisation skipped: {e})")
+    return moved
+
+
 def snap_pcb_data_to_iu_grid(pcb_data):
     """Snap every routed-copper coordinate in ``pcb_data`` onto KiCad's integer
     nanometre grid, IN PLACE. Returns the number of values changed.
