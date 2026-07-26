@@ -358,6 +358,47 @@ def get_terminal_component_info(
         root = uf.find(2 * si)
         copper_count[root] = copper_count.get(root, 0) + 1
         segs_by_component.setdefault(root, []).append(seg)
+
+    # CANONICAL component LABELS. uf.find() returns an arbitrary representative
+    # decided by the union ORDER, which follows the order segments sit in the
+    # board -- and the GUI and CLI hold identical copper in different order. The
+    # partition is the same either way, but the LABELS are not, and downstream
+    # code sorts on them: compute_component_mst_edges does
+    # `comp_ids = sorted(comp_terminals)` and starts its tree from comp_ids[0],
+    # so the whole MST (and the "longest edge" the multipoint router picks
+    # first) depended on which copper happened to be written first. Measured on
+    # eth_tap: both fronts found a 2.10mm longest edge but different pad pairs
+    # (0-3 vs 3-1).
+    #
+    # Relabel by the component's own content: the smallest terminal index it
+    # owns, else the smallest segment anchor. That is a property of the net, so
+    # both fronts agree, and terminal-bearing components keep low ids (their
+    # natural pad order), which preserves the previous "start from the first
+    # terminal's component" behaviour on boards where order never differed.
+    _first_term: Dict[int, int] = {}
+    for i, r in components.items():
+        if r not in _first_term or i < _first_term[r]:
+            _first_term[r] = i
+    _anchor: Dict[int, tuple] = {}
+    for r, segs in segs_by_component.items():
+        a = None
+        for _s in segs:
+            k = (min((_s.start_x, _s.start_y), (_s.end_x, _s.end_y)),
+                 max((_s.start_x, _s.start_y), (_s.end_x, _s.end_y)), _s.layer)
+            if a is None or k < a:
+                a = k
+        _anchor[r] = a
+
+    _roots = set(components.values()) | set(copper_count) | set(segs_by_component)
+    _BIG = len(pad_info) + 1
+
+    def _canon_key(r):
+        return (_first_term.get(r, _BIG), _anchor.get(r) is None, _anchor.get(r) or ())
+
+    remap = {r: i for i, r in enumerate(sorted(_roots, key=_canon_key))}
+    components = {i: remap[r] for i, r in components.items()}
+    copper_count = {remap[r]: c for r, c in copper_count.items()}
+    segs_by_component = {remap[r]: v for r, v in segs_by_component.items()}
     return components, copper_count, segs_by_component
 
 
@@ -1129,7 +1170,34 @@ def _get_net_endpoints_ordered(pcb_data: PCBData, net_id: int, config: GridRoute
     return [], [], f"Cannot determine endpoints: {len(net_segments)} segments, {len(net_pads)} pads"
 
 
-def get_multipoint_net_pads(
+def get_multipoint_net_pads(*args, **kwargs):
+    """Deterministic wrapper: order multi-point terminals by POSITION.
+
+    The terminal list is assembled by walking connected groups / pads, so its
+    ORDER follows the order copper sits in the board -- and the GUI and CLI hold
+    identical copper in different order. Terminal INDICES are the identity used
+    downstream: get_terminal_component_info keys components by them and
+    compute_component_mst_edges builds its tree over them, so a relabelling
+    changes which MST edge is "pads 0 and 3" versus "pads 3 and 1" and hence
+    which leg Phase 1 routes first.
+
+    Measured on eth_tap /Thru Path/ETH0_A1V2 (5 pads): the two fronts produced
+    the SAME five points and geometrically the SAME tree (edges 1.7, 2.100001,
+    1.600001, 2.0) with terminals 0 and 1 swapped -- (58.7,37.5) and
+    (58.7,40.5). Sorting by position makes the labelling a property of the net.
+    Geometry is unchanged, so this cannot pick a worse tree; it only fixes which
+    equivalent labelling both fronts agree on.
+    """
+    out = _get_multipoint_net_pads_unordered(*args, **kwargs)
+    if not out:
+        return out
+    try:
+        return sorted(out, key=lambda t: (t[3], t[4], t[2]))
+    except (IndexError, TypeError):
+        return out
+
+
+def _get_multipoint_net_pads_unordered(
     pcb_data: PCBData,
     net_id: int,
     config: GridRouteConfig
