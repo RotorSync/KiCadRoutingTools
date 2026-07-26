@@ -9,14 +9,30 @@ _run_create_planes used to pass _get_all_copper_layers() (all 6 copper layers),
 handing the router 2 extra inner layers and diverging from the CLI on the same
 board. This pins the GUI to the CLI default.
 
-Mocks create_plane to capture the all_layers kwarg -- no actual plane routing,
-so it's fast. Needs wx (KiCad python). Skips if absent.
+Drives the REAL PlanesTab on a REAL headless RoutingDialog (#493). It used to
+bind _run_create_planes onto a hand-built `Shim` carrying just the few
+attributes the method read at the time -- and then the method grew a
+`self._cancel_requested` read, so this gate spent its life dying with
+`AttributeError: 'Shim' object has no attribute '_cancel_requested'` instead of
+checking anything. A mirrored interface has to be maintained in lockstep with
+the real one; instantiating the real dialog costs a board load and cannot rot
+that way.
+
+create_plane is still mocked, so no plane is actually routed and this stays
+fast. Needs KiCad python (wx + pcbnew); skips cleanly without it.
+
+Run:  python3 tests/gui_parity/test_plane_all_layers_parity.py
 """
 import os
 import subprocess
 import sys
 
+# The real dialog builds about_tab, whose wxEXPAND|wxALIGN_* sizer flags trip a
+# fatal assert on wx debug builds. Must be set before wx is imported.
+os.environ.setdefault('WXSUPPRESS_SIZER_FLAGS_CHECK', '1')
+
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+BOARD = os.path.join(REPO, 'kicad_files', 'rp2350_fpga_eensy_prePlane.kicad_pcb')
 KICAD_PYTHONS = [
     "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3",
     "/usr/bin/python3",
@@ -27,42 +43,43 @@ KICAD_PYTHONS = [
 def _reexec_into_kicad():
     for cand in KICAD_PYTHONS:
         if cand != sys.executable and os.path.exists(cand):
-            if subprocess.run([cand, '-c', 'import wx'],
+            if subprocess.run([cand, '-c', 'import wx, pcbnew'],
                               capture_output=True).returncode == 0:
                 os.execv(cand, [cand, os.path.abspath(__file__)] + sys.argv[1:])
-    print("SKIP: no python with wx found")
+    print("SKIP: no python with wx + pcbnew found")
     sys.exit(0)
 
 
 def main():
     try:
         import wx  # noqa: F401
+        import pcbnew  # noqa: F401
     except ImportError:
         _reexec_into_kicad()
 
     import wx
+    import pcbnew
     sys.path.insert(0, REPO)
-    sys.path.insert(0, os.path.join(REPO, 'kicad_routing_plugin'))
-    import types
-    from kicad_routing_plugin import planes_gui
 
-    app = wx.App(False)
+    if not os.path.exists(BOARD):
+        print(f"SKIP: {os.path.relpath(BOARD, REPO)} not found")
+        return 0
 
-    # A shim carrying just what _run_create_planes reads before create_plane.
-    class Shim:
-        pass
-    tab = Shim()
-    tab.board_filename = "dummy.kicad_pcb"
+    app = wx.App(False)          # noqa: F841 - must outlive the dialog
+    wx.MessageBox = lambda *a, **k: wx.OK
 
-    class BI:
-        copper_layers = ['F.Cu', 'In1.Cu', 'In2.Cu', 'In3.Cu', 'In4.Cu', 'B.Cu']
+    from kicad_parser import build_pcb_data_from_board
+    from kicad_routing_plugin import swig_gui
 
-    class PD:
-        board_info = BI()
-        nets = {}
-    tab.pcb_data = PD()
-    tab._get_all_copper_layers = types.MethodType(
-        planes_gui.PlanesTab._get_all_copper_layers, tab)
+    board = pcbnew.LoadBoard(BOARD)
+    pcbnew.GetBoard = lambda: board
+    layers = build_pcb_data_from_board(board).board_info.copper_layers
+    if len(layers) < 6:
+        print(f"SKIP: need a 6-layer board, {os.path.basename(BOARD)} has {layers}")
+        return 0
+
+    dialog = swig_gui.RoutingDialog(None, build_pcb_data_from_board(board), BOARD)
+    tab = dialog.planes_tab
 
     captured = {}
 
@@ -76,11 +93,10 @@ def main():
 
     import route_planes
     orig = route_planes.create_plane
-    route_planes.create_plane = fake_create_plane
     # _run_create_planes imports create_plane via `from route_planes import
     # create_plane` at call time, so patch the source module.
+    route_planes.create_plane = fake_create_plane
     try:
-        run = types.MethodType(planes_gui.PlanesTab._run_create_planes, tab)
         config = {
             'assignments': [(['GND', '+3V3'], ['In1.Cu', 'In4.Cu'])],
             'via_size': 0.45, 'via_drill': 0.2, 'clearance': 0.10,
@@ -89,7 +105,7 @@ def main():
             'power_nets_widths': [0.3],
         }
         try:
-            run(config)
+            tab._run_create_planes(config)
         except _Stop:
             pass
     finally:
@@ -97,11 +113,17 @@ def main():
 
     got = captured.get('all_layers')
     want = ['F.Cu', 'In1.Cu', 'In4.Cu', 'B.Cu']
-    assert got == want, (
-        f"GUI create passed all_layers={got}, expected the CLI default {want} "
-        "(outer + pour layers, not all copper layers)")
+    if got is None:
+        print("FAIL: create_plane was never called -- _run_create_planes bailed "
+              "out before reaching the engine (check the log above)")
+        return 1
+    if got != want:
+        print(f"FAIL: GUI create passed all_layers={got}, expected the CLI "
+              f"default {want} (outer + pour layers, not all copper layers)")
+        return 1
     print(f"PASS: GUI create all_layers={got} matches the CLI route_planes default")
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
