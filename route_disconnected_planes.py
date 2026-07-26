@@ -46,6 +46,49 @@ import re
 LAST_RIPPED_RECONNECT: Optional[Dict] = None
 
 
+def plane_tap_launch_layers(pad, zone_layers, routing_layers) -> List[str]:
+    """Copper layers a last-resort plane tap may launch from, in
+    deterministic routing-layer order (#494).
+
+    - NPTH hole: no copper exists at all (#328) -- never a tap source.
+    - PLATED barrel / '*.Cu': copper on EVERY layer, so the tap may launch
+      from any of them. Prefer this net's ZONE layers, where the pour it
+      has to reach lives; fall back to all routing layers when the net's
+      zones are not on a routing layer.
+    - Otherwise (SMD): its own concrete copper layers.
+
+    The old form resolved ONE layer with a concrete-layer filter
+    (``endswith('.Cu') and not startswith('*')``), so a '*.Cu' through-hole
+    pad resolved to None and was skipped -- an independent block that
+    survives removing the plated guard on its own (#492 measured both).
+    """
+    if getattr(pad, 'pad_type', '') == 'np_thru_hole':
+        return []
+    layers = getattr(pad, 'layers', None) or []
+    if '*.Cu' in layers or pad_is_plated_through(pad):
+        return [l for l in routing_layers if l in (zone_layers or ())] \
+            or list(routing_layers)
+    return [l for l in routing_layers if l in layers]
+
+
+def pad_still_floating(disconnected_pads, pad, tapped_layer) -> bool:
+    """True if `pad` is STILL unconnected on the layer a tap just landed
+    on -- the custody test that decides whether to keep the copper.
+
+    Per PAD-LAYER, not per pad (#494). check_net_connectivity lists a
+    plated through-hole pad once per copper layer, so a layer-less key let
+    any ONE of those entries veto the repair: a pad joined on B.Cu was
+    undone because its F.Cu entry was still listed. A plated barrel ties
+    every copper layer, so clearing the layer we tapped IS the pad
+    connected. An SMD pad has a single entry, making this identical to the
+    old test for everything that could be repaired before.
+    """
+    key = (round(pad.global_x, 3), round(pad.global_y, 3), tapped_layer,
+           pad.component_ref)
+    return key in {(round(x, 3), round(y, 3), l, ref)
+                   for (x, y, l, ref) in (disconnected_pads or [])}
+
+
 
 def _rip_net_from_pcb(pcb_data: PCBData, rip_net_id: int):
     """Remove a net's segments and vias from pcb_data so a blocked repair can
@@ -1536,12 +1579,24 @@ def route_planes(
                                          pcb_data=pcb_data)
             if res.get('connected'):
                 continue
+            # Launch layers per pad (#494) -- see plane_tap_launch_layers.
+            # KICAD_NO_SWEEP_PLATED=1 restores the old single-concrete-layer
+            # resolution + plated skip, for one-env-var A/B on identical code.
+            _no_plated = bool(os.environ.get('KICAD_NO_SWEEP_PLATED'))
             pad_by_key = {}
             for p in net_pads:
-                pl = next((l for l in p.layers
-                           if l.endswith('.Cu') and not l.startswith('*')), None)
+                if _no_plated:
+                    pl = next((l for l in p.layers
+                               if l.endswith('.Cu')
+                               and not l.startswith('*')), None)
+                    cands = [pl] if (pl and not pad_is_plated_through(p)
+                                     and getattr(p, 'pad_type', '')
+                                     != 'np_thru_hole') else []
+                else:
+                    cands = plane_tap_launch_layers(p, net_zone_layers,
+                                                    routing_layers)
                 pad_by_key[(round(p.global_x, 3), round(p.global_y, 3),
-                            p.component_ref)] = (p, pl)
+                            p.component_ref)] = (p, cands)
             # Relax the board-edge clearance for this forced last-resort tap: the
             # pad being repaired is already placed at the edge, so a via INSIDE it
             # is no closer to the edge than the pad itself (the fab accepts that),
@@ -1563,12 +1618,17 @@ def route_planes(
                 pp = pad_by_key.get((round(fx, 3), round(fy, 3), fref))
                 if pp is None:
                     continue
-                pad, pad_layer = pp
-                # Plated barrels are already plane-tied by the fill; NPTH holes
-                # have no copper at all to connect (#328). Both skip.
-                if (pad_layer is None or pad_is_plated_through(pad)
-                        or getattr(pad, 'pad_type', '') == 'np_thru_hole'):
+                pad, pad_cands = pp
+                # #494: the old guard also skipped PLATED barrels, on the
+                # premise "plated barrels are already plane-tied by the
+                # fill". That cannot hold here -- this loop iterates
+                # res['disconnected_pads'], i.e. pads the fill-aware check
+                # JUST reported still floating (see the banner below), so
+                # for exactly these pads the fill did not reach the barrel.
+                # NPTH still skips: it has no copper at all (#328).
+                if not pad_cands:
                     continue
+                pad_layer = pad_cands[0]
                 name = f"{pad.component_ref}.{pad.pad_number} ({net_name})"
                 if not reported:
                     print(f"\n[{net_name}] fill-aware re-check: pad(s) reported tapped but "
@@ -1595,20 +1655,31 @@ def route_planes(
                     _pad_edge = max(0.0, min(pad.global_x - _mnx, _mxx - pad.global_x,
                                              pad.global_y - _mny, _mxy - pad.global_y)
                                     - max(pad.size_x, pad.size_y) / 2.0)
+                # A plated barrel can launch from any copper layer, so run
+                # the whole via ladder per candidate layer and take the
+                # first that lands a via (#494). An SMD pad has exactly one
+                # candidate, so this is the old single pass for it.
                 result = None
-                for vtry, dtry in via_pairs:
-                    result = tap_pad_with_escalation(
-                        pad, pad_layer, net_id, pcb_data,
-                        replace(tap_config, via_size=vtry, via_drill=dtry,
-                                board_edge_clearance=_pad_edge),
-                        max_search_radius=max_search_radius, via_size=vtry,
-                        via_drill=dtry, verbose=verbose, fine_for_all=True,
-                        distant_trace_radius=0.0, disable_reuse=True,
-                        shared_via_maps=shared_maps, plane_oracle=sweep_oracle)
-                    if result.success and result.via is not None:
-                        if (vtry, dtry) in _escalated_pairs:
-                            warn_fab_escalation(f"last-resort plane via for net "
-                                                f"{net_id} ({vtry}/{dtry}mm)")
+                for _cand in pad_cands:
+                    for vtry, dtry in via_pairs:
+                        result = tap_pad_with_escalation(
+                            pad, _cand, net_id, pcb_data,
+                            replace(tap_config, via_size=vtry, via_drill=dtry,
+                                    board_edge_clearance=_pad_edge),
+                            max_search_radius=max_search_radius, via_size=vtry,
+                            via_drill=dtry, verbose=verbose, fine_for_all=True,
+                            distant_trace_radius=0.0, disable_reuse=True,
+                            shared_via_maps=shared_maps,
+                            plane_oracle=sweep_oracle)
+                        if result.success and result.via is not None:
+                            if (vtry, dtry) in _escalated_pairs:
+                                warn_fab_escalation(
+                                    f"last-resort plane via for net "
+                                    f"{net_id} ({vtry}/{dtry}mm)")
+                            break
+                    if result is not None and result.success \
+                            and result.via is not None:
+                        pad_layer = _cand
                         break
                 if result.success and result.via is not None:
                     new_via_obj = Via(
@@ -1633,11 +1704,9 @@ def route_planes(
                     _v_res = check_net_connectivity(net_id, _v_segs, _v_vias, net_pads,
                                                     zones_by_net.get(net_id, []),
                                                     pcb_data=pcb_data)
-                    _pad_key = (round(pad.global_x, 3), round(pad.global_y, 3),
-                                pad.component_ref)
-                    _still = {(round(x, 3), round(y, 3), ref)
-                              for (x, y, _l, ref) in (_v_res.get('disconnected_pads') or [])}
-                    if _pad_key in _still:
+                    # Custody per PAD-LAYER (#494) -- see pad_still_floating.
+                    if pad_still_floating(_v_res.get('disconnected_pads'),
+                                          pad, pad_layer):
                         pcb_data.vias.remove(new_via_obj)
                         for seg_obj in new_seg_objs:
                             pcb_data.segments.remove(seg_obj)
@@ -1667,23 +1736,27 @@ def route_planes(
                     # otherwise abandons a pad a short trace would connect. The
                     # island-join fill test validates the target; re-run the SAME
                     # fill-aware check and UNDO the track if still floating.
-                    track_res = tap_pad_with_escalation(
-                        pad, pad_layer, net_id, pcb_data,
-                        # #438/#441: the #373 last-resort track must not run CLOSER
-                        # to the board edge than the pad it connects. The blanket
-                        # tap_config board_edge_clearance=0.0 falls back to
-                        # config.clearance in the edge keep-out, letting the fallback
-                        # trace graze the outline sub-fab (ulx3s In2.Cu at 0.0). Cap
-                        # it at the pad's own edge distance, as the via tap above does.
-                        replace(tap_config, via_size=via_size, via_drill=via_drill,
-                                board_edge_clearance=_pad_edge),
-                        max_search_radius=max_search_radius,
-                        via_size=via_size, via_drill=via_drill,
-                        verbose=verbose, fine_for_all=True, pour_trace_only=True,
-                        distant_trace_radius=max_search_radius, disable_reuse=True,
-                        plane_oracle=sweep_oracle)
+                    # Per candidate launch layer, same as the via ladder
+                    # above (#494); one candidate for an SMD pad.
                     connected = False
-                    if track_res.success and track_res.segments:
+                    for _cand in pad_cands:
+                        track_res = tap_pad_with_escalation(
+                            pad, _cand, net_id, pcb_data,
+                            # #438/#441: the #373 last-resort track must not run CLOSER
+                            # to the board edge than the pad it connects. The blanket
+                            # tap_config board_edge_clearance=0.0 falls back to
+                            # config.clearance in the edge keep-out, letting the fallback
+                            # trace graze the outline sub-fab (ulx3s In2.Cu at 0.0). Cap
+                            # it at the pad's own edge distance, as the via tap above does.
+                            replace(tap_config, via_size=via_size, via_drill=via_drill,
+                                    board_edge_clearance=_pad_edge),
+                            max_search_radius=max_search_radius,
+                            via_size=via_size, via_drill=via_drill,
+                            verbose=verbose, fine_for_all=True, pour_trace_only=True,
+                            distant_trace_radius=max_search_radius, disable_reuse=True,
+                            plane_oracle=sweep_oracle)
+                        if not (track_res.success and track_res.segments):
+                            continue
                         new_seg_objs = []
                         for s in track_res.segments:
                             seg_obj = Segment(
@@ -1697,23 +1770,23 @@ def route_planes(
                         _t_res = check_net_connectivity(net_id, _t_segs, _t_vias, net_pads,
                                                         zones_by_net.get(net_id, []),
                                                         pcb_data=pcb_data)
-                        _pad_key = (round(pad.global_x, 3), round(pad.global_y, 3),
-                                    pad.component_ref)
-                        _still = {(round(x, 3), round(y, 3), ref)
-                                  for (x, y, _l, ref) in (_t_res.get('disconnected_pads') or [])}
-                        if _pad_key in _still:
+                        # Custody per PAD-LAYER (#494).
+                        if pad_still_floating(_t_res.get('disconnected_pads'),
+                                              pad, _cand):
                             for seg_obj in new_seg_objs:
                                 pcb_data.segments.remove(seg_obj)
-                        else:
-                            connected = True
-                            for s in track_res.segments:
-                                all_new_segments.append(s)
-                            shared_maps.note_pass_copper([], new_seg_objs)
-                            sweep_oracle.note_tap_committed(pad, [], new_seg_objs)
-                            if name in failed_repair_pads:
-                                failed_repair_pads.remove(name)
-                                total_pads_repaired += 1
-                            print(f"{GREEN}connected by track to same-net copper{RESET}")
+                            continue
+                        connected = True
+                        for s in track_res.segments:
+                            all_new_segments.append(s)
+                        shared_maps.note_pass_copper([], new_seg_objs)
+                        sweep_oracle.note_tap_committed(pad, [], new_seg_objs)
+                        if name in failed_repair_pads:
+                            failed_repair_pads.remove(name)
+                            total_pads_repaired += 1
+                        print(f"{GREEN}connected by track to same-net copper "
+                              f"on {_cand}{RESET}")
+                        break
                     if not connected:
                         if name not in failed_repair_pads:
                             failed_repair_pads.append(name)
