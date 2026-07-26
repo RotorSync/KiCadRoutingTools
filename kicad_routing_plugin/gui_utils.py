@@ -181,6 +181,80 @@ def move_copper_graphics_to_silkscreen_board(board):
     return moved
 
 
+def board_minima_from_live(board):
+    """The GUI twin of fix_kicad_drc_settings.scan_board_minima(), read from the
+    LIVE pcbnew board instead of re-parsing the board file.
+
+    Same five keys, same meaning: the smallest track width / via diameter / via
+    drill / via annular ring / through-hole diameter actually present, so KiCad's
+    min-size rules can be floored at or below the board's own copper.
+
+    Why not just call scan_board_minima: it runs parse_kicad_pcb over the whole
+    file, allocating thousands of GC-tracked objects. The GUI calls it from
+    _write_drc_floors, which runs inside a wx TIMER dispatch, and that allocation
+    burst triggers an automatic gen0 collection mid-dispatch which walks a dict
+    holding a stale pointer and segfaults (visit_decref -> dict_traverse ->
+    collect, faulting on a read-only page). Measured at 3-7 crashes in 10 runs.
+    The dangling reference is in a C extension, not here; the tractable fix is to
+    stop doing a full board re-parse in that context when the live board -- which
+    the GUI already holds -- has every number we need.
+
+    Best-effort: returns {} on error, which makes compute_targets() fall back to
+    its param-only behaviour exactly as an unparseable board would.
+    """
+    try:
+        import pcbnew
+        widths, via_sizes, via_drills, annular, holes = [], [], [], [], []
+        for t in board.GetTracks():
+            try:
+                if t.Type() == pcbnew.PCB_VIA_T:
+                    # GetFrontWidth() first: a bare PCB_VIA::GetWidth() trips a
+                    # wxASSERT for every via on KiCad 10 (see
+                    # update_live_drc_floors).
+                    try:
+                        w = pcbnew.ToMM(t.GetFrontWidth())
+                    except Exception:
+                        w = pcbnew.ToMM(t.GetWidth())
+                    d = pcbnew.ToMM(t.GetDrillValue())
+                    if w:
+                        via_sizes.append(w)
+                    if d:
+                        via_drills.append(d)
+                        holes.append(d)
+                    if w and d and w > d:
+                        annular.append((w - d) / 2.0)
+                else:
+                    w = pcbnew.ToMM(t.GetWidth())
+                    if w:
+                        widths.append(w)
+            except Exception:
+                continue
+        for fp in board.GetFootprints():
+            for pad in fp.Pads():
+                try:
+                    ds = pad.GetDrillSize()
+                    d = pcbnew.ToMM(max(ds.x, ds.y))
+                    if d:
+                        holes.append(d)
+                except Exception:
+                    continue
+        out = {}
+        if widths:
+            out['min_track_width'] = min(widths)
+        if via_sizes:
+            out['min_via_diameter'] = min(via_sizes)
+        if via_drills:
+            out['min_via_drill'] = min(via_drills)
+        if annular:
+            out['min_via_annular_width'] = min(annular)
+        if holes:
+            out['min_through_hole_diameter'] = min(holes)
+        return out
+    except Exception as e:
+        print(f"(live board minima scan skipped: {e})")
+        return {}
+
+
 def default_netclass(board):
     """The board's Default NETCLASS, or None.
 

@@ -1148,6 +1148,14 @@ class PlanExecutor:
                 # the interactive route tab -- not unconditionally (the function default).
                 _cc = getattr(self.dialog, 'clearance_check', None)
                 _clamp = bool(_cc.GetValue()) if _cc is not None else False
+                # Board minima from the LIVE board, so fix_project_for_output
+                # does NOT re-parse the file. That parse allocates thousands of
+                # GC-tracked objects, and this runs inside a wx timer dispatch
+                # where the resulting mid-dispatch collection segfaults (3-7 of
+                # 10 runs). Same five values, read from the board the GUI
+                # already holds -- see gui_utils.board_minima_from_live.
+                from .gui_utils import board_minima_from_live
+                _minima = board_minima_from_live(board) if board is not None else {}
                 from fix_kicad_drc_settings import fix_project_for_output
                 fix_project_for_output(
                     board_file, input_pcb=board_file,
@@ -1159,7 +1167,8 @@ class PlanExecutor:
                     edge_clearance=floors.get('board_edge_clearance'),
                     diff_pair_width=floors.get('diff_pair_width'),
                     diff_pair_gap=floors.get('diff_pair_gap'),
-                    clamp_nondefault_netclasses=_clamp)
+                    clamp_nondefault_netclasses=_clamp,
+                    minima=_minima)
                 self.log(f"Claude plan: recorded DRC floors in the project "
                          f"file (clearance {eff:.4g}; live session already "
                          f"updated via the API)")

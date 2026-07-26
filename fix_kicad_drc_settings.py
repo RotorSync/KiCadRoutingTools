@@ -651,7 +651,7 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
                            keep_courtyards=False, keep_mask=False, keep_footprint=False,
                            keep_thermal=False, enable_layers=False,
                            clamp_nondefault_netclasses=True,  # #439: clamp by default
-                           extra_ignore=(), verbose=True):
+                           extra_ignore=(), verbose=True, minima=None):
     """Make the DRC settings of a freshly written board consistent with the
     routing floors (issue #160 auto-invoke). Ensures ``output_pcb`` has a sibling
     ``.kicad_pro`` -- copying the input board's project if the output is a new
@@ -684,7 +684,15 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
 
     with open(out_pro) as f:
         proj = json.load(f)
-    minima = scan_board_minima(output_pcb)
+    # `minima` lets a caller that ALREADY has the board in memory supply these
+    # instead of us re-parsing the file. The GUI does: scan_board_minima ->
+    # parse_kicad_pcb allocates thousands of GC-tracked objects, and the GUI
+    # calls this from inside a wx timer dispatch where that allocation burst
+    # triggers a mid-dispatch collection that segfaults (see
+    # gui_utils.board_minima_from_live). CLI callers pass nothing and scan as
+    # before, so file-to-file behaviour is unchanged.
+    if minima is None:
+        minima = scan_board_minima(output_pcb)
     clr = clearance if clearance is not None else project_copper_clearance(proj)
     targets = compute_targets(clearance=clr, hole_clearance=hole_clearance,
                               hole_to_hole=hole_to_hole, edge_clearance=edge_clearance,
