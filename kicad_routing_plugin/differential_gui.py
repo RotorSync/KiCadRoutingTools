@@ -15,6 +15,7 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 import routing_defaults as defaults
+from kicad_parser import mm_to_iu
 from .gui_utils import StdoutRedirector
 
 
@@ -1171,7 +1172,7 @@ class DifferentialTab(wx.Panel):
     def _apply_results_to_board(self, results_data):
         """Apply routing results directly to the open pcbnew board."""
         import pcbnew
-        from kicad_parser import POSITION_DECIMALS, mm_to_iu
+        from kicad_parser import POSITION_DECIMALS
         from .swig_gui import _build_layer_mappings
         from .board_swaps import apply_swaps_to_board
 
