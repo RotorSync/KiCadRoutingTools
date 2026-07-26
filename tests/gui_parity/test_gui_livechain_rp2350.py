@@ -129,9 +129,15 @@ def main():
     stages['repair'] = stage('repair')
     route(['+1V1', '/T8F49I2X/PIN.5'], 0.09, 0.0762, 0.25, 0.15, 0.025)
     stages['reconnect'] = stage('reconnect')
+    # grid_step 0.05, matching the first repair. This stage is the #479
+    # late-pinch guard -- it re-checks that the reconnect route above did not
+    # sever the pour -- not a test of grid resolution, and halving the step
+    # quadruples the cell count for no extra coverage. Measured on this board:
+    # the repair costs 354s at 0.025 vs 118s at 0.05, which was ~4 minutes of
+    # this gate's runtime on its own.
     planes(dict(mode='repair', assignments=[(['GND', '+3V3'], ['In1.Cu', 'In4.Cu'])],
                 clearance=0.09, via_size=0.25, via_drill=0.15, track_width=0.0762,
-                grid_step=0.025, rip_blocker_nets=True, **GP))
+                grid_step=0.05, rip_blocker_nets=True, **GP))
     stages['final'] = stage('final')
 
     print("rp2350 live-chain grade parity (GUI, DRC @ 0.09):")

@@ -5,6 +5,7 @@ Analyzes BGA footprint geometry to extract grid parameters and routing channels.
 """
 from __future__ import annotations
 
+import math
 from typing import List, Optional, Tuple
 from collections import defaultdict
 
@@ -22,6 +23,24 @@ from bga_fanout.constants import EDGE_PAD_TOLERANCE
 _COORD_TOL = 1e-3
 
 
+def _mean(group: List[float]) -> float:
+    """Exact cluster mean -- math.fsum, never the builtin sum().
+
+    Python 3.12 changed sum() to use Neumaier compensated summation, so the
+    builtin returns a DIFFERENT (more accurate) float on 3.12+ than on 3.9:
+    sum([0.65]*15) is 9.75 on 3.14 and 9.750000000000002 on 3.9. KiCad bundles
+    its own python (3.9 here) while the CLI runs the system one, so the same
+    board fanned out differently depending on which interpreter ran it -- the
+    1-2 ULP difference lands in the cluster means, shifts the BGA grid bounds
+    (min_x 116.125 vs 116.12500000000003), and flips the escape direction of any
+    ball sitting on an exact boundary tie. On eth_tap's U13 that was one ball
+    (up -> right), which cascaded into 109 vs 110 fanout tracks and a different
+    board from there on. math.fsum is exactly rounded and identical on every
+    version, so the geometry no longer depends on the interpreter (#493).
+    """
+    return math.fsum(group) / len(group)
+
+
 def _cluster_positions(values, tol: float = _COORD_TOL) -> List[float]:
     """Collapse sorted coordinate values into cluster means, merging values
     closer than `tol` (FP noise on rotated footprints)."""
@@ -32,9 +51,9 @@ def _cluster_positions(values, tol: float = _COORD_TOL) -> List[float]:
         if v - group[-1] <= tol:
             group.append(v)
         else:
-            clusters.append(sum(group) / len(group))
+            clusters.append(_mean(group))
             group = [v]
-    clusters.append(sum(group) / len(group))
+    clusters.append(_mean(group))
     return clusters
 
 

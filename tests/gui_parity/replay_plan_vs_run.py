@@ -22,6 +22,15 @@ parse_plan_result -> reset_params_to_defaults -> apply_step_params ->
 apply_step_selection -> tab._on_*() path the buttons run. Nothing is mirrored,
 so a converter/apply bug shows up as a board difference.
 
+THE TWO LEGS RUN ON DIFFERENT PYTHONS, ON PURPOSE. The GUI leg needs pcbnew so
+it runs under KiCad's bundled python (3.9 here); the CLI leg runs the manifest's
+own `python3` (3.14 here). Routing is supposed to be interpreter-independent, so
+this doubles as a check on that -- and it caught a case where it was not: Python
+3.12 switched sum() to compensated summation, bga_fanout's cluster means used
+it, and eth_tap's U13 fanout emitted 109 segments on 3.14 vs 110 on 3.9 from
+byte-identical inputs (fixed in grid.py with math.fsum). If copper diverges,
+check the interpreters before blaming the GUI.
+
 THE REFERENCE IS RE-RUN AT HEAD, NOT READ OFF DISK. The recorded corpus boards
 were routed by whatever commit the run happened on; diffing a GUI replay at HEAD
 against them measures the ENGINE'S drift since that date, not the GUI/CLI gap,
@@ -331,6 +340,17 @@ def build_cli_reference(info, workdir, timeout=10800, verbose=False):
     dest = os.path.join(workdir, 'cli_head')
     os.makedirs(dest, exist_ok=True)
     log_path = os.path.join(workdir, 'cli_head.log')
+
+    # The CLI leg runs AS DEPLOYED -- whatever `python3` the recorded manifest
+    # lines resolve to -- while the GUI leg runs under KiCad's bundled python.
+    # That is deliberate: routing must be interpreter-INDEPENDENT, so leaving
+    # the two legs on their real interpreters makes this driver a live check on
+    # that. It was not always true. Python 3.12 changed sum() to compensated
+    # summation, and bga_fanout's cluster means used it, so eth_tap's U13 fanout
+    # emitted 109 segments on 3.14 and 110 on 3.9 from byte-identical inputs
+    # (fixed: grid.py now uses math.fsum). If a cross-version difference ever
+    # returns it will surface HERE, as a copper divergence -- check the
+    # interpreters before concluding the GUI is at fault.
     cmd = ['python3', '-X', 'utf8',
            os.path.join(STRESS_TESTS, 'redo_stress_test.py'), info['manifest'],
            '--workdir', dest,
@@ -535,7 +555,7 @@ def grade_board(board, clearance, baseline):
     except Exception as e:
         out['grade_core_err'] = str(e)[:150]
         try:
-            o = subprocess.run(['python3', '-X', 'utf8',
+            o = subprocess.run([sys.executable, '-X', 'utf8',
                                 os.path.join(REPO, 'check_drc.py'), board,
                                 '-c', str(clearance)],
                                capture_output=True, text=True, timeout=1800).stdout
@@ -545,7 +565,7 @@ def grade_board(board, clearance, baseline):
             out['drc'] = None
             out['drc_err'] = str(e2)[:100]
     try:
-        o = subprocess.run(['python3', '-X', 'utf8',
+        o = subprocess.run([sys.executable, '-X', 'utf8',
                             os.path.join(REPO, 'check_connected.py'), board],
                            capture_output=True, text=True, timeout=1800).stdout
         out['fully_connected'] = 'ALL NETS FULLY CONNECTED' in o

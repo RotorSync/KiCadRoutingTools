@@ -101,8 +101,16 @@ def detect_bus_groups(
                 px, py = net_endpoints[nid][other]
                 placed = False
                 for cl in clusters:
-                    cx = sum(net_endpoints[m][other][0] for m in cl) / len(cl)
-                    cy = sum(net_endpoints[m][other][1] for m in cl) / len(cl)
+                    # math.fsum, not the builtin sum() (#493): Python 3.12
+                    # switched sum() to compensated summation, so a float sum
+                    # differs by an ULP or two between KiCad's bundled python
+                    # and the system one. These centroids are compared against
+                    # a radius below, so an ULP can flip cluster membership and
+                    # change which nets are treated as a bus -- i.e. the routing
+                    # would depend on the interpreter. fsum is exactly rounded
+                    # on every version.
+                    cx = math.fsum(net_endpoints[m][other][0] for m in cl) / len(cl)
+                    cy = math.fsum(net_endpoints[m][other][1] for m in cl) / len(cl)
                     if math.hypot(px - cx, py - cy) <= 2.0 * detection_radius:
                         cl.append(nid)
                         placed = True

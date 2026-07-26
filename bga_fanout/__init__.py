@@ -1798,6 +1798,21 @@ def generate_bga_fanout(footprint: Footprint,
     Returns:
         Tuple of (tracks, vias_to_add, vias_to_remove, failed_nets)
     """
+    # Config-parity probe (#493). The plane engines have dumped their kwargs
+    # since #362; fanout did not, which is why a GUI/CLI escape divergence here
+    # had to be chased by eye. Same contract: only active under
+    # KICAD_DUMP_BATCH_KWARGS + ..._CONTINUE=1, never alters routing. footprint
+    # and pcb_data are dropped (board payload); the component ref is kept so
+    # calls pair up across the two captures.
+    try:
+        from route import _dump_engine_config as _dump
+        _cfg = {k: v for k, v in locals().items()
+                if k not in ('footprint', 'pcb_data', '_dump')}
+        _cfg['component'] = getattr(footprint, 'reference', None)
+        _dump('bga_fanout', _cfg)
+    except Exception:
+        pass
+
     if layers is None:
         layers = ["F.Cu", "B.Cu"]
 

@@ -1374,8 +1374,12 @@ def get_net_mst_segments(pcb_data: PCBData, net_id: int) -> List[Tuple[Tuple[flo
                     for seg in group:
                         pts.append((seg.start_x, seg.start_y))
                         pts.append((seg.end_x, seg.end_y))
-                    cx = sum(p[0] for p in pts) / len(pts)
-                    cy = sum(p[1] for p in pts) / len(pts)
+                    # math.fsum, not the builtin sum() (#493): Python 3.12 switched sum() to
+                    # compensated summation, so a float sum differs by an ULP or two between
+                    # KiCad's bundled python and the system one -- enough to flip a decision
+                    # made from it and make routing depend on the interpreter.
+                    cx = math.fsum(p[0] for p in pts) / len(pts)
+                    cy = math.fsum(p[1] for p in pts) / len(pts)
                     points.append((cx, cy))
             return compute_mst_segments(points)
 
@@ -1413,8 +1417,8 @@ def get_net_routing_endpoints(pcb_data: PCBData, net_id: int) -> List[Tuple[floa
                     points.append((seg.start_x, seg.start_y))
                     points.append((seg.end_x, seg.end_y))
                 if points:
-                    cx = sum(p[0] for p in points) / len(points)
-                    cy = sum(p[1] for p in points) / len(points)
+                    cx = math.fsum(p[0] for p in points) / len(points)
+                    cy = math.fsum(p[1] for p in points) / len(points)
                     centroids.append((cx, cy))
             return centroids[:2]
 
@@ -1433,8 +1437,8 @@ def get_net_routing_endpoints(pcb_data: PCBData, net_id: int) -> List[Tuple[floa
             for seg in group:
                 stub_pts.append((seg.start_x, seg.start_y))
                 stub_pts.append((seg.end_x, seg.end_y))
-            stub_cx = sum(p[0] for p in stub_pts) / len(stub_pts)
-            stub_cy = sum(p[1] for p in stub_pts) / len(stub_pts)
+            stub_cx = math.fsum(p[0] for p in stub_pts) / len(stub_pts)
+            stub_cy = math.fsum(p[1] for p in stub_pts) / len(stub_pts)
 
             # Find unconnected pads
             unconnected_pads = []
@@ -1450,16 +1454,16 @@ def get_net_routing_endpoints(pcb_data: PCBData, net_id: int) -> List[Tuple[floa
 
             if unconnected_pads:
                 # Compute centroid of unconnected pads
-                pad_cx = sum(p.global_x for p in unconnected_pads) / len(unconnected_pads)
-                pad_cy = sum(p.global_y for p in unconnected_pads) / len(unconnected_pads)
+                pad_cx = math.fsum(p.global_x for p in unconnected_pads) / len(unconnected_pads)
+                pad_cy = math.fsum(p.global_y for p in unconnected_pads) / len(unconnected_pads)
                 return [(stub_cx, stub_cy), (pad_cx, pad_cy)]
 
     # Case 3: No stubs, just pads - use first pad and centroid of rest
     if len(net_segments) == 0 and len(net_pads) >= 2:
         first_pad = net_pads[0]
         other_pads = net_pads[1:]
-        other_cx = sum(p.global_x for p in other_pads) / len(other_pads)
-        other_cy = sum(p.global_y for p in other_pads) / len(other_pads)
+        other_cx = math.fsum(p.global_x for p in other_pads) / len(other_pads)
+        other_cy = math.fsum(p.global_y for p in other_pads) / len(other_pads)
         return [(first_pad.global_x, first_pad.global_y), (other_cx, other_cy)]
 
     return []

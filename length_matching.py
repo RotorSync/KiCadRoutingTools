@@ -2737,8 +2737,8 @@ def apply_intra_pair_length_matching(
     # Debug: show length breakdown
     if config.verbose:
         from net_queries import calculate_via_barrel_length
-        p_seg_only = sum(segment_length(s) for s in p_segments)
-        n_seg_only = sum(segment_length(s) for s in n_segments)
+        p_seg_only = math.fsum(segment_length(s) for s in p_segments)
+        n_seg_only = math.fsum(segment_length(s) for s in n_segments)
         p_via_barrel = calculate_via_barrel_length(p_vias, pcb_data)
         n_via_barrel = calculate_via_barrel_length(n_vias, pcb_data)
         print(f"      P breakdown: {len(p_segments)} segs={p_seg_only:.3f}mm + {len(p_vias)} vias={p_via_barrel:.3f}mm + stub={p_stub_length:.3f}mm = {p_length:.3f}mm")
@@ -2911,8 +2911,12 @@ def apply_ac_coupled_length_matching(xnet, routed_results, config, pcb_data):
         md['base'] = m.base_name
         members.append(md)
 
-    total_p = sum(md['p_len'] for md in members)
-    total_n = sum(md['n_len'] for md in members)
+    # math.fsum, not the builtin sum() (#493): Python 3.12 switched sum() to
+    # compensated summation, so a float sum differs by an ULP or two between
+    # KiCad's bundled python and the system one -- enough to flip a decision
+    # made from it and make routing depend on the interpreter.
+    total_p = math.fsum(md['p_len'] for md in members)
+    total_n = math.fsum(md['n_len'] for md in members)
     delta = abs(total_p - total_n)
     bridges = ", ".join(xnet.bridge_refs)
     print(f"    AC-couple {name}: end-to-end P={total_p:.3f}mm, N={total_n:.3f}mm, "

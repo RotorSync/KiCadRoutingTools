@@ -1301,7 +1301,23 @@ class FanoutTab(wx.Panel):
                 layers=layers,
                 track_width=track_width,
                 clearance=clearance,
-                diff_pair_gap=shared.get('diff_pair_gap', defaults.DIFF_PAIR_GAP),
+                # BGA_DIFF_PAIR_GAP, and NOT shared['diff_pair_gap'] (#493).
+                # Two bugs in one line: the fallback named the signal-routing
+                # constant (DIFF_PAIR_GAP 0.101) instead of the fanout one
+                # (BGA_DIFF_PAIR_GAP 0.1) -- every neighbouring param here
+                # correctly uses its BGA_* default -- and the shared lookup
+                # leaked the DIFFERENTIAL tab's _effective_diff_pair_gap() into
+                # fanout, which resolves to the board's Default net-class gap
+                # when its override box is unchecked. On eth_tap that handed the
+                # escape router 0.125 where the CLI's bga_fanout uses 0.1, and
+                # the ball field escaped down different channels (BOOT0 at
+                # x=123.275 vs 122.625, FPGA_I on F.Cu vs In1.Cu) -- which then
+                # cascaded through the whole chain. Same leak class as the
+                # no_bga_zone/max_iterations bleed from the route tab into the
+                # plane step. bga_fanout.py's --diff-pair-gap likewise defaults
+                # to BGA_DIFF_PAIR_GAP and does not consult the net class, so
+                # this is the value the recorded chains were routed at.
+                diff_pair_gap=defaults.BGA_DIFF_PAIR_GAP,
                 exit_margin=config['exit_margin'],
                 primary_escape=config['primary_escape'],
                 force_escape_direction=config['force_escape_direction'],

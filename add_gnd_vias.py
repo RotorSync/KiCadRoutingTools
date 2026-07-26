@@ -238,7 +238,9 @@ def add_gnd_vias_to_existing_board(
     if new_gnd_vias:
         print(f"\nAdded {len(new_gnd_vias)} GND vias near signal vias")
         if placement_distances:
-            avg_dist = sum(placement_distances) / len(placement_distances)
+            # fsum for consistency with the rest of the codebase (#493); this
+            # one only feeds the printed summary, so no board depends on it.
+            avg_dist = math.fsum(placement_distances) / len(placement_distances)
             min_placed = min(placement_distances)
             max_placed = max(placement_distances)
             print(f"  Placement distances: min={min_placed:.3f}mm, avg={avg_dist:.3f}mm, max={max_placed:.3f}mm")
