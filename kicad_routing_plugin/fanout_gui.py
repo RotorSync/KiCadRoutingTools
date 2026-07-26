@@ -542,11 +542,24 @@ class NetSelectionPanel(wx.Panel):
             self._notify_selection_changed()
 
     def get_selected_nets(self):
-        """Get list of selected net names."""
+        """Get selected net names, in a DETERMINISTIC (sorted) order.
+
+        `_checked_nets` is a set, and `list(set_of_str)` follows Python's
+        per-process randomized string hashing -- so this returned a different
+        ORDER on every launch. The router routes nets in the order it is given,
+        so that made the whole GUI non-deterministic: three runs of the same
+        plan on the same board produced 3425, 3433 and 3431 segments (measured
+        on eth_tap step 11; with PYTHONHASHSEED=0 pinned, two runs were
+        bit-identical). It also made the GUI disagree with the CLI, which
+        passes `expand_net_patterns`' SORTED list -- the same 295 nets in a
+        different order.
+
+        Sorted matches the CLI exactly, so both fronts route in one order.
+        """
         # Sync from the current view
         self._sync_checked_state_from_view()
         # Return all checked nets
-        return list(self._checked_nets)
+        return sorted(self._checked_nets)
 
     def set_selected_nets(self, net_names):
         """Pre-check the given net names (only those present in this panel).
