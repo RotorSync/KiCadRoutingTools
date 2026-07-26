@@ -2067,6 +2067,26 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # our write-lists (the GUI applier adds before it removes,
                 # so a strip of a not-yet-added segment would no-op and the
                 # deleted copper would ship).
+                #
+                # SNAP FIRST. The CLI branch below reconciles against the
+                # WRITTEN file, whose coordinates are 100% on KiCad's integer-nm
+                # grid because the writer quantises on the way out. The router
+                # works in float mm, so this in-memory board is NOT: ~20% of its
+                # coordinates sit up to 0.49 nm off-grid (eth_tap step 11:
+                # 2813/13692). Reconciling against an un-snapped board means the
+                # two fronts retry against DIFFERENT boards, so `return_results`
+                # -- which should only decide whether results are RETURNED --
+                # changed what got ROUTED: 3423 (CLI) vs 3428 (GUI) segments on
+                # identical input and identical kwargs. Snapping here makes this
+                # board bit-identical to the file the CLI would have re-parsed.
+                # Geometrically a no-op (max deviation 0.4878 nm < the 0.5 nm
+                # rounding threshold, so every value lands on the same integer
+                # nm the writer emits).
+                from kicad_parser import snap_pcb_data_to_iu_grid
+                _snapped = snap_pcb_data_to_iu_grid(pcb_data)
+                if _snapped:
+                    print(f"  Reconciliation: snapped {_snapped} in-memory "
+                          f"coordinate(s) onto the nm grid (CLI-file parity).")
                 _rk.update(return_results=True, pcb_data=pcb_data)
                 _rok, _rfail, _rt, _rdata = batch_route(
                     input_file, "", _rec_names, **_rk)
@@ -2117,6 +2137,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                              'exclusion_zone_lines', 'boundary_debug_labels'):
                     if _rdata.get(_key):
                         results_data.setdefault(_key, []).extend(_rdata[_key])
+                # SNAP AGAIN. The sub-run above routed in float mm too, so the
+                # copper it just merged is back off-grid (8 coordinates on
+                # eth_tap step 11) even though we snapped before invoking it.
+                # The CLI's equivalent copper goes through the writer and lands
+                # grid-exact, so without this the fork reopens on exactly the
+                # nets the reconcile pass touched. Snap pcb_data AND the
+                # results the GUI applier will read -- they are usually the
+                # same Segment objects, but not contractually.
+                snap_pcb_data_to_iu_grid(pcb_data)
+                for _r in results_data.get('results', []):
+                    _rsnap = type('_P', (), {})()
+                    _rsnap.segments = _r.get('new_segments') or []
+                    _rsnap.vias = _r.get('new_vias') or []
+                    snap_pcb_data_to_iu_grid(_rsnap)
             else:
                 _rk.update(return_results=False)
                 _rok, _rfail, _rt = batch_route(

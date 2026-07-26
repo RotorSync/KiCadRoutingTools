@@ -43,6 +43,51 @@ def mm_to_iu(mm):
     """
     return int(round(float(mm) * IU_PER_MM))
 
+
+def snap_pcb_data_to_iu_grid(pcb_data):
+    """Snap every routed-copper coordinate in ``pcb_data`` onto KiCad's integer
+    nanometre grid, IN PLACE. Returns the number of values changed.
+
+    The router works in float mm, so ~20% of the copper it commits lands OFF the
+    nm grid by up to ~0.49 nm -- values a board cannot actually store. The writer
+    quantises on the way out, so the FILE is always 100% grid-exact while the
+    in-memory ``pcb_data`` is not. Same board, different bits.
+
+    That mismatch forked GUI from CLI. ``batch_route``'s final-reconcile pass
+    retries incomplete nets against "the finished board", and each front had a
+    different idea of what that board is: the CLI re-parses the WRITTEN file
+    (grid-exact), the GUI re-invokes on the in-memory ``pcb_data`` (not). So
+    ``return_results`` -- a flag that should only decide whether results are
+    RETURNED -- changed what got ROUTED. Measured on eth_tap step 11, same board
+    and same kwargs: reconcile ON gave CLI 3423 vs GUI 3428 segments; reconcile
+    OFF gave 3423 vs 3423, bit-identical.
+
+    Snapping is geometrically a no-op: the largest deviation measured is 0.4878
+    nm, below the 0.5 nm rounding threshold, so every value lands on the SAME
+    integer nm the writer would have emitted. Fields cover exactly what the
+    writer canonicalises (verified grid-exact in written output): segment
+    start/end and width, via position, size and drill.
+    """
+    changed = 0
+
+    def _snap(obj, attr):
+        nonlocal changed
+        v = getattr(obj, attr, None)
+        if isinstance(v, float):
+            q = mm_to_iu(v) / IU_PER_MM
+            if q != v:
+                setattr(obj, attr, q)
+                changed += 1
+
+    for s in getattr(pcb_data, 'segments', None) or ():
+        for a in ('start_x', 'start_y', 'end_x', 'end_y', 'width'):
+            _snap(s, a)
+    for v in getattr(pcb_data, 'vias', None) or ():
+        for a in ('x', 'y', 'size', 'drill'):
+            _snap(v, a)
+    return changed
+
+
 # KiCad 10 removed numeric net IDs from the file format.
 # Files with version >= this threshold use name-only nets: (net "name") instead of (net 29 "name").
 # KiCad 9 uses version 20241229; KiCad 10 uses version 20260206.
