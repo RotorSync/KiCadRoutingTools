@@ -1088,7 +1088,7 @@ class FanoutTab(wx.Panel):
 
     def __init__(self, parent, pcb_data, board_filename,
                  get_shared_params=None, on_fanout_complete=None,
-                 get_connectivity_check=None):
+                 get_connectivity_check=None, sync_pcb_data_callback=None):
         """
         Create the fanout tab.
 
@@ -1107,6 +1107,9 @@ class FanoutTab(wx.Panel):
         self.get_shared_params = get_shared_params
         self.on_fanout_complete = on_fanout_complete
         self.get_connectivity_check = get_connectivity_check
+        # Keeps the dialog's in-memory pcb_data in step with the board after a
+        # fanout applies copper (see _apply_fanout_results).
+        self.sync_pcb_data_callback = sync_pcb_data_callback
 
         self._create_ui()
 
@@ -1518,6 +1521,23 @@ class FanoutTab(wx.Panel):
             cap_summary = self._optimize_decoupling_caps(
                 board, pcbnew, fanout_config or {})
             board.BuildConnectivity()
+
+        # Sync the dialog's in-memory pcb_data from the board.
+        #
+        # The fanout tab was the ONLY tab that never did this: it added tracks
+        # and vias to the live board but left pcb_data untouched, so every later
+        # step routed against a board model missing all the fanout copper. The
+        # CLI never sees this because it is file-to-file -- each step re-parses
+        # the previous step's output and therefore sees everything.
+        #
+        # Measured on eth_tap: each fanout step's BOARD matched the CLI
+        # bit-exactly, yet by step 11 the GUI laid 3514 segments / 366 vias
+        # against the CLI's 3428 / 334 -- more copper, because the router saw
+        # fewer obstacles. A 2-step chain (route_diff -> route, pcb_data built
+        # fresh) was bit-identical, which is what localized it to the carry
+        # rather than to the router.
+        if self.sync_pcb_data_callback:
+            self.sync_pcb_data_callback()
 
         # Per-step live DRC floors (GUI twin of bga_fanout's per-step
         # fix_project_for_output). The fanout tab had NO counterpart at all, so

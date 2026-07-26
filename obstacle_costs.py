@@ -271,6 +271,10 @@ def compute_track_proximity_for_net(pcb_data: PCBData, net_id: int, config: Grid
 
 
 _MERGE_MEMO: dict = {}
+# Cap: entries pin their keyed objects alive (keepalive against id() reuse), so
+# the memo must not grow unbounded in a long-lived GUI session. Cleared wholesale
+# on overflow -- this is a within-run speedup, not a correctness cache.
+_MERGE_MEMO_MAX = 32
 
 
 def merge_track_proximity_costs(obstacles: GridObstacleMap,
@@ -290,6 +294,22 @@ def merge_track_proximity_costs(obstacles: GridObstacleMap,
     # times between cache changes; memoize the concatenation keyed on the
     # cache's identity signature so unchanged caches skip the O(all-nets)
     # vstack. Exact-behavior: any entry add/replace changes the signature.
+    # KEEPALIVE + BOUNDED. This memo is keyed on id(per_net_costs) and its
+    # signature also mixes id(a) of the member arrays. Bare id() keys are unsafe
+    # in a long-lived process (the GUI): once the keyed dict is garbage
+    # collected, a NEW dict can be allocated at the SAME address, and if the
+    # id-derived signature also collides, this returns ANOTHER run's merged
+    # costs -- silently wrong track-proximity costs, i.e. different routing with
+    # identical inputs. The CLI never sees it (fresh process per step).
+    #
+    # Two guards, both required:
+    #   * store the keyed object (and the arrays) IN the entry, so nothing can
+    #     be freed while its id is a live key -- ids can no longer be recycled
+    #     out from under us;
+    #   * bound the memo, so holding those references cannot grow without limit
+    #     across a long GUI session.
+    # Measured note: this was NOT the eth_tap step-11 divergence (disabling the
+    # memo entirely left it unchanged), but the hazard is real and latent.
     key = id(per_net_costs)
     sig = (len(arrays_to_merge),
            sum(len(a) for a in arrays_to_merge),
@@ -299,7 +319,12 @@ def merge_track_proximity_costs(obstacles: GridObstacleMap,
         all_costs = memo[1]
     else:
         all_costs = np.vstack(arrays_to_merge)
-        _MERGE_MEMO[key] = (sig, all_costs)
+        # Bound first, then store WITH keepalive refs (see the note above):
+        # per_net_costs and the member arrays are held so their ids cannot be
+        # recycled while this entry is live.
+        if len(_MERGE_MEMO) >= _MERGE_MEMO_MAX:
+            _MERGE_MEMO.clear()
+        _MERGE_MEMO[key] = (sig, all_costs, per_net_costs, arrays_to_merge)
     obstacles.set_layer_proximity_batch(all_costs)
 
 

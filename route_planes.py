@@ -1973,8 +1973,16 @@ def _write_output_and_reroute(
                     # violations). Route across the board's full copper stack.
                     board_layers = list(getattr(pcb_data.board_info,
                                                 'copper_layers', None) or [])
+                    # dict.fromkeys, NOT list(set(...)): these are layer-name
+                    # STRINGS, and CPython randomizes string hashing per process,
+                    # so set order varies run to run. This list becomes the
+                    # router's `layers=`, and layer ORDER decides which layer is
+                    # tried first -- a non-deterministic order makes the same
+                    # board route differently in two processes. Same class as the
+                    # GUI net-order bug (2df22ca). Order-preserving dedupe is
+                    # deterministic and keeps the board's own layer order first.
                     all_copper_layers = (board_layers if board_layers
-                                         else list(set(all_layers + plane_layers)))
+                                         else list(dict.fromkeys(all_layers + plane_layers)))
                     # Issue #88.2: the reroute must use parameters compatible
                     # with the original signal-routing run, or nets that only
                     # routed with relaxed settings get silently dropped. In
@@ -3552,7 +3560,10 @@ def create_plane(
                                                  'copper_layers', None) or [])
                     _ok, _fail, _t, _rdata = batch_route(
                         input_file, "", _cnames,
-                        layers=_board_layers or list(set(all_layers + plane_layers)),
+                        # Order-preserving dedupe -- see the all_copper_layers
+                        # note above: list(set(...)) over layer-name strings is
+                        # process-order-dependent and this feeds `layers=`.
+                        layers=_board_layers or list(dict.fromkeys(all_layers + plane_layers)),
                         track_width=track_width, clearance=clearance,
                         via_size=via_size, via_drill=via_drill,
                         grid_step=grid_step,

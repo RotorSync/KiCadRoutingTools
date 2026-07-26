@@ -1556,8 +1556,14 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     routing_layers = [l for l in (pcb_data.board_info.copper_layers or [])
                       if l.endswith('.Cu')]
     if not routing_layers:
-        routing_layers = list(set(seg.layer for seg in pcb_data.segments
-                                  if seg.layer.endswith('.Cu')))
+        # sorted(), NOT list(set(...)): layer names are STRINGS and CPython
+        # randomizes string hashing per process, so the fallback order varied
+        # run to run (observed: ['B.Cu','F.Cu','In2.Cu','In1.Cu'] vs
+        # ['In1.Cu','In2.Cu','B.Cu','F.Cu'] in two runs of the same chain).
+        # This list keys _EXPAND_CACHE and drives the per-layer pad/via passes,
+        # so a varying order makes DRC results order-dependent.
+        routing_layers = sorted(set(seg.layer for seg in pcb_data.segments
+                                    if seg.layer.endswith('.Cu')))
     if not routing_layers:
         routing_layers = ['F.Cu', 'B.Cu']  # Fallback
 

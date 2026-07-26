@@ -1617,7 +1617,8 @@ class RoutingDialog(wx.Dialog):
             self.board_filename,
             get_shared_params=get_shared_params,
             on_fanout_complete=self._on_tab_operation_complete,
-            get_connectivity_check=self._get_connectivity_check_fn
+            get_connectivity_check=self._get_connectivity_check_fn,
+            sync_pcb_data_callback=self._sync_pcb_data_from_board
         )
 
     def _create_planes_tab(self):
