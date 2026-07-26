@@ -353,13 +353,17 @@ class ZoneFillModel:
         # NOT MODELLED HERE: neighbour-zone pullback (#483 item 6). KiCad's
         # filler also keeps zone-to-zone clearance, so a sibling pour on the
         # same layer pushes this fill back from their shared boundary. That
-        # is real, but measuring it on a DETERMINISTIC grader (once the
-        # equal-priority UUID ambiguity was fixed, 9e6c48c) gave a mixed
-        # result over 8 boards: duet2_3dp improved (incomplete 2 -> 0) while
-        # scalenode_cm4 regressed (0 -> 1), 6 flat, aggregate -1 incomplete
-        # net. That is inside the known single-board noise floor, so it is
-        # held on branch plane-483-fill-fidelity pending a wave over all 60
-        # trigger boards rather than landed on an 8-board sample.
+        # is real, but it was MEASURED AT SCALE AND REJECTED (#483 closed):
+        # a full trigger-set wave on a deterministic grader (equal-priority
+        # UUID ambiguity fixed in 9e6c48c; A/A gate flat first) improved 3
+        # boards, regressed 3 and left 2 neutral, aggregate incomplete +2 /
+        # DRC +5 / connection-width -1, with per-board deltas from -91 to
+        # +366 segments. Correct in principle, but every board it touches
+        # becomes a coin flip for no aggregate gain. Code preserved on
+        # branches plane-483-fill-fidelity and item6-wave; the test in
+        # tests/test_fill_model_netclass_483.py pins the current "a sibling
+        # pour does not carve" contract, so landing it must flip that
+        # deliberately.
 
         # Copperpour keep-out areas (#477): KiCad's filler subtracts rule
         # areas marked (copperpour not_allowed) from the fill, so a keep-out

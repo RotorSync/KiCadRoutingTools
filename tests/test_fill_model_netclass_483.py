@@ -6,11 +6,12 @@ foreign net with a LOOSER class carves more copper than the zone clearance
 alone -- a model stamping flat zc predicts fill the refill does not produce.
 Mirrors _neck_plane_segments' _pair_clearance: both sides of the pair count.
 
-Item 6 (neighbour-zone pullback) is NOT modelled on main: it measured mixed on
-a deterministic grader -- duet2_3dp improved (incomplete 2 -> 0), scalenode_cm4
-regressed (0 -> 1), aggregate -1 incomplete net over 8 boards, inside the known
-single-board noise floor. It is held on branch plane-483-fill-fidelity pending
-a wave over all 60 trigger boards. One assertion below pins the current
+Item 6 (neighbour-zone pullback) is NOT modelled on main: it was measured at
+scale on a deterministic grader (A/A gate flat first) and REJECTED -- a full
+trigger-set wave improved 3 boards, regressed 3, left 2 neutral, aggregate
+incomplete +2 / DRC +5 / connection-width -1, perturbing -91 to +366 segments
+per board with the sign varying board to board. Code preserved on branches
+plane-483-fill-fidelity and item6-wave. One assertion below pins the current
 "does not carve" contract so landing item 6 must flip it deliberately.
 """
 import os
