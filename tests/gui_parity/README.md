@@ -4,14 +4,32 @@ Measures whether the claude tab's "run selected steps" (GUI engine calls on
 the live pcbnew board) produces the same final board as the recorded stress
 chain's CLI steps run file-to-file.
 
-- `test_gui_engine_parity.py` — headless: CLI leg via subprocesses, GUI leg
-  inside KiCad's bundled python (auto re-exec) driving the real tab apply
-  methods on shimmed dialog instances. Prints a parity report; known
-  deliberate divergences are listed in the module docstring.
-- `replay_plan_vs_run.py` — the same question asked of the REAL plugin: loads a
-  stress run's `<board>_plan.json` into a genuine headless `RoutingDialog` and
-  runs it with the genuine `PlanExecutor`, then diffs against the manifest
-  replayed at HEAD. See "Whole-plan replay" below.
+- `replay_plan_vs_run.py` — **start here.** Loads a stress run's
+  `<board>_plan.json` into a genuine headless `RoutingDialog` and runs it with
+  the genuine `PlanExecutor`, then diffs against the manifest replayed at HEAD.
+  Nothing is mirrored or mocked. See "Whole-plan replay" below.
+- `test_gui_engine_parity.py`, `test_gui_livechain_rp2350.py`,
+  `diag_fullchain_carry_rp2350.py` — **legacy, shim-based** (see below).
+
+### The shim harnesses are superseded
+
+The three shim-based harnesses predate the discovery that the REAL dialog
+constructs headless (`parent=None`, never shown, with
+`WXSUPPRESS_SIZER_FLAGS_CHECK=1`). They bind real tab methods onto plain shim
+objects and hand-build the config the engine is called with, which has a
+structural blind spot: **anything between a dialog CONTROL and the engine
+argument is never executed.**
+
+That is not hypothetical. #493 item 3 was `swig_gui` reading the board's net
+class with `nm * 1e-6`, landing one ULP low (`0.2` → `0.19999999999999998`) and
+handing that to every engine as `clearance`. It reaches the engine through
+`_effective_geometry_floor` → `_get_netclass_parameters`; the shim harness calls
+`batch_route(clearance=step['clearance'], ...)` with its own literal, so it
+could never have seen it. `replay_plan_vs_run.py` caught it on its first run.
+
+Their findings are still recorded below and their gates still run, but prefer
+the real-dialog path for new work, and treat a shim harness passing as weaker
+evidence than it looks.
 
 Workdir: `tests/gui_parity/work/` (gitignored).
 
@@ -24,6 +42,16 @@ Workdir: `tests/gui_parity/work/` (gitignored).
    vias as canonical UUID-independent sets. Byte equality is meaningless by
    design (.kicad_pcb outputs carry per-run random UUIDs -- see project
    notes: never whole-file-diff routing outputs).
+
+> **Superseded (2026-07-25, #493).** Everything in this section and the two
+> below it was measured with the shim harness before the real-dialog driver
+> existed, and its central conclusion — that bit-identical GUI/CLI copper would
+> need engine-level order canonicalization — is **wrong**. The residual was not
+> item ordering: it was the GUI quantising applied copper twice (1 um position
+> rounding plus `pcbnew.FromMM` truncating) and reading its net class one ULP
+> low. With those fixed, nano_eeprom_prog replays **byte-for-byte identical** at
+> 1 nm through `replay_plan_vs_run.py`. Kept for the history of how the forks
+> were found; do not quote the numbers as current.
 
 Current measurement on splitflap: grade PARITY, copper sets DIFFER
 (~300/1200 segments common, same via count at different positions). The
@@ -248,39 +276,50 @@ differs, 2 grade differs, 3 replay failed.
 Note the cost: it runs **both** legs (CLI chain + GUI chain), so budget roughly
 twice a single replay per board.
 
-### First findings (2026-07-25, both legs at HEAD) — filed as #493
+### What it found, and what got fixed (2026-07-25) — #493
 
-Produced on this driver's first two runs. Both boards **grade clean and equal**
-on both sides, so every item is a divergence underneath a green grade.
+The driver's first two runs turned up five divergences, all sitting underneath a
+**green grade on both sides** — which is the point: none of them would ever
+surface as a failing DRC or connectivity number. All five are now fixed.
 
-The headline one is not GUI-specific at all: `matches_net_filter` fnmatches the
-FULL net name, so `--nets '*' '!GND'` **silently fails to exclude `/GND`**.
-eth_tap's step-1 fanout shipped 267 `/GND` + 171 `/3V3` segments (438 of 750)
-from a command that asked to exclude both. The GUI *did* exclude them (by exact
-name, via `claude_plan._plan_plane_nets`), which is why the two legs fan out
-different net sets — i.e. a replayed plan is not a faithful replay of the chain
-it came from. See #493 for the full write-up and the two methodology traps
-(engine drift, nm round-trip) ruled out first.
+1. **`!GND` never excluded `/GND`.** `net_queries.matches_net_filter` and
+   `expand_net_patterns` fnmatched the FULL, sheet-qualified net name, so the
+   unqualified spelling everybody writes matched nothing and the exclusion
+   silently no-opped. eth_tap's step-1 fanout shipped 267 `/GND` + 171 `/3V3`
+   segments (438 of 750) from a command asking to exclude both. This was already
+   diagnosed once as #292 and closed with a "did you mean" warning instead of a
+   fix. Now a pattern naming no path also matches the trailing component
+   (`net_pattern_matches`), shared by the CLI, engine and GUI matchers.
+2. **The GUI's fanout ignored "!" exclusions outright** —
+   `claude_plan._component_net_names` tested `any(glob matches)` over the whole
+   list, so `'*'` always won. It only looked right where `_drop_plane_nets`
+   happened to remove the same nets.
+3. **The GUI routed against a slightly different clearance.** `swig_gui` read
+   the board's net class with `nm * 1e-6`; 1e-6 is not exactly representable, so
+   `200000 * 1e-6` is `0.19999999999999998` and `450000 * 1e-6` is
+   `0.44999999999999996` (0.3/0.25/0.127/0.09 are clean, which is why it only
+   bit some boards). `_effective_geometry_floor` clamps the entered value to the
+   Default class, so those epsilons went to every engine as `clearance` /
+   `via_size`. Now `_nm_to_mm` divides.
+4. **The GUI's plane oracle processed power nets the CLI's does not.** The
+   post-apply kicad-oracle recheck built its net list from the plane assignments
+   *plus* `power_nets` — but `power_nets` is a track-WIDTH assignment, not a set
+   of nets to reconnect. On nano_eeprom_prog it reported 4 missing links on
+   `+5V`, failed to clear them across all 3 rounds, and routed 11 of them
+   anyway: 30 segments of `+5V` copper the CLI board does not have, while the
+   engine itself reported "0 regions, 0 pads repaired".
+5. **GUI-applied copper was quantised twice.** Positions went through
+   `pcbnew.FromMM(round(v, POSITION_DECIMALS=3))`, snapping off-grid copper to
+   1 um (via SIZE and DRILL too — the same class as the #362 track-width bug);
+   and `pcbnew.FromMM` itself TRUNCATES (`66.1 * 1e6` is `66099999.99999999`, so
+   `FromMM(66.1) == 66099999`, one nm short of what the CLI's text writer
+   produces). Both fronts now emit through `kicad_parser.mm_to_iu`, which rounds.
 
-**nano_eeprom_prog** (set10, 3 steps) — grade parity (0 DRC, fully connected,
-both sides), **vias / zones / footprints identical**, and the route +
-plane-create steps match within tolerance. The `repair_planes` step adds
-**30 segments in the GUI that the CLI repair does not** (mostly +5V, 10 of them
-at 0.8 mm — a width both sides may legitimately pick, since both read
-`REPAIR_MAX_TRACK_WIDTH`).
-
-**eth_tap** (set10, 17 steps, ~19 min per leg) — grade parity (0 DRC; both
-sides equally not-fully-connected at HEAD), zones identical, but copper
-diverges massively (2175/7523 segments common). The per-step localization puts
-it at **step 1**, the very first BGA fanout: the CLI's `step1_U13_fanout` has
-**750 segments / 31 vias**, the GUI's has **110 segments / 34 vias**, from a
-board with zero pre-existing copper. Similar via count, ~7x the track copper —
-so it is not the usual rip-up cascade, it is the first step. Both fronts call
-the same `generate_bga_fanout` (`fanout_gui.py:1293`), so the suspect is a
-parameter reaching the engine differently (`layers` goes through
-`_apply_special` → `dialog.layer_checks`, `escape_method` through the BGA
-options panel), not a different entry point. `optimize_caps` also leaves
-21 footprints at different poses.
+**Result: nano_eeprom_prog is now byte-for-byte identical** between the GUI
+replay and the CLI chain — every segment, via, zone and footprint pose, at
+1 nm resolution, at every step. Bit-identical GUI/CLI copper was previously
+believed impossible (see the older note above about ~77% overlap); it isn't, and
+`--dp` now defaults to an exact nanometre comparison rather than a tolerance.
 
 ## Checked-in test inputs
 

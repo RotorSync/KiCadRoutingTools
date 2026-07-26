@@ -12,9 +12,36 @@ from typing import Dict, List, Tuple, Optional
 from pathlib import Path
 
 
-# Position rounding precision for coordinate comparisons
-# All position-based lookups must use this to ensure consistency
+# Position rounding precision for coordinate COMPARISONS (dedup keys, position
+# lookups) -- never for geometry actually written to a board. Rounding applied
+# copper to 1 um was #493 item 5; use mm_to_iu() below to emit geometry.
 POSITION_DECIMALS = 3
+
+# KiCad's internal unit for PCBs is the integer nanometre.
+IU_PER_MM = 1000000
+
+
+def mm_to_iu(mm):
+    """mm -> KiCad internal units (integer nanometres), correctly rounded.
+
+    Use this instead of `pcbnew.FromMM` wherever geometry is written to a board.
+    Two separate bugs made GUI-applied copper differ from the identical route
+    written by the CLI text writer (#493 item 5):
+
+    1. The GUI rounded positions to POSITION_DECIMALS (1 um) before converting,
+       so any point not already on a 1 um boundary -- diagonal joins, nudged
+       vias -- moved by up to 0.5 um. It rounded via SIZE and DRILL the same
+       way, the same class of bug as the #362 track-width one (round(w,3) turns
+       a 0.0762 fab-floor width into 0.076).
+    2. `pcbnew.FromMM` TRUNCATES rather than rounds: 66.1 * 1e6 is
+       66099999.99999999 in binary, so FromMM(66.1) == 66099999 -- one nm short.
+       The CLI writes "66.1" as text and KiCad parses it back to 66100000, so
+       the two fronts stored genuinely different integers for the same point.
+
+    Rounding the scaled value fixes both, and nm is the board's real resolution,
+    so nothing is lost.
+    """
+    return int(round(float(mm) * IU_PER_MM))
 
 # KiCad 10 removed numeric net IDs from the file format.
 # Files with version >= this threshold use name-only nets: (net "name") instead of (net 29 "name").

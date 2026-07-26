@@ -441,6 +441,18 @@ def route_planes(
         print(f"Loading PCB from {input_file}...")
         pcb_data = parse_kicad_pcb(input_file)
 
+    # #493 item 3: snapshot the board's ORIGINAL copper IN MEMORY, now, before
+    # anything mutates pcb_data. The rip-blocker casualty restore below needs
+    # "what this net looked like before we touched it", and used to re-read
+    # `input_file` for it. That is wrong for the GUI: it passes the live board's
+    # path, whose ON-DISK content is whatever was last saved -- for a plan run,
+    # the untouched input board. The restore therefore found no original copper,
+    # skipped the restore, and KEPT the new repair copper the CLI drops, so the
+    # two fronts shipped different boards from byte-identical inputs and kwargs
+    # (nano_eeprom_prog: CLI +0 segments, GUI +30, both grading clean).
+    _orig_segments = list(pcb_data.segments or [])
+    _orig_vias = list(pcb_data.vias or [])
+
     # Route trace (#482): plane repair adds join tracks/vias and rips blockers
     # OUTSIDE the copper choke points, so record it by snapshot-diffing pcb_data
     # at each phase. Local (not attached) so the internal reconnect batch_route
@@ -1060,11 +1072,12 @@ def route_planes(
                         _still_open.append(_cid)
             if _still_open:
                 try:
-                    _orig = parse_kicad_pcb(input_file)
+                    # In-memory snapshot, NOT parse_kicad_pcb(input_file): the
+                    # GUI's input_file is stale on disk (#493 item 3).
                     for _cid in list(_still_open):
-                        _osegs = [s for s in _orig.segments
+                        _osegs = [s for s in _orig_segments
                                   if s.net_id == _cid]
-                        _ovias = [v for v in _orig.vias if v.net_id == _cid]
+                        _ovias = [v for v in _orig_vias if v.net_id == _cid]
                         if not _osegs and not _ovias:
                             continue  # nothing to restore
                         _nm = pcb_data.nets[_cid].name \

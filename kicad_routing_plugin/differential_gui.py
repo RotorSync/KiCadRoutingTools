@@ -1171,7 +1171,7 @@ class DifferentialTab(wx.Panel):
     def _apply_results_to_board(self, results_data):
         """Apply routing results directly to the open pcbnew board."""
         import pcbnew
-        from kicad_parser import POSITION_DECIMALS
+        from kicad_parser import POSITION_DECIMALS, mm_to_iu
         from .swig_gui import _build_layer_mappings
         from .board_swaps import apply_swaps_to_board
 
@@ -1224,14 +1224,14 @@ class DifferentialTab(wx.Panel):
             for seg in result.get('new_segments', []):
                 track = pcbnew.PCB_TRACK(board)
                 track.SetStart(pcbnew.VECTOR2I(
-                    pcbnew.FromMM(seg.start_x),
-                    pcbnew.FromMM(seg.start_y)
+                    mm_to_iu(seg.start_x),
+                    mm_to_iu(seg.start_y)
                 ))
                 track.SetEnd(pcbnew.VECTOR2I(
-                    pcbnew.FromMM(seg.end_x),
-                    pcbnew.FromMM(seg.end_y)
+                    mm_to_iu(seg.end_x),
+                    mm_to_iu(seg.end_y)
                 ))
-                track.SetWidth(pcbnew.FromMM(seg.width))
+                track.SetWidth(mm_to_iu(seg.width))
                 track.SetLayer(get_layer_id(seg.layer))
                 track.SetNetCode(seg.net_id)
                 board.Add(track)
@@ -1316,11 +1316,11 @@ class DifferentialTab(wx.Panel):
         import pcbnew
         pcb_via = pcbnew.PCB_VIA(board)
         pcb_via.SetPosition(pcbnew.VECTOR2I(
-            pcbnew.FromMM(via.x),
-            pcbnew.FromMM(via.y)
+            mm_to_iu(via.x),
+            mm_to_iu(via.y)
         ))
-        pcb_via.SetWidth(pcbnew.FromMM(via.size))
-        pcb_via.SetDrill(pcbnew.FromMM(via.drill))
+        pcb_via.SetWidth(mm_to_iu(via.size))
+        pcb_via.SetDrill(mm_to_iu(via.drill))
         pcb_via.SetNetCode(via.net_id)
         if hasattr(via, 'layers') and len(via.layers) >= 2:
             top_layer = get_layer_id(via.layers[0])

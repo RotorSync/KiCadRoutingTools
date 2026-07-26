@@ -15,6 +15,7 @@ This module deliberately avoids wx so it can be used headless.
 """
 
 from routing_utils import pos_key
+from kicad_parser import mm_to_iu
 
 
 def _to_mm_key(pcbnew, point):
@@ -134,12 +135,10 @@ def _apply_segment_layer_mods(pcbnew, board, segment_mods):
         if seg is not None:
             track = pcbnew.PCB_TRACK(board)
             track.SetStart(pcbnew.VECTOR2I(
-                pcbnew.FromMM(round(seg.start_x, 4)),
-                pcbnew.FromMM(round(seg.start_y, 4))))
+                mm_to_iu(seg.start_x), mm_to_iu(seg.start_y)))
             track.SetEnd(pcbnew.VECTOR2I(
-                pcbnew.FromMM(round(seg.end_x, 4)),
-                pcbnew.FromMM(round(seg.end_y, 4))))
-            track.SetWidth(pcbnew.FromMM(round(seg.width, 4)))
+                mm_to_iu(seg.end_x), mm_to_iu(seg.end_y)))
+            track.SetWidth(mm_to_iu(seg.width))
             track.SetLayer(board.GetLayerID(seg.layer))
             track.SetNetCode(mod.get('net_id', seg.net_id))
             board.Add(track)

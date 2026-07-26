@@ -15,6 +15,7 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 import routing_defaults as defaults
+from kicad_parser import mm_to_iu
 from .fanout_gui import NetSelectionPanel
 from .gui_utils import StdoutRedirector
 
@@ -1452,11 +1453,18 @@ class PlanesTab(wx.Panel):
                 return
             cfg_src = getattr(self, '_plane_drc_config', {}) or {}
             result = getattr(self, '_operation_result', {}) or {}
+            # The PLANE nets only -- exactly the `net_names` the CLI hands
+            # oracle_reconnect (route_disconnected_planes.main). #493: this used
+            # to append cfg_src['power_nets'] as well, but power_nets is a track
+            # WIDTH assignment for the repair router, not a set of nets to
+            # reconnect. Feeding them to the oracle made the GUI hunt "missing
+            # links" on nets the CLI never examines: on nano_eeprom_prog it
+            # reported 4 missing links on +5V, failed to clear them across all 3
+            # rounds, and routed 11 of them anyway -- 30 segments of +5V copper
+            # the CLI board does not have, under an otherwise green grade.
             nets = []
             for a in (cfg_src.get('assignments') or []):
                 nets.extend(a[0])
-            for n in (cfg_src.get('power_nets') or []):
-                nets.append(n)
             if not nets:
                 return
             from routing_config import GridRouteConfig
@@ -1527,22 +1535,19 @@ class PlanesTab(wx.Panel):
             for s in orc.get('new_segments') or []:
                 track = pcbnew.PCB_TRACK(board)
                 track.SetStart(pcbnew.VECTOR2I(
-                    pcbnew.FromMM(round(s.start_x, 4)),
-                    pcbnew.FromMM(round(s.start_y, 4))))
+                    mm_to_iu(s.start_x), mm_to_iu(s.start_y)))
                 track.SetEnd(pcbnew.VECTOR2I(
-                    pcbnew.FromMM(round(s.end_x, 4)),
-                    pcbnew.FromMM(round(s.end_y, 4))))
-                track.SetWidth(pcbnew.FromMM(round(s.width, 4)))
+                    mm_to_iu(s.end_x), mm_to_iu(s.end_y)))
+                track.SetWidth(mm_to_iu(s.width))
                 track.SetLayer(board.GetLayerID(s.layer))
                 track.SetNetCode(s.net_id)
                 board.Add(track)
             for v in orc.get('new_vias') or []:
                 via = pcbnew.PCB_VIA(board)
                 via.SetPosition(pcbnew.VECTOR2I(
-                    pcbnew.FromMM(round(v.x, 4)),
-                    pcbnew.FromMM(round(v.y, 4))))
-                via.SetDrill(pcbnew.FromMM(round(v.drill, 4)))
-                via.SetWidth(pcbnew.FromMM(round(v.size, 4)))
+                    mm_to_iu(v.x), mm_to_iu(v.y)))
+                via.SetDrill(mm_to_iu(v.drill))
+                via.SetWidth(mm_to_iu(v.size))
                 via.SetNetCode(v.net_id)
                 lys = v.layers or ['F.Cu', 'B.Cu']
                 via.SetLayerPair(board.GetLayerID(lys[0]),
@@ -1653,11 +1658,11 @@ class PlanesTab(wx.Panel):
             for via_data in self._new_vias:
                 via = pcbnew.PCB_VIA(board)
                 via.SetPosition(pcbnew.VECTOR2I(
-                    pcbnew.FromMM(via_data['x']),
-                    pcbnew.FromMM(via_data['y'])
+                    mm_to_iu(via_data['x']),
+                    mm_to_iu(via_data['y'])
                 ))
-                via.SetDrill(pcbnew.FromMM(via_data['drill']))
-                via.SetWidth(pcbnew.FromMM(via_data['size']))
+                via.SetDrill(mm_to_iu(via_data['drill']))
+                via.SetWidth(mm_to_iu(via_data['size']))
                 via.SetNetCode(via_data['net_id'])
                 # Set via layers
                 layers = via_data.get('layers', ['F.Cu', 'B.Cu'])
@@ -1671,18 +1676,18 @@ class PlanesTab(wx.Panel):
         tracks_added = 0
         if hasattr(self, '_new_segments') and self._new_segments:
             for seg_data in self._new_segments:
-                track = pcbnew.PCB_TRACK(board)
                 start = seg_data['start']
                 end = seg_data['end']
+                track = pcbnew.PCB_TRACK(board)
                 track.SetStart(pcbnew.VECTOR2I(
-                    pcbnew.FromMM(start[0]),
-                    pcbnew.FromMM(start[1])
+                    mm_to_iu(start[0]),
+                    mm_to_iu(start[1])
                 ))
                 track.SetEnd(pcbnew.VECTOR2I(
-                    pcbnew.FromMM(end[0]),
-                    pcbnew.FromMM(end[1])
+                    mm_to_iu(end[0]),
+                    mm_to_iu(end[1])
                 ))
-                track.SetWidth(pcbnew.FromMM(seg_data['width']))
+                track.SetWidth(mm_to_iu(seg_data['width']))
                 track.SetLayer(get_layer_id(seg_data['layer']))
                 track.SetNetCode(seg_data['net_id'])
                 board.Add(track)
@@ -1755,7 +1760,7 @@ class PlanesTab(wx.Panel):
                         outline = zone.Outline()
                         outline.NewOutline()
                         for x, y in zone_data['polygon_points']:
-                            outline.Append(pcbnew.FromMM(x), pcbnew.FromMM(y))
+                            outline.Append(mm_to_iu(x), mm_to_iu(y))
                         try:
                             zone.HatchBorder()
                         except Exception:
@@ -1794,7 +1799,7 @@ class PlanesTab(wx.Panel):
                 outline = zone.Outline()
                 outline.NewOutline()
                 for x, y in zone_data['polygon_points']:
-                    outline.Append(pcbnew.FromMM(x), pcbnew.FromMM(y))
+                    outline.Append(mm_to_iu(x), mm_to_iu(y))
 
                 # Fill priority: overlapping zones MUST differ, or KiCad has no
                 # defined winner for the contested area and tie-breaks on KIID
@@ -1811,8 +1816,8 @@ class PlanesTab(wx.Panel):
                         _setter(_zprio)
 
                 # Set zone properties
-                zone.SetLocalClearance(pcbnew.FromMM(zone_data.get('clearance', 0.2)))
-                zone.SetMinThickness(pcbnew.FromMM(zone_data.get('min_thickness', 0.1)))
+                zone.SetLocalClearance(mm_to_iu(zone_data.get('clearance', 0.2)))
+                zone.SetMinThickness(mm_to_iu(zone_data.get('min_thickness', 0.1)))
                 zone.SetPadConnection(pcbnew.ZONE_CONNECTION_FULL)  # Direct connect
                 # Hatch the outline so the zone is visible immediately;
                 # the actual copper fill is computed below via ZONE_FILLER.
@@ -1974,11 +1979,11 @@ class PlanesTab(wx.Panel):
             added = 0
             for s in delta.connectors:
                 track = pcbnew.PCB_TRACK(board)
-                track.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(s.start_x),
-                                               pcbnew.FromMM(s.start_y)))
-                track.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(s.end_x),
-                                             pcbnew.FromMM(s.end_y)))
-                track.SetWidth(pcbnew.FromMM(s.width))
+                track.SetStart(pcbnew.VECTOR2I(mm_to_iu(s.start_x),
+                                               mm_to_iu(s.start_y)))
+                track.SetEnd(pcbnew.VECTOR2I(mm_to_iu(s.end_x),
+                                             mm_to_iu(s.end_y)))
+                track.SetWidth(mm_to_iu(s.width))
                 track.SetLayer(get_layer_id(s.layer))
                 track.SetNetCode(s.net_id)
                 board.Add(track)

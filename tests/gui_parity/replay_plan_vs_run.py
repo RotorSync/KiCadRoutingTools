@@ -43,11 +43,12 @@ Comparison is at three levels, finals AND per step:
                 comparing a fresh grade to a stale one manufactures deltas).
   2. COPPER  -- segments and vias as canonical UUID-independent MULTISETS
                 (net name, layer, unordered endpoints, width / net, x, y, size,
-                drill, span). Exact by default: .kicad_pcb outputs carry
-                per-run random UUIDs so byte-diffing is meaningless, but the
-                geometry itself should be reproducible. Unmatched items are
-                additionally near-matched within --tol to separate sub-micron
-                quantization from genuinely different routing.
+                drill, span). EXACT to the nanometre by default: .kicad_pcb
+                outputs carry per-run random UUIDs so byte-diffing is
+                meaningless, but the geometry itself is reproducible and the two
+                fronts are expected to agree exactly. Anything left over is also
+                near-matched within --tol, to separate a sub-micron
+                representational difference from genuinely different routing.
   3. STATE   -- zones (net/layer/priority/outline) and footprint poses
                 (optimize_caps moves parts; the #362 position-sync class).
 
@@ -87,13 +88,11 @@ Usage:
     --tol MM            near-match radius for classifying unmatched copper
                         (default 0.001 = 1 um). Never affects the verdict.
     --dp N              coordinate rounding decimals for the canonical multisets
-                        (default 5 = 10 nm). pcbnew stores integer nanometres
-                        and the CLI text writer emits decimal mm, so the same
-                        point round-trips as 66.1 on one side and 66.099999 on
-                        the other -- a 1 nm representational artifact, four
-                        orders of magnitude below the routing grid. dp=5 is the
-                        finest resolution at which the two representations
-                        agree; pass --dp 6 for a nm-strict view.
+                        (default 6 = 1 nm, the board's own resolution, i.e. an
+                        exact comparison). Both fronts now emit copper through
+                        kicad_parser.mm_to_iu, so GUI and CLI geometry is
+                        bit-identical and no tolerance is needed; loosen it only
+                        to characterise a divergence you are already chasing.
     --timeout SEC       hard cap on the replay (default 7200)
     --json OUT          write the full result dict as JSON
     --verbose           let engine output through instead of tee-ing it to
@@ -561,14 +560,14 @@ def grade_board(board, clearance, baseline):
 
 # ------------------------------------------------------------- copper compare
 
-def canon(path, dp=5):
+def canon(path, dp=6):
     """UUID-independent canonical multisets of a board's routed state.
 
     Segments key on (net NAME, layer, unordered endpoints, width) and vias on
     (net, x, y, size, drill, span) -- never on UUID, which is random per run.
     Counters (not sets) so a duplicated segment is a difference, not a no-op.
-    `dp` rounds coordinates past the pcbnew-int-nm vs text-decimal round-trip
-    (see --dp in the module docstring).
+    `dp` defaults to 6 (1 nm = the board's own resolution), i.e. an EXACT
+    comparison -- see --dp in the module docstring.
     """
     from kicad_parser import parse_kicad_pcb
     pcb = parse_kicad_pcb(path)
@@ -638,7 +637,7 @@ def _near_match(gui_only, cli_only, tol, kind):
     return paired
 
 
-def compare_copper(gui_path, cli_path, dp=5, tol=0.001):
+def compare_copper(gui_path, cli_path, dp=6, tol=0.001):
     g, c = canon(gui_path, dp), canon(cli_path, dp)
     out = {}
     for kind in ('segments', 'vias', 'zones', 'footprints'):
@@ -653,12 +652,11 @@ def compare_copper(gui_path, cli_path, dp=5, tol=0.001):
         entry['identical'] = entry['gui_only'] == 0 and entry['cli_only'] == 0
         entry['equivalent'] = entry['identical']
         if kind in ('segments', 'vias') and not entry['identical']:
-            # Everything the GUI applies goes through pcbnew.FromMM(round(v,
-            # POSITION_DECIMALS=3)), so GUI copper is snapped to a 1 um grid
-            # while the CLI writer keeps full precision -- any point not already
-            # on a 1 um boundary (diagonal joins, nudged vias) lands up to ~0.5 um
-            # apart on the two sides. Pairing the leftovers within --tol separates
-            # that representational class from genuinely different routing.
+            # Since #493 both fronts emit copper through kicad_parser.mm_to_iu,
+            # so identical routing lands on identical integer nanometres and the
+            # exact multisets above should already agree. Pairing whatever is
+            # left within --tol still separates a sub-micron representational
+            # difference (were one to reappear) from genuinely different routing.
             entry['near_matched'] = _near_match(list(gui_only.elements()),
                                                 list(cli_only.elements()), tol, kind)
             entry['unmatched_gui'] = entry['gui_only'] - entry['near_matched']
@@ -820,7 +818,7 @@ def report(res, out=sys.stdout):
               f"{first['segments'].get('unmatched_gui')} GUI-only / "
               f"{first['segments'].get('unmatched_cli')} CLI-only beyond tol")
         elif any(r['compared'] for r in res['per_step']):
-            p("  >> no per-step divergence beyond the 1 um apply rounding")
+            p("  >> no per-step divergence")
 
     p("")
     p(f"VERDICT: {res['verdict']}")
@@ -927,8 +925,8 @@ def run_one(rundir, args):
     elif grade_parity and cu['equivalent']:
         res['verdict'] = (
             f"EQUIVALENT -- same grade, and every differing item pairs within "
-            f"{args.tol} mm (the GUI's POSITION_DECIMALS=3 apply rounding); "
-            f"no genuinely different copper")
+            f"{args.tol} mm (a sub-micron representational difference, not "
+            f"different routing)")
         res['exit'] = 0
     elif grade_parity:
         res['verdict'] = (
@@ -1034,7 +1032,7 @@ def main():
     ap.add_argument('--max-steps', type=int)
     ap.add_argument('--gui-board')
     ap.add_argument('--tol', type=float, default=0.001)
-    ap.add_argument('--dp', type=int, default=5)
+    ap.add_argument('--dp', type=int, default=6)
     ap.add_argument('--timeout', type=float, default=7200)
     ap.add_argument('--json')
     ap.add_argument('--verbose', action='store_true')

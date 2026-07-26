@@ -19,6 +19,7 @@ if ROOT_DIR not in sys.path:
 
 import routing_defaults as defaults
 from kicad_parser import POSITION_DECIMALS
+from kicad_parser import mm_to_iu
 
 def _via_width(via):
     """KiCad 9/10 padstack vias can refuse layerless GetWidth() ('result
@@ -3250,17 +3251,14 @@ class RoutingDialog(wx.Dialog):
         for result in results_data.get('results', []):
             for seg in result.get('new_segments', []):
                 track = pcbnew.PCB_TRACK(board)
-                # Convert mm to internal units (nanometers)
-                # Round to POSITION_DECIMALS to avoid floating-point precision issues
+                # mm -> internal units. mm_to_iu, never FromMM(round(...)):
+                # rounding to 1 um moved off-grid copper and FromMM truncates
+                # (#493 item 5).
                 track.SetStart(pcbnew.VECTOR2I(
-                    pcbnew.FromMM(round(seg.start_x, POSITION_DECIMALS)),
-                    pcbnew.FromMM(round(seg.start_y, POSITION_DECIMALS))
-                ))
+                    mm_to_iu(seg.start_x), mm_to_iu(seg.start_y)))
                 track.SetEnd(pcbnew.VECTOR2I(
-                    pcbnew.FromMM(round(seg.end_x, POSITION_DECIMALS)),
-                    pcbnew.FromMM(round(seg.end_y, POSITION_DECIMALS))
-                ))
-                track.SetWidth(pcbnew.FromMM(seg.width))  # not position-rounded (#362):
+                    mm_to_iu(seg.end_x), mm_to_iu(seg.end_y)))
+                track.SetWidth(mm_to_iu(seg.width))  # never position-rounded (#362):
                 # round(w,3) drops a 0.0762 fab-floor width to 0.076
                 track.SetLayer(get_layer_id(seg.layer))
                 track.SetNetCode(seg.net_id)
@@ -3284,14 +3282,10 @@ class RoutingDialog(wx.Dialog):
         for seg in results_data.get('all_swap_segments', []):
             track = pcbnew.PCB_TRACK(board)
             track.SetStart(pcbnew.VECTOR2I(
-                pcbnew.FromMM(round(seg.start_x, POSITION_DECIMALS)),
-                pcbnew.FromMM(round(seg.start_y, POSITION_DECIMALS))
-            ))
+                mm_to_iu(seg.start_x), mm_to_iu(seg.start_y)))
             track.SetEnd(pcbnew.VECTOR2I(
-                pcbnew.FromMM(round(seg.end_x, POSITION_DECIMALS)),
-                pcbnew.FromMM(round(seg.end_y, POSITION_DECIMALS))
-            ))
-            track.SetWidth(pcbnew.FromMM(seg.width))  # not position-rounded (#362)
+                mm_to_iu(seg.end_x), mm_to_iu(seg.end_y)))
+            track.SetWidth(mm_to_iu(seg.width))  # never position-rounded (#362)
             track.SetLayer(get_layer_id(seg.layer))
             track.SetNetCode(seg.net_id)
             board.Add(track)
@@ -3438,13 +3432,11 @@ class RoutingDialog(wx.Dialog):
         """Add a via to the pcbnew board."""
         import pcbnew
         pcb_via = pcbnew.PCB_VIA(board)
-        # Round to POSITION_DECIMALS to avoid floating-point precision issues
-        pcb_via.SetPosition(pcbnew.VECTOR2I(
-            pcbnew.FromMM(round(via.x, POSITION_DECIMALS)),
-            pcbnew.FromMM(round(via.y, POSITION_DECIMALS))
-        ))
-        pcb_via.SetWidth(pcbnew.FromMM(round(via.size, POSITION_DECIMALS)))
-        pcb_via.SetDrill(pcbnew.FromMM(round(via.drill, POSITION_DECIMALS)))
+        # #493 item 5: size/drill were position-rounded too, the same class as
+        # the #362 track-width bug (round(0.0762,3) -> 0.076).
+        pcb_via.SetPosition(pcbnew.VECTOR2I(mm_to_iu(via.x), mm_to_iu(via.y)))
+        pcb_via.SetWidth(mm_to_iu(via.size))
+        pcb_via.SetDrill(mm_to_iu(via.drill))
         pcb_via.SetNetCode(via.net_id)
         if hasattr(via, 'layers') and len(via.layers) >= 2:
             top_layer = get_layer_id(via.layers[0])

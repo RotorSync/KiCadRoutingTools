@@ -60,6 +60,31 @@ BENIGN_KEYS = {
 }
 
 
+def _inert_net_clearances(diff, cli, gui):
+    """True when the net_clearances difference cannot change routing.
+
+    The GUI always builds an explicit per-net clearance map while the CLI leaves
+    it None/{} on an all-Default board. When every entry equals the call's own
+    base clearance the map is INERT -- each net prices at the base either way --
+    so reporting it just buries the real divergences (it masked nothing here,
+    but it was the only row left after the #493 item-3 fix and would train the
+    eye to ignore this tool). A map with any DIFFERING value is a real
+    divergence and is still reported.
+    """
+    key, cli_val, gui_val = diff
+    if key != 'net_clearances':
+        return False
+    base = gui.get('clearance', cli.get('clearance'))
+    for side in (cli_val, gui_val):
+        if side in (None, '<absent>', {}):
+            continue
+        if not isinstance(side, dict):
+            return False
+        if any(v != base for v in side.values()):
+            return False
+    return True
+
+
 def _load(path):
     """engine-name -> list of kwargs dicts, in call order."""
     from collections import defaultdict
@@ -94,6 +119,7 @@ def main(argv):
             keys = (set(c) | set(g)) - BENIGN_KEYS
             diffs = [(k, c.get(k, '<absent>'), g.get(k, '<absent>'))
                      for k in sorted(keys) if c.get(k) != g.get(k)]
+            diffs = [d for d in diffs if not _inert_net_clearances(d, c, g)]
             if diffs:
                 total_divergent += 1
                 print(f"  {eng}#{i}: {len(diffs)} non-benign diff(s)")

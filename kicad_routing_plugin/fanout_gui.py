@@ -15,6 +15,7 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 import routing_defaults as defaults
+from kicad_parser import mm_to_iu
 
 
 def _get_net_classes_from_board():
@@ -1448,14 +1449,14 @@ class FanoutTab(wx.Panel):
         for track_dict in tracks:
             track = pcbnew.PCB_TRACK(board)
             track.SetStart(pcbnew.VECTOR2I(
-                pcbnew.FromMM(track_dict['start'][0]),
-                pcbnew.FromMM(track_dict['start'][1])
+                mm_to_iu(track_dict['start'][0]),
+                mm_to_iu(track_dict['start'][1])
             ))
             track.SetEnd(pcbnew.VECTOR2I(
-                pcbnew.FromMM(track_dict['end'][0]),
-                pcbnew.FromMM(track_dict['end'][1])
+                mm_to_iu(track_dict['end'][0]),
+                mm_to_iu(track_dict['end'][1])
             ))
-            track.SetWidth(pcbnew.FromMM(track_dict['width']))
+            track.SetWidth(mm_to_iu(track_dict['width']))
             track.SetLayer(get_layer_id(track_dict['layer']))
             track.SetNetCode(track_dict['net_id'])
             board.Add(track)
@@ -1465,11 +1466,11 @@ class FanoutTab(wx.Panel):
         for via_dict in vias:
             via = pcbnew.PCB_VIA(board)
             via.SetPosition(pcbnew.VECTOR2I(
-                pcbnew.FromMM(via_dict['x']),
-                pcbnew.FromMM(via_dict['y'])
+                mm_to_iu(via_dict['x']),
+                mm_to_iu(via_dict['y'])
             ))
-            via.SetWidth(pcbnew.FromMM(via_dict['size']))
-            via.SetDrill(pcbnew.FromMM(via_dict['drill']))
+            via.SetWidth(mm_to_iu(via_dict['size']))
+            via.SetDrill(mm_to_iu(via_dict['drill']))
             via.SetNetCode(via_dict['net_id'])
             if 'layers' in via_dict and len(via_dict['layers']) >= 2:
                 via.SetLayerPair(
@@ -1584,7 +1585,7 @@ class FanoutTab(wx.Panel):
                     continue
                 fp.SetOrientationDegrees(p['new_rotation'])
                 fp.SetPosition(pcbnew.VECTOR2I(
-                    pcbnew.FromMM(p['new_x']), pcbnew.FromMM(p['new_y'])))
+                    mm_to_iu(p['new_x']), mm_to_iu(p['new_y'])))
 
             # Via-nudge with reconnect (#313): the shared engine also moves a
             # boxed-in cap's offending fanout via off the pad and adds connector
@@ -1615,9 +1616,9 @@ class FanoutTab(wx.Panel):
                         break
                 nv = pcbnew.PCB_VIA(board)
                 nv.SetPosition(pcbnew.VECTOR2I(
-                    pcbnew.FromMM(vd['x']), pcbnew.FromMM(vd['y'])))
-                nv.SetWidth(pcbnew.FromMM(vd['size']))
-                nv.SetDrill(pcbnew.FromMM(vd['drill']))
+                    mm_to_iu(vd['x']), mm_to_iu(vd['y'])))
+                nv.SetWidth(mm_to_iu(vd['size']))
+                nv.SetDrill(mm_to_iu(vd['drill']))
                 nv.SetNetCode(vd['net_id'])
                 if len(vd.get('layers', [])) >= 2:
                     nv.SetLayerPair(_layer_id(vd['layers'][0]),
@@ -1627,10 +1628,10 @@ class FanoutTab(wx.Panel):
             for nsd in (result.get('new_segments', []) or []):
                 nt = pcbnew.PCB_TRACK(board)
                 nt.SetStart(pcbnew.VECTOR2I(
-                    pcbnew.FromMM(nsd['start'][0]), pcbnew.FromMM(nsd['start'][1])))
+                    mm_to_iu(nsd['start'][0]), mm_to_iu(nsd['start'][1])))
                 nt.SetEnd(pcbnew.VECTOR2I(
-                    pcbnew.FromMM(nsd['end'][0]), pcbnew.FromMM(nsd['end'][1])))
-                nt.SetWidth(pcbnew.FromMM(nsd['width']))
+                    mm_to_iu(nsd['end'][0]), mm_to_iu(nsd['end'][1])))
+                nt.SetWidth(mm_to_iu(nsd['width']))
                 nt.SetLayer(_layer_id(nsd['layer']))
                 nt.SetNetCode(nsd['net_id'])
                 board.Add(nt)
