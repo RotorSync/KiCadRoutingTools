@@ -112,6 +112,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 disable_bga_zones: Optional[List[str]] = None,
                 track_width: float = defaults.TRACK_WIDTH,
                 impedance: Optional[float] = None,
+                coplanar_gap: float = 0.0,
                 clearance: float = defaults.CLEARANCE,
                 via_size: float = defaults.VIA_SIZE,
                 via_drill: float = defaults.VIA_DRILL,
@@ -363,11 +364,13 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 pcb_data, layers, impedance,
                 spacing=diff_pair_gap, is_differential=True,
                 fallback_width=track_width,
-                min_width=track_width
+                min_width=track_width,
+                coplanar_gap=coplanar_gap
             )
             print_impedance_routing_plan(pcb_data, layers, impedance,
                                         spacing=diff_pair_gap, is_differential=True,
-                                        min_width=track_width)
+                                        min_width=track_width,
+                                        coplanar_gap=coplanar_gap)
 
     # Auto-detect BGA exclusion zones if not specified
     _sel_ids = [nid for _nm, nid in resolve_net_ids(pcb_data, net_names)] \
@@ -1471,6 +1474,18 @@ Examples:
                              "width can only widen it), not ignored.")
     parser.add_argument("--impedance", type=float, default=None,
                         help="Target differential impedance in ohms (e.g., 100). Calculates track width per layer from board stackup using --diff-pair-gap as spacing.")
+    parser.add_argument("--coplanar-gap", type=float, default=0.0,
+                        help="Declare that the pairs in this call run through a ground "
+                             "pour on their OWN layer, this far (mm) from each trace's "
+                             "OUTER edge. Outer layers then use the coplanar-waveguide-"
+                             "over-ground model instead of microstrip, giving a NARROWER "
+                             "trace for the same target ohms. Applies to EVERY pair in "
+                             "the call (unlike route.py there is no --coplanar-nets: the "
+                             "diff engine bakes one width per layer into the obstacle "
+                             "map). Split interfaces into separate calls to mix. The pour "
+                             "does not exist yet, so this is a DECLARATION: pour with a "
+                             "matching 'route_planes --zone-clearance' and verify with "
+                             "'check_impedance.py --coplanar-gap'. Requires --impedance.")
     parser.add_argument("--clearance", type=float, default=None,
                         help="Copper clearance CEILING in mm. When given, every net class "
                              "(Default included) is capped at min(class, this). When OMITTED, "
@@ -1848,6 +1863,7 @@ Examples:
                 layer_costs=args.layer_costs,
                 track_width=args.track_width,
                 impedance=args.impedance,
+                coplanar_gap=args.coplanar_gap,
                 clearance=args.clearance,
                 via_size=args.via_size,
                 via_drill=args.via_drill,

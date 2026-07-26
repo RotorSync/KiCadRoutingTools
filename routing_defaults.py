@@ -62,6 +62,12 @@ RIPPED_ROUTE_AVOIDANCE_COST = 0.1
 
 # Impedance routing
 IMPEDANCE_DEFAULT = 50  # ohms
+# #486: design side gap from a controlled-impedance trace's edge to the
+# same-layer ground pour. 0 = the trace is a plain microstrip (historical
+# behaviour); > 0 declares it a coplanar waveguide over ground, which needs a
+# NARROWER trace for the same target ohms. Must be matched by the plane step's
+# zone clearance -- see route_planes --zone-clearance.
+COPLANAR_GAP = 0.0  # mm (0 = not coplanar)
 
 # Crossing penalty
 CROSSING_PENALTY = 1000.0
@@ -258,6 +264,7 @@ PARAM_RANGES = {
     'stub_proximity_cost': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
     'neckdown_length': {'min': 0.0, 'max': 50.0, 'inc': 0.5, 'digits': 1},
     'neckdown_taper_length': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
+    'coplanar_gap': {'min': 0.0, 'max': 5.0, 'inc': 0.05, 'digits': 3},
     'via_proximity_cost': {'min': 0.0, 'max': 100.0, 'inc': 1.0, 'digits': 1},
     'track_proximity_distance': {'min': 0.0, 'max': 10.0, 'inc': 0.5, 'digits': 1},
     'track_proximity_cost': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},

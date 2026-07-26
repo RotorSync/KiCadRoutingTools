@@ -56,6 +56,8 @@ def get_dialog_settings(dialog):
         # Advanced parameters
         'impedance_check': dialog.impedance_check.GetValue(),
         'impedance_value': dialog.impedance_value.GetValue(),
+        'coplanar_gap': dialog.coplanar_gap.GetValue(),
+        'coplanar_nets': dialog.coplanar_nets_ctrl.GetValue(),
         'max_iterations': dialog.max_iterations.GetValue(),
         'max_probe_iterations': dialog.max_probe_iterations.GetValue(),
         'heuristic_weight': dialog.heuristic_weight.GetValue(),
@@ -315,6 +317,10 @@ def restore_dialog_settings(dialog, settings):
         dialog.impedance_check.SetValue(settings['impedance_check'])
     if 'impedance_value' in settings:
         dialog.impedance_value.SetValue(settings['impedance_value'])
+    if 'coplanar_gap' in settings:
+        dialog.coplanar_gap.SetValue(settings['coplanar_gap'])
+    if 'coplanar_nets' in settings:
+        dialog.coplanar_nets_ctrl.SetValue(settings['coplanar_nets'])
     if 'max_iterations' in settings:
         dialog.max_iterations.SetValue(settings['max_iterations'])
     if 'max_probe_iterations' in settings:

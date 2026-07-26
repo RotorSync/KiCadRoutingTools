@@ -273,6 +273,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 track_width: float = defaults.TRACK_WIDTH,
                 track_width_from_class: bool = False,
                 impedance: Optional[float] = None,
+                coplanar_gap: float = 0.0,
+                coplanar_nets: Optional[List[str]] = None,
                 power_nets: Optional[List[str]] = None,
                 power_nets_widths: Optional[List[float]] = None,
                 power_tap_neckdown: bool = True,
@@ -591,19 +593,51 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Calculate layer-specific widths for impedance-controlled routing
     layer_widths = {}
+    coplanar_layer_widths = {}
+    coplanar_net_ids = set()
     if impedance is not None:
         if not pcb_data.board_info.stackup:
             print("WARNING: No stackup found in PCB file. Using fixed track width.")
         else:
+            # #486: which nets run through a ground pour on their own layer?
+            # An empty coplanar_nets with a gap set means "all of them", so the
+            # base width dict itself is CPW-derived; a net list means only
+            # those get CPW widths and everyone else stays microstrip.
+            _cop_all = bool(coplanar_gap and coplanar_gap > 0 and not coplanar_nets)
+            _cop_some = bool(coplanar_gap and coplanar_gap > 0 and coplanar_nets)
+
             print(f"\nCalculating trace widths for {impedance}Ω single-ended impedance...")
             layer_widths = calculate_layer_widths_for_impedance(
                 pcb_data, layers, impedance,
                 spacing=0.0, is_differential=False,
                 fallback_width=track_width,
-                min_width=track_width
+                min_width=track_width,
+                coplanar_gap=coplanar_gap if _cop_all else 0.0
             )
             print_impedance_routing_plan(pcb_data, layers, impedance, is_differential=False,
-                                        min_width=track_width)
+                                        min_width=track_width,
+                                        coplanar_gap=coplanar_gap if _cop_all else 0.0)
+
+            if _cop_some:
+                coplanar_net_ids = {nid for _nm, nid in
+                                    resolve_net_ids(pcb_data, coplanar_nets)}
+                if not coplanar_net_ids:
+                    print(f"WARNING: --coplanar-nets matched no nets: "
+                          f"{' '.join(coplanar_nets)} (widths stay microstrip)")
+                else:
+                    coplanar_layer_widths = calculate_layer_widths_for_impedance(
+                        pcb_data, layers, impedance,
+                        spacing=0.0, is_differential=False,
+                        fallback_width=track_width,
+                        min_width=track_width,
+                        coplanar_gap=coplanar_gap
+                    )
+                    print(f"\n{len(coplanar_net_ids)} net(s) declared coplanar "
+                          f"(gap {coplanar_gap}mm):")
+                    print_impedance_routing_plan(pcb_data, layers, impedance,
+                                                 is_differential=False,
+                                                 min_width=track_width,
+                                                 coplanar_gap=coplanar_gap)
 
     # Auto-detect BGA exclusion zones if not specified
     _sel_ids = [nid for _nm, nid in resolve_net_ids(pcb_data, net_names)] \
@@ -652,6 +686,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if layer_widths:
         config_kwargs['layer_widths'] = layer_widths
         config_kwargs['impedance_target'] = impedance
+    if coplanar_gap:
+        config_kwargs['coplanar_gap'] = coplanar_gap
+    if coplanar_net_ids and coplanar_layer_widths:
+        config_kwargs['coplanar_net_ids'] = coplanar_net_ids
+        config_kwargs['coplanar_layer_widths'] = coplanar_layer_widths
     if collect_stats:
         config_kwargs['collect_stats'] = collect_stats
     config = GridRouteConfig(**config_kwargs)
@@ -2270,6 +2309,21 @@ For differential pair routing, use route_diff.py:
                              "Ignored if --impedance is specified.")
     parser.add_argument("--impedance", type=float, default=None,
                         help="Target single-ended impedance in ohms (e.g., 50). Calculates track width per layer from board stackup.")
+    parser.add_argument("--coplanar-gap", type=float, default=0.0,
+                        help="Declare that impedance-controlled traces run through a "
+                             "ground pour on their OWN layer, this far (mm, trace edge "
+                             "to pour edge) from it. Outer layers then use the "
+                             "coplanar-waveguide-over-ground model instead of microstrip, "
+                             "which gives a NARROWER trace for the same target ohms. "
+                             "The pour does not exist yet at route time, so this is a "
+                             "DECLARATION: pour the plane layers with a matching "
+                             "'route_planes --zone-clearance', then verify with "
+                             "'check_impedance.py --coplanar-gap'. Requires --impedance.")
+    parser.add_argument("--coplanar-nets", nargs="+", default=None, metavar="PATTERN",
+                        help="Limit --coplanar-gap to these nets (fnmatch patterns). "
+                             "Omitted: every net in this call is treated as coplanar. "
+                             "Given: only matching nets get CPW widths; the rest stay "
+                             "microstrip.")
     parser.add_argument("--clearance", type=float, default=None,
                         help="Copper clearance CEILING in mm. When given, every net class "
                              "(Default included) is capped at min(class, this). When OMITTED, "
@@ -2702,6 +2756,8 @@ For differential pair routing, use route_diff.py:
                 track_width=args.track_width,
                 track_width_from_class=not _tw_explicit,
                 impedance=args.impedance,
+                coplanar_gap=args.coplanar_gap,
+                coplanar_nets=args.coplanar_nets,
                 power_nets=args.power_nets,
                 power_nets_widths=args.power_nets_widths,
                 power_tap_neckdown=not args.no_power_tap_neckdown,

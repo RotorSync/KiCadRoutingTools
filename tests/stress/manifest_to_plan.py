@@ -58,6 +58,7 @@ FLAG_PARAMS = {
     '--turn-cost': 'turn_cost',
     '--diff-pair-gap': 'diff_pair_gap',
     '--impedance': 'impedance',
+    '--coplanar-gap': 'coplanar_gap',
     '--gnd-via-distance': 'gnd_via_distance',
     '--exit-margin': 'exit_margin',
     '--extension': 'extension',
@@ -75,6 +76,9 @@ LIST_FLAGS = {
     # allowlist survives as a list param that claude_plan's alias routes to the
     # diff tab's polarity_swap_nets_text field.
     '--polarity-swap-nets': 'polarity_swap_nets',
+    # #486: route.py's coplanar-waveguide net allowlist (nargs='+' globs).
+    # LIST, not FLAG_PARAMS -- as a scalar flag only the FIRST pattern survived.
+    '--coplanar-nets': 'coplanar_nets',
     '--nets': None,  # handled per action
     '--pairs': None,
     '--plane-layers': None,
@@ -251,7 +255,7 @@ def parse_command(argv):
         step['kind'] = 'bga' if tool == 'bga_fanout.py' else 'qfn'
         step['nets'] = [str(n) for n in nets] or ['*']
     for k in ('--power-nets', '--power-nets-widths', '--layer-costs',
-              '--layers', '--polarity-swap-nets'):
+              '--layers', '--polarity-swap-nets', '--coplanar-nets'):
         if k in lists:
             step['params'][LIST_FLAGS[k]] = lists[k]
     return step

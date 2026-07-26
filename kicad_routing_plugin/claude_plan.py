@@ -229,13 +229,18 @@ _PARAM_CONTROL_ALIASES = {
     'time_matching': 'time_matching_check',
     'keepout': 'keepout_check',
     'guide_corridor': 'guide_corridor_check',
+    # #486: coplanar-waveguide declaration (the gap itself is a same-named
+    # SpinCtrlDouble and needs no alias).
+    'coplanar_nets': 'coplanar_nets_ctrl',
 }
 # _PARAM_SPECIAL: params handled by _apply_special() (composite / inverted /
 # panel-backed controls that a plain SetValue can't fill).
 _PARAM_SPECIAL = {'layers', 'no_bga_zone', 'no_bga_zones', 'power_nets',
                   'power_nets_widths', 'escape_method', 'no_gnd_vias',
                   # #381 D5:
-                  'impedance', 'length_match_groups', 'swappable_nets'}
+                  'impedance', 'length_match_groups', 'swappable_nets',
+                  # #486:
+                  'coplanar_nets'}
 
 # #439: geometry-floor param -> its Basic-tab override checkbox attribute. A plan
 # step that names one of these is the GUI equivalent of the CLI passing that flag,
@@ -385,6 +390,14 @@ def apply_step_params(step, dialog):
             if ctl is None:
                 return False
             ctl.SetValue(_join_nets(value))
+            return True
+        if name == 'coplanar_nets':
+            # #486: list of glob patterns -> the space-separated text control.
+            ctl = getattr(dialog, 'coplanar_nets_ctrl', None)
+            if ctl is None:
+                return False
+            ctl.SetValue(_join_nets(value) if isinstance(value, (list, tuple))
+                         else str(value or ''))
             return True
         if name == 'power_nets_widths' and isinstance(value, (list, tuple)):
             ctl = getattr(dialog, 'power_widths_ctrl', None)
