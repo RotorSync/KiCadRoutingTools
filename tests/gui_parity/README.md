@@ -248,10 +248,19 @@ differs, 2 grade differs, 3 replay failed.
 Note the cost: it runs **both** legs (CLI chain + GUI chain), so budget roughly
 twice a single replay per board.
 
-### First findings (2026-07-25, both legs at HEAD)
+### First findings (2026-07-25, both legs at HEAD) — filed as #493
 
-Neither is root-caused; both are leads this driver produced on its first two
-runs, each localized to a single step.
+Produced on this driver's first two runs. Both boards **grade clean and equal**
+on both sides, so every item is a divergence underneath a green grade.
+
+The headline one is not GUI-specific at all: `matches_net_filter` fnmatches the
+FULL net name, so `--nets '*' '!GND'` **silently fails to exclude `/GND`**.
+eth_tap's step-1 fanout shipped 267 `/GND` + 171 `/3V3` segments (438 of 750)
+from a command that asked to exclude both. The GUI *did* exclude them (by exact
+name, via `claude_plan._plan_plane_nets`), which is why the two legs fan out
+different net sets — i.e. a replayed plan is not a faithful replay of the chain
+it came from. See #493 for the full write-up and the two methodology traps
+(engine drift, nm round-trip) ruled out first.
 
 **nano_eeprom_prog** (set10, 3 steps) — grade parity (0 DRC, fully connected,
 both sides), **vias / zones / footprints identical**, and the route +
