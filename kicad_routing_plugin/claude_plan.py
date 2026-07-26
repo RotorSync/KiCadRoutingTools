@@ -81,6 +81,15 @@ PLAN_RESULT_SCHEMA = (
 )
 
 
+def _join_nets(values):
+    """Space-join net names for a whitespace-separated GUI field, quoting any
+    that contain spaces. KiCad net names may ('/Management Interface/VDDA');
+    unquoted, one such name splits into two on read and every consumer that
+    pairs names with widths/groups mismatches (#493)."""
+    import shlex
+    return " ".join(shlex.quote(str(v)) for v in values)
+
+
 def parse_plan_result(value):
     """Parse the RESULT= JSON plan.
 
@@ -375,7 +384,7 @@ def apply_step_params(step, dialog):
             ctl = getattr(dialog, 'power_nets_ctrl', None)
             if ctl is None:
                 return False
-            ctl.SetValue(' '.join(str(v) for v in value))
+            ctl.SetValue(_join_nets(value))
             return True
         if name == 'power_nets_widths' and isinstance(value, (list, tuple)):
             ctl = getattr(dialog, 'power_widths_ctrl', None)
@@ -438,9 +447,9 @@ def apply_step_params(step, dialog):
             if isinstance(value, str):
                 text = value
             elif value and isinstance(value[0], (list, tuple)):
-                text = ', '.join(' '.join(str(p) for p in g) for g in value)
+                text = ', '.join(_join_nets(g) for g in value)
             else:
-                text = ' '.join(str(p) for p in (value or []))
+                text = _join_nets(value or [])
             ctl.SetValue(text)
             return True
         if name == 'swappable_nets':
@@ -498,7 +507,13 @@ def apply_step_params(step, dialog):
         widths = params.get("power_nets_widths")
         if power:
             if widths and len(widths) == len(power):
-                dialog.power_nets_ctrl.SetValue(" ".join(str(p) for p in power))
+                # Quote names containing spaces: the control is whitespace
+                # separated and KiCad net names may contain spaces
+                # ('/Management Interface/VDDA'). Unquoted, one such net split
+                # into two on read, the power-net/width counts disagreed, and
+                # identify_power_nets raised inside the routing worker -- the
+                # step then reported FINISHED having routed nothing (#493).
+                dialog.power_nets_ctrl.SetValue(_join_nets(power))
                 dialog.power_widths_ctrl.SetValue(" ".join(f"{float(w):g}" for w in widths))
                 notes.append(f"set power_nets={list(power)} widths={list(widths)}")
             else:

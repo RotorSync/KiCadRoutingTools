@@ -1336,7 +1336,10 @@ class DifferentialTab(wx.Panel):
         matching route_diff.py's --polarity-swap-nets semantics.
         """
         text = self.polarity_swap_nets_text.GetValue()
-        patterns = [t for t in text.replace(',', ' ').split() if t]
+        # _split_net_list, not split(): net names may contain spaces (#493).
+        # Commas stay a separator, so quote a name only if it has whitespace.
+        from .swig_gui import _split_net_list
+        patterns = [t for t in _split_net_list(text.replace(',', ' ')) if t]
         return patterns or None
 
     def get_config(self):

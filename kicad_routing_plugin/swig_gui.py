@@ -52,6 +52,34 @@ def _build_layer_mappings():
     return name_to_id, id_to_name
 
 
+def _split_net_list(text):
+    """Split a whitespace-separated net-name field, honouring quotes.
+
+    KiCad net names routinely contain SPACES -- any net declared on a sheet with
+    a space in its name, e.g. '/Management Interface/VDDA'. The power-nets field
+    is whitespace-separated, so a bare split() tore that one net into
+    '/Management' and 'Interface/VDDA': 6 names against 5 widths, and
+    identify_power_nets raises "patterns (6) and widths (5) must have same
+    length". In the GUI that exception killed the routing worker thread after
+    the engine had printed its header; the tab re-enabled its button, so the
+    Claude-tab plan executor recorded the step as FINISHED and moved on. eth_tap
+    step 11 silently routed nothing at all -- 2270 segments of signal routing
+    lost with no error shown (#493 follow-up).
+
+    shlex.split accepts the plain space-separated form unchanged and additionally
+    understands quotes, so a name with spaces survives when written by
+    claude_plan (which now quotes) or typed by a user.
+    """
+    import shlex
+    text = (text or '').strip()
+    if not text:
+        return []
+    try:
+        return shlex.split(text)
+    except ValueError:
+        return text.split()   # unbalanced quotes: fall back, never crash routing
+
+
 def _nm_to_mm(nm):
     """KiCad's integer nanometres -> mm, without the one-ULP multiply error.
 
@@ -1604,7 +1632,7 @@ class RoutingDialog(wx.Dialog):
             # Power nets/widths from the route tab, so plane rip-up re-routes a
             # ripped wide power net at its proper width, not the signal default
             # (matches the CLI passing --power-nets to route_disconnected_planes).
-            power_nets = self.power_nets_ctrl.GetValue().split() or None
+            power_nets = _split_net_list(self.power_nets_ctrl.GetValue()) or None
             try:
                 power_widths = [float(w) for w in self.power_widths_ctrl.GetValue().split()] or None
             except ValueError:
@@ -1891,7 +1919,8 @@ class RoutingDialog(wx.Dialog):
         # Split by comma to get separate groups, each group has space-separated patterns
         groups = []
         for group_text in text.split(','):
-            patterns = group_text.strip().split()
+            # _split_net_list, not split(): net names may contain spaces (#493)
+            patterns = _split_net_list(group_text)
             if patterns:
                 groups.append(patterns)
         return groups if groups else None
@@ -2661,7 +2690,7 @@ class RoutingDialog(wx.Dialog):
         power_nets_text = self.power_nets_ctrl.GetValue().strip()
         power_widths_text = self.power_widths_ctrl.GetValue().strip()
         if power_nets_text:
-            config['power_nets'] = power_nets_text.split()
+            config['power_nets'] = _split_net_list(power_nets_text)
             if power_widths_text:
                 try:
                     config['power_nets_widths'] = [float(w) for w in power_widths_text.split()]
@@ -2678,7 +2707,7 @@ class RoutingDialog(wx.Dialog):
         if no_bga_text.upper() == 'ALL':
             config['no_bga_zones'] = []  # Empty list means disable all
         elif no_bga_text:
-            config['no_bga_zones'] = no_bga_text.split()
+            config['no_bga_zones'] = _split_net_list(no_bga_text)
         else:
             config['no_bga_zones'] = None  # None means use BGA zones
 
@@ -2690,7 +2719,7 @@ class RoutingDialog(wx.Dialog):
         elif rip_existing_text.upper() == 'ALL':
             config['rip_existing_nets'] = ['*']
         else:
-            config['rip_existing_nets'] = rip_existing_text.split()
+            config['rip_existing_nets'] = _split_net_list(rip_existing_text)
 
         # Parse layer costs
         config['layer_costs'] = self._selected_layer_costs()
