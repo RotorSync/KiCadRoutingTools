@@ -203,7 +203,22 @@ def parse_command(argv):
     if action in ('route',):
         step['nets'] = [str(n) for n in nets] or ['*']
     elif action == 'route_diff':
-        step['pairs'] = [str(n) for n in lists.get('--pairs', nets)]
+        # route_diff.py takes its pair patterns POSITIONALLY, after the input and
+        # output boards -- there is no --pairs flag on the real CLI:
+        #     route_diff.py in.kicad_pcb out.kicad_pcb '*ETH0_A_*' '*ETH0_B_*' ...
+        # Those were collected into `positional` and then dropped on the floor,
+        # so every recorded diff step converted to `pairs: []`. The GUI reads an
+        # empty pairs list as "route every auto-detected pair", so a replayed
+        # plan routed pairs the CLI never touched (eth_tap: +22 segments on
+        # VCP_P/N and C2_P/N, two pairs absent from the recorded chain, which
+        # then cascaded through every later step). 204 of the corpus's 206
+        # recorded diff steps were affected.
+        # Empty still legitimately means "all pairs" -- that is what the CLI does
+        # when given no patterns -- so the ambiguity resolves itself once the
+        # patterns actually survive.
+        pair_globs = [p for p in positional if not p.endswith('.kicad_pcb')]
+        step['pairs'] = [str(n) for n in
+                         (lists.get('--pairs') or nets or pair_globs)]
     elif action in ('route_planes', 'repair_planes'):
         layers = [str(l) for l in lists.get('--plane-layers', [])]
         net_names = [str(n) for n in nets]

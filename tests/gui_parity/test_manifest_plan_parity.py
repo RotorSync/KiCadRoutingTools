@@ -104,6 +104,33 @@ def _plane_layers(argv):
     return out
 
 
+def _positional_pairs(argv):
+    """The pair globs a route_diff command passes POSITIONALLY.
+
+    Derived independently of manifest_to_plan (that is the point of this gate):
+    take the tokens after the tool name up to the FIRST option, and drop the
+    input/output boards. route_diff.py has no --pairs flag -- the patterns are
+    positional -- and the converter used to collect them into a local it never
+    read, so every recorded diff step became `pairs: []`. The GUI reads an empty
+    pairs list as "route every auto-detected pair", so 204 of the corpus's 206
+    diff steps replayed wider than the chain they came from.
+    """
+    tool_i = None
+    for i, a in enumerate(argv):
+        if os.path.basename(a) == 'route_diff.py':
+            tool_i = i
+            break
+    if tool_i is None:
+        return []
+    out = []
+    for a in argv[tool_i + 1:]:
+        if a.startswith('-'):
+            break
+        if not a.endswith('.kicad_pcb'):
+            out.append(a)
+    return out
+
+
 def check_pair(argv, step):
     """Return list of (flag, reason) mismatches for one command/step pair."""
     params = step.get('params', {})
@@ -134,6 +161,18 @@ def check_pair(argv, step):
             i += 1
             continue
         i += 1
+    # Positional diff-pair globs must survive into step['pairs'].
+    if step.get('action') == 'route_diff':
+        want_pairs = _positional_pairs(argv)
+        if want_pairs:
+            got_pairs = [str(x) for x in (step.get('pairs') or [])]
+            n += 1
+            if not set(want_pairs).issubset(set(got_pairs)):
+                missing = [g for g in want_pairs if g not in got_pairs]
+                bad.append(('<positional pairs>',
+                            f"want {want_pairs} got {got_pairs} "
+                            f"(missing {missing})"))
+
     # --plane-layers must survive as the assignment layers
     pl = _plane_layers(argv)
     if pl:
