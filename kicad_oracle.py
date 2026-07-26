@@ -529,25 +529,34 @@ def clamp_emitted_width(route_points, extra_conn, used_width, nominal_width,
     """
     if used_width <= nominal_width:
         return used_width
-    from plane_region_connector import wide_route_clear
-    bec = getattr(config, 'board_edge_clearance', 0.0)
-
-    def _clear(w):
-        if not wide_route_clear(route_points, w, pcb_data, net_id, config,
-                                board_edge_clearance=bec):
-            return False
-        for (p1, p2, layer) in (extra_conn or []):
-            if not wide_route_clear([(p1[0], p1[1], layer), (p2[0], p2[1], layer)],
-                                    w, pcb_data, net_id, config,
-                                    board_edge_clearance=bec):
-                return False
-        return True
-
     w = used_width
-    while w > nominal_width and not _clear(w):
+    while w > nominal_width and not emitted_copper_clear(
+            route_points, extra_conn, w, pcb_data, net_id, config):
         lower = [c for c in (nominal_width,) + tuple(ladder) if c < w]
         w = max(lower)
     return w
+
+
+def emitted_copper_clear(route_points, extra_conn, width, pcb_data, net_id,
+                         config):
+    """True when the copper about to be written -- `route_points` at `width`
+    PLUS the same-net weld connectors `extra_conn` -- clears foreign copper,
+    the board edge and NPTH drills.
+
+    Split out of clamp_emitted_width so the caller can also ask the question at
+    the NOMINAL width, where there is no lower rung left to fall back to.
+    """
+    from plane_region_connector import wide_route_clear
+    bec = getattr(config, 'board_edge_clearance', 0.0)
+    if not wide_route_clear(route_points, width, pcb_data, net_id, config,
+                            board_edge_clearance=bec):
+        return False
+    for (p1, p2, layer) in (extra_conn or []):
+        if not wide_route_clear([(p1[0], p1[1], layer), (p2[0], p2[1], layer)],
+                                width, pcb_data, net_id, config,
+                                board_edge_clearance=bec):
+            return False
+    return True
 
 
 def _largest_track_component_points(pcb_data, net_id, max_pts: int = 40):
@@ -1557,6 +1566,26 @@ def oracle_reconnect(board_file: str, net_names, config,
             used_width = clamp_emitted_width(
                 route_points, _extra_conn, used_width, config.track_width,
                 pcb_data, net_id, config)
+            # Even at the nominal width the copper can graze: a `force_raw`
+            # retry seeds the A* on KiCad's RAW reported point, and a
+            # source/target cell is exemption-cleared in the obstacle map, so
+            # the first segment out of that seed can sit inside the clearance
+            # floor no matter how thin it is (rp2350: a GND link seeded 0.1414
+            # from a +1V1 diagonal needing 0.1662, a 25um graze that survived
+            # every width rung). Nothing thinner is left to fall back to, and
+            # nudge_grazing_microshift rightly refuses to move the seed vertex
+            # because that would detach the link from the island it must bond
+            # to -- so DECLINE the link. KiCad already reports it unconnected;
+            # shipping a short in its place trades a ratsnest line for a DRC
+            # violation, which is the wrong way round (same call as #396's
+            # rescue: decline cleanly rather than ship a false connection).
+            if not emitted_copper_clear(route_points, _extra_conn, used_width,
+                                        pcb_data, net_id, config):
+                print(f"    {net_name}: ({ax:.2f},{ay:.2f})<->({bx:.2f},{by:.2f})"
+                      f"  DECLINED (copper would violate clearance at "
+                      f"{used_width:.4g}mm; left unconnected)")
+                failed += 1
+                continue
             n_segs = 0
             for k in range(len(route_points) - 1):
                 x1, y1, l1 = route_points[k]

@@ -355,6 +355,22 @@ def local_to_global(fp_x: float, fp_y: float, fp_rotation_deg: float,
 
     CRITICAL: Negate the rotation angle! KiCad's rotation convention requires
     negating the angle when applying the standard rotation matrix formula.
+
+    The result is SNAPPED to KiCad's integer-nanometre grid, because that is the
+    only coordinate space a board can actually store. Everything else in PCBData
+    is read verbatim from the file (segments, vias, footprint origins) and so
+    matches pcbnew bit-for-bit; pad globals are the one value we must COMPUTE,
+    and pcbnew computes them in integer nm while we compute them in float mm.
+    Without the snap the two answers land up to ~0.3 nm apart -- geometrically
+    nil, but different BIT PATTERNS, which is enough to flip an A* tie-break.
+    That is exactly how eth_tap step 11 diverged: 64 of 1699 pads came out a few
+    femtometres off (44.300000000000004 vs 44.3), and the GUI (pcbnew-backed
+    PCBData) then routed 16 segments differently from the CLI (text-parsed
+    PCBData) -- 3569 vs 3472 segments by the end of the chain. Snapping makes
+    all 1699 pads bit-identical to pcbnew and the two fronts route the same.
+
+    Same family as #493: canonicalise to integer nm rather than trusting float
+    mm arithmetic to agree across two implementations.
     """
     rad = math.radians(-fp_rotation_deg)  # CRITICAL: negate the angle
     cos_r = math.cos(rad)
@@ -363,7 +379,7 @@ def local_to_global(fp_x: float, fp_y: float, fp_rotation_deg: float,
     global_x = fp_x + (pad_local_x * cos_r - pad_local_y * sin_r)
     global_y = fp_y + (pad_local_x * sin_r + pad_local_y * cos_r)
 
-    return global_x, global_y
+    return (mm_to_iu(global_x) / IU_PER_MM, mm_to_iu(global_y) / IU_PER_MM)
 
 
 # Tolerance (deg) within which a pad rotation is treated as axis-aligned and
