@@ -595,6 +595,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     layer_widths = {}
     coplanar_layer_widths = {}
     coplanar_net_ids = set()
+    if impedance is None and coplanar_gap:
+        # The coplanar gap only changes which IMPEDANCE formula picks the width.
+        # With no target it has nothing to act on, and silently ignoring it
+        # would leave the caller believing they routed a CPW (#486).
+        print("WARNING: --coplanar-gap given without --impedance; it only "
+              "selects the impedance model, so it has NO effect here. Add "
+              "--impedance <ohms> to route as a coplanar waveguide.")
     if impedance is not None:
         if not pcb_data.board_info.stackup:
             print("WARNING: No stackup found in PCB file. Using fixed track width.")

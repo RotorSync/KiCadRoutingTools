@@ -354,6 +354,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # Calculate layer-specific widths for impedance-controlled routing
     # For diff pairs, we use the diff_pair_gap as the fixed spacing and calculate width
     layer_widths = {}
+    if impedance is None and coplanar_gap:
+        # See route.py: the gap only selects the impedance model (#486).
+        print("WARNING: --coplanar-gap given without --impedance; it only "
+              "selects the impedance model, so it has NO effect here. Add "
+              "--impedance <ohms> to route as a coplanar waveguide.")
     if impedance is not None:
         if not pcb_data.board_info.stackup:
             print("WARNING: No stackup found in PCB file. Using fixed track width.")
