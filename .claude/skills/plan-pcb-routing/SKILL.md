@@ -1175,6 +1175,16 @@ python3 route_diff.py board.kicad_pcb \
 
 This updates the `.kicad_sch` files with any pad swaps made during routing.
 
+**Shared symbols are refused, not rewritten (#489 §3).** Pin numbers live in the
+file's `lib_symbols` definition, which every instance of that `lib_id` shares. When
+a second component uses the same symbol — the common case for connectors, identical
+channels, and multi-channel analog — the swap is **refused** for that file with a
+message naming the sharers, because applying it would silently re-pin those other
+components too. The units of one multi-unit part (U2A/U2B) share the definition
+legitimately and are still updated. A refused swap means board and schematic
+disagree on those pins: report it and tell the user to fix it by hand (or give the
+component its own uniquely-named symbol) before fabricating.
+
 **Important:** After routing with swaps, ask the user:
 > "The router performed X polarity swaps and Y target swaps. Would you like to
 > update the schematic to match? If so, provide the path to your KiCad project
