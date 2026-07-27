@@ -1371,11 +1371,13 @@ def oracle_reconnect(board_file: str, net_names, config,
                 for w in (0.2, 0.4, 0.8):
                     if w <= used_width:
                         continue
-                    # The #268 stamp-shell quantization guard used to be a blunt
-                    # +1.0 here; _track_margin_for_width now snaps to the lattice
-                    # itself (#505), which subsumes it -- and unlike a whole cell
-                    # is correct on the 45-degree axis.
-                    margin = _track_margin_for_width(
+                    # +1.0 = the #268 stamp-shell quantization guard (see the
+                    # region-join caller in plane_region_connector); #156 made
+                    # _track_margin_for_width itself exact/fractional. The #505
+                    # lattice snap was tried here and reverted -- see that
+                    # function's docstring: on the plane ladders it cost trunk
+                    # copper and changed no DRC.
+                    margin = 1.0 + _track_margin_for_width(
                         w, rung_cfg.track_width, rung_cfg.grid_step)
                     wider, _ = route_plane_connection_wide(
                         src, tgt,

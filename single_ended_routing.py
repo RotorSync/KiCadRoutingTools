@@ -1791,25 +1791,22 @@ def _impedance_neckdown_allowed():
 
 def _track_margin_for_width(width, layer_width, grid_step):
     """Extra FRACTIONAL grid-cell margin the A* needs for a track of `width`
-    over the map's reserved `layer_width` (#156), snapped to the lattice (#505).
+    over the map's reserved `layer_width` (#156): the exact extra half-width.
+    Callers add the #268 stamp-shell quantization guard on top.
 
-    The bare extra half-width is NOT enough, and the old claim here -- that "the
-    Rust swept-capsule check covers diagonals ... so integer padding only
-    over-blocked" -- is wrong in both halves. The margin is measured from the
-    outermost BLOCKED CELL, so (a) it only ever acts at a distance that occurs
-    between two lattice cells, making any in-between value behave like the next
-    one DOWN, and (b) the 45-degree axis needs a reach of e*sqrt(2), not e.
-
-    Callers used to bolt a blunt `1.0 +` on for the #268 stamp-shell
-    quantization guard; the snap subsumes it and is exact instead of integer,
-    so the guard is gone from the call sites. See
-    routing_config._snap_to_lattice_reach."""
+    Deliberately NOT lattice-snapped, unlike the single-ended margin
+    (routing_config._snap_to_lattice_reach). The snap was tried here (#505) and
+    reverted on evidence: this margin feeds the PLANE width-upgrade ladders in
+    plane_region_connector / kicad_oracle, where `wide_route_clear` re-checks
+    the widened route against the real geometry before accepting it -- so the
+    margin is a search heuristic, not the correctness gate. Snapping raised it
+    by up to +3 cells on wide straps and bought nothing: sechzig's plane repair
+    graded IDENTICALLY (8 kicad / 6 check_drc / 9 connection_width) while
+    losing trunk copper (2.0mm straps 9 -> 4, 1.6mm 8 -> 6, absorbed into
+    0.8mm). Pure cost. The single-ended path has no such re-check, which is why
+    the snap belongs there and not here."""
     extra_half = (width - layer_width) / 2
-    if extra_half <= 0:
-        return 0.0
-    e = extra_half / grid_step
-    from routing_config import _snap_to_lattice_reach
-    return _snap_to_lattice_reach(e, e)
+    return extra_half / grid_step if extra_half > 0 else 0.0
 
 
 def _margin_at(track_margin, layer_idx):
