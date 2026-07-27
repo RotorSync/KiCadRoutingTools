@@ -17,6 +17,59 @@ from routing_constants import FORBIDDEN_LAYER_COST
 # default grid changes, so the two are intentionally separate constants.
 REFERENCE_GRID_STEP = 0.1  # mm
 
+# Lattice geometry for the #505 margin correction. The A* margin is measured
+# from the outermost BLOCKED CELL, so it can only ever "act" at a distance that
+# actually occurs between two lattice cells -- sqrt(i^2+j^2). A margin landing
+# between two such distances rejects exactly what the lower one rejects, so the
+# margin must be SNAPPED UP to a real lattice distance to have any effect.
+_SQRT2 = math.sqrt(2.0)
+# Only the {n, sqrt(n^2+1)} family can ever be the NEAREST blocked cell: the
+# blocked region is convex-ish around the obstacle, so if a cell two rows off
+# the axis is blocked then one closer in this family is blocked too. Brute
+# forcing the lattice (tests/test_505_diagonal_margin.py) bears this out --
+# every minimal safe margin it finds is 1, sqrt(2), 2, sqrt(5), 3, sqrt(10),
+# 4 ...; 2*sqrt(2) and sqrt(13) never appear. Including them would let the
+# snap stop one family member short and under-reject.
+# Range covers the widest realistic case: a 0.8mm plane strap over a 0.127mm
+# reserve on a 0.05 grid is e~6.7, needing a reach ~9.5 -- running off the end
+# of the table would return an UNSNAPPED value, i.e. an inert margin.
+_LATTICE_REACH = sorted({float(n) for n in range(1, 65)}
+                        | {math.hypot(n, 1) for n in range(1, 65)})
+
+
+def _snap_to_lattice_reach(margin: float, e: float) -> float:
+    """Round `margin` up to the smallest cell-to-cell lattice distance that can
+    reject everything inside the true keep-out radius (#505).
+
+    Two failures the raw orthogonal margin has:
+
+    1. It is derived from AXIS-ALIGNED rows (1 cell apart), but the router also
+       moves at 45 degrees, where rows sit 1/sqrt(2) cells apart and the step
+       from the stamp shell to the next row is sqrt(2). Worst case over all
+       obstacle orientations and sub-cell phases, the margin has to reach
+       e*sqrt(2) (brute-forced over the lattice in tests/test_505_*).
+    2. Any value strictly between two lattice distances behaves like the lower
+       one, so a margin of 1.25 rejects exactly what 1.0 rejects.
+
+    Snapping to the lattice is what makes the margin bite while staying below
+    the blunt e+1 wherever a lattice distance falls in between (e=1.25 -> 2.0,
+    not 2.25). Measured: polykit_x let a 45-degree power track sit at 0.565685mm
+    against a 0.575 requirement (kicad-cli "actual 0.1907 vs 0.2") x39, and
+    caravel_nucleo at 0.388909 vs 0.400 x7; both grade clean with this snap."""
+    # The 45-degree reach must be STRICTLY above e*sqrt(2): when the two are
+    # equal (e=1.0 -> e*sqrt(2) = sqrt(2) exactly) the sqrt(2) row is the one
+    # that still has to be rejected, so landing ON it is one row short -- the
+    # brute force puts need(1.0) at 2.0, not sqrt(2).
+    diag = next((r for r in _LATTICE_REACH if r > e * _SQRT2 + 1e-12),
+                e * _SQRT2)
+    # `margin` (the axis-aligned term) is already an integer row, itself a
+    # lattice distance, so max() cannot land between two of them.
+    need = max(margin, diag)
+    # Nudge past the lattice distance: the router blocks on d <= margin with d
+    # computed from exact integer offsets, and a margin computed as a quotient
+    # can land one ULP BELOW the very distance it must reject.
+    return need * (1.0 + 1e-12)
+
 
 @dataclass
 class DiffPairNet:
@@ -279,9 +332,17 @@ class GridRouteConfig:
         width (same-run impedance peers), or this track's own width (power
         peers) -- compute the margin that rejects EXACTLY the grid rows
         baking at the true requirement would reject, and take the largest.
-        Result is always in [e, e+1): the targeted point between bare `e`
-        (slips) and the blunt +1 (over-blocks) -- e.g. 1.0 on a 0.988
-        layer but still 0.596 where the phase already works out."""
+        Rows are counted on BOTH movement axes: the axis-aligned rows (1 cell
+        apart) and the 45-degree rows (1/sqrt(2) cells apart, #505) -- an
+        orthogonally-derived margin can sit below the sqrt(2) shell step and
+        so reject nothing at all diagonally.
+        The result is then snapped onto the lattice (_snap_to_lattice_reach),
+        because a margin BETWEEN two cell-to-cell distances rejects exactly what
+        the lower one rejects. It is always >= e, and usually still under the
+        blunt e+1 (e=1.25 -> 2.0, not 2.25) -- but NOT always: where the reach
+        e*sqrt(2) crosses a lattice distance the snap can exceed e+1 (e=1.70 ->
+        3.0). Correctness wins there; an undershoot is a clearance violation,
+        an overshoot only costs some routability."""
         reserve = self.route_reserve_width(layer)
         e = (net_width - reserve) / 2.0 / self.grid_step
         if e <= 1e-9:
@@ -300,7 +361,7 @@ class GridRouteConfig:
             n_max = math.ceil(r_need - 1e-9) - 1 - shell  # last row to reject
             if n_max > margin:
                 margin = float(n_max)
-        return margin
+        return _snap_to_lattice_reach(margin, e)
 
     def track_margins_for_net(self, net_id: int) -> List[float]:
         """Per-layer FRACTIONAL A* track margins (grid cells) for `net_id`

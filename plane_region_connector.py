@@ -1645,11 +1645,13 @@ def _try_route_between_regions(
             # outermost blocked cell sits up to ~one cell inside it; a bare
             # margin measured from that shell lets a widened trunk land tens of
             # um inside the NPTH/copper floor. #156 made the base margin the
-            # exact FRACTIONAL extra half-width (no ceil); one full extra cell
-            # on top is provably sufficient for any obstacle phase, and a
-            # widened plane join is upgrade-only copper in open space, so the
-            # cushion costs nothing that matters here.
-            track_margin = 1.0 + _track_margin_for_width(
+            # lattice-snapped extra half-width (#505). The blunt `1.0 +` that
+            # used to sit here was the #268 stamp-shell quantization guard;
+            # _track_margin_for_width now snaps to the lattice itself, which is
+            # both exact and correct on the 45-degree axis (a whole extra cell
+            # is neither -- it can still land BETWEEN two lattice distances and
+            # act like the lower one).
+            track_margin = _track_margin_for_width(
                 try_width, min_track_width, config.grid_step)
 
             wider, _ = _try_route(
