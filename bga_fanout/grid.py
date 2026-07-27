@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 from typing import List, Optional, Tuple
+import math as _math
 from collections import defaultdict
 
 from kicad_parser import Footprint
@@ -109,6 +110,52 @@ def analyze_bga_grid(footprint: Footprint) -> Optional[BGAGrid]:
         max_y=max(y_positions) + pitch_y / 2
     )
 
+
+
+def staggered_lattice_diagnosis(footprint, grid) -> Optional[str]:
+    """Is this footprint a STAGGERED lattice rather than a ball grid? (#500)
+
+    `analyze_bga_grid` derives the pitch from the gaps between distinct pad
+    coordinates. On a staggered multi-row package (AQFN and friends) the two
+    offset rows project onto each axis at HALF the real pad spacing, so the
+    reported pitch is half the truth and every downstream budget is computed
+    against it. osprey_kb's Nordic_AQFN-73 reports `pitch 0.25` while 70 of its
+    78 pads have a 0.5mm nearest neighbour; the escape budget then evaluates to
+    `via <= -0.20mm` -- impossible for any via -- and the run spends 2967s
+    dropping balls and retrying under-pad before finishing. qfn_fanout does the
+    same chip in 2.4s with `--escape-method underpad --allow-via-in-pad`.
+
+    Returns a human-readable reason when the footprint is not a grid array, or
+    None when it looks like a genuine BGA/PGA/LGA.
+    """
+    pads = footprint.pads
+    if not pads or grid is None:
+        return None
+    lattice = min(grid.pitch_x, grid.pitch_y)
+    if lattice <= 0:
+        return None
+
+    # True nearest-neighbour spacing, in 2D.
+    near = None
+    for i, a in enumerate(pads):
+        for b in pads[i + 1:]:
+            d = _math.hypot(a.global_x - b.global_x, a.global_y - b.global_y)
+            if d > 1e-6 and (near is None or d < near):
+                near = d
+    if near is None:
+        return None
+
+    cells = max(1, len(grid.rows) * len(grid.cols))
+    occupancy = len(pads) / cells
+    # A ball grid fills its lattice; a staggered lattice is a checkerboard, so
+    # its nearest neighbour is ~sqrt(2)x or 2x the lattice step and most cells
+    # are empty. Require BOTH signals so a sparse-but-true BGA (depopulated
+    # centre) is not misread -- those still sit ON the lattice (near ~ lattice).
+    if near > lattice * 1.4 and occupancy < 0.35:
+        return (f"pads sit on a {lattice:.3f}mm lattice but no two are closer "
+                f"than {near:.3f}mm, and only {occupancy * 100:.0f}% of the "
+                f"{len(grid.rows)}x{len(grid.cols)} lattice is populated")
+    return None
 
 def calculate_channels(grid: BGAGrid) -> List[Channel]:
     """Calculate routing channels between ball rows and columns."""

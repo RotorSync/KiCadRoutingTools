@@ -39,6 +39,7 @@ from bga_fanout.layer_balance import rebalance_layers
 from bga_fanout.layer_assignment import assign_layers_smart
 from bga_fanout.grid import (
     analyze_bga_grid,
+    staggered_lattice_diagnosis,
     calculate_channels,
     is_edge_pad,
 )
@@ -2941,6 +2942,30 @@ def main():
     print(f"  Position: ({footprint.x:.2f}, {footprint.y:.2f})")
     print(f"  Rotation: {footprint.rotation}deg")
     print(f"  Pads: {len(footprint.pads)}")
+
+    # Staggered-lattice guard (#500). bga_fanout models a BALL GRID. A staggered
+    # multi-row no-lead package (AQFN and friends) is not one: its two offset
+    # rows project onto each axis at HALF the real pad spacing, so the detected
+    # pitch is half the truth and every downstream escape budget is computed
+    # against it. osprey_kb's Nordic_AQFN-73 reports pitch 0.25 where no two
+    # pads are closer than 0.5, its escape budget evaluates to `via <= -0.20mm`
+    # (impossible for any via), and the run took 2967s of dropping balls and
+    # retrying under-pad before finishing. qfn_fanout does the same chip in
+    # 2.4s, 39/39, DRC-clean. Fail in a second with that command instead.
+    _grid_for_guard = analyze_bga_grid(footprint)
+    _stagger_why = staggered_lattice_diagnosis(footprint, _grid_for_guard)
+    if _stagger_why and not os.environ.get('KICAD_ALLOW_STAGGERED_BGA'):
+        print(f"\nERROR: {footprint.reference} ({footprint.footprint_name}) is "
+              f"not a grid array: {_stagger_why}.")
+        print("  bga_fanout models a ball grid; on a staggered package its "
+              "pitch reads half the real pad spacing, so the escape budget is "
+              "impossible and the run takes minutes to hours.")
+        print("  Use qfn_fanout, which handles these:")
+        print(f"    python3 qfn_fanout.py <board> --component "
+              f"{footprint.reference} --escape-method underpad "
+              f"--allow-via-in-pad ...")
+        print("  Set KICAD_ALLOW_STAGGERED_BGA=1 to run anyway.")
+        return 1
 
     tracks, vias_to_add, vias_to_remove, _failed_nets = generate_bga_fanout(
         footprint,
