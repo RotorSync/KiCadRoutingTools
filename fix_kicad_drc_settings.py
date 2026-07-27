@@ -424,6 +424,22 @@ def compute_targets(clearance=None, hole_clearance=None, hole_to_hole=None,
     tw = _floor(track_width, minima.get("min_track_width"))
     if tw is not None:
         targets["min_track_width"] = tw
+        # Min copper WEB (#505). KiCad's connection_width rule grades the
+        # narrowest copper joining two areas, so a web floor left ABOVE the
+        # track floor condemns copper we deliberately routed: a track IS the
+        # web wherever it is the sole connection. Left unclamped this was the
+        # single largest DRC number in the corpus and none of it was real --
+        # ulx5m_gatemate's stock 0.127 web rule against its 0.0889 routed floor
+        # flagged 4749 items (13495 of its 14515 tracks sit under 0.127);
+        # clamped to the routed floor the same board grades 2, with every other
+        # DRC count unchanged. Same principle as the clearance ceiling (#439):
+        # grade what was actually built, not the stock aspiration.
+        # ONLY-LOWER, like every floor here (apply_* enforces it), and never
+        # TURNS THE CHECKER ON: a board with no min_connection (or 0) has
+        # KiCad's connection_width check disabled, and enabling it would invent
+        # a constraint the author never asked for. See the guard in
+        # apply_targets_to_project.
+        targets["min_connection"] = tw
     vd = _floor(via_diameter, minima.get("min_via_diameter"))
     if vd is not None:
         targets["min_via_diameter"] = vd
@@ -504,6 +520,13 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
         # is lifted to the fab floor rather than kept. `target` already carries
         # max(routed edge, fab_edge); take max with cur so a board rule ABOVE the
         # fab floor (e.g. 0.5) is preserved.
+        # Min copper WEB (#505): only ever LOWER an existing, ENABLED rule.
+        # KiCad's connection_width checker is off at 0 (and absent means 0), so
+        # writing a value where the board had none would switch on a check the
+        # author never enabled -- the opposite of this function's only-loosen
+        # guarantee, even though the number itself is a loosening.
+        if key == "min_connection" and not cur:
+            continue
         if key == "min_copper_edge_clearance":
             new = max(cur or 0.0, target)
             if cur is None or abs(new - cur) > EPS:
@@ -753,11 +776,17 @@ def apply_targets_to_board(board, targets: dict, sev_plan: dict,
         # default, so usually moot, but the CLI lowers it -- keep the two paths
         # writing the same rule set). Guarded by hasattr below for older KiCad.
         "min_via_annular_width": "m_ViasMinAnnularWidth",
+        # #505 min copper web. Name varies by KiCad version; the hasattr guard
+        # below skips it where absent, and the `not cur` guard keeps a disabled
+        # checker disabled (parity with apply_targets_to_project).
+        "min_connection": "m_MinConn",
     }
     for key, target in targets.items():
         a = attr.get(key)
         if a is None or target is None or not hasattr(bds, a):
             continue
+        if key == "min_connection" and not getattr(bds, a, 0):
+            continue    # checker was OFF -- do not switch it on
         tgt_nm = round(float(target) * MM)
         cur = getattr(bds, a)
         # Edge clearance may RAISE to the fab copper-to-edge floor (#441); every
