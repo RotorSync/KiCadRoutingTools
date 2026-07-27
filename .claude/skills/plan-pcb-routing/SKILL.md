@@ -119,6 +119,7 @@ for ref, fp in pcb.footprints.items():
 | PGA (through-hole grid) | `bga_fanout.py` | Same tool works for PGA |
 | LGA / WLCSP / CGA (land/chip-scale grid) | `bga_fanout.py` | Grid escape; interior lands strand without it (issue #144) |
 | QFN/QFP/DFN (perimeter SMD) | `qfn_fanout.py` | Stub routing for quad/dual no-lead and flat packages |
+| **AQFN / staggered multi-row no-lead** | `qfn_fanout.py` **`--escape-method underpad --allow-via-in-pad`** | Inner rows the surface fan cannot reach - see below. **Never `bga_fanout.py`** |
 | DIP/SOIC (through-hole/SMD rows) | None needed | Standard routing handles these |
 
 ### When to Use Fanout for BGA/PGA/LGA
@@ -156,6 +157,34 @@ only. On a 4+ layer board, pass ALL the board's copper layers, e.g.
 `--layers F.Cu In1.Cu In2.Cu B.Cu` — otherwise deep balls have nowhere to escape to
 and those nets are dropped from the fanout. `qfn_fanout.py` is perimeter-only and
 doesn't take escape layers.
+
+**Staggered multi-row no-lead packages (AQFN) - use via-in-pad (#500).** An
+AQFN (e.g. `Nordic_AQFN-73-1EP_7x7mm_P0.5mm`, on osprey_kb / hex_gateway /
+mikoto_nrf52840) puts its pads in TWO OR MORE staggered rows per side. The
+surface 45-degree stub fan reaches only the outermost row, so the default
+silently drops the rest. Measured on osprey_kb U1 (78 pads, 39 nets):
+
+| command | escaped | time |
+|---|---|---|
+| `qfn_fanout.py` (default stub) | 26/40 | 2.4s |
+| `qfn_fanout.py --escape-method underpad` | 35/40 | 2.6s |
+| **`qfn_fanout.py --escape-method underpad --allow-via-in-pad`** | **39/39, DRC-clean** | **2.4s** |
+| `bga_fanout.py` | 39/39 | **2967s** |
+
+So: **for any AQFN or staggered multi-row no-lead part, plan
+`qfn_fanout.py --escape-method underpad --allow-via-in-pad`.** Via-in-pad is
+what reaches the innermost row; without it 5 pads drop.
+
+Do NOT send these to `bga_fanout.py`. It models a ball grid, and a staggered
+package's two offset rows project onto each axis at HALF the real pad spacing -
+so its detected pitch is half the truth, its escape budget evaluates to a
+NEGATIVE via size, and it grinds for ~50 minutes to reach the same answer.
+`bga_fanout.py` now refuses these outright with the qfn_fanout command to use
+(override: `KICAD_ALLOW_STAGGERED_BGA=1`).
+
+Spotting one: the footprint name contains `AQFN`, or the part has far more pads
+than a single peripheral ring of its size would hold (73-90 pads on a 7x7mm
+body), or `bga_fanout.py` reports a pitch that is half the name's `P<pitch>mm`.
 
 **Crowded fine-pitch QFN edge (surface fan has no room):** if a `qfn_fanout`
 stub (especially a diff pair) is boxed in by a neighbour pair and a foreign
