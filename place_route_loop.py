@@ -82,6 +82,11 @@ def run_route(pcb_file: str, routed_file: str, route_args: str, log_file: str):
         'blockers': sorted(blockers),
         'iterations': summary.get('total_iterations', 0),
         'vias': summary.get('total_vias', 0),
+        # #409 follow-up: pad-pair routability tallies (PRR = connected/total
+        # downstream); 0/0 on logs from routers without the keys. Report-only
+        # here -- better() still compares failures/iterations (#458's scope).
+        'pad_pairs_connected': summary.get('pad_pairs_connected', 0),
+        'pad_pairs_total': summary.get('pad_pairs_total', 0),
     }
 
 
