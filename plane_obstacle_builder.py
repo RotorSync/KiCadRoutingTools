@@ -649,24 +649,39 @@ def _cutout_fingerprint(cutout):
 
 
 def _rasterize_cutout_cached(pcb_data, cutout_idx: int, cutout, coord: GridCoord,
-                             clearance: float):
+                             clearance: float, band_only: bool = False,
+                             clip_bounds=None):
     """Memoized cutout rasterization (same rationale as the edge-mask cache):
     board cutouts are static, but each obstacle build re-rasterized every one
     per layer. Returns (cgx, cgy, cmask) with the clearance band applied.
-    Keyed by geometry fingerprint, not list index (see _cutout_fingerprint)."""
+    Keyed by geometry fingerprint, not list index (see _cutout_fingerprint).
+
+    ``band_only`` (#505) drops the interior term, leaving just the clearance
+    band around the boundary -- for a milled INNER contour, which is a mill line
+    rather than an opening: its inside is still board (it encloses pads by
+    definition), so blocking the interior would blank the plane.
+
+    ``clip_bounds`` restricts rasterization to the map's real extent. A milled
+    inner contour is typically BOARD-SIZED (crkbd's is the whole outline), and
+    without clipping every local-window build would rasterize the entire board
+    -- the exact cost _rasterize_polygon's own docstring warns about. Clipping
+    is a pure optimisation: no cell inside the map changes."""
     cache = getattr(pcb_data, '_cutout_mask_cache', None)
     if cache is None:
         cache = {}
         pcb_data._cutout_mask_cache = cache
     key = (_cutout_fingerprint(cutout), round(coord.grid_step, 9),
-           round(clearance, 9))
+           round(clearance, 9), band_only,
+           tuple(round(b, 6) for b in clip_bounds) if clip_bounds else None)
     hit = cache.get(key)
     if hit is None:
-        cgx, cgy, c_inside, c_edge = _rasterize_polygon(cutout, coord, clearance)
+        cgx, cgy, c_inside, c_edge = _rasterize_polygon(
+            cutout, coord, clearance, clip_bounds=clip_bounds)
         if cgx is None:
             hit = (None, None, None)
         else:
-            hit = (cgx, cgy, c_inside | (c_edge < clearance))
+            band = c_edge < clearance
+            hit = (cgx, cgy, band if band_only else (c_inside | band))
         cache[key] = hit
     return hit
 
@@ -769,6 +784,19 @@ def _add_board_edge_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         if cmask.any():
             obstacles.add_blocked_vias_batch(np.column_stack([cgx[cmask], cgy[cmask]]))
 
+    # Milled inner contours (#505): band only -- a mill line, not an opening.
+    for _ei, _ec in enumerate(getattr(pcb_data.board_info,
+                                      'board_edge_contours', None) or []):
+        if len(_ec) < 3:
+            continue
+        cgx, cgy, cmask = _rasterize_cutout_cached(
+            pcb_data, _ei, _ec, coord, via_edge_clearance, band_only=True,
+            clip_bounds=pcb_data.board_info.board_bounds)
+        if cgx is None:
+            continue
+        if cmask.any():
+            obstacles.add_blocked_vias_batch(np.column_stack([cgx[cmask], cgy[cmask]]))
+
 
 def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                      config: GridRouteConfig, layer_idx: int,
@@ -830,6 +858,18 @@ def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
             continue
         cgx, cgy, cmask = _rasterize_cutout_cached(
             pcb_data, _ci, cutout, coord, track_edge_clearance)
+        if cgx is None:
+            continue
+        _block_cells_on_layers(obstacles, cgx, cgy, cmask, [layer_idx])
+
+    # Milled inner contours (#505): band only -- a mill line, not an opening.
+    for _ei, _ec in enumerate(getattr(pcb_data.board_info,
+                                      'board_edge_contours', None) or []):
+        if len(_ec) < 3:
+            continue
+        cgx, cgy, cmask = _rasterize_cutout_cached(
+            pcb_data, _ei, _ec, coord, track_edge_clearance, band_only=True,
+            clip_bounds=pcb_data.board_info.board_bounds)
         if cgx is None:
             continue
         _block_cells_on_layers(obstacles, cgx, cgy, cmask, [layer_idx])

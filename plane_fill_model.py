@@ -251,6 +251,19 @@ class ZoneFillModel:
                 rx2, ry2 = ring[(k + 1) % len(ring)]
                 _stamp_capsule(rx1, ry1, rx2, ry2, 0.0)
 
+        def _stamp_ring_band(ring):
+            """Keep-out BAND along a ring's boundary, interior untouched (#505).
+
+            For a milled inner contour the copper is routed away along the LINE,
+            so the pour pulls back from it on BOTH sides -- but the inside is
+            still board (these contours enclose pads by definition), so the
+            even-odd interior pass _stamp_poly does would wrongly erase the whole
+            plane. Only the guard band is stamped."""
+            for k in range(len(ring)):
+                rx1, ry1 = ring[k]
+                rx2, ry2 = ring[(k + 1) % len(ring)]
+                _stamp_capsule(rx1, ry1, rx2, ry2, 0.0)
+
         def _stamp_rot_rect(px, py, hx, hy, ang_deg):
             # exact rotated-rect keep-out: rotate cell centers into the
             # pad frame, then the same rounded-rect distance as _stamp_rect
@@ -445,6 +458,20 @@ class ZoneFillModel:
                      or []):
             if len(_cut) >= 3:
                 _stamp_poly(_cut)
+
+        # Milled INNER contours (#505): Edge.Cuts geometry that is not a hole
+        # and not an outer ring -- a pad-containing inner outline reclassified
+        # by drop_pad_containing_cutouts. KiCad mills along the line, so the
+        # pour pulls back from BOTH sides of it; but the interior is board (it
+        # encloses pads by definition), so this is a BAND, never the even-odd
+        # fill _stamp_poly applies to a real opening. Without it the model
+        # predicts pour straight across the mill line -- on crkbd, across the
+        # gap between the two keyboard halves -- and the fill-aware via
+        # preference then steers plane taps onto copper that fab removes.
+        for _ec in (getattr(pcb_data.board_info, 'board_edge_contours', None)
+                    or []):
+            if len(_ec) >= 3:
+                _stamp_ring_band(_ec)
 
         # Outline clip (polygon test, vectorized ray cast per row).
         poly = zone.polygon

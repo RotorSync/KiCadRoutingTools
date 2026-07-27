@@ -1111,6 +1111,14 @@ def board_edge_geometry(board_info) -> Tuple[List[List[Tuple[float, float]]],
     outer = outlines or None
     rings = list(outlines)
     rings.extend(cutouts)
+    # Milled inner contours (#505): Edge.Cuts geometry that is NOT a hole and
+    # NOT an outer ring -- a pad-containing inner outline that
+    # drop_pad_containing_cutouts reclassified. Copper must hold its edge
+    # clearance from them, so they belong in `rings`; they must stay OUT of
+    # `cutouts`, or _point_on_board would call every pad they enclose off-board
+    # (the #291 regression this reclassification exists to avoid).
+    rings.extend(c for c in (getattr(board_info, 'board_edge_contours', None) or [])
+                 if len(c) >= 3)
     return rings, outer, cutouts
 
 

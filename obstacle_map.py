@@ -709,6 +709,16 @@ def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                 _add_cutout_obstacles(obstacles, cutout, coord, num_layers,
                                       track_edge_clearance, via_edge_clearance)
 
+    # Milled inner contours (#505): Edge.Cuts boundaries that are neither holes
+    # nor outer rings -- a pad-containing inner outline reclassified by
+    # drop_pad_containing_cutouts. Only a BAND around the boundary is blocked,
+    # never the interior: these enclose pads by definition (crkbd's encloses the
+    # whole board), so a cutout-style `inside` fill would block everything.
+    for contour in (getattr(pcb_data.board_info, 'board_edge_contours', None) or []):
+        if len(contour) >= 3:
+            _add_edge_contour_obstacles(obstacles, contour, coord, num_layers,
+                                        track_edge_clearance, via_edge_clearance)
+
 
 def _edge_band_pad_layer_exemption(pcb_data, coord: GridCoord, edge_clearance: float,
                                    layer_list, board_outlines, bounds):
@@ -848,6 +858,33 @@ def _add_cutout_obstacles(obstacles: GridObstacleMap, cutout: List[Tuple[float, 
         if via_mask.any():
             obstacles.add_static_blocked_vias_batch(
                 np.column_stack([gx_flat[via_mask], gy_flat[via_mask]]))
+
+
+def _add_edge_contour_obstacles(obstacles: GridObstacleMap, contour: List[Tuple[float, float]],
+                                coord: GridCoord, num_layers: int,
+                                track_edge_clearance: float, via_edge_clearance: float):
+    """Block a clearance BAND on both sides of a milled inner contour (#505).
+
+    Unlike :func:`_add_cutout_obstacles` this never blocks the polygon interior.
+    These contours are pad-containing by construction -- that is exactly why
+    drop_pad_containing_cutouts refused to treat them as holes -- so filling the
+    inside would blank the board (crkbd's contour encloses all 870+ pads). What
+    the geometry does demand is edge clearance: KiCad mills along the line and
+    grades copper against it, so a track may not come within the edge clearance
+    from EITHER side. `_points_edge_distance` is unsigned, so one distance test
+    covers both sides.
+    """
+    margin = max(track_edge_clearance, via_edge_clearance) + coord.grid_step
+    for gx_flat, gy_flat, _inside, edge_dist in _rasterize_polygon_banded(
+            contour, coord, margin):
+        band_track = edge_dist < track_edge_clearance
+        band_via = edge_dist < via_edge_clearance
+        # #422: board geometry is permanent -> static keep-out bitmap.
+        _block_cells_on_layers(obstacles, gx_flat, gy_flat, band_track,
+                               range(num_layers), static=True)
+        if band_via.any():
+            obstacles.add_static_blocked_vias_batch(
+                np.column_stack([gx_flat[band_via], gy_flat[band_via]]))
 
 
 def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord, num_layers: int,

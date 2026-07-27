@@ -360,6 +360,16 @@ class BoardInfo:
     # holds every outer ring. Empty on single-outline/rectangular boards means
     # "use board_outline".
     board_outlines: List[List[Tuple[float, float]]] = field(default_factory=list)
+    # Edge.Cuts contours that are MILLED BOUNDARIES for clearance but are not
+    # holes and not outer rings (#505). drop_pad_containing_cutouts moves a
+    # pad-containing inner contour here: it must not act as a cutout (that would
+    # mark every pad it encloses off-board, #291), but KiCad still routes the
+    # board along it, so copper has to keep its edge clearance from it. Consumers
+    # measure clearance / stamp a keep-out BAND around these, and never treat
+    # their interior as off-board. crkbd: the real 64-point board outline nested
+    # inside the panel frame -- dropping it outright let the router lay copper
+    # straight across the milled gap between the two keyboard halves (85 items).
+    board_edge_contours: List[List[Tuple[float, float]]] = field(default_factory=list)
     keepouts: List[dict] = field(default_factory=list)  # Keep-out rule areas: {polygon, layers:set, tracks_allowed, vias_allowed, copper_pour_allowed}
     # Smallest copper clearance any routing step actually used on this board this
     # run -- e.g. a fine-pitch tap that escalated below the nominal --clearance.
@@ -1920,7 +1930,18 @@ def drop_pad_containing_cutouts(board_info, pads_by_net):
     contour dropped all 870 pads, every net lost its endpoints, and the router
     ground for ~3h on 0-endpoint nets before the run's time cap killed it (no
     output -> chain break). A real cutout encloses no pad centres, so a "cutout"
-    that contains >=2 of them is a mis-classified inner contour: drop it.
+    that contains >=2 of them is a mis-classified inner contour.
+
+    It is RECLASSIFIED, not discarded (#505). The contour is still Edge.Cuts --
+    KiCad mills the board along it and grades copper against it -- so dropping
+    it outright blinded BOTH the router's edge keep-out and check_drc's edge
+    measurement, and copper landed ON the milled line (kicad-cli "actual 0.0000
+    mm"). crkbd is a panelized split keyboard: its REAL 64-point outline nests
+    inside the panel frame, so containment called it a cutout and this rule then
+    deleted it -- the router laid 85 items of copper across the milled gap
+    between the two halves, none of which check_drc could see. Moving it to
+    board_edge_contours keeps the #291 rescue (no pad is marked off-board) while
+    restoring the edge clearance the geometry actually demands.
     """
     cutouts = getattr(board_info, 'board_cutouts', None)
     if not cutouts or not pads_by_net:
@@ -1943,9 +1964,14 @@ def drop_pad_containing_cutouts(board_info, pads_by_net):
         (dropped if n_inside >= 2 else kept).append(c)
     if dropped:
         board_info.board_cutouts = kept
-        print(f"WARNING: dropped {len(dropped)} Edge.Cuts contour(s) mis-read as "
-              f"board cutout(s) -- each encloses pads, so it is an inner outline / "
-              f"keep-out, not a hole (would have marked enclosed pads off-board).")
+        # Keep them as milled EDGES (#505): not holes, but copper must still
+        # hold its board-edge clearance from them.
+        board_info.board_edge_contours = list(
+            getattr(board_info, 'board_edge_contours', None) or []) + dropped
+        print(f"WARNING: reclassified {len(dropped)} Edge.Cuts contour(s) mis-read "
+              f"as board cutout(s) -- each encloses pads, so it is an inner outline "
+              f"/ keep-out, not a hole (as a cutout it would have marked the "
+              f"enclosed pads off-board). Kept as a milled edge for clearance.")
 
 
 def _classify_contours(contours):
@@ -4467,6 +4493,13 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
     outs_f = sorted(len(o) for o in (getattr(bi_f, 'board_outlines', None) or []))
     if outs_b != outs_f:
         diffs.append(f"Board outer-ring set: board={outs_b} file={outs_f}")
+    # Reclassified milled inner contours (#505): they drive edge clearance and
+    # the edge keep-out band, so a side that misses one routes copper onto the
+    # mill line while the other does not.
+    ec_b = sorted(len(o) for o in (getattr(bi_b, 'board_edge_contours', None) or []))
+    ec_f = sorted(len(o) for o in (getattr(bi_f, 'board_edge_contours', None) or []))
+    if ec_b != ec_f:
+        diffs.append(f"Board milled inner-contour set: board={ec_b} file={ec_f}")
 
     # --- Compare keepout zones (routing obstacles) ---
     kz_b = from_board.keepout_zones or []
