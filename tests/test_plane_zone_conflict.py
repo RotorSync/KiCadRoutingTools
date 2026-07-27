@@ -29,7 +29,7 @@ sys.path.insert(0, ROOT_DIR)
 sys.path.insert(0, os.path.join(ROOT_DIR, "rust_router"))
 
 from plane_io import (ZoneInfo, check_existing_zones,  # noqa: E402
-                      shared_layer_zone_priority)
+                      shared_layer_zone_priority, filter_zones_from_content)
 
 BOARD = os.path.join(ROOT_DIR, "kicad_files", "cap_chain.kicad_pcb")
 
@@ -95,6 +95,54 @@ def run():
               [ZoneInfo(1, 'A', 'In1.Cu', priority=0)]) > 0,
           "priority must stay NON-NEGATIVE: KiCad's parsers match \\d+, so a "
           "negative value is written and then read back as 0 (measured)")
+
+    # ------------------------- same-net replacement: names, and multi-layer pours
+    # On a KiCad 10 board a zone carries (net "NAME"), so passing only numeric
+    # (net_id, layer) pairs could never match and "Replacing existing zone" was a
+    # silent no-op -- every re-run appended another same-net pour (megadesk).
+    V10_ONE_LAYER = ('(kicad_pcb\n'
+                     '\t(zone\n\t\t(net "GND")\n\t\t(layer "B.Cu")\n'
+                     '\t\t(uuid "z-single")\n\t\t(polygon\n\t\t\t(pts\n'
+                     '\t\t\t\t(xy 0 0) (xy 5 0) (xy 5 5)\n\t\t\t)\n\t\t)\n\t)\n)\n')
+    out = filter_zones_from_content(V10_ONE_LAYER, [(1, 'B.Cu')],
+                                    zone_names_to_remove=[('GND', 'B.Cu')])
+    check('z-single' not in out,
+          "a single-layer KiCad 10 zone must be removed when its NAME pair is given")
+    out = filter_zones_from_content(V10_ONE_LAYER, [(1, 'B.Cu')])
+    check('z-single' in out,
+          "without the name pairs the numeric matcher cannot fire on a v10 board "
+          "-- this is the bug, kept as a regression witness for the caller")
+
+    # A `(layers ...)` pour is ONE zone: removing it to replace ONE of its layers
+    # would destroy copper on the others.
+    V10_MULTI = ('(kicad_pcb\n'
+                 '\t(zone\n\t\t(net "GND")\n\t\t(layers "F.Cu" "B.Cu")\n'
+                 '\t\t(uuid "z-multi")\n\t\t(polygon\n\t\t\t(pts\n'
+                 '\t\t\t\t(xy 0 0) (xy 5 0) (xy 5 5)\n\t\t\t)\n\t\t)\n\t)\n)\n')
+    out = filter_zones_from_content(V10_MULTI, [(1, 'B.Cu')],
+                                    zone_names_to_remove=[('GND', 'B.Cu')])
+    check('z-multi' in out,
+          "a multi-layer pour must NOT be deleted to replace one of its layers "
+          "-- that silently removes the other layer's copper")
+    out = filter_zones_from_content(
+        V10_MULTI, [(1, 'B.Cu'), (1, 'F.Cu')],
+        zone_names_to_remove=[('GND', 'B.Cu'), ('GND', 'F.Cu')])
+    check('z-multi' not in out,
+          "a multi-layer pour IS removable when every layer it covers is replaced")
+
+    # check_existing_zones must reach the same conclusion from the span.
+    multi = ZoneInfo(net_id=1, net_name='GND', layer='B.Cu', uuid='z-multi',
+                     span=('F.Cu', 'B.Cu'))
+    create, cont, replace, coexist = check_existing_zones([multi], 'B.Cu', 'GND', 1)
+    check(replace is None,
+          "a same-net MULTI-layer pour must not be offered as a replace target")
+    check(coexist == [multi],
+          "it must instead be reported as a pour to coexist with (and out-rank)")
+    single = ZoneInfo(net_id=1, net_name='GND', layer='B.Cu', uuid='z-single',
+                      span=('B.Cu',))
+    _c, _k, replace, coexist = check_existing_zones([single], 'B.Cu', 'GND', 1)
+    check(replace is single and coexist == [],
+          "a same-net SINGLE-layer pour is still replaced outright")
 
     # -------------------------- main() must not run post-passes with no output file
     if not os.path.isfile(BOARD):

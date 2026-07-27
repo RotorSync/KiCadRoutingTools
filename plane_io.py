@@ -31,6 +31,13 @@ class ZoneInfo:
     # incumbent (see shared_layer_zone_priority -- priorities are non-negative,
     # so it cannot go below).
     priority: int = 0
+    # A KiCad zone can span SEVERAL layers -- `(layers "F.Cu" "B.Cu")` is ONE
+    # physical pour, which the reader expands into one ZoneInfo per layer. `span`
+    # is that pour's full layer set and `uuid` identifies it, so a consumer can
+    # tell "this is only on my layer" (safe to replace) from "this also pours
+    # other layers" (deleting it would destroy copper nobody asked to touch).
+    uuid: str = ''
+    span: Tuple[str, ...] = ()
 
 
 def extract_zones(pcb_file: str) -> List[ZoneInfo]:
@@ -56,10 +63,23 @@ def extract_zones(pcb_file: str) -> List[ZoneInfo]:
     from kicad_parser import extract_zones as _parser_extract_zones
     from kicad_parser import extract_nets, detect_kicad_version
     _, name_to_id = extract_nets(content, detect_kicad_version(content))
+    parsed = list(_parser_extract_zones(content, name_to_id))
+
+    # Recover each PHYSICAL pour's full layer span: the reader emits one Zone per
+    # copper layer, and the entries of a multi-layer `(layers ...)` pour share a
+    # uuid. Consumers need the span to know that deleting the pour would also
+    # remove copper on layers they were not asked to touch.
+    span_by_uuid: Dict[str, List[str]] = {}
+    for z in parsed:
+        if z.uuid:
+            span_by_uuid.setdefault(z.uuid, []).append(z.layer)
+
     return [ZoneInfo(net_id=z.net_id, net_name=z.net_name, layer=z.layer,
                      in_footprint=z.in_footprint,
-                     priority=int(getattr(z, 'priority', 0) or 0))
-            for z in _parser_extract_zones(content, name_to_id)]
+                     priority=int(getattr(z, 'priority', 0) or 0),
+                     uuid=z.uuid or '',
+                     span=tuple(span_by_uuid.get(z.uuid, [z.layer])))
+            for z in parsed]
 
 
 def check_existing_zones(zones: List[ZoneInfo], target_layer: str, target_net_name: str,
@@ -88,15 +108,19 @@ def check_existing_zones(zones: List[ZoneInfo], target_layer: str, target_net_na
         verbose: Print verbose output
 
     Returns:
-        (should_create_zone, should_continue, zone_to_replace, foreign_zones)
+        (should_create_zone, should_continue, zone_to_replace, coexisting_zones)
         - should_create_zone: True to create/replace zone
         - should_continue: kept for callers; now always True (no abort case left)
-        - zone_to_replace: ZoneInfo of the SAME-NET zone to replace, or None
-        - foreign_zones: other nets' pours already on this layer, which our new
-          pour must yield to
+        - zone_to_replace: ZoneInfo of the SAME-NET zone to replace, or None --
+          None also when the same-net pour spans OTHER layers, since deleting it
+          would remove copper on layers this run was not asked to touch
+        - coexisting_zones: pours already on this layer that stay, and that the
+          new plane must therefore out-prioritize: other nets' pours, plus a
+          same-net multi-layer pour that cannot be replaced
     """
     zone_to_replace = None
-    foreign: List[ZoneInfo] = []
+    coexist: List[ZoneInfo] = []
+    keep_span: List[ZoneInfo] = []
 
     for zone in zones:
         # #478: footprint-owned pours are the footprint's business -- a small
@@ -108,13 +132,29 @@ def check_existing_zones(zones: List[ZoneInfo], target_layer: str, target_net_na
         if zone.layer != target_layer:
             continue
         if zone.net_id == target_net_id or zone.net_name == target_net_name:
-            # Same net - replace existing zone with our parameters
-            if zone_to_replace is None:
+            # Same net. Replaceable ONLY if this layer is all the pour covers --
+            # a `(layers "F.Cu" "B.Cu")` pour is ONE zone, so deleting it to
+            # "replace the B.Cu pour" would silently take the F.Cu pour with it.
+            span = tuple(getattr(zone, 'span', ()) or (zone.layer,))
+            if set(span) - {target_layer}:
+                keep_span.append(zone)
+                coexist.append(zone)
+            elif zone_to_replace is None:
                 print(f"Note: Replacing existing zone on {target_layer} for net '{zone.net_name}' with new parameters")
                 zone_to_replace = zone
         else:
-            foreign.append(zone)
+            coexist.append(zone)
 
+    for zone in keep_span:
+        others = ", ".join(sorted(set(zone.span) - {target_layer}))
+        print(f"WARNING: net '{zone.net_name}' already has a pour on {target_layer}, "
+              f"but it is ONE multi-layer zone that also covers {others}, so it "
+              f"cannot be replaced for {target_layer} alone without destroying "
+              f"that copper. Keeping it and pouring the new plane over it at a "
+              f"higher fill priority (same net, so no short). To replace it "
+              f"outright, run those layers together or delete the pour in KiCad.")
+
+    foreign = [z for z in coexist if z not in keep_span]
     if foreign:
         names = ", ".join(sorted({f"'{z.net_name}'" for z in foreign}))
         print(f"WARNING: {target_layer} already carries {len(foreign)} pour(s) for "
@@ -124,7 +164,7 @@ def check_existing_zones(zones: List[ZoneInfo], target_layer: str, target_net_na
               f"overlap the existing pour(s) pull back around it. Point "
               f"--plane-layers at a free layer if you want the opposite.")
 
-    return (True, True, zone_to_replace, foreign)
+    return (True, True, zone_to_replace, coexist)
 
 
 def shared_layer_zone_priority(foreign_zones: List[ZoneInfo]) -> int:
@@ -243,15 +283,33 @@ def filter_nets_from_content(content: str, net_ids_to_exclude: List[int],
     return '\n'.join(result_lines)
 
 
+def _zone_layer_span(element_text: str) -> set:
+    """Every copper layer a zone block declares.
+
+    Handles both spellings: `(layer "B.Cu")` and the multi-layer
+    `(layers "F.Cu" "B.Cu")`, which is ONE physical pour.
+    """
+    m = re.search(r'\(layers\s+((?:"[^"]+"\s*)+)\)', element_text)
+    if m:
+        return set(re.findall(r'"([^"]+)"', m.group(1)))
+    m = re.search(r'\(layer\s+"([^"]+)"\)', element_text)
+    return {m.group(1)} if m else set()
+
+
 def filter_zones_from_content(content: str, zones_to_remove: List[Tuple[int, str]],
                               zone_names_to_remove: List[Tuple[str, str]] = None) -> str:
     """
     Filter out zones for specific (net_id, layer) pairs from PCB file content.
 
+    A zone is removed only when EVERY layer it pours is in the remove set, so a
+    multi-layer pour is never deleted to "replace" one of its layers.
+
     Args:
         content: Raw PCB file content
         zones_to_remove: List of (net_id, layer) tuples to remove
-        zone_names_to_remove: For KiCad 10, list of (net_name, layer) tuples to remove
+        zone_names_to_remove: For KiCad 10, list of (net_name, layer) tuples to
+            remove -- REQUIRED for a name-based board, where zones carry
+            (net "NAME") and the numeric matcher can never fire
 
     Returns:
         Filtered content with those zones removed
@@ -284,28 +342,36 @@ def filter_zones_from_content(content: str, zones_to_remove: List[Tuple[int, str
                 element_lines.append(lines[i])
                 open_parens += lines[i].count('(') - lines[i].count(')')
 
-            # Extract net_id and layer from the zone
+            # Extract net and layer SPAN from the zone. A pour may declare one
+            # layer -- (layer "B.Cu") -- or several -- (layers "F.Cu" "B.Cu"),
+            # which is ONE physical zone. Matching only the singular spelling
+            # meant a multi-layer pour was never removable here at all (megadesk's
+            # GND pour), the same blind spot #369 A12 fixed on the READ side.
             element_text = '\n'.join(element_lines)
-            layer_match = re.search(r'\(layer\s+"([^"]+)"\)', element_text)
+            zone_layers = _zone_layer_span(element_text)
             # Try KiCad 9: (net <id>)
             net_match = re.search(r'\(net\s+(\d+)\)', element_text)
 
-            if net_match and layer_match:
+            def _removable(keys, want) -> bool:
+                # Remove only when EVERY layer this pour covers is being replaced.
+                # Otherwise deleting it would take copper on a layer nobody asked
+                # to touch (a GND pour on F.Cu+B.Cu replaced "for B.Cu").
+                return bool(keys) and keys <= want and not _fp_nested
+
+            if net_match and zone_layers:
                 zone_net_id = int(net_match.group(1))
-                zone_layer = layer_match.group(1)
-                if (zone_net_id, zone_layer) in remove_set and not _fp_nested:
+                if _removable({(zone_net_id, l) for l in zone_layers}, remove_set):
                     # Skip this zone entirely
                     i += 1
                     continue
-            elif layer_match and remove_name_set:
+            elif zone_layers and remove_name_set:
                 # KiCad 10: (net "name")
                 net_match_v10 = re.search(r'\(net\s+"((?:[^"\\]|\\.)*)"\)', element_text)
                 if net_match_v10:
                     # Unescape: remove_name_set holds parser display names.
                     zone_net_name = _unescape_kicad_string(net_match_v10.group(1))
-                    zone_layer = layer_match.group(1)
-                    if (zone_net_name, zone_layer) in remove_name_set \
-                            and not _fp_nested:
+                    if _removable({(zone_net_name, l) for l in zone_layers},
+                                  remove_name_set):
                         i += 1
                         continue
 
@@ -365,9 +431,21 @@ def write_plane_output(
         else:
             print("  All pads already have teardrop settings")
 
-    # Filter out zones to be replaced
+    # Filter out zones to be replaced. SAME #88.1 class as the net filter just
+    # below, which was fixed long before: on a KiCad 10 board a zone carries
+    # (net "NAME"), so the numeric (net <id>) matcher here never matched and the
+    # "replaced" zone silently SHIPPED alongside its replacement -- two same-net
+    # pours on one layer, while the log said "Replacing existing zone".
+    # Reproduced on megadesk (version 20260206): a single-net GND run on B.Cu left
+    # the original 4-point GND pour sitting next to the new one.
     if zones_to_replace:
-        content = filter_zones_from_content(content, zones_to_replace)
+        zone_names = None
+        if net_id_to_name:
+            zone_names = [(net_id_to_name[nid], layer)
+                          for nid, layer in zones_to_replace
+                          if nid in net_id_to_name]
+        content = filter_zones_from_content(content, zones_to_replace,
+                                            zone_names_to_remove=zone_names)
 
     # Filter out excluded nets if specified.
     # Issue #88.1: on KiCad 10 boards, segments/vias reference nets by NAME

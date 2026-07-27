@@ -187,6 +187,23 @@ non-negative: a value below the incumbent is written but read back as 0.
 Footprint-owned pours (a shield or thermal pour inside a footprint) neither
 contend nor get replaced (#478).
 
+#### Replacing a same-net pour
+
+An existing pour for the **same** net on the target layer is replaced by default
+(`--skip-existing-zones` keeps it instead). Two cases used to go wrong silently:
+
+- **KiCad 10 boards.** Zones carry `(net "NAME")`, and the replacement filter was
+  only given numeric `(net <id>)` pairs, so it never matched: the old pour shipped
+  next to its replacement while the log said "Replacing existing zone", and every
+  re-run stacked another duplicate. The name pairs are passed now.
+- **Multi-layer pours.** `(layers "F.Cu" "B.Cu")` is **one** zone. It is *not*
+  deleted to replace one of its layers -- that would destroy the copper on the
+  others. The run warns, keeps the pour, and pours the new plane over it at a
+  higher fill priority (same net, so no short); replace it outright by running
+  those layers together or by deleting it in KiCad.
+
+A pour is therefore removed only when every layer it covers is being replaced.
+
 #### Choosing `--gnd-via-distance`
 
 The `--gnd-via-distance` parameter sets the maximum search radius. The algorithm always places
