@@ -498,6 +498,7 @@ def route_planes(
     net_clearances: Optional[dict] = None,
     clamp_netclasses: bool = True,
     clearance_ceiling: Optional[float] = None,
+    add_teardrops: bool = False,
 ) -> Tuple[int, int]:
     """
     Route between disconnected regions in power plane zones.
@@ -2098,7 +2099,8 @@ def route_planes(
                       net_id_to_name=kv10_names,
                       exclude_net_ids=ripped_net_ids + partial_ids,
                       removed_segments=file_strip_segments,
-                      removed_vias=file_strip_vias)
+                      removed_vias=file_strip_vias,
+                      add_teardrops=add_teardrops)
         print(f"Output written to {output_file}")
         print("Note: Open in KiCad and press 'B' to refill zones")
     else:
@@ -2116,7 +2118,8 @@ def route_planes(
 def _write_output(input_file: str, output_file: str, segments: List[Dict], vias: List[Dict] = None,
                   debug_lines: List[str] = None, net_id_to_name: Dict = None,
                   exclude_net_ids: List[int] = None,
-                  removed_segments: List = None, removed_vias: List = None):
+                  removed_segments: List = None, removed_vias: List = None,
+                  add_teardrops: bool = False):
     """Write the output PCB file with new segments, vias, and optional debug lines.
 
     exclude_net_ids: nets whose existing copper is stripped from the output (used
@@ -2189,9 +2192,27 @@ def _write_output(input_file: str, output_file: str, segments: List[Dict], vias:
     if debug_lines:
         routing_text += '\n' + '\n'.join(debug_lines)
 
+    # Teardrops on pads (#489 §9): this step lays tap traces INTO pads, which is
+    # exactly the trace-to-pad junction a teardrop is for, and it had no way to
+    # ask for one.
+    if add_teardrops:
+        from kicad_writer import add_teardrops_to_pads
+        print("Adding teardrop settings to pads...")
+        content, _td = add_teardrops_to_pads(content)
+        print(f"  Added teardrops to {_td} pads" if _td
+              else "  All pads already have teardrop settings")
+
     # Insert before final closing paren
     last_paren = content.rfind(')')
     new_content = content[:last_paren] + '\n' + routing_text + '\n' + content[last_paren:]
+
+    # Vias LAST, so the repair vias this run just placed get teardrops too (the
+    # same ordering rule as output_writer / plane_io).
+    if add_teardrops:
+        from kicad_writer import add_teardrops_to_vias
+        new_content, _vtd = add_teardrops_to_vias(new_content)
+        print(f"  Added teardrops to {_vtd} vias" if _vtd
+              else "  No vias needed teardrops (none present, or all already set)")
 
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(new_content)
@@ -2317,6 +2338,12 @@ Examples:
     parser.add_argument("--no-bga-zone", "--no-bga-zones", action="store_true",
                         help="Disable BGA auto-exclusion zones when re-routing ripped nets "
                              "(match the original signal run's --no-bga-zone).")
+
+    # #489 §9: this step lays tap traces INTO pads and places repair vias, so it
+    # needs the same teardrop switch route.py / route_diff.py / route_planes.py
+    # have. GUI: the existing "Add teardrops" checkbox feeds it.
+    parser.add_argument("--add-teardrops", action="store_true",
+                        help="Add teardrop settings to all pads and vias in output file")
 
     # Debug options
     parser.add_argument("--dry-run", action="store_true",
@@ -2470,7 +2497,8 @@ Examples:
         power_nets_widths=args.power_nets_widths,
         no_bga_zone=args.no_bga_zone,
         clamp_netclasses=args._clamp_netclasses,
-        clearance_ceiling=args._clearance_ceiling
+        clearance_ceiling=args._clearance_ceiling,
+        add_teardrops=args.add_teardrops
     )
 
     # Dead-end sweep + gap-snap on the repaired plane copper (issue #84), gated

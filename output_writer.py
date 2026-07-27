@@ -181,7 +181,7 @@ def write_routed_output(
         if via_teardrop_count > 0:
             print(f"  Added teardrops to {via_teardrop_count} vias")
         else:
-            print("  All vias already have teardrop settings")
+            print("  No vias needed teardrops (none present, or all already set)")
 
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(new_content)

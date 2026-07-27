@@ -1671,7 +1671,7 @@ Examples:
     parser.add_argument("--debug-memory", action="store_true",
                         help="Print memory usage statistics at key points during routing")
     parser.add_argument("--add-teardrops", action="store_true",
-                        help="Add teardrop settings to all pads in output file")
+                        help="Add teardrop settings to all pads and vias in output file")
     from fix_kicad_drc_settings import add_drc_fix_args
     add_drc_fix_args(parser)
 

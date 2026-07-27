@@ -106,6 +106,45 @@ def apply_via_protection(pcb_via, tenting_attrs):
     return applied
 
 
+def apply_teardrops_to_board(board):
+    """Enable teardrops on every pad and via of the live board (#489 §9).
+
+    GUI counterpart of the writers' `add_teardrops_to_pads` /
+    `add_teardrops_to_vias`: the CLI applies teardrops to the output FILE, while
+    the GUI applies copper straight into pcbnew, so without this the "Add
+    teardrops" checkbox did nothing on the tabs that apply in memory (fanout, and
+    the planes tabs, whose config key was read but never supplied).
+
+    Matches the writers' scope -- all pads and all vias, not just the ones this
+    run added -- so the two fronts produce the same board. Best-effort; returns
+    (pads_changed, vias_changed), (0, 0) on a KiCad without the accessors.
+    """
+    try:
+        import pcbnew
+    except ImportError:
+        return (0, 0)
+
+    pads = vias = 0
+    try:
+        for fp in board.GetFootprints():
+            for pad in fp.Pads():
+                if not pad.GetTeardropsEnabled():
+                    pad.SetTeardropsEnabled(True)
+                    pads += 1
+        for track in board.GetTracks():
+            if track.GetClass() != 'PCB_VIA':
+                continue
+            if not track.GetTeardropsEnabled():
+                track.SetTeardropsEnabled(True)
+                vias += 1
+    except AttributeError as e:
+        print(f"(teardrops skipped: this KiCad has no teardrop API: {e})")
+        return (0, 0)
+    if pads or vias:
+        print(f"Teardrops enabled on {pads} pad(s) and {vias} via(s)")
+    return (pads, vias)
+
+
 def refill_all_zones(board):
     """Re-fill EVERY copper zone on the board so plane pours pull back around
     copper added after they were first filled (#362).

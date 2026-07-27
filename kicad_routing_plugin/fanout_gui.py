@@ -1360,6 +1360,8 @@ class FanoutTab(wx.Panel):
                     # Advanced cap-placement knobs (#130) so the inline checkbox
                     # path honours them too, not just defaults.
                     **{k: v for k, v in config.items() if k.startswith('cap_')},
+                    # Shared "Add teardrops" checkbox (#489 section 9).
+                    'add_teardrops': shared.get('add_teardrops', False),
                 },
                 optimize_caps=config.get('optimize_caps', False))
 
@@ -1428,6 +1430,8 @@ class FanoutTab(wx.Panel):
                 fanout_config={
                     'track_width': track_width,
                     'extension': extension,
+                    # Shared "Add teardrops" checkbox (#489 section 9).
+                    'add_teardrops': shared.get('add_teardrops', False),
                 },
                 fanout_kind='qfn')
 
@@ -1517,6 +1521,13 @@ class FanoutTab(wx.Panel):
 
         # Build connectivity to register new items properly
         board.BuildConnectivity()
+
+        # Teardrops, if the shared "Add teardrops" checkbox is on (#489 §9). The
+        # CLI writer applies them to the output file; the GUI applies copper into
+        # pcbnew, so it has to set them on the board itself.
+        if (fanout_config or {}).get('add_teardrops'):
+            from .gui_utils import apply_teardrops_to_board
+            apply_teardrops_to_board(board)
 
         # Optionally tidy decoupling caps around the fresh fanout vias (#130)
         cap_summary = None

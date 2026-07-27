@@ -152,6 +152,36 @@ def run():
     check(n4 == 0 and empty == "(kicad_pcb\n)\n",
           "a board with no vias must be returned unchanged")
 
+    # ------------------- every step that writes pad/via copper offers the flag
+    # The filed gap: --add-teardrops existed on 3 of 6 CLIs, missing exactly from
+    # the two scripts that place the most pad-entry copper and from plane repair.
+    import re as _re
+    for rel in ("route.py", "route_diff.py", "route_planes.py",
+                "route_disconnected_planes.py",
+                "bga_fanout/__init__.py", "qfn_fanout/__init__.py"):
+        src = open(os.path.join(ROOT_DIR, rel), encoding="utf-8").read()
+        check("--add-teardrops" in src,
+              f"{rel} must offer --add-teardrops (#489 §9)")
+        check(_re.search(r"add_teardrops\s*=\s*args\.add_teardrops", src)
+              or "add_teardrops=add_teardrops" in src,
+              f"{rel} must pass the flag through to its writer, not just parse it")
+
+    # The shared GUI checkbox must reach the tabs that grew the flag, or the GUI
+    # silently diverges from the CLI (CLAUDE.md parity rule).
+    gui = open(os.path.join(ROOT_DIR, "kicad_routing_plugin", "swig_gui.py"),
+               encoding="utf-8").read()
+    check(gui.count("'add_teardrops': self.add_teardrops_check.GetValue()") >= 3,
+          "the fanout and planes tabs' shared params must carry add_teardrops "
+          "alongside the route tab's (found "
+          f"{gui.count(chr(39) + 'add_teardrops' + chr(39) + ': self.add_teardrops_check.GetValue()')})")
+    for rel, sym in (("kicad_routing_plugin/gui_utils.py", "def apply_teardrops_to_board"),
+                     ("kicad_routing_plugin/fanout_gui.py", "apply_teardrops_to_board"),
+                     ("kicad_routing_plugin/planes_gui.py", "apply_teardrops_to_board")):
+        src = open(os.path.join(ROOT_DIR, rel), encoding="utf-8").read()
+        check(sym in src,
+              f"{rel} must apply teardrops on the pcbnew board ({sym}); the GUI "
+              f"applies copper in memory, so the file-side pass never runs there")
+
     if fails:
         for f in fails:
             print(f"  FAIL  {f}")

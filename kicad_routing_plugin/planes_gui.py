@@ -1269,6 +1269,11 @@ class PlanesTab(wx.Panel):
                 reroute_ripped_nets=config.get('reroute_ripped_nets', False),
                 debug_lines=config.get('debug_lines', False),
                 verbose=config.get('verbose', False),
+                # #489 §9: CLI parity for the shared "Add teardrops" checkbox.
+                # This path is in-memory (output_file=""), so the engine's own
+                # file-side pass is a no-op here -- the pcbnew applier after the
+                # apply is what actually lands them (see _apply_repair_results).
+                add_teardrops=config.get('add_teardrops', False),
                 via_size=config.get('via_size', defaults.VIA_SIZE),
                 via_drill=config.get('via_drill', defaults.VIA_DRILL),
                 grid_step=config.get('grid_step', defaults.GRID_STEP),
@@ -1840,6 +1845,15 @@ class PlanesTab(wx.Panel):
 
         # Build connectivity before filling so nets are resolved properly.
         board.BuildConnectivity()
+
+        # Teardrops, if the shared "Add teardrops" checkbox is on (#489 §9). Both
+        # plane modes apply copper into pcbnew, so the writers' file-side pass
+        # never runs here -- and config['add_teardrops'] was read by the create
+        # path but never supplied, so the checkbox did nothing on this tab.
+        _tdcfg = getattr(self, "_plane_drc_config", None) or {}
+        if _tdcfg.get('add_teardrops'):
+            from .gui_utils import apply_teardrops_to_board
+            apply_teardrops_to_board(board)
 
         # Fill any newly-added zones so they appear as solid copper without
         # the user needing to run "Fill All Zones" (B) manually.

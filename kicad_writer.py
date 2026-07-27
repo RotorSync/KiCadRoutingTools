@@ -784,7 +784,8 @@ def add_tracks_to_pcb(input_path: str, output_path: str, tracks: List[Dict],
 def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
                                tracks: List[Dict], vias: List[Dict] = None,
                                remove_vias: List[Dict] = None,
-                               net_id_to_name: Dict[int, str] = None) -> bool:
+                               net_id_to_name: Dict[int, str] = None,
+                               add_teardrops: bool = False) -> bool:
     """
     Add track segments and vias to a PCB file, optionally removing existing vias.
 
@@ -794,6 +795,9 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
         tracks: List of track dicts with keys: start, end, width, layer, net_id
         vias: List of via dicts with keys: x, y, size, drill, layers, net_id
         remove_vias: List of via dicts with keys: x, y (position to match for removal)
+        add_teardrops: Add teardrop settings to every pad and via in the output.
+            Here rather than in each fanout main() so bga_fanout and qfn_fanout
+            share one implementation with the other writers (#489 §9).
 
     Returns:
         True if successful
@@ -900,10 +904,28 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
 
     routing_text = '\n'.join(elements)
 
+    # Teardrops on pads, if asked (#489 §9). Pads are never ADDED here, so this
+    # runs on the input text; the VIA pass waits until the new copper is in.
+    if add_teardrops:
+        print("Adding teardrop settings to pads and vias...")
+        content, _td = add_teardrops_to_pads(content)
+        print(f"  Added teardrops to {_td} pads" if _td
+              else "  All pads already have teardrop settings")
+
+    def _finish(text: str) -> str:
+        # Via teardrops LAST so THIS run's vias get them too -- for a fanout that
+        # is the whole point (a 0.1mm trace meeting a 0.25mm via pad).
+        if not add_teardrops:
+            return text
+        text, _vtd = add_teardrops_to_vias(text)
+        print(f"  Added teardrops to {_vtd} vias" if _vtd
+              else "  No vias needed teardrops (none present, or all already set)")
+        return text
+
     if not routing_text.strip():
         print("Warning: No routing elements to add")
         with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(content)
+            f.write(_finish(content))
         return True
 
     # Find the last closing parenthesis
@@ -918,7 +940,7 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
 
     # Write output file
     with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(new_content)
+        f.write(_finish(new_content))
 
     return True
 

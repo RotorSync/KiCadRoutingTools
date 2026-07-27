@@ -232,6 +232,8 @@ _PARAM_CONTROL_ALIASES = {
     # #486: coplanar-waveguide declaration (the gap itself is a same-named
     # SpinCtrlDouble and needs no alias).
     'coplanar_nets': 'coplanar_nets_ctrl',
+    # #489 section 9: one shared checkbox drives teardrops on every step.
+    'add_teardrops': 'add_teardrops_check',
 }
 # _PARAM_SPECIAL: params handled by _apply_special() (composite / inverted /
 # panel-backed controls that a plain SetValue can't fill).
