@@ -262,6 +262,7 @@ def _empty_results_data() -> dict:
         'segments_to_remove': [],
         'vias_to_remove': [],
         'blockers': [],
+        'pad_pairs_open': [],
     }
 
 
@@ -1807,6 +1808,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _zones_by_net: Dict[int, list] = {}
     for _z in getattr(pcb_data, 'zones', []) or []:
         _zones_by_net.setdefault(_z.net_id, []).append(_z)
+    # (num_pads, pad_components) per graded net -- raw material for the
+    # pad-pair tallies emitted with the summary (#409 follow-up). Filled by
+    # the sweep below and by the straggler grading at summary time.
+    _pad_pair_stats: Dict[int, Tuple[int, int]] = {}
     for _nid, _res in routed_results.items():
         if _nid in state.diff_pair_by_net_id:
             continue  # diff pairs report via their own path
@@ -1840,6 +1845,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         if _res.get('is_multipoint'):
             _res['tap_pads_total'] = len(_pads)
             _res['tap_pads_connected'] = len(_pads) - len(_dp)
+        # #409 follow-up: keep this net's pad/component counts for the pad-pair
+        # tallies (num_components is otherwise discarded by this sweep).
+        _pad_pair_stats[_nid] = (len(_pads), _r.get('num_components') or 0)
 
     # Collect multi-point tap routing stats and failed pad details
     tap_pads_connected = 0
@@ -2053,6 +2061,68 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             summary['blockers'] = blockers_report
     except Exception:
         blockers_report = []
+    # #409 follow-up: pad-pair routability tallies (PRR ingredients: connected
+    # = |pads| - pad components from the authoritative union-find above, total
+    # = |pads| - 1) plus a per-open-net outcome. Population: every multi-pad
+    # net graded against the WRITTEN board -- the sweep over routed_results
+    # (which includes pre-existing rippable nets) plus scope nets with no
+    # result and coverage-gate nets, graded here identically. NOT reconcilable
+    # with multipoint_edges_* (component-MST: pre-existing copper joins
+    # terminals, so there are fewer edges than pad pairs). route.py runs no
+    # DRC, so every route-time deficit is an 'open'; shorts are check_drc.py's
+    # domain ('outcome' exists so a DRC-integrated emitter can add 'short'
+    # without a schema break). Computed before the final reconciliation, like
+    # 'blockers'. Single-outline semantics: once rebased onto #479's
+    # net_break_within_outlines, derive per-outline from pad_components.
+    pad_pairs_open_report = []
+    try:
+        _straggler_ids = list(failed_single_ids) + \
+            [m['net_id'] for m in failed_multipoint]
+        for _nid in _straggler_ids:
+            if _nid in _pad_pair_stats or _nid in state.diff_pair_by_net_id:
+                continue
+            _pads = pcb_data.pads_by_net.get(_nid, [])
+            if len(_pads) < 2:
+                continue
+            _r = check_net_connectivity(
+                _nid, _segs_by_net.get(_nid, []), _vias_by_net.get(_nid, []),
+                _pads, _zones_by_net.get(_nid, []), tolerance=0.02,
+                pcb_data=pcb_data)
+            _pad_pair_stats[_nid] = (len(_pads), _r.get('num_components') or 0)
+        _pp_conn = 0
+        _pp_total = 0
+        _refused = set(state.collision_refused_net_ids or set())
+        for _nid, (_np, _k) in _pad_pair_stats.items():
+            _pt = _np - 1
+            # k == 0 means no pad was visible to the union-find (padless-copper
+            # answer from check_net_connectivity): grade as fully connected,
+            # and never let invisible pads push connected above total.
+            _pc = _pt if _k <= 0 else min(_pt, max(0, _np - _k))
+            _pp_total += _pt
+            _pp_conn += _pc
+            if _pc >= _pt:
+                continue
+            _name = (pcb_data.nets[_nid].name if _nid in pcb_data.nets
+                     else f"Net {_nid}")
+            if _nid in _refused:
+                _sub = 'collision_refused'
+            elif _nid in failed_multipoint_ids and _nid not in routed_results:
+                _sub = 'coverage_gate'
+            elif _nid not in routed_results:
+                _sub = 'unrouted'
+            else:
+                _sub = 'partial'
+            pad_pairs_open_report.append({
+                'net': _name, 'pairs_connected': _pc, 'pairs_total': _pt,
+                'outcome': 'open', 'open_subtype': _sub})
+        pad_pairs_open_report.sort(key=lambda e: e['net'])
+        if _pp_total:
+            summary['pad_pairs_connected'] = _pp_conn
+            summary['pad_pairs_total'] = _pp_total
+        if pad_pairs_open_report:
+            summary['pad_pairs_open'] = pad_pairs_open_report
+    except Exception:
+        pad_pairs_open_report = []
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
 
     # Write output file or return results for direct application
@@ -2075,6 +2145,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             'vias_to_remove': stale_input_vias,
             # #409: same data as JSON_SUMMARY['blockers'] (may be empty).
             'blockers': blockers_report,
+            # #409 follow-up: same data as JSON_SUMMARY['pad_pairs_open']
+            # (may be empty).
+            'pad_pairs_open': pad_pairs_open_report,
         }
     else:
         # Write output file using extracted output_writer module

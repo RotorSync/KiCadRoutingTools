@@ -27,6 +27,28 @@ Key fields:
   Derived from the final-board union-find (the same check `check_connected.py`
   uses), so it credits pads reached via planes/zones, fanout stubs, and
   rip-up/retry reroutes and agrees with `check_connected.py` (issue #184).
+- `pad_pairs_connected` / `pad_pairs_total`: pad-pair routability tallies
+  (#409 follow-up; PRR = connected/total downstream). Per graded multi-pad
+  net: connected = |pads| − pad components from the same final-board
+  union-find, total = |pads| − 1 (clamped so a net whose pads are invisible
+  to the union-find grades as connected). Population: the routing scope
+  after already-routed filtering, pre-existing rippable nets the run graded,
+  and disturbed coverage-gate nets. NOT reconcilable with
+  `multipoint_edges_*` (those count component-MST edges — pre-existing
+  copper joins terminals first, so there are fewer edges than pad pairs).
+  Computed before the final reconciliation, like `blockers`. Single-outline
+  semantics for now (a cross-outline split counts as open pairs).
+- `pad_pairs_open`: per net shipping a pair deficit: `{net, pairs_connected,
+  pairs_total, outcome, open_subtype}`, sorted by net; key absent when none.
+  `outcome` is always `"open"` today — route.py runs no DRC, so a route-time
+  failure is definitionally an open; shorts are `check_drc.py`'s domain and
+  the field exists so a DRC-integrated emitter can add `"short"` without a
+  schema break. (Distinct namespace from route_diff `pair_reports.outcome`.)
+  `open_subtype`: `collision_refused` (left open because restoring the
+  ripped track would collide — a short was averted, #134), `coverage_gate`
+  (disturbed out-of-scope net shipping broken), `unrouted` (scope net, no
+  result at all), `partial` (routed a result but left pads disconnected).
+  Join with `blockers` on `net` for cause + outcome per failed net.
 
 ### Failed net histories
 
