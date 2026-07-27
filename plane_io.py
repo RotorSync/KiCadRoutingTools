@@ -12,6 +12,7 @@ from typing import List, Dict, Tuple, Optional
 from kicad_parser import PCBData, parse_kicad_pcb, _unescape_kicad_string
 from kicad_writer import (generate_via_sexpr, generate_segment_sexpr, move_copper_text_to_silkscreen,
                           move_copper_graphics_to_silkscreen, add_teardrops_to_pads,
+                          add_teardrops_to_vias,
                           prevailing_via_protection_in_text as _prevailing_via_protection_in_text)
 # E3: the one guarded squared-distance kernel (length_sq < 1e-10 degenerate guard).
 from geometry_utils import point_to_segment_dist_sq as _pt_seg_dist_sq
@@ -298,7 +299,9 @@ def write_plane_output(
     content = move_copper_text_to_silkscreen(content)
     content = move_copper_graphics_to_silkscreen(content)
 
-    # Add teardrops to all pads if requested
+    # Add teardrops to all pads if requested. Pads are never ADDED by a routing
+    # run, so this can run on the input text; the VIA pass has to wait until this
+    # run's own stitching vias are in the content (see below, #489 §9).
     if add_teardrops:
         print("Adding teardrop settings to pads...")
         content, teardrop_count = add_teardrops_to_pads(content)
@@ -354,7 +357,12 @@ def write_plane_output(
         ))
 
     if not elements:
-        # Nothing to add, just copy the file
+        # Nothing to add, just copy the file -- but the via teardrop pass still
+        # has to run over the board's existing vias.
+        if add_teardrops:
+            content, _vtd = add_teardrops_to_vias(content)
+            print(f"  Added teardrops to {_vtd} vias"
+                  if _vtd else "  All vias already have teardrop settings")
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(content)
         return True
@@ -368,6 +376,16 @@ def write_plane_output(
         return False
 
     new_content = content[:last_paren] + '\n' + routing_text + '\n' + content[last_paren:]
+
+    # Via teardrops LAST, so this run's own stitching vias get them too -- those
+    # are the vias that most need one (#489 §9). Running before the insert above
+    # covered only the vias already on the board (measured: 63 of 81 on megadesk).
+    if add_teardrops:
+        new_content, via_teardrop_count = add_teardrops_to_vias(new_content)
+        if via_teardrop_count > 0:
+            print(f"  Added teardrops to {via_teardrop_count} vias")
+        else:
+            print("  All vias already have teardrop settings")
 
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(new_content)

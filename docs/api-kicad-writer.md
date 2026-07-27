@@ -223,7 +223,26 @@ add_teardrops_to_pads(content: str, best_length_ratio=0.5, max_length=1.0,
 ```
 
 Adds a `(teardrops ...)` settings block to every pad that lacks one; returns
-the modified content and the count. Exposed on the CLIs as `--teardrops`.
+the modified content and the count. Exposed on the CLIs as `--add-teardrops`.
+
+```python
+add_teardrops_to_vias(content: str, ...same parameters...) -> Tuple[str, int]
+```
+
+The same for **vias**, which got teardrops on no path at all before #489 §9 —
+track-to-via teardrops matter most exactly where a 0.1 mm trace meets a 0.25 mm
+via pad in a fine-pitch escape. Two details are load-bearing:
+
+- The block is inserted **after** the via's `(uuid ...)`, as its last child.
+  KiCad does not care about child order (verified by round-trip through pcbnew:
+  0 vias reported `GetTeardropsEnabled()` before, all 63 after), while this
+  repo's own via regexes require `layers → (free)? → net → uuid` to be
+  contiguous — inserting earlier would make the boards we write unparseable by us.
+- Both writers run this pass **last**, after the run's new copper is inserted,
+  so vias *this run placed* get teardrops too. Running it on the input text
+  covered only pre-existing vias (63 of 81 on megadesk).
+
+Idempotent: a via that already has a block is skipped.
 
 ## `output_writer.py`
 

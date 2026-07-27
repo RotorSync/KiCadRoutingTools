@@ -1476,6 +1476,94 @@ def add_teardrops_to_pads(content: str,
     return ''.join(result_parts), count
 
 
+def add_teardrops_to_vias(content: str,
+                          best_length_ratio: float = 0.5,
+                          max_length: float = 1.0,
+                          best_width_ratio: float = 1.0,
+                          max_width: float = 2.0,
+                          curved_edges: bool = False,
+                          filter_ratio: float = 0.9,
+                          allow_two_segments: bool = True,
+                          prefer_zone_connections: bool = True) -> tuple[str, int]:
+    """Add teardrop settings to every via that does not already have them.
+
+    `--add-teardrops` reached PADS only: `add_teardrops_to_pads` above, with zero
+    teardrop references anywhere near via emission, so vias got teardrops on NO
+    path (#489 §9). Track-to-via teardrops matter most exactly where this tool is
+    weakest -- fine-pitch BGA escape, where a 0.1mm trace meets a 0.25mm via pad --
+    and they are the standard mitigation for drill breakout under layer-to-layer
+    registration error.
+
+    KiCad accepts the same 9-field `(teardrops ...)` block on a via as on a pad
+    (verified by round-tripping SetTeardropsEnabled through pcbnew). The block is
+    inserted AFTER `(uuid ...)`, as the via's last child: KiCad's parser does not
+    care about child order, while this repo's own via regexes require
+    layers -> (free)? -> net -> uuid to be contiguous, so inserting earlier would
+    make the boards we write unparseable BY US.
+
+    Returns (modified_content, count_of_vias_given_teardrops).
+    """
+    curved_str = "yes" if curved_edges else "no"
+    two_seg_str = "yes" if allow_two_segments else "no"
+    zone_str = "yes" if prefer_zone_connections else "no"
+
+    teardrop_block = f'''
+		(teardrops
+			(best_length_ratio {best_length_ratio})
+			(max_length {max_length})
+			(best_width_ratio {best_width_ratio})
+			(max_width {max_width})
+			(curved_edges {curved_str})
+			(filter_ratio {filter_ratio})
+			(enabled yes)
+			(allow_two_segments {two_seg_str})
+			(prefer_zone_connections {zone_str})
+		)'''
+
+    count = 0
+    result_parts = []
+    last_end = 0
+    i = 0
+
+    while True:
+        via_start = content.find('(via', i)
+        if via_start == -1:
+            break
+        # '(via' must be the whole token, not a prefix of something else.
+        nxt = content[via_start + 4:via_start + 5]
+        if nxt and nxt not in ' \t\r\n(':
+            i = via_start + 4
+            continue
+
+        depth = 0
+        via_end = via_start
+        for j in range(via_start, len(content)):
+            if content[j] == '(':
+                depth += 1
+            elif content[j] == ')':
+                depth -= 1
+                if depth == 0:
+                    via_end = j + 1
+                    break
+
+        via_block = content[via_start:via_end]
+
+        if '(teardrops' not in via_block:
+            uuid_match = re.search(r'\(uuid\s+"[^"]*"\)', via_block)
+            if uuid_match:
+                cut = uuid_match.end()
+                new_via_block = via_block[:cut] + teardrop_block + via_block[cut:]
+                result_parts.append(content[last_end:via_start])
+                result_parts.append(new_via_block)
+                last_end = via_end
+                count += 1
+
+        i = via_end
+
+    result_parts.append(content[last_end:])
+    return ''.join(result_parts), count
+
+
 def swap_pad_nets_in_content(content: str, pad1: Pad, pad2: Pad) -> str:
     """
     Swap the net assignments of two pads in the KiCad PCB file content.

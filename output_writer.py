@@ -76,9 +76,11 @@ def write_routed_output(
     content = move_copper_text_to_silkscreen(content)
     content = move_copper_graphics_to_silkscreen(content)
 
-    # Add teardrops to all pads if requested
+    # Add teardrops to all pads if requested. Pads are never ADDED by a routing
+    # run, so this can run on the input text; the VIA pass runs at the END, once
+    # this run's own vias are in the content (#489 §9).
     if add_teardrops:
-        print("Adding teardrop settings to pads...")
+        print("Adding teardrop settings to pads and vias...")
         content, teardrop_count = add_teardrops_to_pads(content)
         if teardrop_count > 0:
             print(f"  Added teardrops to {teardrop_count} pads")
@@ -170,6 +172,16 @@ def write_routed_output(
     # Insert routing text before final closing paren
     last_paren = content.rfind(')')
     new_content = content[:last_paren] + '\n' + routing_text + '\n' + content[last_paren:]
+
+    # Via teardrops LAST, so THIS run's own vias get them too -- the fine-pitch
+    # escape vias are exactly the ones a track-to-via teardrop is for (#489 §9).
+    if add_teardrops:
+        from kicad_writer import add_teardrops_to_vias
+        new_content, via_teardrop_count = add_teardrops_to_vias(new_content)
+        if via_teardrop_count > 0:
+            print(f"  Added teardrops to {via_teardrop_count} vias")
+        else:
+            print("  All vias already have teardrop settings")
 
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(new_content)
