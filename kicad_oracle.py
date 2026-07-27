@@ -788,15 +788,22 @@ def _exact_fill_endpoints(pcb_data, net_id, net_name, A, B, exact_map,
 
     aa = np.asarray([(p[0], p[1]) for p in a_pts])
     bb = np.asarray([(p[0], p[1]) for p in b_pts])
-    best = (float('inf'), 0, 0)
-    chunk = 2000
-    for i0 in range(0, len(aa), chunk):
-        d = ((aa[i0:i0 + chunk, None, :] - bb[None, :, :]) ** 2).sum(axis=2)
-        jj = np.unravel_index(int(np.argmin(d)), d.shape)
-        dv = float(d[jj])
-        if dv < best[0]:
-            best = (dv, i0 + int(jj[0]), int(jj[1]))
-    _, i_best, j_best = best
+    # Nearest approach via KD-tree, not an all-pairs distance matrix (#499).
+    # The brute force materialised a (2000 x len(bb)) matrix per chunk: on
+    # kbic65 that is aa=3.9k x bb=82k = 317M pairs, 25-90s PER CALL, and the
+    # oracle calls it once per missing link (483 of them, mostly for the SAME
+    # island pair) -- 99% of that board's 6876s chain. scipy is a declared
+    # dependency (requirements.txt) and already used by plane_fill_model.
+    #
+    # Tie-breaks are resolved explicitly to keep the choice deterministic and
+    # identical to the old row-major argmin: smallest aa index among the
+    # minimum distances, then smallest bb index among ITS minima.
+    from scipy.spatial import cKDTree
+    _d, _j = cKDTree(bb).query(aa, k=1)
+    _dmin = float(np.min(_d))
+    i_best = int(np.flatnonzero(_d <= _dmin + 1e-12)[0])
+    _dj = ((bb - aa[i_best]) ** 2).sum(axis=1)
+    j_best = int(np.flatnonzero(_dj <= float(np.min(_dj)) + 1e-18)[0])
     pa, pb = a_pts[i_best], b_pts[j_best]
     if _m.hypot(pb[0] - pa[0], pb[1] - pa[1]) > 60.0:
         return None
@@ -1024,6 +1031,18 @@ def oracle_reconnect(board_file: str, net_names, config,
                 work.append((net_name, B, (bx_, by_, bl_, 'main')))
             else:
                 work.append((net_name, A, B))
+        # Obstacle-map memo (#499). The base map is a pure function of
+        # (net_id, the board's copper, config) and route_plane_connection_wide
+        # CLONES it (`clone_fresh`) rather than mutating, so it is reusable
+        # across links until copper actually lands. It was rebuilt PER LINK.
+        # Measured on kbic65: each rebuild is 0.4-1.9s -- secondary to the
+        # nearest-approach fix above, not the main cost -- but it is pure waste
+        # on the links that add no copper (93% of that board's links have
+        # identical endpoints). Keyed on the copper counts so any route that
+        # DOES land invalidates it; cleared on miss so only one map is ever
+        # alive (these maps are hundreds of MB).
+        _obs_memo = {}
+
         for _w_idx, (net_name, (ax, ay, al, akind), (bx, by, bl, bkind)) \
                 in enumerate(work):
             if cancel_check and cancel_check():
@@ -1055,14 +1074,19 @@ def oracle_reconnect(board_file: str, net_names, config,
             if force_raw:
                 print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
                       f"<->({bx:.2f},{by:.2f})  retry with raw endpoints")
-            base_obstacles, _ = build_base_obstacles(
-                exclude_net_ids={net_id},
-                routing_layers=routing_layers,
-                pcb_data=pcb_data,
-                config=config,
-                track_width=config.track_width,
-                track_via_clearance=track_via_clearance,
-                hole_to_hole_clearance=hole_to_hole_clearance)
+            _obs_key = (net_id, len(pcb_data.segments), len(pcb_data.vias))
+            base_obstacles = _obs_memo.get(_obs_key)
+            if base_obstacles is None:
+                _obs_memo.clear()   # keep exactly one map alive
+                base_obstacles, _ = build_base_obstacles(
+                    exclude_net_ids={net_id},
+                    routing_layers=routing_layers,
+                    pcb_data=pcb_data,
+                    config=config,
+                    track_width=config.track_width,
+                    track_via_clearance=track_via_clearance,
+                    hole_to_hole_clearance=hole_to_hole_clearance)
+                _obs_memo[_obs_key] = base_obstacles
             net_vias = [(v.x, v.y) for v in pcb_data.vias
                         if v.net_id == net_id]
             # #479 reuse-audit gap 1: plated THT barrels are reusable layer
