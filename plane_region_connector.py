@@ -248,6 +248,97 @@ def _build_layer_blocked_set(
     return blocked, net_segment_cells
 
 
+def _point_in_copperpour_keepout(pcb_data, x: float, y: float,
+                                 plane_layer: str) -> bool:
+    """Is (x,y) inside a (copperpour not_allowed) rule area on `plane_layer`?
+
+    Even-odd over outline + holes, the same rule ZoneFillModel stamps with.
+    """
+    from check_connected import point_in_polygon
+    for ko in (getattr(pcb_data.board_info, 'keepouts', None) or []):
+        if ko.get('copper_pour_allowed', True):
+            continue
+        kls = ko.get('layers') or set()
+        if kls and plane_layer not in kls and '*.Cu' not in kls and \
+                not (plane_layer in ('F.Cu', 'B.Cu') and
+                     ({'F&B.Cu', 'F&B'} & kls)):
+            continue
+        outline = ko.get('polygon') or []
+        if len(outline) < 3 or not point_in_polygon(x, y, outline):
+            continue
+        inside = True
+        for hole in (ko.get('holes') or []):
+            if len(hole) >= 3 and point_in_polygon(x, y, hole):
+                inside = not inside
+        if inside:
+            return True
+    return False
+
+
+def _net_has_pourable_anchor(pcb_data, net_id: int, plane_layer: str) -> bool:
+    """Can the pour on `plane_layer` reach ANY same-net anchor? (#499)
+
+    KiCad's island removal only runs when at least one fill island is anchored.
+    With nothing anchored it keeps EVERY island rather than deleting the whole
+    fill -- verified against KiCad 10 on a kbic65-geometry board: with a GND pad
+    F.Cu fills as 1 island (4 unanchored strips deleted), with the pad removed
+    the same board fills as 5 (none deleted).
+
+    kbic65 is exactly that case: GND has 3 pads and 0 vias, and ALL THREE sit
+    inside the board's copperpour keep-out band (y 35.7-67.5), so no island can
+    ever touch an anchor. All 482 of its islands survive and 199 are DRC-flagged
+    isolated_copper -- while we assumed mode 0 had deleted them, so plane repair
+    skipped them and the post-write kicad-oracle inherited 483 links to weld one
+    at a time (the board's 6905s chain).
+
+    An anchor inside a copperpour keep-out anchors NOTHING: no copper is poured
+    there to touch it.
+    """
+    cache = getattr(pcb_data, '_pourable_anchor_cache', None)
+    if cache is None:
+        cache = {}
+        try:
+            pcb_data._pourable_anchor_cache = cache
+        except Exception:
+            pass
+    key = (net_id, plane_layer)
+    if key in cache:
+        return cache[key]
+
+    # Count anchors on this layer, and how many are POURABLE (outside every
+    # copperpour keep-out). The distinction matters: a net with NO anchors at
+    # all on this layer is the ordinary mid-chain state of an inner plane
+    # before its stitching vias exist, and must keep the existing behaviour --
+    # flipping it would enable orphan joining across the corpus (measured: 24
+    # of 176 net/layer pairs, on boards with no keep-outs at all) and ship the
+    # copper clutter the mode-0 policy exists to avoid. Only a net whose
+    # anchors ALL sit inside a keep-out is the kbic65 case.
+    total = pourable = 0
+
+    def _tally(x, y):
+        nonlocal total, pourable
+        total += 1
+        if not _point_in_copperpour_keepout(pcb_data, x, y, plane_layer):
+            pourable += 1
+
+    for v in getattr(pcb_data, 'vias', []) or []:
+        if v.net_id == net_id:
+            _tally(v.x, v.y)
+    for pad in (pcb_data.pads_by_net.get(net_id, []) or []):
+        lay = pad.layers or []
+        if pad.drill > 0 or plane_layer in lay or '*.Cu' in lay:
+            _tally(pad.global_x, pad.global_y)
+    for sg in getattr(pcb_data, 'segments', []) or []:
+        if sg.net_id == net_id and sg.layer == plane_layer:
+            _tally(sg.start_x, sg.start_y)
+
+    # "Has a pourable anchor" is True when there is nothing to judge (total 0),
+    # so callers fall back to the existing mode-0 policy in that case.
+    found = pourable > 0 or total == 0
+    cache[key] = found
+    return found
+
+
 def _island_kept_by_filler(pcb_data, net_id: int, plane_layer: str, patch,
                            coord, analysis_grid_step: float) -> bool:
     """Would KiCad's filler KEEP the fill at this modeled orphan patch? (#350)
@@ -307,6 +398,13 @@ def _island_kept_by_filler(pcb_data, net_id: int, plane_layer: str, patch,
     if mode == 2:
         patch_area = len(patch) * analysis_grid_step * analysis_grid_step
         return patch_area >= getattr(owner, 'island_area_min', 0.0)
+    # mode 0 deletes truly isolated islands -- but ONLY when the net has an
+    # island to keep. KiCad's removal is relative to the net's anchored fill;
+    # with NO reachable anchor it keeps every island instead of erasing the
+    # whole pour (#499, verified on KiCad 10). Assuming deletion there hides
+    # real disconnected copper from plane repair.
+    if not _net_has_pourable_anchor(pcb_data, net_id, plane_layer):
+        return True
     return False  # mode 0: the filler deletes truly isolated islands
 
 
@@ -447,7 +545,15 @@ def _regions_from_fill_models(net_id, pcb_data, coord, plane_layer,
     _zones = [z for z in (getattr(pcb_data, 'zones', None) or [])
               if z.net_id == net_id and z.layer == plane_layer]
     _modes = {getattr(z, 'island_removal_mode', 0) or 0 for z in _zones} or {0}
-    if _modes != {0}:
+    # ...but mode 0 only DELETES when the net has an island worth keeping.
+    # KiCad's removal is relative to the anchored fill; with no reachable
+    # anchor it keeps EVERY island rather than erasing the pour (#499,
+    # verified on KiCad 10). kbic65 is that case -- GND's only 3 pads sit
+    # inside the copperpour keep-out band, so all 482 of its islands survive
+    # and 199 are DRC-flagged isolated_copper, while we skipped every one as
+    # "the filler will delete it" and left them to the post-write oracle.
+    _unanchored = not _net_has_pourable_anchor(pcb_data, net_id, plane_layer)
+    if _modes != {0} or _unanchored:
         _amin = max([getattr(z, 'island_area_min', 0.0) or 0.0
                      for z in _zones] + [0.0])
         orphan_min_mm2 = max(25.0, _amin)
