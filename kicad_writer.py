@@ -284,7 +284,13 @@ def _segments_properly_cross(p1, p2, p3, p4) -> bool:
     touching segments are excluded on purpose -- see _polygons_overlap."""
     def orient(a, b, c):
         v = ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
-        return (v > 1e-12) - (v < -1e-12)
+        # int(), not bare bool arithmetic: zone points reach here as numpy
+        # scalars on some boards, and numpy 2.x REMOVED np.bool_ - np.bool_
+        # (TypeError). That killed route_planes outright -- the step wrote no
+        # board, downstream steps hit FileNotFoundError, and the board was
+        # dropped from grading as chain=BROKEN rather than reported. Identical
+        # for Python floats (bool is an int subclass).
+        return int(v > 1e-12) - int(v < -1e-12)
     d1, d2 = orient(p3, p4, p1), orient(p3, p4, p2)
     d3, d4 = orient(p1, p2, p3), orient(p1, p2, p4)
     return d1 * d2 < 0 and d3 * d4 < 0
