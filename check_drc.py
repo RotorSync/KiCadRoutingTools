@@ -2247,6 +2247,55 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     v['required_mm'] = req_clr
                 violations.append(v)
 
+    # VIA arm of the same copper-to-hole rule (#505). The pass above walks
+    # TRACKS only; a via near a hole was covered solely by the drill-to-drill
+    # check (pad-drill-via-drill, at hole_to_hole_clearance), which measures the
+    # via's DRILL. KiCad's hole_clearance holds the via's COPPER off the hole
+    # wall and honors the pad's clearance override, so an NPTH mounting hole
+    # with a local_clearance override went entirely unseen here -- pinci shipped
+    # 5 such items (0.9/1.3mm overrides, vias 0.76-1.13mm away) that check_drc
+    # reported as clean while kicad-cli flagged every one.
+    if holes and pcb_data.vias:
+        for (h1x, h1y), (h2x, h2y), hr, hnet, ref, req_clr, copper_exempt in holes:
+            # NPTH only (copper_exempt is None), symmetric with the router's
+            # via keep-out. A PLATED pad's own copper already blocks vias and is
+            # reported by the pad-via checks, so grading its barrel here would
+            # double-count the same physical conflict.
+            if copper_exempt is not None:
+                continue
+            # Grade at KICAD's requirement, not the project's NPTH fab floor.
+            # The hole tuple carries max(npth_clr, local_clearance): the floor is
+            # a conservative ROUTING policy for tracks (NPTH_TO_TRACK_CLEARANCE),
+            # not a KiCad DRC rule, so grading vias against it invents items
+            # kicad-cli never reports (crkbd: 7 phantoms at 0.016-0.023mm, whose
+            # NPTH pads carry no override at all -- exactly the 0.20-vs-0.127
+            # gap). Above the floor the value can only have come from the pad
+            # override, which KiCad does honor.
+            kicad_req = req_clr if req_clr > npth_clr + 1e-9 else clearance
+            for via in pcb_data.vias:
+                # Own-net copper legitimately lands on the pad (mirrors the
+                # track arm's snet != hnet exemption, #442).
+                if via.net_id == hnet:
+                    continue
+                dist = point_to_segment_distance(via.x, via.y, h1x, h1y, h2x, h2y)
+                overlap = (hr + via.size / 2.0 + kicad_req) - dist
+                if overlap <= kicad_req * clearance_margin:
+                    continue
+                hole_net = pcb_data.nets.get(hnet, None)
+                via_net = pcb_data.nets.get(via.net_id, None)
+                v = {
+                    'type': 'via-hole',
+                    'net1': hole_net.name if hole_net else f"net_{hnet}",
+                    'net2': via_net.name if via_net else f"net_{via.net_id}",
+                    'hole_ref': ref or 'via',
+                    'overlap_mm': float(overlap),
+                    'hole_loc': ((h1x + h2x) / 2.0, (h1y + h2y) / 2.0),
+                    'via_loc': (via.x, via.y),
+                }
+                if kicad_req > clearance + 1e-9:
+                    v['required_mm'] = kicad_req
+                violations.append(v)
+
     # Check board edge clearances. Measure to the real Edge.Cuts outline (outer
     # ring + interior cutouts) when the parser found one, so copper routed into a
     # cutout/slot/notch -- which sits inside the bounding box -- is caught (issue
@@ -2736,6 +2785,11 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
                         print(f"    Hole: ({v['hole_loc'][0]:.2f},{v['hole_loc'][1]:.2f})")
                         print(f"    Seg: ({v['seg_loc'][0]:.2f},{v['seg_loc'][1]:.2f})-({v['seg_loc'][2]:.2f},{v['seg_loc'][3]:.2f})")
+                    elif vtype == 'via-hole':
+                        print(f"  Hole:{v['net1']} ({v['hole_ref']}) <-> Via:{v['net2']} (copper-to-hole)")
+                        print(f"    Overlap: {v['overlap_mm']:.3f}mm")
+                        print(f"    Hole: ({v['hole_loc'][0]:.2f},{v['hole_loc'][1]:.2f})")
+                        print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
                     elif vtype == 'segment-board-edge':
                         where = _edge_phrase(v['edge'])
                         print(f"  {v['net1']} {where}")

@@ -1390,6 +1390,37 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         block_via_cells_near_drills(obstacles, drill_holes, config.via_drill,
                                     config.hole_to_hole_clearance, config.grid_step)
 
+    # VIA arm of the #326 override (#505). KiCad's hole_clearance holds a via's
+    # COPPER -- not merely its drill -- `local_clearance` off the hole wall. For
+    # an NPTH pad nothing enforced that: the pad has no copper, so the pad-copper
+    # blocker never stamps it, and the only via keep-out is the hole-to-hole
+    # DRILL minimum above, which is measured drill-to-drill at a much smaller
+    # value. pinci shipped 5 vias 0.76-1.13mm from 0.9/1.3mm-override mounting
+    # holes, every one satisfying h2h (1.427mm) while KiCad wanted 2.225/2.625mm.
+    # Scoped to NPTH like the track arm: a plated pad's own copper obstacle
+    # already keeps vias off, and stamping its annulus would strand
+    # zero-annular-ring pads.
+    # block_via_cells_near_drills builds hole_r + clearance + via_drill/2, so
+    # passing lc + (via_size - via_drill)/2 yields hole_r + lc + via_size/2 --
+    # the via COPPER edge held `lc` off the hole wall (same idiom as the #448
+    # slot band above).
+    _via_override: Dict[float, list] = {}
+    for _pads in pcb_data.pads_by_net.values():
+        for _pad in _pads:
+            if _pad.drill <= 0 or _pad_has_copper(_pad):
+                continue
+            _lc = getattr(_pad, 'local_clearance', 0.0) or 0.0
+            if _lc <= 0:
+                continue
+            _via_clr = _lc + (config.via_size - config.via_drill) / 2.0
+            if _via_clr <= config.hole_to_hole_clearance:
+                continue          # the h2h stamp already covers this override
+            _via_override.setdefault(round(_via_clr, 9), []).extend(
+                pad_drill_circles(_pad))
+    for _clr, _circles in _via_override.items():
+        block_via_cells_near_drills(obstacles, _circles, config.via_drill,
+                                    _clr, config.grid_step)
+
 
 def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                                 net_id: int, config: GridRouteConfig,
