@@ -1466,6 +1466,59 @@ def _apply_meanders_to_net_with_iteration(
         return new_segments, new_segments, bump_count, new_metric
 
 
+def _seed_group_members_from_board(
+    net_names: List[str],
+    have_names,
+    pcb_data: PCBData,
+) -> Dict[str, dict]:
+    """Pseudo-results for group members with NO in-run routing result, measured
+    from the copper already on the board (#489 §7).
+
+    Matching was same-run only: a group whose members the planner routed in
+    DIFFERENT chain steps was skipped entirely with "fewer than 2 routed nets",
+    even though the earlier step's copper is sitting in pcb_data. Seeding those
+    members lets them set the group TARGET, which is the whole point -- this
+    run's nets then meander up to the net routed earlier.
+
+    The returned dicts are deliberately NOT inserted into net_results and carry
+    'from_board': True so the meander loop skips them: their copper is already
+    written, so "adding length" to them would emit a duplicate copy.
+    """
+    from net_queries import calculate_route_length
+
+    if pcb_data is None:
+        return {}
+    wanted = {}
+    for nid, net in pcb_data.nets.items():
+        if net.name and net.name in net_names and net.name not in have_names:
+            wanted[nid] = net.name
+    if not wanted:
+        return {}
+
+    segs_by: Dict[int, List[Segment]] = {}
+    vias_by: Dict[int, List] = {}
+    for s in pcb_data.segments:
+        if s.net_id in wanted:
+            segs_by.setdefault(s.net_id, []).append(s)
+    for v in pcb_data.vias:
+        if v.net_id in wanted:
+            vias_by.setdefault(v.net_id, []).append(v)
+
+    seeded = {}
+    for nid, name in wanted.items():
+        segs = segs_by.get(nid, [])
+        if not segs:
+            continue  # no copper on the board either -- genuinely unrouted
+        vias = vias_by.get(nid, [])
+        seeded[name] = {
+            'new_segments': segs,
+            'new_vias': vias,
+            'route_length': calculate_route_length(segs, vias, pcb_data),
+            'from_board': True,
+        }
+    return seeded
+
+
 def apply_length_matching_to_group(
     net_results: Dict[str, dict],
     net_names: List[str],
@@ -1506,9 +1559,21 @@ def apply_length_matching_to_group(
                     group_results[name] = result
                     processed_result_ids.add(result_id)
 
+    # Members routed in an EARLIER chain step have no in-run result; measure
+    # them from board copper so they can still set the target (#489 §7).
+    board_seeded = _seed_group_members_from_board(net_names, set(group_results), pcb_data)
+    group_results.update(board_seeded)
+
     if len(group_results) < 2:
         print(f"  Length matching group: fewer than 2 routed nets, skipping")
         return net_results
+    if len(board_seeded) == len(group_results):
+        print(f"  Length matching group: no nets routed this run, skipping")
+        return net_results
+    if board_seeded:
+        print(f"  Length matching group: {len(board_seeded)} member(s) measured "
+              f"from existing board copper (routed in an earlier step): "
+              f"{', '.join(sorted(board_seeded))}")
 
     # Identify diff pairs vs single-ended
     diff_pair_count = sum(1 for r in group_results.values() if r.get('is_diff_pair'))
@@ -1523,6 +1588,10 @@ def apply_length_matching_to_group(
     already_processed_vias: List = list(prev_group_vias) if prev_group_vias else []
 
     for result in group_results.values():
+        # Board-seeded members are already in pcb_data (the index reads it), so
+        # adding their copper here would only duplicate it.
+        if result.get('from_board'):
+            continue
         if result.get('new_segments'):
             already_processed_segments.extend(result['new_segments'])
         if result.get('new_vias'):
@@ -1547,6 +1616,12 @@ def apply_length_matching_to_group(
     for net_name, result in group_results.items():
         current_length = result['route_length']
         delta = target_length - current_length
+
+        if result.get('from_board'):
+            # Copper already written in an earlier step: it sets the target, it
+            # cannot be lengthened here.
+            print(f"    {net_name}: {current_length:.2f}mm (existing board copper, not modified)")
+            continue
 
         if delta <= config.length_match_tolerance:
             suffix = " (diff pair)" if result.get('is_diff_pair') else ""
@@ -1646,9 +1721,21 @@ def apply_time_matching_to_group(
                     group_results[name] = result
                     processed_result_ids.add(result_id)
 
+    # Members routed in an EARLIER chain step: measured from board copper so
+    # they can set the target (#489 §7). Never meandered -- already written.
+    board_seeded = _seed_group_members_from_board(net_names, set(group_results), pcb_data)
+    group_results.update(board_seeded)
+
     if len(group_results) < 2:
         print(f"  Time matching group: fewer than 2 routed nets, skipping")
         return net_results
+    if len(board_seeded) == len(group_results):
+        print(f"  Time matching group: no nets routed this run, skipping")
+        return net_results
+    if board_seeded:
+        print(f"  Time matching group: {len(board_seeded)} member(s) measured "
+              f"from existing board copper (routed in an earlier step): "
+              f"{', '.join(sorted(board_seeded))}")
 
     # Identify diff pairs vs single-ended
     diff_pair_count = sum(1 for r in group_results.values() if r.get('is_diff_pair'))
@@ -1672,6 +1759,9 @@ def apply_time_matching_to_group(
     already_processed_vias: List = list(prev_group_vias) if prev_group_vias else []
 
     for result in group_results.values():
+        # Board-seeded members already live in pcb_data (see the length path).
+        if result.get('from_board'):
+            continue
         if result.get('new_segments'):
             already_processed_segments.extend(result['new_segments'])
         if result.get('new_vias'):
@@ -1689,6 +1779,10 @@ def apply_time_matching_to_group(
     for net_name, result in group_results.items():
         current_time = net_times[net_name]
         delta_time = target_time - current_time
+
+        if result.get('from_board'):
+            print(f"    {net_name}: {current_time:.2f}ps (existing board copper, not modified)")
+            continue
 
         if delta_time <= config.time_match_tolerance:
             suffix = " (diff pair)" if result.get('is_diff_pair') else ""

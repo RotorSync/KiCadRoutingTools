@@ -167,6 +167,54 @@ vias = [v for v in pcb.vias if v.net_id == net.net_id]
 print(f"{net.name}: {calculate_route_length(segs, vias, pcb):.2f} mm")
 ```
 
+### Per-net and pin-pair length
+
+```python
+net_copper_length(pcb_data, net_id, include_vias=True) -> float
+net_copper_lengths(pcb_data, net_ids=None, include_vias=True) -> Dict[int, float]
+```
+
+Ask "how long is net N?" directly from a parsed board, without hand-slicing
+the segment lists. `calculate_route_length` above takes a **segment list**, not
+a `(pcb_data, net_id)` pair — passing it a `PCBData` raises (#489 §7).
+`net_copper_lengths` measures many nets in one pass over the copper.
+
+Both report **total net copper**. That equals the signal path only on a clean
+point-to-point net; on a multipoint/fly-by net, or one carrying a stub, it is
+the sum of every branch and matches no path at all.
+
+```python
+pin_pair_path_length(pcb_data, net_id, pad_a, pad_b, tolerance=0.02)
+    -> Optional[float]
+```
+
+Shortest **copper path between two pads** — the from-to measurement length
+matching needs. Walks a weighted graph over the net's own copper: segments
+carry their length, coincident endpoints and T-junctions join at zero cost,
+and a via crosses its span at the barrel length from the stackup. Pads and vias
+attach by copper **overlap** (a track ends anywhere inside them, not on their
+centre), and their own pad/barrel copper is not charged — matching how KiCad
+measures track length.
+
+Returns `None` when no track path joins the two pads: an unrouted or broken
+net, or one whose pads meet only through a **zone** (pours are not traversed).
+`0.0` means the pads' copper touches directly.
+
+```python
+from kicad_parser import parse_kicad_pcb
+from net_queries import net_copper_length, pin_pair_path_length
+
+pcb = parse_kicad_pcb('kicad_files/routed_output.kicad_pcb')
+net = next(n for n in pcb.nets.values() if n.name == 'Net-(U2A-DATA_4)')
+pads = pcb.pads_by_net[net.net_id]
+total = net_copper_length(pcb, net.net_id)
+path = pin_pair_path_length(pcb, net.net_id, pads[0], pads[1])
+print(f"{net.name}: {total:.2f} mm total copper, "
+      f"{'no track path' if path is None else f'{path:.2f} mm pin-to-pin'}")
+# Net-(U2A-DATA_4): 25.99 mm total copper, 23.52 mm pin-to-pin
+# -> 2.5 mm of that net's copper is branch/stub, not on the signal path.
+```
+
 ### `expand_pad_layers`
 
 ```python

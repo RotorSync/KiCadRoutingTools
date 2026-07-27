@@ -54,17 +54,33 @@ If the board has length-matched groups (DDR byte lanes, matched buses — detect
 
 ```python
 from kicad_parser import parse_kicad_pcb
-from net_queries import calculate_route_length
+from net_queries import net_copper_lengths, pin_pair_path_length
 
 pcb = parse_kicad_pcb('board.kicad_pcb')
+name_to_id = {n.name: nid for nid, n in pcb.nets.items()}
 for group_name, net_names in groups.items():
-    lengths = {}
-    for net in pcb.nets.values():
-        if net.name in net_names:
-            lengths[net.name] = calculate_route_length(pcb, net.net_id)
+    ids = [name_to_id[n] for n in net_names if n in name_to_id]
+    by_id = net_copper_lengths(pcb, ids)          # one pass over the copper
+    lengths = {n: by_id[name_to_id[n]] for n in net_names if n in name_to_id}
     spread = max(lengths.values()) - min(lengths.values())
     # PASS if spread <= tolerance (default 0.1 mm); report worst offender otherwise
 ```
+
+`net_copper_lengths` (and `net_copper_length` for one net) measures **total net
+copper**. That is the right number only for a clean point-to-point net. On a
+**multipoint or fly-by net, or any net with a stub**, total copper is the sum of
+every branch and matches no signal path — measure the driver→receiver path
+instead, and match on that:
+
+```python
+pads = pcb.pads_by_net[name_to_id['DQ0']]
+path_mm = pin_pair_path_length(pcb, name_to_id['DQ0'], pads[0], pads[1])
+# None = those two pads are not joined by TRACK copper (plane-only or broken)
+```
+
+Report both when they differ by more than the tolerance: a group that passes on
+total copper can fail on path length. Pads joined only through a zone return
+`None` — say so rather than reporting a length.
 
 For time-matched groups use `calculate_route_propagation_time_ps()` from `impedance.py` instead, and compare against the ps tolerance. Lengths include via barrels from the stackup, matching KiCad's measurement.
 
