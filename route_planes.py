@@ -3411,6 +3411,12 @@ def create_plane(
                 ripped_names.append(net.name if net else f"net_{rid}")
             print(f"  Nets excluded from output: {', '.join(ripped_names)}")
 
+    # Via-in-pad is a FAB requirement this run may just have created (#489 §8).
+    # Emitted from the shared engine so the GUI planes tab reports it too.
+    from fab_notes import print_via_in_pad_note
+    print_via_in_pad_note(all_new_vias, pcb_data.pads_by_net,
+                          context="plane stitching vias")
+
     # Finalize plane tap copper ONCE, before the write/dry-run split, so the
     # GUI (dry_run=True, return_results) and the CLI (writes the file) emit
     # identical copper for identical inputs: neck grazes -> graze prune /

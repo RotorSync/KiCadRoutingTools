@@ -408,6 +408,10 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
         print(f"    dropped (no clear via offset): {dropped}")
     if clamp_n:
         print(f"    clamped {clamp_n} via-in-pad(s) to fit their pad edge (#202)")
+    # The FAB requirement this escape may have just created (#489 §8). Emitted
+    # from the shared engine path so the GUI fanout tab reports it too.
+    from fab_notes import print_via_in_pad_note
+    print_via_in_pad_note(vias, pcb_data.pads_by_net, context="QFN underpad escape")
     if escalated_n:
         warn_fab_escalation(f"{escalated_n} via-in-pad(s) (sub-0.45mm pads)")
     if floor_n:

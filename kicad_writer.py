@@ -212,23 +212,100 @@ def generate_gr_line_sexpr(start: Tuple[float, float], end: Tuple[float, float],
 	)'''
 
 
+DEFAULT_VIA_TENTING = {'tenting': '(front yes) (back yes)'}
+
+VIA_PROTECTION_TOKEN_ORDER = ('tenting', 'covering', 'plugging', 'capping', 'filling')
+
+
+def via_protection_sexpr(tenting_attrs: dict = None, net_name: str = None) -> str:
+    """The `(tenting ...)` / `(covering ...)` / ... fragment to emit for a via.
+
+    `tenting_attrs` is a Via's parsed spec ({token: raw inner text}); passing it
+    keeps what the board actually specified. Without it the previous behavior
+    stands -- front+back tenting on KiCad 10 output -- since there is no
+    board-level policy to consult here (#489 §8).
+    """
+    spec = tenting_attrs if tenting_attrs else (
+        DEFAULT_VIA_TENTING if net_name is not None else {})
+    if not spec:
+        return ""
+    def _one(token: str, inner: str) -> str:
+        # The parsed inner text keeps the source file's line breaks and tabs;
+        # collapse them so the re-emitted token reads on one line. Same s-expr.
+        inner = " ".join((inner or '').split())
+        return f"({token} {inner})" if inner else f"({token})"
+
+    parts = [_one(t, spec[t]) for t in VIA_PROTECTION_TOKEN_ORDER if t in spec]
+    # Emit an unrecognised token rather than dropping it -- losing the spec is
+    # the bug being fixed.
+    parts += [_one(t, v) for t, v in spec.items()
+              if t not in VIA_PROTECTION_TOKEN_ORDER]
+    return "".join(f"\n\t\t{p}" for p in parts)
+
+
+def prevailing_via_protection(vias) -> Optional[dict]:
+    """The protection spec most of a board's existing vias carry, or None.
+
+    Used as the default for vias this tool ADDS, so a new via follows the
+    board's own convention instead of a hardcoded front+back tenting (#489 §8).
+    hackrf_one is the motivating case: all 498 of its vias explicitly declare
+    covering/plugging/capping/filling = no, and the tool would have stamped
+    tenting yes on every via it added to that board.
+
+    Deterministic: ties break on the canonical spec text, not dict order.
+    """
+    from collections import Counter
+
+    counts = Counter()
+    canonical = {}
+    for via in vias or ():
+        spec = getattr(via, 'tenting_attrs', None)
+        if not spec:
+            continue
+        key = tuple(sorted((t, " ".join((v or '').split())) for t, v in spec.items()))
+        counts[key] += 1
+        canonical[key] = dict(spec)
+    if not counts:
+        return None
+    best = min(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+    return canonical[best]
+
+
+def prevailing_via_protection_in_text(content: str) -> Optional[dict]:
+    """`prevailing_via_protection` for a writer that holds the board TEXT rather
+    than parsed Via objects (the plane / repair writers work on file text)."""
+    from kicad_parser import _extract_via_protection_attrs
+
+    class _V:
+        __slots__ = ('tenting_attrs',)
+
+        def __init__(self, spec):
+            self.tenting_attrs = spec
+
+    specs = _extract_via_protection_attrs(content)
+    if not specs:
+        return None
+    return prevailing_via_protection([_V(s) for s in specs.values()])
+
+
 def generate_via_sexpr(x: float, y: float, size: float, drill: float,
                        layers: List[str], net_id: int, free: bool = False,
-                       net_name: str = None) -> str:
+                       net_name: str = None, tenting_attrs: dict = None) -> str:
     """Generate KiCad S-expression for a via.
 
     Args:
         free: If True, adds (free yes) to prevent KiCad from auto-assigning net based on overlapping tracks.
         net_name: If provided, output KiCad 10 format (net "name") instead of (net id).
+        tenting_attrs: The via's own protection spec as parsed from the board
+            (Via.tenting_attrs). Pass it for any via that already existed so a
+            ripped-and-re-placed via keeps its real tenting/plugging/filling
+            instead of being re-stamped with front+back tenting (#489 §8).
     """
     layers_str = '" "'.join(layers)
     free_str = "\n\t\t(free yes)" if free else ""
     net_str = f'(net "{_escape_net_name(net_name)}")' if net_name is not None else f'(net {net_id})'
     # KiCad 10 adds structured tenting/covering/plugging fields after layers
-    if net_name is not None:
-        tenting_str = "\n\t\t(tenting (front yes) (back yes))"
-    else:
-        tenting_str = ""
+    tenting_str = via_protection_sexpr(tenting_attrs, net_name)
     return f'''	(via
 		(at {x:.6f} {y:.6f})
 		(size {size})

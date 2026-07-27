@@ -153,8 +153,13 @@ def write_routed_output(
                   f"(post-transform strip)")
 
     # Generate routing text (new segments and vias)
+    # Vias this run adds inherit the board's own via protection convention
+    # rather than a hardcoded tenting policy (#489 §8).
+    from kicad_writer import prevailing_via_protection
+    _default_via_attrs = prevailing_via_protection(getattr(pcb_data, 'vias', None))
     routing_text = _generate_routing_text(results, all_swap_vias, net_id_to_name if kicad_v10 else None,
-                                          all_swap_segments=all_swap_segments)
+                                          all_swap_segments=all_swap_segments,
+                                          default_via_attrs=_default_via_attrs)
 
     # Add debug paths if enabled
     if debug_lines:
@@ -330,12 +335,20 @@ def _apply_polarity_swaps(content: str, pad_swaps: List[Dict], pcb_data,
 
 def _generate_routing_text(results: List[Dict], all_swap_vias: List,
                            net_id_to_name: Dict = None,
-                           all_swap_segments: List = None) -> str:
-    """Generate routing text for new segments and vias."""
+                           all_swap_segments: List = None,
+                           default_via_attrs: Dict = None) -> str:
+    """Generate routing text for new segments and vias.
+
+    default_via_attrs: protection spec for vias that carry none of their own --
+    the board's prevailing convention (#489 §8).
+    """
     routing_text = ""
 
     def _net_name(net_id):
         return net_id_to_name.get(net_id) if net_id_to_name else None
+
+    def _via_attrs(via):
+        return getattr(via, 'tenting_attrs', None) or default_via_attrs
 
     # Add segments and vias from routing results
     for result in results:
@@ -348,7 +361,10 @@ def _generate_routing_text(results: List[Dict], all_swap_vias: List,
             routing_text += generate_via_sexpr(
                 via.x, via.y, via.size, via.drill,
                 via.layers, via.net_id, getattr(via, 'free', False),
-                net_name=_net_name(via.net_id)
+                net_name=_net_name(via.net_id),
+                # Keep a re-placed via's own protection spec; a genuinely new
+                # via follows the board's convention (#489 §8).
+                tenting_attrs=_via_attrs(via)
             ) + "\n"
 
     # Add vias from stub layer swapping
@@ -358,7 +374,10 @@ def _generate_routing_text(results: List[Dict], all_swap_vias: List,
             routing_text += generate_via_sexpr(
                 via.x, via.y, via.size, via.drill,
                 via.layers, via.net_id, getattr(via, 'free', False),
-                net_name=_net_name(via.net_id)
+                net_name=_net_name(via.net_id),
+                # Keep a re-placed via's own protection spec; a genuinely new
+                # via follows the board's convention (#489 §8).
+                tenting_attrs=_via_attrs(via)
             ) + "\n"
 
     # Add stub segments synthesized by bare-pad target swaps

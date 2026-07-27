@@ -32,6 +32,80 @@ class StdoutRedirector:
             self.original.flush()
 
 
+def apply_via_protection(pcb_via, tenting_attrs):
+    """Put a Via's parsed protection spec back onto a pcbnew PCB_VIA (#489 §8).
+
+    GUI counterpart of the writer's tenting round-trip: without it, a via the GUI
+    RE-PLACES (rip-up/reroute, sub-grid nudge, tap relocation) comes back with the
+    board default and silently loses its own tenting/plugging/filling -- the loss
+    the CLI side now avoids. A via with NO spec is deliberately left alone:
+    pcbnew's *_MODE_FROM_BOARD already means "inherit the board setting".
+
+    Best-effort; does nothing on a KiCad without these accessors. Returns True
+    when something was applied.
+    """
+    if not tenting_attrs:
+        return False
+    try:
+        import pcbnew
+    except ImportError:
+        return False
+    import re
+
+    def _sides(inner):
+        """'(front no) (back yes)' -> {'front': False, 'back': True}"""
+        return {m.group(1): (m.group(2) == 'yes')
+                for m in re.finditer(r'\((front|back)\s+(yes|no)\)', inner or '')}
+
+    applied = False
+    for token, front_set, back_set, yes_name, no_name in (
+            ('tenting', 'SetFrontTentingMode', 'SetBackTentingMode',
+             'TENTING_MODE_TENTED', 'TENTING_MODE_NOT_TENTED'),
+            ('covering', 'SetFrontCoveringMode', 'SetBackCoveringMode',
+             'COVERING_MODE_COVERED', 'COVERING_MODE_NOT_COVERED'),
+            ('plugging', 'SetFrontPluggingMode', 'SetBackPluggingMode',
+             'PLUGGING_MODE_PLUGGED', 'PLUGGING_MODE_NOT_PLUGGED')):
+        if token not in tenting_attrs:
+            continue
+        yes_const = getattr(pcbnew, yes_name, None)
+        no_const = getattr(pcbnew, no_name, None)
+        if yes_const is None or no_const is None:
+            continue
+        sides = _sides(tenting_attrs[token])
+        for side, setter_name in (('front', front_set), ('back', back_set)):
+            if side not in sides:
+                continue
+            setter = getattr(pcb_via, setter_name, None)
+            if setter is None:
+                continue
+            try:
+                setter(yes_const if sides[side] else no_const)
+                applied = True
+            except Exception:
+                pass
+
+    for token, setter_name, yes_name, no_name in (
+            ('capping', 'SetCappingMode', 'CAPPING_MODE_CAPPED', 'CAPPING_MODE_NOT_CAPPED'),
+            ('filling', 'SetFillingMode', 'FILLING_MODE_FILLED', 'FILLING_MODE_NOT_FILLED')):
+        if token not in tenting_attrs:
+            continue
+        yes_const = getattr(pcbnew, yes_name, None)
+        no_const = getattr(pcbnew, no_name, None)
+        setter = getattr(pcb_via, setter_name, None)
+        if yes_const is None or no_const is None or setter is None:
+            continue
+        value = (tenting_attrs[token] or '').strip().lower()
+        if value not in ('yes', 'no'):
+            continue
+        try:
+            setter(yes_const if value == 'yes' else no_const)
+            applied = True
+        except Exception:
+            pass
+
+    return applied
+
+
 def refill_all_zones(board):
     """Re-fill EVERY copper zone on the board so plane pours pull back around
     copper added after they were first filled (#362).

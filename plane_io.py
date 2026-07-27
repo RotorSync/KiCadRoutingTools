@@ -11,7 +11,8 @@ from typing import List, Dict, Tuple, Optional
 
 from kicad_parser import PCBData, parse_kicad_pcb, _unescape_kicad_string
 from kicad_writer import (generate_via_sexpr, generate_segment_sexpr, move_copper_text_to_silkscreen,
-                          move_copper_graphics_to_silkscreen, add_teardrops_to_pads)
+                          move_copper_graphics_to_silkscreen, add_teardrops_to_pads,
+                          prevailing_via_protection_in_text as _prevailing_via_protection_in_text)
 # E3: the one guarded squared-distance kernel (length_sq < 1e-10 degenerate guard).
 from geometry_utils import point_to_segment_dist_sq as _pt_seg_dist_sq
 
@@ -331,12 +332,17 @@ def write_plane_output(
     if zone_sexpr:
         elements.append(zone_sexpr)
 
-    # Add vias
+    # Add vias. A reused via carries its own protection spec; a new stitching
+    # via follows the board's convention rather than a hardcoded tenting
+    # policy (#489 §8). Read from the file text being written, which already
+    # holds the board's existing vias.
+    _default_via_attrs = _prevailing_via_protection_in_text(content)
     for via in new_vias:
         via_net_name = net_id_to_name.get(via['net_id']) if net_id_to_name else None
         elements.append(generate_via_sexpr(
             via['x'], via['y'], via['size'], via['drill'],
-            via['layers'], via['net_id'], net_name=via_net_name
+            via['layers'], via['net_id'], net_name=via_net_name,
+            tenting_attrs=via.get('tenting_attrs') or _default_via_attrs
         ))
 
     # Add segments
@@ -537,7 +543,11 @@ def restore_failed_reroute_nets(
                                   'width': s.width, 'layer': s.layer, 'net_id': nid})
         for v in vias:
             restored_vias.append({'x': v.x, 'y': v.y, 'size': v.size, 'drill': v.drill,
-                                  'layers': v.layers, 'net_id': nid})
+                                  'layers': v.layers, 'net_id': nid,
+                                  # These vias came OFF the board and go back on;
+                                  # carry their tenting/plugging spec with them
+                                  # or the restore silently re-tents them (#489 §8).
+                                  'tenting_attrs': dict(getattr(v, 'tenting_attrs', {}) or {})})
 
     if not restored_net_ids:
         return [], 0, 0
@@ -619,7 +629,8 @@ def restore_failed_reroute_nets(
     for v in restored_vias:
         nm = net_id_to_name.get(v['net_id']) if net_id_to_name else None
         elements.append(generate_via_sexpr(v['x'], v['y'], v['size'], v['drill'],
-                                           v['layers'], v['net_id'], net_name=nm))
+                                           v['layers'], v['net_id'], net_name=nm,
+                                           tenting_attrs=v.get('tenting_attrs')))
     for s in restored_segs:
         nm = net_id_to_name.get(s['net_id']) if net_id_to_name else None
         elements.append(generate_segment_sexpr(s['start'], s['end'], s['width'],

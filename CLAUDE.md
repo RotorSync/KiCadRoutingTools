@@ -291,3 +291,14 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 - `via.drill` - Drill diameter
 - `via.layers` - Layer span
 - `via.net_id` - Net ID
+- `via.tenting_attrs` - Protection spec `{token: raw inner s-expr}` for
+  `tenting`/`covering`/`plugging`/`capping`/`filling` (#489 §8); `{}` = the board
+  specified nothing. Read by BOTH parse paths in the same normalized form. Pass it
+  back via `generate_via_sexpr(..., tenting_attrs=...)` for any via that already
+  existed — a RE-PLACED via (rip-up, sub-grid nudge, tap relocation) otherwise
+  loses its spec and is re-stamped with front+back tenting, which is wrong for
+  via-in-pad (needs IPC-4761 Type VII filled+capped+plated). Vias the tool ADDS
+  default to `kicad_writer.prevailing_via_protection(pcb.vias)` — the board's own
+  convention — instead of a hardcoded policy. GUI side:
+  `gui_utils.apply_via_protection(pcb_via, attrs)`. `fab_notes.print_via_in_pad_note`
+  emits the IPC-4761 note from the shared engines when a run puts vias in pads.

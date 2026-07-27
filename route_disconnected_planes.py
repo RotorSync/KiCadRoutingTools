@@ -2165,6 +2165,10 @@ def _write_output(input_file: str, output_file: str, segments: List[Dict], vias:
     # Generate via S-expressions
     via_sexprs = []
     if vias:
+        # Repair vias follow the board's own via protection convention instead
+        # of a hardcoded front+back tenting (#489 §8).
+        from kicad_writer import prevailing_via_protection_in_text
+        _default_via_attrs = prevailing_via_protection_in_text(content)
         for via in vias:
             via_net_name = net_id_to_name.get(via['net_id']) if net_id_to_name else None
             sexpr = generate_via_sexpr(
@@ -2174,7 +2178,8 @@ def _write_output(input_file: str, output_file: str, segments: List[Dict], vias:
                 drill=via['drill'],
                 layers=['F.Cu', 'B.Cu'],  # Through-hole vias
                 net_id=via['net_id'],
-                net_name=via_net_name
+                net_name=via_net_name,
+                tenting_attrs=via.get('tenting_attrs') or _default_via_attrs
             )
             via_sexprs.append(sexpr)
 

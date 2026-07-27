@@ -1657,4 +1657,9 @@ def generate_underpad_escape(footprint: Footprint,
             print(f"  Under-pad: WARNING {clamp_stats['floor']} pad(s) smaller than "
                   f"the fab via floor ({fab_floor_min(_copper)['via_diameter']:.2f}mm "
                   f"dia); via held at the floor and still bulges past the pad edge")
+    # The FAB requirement under-pad escape creates (#489 §8): via-in-pad needs
+    # IPC-4761 Type VII. Emitted from the shared engine so both fronts report it.
+    from fab_notes import print_via_in_pad_note
+    print_via_in_pad_note(vias_to_add, pcb_data.pads_by_net,
+                          context="BGA under-pad escape")
     return tracks, vias_to_add, failed
