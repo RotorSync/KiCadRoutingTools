@@ -91,6 +91,41 @@ check(f"min_track_width still clamped to {ROUTED_TW} (got {out.get('min_track_wi
 check("web rule never ends up ABOVE the track floor",
       out.get("min_connection") <= out.get("min_track_width") + 1e-9)
 
+# --------------------------------------------------------------------------
+# GUI parity. The pcbnew path writes BOARD_DESIGN_SETTINGS fields whose names
+# vary by KiCad version, so it is guarded by hasattr -- which means a WRONG
+# attribute name fails SILENTLY and the GUI would never get the clamp. Pin the
+# real name (m_MinConn, confirmed present in BOARD_DESIGN_SETTINGS) and the same
+# three semantics. Skips cleanly under a python without pcbnew; run it with
+# KiCad's interpreter to exercise it.
+# --------------------------------------------------------------------------
+try:
+    import pcbnew  # noqa: F401
+except ImportError:
+    print("  [skip] pcbnew not importable -- GUI path not exercised "
+          "(run under KiCad's python to cover it)")
+else:
+    from fix_kicad_drc_settings import apply_targets_to_board  # noqa: E402
+    MM = 1e6
+    _t = compute_targets(clearance=0.1, track_width=ROUTED_TW,
+                         minima={"min_track_width": ROUTED_TW})
+    check("pcbnew exposes m_MinConn (else the clamp silently no-ops)",
+          hasattr(pcbnew.BOARD().GetDesignSettings(), "m_MinConn"))
+
+    def gui(start_mm):
+        b = pcbnew.BOARD()
+        bds = b.GetDesignSettings()
+        bds.m_TrackMinWidth = int(0.127 * MM)
+        bds.m_MinConn = int(start_mm * MM)
+        apply_targets_to_board(b, _t, {})
+        return round(bds.m_MinConn / MM, 6)
+
+    check(f"GUI: stale 0.127 clamped to {ROUTED_TW} (got {gui(0.127)})",
+          gui(0.127) == ROUTED_TW)
+    check(f"GUI: already-tighter 0.05 left alone (got {gui(0.05)})",
+          gui(0.05) == 0.05)
+    check(f"GUI: checker OFF stays off (got {gui(0.0)})", gui(0.0) == 0.0)
+
 print("-" * 60)
 if fails:
     print(f"{len(fails)} FAILED: " + "; ".join(fails))
