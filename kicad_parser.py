@@ -230,6 +230,18 @@ class Via:
     net_id: int
     uuid: str = ""
     free: bool = False  # If True, KiCad won't auto-assign net based on overlapping tracks
+    # Protection spec: {token: raw inner s-expr}, e.g.
+    # {'tenting': '(front yes) (back yes)'} for tenting/covering/plugging/
+    # capping/filling. Held as raw text so it round-trips byte-faithfully
+    # whatever sub-syntax the KiCad version uses. Empty = the board said nothing.
+    #
+    # This existed nowhere before #489 §8: the parser skipped these tokens and
+    # the writer stamped `(tenting (front yes) (back yes))` on every via it
+    # emitted, so any via that got RIPPED AND RE-PLACED (rip-up/reroute, the
+    # sub-grid via nudge, tap relocation) silently lost its real spec -- which
+    # matters most for via-in-pad, where IPC-4761 Type VII filled+capped+plated
+    # is what keeps solder out of the barrel.
+    tenting_attrs: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -2454,7 +2466,158 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
                 if via.uuid in free_uuids:
                     via.free = True
 
+    # Protection spec per via (#489 §8): tenting/covering/plugging/capping/
+    # filling were parsed by NOBODY, so a re-placed via lost whatever the board
+    # specified and got the writer's hardcoded front+back tenting instead.
+    if vias:
+        attrs_by_uuid = _extract_via_protection_attrs(content)
+        if attrs_by_uuid:
+            for via in vias:
+                spec = attrs_by_uuid.get(via.uuid)
+                if spec:
+                    via.tenting_attrs = spec
+
     return vias
+
+
+VIA_PROTECTION_TOKENS = ('tenting', 'covering', 'plugging', 'capping', 'filling')
+
+
+def _pcbnew_via_protection_attrs(via) -> Dict[str, str]:
+    """A pcbnew PCB_VIA's protection spec in the same {token: raw inner text}
+    shape the text parser produces (#489 §8 parity).
+
+    Only modes the via OVERRIDES are recorded: *_MODE_FROM_BOARD means "inherit
+    the board setting", which is the absence of a token in the file. Returns {}
+    on a KiCad without these accessors, so the builder degrades to today's
+    behavior rather than raising.
+    """
+    import pcbnew
+
+    def _side(getter, tented_const, not_tented_const):
+        try:
+            mode = getter()
+        except Exception:
+            return None
+        if mode == tented_const:
+            return 'yes'
+        if mode == not_tented_const:
+            return 'no'
+        return None  # FROM_BOARD -> inherit, emit nothing
+
+    out: Dict[str, str] = {}
+    try:
+        pairs = (
+            ('tenting', via.GetFrontTentingMode, via.GetBackTentingMode,
+             pcbnew.TENTING_MODE_TENTED, pcbnew.TENTING_MODE_NOT_TENTED),
+            ('covering', via.GetFrontCoveringMode, via.GetBackCoveringMode,
+             pcbnew.COVERING_MODE_COVERED, pcbnew.COVERING_MODE_NOT_COVERED),
+        )
+    except AttributeError:
+        return {}
+
+    for token, front_get, back_get, yes_const, no_const in pairs:
+        front = _side(front_get, yes_const, no_const)
+        back = _side(back_get, yes_const, no_const)
+        parts = []
+        if front is not None:
+            parts.append(f"(front {front})")
+        if back is not None:
+            parts.append(f"(back {back})")
+        if parts:
+            out[token] = " ".join(parts)
+
+    # plugging is per-side too; capping and filling are whole-via.
+    try:
+        front = _side(via.GetFrontPluggingMode, pcbnew.PLUGGING_MODE_PLUGGED,
+                      pcbnew.PLUGGING_MODE_NOT_PLUGGED)
+        back = _side(via.GetBackPluggingMode, pcbnew.PLUGGING_MODE_PLUGGED,
+                     pcbnew.PLUGGING_MODE_NOT_PLUGGED)
+        parts = []
+        if front is not None:
+            parts.append(f"(front {front})")
+        if back is not None:
+            parts.append(f"(back {back})")
+        if parts:
+            out['plugging'] = " ".join(parts)
+    except AttributeError:
+        pass
+
+    for token, getter, yes_name, no_name in (
+            ('capping', getattr(via, 'GetCappingMode', None),
+             'CAPPING_MODE_CAPPED', 'CAPPING_MODE_NOT_CAPPED'),
+            ('filling', getattr(via, 'GetFillingMode', None),
+             'FILLING_MODE_FILLED', 'FILLING_MODE_NOT_FILLED')):
+        yes_const = getattr(pcbnew, yes_name, None)
+        no_const = getattr(pcbnew, no_name, None)
+        if getter is None or yes_const is None or no_const is None:
+            continue
+        value = _side(getter, yes_const, no_const)
+        if value is not None:
+            out[token] = value
+
+    return out
+
+
+def _balanced_token_text(text: str, token: str) -> Optional[str]:
+    """Inner text of `(token ...)` in `text`, or None. Paren-balanced, so a
+    nested `(front yes) (back yes)` comes back whole."""
+    m = re.search(r'\(' + re.escape(token) + r'(?=[\s)])', text)
+    if not m:
+        return None
+    start = m.start()
+    depth = 0
+    for i, c in enumerate(text[start:]):
+        if c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+            if depth == 0:
+                inner = text[start + len(token) + 1:start + i]
+                # Collapse the file's line breaks/tabs: the pcbnew builder
+                # produces "(front no) (back no)" for the same via, and the two
+                # parse paths must be comparable field-for-field (CLAUDE.md
+                # parser-parity rule), not just semantically equal.
+                return " ".join(inner.split())
+    return None
+
+
+def _extract_via_protection_attrs(content: str) -> Dict[str, Dict[str, str]]:
+    """{via uuid: {token: raw inner text}} for the tenting-family tokens.
+
+    Read from each via's own block rather than by extending the via regexes: the
+    tokens are optional, differ by KiCad version, and the numeric-net pattern is
+    deliberately strict about field order. Skipped entirely (single linear scan)
+    when the file mentions none of them, so the common board pays nothing.
+    """
+    if not any(('(' + t) in content for t in VIA_PROTECTION_TOKENS):
+        return {}
+
+    out: Dict[str, Dict[str, str]] = {}
+    for m in re.finditer(r'\(via(?=[\s(])', content):
+        start = m.start()
+        depth = 0
+        end = start
+        for i, c in enumerate(content[start:]):
+            if c == '(':
+                depth += 1
+            elif c == ')':
+                depth -= 1
+                if depth == 0:
+                    end = start + i + 1
+                    break
+        block = content[start:end]
+        uuid_match = re.search(r'\(uuid\s+"([^"]+)"\)', block)
+        if not uuid_match:
+            continue
+        spec = {}
+        for token in VIA_PROTECTION_TOKENS:
+            inner = _balanced_token_text(block, token)
+            if inner is not None:
+                spec[token] = inner
+        if spec:
+            out[uuid_match.group(1)] = spec
+    return out
 
 
 def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Segment]:
@@ -3599,6 +3762,10 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 drill=to_mm(track.GetDrill()),
                 layers=[get_layer_name(track.TopLayer()), get_layer_name(track.BottomLayer())],
                 net_id=track.GetNetCode(),
+                # Parity with the text parser's protection spec (#489 §8): the
+                # builder must read it too, or GUI-side vias round-trip as
+                # "unspecified" and lose it exactly where the CLI keeps it.
+                tenting_attrs=_pcbnew_via_protection_attrs(track),
             )
             vias.append(v)
 

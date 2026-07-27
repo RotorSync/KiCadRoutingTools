@@ -11,7 +11,9 @@ from typing import List, Dict, Tuple, Optional
 
 from kicad_parser import PCBData, parse_kicad_pcb, _unescape_kicad_string
 from kicad_writer import (generate_via_sexpr, generate_segment_sexpr, move_copper_text_to_silkscreen,
-                          move_copper_graphics_to_silkscreen, add_teardrops_to_pads)
+                          move_copper_graphics_to_silkscreen, add_teardrops_to_pads,
+                          add_teardrops_to_vias,
+                          prevailing_via_protection_in_text as _prevailing_via_protection_in_text)
 # E3: the one guarded squared-distance kernel (length_sq < 1e-10 degenerate guard).
 from geometry_utils import point_to_segment_dist_sq as _pt_seg_dist_sq
 
@@ -23,6 +25,19 @@ class ZoneInfo:
     net_name: str
     layer: str
     in_footprint: bool = False  # #478: owned by a footprint, not the board
+    # Fill priority of the EXISTING pour. Needed to coexist with a foreign-net
+    # pour deterministically: KiCad fills higher priority first and only lower
+    # ones pull back, so a new plane sharing the layer takes one ABOVE the highest
+    # incumbent (see shared_layer_zone_priority -- priorities are non-negative,
+    # so it cannot go below).
+    priority: int = 0
+    # A KiCad zone can span SEVERAL layers -- `(layers "F.Cu" "B.Cu")` is ONE
+    # physical pour, which the reader expands into one ZoneInfo per layer. `span`
+    # is that pour's full layer set and `uuid` identifies it, so a consumer can
+    # tell "this is only on my layer" (safe to replace) from "this also pours
+    # other layers" (deleting it would destroy copper nobody asked to touch).
+    uuid: str = ''
+    span: Tuple[str, ...] = ()
 
 
 def extract_zones(pcb_file: str) -> List[ZoneInfo]:
@@ -48,14 +63,42 @@ def extract_zones(pcb_file: str) -> List[ZoneInfo]:
     from kicad_parser import extract_zones as _parser_extract_zones
     from kicad_parser import extract_nets, detect_kicad_version
     _, name_to_id = extract_nets(content, detect_kicad_version(content))
+    parsed = list(_parser_extract_zones(content, name_to_id))
+
+    # Recover each PHYSICAL pour's full layer span: the reader emits one Zone per
+    # copper layer, and the entries of a multi-layer `(layers ...)` pour share a
+    # uuid. Consumers need the span to know that deleting the pour would also
+    # remove copper on layers they were not asked to touch.
+    span_by_uuid: Dict[str, List[str]] = {}
+    for z in parsed:
+        if z.uuid:
+            span_by_uuid.setdefault(z.uuid, []).append(z.layer)
+
     return [ZoneInfo(net_id=z.net_id, net_name=z.net_name, layer=z.layer,
-                     in_footprint=z.in_footprint)
-            for z in _parser_extract_zones(content, name_to_id)]
+                     in_footprint=z.in_footprint,
+                     priority=int(getattr(z, 'priority', 0) or 0),
+                     uuid=z.uuid or '',
+                     span=tuple(span_by_uuid.get(z.uuid, [z.layer])))
+            for z in parsed]
 
 
 def check_existing_zones(zones: List[ZoneInfo], target_layer: str, target_net_name: str,
-                          target_net_id: int, verbose: bool = False) -> Tuple[bool, bool, Optional[ZoneInfo]]:
+                          target_net_id: int, verbose: bool = False
+                          ) -> Tuple[bool, bool, Optional[ZoneInfo], List[ZoneInfo]]:
     """Check for existing zones on the target layer.
+
+    A foreign-net pour on the layer is NOT fatal. KiCad allows zones of different
+    nets to share a layer -- it fills them by priority and holds clearance
+    between nets -- and this function used to abort the whole run over it, which
+    left `route_planes` unable to add a plane to any board that already had one
+    on that layer (and, worse, the CLI aborted while the GUI path deliberately
+    did not: "in KiCad, zones with different nets may coexist on a layer").
+
+    So the foreign pour is kept, ours is created alongside, and the caller gives
+    ours a fill priority ABOVE the incumbent -- see `shared_layer_zone_priority`.
+    That picks a definite winner for the overlap (the plane the user just asked
+    for) instead of leaving KiCad to tie-break on UUIDs. Both nets still keep
+    clearance from each other, so coexisting is not a short.
 
     Args:
         zones: List of existing zones
@@ -65,11 +108,20 @@ def check_existing_zones(zones: List[ZoneInfo], target_layer: str, target_net_na
         verbose: Print verbose output
 
     Returns:
-        (should_create_zone, should_continue, zone_to_replace) tuple
+        (should_create_zone, should_continue, zone_to_replace, coexisting_zones)
         - should_create_zone: True to create/replace zone
-        - should_continue: False if zone exists on different net (error condition)
-        - zone_to_replace: ZoneInfo of existing zone to replace, or None
+        - should_continue: kept for callers; now always True (no abort case left)
+        - zone_to_replace: ZoneInfo of the SAME-NET zone to replace, or None --
+          None also when the same-net pour spans OTHER layers, since deleting it
+          would remove copper on layers this run was not asked to touch
+        - coexisting_zones: pours already on this layer that stay, and that the
+          new plane must therefore out-prioritize: other nets' pours, plus a
+          same-net multi-layer pour that cannot be replaced
     """
+    zone_to_replace = None
+    coexist: List[ZoneInfo] = []
+    keep_span: List[ZoneInfo] = []
+
     for zone in zones:
         # #478: footprint-owned pours are the footprint's business -- a small
         # shield/thermal pour must neither veto a whole plane layer nor be
@@ -77,19 +129,64 @@ def check_existing_zones(zones: List[ZoneInfo], target_layer: str, target_net_na
         # fills both; zone priority + clearance arbitrate the overlap.
         if getattr(zone, 'in_footprint', False):
             continue
-        if zone.layer == target_layer:
-            if zone.net_id == target_net_id or zone.net_name == target_net_name:
-                # Same net - replace existing zone with our parameters
+        if zone.layer != target_layer:
+            continue
+        if zone.net_id == target_net_id or zone.net_name == target_net_name:
+            # Same net. Replaceable ONLY if this layer is all the pour covers --
+            # a `(layers "F.Cu" "B.Cu")` pour is ONE zone, so deleting it to
+            # "replace the B.Cu pour" would silently take the F.Cu pour with it.
+            span = tuple(getattr(zone, 'span', ()) or (zone.layer,))
+            if set(span) - {target_layer}:
+                keep_span.append(zone)
+                coexist.append(zone)
+            elif zone_to_replace is None:
                 print(f"Note: Replacing existing zone on {target_layer} for net '{zone.net_name}' with new parameters")
-                return (True, True, zone)
-            else:
-                # Different net - error
-                print(f"Error: Zone already exists on {target_layer} for DIFFERENT net '{zone.net_name}' (ID {zone.net_id})")
-                print(f"  Cannot create {target_net_name} zone on same layer. Aborting.")
-                return (False, False, None)
+                zone_to_replace = zone
+        else:
+            coexist.append(zone)
 
-    # No existing zone on this layer
-    return (True, True, None)
+    for zone in keep_span:
+        others = ", ".join(sorted(set(zone.span) - {target_layer}))
+        print(f"WARNING: net '{zone.net_name}' already has a pour on {target_layer}, "
+              f"but it is ONE multi-layer zone that also covers {others}, so it "
+              f"cannot be replaced for {target_layer} alone without destroying "
+              f"that copper. Keeping it and pouring the new plane over it at a "
+              f"higher fill priority (same net, so no short). To replace it "
+              f"outright, run those layers together or delete the pour in KiCad.")
+
+    foreign = [z for z in coexist if z not in keep_span]
+    if foreign:
+        names = ", ".join(sorted({f"'{z.net_name}'" for z in foreign}))
+        print(f"WARNING: {target_layer} already carries {len(foreign)} pour(s) for "
+              f"other net(s) {names}; creating the '{target_net_name}' plane "
+              f"alongside them (KiCad allows it and holds clearance between nets). "
+              f"The new plane takes the HIGHER fill priority, so where they "
+              f"overlap the existing pour(s) pull back around it. Point "
+              f"--plane-layers at a free layer if you want the opposite.")
+
+    return (True, True, zone_to_replace, coexist)
+
+
+def shared_layer_zone_priority(foreign_zones: List[ZoneInfo]) -> int:
+    """Fill-priority offset for a new plane sharing a layer with other nets' pours.
+
+    One ABOVE the highest incumbent, so KiCad -- which fills highest priority
+    first and only pulls LOWER-priority zones back -- resolves every overlap in
+    favour of the plane just requested, deterministically. Without it both sit at
+    priority 0 and the fill hinges on UUID order, the exact nondeterminism
+    `zone_overlap_priorities` exists to remove.
+
+    Upward, not downward: KiCad zone priority is NON-NEGATIVE. A "one below the
+    incumbent" value of -1 is written but then read back as 0 (the parsers match
+    `\\d+`), so it silently did nothing -- measured on megadesk before this was
+    turned around. Going up also leaves the user's own zone untouched.
+
+    Returns 0 when nothing contends, so boards that never had the ambiguity are
+    byte-for-byte unchanged.
+    """
+    if not foreign_zones:
+        return 0
+    return max(int(getattr(z, 'priority', 0) or 0) for z in foreign_zones) + 1
 
 
 def resolve_net_id(pcb_data: PCBData, net_name: str) -> Optional[int]:
@@ -186,15 +283,33 @@ def filter_nets_from_content(content: str, net_ids_to_exclude: List[int],
     return '\n'.join(result_lines)
 
 
+def _zone_layer_span(element_text: str) -> set:
+    """Every copper layer a zone block declares.
+
+    Handles both spellings: `(layer "B.Cu")` and the multi-layer
+    `(layers "F.Cu" "B.Cu")`, which is ONE physical pour.
+    """
+    m = re.search(r'\(layers\s+((?:"[^"]+"\s*)+)\)', element_text)
+    if m:
+        return set(re.findall(r'"([^"]+)"', m.group(1)))
+    m = re.search(r'\(layer\s+"([^"]+)"\)', element_text)
+    return {m.group(1)} if m else set()
+
+
 def filter_zones_from_content(content: str, zones_to_remove: List[Tuple[int, str]],
                               zone_names_to_remove: List[Tuple[str, str]] = None) -> str:
     """
     Filter out zones for specific (net_id, layer) pairs from PCB file content.
 
+    A zone is removed only when EVERY layer it pours is in the remove set, so a
+    multi-layer pour is never deleted to "replace" one of its layers.
+
     Args:
         content: Raw PCB file content
         zones_to_remove: List of (net_id, layer) tuples to remove
-        zone_names_to_remove: For KiCad 10, list of (net_name, layer) tuples to remove
+        zone_names_to_remove: For KiCad 10, list of (net_name, layer) tuples to
+            remove -- REQUIRED for a name-based board, where zones carry
+            (net "NAME") and the numeric matcher can never fire
 
     Returns:
         Filtered content with those zones removed
@@ -227,28 +342,36 @@ def filter_zones_from_content(content: str, zones_to_remove: List[Tuple[int, str
                 element_lines.append(lines[i])
                 open_parens += lines[i].count('(') - lines[i].count(')')
 
-            # Extract net_id and layer from the zone
+            # Extract net and layer SPAN from the zone. A pour may declare one
+            # layer -- (layer "B.Cu") -- or several -- (layers "F.Cu" "B.Cu"),
+            # which is ONE physical zone. Matching only the singular spelling
+            # meant a multi-layer pour was never removable here at all (megadesk's
+            # GND pour), the same blind spot #369 A12 fixed on the READ side.
             element_text = '\n'.join(element_lines)
-            layer_match = re.search(r'\(layer\s+"([^"]+)"\)', element_text)
+            zone_layers = _zone_layer_span(element_text)
             # Try KiCad 9: (net <id>)
             net_match = re.search(r'\(net\s+(\d+)\)', element_text)
 
-            if net_match and layer_match:
+            def _removable(keys, want) -> bool:
+                # Remove only when EVERY layer this pour covers is being replaced.
+                # Otherwise deleting it would take copper on a layer nobody asked
+                # to touch (a GND pour on F.Cu+B.Cu replaced "for B.Cu").
+                return bool(keys) and keys <= want and not _fp_nested
+
+            if net_match and zone_layers:
                 zone_net_id = int(net_match.group(1))
-                zone_layer = layer_match.group(1)
-                if (zone_net_id, zone_layer) in remove_set and not _fp_nested:
+                if _removable({(zone_net_id, l) for l in zone_layers}, remove_set):
                     # Skip this zone entirely
                     i += 1
                     continue
-            elif layer_match and remove_name_set:
+            elif zone_layers and remove_name_set:
                 # KiCad 10: (net "name")
                 net_match_v10 = re.search(r'\(net\s+"((?:[^"\\]|\\.)*)"\)', element_text)
                 if net_match_v10:
                     # Unescape: remove_name_set holds parser display names.
                     zone_net_name = _unescape_kicad_string(net_match_v10.group(1))
-                    zone_layer = layer_match.group(1)
-                    if (zone_net_name, zone_layer) in remove_name_set \
-                            and not _fp_nested:
+                    if _removable({(zone_net_name, l) for l in zone_layers},
+                                  remove_name_set):
                         i += 1
                         continue
 
@@ -297,7 +420,9 @@ def write_plane_output(
     content = move_copper_text_to_silkscreen(content)
     content = move_copper_graphics_to_silkscreen(content)
 
-    # Add teardrops to all pads if requested
+    # Add teardrops to all pads if requested. Pads are never ADDED by a routing
+    # run, so this can run on the input text; the VIA pass has to wait until this
+    # run's own stitching vias are in the content (see below, #489 §9).
     if add_teardrops:
         print("Adding teardrop settings to pads...")
         content, teardrop_count = add_teardrops_to_pads(content)
@@ -306,9 +431,21 @@ def write_plane_output(
         else:
             print("  All pads already have teardrop settings")
 
-    # Filter out zones to be replaced
+    # Filter out zones to be replaced. SAME #88.1 class as the net filter just
+    # below, which was fixed long before: on a KiCad 10 board a zone carries
+    # (net "NAME"), so the numeric (net <id>) matcher here never matched and the
+    # "replaced" zone silently SHIPPED alongside its replacement -- two same-net
+    # pours on one layer, while the log said "Replacing existing zone".
+    # Reproduced on megadesk (version 20260206): a single-net GND run on B.Cu left
+    # the original 4-point GND pour sitting next to the new one.
     if zones_to_replace:
-        content = filter_zones_from_content(content, zones_to_replace)
+        zone_names = None
+        if net_id_to_name:
+            zone_names = [(net_id_to_name[nid], layer)
+                          for nid, layer in zones_to_replace
+                          if nid in net_id_to_name]
+        content = filter_zones_from_content(content, zones_to_replace,
+                                            zone_names_to_remove=zone_names)
 
     # Filter out excluded nets if specified.
     # Issue #88.1: on KiCad 10 boards, segments/vias reference nets by NAME
@@ -331,12 +468,17 @@ def write_plane_output(
     if zone_sexpr:
         elements.append(zone_sexpr)
 
-    # Add vias
+    # Add vias. A reused via carries its own protection spec; a new stitching
+    # via follows the board's convention rather than a hardcoded tenting
+    # policy (#489 §8). Read from the file text being written, which already
+    # holds the board's existing vias.
+    _default_via_attrs = _prevailing_via_protection_in_text(content)
     for via in new_vias:
         via_net_name = net_id_to_name.get(via['net_id']) if net_id_to_name else None
         elements.append(generate_via_sexpr(
             via['x'], via['y'], via['size'], via['drill'],
-            via['layers'], via['net_id'], net_name=via_net_name
+            via['layers'], via['net_id'], net_name=via_net_name,
+            tenting_attrs=via.get('tenting_attrs') or _default_via_attrs
         ))
 
     # Add segments
@@ -348,7 +490,12 @@ def write_plane_output(
         ))
 
     if not elements:
-        # Nothing to add, just copy the file
+        # Nothing to add, just copy the file -- but the via teardrop pass still
+        # has to run over the board's existing vias.
+        if add_teardrops:
+            content, _vtd = add_teardrops_to_vias(content)
+            print(f"  Added teardrops to {_vtd} vias" if _vtd
+                  else "  No vias needed teardrops (none present, or all already set)")
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(content)
         return True
@@ -362,6 +509,16 @@ def write_plane_output(
         return False
 
     new_content = content[:last_paren] + '\n' + routing_text + '\n' + content[last_paren:]
+
+    # Via teardrops LAST, so this run's own stitching vias get them too -- those
+    # are the vias that most need one (#489 §9). Running before the insert above
+    # covered only the vias already on the board (measured: 63 of 81 on megadesk).
+    if add_teardrops:
+        new_content, via_teardrop_count = add_teardrops_to_vias(new_content)
+        if via_teardrop_count > 0:
+            print(f"  Added teardrops to {via_teardrop_count} vias")
+        else:
+            print("  No vias needed teardrops (none present, or all already set)")
 
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(new_content)
@@ -537,7 +694,11 @@ def restore_failed_reroute_nets(
                                   'width': s.width, 'layer': s.layer, 'net_id': nid})
         for v in vias:
             restored_vias.append({'x': v.x, 'y': v.y, 'size': v.size, 'drill': v.drill,
-                                  'layers': v.layers, 'net_id': nid})
+                                  'layers': v.layers, 'net_id': nid,
+                                  # These vias came OFF the board and go back on;
+                                  # carry their tenting/plugging spec with them
+                                  # or the restore silently re-tents them (#489 §8).
+                                  'tenting_attrs': dict(getattr(v, 'tenting_attrs', {}) or {})})
 
     if not restored_net_ids:
         return [], 0, 0
@@ -619,7 +780,8 @@ def restore_failed_reroute_nets(
     for v in restored_vias:
         nm = net_id_to_name.get(v['net_id']) if net_id_to_name else None
         elements.append(generate_via_sexpr(v['x'], v['y'], v['size'], v['drill'],
-                                           v['layers'], v['net_id'], net_name=nm))
+                                           v['layers'], v['net_id'], net_name=nm,
+                                           tenting_attrs=v.get('tenting_attrs')))
     for s in restored_segs:
         nm = net_id_to_name.get(s['net_id']) if net_id_to_name else None
         elements.append(generate_segment_sexpr(s['start'], s['end'], s['width'],

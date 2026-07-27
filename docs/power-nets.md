@@ -83,7 +83,7 @@ Analyze the power nets in kicad_files/my_board.kicad_pcb and recommend track wid
    - PASS_THROUGH: Series elements (inductors, ferrite beads, fuses, power switches)
    - SHUNT: Decoupling capacitors, pull-up resistors
 5. **Trace power paths** - Traces current flow from sinks back to sources
-6. **Width recommendations** - Calculates track widths based on IPC-2152 and estimated current
+6. **Width recommendations** - Calculates track widths from the IPC-2221 chart fit and estimated current (see the note under Track Width Guidelines: this is 2221, not 2152)
 
 ### Why AI Analysis Helps
 
@@ -127,9 +127,15 @@ Many KiCad symbols have incorrect pintype annotations. Common mislabeling patter
 --power-nets "GND" "+3.3V" "/VDDPLL" "/VCCA" "Net-(TB201-P1)" --power-nets-widths 0.5 0.5 0.3 0.3 0.5
 ```
 
-## Track Width Guidelines (IPC-2152)
+## Track Width Guidelines (IPC-2221)
 
-Use these guidelines to select appropriate track widths based on expected current:
+Use these guidelines to select appropriate track widths based on expected current.
+
+These come from the **IPC-2221** current-carrying charts (`I = k × ΔT^0.44 ×
+A^0.725`), which this project labeled IPC-2152 in several places until #489 §6.
+IPC-2152 is the later standard and reverses 2221's 2× derating of *internal*
+layers, so the widths below are conservative for inner-layer routing. The
+recommended column already carries safety margin over the bare formula.
 
 | Current | 1oz Cu, 10C rise | 1oz Cu, 20C rise | Recommended |
 |---------|-------------------|-------------------|-------------|

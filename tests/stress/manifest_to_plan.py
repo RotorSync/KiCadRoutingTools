@@ -91,6 +91,9 @@ BOOL_FLAGS = {
     # singular. Both map to the GUI's no_bga_zone special (bare = exclude ALL).
     '--no-bga-zone': 'no_bga_zone',
     '--no-bga-zones': 'no_bga_zone',
+    # #489 section 9: now on every step that writes pad/via copper (route,
+    # route_diff, route_planes, route_disconnected_planes, bga/qfn fanout).
+    '--add-teardrops': 'add_teardrops',
 }
 
 # Flags whose values are file paths / bookkeeping -- consumed, never params.

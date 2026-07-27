@@ -1335,6 +1335,9 @@ class DifferentialTab(wx.Panel):
             top_layer = get_layer_id(via.layers[0])
             bot_layer = get_layer_id(via.layers[1])
             pcb_via.SetLayerPair(top_layer, bot_layer)
+        # Keep a re-placed via's own tenting/plugging/filling (#489 §8).
+        from gui_utils import apply_via_protection
+        apply_via_protection(pcb_via, getattr(via, 'tenting_attrs', None))
         board.Add(pcb_via)
 
     def get_polarity_swap_nets(self):

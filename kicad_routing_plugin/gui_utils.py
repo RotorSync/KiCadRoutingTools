@@ -32,6 +32,119 @@ class StdoutRedirector:
             self.original.flush()
 
 
+def apply_via_protection(pcb_via, tenting_attrs):
+    """Put a Via's parsed protection spec back onto a pcbnew PCB_VIA (#489 §8).
+
+    GUI counterpart of the writer's tenting round-trip: without it, a via the GUI
+    RE-PLACES (rip-up/reroute, sub-grid nudge, tap relocation) comes back with the
+    board default and silently loses its own tenting/plugging/filling -- the loss
+    the CLI side now avoids. A via with NO spec is deliberately left alone:
+    pcbnew's *_MODE_FROM_BOARD already means "inherit the board setting".
+
+    Best-effort; does nothing on a KiCad without these accessors. Returns True
+    when something was applied.
+    """
+    if not tenting_attrs:
+        return False
+    try:
+        import pcbnew
+    except ImportError:
+        return False
+    import re
+
+    def _sides(inner):
+        """'(front no) (back yes)' -> {'front': False, 'back': True}"""
+        return {m.group(1): (m.group(2) == 'yes')
+                for m in re.finditer(r'\((front|back)\s+(yes|no)\)', inner or '')}
+
+    applied = False
+    for token, front_set, back_set, yes_name, no_name in (
+            ('tenting', 'SetFrontTentingMode', 'SetBackTentingMode',
+             'TENTING_MODE_TENTED', 'TENTING_MODE_NOT_TENTED'),
+            ('covering', 'SetFrontCoveringMode', 'SetBackCoveringMode',
+             'COVERING_MODE_COVERED', 'COVERING_MODE_NOT_COVERED'),
+            ('plugging', 'SetFrontPluggingMode', 'SetBackPluggingMode',
+             'PLUGGING_MODE_PLUGGED', 'PLUGGING_MODE_NOT_PLUGGED')):
+        if token not in tenting_attrs:
+            continue
+        yes_const = getattr(pcbnew, yes_name, None)
+        no_const = getattr(pcbnew, no_name, None)
+        if yes_const is None or no_const is None:
+            continue
+        sides = _sides(tenting_attrs[token])
+        for side, setter_name in (('front', front_set), ('back', back_set)):
+            if side not in sides:
+                continue
+            setter = getattr(pcb_via, setter_name, None)
+            if setter is None:
+                continue
+            try:
+                setter(yes_const if sides[side] else no_const)
+                applied = True
+            except Exception:
+                pass
+
+    for token, setter_name, yes_name, no_name in (
+            ('capping', 'SetCappingMode', 'CAPPING_MODE_CAPPED', 'CAPPING_MODE_NOT_CAPPED'),
+            ('filling', 'SetFillingMode', 'FILLING_MODE_FILLED', 'FILLING_MODE_NOT_FILLED')):
+        if token not in tenting_attrs:
+            continue
+        yes_const = getattr(pcbnew, yes_name, None)
+        no_const = getattr(pcbnew, no_name, None)
+        setter = getattr(pcb_via, setter_name, None)
+        if yes_const is None or no_const is None or setter is None:
+            continue
+        value = (tenting_attrs[token] or '').strip().lower()
+        if value not in ('yes', 'no'):
+            continue
+        try:
+            setter(yes_const if value == 'yes' else no_const)
+            applied = True
+        except Exception:
+            pass
+
+    return applied
+
+
+def apply_teardrops_to_board(board):
+    """Enable teardrops on every pad and via of the live board (#489 §9).
+
+    GUI counterpart of the writers' `add_teardrops_to_pads` /
+    `add_teardrops_to_vias`: the CLI applies teardrops to the output FILE, while
+    the GUI applies copper straight into pcbnew, so without this the "Add
+    teardrops" checkbox did nothing on the tabs that apply in memory (fanout, and
+    the planes tabs, whose config key was read but never supplied).
+
+    Matches the writers' scope -- all pads and all vias, not just the ones this
+    run added -- so the two fronts produce the same board. Best-effort; returns
+    (pads_changed, vias_changed), (0, 0) on a KiCad without the accessors.
+    """
+    try:
+        import pcbnew
+    except ImportError:
+        return (0, 0)
+
+    pads = vias = 0
+    try:
+        for fp in board.GetFootprints():
+            for pad in fp.Pads():
+                if not pad.GetTeardropsEnabled():
+                    pad.SetTeardropsEnabled(True)
+                    pads += 1
+        for track in board.GetTracks():
+            if track.GetClass() != 'PCB_VIA':
+                continue
+            if not track.GetTeardropsEnabled():
+                track.SetTeardropsEnabled(True)
+                vias += 1
+    except AttributeError as e:
+        print(f"(teardrops skipped: this KiCad has no teardrop API: {e})")
+        return (0, 0)
+    if pads or vias:
+        print(f"Teardrops enabled on {pads} pad(s) and {vias} via(s)")
+    return (pads, vias)
+
+
 def refill_all_zones(board):
     """Re-fill EVERY copper zone on the board so plane pours pull back around
     copper added after they were first filled (#362).

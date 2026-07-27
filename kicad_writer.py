@@ -212,23 +212,100 @@ def generate_gr_line_sexpr(start: Tuple[float, float], end: Tuple[float, float],
 	)'''
 
 
+DEFAULT_VIA_TENTING = {'tenting': '(front yes) (back yes)'}
+
+VIA_PROTECTION_TOKEN_ORDER = ('tenting', 'covering', 'plugging', 'capping', 'filling')
+
+
+def via_protection_sexpr(tenting_attrs: dict = None, net_name: str = None) -> str:
+    """The `(tenting ...)` / `(covering ...)` / ... fragment to emit for a via.
+
+    `tenting_attrs` is a Via's parsed spec ({token: raw inner text}); passing it
+    keeps what the board actually specified. Without it the previous behavior
+    stands -- front+back tenting on KiCad 10 output -- since there is no
+    board-level policy to consult here (#489 §8).
+    """
+    spec = tenting_attrs if tenting_attrs else (
+        DEFAULT_VIA_TENTING if net_name is not None else {})
+    if not spec:
+        return ""
+    def _one(token: str, inner: str) -> str:
+        # The parsed inner text keeps the source file's line breaks and tabs;
+        # collapse them so the re-emitted token reads on one line. Same s-expr.
+        inner = " ".join((inner or '').split())
+        return f"({token} {inner})" if inner else f"({token})"
+
+    parts = [_one(t, spec[t]) for t in VIA_PROTECTION_TOKEN_ORDER if t in spec]
+    # Emit an unrecognised token rather than dropping it -- losing the spec is
+    # the bug being fixed.
+    parts += [_one(t, v) for t, v in spec.items()
+              if t not in VIA_PROTECTION_TOKEN_ORDER]
+    return "".join(f"\n\t\t{p}" for p in parts)
+
+
+def prevailing_via_protection(vias) -> Optional[dict]:
+    """The protection spec most of a board's existing vias carry, or None.
+
+    Used as the default for vias this tool ADDS, so a new via follows the
+    board's own convention instead of a hardcoded front+back tenting (#489 §8).
+    hackrf_one is the motivating case: all 498 of its vias explicitly declare
+    covering/plugging/capping/filling = no, and the tool would have stamped
+    tenting yes on every via it added to that board.
+
+    Deterministic: ties break on the canonical spec text, not dict order.
+    """
+    from collections import Counter
+
+    counts = Counter()
+    canonical = {}
+    for via in vias or ():
+        spec = getattr(via, 'tenting_attrs', None)
+        if not spec:
+            continue
+        key = tuple(sorted((t, " ".join((v or '').split())) for t, v in spec.items()))
+        counts[key] += 1
+        canonical[key] = dict(spec)
+    if not counts:
+        return None
+    best = min(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+    return canonical[best]
+
+
+def prevailing_via_protection_in_text(content: str) -> Optional[dict]:
+    """`prevailing_via_protection` for a writer that holds the board TEXT rather
+    than parsed Via objects (the plane / repair writers work on file text)."""
+    from kicad_parser import _extract_via_protection_attrs
+
+    class _V:
+        __slots__ = ('tenting_attrs',)
+
+        def __init__(self, spec):
+            self.tenting_attrs = spec
+
+    specs = _extract_via_protection_attrs(content)
+    if not specs:
+        return None
+    return prevailing_via_protection([_V(s) for s in specs.values()])
+
+
 def generate_via_sexpr(x: float, y: float, size: float, drill: float,
                        layers: List[str], net_id: int, free: bool = False,
-                       net_name: str = None) -> str:
+                       net_name: str = None, tenting_attrs: dict = None) -> str:
     """Generate KiCad S-expression for a via.
 
     Args:
         free: If True, adds (free yes) to prevent KiCad from auto-assigning net based on overlapping tracks.
         net_name: If provided, output KiCad 10 format (net "name") instead of (net id).
+        tenting_attrs: The via's own protection spec as parsed from the board
+            (Via.tenting_attrs). Pass it for any via that already existed so a
+            ripped-and-re-placed via keeps its real tenting/plugging/filling
+            instead of being re-stamped with front+back tenting (#489 §8).
     """
     layers_str = '" "'.join(layers)
     free_str = "\n\t\t(free yes)" if free else ""
     net_str = f'(net "{_escape_net_name(net_name)}")' if net_name is not None else f'(net {net_id})'
     # KiCad 10 adds structured tenting/covering/plugging fields after layers
-    if net_name is not None:
-        tenting_str = "\n\t\t(tenting (front yes) (back yes))"
-    else:
-        tenting_str = ""
+    tenting_str = via_protection_sexpr(tenting_attrs, net_name)
     return f'''	(via
 		(at {x:.6f} {y:.6f})
 		(size {size})
@@ -707,7 +784,8 @@ def add_tracks_to_pcb(input_path: str, output_path: str, tracks: List[Dict],
 def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
                                tracks: List[Dict], vias: List[Dict] = None,
                                remove_vias: List[Dict] = None,
-                               net_id_to_name: Dict[int, str] = None) -> bool:
+                               net_id_to_name: Dict[int, str] = None,
+                               add_teardrops: bool = False) -> bool:
     """
     Add track segments and vias to a PCB file, optionally removing existing vias.
 
@@ -717,6 +795,9 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
         tracks: List of track dicts with keys: start, end, width, layer, net_id
         vias: List of via dicts with keys: x, y, size, drill, layers, net_id
         remove_vias: List of via dicts with keys: x, y (position to match for removal)
+        add_teardrops: Add teardrop settings to every pad and via in the output.
+            Here rather than in each fanout main() so bga_fanout and qfn_fanout
+            share one implementation with the other writers (#489 §9).
 
     Returns:
         True if successful
@@ -823,10 +904,28 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
 
     routing_text = '\n'.join(elements)
 
+    # Teardrops on pads, if asked (#489 §9). Pads are never ADDED here, so this
+    # runs on the input text; the VIA pass waits until the new copper is in.
+    if add_teardrops:
+        print("Adding teardrop settings to pads and vias...")
+        content, _td = add_teardrops_to_pads(content)
+        print(f"  Added teardrops to {_td} pads" if _td
+              else "  All pads already have teardrop settings")
+
+    def _finish(text: str) -> str:
+        # Via teardrops LAST so THIS run's vias get them too -- for a fanout that
+        # is the whole point (a 0.1mm trace meeting a 0.25mm via pad).
+        if not add_teardrops:
+            return text
+        text, _vtd = add_teardrops_to_vias(text)
+        print(f"  Added teardrops to {_vtd} vias" if _vtd
+              else "  No vias needed teardrops (none present, or all already set)")
+        return text
+
     if not routing_text.strip():
         print("Warning: No routing elements to add")
         with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(content)
+            f.write(_finish(content))
         return True
 
     # Find the last closing parenthesis
@@ -841,7 +940,7 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
 
     # Write output file
     with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(new_content)
+        f.write(_finish(new_content))
 
     return True
 
@@ -1396,6 +1495,94 @@ def add_teardrops_to_pads(content: str,
     # Add remaining content
     result_parts.append(content[last_end:])
 
+    return ''.join(result_parts), count
+
+
+def add_teardrops_to_vias(content: str,
+                          best_length_ratio: float = 0.5,
+                          max_length: float = 1.0,
+                          best_width_ratio: float = 1.0,
+                          max_width: float = 2.0,
+                          curved_edges: bool = False,
+                          filter_ratio: float = 0.9,
+                          allow_two_segments: bool = True,
+                          prefer_zone_connections: bool = True) -> tuple[str, int]:
+    """Add teardrop settings to every via that does not already have them.
+
+    `--add-teardrops` reached PADS only: `add_teardrops_to_pads` above, with zero
+    teardrop references anywhere near via emission, so vias got teardrops on NO
+    path (#489 §9). Track-to-via teardrops matter most exactly where this tool is
+    weakest -- fine-pitch BGA escape, where a 0.1mm trace meets a 0.25mm via pad --
+    and they are the standard mitigation for drill breakout under layer-to-layer
+    registration error.
+
+    KiCad accepts the same 9-field `(teardrops ...)` block on a via as on a pad
+    (verified by round-tripping SetTeardropsEnabled through pcbnew). The block is
+    inserted AFTER `(uuid ...)`, as the via's last child: KiCad's parser does not
+    care about child order, while this repo's own via regexes require
+    layers -> (free)? -> net -> uuid to be contiguous, so inserting earlier would
+    make the boards we write unparseable BY US.
+
+    Returns (modified_content, count_of_vias_given_teardrops).
+    """
+    curved_str = "yes" if curved_edges else "no"
+    two_seg_str = "yes" if allow_two_segments else "no"
+    zone_str = "yes" if prefer_zone_connections else "no"
+
+    teardrop_block = f'''
+		(teardrops
+			(best_length_ratio {best_length_ratio})
+			(max_length {max_length})
+			(best_width_ratio {best_width_ratio})
+			(max_width {max_width})
+			(curved_edges {curved_str})
+			(filter_ratio {filter_ratio})
+			(enabled yes)
+			(allow_two_segments {two_seg_str})
+			(prefer_zone_connections {zone_str})
+		)'''
+
+    count = 0
+    result_parts = []
+    last_end = 0
+    i = 0
+
+    while True:
+        via_start = content.find('(via', i)
+        if via_start == -1:
+            break
+        # '(via' must be the whole token, not a prefix of something else.
+        nxt = content[via_start + 4:via_start + 5]
+        if nxt and nxt not in ' \t\r\n(':
+            i = via_start + 4
+            continue
+
+        depth = 0
+        via_end = via_start
+        for j in range(via_start, len(content)):
+            if content[j] == '(':
+                depth += 1
+            elif content[j] == ')':
+                depth -= 1
+                if depth == 0:
+                    via_end = j + 1
+                    break
+
+        via_block = content[via_start:via_end]
+
+        if '(teardrops' not in via_block:
+            uuid_match = re.search(r'\(uuid\s+"[^"]*"\)', via_block)
+            if uuid_match:
+                cut = uuid_match.end()
+                new_via_block = via_block[:cut] + teardrop_block + via_block[cut:]
+                result_parts.append(content[last_end:via_start])
+                result_parts.append(new_via_block)
+                last_end = via_end
+                count += 1
+
+        i = via_end
+
+    result_parts.append(content[last_end:])
     return ''.join(result_parts), count
 
 

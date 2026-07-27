@@ -866,6 +866,12 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         if gnd_net_id:
             print(f"GND net: '{gnd_net_name}' (id {gnd_net_id}) "
                   f"(GND vias will be added as obstacles)")
+            # Split-ground board: each pair returns to ITS OWN domain, so say so
+            # once here rather than per pair (#489 §5).
+            from net_queries import describe_ground_domains
+            _dom_note = describe_ground_domains(pcb_data)
+            if _dom_note:
+                print(_dom_note)
         else:
             cands = gnd_candidate_names(pcb_data)
             hint = f" Candidate nets: {', '.join(cands)}." if cands else ""
@@ -1665,7 +1671,7 @@ Examples:
     parser.add_argument("--debug-memory", action="store_true",
                         help="Print memory usage statistics at key points during routing")
     parser.add_argument("--add-teardrops", action="store_true",
-                        help="Add teardrop settings to all pads in output file")
+                        help="Add teardrop settings to all pads and vias in output file")
     from fix_kicad_drc_settings import add_drc_fix_args
     add_drc_fix_args(parser)
 

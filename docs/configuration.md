@@ -177,7 +177,7 @@ python route.py input.kicad_pcb output.kicad_pcb --nets "Net*" \
 
 Patterns are matched in order - first match determines width. Obstacle clearances automatically adjust for wider power traces.
 
-See [Power Net Analysis](power-nets.md) for automatic detection, AI-powered analysis, and IPC-2152 track width guidelines.
+See [Power Net Analysis](power-nets.md) for automatic detection, AI-powered analysis, and IPC-2221 track width guidelines.
 
 ### Algorithm Options
 
@@ -463,7 +463,7 @@ Available in `route.py` only (not `route_diff.py` or `route_planes.py`). See the
 | `--skip-routing` | false | Skip actual routing, only do swaps and write debug info |
 | `--debug-memory` | false | Print memory usage statistics at key points during routing |
 | `--stats` | false | Print A* search statistics (cells expanded, heuristic efficiency) |
-| `--add-teardrops` | false | Add teardrop settings to all pads in output file |
+| `--add-teardrops` | false | Add teardrop settings to all pads **and vias** in the output file. Available on every step that writes pad/via copper: `route.py`, `route_diff.py`, `route_planes.py`, `route_disconnected_planes.py`, `bga_fanout.py`, `qfn_fanout.py` (#489 §9). In the GUI it is the one shared "Add teardrops" checkbox, which now reaches the fanout and planes tabs too. |
 
 ## GridRouteConfig Class
 

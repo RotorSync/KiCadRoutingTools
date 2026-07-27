@@ -39,19 +39,53 @@ def add_gnd_vias_to_existing_board(
     Returns:
         List of new GND Via objects to add
     """
-    # Find GND net ID
+    # Find GND net ID. An exact name match first (so an explicit --gnd-via-net is
+    # honoured verbatim), then the GND-family resolver.
+    from net_queries import (resolve_gnd_net_id, resolve_return_net_id,
+                             resolve_ground_domains, describe_ground_domains)
+
+    # An empty gnd_net_name is AUTO: resolve per signal from its own ground
+    # domain (the default, #489 §5). A NAMED net pins every return via to it.
+    explicit_name = (gnd_net_name or "").strip() or None
+
     gnd_net_id = None
-    for net_id, net in pcb_data.nets.items():
-        if net.name == gnd_net_name:
-            gnd_net_id = net_id
-            break
+    if explicit_name:
+        for net_id, net in pcb_data.nets.items():
+            if net.name == explicit_name:
+                gnd_net_id = net_id
+                break
+    if gnd_net_id is None:
+        gnd_net_id, resolved_name = resolve_gnd_net_id(pcb_data, explicit_name)
+        if gnd_net_id is not None and explicit_name:
+            print(f"GND net '{explicit_name}' not matched exactly; using "
+                  f"'{resolved_name}' for return vias")
 
     if gnd_net_id is None:
-        print(f"Warning: GND net '{gnd_net_name}' not found, skipping GND via placement")
+        target = explicit_name or "GND family"
+        print(f"Warning: GND net '{target}' not found, skipping GND via placement")
         return []
 
-    # Collect all signal vias from the board (non-GND, non-power vias)
-    signal_vias = [v for v in pcb_data.vias if v.net_id != gnd_net_id and v.net_id != 0]
+    # Split-ground boards (#489 §5): every signal via used to be stitched to ONE
+    # board-global ground, which can bridge the very domains the split exists to
+    # separate. Each via now returns to its OWN net's domain; single-domain boards
+    # resolve exactly as before.
+    domains = {nid: refs for nid, refs in resolve_ground_domains(pcb_data).items() if refs}
+    note = describe_ground_domains(pcb_data, explicit_name)
+    if note:
+        print(note)
+
+    def _return_net_for(via) -> int:
+        if explicit_name or len(domains) < 2:
+            return gnd_net_id
+        dom_id, _dom_name = resolve_return_net_id(pcb_data, via.net_id, explicit_name)
+        return dom_id if dom_id is not None else gnd_net_id
+
+    # Collect all signal vias from the board (non-ground, non-power vias). Every
+    # ground DOMAIN's vias are excluded, not just the resolved one -- an AGND via
+    # is not a signal via needing a return path.
+    ground_ids = set(domains) or {gnd_net_id}
+    ground_ids.add(gnd_net_id)
+    signal_vias = [v for v in pcb_data.vias if v.net_id not in ground_ids and v.net_id != 0]
 
     if not signal_vias:
         print("No signal vias found in board")
@@ -59,13 +93,17 @@ def add_gnd_vias_to_existing_board(
 
     print(f"Checking {len(signal_vias)} signal vias for GND via placement")
 
-    # Collect existing GND vias from PCB data
-    existing_gnd_positions = [(v.x, v.y) for v in pcb_data.vias if v.net_id == gnd_net_id]
-
-    # Also include through-hole GND pads (they act as GND vias)
-    for pad in pcb_data.pads_by_net.get(gnd_net_id, []):
-        if pad.drill and pad.drill > 0:  # Through-hole pad
-            existing_gnd_positions.append((pad.global_x, pad.global_y))
+    # Existing return copper, per ground net: a via only counts as "already has a
+    # return" if the nearby ground copper is in the SAME domain (that is the whole
+    # point of the split).
+    existing_by_net: Dict[int, List] = {}
+    for nid in ground_ids:
+        pts = [(v.x, v.y) for v in pcb_data.vias if v.net_id == nid]
+        # Through-hole pads of that net act as return vias too.
+        for pad in pcb_data.pads_by_net.get(nid, []):
+            if pad.drill and pad.drill > 0:
+                pts.append((pad.global_x, pad.global_y))
+        existing_by_net[nid] = pts
 
     # Minimum distance from signal via center to GND via center: larger of the
     # copper ring clearance (via_size + clearance) and the drill hole-to-hole
@@ -153,8 +191,9 @@ def add_gnd_vias_to_existing_board(
                     if dist < min_pad_dist:
                         return (False, f"too_close_to_th_pad({dist:.2f}mm)")
 
-        # Check against GND vias we're placing in this batch
-        for px, py in placed_gnd_positions:
+        # Check against GND vias we're placing in this batch. Physical spacing,
+        # so EVERY batch via counts regardless of which ground domain it serves.
+        for (px, py), _bnet in placed_gnd_positions:
             dist = math.sqrt((x_mm - px)**2 + (y_mm - py)**2)
             if dist < via_via_min_dist:
                 return (False, f"too_close_to_batch_gnd_via({dist:.2f}mm)")
@@ -170,11 +209,15 @@ def add_gnd_vias_to_existing_board(
 
     for sig_via in signal_vias:
         sx, sy = sig_via.x, sig_via.y
+        via_gnd_net_id = _return_net_for(sig_via)
 
-        # Check if there's already a GND via/pad within gnd_via_distance
+        # Check if there's already a same-domain GND via/pad within
+        # gnd_via_distance. Ground copper of ANOTHER domain is not a return path
+        # for this signal, so it must not satisfy the coverage test (#489 §5).
         has_nearby_gnd = False
         nearest_gnd_dist = float('inf')
-        for gx, gy in existing_gnd_positions + placed_gnd_positions:
+        for gx, gy in (existing_by_net.get(via_gnd_net_id, [])
+                       + [p for p, n in placed_gnd_positions if n == via_gnd_net_id]):
             dist = math.sqrt((sx - gx)**2 + (sy - gy)**2)
             nearest_gnd_dist = min(nearest_gnd_dist, dist)
             if dist <= gnd_via_distance:
@@ -227,16 +270,25 @@ def add_gnd_vias_to_existing_board(
                 drill=config.via_drill,
                 # Through-hole span like every other routed via (see above).
                 layers=["F.Cu", "B.Cu"],
-                net_id=gnd_net_id,
+                # This signal's OWN ground domain (#489 §5), not one board-global net.
+                net_id=via_gnd_net_id,
                 free=True
             )
             new_gnd_vias.append(gnd_via)
-            placed_gnd_positions.append(best_pos)
-            existing_gnd_positions.append(best_pos)
+            placed_gnd_positions.append((best_pos, via_gnd_net_id))
+            existing_by_net.setdefault(via_gnd_net_id, []).append(best_pos)
 
     # Summary
     if new_gnd_vias:
         print(f"\nAdded {len(new_gnd_vias)} GND vias near signal vias")
+        if len(domains) > 1:
+            per_net: Dict[int, int] = {}
+            for v in new_gnd_vias:
+                per_net[v.net_id] = per_net.get(v.net_id, 0) + 1
+            breakdown = ", ".join(
+                f"{(pcb_data.nets.get(nid).name if pcb_data.nets.get(nid) else nid)}: {n}"
+                for nid, n in sorted(per_net.items(), key=lambda kv: -kv[1]))
+            print(f"  Per ground domain -- {breakdown}")
         if placement_distances:
             # fsum for consistency with the rest of the codebase (#493); this
             # one only feeds the printed summary, so no board depends on it.

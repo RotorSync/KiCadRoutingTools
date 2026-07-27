@@ -18,7 +18,7 @@ from connectivity import (
 )
 from obstacle_map import check_line_clearance
 from geometry_utils import simplify_path, segments_intersect_tuple
-from net_queries import resolve_gnd_net_id
+from net_queries import resolve_gnd_net_id, resolve_return_net_id
 # Note: Layer switching is now done upfront in route.py, not during routing
 
 # Import Rust router
@@ -3798,9 +3798,13 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     # match ('/GND', 'GNDA', 'DGND', ...) so return vias aren't silently
     # skipped on boards that don't spell the net literally 'GND' (#379). Quiet
     # here: this runs per-pair; batch_route_diff_pairs warns once if unresolved.
+    # On a split-ground board, return to THIS pair's own ground domain instead of
+    # one board-global net (#489 §5) -- stitching an analog pair's vias to DGND
+    # bridges the split while DRC and connectivity both stay green. Identical to
+    # the old behaviour on a single-domain board.
     gnd_net_id = None
     if config.gnd_via_enabled:
-        gnd_net_id, _ = resolve_gnd_net_id(pcb_data)
+        gnd_net_id, _ = resolve_return_net_id(pcb_data, p_net_id)
 
     # Find endpoints (or use explicit leg endpoints for multi-point routing)
     if endpoints is not None:

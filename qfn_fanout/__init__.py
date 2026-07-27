@@ -408,6 +408,10 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
         print(f"    dropped (no clear via offset): {dropped}")
     if clamp_n:
         print(f"    clamped {clamp_n} via-in-pad(s) to fit their pad edge (#202)")
+    # The FAB requirement this escape may have just created (#489 §8). Emitted
+    # from the shared engine path so the GUI fanout tab reports it too.
+    from fab_notes import print_via_in_pad_note
+    print_via_in_pad_note(vias, pcb_data.pads_by_net, context="QFN underpad escape")
     if escalated_n:
         warn_fab_escalation(f"{escalated_n} via-in-pad(s) (sub-0.45mm pads)")
     if floor_n:
@@ -865,6 +869,10 @@ def main():
                              '(via-in-pad), so a via boxed in on the outward side can '
                              'stagger inward toward the chip instead of being dropped. '
                              'The via still must clear other-net pads, vias and tracks.')
+    # #489 section 9: fanout is where a teardrop matters most (a 0.1mm trace
+    # meeting a 0.25mm via pad), and this step had no way to ask for one.
+    parser.add_argument('--add-teardrops', action='store_true',
+                        help='Add teardrop settings to all pads and vias in the output file')
     from fab_tiers import (add_fab_tier_args, fab_tier_from_args, set_default_fab_tier,
                            enforce_fab_floors, count_copper_layers_in_file)
     add_fab_tier_args(parser)
@@ -947,7 +955,8 @@ def main():
         print(f"\nWriting {len(tracks)} tracks and {len(vias)} vias to {args.output}...")
         net_id_to_name = {nid: net.name for nid, net in pcb_data.nets.items()}
         add_tracks_and_vias_to_pcb(args.pcb, args.output, tracks, vias,
-                                   net_id_to_name=net_id_to_name)
+                                   net_id_to_name=net_id_to_name,
+                                   add_teardrops=args.add_teardrops)
         print("Done!")
     else:
         print("\nNo fanout tracks generated")

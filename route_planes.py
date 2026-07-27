@@ -36,6 +36,7 @@ from plane_io import (
     ZoneInfo,
     extract_zones,
     check_existing_zones,
+    shared_layer_zone_priority,
     resolve_net_id,
     write_plane_output
 )
@@ -77,7 +78,8 @@ from plane_resistance import (
     analyze_single_net_plane,
     analyze_multi_net_plane,
     print_single_net_resistance,
-    print_multi_net_resistance
+    print_multi_net_resistance,
+    stackup_copper_oz
 )
 import routing_defaults as defaults
 
@@ -1083,7 +1085,8 @@ def _generate_multinet_layer_zones(
     voronoi_seed_interval: float,
     board_edge_clearance: float,
     debug_lines: bool,
-    verbose: bool
+    verbose: bool,
+    priority_offset: int = 0
 ) -> Tuple[List[str], List[str], List[Dict]]:
     """
     Generate Voronoi-based zone boundaries for a multi-net layer.
@@ -1501,11 +1504,13 @@ def _generate_multinet_layer_zones(
     _flat = [(layer, nid, poly)
              for nid, polys in zone_polygons.items() for poly in polys]
     _prios = zone_overlap_priorities(_flat)
+    # priority_offset (>0) lifts this whole layer above a FOREIGN net's pour that
+    # was already there, keeping the relative order among our own zones intact.
     _prio_of = {}
     _k = 0
     for nid, polys in zone_polygons.items():
         for poly_idx in range(len(polys)):
-            _prio_of[(nid, poly_idx)] = _prios[_k]
+            _prio_of[(nid, poly_idx)] = _prios[_k] + priority_offset
             _k += 1
     if any(_prios):
         print(f"  Overlapping zones on {layer}: assigned fill priorities "
@@ -1549,18 +1554,28 @@ def _generate_multinet_layer_zones(
                 'priority': _prio_of.get((net_id, poly_idx), 0),
             })
 
-    # Calculate and print resistance
+    # Calculate and print resistance. copper_oz comes from the board's OWN
+    # stackup: this call omitted it, so every board was graded at 1 oz even when
+    # the stackup said 2, while the thickness sat unread in the same PCBData
+    # (#489 §6).
     resistance_results = {}
+    copper_oz = stackup_copper_oz(pcb_data, layer)
     for net_id, polygons in zone_polygons.items():
         net = pcb_data.nets.get(net_id)
         net_name = net.name if net else f"net_{net_id}"
         mst_edges = net_mst_edges.get(net_id, [])
         edge_routes = routed_paths_by_edge.get(net_id, {})
         largest_polygon = max(polygons, key=lambda p: len(p))
-        result = analyze_multi_net_plane(largest_polygon, mst_edges, edge_routes, layer)
+        result = analyze_multi_net_plane(largest_polygon, mst_edges, edge_routes, layer,
+                                        copper_oz=copper_oz)
         resistance_results[net_name] = result
 
     print_multi_net_resistance(resistance_results)
+
+    # Carry the numbers with the zones instead of print-and-discard, so a caller
+    # (or the GUI) can gate on them (#489 §6).
+    for entry in zone_data_list:
+        entry['resistance_analysis'] = resistance_results.get(entry['net_name'])
 
     return zone_sexprs, debug_line_sexprs, zone_data_list
 
@@ -2362,11 +2377,18 @@ def create_plane(
         key = (z.net_name, z.layer)
         if key in seen_keys:
             continue
-        existing_zones.append(ZoneInfo(net_id=z.net_id, net_name=z.net_name, layer=z.layer))
+        existing_zones.append(ZoneInfo(net_id=z.net_id, net_name=z.net_name, layer=z.layer,
+                                      in_footprint=getattr(z, 'in_footprint', False),
+                                      priority=int(getattr(z, 'priority', 0) or 0)))
         seen_keys.add(key)
 
     should_create_zones = []  # Per-net flag for whether to create zone
     zones_to_replace = []  # List of (net_id, layer) tuples for zones to replace
+    # Fill priority per net for a plane that has to SHARE its layer with another
+    # net's existing pour: ABOVE the incumbent, so the newly requested plane wins
+    # the overlap deterministically (see plane_io.shared_layer_zone_priority --
+    # KiCad priorities are non-negative, so it cannot go below). Absent = 0.
+    shared_layer_priority: Dict[str, int] = {}
     for i, (net_name, plane_layer, net_id) in enumerate(zip(net_names, plane_layers, net_ids)):
         if skip_existing_zones:
             # GUI path: never error on existing zones of other nets - in KiCad,
@@ -2383,10 +2405,22 @@ def create_plane(
                 should_create_zones.append(False)
             else:
                 should_create_zones.append(True)
+            # Same shared-layer priority rule as the CLI path below, so both
+            # fronts fill an already-occupied layer identically.
+            _foreign = [z for z in existing_zones
+                        if z.layer == plane_layer
+                        and not getattr(z, 'in_footprint', False)
+                        and z.net_name != net_name
+                        and not (z.net_id and z.net_id == net_id)]
+            if _foreign:
+                shared_layer_priority[net_name] = shared_layer_zone_priority(_foreign)
             continue
 
-        # CLI / strict path
-        should_create, should_continue, zone_to_replace = check_existing_zones(
+        # CLI path. A foreign-net pour on the layer no longer aborts the run: the
+        # plane is created alongside it, at a higher fill priority so the overlap
+        # resolves deterministically (see check_existing_zones /
+        # shared_layer_zone_priority).
+        should_create, should_continue, zone_to_replace, foreign_zones = check_existing_zones(
             existing_zones, plane_layer, net_name, net_id, verbose
         )
         if not should_continue:
@@ -2395,6 +2429,8 @@ def create_plane(
         should_create_zones.append(should_create)
         if zone_to_replace:
             zones_to_replace.append((zone_to_replace.net_id, zone_to_replace.layer))
+        if foreign_zones:
+            shared_layer_priority[net_name] = shared_layer_zone_priority(foreign_zones)
 
     # Step 3: Get board bounds for zone polygon
     board_bounds = pcb_data.board_info.board_bounds
@@ -3248,7 +3284,10 @@ def create_plane(
         zone_sexpr = None
         is_multi_net_layer = layer_nets and len(layer_nets.get(plane_layer, [])) > 1
         if should_create_zone and not is_multi_net_layer:
-            # Single-net layer: use full board rectangle
+            # Single-net layer: use full board rectangle. When another net's pour
+            # already shares this layer, fill ABOVE it so the overlap resolves to
+            # this plane deterministically (0 otherwise, i.e. unchanged).
+            _prio = shared_layer_priority.get(net_name, 0)
             zone_sexpr = generate_zone_sexpr(
                 net_id=net_id,
                 net_name=net_name,
@@ -3257,9 +3296,18 @@ def create_plane(
                 clearance=zone_clearance,
                 min_thickness=min_thickness,
                 direct_connect=True,
-                use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION
+                use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION,
+                priority=_prio
             )
             all_zone_sexprs.append(zone_sexpr)
+
+            # Calculate and print resistance for single-net layer, at the copper
+            # weight this board's stackup actually specifies (#489 §6).
+            result = analyze_single_net_plane(
+                zone_polygon, plane_layer,
+                copper_oz=stackup_copper_oz(pcb_data, plane_layer))
+            print_single_net_resistance(result, net_name)
+
             all_zone_data.append({
                 'net_id': net_id,
                 'net_name': net_name,
@@ -3267,11 +3315,11 @@ def create_plane(
                 'polygon_points': zone_polygon,
                 'clearance': zone_clearance,
                 'min_thickness': min_thickness,
+                'resistance_analysis': result,
+                # The GUI builds its pcbnew ZONE from this dict, so the shared-layer
+                # priority has to travel with it or the two fronts fill differently.
+                'priority': _prio,
             })
-
-            # Calculate and print resistance for single-net layer
-            result = analyze_single_net_plane(zone_polygon, plane_layer)
-            print_single_net_resistance(result, net_name)
 
         # Print per-net results
         print(f"\nResults for '{net_name}':")
@@ -3370,7 +3418,14 @@ def create_plane(
                     voronoi_seed_interval=voronoi_seed_interval,
                     board_edge_clearance=board_edge_clearance,
                     debug_lines=debug_lines,
-                    verbose=verbose
+                    verbose=verbose,
+                    # Sit above any FOREIGN pour already on this layer, exactly
+                    # like the single-net path. Without it, our Voronoi zones and
+                    # the incumbent would both be priority 0 and KiCad would
+                    # tie-break the fill on UUIDs.
+                    priority_offset=max(
+                        (shared_layer_priority.get(n, 0) for n in nets_on_layer),
+                        default=0)
                 )
                 all_zone_sexprs.extend(zone_sexprs)
                 all_debug_lines.extend(debug_line_sexprs)
@@ -3394,6 +3449,12 @@ def create_plane(
                 net = pcb_data.nets.get(rid)
                 ripped_names.append(net.name if net else f"net_{rid}")
             print(f"  Nets excluded from output: {', '.join(ripped_names)}")
+
+    # Via-in-pad is a FAB requirement this run may just have created (#489 §8).
+    # Emitted from the shared engine so the GUI planes tab reports it too.
+    from fab_notes import print_via_in_pad_note
+    print_via_in_pad_note(all_new_vias, pcb_data.pads_by_net,
+                          context="plane stitching vias")
 
     # Finalize plane tap copper ONCE, before the write/dry-run split, so the
     # GUI (dry_run=True, return_results) and the CLI (writes the file) emit
@@ -3741,13 +3802,16 @@ Examples:
                              "tolerate other-net zones on the same layer (e.g. a GND island under an RF feed)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Print detailed DEBUG messages")
     parser.add_argument("--debug-lines", action="store_true", help="Output MST routes on User.1, User.2, etc. per net")
-    parser.add_argument("--add-teardrops", action="store_true", help="Add teardrop settings to all pads in output file")
+    parser.add_argument("--add-teardrops", action="store_true",
+        help="Add teardrop settings to all pads and vias in output file")
 
     # GND return vias
     parser.add_argument("--add-gnd-vias", action="store_true",
         help="Add GND vias near signal vias for return current path")
-    parser.add_argument("--gnd-via-net", type=str, default="GND",
-        help="Net name for GND vias (default: GND)")
+    parser.add_argument("--gnd-via-net", type=str, default=defaults.GND_VIA_NET,
+        help="Pin GND return vias to this net (default: auto -- match each "
+             "signal's own ground domain, which is plain GND on a board with "
+             "one ground)")
     parser.add_argument("--gnd-via-distance", type=float, default=2.0,
         help="Maximum distance from signal via to place GND via in mm (default: 2.0)")
 
@@ -3868,6 +3932,15 @@ Examples:
         if len(nets) > 1:
             print(f"Layer {layer} has multiple nets: {', '.join(nets)}")
 
+    # Did the engine actually write a board? Every post-pass below re-reads the
+    # OUTPUT file, and an early engine return (bad board bounds, a cancel, a
+    # validation exit) writes nothing -- running them anyway raised
+    # FileNotFoundError out of clean_plane_copper, burying the real error message
+    # under a traceback. Compare against the pre-call state so a leftover file
+    # from an EARLIER run isn't mistaken for this run's output.
+    _out_before = (os.path.getmtime(args.output_file)
+                   if args.output_file and os.path.isfile(args.output_file) else None)
+
     create_plane(
         input_file=args.input_file,
         output_file=args.output_file,
@@ -3910,8 +3983,15 @@ Examples:
         clearance_ceiling=args._clearance_ceiling,
     )
 
+    _wrote_output = bool(args.output_file) and os.path.isfile(args.output_file) and (
+        _out_before is None or os.path.getmtime(args.output_file) != _out_before)
+    if not args.dry_run and not _wrote_output:
+        print("\nNo output board was written (see the error above); skipping the "
+              "post-route passes: GND return vias, plane copper cleanup and the "
+              "DRC-floor writeback.")
+
     # Add GND return vias if requested
-    if args.add_gnd_vias and not args.dry_run:
+    if args.add_gnd_vias and not args.dry_run and _wrote_output:
         from kicad_parser import parse_kicad_pcb
         from routing_config import GridRouteConfig, GridCoord
         from obstacle_map import build_base_obstacle_map
@@ -3978,7 +4058,7 @@ Examples:
     # Dead-end sweep + gap-snap on the plane copper (issue #84): plane routing
     # writes outside route.py's write-list, so its dead-end stubs are not cleaned
     # otherwise. Gated against connectivity + pours, so it never breaks a net.
-    if not args.dry_run:
+    if not args.dry_run and _wrote_output:
         from pcb_modification import clean_plane_copper
         _snapped, _removed = clean_plane_copper(args.output_file, net_names,
                                                 args.clearance, args.grid_step)

@@ -85,7 +85,12 @@ TIME_MATCH_TOLERANCE = 1.0  # ps
 
 # GND via placement for single-ended routing
 ADD_GND_VIAS = False  # If True, add GND vias near signal vias
-GND_VIA_NET = "GND"  # Net name for GND vias
+# Net to pin GND return vias to. "" = AUTO (#489 §5): resolve the ground net per
+# signal from its OWN ground domain. On a single-ground board that is the same net
+# the old literal "GND" default resolved to; on a split-ground board it stops
+# analog vias being stitched to the digital ground. Naming a net here still pins
+# every return via to it, board-wide.
+GND_VIA_NET = ""  # Net name for GND vias ("" = auto, per ground domain)
 GND_VIA_DISTANCE = 2.0  # mm - max distance from signal via to GND via
 
 # Algorithm parameters

@@ -147,6 +147,14 @@ whose resolved copper overlaps a different-net neighbour (a modelling error).
 | `net_id` | int | Net ID |
 | `uuid` | str | UUID from the file |
 | `free` | bool | `(free yes)` flag — KiCad won't reassign the net from overlapping copper |
+| `tenting_attrs` | Dict[str, str] | Protection spec as `{token: raw inner s-expr}` for `tenting`/`covering`/`plugging`/`capping`/`filling`, e.g. `{'covering': '(front no) (back no)', 'capping': 'no'}`. `{}` = the board specified nothing (KiCad inherits its board default). Read by **both** parse paths (text and `build_pcb_data_from_board`) in the same normalized form. |
+
+Pass `tenting_attrs` back to `generate_via_sexpr` for any via that already
+existed, so a ripped-and-re-placed via keeps its real spec instead of being
+re-stamped with front+back tenting (#489 §8) — that matters most for via-in-pad,
+which needs IPC-4761 Type VII (filled + capped + plated). `kicad_writer.
+prevailing_via_protection(vias)` gives the board's own convention to use as the
+default for vias you ADD.
 
 ### `Net`
 

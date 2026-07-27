@@ -2536,7 +2536,7 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--debug-memory", action="store_true",
                         help="Print memory usage statistics at key points during routing")
     parser.add_argument("--add-teardrops", action="store_true",
-                        help="Add teardrop settings to all pads in output file")
+                        help="Add teardrop settings to all pads and vias in output file")
     parser.add_argument("--stats", action="store_true",
                         help="Collect and print A* search statistics for debugging heuristic efficiency")
 

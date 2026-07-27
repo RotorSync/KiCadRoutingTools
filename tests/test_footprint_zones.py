@@ -126,12 +126,19 @@ def main():
     fp_pour = ZoneInfo(net_id=2, net_name='+3V3', layer='In2.Cu',
                        in_footprint=True)
     board_pour = ZoneInfo(net_id=2, net_name='+3V3', layer='In2.Cu')
-    ok, cont, repl = check_existing_zones([fp_pour], 'In2.Cu', 'GND', 1)
+    ok, cont, repl, foreign = check_existing_zones([fp_pour], 'In2.Cu', 'GND', 1)
     check("different-net FOOTPRINT pour does not veto the plane",
           ok and cont and repl is None)
-    ok, cont, repl = check_existing_zones([board_pour], 'In2.Cu', 'GND', 1)
-    check("different-net BOARD pour still vetoes", not ok and not cont)
-    ok, cont, repl = check_existing_zones(
+    check("different-net FOOTPRINT pour does not even contend for the layer",
+          foreign == [])
+    # A different-net BOARD pour no longer vetoes the run: KiCad lets zones of
+    # different nets share a layer, so the plane is poured alongside it (at a
+    # higher fill priority). It IS reported as contending, which is exactly the
+    # distinction #478 draws -- a footprint pour must not be.
+    ok, cont, repl, foreign = check_existing_zones([board_pour], 'In2.Cu', 'GND', 1)
+    check("different-net BOARD pour coexists and is reported as contending",
+          ok and cont and repl is None and [z.net_name for z in foreign] == ['+3V3'])
+    ok, cont, repl, foreign = check_existing_zones(
         [ZoneInfo(net_id=1, net_name='GND', layer='In2.Cu',
                   in_footprint=True)], 'In2.Cu', 'GND', 1)
     check("same-net footprint pour is not a replace target", repl is None)

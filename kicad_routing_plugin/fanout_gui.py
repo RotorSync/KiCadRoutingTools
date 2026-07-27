@@ -1360,6 +1360,8 @@ class FanoutTab(wx.Panel):
                     # Advanced cap-placement knobs (#130) so the inline checkbox
                     # path honours them too, not just defaults.
                     **{k: v for k, v in config.items() if k.startswith('cap_')},
+                    # Shared "Add teardrops" checkbox (#489 section 9).
+                    'add_teardrops': shared.get('add_teardrops', False),
                 },
                 optimize_caps=config.get('optimize_caps', False))
 
@@ -1428,6 +1430,8 @@ class FanoutTab(wx.Panel):
                 fanout_config={
                     'track_width': track_width,
                     'extension': extension,
+                    # Shared "Add teardrops" checkbox (#489 section 9).
+                    'add_teardrops': shared.get('add_teardrops', False),
                 },
                 fanout_kind='qfn')
 
@@ -1509,11 +1513,21 @@ class FanoutTab(wx.Panel):
                     get_layer_id(via_dict['layers'][0]),
                     get_layer_id(via_dict['layers'][1])
                 )
+            # Keep a re-placed via's own tenting/plugging/filling (#489 §8).
+            from gui_utils import apply_via_protection
+            apply_via_protection(via, via_dict.get('tenting_attrs'))
             board.Add(via)
             vias_added += 1
 
         # Build connectivity to register new items properly
         board.BuildConnectivity()
+
+        # Teardrops, if the shared "Add teardrops" checkbox is on (#489 §9). The
+        # CLI writer applies them to the output file; the GUI applies copper into
+        # pcbnew, so it has to set them on the board itself.
+        if (fanout_config or {}).get('add_teardrops'):
+            from .gui_utils import apply_teardrops_to_board
+            apply_teardrops_to_board(board)
 
         # Optionally tidy decoupling caps around the fresh fanout vias (#130)
         cap_summary = None
@@ -1674,6 +1688,10 @@ class FanoutTab(wx.Panel):
                 # with placement/writer._remove_vias_at_positions net_ids, #313):
                 # a position-only match could delete a DIFFERENT net's via sitting
                 # within 1um of the moved via's old spot.
+                # This is the via NUDGE: the old via is deleted and an identical
+                # one re-added a fraction of a mm away. Carry its protection spec
+                # across or the nudge silently re-tents it (#489 §8).
+                moved_attrs = vd.get('tenting_attrs')
                 for track in list(board.GetTracks()):
                     if track.GetClass() != 'PCB_VIA':
                         continue
@@ -1682,6 +1700,12 @@ class FanoutTab(wx.Panel):
                     pos = track.GetPosition()
                     if (abs(pcbnew.ToMM(pos.x) - old_x) < 1e-3 and
                             abs(pcbnew.ToMM(pos.y) - old_y) < 1e-3):
+                        if not moved_attrs:
+                            try:
+                                from kicad_parser import _pcbnew_via_protection_attrs
+                                moved_attrs = _pcbnew_via_protection_attrs(track)
+                            except Exception:
+                                moved_attrs = None
                         board.Remove(track)
                         break
                 nv = pcbnew.PCB_VIA(board)
@@ -1693,6 +1717,8 @@ class FanoutTab(wx.Panel):
                 if len(vd.get('layers', [])) >= 2:
                     nv.SetLayerPair(_layer_id(vd['layers'][0]),
                                     _layer_id(vd['layers'][1]))
+                from gui_utils import apply_via_protection
+                apply_via_protection(nv, moved_attrs)
                 board.Add(nv)
 
             for nsd in (result.get('new_segments', []) or []):

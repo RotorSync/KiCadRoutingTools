@@ -76,9 +76,11 @@ def write_routed_output(
     content = move_copper_text_to_silkscreen(content)
     content = move_copper_graphics_to_silkscreen(content)
 
-    # Add teardrops to all pads if requested
+    # Add teardrops to all pads if requested. Pads are never ADDED by a routing
+    # run, so this can run on the input text; the VIA pass runs at the END, once
+    # this run's own vias are in the content (#489 §9).
     if add_teardrops:
-        print("Adding teardrop settings to pads...")
+        print("Adding teardrop settings to pads and vias...")
         content, teardrop_count = add_teardrops_to_pads(content)
         if teardrop_count > 0:
             print(f"  Added teardrops to {teardrop_count} pads")
@@ -153,8 +155,13 @@ def write_routed_output(
                   f"(post-transform strip)")
 
     # Generate routing text (new segments and vias)
+    # Vias this run adds inherit the board's own via protection convention
+    # rather than a hardcoded tenting policy (#489 §8).
+    from kicad_writer import prevailing_via_protection
+    _default_via_attrs = prevailing_via_protection(getattr(pcb_data, 'vias', None))
     routing_text = _generate_routing_text(results, all_swap_vias, net_id_to_name if kicad_v10 else None,
-                                          all_swap_segments=all_swap_segments)
+                                          all_swap_segments=all_swap_segments,
+                                          default_via_attrs=_default_via_attrs)
 
     # Add debug paths if enabled
     if debug_lines:
@@ -165,6 +172,16 @@ def write_routed_output(
     # Insert routing text before final closing paren
     last_paren = content.rfind(')')
     new_content = content[:last_paren] + '\n' + routing_text + '\n' + content[last_paren:]
+
+    # Via teardrops LAST, so THIS run's own vias get them too -- the fine-pitch
+    # escape vias are exactly the ones a track-to-via teardrop is for (#489 §9).
+    if add_teardrops:
+        from kicad_writer import add_teardrops_to_vias
+        new_content, via_teardrop_count = add_teardrops_to_vias(new_content)
+        if via_teardrop_count > 0:
+            print(f"  Added teardrops to {via_teardrop_count} vias")
+        else:
+            print("  No vias needed teardrops (none present, or all already set)")
 
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(new_content)
@@ -330,12 +347,20 @@ def _apply_polarity_swaps(content: str, pad_swaps: List[Dict], pcb_data,
 
 def _generate_routing_text(results: List[Dict], all_swap_vias: List,
                            net_id_to_name: Dict = None,
-                           all_swap_segments: List = None) -> str:
-    """Generate routing text for new segments and vias."""
+                           all_swap_segments: List = None,
+                           default_via_attrs: Dict = None) -> str:
+    """Generate routing text for new segments and vias.
+
+    default_via_attrs: protection spec for vias that carry none of their own --
+    the board's prevailing convention (#489 §8).
+    """
     routing_text = ""
 
     def _net_name(net_id):
         return net_id_to_name.get(net_id) if net_id_to_name else None
+
+    def _via_attrs(via):
+        return getattr(via, 'tenting_attrs', None) or default_via_attrs
 
     # Add segments and vias from routing results
     for result in results:
@@ -348,7 +373,10 @@ def _generate_routing_text(results: List[Dict], all_swap_vias: List,
             routing_text += generate_via_sexpr(
                 via.x, via.y, via.size, via.drill,
                 via.layers, via.net_id, getattr(via, 'free', False),
-                net_name=_net_name(via.net_id)
+                net_name=_net_name(via.net_id),
+                # Keep a re-placed via's own protection spec; a genuinely new
+                # via follows the board's convention (#489 §8).
+                tenting_attrs=_via_attrs(via)
             ) + "\n"
 
     # Add vias from stub layer swapping
@@ -358,7 +386,10 @@ def _generate_routing_text(results: List[Dict], all_swap_vias: List,
             routing_text += generate_via_sexpr(
                 via.x, via.y, via.size, via.drill,
                 via.layers, via.net_id, getattr(via, 'free', False),
-                net_name=_net_name(via.net_id)
+                net_name=_net_name(via.net_id),
+                # Keep a re-placed via's own protection spec; a genuinely new
+                # via follows the board's convention (#489 §8).
+                tenting_attrs=_via_attrs(via)
             ) + "\n"
 
     # Add stub segments synthesized by bare-pad target swaps

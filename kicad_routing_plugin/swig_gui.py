@@ -1623,6 +1623,10 @@ class RoutingDialog(wx.Dialog):
                 # Edge.Cuts keep-out for QFN escape stubs/vias (issue #288);
                 # 0 = fall back to the copper clearance inside generate_qfn_fanout.
                 'board_edge_clearance': self._effective_board_edge_clearance(),
+                # #489 section 9: the ONE shared "Add teardrops" checkbox now
+                # reaches fanout too -- it is the step where a track-to-via
+                # teardrop matters most.
+                'add_teardrops': self.add_teardrops_check.GetValue(),
             }
 
         return FanoutTab(
@@ -1679,6 +1683,10 @@ class RoutingDialog(wx.Dialog):
                 'clamp_netclasses': self.clearance_check.GetValue(),
                 'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
                 'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
+                # #489 section 9: planes_gui already READ config['add_teardrops']
+                # for the create path, but nothing ever supplied it, so the
+                # checkbox was dead here. Both plane modes get it now.
+                'add_teardrops': self.add_teardrops_check.GetValue(),
             }
 
         def get_claude_params():
@@ -3492,6 +3500,10 @@ class RoutingDialog(wx.Dialog):
             top_layer = get_layer_id(via.layers[0])
             bot_layer = get_layer_id(via.layers[1])
             pcb_via.SetLayerPair(top_layer, bot_layer)
+        # Keep a re-placed via's own tenting/plugging/filling (#489 §8). A via
+        # with no spec is left to inherit the board setting, as before.
+        from gui_utils import apply_via_protection
+        apply_via_protection(pcb_via, getattr(via, 'tenting_attrs', None))
         board.Add(pcb_via)
 
     def _move_copper_text_to_silkscreen(self, board):
