@@ -6,7 +6,7 @@ The `route_planes.py` script creates copper pour zones and places vias to connec
 
 When creating a ground or power plane on an inner or bottom layer, SMD pads on other layers need via connections to reach the plane. This tool automates:
 
-1. **Zone creation** - Creates a copper pour zone covering the board. Replaces existing zones for the same net/layer with new parameters
+1. **Zone creation** - Creates a copper pour zone covering the board. Replaces an existing zone for the same net/layer with new parameters; coexists with other nets' pours on that layer (warning + explicit fill priority)
 2. **Pad classification** - Identifies which pads need vias vs direct zone connection
 3. **Via placement** - Places vias near pads, avoiding obstacles on all copper layers
 4. **Trace routing** - Routes traces from offset vias to pads using A* pathfinding
@@ -65,7 +65,7 @@ When specifying multiple nets, each net is paired with its corresponding plane l
 |--------|---------|-------------|
 | `--zone-clearance` | 0.2 | Zone clearance from other copper in mm |
 | `--min-thickness` | 0.1 | Minimum zone copper thickness in mm |
-| `--skip-existing-zones` | off | Keep an existing same-net zone on the target layer instead of replacing it (place stitching vias only), and tolerate other-net zones on the same layer (e.g. a GND island under an RF feed). When off (the CLI default), an existing same-net zone on the target layer is replaced |
+| `--skip-existing-zones` | off | Keep an existing same-net zone on the target layer instead of replacing it (place stitching vias only). When off (the CLI default), an existing same-net zone on the target layer is replaced. **Other nets' pours on the layer are tolerated either way** — see below |
 
 ### Algorithm Options
 
@@ -166,6 +166,26 @@ count. `--gnd-via-net AGND` still pins everything to one net board-wide.
 
 Helpers: `net_queries.resolve_ground_domains`, `ground_domain_bridges`,
 `resolve_return_net_id`, `describe_ground_domains`.
+
+#### Sharing a layer with another net's pour
+
+A pour belonging to a **different net** on the target layer used to abort the run
+("Cannot create *net* zone on same layer. Aborting.") — so a plane could not be
+added to any board that already had a pour on that layer, and the abort then
+crashed the post-passes on the output file it never wrote. KiCad itself allows
+zones of different nets to share a layer: it fills them by priority and holds
+normal clearance between nets.
+
+The run now **warns and continues**, naming the other nets, and gives the new
+plane a fill priority **one above the highest incumbent** so KiCad resolves the
+overlap in favour of the plane you just asked for — the existing pours pull back
+around it rather than the outcome depending on zone UUID order. The incumbent
+zones themselves are left untouched. Point `--plane-layers` at a free layer if
+you want the opposite. Priority is chosen upward because KiCad zone priority is
+non-negative: a value below the incumbent is written but read back as 0.
+
+Footprint-owned pours (a shield or thermal pour inside a footprint) neither
+contend nor get replaced (#478).
 
 #### Choosing `--gnd-via-distance`
 
@@ -527,7 +547,8 @@ The plane generation code is organized into several modules:
 
 **plane_io.py:**
 - `extract_zones()` - Reads existing zones from PCB file
-- `check_existing_zones()` - Validates zone conflicts
+- `check_existing_zones()` - Reports what already occupies the target layer: the same-net pour to replace, plus other nets' pours to coexist with (it no longer aborts the run over a foreign pour)
+- `shared_layer_zone_priority()` - Fill priority for a plane sharing a layer with another net's pour: one above the highest incumbent, so the overlap resolves deterministically
 - `write_plane_output()` - Writes vias, traces, and zones to output file
 
 **plane_obstacle_builder.py:**

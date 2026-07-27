@@ -25,6 +25,12 @@ class ZoneInfo:
     net_name: str
     layer: str
     in_footprint: bool = False  # #478: owned by a footprint, not the board
+    # Fill priority of the EXISTING pour. Needed to coexist with a foreign-net
+    # pour deterministically: KiCad fills higher priority first and only lower
+    # ones pull back, so a new plane sharing the layer takes one ABOVE the highest
+    # incumbent (see shared_layer_zone_priority -- priorities are non-negative,
+    # so it cannot go below).
+    priority: int = 0
 
 
 def extract_zones(pcb_file: str) -> List[ZoneInfo]:
@@ -51,13 +57,28 @@ def extract_zones(pcb_file: str) -> List[ZoneInfo]:
     from kicad_parser import extract_nets, detect_kicad_version
     _, name_to_id = extract_nets(content, detect_kicad_version(content))
     return [ZoneInfo(net_id=z.net_id, net_name=z.net_name, layer=z.layer,
-                     in_footprint=z.in_footprint)
+                     in_footprint=z.in_footprint,
+                     priority=int(getattr(z, 'priority', 0) or 0))
             for z in _parser_extract_zones(content, name_to_id)]
 
 
 def check_existing_zones(zones: List[ZoneInfo], target_layer: str, target_net_name: str,
-                          target_net_id: int, verbose: bool = False) -> Tuple[bool, bool, Optional[ZoneInfo]]:
+                          target_net_id: int, verbose: bool = False
+                          ) -> Tuple[bool, bool, Optional[ZoneInfo], List[ZoneInfo]]:
     """Check for existing zones on the target layer.
+
+    A foreign-net pour on the layer is NOT fatal. KiCad allows zones of different
+    nets to share a layer -- it fills them by priority and holds clearance
+    between nets -- and this function used to abort the whole run over it, which
+    left `route_planes` unable to add a plane to any board that already had one
+    on that layer (and, worse, the CLI aborted while the GUI path deliberately
+    did not: "in KiCad, zones with different nets may coexist on a layer").
+
+    So the foreign pour is kept, ours is created alongside, and the caller gives
+    ours a fill priority ABOVE the incumbent -- see `shared_layer_zone_priority`.
+    That picks a definite winner for the overlap (the plane the user just asked
+    for) instead of leaving KiCad to tie-break on UUIDs. Both nets still keep
+    clearance from each other, so coexisting is not a short.
 
     Args:
         zones: List of existing zones
@@ -67,11 +88,16 @@ def check_existing_zones(zones: List[ZoneInfo], target_layer: str, target_net_na
         verbose: Print verbose output
 
     Returns:
-        (should_create_zone, should_continue, zone_to_replace) tuple
+        (should_create_zone, should_continue, zone_to_replace, foreign_zones)
         - should_create_zone: True to create/replace zone
-        - should_continue: False if zone exists on different net (error condition)
-        - zone_to_replace: ZoneInfo of existing zone to replace, or None
+        - should_continue: kept for callers; now always True (no abort case left)
+        - zone_to_replace: ZoneInfo of the SAME-NET zone to replace, or None
+        - foreign_zones: other nets' pours already on this layer, which our new
+          pour must yield to
     """
+    zone_to_replace = None
+    foreign: List[ZoneInfo] = []
+
     for zone in zones:
         # #478: footprint-owned pours are the footprint's business -- a small
         # shield/thermal pour must neither veto a whole plane layer nor be
@@ -79,19 +105,48 @@ def check_existing_zones(zones: List[ZoneInfo], target_layer: str, target_net_na
         # fills both; zone priority + clearance arbitrate the overlap.
         if getattr(zone, 'in_footprint', False):
             continue
-        if zone.layer == target_layer:
-            if zone.net_id == target_net_id or zone.net_name == target_net_name:
-                # Same net - replace existing zone with our parameters
+        if zone.layer != target_layer:
+            continue
+        if zone.net_id == target_net_id or zone.net_name == target_net_name:
+            # Same net - replace existing zone with our parameters
+            if zone_to_replace is None:
                 print(f"Note: Replacing existing zone on {target_layer} for net '{zone.net_name}' with new parameters")
-                return (True, True, zone)
-            else:
-                # Different net - error
-                print(f"Error: Zone already exists on {target_layer} for DIFFERENT net '{zone.net_name}' (ID {zone.net_id})")
-                print(f"  Cannot create {target_net_name} zone on same layer. Aborting.")
-                return (False, False, None)
+                zone_to_replace = zone
+        else:
+            foreign.append(zone)
 
-    # No existing zone on this layer
-    return (True, True, None)
+    if foreign:
+        names = ", ".join(sorted({f"'{z.net_name}'" for z in foreign}))
+        print(f"WARNING: {target_layer} already carries {len(foreign)} pour(s) for "
+              f"other net(s) {names}; creating the '{target_net_name}' plane "
+              f"alongside them (KiCad allows it and holds clearance between nets). "
+              f"The new plane takes the HIGHER fill priority, so where they "
+              f"overlap the existing pour(s) pull back around it. Point "
+              f"--plane-layers at a free layer if you want the opposite.")
+
+    return (True, True, zone_to_replace, foreign)
+
+
+def shared_layer_zone_priority(foreign_zones: List[ZoneInfo]) -> int:
+    """Fill-priority offset for a new plane sharing a layer with other nets' pours.
+
+    One ABOVE the highest incumbent, so KiCad -- which fills highest priority
+    first and only pulls LOWER-priority zones back -- resolves every overlap in
+    favour of the plane just requested, deterministically. Without it both sit at
+    priority 0 and the fill hinges on UUID order, the exact nondeterminism
+    `zone_overlap_priorities` exists to remove.
+
+    Upward, not downward: KiCad zone priority is NON-NEGATIVE. A "one below the
+    incumbent" value of -1 is written but then read back as 0 (the parsers match
+    `\\d+`), so it silently did nothing -- measured on megadesk before this was
+    turned around. Going up also leaves the user's own zone untouched.
+
+    Returns 0 when nothing contends, so boards that never had the ambiguity are
+    byte-for-byte unchanged.
+    """
+    if not foreign_zones:
+        return 0
+    return max(int(getattr(z, 'priority', 0) or 0) for z in foreign_zones) + 1
 
 
 def resolve_net_id(pcb_data: PCBData, net_name: str) -> Optional[int]:
@@ -361,8 +416,8 @@ def write_plane_output(
         # has to run over the board's existing vias.
         if add_teardrops:
             content, _vtd = add_teardrops_to_vias(content)
-            print(f"  Added teardrops to {_vtd} vias"
-                  if _vtd else "  All vias already have teardrop settings")
+            print(f"  Added teardrops to {_vtd} vias" if _vtd
+                  else "  No vias needed teardrops (none present, or all already set)")
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(content)
         return True
@@ -385,7 +440,7 @@ def write_plane_output(
         if via_teardrop_count > 0:
             print(f"  Added teardrops to {via_teardrop_count} vias")
         else:
-            print("  All vias already have teardrop settings")
+            print("  No vias needed teardrops (none present, or all already set)")
 
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(new_content)
