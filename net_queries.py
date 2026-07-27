@@ -763,6 +763,139 @@ def resolve_gnd_net_id(pcb_data: PCBData,
     return None, None
 
 
+def _ground_family_net_ids(pcb_data: PCBData) -> List[Tuple[int, str]]:
+    """[(net_id, name)] of every ground-family net, deterministically ordered."""
+    fam = [(nid, net.name) for nid, net in pcb_data.nets.items()
+           if nid != 0 and net.name and is_ground_net_name(net.name)]
+    fam.sort(key=lambda kv: (len(kv[1]), kv[1], kv[0]))
+    return fam
+
+
+def ground_domain_bridges(pcb_data: PCBData) -> List[Dict]:
+    """Components that deliberately TIE two ground nets together.
+
+    A split-ground board joins its domains at exactly one point, through a
+    ferrite, a 0 Ohm link or a net tie. Such a part touches BOTH grounds, so it
+    must not be used to decide which domain a signal returns to -- otherwise the
+    two domains look like one through it.
+
+    Detected structurally (no datasheet needed): a populated part with exactly
+    two electrically-distinct pads, one on each of two different ground-family
+    nets. Net ties are included via footprint.net_tie_groups. Returns
+    [{'ref', 'net_ids'}].
+    """
+    fam_ids = {nid for nid, _ in _ground_family_net_ids(pcb_data)}
+    bridges = []
+    for ref, fp in sorted(pcb_data.footprints.items()):
+        if fp.dnp:
+            continue  # a no-pop link is an OPEN: it bridges nothing
+        pad_nets = {p.net_id for p in fp.pads if p.net_id}
+        if len(pad_nets) != 2:
+            continue
+        if pad_nets <= fam_ids:
+            bridges.append({'ref': ref, 'net_ids': sorted(pad_nets)})
+    return bridges
+
+
+def resolve_ground_domains(pcb_data: PCBData) -> Dict[int, Set[str]]:
+    """{ground net_id: {component refs returning to it}} (#489 §5).
+
+    `resolve_gnd_net_id` resolves ONE board-global ground, so on a split-ground
+    board with AGND + DGND and no plain 'GND' it picks one arbitrarily and the
+    return-via features stitch every signal via -- analog included -- to that one
+    net. That is worse than doing nothing: it can bridge the very domains the
+    designer built the split to separate, while connectivity and DRC both stay
+    green.
+
+    Each ground-family net is a domain, seeded with the components that touch it.
+    Bridge parts (see ground_domain_bridges) are excluded so a domain's membership
+    does not leak across the split. A component touching two domains directly
+    (not through a bridge) is left out of both -- it is genuinely ambiguous, and
+    guessing is what caused the bug.
+    """
+    cached = getattr(pcb_data, '_ground_domains', None)
+    if cached is not None:
+        return cached
+
+    fam = _ground_family_net_ids(pcb_data)
+    bridge_refs = {b['ref'] for b in ground_domain_bridges(pcb_data)}
+
+    touches: Dict[str, Set[int]] = {}
+    for nid, _name in fam:
+        for pad in pcb_data.pads_by_net.get(nid, ()) or ():
+            ref = pad.component_ref
+            if not ref or ref in bridge_refs:
+                continue
+            touches.setdefault(ref, set()).add(nid)
+
+    domains: Dict[int, Set[str]] = {nid: set() for nid, _ in fam}
+    for ref, nids in touches.items():
+        if len(nids) == 1:
+            domains[next(iter(nids))].add(ref)
+    pcb_data._ground_domains = domains
+    return domains
+
+
+def resolve_return_net_id(pcb_data: PCBData, net_id: Optional[int] = None,
+                          preferred_name: Optional[str] = None
+                          ) -> Tuple[Optional[int], Optional[str]]:
+    """The ground net a given signal net should return to (#489 §5).
+
+    Same contract as `resolve_gnd_net_id`, and IDENTICAL to it whenever the board
+    has 0 or 1 ground domains (the overwhelmingly common case) or the caller
+    passes `preferred_name` (--gnd-via-net still wins outright).
+
+    With several ground domains, the signal's own endpoint components decide:
+    the domain shared by the components its pads sit on. Ambiguous or unknown
+    falls back to the board-global answer, so behaviour never gets worse than
+    before -- it just stops being confidently wrong on the boards where grounding
+    matters most.
+    """
+    if preferred_name:
+        return resolve_gnd_net_id(pcb_data, preferred_name)
+
+    domains = resolve_ground_domains(pcb_data)
+    if net_id is None or len([d for d in domains if domains[d]]) < 2:
+        return resolve_gnd_net_id(pcb_data)
+
+    refs = {p.component_ref for p in pcb_data.pads_by_net.get(net_id, ()) or ()
+            if p.component_ref}
+    if not refs:
+        return resolve_gnd_net_id(pcb_data)
+
+    hits = [nid for nid, members in sorted(domains.items()) if refs & members]
+    if len(hits) == 1:
+        net = pcb_data.nets.get(hits[0])
+        return hits[0], (net.name if net else None)
+    return resolve_gnd_net_id(pcb_data)
+
+
+def describe_ground_domains(pcb_data: PCBData,
+                            preferred_name: Optional[str] = None
+                            ) -> Optional[str]:
+    """A one-shot warning when a board has SEVERAL ground domains and the user
+    has not disambiguated, or None when there is nothing to say (#489 §5)."""
+    if preferred_name:
+        return None
+    domains = {nid: refs for nid, refs in resolve_ground_domains(pcb_data).items() if refs}
+    if len(domains) < 2:
+        return None
+    parts = []
+    for nid, refs in sorted(domains.items(), key=lambda kv: -len(kv[1])):
+        net = pcb_data.nets.get(nid)
+        parts.append(f"{net.name if net else nid} ({len(refs)} components)")
+    bridges = ground_domain_bridges(pcb_data)
+    bridge_txt = ""
+    if bridges:
+        bridge_txt = (" Tied by " +
+                      ", ".join(b['ref'] for b in bridges[:4]) +
+                      (", ..." if len(bridges) > 4 else "") + ".")
+    return (f"NOTE: {len(domains)} ground domains found: {'; '.join(parts)}."
+            f"{bridge_txt} Return vias are matched to each signal's own domain "
+            f"from its endpoint components; pass --gnd-via-net to force one net "
+            f"for the whole board.")
+
+
 def gnd_candidate_names(pcb_data: PCBData) -> List[str]:
     """Ground-ish net names on the board, for a 'no GND net found' diagnostic."""
     return sorted({net.name for nid, net in pcb_data.nets.items()

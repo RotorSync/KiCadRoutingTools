@@ -215,6 +215,33 @@ print(f"{net.name}: {total:.2f} mm total copper, "
 # -> 2.5 mm of that net's copper is branch/stub, not on the signal path.
 ```
 
+### Ground domains
+
+```python
+resolve_gnd_net_id(pcb_data, preferred_name=None) -> Tuple[Optional[int], Optional[str]]
+resolve_ground_domains(pcb_data) -> Dict[int, Set[str]]
+ground_domain_bridges(pcb_data) -> List[Dict]
+resolve_return_net_id(pcb_data, net_id=None, preferred_name=None)
+    -> Tuple[Optional[int], Optional[str]]
+describe_ground_domains(pcb_data, preferred_name=None) -> Optional[str]
+```
+
+`resolve_gnd_net_id` gives the board-global ground (explicit name > exact `GND` >
+the GND family). Use `resolve_return_net_id` for **return-via placement**: it
+returns the ground net a given signal should return to, which on a split-ground
+board is its own domain rather than one arbitrary net (#489 §5).
+
+`resolve_ground_domains` maps each ground-family net to the components returning
+to it. `ground_domain_bridges` finds the single-point ties between domains
+(populated 2-pad parts with one pad on each ground — ferrites, 0 Ω links, net
+ties), which are excluded from domain membership so it cannot leak across the
+split. `describe_ground_domains` returns a one-shot warning string when a board
+has several domains and the caller has not disambiguated, else `None`.
+
+`resolve_return_net_id` is identical to `resolve_gnd_net_id` whenever the board
+has fewer than two ground domains or a `preferred_name` is given, and falls back
+to it for any signal whose domain is ambiguous.
+
 ### `expand_pad_layers`
 
 ```python

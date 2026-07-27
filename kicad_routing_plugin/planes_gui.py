@@ -360,7 +360,11 @@ class CreatePlanesOptionsPanel(wx.Panel):
 
         gnd_grid.Add(wx.StaticText(self, label="GND Net Name:"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.gnd_via_net = wx.TextCtrl(self, value=defaults.GND_VIA_NET)
-        self.gnd_via_net.SetToolTip("Net name for GND vias (e.g., GND)")
+        self.gnd_via_net.SetToolTip(
+            "Pin GND return vias to this net. Leave EMPTY for auto: each signal "
+            "returns to its own ground domain (plain GND on a board with one "
+            "ground; AGND/DGND matched per signal on a split-ground board). "
+            "Matches the CLI --gnd-via-net default.")
         gnd_grid.Add(self.gnd_via_net, 0, wx.EXPAND)
 
         gnd_sizer.Add(gnd_grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)

@@ -3768,8 +3768,10 @@ Examples:
     # GND return vias
     parser.add_argument("--add-gnd-vias", action="store_true",
         help="Add GND vias near signal vias for return current path")
-    parser.add_argument("--gnd-via-net", type=str, default="GND",
-        help="Net name for GND vias (default: GND)")
+    parser.add_argument("--gnd-via-net", type=str, default=defaults.GND_VIA_NET,
+        help="Pin GND return vias to this net (default: auto -- match each "
+             "signal's own ground domain, which is plain GND on a board with "
+             "one ground)")
     parser.add_argument("--gnd-via-distance", type=float, default=2.0,
         help="Maximum distance from signal via to place GND via in mm (default: 2.0)")
 

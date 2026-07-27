@@ -135,14 +135,37 @@ This feature is for single-ended signal vias placed by `route.py`.
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--add-gnd-vias` | off | Enable GND return via placement near signal vias |
-| `--gnd-via-net` | GND | Net name for the GND vias |
+| `--gnd-via-net` | *auto* | Pin every return via to this net. Empty (the default) matches each signal to **its own ground domain** |
 | `--gnd-via-distance` | 2.0 | Maximum distance from signal via to place GND via (mm) |
 
 The algorithm:
-1. Finds all signal vias (non-GND nets)
-2. Skips signal vias that already have a GND via or through-hole GND pad within the distance threshold
+1. Finds all signal vias (nets that are not a ground net)
+2. Skips signal vias that already have a **same-domain** GND via or through-hole GND pad within the distance threshold
 3. For each remaining signal via, searches outward from the minimum viable distance (via-to-via clearance) in 24 angles (every 15°)
-4. Places the GND via at the closest valid position that respects track clearances
+4. Places the GND via at the closest valid position that respects track clearances, on the signal's own ground net
+
+#### Split grounds (#489 §5)
+
+Ground used to collapse to one board-global net, so every signal via -- analog
+included -- was stitched to it. On a split-ground board that is worse than doing
+nothing: it can bridge the very domains the split exists to separate, while
+connectivity and DRC both report green.
+
+Each ground-family net (`GND*`, `AGND`, `DGND`, `PGND`, ...) is now a **domain**,
+seeded with the components that touch it. The single-point tie between domains --
+a ferrite, a 0 Ω link, a net tie -- is detected structurally (a populated 2-pad
+part with one pad on each ground) and excluded from that seeding, so membership
+cannot leak across the split. A signal's return domain is then the domain of its
+endpoint components; anything ambiguous falls back to the board-global answer, so
+behaviour never gets worse than before.
+
+Boards with one ground resolve exactly as before (verified across the corpus set:
+12 single-ground boards unchanged for every net, 3 split-ground boards corrected).
+A run on a multi-domain board prints the domains, the tie, and the per-domain via
+count. `--gnd-via-net AGND` still pins everything to one net board-wide.
+
+Helpers: `net_queries.resolve_ground_domains`, `ground_domain_bridges`,
+`resolve_return_net_id`, `describe_ground_domains`.
 
 #### Choosing `--gnd-via-distance`
 
