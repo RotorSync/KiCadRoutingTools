@@ -77,7 +77,8 @@ from plane_resistance import (
     analyze_single_net_plane,
     analyze_multi_net_plane,
     print_single_net_resistance,
-    print_multi_net_resistance
+    print_multi_net_resistance,
+    stackup_copper_oz
 )
 import routing_defaults as defaults
 
@@ -1549,18 +1550,28 @@ def _generate_multinet_layer_zones(
                 'priority': _prio_of.get((net_id, poly_idx), 0),
             })
 
-    # Calculate and print resistance
+    # Calculate and print resistance. copper_oz comes from the board's OWN
+    # stackup: this call omitted it, so every board was graded at 1 oz even when
+    # the stackup said 2, while the thickness sat unread in the same PCBData
+    # (#489 §6).
     resistance_results = {}
+    copper_oz = stackup_copper_oz(pcb_data, layer)
     for net_id, polygons in zone_polygons.items():
         net = pcb_data.nets.get(net_id)
         net_name = net.name if net else f"net_{net_id}"
         mst_edges = net_mst_edges.get(net_id, [])
         edge_routes = routed_paths_by_edge.get(net_id, {})
         largest_polygon = max(polygons, key=lambda p: len(p))
-        result = analyze_multi_net_plane(largest_polygon, mst_edges, edge_routes, layer)
+        result = analyze_multi_net_plane(largest_polygon, mst_edges, edge_routes, layer,
+                                        copper_oz=copper_oz)
         resistance_results[net_name] = result
 
     print_multi_net_resistance(resistance_results)
+
+    # Carry the numbers with the zones instead of print-and-discard, so a caller
+    # (or the GUI) can gate on them (#489 §6).
+    for entry in zone_data_list:
+        entry['resistance_analysis'] = resistance_results.get(entry['net_name'])
 
     return zone_sexprs, debug_line_sexprs, zone_data_list
 
@@ -3260,6 +3271,14 @@ def create_plane(
                 use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION
             )
             all_zone_sexprs.append(zone_sexpr)
+
+            # Calculate and print resistance for single-net layer, at the copper
+            # weight this board's stackup actually specifies (#489 §6).
+            result = analyze_single_net_plane(
+                zone_polygon, plane_layer,
+                copper_oz=stackup_copper_oz(pcb_data, plane_layer))
+            print_single_net_resistance(result, net_name)
+
             all_zone_data.append({
                 'net_id': net_id,
                 'net_name': net_name,
@@ -3267,11 +3286,8 @@ def create_plane(
                 'polygon_points': zone_polygon,
                 'clearance': zone_clearance,
                 'min_thickness': min_thickness,
+                'resistance_analysis': result,
             })
-
-            # Calculate and print resistance for single-net layer
-            result = analyze_single_net_plane(zone_polygon, plane_layer)
-            print_single_net_resistance(result, net_name)
 
         # Print per-net results
         print(f"\nResults for '{net_name}':")

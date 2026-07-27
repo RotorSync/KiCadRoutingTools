@@ -275,11 +275,12 @@ After zone creation, the tool calculates and displays approximate plane resistan
 
 **Calculations:**
 - **Resistance:** `R = ρ × L / (W × t)` where ρ = 1.68×10⁻⁸ Ω·m (copper), L = path length, W = average width, t = copper thickness
-- **Max current:** IPC-2152 formula `I = k × ΔT^0.44 × A^0.725` where k = 0.024 for internal layers, 0.048 for external, A = cross-sectional area in mils²
+- **Max current:** the **IPC-2221** chart fit `I = k × ΔT^0.44 × A^0.725`, k = 0.024 internal / 0.048 external, A = cross-sectional area in mils². This was documented as IPC-2152, but the formula and both k values are 2221's (#489 §6). IPC-2152 came later and specifically **overturned** 2221's 2× derating of internal layers — an inner trace in FR4 runs *cooler* than an external one in still air — so `Imax` under-credits inner planes by roughly 2×. `plane_resistance.calculate_max_current_ipc2152()` gives the corrected estimate, and it is printed alongside for internal layers.
 
 **Assumptions:**
-- 1 oz copper (35 µm thickness)
+- Copper weight is read from the board's own **stackup**, per layer (1 oz / 35 µm only when the board has no stackup)
 - 10°C maximum temperature rise
+- **Chart range:** the 2221 curves are drawn for cross-sections up to ~700 mils². A plane pour is far outside that, so a result past the range is reported as *not rated* instead of as a current, with the extrapolated number shown only for reference — this is why the example below no longer states "21.05 A" as fact.
 
 **Example output (single-net layer):**
 ```
@@ -287,24 +288,30 @@ Plane Resistance Analysis (1 oz copper, 10°C rise):
   Path length: 117.0 mm (diagonal)
   Avg width:   52.2 mm
   Resistance:  1.075 mΩ
-  Max current: 21.05 A
+  Max current: not rated -- 2832 mils² cross-section is past the IPC-2221
+               chart range (700 mils²); the fit would say 21.05 A by extrapolation
 ```
 
 **Example output (multi-net layer):**
 ```
 Plane Resistance Analysis (1 oz copper, 10°C rise):
-----------------------------------------------------------------------
+--------------------------------------------------------------------------
 Net                       Path(mm)   AvgW(mm)   R(mΩ)      Imax(A)
-----------------------------------------------------------------------
+--------------------------------------------------------------------------
 /fpga_adc/VA19            33.6       3.6        4.457      3.03
-/fpga_adc/VA11            96.3       5.7        8.121      4.22
-/fpga_adc/VLVDS           28.4       78.1       0.175      28.18
+/fpga_adc/VA11            96.3       5.7        8.121      4.22*
+/fpga_adc/VLVDS           28.4       78.1       0.175      28.18*
 /fpga_adc/VD11            31.7       4.3        3.537      3.44
-----------------------------------------------------------------------
+--------------------------------------------------------------------------
 Path = longest MST route, AvgW = avg polygon width along path
+Imax = IPC-2221 chart fit; inner layers carry 2221's 2x derating, which IPC-2152 overturned
+* extrapolated past the IPC-2221 chart range (700 mils²) -- not a rating
 ```
 
 This helps identify potential current bottlenecks in power distribution networks. Narrow polygon sections (low AvgW) will have higher resistance and lower current capacity.
+
+Each zone's numbers are also returned with the zone data (`resistance_analysis`),
+so a caller can gate on them instead of scraping the printout.
 
 ## Error Messages
 
@@ -521,7 +528,10 @@ The plane generation code is organized into several modules:
 - `find_mst_diameter_path()` - Finds longest path through MST (tree diameter)
 - `calculate_average_width_along_path()` - Samples polygon width perpendicular to path
 - `calculate_resistance()` - Computes R = ρL/Wt
-- `calculate_max_current_ipc()` - Computes max current using IPC-2152 formula
+- `calculate_max_current_ipc2221()` - Max current from the IPC-2221 chart fit (was `calculate_max_current_ipc`, which is kept as an alias)
+- `calculate_max_current_ipc2152()` - Same fit with IPC-2152's internal/external correction (no 2× inner-layer derating)
+- `ipc2221_area_in_range()` - Whether the conductor is inside the 2221 chart's data range (False ⇒ the number is an extrapolation, not a rating)
+- `stackup_copper_oz()` - Copper weight in oz for a layer, read from the board's stackup
 
 ## Repairing Disconnected Plane Regions
 

@@ -177,7 +177,7 @@ python route.py input.kicad_pcb output.kicad_pcb --nets "Net*" \
 
 Patterns are matched in order - first match determines width. Obstacle clearances automatically adjust for wider power traces.
 
-See [Power Net Analysis](power-nets.md) for automatic detection, AI-powered analysis, and IPC-2152 track width guidelines.
+See [Power Net Analysis](power-nets.md) for automatic detection, AI-powered analysis, and IPC-2221 track width guidelines.
 
 ### Algorithm Options
 
