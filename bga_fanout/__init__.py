@@ -1737,6 +1737,107 @@ def _strap_unescaped_extras(footprint: Footprint, pcb_data: PCBData,
     return strapped, still_bare
 
 
+def _underpad_shrink_rescue(footprint, pcb_data, grid, layers, up_kw,
+                            tracks, vias_to_add, failed_nets):
+    """Retry balls the under-pad escape DROPPED, at the FAB FLOOR (#505).
+
+    One rung, the tightest. Walking the whole ladder costs a full escape
+    rebuild per rung -- ~200s each on a 285-ball 0.5mm array, and the
+    escape-priority machinery already calls this more than once -- while an
+    intermediate rung cannot fit where the floor does not.
+
+    A dropped ball is an unrouted net the downstream router usually cannot
+    rescue either -- it has no copper to pick up. The nominal width is a
+    preference, not a constraint: the fab floor is what the board can actually
+    be built to, so shrink toward it rather than shipping a hole. Each rung
+    re-routes ONLY the still-failed balls, against the copper already
+    committed (appended to pcb_data so the retry's obstacle build and its
+    existing-copper checks both see it), so a narrower escape can thread a
+    channel the nominal width could not while never grazing what shipped.
+
+    Track, via AND clearance shrink together, because on a fine-pitch array the
+    binding constraint is usually the CLEARANCE, not the track: between adjacent
+    0.23mm pads on a 0.5mm pitch the gap is 0.27mm and a track needs
+    `track + 2*clearance`, so orangecrab U3 does not fit at 0.1/0.1 (0.30), nor
+    even at the 0.0762 track floor (0.276) -- only dropping clearance to the
+    0.09 floor (0.256) opens it. Shrinking track/via alone rescued nothing
+    there. Each rung is a real fab floor, and the caller's `--clearance` is a
+    preference the ladder is explicitly allowed to escalate below (the same
+    standard->advanced escalation the via clamp and the plane taps already do);
+    the routed floor is what the .kicad_pro writeback records, so the board is
+    graded at what actually shipped.
+    """
+    from bga_fanout.underpad import generate_underpad_escape
+    from kicad_parser import Segment as _Seg, Via as _Via
+
+    ncu = (len(pcb_data.board_info.copper_layers)
+           if pcb_data.board_info.copper_layers else 4)
+    tw0 = up_kw['track_width']
+    vs0, vd0 = up_kw['via_size'], up_kw['via_drill']
+    cl0 = up_kw['clearance']
+    # Ladder rungs strictly smaller than what we just tried.
+    rungs = []
+    for f in fab_floor_ladder(ncu):
+        tw = min(tw0, f['track_width'])
+        vs, vd = min(vs0, f['via_diameter']), min(vd0, f['via_drill'])
+        cl = min(cl0, f['clearance'])
+        if (tw, vs, vd, cl) != (tw0, vs0, vd0, cl0) and (tw, vs, vd, cl) not in rungs:
+            rungs.append((tw, vs, vd, cl))
+    # Only the TIGHTEST rung (the fab floor). Walking the whole ladder costs a
+    # full escape rebuild per rung -- on a 285-ball 0.5mm array that is ~200s
+    # EACH, and the escape-priority machinery already calls us more than once.
+    # An intermediate rung that fits where the floor does not cannot exist
+    # (the floor is a subset of every rung's freedom), so the extra passes buy
+    # only slightly wider copper on the rescued balls, at multiples of the cost.
+    # Sort so the tightest (smallest track/via/clearance) is last, whatever
+    # order the ladder yielded.
+    rungs.sort(reverse=True)
+    rungs = rungs[-1:]
+    if not rungs:
+        return tracks, vias_to_add, failed_nets
+
+    for (tw, vs, vd, cl) in rungs:
+        still = set(failed_nets)
+        keys = {(p.global_x, p.global_y) for p in footprint.pads
+                if p.net_name in still}
+        if not keys:
+            break
+        n_seg0, n_via0 = len(pcb_data.segments), len(pcb_data.vias)
+        try:
+            for t in tracks:
+                pcb_data.segments.append(_Seg(
+                    start_x=t['start'][0], start_y=t['start'][1],
+                    end_x=t['end'][0], end_y=t['end'][1],
+                    width=t['width'], layer=t['layer'], net_id=t['net_id']))
+            for v in vias_to_add:
+                pcb_data.vias.append(_Via(
+                    x=v['x'], y=v['y'], size=v['size'], drill=v['drill'],
+                    layers=v.get('layers') or ['F.Cu', 'B.Cu'],
+                    net_id=v['net_id']))
+            kw = dict(up_kw)
+            kw.update(track_width=tw, via_size=vs, via_drill=vd, clearance=cl,
+                      only_pad_keys=keys, verbose=False)
+            t2, v2, f2 = generate_underpad_escape(
+                footprint, pcb_data, grid, layers, **kw)
+        finally:
+            del pcb_data.segments[n_seg0:]
+            del pcb_data.vias[n_via0:]
+        rescued = still - set(f2)
+        # Always report the attempt: a silent no-op rung is indistinguishable
+        # from "the rescue never ran", which cost a debugging round.
+        print(f"  Under-pad shrink rescue @ track {tw:.4f}mm / via {vs:.2f}mm / "
+              f"clearance {cl:.4f}mm (nominal {tw0:.4f}/{vs0:.2f}/{cl0:.4f}): "
+              f"rescued {len(rescued)} of {len(still)} dropped ball(s)")
+        if rescued:
+            tracks = tracks + t2
+            vias_to_add = vias_to_add + v2
+            failed_nets = [n for n in failed_nets if n not in rescued]
+            warn_fab_escalation('under-pad escape rescue')
+        if not failed_nets:
+            break
+    return tracks, vias_to_add, failed_nets
+
+
 def generate_bga_fanout(footprint: Footprint,
                         pcb_data: PCBData,
                         net_filter: Optional[List[str]] = None,
@@ -2249,8 +2350,7 @@ def generate_bga_fanout(footprint: Footprint,
                                      or (v.n_pad and v.n_pad.net_name in _direct_route_nets))}
         if up_diff_pairs:
             print(f"  Found {len(up_diff_pairs)} differential pair(s) to escape coupled")
-        tracks, vias_to_add, failed_nets = generate_underpad_escape(
-            footprint, pcb_data, grid, layers,
+        _up_kw = dict(
             track_width=track_width, clearance=clearance,
             via_size=via_size, via_drill=via_drill, exit_margin=exit_margin,
             net_filter_fn=net_filter_fn,
@@ -2259,6 +2359,16 @@ def generate_bga_fanout(footprint: Footprint,
             only_pad_keys=_pad_filter,
             dogbone=(escape_method == 'dogbone'),
         )
+        tracks, vias_to_add, failed_nets = generate_underpad_escape(
+            footprint, pcb_data, grid, layers, **_up_kw)
+        # #505 fab-floor rescue. NOT during the _single_pass coverage probe:
+        # that run's only job is to answer "did the legacy pass drop anything",
+        # and rescuing there both wastes a full escape build and changes the
+        # gate's answer. The escape-priority passes below it get the rescue.
+        if failed_nets and not _single_pass:
+            tracks, vias_to_add, failed_nets = _underpad_shrink_rescue(
+                footprint, pcb_data, grid, layers, _up_kw,
+                tracks, vias_to_add, failed_nets)
         return tracks, vias_to_add, [], failed_nets
 
     channels = calculate_channels(grid)

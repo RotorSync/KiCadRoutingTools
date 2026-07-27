@@ -1047,15 +1047,30 @@ def generate_underpad_escape(footprint: Footprint,
                 snap_exit_end(pts, li, exempt=_eff_exempt(home, carve, li),
                               net_id_for_snap=net_id)
             runs_pts.append(pts)
-        for ri, (li, cells) in enumerate(runs):
-            for (ix, iy) in cells:
-                if (ix, iy) not in home:
-                    occ.block_layer(li, *occ.xy(ix, iy), trk_keep)
+        for ri, (li, _cells) in enumerate(runs):
             pts = runs_pts[ri]
-            if ri == len(runs) - 1 and len(pts) >= 2:
-                # the snapped tail may extend past the A* cells -- stamp it
-                occ.block_segment(li, pts[-2], pts[-1], trk_keep)
+            # Stamp the EMITTED polyline, and stamp it INSIDE `home` too (#505).
+            # Two leaks this closes, both of which shipped real DRC on orangecrab
+            # U3 (56 grazes at 0.166mm centre-to-centre against a 0.2mm
+            # requirement; 0 after this change, and one MORE ball escapes):
+            #   * the old stamp skipped cells in the ball's own home disk, so its
+            #     near-pad escape copper was invisible to EVERY later ball. The
+            #     home exemption is a ROUTE-TIME affordance (astar, so a route can
+            #     break out of its own keep-out ring) -- it must not also erase the
+            #     copper from the map once committed. _carve_foreign cannot cover
+            #     this: it only re-blocks foreign stamps inside the QUERYING ball's
+            #     home, so a later escape whose conflicting cell lies outside its
+            #     own home never consults the carve, and the grid holds no stamp.
+            #     Adjacent home disks overlap (home_r > half pitch), so a passing
+            #     ball-to-boundary escape runs straight through that blind lens.
+            #   * cell centres are not the copper: commit() rewrites pts[0] to the
+            #     exact pad centre and snap_exit_end may move the tail, so stamping
+            #     A* cells left the real first/last segments unstamped.
+            # Same-net traversal is preserved: a later ball of the SAME net lifts
+            # this via its own home exemption, and _carve_foreign does not re-add
+            # same-net stamps.
             for a, b in zip(pts, pts[1:]):
+                occ.block_segment(li, a, b, trk_keep)
                 tracks.append({'start': a, 'end': b, 'width': track_width,
                                'layer': layers[li], 'net_id': net_id})
         for (ix, iy) in via_cells:
@@ -1556,12 +1571,9 @@ def generate_underpad_escape(footprint: Footprint,
             pts[0] = (vx, vy)          # start exactly at the via
         snap_exit_end(pts, li, exempt=_eff_exempt(home, carve, li),
                       net_id_for_snap=p.net_id)
-        for (ix, iy) in cells:
-            if (ix, iy) not in home:
-                occ.block_layer(li, *occ.xy(ix, iy), trk_keep)
-        if len(pts) >= 2:
-            occ.block_segment(li, pts[-2], pts[-1], trk_keep)
+        # Stamp the emitted polyline, home cells included (#505) -- see commit().
         for a, b in zip(pts, pts[1:]):
+            occ.block_segment(li, a, b, trk_keep)
             tracks.append({'start': a, 'end': b, 'width': track_width,
                            'layer': layers[li], 'net_id': p.net_id})
         tracks.append({'start': (p.global_x, p.global_y), 'end': (vx, vy),
