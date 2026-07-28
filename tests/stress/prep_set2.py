@@ -11,6 +11,8 @@ kicad_parser sees them. Mirrors tests/stress/strip_routing.py.
 Run with KiCad's bundled Python:
   /Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3 prep_set2.py <src.kicad_pcb> <dst.kicad_pcb>
 """
+import os
+import re
 import sys
 import pcbnew
 
@@ -51,13 +53,90 @@ def simplify_closed(points, eps):
     return out[:-1] if len(out) > 3 else list(points)
 
 
+def strip_zero_length_edge_cuts(path):
+    """Delete null-length Edge.Cuts primitives from a WRITTEN board file.
+
+    KiCad flags each one as `invalid_outline` ("segment has null or very small
+    length: 0 nm") AND grinds on the malformed outline: on pinci, 335 of them
+    (12 board-level, 323 inside footprints) made `kicad-cli pcb drc` take
+    **656 seconds**; with them removed the same DRC takes **2.7 seconds**, a
+    ~280x speedup, and the real findings are unchanged (199 phantom
+    invalid_outline vanish; shorting_items 8->8, solder_mask_bridge 16->16,
+    unconnected 101->101, all other violations byte-identical).
+
+    Deleting them cannot change the board shape -- a segment from a point to
+    itself draws nothing and mills nothing. This is deliberately ONLY the
+    zero-length class: tests/stress/fix_outline_gaps.py also culls open
+    fragments and bridges gaps, which on pcie_test_edge and kbic65 made DRC
+    WORSE (invalid_outline 4->6 and 3->48), and `--max-bridge 0` deletes the
+    fragments instead of bridging them, which wiped kbic65's outline entirely.
+    Those repairs stay opt-in and hand-verified; this one is safe to run on
+    every board.
+
+    Done as a TEXT pass on the saved file, deliberately: most of pinci's
+    degenerate primitives live INSIDE footprints, and removing those through
+    the SWIG object API (`FOOTPRINT.Remove`) kills the interpreter with no
+    traceback -- prep_set2 then writes nothing at all. Editing the s-expression
+    is both safer and exactly the transformation verified on the corpus.
+    """
+    with open(path, 'r', encoding='utf-8') as f:
+        text = f.read()
+
+    spans = []
+    for tag in ('gr_line', 'fp_line'):
+        for m in re.finditer(r'\(' + tag + r'\b', text):
+            i = m.start()
+            depth = 0
+            for j in range(i, min(i + 4000, len(text))):
+                if text[j] == '(':
+                    depth += 1
+                elif text[j] == ')':
+                    depth -= 1
+                    if depth == 0:
+                        blk = text[i:j + 1]
+                        if '"Edge.Cuts"' in blk:
+                            s = re.search(r'\(start ([-\d.]+) ([-\d.]+)\)', blk)
+                            e = re.search(r'\(end ([-\d.]+) ([-\d.]+)\)', blk)
+                            if s and e and (float(s.group(1)) == float(e.group(1))
+                                            and float(s.group(2)) == float(e.group(2))):
+                                spans.append((i, j + 1))
+                        break
+    if not spans:
+        return 0
+    out, prev = [], 0
+    for a, b in sorted(spans):
+        out.append(text[prev:a])
+        prev = b
+    out.append(text[prev:])
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(''.join(out))
+    return len(spans)
+
+
 def main():
     # argv: <src> <routed_dst> <stripped_dst>
     # Loads once, writes a NORMALIZED-but-routed reference (routed_dst, mirrors
     # set-1 boards/ for compare_to_original + measure_routing), then strips and
     # writes the unrouted board (stripped_dst).
     src, routed_dst, dst = sys.argv[1], sys.argv[2], sys.argv[3]
-    board = pcbnew.LoadBoard(src)
+    # Strip null-length Edge.Cuts primitives from a COPY of the source, then load
+    # that -- so both outputs are clean AND the outline rebuild below actually
+    # runs. On pinci the degenerate segments make GetBoardPolygonOutlines() fail
+    # outright ("outline left as-is"), so the unrouted board kept the malformed
+    # outline it was supposed to be normalizing.
+    import shutil
+    import tempfile
+    _clean_src = os.path.join(tempfile.mkdtemp(prefix='prep_clean_'),
+                              os.path.basename(src))
+    shutil.copy(src, _clean_src)
+    _pro = os.path.splitext(src)[0] + '.kicad_pro'
+    if os.path.exists(_pro):   # keep the DRC floor beside it (#441)
+        shutil.copy(_pro, os.path.splitext(_clean_src)[0] + '.kicad_pro')
+    _zl = strip_zero_length_edge_cuts(_clean_src)
+    if _zl:
+        print(f"  outline: removed {_zl} zero-length Edge.Cuts primitive(s)")
+
+    board = pcbnew.LoadBoard(_clean_src)
     pcbnew.SaveBoard(routed_dst, board)  # normalized, routing intact
 
     copper_ids = [lid for lid in board.GetEnabledLayers().CuStack()]
