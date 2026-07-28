@@ -222,10 +222,12 @@ def main():
     ap.add_argument("--heavy-mb", type=float, default=2500.0,
                     help="a board whose prior peak exceeds this is 'heavy' "
                          "(only used with --heavy-slots)")
-    ap.add_argument("--heavy-slots", type=int, default=0,
-                    help="max heavy boards concurrent; 0 (DEFAULT) = no limit, so "
-                         "board order is honoured strictly. Set 1 on a small-RAM "
-                         "box to stop several multi-GB boards coinciding")
+    ap.add_argument("--heavy-slots", type=int, default=4,
+                    help="max heavy boards concurrent (DEFAULT 4); 0 = no limit. "
+                         "A LOW value serialises the tail: a corpus wave ends with "
+                         "its heavy boards, so --heavy-slots 1 drains them one at a "
+                         "time and the last 6 boards can take longer than the first "
+                         "159. 4 keeps the pool busy while still capping peak RAM")
     ap.add_argument("--cost-baseline", default=None,
                     help="prior wave dir supplying per-board time/memory for scheduling")
     ap.add_argument("--extra-remap", action="append", default=[], metavar="OLD:NEW",
