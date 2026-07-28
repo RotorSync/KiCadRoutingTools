@@ -891,7 +891,7 @@ def try_phase3_ripup(
     blockers = list(_merged.values())
     apply_known_blockers(blockers, _known, exclude_ids, pcb_data)
     rank_blockers(blockers, getattr(config, 'ripup_blocker_select', 'count'),
-                  config=config)
+                  config=config, pcb_data=pcb_data)
 
     if not blockers:
         return None

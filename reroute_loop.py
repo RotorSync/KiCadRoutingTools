@@ -22,6 +22,7 @@ from diff_pair_routing import (route_diff_pair_with_obstacles, get_diff_pair_end
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
 from rip_up_reroute import rip_up_net, restore_net
 from leg_rip import LEG_RIP_ENABLED, select_blocking_branch  # #510
+from rip_defer import queue_reroute, release_deferred  # #510 churn
 from polarity_swap import apply_polarity_swap, get_canonical_net_id, rip_combo_already_tried
 from layer_swap_fallback import try_fallback_layer_swap, add_own_stubs_as_obstacles_for_diff_pair
 from routing_context import (
@@ -98,7 +99,14 @@ def run_reroute_loop(
     queued_net_ids = state.queued_net_ids
 
     # Unified reroute loop - handles all nets ripped during diff pair or single-ended routing
-    while reroute_index < len(reroute_queue):
+    #
+    # #510 churn: when the queue drains, release the nets that were held back for
+    # repeated ripping and keep going. They are re-routed LAST, into a board whose
+    # other nets have stopped moving -- which is the whole point of deferring them
+    # (measured: +3V3 was rebuilt 54 times, median 4 events before the next rip).
+    # release_deferred is idempotent, so the released nets cannot be deferred a
+    # second time and stranded.
+    while reroute_index < len(reroute_queue) or release_deferred(state):
         # Check for cancellation at start of each reroute iteration
         if cancel_check and cancel_check():
             print("\nReroute cancelled by user")
@@ -106,6 +114,7 @@ def run_reroute_loop(
 
         reroute_item = reroute_queue[reroute_index]
         reroute_index += 1
+        state.reroute_index = reroute_index   # #510 churn: push-back origin
 
         if reroute_item[0] == 'single':
             _, ripped_net_name, ripped_net_id = reroute_item
@@ -485,7 +494,7 @@ def run_reroute_loop(
                                         if net_id_tmp not in queued_net_ids:
                                             net = pcb_data.nets.get(net_id_tmp)
                                             net_name_tmp = net.name if net else f"Net {net_id_tmp}"
-                                            reroute_queue.append(('single', net_name_tmp, net_id_tmp))
+                                            queue_reroute(state, ('single', net_name_tmp, net_id_tmp), net_id_tmp)
                                             queued_net_ids.add(net_id_tmp)
 
                                 reroute_succeeded = True
@@ -866,7 +875,7 @@ def run_reroute_loop(
                                         if net_id_tmp not in queued_net_ids:
                                             net = pcb_data.nets.get(net_id_tmp)
                                             net_name_tmp = net.name if net else f"Net {net_id_tmp}"
-                                            reroute_queue.append(('single', net_name_tmp, net_id_tmp))
+                                            queue_reroute(state, ('single', net_name_tmp, net_id_tmp), net_id_tmp)
                                             queued_net_ids.add(net_id_tmp)
 
                                 reroute_succeeded = True

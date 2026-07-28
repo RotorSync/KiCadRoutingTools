@@ -66,6 +66,16 @@ class RoutingState:
 
     # Reroute queue for ripped-up nets
     reroute_queue: List[Tuple] = field(default_factory=list)
+    # #510 follow-up (churn): how many times each net has been ripped, and the
+    # nets held back for a FINAL round because they kept being ripped. A net
+    # that churns is re-routed, ripped again by the next net, re-routed... --
+    # muzy_zynq2's +3V3 was routed 77 times and ripped 67. Deferring it to a
+    # later round (rather than forbidding its rip, which would cost
+    # connectivity) lets the other nets settle first, so it is re-routed once
+    # into a board that has stopped moving.
+    rip_counts: Dict[int, int] = field(default_factory=dict)
+    deferred_reroutes: List[Tuple] = field(default_factory=list)
+    deferred_released: bool = False
     # Track which nets are already queued (to prevent duplicate entries)
     queued_net_ids: Set[int] = field(default_factory=set)
     # Issue #134: nets whose stale copper would have shorted another net on

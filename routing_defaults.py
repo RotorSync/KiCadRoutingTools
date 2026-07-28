@@ -109,7 +109,11 @@ RIPUP_ABANDON_METRIC_CHOICES = ('stranded', 'total-pads', 'complete-nets',
 # rip-up ladder targets first when a route fails. 'count' is the historical
 # weighted-cell-count ranking; the alternatives re-rank the same rippable set.
 RIPUP_BLOCKER_SELECT = 'count'
-RIPUP_BLOCKER_SELECT_CHOICES = ('count', 'near-target', 'bidir', 'mincut')
+# 'cost' (#510 follow-up): rank by weighted-count / sqrt(pads)*sqrt(span) so a
+# CHEAP net is preferred as the rip victim. Plain 'count' correlates with
+# victim SIZE, so the router systematically rips the most expensive net it
+# could have picked (muzy_zynq2: +3V3 ripped 67x = 40% of all torn copper).
+RIPUP_BLOCKER_SELECT_CHOICES = ('count', 'near-target', 'bidir', 'mincut', 'cost')
 
 # Layer direction preference (0=horizontal, 1=vertical, 255=none)
 # Alternates H/V starting with horizontal on top layer

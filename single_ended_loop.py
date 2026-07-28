@@ -82,6 +82,7 @@ from single_ended_routing import route_net_with_obstacles, route_net_with_visual
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
 from rip_up_reroute import rip_up_net, restore_net
 from leg_rip import LEG_RIP_ENABLED, select_blocking_branch  # #510
+from rip_defer import queue_reroute  # #510 churn
 from diff_pair_custody import record_casualty
 from polarity_swap import get_canonical_net_id, rip_combo_already_tried
 from routing_context import (
@@ -1236,7 +1237,10 @@ def route_single_ended_nets(
                                     if rid not in queued_net_ids:
                                         ripped_net = pcb_data.nets.get(rid)
                                         ripped_net_name = ripped_net.name if ripped_net else f"Net {rid}"
-                                        reroute_queue.append(('single', ripped_net_name, rid))
+                                        # #510 churn: hold a repeatedly-ripped net
+                                        # for the final round instead of rebuilding it
+                                        # into a board that is still moving.
+                                        queue_reroute(state, ('single', ripped_net_name, rid), rid)
                                         queued_net_ids.add(rid)
 
                             ripped_up = True

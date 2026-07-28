@@ -913,6 +913,25 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                     and abs(_y - _p.global_y) < 0.05
                                     for (_x, _y) in _pts_by.get(_p.net_id, ()))):
                     _direct_ids.add(_p.net_id)
+        # BIG nets are NOT promoted. Direct-first exists to let short natural
+        # surface lanes get claimed early, but a big power rail has the most BGA
+        # balls, so the rule front-loads exactly the most expensive nets on the
+        # board -- and everything routed afterwards then rips them. Measured on
+        # muzy_zynq2: +1V8/+3V3/+1V0 were routed #1/#2/#3 of 136 and ripped
+        # 26/47/12 times each afterwards, with +3V3 alone accounting for 17115 of
+        # the board's 42447 torn segments (40% of ALL destroyed copper). +5V, the
+        # one big rail that landed late (#131), was ripped only 7 times.
+        # Threshold is a MULTIPLE OF THE BOARD'S MEDIAN net cost, not an absolute
+        # value: span is in mm, so an absolute cut-off does not port between a
+        # 20mm module and a 200mm backplane. KICAD_BIG_NET_FACTOR=0 disables.
+        _big_ids = set()
+        if _direct_ids:
+            from net_cost import net_cost, big_net_threshold
+            _th = big_net_threshold(pcb_data, [nid for _nm, nid in net_ids])
+            if _th > 0:
+                _big_ids = {nid for nid in _direct_ids
+                            if net_cost(pcb_data, nid) > _th}
+                _direct_ids = _direct_ids - _big_ids
         if _direct_ids:
             _front = [t for t in net_ids if t[1] in _direct_ids]
             _rest = [t for t in net_ids if t[1] not in _direct_ids]
@@ -921,6 +940,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"net(s) moved to the front: "
                   f"{', '.join(nm for nm, _ in _front[:8])}"
                   f"{', ...' if len(_front) > 8 else ''}")
+        if _big_ids:
+            _names = [nm for nm, nid in net_ids if nid in _big_ids]
+            print(f"  ({len(_big_ids)} BIG net(s) held OUT of direct-first to cut "
+                  f"rip churn: {', '.join(_names[:6])}"
+                  f"{', ...' if len(_names) > 6 else ''})")
 
     # All nets are single-ended in this tool
     single_ended_nets = net_ids
