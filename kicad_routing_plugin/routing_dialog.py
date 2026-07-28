@@ -408,6 +408,19 @@ class RoutingDialog(wx.Dialog):
             self.pcb_data.segments = fresh.segments
             self.pcb_data.vias = fresh.vias
             self.pcb_data.zones = fresh.zones
+            # Net classes too. They are not board state -- the builder reads
+            # them from the sibling .kicad_pro -- but EVERY step rewrites that
+            # file with the floors it just routed to (apply_drc_settings_fix,
+            # the IPC twin of the CLI's per-step fix_project_for_output). Without
+            # this the dialog keeps the map from when it OPENED, so a later step
+            # whose geometry is not pinned by an override resolves it from a
+            # stale (or, on a board that had no project file at load, EMPTY)
+            # netclass and silently falls back to the routing_defaults control
+            # value. Measured: the plane step laid 58 GND taps at 0.3 where the
+            # CLI -- which re-reads the project file every step, being
+            # file-to-file -- used the board's 0.127.
+            self.pcb_data.netclass_params = fresh.netclass_params
+            self.pcb_data.net_to_class = fresh.net_to_class
         except Exception as e:
             print(f"Warning: Could not sync from board: {e}")
 
