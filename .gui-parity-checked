@@ -1,3 +1,82 @@
+81a50b9 2026-07-28 parity sweep 4d99b23..81a50b9 (3 commits: the parity-marker
+correction, the /Users/andy path purge, and the RUNBOOK <TOOLS_REPO> placeholder +
+manifest_to_plan -o alias). Outcome: NO GAPS -- zero routing-engine and zero
+kicad_routing_plugin/ files in the range. Headline: ALL THREE wx harnesses were
+RUN this session, the first time in seven markers, and all three PASS.
+
+  * NOTHING PARITY-BEARING CHANGED. The range touches no CLI routing script and
+    no plugin file. Per-file:
+    - manifest_to_plan.py: the ONLY converter change is in main()'s argv parsing
+      (accept -o/--output beside the positional, and refuse an output path that
+      starts with '-'). Verified confined: the diff hunks are the docstring and
+      main() only; FLAG_PARAMS / LIST_FLAGS / BOOL_FLAGS / TOOL_FLAG_* /
+      parse_command / plan_steps_from_manifest are UNTOUCHED (0 changed lines),
+      so the plan->params mapping gate 1 exercises is bit-identical.
+      WHY IT MATTERED: output is positional, and the old raw sys.argv parse took
+      the literal string '-o' AS the output path -- `manifest_to_plan.py <m> -o
+      plan.json` wrote a file named `-o` and left the real target STALE while
+      printing "written to -o" as if it had succeeded. A weeks-old stale plan
+      then read as two converter bugs (wrong fanout `kind`, dropped
+      `allow_via_in_pad`); NEITHER EXISTED. Fixed so it cannot recur.
+    - probe_effective_floors.py (tests/gui_parity): hardcoded repo root ->
+      derived from __file__. Diagnostic probe, no gate depends on it.
+    - manifest_set*.json (27 files, 391 values): corpus provenance data, not read
+      by the converter or the GUI. "file" reduced to basename (every consumer
+      only ever used Path(...).name); resolution verified byte-identical.
+    - RUNBOOK.md: headless-worker instructions, no CLI/GUI surface.
+
+  * ALL THREE wx HARNESSES RUN AND GREEN (ending the six-marker carry-over; see
+    the 4d99b23 entry for why the prerequisites were there all along):
+    - test_gui_engine_parity.py: VERDICT PARITY, copper sets IDENTICAL
+      (1307/1307 segments, 144/144 vias), kicad unconnected 0/0, drc 0/0. Re-run
+      AFTER the 26c51da wiring fixes -- they perturb nothing at default settings,
+      as expected since each added value equals the engine default until a user
+      changes the control.
+    - test_gui_livechain_rp2350.py: PASS -- GUI and CLI both grade 0 DRC at EVERY
+      stage (create / repair / reconnect / final) at the 0.09 floor on the
+      set11-class rp2350 board.
+    - replay_plan_vs_run.py (the strongest harness -- real dialog + real
+      PlanExecutor + the real converter, nothing mocked): IDENTICAL on BOTH
+      boards tried. set1/megadesk 365/365 segments, 49/49 vias, zones and
+      footprints identical, 4/4 steps match. set3/esp_prog 185/185 segments,
+      32/32 vias, 4/4 steps match INCLUDING its route_diff step -- which
+      exercises the differential_gui call site changed in 26c51da.
+      Incidental: esp_prog's RECORDED board carries 16 router DRC / 15 kicad DRC
+      while both legs at HEAD grade 0/0 -- engine improvement since that
+      recording, not a GUI/CLI gap (the tool reports that drift separately).
+
+  * HARNESS DEFECT FIXED EN ROUTE (4d99b23, recorded here for completeness):
+    test_gui_engine_parity reused tests/gui_parity/work/, and both legs route to
+    FIXED output names, so route*.py read back the PREVIOUS run's sibling
+    .kicad_pro DRC floor. With NO code change: 1st run on a clean dir IDENTICAL,
+    2nd and 3rd runs in the same dir reported 3 then 624/644 divergent segments,
+    reproducibly. The DEFAULT invocation therefore manufactured a phantom
+    divergence on every run after the first -- it briefly looked like this
+    session's own fixes had broken plane routing. Workdir is purged at start now;
+    consecutive default runs are IDENTICAL. LESSON: A/A with a FRESH workdir
+    before bisecting your own change.
+
+GATES RUN GREEN AT HEAD (all four):
+  * test_manifest_plan_parity.py: 12286 flag-checks / 316 manifests, 0 mismatches;
+    param->control 12/12, 0 unresolved. (Corpus grew mid-session: the sets-21-25
+    LLM run is recording new manifests, and ble02_rf_module was re-recorded onto
+    qfn_fanout after #500 correctly refused its staggered U2.)
+  * test_cli_postpass_coverage.py: 4 registered, 10 in use, 0 failures.
+  * test_engine_kwarg_parity.py: 0 CLI-only kwargs, 0 NEW dead controls.
+  * test_gui_engine_parity.py: PARITY, copper IDENTICAL.
+
+STILL OPEN (unchanged by this range, carried):
+  * The 25 recorded dead diff-tab keys (KNOWN_DEAD_DIFF_KEYS) -- structural: the
+    Differential tab's ~30-key get_routing_config vs the ~83-key
+    _build_routing_config. Delegating one to the other would make 25 ignored
+    Basic-tab controls take effect and CHANGE GUI diff-routing results, so it is
+    a PRODUCT DECISION, deliberately not flipped. AWAITING A DECISION.
+  * Carried wx items: multi-class net_clearances convergence, a QFN GUI fanout on
+    zynq_ad9364 U11, and a GUI diff route on a board with real pairs + Coplanar
+    Gap graded with check_impedance.py -- the kwarg gate proves the value REACHES
+    the engine; it does not yet prove the resulting geometry hits the CPW target.
+
+--- prior sweeps ---
 4d99b23 2026-07-28 parity sweep b9f56e4..937b745 (139 commits: #486 impedance/
 coplanar, the GUI/CLI order-canonicalisation wave, #479 plane region joins, #482
 trace+movie, #483/#484/#489/#490 audit fixes, #494, #496, #499, #500, #505,
