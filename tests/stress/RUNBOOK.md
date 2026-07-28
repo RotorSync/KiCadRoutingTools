@@ -608,3 +608,81 @@ grade stricter or you manufacture phantom grazes.
 Rule of thumb: full-chain regressions → `ab_replay_grade.py`; diff-pair
 regressions → `redo_diff_stage.py`; plane/reconnect/grading-only changes →
 `partial_replay_from_planes.py` (reuses a prior wave's upstream boards).
+
+## Multi-set waves & release sign-off
+
+`ab_replay_grade.py` grades **one set**. A release decision (should this become a
+tag?) spans the whole corpus and more than one baseline, which is what these two
+add. Both keep `ab_replay_grade`'s grading semantics and `summary.json` schema, so
+they interoperate with `--compare` and `--regrade`.
+
+- **`ab_wave_driver.py`** — replays many sets under ONE global queue, so `--jobs`
+  boards stay in flight **across set boundaries** (`ab_replay_grade --set` drains
+  each set's tail to idle before the next starts — over 11 sets that dominates).
+  It calls `ab_replay_grade.do_board` per board, so grading, the per-board
+  `--clearance`, and the #405 baseline subtraction are unchanged.
+
+  ```bash
+  # candidate wave, sets 1-11, 5 boards in flight at all times
+  nohup caffeinate -s python3 -u tests/stress/ab_wave_driver.py wave \
+      --out ~/Documents/kicad_stress_test/ab_main_0728a --label head --jobs 5 \
+      --cost-baseline ~/Documents/kicad_stress_test/ab_main_0726a \
+      > ~/wave.log 2>&1 &
+
+  # re-grade an existing wave in place with today's grader (no re-routing)
+  python3 tests/stress/ab_wave_driver.py regrade \
+      --out ~/Documents/kicad_stress_test/ab_main_0726a --label base --jobs 5
+  ```
+
+  Scheduling: **longest-processing-time-first** from `--cost-baseline` (else the
+  corpus's 2 h board can start last holding 4 cores idle), plus **memory
+  admission** — at most `--heavy-slots` boards over `--heavy-mb` run at once
+  (~11 corpus boards exceed 2.5 GB and one peaks at 6.6 GB; five at once on an
+  8 GB box swaps and gets workers OOM-killed, surfacing as NORESULT rows hours
+  in). A blocked heavy board does **not** hold a worker slot — the scheduler
+  starts the next eligible board — so `--jobs` stay in flight regardless.
+
+- **`ab_wave_report.py`** — rolls a candidate wave up against one or more
+  baseline arms, all sets at once, ranking the per-board regressions.
+
+  ```bash
+  python3 tests/stress/ab_wave_report.py \
+      --new  ~/Documents/kicad_stress_test/ab_main_0728a \
+      --base 0726a=~/Documents/kicad_stress_test/ab_main_0726a \
+      --base dp250=~/Documents/kicad_stress_test/ab_dp250
+  ```
+
+  Grades on `drc_real` / `nets_incomplete` / `kicad_connection_width` /
+  `diff_pairs_coupled` (negative is better except diff-pairs) — never raw `drc`
+  (counts pre-existing input copper) and never `conn` alone (a net that loses its
+  copper entirely moves from the conn bucket to the unrouted bucket, so `conn`
+  can drop while the board got worse). A baseline covering only some sets (e.g.
+  `ab_dp250` = sets 6-11) reports on the sets it has. Boards whose **chain broke**
+  are listed separately and are a release blocker — they can never show up as a
+  DRC delta, because a broken chain has no final board to grade.
+
+### Running a wave that lasts hours
+
+- **Detach it**: `nohup … &`, and verify it reparented to init
+  (`ps -eo pid,ppid,etime,command | grep ab_wave_driver`). A foreground wave dies
+  with the terminal or the agent session.
+- **`caffeinate -s`** around the whole driver — a mid-wave sleep suspends every
+  worker and corrupts the timing columns.
+- **Attach a monitor** that greps for *both* progress and every failure shape;
+  one that matches only the happy path is silent through a crashloop:
+  `tail -f wave.log | grep -E --line-buffered
+  "chain=BROKEN|NORESULT|ALL DONE|Traceback|Killed|MemoryError|PROGRESS"`.
+- **Freeze the working tree for the whole wave.** Manifests bake tool paths
+  absolutely, so a replay runs whatever is checked out *right now*; editing a
+  routing module mid-wave means early boards ran different code than late ones,
+  silently. Adding new files is safe. Two waves must therefore run sequentially.
+- **Regrade the baseline — never diff against stored numbers.** Every grader here
+  is under active development, so an old `summary.json` is a snapshot of code that
+  no longer exists; re-grading an old wave's own copper has moved rows in both
+  directions and once turned a real −24 into an apparent −72. `regrade` rewrites
+  `summary.json` in place, so `cp summary.json summary_orig.json` first. If a
+  regrade reproduces well under ~100 % of the stored rows, that table was never a
+  usable baseline.
+- **Wave dirs are write-once** (`ab_<what>_MMDD` + same-day `a`/`b`/`c`): re-running
+  into an existing dir reads back the sibling `.kicad_pro` DRC floor and silently
+  changes the routing — it looks like non-determinism but isn't.

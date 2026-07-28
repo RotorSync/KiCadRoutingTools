@@ -171,6 +171,42 @@ re-routing), or to reuse a prior wave as a baseline:
 python3 tests/stress/ab_replay_grade.py --regrade ab/old --set ~/…/runs_set3
 ```
 
+### Multi-set waves & release sign-off (`ab_wave_driver.py`, `ab_wave_report.py`)
+
+`ab_replay_grade.py` handles **one set**. Deciding whether a HEAD should become a
+release tag spans the whole corpus against more than one baseline:
+
+```bash
+# 1. candidate wave, sets 1-11, 5 boards in flight AT ALL TIMES (across sets)
+nohup caffeinate -s python3 -u tests/stress/ab_wave_driver.py wave \
+    --out ~/…/ab_main_0728a --label head --jobs 5 \
+    --cost-baseline ~/…/ab_main_0726a > ~/wave.log 2>&1 &
+
+# 2. re-grade each baseline with TODAY's grader (back up summary.json first!)
+python3 tests/stress/ab_wave_driver.py regrade --out ~/…/ab_main_0726a --jobs 5
+
+# 3. roll it all up
+python3 tests/stress/ab_wave_report.py --new ~/…/ab_main_0728a \
+    --base 0726a=~/…/ab_main_0726a --base dp250=~/…/ab_dp250
+```
+
+`ab_wave_driver.py` runs one **global queue** over every set (so a set's slow tail
+no longer drains the pool to idle before the next set starts), longest-job-first,
+with memory admission capping concurrent >2.5 GB boards — a blocked heavy board
+doesn't hold a worker slot, so `--jobs` stay busy. It calls
+`ab_replay_grade.do_board`, so grading and the `summary.json` schema are identical.
+`ab_wave_report.py` aggregates every set against each baseline arm on
+`drc_real` / `nets_incomplete` / `kicad_connection_width` / `diff_pairs_coupled`,
+ranks per-board regressions, and flags broken chains separately (a release blocker
+that can never appear as a DRC delta).
+
+Both are documented in depth in `RUNBOOK.md` → "Multi-set waves & release
+sign-off", including the run-for-hours checklist: detach with `nohup`, wrap in
+`caffeinate -s`, attach a monitor that greps failures as well as progress, freeze
+the working tree for the whole wave (manifests bake tool paths absolutely), and
+**re-grade baselines rather than diffing stored numbers** — graders here drift
+within days.
+
 ### Per-command timing (#132)
 
 Both the original run and a replay record per-command wall-clock so routing
