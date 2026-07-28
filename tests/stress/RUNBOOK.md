@@ -641,13 +641,26 @@ they interoperate with `--compare` and `--regrade`.
       --out ~/Documents/kicad_stress_test/ab_main_0726a --label base --jobs 5
   ```
 
-  Scheduling: **longest-processing-time-first** from `--cost-baseline` (else the
-  corpus's 2 h board can start last holding 4 cores idle), plus **memory
-  admission** — at most `--heavy-slots` boards over `--heavy-mb` run at once
-  (~11 corpus boards exceed 2.5 GB and one peaks at 6.6 GB; five at once on an
-  8 GB box swaps and gets workers OOM-killed, surfacing as NORESULT rows hours
-  in). A blocked heavy board does **not** hold a worker slot — the scheduler
-  starts the next eligible board — so `--jobs` stay in flight regardless.
+  Scheduling: **`--order name` is the default** — plain corpus order, by set then
+  board name (numeric sets sort 9 before 10). Prefer it: the Nth board of a wave
+  is the same board every run, two waves' logs interleave comparably, and a wave
+  killed part way through covers a predictable prefix. Order never affects
+  grading (routing is deterministic and each board is independent), so this costs
+  only wall-clock.
+
+  `--order lpt` is the opt-in alternative — longest-processing-time-first from
+  `--cost-baseline`, so the corpus's multi-hour board starts at t=0 instead of
+  stranding idle cores at the end. Shorter makespan, but run order becomes
+  data-dependent (it shifts whenever the baseline changes), so waves stop being
+  comparable board-for-board. Use it only when wall-clock genuinely matters.
+
+  **Memory admission is off by default** (`--heavy-slots 0`), so the chosen order
+  is honoured strictly. Set `--heavy-slots 1` on a small-RAM box to cap how many
+  boards over `--heavy-mb` run at once (~11 corpus boards exceed 2.5 GB and one
+  peaks at 6.6 GB; several together on an 8 GB box swap and get workers
+  OOM-killed, surfacing as NORESULT rows hours in). When enabled a blocked heavy
+  board does **not** hold a worker slot — the scheduler starts the next eligible
+  board — so `--jobs` stay in flight, but that *is* a reordering.
 
 - **`ab_wave_report.py`** — rolls a candidate wave up against one or more
   baseline arms, all sets at once, ranking the per-board regressions.

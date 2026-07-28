@@ -191,10 +191,13 @@ python3 tests/stress/ab_wave_report.py --new ~/…/ab_main_0728a \
 ```
 
 `ab_wave_driver.py` runs one **global queue** over every set (so a set's slow tail
-no longer drains the pool to idle before the next set starts), longest-job-first,
-with memory admission capping concurrent >2.5 GB boards — a blocked heavy board
-doesn't hold a worker slot, so `--jobs` stay busy. It calls
-`ab_replay_grade.do_board`, so grading and the `summary.json` schema are identical.
+no longer drains the pool to idle before the next set starts), in plain corpus
+order by default — by set, then board name — which keeps runs reproducible and
+comparable board-for-board. `--order lpt` opts into longest-job-first for a
+shorter makespan at the cost of a data-dependent order, and `--heavy-slots 1`
+opts into memory admission on a small-RAM box (off by default, since it reorders).
+It calls `ab_replay_grade.do_board`, so grading and the `summary.json` schema are
+identical.
 `ab_wave_report.py` aggregates every set against each baseline arm on
 `drc_real` / `nets_incomplete` / `kicad_connection_width` / `diff_pairs_coupled`,
 ranks per-board regressions, and flags broken chains separately (a release blocker
