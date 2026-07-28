@@ -87,6 +87,27 @@ class _FakeNetMap:
         return self._by_name[net_name]
 
 
+class _FakeFootprint:
+    """Minimal movable footprint: reference + position + orientation."""
+
+    def __init__(self, reference, x_mm, y_mm, rotation_deg):
+        from kipy.geometry import Vector2
+        self.reference = reference
+        self.position = Vector2.from_xy_mm(x_mm, y_mm)
+        self.orientation = _Deg(rotation_deg or 0.0)
+
+
+class _Deg:
+    """Angle stand-in exposing `.degrees`, the field the adapter reads back.
+
+    apply_footprint_moves ASSIGNS a real kipy Angle; this is only the seed value
+    so an un-moved footprint round-trips at its current rotation.
+    """
+
+    def __init__(self, degrees):
+        self.degrees = degrees
+
+
 class FakeIpcBoard:
     """The kipy Board slice `kicad_ipc_adapter` uses, backed by `path`.
 
@@ -132,6 +153,11 @@ class FakeIpcBoard:
             self._src[id(k)] = v
             self._vias.append(k)
 
+        self._footprints = [
+            _FakeFootprint(ref, fp.x, fp.y, fp.rotation)
+            for ref, fp in self.pcb_data.footprints.items()
+        ]
+
         # Pending, flushed on push_commit.
         self._added, self._removed, self._updated = [], [], []
         self._zone_sexprs = []
@@ -148,10 +174,19 @@ class FakeIpcBoard:
         return [self.net_map.resolve(n) for n in sorted(
             {n.name for n in self.pcb_data.nets.values() if n.name})]
 
+    def get_footprints(self):
+        """Movable footprint stand-ins (reference / position / orientation).
+
+        Only what apply_footprint_moves touches: it reads the reference through
+        kicad_parser._fp_reference (which probes `.reference` first), then SETS
+        `.position` / `.orientation` and commit.update()s the object. These are
+        plain Python objects on purpose -- nothing is assigned INTO a kipy
+        protobuf here, so no `.proto` is required.
+        """
+        return list(self._footprints)
+
     # The adapter reads these but nothing it does headlessly depends on their
     # contents; PCBData (from the file) is the real source for geometry.
-    def get_footprints(self):
-        return []
 
     def get_pads(self):
         return []
@@ -192,6 +227,35 @@ class FakeIpcBoard:
 
     def update_items(self, items):
         self._updated.extend(items)
+
+    def _flush_footprint_moves(self):
+        """Write updated footprint positions back to the file.
+
+        apply_footprint_moves (optimize_caps, #130) mutates footprint objects and
+        commit.update()s them. Without this the moves would live only in memory,
+        and the next step's PCBData -- re-parsed from the file -- would show the
+        caps back at their ORIGINAL positions: the #362 stale-position bug, but
+        manufactured by the harness rather than by the plugin.
+        """
+        from placement.writer import write_placed_output
+        placements = []
+        for fp in self._updated:
+            ref = getattr(fp, 'reference', None)
+            pos = getattr(fp, 'position', None)
+            if not ref or pos is None:
+                continue
+            from kicad_ipc_adapter import _vec_xy_mm
+            x, y = _vec_xy_mm(pos)
+            rot = 0.0
+            ang = getattr(fp, 'orientation', None)
+            if ang is not None:
+                rot = getattr(ang, 'degrees', None)
+                rot = rot if rot is not None else 0.0
+            placements.append({'reference': ref, 'new_x': x, 'new_y': y,
+                               'new_rotation': rot})
+        if placements:
+            write_placed_output(self.path, self.path, placements)
+        return len(placements)
 
     def drop_commit(self, _handle):
         self._added, self._removed, self._updated = [], [], []
@@ -246,6 +310,8 @@ class FakeIpcBoard:
 
         if rm_vias:
             self._strip_vias(rm_vias)
+        if self._updated:
+            self._flush_footprint_moves()
 
         self._zone_sexprs = []
         self._reseed()

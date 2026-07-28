@@ -19,7 +19,9 @@ def _rotate_pad_angles(fp_text: str, delta_rot: float) -> str:
         head, x, y, angle = m.group(1), m.group(2), m.group(3), m.group(4)
         new_angle = ((float(angle) if angle else 0.0) + delta_rot) % 360
         if new_angle != 0:
-            return f'{head}(at {x} {y} {new_angle:.4g})'
+            # :.6g, not :.4g -- 4 significant digits rounds a 137.25deg pad to
+            # 137.2. x/y pass through as text here, so only the angle is at risk.
+            return f'{head}(at {x} {y} {new_angle:.6g})'
         return f'{head}(at {x} {y})'
 
     return re.sub(
@@ -100,10 +102,19 @@ def write_placed_output(input_file: str, output_file: str,
         new_rot = placement['new_rotation']
         old_rot = float(at_match.group(3)) if at_match.group(3) else 0.0
 
+        # :.6f, NOT :.4g. `%g` counts SIGNIFICANT digits, so a coordinate past
+        # 100mm -- most of a real board -- was quantised to 0.1mm: a cap moved to
+        # x=139.96 was written as "140", a 40um placement error, and past 1000mm
+        # the step becomes 1mm. That silently coarsens the very clearance repair
+        # this writer exists to apply (#130 cap moves, #313 via nudge), and it
+        # can push a part back into the graze it was moved out of. :.6f is the
+        # nanometre-faithful format kicad_writer already uses for track
+        # geometry. Rotation keeps a significant-digit format (angles are small
+        # and exact-ish) but widened so e.g. 137.25deg survives.
         if new_rot != 0:
-            new_at = f"(at {new_x:.4g} {new_y:.4g} {new_rot:.4g})"
+            new_at = f"(at {new_x:.6f} {new_y:.6f} {new_rot:.6g})"
         else:
-            new_at = f"(at {new_x:.4g} {new_y:.4g})"
+            new_at = f"(at {new_x:.6f} {new_y:.6f})"
 
         new_fp_text = fp_text[:at_match.start()] + new_at + fp_text[at_match.end():]
 

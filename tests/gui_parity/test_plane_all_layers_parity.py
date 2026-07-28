@@ -19,7 +19,8 @@ the real one; instantiating the real dialog costs a board load and cannot rot
 that way.
 
 create_plane is still mocked, so no plane is actually routed and this stays
-fast. Needs KiCad python (wx + pcbnew); skips cleanly without it.
+fast. Needs wx + kipy (KiCad's python plus `pip install --user kicad-python`);
+skips cleanly without it.
 
 Run:  python3 tests/gui_parity/test_plane_all_layers_parity.py
 """
@@ -43,23 +44,24 @@ KICAD_PYTHONS = [
 def _reexec_into_kicad():
     for cand in KICAD_PYTHONS:
         if cand != sys.executable and os.path.exists(cand):
-            if subprocess.run([cand, '-c', 'import wx, pcbnew'],
+            if subprocess.run([cand, '-c', 'import wx, kipy'],
                               capture_output=True).returncode == 0:
                 os.execv(cand, [cand, os.path.abspath(__file__)] + sys.argv[1:])
-    print("SKIP: no python with wx + pcbnew found")
+    print("SKIP: no python with wx + kipy found "
+          "(install kipy: <kicad_python> -m pip install --user kicad-python)")
     sys.exit(0)
 
 
 def main():
     try:
-        import wx  # noqa: F401
-        import pcbnew  # noqa: F401
+        import wx    # noqa: F401
+        import kipy  # noqa: F401
     except ImportError:
         _reexec_into_kicad()
 
     import wx
-    import pcbnew
     sys.path.insert(0, REPO)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
     if not os.path.exists(BOARD):
         print(f"SKIP: {os.path.relpath(BOARD, REPO)} not found")
@@ -68,17 +70,19 @@ def main():
     app = wx.App(False)          # noqa: F841 - must outlive the dialog
     wx.MessageBox = lambda *a, **k: wx.OK
 
-    from kicad_parser import build_pcb_data_from_board
-    from kicad_routing_plugin import swig_gui
+    import kicad_parser
+    from kicad_routing_plugin import routing_dialog
+    from fake_ipc_board import install as _install_fake_board
 
-    board = pcbnew.LoadBoard(BOARD)
-    pcbnew.GetBoard = lambda: board
-    layers = build_pcb_data_from_board(board).board_info.copper_layers
+    # IPC: no in-process board; back the plugin's "live board" with the file.
+    board = _install_fake_board(BOARD)
+    layers = kicad_parser.build_pcb_data_from_board(board).board_info.copper_layers
     if len(layers) < 6:
         print(f"SKIP: need a 6-layer board, {os.path.basename(BOARD)} has {layers}")
         return 0
 
-    dialog = swig_gui.RoutingDialog(None, build_pcb_data_from_board(board), BOARD)
+    dialog = routing_dialog.RoutingDialog(
+        None, kicad_parser.build_pcb_data_from_board(board), BOARD)
     tab = dialog.planes_tab
 
     captured = {}

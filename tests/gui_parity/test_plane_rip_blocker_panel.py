@@ -32,7 +32,7 @@ KICAD_PYTHONS = [
 def _reexec_into_kicad():
     for cand in KICAD_PYTHONS:
         if cand != sys.executable and os.path.exists(cand):
-            if subprocess.run([cand, '-c', 'import wx, pcbnew'],
+            if subprocess.run([cand, '-c', 'import wx, kipy'],
                               capture_output=True).returncode == 0:
                 os.execv(cand, [cand, os.path.abspath(__file__)] + sys.argv[1:])
     print("SKIP: no python with wx found")

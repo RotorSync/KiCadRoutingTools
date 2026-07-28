@@ -4,7 +4,7 @@
 The Advanced tab's **Make routing movie** debug checkbox (default OFF) makes the
 GUI record what it routes and write the same movie `make_movie.py` makes. The
 GUI-only half is what can silently rot, so this drives the REAL
-`swig_gui.RoutingDialog` headless (parent None, never shown) and asserts:
+`routing_dialog.RoutingDialog` headless (parent None, never shown) and asserts:
 
   1. the checkbox exists in the Advanced tab's debug section and defaults OFF,
      and nothing is recorded while it is off;
@@ -19,7 +19,8 @@ GUI-only half is what can silently rot, so this drives the REAL
      that before every step, so resetting it would abandon a plan's movie
      halfway -- while an explicit "reset all settings" does.
 
-Needs KiCad's pcbnew + wx; skips if absent.
+Needs wx + kipy (KiCad's python plus `pip install --user kicad-python`);
+skips if absent.
 Run: python3 tests/gui_parity/test_movie_recorder.py
 """
 import os
@@ -55,10 +56,11 @@ def check(name, ok, detail=''):
 def _reexec_into_kicad():
     for cand in KICAD_PYTHONS:
         if cand != sys.executable and os.path.exists(cand):
-            if subprocess.run([cand, '-c', 'import pcbnew, wx'],
+            if subprocess.run([cand, '-c', 'import wx, kipy'],
                               capture_output=True).returncode == 0:
                 os.execv(cand, [cand, os.path.abspath(__file__)] + sys.argv[1:])
-    print("SKIP: no python with pcbnew + wx found")
+    print("SKIP: no python with wx + kipy found "
+          "(install kipy: <kicad_python> -m pip install --user kicad-python)")
     sys.exit(0)
 
 
@@ -86,25 +88,28 @@ def _wait_for_render(recorder, log_lines, timeout=120):
 
 def main():
     try:
-        import pcbnew  # noqa: F401
-        import wx      # noqa: F401
+        import wx    # noqa: F401
+        import kipy  # noqa: F401
     except ImportError:
         _reexec_into_kicad()
 
-    import pcbnew
     import wx
-    from kicad_parser import build_pcb_data_from_board
-    from kicad_routing_plugin import swig_gui
+    import kicad_parser
+    from kicad_routing_plugin import routing_dialog
     from kicad_routing_plugin.movie_recorder import record_movie_step
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from fake_ipc_board import install as _install_fake_board
 
     if not os.path.exists(BOARD):
         print(f"SKIP: fixture board missing ({BOARD})")
         return 0
 
     app = wx.App(False)
-    board = pcbnew.LoadBoard(BOARD)
-    pcbnew.GetBoard = lambda: board       # how the plugin reads the live board
-    dialog = swig_gui.RoutingDialog(None, build_pcb_data_from_board(board), BOARD)
+    # IPC: the plugin reads its "live board" through kicad_ipc_adapter, so back
+    # that with the fixture file instead of loading it in-process.
+    board = _install_fake_board(BOARD)
+    dialog = routing_dialog.RoutingDialog(
+        None, kicad_parser.build_pcb_data_from_board(board), BOARD)
     recorder = dialog.movie_recorder
 
     # Capture the Log tab's text instead of writing movies next to the fixture

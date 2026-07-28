@@ -64,11 +64,11 @@ def _reexec_into_kicad():
         if cand == sys.executable:
             continue
         if os.path.exists(cand):
-            r = subprocess.run([cand, '-c', 'import pcbnew'],
+            r = subprocess.run([cand, '-c', 'import wx, kipy'],
                                capture_output=True)
             if r.returncode == 0:
                 os.execv(cand, [cand, os.path.abspath(__file__)] + sys.argv[1:])
-    print("ERROR: no python with pcbnew found")
+    print("ERROR: no python with wx + kipy found")
     sys.exit(2)
 
 
@@ -268,7 +268,7 @@ def main():
 
 if __name__ == '__main__':
     try:
-        import pcbnew  # noqa: F401
+        import kipy  # noqa: F401
     except ImportError:
         _reexec_into_kicad()
     sys.exit(main())
