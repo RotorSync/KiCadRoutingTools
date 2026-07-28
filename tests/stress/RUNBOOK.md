@@ -75,10 +75,17 @@ Two corpora share this harness; pick the SET's paths and stay consistent
 within a board. `<SET>` below is `_set<N>` (e.g. `_set1` for set 1, `_set2` for set 2).
 
 
+**`<TOOLS_REPO>` below means the tools-repo directory whose ABSOLUTE path your
+prompt already gives you** (the same path in "Run tools as: `python3 -X utf8
+<TOOLS_REPO>/<tool>.py`" and in `--add-dir`). Substitute that absolute path
+yourself wherever you see `<TOOLS_REPO>`; never type the literal string
+`<TOOLS_REPO>` into a shell, and do not expect it to be set as an environment
+variable.
+
 - Tools repo (READ-ONLY — never write/modify anything here):
-  `/Users/andy/Documents/KiCadRoutingTools`
+  `<TOOLS_REPO>`
 - Skill to follow:
-  `/Users/andy/Documents/KiCadRoutingTools/.claude/skills/plan-pcb-routing/SKILL.md`
+  `<TOOLS_REPO>/.claude/skills/plan-pcb-routing/SKILL.md`
 - Input board: `~/Documents/kicad_stress_test/boards_unrouted<SET>/<BOARD>.kicad_pcb`
 - Your working dir (create it): `~/Documents/kicad_stress_test/runs<SET>/<BOARD>/`
   ALL outputs, intermediates, and logs go here (NOT /tmp — parallel runs collide).
@@ -183,11 +190,11 @@ harmless.
 
 ## Rules
 
-1. Invoke all tools as `python3 -X utf8 /Users/andy/Documents/KiCadRoutingTools/<tool>.py ...`
+1. Invoke all tools as `python3 -X utf8 <TOOLS_REPO>/<tool>.py ...`
    from your working dir. Tee every command's output to a log file in your run dir.
    MEMORY CAP (mandatory): prefix EVERY routing/fanout/plane/check command with
    the watchdog wrapper, e.g.
-   `bash /Users/andy/Documents/KiCadRoutingTools/tests/stress/run_limited.sh python3 -X utf8 .../route.py ... 2>&1 | tee step.log`
+   `bash <TOOLS_REPO>/tests/stress/run_limited.sh python3 -X utf8 .../route.py ... 2>&1 | tee step.log`
    It kills the job at ~4 GB RSS (exit 137, `MEMORY_LIMIT_EXCEEDED` on stderr).
    Separately, the board-mutating tools self-record their invocations to
    `<run-dir>/redo_commands.sh` (run_board.sh sets `REDO_MANIFEST`) so the whole
@@ -227,7 +234,7 @@ harmless.
    input-sibling projects at every step, and the replay seeder now carries
    `<board>.kicad_pro` for legacy stem-mismatched manifests).
 1b. PARSER-PARITY VALIDATION (per board, start AND end): run
-   `python3 /Users/andy/Documents/KiCadRoutingTools/validate_pcb_data.py <board>`
+   `python3 <TOOLS_REPO>/validate_pcb_data.py <board>`
    on the input board before any routing step, and again on the final board.
    It diffs the pcbnew-built PCBData (the GUI's model) against the text parse
    (the CLI's model) — the headless twin of the GUI's "Validate PCB Data"
@@ -313,7 +320,7 @@ harmless.
    FIX VERIFICATION (issues #79/#80, fixed): fanout tools now write name-style
    net refs on KiCad 10 boards and the parser merges mixed styles. After each
    fanout step, still run
-   `python3 /Users/andy/Documents/KiCadRoutingTools/tests/stress/fix_mixed_net_refs.py <fanout_output.kicad_pcb>`
+   `python3 <TOOLS_REPO>/tests/stress/fix_mixed_net_refs.py <fanout_output.kicad_pcb>`
    — it should report "rewrote 0 numeric net refs". If it reports >0, that is
    a REGRESSION: record it prominently in issues with the count.
    Heed the fanout tool's fine-pitch NOTE (issue #97 warning): use the
@@ -463,7 +470,7 @@ harmless.
     - `check_connected.py <final> 2>&1 | tee connectivity.log`
     - `check_orphan_stubs.py <final> 2>&1 | tee orphans.log`
 11b. COMPARE-TO-ORIGINAL (always, final step): run
-    `python3 /Users/andy/Documents/KiCadRoutingTools/tests/stress/compare_to_original.py
+    `python3 <TOOLS_REPO>/tests/stress/compare_to_original.py
      --ours <final> --orig ~/Documents/kicad_stress_test/boards_set<N>/<board>.kicad_pcb
      --json 2>&1 | tee compare.log`
     It contrasts OUR routing with the human-routed original (vias, total copper
