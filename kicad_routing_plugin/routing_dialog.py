@@ -3452,7 +3452,7 @@ class RoutingDialog(wx.Dialog):
         # auto-fix. Edits the .kicad_pro on disk (kipy can't write live design
         # settings) and prompts the user to reload. Best-effort.
         if successful > 0:
-            from gui_utils import apply_drc_settings_fix
+            from .gui_utils import apply_drc_settings_fix
             apply_drc_settings_fix(config)
 
         # Sync pcb_data so subsequent routing and connectivity checks see

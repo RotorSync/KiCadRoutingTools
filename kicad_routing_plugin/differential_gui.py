@@ -1220,7 +1220,7 @@ class DifferentialTab(wx.Panel):
         # #160), mirroring route_diff.py's auto-fix. Edits .kicad_pro on disk;
         # the user must reload the project. Best-effort.
         if counts["tracks"] > 0:
-            from gui_utils import apply_drc_settings_fix
+            from .gui_utils import apply_drc_settings_fix
             apply_drc_settings_fix(getattr(self, "_diff_drc_config", None),
                                    diff_pair=True)
 

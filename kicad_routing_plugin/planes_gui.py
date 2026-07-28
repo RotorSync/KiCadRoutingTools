@@ -1630,7 +1630,7 @@ class PlanesTab(wx.Panel):
         # .kicad_pro on disk (kipy can't write live design settings); the user
         # must reload the project. Best-effort.
         if counts['zones'] or counts['vias'] or counts['tracks']:
-            from gui_utils import apply_drc_settings_fix
+            from .gui_utils import apply_drc_settings_fix
             apply_drc_settings_fix(getattr(self, "_plane_drc_config", None))
 
         # Plane-copper cleanup (CLI/GUI parity): dead-end trims, stub-gap snaps,
