@@ -217,32 +217,16 @@ def resolve_run(rundir):
 
 
 def _regen_steps(manifest):
-    """Re-run manifest_to_plan's conversion in-process, KEEPING each step's
-    `_files` (its CLI input/output boards) so plan steps can be paired with the
-    chain's intermediate boards. Mirrors manifest_to_plan.main() exactly."""
-    import manifest_to_plan as M
-    from redo_stress_test import parse_manifest, compute_prune_keep, is_check_cmd
-    cmds = parse_manifest(manifest)
-    keep, _ = compute_prune_keep(cmds)
-    steps = []
-    for i, (_cwd, argv) in enumerate(cmds):
-        if i not in keep or is_check_cmd(argv):
-            continue
-        if any(os.path.basename(a) == 'place_fanout_clearance.py' for a in argv):
-            step = M.cap_optimization_step(argv)
-            step['_files'] = [a for a in argv if a.endswith('.kicad_pcb')]
-            steps.append(step)
-            continue
-        step = M.parse_command(argv)
-        if step is None:
-            continue
-        if step['action'] == 'repair_planes' and 'assignments' not in step:
-            for prev in reversed(steps):
-                if prev['action'] == 'route_planes' and prev.get('assignments'):
-                    step['assignments'] = [dict(a) for a in prev['assignments']]
-                    break
-        steps.append(step)
-    return steps
+    """manifest_to_plan's conversion in-process, KEEPING each step's `_files`
+    (its CLI input/output boards) so plan steps can be paired with the chain's
+    intermediate boards.
+
+    This used to re-implement the converter's loop and had to be kept in step
+    with it by hand -- exactly the drift this harness exists to catch. It now
+    calls the converter's own function, so a change there cannot leave the
+    harness comparing against a stale conversion."""
+    from manifest_to_plan import plan_steps_from_manifest
+    return plan_steps_from_manifest(manifest, keep_files=True)[0]
 
 
 def load_plan(info, source='saved', augment=True):
@@ -438,50 +422,24 @@ class _Tee:
 def replay(info, steps, workdir, timeout=7200, verbose=False, snapshots=True):
     """Run the plan through the REAL plugin dialog + PlanExecutor, headless.
 
+    The driving itself (headless dialog, PlanExecutor in a wx MainLoop, popup
+    stubs, per-step snapshots, deterministic wx teardown) lives in the
+    repo-root `headless_plan` module, which is also what the user-facing
+    `run_plan.py` runs -- so this harness exercises the shipped driver rather
+    than a private copy of it.
+
     Returns a dict with the produced board, per-step status and timings.
     """
-    import wx
-    import pcbnew
+    from headless_plan import run_plan
 
     live = os.path.join(workdir, 'gui_replay.kicad_pcb')
     _copy_board_with_siblings(info['input_board'], live)
 
-    app = wx.App(False)
-    # No user is present: a modal popup would hang the run forever. quiet=True
-    # already suppresses the per-step completion popups; this covers the rest
-    # (validation warnings, the plane-offer prompt's cousins).
-    wx.MessageBox = lambda *a, **k: wx.OK
-
-    class _NoModal:
-        def __init__(self, *a, **k):
-            pass
-
-        def ShowModal(self):
-            return wx.ID_OK
-
-        def Destroy(self):
-            pass
-
-        def __getattr__(self, _n):
-            return lambda *a, **k: None
-
-    wx.MessageDialog = _NoModal
-
-    board = pcbnew.LoadBoard(live)
-    pcbnew.GetBoard = lambda: board  # the plugin reads the "live" board through this
-
-    from kicad_parser import build_pcb_data_from_board
-    from kicad_routing_plugin import swig_gui
-    from kicad_routing_plugin.claude_plan import PlanExecutor, step_label
-
-    pcb_data = build_pcb_data_from_board(board)
-    dialog = swig_gui.RoutingDialog(None, pcb_data, live)
-
-    result = {'live_board': live, 'steps': [], 'completed': 0,
-              'aborted': None, 'timed_out': False}
-    state = {'started': {}, 'log': []}
+    state = {'started': {}}
     log_path = os.path.join(workdir, 'replay.log')
     tee = _Tee(log_path, enabled=not verbose)
+
+    from kicad_routing_plugin.claude_plan import step_label
 
     def on_status(index, status):
         if status == 'running':
@@ -490,82 +448,21 @@ def replay(info, steps, workdir, timeout=7200, verbose=False, snapshots=True):
                          f"{step_label(index + 1, steps[index])} ...")
             return
         elapsed = time.time() - state['started'].get(index, time.time())
-        result['steps'].append({'index': index, 'action': steps[index]['action'],
-                                'label': step_label(index + 1, steps[index]),
-                                'status': status, 'seconds': round(elapsed, 1)})
         tee.progress(f"  step {index + 1}/{len(steps)}  {status}  ({elapsed:.1f}s)")
-        if status == 'done' and snapshots:
-            try:
-                pcbnew.SaveBoard(os.path.join(
-                    workdir, f'gui_step{index + 1:02d}.kicad_pcb'), board)
-            except Exception as e:
-                state['log'].append(f"snapshot step {index + 1} failed: {e}")
 
-    def on_finished(completed, reason):
-        result['completed'] = completed
-        result['aborted'] = reason
-        try:
-            # Save back to the live path so the board sits beside the .kicad_pro
-            # PlanExecutor._write_drc_floors just stamped with the routed floors.
-            pcbnew.SaveBoard(live, board)
-        except Exception as e:
-            state['log'].append(f"final save failed: {e}")
-        app.ExitMainLoop()
-
-    def on_timeout():
-        result['timed_out'] = True
-        state['log'].append(f"replay exceeded --timeout {timeout}s")
-        app.ExitMainLoop()
-
-    executor = PlanExecutor(dialog, steps, list(range(len(steps))),
-                            on_status, on_finished,
-                            log=lambda m: state['log'].append(m), quiet=True)
-    t0 = time.time()
     with tee:
         tee.progress(f"  replaying {len(steps)} step(s) "
                      f"(engine output -> {os.path.relpath(log_path, REPO)})")
-        wx.CallAfter(executor.start)
-        _timeout_timer = wx.CallLater(int(timeout * 1000), on_timeout)
-        app.MainLoop()
-    result['seconds'] = round(time.time() - t0, 1)
-    result['log'] = state['log']
+        result = run_plan(live, steps,
+                          snapshot_dir=(workdir if snapshots else None),
+                          snapshot_prefix='gui_step',
+                          snapshot_format='{prefix}{n:02d}.kicad_pcb',
+                          timeout=timeout, on_status=on_status, quiet=True)
 
-    # Deterministic wx teardown. Without this the run segfaults AFTER finishing
-    # -- measured 2 of 3 runs exiting 139 on a 1-step replay, and one probe run
-    # died before printing its results, so a crash here can silently cost a
-    # measurement rather than just look untidy.
-    #
-    # Two causes, both "leave it to the interpreter":
-    #   * the wx.CallLater timeout timer was NEVER cancelled. On a normal finish
-    #     it is still pending (default deadline 7200s) holding a callback into
-    #     this frame, and wxWidgets tears it down at an arbitrary later point.
-    #   * the dialog was never Destroy()ed. Its C++ side then gets finalized
-    #     during interpreter shutdown, after the wx.App it belongs to is gone.
-    # Either way the heap is corrupt by the time CPython's GC next walks it,
-    # which is why the crash surfaces as SIGBUS/SIGSEGV inside visit_decref /
-    # dict_traverse / collect with a traceback pointing at unrelated code.
-    #
-    # Order matters: stop the timer first (so nothing can fire into a
-    # half-destroyed dialog), destroy the dialog, then let wx process the
-    # pending destroy events while the App is still alive.
-    try:
-        if _timeout_timer is not None and _timeout_timer.IsRunning():
-            _timeout_timer.Stop()
-    except Exception:
-        pass
-    try:
-        dialog.Destroy()
-    except Exception:
-        pass
-    try:
-        app.ProcessPendingEvents()
-    except Exception:
-        pass
-    dialog = None
-    app = None
+    result['live_board'] = live      # the name the rest of this harness uses
 
     with open(os.path.join(workdir, 'replay_plan_log.txt'), 'w') as f:
-        f.write("\n".join(state['log']))
+        f.write("\n".join(result['log']))
     return result
 
 

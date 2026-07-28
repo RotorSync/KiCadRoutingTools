@@ -305,12 +305,17 @@ def cap_optimization_step(argv):
     return step
 
 
-def main():
-    if len(sys.argv) < 3:
-        print(__doc__)
-        return 2
-    manifest, out = sys.argv[1], sys.argv[2]
+def plan_steps_from_manifest(manifest, keep_files=False):
+    """(steps, skipped_count) for a recorded manifest -- the whole conversion.
 
+    THE single implementation: main() (and make_plan.py) dump these steps as the
+    plan JSON, and tests/gui_parity/replay_plan_vs_run.py calls it with
+    ``keep_files=True`` to pair each step with the CLI chain board it produced.
+    It used to be a loop in main() with a hand-kept copy in the parity harness.
+
+    ``keep_files``: keep each step's private ``_files`` (its CLI input/output
+    boards). The plan JSON must NOT carry them, so main() leaves this False.
+    """
     # Prune with redo_stress_test's canonical file-dependency logic so the plan
     # is EXACTLY the simplified/deduplicated chain a replay runs -- the same
     # "N of M commands" set, with superseded retries and dead-end branches
@@ -333,7 +338,9 @@ def main():
             continue  # pruned out, or a check/grade command (no GUI step)
         if any(os.path.basename(a) == 'place_fanout_clearance.py' for a in argv):
             # standalone optimize_caps step, matching the live GUI plan (see above)
-            steps.append(cap_optimization_step(argv))
+            step = cap_optimization_step(argv)
+            step['_files'] = [a for a in argv if a.endswith('.kicad_pcb')]
+            steps.append(step)
             continue
         step = parse_command(argv)
         if step is None:
@@ -350,8 +357,18 @@ def main():
                     break
         steps.append(step)
 
-    for s in steps:
-        s.pop('_files', None)
+    if not keep_files:
+        for s in steps:
+            s.pop('_files', None)
+    return steps, skipped
+
+
+def main():
+    if len(sys.argv) < 3:
+        print(__doc__)
+        return 2
+    manifest, out = sys.argv[1], sys.argv[2]
+    steps, skipped = plan_steps_from_manifest(manifest)
     with open(out, 'w', encoding='utf-8') as f:
         json.dump({'steps': steps}, f, indent=2)
     print(f"{len(steps)} step(s) written to {out} "

@@ -39,14 +39,64 @@ The Claude tab's **Model** and **Effort** dropdowns apply to every button above 
 persist with the other dialog settings. Each run shows a startup header (Claude Code
 version, model, discovered skills) so you can confirm what actually ran.
 
+**Recording a plan run.** Tick **Make routing movie** in the Advanced tab's *Debug*
+section (default off) and a plan run writes one movie covering every step it ran,
+next to the board, with the path logged in green. A routing step run on its own tab
+gets its own movie the same way. See
+[Board rendering & routing animation](route-animation.md).
+
 **Saving and replaying a plan.** Next to the step list the Claude tab has **Save…**
 and **Load…** buttons. **Save…** writes the current plan steps (actions, nets/pairs/
 assignments, and per-step parameters) to a JSON file; **Load…** reads one back into the
 step list so **Run Selected Steps** replays the exact same routing chain **without another
-Claude run** — useful for re-running a vetted plan or sharing it. `Load…` also accepts a
-plan exported by `tests/stress/manifest_to_plan.py`, which turns a stress-test
-`redo_commands.sh` manifest into a loadable plan JSON, so a recorded no-LLM stress chain
-can be driven through the GUI plan executor.
+Claude run** — useful for re-running a vetted plan or sharing it.
+
+## Plans from the command line
+
+A plan is just a JSON file, so it does not need the GUI at either end (issue #507).
+
+### Making a plan
+
+`make_plan.py` converts a **recorded command chain** into a loadable plan. Every
+stress run leaves one (`redo_commands.sh`), and the board-mutating tools
+self-record whenever `REDO_MANIFEST` points somewhere, so your own CLI session
+becomes a plan too:
+
+```bash
+python3 make_plan.py runs_set1/myboard --list       # a recorded run directory
+                                                    # -> myboard_plan.json
+
+export REDO_MANIFEST=$PWD/redo_commands.sh          # or record your own chain
+python3 bga_fanout.py board.kicad_pcb s1.kicad_pcb --component U1
+python3 route.py s1.kicad_pcb s2.kicad_pcb --nets '/SPI*'
+python3 make_plan.py .                              # -> plan JSON for the GUI
+```
+
+The conversion prunes superseded retries and dead-end branches (the same file
+dependency chain a replay runs), drops check/grade commands, and carries every
+recognized `--flag` into the step's parameters — so the GUI routes the way the
+recorded commands did. Load the result with the Claude tab's **Load…** button.
+
+### Running a plan headless
+
+`run_plan.py` executes a plan against a board through the **real** plugin dialog
+and plan executor — no window, no clicks, no Claude. It re-execs into KiCad's
+bundled python (which has `pcbnew` + `wx`) automatically:
+
+```bash
+python3 run_plan.py board.kicad_pcb plan.json -o routed.kicad_pcb
+python3 run_plan.py board.kicad_pcb plan.json --list        # show the steps
+python3 run_plan.py board.kicad_pcb plan.json --steps 1,3-5 # run a subset
+python3 run_plan.py board.kicad_pcb plan.json --movie routing.mp4
+```
+
+The input board is never modified — it is copied *with its `.kicad_pro`* (which
+carries the DRC floor, #441) to the output path, and the plan runs on that.
+`--snapshot-dir` keeps the board after each step; `--movie` snapshots and then
+renders the whole run with [`make_movie.py`](route-animation.md).
+
+This is the same driver (`headless_plan.py`) the GUI/CLI parity harness uses, so
+what runs here is what the buttons run.
 
 ## The Skills
 
