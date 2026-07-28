@@ -297,8 +297,38 @@ def install(board_path):
 
     def _build(b, *a, **k):
         if isinstance(b, FakeIpcBoard):
-            return parse_kicad_pcb(b.path)
+            return build_pcb_data_like_ipc(b.path)
         return _real_build(b, *a, **k)
 
     kicad_parser.build_pcb_data_from_board = _build
     return board
+
+
+def build_pcb_data_like_ipc(path):
+    """parse_kicad_pcb + the extras the REAL kipy builder adds.
+
+    The kipy builder does not only translate board objects: net-class settings
+    are not exposed over IPC at all, so it reads them out of the sibling
+    .kicad_pro and lands them in `netclass_params` / `net_to_class`. The text
+    parser does not do that, so serving PCBData with a bare parse_kicad_pcb
+    silently hands the dialog an EMPTY netclass map -- and the dialog's
+    `_effective_*` floors then fall back to their control defaults (0.3 track
+    width instead of the board's 0.127).
+
+    That would make the harness invent divergences that do not exist in the real
+    GUI, which is precisely the failure mode the previous shim harness had. So
+    mirror the builder here.
+    """
+    pcb = parse_kicad_pcb(path)
+    try:
+        from kicad_parser import (read_netclasses_from_kicad_pro,
+                                  _resolve_net_to_class)
+        classes_by_name, patterns, explicit = read_netclasses_from_kicad_pro(path)
+        pcb.netclass_params = classes_by_name
+        pcb.net_to_class = {
+            n.name: _resolve_net_to_class(n.name, patterns, explicit)
+            for n in pcb.nets.values() if n.name
+        }
+    except Exception as e:
+        print(f"fake_ipc_board: netclass read failed: {e}")
+    return pcb

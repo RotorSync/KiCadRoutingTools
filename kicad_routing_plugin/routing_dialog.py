@@ -804,7 +804,7 @@ class RoutingDialog(wx.Dialog):
             # board's Default class therefore never loosens the base (the interactive
             # validation warns + pins it; this is the route-time safety net).
             if name == 'clearance':
-                dflt = (_get_netclass_parameters('Default') or {}).get('clearance')
+                dflt = (_get_netclass_parameters('Default', self.pcb_data) or {}).get('clearance')
                 if dflt is not None and val > dflt:
                     val = dflt
         else:
@@ -812,7 +812,7 @@ class RoutingDialog(wx.Dialog):
                 constraints = _get_board_minimum_constraints() or {}
                 board_val = constraints.get('min_hole_to_hole')
             else:
-                netclass = _get_netclass_parameters('Default') or {}
+                netclass = _get_netclass_parameters('Default', self.pcb_data) or {}
                 board_val = netclass.get(name)
             val = board_val if board_val is not None else getattr(self, name).GetValue()
         return self._fab_floored(name, val)
@@ -868,7 +868,7 @@ class RoutingDialog(wx.Dialog):
         if ctrl_name == 'clearance' and ctrl is not None \
                 and getattr(self, 'clearance_check', None) is not None \
                 and self.clearance_check.GetValue():
-            dflt = (_get_netclass_parameters('Default') or {}).get('clearance')
+            dflt = (_get_netclass_parameters('Default', self.pcb_data) or {}).get('clearance')
             if dflt is not None and ctrl.GetValue() > dflt + 1e-9:
                 self._drc_validating = True
                 try:

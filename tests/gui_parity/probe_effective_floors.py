@@ -2,18 +2,26 @@
 netclass (CLI parity), or fall back to defaults.TRACK_WIDTH like the shim?"""
 import os, sys
 os.environ.setdefault('WXSUPPRESS_SIZER_FLAGS_CHECK', '1')
-R='/Users/andy/Documents/KiCadRoutingTools'; sys.path.insert(0,R); sys.path.insert(0, os.path.dirname(R))
-import wx, pcbnew, json
+# Resolve the repo from THIS file, not a hardcoded path: a git worktree has its
+# own checkout, and an absolute path silently probed the main one instead.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+R = os.path.dirname(os.path.dirname(_HERE))
+sys.path.insert(0, R); sys.path.insert(0, _HERE)
+import wx, json
 import routing_defaults as defaults
-from kicad_parser import build_pcb_data_from_board
-from kicad_routing_plugin import swig_gui
+import kicad_parser
+from kicad_routing_plugin import routing_dialog
 
 board_path = sys.argv[1]
 app = wx.App(False)
-board = pcbnew.LoadBoard(board_path)
-pcbnew.GetBoard = lambda: board
-pd = build_pcb_data_from_board(board)
-dlg = swig_gui.RoutingDialog(None, pd, board_path)
+# IPC: no in-process board -- back the plugin's "live board" with the file.
+from fake_ipc_board import install as _install_fake_board
+board = _install_fake_board(board_path)
+# Call through the MODULE, not a name bound at import time: install() rebinds
+# kicad_parser.build_pcb_data_from_board, and a `from ... import` above would
+# have captured the original and driven the real kipy reader at the fake board.
+pd = kicad_parser.build_pcb_data_from_board(board)
+dlg = routing_dialog.RoutingDialog(None, pd, board_path)
 
 pro = os.path.splitext(board_path)[0] + '.kicad_pro'
 proj = None

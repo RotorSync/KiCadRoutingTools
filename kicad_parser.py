@@ -3435,7 +3435,15 @@ def _build_pcb_data_from_board_impl(board) -> PCBData:
         board_bounds=board_bounds,
         stackup=stackup,
         board_outline=board_outline,
-        board_outlines=board_outlines,
+        # _extract_board_contours_kipy returns ONE outline plus cutouts, where
+        # the text parser returns a LIST of outers (#304 multi-outline boards).
+        # This referenced an undefined `board_outlines` and so raised NameError
+        # on EVERY call -- i.e. the IPC plugin could never build PCBData at all
+        # (ipc_entry logs "build_pcb_data_from_board failed" and the dialog
+        # never opens). Wrap the single outline so the field matches what this
+        # builder actually produces; bringing the kipy side up to the text
+        # parser's containment classification is a separate parity item.
+        board_outlines=([board_outline] if board_outline else []),
         board_cutouts=board_cutouts
     )
 
