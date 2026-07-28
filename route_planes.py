@@ -1772,7 +1772,7 @@ def _neck_plane_segments(all_new_segments, pcb_data, clearance, all_layers,
 def _finalize_plane_copper(all_new_segments, all_new_vias, pcb_data, clearance,
                            all_layers, track_width, grid_step, via_size,
                            via_drill, hole_to_hole_clearance,
-                           net_clearances=None):
+                           net_clearances=None, strip_sink=None):
     """Run the full pre-write cleanup pipeline on plane tap copper and return the
     resulting all_new_segments.
 
@@ -1810,7 +1810,8 @@ def _finalize_plane_copper(all_new_segments, all_new_vias, pcb_data, clearance,
     if all_new_segments:
         from pcb_modification import cleanup_plane_taps_grazing
         scope = {s['net_id'] for s in all_new_segments}
-        all_new_segments, gz_rm, gz_nudge, gz_swept = cleanup_plane_taps_grazing(
+        (all_new_segments, gz_rm, gz_nudge, gz_swept,
+         gz_input_strips) = cleanup_plane_taps_grazing(
             pcb_data, all_new_segments, scope, clearance=clearance,
             max_shift=grid_step / 2, all_new_vias=all_new_vias,
             hole_to_hole=hole_to_hole_clearance)
@@ -1820,6 +1821,12 @@ def _finalize_plane_copper(all_new_segments, all_new_vias, pcb_data, clearance,
             print(f"  Graze nudge: re-bent grazing tap jog(s) on {gz_nudge} net(s)")
         if gz_swept:
             print(f"  Dead-end sweep: trimmed {gz_swept} orphaned tap segment(s)")
+        # #508 finding 2: INPUT copper the passes deleted from pcb_data must
+        # reach the writer/applier strip channel or the output re-emits it.
+        if gz_input_strips and strip_sink is not None:
+            strip_sink.extend(gz_input_strips)
+            print(f"  Graze/sweep passes removed {len(gz_input_strips)} "
+                  f"input-board segment(s); forwarded to the strip channel")
 
     # 3. close soft joints (#334) -- last, appends bridges (from_restore=True)
     try:
@@ -1869,10 +1876,15 @@ def _write_output_and_reroute(
     add_teardrops: bool = False,
     no_bga_zone: bool = False,
     clamp_netclasses: bool = True,
-    clearance_ceiling: Optional[float] = None
+    clearance_ceiling: Optional[float] = None,
+    removed_input_segments: Optional[List] = None
 ) -> bool:
     """
     Write output file and optionally reroute ripped nets.
+
+    removed_input_segments (#508 finding 2): input-board Segment objects the
+    finalize passes deleted from pcb_data -- the writer must strip their text
+    or the output re-emits copper the router withdrew (board != file).
 
     Returns:
         True if output was written successfully
@@ -1886,12 +1898,28 @@ def _write_output_and_reroute(
     kicad_v10_names = pcb_data.net_id_to_name if pcb_data.kicad_version >= KICAD_10_MIN_VERSION else None
     if not write_plane_output(input_file, output_file, combined_zone_sexpr, all_new_vias, all_new_segments,
                               exclude_net_ids=all_ripped_net_ids, zones_to_replace=zones_to_replace,
-                              add_teardrops=add_teardrops, net_id_to_name=kicad_v10_names):
+                              add_teardrops=add_teardrops, net_id_to_name=kicad_v10_names,
+                              removed_segments=removed_input_segments):
         print("Error writing output file")
         return False
 
     print(f"Output written to {output_file}")
     print("Note: Open in KiCad and press 'B' to refill zones")
+
+    # Board-vs-file ledger (KICAD_BOARD_LEDGER=1, #508): the written file must
+    # match pcb_data for every net this run touched -- the class of bug where
+    # one pass changes the write list without pcb_data (or vice versa) is
+    # exactly what this audit exists to catch, and this engine had NO ledger
+    # call (the one ledgered engine, route.py, came back clean; every serious
+    # #508 finding sat on an unledgered path). No-op unless the env var is set.
+    # Runs BEFORE the ripped-net reroute below: that reroute is file-based and
+    # deliberately not mirrored into pcb_data.
+    from cleanup_pipeline import verify_written_file_parity
+    _ledger_scope = sorted({d['net_id'] for d in all_new_segments}
+                           | {d['net_id'] for d in all_new_vias}
+                           | set(all_ripped_net_ids))
+    verify_written_file_parity(output_file, pcb_data, _ledger_scope,
+                               label=' planes')
 
     if all_ripped_net_ids:
         # Verify against the WRITTEN output which ripped nets are actually
@@ -2109,15 +2137,16 @@ def _verify_broken_ripped_nets(output_file: str, ripped_net_ids: List[int],
 def _empty_plane_results(return_results: bool):
     """Zero-work create_plane result in the shape the caller expects (#382 E5).
 
-    The GUI (return_results=True) unpacks EXACTLY 9 values; the CLI unpacks 3.
+    The GUI (return_results=True) unpacks EXACTLY 10 values; the CLI unpacks 3.
     Every validation-error early return must go through here so a bad-input exit
     can't hand the GUI a short tuple it will ValueError on -- the bug this
-    consolidates. The 9-field shape mirrors the full return_results path:
+    consolidates. The 10-field shape mirrors the full return_results path:
     (vias, traces, pads_needing, new_vias, new_segments, new_zones,
-     failed_pads, ripped_net_ids, reconnect_swap_data (#484 H3)).
+     failed_pads, ripped_net_ids, reconnect_swap_data (#484 H3),
+     reconnect_strips (#508)).
     """
     if return_results:
-        return (0, 0, 0, [], [], [], 0, [], {})
+        return (0, 0, 0, [], [], [], 0, [], {}, [])
     return (0, 0, 0)
 
 
@@ -3463,10 +3492,13 @@ def create_plane(
     # lived inside _write_output_and_reroute and the GUI path never ran it.
     if progress_callback:
         progress_callback(0, 0, "Cleaning up plane tap copper...")
+    # #508 finding 2: input-board copper the finalize passes delete from
+    # pcb_data; must reach the CLI writer's strip channel / GUI applier.
+    _finalize_strips: list = []
     all_new_segments = _finalize_plane_copper(
         all_new_segments, all_new_vias, pcb_data, clearance, all_layers,
         track_width, grid_step, via_size, via_drill, hole_to_hole_clearance,
-        net_clearances=net_clearances)
+        net_clearances=net_clearances, strip_sink=_finalize_strips)
 
     # Route trace (#482): emit the finalized plane-tap tracks/vias, grouped by
     # net so each plane's taps land as one animation event, then write
@@ -3565,7 +3597,8 @@ def create_plane(
             add_teardrops=add_teardrops,
             no_bga_zone=no_bga_zone,
             clamp_netclasses=clamp_netclasses,
-            clearance_ceiling=clearance_ceiling
+            clearance_ceiling=clearance_ceiling,
+            removed_input_segments=_finalize_strips
         )
 
         # Geometric truth check (issues #89 and #107): the via-placement
@@ -3587,6 +3620,11 @@ def create_plane(
     if progress_callback:
         progress_callback(1, 1, "Plane creation complete")
     reconnect_swap_data: dict = {}
+    # Input-board copper withdrawn from pcb_data by the finalize passes
+    # (#508 finding 2) or the in-memory reconnect's cleanup (#508 finding 1):
+    # the GUI applier must delete these individually -- the whole-net delete
+    # only covers ripped nets.
+    reconnect_strips: list = list(_finalize_strips)
     if return_results:
         # GUI parity with the CLI's in-run ripped-net reconnect (#347): the
         # file path above reroutes verified-broken casualties after writing;
@@ -3670,21 +3708,52 @@ def create_plane(
                         if _rdata.get(_key):
                             reconnect_swap_data.setdefault(_key, []).extend(
                                 _rdata[_key])
+                    # #508 finding 1 (unmirrored twin of #463/03d10b7): the
+                    # inner batch_route's cleanup DELETES copper from pcb_data
+                    # and reports it in segments_to_remove/vias_to_remove;
+                    # dropping that channel ships copper the board no longer
+                    # has. Consume it: purge matching write-list emissions and
+                    # forward the rest to the GUI strip channel.
+                    from plane_write_reconcile import consume_inner_strips
+                    _fs: list = []
+                    _fv: list = []
+                    consume_inner_strips(_rdata, all_new_segments,
+                                         all_new_vias, pcb_data,
+                                         _fs, _fv, "reconnect")
+                    reconnect_strips.extend(_fs)
+                    reconnect_strips.extend(_fv)
                     if _fail:
                         print(f"  {_fail} ripped net(s) could NOT be reconnected "
                               f"-- their board copper is deleted by the applier "
                               f"and they need the routing tab")
                 except Exception as _e:
                     print(f"  in-memory ripped-net reconnect failed: {_e}")
-        # all_ripped_net_ids LAST for backward compatibility: the GUI must
-        # delete these nets' existing board copper before applying new_vias/
-        # new_segments (which include the from_restore replacement pieces) --
-        # the CLI writer's exclude_net_ids strip has no pcbnew equivalent, so
-        # without this the live board keeps the originals AND gains the
-        # emitted copies (duplicated restored copper).
+        # #508 finding 1, second mechanism (the #463 class itself): a partial
+        # restore's kept-set was emitted (from_restore dicts) BEFORE the
+        # reconnect ran, and the reconnect may have re-routed that same net,
+        # deleting the kept copper from pcb_data -- the write list must not
+        # still carry it (spartan6_6layer shipped a collinear different-net
+        # overlap this way in the sibling engine). pcb_data is authoritative
+        # once the reconnect and its restore-on-failure custody have run.
+        from plane_write_reconcile import drop_withdrawn_partial_restores
+        _rest_s = [d for d in all_new_segments if d.get('from_restore')]
+        _rest_v = [d for d in all_new_vias if d.get('from_restore')]
+        _n_s, _n_v, _names = drop_withdrawn_partial_restores(
+            _rest_s, _rest_v, all_new_segments, all_new_vias, pcb_data)
+        if _n_s or _n_v:
+            print(f"  dropped {_n_s} stale partial-restore segment(s) and "
+                  f"{_n_v} via(s) the reconnect withdrew: {', '.join(_names)}")
+        # all_ripped_net_ids after the emit lists for backward compatibility:
+        # the GUI must delete these nets' existing board copper before applying
+        # new_vias/new_segments (which include the from_restore replacement
+        # pieces) -- the CLI writer's exclude_net_ids strip has no pcbnew
+        # equivalent, so without this the live board keeps the originals AND
+        # gains the emitted copies (duplicated restored copper).
+        # reconnect_strips LAST (#508): input copper the reconnect's cleanup
+        # withdrew; the applier deletes these individually.
         return (total_vias_placed, total_traces_added, total_pads_needing_vias,
                 all_new_vias, all_new_segments, all_zone_data, total_failed_pads,
-                all_ripped_net_ids, reconnect_swap_data)
+                all_ripped_net_ids, reconnect_swap_data, reconnect_strips)
     return (total_vias_placed, total_traces_added, total_pads_needing_vias)
 
 

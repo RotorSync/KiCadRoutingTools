@@ -187,8 +187,9 @@ def _tap_relocation_rescue(pcb_data, net_id, config, state, results,
                                           state.working_obstacles)
         if result and not result.get('failed'):
             from tap_relocation import retap_pad
-            if not retap_pad(pcb_data, config, state.working_obstacles,
-                             state.net_obstacles_cache, token):
+            _retap = retap_pad(pcb_data, config, state.working_obstacles,
+                               state.net_obstacles_cache, token)
+            if not _retap:
                 # No legal replacement tap -> the relocation is not
                 # allowed to stand; drop the route and put the tap back.
                 print(f"  TAP RELOCATION: re-tap declined -> reverting "
@@ -196,6 +197,14 @@ def _tap_relocation_rescue(pcb_data, net_id, config, state, results,
                 restore_tap(pcb_data, state.working_obstacles,
                             state.net_obstacles_cache, token)
                 continue
+            # #508 finding 3 custody: the removed PRE-EXISTING plane via +
+            # stub must be stripped from the output (plane nets are outside
+            # the sweep scope, so no other pass will), and the replacement
+            # re-tap via must ship (it rides the swap-via write channel).
+            state.tap_relocation_removed_vias.append(token['via'])
+            state.tap_relocation_removed_segments.extend(token['stubs'])
+            if _retap is not True:
+                state.all_swap_vias.append(_retap)
             net = pcb_data.nets.get(net_id)
             nname = net.name if net else str(net_id)
             print(f"  TAP RELOCATION RESCUE: {nname} routed after relocating "

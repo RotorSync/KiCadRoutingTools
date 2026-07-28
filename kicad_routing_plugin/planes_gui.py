@@ -1035,7 +1035,8 @@ class PlanesTab(wx.Panel):
         failed_pads = 0
         try:
             (vias, traces, pads_needing, new_vias, new_segments, new_zones,
-             failed_pads, ripped_net_ids, reconnect_swap_data) = create_plane(
+             failed_pads, ripped_net_ids, reconnect_swap_data,
+             reconnect_strips) = create_plane(
                 input_file=self.board_filename,
                 output_file="",
                 net_names=expanded_nets,
@@ -1114,6 +1115,10 @@ class PlanesTab(wx.Panel):
             self._new_zones = new_zones
             self._ripped_net_ids = ripped_net_ids
             self._reconnect_swap_data = reconnect_swap_data or {}
+            # #508 finding 1: input copper the in-memory reconnect's cleanup
+            # withdrew from pcb_data -- the applier deletes these individually
+            # (the whole-net delete only covers ripped nets).
+            self._strip_segments = reconnect_strips or []
 
             # Add GND return vias if enabled
             if config.get('add_gnd_vias', False):
@@ -1547,6 +1552,41 @@ class PlanesTab(wx.Panel):
                 _os.unlink(tmp)
             except OSError:
                 pass
+            # #508 finding 15: the oracle's stranded-fragment deletions are
+            # stripped from its temp file and pcb_data, but the LIVE board
+            # still holds that copper -- delete it here (before the adds, so
+            # a same-position emission is never collateral).
+            _orc_rm = ((orc.get('removed_segments') or [])
+                       + (orc.get('removed_vias') or []))
+            if _orc_rm:
+                _rm_keys = set()
+                for s in _orc_rm:
+                    if hasattr(s, 'start_x'):
+                        _rm_keys.add((round(s.start_x, 3), round(s.start_y, 3),
+                                      round(s.end_x, 3), round(s.end_y, 3),
+                                      s.net_id))
+                    else:
+                        _rm_keys.add((round(s.x, 3), round(s.y, 3), s.net_id))
+                _n_orc_rm = 0
+                for item in list(board.GetTracks()):
+                    if item.Type() == pcbnew.PCB_VIA_T:
+                        k = (round(pcbnew.ToMM(item.GetPosition().x), 3),
+                             round(pcbnew.ToMM(item.GetPosition().y), 3),
+                             item.GetNetCode())
+                    else:
+                        k = (round(pcbnew.ToMM(item.GetStart().x), 3),
+                             round(pcbnew.ToMM(item.GetStart().y), 3),
+                             round(pcbnew.ToMM(item.GetEnd().x), 3),
+                             round(pcbnew.ToMM(item.GetEnd().y), 3),
+                             item.GetNetCode())
+                        if k not in _rm_keys:
+                            k = (k[2], k[3], k[0], k[1], k[4])
+                    if k in _rm_keys:
+                        board.RemoveNative(item)
+                        _n_orc_rm += 1
+                if _n_orc_rm:
+                    print(f"KiCad-oracle (GUI): deleted {_n_orc_rm} stranded "
+                          f"fragment piece(s) from the live board")
             for s in orc.get('new_segments') or []:
                 track = pcbnew.PCB_TRACK(board)
                 track.SetStart(pcbnew.VECTOR2I(
@@ -1629,6 +1669,10 @@ class PlanesTab(wx.Panel):
                     _removed += 1
             if _removed:
                 print(f"Removed {_removed} cleanup-stripped segment(s)/via(s)")
+        # One-shot: a later run on this dialog must not re-apply stale strips
+        # (#508 finding 19 -- _new_vias/_new_segments were already cleared
+        # after apply, _strip_segments never was).
+        self._strip_segments = []
 
         ripped = set(getattr(self, '_ripped_net_ids', None) or [])
         if ripped:
@@ -1656,6 +1700,10 @@ class PlanesTab(wx.Panel):
                       "to the live board (#484)")
             except Exception as _se:
                 print(f"WARNING: reconnect swaps could not be applied: {_se}")
+        # One-shot for the same reason as _strip_segments above: the repair
+        # path never assigns this, so a create-then-repair sequence would
+        # re-apply the create run's swaps (#508 finding 19's shape).
+        self._reconnect_swap_data = {}
 
         # Get layer name to ID mapping
         name_to_id = {}

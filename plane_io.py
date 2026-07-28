@@ -394,7 +394,8 @@ def write_plane_output(
     exclude_net_ids: List[int] = None,
     zones_to_replace: List[Tuple[int, str]] = None,
     add_teardrops: bool = False,
-    net_id_to_name: Dict[int, str] = None
+    net_id_to_name: Dict[int, str] = None,
+    removed_segments: List = None
 ) -> bool:
     """Write the complete output file with zone (optional), vias, and traces.
 
@@ -409,12 +410,24 @@ def write_plane_output(
         zones_to_replace: Optional list of (net_id, layer) tuples for zones to
                           remove before adding new zones
         add_teardrops: Add teardrop settings to all pads
+        removed_segments: SPECIFIC input-board Segment objects to delete (#508
+                          finding 2 / #484 class: an in-memory pass removed a
+                          non-excluded net's input copper from pcb_data; the
+                          writer must strip its text or board != file)
 
     Returns:
         True if successful, False otherwise
     """
     with open(input_file, 'r', encoding='utf-8') as f:
         content = f.read()
+
+    if removed_segments:
+        from kicad_writer import remove_segments_from_content
+        content, _nrs = remove_segments_from_content(
+            content, removed_segments, net_id_to_name=net_id_to_name)
+        if _nrs:
+            print(f"  Stripped {_nrs} in-memory-removed input segment(s) "
+                  f"from the output")
 
     # Move text from copper layers to silkscreen (prevents routing interference)
     content = move_copper_text_to_silkscreen(content)

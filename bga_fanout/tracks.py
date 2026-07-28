@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Dict, List, Tuple
 
 from kicad_parser import PCBData
-from bga_fanout.types import create_track, FanoutRoute
+from bga_fanout.types import create_track, route_uid, FanoutRoute
 from bga_fanout.collision import check_segment_collision
 from bga_fanout.constants import POSITION_TOLERANCE
 
@@ -114,7 +114,8 @@ def generate_tracks_from_routes(
         if getattr(route, 'neighbor_connection', False):
             # Simple direct connection from this pad to neighbor pad
             tracks.append(create_track(route.pad_pos, route.exit_pos, track_width,
-                                       route.layer, route.net_id, route.pair_id))
+                                       route.layer, route.net_id, route.pair_id,
+                                       route_uid=route_uid(route)))
             neighbor_count += 1
             continue
 
@@ -125,27 +126,33 @@ def generate_tracks_from_routes(
                 # Differential edge pair: 45° stub to converge, then straight to exit
                 # 45° stub: pad -> stub_end (convergence point)
                 tracks.append(create_track(route.pad_pos, route.stub_end, track_width,
-                                           route.layer, route.net_id, route.pair_id))
+                                           route.layer, route.net_id, route.pair_id,
+                                       route_uid=route_uid(route)))
                 # Straight segment: stub_end -> exit
                 tracks.append(create_track(route.stub_end, route.exit_pos, track_width,
-                                           route.layer, route.net_id, route.pair_id))
+                                           route.layer, route.net_id, route.pair_id,
+                                       route_uid=route_uid(route)))
             else:
                 # Single-ended edge pad: direct segment to exit
                 tracks.append(create_track(route.pad_pos, route.exit_pos, track_width,
-                                           route.layer, route.net_id, route.pair_id))
+                                           route.layer, route.net_id, route.pair_id,
+                                       route_uid=route_uid(route)))
             # Add jog segment(s)
             if route.jog_end:
                 if route.jog_extension:
                     # Outside track of diff pair: extension segment first
                     tracks.append(create_track(route.exit_pos, route.jog_extension, track_width,
-                                               route.layer, route.net_id, route.pair_id))
+                                               route.layer, route.net_id, route.pair_id,
+                                       route_uid=route_uid(route)))
                     # Then the 45° jog from extension point
                     tracks.append(create_track(route.jog_extension, route.jog_end, track_width,
-                                               route.layer, route.net_id, route.pair_id))
+                                               route.layer, route.net_id, route.pair_id,
+                                       route_uid=route_uid(route)))
                 else:
                     # Inside track or single-ended: direct 45° jog
                     tracks.append(create_track(route.exit_pos, route.jog_end, track_width,
-                                               route.layer, route.net_id, route.pair_id))
+                                               route.layer, route.net_id, route.pair_id,
+                                       route_uid=route_uid(route)))
             edge_count += 1
         else:
             # Inner pad: 45° stub + channel segment + jog
@@ -157,21 +164,26 @@ def generate_tracks_from_routes(
                 #
                 # First 45°: pad -> channel_point (entry to channel)
                 tracks.append(create_track(route.pad_pos, route.channel_point, track_width,
-                                           route.layer, route.net_id, route.pair_id))
+                                           route.layer, route.net_id, route.pair_id,
+                                       route_uid=route_uid(route)))
                 # Straight segment in channel: channel_point -> channel_point2 (1 pitch)
                 if route.channel_point2:
                     tracks.append(create_track(route.channel_point, route.channel_point2, track_width,
-                                               route.layer, route.net_id, route.pair_id))
+                                               route.layer, route.net_id, route.pair_id,
+                                       route_uid=route_uid(route)))
                     # Second 45°: channel_point2 -> stub_end (exit from channel)
                     tracks.append(create_track(route.channel_point2, route.stub_end, track_width,
-                                               route.layer, route.net_id, route.pair_id))
+                                               route.layer, route.net_id, route.pair_id,
+                                       route_uid=route_uid(route)))
                 else:
                     # Fallback if no channel_point2 (shouldn't happen)
                     tracks.append(create_track(route.channel_point, route.stub_end, track_width,
-                                               route.layer, route.net_id, route.pair_id))
+                                               route.layer, route.net_id, route.pair_id,
+                                       route_uid=route_uid(route)))
                 # Straight segment: stub_end -> exit
                 tracks.append(create_track(route.stub_end, route.exit_pos, track_width,
-                                           route.layer, route.net_id, route.pair_id))
+                                           route.layer, route.net_id, route.pair_id,
+                                       route_uid=route_uid(route)))
             else:
                 # Normal inner pad: single 45° stub to channel, then straight to exit
                 # Check for zero-length stubs (pad is exactly on channel)
@@ -182,34 +194,41 @@ def generate_tracks_from_routes(
                 if has_stub:
                     # 45-degree stub: pad -> stub_end
                     tracks.append(create_track(route.pad_pos, route.stub_end, track_width,
-                                               route.layer, route.net_id, route.pair_id))
+                                               route.layer, route.net_id, route.pair_id,
+                                       route_uid=route_uid(route)))
 
                 if route.pre_channel_jog:
                     # Jogged route: stub_end -> jog_point -> exit
                     # Jog segment: stub_end -> pre_channel_jog
                     tracks.append(create_track(route.stub_end, route.pre_channel_jog, track_width,
-                                               route.layer, route.net_id, route.pair_id))
+                                               route.layer, route.net_id, route.pair_id,
+                                       route_uid=route_uid(route)))
                     # Channel segment: pre_channel_jog -> exit
                     tracks.append(create_track(route.pre_channel_jog, route.exit_pos, track_width,
-                                               route.layer, route.net_id, route.pair_id))
+                                               route.layer, route.net_id, route.pair_id,
+                                       route_uid=route_uid(route)))
                 else:
                     # Normal route: stub_end -> exit
                     tracks.append(create_track(route.stub_end, route.exit_pos, track_width,
-                                               route.layer, route.net_id, route.pair_id))
+                                               route.layer, route.net_id, route.pair_id,
+                                       route_uid=route_uid(route)))
 
             # Jog segment(s): exit -> jog_end
             if route.jog_end:
                 if route.jog_extension:
                     # Outside track of diff pair: extension segment first
                     tracks.append(create_track(route.exit_pos, route.jog_extension, track_width,
-                                               route.layer, route.net_id, route.pair_id))
+                                               route.layer, route.net_id, route.pair_id,
+                                       route_uid=route_uid(route)))
                     # Then the 45° jog from extension point
                     tracks.append(create_track(route.jog_extension, route.jog_end, track_width,
-                                               route.layer, route.net_id, route.pair_id))
+                                               route.layer, route.net_id, route.pair_id,
+                                       route_uid=route_uid(route)))
                 else:
                     # Inside track or single-ended: direct 45° jog
                     tracks.append(create_track(route.exit_pos, route.jog_end, track_width,
-                                               route.layer, route.net_id, route.pair_id))
+                                               route.layer, route.net_id, route.pair_id,
+                                       route_uid=route_uid(route)))
             inner_count += 1
 
     print(f"  Generated {len(tracks)} track segments")

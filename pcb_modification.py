@@ -3252,6 +3252,17 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
                         results.append(res)
                     res['new_segments'] = list(res.get('new_segments') or []) + new
                     added_segments.extend(new)
+                    # #508 finding 5: splice pcb_data NOW, per commit, not
+                    # after the whole loop -- later nets' clears()/grazes()
+                    # read foreign copper from pcb_data, and a deferred splice
+                    # let two nets be re-bent into the SAME free pocket (an
+                    # earlier commit's added copper invisible, its removed
+                    # chain still blocking).
+                    _chain_ids = {id(s) for s in chain}
+                    pcb_data.segments = [s for s in pcb_data.segments
+                                         if id(s) not in _chain_ids] + new
+                    if hasattr(pcb_data, '_foreign_seg_arr_cache'):
+                        pcb_data._foreign_seg_arr_cache = None
                     net_segs = trial
                     net_changed = True
                     break
@@ -3263,13 +3274,9 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
             segs = r.get('new_segments')
             if segs:
                 r['new_segments'] = [s for s in segs if id(s) not in removed_ids]
-    if removed_ids or original_to_remove:
-        orig_ids = {id(s) for s in original_to_remove}
-        pcb_data.segments = [s for s in pcb_data.segments
-                             if id(s) not in removed_ids and id(s) not in orig_ids]
-    pcb_data.segments = list(pcb_data.segments) + added_segments
-    # foreign-copper caches read pcb_data.segments; invalidate so later passes /
-    # the next call see the spliced geometry.
+    # pcb_data was spliced per commit above (#508 finding 5); a final flush
+    # keeps the next pass's foreign caches honest even when nothing changed
+    # here but the caller mutated segments between calls.
     if hasattr(pcb_data, '_foreign_seg_arr_cache'):
         pcb_data._foreign_seg_arr_cache = None
 
@@ -3710,7 +3717,13 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                             # never splice it into pcb_data)
                             removed_ids.add(id(g))
                             added_ids.discard(id(g))
-                            added_segments.remove(g)
+                            # by IDENTITY, not value (#508 finding 18):
+                            # Segment is a plain dataclass, so list.remove()
+                            # matches the first VALUE-equal element -- a
+                            # look-alike same-net segment from another round
+                            # could be removed while g stayed live.
+                            added_segments[:] = [x for x in added_segments
+                                                 if x is not g]
                         elif id(g) in routed_seg_result:
                             removed_ids.add(id(g))
                             res = res or routed_seg_result[id(g)]
@@ -3722,6 +3735,15 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                     res['new_segments'] = list(res.get('new_segments') or []) + new
                     added_segments.extend(new)
                     added_ids.update(id(g) for g in new)
+                    # #508 finding 5 (microshift twin of the octolinear fix):
+                    # splice pcb_data per commit -- later nets' clears() reads
+                    # foreign copper from pcb_data, and a deferred splice let
+                    # two nets shift into the same pocket.
+                    _old_ids = {id(g) for g in old}
+                    pcb_data.segments = [g for g in pcb_data.segments
+                                         if id(g) not in _old_ids] + new
+                    if hasattr(pcb_data, '_foreign_seg_arr_cache'):
+                        pcb_data._foreign_seg_arr_cache = None
                     net_segs = trial
                     net_changed = True
                     round_changed = True
@@ -3737,11 +3759,8 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
             segs = r.get('new_segments')
             if segs:
                 r['new_segments'] = [s for s in segs if id(s) not in removed_ids]
-    if removed_ids or original_to_remove:
-        orig_ids = {id(s) for s in original_to_remove}
-        pcb_data.segments = [s for s in pcb_data.segments
-                             if id(s) not in removed_ids and id(s) not in orig_ids]
-    pcb_data.segments = list(pcb_data.segments) + added_segments
+    # pcb_data was spliced per commit above (#508 finding 5); final cache
+    # flush only.
     if hasattr(pcb_data, '_foreign_seg_arr_cache'):
         pcb_data._foreign_seg_arr_cache = None
 
@@ -4174,6 +4193,23 @@ def merge_close_same_net_vias(all_new_vias, all_new_segments, pcb_data,
                     _set_end(s, 'start', survivor)
                 if b and abs(b[0] - nx) < EPS and abs(b[1] - ny) < EPS:
                     _set_end(s, 'end', survivor)
+            # #508 finding 12: the plane engines stamp the new via and its tap
+            # segments into pcb_data as OBJECTS during routing; updating only
+            # the write-list dicts left the BOARD carrying a via the file
+            # won't have, and board segment ends at the dropped position --
+            # every later pass (obstacle maps, connectivity gates, ledger)
+            # then reasons about copper that never ships. Mirror the merge.
+            pcb_data.vias[:] = [pv for pv in pcb_data.vias
+                                if not (pv.net_id == nid
+                                        and abs(pv.x - nx) < EPS
+                                        and abs(pv.y - ny) < EPS)]
+            for ps in (getattr(pcb_data, 'segments', None) or []):
+                if ps.net_id != nid:
+                    continue
+                if abs(ps.start_x - nx) < EPS and abs(ps.start_y - ny) < EPS:
+                    ps.start_x, ps.start_y = survivor
+                if abs(ps.end_x - nx) < EPS and abs(ps.end_y - ny) < EPS:
+                    ps.end_x, ps.end_y = survivor
             merged += 1
             continue
         if blocked:
@@ -4220,18 +4256,33 @@ def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
     zones), so a load-bearing tap that actually carries a pad to the plane is kept
     and only genuinely redundant/dead copper goes.
 
-    Returns (all_new_segments, n_removed, n_nudged, n_swept).
+    Returns (all_new_segments, n_removed, n_nudged, n_swept, input_strips).
+    input_strips (#508 finding 2): removed segments that matched NO write-list
+    dict are INPUT-board copper -- the passes delete them from pcb_data, but
+    the writer re-emits input text (and the GUI board still holds them), so
+    the caller must forward these to its strip channel or board != file.
     """
     def sig(sx, sy, ex, ey, layer):
         a, b = (round(sx, 3), round(sy, 3)), (round(ex, 3), round(ey, 3))
         return (min(a, b), max(a, b), layer)
 
+    input_strips: List = []
+
     def strip(segs, removed):
         if not removed:
             return segs, 0
         rm = {sig(s.start_x, s.start_y, s.end_x, s.end_y, s.layer) for s in removed}
+        matched = {sig(d['start'][0], d['start'][1], d['end'][0], d['end'][1],
+                       d['layer'])
+                   for d in segs
+                   if sig(d['start'][0], d['start'][1], d['end'][0], d['end'][1],
+                          d['layer']) in rm}
         out = [d for d in segs
                if sig(d['start'][0], d['start'][1], d['end'][0], d['end'][1], d['layer']) not in rm]
+        input_strips.extend(
+            s for s in removed
+            if sig(s.start_x, s.start_y, s.end_x, s.end_y, s.layer)
+            not in matched)
         return out, len(segs) - len(out)
 
     # Copper protection for pads the repair ITSELF proved fill-unreachable
@@ -4385,7 +4436,7 @@ def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
         rm_ids = {id(s) for s in de_removed}
         pcb_data.segments = [s for s in pcb_data.segments if id(s) not in rm_ids]
 
-    return all_new_segments, n_removed, n_nudged, n_swept
+    return all_new_segments, n_removed, n_nudged, n_swept, input_strips
 
 
 def swap_pad_nets_in_pcb_data(pcb_data: PCBData, pad_a, pad_b) -> None:

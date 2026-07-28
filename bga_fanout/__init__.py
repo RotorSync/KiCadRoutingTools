@@ -2763,11 +2763,17 @@ def generate_bga_fanout(footprint: Footprint,
         # (#253) are dropped: without the via their inner-layer copper is
         # disconnected decoration. Remove their tracks and report the nets as
         # failed so the main router picks them up from the bare ball.
+        # #508 finding 6 coherence: the net's OTHER balls' routes are dropped
+        # WITH their tracks (the old code removed tracks net-wide but left
+        # the sibling routes in `routes` -- still counted escaped, shipping
+        # via-in-pad balls with no track).
         if via_blocked_routes:
+            from bga_fanout.reroute import _remove_route_tracks
             blocked_net_ids = {r.net_id for r in via_blocked_routes}
-            blocked_routes = set(id(r) for r in via_blocked_routes)
-            tracks = [t for t in tracks if t.get('net_id') not in blocked_net_ids]
-            routes = [r for r in routes if id(r) not in blocked_routes]
+            for r in routes:
+                if r.net_id in blocked_net_ids:
+                    _remove_route_tracks(tracks, r)
+            routes = [r for r in routes if r.net_id not in blocked_net_ids]
             for r in via_blocked_routes:
                 name = r.pad.net_name or f"net{r.net_id}"
                 if name not in failed_nets:
@@ -2838,6 +2844,34 @@ def generate_bga_fanout(footprint: Footprint,
                 if nm not in failed_nets:
                     failed_nets.append(nm)
             print(f"  Pad-aware: removed {len(pad_failed)} unroutable net(s): {pad_failed}")
+
+        # #508 finding 7: vias_to_add/vias_to_remove were derived from the
+        # PRE-repair route layers, and repair_pad_crossings mutates
+        # route.layer -- a route moved to the top layer shipped its (now
+        # pointless) via-in-pad next to top-layer-only copper
+        # (spartan6_6layer step1: 7 F.Cu balls, via + seglayers=['F.Cu']
+        # from a via-less input), and a route moved OFF the top layer never
+        # got the via its inner copper needs. Re-derive both lists from the
+        # FINAL routes; newly via-blocked routes are dropped exactly like
+        # the in-pass path. This also un-stales the via-vs-foreign-track
+        # guard below, which previously scanned pre-repair vias against
+        # post-repair tracks.
+        vias_to_add, vias_to_remove, _reblocked = manage_vias(
+            best_routes, pcb_data, layers[0], via_size, via_drill, clearance)
+        if _reblocked:
+            from bga_fanout.reroute import _remove_route_tracks
+            _rb_net_ids = {r.net_id for r in _reblocked}
+            for r in best_routes:
+                if r.net_id in _rb_net_ids:
+                    _remove_route_tracks(tracks, r)
+            best_routes[:] = [r for r in best_routes
+                              if r.net_id not in _rb_net_ids]
+            for r in _reblocked:
+                name = r.pad.net_name or f"net{r.net_id}"
+                if name not in failed_nets:
+                    failed_nets.append(name)
+            print(f"  Pad-aware: {len(_reblocked)} repaired route(s) newly "
+                  f"via-blocked; dropped (#253 semantics)")
 
     # Clearance-aware escape clearing (issue #123 PAD-SEGMENT). The repair above
     # fires only on true crossings; a route's outer escape can still graze a
@@ -2926,6 +2960,27 @@ def generate_bga_fanout(footprint: Footprint,
             return up_tracks, up_vias, up_vias_rm, up_failed
         print(f"  Under-pad escape did not improve ({len(up_failed)} dropped) - "
               f"keeping the channel result")
+
+    # Write-list invariant (#508 findings 6/7): every surviving FanoutRoute
+    # must have at least one track in the write list -- a route still counted
+    # as escaped but with no copper ships a via-in-pad ball with NO track (a
+    # dead drill that consumes hole-to-hole budget downstream; cparti_fpga
+    # +1V8/+1V0). This divergence lives entirely inside the write lists
+    # (tracks vs routes vs vias_to_add), so no pcb_data-vs-file ledger can
+    # see it -- it is asserted here instead.
+    from bga_fanout.types import route_uid as _ruid
+    _names_by_net = {r.net_id: (r.pad.net_name or f"net{r.net_id}")
+                     for r in best_routes}
+    _tracked_uids = {t.get('route_uid') for t in tracks}
+    _failed_set = set(failed_nets)
+    _orphans = [r for r in best_routes
+                if _ruid(r) not in _tracked_uids
+                and _names_by_net.get(r.net_id) not in _failed_set]
+    if _orphans:
+        print(f"  WARNING (#508 invariant): {len(_orphans)} escaped route(s) "
+              f"have no track in the write list -- their balls would ship a "
+              f"dead via-in-pad: "
+              f"{sorted({_names_by_net[r.net_id] for r in _orphans})}")
 
     return tracks, vias_to_add, vias_to_remove, failed_nets
 

@@ -2328,22 +2328,52 @@ def route_disconnected_regions(
                 config.via_drill)
             return (config.via_drill + other) / 2 + hole_to_hole_clearance
 
+        # #508 finding 14: a via suppressed below is a layer TRANSITION the
+        # route depends on -- both layers' strap segments still ship, so
+        # without its transition the strap is severed at that point (the
+        # #479 verification checks only strap ENDS on region material, never
+        # interior continuity). The nearby surviving via/barrel spans the
+        # copper layers, but sits up to drill+h2h away: bridge the orphaned
+        # transition point to the survivor on BOTH transition layers so the
+        # electrical path survives the suppression.
+        def _transition_layers(vx, vy):
+            for _k in range(len(route_points) - 1):
+                _p1, _p2 = route_points[_k], route_points[_k + 1]
+                if (_p1[2] != _p2[2]
+                        and abs(_p1[0] - vx) < 1e-6
+                        and abs(_p1[1] - vy) < 1e-6):
+                    return (_p1[2], _p2[2])
+            return None
+
+        def _bridge_to_survivor(vx, vy, sx, sy):
+            if math.hypot(sx - vx, sy - vy) < 0.05:
+                return  # touching: the barrel already carries the joint
+            _tl = _transition_layers(vx, vy)
+            if not _tl:
+                return
+            for _l in set(_tl):
+                segments.append({
+                    'start': (vx, vy), 'end': (sx, sy),
+                    'width': track_width, 'layer': _l, 'net_id': net_id})
+
         # First filter via_positions to remove vias too close to each other within this route
         filtered_via_positions = []
         for vx, vy in via_positions:
-            too_close_to_filtered = any(
-                math.sqrt((fx - vx)**2 + (fy - vy)**2) < min_via_distance
-                for fx, fy in filtered_via_positions
-            )
-            if not too_close_to_filtered:
+            _near = next(
+                ((fx, fy) for fx, fy in filtered_via_positions
+                 if math.sqrt((fx - vx)**2 + (fy - vy)**2) < min_via_distance),
+                None)
+            if _near is None:
                 filtered_via_positions.append((vx, vy))
+            else:
+                _bridge_to_survivor(vx, vy, _near[0], _near[1])
 
         for vx, vy in filtered_via_positions:
-            too_close = any(
-                math.sqrt((ex - vx)**2 + (ey - vy)**2) < _min_dist_to(ex, ey)
-                for ex, ey in net_vias
-            )
-            if not too_close:
+            _near = next(
+                ((ex, ey) for ex, ey in net_vias
+                 if math.sqrt((ex - vx)**2 + (ey - vy)**2) < _min_dist_to(ex, ey)),
+                None)
+            if _near is None:
                 vias.append({
                     'x': vx,
                     'y': vy,
@@ -2352,14 +2382,18 @@ def route_disconnected_regions(
                     'net_id': net_id
                 })
                 net_vias.append((vx, vy))  # Available for reuse
+            else:
+                _bridge_to_survivor(vx, vy, _near[0], _near[1])
 
         # Add open-space via if one was used and not too close to existing vias
         if open_space_via:
-            too_close = any(
-                math.sqrt((ex - open_space_via[0])**2 + (ey - open_space_via[1])**2) < _min_dist_to(ex, ey)
-                for ex, ey in net_vias
-            )
-            if not too_close:
+            _near = next(
+                ((ex, ey) for ex, ey in net_vias
+                 if math.sqrt((ex - open_space_via[0])**2
+                              + (ey - open_space_via[1])**2)
+                 < _min_dist_to(ex, ey)),
+                None)
+            if _near is None:
                 vias.append({
                     'x': open_space_via[0],
                     'y': open_space_via[1],
@@ -2368,6 +2402,10 @@ def route_disconnected_regions(
                     'net_id': net_id
                 })
                 net_vias.append(open_space_via)
+            else:
+                # #508 finding 14: same orphaned-transition bridge as above.
+                _bridge_to_survivor(open_space_via[0], open_space_via[1],
+                                    _near[0], _near[1])
 
         routes_added += 1
 

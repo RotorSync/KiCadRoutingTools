@@ -445,8 +445,25 @@ def _phase3_tap_relocation_retry(net_id, completed_result, pcb_data, config,
     if retry and after < len(failed_pads):
         # Commit condition: every detached pad gets its replacement tap NOW
         # (relying on a later repair step shipped detached pads in the
-        # finisher steps -- the c1 defect).
-        if all(retap_pad(pcb_data, config, working, cache, t) for t in tokens):
+        # finisher steps -- the c1 defect). Same short-circuit as the old
+        # all(generator): stop at the first declined re-tap.
+        _retaps = []
+        for t in tokens:
+            _rv = retap_pad(pcb_data, config, working, cache, t)
+            if not _rv:
+                break
+            _retaps.append(_rv)
+        if len(_retaps) == len(tokens):
+            # #508 finding 3 custody: strip the removed pre-existing plane
+            # vias/stubs from the output and ship the replacement re-tap
+            # vias (swap-via write channel) -- pcb_data alone reaches
+            # neither the writer nor the GUI applier.
+            for t in tokens:
+                state.tap_relocation_removed_vias.append(t['via'])
+                state.tap_relocation_removed_segments.extend(t['stubs'])
+            for _rv in _retaps:
+                if _rv is not True:
+                    state.all_swap_vias.append(_rv)
             print(f"  PHASE-3 TAP RELOCATION: {len(failed_pads) - after} "
                   f"pad(s) reconnected after relocating {len(tokens)} "
                   f"plane tap(s)")

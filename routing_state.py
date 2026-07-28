@@ -128,6 +128,16 @@ class RoutingState:
     all_swap_vias: List = field(default_factory=list)
     pad_swaps: List[Dict] = field(default_factory=list)
 
+    # Tap-relocation custody (#508 finding 3): a COMMITTED relocation removes
+    # a PRE-EXISTING plane-net via + stub from pcb_data, but plane nets are
+    # deliberately outside the sweep/strip scope (they are never in
+    # routed_results), so without these lists the writer re-emits the removed
+    # copper from the input text -- a short in the file that exists in no
+    # in-memory state -- and the replacement re-tap via never ships.
+    # batch_route drains them into segments_to_remove / vias_to_remove.
+    tap_relocation_removed_segments: List = field(default_factory=list)
+    tap_relocation_removed_vias: List = field(default_factory=list)
+
     # Obstacle maps (set by caller)
     base_obstacles: Any = None
     diff_pair_base_obstacles: Any = None

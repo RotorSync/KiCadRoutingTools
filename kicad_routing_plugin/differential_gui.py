@@ -1226,6 +1226,23 @@ class DifferentialTab(wx.Panel):
                     board.Remove(track)
                     tracks_removed += 1
 
+        # Remove original-board VIAS the pipeline flagged (#508 finding 11:
+        # route_diff now returns vias_to_remove; swig_gui parity).
+        vias_to_remove = results_data.get('vias_to_remove') or []
+        if vias_to_remove:
+            via_keys = {(round(v.x, POSITION_DECIMALS),
+                         round(v.y, POSITION_DECIMALS), v.net_id)
+                        for v in vias_to_remove}
+            for track in list(board.GetTracks()):
+                if track.Type() != pcbnew.PCB_VIA_T:
+                    continue
+                vk = (round(pcbnew.ToMM(track.GetPosition().x), POSITION_DECIMALS),
+                      round(pcbnew.ToMM(track.GetPosition().y), POSITION_DECIMALS),
+                      track.GetNetCode())
+                if vk in via_keys:
+                    board.Remove(track)
+                    tracks_removed += 1
+
         # Add segments from routing results
         for result in results_data.get('results', []):
             for seg in result.get('new_segments', []):
@@ -1252,6 +1269,23 @@ class DifferentialTab(wx.Panel):
         for via in results_data.get('all_swap_vias', []):
             self._add_via_to_board(board, via, get_layer_id)
             vias_added += 1
+
+        # Add reuse-connector segments from layer swapping (#340 / #508
+        # finding 9): when a swap anchors its transition on an existing
+        # same-net via, the pad->via connector copper rides the
+        # all_swap_segments channel. swig_gui draws these; this path never
+        # did, leaving the swapped net floating (DRC-clean but open).
+        for seg in results_data.get('all_swap_segments', []):
+            track = pcbnew.PCB_TRACK(board)
+            track.SetStart(pcbnew.VECTOR2I(
+                mm_to_iu(seg.start_x), mm_to_iu(seg.start_y)))
+            track.SetEnd(pcbnew.VECTOR2I(
+                mm_to_iu(seg.end_x), mm_to_iu(seg.end_y)))
+            track.SetWidth(mm_to_iu(seg.width))  # never position-rounded (#362)
+            track.SetLayer(get_layer_id(seg.layer))
+            track.SetNetCode(seg.net_id)
+            board.Add(track)
+            tracks_added += 1
 
         # Build connectivity to register new items properly
         board.BuildConnectivity()

@@ -1340,6 +1340,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             pruned['partial_restore_134'] = True
             add_route_to_pcb_data(pcb_data, pruned, debug_lines=config.debug_lines)
             results.append(pruned)
+            # #508 finding 8: register the restore as the net's AUTHORITATIVE
+            # result, or the #87 superseded-result filter (`_authoritative`,
+            # identity-keyed off routed_results) silently drops it from the
+            # write-list on EVERY firing -- the copper landed in pcb_data,
+            # the log said "restored", and the file shipped none of it (the
+            # exact trap net_rescue.py's partial branch documents; evidence
+            # runs_set14/rusefi_alphax4/step2b_retry.log). The entry
+            # condition guarantees the net has no other result.
+            routed_results[nid] = pruned
             nm = pcb_data.nets[nid].name if nid in pcb_data.nets else nid
             print(f"Issue #134 last resort: {nm} reroute failed; restored "
                   f"{len(keep_segs)} segment(s) + {len(keep_vias)} via(s) of its "
@@ -1472,6 +1481,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # nebula_watch's 14 layer swaps == its 14 "failed" multi-point nets).
         for _via in all_swap_vias:
             _v.setdefault(_via.net_id, []).append(_via)
+        # Swap reuse-connector SEGMENTS ride all_swap_segments the same way
+        # (#508 finding 13): written to the output, in no result's
+        # new_segments -- omitting them severs the swapped stub from its pad
+        # in this gate's model and manufactures phantom disconnects.
+        for _seg in all_swap_segments:
+            _s.setdefault(_seg.net_id, []).append(_seg)
         return _s, _v
 
     def _seg_sig_209(s):
@@ -1621,6 +1636,28 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print(f"Stripping {len(stale_input_vias)} stale input via(s) of "
               f"ripped/re-routed nets not on the final board")
 
+    # #508 finding 3: a COMMITTED tap relocation removed a PRE-EXISTING
+    # plane-net via + stub from pcb_data. Plane nets are deliberately outside
+    # sweep_scope_ids (never in routed_results), so neither strip computation
+    # above can see the removal -- without this merge the writer re-emits the
+    # removed via from the input text, under a net that has since routed
+    # through the vacated pocket: a short in the file only. (The replacement
+    # re-tap via ships via all_swap_vias.)
+    if state.tap_relocation_removed_segments:
+        _known_trs = {id(s) for s in dead_end_input_segments}
+        dead_end_input_segments = list(dead_end_input_segments) + \
+            [s for s in state.tap_relocation_removed_segments
+             if id(s) not in _known_trs]
+    if state.tap_relocation_removed_vias:
+        _known_trv = {id(v) for v in stale_input_vias}
+        stale_input_vias = list(stale_input_vias) + \
+            [v for v in state.tap_relocation_removed_vias
+             if id(v) not in _known_trv]
+    if state.tap_relocation_removed_segments or state.tap_relocation_removed_vias:
+        print(f"Stripping {len(state.tap_relocation_removed_segments)} "
+              f"segment(s) + {len(state.tap_relocation_removed_vias)} via(s) "
+              f"removed by committed tap relocations (#508)")
+
     # Uniform contract, stale-strip edition: the #284 re-emit clause can strip
     # an original that is STILL on the board (a routed twin reproduced its
     # span, so the file keeps only the emitted copy) -- mirror that removal
@@ -1736,6 +1773,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # looks disconnected and ships as a phantom "failed multi-point" entry.
     for _v in all_swap_vias:
         _vias_by_net.setdefault(_v.net_id, []).append(_v)
+    # Swap reuse-connector segments too (#508 finding 13): all_swap_segments
+    # is written to the output but is in no result's new_segments, so
+    # omitting it here severs layer-swapped stubs from their pads in this
+    # sweep's model -- phantom failed_multipoint entries.
+    for _s in all_swap_segments:
+        _segs_by_net.setdefault(_s.net_id, []).append(_s)
     _zones_by_net: Dict[int, list] = {}
     for _z in getattr(pcb_data, 'zones', []) or []:
         _zones_by_net.setdefault(_z.net_id, []).append(_z)

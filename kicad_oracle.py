@@ -911,6 +911,11 @@ def oracle_reconnect(board_file: str, net_names, config,
     remaining = -1
     emitted_segments = []  # parser objects, for callers that apply results
     emitted_vias = []      # to a live board instead of reading the file
+    # Stranded-fragment deletions (#508 findings 4+15): copper deleted from
+    # pcb_data/the file that a live-board caller (planes_gui) must ALSO
+    # delete -- the file strip has no pcbnew equivalent.
+    removed_board_segments = []
+    removed_board_vias = []
     attempted = {}  # (net, endpoints) -> attempt count (graduated retries)
     for rnd in range(max_rounds):
         if cancel_check and cancel_check():
@@ -1466,6 +1471,19 @@ def oracle_reconnect(board_file: str, net_names, config,
                     _dsegs, _dvias = _deleted
                     from kicad_writer import (remove_segments_from_content,
                                               remove_vias_from_content)
+                    # #508 finding 4: the fragment may include copper EMITTED
+                    # EARLIER THIS ROUND, whose sexprs are still pending in
+                    # new_sexprs (spliced into content only at round end) --
+                    # a text removal against `content` cannot see them, so
+                    # the round-end splice would resurrect the deleted
+                    # copper. Flush the pending emissions first so the
+                    # removal below operates on the complete text.
+                    if new_sexprs:
+                        _idx = content.rfind(')')
+                        content = (content[:_idx] + ''.join(new_sexprs)
+                                   + content[_idx:])
+                        new_sexprs = []
+                        content_dirty = True
                     content, _nrs = remove_segments_from_content(
                         content, _dsegs,
                         net_id_to_name={net_id: net_name} if v10 else None)
@@ -1479,6 +1497,16 @@ def oracle_reconnect(board_file: str, net_names, config,
                                             if id(s) not in _ds_ids]
                     pcb_data.vias[:] = [v for v in pcb_data.vias
                                         if id(v) not in _dv_ids]
+                    # Mirror the deletion into the RESULT emit lists too --
+                    # the GUI applies new_segments/new_vias to the live
+                    # board, and a deleted object left there ships copper
+                    # pcb_data no longer has (#508 findings 4+15).
+                    emitted_segments[:] = [s for s in emitted_segments
+                                           if id(s) not in _ds_ids]
+                    emitted_vias[:] = [v for v in emitted_vias
+                                       if id(v) not in _dv_ids]
+                    removed_board_segments.extend(_dsegs)
+                    removed_board_vias.extend(_dvias)
                     content_dirty = True
                     print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
                           f"<->({bx:.2f},{by:.2f})  RESOLVED (deleted "
@@ -1725,6 +1753,16 @@ def oracle_reconnect(board_file: str, net_names, config,
             pcb_data.segments[:] = [s for s in pcb_data.segments
                                     if id(s) not in _ds]
             pcb_data.vias[:] = [v for v in pcb_data.vias if id(v) not in _dv]
+            # #508 finding 15: a deleted fragment can include copper this
+            # oracle run emitted in an earlier round -- the GUI applies the
+            # returned new_segments/new_vias to the live board, so leaving
+            # the deleted objects in the emit lists ships copper pcb_data
+            # (and the file, stripped above) no longer has.
+            emitted_segments[:] = [s for s in emitted_segments
+                                   if id(s) not in _ds]
+            emitted_vias[:] = [v for v in emitted_vias if id(v) not in _dv]
+            removed_board_segments.extend(_dsegs)
+            removed_board_vias.extend(_dvias)
             _stranded_deleted += 1
             print(f"    {_lnet}: link resolved by deleting stranded "
                   f"pad-less fragment ({len(_dsegs)} seg(s), "
@@ -1742,4 +1780,8 @@ def oracle_reconnect(board_file: str, net_names, config,
     return {'available': True, 'rounds': rounds, 'links_routed': routed,
             'links_failed': failed, 'remaining': remaining,
             'cross_board': cross_board,
-            'new_segments': emitted_segments, 'new_vias': emitted_vias}
+            'new_segments': emitted_segments, 'new_vias': emitted_vias,
+            # #508 finding 15: stranded-fragment copper deleted from the
+            # file/pcb_data; a live-board caller must delete it too.
+            'removed_segments': removed_board_segments,
+            'removed_vias': removed_board_vias}

@@ -1363,7 +1363,8 @@ class FanoutTab(wx.Panel):
                     # Shared "Add teardrops" checkbox (#489 section 9).
                     'add_teardrops': shared.get('add_teardrops', False),
                 },
-                optimize_caps=config.get('optimize_caps', False))
+                optimize_caps=config.get('optimize_caps', False),
+                vias_to_remove=vias_to_remove)
 
         except Exception as e:
             import traceback
@@ -1449,7 +1450,7 @@ class FanoutTab(wx.Panel):
 
     def _apply_fanout_results(self, tracks, vias, failed_nets=None,
                               fanout_config=None, fanout_kind='bga',
-                              optimize_caps=False):
+                              optimize_caps=False, vias_to_remove=None):
         """Apply fanout results to the pcbnew board.
 
         Args:
@@ -1463,6 +1464,11 @@ class FanoutTab(wx.Panel):
                 suggestions can reference the user's actual values.
             fanout_kind: 'bga' or 'qfn' - selects which suggestion helper
                 to use when displaying parameter advice.
+            vias_to_remove: optional list of via dicts (x, y, net_id) that
+                manage_vias decided are superseded (a route moved to the
+                top layer no longer needs its via). The CLI writer strips
+                them from the file; the GUI must delete them from the live
+                board too (#508 finding 17 -- they were silently discarded).
         """
         import pcbnew
         from .swig_gui import _build_layer_mappings
@@ -1480,6 +1486,24 @@ class FanoutTab(wx.Panel):
 
         tracks_added = 0
         vias_added = 0
+
+        # Remove superseded existing vias BEFORE the adds (#508 finding 17).
+        if vias_to_remove:
+            _rm_keys = {(round(v['x'], 3), round(v['y'], 3), v.get('net_id'))
+                        for v in vias_to_remove}
+            _n_rm = 0
+            for item in list(board.GetTracks()):
+                if item.Type() != pcbnew.PCB_VIA_T:
+                    continue
+                k = (round(pcbnew.ToMM(item.GetPosition().x), 3),
+                     round(pcbnew.ToMM(item.GetPosition().y), 3),
+                     item.GetNetCode())
+                if k in _rm_keys:
+                    board.RemoveNative(item)
+                    _n_rm += 1
+            if _n_rm:
+                print(f"Removed {_n_rm} superseded fanout via(s) "
+                      f"(top-layer routes, #508)")
 
         # Add tracks
         for track_dict in tracks:

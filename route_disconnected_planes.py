@@ -181,56 +181,11 @@ def _via_site_consensus_blocker(pad, pcb_data, blocker_config, net_id,
 # set KICAD_PLANE_PARTIAL_RESTORE=1 to A/B the old policy on a corpus replay.
 _PLANE_PARTIAL_RESTORE = os.environ.get('KICAD_PLANE_PARTIAL_RESTORE') == '1'
 
-
-def drop_withdrawn_partial_restores(emitted_segs, emitted_vias,
-                                    all_new_segments, all_new_vias, pcb_data):
-    """Drop partial-restore copper the ripped-net reconnect has since withdrawn.
-
-    A partial restore's kept-set is emitted into the write list BEFORE the
-    reconnect runs, and unconditionally -- but the same net is queued as a
-    reconnect casualty, so the reconnect may RE-ROUTE it and delete that copper
-    from pcb_data. The write list still carried it, so the OUTPUT shipped
-    copper present in no in-memory state (#463 spartan6_6layer: /RAM/DDR-LDM's
-    In3.Cu run written after the reconnect moved it to In1.Cu and gave the
-    corridor to /RAM/DDR-D11 -- a 0.220mm collinear overlap, a hard short).
-
-    pcb_data is authoritative once the reconnect and its restore-on-failure
-    custody have run. Pure write-list filter: no routing, no obstacle work, no
-    persistent structures, and indexed on the emitted nets only (a whole-board
-    index would be ~all copper for a handful of lookups).
-
-    Matching is by IDENTITY, not value: an equal-looking dict may be legitimate
-    copper from another pass. `stale_*` holds the references across the filter,
-    so the id() keys cannot be recycled underneath us.
-
-    Mutates all_new_segments/all_new_vias in place; returns
-    (n_segments_dropped, n_vias_dropped, sorted net names).
-    """
-    if not emitted_segs and not emitted_vias:
-        return 0, 0, []
-    pn = ({d['net_id'] for d in emitted_segs}
-          | {d['net_id'] for d in emitted_vias})
-    live_s = {(s.net_id, round(s.start_x, 3), round(s.start_y, 3),
-               round(s.end_x, 3), round(s.end_y, 3), s.layer)
-              for s in pcb_data.segments if s.net_id in pn}
-    live_v = {(v.net_id, round(v.x, 3), round(v.y, 3))
-              for v in pcb_data.vias if v.net_id in pn}
-    stale_s = [d for d in emitted_segs
-               if (d['net_id'], round(d['start'][0], 3), round(d['start'][1], 3),
-                   round(d['end'][0], 3), round(d['end'][1], 3),
-                   d['layer']) not in live_s]
-    stale_v = [d for d in emitted_vias
-               if (d['net_id'], round(d['x'], 3), round(d['y'], 3)) not in live_v]
-    if not stale_s and not stale_v:
-        return 0, 0, []
-    sid = {id(d) for d in stale_s}
-    vid = {id(d) for d in stale_v}
-    all_new_segments[:] = [d for d in all_new_segments if id(d) not in sid]
-    all_new_vias[:] = [d for d in all_new_vias if id(d) not in vid]
-    names = sorted({(pcb_data.nets[d['net_id']].name
-                     if d['net_id'] in pcb_data.nets else str(d['net_id']))
-                    for d in stale_s + stale_v})
-    return len(stale_s), len(stale_v), names
+# Shared with route_planes (#508 finding 1: its GUI reconnect had neither
+# reconcile mechanism). Re-exported here so existing call sites and
+# tests/test_463_partial_restore_stale_emit.py keep driving the REAL function.
+from plane_write_reconcile import (consume_inner_strips,  # noqa: E402,F401
+                                   drop_withdrawn_partial_restores)
 
 
 def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_config,
@@ -790,58 +745,10 @@ def route_planes(
     file_strip_vias: List = []
 
     def _consume_inner_strips(_rd, _label):
-        """Board == write model (#XTAL_O zombie class): an in-memory
-        batch_route's cleanup removes superseded/orphaned copper from
-        pcb_data AND reports it in segments_to_remove/vias_to_remove --
-        dropping that channel ships copper the board no longer has (the
-        write-list still carries it via the partial-restore emissions).
-        Remove matching write-list entries; casualty nets' input-file
-        copper is already wholly excluded by the writer, so coordinate
-        matching over the emissions is the complete consumption."""
-        _rs = _rd.get('segments_to_remove') or []
-        _rv = _rd.get('vias_to_remove') or []
-        if not _rs and not _rv:
-            return
-        # Input copper of NON-excluded nets (#484): removing it from the
-        # write-list is not enough -- the writer re-emits input text, so
-        # these must also go to the writer's per-segment strip channel
-        # (and the GUI strip channel).
-        file_strip_segments.extend(_rs)
-        file_strip_vias.extend(_rv)
-        _skeys = set()
-        for _s in _rs:
-            _a = (round(_s.start_x, 3), round(_s.start_y, 3))
-            _b = (round(_s.end_x, 3), round(_s.end_y, 3))
-            _skeys.add((_a, _b, _s.layer, _s.net_id))
-            _skeys.add((_b, _a, _s.layer, _s.net_id))
-        _vkeys = {(round(_v.x, 3), round(_v.y, 3), _v.net_id) for _v in _rv}
-        _n0 = len(all_new_segments) + len(all_new_vias)
-        if _skeys:
-            all_new_segments[:] = [
-                d for d in all_new_segments
-                if ((round(d['start'][0], 3), round(d['start'][1], 3)),
-                    (round(d['end'][0], 3), round(d['end'][1], 3)),
-                    d['layer'], d['net_id']) not in _skeys]
-        if _vkeys:
-            all_new_vias[:] = [
-                d for d in all_new_vias
-                if (round(d['x'], 3), round(d['y'], 3),
-                    d['net_id']) not in _vkeys]
-        # mirror out of pcb_data too (inner cleanup already removed its own
-        # objects; kept-piece duplicates re-added via partial_restores may
-        # remain)
-        pcb_data.segments[:] = [
-            s for s in pcb_data.segments
-            if ((round(s.start_x, 3), round(s.start_y, 3)),
-                (round(s.end_x, 3), round(s.end_y, 3)),
-                s.layer, s.net_id) not in _skeys]
-        pcb_data.vias[:] = [
-            v for v in pcb_data.vias
-            if (round(v.x, 3), round(v.y, 3), v.net_id) not in _vkeys]
-        _n1 = len(all_new_segments) + len(all_new_vias)
-        if _n0 != _n1:
-            print(f"  {_label}: consumed inner strip channel -- dropped "
-                  f"{_n0 - _n1} superseded write-list piece(s)")
+        # Shared with route_planes' GUI reconnect (#508 finding 1); see
+        # plane_write_reconcile.consume_inner_strips for the full story.
+        consume_inner_strips(_rd, all_new_segments, all_new_vias, pcb_data,
+                             file_strip_segments, file_strip_vias, _label)
 
     all_debug_lines: List[str] = []
     total_routes = 0
@@ -1995,7 +1902,8 @@ def route_planes(
             progress_callback(0, 0, "Cleaning up repair copper (graze prune/nudge)...")
         from pcb_modification import cleanup_plane_taps_grazing
         _scope = {s['net_id'] for s in all_new_segments}
-        all_new_segments, _gz_rm, _gz_nudge, _gz_swept = cleanup_plane_taps_grazing(
+        (all_new_segments, _gz_rm, _gz_nudge, _gz_swept,
+         _gz_input_strips) = cleanup_plane_taps_grazing(
             pcb_data, all_new_segments, _scope, clearance=clearance,
             max_shift=config.grid_step / 2, all_new_vias=all_new_vias,
             hole_to_hole=config.hole_to_hole_clearance,
@@ -2006,6 +1914,12 @@ def route_planes(
             print(f"  Graze nudge: re-bent grazing tap jog(s) on {_gz_nudge} net(s)")
         if _gz_swept:
             print(f"  Dead-end sweep: trimmed {_gz_swept} orphaned repair segment(s)")
+        # #508 finding 2: INPUT copper the passes deleted from pcb_data must
+        # reach the writer/GUI strip channel or the output re-emits it.
+        if _gz_input_strips:
+            file_strip_segments.extend(_gz_input_strips)
+            print(f"  Graze/sweep passes removed {len(_gz_input_strips)} "
+                  f"input-board segment(s); forwarded to the strip channel")
 
     # Issue #293: re-verify the signal nets that were connected when we started.
     # Ripped nets are excluded (they are honestly reported + stripped for a
@@ -2161,7 +2075,22 @@ def route_planes(
             all_new_segments[:] = _kept_dicts
             _strip_segments = list(
                 {id(_s): _s for _s in _stripped.values()}.values())
-            _strip_segments += list(getattr(_out, 'input_strip_vias', []) or [])
+            # #508 finding 16: mirror the segment reconcile for VIAS. A
+            # stripped via matching an emission dict must DROP that dict
+            # (the applier deletes before it adds, so the strip would no-op
+            # and the withdrawn via would ship anyway); only strips of
+            # genuine input-board vias go to the GUI strip channel.
+            _vstripped = {}
+            for _v in (getattr(_out, 'input_strip_vias', []) or []):
+                _vstripped[(round(_v.x, 3), round(_v.y, 3), _v.net_id)] = _v
+            _kept_vdicts = []
+            for _d in all_new_vias:
+                _hit = _vstripped.pop(
+                    (round(_d['x'], 3), round(_d['y'], 3), _d['net_id']), None)
+                if _hit is None:
+                    _kept_vdicts.append(_d)
+            all_new_vias[:] = _kept_vdicts
+            _strip_segments += list(_vstripped.values())
             _strip_segments += file_strip_segments + file_strip_vias
         except Exception as _e:
             print(f"{RED}  in-memory plane cleanup failed: {_e}{RESET}")
@@ -2189,6 +2118,18 @@ def route_planes(
                       add_teardrops=add_teardrops)
         print(f"Output written to {output_file}")
         print("Note: Open in KiCad and press 'B' to refill zones")
+
+        # Board-vs-file ledger (KICAD_BOARD_LEDGER=1, #508): the written file
+        # must match pcb_data for every net this run touched -- this engine
+        # had NO ledger call and both #463 and the #508 findings sat on
+        # unledgered paths. No-op unless the env var is set.
+        from cleanup_pipeline import verify_written_file_parity
+        _ledger_scope = sorted(set(net_ids)
+                               | set(ripped_net_ids) | set(partial_ids)
+                               | {d['net_id'] for d in all_new_segments}
+                               | {d['net_id'] for d in all_new_vias})
+        verify_written_file_parity(output_file, pcb_data, _ledger_scope,
+                                   label=' planes-repair')
     else:
         print("\nNo routes added - copying input to output unchanged")
         with open(input_file, 'r', encoding='utf-8') as f:

@@ -261,7 +261,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             with open(os.environ['KICAD_DUMP_BATCH_KWARGS'], 'w') as _f:
                 _json.dump(_dump, _f, indent=1, sort_keys=True)
             if return_results:
-                return 0, 0, 0.0, {'results': [], 'segments_to_remove': []}
+                return 0, 0, 0.0, {'results': [], 'segments_to_remove': [],
+                                   'vias_to_remove': []}
             return 0, 0, 0.0
 
     # Board-setup copper-to-edge rule (#338): route to at least the sibling
@@ -671,9 +672,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             bare_pad_swaps=bare_pad_swaps
         )
 
-    # Add stub swap vias to pcb_data so routing and length matching see them as obstacles
-    for via in all_swap_vias:
-        pcb_data.vias.append(via)
+    # NOTE (#508 finding 10): apply_stub_layer_switch already appends each
+    # swap via to pcb_data.vias itself -- the re-append loop route.py removed
+    # (see its note at the apply_single_ended_layer_swaps call) survived here,
+    # putting every pad swap via on the board TWICE (double obstacle stamp,
+    # and the board carried one more via than the written file).
 
     # Skip (and loudly list) nets with <2 pads -- unroutable; do it before ordering.
     net_ids = filter_routable_nets(pcb_data, net_ids)
@@ -1177,6 +1180,12 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         label='Diff-pair ', snap=False, phantom=False, neck=False,
         keep_input_copper=keep_input_copper)
     cleanup_input_strip = _dp_cleanup.input_strip_segments
+    # #508 finding 11: the pipeline's removed input VIAS were dropped on the
+    # floor here -- the orphan-island sweep deletes them from pcb_data, but
+    # neither the writer nor the GUI ever heard, so the output kept via
+    # barrels the router had withdrawn (firing: cm4_underwater step4_diff).
+    cleanup_input_strip_vias = list(
+        getattr(_dp_cleanup, 'input_strip_vias', None) or [])
 
     # Build summary data
     import json
@@ -1305,6 +1314,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             # without this key the GUI kept them on the live board (parity gap
             # found in the #319 restructure audit).
             'segments_to_remove': cleanup_input_strip,
+            # #508 finding 11: removed input vias, same contract as
+            # segments_to_remove (route.py parity; differential_gui applies).
+            'vias_to_remove': cleanup_input_strip_vias,
             # successful/failed only count pairs that were coupled-routed or
             # outright failed -- electrically-short pairs deferred to the
             # single-ended pass, and pairs skipped for self-overlapping fanout,
@@ -1335,7 +1347,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             boundary_debug_labels=boundary_debug_labels,
             skip_routing=skip_routing,
             add_teardrops=add_teardrops,
-            segments_to_remove=cleanup_input_strip or None
+            segments_to_remove=cleanup_input_strip or None,
+            vias_to_remove=cleanup_input_strip_vias or None
         )
         # When no coupled copper was written -- every pair was deferred to
         # single-ended (electrically short), OR a pair could not be routed at all
@@ -1344,6 +1357,14 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         # unrouted nets are picked up by the downstream single-ended route.py pass
         # (the chains route '*' from the diff step's output); without this the
         # whole chain FileNotFoundErrors on the missing board (issues #90, #167).
+        if wrote and output_file:
+            # Board-vs-file ledger (KICAD_BOARD_LEDGER=1, #508): the written
+            # file must match pcb_data for every routed pair's nets -- this
+            # engine had NO ledger call (findings 10/11 sat here). No-op
+            # unless the env var is set.
+            from cleanup_pipeline import verify_written_file_parity
+            verify_written_file_parity(output_file, pcb_data, sorted(dp_scope),
+                                       label=' diff')
         if not wrote and output_file:
             from pcb_io_utils import passthrough_copy
             passthrough_copy(input_file, output_file)

@@ -157,11 +157,14 @@ def relocate_tap(pcb_data: PCBData, config: GridRouteConfig,
 
 def retap_pad(pcb_data: PCBData, config: GridRouteConfig,
               working_obstacles, net_obstacles_cache: dict,
-              token: dict, coord=None, layer_names=None) -> bool:
+              token: dict, coord=None, layer_names=None):
     """Place a replacement tap via in/at the detached pad (the ae2069
     plane-tap machinery via _place_shrunk_via_in_pad). Success mutates
     pcb_data + swaps the net's cache entry (the balanced pattern) and
-    returns True; a token with no pad (stitching via) is vacuously True."""
+    returns the placed Via -- the caller MUST forward it to a write channel
+    (#508 finding 3: pcb_data alone never reaches the output; the re-tap the
+    conditional commit depends on would not ship). A token with no pad
+    (stitching via) is vacuously True; failure returns False."""
     pad = token.get('pad')
     if pad is None:
         return True
@@ -192,7 +195,7 @@ def retap_pad(pcb_data: PCBData, config: GridRouteConfig,
         pcb_data.vias.append(new_via)
     print(f"  TAP RELOCATION: re-tapped {pad.component_ref}.{pad.pad_number} "
           f"with a fresh via at ({new_via.x:.2f}, {new_via.y:.2f})")
-    return True
+    return new_via
 
 
 def restore_tap(pcb_data: PCBData, working_obstacles,
