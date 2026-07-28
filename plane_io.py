@@ -13,7 +13,8 @@ from kicad_parser import PCBData, parse_kicad_pcb, _unescape_kicad_string
 from kicad_writer import (generate_via_sexpr, generate_segment_sexpr, move_copper_text_to_silkscreen,
                           move_copper_graphics_to_silkscreen, add_teardrops_to_pads,
                           add_teardrops_to_vias,
-                          prevailing_via_protection_in_text as _prevailing_via_protection_in_text)
+                          prevailing_via_protection_in_text as _prevailing_via_protection_in_text,
+    strip_zero_length_edge_cuts)
 # E3: the one guarded squared-distance kernel (length_sq < 1e-10 degenerate guard).
 from geometry_utils import point_to_segment_dist_sq as _pt_seg_dist_sq
 
@@ -432,6 +433,7 @@ def write_plane_output(
     # Move text from copper layers to silkscreen (prevents routing interference)
     content = move_copper_text_to_silkscreen(content)
     content = move_copper_graphics_to_silkscreen(content)
+    content = strip_zero_length_edge_cuts(content)
 
     # Add teardrops to all pads if requested. Pads are never ADDED by a routing
     # run, so this can run on the input text; the VIA pass has to wait until this

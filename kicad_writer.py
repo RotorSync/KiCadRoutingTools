@@ -104,6 +104,71 @@ _COPPER_GRAPHIC_TAGS = (
 )
 
 
+def strip_zero_length_edge_cuts(content: str) -> str:
+    """Drop null-length Edge.Cuts primitives from board content.
+
+    A segment whose start equals its end draws nothing and mills nothing, but
+    KiCad treats it as a MALFORMED OUTLINE: it reports one `invalid_outline`
+    violation per occurrence ("segment has null or very small length: 0 nm") and
+    then grinds. Measured on the pinci corpus board, which carries 335 of them
+    (12 board-level, 323 inside footprints):
+
+        kicad-cli pcb drc, as-is                    656 s
+        kicad-cli pcb drc, --refill-zones           543 s
+        kicad-cli pcb drc, these primitives removed 2.7 s      (~280x)
+
+    with the real findings unchanged -- the 199 phantom invalid_outline vanish
+    and every other violation is byte-identical (shorting_items 8->8,
+    solder_mask_bridge 16->16, unconnected 101->101).
+
+    Applied on WRITE, beside move_copper_*_to_silkscreen, because our writers
+    copy the input file's text: without this, garbage in the user's source
+    passes straight through into the routed board we hand back, and THEIR KiCad
+    DRC pays the same cost. The read side already tolerates these (see the
+    degenerate-line guard in kicad_parser._extract_board_contours), so this is
+    purely about not propagating them.
+
+    Deliberately ONLY the zero-length class. Repairing genuinely OPEN outlines
+    (bridging gaps, culling fragments) is a real geometry change that made DRC
+    worse on both corpus boards that needed it, and stays opt-in in
+    tests/stress/fix_outline_gaps.py.
+    """
+    removed = 0
+    out = []
+    i = 0
+    for m in re.finditer(r'\((gr_line|fp_line)\b', content):
+        if m.start() < i:
+            continue
+        s0 = m.start()
+        depth = 0
+        end = None
+        for j in range(s0, min(s0 + 4000, len(content))):
+            if content[j] == '(':
+                depth += 1
+            elif content[j] == ')':
+                depth -= 1
+                if depth == 0:
+                    end = j + 1
+                    break
+        if end is None:
+            continue
+        blk = content[s0:end]
+        if '"Edge.Cuts"' in blk:
+            a = re.search(r'\(start ([-\d.]+) ([-\d.]+)\)', blk)
+            b = re.search(r'\(end ([-\d.]+) ([-\d.]+)\)', blk)
+            if a and b and float(a.group(1)) == float(b.group(1)) \
+                    and float(a.group(2)) == float(b.group(2)):
+                out.append(content[i:s0])
+                i = end
+                removed += 1
+    if not removed:
+        return content
+    out.append(content[i:])
+    print(f"Dropped {removed} zero-length Edge.Cuts primitive(s) "
+          f"(KiCad grades these as invalid_outline and slows to a crawl)")
+    return ''.join(out)
+
+
 def move_copper_graphics_to_silkscreen(content: str) -> str:
     """Move graphic primitives (logos / artwork drawn as polys, lines, arcs, ...)
     from copper layers to silkscreen, mirroring move_copper_text_to_silkscreen:
@@ -741,6 +806,7 @@ def add_tracks_to_pcb(input_path: str, output_path: str, tracks: List[Dict],
     # Move copper logos/artwork to silkscreen too (net-less copper graphics would
     # otherwise short against routed/poured copper).
     content = move_copper_graphics_to_silkscreen(content)
+    content = strip_zero_length_edge_cuts(content)
 
     # Generate segment S-expressions
     segments = []
@@ -824,6 +890,7 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
     # Move copper logos/artwork to silkscreen too (net-less copper graphics would
     # otherwise short against routed/poured copper).
     content = move_copper_graphics_to_silkscreen(content)
+    content = strip_zero_length_edge_cuts(content)
 
     # Remove existing vias if specified
     if remove_vias:
