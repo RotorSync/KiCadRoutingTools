@@ -2,8 +2,12 @@
 netclass (CLI parity), or fall back to defaults.TRACK_WIDTH like the shim?"""
 import os, sys
 os.environ.setdefault('WXSUPPRESS_SIZER_FLAGS_CHECK', '1')
-# Resolve the repo from THIS file, not a hardcoded path: a git worktree has its
-# own checkout, and an absolute path silently probed the main one instead.
+# Repo root from THIS file's location (tests/gui_parity/ -> repo), never a
+# hardcoded home dir -- the sibling gates all derive it this way, and an
+# absolute path silently probed the MAIN checkout from inside a worktree.
+# (Both branches fixed this independently; same derivation.) This branch also
+# puts the gate's own directory on sys.path for `fake_ipc_board`, and imports no
+# pcbnew -- the IPC plugin reaches the board over kipy instead.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 R = os.path.dirname(os.path.dirname(_HERE))
 sys.path.insert(0, R); sys.path.insert(0, _HERE)

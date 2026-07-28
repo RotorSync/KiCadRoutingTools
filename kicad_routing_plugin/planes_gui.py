@@ -1053,6 +1053,11 @@ class PlanesTab(wx.Panel):
                 max_via_reuse_radius=config.get('max_via_reuse_radius', defaults.PLANE_MAX_VIA_REUSE_RADIUS),
                 close_via_radius=config.get('close_via_radius'),
                 hole_to_hole_clearance=config.get('hole_to_hole_clearance', defaults.HOLE_TO_HOLE_CLEARANCE),
+                # #424: route_planes.py passes --ripup-blocker-select to
+                # create_plane; the shared Basic-tab dropdown reaches the plane
+                # engine here (supplied by the planes get_shared_params).
+                ripup_blocker_select=config.get('ripup_blocker_select',
+                                                defaults.RIPUP_BLOCKER_SELECT),
                 # #381 D6: per-layer cost bias from the shared Basic-tab control
                 # (route_planes.py passes --layer-costs); None -> engine default.
                 layer_costs=config.get('layer_costs') or None,

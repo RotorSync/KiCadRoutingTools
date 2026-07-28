@@ -248,6 +248,17 @@ def main():
         workdir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                'work')
     workdir = os.path.abspath(workdir)
+    # PURGE the workdir first. Both legs route to FIXED output names in here, and
+    # route*.py reads back a sibling <output>.kicad_pro DRC floor written by the
+    # PREVIOUS run -- so re-running into a dirty workdir silently re-routes at a
+    # different floor and the gate reports a copper divergence that is pure
+    # carry-over, not a regression. Measured: first run on a clean dir gives
+    # IDENTICAL copper sets (1307/1307 segs, 144/144 vias); the 2nd and 3rd runs
+    # in the SAME dir reported 3 then 624/644 divergent segments with NO code
+    # change, reproducibly. That false failure is exactly the phantom a parity
+    # gate must never manufacture (see CLAUDE.md: fresh output path per run).
+    if os.path.isdir(workdir):
+        shutil.rmtree(workdir)
     os.makedirs(workdir, exist_ok=True)
 
     cli_final = run_cli_leg(board, workdir)

@@ -1817,6 +1817,12 @@ class RoutingDialog(wx.Dialog):
                 # for the create path, but nothing ever supplied it, so the
                 # checkbox was dead here. Both plane modes get it now.
                 'add_teardrops': self.add_teardrops_check.GetValue(),
+                # #424: route_planes.py passes --ripup-blocker-select to
+                # create_plane; the shared Basic-tab dropdown must reach the plane
+                # engine too or a non-default blocker strategy applies to signal
+                # routing only, and plane rip-up silently keeps 'count'.
+                'ripup_blocker_select': self.ripup_blocker_select.GetString(
+                    self.ripup_blocker_select.GetSelection()),
             }
 
         def get_claude_params():
@@ -1907,6 +1913,20 @@ class RoutingDialog(wx.Dialog):
                 'fix_drc_settings': self.fix_drc_check.GetValue(),
                 'keep_thermal': self.keep_thermal_check.GetValue(),
                 'clamp_netclasses': self.clearance_check.GetValue(),
+                # #486: the shared Coplanar Gap control must reach the DIFF engine
+                # too. route_diff.py passes --coplanar-gap to batch_route_diff_pairs;
+                # without this key the diff tab's coplanar_gap read falls back to
+                # 0.0 forever, so coupled pairs silently route as microstrip (a
+                # WIDER trace than CPW-over-ground for the same ohms) and miss the
+                # impedance target. NOTE route_diff has no --coplanar-nets -- that
+                # allowlist is route.py-only -- so only the gap belongs here.
+                'coplanar_gap': self.coplanar_gap.GetValue(),
+                # #489 section 9: the ONE shared "Add teardrops" checkbox. The
+                # planes/fanout tabs get it via get_shared_params(); the Differential
+                # tab reads this dict instead, so without the key its teardrop pass
+                # was dead and GUI diff routing never matched route_diff
+                # --add-teardrops.
+                'add_teardrops': self.add_teardrops_check.GetValue(),
             }
 
         def sync_pcb_data():

@@ -966,6 +966,11 @@ class DifferentialTab(wx.Panel):
                 # control is honoured for single-ended routing but silently
                 # dropped for diff pairs, shipping every coupled pair too wide.
                 coplanar_gap=config.get('coplanar_gap', 0.0),
+                # #424: route_diff.py passes --ripup-blocker-select here; without
+                # it a non-default blocker strategy applied to single-ended
+                # routing only and diff-pair rip-up silently stayed on 'count'.
+                ripup_blocker_select=config.get('ripup_blocker_select',
+                                                defaults.RIPUP_BLOCKER_SELECT),
                 clearance=config.get('clearance', 0.1),
                 via_size=config.get('via_size', 0.3),
                 via_drill=config.get('via_drill', 0.2),

@@ -5,6 +5,7 @@ The Claude tab's Load button accepts the output, so a recorded stress chain
 can be replayed through the GUI plan executor without any LLM run:
 
     python3 tests/stress/manifest_to_plan.py runs_set1/<board>/redo_commands.sh plan.json
+    python3 tests/stress/manifest_to_plan.py runs_set1/<board>/redo_commands.sh -o plan.json
 
 Maps each routing command to a plan step (action + nets/pairs/assignments +
 params). Since the GUI accepts ANY snake_case option name in params, every
@@ -364,10 +365,37 @@ def plan_steps_from_manifest(manifest, keep_files=False):
 
 
 def main():
-    if len(sys.argv) < 3:
+    # Output is POSITIONAL, but `-o/--output` is accepted too: the -o form is the
+    # reflex for a tool like this, and the old raw-argv parse silently took the
+    # literal string '-o' AS the output path -- writing a plan to a file named
+    # `-o` in the cwd while the real target kept its stale contents. That looks
+    # exactly like "the converter is broken" until you check the file's mtime.
+    argv, positional, out = sys.argv[1:], [], None
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ('-h', '--help'):
+            print(__doc__)
+            return 0
+        if a in ('-o', '--output'):
+            if i + 1 >= len(argv):
+                print("error: -o/--output needs a path")
+                return 2
+            out, i = argv[i + 1], i + 2
+            continue
+        positional.append(a)
+        i += 1
+    manifest = positional[0] if positional else None
+    if out is None and len(positional) > 1:
+        out = positional[1]
+    if not manifest or not out:
         print(__doc__)
         return 2
-    manifest, out = sys.argv[1], sys.argv[2]
+    if out.startswith('-'):
+        # Belt and braces: never write to something that looks like a flag.
+        print(f"error: refusing to write the plan to {out!r} -- that looks like a "
+              f"flag, not a path. Use: manifest_to_plan.py <manifest> <plan.json>")
+        return 2
     steps, skipped = plan_steps_from_manifest(manifest)
     with open(out, 'w', encoding='utf-8') as f:
         json.dump({'steps': steps}, f, indent=2)
