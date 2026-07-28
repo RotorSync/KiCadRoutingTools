@@ -52,7 +52,12 @@ _REPO = os.path.dirname(os.path.dirname(_HERE))
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
-from kicad_parser import parse_kicad_pcb  # noqa: E402
+from kicad_parser import parse_kicad_pcb, KICAD_10_MIN_VERSION  # noqa: E402
+
+
+# id(kipy Zone) -> the arguments make_zone was called with. Module level so a
+# board created before install() still resolves zones built after it.
+_ZONE_SRC = {}
 
 
 def _net_obj(name):
@@ -95,6 +100,29 @@ class _FakeFootprint:
         self.reference = reference
         self.position = Vector2.from_xy_mm(x_mm, y_mm)
         self.orientation = _Deg(rotation_deg or 0.0)
+
+
+class _FakeZone:
+    """Zone stand-in shaped for existing_zone_keys().
+
+    That helper reads `.net.name` and `.layers` -- PLURAL, a list of BoardLayer
+    enums it puts through layer_name_for(). Exposing a single `.layer` string
+    made every re-run miss the dedupe and stack a second pour on the same
+    net+layer.
+    """
+
+    def __init__(self, net_name, layer_name):
+        from kicad_ipc_adapter import layer_maps
+        self.net = _NamedNet(net_name)
+        self.layer = layer_name
+        name_to_bl, _ = layer_maps()
+        bl = name_to_bl.get(layer_name)
+        self.layers = [bl] if bl is not None else []
+
+
+class _NamedNet:
+    def __init__(self, name):
+        self.name = name or ""
 
 
 class _Deg:
@@ -157,6 +185,10 @@ class FakeIpcBoard:
             _FakeFootprint(ref, fp.x, fp.y, fp.rotation)
             for ref, fp in self.pcb_data.footprints.items()
         ]
+        self._zones = [
+            _FakeZone(self._name_of.get(z.net_id, ''), z.layer)
+            for z in self.pcb_data.zones
+        ]
 
         # Pending, flushed on push_commit.
         self._added, self._removed, self._updated = [], [], []
@@ -192,7 +224,13 @@ class FakeIpcBoard:
         return []
 
     def get_zones(self):
-        return []
+        """Zone stand-ins carrying net + layer.
+
+        existing_zone_keys() reads exactly those two fields to skip duplicate
+        zone creation when the plane builder runs twice. Returning [] made every
+        re-run look like a fresh board.
+        """
+        return list(self._zones)
 
     def get_shapes(self):
         return []
@@ -263,6 +301,7 @@ class FakeIpcBoard:
     def push_commit(self, _handle, _message=""):
         """Flush the batch to the .kicad_pcb, then re-read it."""
         from plane_io import write_plane_output
+        from kicad_writer import generate_zone_sexpr
         from kicad_ipc_adapter import _vec_xy_mm, layer_name_for
 
         def _name(item):
@@ -299,6 +338,27 @@ class FakeIpcBoard:
                    if id(it) in self._src and hasattr(self._src[id(it)], 'start_x')]
         rm_vias = [self._src[id(it)] for it in self._removed
                    if id(it) in self._src and hasattr(self._src[id(it)], 'x')]
+
+        # Zones. A kipy Zone carries none of the fields the text writer needs in
+        # a shape we could read back reliably, so install() wraps make_zone and
+        # records the SOURCE arguments -- lossless, and it cannot drift from what
+        # the plugin actually asked for. Dropping these was worth 257 phantom
+        # "gui-only" segments: with no pour on the board, the next step's plane
+        # REPAIR reconnected the regions with tracks instead.
+        for it in self._added:
+            zd = _ZONE_SRC.get(id(it))
+            if zd is None:
+                continue
+            self._zone_sexprs.append(generate_zone_sexpr(
+                net_id=_nid(zd['net_name']),
+                net_name=zd['net_name'],
+                layer=zd['layer'],
+                polygon_points=zd['polygon_mm'],
+                clearance=zd['clearance_mm'],
+                min_thickness=zd['min_thickness_mm'],
+                direct_connect=True,
+                use_net_name=self.pcb_data.kicad_version >= KICAD_10_MIN_VERSION,
+            ))
 
         zone_sexpr = '\n'.join(self._zone_sexprs) if self._zone_sexprs else None
         ok = write_plane_output(
@@ -348,6 +408,25 @@ def install(board_path):
     import kicad_parser
 
     board = FakeIpcBoard(board_path)
+
+    # Record what each kipy Zone was BUILT from. Reading a protobuf-backed Zone
+    # back (outline nodes, layer enum, net, clearance) is fiddly and version
+    # dependent; capturing the call arguments is exact and cannot drift.
+    _real_make_zone = adapter.make_zone
+
+    def _make_zone(net_map, polygon_mm, layer_name, net_name=None,
+                   clearance_mm=0.2, min_thickness_mm=0.1, **kw):
+        z = _real_make_zone(net_map, polygon_mm, layer_name, net_name=net_name,
+                            clearance_mm=clearance_mm,
+                            min_thickness_mm=min_thickness_mm, **kw)
+        _ZONE_SRC[id(z)] = {
+            'polygon_mm': list(polygon_mm), 'layer': layer_name,
+            'net_name': net_name or '', 'clearance_mm': clearance_mm,
+            'min_thickness_mm': min_thickness_mm,
+        }
+        return z
+
+    adapter.make_zone = _make_zone
 
     adapter.get_board = lambda *a, **k: board
     adapter.connect = lambda *a, **k: None
