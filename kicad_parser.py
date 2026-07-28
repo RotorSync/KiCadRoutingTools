@@ -3287,14 +3287,12 @@ def _kipy_pad_polygon_points(pwh):
     outline = getattr(pwh, "outline", None)
     if outline is None:
         return None
-    pts = []
-    for node in getattr(outline, "nodes", None) or []:
-        try:
-            if getattr(node, "has_point", True):
-                p = node.point
-                pts.append((float(p.x_mm), float(p.y_mm)))
-        except Exception:
-            continue
+    # _polyline_points_mm, not a bare p.x_mm: kipy 0.7.1's Vector2 exposes only
+    # integer-nm .x/.y, so the direct read raised AttributeError for EVERY node
+    # and the `except: continue` swallowed it -- the outline came back empty and
+    # the custom pad silently fell back to its bounding box (#188 copper
+    # fidelity lost with no error). That helper probes both spellings.
+    pts = _polyline_points_mm(outline)
     if len(pts) < 3:
         return None
     return [pts]

@@ -1479,6 +1479,11 @@ class FanoutTab(wx.Panel):
                 # Matched by position AND net, like the adapter's other strips.
                 if vias_to_remove:
                     from routing_utils import pos_key
+                    # _vec_xy_mm, NOT position.x_mm: kipy 0.7.1's Vector2 exposes
+                    # only integer-nm .x/.y, so a bare .x_mm raises AttributeError
+                    # and (inside this commit's try) would abort the whole fanout
+                    # apply. The adapter's reader tolerates both spellings.
+                    from kicad_ipc_adapter import _vec_xy_mm
                     _rm_keys = {(pos_key(v['x'], v['y']),
                                  name_for(v.get('net_id')) or '')
                                 for v in vias_to_remove}
@@ -1486,7 +1491,7 @@ class FanoutTab(wx.Panel):
                     for _vv in board.get_vias():
                         _vname = ((getattr(_vv.net, "name", "") or "")
                                   if _vv.net is not None else "")
-                        _vx, _vy = _vv.position.x_mm, _vv.position.y_mm
+                        _vx, _vy = _vec_xy_mm(_vv.position)
                         if (pos_key(_vx, _vy), _vname) in _rm_keys:
                             commit.remove(_vv)
                             _n_rm += 1
