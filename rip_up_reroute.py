@@ -6,6 +6,8 @@ as well as restoring them when needed (e.g., when a rip-up retry fails).
 """
 from __future__ import annotations
 
+import os
+
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from kicad_parser import PCBData
@@ -17,6 +19,9 @@ from obstacle_costs import compute_track_proximity_for_net, compute_ripped_route
 from obstacle_cache import (
     precompute_net_obstacles, add_net_obstacles_from_cache, remove_net_obstacles_from_cache
 )
+
+# Debug knob, read ONCE: no per-rip environ lookup when it is off.
+_RIP_CALLER_DEBUG = os.environ.get('KICAD_RIP_CALLER') == '1'
 
 if TYPE_CHECKING:
     import numpy as np
@@ -34,8 +39,21 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
                net_obstacles_cache: Dict[int, 'NetObstacleData'] = None,
                ripped_route_layer_costs: Dict[int, 'np.ndarray'] = None,
                ripped_route_via_positions: Dict[int, List[Tuple[int, int]]] = None,
-               layer_map: Dict[str, int] = None) -> Tuple[Optional[dict], List[int], bool]:
+               layer_map: Dict[str, int] = None,
+               only_segments: Optional[List] = None) -> Tuple[Optional[dict], List[int], bool]:
     """Rip up a routed net (or diff pair), removing it from pcb_data and tracking structures.
+
+    #510 PARTIAL (leg-level) RIP: pass `only_segments` to remove just those
+    segments -- the branch that actually blocks the route -- instead of the whole
+    net. `only_segments=None` (the default) is the historic whole-net behaviour,
+    bit-for-bit, so this is a strict superset and the default path is unchanged.
+
+    A partial rip deliberately does NOT drop the net's surviving copper: it stays
+    on the board and in the write-list, and the net is re-queued so the
+    multipoint router reconnects the orphaned component (route_multipoint_main
+    derives pad_components from existing copper, so it routes only the missing
+    edge). The saved record covers exactly the removed segments, so a restore
+    puts back that branch and nothing else.
 
     Args:
         net_id: The net ID to rip up
@@ -62,8 +80,101 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
     """
     if net_id not in routed_results:
         return None, [], False
+    if _RIP_CALLER_DEBUG:
+        # KICAD_RIP_CALLER=1: attribute each rip to its CALLING FUNCTION, split
+        # into the two kinds that behave completely differently:
+        #   BLOCKER  -- "net X is in my way, tear it out" (what #510 targets)
+        #   own-tree -- seam_reask_one_net re-asking a net's OWN tree wholesale
+        #               (#444); whole-net is correct there by design.
+        # Traces record `rip` events with net/net_name/del_s but NOT the call
+        # site, so every rip looks alike from the trace. That cost real time on
+        # #510: lora_v3 shows 12 rips and reads like an ideal test board, but 11
+        # are own-tree re-asks and only ONE is a blocker rip. Anything reasoning
+        # about "how often does the router rip" from traces alone repeats it.
+        import traceback as _tb
+        _fr = _tb.extract_stack()[-2]
+        _kind = 'own-tree' if _fr.name == 'seam_reask_one_net' else 'BLOCKER'
+        print(f"      [rip-caller] {_kind} {_fr.filename.split('/')[-1]}::{_fr.name}",
+              flush=True)
 
     saved_result = routed_results[net_id]
+
+    # ---- #510 partial (leg-level) rip -------------------------------------
+    # Remove ONLY the blocking branch. The net keeps its other legs, stays in the
+    # write-list, and is re-queued so the multipoint router reconnects the
+    # orphaned component. Returns early: none of the whole-net teardown below
+    # (dropping routed_results / paths / caches for the entire net) applies.
+    if only_segments:
+        _keep_ids = {id(s) for s in only_segments}
+        _live = [s for s in pcb_data.segments
+                 if s.net_id == net_id and id(s) in _keep_ids]
+        if not _live:
+            return None, [], False
+        # Vias that ONLY this branch uses (an endpoint of a removed segment and
+        # of nothing that survives) go with it; a via still serving surviving
+        # copper must stay, or the rest of the net is severed at the layer change.
+        _rm_pts = {(round(s.start_x, 4), round(s.start_y, 4)) for s in _live} | \
+                  {(round(s.end_x, 4), round(s.end_y, 4)) for s in _live}
+        _survivor_pts = set()
+        for s in pcb_data.segments:
+            if s.net_id != net_id or id(s) in _keep_ids:
+                continue
+            _survivor_pts.add((round(s.start_x, 4), round(s.start_y, 4)))
+            _survivor_pts.add((round(s.end_x, 4), round(s.end_y, 4)))
+        _live_vias = [v for v in pcb_data.vias
+                      if v.net_id == net_id
+                      and (round(v.x, 4), round(v.y, 4)) in _rm_pts
+                      and (round(v.x, 4), round(v.y, 4)) not in _survivor_pts]
+
+        partial = {'new_segments': _live, 'new_vias': _live_vias,
+                   'partial_leg_rip': True, 'net_id': net_id}
+        remove_route_from_pcb_data(pcb_data, partial)
+        # Keep the owning result in the write-list but shrink it to what remains,
+        # or the removed copper ships anyway (#369 A2 / #508 write-list class).
+        for _key, _removed in (('new_segments', _keep_ids),
+                               ('new_vias', {id(v) for v in _live_vias})):
+            if isinstance(saved_result.get(_key), list):
+                saved_result[_key] = [o for o in saved_result[_key]
+                                      if id(o) not in _removed]
+        for _leg in (saved_result.get('leg_results') or []):
+            for _key, _removed in (('new_segments', _keep_ids),
+                                   ('new_vias', {id(v) for v in _live_vias})):
+                if isinstance(_leg.get(_key), list):
+                    _leg[_key] = [o for o in _leg[_key] if id(o) not in _removed]
+        # Re-queue the net: its surviving copper makes it a partially-routed net,
+        # which route_multipoint_main handles natively via pad_components.
+        if net_id in routed_net_ids:
+            routed_net_ids.remove(net_id)
+        routed_net_paths.pop(net_id, None)
+        routed_results.pop(net_id, None)
+        if track_proximity_cache is not None:
+            track_proximity_cache.pop(net_id, None)
+        if net_id not in remaining_net_ids:
+            remaining_net_ids.append(net_id)
+        # Obstacle map: remove the STALE whole-net entry, then RECOMPUTE from
+        # what is still on the board and add it back -- the same remove/
+        # recompute/add cycle the whole-net path uses. Dropping the entry
+        # instead would leave the SURVIVING copper unrepresented in the working
+        # map (under-blocking -> the router lays a foreign track over live
+        # copper -> a short), and would also break the #309 ref-count balance
+        # invariant `working == base + sum(caches)` that
+        # tests/test_obstacle_map_balance.py asserts under rip churn.
+        if working_obstacles is not None and net_obstacles_cache is not None:
+            if net_id in net_obstacles_cache:
+                remove_net_obstacles_from_cache(working_obstacles, net_obstacles_cache[net_id])
+            net_obstacles_cache[net_id] = precompute_net_obstacles(pcb_data, net_id, config)
+            add_net_obstacles_from_cache(working_obstacles, net_obstacles_cache[net_id])
+        # Ripped-route avoidance: steer the retry away from the branch we freed,
+        # exactly as the whole-net path does for the copper it removed.
+        if config.ripped_route_avoidance_cost > 0 and ripped_route_layer_costs is not None \
+                and layer_map is not None:
+            _lc, _vp = compute_ripped_route_costs(partial, config, layer_map)
+            ripped_route_layer_costs[net_id] = _lc
+            if ripped_route_via_positions is not None:
+                ripped_route_via_positions[net_id] = _vp
+        partial['_owner_result'] = saved_result
+        return partial, [net_id], False
+
     ripped_net_ids = []
     # #369 A2: a multi-leg multipoint diff pair registers a MERGED dict in
     # routed_results while the write-list carries its per-LEG dicts -- the
@@ -292,6 +403,32 @@ def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
         for _rid in ripped_net_ids:
             _reg.pop(_rid, None)
     if saved_result is None:
+        return
+
+    # ---- #510 partial (leg-level) restore ---------------------------------
+    # Put back exactly the branch that was removed, and nothing else. The #134
+    # custody check still applies FIRST: if something moved into the vacated
+    # corridor while the branch was out, refuse and leave it ripped (the net is
+    # already queued for a clean re-route) rather than ship a different-net short.
+    if saved_result.get('partial_leg_rip'):
+        if _saved_route_collides(saved_result, pcb_data, [net_id], config.clearance):
+            print(f"      restore skipped (net {net_id}): partial-leg copper would "
+                  f"short other-net copper; left ripped (#134/#510)")
+            if refused_sink is not None:
+                refused_sink.add(net_id)
+            return
+        add_route_to_pcb_data(pcb_data, saved_result, trace_event='restore')
+        owner = saved_result.get('_owner_result')
+        if owner is not None:
+            # Re-grow the owning result so the restored copper ships with it.
+            for _key in ('new_segments', 'new_vias'):
+                if isinstance(owner.get(_key), list):
+                    owner[_key] = list(owner[_key]) + list(saved_result.get(_key) or [])
+            routed_results[net_id] = owner
+            if net_id not in routed_net_ids:
+                routed_net_ids.append(net_id)
+            if net_id in remaining_net_ids:
+                remaining_net_ids.remove(net_id)
         return
 
     # Issue #134: collision-aware restoration. If re-adding this net's stale

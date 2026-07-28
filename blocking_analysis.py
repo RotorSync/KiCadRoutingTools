@@ -395,7 +395,7 @@ def analyze_frontier_blocking(
     apply_known_blockers(results, known_blockers, exclude_net_ids, pcb_data)
 
     rank_blockers(results, getattr(config, 'ripup_blocker_select', 'count'),
-                  config=config)
+                  config=config, pcb_data=pcb_data)
 
     report = BlockingReport(results)
     report.frontier_cells = int(blocked_keys.size)
@@ -468,7 +468,7 @@ def _count_sort_key(x):
 
 
 def rank_blockers(results, algo: str = 'count',
-                  bidir_both_sets=None, config=None) -> None:
+                  bidir_both_sets=None, config=None, pcb_data=None) -> None:
     """Order BlockingInfo in place by the selected algorithm (#424 audit;
     --ripup-blocker-select).
 
@@ -483,6 +483,18 @@ def rank_blockers(results, algo: str = 'count',
                     genuine separating wall; bystanders behind one endpoint
                     appear in only one. Weighted-count score doubled for
                     both-direction nets (bidir_both_sets = set of net_ids).
+    'cost'        - prefer ripping the CHEAP victim: score = weighted count
+                    divided by the net's re-route cost, sqrt(pads)*sqrt(span)
+                    (net_cost.py). The default 'count' ranking is correlated
+                    with victim SIZE -- a big net has more copper, so it blocks
+                    more frontier cells and is picked most often -- which makes
+                    the router systematically tear out the most expensive thing
+                    it could have chosen. Measured on muzy_zynq2: +3V3 (87 pads)
+                    was ripped 67 times and accounted for 17115 of the board's
+                    42447 torn segments, 40% of all destroyed copper from ONE
+                    net. The sqrt damping matters: a linear penalty makes the
+                    biggest net effectively un-rippable, converting churn into
+                    UNROUTED nets, which is a worse trade.
     'mincut' ranking is not a sort: the probe (mincut_probe_order) reorders
     candidates by actual path crossings; after that reorder the list is
     already in rip order and this function is not called.
@@ -515,6 +527,16 @@ def rank_blockers(results, algo: str = 'count',
             boost = 2.0 if x.net_id in both else 1.0
             # scale the score component of the count key
             return (base[0], base[1], base[2] * boost / _r(x), base[3] / _r(x))
+        results.sort(key=key, reverse=True)
+    elif algo == 'cost' and pcb_data is not None:
+        from net_cost import net_cost
+        def key(x):
+            base = _count_sort_key(x)
+            # Divide by re-route cost so a cheap net outranks an expensive one
+            # at equal blocking. Floor at 1.0: a 1-pad/degenerate net must not
+            # get a divide-by-~0 boost to the top of the rip order.
+            c = max(net_cost(pcb_data, x.net_id), 1.0)
+            return (base[0], base[1], base[2] / (_r(x) * c), base[3] / (_r(x) * c))
         results.sort(key=key, reverse=True)
     else:
         def key(x):
