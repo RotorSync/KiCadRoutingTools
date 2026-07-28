@@ -167,6 +167,57 @@ def _via_site_consensus_blocker(pad, pcb_data, blocker_config, net_id,
     return votes.most_common(1)[0][0] if votes else None
 
 
+def drop_withdrawn_partial_restores(emitted_segs, emitted_vias,
+                                    all_new_segments, all_new_vias, pcb_data):
+    """Drop partial-restore copper the ripped-net reconnect has since withdrawn.
+
+    A partial restore's kept-set is emitted into the write list BEFORE the
+    reconnect runs, and unconditionally -- but the same net is queued as a
+    reconnect casualty, so the reconnect may RE-ROUTE it and delete that copper
+    from pcb_data. The write list still carried it, so the OUTPUT shipped
+    copper present in no in-memory state (#463 spartan6_6layer: /RAM/DDR-LDM's
+    In3.Cu run written after the reconnect moved it to In1.Cu and gave the
+    corridor to /RAM/DDR-D11 -- a 0.220mm collinear overlap, a hard short).
+
+    pcb_data is authoritative once the reconnect and its restore-on-failure
+    custody have run. Pure write-list filter: no routing, no obstacle work, no
+    persistent structures, and indexed on the emitted nets only (a whole-board
+    index would be ~all copper for a handful of lookups).
+
+    Matching is by IDENTITY, not value: an equal-looking dict may be legitimate
+    copper from another pass. `stale_*` holds the references across the filter,
+    so the id() keys cannot be recycled underneath us.
+
+    Mutates all_new_segments/all_new_vias in place; returns
+    (n_segments_dropped, n_vias_dropped, sorted net names).
+    """
+    if not emitted_segs and not emitted_vias:
+        return 0, 0, []
+    pn = ({d['net_id'] for d in emitted_segs}
+          | {d['net_id'] for d in emitted_vias})
+    live_s = {(s.net_id, round(s.start_x, 3), round(s.start_y, 3),
+               round(s.end_x, 3), round(s.end_y, 3), s.layer)
+              for s in pcb_data.segments if s.net_id in pn}
+    live_v = {(v.net_id, round(v.x, 3), round(v.y, 3))
+              for v in pcb_data.vias if v.net_id in pn}
+    stale_s = [d for d in emitted_segs
+               if (d['net_id'], round(d['start'][0], 3), round(d['start'][1], 3),
+                   round(d['end'][0], 3), round(d['end'][1], 3),
+                   d['layer']) not in live_s]
+    stale_v = [d for d in emitted_vias
+               if (d['net_id'], round(d['x'], 3), round(d['y'], 3)) not in live_v]
+    if not stale_s and not stale_v:
+        return 0, 0, []
+    sid = {id(d) for d in stale_s}
+    vid = {id(d) for d in stale_v}
+    all_new_segments[:] = [d for d in all_new_segments if id(d) not in sid]
+    all_new_vias[:] = [d for d in all_new_vias if id(d) not in vid]
+    names = sorted({(pcb_data.nets[d['net_id']].name
+                     if d['net_id'] in pcb_data.nets else str(d['net_id']))
+                    for d in stale_s + stale_v})
+    return len(stale_s), len(stale_v), names
+
+
 def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_config,
                         max_search_radius, via_size, via_drill, max_rip_nets,
                         protected_net_ids, first_failure, ripped_net_ids, verbose,
@@ -1066,18 +1117,28 @@ def route_planes(
     for _rid in ripped_net_ids:
         _latest.pop(_rid, None)
     partial_ids: List[int] = []
+    # Keep a handle on exactly the dicts emitted here: the reconnect below can
+    # re-route a partially-restored net and DELETE this copper from pcb_data,
+    # after which the write list must not still carry it (see the
+    # reconciliation after the reconnect).
+    _partial_emitted_segs: List[Dict] = []
+    _partial_emitted_vias: List[Dict] = []
     for _pid, _ksegs, _kvias, _dropped in _latest.values():
         if _pid not in partial_ids:
             partial_ids.append(_pid)
         for _ks in _ksegs:
-            all_new_segments.append({'start': (_ks.start_x, _ks.start_y),
-                                     'end': (_ks.end_x, _ks.end_y),
-                                     'width': _ks.width, 'layer': _ks.layer,
-                                     'net_id': _pid})
+            _d = {'start': (_ks.start_x, _ks.start_y),
+                  'end': (_ks.end_x, _ks.end_y),
+                  'width': _ks.width, 'layer': _ks.layer,
+                  'net_id': _pid}
+            all_new_segments.append(_d)
+            _partial_emitted_segs.append(_d)
         for _kv in _kvias:
-            all_new_vias.append({'x': _kv.x, 'y': _kv.y, 'size': _kv.size,
-                                 'drill': _kv.drill, 'layers': _kv.layers,
-                                 'net_id': _pid})
+            _d = {'x': _kv.x, 'y': _kv.y, 'size': _kv.size,
+                  'drill': _kv.drill, 'layers': _kv.layers,
+                  'net_id': _pid}
+            all_new_vias.append(_d)
+            _partial_emitted_vias.append(_d)
 
     # The ripped signal nets' old copper is excluded from the OUTPUT but still
     # sits in pcb_data here (stripped only at write time). Drop it before the
@@ -1324,6 +1385,32 @@ def route_planes(
                           f"{_e}{RESET}")
             if _still_open:
                 _report_unrouted_ripped_nets(pcb_data, _still_open)
+
+    # A partial restore's kept-set is emitted into the write list ABOVE, before
+    # the reconnect runs, and unconditionally. But the reconnect may RE-ROUTE
+    # that same net (it is queued as a casualty) and delete the kept copper
+    # from pcb_data -- and the write list still carried it, so the OUTPUT
+    # shipped copper the router had legitimately withdrawn. #463
+    # spartan6_6layer: /RAM/DDR-LDM was partially restored on In3.Cu, the
+    # reconnect moved it to In1.Cu (solo source switch) and handed the corridor
+    # to /RAM/DDR-D11, yet the stale In3.Cu run was still written -- a 0.220mm
+    # COLLINEAR overlap between two different DDR nets, i.e. a hard short that
+    # existed in no in-memory state, only in the file. The existing guards
+    # cover a net re-ripped to a full rip, and an earlier kept-set superseded
+    # by a later one; neither sees a reconnect reroute.
+    #
+    # pcb_data is authoritative once the reconnect and its restore-on-failure
+    # custody have run: drop any emitted piece no longer live there. Pure
+    # write-list filter -- no routing, no obstacle work, no new structures.
+    # (Identity, not value: an equal-looking dict may be legitimate copper from
+    # another pass. _stale_* holds the references while we filter, so the id()
+    # keys cannot be recycled underneath us.)
+    _n_s, _n_v, _names = drop_withdrawn_partial_restores(
+        _partial_emitted_segs, _partial_emitted_vias,
+        all_new_segments, all_new_vias, pcb_data)
+    if _n_s or _n_v:
+        print(f"  dropped {_n_s} stale partial-restore segment(s) and "
+              f"{_n_v} via(s) the reconnect withdrew: {', '.join(_names)}")
 
     # Post-reconnect join round: the reconnect's copper subtracts from the
     # plane fill, so it can re-sever a region the round-1 joins had connected
