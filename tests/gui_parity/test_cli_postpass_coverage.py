@@ -57,8 +57,27 @@ REGISTRY = {
     'add_gnd_vias_to_existing_board': ['add_gnd_vias_to_existing_board'],
 }
 # NOTE (deliberately NOT registered): move_copper_graphics_to_silkscreen runs
-# inside the shared plane WRITER (plane_io), not a main() -- Class 1, inherited
-# by both fronts. fix_kicad_drc_settings is a MODULE; the main() call is
+# inside the shared plane WRITER (plane_io), not a main() -- so this gate, which
+# discovers CLI main() post-passes, does not see it. It is NOT "inherited" by the
+# GUI though: the GUI applies copper to the live pcbnew board and never calls the
+# text writers, so parity there comes from a HAND-WRITTEN twin,
+# gui_utils.move_copper_graphics_to_silkscreen_board. Any new writer-level pass
+# needs the same treatment.
+#
+# OPEN GAP (2026-07-28): kicad_writer.strip_zero_length_edge_cuts sits in exactly
+# that position -- wired into output_writer / plane_io / kicad_writer beside the
+# silkscreen movers -- and has NO GUI twin yet. Consequence: a board routed
+# through the CLI comes back with its null-length Edge.Cuts primitives dropped
+# (KiCad grades each as invalid_outline and slows to a crawl: 656s -> 2.7s on
+# pinci), while the same board routed through the GUI keeps them, because the
+# GUI mutates the user's open document rather than authoring a file. The twin
+# would be gui_utils.strip_zero_length_edge_cuts_board(board), called where
+# move_copper_graphics_to_silkscreen_board already is (swig_gui _apply path and
+# planes_gui). Not shipped blind: removing footprint-embedded Edge.Cuts items
+# through the SWIG object API killed the interpreter in every headless attempt
+# here, so it needs writing and verifying against a real running KiCad.
+#
+# fix_kicad_drc_settings is a MODULE; the main() call is
 # fix_project_for_output (above).
 
 # Modules whose public functions are ALL post-route finalization passes: a
