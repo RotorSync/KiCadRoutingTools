@@ -1,3 +1,63 @@
+c7babd4 2026-07-28 parity sweep 81a50b9..c7babd4 (4 commits: the placement
+coordinate-precision fix, the corpus-prep and writer-level Edge.Cuts strips, and this
+lint note). Outcome: ONE PRE-EXISTING GAP CLOSED, ONE NEW GAP OPENED AND RECORDED.
+Zero files in kicad_routing_plugin/ this range; every finding is CLI-side.
+
+  * GAP CLOSED -- placement/writer.py wrote footprint positions with `{:.4g}`.
+    `%g` counts SIGNIFICANT digits, so any coordinate past 100mm (most of a real
+    board) was quantised to 0.1mm and past 1000mm to 1mm: a cap moved to
+    x=139.96 was written "140", a 40um error introduced by the writer itself.
+    The GUI was ALREADY correct -- fanout_gui moves footprints with
+    `mm_to_iu(p['new_x'])`, nanometre-exact -- so this was a genuine CLI/GUI
+    DIVERGENCE, not merely a bug: the two fronts placed the same cap in
+    different spots. Now `:.6f` (angles `:.4g` -> `:.6g`, which was rounding a
+    137.25deg pad to 137.2). Measured on rp2350: moving C20 (x=150.2) by
+    (+0.2, -0.35) gave (150.4, 118.3) before and (150.4, 118.35) after.
+    Silently coarsened the #130 cap moves / #313 via nudge -- the very
+    clearance repair the writer exists to apply.
+
+  * GAP OPENED (recorded, NOT closed) -- kicad_writer.strip_zero_length_edge_cuts
+    is wired into output_writer / plane_io / kicad_writer beside the silkscreen
+    movers, so every board the CLI WRITES now has its null-length Edge.Cuts
+    primitives dropped. The GUI mutates the user's open pcbnew document and never
+    calls those writers, so it does NOT. Consequence: same board, two fronts,
+    different Edge.Cuts content. The twin would be
+    gui_utils.strip_zero_length_edge_cuts_board(board) at the two sites that
+    already call move_copper_graphics_to_silkscreen_board (swig_gui apply path,
+    planes_gui). NOT shipped blind -- removing footprint-embedded Edge.Cuts items
+    via the SWIG object API killed the interpreter in every headless attempt, so
+    it needs verifying against a running KiCad. Noted in
+    tests/gui_parity/test_cli_postpass_coverage.py, which cannot discover it
+    (that gate walks CLI main()s; this lives in the shared writers, same blind
+    spot as move_copper_graphics_to_silkscreen).
+    WHY IT MATTERS: KiCad grades each null-length primitive as `invalid_outline`
+    and then grinds. On pinci (335 of them, 323 inside footprints) kicad-cli DRC
+    took 656s; with them dropped, 2.7s -- ~280x -- and every real finding is
+    byte-identical (199 phantom invalid_outline vanish; shorting_items 8->8,
+    solder_mask_bridge 16->16, unconnected 101->101). --refill-zones is NOT the
+    driver (543s with it). 406 corpus boards scanned: median Edge.Cuts segment
+    count is 4, so pinci at 5066 is a ~1250x outlier; only 4 boards carry any
+    degenerate primitives at all.
+
+  * tests/stress/prep_set2.py (corpus prep) also strips them, from a COPY of the
+    source before LoadBoard. Not parity-bearing (no GUI equivalent exists or is
+    wanted), but it additionally un-breaks prep's OWN outline rebuild: the
+    degenerate segments made GetBoardPolygonOutlines() fail, so prep printed
+    "outline left as-is" and silently skipped normalizing. pinci's unrouted
+    Edge.Cuts now goes 4731 -> 353 segments, DRC-identical (24 violations either
+    way).
+
+  * GATES: test_manifest_plan_parity.py 12936 flag-checks across 334 manifests,
+    0 mismatches; param->control 12/12, 0 unresolved. test_cli_postpass_coverage.py
+    4 registered, 10 in active CLI use, 1 CLI-only acknowledged, 0 failures.
+    wx harnesses were run earlier this session at 7a1dd53 and still apply: the
+    writer strip is a provable NO-OP on the rp2350 fixture (0 zero-length
+    primitives, 4 Edge.Cuts segments total; the pass returns the content object
+    unchanged). test_gui_engine_parity.py VERDICT PARITY, copper sets IDENTICAL
+    (1307/1307 segments, 144/144 vias), kicad unconnected 0/0, drc 0/0.
+    test_gui_livechain_rp2350.py PASS -- GUI and CLI both grade 0 DRC at every
+    stage (create/repair/reconnect/final) at the 0.09 floor.
+
 81a50b9 2026-07-28 parity sweep 4d99b23..81a50b9 (3 commits: the parity-marker
 correction, the /Users/andy path purge, and the RUNBOOK <TOOLS_REPO> placeholder +
 manifest_to_plan -o alias). Outcome: NO GAPS -- zero routing-engine and zero
