@@ -228,11 +228,30 @@ class RoutingDialog(wx.Dialog):
         self._plane_prompt_dismissed = set()
 
         self._create_ui()
+        # Routing movie recorder (#506). Created after the UI because it reads
+        # the Advanced tab's "Make routing movie" checkbox; inert while that is
+        # unchecked (the default).
+        from .movie_recorder import MovieRecorder
+        self.movie_recorder = MovieRecorder(self)
+        self.Bind(wx.EVT_WINDOW_DESTROY, self._on_dialog_destroy)
         self._load_nets_immediate()  # Load net names only (fast)
         self.Centre()
 
         # Defer sync and connectivity check until after dialog is shown
         wx.CallAfter(self._deferred_init)
+
+    def _on_make_movie_toggle(self, event):
+        """Ticking "Make routing movie" starts recording from the board as it
+        stands now, so the next step's movie shows only what THAT step adds."""
+        self.movie_recorder.on_toggle(event)
+
+    def _on_dialog_destroy(self, event):
+        if event.GetEventObject() is self:
+            try:
+                self.movie_recorder.cleanup()
+            except Exception:
+                pass
+        event.Skip()
 
     def _sync_pcb_data_from_board(self):
         """Sync pcb_data.segments and pcb_data.vias from pcbnew's in-memory board.
@@ -1523,6 +1542,21 @@ class RoutingDialog(wx.Dialog):
         self.stats_check.SetToolTip("Show A* search statistics (iterations, expansions, etc.)")
         options_inner.Add(self.stats_check, 0, wx.ALL, 3)
 
+        # Routing movie (#506). Off by default: it snapshots the board after
+        # every routing step and renders a movie, which costs a few seconds.
+        self.make_movie_check = wx.CheckBox(options_scroll, label="Make routing movie")
+        self.make_movie_check.SetValue(False)
+        self.make_movie_check.SetToolTip(
+            "Record the routing and write a movie next to the board "
+            "(<board>_routing.mp4, or .gif without imageio-ffmpeg). Each routing "
+            "step gets its own movie; a plan run from the Claude tab (Run "
+            "Selected Steps / Run All Selected Steps) gets ONE movie covering "
+            "all of its steps. New copper flashes white, rips flash red. The "
+            "path is printed in green in the Log tab. Same movie as the command "
+            "line's make_movie.py.")
+        self.make_movie_check.Bind(wx.EVT_CHECKBOX, self._on_make_movie_toggle)
+        options_inner.Add(self.make_movie_check, 0, wx.ALL, 3)
+
         options_scroll.SetSizer(options_inner)
         options_box_sizer.Add(options_scroll, 1, wx.EXPAND)
         return options_box_sizer
@@ -2220,6 +2254,12 @@ class RoutingDialog(wx.Dialog):
         self.planes_tab.net_panel._checked_nets = set()
         self.differential_tab.pair_panel._checked_pairs = set()
 
+        # An explicit "reset settings" DOES turn movie recording off (unlike
+        # the per-step parameter reset, which must leave it alone -- see
+        # reset_params_to_defaults).
+        self.make_movie_check.SetValue(False)
+        self.movie_recorder.cleanup()
+
         self.reset_params_to_defaults()
 
     def reset_params_to_defaults(self):
@@ -2412,6 +2452,11 @@ class RoutingDialog(wx.Dialog):
         self.skip_routing_check.SetValue(False)
         self.debug_memory_check.SetValue(False)
         self.stats_check.SetValue(False)
+        # NOT reset: make_movie_check (#506). The plan executor resets params
+        # before EVERY step, so resetting the movie box here would untick the
+        # user's choice mid-plan and abandon the run's movie halfway. It is a
+        # session output preference, not a routing parameter -- nothing about
+        # the routed copper depends on it.
 
         # Reset hide checkboxes
         if self.net_panel.hide_check:
@@ -3449,6 +3494,12 @@ class RoutingDialog(wx.Dialog):
             except Exception as e:
                 print(f"Warning: failed to build routing suggestions: {e}")
         msg += "\nUse Edit -> Undo to revert changes."
+
+        # Routing movie (#506): snapshot the board this step just produced,
+        # BEFORE the completion popup blocks on the user. No-op unless the
+        # Advanced tab's "Make routing movie" box is ticked.
+        from .movie_recorder import record_movie_step
+        record_movie_step(self, 'route')
 
         if getattr(getattr(self, 'GetTopLevelParent', lambda: self)(), '_suppress_completion_popups', False):
             print(msg)  # unattended plan run: no per-step OK dialog

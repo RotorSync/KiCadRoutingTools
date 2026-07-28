@@ -253,9 +253,29 @@ def discover_steps(run_dir: str) -> Tuple[List[Tuple[str, str, Optional[str]]], 
     return steps, final
 
 
+def steps_for_boards(boards: List[str]) -> List[Tuple[str, str, Optional[str]]]:
+    """[(label, board, trace|None), ...] for an EXPLICIT, already-ordered board
+    list (make_movie.py's board-sequence mode, GUI per-step snapshots). Same
+    shape discover_steps returns, minus the discovery/ordering."""
+    steps = []
+    for b in boards:
+        tr = os.path.splitext(b)[0] + '_routetrace.json'
+        steps.append((os.path.splitext(os.path.basename(b))[0], b,
+                      tr if os.path.exists(tr) else None))
+    return steps
+
+
 def build_run(run_dir, size, ss, alpha, rip_hold, chunks):
-    from kicad_parser import parse_kicad_pcb
     steps, final = discover_steps(run_dir)
+    if not final:
+        return []
+    return build_boards(steps, final, size, ss, alpha, rip_hold, chunks)
+
+
+def build_boards(steps, final, size, ss, alpha, rip_hold, chunks):
+    """Frames for a chain given as [(label, board, trace|None), ...] plus the
+    final board. ``build_run`` is this with the chain discovered from a run dir."""
+    from kicad_parser import parse_kicad_pcb
     if not final:
         return []
     # dynamic_zones: plane pours reveal as each plane is created, rather than

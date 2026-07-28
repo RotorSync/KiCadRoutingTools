@@ -274,6 +274,13 @@ skip cleanly without KiCad python). Run any directly:
 - `test_plane_all_layers_parity.py` -- GUI create passes `all_layers` =
   outer+pour (the route_planes default), not all 6 copper layers (mocks
   create_plane to capture the kwarg).
+- `test_movie_recorder.py` -- the Advanced tab's **Make routing movie** debug
+  checkbox (#506): default OFF and inert while off; one routing step renders
+  ONE movie; a plan run (`begin_group`/`end_group`, what the Claude tab's Run
+  Selected Steps brackets) renders ONE movie for ALL its steps; the path is
+  logged in GREEN; and `reset_params_to_defaults` must NOT untick it (the plan
+  executor calls that before every step, so a reset there would abandon the
+  run's movie halfway) while an explicit reset-all does.
 - `diag_fullchain_carry_rp2350.py` -- **DELETED 2026-07-26.** Was a full
   GUI-carry reproduction (ONE board + ONE shared pcb_data across all 10 plan
   steps, graded per stage vs the CLI) built to localize where the carry
@@ -284,10 +291,16 @@ skip cleanly without KiCad python). Run any directly:
 ## Whole-plan replay through the real plugin (replay_plan_vs_run.py)
 
 Every stress board leaves a GUI-loadable plan beside its chain (`run_board.sh`
-→ `manifest_to_plan.py` → `<board>_plan.json`). This driver does what a user
-does with it — open the unrouted board, Claude tab → **Load...** → **Run All
-Selected Steps** — with no buttons and no LLM, then diffs the result against the
-CLI chain.
+→ `manifest_to_plan.py` → `<board>_plan.json`; `make_plan.py` builds the same
+file from any recorded manifest). This driver does what a user does with it —
+open the unrouted board, Claude tab → **Load...** → **Run All Selected Steps** —
+with no buttons and no LLM, then diffs the result against the CLI chain.
+
+The headless driving itself lives in the repo-root **`headless_plan.py`**, which
+is also what the user-facing `run_plan.py` runs (#507) — so this harness
+exercises the shipped driver instead of a private copy. Same for the conversion:
+`_regen_steps` calls `manifest_to_plan.plan_steps_from_manifest`, the converter's
+own function, rather than re-implementing its loop.
 
     python3 tests/gui_parity/replay_plan_vs_run.py <rundir>
     python3 tests/gui_parity/replay_plan_vs_run.py --set <runs_setN> [--boards a,b]

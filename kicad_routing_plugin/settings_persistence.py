@@ -134,6 +134,7 @@ def get_dialog_settings(dialog):
         'skip_routing_check': dialog.skip_routing_check.GetValue(),
         'debug_memory_check': dialog.debug_memory_check.GetValue(),
         'stats_check': dialog.stats_check.GetValue(),
+        'make_movie_check': dialog.make_movie_check.GetValue(),
 
         # Swappable nets options
         'update_schematic_check': dialog.update_schematic_check.GetValue(),
@@ -463,6 +464,11 @@ def restore_dialog_settings(dialog, settings):
         dialog.debug_memory_check.SetValue(settings['debug_memory_check'])
     if 'stats_check' in settings:
         dialog.stats_check.SetValue(settings['stats_check'])
+    if 'make_movie_check' in settings:
+        # Restoring the box does NOT arm the recorder: its baseline is taken
+        # when the user ticks it (or when a plan run starts), so a restored
+        # tick still records from the board as it stands at that moment.
+        dialog.make_movie_check.SetValue(settings['make_movie_check'])
 
     # Restore swappable nets options
     if 'update_schematic_check' in settings:

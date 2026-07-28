@@ -15,6 +15,7 @@ Building blocks:
 import os
 import json
 import shutil
+import sys
 import threading
 import subprocess
 
@@ -22,6 +23,8 @@ import wx
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(PLUGIN_DIR)
+if ROOT_DIR not in sys.path:      # top-level modules
+    sys.path.insert(0, ROOT_DIR)
 
 # KiCad launched from Finder/desktop doesn't inherit the shell PATH, so
 # shutil.which() alone often misses `claude`. Check common install spots.
@@ -945,6 +948,11 @@ class ClaudeTab(wx.Panel):
         self.run_all_plan_btn.Disable()
         self.plan_btn.Disable()
         self.stop_plan_btn.Enable()
+        # Routing movie (#506): a plan run is ONE movie covering every step it
+        # runs, not one per step -- bracket it (no-op unless recording is on).
+        recorder = self._movie_recorder()
+        if recorder is not None:
+            recorder.begin_group()
         self._plan_executor = PlanExecutor(
             self.routing_dialog, self._plan_steps, indices,
             on_status=self._on_plan_step_status,
@@ -992,8 +1000,23 @@ class ClaudeTab(wx.Panel):
             # Stopped/failed steps stay checked so a re-run picks them up.
             self.plan_list.Check(index, False)
 
+    def _movie_recorder(self):
+        """The dialog's routing-movie recorder, or None (tab used standalone)."""
+        dialog = self.routing_dialog
+        if dialog is None and hasattr(self, 'GetTopLevelParent'):
+            dialog = self.GetTopLevelParent()
+        return getattr(dialog, 'movie_recorder', None)
+
     def _on_plan_finished(self, completed, aborted_reason):
         self._plan_executor = None
+        # Close the movie group: renders one movie for the steps that ran (a
+        # stopped/failed plan still gets the movie of what it did do).
+        recorder = self._movie_recorder()
+        if recorder is not None:
+            try:
+                recorder.end_group()
+            except Exception as e:
+                self._log(f"Routing movie: not rendered ({e})")
         if self:
             try:
                 self.elapsed_label.SetLabel("")

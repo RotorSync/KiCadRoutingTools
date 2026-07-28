@@ -13,9 +13,10 @@ Three pieces:
 
 | Tool | Role |
 |------|------|
+| `make_movie.py` | **Front door** — make the movie from whatever you have: a run directory, a list of step boards, or one board. |
 | `route_render.py` | **Renderer / viewer** — draw a board (segments, vias, pads, zones, outline) to a PNG straight from geometry. |
 | `route_trace.py` | **Trace recorder** — with `KICAD_ROUTE_TRACE=1`, record every segment/via as it is committed, ripped, and restored. |
-| `animate_route.py` | **Animator** — replay a trace (or a whole run) into an `.mp4` / `.gif` movie. |
+| `animate_route.py` | **Animator** — the engine `make_movie.py` drives; also replays a single trace over a board. |
 
 ---
 
@@ -32,8 +33,62 @@ KICAD_ROUTE_TRACE=1 python3 route.py in.kicad_pcb out.kicad_pcb
 # 3. Movie of that routing step
 python3 animate_route.py out_routetrace.json --board in.kicad_pcb -o routing.mp4
 
-# 4. Movie of a WHOLE stress run (fanout -> diff -> planes -> signal -> repair)
-python3 animate_route.py --run-dir runs_set1/myboard -o routing.mp4
+# 4. Movie of a WHOLE run (fanout -> diff -> planes -> signal -> repair)
+python3 make_movie.py runs_set1/myboard            # -> runs_set1/myboard/routing.mp4
+```
+
+---
+
+## `make_movie.py` — making the movie (issue #506)
+
+The stress harness renders one movie per run; this makes the same movie on
+demand, from any set of boards you already have.
+
+```bash
+python3 make_movie.py RUNDIR                       # whole chain in a directory
+python3 make_movie.py step1.kicad_pcb step2.kicad_pcb step3.kicad_pcb
+python3 make_movie.py board.kicad_pcb              # one board draws its own copper
+python3 make_movie.py RUNDIR -o out.mp4 --size 1400 --fps 8 --png
+```
+
+- **A directory** → its chain, ordered by `stepN` in the filename when present,
+  otherwise by write time (the order the chain produced them).
+- **Several boards** → animated in the order given (`step*.kicad_pcb` from a shell
+  glob works; each board's *new* copper is the delta from the previous one).
+- **One board** → its copper reveals in `--chunks` batches.
+
+Any board with a sibling `<board>_routetrace.json` animates per segment/via
+instead of as a coarse delta, so `KICAD_ROUTE_TRACE=1` on the routing steps buys
+a much finer movie for free.
+
+Options: `-o/--output` (the extension picks `.mp4` vs `.gif`), `--size`, `--fps`,
+`--supersample`, `--layer-alpha`, `--rip-hold`, `--chunks`, `--end-hold`,
+`--png-dir` (dump raw frames), `--png` (also write a full-resolution still of the
+final board), `--quiet`.
+
+**In the GUI:** tick **Make routing movie** in the Advanced tab's *Debug*
+section (default off). While it is on the plugin records what it routes and
+writes the movie next to the board as `<board>_routing.mp4` (then `_routing_2`,
+`_routing_3`, … — earlier movies are never overwritten), printing the path in
+**green** in the Log tab:
+
+- **Any single routing step** — Route, Route Diff Pairs, Create Planes, Repair
+  Planes, Fanout — gets its own movie the moment it completes, animating just
+  that step's new copper.
+- **A plan run** from the Claude tab (*Run Selected Steps* / *Run All Selected
+  Steps*) gets **one** movie covering all of its steps together.
+
+The baseline is the board as it stood when you ticked the box (and the end state
+of each movie afterwards), so successive movies never re-animate copper an
+earlier one already showed. Rendering happens off the UI thread. `run_plan.py --movie`
+(see [plans from the command line](claude-skills.md#plans-from-the-command-line))
+does the same for a headless run.
+
+Library use (what the GUI calls):
+
+```python
+from make_movie import make_movie
+path = make_movie(['runs_set1/myboard'], out='routing.mp4')   # or a board list
 ```
 
 In a movie, **new copper flashes white**, **reroutes / restores flash green**,

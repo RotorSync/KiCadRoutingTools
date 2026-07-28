@@ -110,6 +110,14 @@ old kicad-cli + headless-Chrome `board_layer_images` path):
 Both the live worker (`run_board.sh`) and the no-LLM replay
 (`redo_stress_test.py`) produce these automatically.
 
+**By hand, for any run dir** (same movie, same code — `render_run.py` now calls
+`make_movie.py`, which is also what the GUI's "Routing Movie..." button runs):
+
+```bash
+python3 make_movie.py runs_set1/myboard              # -> runs_set1/myboard/routing.mp4
+python3 make_movie.py step1.kicad_pcb step2.kicad_pcb -o out.mp4
+```
+
 **For these to be created correctly:**
 - The movie discovers the chain boards automatically: it prefers a `stepN` in
   the filename (`step6_route` or `board_step6_route`, sub-steps `step2a/2b`

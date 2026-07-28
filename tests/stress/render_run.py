@@ -3,7 +3,8 @@
 
 Replaces the old kicad-cli + headless-Chrome renderer (board_image.py /
 board_layer_images.py) with the fast geometry renderer (route_render), and
-adds an animated movie of the whole routing run (animate_route). Drops, next
+adds an animated movie of the whole routing run (make_movie -> animate_route;
+``python3 make_movie.py RUNDIR`` makes the same movie by hand). Drops, next
 to the final board / in the run dir:
 
   * ``<board>.png``            -- combined final snapshot (all copper layers)
@@ -59,18 +60,11 @@ def render_run_movie(run_dir, out=None, size=1000, fps=8.0, quiet=False):
     than GIF and plays everywhere) when imageio-ffmpeg is available, else falls
     back to ``routing.gif`` -- the .mp4 extension drives the choice in
     save_movie."""
-    import animate_route as a
-    frames = a.build_run(run_dir, size=size, ss=1, alpha=150, rip_hold=2, chunks=6)
-    if not frames:
-        if not quiet:
-            print(f"render_run: no chain boards in {run_dir}; no movie")
-        return None
-    out = out or os.path.join(run_dir, 'routing.mp4')
-    a.save_movie(frames, out, fps=fps, end_hold=1.5)
-    # report the path actually written (save_movie falls back .mp4 -> .gif)
-    if out.endswith('.mp4') and not os.path.exists(out):
-        out = os.path.splitext(out)[0] + '.gif'
-    return out
+    from make_movie import make_movie
+    written = make_movie([run_dir], out=out, size=size, fps=fps, quiet=quiet)
+    if not written and not quiet:
+        print(f"render_run: no chain boards in {run_dir}; no movie")
+    return written
 
 
 def main():
