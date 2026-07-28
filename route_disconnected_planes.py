@@ -167,6 +167,21 @@ def _via_site_consensus_blocker(pad, pcb_data, blocker_config, net_id,
     return votes.most_common(1)[0][0] if votes else None
 
 
+# Restore policy for a rip-up blocker whose copper partly conflicts with the new
+# tap (#509). Default FULL RIP: drop the whole net and let the mandated reconnect
+# re-route it fresh, which is route.py's contract. Piece-level partial restore --
+# keep the non-colliding fragments and have the reconnect close the gap -- is the
+# old behaviour, kept behind this knob for A/B.
+#
+# Measured on spartan6_6layer's plane-repair step (all arms DRC-clean at 0.1):
+#   piece-level                          connectivity issues 14
+#   full rip                             connectivity issues  8
+# The reconnect withdrew ~6.8 pieces per net across 36 nets there and re-threaded
+# them anyway, so the fragments were mostly wasted work. ONE BOARD, ONE STEP --
+# set KICAD_PLANE_PARTIAL_RESTORE=1 to A/B the old policy on a corpus replay.
+_PLANE_PARTIAL_RESTORE = os.environ.get('KICAD_PLANE_PARTIAL_RESTORE') == '1'
+
+
 def drop_withdrawn_partial_restores(emitted_segs, emitted_vias,
                                     all_new_segments, all_new_vias, pcb_data):
     """Drop partial-restore copper the ripped-net reconnect has since withdrawn.
@@ -977,7 +992,9 @@ def route_planes(
                             plane_net_ids, result, ripped_net_ids, verbose,
                             distant_trace_radius=distant_radius,
                             shared_via_maps=shared_maps,
-                            partial_restores=partial_restores,
+                            partial_restores=(partial_restores
+                                              if _PLANE_PARTIAL_RESTORE
+                                              else None),
                             plane_oracle=plane_oracle)
                         if rr is not None:
                             result = rr
@@ -1270,119 +1287,101 @@ def route_planes(
                     if not _rr.get('connected'):
                         _still_open.append(_cid)
             if _still_open:
+                # Per-NET try (#509 part 3): the catch used to wrap the whole
+                # pass, so one bad net abandoned custody for every other one --
+                # and the run still exited rc=0 with only a red line to show
+                # for it. A dict/object mix-up in this block silently disabled
+                # custody across two full A/B arms and read as "no conflicts
+                # arose" (RESTORED=0 REFUSED=0 is indistinguishable from
+                # nothing-to-do). route.py's equivalent restore path has NO
+                # blanket catch at all and fails loudly; scope it tightly here
+                # and always report a tally so a zero is never ambiguous.
+                _cust = {'restored': 0, 'refused': 0, 'errored': 0}
+                # In-memory snapshot, NOT parse_kicad_pcb(input_file): the
+                # GUI's input_file is stale on disk (#493 item 3).
+                for _cid in list(_still_open):
+                  try:
+                      _osegs = [s for s in _orig_segments
+                                if s.net_id == _cid]
+                      _ovias = [v for v in _orig_vias if v.net_id == _cid]
+                      if not _osegs and not _ovias:
+                          continue  # nothing to restore
+                      _nm = pcb_data.nets[_cid].name \
+                          if _cid in pcb_data.nets else f"net_{_cid}"
+                      # REFUSE, do not displace (#509 part 1). route.py
+                      # brackets rip and restore inside ONE attempt
+                      # (single_ended_loop `rips = []` ... `_restore_rips`),
+                      # so nothing can move into the vacated corridor and its
+                      # collision test is a documented backstop for a case
+                      # that "cannot happen". Here the window spans the whole
+                      # reconnect batch, so conflicts are routine -- and the
+                      # old code resolved them by DELETING the other net's
+                      # copper, destroying a route that SUCCEEDED in order to
+                      # reinstate one that FAILED. Refuse instead and leave
+                      # the net unrouted, exactly as restore_net does via
+                      # refused_sink: unrouted beats shorted. Refusing is
+                      # safe even when the test is conservative; deleting is
+                      # not.
+                      #
+                      # Test with the SHARED #134 primitive (#509 part 2),
+                      # not a local endpoint-sampling copy: the old _collides
+                      # measured only the candidate's ENDPOINTS against the
+                      # restored segments, so two tracks crossing at right
+                      # angles -- both endpoints far apart, intersecting dead
+                      # centre -- passed it (spartan6_6layer GPIO-N22 x
+                      # GPIO-P20: endpoints 1.600/0.400 vs a 0.230 rule,
+                      # true crossing 0.000). It also tested only a
+                      # segment's START point against restored vias.
+                      from rip_up_reroute import _saved_route_collides
+                      if _saved_route_collides(
+                              {'new_segments': _osegs, 'new_vias': _ovias},
+                              pcb_data, [_cid], clearance):
+                          print(f"  {YELLOW}REFUSED restore of {_nm}: copper "
+                                f"routed meanwhile occupies its corridor; "
+                                f"left unrouted rather than displacing it"
+                                f"{RESET}")
+                          _cust['refused'] += 1
+                          continue
+                      # Corridor still clear: drop the failed reroute and
+                      # reinstate the original (in-memory + write-list).
+                      pcb_data.segments[:] = [
+                          s for s in pcb_data.segments if s.net_id != _cid]
+                      pcb_data.vias[:] = [
+                          v for v in pcb_data.vias if v.net_id != _cid]
+                      all_new_segments[:] = [
+                          d for d in all_new_segments
+                          if d.get('net_id') != _cid]
+                      all_new_vias[:] = [
+                          d for d in all_new_vias if d.get('net_id') != _cid]
+                      # restore the originals in-memory; the writer keeps
+                      # the file copper because the net leaves the exclude
+                      # lists below
+                      pcb_data.segments.extend(_osegs)
+                      pcb_data.vias.extend(_ovias)
+                      for _lst in (ripped_net_ids, partial_ids):
+                          while _cid in _lst:
+                              _lst.remove(_cid)
+                      _still_open.remove(_cid)
+                      _cust['restored'] += 1
+                      print(f"  {YELLOW}RESTORED {_nm}: reconnect failed; "
+                            f"original copper reinstated{RESET}")
+                  except Exception as _e:
+                      _cust['errored'] += 1
+                      print(f"{RED}  custody FAILED for "
+                            f"{pcb_data.nets[_cid].name if _cid in pcb_data.nets else _cid}"
+                            f": {_e}{RESET}")
                 try:
-                    # In-memory snapshot, NOT parse_kicad_pcb(input_file): the
-                    # GUI's input_file is stale on disk (#493 item 3).
-                    for _cid in list(_still_open):
-                        _osegs = [s for s in _orig_segments
-                                  if s.net_id == _cid]
-                        _ovias = [v for v in _orig_vias if v.net_id == _cid]
-                        if not _osegs and not _ovias:
-                            continue  # nothing to restore
-                        _nm = pcb_data.nets[_cid].name \
-                            if _cid in pcb_data.nets else f"net_{_cid}"
-                        # drop the failed reroute (in-memory + write-list)
-                        pcb_data.segments[:] = [
-                            s for s in pcb_data.segments if s.net_id != _cid]
-                        pcb_data.vias[:] = [
-                            v for v in pcb_data.vias if v.net_id != _cid]
-                        all_new_segments[:] = [
-                            d for d in all_new_segments
-                            if d.get('net_id') != _cid]
-                        all_new_vias[:] = [
-                            d for d in all_new_vias if d.get('net_id') != _cid]
-                        # drop NEW repair copper that would short the restore
-                        def _collides(d, _is_via):
-                            import math as _m
-                            for _s in _osegs:
-                                _half = (d['size'] if _is_via
-                                         else d['width']) / 2.0
-                                if not _is_via \
-                                        and d['layer'] != _s.layer:
-                                    continue
-                                _dx = _s.end_x - _s.start_x
-                                _dy = _s.end_y - _s.start_y
-                                _L2 = _dx * _dx + _dy * _dy
-                                _px, _py = (d['x'], d['y']) if _is_via \
-                                    else d['start']
-                                _t = max(0.0, min(1.0, ((
-                                    (_px - _s.start_x) * _dx
-                                    + (_py - _s.start_y) * _dy) / _L2))) \
-                                    if _L2 else 0.0
-                                _dd = _m.hypot(
-                                    _px - (_s.start_x + _t * _dx),
-                                    _py - (_s.start_y + _t * _dy))
-                                if _dd < _half + _s.width / 2.0 + clearance:
-                                    return True
-                                if not _is_via:
-                                    _px2, _py2 = d['end']
-                                    _t2 = max(0.0, min(1.0, ((
-                                        (_px2 - _s.start_x) * _dx
-                                        + (_py2 - _s.start_y) * _dy) / _L2))) \
-                                        if _L2 else 0.0
-                                    _dd2 = _m.hypot(
-                                        _px2 - (_s.start_x + _t2 * _dx),
-                                        _py2 - (_s.start_y + _t2 * _dy))
-                                    if _dd2 < _half + _s.width / 2.0 \
-                                            + clearance:
-                                        return True
-                            for _v in _ovias:
-                                _px, _py = (d['x'], d['y']) if _is_via \
-                                    else d['start']
-                                _r = (d['size'] if _is_via
-                                      else d['width']) / 2.0
-                                if _m.hypot(_px - _v.x, _py - _v.y) \
-                                        < _r + _v.size / 2.0 + clearance:
-                                    return True
-                            return False
-                        _rm_v = [d for d in all_new_vias
-                                 if d.get('net_id') != _cid
-                                 and _collides(d, True)]
-                        _rm_s = [d for d in all_new_segments
-                                 if d.get('net_id') != _cid
-                                 and _collides(d, False)]
-                        _rmv_pos = {(round(d['x'], 3), round(d['y'], 3))
-                                    for d in _rm_v}
-                        _rms_key = {(round(d['start'][0], 3),
-                                     round(d['start'][1], 3),
-                                     round(d['end'][0], 3),
-                                     round(d['end'][1], 3), d['layer'])
-                                    for d in _rm_s}
-                        all_new_vias[:] = [d for d in all_new_vias
-                                           if d not in _rm_v]
-                        all_new_segments[:] = [d for d in all_new_segments
-                                               if d not in _rm_s]
-                        pcb_data.vias[:] = [
-                            v for v in pcb_data.vias
-                            if (round(v.x, 3), round(v.y, 3)) not in _rmv_pos]
-                        pcb_data.segments[:] = [
-                            s for s in pcb_data.segments
-                            if (round(s.start_x, 3), round(s.start_y, 3),
-                                round(s.end_x, 3), round(s.end_y, 3),
-                                s.layer) not in _rms_key]
-                        # restore the originals in-memory; the writer keeps
-                        # the file copper because the net leaves the exclude
-                        # lists below
-                        pcb_data.segments.extend(_osegs)
-                        pcb_data.vias.extend(_ovias)
-                        for _lst in (ripped_net_ids, partial_ids):
-                            while _cid in _lst:
-                                _lst.remove(_cid)
-                        _still_open.remove(_cid)
-                        print(f"  {YELLOW}RESTORED {_nm}: reconnect failed; "
-                              f"original copper reinstated (dropped "
-                              f"{len(_rm_v)} colliding new via(s), "
-                              f"{len(_rm_s)} segment(s)){RESET}")
-                    try:
-                        from plane_fill_model import \
-                            _CACHE_ATTR as _PFM_CACHE_R
-                        if hasattr(pcb_data, _PFM_CACHE_R):
-                            delattr(pcb_data, _PFM_CACHE_R)
-                    except Exception:
-                        pass
-                except Exception as _e:
-                    print(f"{RED}  restore-on-failure pass failed: "
-                          f"{_e}{RESET}")
+                    from plane_fill_model import \
+                        _CACHE_ATTR as _PFM_CACHE_R
+                    if hasattr(pcb_data, _PFM_CACHE_R):
+                        delattr(pcb_data, _PFM_CACHE_R)
+                except Exception:
+                    pass
+                # Unconditional tally: without it a silent zero reads exactly
+                # like "nothing to do" (#509 part 3).
+                print(f"  custody: {_cust['restored']} restored, "
+                      f"{_cust['refused']} refused, {_cust['errored']} errored "
+                      f"of {len(_casualties)} casualty net(s)")
             if _still_open:
                 _report_unrouted_ripped_nets(pcb_data, _still_open)
 
