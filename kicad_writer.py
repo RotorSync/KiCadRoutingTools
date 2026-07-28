@@ -212,23 +212,100 @@ def generate_gr_line_sexpr(start: Tuple[float, float], end: Tuple[float, float],
 	)'''
 
 
+DEFAULT_VIA_TENTING = {'tenting': '(front yes) (back yes)'}
+
+VIA_PROTECTION_TOKEN_ORDER = ('tenting', 'covering', 'plugging', 'capping', 'filling')
+
+
+def via_protection_sexpr(tenting_attrs: dict = None, net_name: str = None) -> str:
+    """The `(tenting ...)` / `(covering ...)` / ... fragment to emit for a via.
+
+    `tenting_attrs` is a Via's parsed spec ({token: raw inner text}); passing it
+    keeps what the board actually specified. Without it the previous behavior
+    stands -- front+back tenting on KiCad 10 output -- since there is no
+    board-level policy to consult here (#489 §8).
+    """
+    spec = tenting_attrs if tenting_attrs else (
+        DEFAULT_VIA_TENTING if net_name is not None else {})
+    if not spec:
+        return ""
+    def _one(token: str, inner: str) -> str:
+        # The parsed inner text keeps the source file's line breaks and tabs;
+        # collapse them so the re-emitted token reads on one line. Same s-expr.
+        inner = " ".join((inner or '').split())
+        return f"({token} {inner})" if inner else f"({token})"
+
+    parts = [_one(t, spec[t]) for t in VIA_PROTECTION_TOKEN_ORDER if t in spec]
+    # Emit an unrecognised token rather than dropping it -- losing the spec is
+    # the bug being fixed.
+    parts += [_one(t, v) for t, v in spec.items()
+              if t not in VIA_PROTECTION_TOKEN_ORDER]
+    return "".join(f"\n\t\t{p}" for p in parts)
+
+
+def prevailing_via_protection(vias) -> Optional[dict]:
+    """The protection spec most of a board's existing vias carry, or None.
+
+    Used as the default for vias this tool ADDS, so a new via follows the
+    board's own convention instead of a hardcoded front+back tenting (#489 §8).
+    hackrf_one is the motivating case: all 498 of its vias explicitly declare
+    covering/plugging/capping/filling = no, and the tool would have stamped
+    tenting yes on every via it added to that board.
+
+    Deterministic: ties break on the canonical spec text, not dict order.
+    """
+    from collections import Counter
+
+    counts = Counter()
+    canonical = {}
+    for via in vias or ():
+        spec = getattr(via, 'tenting_attrs', None)
+        if not spec:
+            continue
+        key = tuple(sorted((t, " ".join((v or '').split())) for t, v in spec.items()))
+        counts[key] += 1
+        canonical[key] = dict(spec)
+    if not counts:
+        return None
+    best = min(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+    return canonical[best]
+
+
+def prevailing_via_protection_in_text(content: str) -> Optional[dict]:
+    """`prevailing_via_protection` for a writer that holds the board TEXT rather
+    than parsed Via objects (the plane / repair writers work on file text)."""
+    from kicad_parser import _extract_via_protection_attrs
+
+    class _V:
+        __slots__ = ('tenting_attrs',)
+
+        def __init__(self, spec):
+            self.tenting_attrs = spec
+
+    specs = _extract_via_protection_attrs(content)
+    if not specs:
+        return None
+    return prevailing_via_protection([_V(s) for s in specs.values()])
+
+
 def generate_via_sexpr(x: float, y: float, size: float, drill: float,
                        layers: List[str], net_id: int, free: bool = False,
-                       net_name: str = None) -> str:
+                       net_name: str = None, tenting_attrs: dict = None) -> str:
     """Generate KiCad S-expression for a via.
 
     Args:
         free: If True, adds (free yes) to prevent KiCad from auto-assigning net based on overlapping tracks.
         net_name: If provided, output KiCad 10 format (net "name") instead of (net id).
+        tenting_attrs: The via's own protection spec as parsed from the board
+            (Via.tenting_attrs). Pass it for any via that already existed so a
+            ripped-and-re-placed via keeps its real tenting/plugging/filling
+            instead of being re-stamped with front+back tenting (#489 §8).
     """
     layers_str = '" "'.join(layers)
     free_str = "\n\t\t(free yes)" if free else ""
     net_str = f'(net "{_escape_net_name(net_name)}")' if net_name is not None else f'(net {net_id})'
     # KiCad 10 adds structured tenting/covering/plugging fields after layers
-    if net_name is not None:
-        tenting_str = "\n\t\t(tenting (front yes) (back yes))"
-    else:
-        tenting_str = ""
+    tenting_str = via_protection_sexpr(tenting_attrs, net_name)
     return f'''	(via
 		(at {x:.6f} {y:.6f})
 		(size {size})
@@ -255,6 +332,205 @@ def generate_gr_text_sexpr(text: str, x: float, y: float, layer: str,
 	)'''
 
 
+def _polygon_area(poly) -> float:
+    """Unsigned shoelace area of a polygon given as [(x, y), ...]."""
+    a = 0.0
+    n = len(poly)
+    for i in range(n):
+        x1, y1 = poly[i][0], poly[i][1]
+        x2, y2 = poly[(i + 1) % n][0], poly[(i + 1) % n][1]
+        a += x1 * y2 - x2 * y1
+    return abs(a) / 2.0
+
+
+def _point_in_polygon(x: float, y: float, poly) -> bool:
+    """Even-odd ray cast. Boundary cases are don't-care here: this only feeds
+    the overlap test, and a zone grazing another's edge needs no tie-break."""
+    inside = False
+    n = len(poly)
+    for i in range(n):
+        x1, y1 = poly[i][0], poly[i][1]
+        x2, y2 = poly[(i + 1) % n][0], poly[(i + 1) % n][1]
+        if (y1 > y) != (y2 > y) and x < (x2 - x1) * (y - y1) / (y2 - y1) + x1:
+            inside = not inside
+    return inside
+
+
+def _segments_properly_cross(p1, p2, p3, p4) -> bool:
+    """True only when p1p2 and p3p4 cross TRANSVERSALLY. Collinear or merely
+    touching segments are excluded on purpose -- see _polygons_overlap."""
+    def orient(a, b, c):
+        v = ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
+        # int(), not bare bool arithmetic: zone points reach here as numpy
+        # scalars on some boards, and numpy 2.x REMOVED np.bool_ - np.bool_
+        # (TypeError). That killed route_planes outright -- the step wrote no
+        # board, downstream steps hit FileNotFoundError, and the board was
+        # dropped from grading as chain=BROKEN rather than reported. Identical
+        # for Python floats (bool is an int subclass).
+        return int(v > 1e-12) - int(v < -1e-12)
+    d1, d2 = orient(p3, p4, p1), orient(p3, p4, p2)
+    d3, d4 = orient(p1, p2, p3), orient(p1, p2, p4)
+    return d1 * d2 < 0 and d3 * d4 < 0
+
+
+def _overlap_area(pa, pb, samples: int = 64) -> float:
+    """Approximate shared area (mm^2) of two outlines, by sampling a fixed grid
+    over their bounding-box intersection.
+
+    Deliberately NOT exact polygon clipping: all we need is "is the contested
+    region big enough to hold copper", and an exact clipper (shapely) is only
+    LAZILY importable here -- KiCad's bundled Python may not have it, and a
+    silent fallback would let the GUI and CLI assign DIFFERENT priorities,
+    which is the CLI/GUI drift this codebase keeps getting bitten by. A fixed
+    grid is pure Python, dependency-free and deterministic, so both front ends
+    always agree.
+    """
+    ax1 = min(p[0] for p in pa); ax2 = max(p[0] for p in pa)
+    ay1 = min(p[1] for p in pa); ay2 = max(p[1] for p in pa)
+    bx1 = min(p[0] for p in pb); bx2 = max(p[0] for p in pb)
+    by1 = min(p[1] for p in pb); by2 = max(p[1] for p in pb)
+    x1, x2 = max(ax1, bx1), min(ax2, bx2)
+    y1, y2 = max(ay1, by1), min(ay2, by2)
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    box = (x2 - x1) * (y2 - y1)
+    hits = 0
+    for i in range(samples):
+        x = x1 + (i + 0.5) * (x2 - x1) / samples
+        for j in range(samples):
+            y = y1 + (j + 0.5) * (y2 - y1) / samples
+            if _point_in_polygon(x, y, pa) and _point_in_polygon(x, y, pb):
+                hits += 1
+    return box * hits / float(samples * samples)
+
+
+def _polygons_overlap(pa, pb, eps: float = 0.02,
+                      min_area: float = 0.01) -> bool:
+    """True when two zone outlines contend for a MEANINGFUL patch of copper.
+
+    Two things must not count as overlap, and each bit us in turn:
+
+    * ADJACENCY. route_planes' Voronoi cells tile the board, so neighbours
+      share a boundary and their vertices lie exactly ON each other's edges --
+      where the even-odd rule is undefined, so a plain point-in-polygon test
+      calls adjacent pairs "overlapping".
+    * NUMERICAL SLIVERS. Those shared boundaries are floating point, so
+      neighbouring edges routinely cross by nanometres. Topology alone
+      (transversal crossing / vertex containment) flags those too: on
+      scalenode_cm4 it reported 31 contending pairs of which exactly ONE had
+      real area -- 29 were under 1e-4 mm^2. Re-prioritising those would have
+      changed the fill of zone pairs that were never ambiguous.
+
+    So: cheap topology first (bbox reject, transversal crossing, or a vertex
+    nudged INWARD toward its own centroid -- which catches nesting, where no
+    edges cross), then an AREA test. `min_area` = 0.01 mm^2 is a 0.1x0.1mm
+    patch, min_thickness scale: a thinner contested region is opened away by
+    the fill's own minimum-thickness rule, so who "wins" it cannot matter.
+    Measured corpus areas separate cleanly either side of it (noise <= 1e-4,
+    real >= 0.01), so the threshold is not near anything.
+    """
+    if not pa or not pb:
+        return False
+    ax1 = min(p[0] for p in pa); ax2 = max(p[0] for p in pa)
+    ay1 = min(p[1] for p in pa); ay2 = max(p[1] for p in pa)
+    bx1 = min(p[0] for p in pb); bx2 = max(p[0] for p in pb)
+    by1 = min(p[1] for p in pb); by2 = max(p[1] for p in pb)
+    if ax2 < bx1 or bx2 < ax1 or ay2 < by1 or by2 < ay1:
+        return False
+
+    na, nb = len(pa), len(pb)
+    topo = False
+    for i in range(na):
+        if topo:
+            break
+        a1, a2 = pa[i], pa[(i + 1) % na]
+        for j in range(nb):
+            if _segments_properly_cross(a1, a2, pb[j], pb[(j + 1) % nb]):
+                topo = True
+                break
+
+    if not topo:
+        def nudged_inside(poly, other):
+            cx = sum(p[0] for p in poly) / len(poly)
+            cy = sum(p[1] for p in poly) / len(poly)
+            for p in poly:
+                x, y = p[0], p[1]
+                dx, dy = cx - x, cy - y
+                n = (dx * dx + dy * dy) ** 0.5
+                if n < 1e-12:
+                    continue
+                if _point_in_polygon(x + dx / n * eps, y + dy / n * eps, other):
+                    return True
+            return False
+        topo = nudged_inside(pa, pb) or nudged_inside(pb, pa)
+
+    return topo and _overlap_area(pa, pb) >= min_area
+
+
+def zone_overlap_priorities(zones) -> List[int]:
+    """Priorities that make an overlapping set of zones fill DETERMINISTICALLY.
+
+    `zones` is a list of (layer, net_id, polygon_points); the return value is a
+    parallel list of priorities.
+
+    KiCad fills higher-priority zones first and only lower-priority zones pull
+    back, so overlapping zones left at the SAME priority have no defined winner
+    and KiCad falls back to KIID (UUID) order. We mint a fresh uuid4 for every
+    zone we write, so that made the fill -- and therefore island topology and
+    connectivity -- vary between runs over identical copper (usp_obc_v7: a
+    nested Net-(U5-GND) pour inside the GND pour, both priority 0 on In1.Cu,
+    graded "1 net unconnected" on 4 of 6 UUID rolls). Emitting distinct
+    priorities removes the ambiguity at the source.
+
+    SMALLER area wins (higher priority). A pour nested inside a bigger one is
+    there precisely because it must own that patch -- give the big pour the tie
+    and the small one gets carved up, which is the failure we started from.
+    Ties break on (net_id, index) so the result never depends on dict order.
+    Zones that overlap nothing keep priority 0, so boards that never had the
+    ambiguity are byte-for-byte unaffected.
+    """
+    n = len(zones)
+    prio = [0] * n
+    # Group by layer: zones on different layers never contend.
+    by_layer: Dict[str, List[int]] = {}
+    for i, (layer, _nid, _poly) in enumerate(zones):
+        by_layer.setdefault(layer, []).append(i)
+
+    for _layer, idxs in by_layer.items():
+        # Connected components of the "overlaps" relation: only zones that
+        # actually contend need separated priorities.
+        parent = {i: i for i in idxs}
+
+        def find(a):
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
+
+        for pos, i in enumerate(idxs):
+            for j in idxs[pos + 1:]:
+                if zones[i][1] == zones[j][1]:
+                    continue  # same net: overlap is harmless, they merge
+                if _polygons_overlap(zones[i][2], zones[j][2]):
+                    ri, rj = find(i), find(j)
+                    if ri != rj:
+                        parent[ri] = rj
+
+        groups: Dict[int, List[int]] = {}
+        for i in idxs:
+            groups.setdefault(find(i), []).append(i)
+
+        for members in groups.values():
+            if len(members) < 2:
+                continue  # no contention -> leave at 0
+            ordered = sorted(members,
+                             key=lambda i: (-_polygon_area(zones[i][2]),
+                                            zones[i][1], i))
+            for rank, i in enumerate(ordered):
+                prio[i] = rank
+    return prio
+
+
 def generate_zone_sexpr(
     net_id: int,
     net_name: str,
@@ -265,7 +541,8 @@ def generate_zone_sexpr(
     thermal_gap: float = 0.2,
     thermal_bridge_width: float = 0.2,
     direct_connect: bool = True,
-    use_net_name: bool = False
+    use_net_name: bool = False,
+    priority: int = 0
 ) -> str:
     """Generate KiCad S-expression for a filled copper zone.
 
@@ -280,6 +557,15 @@ def generate_zone_sexpr(
         thermal_bridge_width: Width of thermal bridges
         direct_connect: If True, use solid/direct pad connections; if False, use thermal relief
         use_net_name: If True, output KiCad 10 format (net "name") instead of (net id)
+        priority: Fill priority. KiCad fills HIGHER priority zones first and only
+            LOWER-priority zones pull back, so two OVERLAPPING zones left at the
+            same priority have no defined winner -- KiCad tie-breaks on the zones'
+            KIIDs, i.e. on their UUIDs. Since we mint a fresh uuid4 per run, that
+            made the FILL itself vary run to run over bit-identical copper:
+            usp_obc_v7 (a Net-(U5-GND) pour nested wholly inside the GND pour,
+            both priority 0 on In1.Cu) graded "1 net unconnected" on 4 of 6 UUID
+            rolls. Overlapping zones must therefore be emitted at DISTINCT
+            priorities -- see zone_overlap_priorities().
 
     Returns:
         S-expression string for the zone
@@ -321,14 +607,100 @@ def generate_zone_sexpr(
 		)'''
         extra_zone_props = '\n\t\t(filled_areas_thickness no)'
 
+    priority_str = f'\n\t\t(priority {int(priority)})' if priority else ''
+
     return f'''	(zone
 		{net_lines}
 		(layer "{layer}")
 		(uuid "{uuid.uuid4()}")
-		(hatch edge 0.5)
+		(hatch edge 0.5){priority_str}
 		{connect_pads_str}
 		(min_thickness {min_thickness}){extra_zone_props}
 		{fill_block}
+		(polygon
+			(pts
+				{pts_str}
+			)
+		)
+	)'''
+
+
+def npth_slot_keepout_polygons(pcb_data, dilate: float,
+                               arc_segments: int = 32) -> List[Tuple[str, List[Tuple[float, float]]]]:
+    """[(ref, polygon_points)] outlining every NPTH SLOT (oval-drill) hole's
+    capsule dilated by ``dilate`` mm (#448).
+
+    KiCad's DRC edge provider treats milled NPTH slots as board edge
+    (copper_edge_clearance), but its zone FILLER pulls fill back from them at
+    only the hole clearance -- so a plane zone poured over a slotted footprint
+    (keyboard switches, USB shields) self-flags against the board's edge rule.
+    These polygons back copper_pour keepout rule areas that make the filler
+    honor the edge clearance. Round NPTH drills are excluded: KiCad grades
+    those under hole_clearance, which the filler already honors.
+
+    ``dilate`` should be the board's effective copper-to-edge clearance. A
+    small sagitta allowance for the inscribed arc polygons is added here so
+    the chord error cannot re-expose sub-clearance fill.
+    """
+    import math as _math
+    from kicad_parser import pad_drill_capsule
+    dilate = dilate + 0.01  # inscribed-polygon sagitta allowance
+    out = []
+    for fp in pcb_data.footprints.values():
+        for pad in fp.pads:
+            if getattr(pad, 'pad_type', '') != 'np_thru_hole' or pad.drill <= 0:
+                continue
+            (x1, y1), (x2, y2), r = pad_drill_capsule(pad)
+            if _math.hypot(x2 - x1, y2 - y1) <= 1e-9:
+                continue  # round drill: not part of the milled edge
+            rr = r + dilate
+            a0 = _math.atan2(y2 - y1, x2 - x1)
+            pts = []
+            for i in range(arc_segments + 1):  # cap around (x2, y2)
+                ang = a0 - _math.pi / 2 + _math.pi * i / arc_segments
+                pts.append((x2 + rr * _math.cos(ang), y2 + rr * _math.sin(ang)))
+            for i in range(arc_segments + 1):  # cap around (x1, y1)
+                ang = a0 + _math.pi / 2 + _math.pi * i / arc_segments
+                pts.append((x1 + rr * _math.cos(ang), y1 + rr * _math.sin(ang)))
+            ref = f"{pad.component_ref}.{pad.pad_number}".rstrip('.')
+            # Index into the name: split keyboards repeat footprint refs
+            # (two SW25 halves), and rule-area names must be unique.
+            out.append((f"{ref}-{len(out)}", pts))
+    return out
+
+
+def generate_keepout_zone_sexpr(layers: List[str],
+                                polygon_points: List[Tuple[float, float]],
+                                name: str,
+                                use_net_name: bool = False) -> str:
+    """Rule-area zone blocking only copper POUR (tracks/vias/pads stay
+    allowed -- the router enforces its own clearances). Used for the NPTH
+    slot edge keepouts (#448). use_net_name=True emits the KiCad 10 net
+    header (same switch as generate_zone_sexpr)."""
+    pts_str = " ".join(f"(xy {x:.6f} {y:.6f})" for x, y in polygon_points)
+    layers_str = " ".join(f'"{l}"' for l in layers)
+    net_lines = '(net "")' if use_net_name else '(net 0)\n\t\t(net_name "")'
+    return f'''	(zone
+		{net_lines}
+		(layers {layers_str})
+		(uuid "{uuid.uuid4()}")
+		(name "{name}")
+		(hatch edge 0.5)
+		(connect_pads
+			(clearance 0)
+		)
+		(min_thickness 0.25)
+		(keepout
+			(tracks allowed)
+			(vias allowed)
+			(pads allowed)
+			(copperpour not_allowed)
+			(footprints allowed)
+		)
+		(fill
+			(thermal_gap 0.5)
+			(thermal_bridge_width 0.5)
+		)
 		(polygon
 			(pts
 				{pts_str}
@@ -412,7 +784,8 @@ def add_tracks_to_pcb(input_path: str, output_path: str, tracks: List[Dict],
 def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
                                tracks: List[Dict], vias: List[Dict] = None,
                                remove_vias: List[Dict] = None,
-                               net_id_to_name: Dict[int, str] = None) -> bool:
+                               net_id_to_name: Dict[int, str] = None,
+                               add_teardrops: bool = False) -> bool:
     """
     Add track segments and vias to a PCB file, optionally removing existing vias.
 
@@ -422,6 +795,9 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
         tracks: List of track dicts with keys: start, end, width, layer, net_id
         vias: List of via dicts with keys: x, y, size, drill, layers, net_id
         remove_vias: List of via dicts with keys: x, y (position to match for removal)
+        add_teardrops: Add teardrop settings to every pad and via in the output.
+            Here rather than in each fanout main() so bga_fanout and qfn_fanout
+            share one implementation with the other writers (#489 §9).
 
     Returns:
         True if successful
@@ -528,10 +904,28 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
 
     routing_text = '\n'.join(elements)
 
+    # Teardrops on pads, if asked (#489 §9). Pads are never ADDED here, so this
+    # runs on the input text; the VIA pass waits until the new copper is in.
+    if add_teardrops:
+        print("Adding teardrop settings to pads and vias...")
+        content, _td = add_teardrops_to_pads(content)
+        print(f"  Added teardrops to {_td} pads" if _td
+              else "  All pads already have teardrop settings")
+
+    def _finish(text: str) -> str:
+        # Via teardrops LAST so THIS run's vias get them too -- for a fanout that
+        # is the whole point (a 0.1mm trace meeting a 0.25mm via pad).
+        if not add_teardrops:
+            return text
+        text, _vtd = add_teardrops_to_vias(text)
+        print(f"  Added teardrops to {_vtd} vias" if _vtd
+              else "  No vias needed teardrops (none present, or all already set)")
+        return text
+
     if not routing_text.strip():
         print("Warning: No routing elements to add")
         with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(content)
+            f.write(_finish(content))
         return True
 
     # Find the last closing parenthesis
@@ -546,7 +940,7 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
 
     # Write output file
     with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(new_content)
+        f.write(_finish(new_content))
 
     return True
 
@@ -1101,6 +1495,94 @@ def add_teardrops_to_pads(content: str,
     # Add remaining content
     result_parts.append(content[last_end:])
 
+    return ''.join(result_parts), count
+
+
+def add_teardrops_to_vias(content: str,
+                          best_length_ratio: float = 0.5,
+                          max_length: float = 1.0,
+                          best_width_ratio: float = 1.0,
+                          max_width: float = 2.0,
+                          curved_edges: bool = False,
+                          filter_ratio: float = 0.9,
+                          allow_two_segments: bool = True,
+                          prefer_zone_connections: bool = True) -> tuple[str, int]:
+    """Add teardrop settings to every via that does not already have them.
+
+    `--add-teardrops` reached PADS only: `add_teardrops_to_pads` above, with zero
+    teardrop references anywhere near via emission, so vias got teardrops on NO
+    path (#489 §9). Track-to-via teardrops matter most exactly where this tool is
+    weakest -- fine-pitch BGA escape, where a 0.1mm trace meets a 0.25mm via pad --
+    and they are the standard mitigation for drill breakout under layer-to-layer
+    registration error.
+
+    KiCad accepts the same 9-field `(teardrops ...)` block on a via as on a pad
+    (verified by round-tripping SetTeardropsEnabled through pcbnew). The block is
+    inserted AFTER `(uuid ...)`, as the via's last child: KiCad's parser does not
+    care about child order, while this repo's own via regexes require
+    layers -> (free)? -> net -> uuid to be contiguous, so inserting earlier would
+    make the boards we write unparseable BY US.
+
+    Returns (modified_content, count_of_vias_given_teardrops).
+    """
+    curved_str = "yes" if curved_edges else "no"
+    two_seg_str = "yes" if allow_two_segments else "no"
+    zone_str = "yes" if prefer_zone_connections else "no"
+
+    teardrop_block = f'''
+		(teardrops
+			(best_length_ratio {best_length_ratio})
+			(max_length {max_length})
+			(best_width_ratio {best_width_ratio})
+			(max_width {max_width})
+			(curved_edges {curved_str})
+			(filter_ratio {filter_ratio})
+			(enabled yes)
+			(allow_two_segments {two_seg_str})
+			(prefer_zone_connections {zone_str})
+		)'''
+
+    count = 0
+    result_parts = []
+    last_end = 0
+    i = 0
+
+    while True:
+        via_start = content.find('(via', i)
+        if via_start == -1:
+            break
+        # '(via' must be the whole token, not a prefix of something else.
+        nxt = content[via_start + 4:via_start + 5]
+        if nxt and nxt not in ' \t\r\n(':
+            i = via_start + 4
+            continue
+
+        depth = 0
+        via_end = via_start
+        for j in range(via_start, len(content)):
+            if content[j] == '(':
+                depth += 1
+            elif content[j] == ')':
+                depth -= 1
+                if depth == 0:
+                    via_end = j + 1
+                    break
+
+        via_block = content[via_start:via_end]
+
+        if '(teardrops' not in via_block:
+            uuid_match = re.search(r'\(uuid\s+"[^"]*"\)', via_block)
+            if uuid_match:
+                cut = uuid_match.end()
+                new_via_block = via_block[:cut] + teardrop_block + via_block[cut:]
+                result_parts.append(content[last_end:via_start])
+                result_parts.append(new_via_block)
+                last_end = via_end
+                count += 1
+
+        i = via_end
+
+    result_parts.append(content[last_end:])
     return ''.join(result_parts), count
 
 

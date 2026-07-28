@@ -7,6 +7,23 @@ use std::collections::BinaryHeap;
 use crate::obstacle_map::GridObstacleMap;
 use crate::types::{GridState, OpenEntry, RouteStats, SearchSink, StatsSink, FrontierSink, DIRECTIONS, ORTHO_COST, DIAG_COST, DEFAULT_TURN_COST};
 
+/// Direction octant 0-7 for a unit step (soft-knobs N5: angle-proportional
+/// turn cost -- octant delta * 45 degrees is the turn angle).
+#[inline]
+fn octant_index(dx: i32, dy: i32) -> i32 {
+    match (dx.signum(), dy.signum()) {
+        (1, 0) => 0,
+        (1, 1) => 1,
+        (0, 1) => 2,
+        (-1, 1) => 3,
+        (-1, 0) => 4,
+        (-1, -1) => 5,
+        (0, -1) => 6,
+        (1, -1) => 7,
+        _ => 0,
+    }
+}
+
 /// S1-B (issue #384): tiled flat-array node store. Replaces the per-node
 /// FxHashMap<u64, NodeState> (S1-A) with 64x64-cell tiles per layer: a node
 /// lookup is one SMALL hashmap probe per tile plus direct array indexing, and
@@ -238,6 +255,29 @@ pub(crate) enum SearchStep {
     Exhausted,
 }
 
+/// Wide-track search margin (issue #156): the extra half-width, in FRACTIONAL
+/// grid cells, that the swept-capsule check reserves beyond what the obstacle
+/// map already stamped. Accepted from Python as a scalar (int/float, uniform
+/// across layers -- power nets) or a per-layer list of floats (impedance
+/// routing, where the layer stackup gives each layer its own width).
+#[derive(FromPyObject, Clone)]
+pub enum TrackMarginArg {
+    Scalar(f64),
+    PerLayer(Vec<f64>),
+}
+
+impl TrackMarginArg {
+    /// Margin (grid cells) to reserve on `layer`. A per-layer list that is
+    /// shorter than the layer count yields 0.0 for the missing layers.
+    #[inline]
+    pub(crate) fn at(&self, layer: usize) -> f64 {
+        match self {
+            TrackMarginArg::Scalar(m) => *m,
+            TrackMarginArg::PerLayer(v) => v.get(layer).copied().unwrap_or(0.0),
+        }
+    }
+}
+
 /// Per-search options (route_multi's optional arguments, pre-normalized).
 pub(crate) struct SearchOptions {
     collinear_vias: bool,
@@ -245,7 +285,7 @@ pub(crate) struct SearchOptions {
     norm_start_dir: Option<(i32, i32)>,
     norm_end_dir: Option<(f64, f64)>,
     direction_steps: i32,
-    track_margin: f64,
+    track_margin: TrackMarginArg,
 }
 
 impl SearchOptions {
@@ -255,7 +295,7 @@ impl SearchOptions {
         start_direction: Option<(i32, i32)>,
         end_direction: Option<(f64, f64)>,
         direction_steps: i32,
-        track_margin: i32,
+        track_margin: TrackMarginArg,
     ) -> Self {
         // Normalize start direction if provided
         let norm_start_dir = start_direction.map(|(dx, dy)| (dx.signum(), dy.signum()));
@@ -271,7 +311,7 @@ impl SearchOptions {
             norm_start_dir,
             norm_end_dir,
             direction_steps,
-            track_margin: track_margin as f64,
+            track_margin,
         }
     }
 }
@@ -570,7 +610,8 @@ impl GridSearch {
                 let ngy = current.gy + dy;
 
                 if obstacles.segment_blocked(current.gx, current.gy, ngx, ngy,
-                                             current.layer as usize, self.opts.track_margin) {
+                                             current.layer as usize,
+                                             self.opts.track_margin.at(current.layer as usize)) {
                     sink.on_blocked(ngx, ngy, current.layer);
                     continue;
                 }
@@ -593,10 +634,22 @@ impl GridSearch {
                 // Apply layer cost multiplier (1000 = 1.0x, 1500 = 1.5x, etc.)
                 let layer_multiplier = router.layer_cost_or_default(current.layer as usize);
                 let move_cost = (base_move_cost as i64 * layer_multiplier as i64 / 1000) as i32;
-                // Turn cost if direction changes (encourages straighter paths)
+                // Turn cost proportional to the turn ANGLE (soft-knobs N5):
+                // the knob is the 90-degree anchor; a 45-degree kink costs
+                // half, a 135-degree hairpin 1.5x, a reversal 2x. The old
+                // flat charge priced a gentle jog like a hairpin -- part of
+                // why grid paths zigzag where human routes flow.
                 let turn_cost = match prev_direction {
                     Some((pdx, pdy)) if pdx != 0 || pdy != 0 => {
-                        if dx != pdx || dy != pdy { router.turn_cost } else { 0 }
+                        if dx != pdx || dy != pdy {
+                            let di = octant_index(dx, dy);
+                            let pi = octant_index(pdx, pdy);
+                            let delta = (di - pi).rem_euclid(8);
+                            let angle_units = delta.min(8 - delta); // 1=45deg .. 4=180deg
+                            (router.turn_cost as i64 * angle_units as i64 / 2) as i32
+                        } else {
+                            0
+                        }
                     }
                     _ => 0, // No previous direction (source node or via)
                 };
@@ -611,17 +664,39 @@ impl GridSearch {
                 let direction_penalty = if router.direction_preference_cost > 0 {
                     let preferred = router.layer_direction_preferences
                         .get(current.layer as usize).copied().unwrap_or(255);
+                    // Charge progress along the NON-PREFERRED axis, diagonals
+                    // included (#452). Charging only PURE axis moves
+                    // (`dy != 0 && dx == 0`) left a free staircase: a 45 move
+                    // satisfies neither test, so on an H-preferred layer the
+                    // cheapest way to travel vertically was a chain of
+                    // zero-penalty diagonals, and the preference was bypassed
+                    // rather than merely weak (raising the knob could not fix
+                    // it). A diagonal advances one cell of wrong-axis progress
+                    // exactly like a pure axis move, so it pays the same.
+                    // Weight stays gentle by design: 50 vs DIAG_COST 1414 is a
+                    // ~3.5% nudge that tips ties toward the preferred axis
+                    // without discouraging useful 45 routing.
                     match preferred {
-                        0 => if dy != 0 && dx == 0 { router.direction_preference_cost } else { 0 },
-                        1 => if dx != 0 && dy == 0 { router.direction_preference_cost } else { 0 },
+                        0 => if dy != 0 { router.direction_preference_cost } else { 0 },
+                        1 => if dx != 0 { router.direction_preference_cost } else { 0 },
                         _ => 0, // No preference (255 or other)
                     }
                 } else { 0 };
-                // Path attraction bonus for bus routing - direction-based, no spiraling
-                let path_attraction_bonus =
+                // Path attraction for bus routing: a multiplicative DISCOUNT
+                // percent (0-90) on the whole step, direction-based, no
+                // spiraling. Multiplicative + capped means a step can never
+                // go free or negative (A* first-arrival stays valid) and the
+                // proximity/alignment/layer gradations survive any bonus
+                // setting instead of saturating a subtractive floor. The
+                // vertical (cross-layer copper) attraction stays subtractive
+                // but is capped so it too cannot zero the step.
+                let path_discount_pct =
                     router.get_path_attraction_bonus(ngx, ngy, current.layer, dx, dy);
-                let new_g = g + move_cost + turn_cost + proximity_cost + direction_penalty
-                    - attraction_bonus - path_attraction_bonus;
+                let base_step = move_cost + turn_cost + proximity_cost + direction_penalty;
+                let after_vert = (base_step - attraction_bonus).max(move_cost / 10);
+                let step_cost = (after_vert * (100 - path_discount_pct) / 100)
+                    .max(move_cost / 10);
+                let new_g = g + step_cost;
 
                 if new_g < existing_g {
                     if existing_g != i32::MAX {
@@ -712,7 +787,8 @@ impl GridSearch {
 
                 // Check if destination layer is blocked at this position
                 if obstacles.segment_blocked(current.gx, current.gy, current.gx, current.gy,
-                                             layer as usize, self.opts.track_margin) {
+                                             layer as usize,
+                                             self.opts.track_margin.at(layer as usize)) {
                     sink.on_blocked(current.gx, current.gy, layer);
                     continue;
                 }
@@ -791,20 +867,28 @@ pub struct GridRouter {
     attraction_path: Vec<(i32, i32, u8, i8, i8)>,  // Path to attract to with direction
     attraction_radius: i32,  // Grid units for attraction (0 = disabled)
     attraction_bonus: i32,   // Cost reduction when moving parallel to path (same layer)
-    // Spatial hash for efficient path distance lookup (C2: was a map whose
-    // values were never read; membership is all that matters)
-    attraction_path_hash: FxHashSet<u64>,  // buckets with path points nearby
+    // Fraction (percent) of the attraction bonus granted on layers OTHER
+    // than the path point's layer (issue #296 R9 phase B: a bus corridor
+    // must survive a via transition -- with 0 the river loses all guidance
+    // the moment a member changes layer). 0 = same-layer only (legacy).
+    attraction_cross_layer_pct: i32,
+    // Spatial POINT index for the attraction path (soft-knobs P2): bucket
+    // (bx, by, layer=254 wildcard) -> indices into attraction_path. The old
+    // membership-only hash still forced a linear scan of the WHOLE path per
+    // candidate move; the index bounds each lookup to the nearby points.
+    attraction_path_buckets: FxHashMap<u64, Vec<u32>>,
 }
 
 #[pymethods]
 impl GridRouter {
     #[new]
-    #[pyo3(signature = (via_cost, h_weight, turn_cost=None, via_proximity_cost=1, vertical_attraction_radius=0, vertical_attraction_bonus=0, layer_costs=None, proximity_heuristic_cost=None, layer_direction_preferences=None, direction_preference_cost=0, attraction_radius=0, attraction_bonus=0))]
+    #[pyo3(signature = (via_cost, h_weight, turn_cost=None, via_proximity_cost=1, vertical_attraction_radius=0, vertical_attraction_bonus=0, layer_costs=None, proximity_heuristic_cost=None, layer_direction_preferences=None, direction_preference_cost=0, attraction_radius=0, attraction_bonus=0, attraction_cross_layer_pct=0))]
     pub fn new(via_cost: i32, h_weight: f32, turn_cost: Option<i32>, via_proximity_cost: Option<i32>,
                vertical_attraction_radius: i32, vertical_attraction_bonus: i32,
                layer_costs: Option<Vec<i32>>, proximity_heuristic_cost: Option<i32>,
                layer_direction_preferences: Option<Vec<u8>>, direction_preference_cost: i32,
-               attraction_radius: i32, attraction_bonus: i32) -> Self {
+               attraction_radius: i32, attraction_bonus: i32,
+               attraction_cross_layer_pct: i32) -> Self {
         Self {
             via_cost,
             h_weight,
@@ -819,7 +903,8 @@ impl GridRouter {
             attraction_path: Vec::new(),
             attraction_radius,
             attraction_bonus,
-            attraction_path_hash: FxHashSet::default(),
+            attraction_cross_layer_pct,
+            attraction_path_buckets: FxHashMap::default(),
         }
     }
 
@@ -836,7 +921,7 @@ impl GridRouter {
     /// Call this before routing each subsequent bus member with the previously routed path.
     /// Pass an empty Vec to clear the attraction.
     pub fn set_attraction_path(&mut self, path: Vec<(i32, i32, u8)>) {
-        self.attraction_path_hash.clear();
+        self.attraction_path_buckets.clear();
         self.attraction_path.clear();
 
         if path.is_empty() || self.attraction_radius <= 0 {
@@ -866,27 +951,14 @@ impl GridRouter {
             (gx, gy, layer, dx, dy)
         }).collect();
 
-        // Build spatial hash for efficient distance lookups
-        // Key: (gx / bucket_size, gy / bucket_size, layer) packed into u64
+        // Build the spatial POINT index (soft-knobs P2): each point goes in
+        // its OWN bucket; lookups scan the neighborhood of buckets within the
+        // radius. Layer-blind (254 wildcard key) -- the lookup filters layers
+        // itself for the cross-layer fraction (#296 R9 phase B).
         let bucket_size = (self.attraction_radius / 2).max(1);
-
-        for &(px, py, layer, _, _) in &path_with_directions {
-            // Add this path point to its bucket and neighboring buckets within radius
-            let bx = px / bucket_size;
-            let by = py / bucket_size;
-
-            // Mark cells within attraction radius
-            let cells_to_check = (self.attraction_radius / bucket_size) + 1;
-            for dbx in -cells_to_check..=cells_to_check {
-                for dby in -cells_to_check..=cells_to_check {
-                    let cell_bx = bx + dbx;
-                    let cell_by = by + dby;
-                    // Pack bucket coords + layer into key
-                    let key = Self::pack_bucket_key(cell_bx, cell_by, layer);
-                    // Store that this bucket has path points nearby
-                    self.attraction_path_hash.insert(key);
-                }
-            }
+        for (i, &(px, py, _layer, _, _)) in path_with_directions.iter().enumerate() {
+            let key = Self::pack_bucket_key(px / bucket_size, py / bucket_size, 254);
+            self.attraction_path_buckets.entry(key).or_default().push(i as u32);
         }
 
         self.attraction_path = path_with_directions;
@@ -895,7 +967,7 @@ impl GridRouter {
     /// Clear the attraction path
     pub fn clear_attraction_path(&mut self) {
         self.attraction_path.clear();
-        self.attraction_path_hash.clear();
+        self.attraction_path_buckets.clear();
     }
 
     /// Route from multiple source points to multiple target points.
@@ -912,11 +984,13 @@ impl GridRouter {
     /// end_direction: Optional (dx, dy) continuous direction for final moves to target.
     /// If specified, checks arrival direction is within ±60° of this direction.
     /// direction_steps: Number of steps to constrain at start (default 2).
-    /// track_margin: Extra margin in grid cells for wide tracks (e.g., power nets).
-    /// When > 0, checks cells within this radius for obstacles.
+    /// track_margin: Extra margin in FRACTIONAL grid cells for wide tracks
+    /// (power nets / impedance-width nets). Scalar (uniform) or per-layer
+    /// list of floats (#156). When > 0 on a layer, the swept-capsule check
+    /// reserves that Euclidean radius along every move on that layer.
     ///
     /// C1: thin wrapper over the shared GridSearch core with a StatsSink.
-    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=0))]
+    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=TrackMarginArg::Scalar(0.0)))]
     #[allow(clippy::too_many_arguments)]
     pub fn route_multi(
         &self,
@@ -929,7 +1003,7 @@ impl GridRouter {
         start_direction: Option<(i32, i32)>,
         end_direction: Option<(f64, f64)>,
         direction_steps: i32,
-        track_margin: i32,
+        track_margin: TrackMarginArg,
     ) -> (Option<Vec<(i32, i32, u8)>>, u32, std::collections::HashMap<String, f64>) {
         let opts = SearchOptions::new(collinear_vias, via_exclusion_radius,
                                       start_direction, end_direction,
@@ -980,7 +1054,7 @@ impl GridRouter {
     /// - On failure: path is None, blocked_cells contains cells that blocked expansion
     ///
     /// C1: thin wrapper over the shared GridSearch core with a FrontierSink.
-    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=0))]
+    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=TrackMarginArg::Scalar(0.0)))]
     #[allow(clippy::too_many_arguments)]
     pub fn route_with_frontier(
         &self,
@@ -993,7 +1067,7 @@ impl GridRouter {
         start_direction: Option<(i32, i32)>,
         end_direction: Option<(f64, f64)>,
         direction_steps: i32,
-        track_margin: i32,
+        track_margin: TrackMarginArg,
     ) -> (Option<Vec<(i32, i32, u8)>>, u32, Vec<(i32, i32, u8)>) {
         let opts = SearchOptions::new(collinear_vias, via_exclusion_radius,
                                       start_direction, end_direction,
@@ -1271,37 +1345,60 @@ impl GridRouter {
             return 0;
         }
 
-        // Quick check: is this position potentially near the path?
+        // Scan only the point-index buckets within reach (soft-knobs P2: the
+        // old membership hash still linear-scanned the WHOLE path per move).
+        // Distance is EUCLIDEAN (soft-knobs N4: the old Manhattan test against
+        // a Euclidean-derived radius halved the diagonal reach). Same-layer
+        // points give the full bonus; when only OTHER-layer points are near,
+        // grant attraction_cross_layer_pct of it (the corridor survives via
+        // transitions instead of going silent, #296 R9 phase B).
         let bucket_size = (self.attraction_radius / 2).max(1);
-        let bx = x / bucket_size;
-        let by = y / bucket_size;
-        let key = Self::pack_bucket_key(bx, by, layer);
+        let r2 = self.attraction_radius * self.attraction_radius;
+        let bx0 = (x - self.attraction_radius) / bucket_size - 1;
+        let bx1 = (x + self.attraction_radius) / bucket_size + 1;
+        let by0 = (y - self.attraction_radius) / bucket_size - 1;
+        let by1 = (y + self.attraction_radius) / bucket_size + 1;
 
-        if !self.attraction_path_hash.contains(&key) {
-            return 0;
+        let mut d2_same = i64::MAX;
+        let mut dir_same: Option<(i8, i8)> = None;
+        let mut d2_cross = i64::MAX;
+        let mut dir_cross: Option<(i8, i8)> = None;
+
+        for bx in bx0..=bx1 {
+            for by in by0..=by1 {
+                let Some(idxs) = self.attraction_path_buckets
+                    .get(&Self::pack_bucket_key(bx, by, 254)) else { continue };
+                for &i in idxs {
+                    let (px, py, pl, path_dx, path_dy) = self.attraction_path[i as usize];
+                    let ddx = (x - px) as i64;
+                    let ddy = (y - py) as i64;
+                    let d2 = ddx * ddx + ddy * ddy;
+                    if d2 > r2 as i64 {
+                        continue;
+                    }
+                    if pl == layer {
+                        if d2 < d2_same {
+                            d2_same = d2;
+                            dir_same = Some((path_dx, path_dy));
+                        }
+                    } else if self.attraction_cross_layer_pct > 0 && d2 < d2_cross {
+                        d2_cross = d2;
+                        dir_cross = Some((path_dx, path_dy));
+                    }
+                }
+            }
         }
 
-        // Find all nearby path points and accumulate direction-matching bonus
-        // Using the closest point's direction
-        let mut nearest_dist = i32::MAX;
-        let mut nearest_dir: Option<(i8, i8)> = None;
-
-        for &(px, py, pl, path_dx, path_dy) in &self.attraction_path {
-            if pl != layer {
-                continue;
-            }
-
-            let dist = (x - px).abs() + (y - py).abs();
-            if dist <= self.attraction_radius && dist < nearest_dist {
-                nearest_dist = dist;
-                nearest_dir = Some((path_dx, path_dy));
-            }
-        }
-
+        let (nearest_d2, nearest_dir, layer_pct) = if dir_same.is_some() {
+            (d2_same, dir_same, 100)
+        } else {
+            (d2_cross, dir_cross, self.attraction_cross_layer_pct)
+        };
         let (path_dx, path_dy) = match nearest_dir {
             Some(d) => d,
             None => return 0,
         };
+        let nearest_dist = (nearest_d2 as f32).sqrt() as i32;
 
         // Check direction alignment using dot product
         let dot = move_dx * (path_dx as i32) + move_dy * (path_dy as i32);
@@ -1321,8 +1418,15 @@ impl GridRouter {
         let proximity_ratio = (self.attraction_radius - nearest_dist) as f32 / self.attraction_radius as f32;
         let proximity_pct = (proximity_ratio * proximity_ratio * 100.0) as i32;
 
-        // Calculate bonus: base * proximity% * alignment%
-        (self.attraction_bonus as i64 * proximity_pct as i64 * alignment as i64 / 10000) as i32
+        // Return a DISCOUNT PERCENT of the step cost (0-90), not cost units:
+        // a subtractive bonus larger than the move cost saturates into a
+        // negative/floored edge and every gradation (proximity, alignment,
+        // layer) collapses -- the soft-knobs review's finding #2. Strength
+        // mapping keeps legacy tuning meaningful: 50 bonus units = 1% max
+        // discount, so the default 5000 = full strength, capped at 90%.
+        let strength_pct = (self.attraction_bonus / 50).min(90);
+        (strength_pct as i64 * proximity_pct as i64 * alignment as i64
+            * layer_pct as i64 / 1_000_000) as i32
     }
 
     /// Convert RouteStats to a Python-friendly dictionary

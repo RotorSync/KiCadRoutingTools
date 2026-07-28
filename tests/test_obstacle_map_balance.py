@@ -110,8 +110,17 @@ def main():
     kit_out = os.path.join(tmp, "kit_out.kicad_pcb")
     kit_geom = ["--track-width", "0.2", "--clearance", "0.2", "--via-size", "0.5",
                 "--via-drill", "0.4", "--hole-to-hole-clearance", "0.3"]
+    # Pre-route a WIDE slice of U102's signal nets, not just /AN*. Per this
+    # file's own header ("re-tune the recipe, NOT delete the assertion"): with
+    # only /AN* routed, the plane step still hit blocked pads but every rip-up
+    # attempt failed with "blocked by +3.3V (protected, cannot rip)" -- the
+    # blockers were plane copper, which is never rippable, so zero rips ever
+    # happened and the balance assertion below went vacuous. These nets put
+    # RIPPABLE signal copper around U102's plane pads; the stage now logs 3
+    # real rips out of 36 rip-up attempts.
     rc, log = run_cmd(["route.py", os.path.join(KF, "kit-dev-coldfire-xilinx_5213.kicad_pcb"),
-                       kit_out, "--nets", "/AN*",
+                       kit_out, "--nets", "/AN*", "/IRQ*", "/QSPI*", "/DTIN*",
+                       "/PWM*", "/GPT*", "/PST*", "/DDAT*",
                        "--layers", "F.Cu", "In1.Cu", "In2.Cu", "B.Cu",
                        "--max-ripup", "10"] + kit_geom, audit=False)
     check("route_planes: kit signal pre-route completed", rc == 0, f"rc={rc}")

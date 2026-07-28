@@ -62,6 +62,12 @@ RIPPED_ROUTE_AVOIDANCE_COST = 0.1
 
 # Impedance routing
 IMPEDANCE_DEFAULT = 50  # ohms
+# #486: design side gap from a controlled-impedance trace's edge to the
+# same-layer ground pour. 0 = the trace is a plain microstrip (historical
+# behaviour); > 0 declares it a coplanar waveguide over ground, which needs a
+# NARROWER trace for the same target ohms. Must be matched by the plane step's
+# zone clearance -- see route_planes --zone-clearance.
+COPLANAR_GAP = 0.0  # mm (0 = not coplanar)
 
 # Crossing penalty
 CROSSING_PENALTY = 1000.0
@@ -79,7 +85,12 @@ TIME_MATCH_TOLERANCE = 1.0  # ps
 
 # GND via placement for single-ended routing
 ADD_GND_VIAS = False  # If True, add GND vias near signal vias
-GND_VIA_NET = "GND"  # Net name for GND vias
+# Net to pin GND return vias to. "" = AUTO (#489 §5): resolve the ground net per
+# signal from its OWN ground domain. On a single-ground board that is the same net
+# the old literal "GND" default resolved to; on a split-ground board it stops
+# analog vias being stitched to the digital ground. Naming a net here still pins
+# every return via to it, board-wide.
+GND_VIA_NET = ""  # Net name for GND vias ("" = auto, per ground domain)
 GND_VIA_DISTANCE = 2.0  # mm - max distance from signal via to GND via
 
 # Algorithm parameters
@@ -94,9 +105,20 @@ RIPUP_ABANDON_METRIC_CHOICES = ('stranded', 'total-pads', 'complete-nets',
                                 'congestion', 'history', 'weighted',
                                 'probe', 'weighted-probe')
 
+# Rip-up blocker SELECTION algorithm (#424 audit): which foreign net the
+# rip-up ladder targets first when a route fails. 'count' is the historical
+# weighted-cell-count ranking; the alternatives re-rank the same rippable set.
+RIPUP_BLOCKER_SELECT = 'count'
+RIPUP_BLOCKER_SELECT_CHOICES = ('count', 'near-target', 'bidir', 'mincut')
+
 # Layer direction preference (0=horizontal, 1=vertical, 255=none)
 # Alternates H/V starting with horizontal on top layer
-DIRECTION_PREFERENCE_COST = 50  # Cost penalty for non-preferred direction (0 = disabled)
+DIRECTION_PREFERENCE_COST = 250  # Cost penalty for non-preferred direction (0 = disabled).
+# 250 is a compromise: 5000 (5x a move) reproduced human H/V lane style but
+# starved routability on dense boards (sets 6-11 A/B: +104 incomplete nets,
+# kbic65 98.9%->15.1%, route.py ~2x slower); the old 50 (~5% of a move) was
+# functionally inert. 250 (~25% of a move) keeps a real lane nudge without the
+# cost-5000 wall that made short diagonal diode/matrix hops unroutable.
 
 # Bus routing - auto-detection and parallel routing of grouped nets
 BUS_DETECTION_RADIUS = 5.0  # mm - max endpoint distance to form bus
@@ -249,6 +271,7 @@ PARAM_RANGES = {
     'stub_proximity_cost': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
     'neckdown_length': {'min': 0.0, 'max': 50.0, 'inc': 0.5, 'digits': 1},
     'neckdown_taper_length': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
+    'coplanar_gap': {'min': 0.0, 'max': 5.0, 'inc': 0.05, 'digits': 3},
     'via_proximity_cost': {'min': 0.0, 'max': 100.0, 'inc': 1.0, 'digits': 1},
     'track_proximity_distance': {'min': 0.0, 'max': 10.0, 'inc': 0.5, 'digits': 1},
     'track_proximity_cost': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},

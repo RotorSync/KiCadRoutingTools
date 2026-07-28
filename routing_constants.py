@@ -47,11 +47,27 @@ PROXIMITY_COST_MULTIPLIER = 1000      # Multiplier for proximity cost calculatio
 # Resistance analysis (plane_resistance.py)
 RAY_CAST_LENGTH = 1000.0              # mm - ray length for polygon width sampling
 
-# IPC-2152 formula constants for max current calculation
-IPC_2152_EXPONENT_A = 0.44            # Area exponent
-IPC_2152_EXPONENT_B = 0.725           # Temperature rise exponent
-IPC_2152_K_INTERNAL = 0.024           # k-value for internal layers
-IPC_2152_K_EXTERNAL = 0.048           # k-value for external layers
+# Max-current chart fit: I = k * dT^0.44 * A^0.725, A in mils^2.
+#
+# This is the IPC-2221 fit, NOT IPC-2152 (#489 §6) -- these constants carried
+# 2152 names for a long time, and their two exponent comments were swapped on
+# top of that (0.44 was labeled the area exponent; it is the TEMPERATURE-RISE
+# exponent). IPC-2152 specifically overturned 2221's 2x internal derating:
+# internal traces in FR4 run COOLER than external ones in still air, so the
+# k_internal below under-credits inner layers by roughly 2x. See
+# plane_resistance.calculate_max_current_ipc2221 /
+# calculate_max_current_ipc2152.
+IPC_2221_EXPONENT_DT = 0.44           # Temperature-rise exponent
+IPC_2221_EXPONENT_AREA = 0.725        # Cross-sectional-area exponent
+IPC_2221_K_INTERNAL = 0.024           # k-value for internal layers
+IPC_2221_K_EXTERNAL = 0.048           # k-value for external layers
+
+# Validity bound of that chart fit. IPC-2221's curves are drawn for
+# cross-sections up to ~700 mils^2; the fit is a power law, so applying it to a
+# 52mm-wide POUR (~2900 mils^2 at 1 oz) extrapolates far outside the data and
+# prints a number that reads like a rating but is not one. Results past this are
+# flagged out-of-range rather than silently reported.
+IPC_2221_MAX_AREA_MILS2 = 700.0
 
 # Polygon/zone geometry tolerances (mm)
 POLYGON_BUFFER_DISTANCE = 0.01        # Buffer distance for polygon shrinking

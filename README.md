@@ -64,6 +64,8 @@ Fast, grid-based A\* routing with a native Rust core (~10× faster than pure Pyt
 - Full [KiCad plugin GUI](#kicad-plugin) (KiCad 9 & 10) and a scriptable [CLI](#command-line-interface)
 - [AI assistance](docs/claude-skills.md) — a **Claude tab** that plans an entire routing workflow, per-field "Ask Claude" helpers, and datasheet-driven power / high-speed / diff-pair analysis
 - Optional [real-time PyGame visualizer](pygame_visualizer/README.md) (`route.py --visualize`)
+- [Board rendering & routing animation](docs/route-animation.md) — fast geometry PNG renderer, plus a movie of the router laying/ripping/restoring copper (`make_movie.py`, or the Advanced tab's **Make routing movie** debug checkbox → `.mp4`/`.gif`)
+- [Routing plans as files](docs/claude-skills.md#plans-from-the-command-line) — save/load a whole routing chain as JSON: build one from a recorded command chain (`make_plan.py`), run it headless through the real plugin (`run_plan.py`), or load it in the GUI
 
 ## Quick Start
 
@@ -801,6 +803,8 @@ Every tool prints its full option list with `--help`, and **[docs/configuration.
 | `place_fanout_clearance.py` | Move decoupling caps off fanout vias | [Utilities](docs/utilities.md) |
 | `place_optimize.py` | Placement for routability | [Placement Optimization](docs/placement-optimization.md) |
 | `check_*.py` | DRC / connectivity / hygiene / pad checks | [Utilities](docs/utilities.md) |
+| `make_movie.py` | Movie of a routing run (`.mp4`/`.gif`) | [Rendering & animation](docs/route-animation.md) |
+| `make_plan.py` / `run_plan.py` | Build a GUI routing plan from a recorded chain / run one headless | [Plans from the CLI](docs/claude-skills.md#plans-from-the-command-line) |
 
 ```bash
 # Full option list for any tool
@@ -826,10 +830,8 @@ The shared option groups — geometry, power-net widths, algorithm/strategy, pro
 ## Limitations
 
 - No push-and-shove (routes around obstacles, doesn't move them)
-- Stub layer swaps for multipoint nets (3+ pads) only handle the all-stubs-to-one-common-layer case; mixed per-cluster layer assignment is not attempted
 - No blind or buried vias
 - No coarse grid assignment before detailed routing to plan overall topology
-- No via cost or other parameter learning/tuning
 - No design rules by region/area support
 
 ## Contributing

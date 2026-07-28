@@ -36,6 +36,7 @@ from pcb_modification import (
     snap_stub_gaps,
     drop_phantom_copper,
     prune_grazing_segments,
+    weld_redundant_grazing_detours,
     nudge_grazing_octolinear,
     nudge_grazing_microshift,
     nudge_grazing_vias,
@@ -64,6 +65,7 @@ class CleanupOutcome:
 
 
 def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
+                           protect_net_ids=None,
                            label: str = '',
                            snap: bool = True,
                            phantom: bool = True,
@@ -76,6 +78,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                            freeze_hook: Optional[Callable[[], None]] = None,
                            original_segment_ids=None,
                            original_via_ids=None,
+                           keep_input_copper: bool = False,
                            ) -> CleanupOutcome:
     """Run the post-route cleanup passes in their one canonical order.
 
@@ -122,6 +125,15 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
 
     Returns a CleanupOutcome; input-file removals from every pass are merged
     into ``input_strip_segments`` in pass order.
+
+    ``keep_input_copper`` makes INPUT-FILE copper read-only for every
+    subtractive/rewriting pass: it still anchors connectivity, degree and
+    grazing models, but is never removed, split, or re-bent — for chained
+    flows whose earlier stages author copper (escape stubs, hand-authored
+    routes) that a later stage must still see verbatim. This-run copper is
+    cleaned normally, and the strip lists then stay empty by construction.
+    Do NOT set it on the plane fronts' file-round-trip (results=[] makes
+    every segment read as input and would freeze all plane copper).
     """
     out = CleanupOutcome()
     counts = out.counts
@@ -185,20 +197,44 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     if freeze_hook is not None:
         freeze_hook()
 
+    # #436/#438: cross-class + board-edge floors, threaded into every copper-
+    # MOVING cleanup pass so a re-bend / micro-shift / via-nudge / connector-snap
+    # honors each foreign net's class clearance and the board edge rule (not the
+    # flat routing clearance the base A* map already respected). Inert on an
+    # all-Default board (net_clearances empty) with no strict edge rule.
+    _nc = getattr(config, 'net_clearances', None) or None
+    _bec = getattr(config, 'board_edge_clearance', 0.0) or 0.0
+
     if graze:
         _gz_segs, _gz_nets, _gz_strip = prune_grazing_segments(
             results, pcb_data, scope_net_ids, clearance=config.clearance,
-            check_foreign_segments=True)
+            check_foreign_segments=True, keep_input_copper=keep_input_copper,
+            net_clearances=_nc)
         counts['graze_pruned'] = _gz_segs
         _trace('graze')
         strip.extend(_gz_strip)
         if _gz_segs:
             print(f"{label}Graze prune: removed {_gz_segs} grazing segment(s) "
                   f"across {_gz_nets} net(s)")
+        # #441: drop a redundant out-and-back detour whose nub grazes a foreign net
+        # and that prune_grazing_segments' strict gate refused (the surviving A~C
+        # overlap is non-coincident), by welding the solidly-overlapping neighbours
+        # coincident (picodvi DVI_CK terminal-leg jog).
+        _wd_segs, _wd_nets, _wd_strip = weld_redundant_grazing_detours(
+            results, pcb_data, scope_net_ids, clearance=config.clearance,
+            keep_input_copper=keep_input_copper, net_clearances=_nc)
+        counts['detours_welded'] = _wd_segs
+        _trace('weld_detour')
+        strip.extend(_wd_strip)
+        if _wd_segs:
+            print(f"{label}Detour weld: removed {_wd_segs} redundant grazing "
+                  f"detour seg(s) across {_wd_nets} net(s)")
 
     if octolinear:
         _nz_segs, _nz_nets, _nz_strip, _ = nudge_grazing_octolinear(
-            results, pcb_data, scope_net_ids, clearance=config.clearance)
+            results, pcb_data, scope_net_ids, clearance=config.clearance,
+            keep_input_copper=keep_input_copper,
+            net_clearances=_nc, board_edge_clearance=_bec)
         counts['octolinear_nudged'] = _nz_segs
         _trace('octolinear')
         strip.extend(_nz_strip)
@@ -209,7 +245,12 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     _ms_segs, _ms_nets, _ms_strip, _ = nudge_grazing_microshift(
         results, pcb_data, scope_net_ids, clearance=config.clearance,
         max_shift=(microshift_max_shift if microshift_max_shift is not None
-                   else config.grid_step / 2))
+                   else config.grid_step / 2),
+        keep_input_copper=keep_input_copper,
+        # #436: cross-class-aware graze fix — measure shortfall against each
+        # net's own netclass floor and each foreign net's class, not the global
+        # clearance (daisho's 456 same-class grid grazes, cparti's SW1-vs-SMA).
+        net_clearances=_nc, board_edge_clearance=_bec)
     counts['microshifted'] = _ms_segs
     _trace('microshift')
     strip.extend(_ms_strip)
@@ -226,16 +267,32 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
             # short to clear the ~40um grazes the looser UNBLOCK_REFIT_MARGIN_MM now
             # leaves; a full cell reaches them while a via never moves more than
             # one cell. Moves the via (still connected), never shrinks it.
-            max_shift=config.grid_step)
+            max_shift=config.grid_step,
+            net_clearances=_nc, board_edge_clearance=_bec)
         counts['vias_nudged'] = _vn_moved
         _trace('via_nudge')
         if _vn_moved:
             print(f"{label}Via nudge: moved {_vn_moved} grazing via(s) on "
                   f"{_vn_nets} net(s) by their sub-grid clearance shortfall (#280)")
 
+    # #473 (extended): protected nets keep ALL their copper through EVERY
+    # subtractive pass, not just the dead-end sweep. Cycle prune / strict
+    # collapse / orphan islands / dangle trim on an unfinished net is the
+    # same landing-site erosion the sweep guard exists for (a fragment
+    # graded "redundant"/"orphan" today is the copper the next chain step
+    # welds to). Restrict their scope instead of threading a new parameter
+    # through each pass.
+    _sub_scope = scope_net_ids
+    if protect_net_ids:
+        if scope_net_ids is None:
+            _sub_scope = ({s.net_id for s in pcb_data.segments}
+                          | {v.net_id for v in pcb_data.vias}) - set(protect_net_ids)
+        else:
+            _sub_scope = set(scope_net_ids) - set(protect_net_ids)
     if cycles:
         _cy_segs, _cy_nets, _cy_strip = prune_redundant_cycles(
-            results, pcb_data, scope_net_ids, clearance=config.clearance)
+            results, pcb_data, _sub_scope, clearance=config.clearance,
+            keep_input_copper=keep_input_copper)
         counts['cycles_pruned'] = _cy_segs
         _trace('cycles')
         strip.extend(_cy_strip)
@@ -246,7 +303,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     # Strict-redundant collapse (#217 classes 1-2): superseded parallel
     # chains and pad/via-buried tails that are redundant under the strict
     # width-clamped graph. Before the sweep so freed this-run vias drop.
-    _sc_n, _sc_strip = collapse_strict_redundant(results, pcb_data, scope_net_ids)
+    _sc_n, _sc_strip = collapse_strict_redundant(results, pcb_data, _sub_scope,
+                                                 keep_input_copper=keep_input_copper)
     counts['strict_collapsed'] = _sc_n
     _trace('strict_collapse')
     strip.extend(_sc_strip)
@@ -258,7 +316,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     # their net -- rip/reroute leftovers connected to nothing. Runs before
     # the dead-end sweep so the sweep's unsupported-via pass drops the
     # islands' freed this-run vias.
-    _oi_n, _oi_segs, _oi_strip, _oi_via_strip = remove_orphan_islands(results, pcb_data, scope_net_ids)
+    _oi_n, _oi_segs, _oi_strip, _oi_via_strip = remove_orphan_islands(
+        results, pcb_data, _sub_scope, keep_input_copper=keep_input_copper)
     out.input_strip_vias.extend(_oi_via_strip)
     counts['orphan_islands'] = _oi_n
     _trace('orphan_islands')
@@ -267,7 +326,9 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         print(f"{label}Orphan islands: removed {_oi_n} pad-less copper "
               f"island(s) ({_oi_segs} segment(s))")
 
-    _de_segs, _de_vias, _de_strip = sweep_dead_ends(results, pcb_data, scope_net_ids)
+    _de_segs, _de_vias, _de_strip = sweep_dead_ends(results, pcb_data, scope_net_ids,
+                                                    protect_net_ids=protect_net_ids,
+                                                    keep_input_copper=keep_input_copper)
     counts['dead_ends_swept'] = _de_segs
     counts['dead_end_vias'] = _de_vias
     _trace('sweep')
@@ -280,7 +341,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     # a dead-end segment T-anchored mid-BODY (a via ON the trace, or a tee) is
     # load-bearing through the anchor, so the whole-segment prune keeps it and
     # the copper past the anchor ships as an antenna. Split-trim to the anchor.
-    _dt_n, _dt_strip = trim_dangles_past_body_anchor(results, pcb_data, scope_net_ids)
+    _dt_n, _dt_strip = trim_dangles_past_body_anchor(results, pcb_data, _sub_scope,
+                                                     keep_input_copper=keep_input_copper)
     counts['dangles_trimmed'] = _dt_n
     _trace('dangle_trim')
     strip.extend(_dt_strip)

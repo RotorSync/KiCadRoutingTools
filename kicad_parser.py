@@ -13,9 +13,129 @@ from typing import Dict, List, Tuple, Optional
 from pathlib import Path
 
 
-# Position rounding precision for coordinate comparisons
-# All position-based lookups must use this to ensure consistency
+# Position rounding precision for coordinate COMPARISONS (dedup keys, position
+# lookups) -- never for geometry actually written to a board. Rounding applied
+# copper to 1 um was #493 item 5; use mm_to_iu() below to emit geometry.
 POSITION_DECIMALS = 3
+
+# KiCad's internal unit for PCBs is the integer nanometre.
+IU_PER_MM = 1000000
+
+
+def mm_to_iu(mm):
+    """mm -> KiCad internal units (integer nanometres), correctly rounded.
+
+    Use this instead of `pcbnew.FromMM` wherever geometry is written to a board.
+    Two separate bugs made GUI-applied copper differ from the identical route
+    written by the CLI text writer (#493 item 5):
+
+    1. The GUI rounded positions to POSITION_DECIMALS (1 um) before converting,
+       so any point not already on a 1 um boundary -- diagonal joins, nudged
+       vias -- moved by up to 0.5 um. It rounded via SIZE and DRILL the same
+       way, the same class of bug as the #362 track-width one (round(w,3) turns
+       a 0.0762 fab-floor width into 0.076).
+    2. `pcbnew.FromMM` TRUNCATES rather than rounds: 66.1 * 1e6 is
+       66099999.99999999 in binary, so FromMM(66.1) == 66099999 -- one nm short.
+       The CLI writes "66.1" as text and KiCad parses it back to 66100000, so
+       the two fronts stored genuinely different integers for the same point.
+
+    Rounding the scaled value fixes both, and nm is the board's real resolution,
+    so nothing is lost.
+    """
+    return int(round(float(mm) * IU_PER_MM))
+
+
+def canonicalize_pcb_data_order(pcb_data):
+    """Sort pcb_data.segments and .vias into a canonical GEOMETRIC order,
+    in place. Returns True if anything moved.
+
+    The GUI adds copper to a live pcbnew board and the CLI writer emits it from
+    its own lists, so the two fronts hold IDENTICAL copper in DIFFERENT order --
+    measured repeatedly on eth_tap: same 1159-segment set, three different
+    orders across two GUI chains and the CLI. Nothing downstream should depend
+    on that, but list position keeps leaking into decisions: representative
+    endpoint selection, connected-group ordering, stub free ends, MST terminal
+    labelling, unit distances. Each was fixed individually and another surfaced.
+
+    Canonicalising the order ONCE, at the engine entry, closes the whole class
+    instead of one consumer at a time. The key is pure geometry (layer, then the
+    unordered endpoint pair, then width / size), so it is identical on both
+    fronts and stable across runs.
+
+    This does NOT reorder anything the router later appends -- it only fixes the
+    starting state, which is what the two fronts disagree about.
+    """
+    def _segkey(s):
+        a = (s.start_x, s.start_y)
+        b = (s.end_x, s.end_y)
+        return (s.layer, s.net_id, min(a, b), max(a, b), s.width)
+
+    def _viakey(v):
+        return (v.x, v.y, v.net_id, getattr(v, 'size', 0.0) or 0.0,
+                getattr(v, 'drill', 0.0) or 0.0)
+
+    moved = False
+    try:
+        segs = getattr(pcb_data, 'segments', None)
+        if segs:
+            new = sorted(segs, key=_segkey)
+            if any(x is not y for x, y in zip(new, segs)):
+                moved = True
+            pcb_data.segments[:] = new
+        vias = getattr(pcb_data, 'vias', None)
+        if vias:
+            new = sorted(vias, key=_viakey)
+            if any(x is not y for x, y in zip(new, vias)):
+                moved = True
+            pcb_data.vias[:] = new
+    except Exception as e:
+        print(f"(pcb_data order canonicalisation skipped: {e})")
+    return moved
+
+
+def snap_pcb_data_to_iu_grid(pcb_data):
+    """Snap every routed-copper coordinate in ``pcb_data`` onto KiCad's integer
+    nanometre grid, IN PLACE. Returns the number of values changed.
+
+    The router works in float mm, so ~20% of the copper it commits lands OFF the
+    nm grid by up to ~0.49 nm -- values a board cannot actually store. The writer
+    quantises on the way out, so the FILE is always 100% grid-exact while the
+    in-memory ``pcb_data`` is not. Same board, different bits.
+
+    That mismatch forked GUI from CLI. ``batch_route``'s final-reconcile pass
+    retries incomplete nets against "the finished board", and each front had a
+    different idea of what that board is: the CLI re-parses the WRITTEN file
+    (grid-exact), the GUI re-invokes on the in-memory ``pcb_data`` (not). So
+    ``return_results`` -- a flag that should only decide whether results are
+    RETURNED -- changed what got ROUTED. Measured on eth_tap step 11, same board
+    and same kwargs: reconcile ON gave CLI 3423 vs GUI 3428 segments; reconcile
+    OFF gave 3423 vs 3423, bit-identical.
+
+    Snapping is geometrically a no-op: the largest deviation measured is 0.4878
+    nm, below the 0.5 nm rounding threshold, so every value lands on the SAME
+    integer nm the writer would have emitted. Fields cover exactly what the
+    writer canonicalises (verified grid-exact in written output): segment
+    start/end and width, via position, size and drill.
+    """
+    changed = 0
+
+    def _snap(obj, attr):
+        nonlocal changed
+        v = getattr(obj, attr, None)
+        if isinstance(v, float):
+            q = mm_to_iu(v) / IU_PER_MM
+            if q != v:
+                setattr(obj, attr, q)
+                changed += 1
+
+    for s in getattr(pcb_data, 'segments', None) or ():
+        for a in ('start_x', 'start_y', 'end_x', 'end_y', 'width'):
+            _snap(s, a)
+    for v in getattr(pcb_data, 'vias', None) or ():
+        for a in ('x', 'y', 'size', 'drill'):
+            _snap(v, a)
+    return changed
+
 
 # KiCad 10 removed numeric net IDs from the file format.
 # Files with version >= this threshold use name-only nets: (net "name") instead of (net 29 "name").
@@ -111,6 +231,18 @@ class Via:
     net_id: int
     uuid: str = ""
     free: bool = False  # If True, KiCad won't auto-assign net based on overlapping tracks
+    # Protection spec: {token: raw inner s-expr}, e.g.
+    # {'tenting': '(front yes) (back yes)'} for tenting/covering/plugging/
+    # capping/filling. Held as raw text so it round-trips byte-faithfully
+    # whatever sub-syntax the KiCad version uses. Empty = the board said nothing.
+    #
+    # This existed nowhere before #489 §8: the parser skipped these tokens and
+    # the writer stamped `(tenting (front yes) (back yes))` on every via it
+    # emitted, so any via that got RIPPED AND RE-PLACED (rip-up/reroute, the
+    # sub-grid via nudge, tap relocation) silently lost its real spec -- which
+    # matters most for via-in-pad, where IPC-4761 Type VII filled+capped+plated
+    # is what keeps solder out of the barrel.
+    tenting_attrs: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -148,6 +280,11 @@ class Zone:
     island_removal_mode: int = 0  # 0 = always remove isolated islands (KiCad default,
     # token absent from the file), 1 = never remove, 2 = remove below island_area_min
     island_area_min: float = 0.0  # mm^2 floor for mode 2 (KiCad file units are mm^2)
+    clearance: float = None  # zone fill clearance (connect_pads (clearance X)); None = unknown
+    min_thickness: float = None  # minimum fill width; None = unknown
+    in_footprint: bool = False  # #478: zone is owned by a footprint (nested in its
+    # (footprint ...) block). Points are still BOARD coordinates. Consumers treat it
+    # as normal copper/keep-out; plane creation must not replace or abort on it.
 
 
 @dataclass
@@ -180,6 +317,14 @@ class Footprint:
     # The parser RESOLVES the inheritance into each pad's local_clearance at
     # parse time, so clearance consumers only ever read pad.local_clearance;
     # this field records the raw footprint value for fidelity (issue #326).
+    net_tie_groups: List[List[str]] = field(default_factory=list)
+    # KiCad (net_tie_pad_groups "1,2" ...): pad-number groups this footprint
+    # DELIBERATELY shorts (Kelvin shunts, net-tie parts). KiCad exempts copper
+    # of the grouped pads' nets from mutual clearance at the footprint, so a
+    # sense pad enclosed by its partner's ring is still routable (cynthion
+    # R42: the AUX_SENSE- tab sits inside AUX_VBUS_IN's pad -- treating the
+    # partner as a hard obstacle seals the net forever). Obstacle builders and
+    # check_drc consume this via PCBData.net_tie_exempt_pad_ids().
 
 
 @dataclass
@@ -216,7 +361,17 @@ class BoardInfo:
     # holds every outer ring. Empty on single-outline/rectangular boards means
     # "use board_outline".
     board_outlines: List[List[Tuple[float, float]]] = field(default_factory=list)
-    keepouts: List[dict] = field(default_factory=list)  # Keep-out rule areas: {polygon, layers:set, tracks_allowed, vias_allowed}
+    # Edge.Cuts contours that are MILLED BOUNDARIES for clearance but are not
+    # holes and not outer rings (#505). drop_pad_containing_cutouts moves a
+    # pad-containing inner contour here: it must not act as a cutout (that would
+    # mark every pad it encloses off-board, #291), but KiCad still routes the
+    # board along it, so copper has to keep its edge clearance from it. Consumers
+    # measure clearance / stamp a keep-out BAND around these, and never treat
+    # their interior as off-board. crkbd: the real 64-point board outline nested
+    # inside the panel frame -- dropping it outright let the router lay copper
+    # straight across the milled gap between the two keyboard halves (85 items).
+    board_edge_contours: List[List[Tuple[float, float]]] = field(default_factory=list)
+    keepouts: List[dict] = field(default_factory=list)  # Keep-out rule areas: {polygon, layers:set, tracks_allowed, vias_allowed, copper_pour_allowed}
     # Smallest copper clearance any routing step actually used on this board this
     # run -- e.g. a fine-pitch tap that escalated below the nominal --clearance.
     # None until a step records one. Routers fold this into the .kicad_pro DRC
@@ -245,6 +400,39 @@ class PCBData:
     net_to_class: Dict[str, str] = field(default_factory=dict)  # net_name -> class_name
     guide_paths: List[GuidePath] = field(default_factory=list)  # User-drawn guide corridors (issue #7)
     keepout_zones: List[GuidePath] = field(default_factory=list)  # User-drawn keepout polygons (issue #27)
+
+    def net_tie_exempt_pad_ids(self, net_id: int):
+        """id()s of pads whose keep-out copper of `net_id` may IGNORE.
+
+        For every footprint net-tie group (net_tie_pad_groups) that contains a
+        pad on `net_id`, the OTHER pads of that group are deliberate shorts at
+        the footprint -- KiCad exempts their mutual clearance, and the partner
+        pad often physically encloses the tied pad (Kelvin shunts: cynthion
+        R42's AUX_SENSE- tab sits inside AUX_VBUS_IN's pad). Obstacle builders
+        skip stamping these pads when routing `net_id`; check_drc skips the
+        corresponding pairs. Cached per net; identity keying is safe because
+        the pad objects live in this PCBData for its whole lifetime.
+        """
+        cache = getattr(self, '_net_tie_exempt_cache', None)
+        if cache is None:
+            cache = {}
+            self._net_tie_exempt_cache = cache
+        got = cache.get(net_id)
+        if got is not None:
+            return got
+        exempt = set()
+        for fp in self.footprints.values():
+            if not fp.net_tie_groups:
+                continue
+            by_num = {}
+            for p in fp.pads:
+                by_num.setdefault(p.pad_number, []).append(p)
+            for group in fp.net_tie_groups:
+                members = [p for num in group for p in by_num.get(num, [])]
+                if any(p.net_id == net_id for p in members):
+                    exempt.update(id(p) for p in members if p.net_id != net_id)
+        cache[net_id] = exempt
+        return exempt
 
     def get_via_barrel_length(self, layer1: str, layer2: str) -> float:
         """Calculate the via barrel length between two copper layers.
@@ -289,6 +477,22 @@ def local_to_global(fp_x: float, fp_y: float, fp_rotation_deg: float,
 
     CRITICAL: Negate the rotation angle! KiCad's rotation convention requires
     negating the angle when applying the standard rotation matrix formula.
+
+    The result is SNAPPED to KiCad's integer-nanometre grid, because that is the
+    only coordinate space a board can actually store. Everything else in PCBData
+    is read verbatim from the file (segments, vias, footprint origins) and so
+    matches pcbnew bit-for-bit; pad globals are the one value we must COMPUTE,
+    and pcbnew computes them in integer nm while we compute them in float mm.
+    Without the snap the two answers land up to ~0.3 nm apart -- geometrically
+    nil, but different BIT PATTERNS, which is enough to flip an A* tie-break.
+    That is exactly how eth_tap step 11 diverged: 64 of 1699 pads came out a few
+    femtometres off (44.300000000000004 vs 44.3), and the GUI (pcbnew-backed
+    PCBData) then routed 16 segments differently from the CLI (text-parsed
+    PCBData) -- 3569 vs 3472 segments by the end of the chain. Snapping makes
+    all 1699 pads bit-identical to pcbnew and the two fronts route the same.
+
+    Same family as #493: canonicalise to integer nm rather than trusting float
+    mm arithmetic to agree across two implementations.
     """
     rad = math.radians(-fp_rotation_deg)  # CRITICAL: negate the angle
     cos_r = math.cos(rad)
@@ -297,7 +501,7 @@ def local_to_global(fp_x: float, fp_y: float, fp_rotation_deg: float,
     global_x = fp_x + (pad_local_x * cos_r - pad_local_y * sin_r)
     global_y = fp_y + (pad_local_x * sin_r + pad_local_y * cos_r)
 
-    return global_x, global_y
+    return (mm_to_iu(global_x) / IU_PER_MM, mm_to_iu(global_y) / IU_PER_MM)
 
 
 # Tolerance (deg) within which a pad rotation is treated as axis-aligned and
@@ -340,7 +544,16 @@ def _custom_pad_primitive_points(pad_text: str):
         if cm and m2.group(1) == 'circle':
             cx, cy, ex, ey = map(float, cm.groups())
             r = math.hypot(ex - cx, ey - cy)
-            pts += [(cx - r, cy), (cx + r, cy), (cx, cy - r), (cx, cy + r)]
+            # A circle is rotation-invariant about its centre: represent it as
+            # the centre point with the OUTER radius (centreline radius + half
+            # the stroke -- KiCad strokes the outline of both filled and
+            # unfilled circles) folded into the half-stroke term. The extent
+            # consumer then computes |rotated centre| + r + w/2 exactly at ANY
+            # pad angle. Sampling the four axis extremes under-covered rotated
+            # pads (#418, ottercast MK1: a 315deg unfilled ring lost ~0.4mm of
+            # copper per side vs pcbnew).
+            out.append(([(cx, cy)], r + hw))
+            continue
         elif m2.group(1) in ('rect', 'line'):
             sm = re.search(r'\(start\s+(-?[\d.]+)\s+(-?[\d.]+)\)\s+\(end\s+(-?[\d.]+)\s+(-?[\d.]+)\)', block)
             if sm:
@@ -349,6 +562,44 @@ def _custom_pad_primitive_points(pad_text: str):
                        [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
         if pts:
             out.append((pts, hw))
+    return out
+
+
+def _offset_polygon_outward(pts, hw):
+    """Offset a closed polygon outward by ``hw`` (mitered per-vertex normals,
+    miter capped at 4x for very sharp corners). Winding is derived from the
+    shoelace sum, so either vertex order works. Approximate at reflex
+    (concave) vertices -- the notch is offset too, mildly over-covering it --
+    which is conservative for clearance to external copper."""
+    n = len(pts)
+    if n < 3 or hw <= 0:
+        return pts
+    area2 = sum(pts[i][0] * pts[(i + 1) % n][1] - pts[(i + 1) % n][0] * pts[i][1]
+                for i in range(n))
+    sign = 1.0 if area2 > 0 else -1.0
+    normals = []
+    for i in range(n):
+        dx = pts[(i + 1) % n][0] - pts[i][0]
+        dy = pts[(i + 1) % n][1] - pts[i][1]
+        length = math.hypot(dx, dy)
+        normals.append((sign * dy / length, -sign * dx / length)
+                       if length > 1e-12 else None)
+    out = []
+    for i in range(n):
+        adj = [v for v in (normals[i - 1], normals[i]) if v is not None]
+        if not adj:
+            out.append(pts[i])
+            continue
+        ax = sum(v[0] for v in adj)
+        ay = sum(v[1] for v in adj)
+        length = math.hypot(ax, ay)
+        if length < 1e-12:
+            out.append(pts[i])
+            continue
+        bx, by = ax / length, ay / length
+        cos_half = max(0.25, bx * adj[0][0] + by * adj[0][1])
+        out.append((pts[i][0] + bx * hw / cos_half,
+                    pts[i][1] + by * hw / cos_half))
     return out
 
 
@@ -480,19 +731,48 @@ def _custom_pad_global_polygons(pad_text: str, global_x: float, global_y: float,
                     for _p1, p2 in segs:
                         pts.append(p2)
             local = pts if len(pts) >= 3 else None
+            if local:
+                # KiCad strokes the gr_poly OUTLINE with its (width ...) --
+                # for filled and unfilled polys alike -- so copper reaches
+                # width/2 beyond the outline (#418). Offset the outline
+                # outward by that half-stroke. An unfilled poly's interior
+                # is not really copper, but the filled-outline model is kept
+                # (conservative, and exact for clearance to external copper).
+                hw = _width(block) / 2.0
+                if hw > 0:
+                    local = _offset_polygon_outward(local, hw)
         elif kind == 'circle':
             c = _field(block, 'center', 2)
             e = _field(block, 'end', 2)
             if c and e:
-                # Solid disc out to the outer copper edge (centerline radius + half
-                # stroke); a filled circle has the same outer extent. The interior
-                # is modelled solid (the union has no holes) -- conservative, and
-                # exact for clearance to external copper, which is all that matters.
-                R = math.hypot(e[0] - c[0], e[1] - c[1]) + _width(block) / 2.0
+                r_mid = math.hypot(e[0] - c[0], e[1] - c[1])
+                hw = _width(block) / 2.0
+                R = r_mid + hw
+                # An UNFILLED gr_circle is a stroked RING: copper only in the
+                # annulus [r_mid-hw, r_mid+hw]. The old solid-disc model
+                # ("conservative, clearance to external copper is all that
+                # matters") entombed anything living INSIDE the ring --
+                # ottercast MK1: a bottom-port MEMS mic's signal pad sits in
+                # the opening (the human connects it with a via there) and the
+                # phantom disc made it unroutable even on an empty board.
+                # Model the annulus as a single SEAMED polygon (outer loop +
+                # radial seam + inner loop): even-odd crossing tests -- which
+                # every consumer of pad.polygons uses -- see the opening as
+                # outside, and the zero-width seam lies inside real copper.
+                filled = not re.search(r'\(fill\s+(?:no|none)\b', block)
+                r_in = 0.0 if filled else max(0.0, r_mid - hw)
                 if R > 0:
                     N = 32
-                    local = [(c[0] + R * math.cos(2 * math.pi * k / N),
-                              c[1] + R * math.sin(2 * math.pi * k / N)) for k in range(N)]
+                    outer = [(c[0] + R * math.cos(2 * math.pi * k / N),
+                              c[1] + R * math.sin(2 * math.pi * k / N))
+                             for k in range(N)]
+                    if r_in > 0.05:
+                        inner = [(c[0] + r_in * math.cos(-2 * math.pi * k / N),
+                                  c[1] + r_in * math.sin(-2 * math.pi * k / N))
+                                 for k in range(N)]
+                        local = outer + [outer[0], inner[0]] + inner[1:] + [inner[0]]
+                    else:
+                        local = outer
         elif kind == 'rect':
             s = _field(block, 'start', 2)
             e = _field(block, 'end', 2)
@@ -548,8 +828,19 @@ def _custom_pad_global_polygons(pad_text: str, global_x: float, global_y: float,
                                 (ax / 2, ay / 2), (-ax / 2, ay / 2)]
             else:
                 r = min(ax, ay) / 2.0
-                anchor_local = [(r * math.cos(i * math.pi / 8),
-                                 r * math.sin(i * math.pi / 8)) for i in range(16)]
+                # Adaptive tessellation (#450): a fixed inscribed 16-gon has a
+                # 38um radial error on a 4mm anchor (scalenode SP6: a via KiCad
+                # measures 70um from the real circle read as 102um here, so a
+                # sub-clearance graze graded clean). Stay INSCRIBED (the
+                # polygon never exceeds the real copper -- no phantom grazes,
+                # no router over-block) but pick the vertex count for a <=5um
+                # sagitta.
+                _eps = 0.005
+                n = 16
+                if r > _eps:
+                    n = max(16, int(math.ceil(math.pi / math.acos(1.0 - _eps / r))))
+                anchor_local = [(r * math.cos(2.0 * i * math.pi / n),
+                                 r * math.sin(2.0 * i * math.pi / n)) for i in range(n)]
             polys.append(to_global(anchor_local))
     return polys or None
 
@@ -1535,6 +1826,63 @@ def _pt_in_ring(x: float, y: float, ring) -> bool:
     return inside
 
 
+def drop_pad_containing_cutouts(board_info, pads_by_net):
+    """Drop bogus board cutouts -- a genuine cutout is a HOLE in the copper and
+    contains no pads.
+
+    _classify_contours marks ANY Edge.Cuts ring nested inside the outline as a
+    cutout (by containment). That over-classifies: a large inner Edge.Cuts
+    contour -- a frame line, an internal keep-out drawn on Edge.Cuts, a milled
+    pocket that isn't a through hole -- then swallows the board interior, so
+    make_off_board_test/_point_on_board reports every enclosed pad as off-board
+    and drop_off_board_pads (#291) removes it. bus_pirate5: a 60.8x80.2mm inner
+    contour dropped all 870 pads, every net lost its endpoints, and the router
+    ground for ~3h on 0-endpoint nets before the run's time cap killed it (no
+    output -> chain break). A real cutout encloses no pad centres, so a "cutout"
+    that contains >=2 of them is a mis-classified inner contour.
+
+    It is RECLASSIFIED, not discarded (#505). The contour is still Edge.Cuts --
+    KiCad mills the board along it and grades copper against it -- so dropping
+    it outright blinded BOTH the router's edge keep-out and check_drc's edge
+    measurement, and copper landed ON the milled line (kicad-cli "actual 0.0000
+    mm"). crkbd is a panelized split keyboard: its REAL 64-point outline nests
+    inside the panel frame, so containment called it a cutout and this rule then
+    deleted it -- the router laid 85 items of copper across the milled gap
+    between the two halves, none of which check_drc could see. Moving it to
+    board_edge_contours keeps the #291 rescue (no pad is marked off-board) while
+    restoring the edge clearance the geometry actually demands.
+    """
+    cutouts = getattr(board_info, 'board_cutouts', None)
+    if not cutouts or not pads_by_net:
+        return
+    pad_xy = [(p.global_x, p.global_y)
+              for pads in pads_by_net.values() for p in pads]
+    if not pad_xy:
+        return
+    kept, dropped = [], []
+    for c in cutouts:
+        if len(c) < 3:
+            kept.append(c)
+            continue
+        n_inside = 0
+        for (px, py) in pad_xy:
+            if _pt_in_ring(px, py, c):
+                n_inside += 1
+                if n_inside >= 2:
+                    break
+        (dropped if n_inside >= 2 else kept).append(c)
+    if dropped:
+        board_info.board_cutouts = kept
+        # Keep them as milled EDGES (#505): not holes, but copper must still
+        # hold its board-edge clearance from them.
+        board_info.board_edge_contours = list(
+            getattr(board_info, 'board_edge_contours', None) or []) + dropped
+        print(f"WARNING: reclassified {len(dropped)} Edge.Cuts contour(s) mis-read "
+              f"as board cutout(s) -- each encloses pads, so it is an inner outline "
+              f"/ keep-out, not a hole (as a cutout it would have marked the "
+              f"enclosed pads off-board). Kept as a milled edge for clearance.")
+
+
 def _classify_contours(contours):
     """Split closed Edge.Cuts contours into (outers, cutouts) by CONTAINMENT.
 
@@ -1742,6 +2090,18 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
         fp_clr_match = re.search(r'\(clearance\s+(-?[\d.]+)\)', fp_text[:_clr_end])
         fp_clearance = max(0.0, float(fp_clr_match.group(1))) if fp_clr_match else 0.0
 
+        # Net-tie pad groups: (net_tie_pad_groups "1, 2" "3, 4") -- each quoted
+        # string is one comma-separated group of pad numbers this footprint
+        # deliberately shorts (Kelvin shunt / net-tie). Whitespace around the
+        # numbers varies by KiCad version; strip it.
+        net_tie_groups: List[List[str]] = []
+        ntpg_match = re.search(r'\(net_tie_pad_groups\b([^)]*)\)', fp_text)
+        if ntpg_match:
+            for grp in re.findall(r'"([^"]*)"', ntpg_match.group(1)):
+                pads_in_group = [p.strip() for p in grp.split(',') if p.strip()]
+                if len(pads_in_group) >= 2:
+                    net_tie_groups.append(pads_in_group)
+
         footprint = Footprint(
             reference=reference,
             footprint_name=fp_name,
@@ -1752,7 +2112,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             value=value,
             dnp=is_dnp,
             locked=is_locked,
-            clearance=fp_clearance
+            clearance=fp_clearance,
+            net_tie_groups=net_tie_groups
         )
 
         # Extract pads
@@ -1788,11 +2149,21 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             # (size resolution below was already fixed to the absolute angle).
             total_rotation = pad_rotation % 360
 
-            # Extract size
-            size_match = re.search(r'\(size\s+([\d.-]+)\s+([\d.-]+)\)', pad_text)
-            if size_match:
-                size_x = float(size_match.group(1))
-                size_y = float(size_match.group(2))
+            # Extract size. A KiCad 9 custom PADSTACK gives per-copper-layer
+            # geometry inside the pad: e.g. an oval 2.54x1.27 on top but a larger
+            # custom 2.6416x1.778 on B.Cu (apple1_mainboard DIP pads). The base
+            # (size ...) alone UNDER-models the pad on the bigger layer -- the
+            # router then drops vias against that layer's copper (apple1: a via
+            # 0.027mm from a B.Cu pad KiCad flags but check_drc missed, because
+            # both read only the 2.54x1.27 base). Take the MAX extent over the
+            # base and every padstack layer's (size ...): DRC-safe (reserves for
+            # the largest copper on any layer), slightly conservative where a
+            # layer's copper is smaller. pad_text is the balanced pad sexpr, so
+            # these matches are all THIS pad's (base + padstack), never the next.
+            sizes = re.findall(r'\(size\s+([\d.-]+)\s+([\d.-]+)\)', pad_text)
+            if sizes:
+                size_x = max(float(sx) for sx, _ in sizes)
+                size_y = max(float(sy) for _, sy in sizes)
             else:
                 size_x = size_y = 0.5  # default
 
@@ -2030,7 +2401,158 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
                 if via.uuid in free_uuids:
                     via.free = True
 
+    # Protection spec per via (#489 §8): tenting/covering/plugging/capping/
+    # filling were parsed by NOBODY, so a re-placed via lost whatever the board
+    # specified and got the writer's hardcoded front+back tenting instead.
+    if vias:
+        attrs_by_uuid = _extract_via_protection_attrs(content)
+        if attrs_by_uuid:
+            for via in vias:
+                spec = attrs_by_uuid.get(via.uuid)
+                if spec:
+                    via.tenting_attrs = spec
+
     return vias
+
+
+VIA_PROTECTION_TOKENS = ('tenting', 'covering', 'plugging', 'capping', 'filling')
+
+
+def _pcbnew_via_protection_attrs(via) -> Dict[str, str]:
+    """A pcbnew PCB_VIA's protection spec in the same {token: raw inner text}
+    shape the text parser produces (#489 §8 parity).
+
+    Only modes the via OVERRIDES are recorded: *_MODE_FROM_BOARD means "inherit
+    the board setting", which is the absence of a token in the file. Returns {}
+    on a KiCad without these accessors, so the builder degrades to today's
+    behavior rather than raising.
+    """
+    import pcbnew
+
+    def _side(getter, tented_const, not_tented_const):
+        try:
+            mode = getter()
+        except Exception:
+            return None
+        if mode == tented_const:
+            return 'yes'
+        if mode == not_tented_const:
+            return 'no'
+        return None  # FROM_BOARD -> inherit, emit nothing
+
+    out: Dict[str, str] = {}
+    try:
+        pairs = (
+            ('tenting', via.GetFrontTentingMode, via.GetBackTentingMode,
+             pcbnew.TENTING_MODE_TENTED, pcbnew.TENTING_MODE_NOT_TENTED),
+            ('covering', via.GetFrontCoveringMode, via.GetBackCoveringMode,
+             pcbnew.COVERING_MODE_COVERED, pcbnew.COVERING_MODE_NOT_COVERED),
+        )
+    except AttributeError:
+        return {}
+
+    for token, front_get, back_get, yes_const, no_const in pairs:
+        front = _side(front_get, yes_const, no_const)
+        back = _side(back_get, yes_const, no_const)
+        parts = []
+        if front is not None:
+            parts.append(f"(front {front})")
+        if back is not None:
+            parts.append(f"(back {back})")
+        if parts:
+            out[token] = " ".join(parts)
+
+    # plugging is per-side too; capping and filling are whole-via.
+    try:
+        front = _side(via.GetFrontPluggingMode, pcbnew.PLUGGING_MODE_PLUGGED,
+                      pcbnew.PLUGGING_MODE_NOT_PLUGGED)
+        back = _side(via.GetBackPluggingMode, pcbnew.PLUGGING_MODE_PLUGGED,
+                     pcbnew.PLUGGING_MODE_NOT_PLUGGED)
+        parts = []
+        if front is not None:
+            parts.append(f"(front {front})")
+        if back is not None:
+            parts.append(f"(back {back})")
+        if parts:
+            out['plugging'] = " ".join(parts)
+    except AttributeError:
+        pass
+
+    for token, getter, yes_name, no_name in (
+            ('capping', getattr(via, 'GetCappingMode', None),
+             'CAPPING_MODE_CAPPED', 'CAPPING_MODE_NOT_CAPPED'),
+            ('filling', getattr(via, 'GetFillingMode', None),
+             'FILLING_MODE_FILLED', 'FILLING_MODE_NOT_FILLED')):
+        yes_const = getattr(pcbnew, yes_name, None)
+        no_const = getattr(pcbnew, no_name, None)
+        if getter is None or yes_const is None or no_const is None:
+            continue
+        value = _side(getter, yes_const, no_const)
+        if value is not None:
+            out[token] = value
+
+    return out
+
+
+def _balanced_token_text(text: str, token: str) -> Optional[str]:
+    """Inner text of `(token ...)` in `text`, or None. Paren-balanced, so a
+    nested `(front yes) (back yes)` comes back whole."""
+    m = re.search(r'\(' + re.escape(token) + r'(?=[\s)])', text)
+    if not m:
+        return None
+    start = m.start()
+    depth = 0
+    for i, c in enumerate(text[start:]):
+        if c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+            if depth == 0:
+                inner = text[start + len(token) + 1:start + i]
+                # Collapse the file's line breaks/tabs: the pcbnew builder
+                # produces "(front no) (back no)" for the same via, and the two
+                # parse paths must be comparable field-for-field (CLAUDE.md
+                # parser-parity rule), not just semantically equal.
+                return " ".join(inner.split())
+    return None
+
+
+def _extract_via_protection_attrs(content: str) -> Dict[str, Dict[str, str]]:
+    """{via uuid: {token: raw inner text}} for the tenting-family tokens.
+
+    Read from each via's own block rather than by extending the via regexes: the
+    tokens are optional, differ by KiCad version, and the numeric-net pattern is
+    deliberately strict about field order. Skipped entirely (single linear scan)
+    when the file mentions none of them, so the common board pays nothing.
+    """
+    if not any(('(' + t) in content for t in VIA_PROTECTION_TOKENS):
+        return {}
+
+    out: Dict[str, Dict[str, str]] = {}
+    for m in re.finditer(r'\(via(?=[\s(])', content):
+        start = m.start()
+        depth = 0
+        end = start
+        for i, c in enumerate(content[start:]):
+            if c == '(':
+                depth += 1
+            elif c == ')':
+                depth -= 1
+                if depth == 0:
+                    end = start + i + 1
+                    break
+        block = content[start:end]
+        uuid_match = re.search(r'\(uuid\s+"([^"]+)"\)', block)
+        if not uuid_match:
+            continue
+        spec = {}
+        for token in VIA_PROTECTION_TOKENS:
+            inner = _balanced_token_text(block, token)
+            if inner is not None:
+                spec[token] = inner
+        if spec:
+            out[uuid_match.group(1)] = spec
+    return out
 
 
 def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Segment]:
@@ -2234,8 +2756,18 @@ def _iter_zone_blocks(content: str):
     # KiCad v5/v6 write zones single-line ("(zone (net 0) (layer F.Cu) ...")
     # and the newline-anchored pattern parsed ZERO zones/keepouts from those
     # files (every pour and rule area silently dropped).
-    zone_start_pattern = r'\r?\n\t\(zone(?=[\s(])'
+    # #478: accept ANY indentation, not exactly one tab -- KiCad 7+ footprints
+    # can own zones (keep-outs AND copper pours), written at two tabs, and the
+    # single-tab anchor dropped every one of them (router routed through
+    # footprint keep-outs; fill model over-credited across them). Yields
+    # (body, in_footprint): >= 2 tabs (or a deep space indent in legacy
+    # space-indented files) marks a footprint-nested zone. Footprint-zone
+    # polygon points are stored in BOARD coordinates, so no transform applies.
+    zone_start_pattern = r'\r?\n([\t ]*)\(zone(?=[\s(])'
     for start_match in re.finditer(zone_start_pattern, content):
+        indent = start_match.group(1)
+        in_footprint = indent.count('\t') >= 2 or \
+            ('\t' not in indent and len(indent) >= 4)
         # Find the matching closing paren (string-aware, so a lone paren inside
         # a quoted token cannot run the scan past the zone end — see issue #113).
         # start_match begins at the newline before "(zone"; locate that "(".
@@ -2244,7 +2776,7 @@ def _iter_zone_blocks(content: str):
         body_start = open_idx + len('(zone')
         if zone_end <= body_start:
             continue
-        yield content[body_start:zone_end]
+        yield content[body_start:zone_end], in_footprint
 
 
 def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]:
@@ -2255,7 +2787,7 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
     """
     zones = []
 
-    for zone_content in _iter_zone_blocks(content):
+    for zone_content, in_footprint in _iter_zone_blocks(content):
         # Rule areas are routing restrictions, not copper -- skip regardless
         # of net clause. v5/v6 keepouts DO carry (net 0), so the old skip
         # (inside the no-numeric-net branch only) would have modeled them as
@@ -2339,6 +2871,14 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
         island_removal_mode = int(irm_match.group(1)) if irm_match else 0
         iam_match = re.search(r'\(island_area_min\s+([\d.]+)\)', zone_header)
         island_area_min = float(iam_match.group(1)) if iam_match else 0.0
+        # Fill-model inputs (#validator-parity): the pour's own clearance
+        # lives under (connect_pads ... (clearance X)); min_thickness is a
+        # direct child. Absent (older files) -> None; the fill model then
+        # falls back to routing_defaults.
+        zcl_match = re.search(r'\(clearance\s+([\d.]+)\)', zone_header)
+        zone_clearance_val = float(zcl_match.group(1)) if zcl_match else None
+        mth_match = re.search(r'\(min_thickness\s+([\d.]+)\)', zone_header)
+        zone_min_th = float(mth_match.group(1)) if mth_match else None
 
         # Extract polygon points - find (pts ...) and extract xy coordinates
         pts_start = zone_content.find('(pts')
@@ -2375,7 +2915,10 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
                 uuid=uuid,
                 priority=priority,
                 island_removal_mode=island_removal_mode,
-                island_area_min=island_area_min
+                island_area_min=island_area_min,
+                clearance=zone_clearance_val,
+                min_thickness=zone_min_th,
+                in_footprint=in_footprint
             ))
 
     return zones
@@ -2384,13 +2927,14 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
 def extract_keepouts(content: str) -> List[dict]:
     """Extract keep-out rule areas (zones with a (keepout ...) clause and no net fill).
 
-    These define regions where tracks and/or vias are not allowed — e.g. an
-    antenna-flange RF clearance. Returns a list of dicts:
+    These define regions where tracks, vias and/or zone fill are not allowed
+    — e.g. an antenna-flange RF clearance. Returns a list of dicts:
         {polygon: [(x,y),...], layers: set(layer_names),
-         tracks_allowed: bool, vias_allowed: bool}
+         tracks_allowed: bool, vias_allowed: bool, copper_pour_allowed: bool,
+         in_footprint: bool}
     """
     keepouts = []
-    for zc in _iter_zone_blocks(content):
+    for zc, in_footprint in _iter_zone_blocks(content):
         # The keepout clause holds nested sub-clauses, e.g.
         #   (keepout (tracks not_allowed) (vias not_allowed) (pads allowed) ...)
         # so capture its full balanced-paren body rather than just the first ).
@@ -2410,6 +2954,10 @@ def extract_keepouts(content: str) -> List[dict]:
         ko_body = zc[ko_start:ko_end + 1]
         tracks_allowed = 'tracks not_allowed' not in ko_body
         vias_allowed = 'vias not_allowed' not in ko_body
+        # #477: KiCad's filler subtracts (copperpour not_allowed) areas from
+        # zone fill, splitting planes into islands -- the fill model must see
+        # them or it grades keep-out-split planes as one piece.
+        copper_pour_allowed = 'copperpour not_allowed' not in ko_body
 
         # Layers: (layers "F.Cu" "In1.Cu" ...) or single (layer "F.Cu").
         # v5/v6 write tokens UNQUOTED ((layers F&B.Cu)) -- accept both (#369 A5).
@@ -2446,7 +2994,9 @@ def extract_keepouts(content: str) -> List[dict]:
         if not polys:
             continue
         keepouts.append({'polygon': polys[0], 'holes': polys[1:], 'layers': layers,
-                         'tracks_allowed': tracks_allowed, 'vias_allowed': vias_allowed})
+                         'tracks_allowed': tracks_allowed, 'vias_allowed': vias_allowed,
+                         'copper_pour_allowed': copper_pour_allowed,
+                         'in_footprint': in_footprint})
     return keepouts
 
 
@@ -2481,6 +3031,9 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
 
     # Build net_id_to_name mapping for writer output
     net_id_to_name = {net_id: net.name for net_id, net in nets.items()}
+
+    # Drop Edge.Cuts contours mis-classified as cutouts (they enclose pads).
+    drop_pad_containing_cutouts(board_info, pads_by_net)
 
     return PCBData(
         board_info=board_info,
@@ -2940,6 +3493,18 @@ def _build_pcb_data_from_board_impl(board) -> PCBData:
         except Exception:
             fp_clearance = 0.0
 
+        # Net-tie pad groups — parity with the text parser (Kelvin shunts /
+        # net-tie parts; KiCad exempts the grouped pads' mutual clearance).
+        # GetNetTiePadGroups() returns a vector of "1, 2"-style strings.
+        try:
+            fp_net_tie = []
+            for _grp in fp.GetNetTiePadGroups():
+                _nums = [p.strip() for p in str(_grp).split(',') if p.strip()]
+                if len(_nums) >= 2:
+                    fp_net_tie.append(_nums)
+        except Exception:
+            fp_net_tie = []
+
         footprint = Footprint(
             reference=reference,
             footprint_name=fp_name,
@@ -2950,7 +3515,8 @@ def _build_pcb_data_from_board_impl(board) -> PCBData:
             value=fp_value,
             dnp=fp_dnp,
             locked=fp_locked,
-            clearance=fp_clearance
+            clearance=fp_clearance,
+            net_tie_groups=fp_net_tie
         )
 
         for pad in _fp_pads(fp):
@@ -3112,6 +3678,9 @@ def _build_pcb_data_from_board_impl(board) -> PCBData:
                 board_info.keepouts = extract_keepouts(f.read())
     except Exception:
         pass
+
+    # Drop Edge.Cuts contours mis-classified as cutouts (they enclose pads).
+    drop_pad_containing_cutouts(board_info, pads_by_net)
 
     return PCBData(
         board_info=board_info,
@@ -3958,6 +4527,15 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
         bfc = getattr(bf, 'clearance', 0.0); ffc = getattr(ff, 'clearance', 0.0)
         if not close(bfc, ffc):
             diffs.append(f"Footprint {ref} clearance: board={bfc:.3f} file={ffc:.3f}")
+        # Net-tie pad groups (#328): the pcbnew path wraps GetNetTiePadGroups() in a
+        # broad try/except -> [], so a KiCad build that drops them would silently give
+        # the GUI zero net-ties (phantom shorts / refused tie escapes) while the text
+        # parser has them. Compare as order-insensitive sets of frozensets.
+        bnt = {frozenset(g) for g in (getattr(bf, 'net_tie_groups', None) or [])}
+        fnt = {frozenset(g) for g in (getattr(ff, 'net_tie_groups', None) or [])}
+        if bnt != fnt:
+            diffs.append(f"Footprint {ref} net_tie_groups: board={sorted(map(sorted, bnt))} "
+                         f"file={sorted(map(sorted, fnt))}")
         if len(bf.pads) != len(ff.pads):
             diffs.append(f"Footprint {ref} pad count: board={len(bf.pads)} file={len(ff.pads)}")
         else:
@@ -4145,6 +4723,13 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
     outs_f = sorted(len(o) for o in (getattr(bi_f, 'board_outlines', None) or []))
     if outs_b != outs_f:
         diffs.append(f"Board outer-ring set: board={outs_b} file={outs_f}")
+    # Reclassified milled inner contours (#505): they drive edge clearance and
+    # the edge keep-out band, so a side that misses one routes copper onto the
+    # mill line while the other does not.
+    ec_b = sorted(len(o) for o in (getattr(bi_b, 'board_edge_contours', None) or []))
+    ec_f = sorted(len(o) for o in (getattr(bi_f, 'board_edge_contours', None) or []))
+    if ec_b != ec_f:
+        diffs.append(f"Board milled inner-contour set: board={ec_b} file={ec_f}")
 
     # --- Compare keepout zones (routing obstacles) ---
     kz_b = from_board.keepout_zones or []

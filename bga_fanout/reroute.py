@@ -11,6 +11,7 @@ from typing import List, Dict, Tuple, Optional, Set
 from kicad_parser import PCBData, Footprint
 from bga_fanout.types import (
     create_track,
+    route_uid,
     Channel,
     BGAGrid,
     FanoutRoute,
@@ -73,7 +74,24 @@ def _seg_hits_pad(x1, y1, x2, y2, pad, samples=16, margin: float = 0.0) -> bool:
     the pad's own frame, so the true (rotated) rectangle is tested rather than its
     axis-aligned bounding box - exact for diagonal pads (e.g. a part placed at a
     non-orthogonal angle, or a foreign pad seen in a rotated fanout frame).
+
+    Custom-shape pads are tested against their REAL polygon copper (pad.polygons),
+    not the axis-aligned bbox: for a custom pad pad.size_x/size_y is the SYMMETRIC
+    bbox about the pad centre, which for an off-centre outline (a meander antenna,
+    a comb/finger pad) phantom-blocks a via metres of clearance away from any real
+    copper (the antenna at mikoto's AE1: a 20x11mm bbox reaching a QFN 8mm off,
+    the #232 phantom class). Mirrors check_drc's polygon model so the two agree.
     """
+    polys = getattr(pad, 'polygons', None) if getattr(pad, 'shape', None) == 'custom' else None
+    if polys:
+        from check_drc import _point_to_polys_distance
+        n = max(1, int(math.hypot(x2 - x1, y2 - y1) / 0.05))
+        for t in range(n + 1):
+            f = t / n
+            if _point_to_polys_distance(x1 + (x2 - x1) * f,
+                                        y1 + (y2 - y1) * f, polys) <= margin + 1e-9:
+                return True
+        return False
     hx = pad.size_x / 2.0 + margin
     hy = pad.size_y / 2.0 + margin
     px, py = pad.global_x, pad.global_y
@@ -614,12 +632,17 @@ def try_jogged_route(route: 'FanoutRoute',
                 is_p=route.is_p
             )
 
-            # Create track dicts for this route (including jog at exit)
+            # Create track dicts for this route (including jog at exit),
+            # stamped with the NEW route's uid (#508 finding 6).
             new_tracks = [
-                create_track(route.pad_pos, stub_end, track_width, layer, route.net_id, route.pair_id),
-                create_track(stub_end, jog_point, track_width, layer, route.net_id, route.pair_id),
-                create_track(jog_point, exit_pos, track_width, layer, route.net_id, route.pair_id),
-                create_track(exit_pos, jog_end, track_width, layer, route.net_id, route.pair_id),
+                create_track(route.pad_pos, stub_end, track_width, layer, route.net_id, route.pair_id,
+                             route_uid=route_uid(new_route)),
+                create_track(stub_end, jog_point, track_width, layer, route.net_id, route.pair_id,
+                             route_uid=route_uid(new_route)),
+                create_track(jog_point, exit_pos, track_width, layer, route.net_id, route.pair_id,
+                             route_uid=route_uid(new_route)),
+                create_track(exit_pos, jog_end, track_width, layer, route.net_id, route.pair_id,
+                             route_uid=route_uid(new_route)),
             ]
 
             return new_route, layer, new_tracks
@@ -838,11 +861,10 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
                         if result:
                             new_route, new_layer = result
 
-                            # Remove old tracks for this net
-                            old_track_indices = [i for i, t in enumerate(tracks)
-                                                if t.get('net_id') == net_id and not t.get('pair_id')]
-                            for idx in sorted(old_track_indices, reverse=True):
-                                tracks.pop(idx)
+                            # Remove THIS route's old tracks (#508 finding 6:
+                            # net-scoped removal deleted other same-net
+                            # balls' escapes)
+                            _remove_route_tracks(tracks, route)
 
                             # Update route in routes list
                             route_idx = routes.index(route)
@@ -850,9 +872,11 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
 
                             # Add new tracks
                             tracks.append(create_track(new_route.pad_pos, new_route.stub_end,
-                                                       track_width, new_layer, net_id))
+                                                       track_width, new_layer, net_id,
+                                                       route_uid=route_uid(new_route)))
                             tracks.append(create_track(new_route.stub_end, new_route.exit_pos,
-                                                       track_width, new_layer, net_id))
+                                                       track_width, new_layer, net_id,
+                                                       route_uid=route_uid(new_route)))
 
                             rerouted += 1
                             resolved = True
@@ -948,11 +972,8 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
 
                             jogged_net_name = net_names.get(to_jog.net_id, f"net_{to_jog.net_id}")
 
-                            # Remove old tracks for the route being jogged
-                            old_track_indices = [i for i, t in enumerate(tracks)
-                                                if t.get('net_id') == to_jog.net_id]
-                            for idx in sorted(old_track_indices, reverse=True):
-                                tracks.pop(idx)
+                            # Remove THIS route's old tracks (#508 finding 6)
+                            _remove_route_tracks(tracks, to_jog)
 
                             # Update route in routes list
                             jog_idx = routes.index(to_jog)
@@ -966,10 +987,7 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
                             # Move the diff-pair partner onto the same layer
                             if partner_result is not None:
                                 p_route, p_layer, p_tracks = partner_result
-                                p_old = [i for i, t in enumerate(tracks)
-                                         if t.get('net_id') == partner.net_id]
-                                for idx in sorted(p_old, reverse=True):
-                                    tracks.pop(idx)
+                                _remove_route_tracks(tracks, partner)
                                 routes[routes.index(partner)] = p_route
                                 tracks.extend(p_tracks)
                                 p_name = net_names.get(partner.net_id, f"net_{partner.net_id}")
@@ -992,11 +1010,9 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
                                 if retry_result:
                                     new_route, retry_layer = retry_result
 
-                                    # Remove old tracks for this net
-                                    old_track_indices = [i for i, t in enumerate(tracks)
-                                                        if t.get('net_id') == net_id and not t.get('pair_id')]
-                                    for idx in sorted(old_track_indices, reverse=True):
-                                        tracks.pop(idx)
+                                    # Remove THIS route's old tracks
+                                    # (#508 finding 6)
+                                    _remove_route_tracks(tracks, route)
 
                                     # Update route in routes list
                                     route_idx = routes.index(route)
@@ -1004,9 +1020,11 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
 
                                     # Add new tracks
                                     tracks.append(create_track(new_route.pad_pos, new_route.stub_end,
-                                                               track_width, retry_layer, net_id))
+                                                               track_width, retry_layer, net_id,
+                                                               route_uid=route_uid(new_route)))
                                     tracks.append(create_track(new_route.stub_end, new_route.exit_pos,
-                                                               track_width, retry_layer, net_id))
+                                                               track_width, retry_layer, net_id,
+                                                               route_uid=route_uid(new_route)))
 
                                     rerouted += 1
                                     resolved = True
@@ -1022,11 +1040,9 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
                     if route in routes:
                         routes.remove(route)
 
-                    # Remove tracks for this net
-                    old_track_indices = [i for i, t in enumerate(tracks)
-                                        if t.get('net_id') == net_id and not t.get('pair_id')]
-                    for idx in sorted(old_track_indices, reverse=True):
-                        tracks.pop(idx)
+                    # Remove THIS route's tracks (#508 finding 6: net-scoped
+                    # removal deleted other same-net balls' escapes)
+                    _remove_route_tracks(tracks, route)
 
                     print(f"    FAILED: Could not route {net_name} - no collision-free path found")
 
@@ -1036,20 +1052,37 @@ def resolve_collisions(routes: List[FanoutRoute], tracks: List[Dict],
     return reassigned + rerouted, failed_nets
 
 
+def _remove_route_tracks(tracks: List[Dict], route: 'FanoutRoute') -> int:
+    """Remove exactly THIS route's track dicts, matched by route_uid.
+
+    #508 finding 6: the old net_id-scoped filter deleted every same-net
+    ball's escape (a multi-ball power rail has one FanoutRoute per ball)
+    while only one route's segments were re-added -- the other balls stayed
+    counted as escaped, their vias stayed in vias_to_add, and the output
+    shipped via-in-pad balls with NO track (cparti_fpga +1V8/+1V0). Tracks
+    not derived from a route (underpad escapes, straps) carry no uid and are
+    never touched.
+    """
+    uid = route_uid(route)
+    old = [i for i, t in enumerate(tracks) if t.get('route_uid') == uid]
+    for idx in sorted(old, reverse=True):
+        tracks.pop(idx)
+    return len(old)
+
+
 def _rebuild_track_for_route(tracks: List[Dict], route: 'FanoutRoute',
                              track_width: float) -> None:
     """Replace this route's tracks in `tracks` with freshly generated segments.
 
-    Removes existing track dicts for the route's net_id and re-adds segments
-    derived from the (possibly modified) route geometry on its current layer.
+    Removes existing track dicts for THIS route (by route_uid, #508 finding
+    6 -- never net-wide) and re-adds segments derived from the (possibly
+    modified) route geometry on its current layer.
     """
-    net_id = route.net_id
-    old = [i for i, t in enumerate(tracks) if t.get('net_id') == net_id]
-    for idx in sorted(old, reverse=True):
-        tracks.pop(idx)
+    _remove_route_tracks(tracks, route)
     for seg in route_segments(route):
         tracks.append(create_track(seg['start'], seg['end'], track_width,
-                                   route.layer, net_id, route.pair_id))
+                                   route.layer, route.net_id, route.pair_id,
+                                   route_uid=route_uid(route)))
 
 
 def _tracks_collision_free(segments: List[Dict], layer: str, net_id: int,

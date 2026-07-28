@@ -15,6 +15,7 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 import routing_defaults as defaults
+from kicad_parser import mm_to_iu
 from .gui_utils import StdoutRedirector
 
 
@@ -461,33 +462,49 @@ class DifferentialTab(wx.Panel):
         param_box = wx.StaticBox(self, label="Differential Pair Parameters")
         param_sizer = wx.StaticBoxSizer(param_box, wx.VERTICAL)
 
-        # Use net class definitions checkbox
-        self.use_netclass_check = wx.CheckBox(self, label="Use net class definitions")
-        self.use_netclass_check.SetValue(False)
-        self.use_netclass_check.SetToolTip("Use DP width and gap from selected net class")
-        self.use_netclass_check.Bind(wx.EVT_CHECKBOX, self._on_use_netclass_changed)
-        param_sizer.Add(self.use_netclass_check, 0, wx.ALL, 5)
-
         param_grid = wx.FlexGridSizer(cols=2, hgap=10, vgap=5)
         param_grid.AddGrowableCol(1)
 
-        # Diff pair width
+        # Diff pair width -- "override checkbox + spinctrl" row (like the Basic
+        # tab's geometry floors). Unchecked = default from the board Default
+        # net-class diff_pair_width; checking the box overrides with the typed value.
         param_grid.Add(wx.StaticText(self, label="Pair Width (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
         r = defaults.PARAM_RANGES['diff_pair_width']
+        dpw_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.diff_pair_width_check = wx.CheckBox(self, label="")
+        self.diff_pair_width_check.SetValue(False)
+        self.diff_pair_width_check.SetToolTip(
+            "Override the pair leg width (unchecked = use the board Default "
+            "net-class differential-pair width)")
+        self.diff_pair_width_check.Bind(wx.EVT_CHECKBOX, self._on_diff_geom_override_check)
         self.diff_pair_width = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
                                                   initial=defaults.DIFF_PAIR_WIDTH, inc=r['inc'])
         self.diff_pair_width.SetDigits(r['digits'])
         self.diff_pair_width.SetToolTip("Track width for differential pair traces")
-        param_grid.Add(self.diff_pair_width, 0, wx.EXPAND)
+        self.diff_pair_width.Enable(False)
+        dpw_sizer.Add(self.diff_pair_width_check, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        dpw_sizer.Add(self.diff_pair_width, 1, wx.EXPAND)
+        param_grid.Add(dpw_sizer, 0, wx.EXPAND)
 
-        # Diff pair gap
+        # Diff pair gap -- same override pattern (unchecked = board Default
+        # net-class diff_pair_gap).
         param_grid.Add(wx.StaticText(self, label="Pair Gap (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
         r = defaults.PARAM_RANGES['diff_pair_gap']
+        dpg_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.diff_pair_gap_check = wx.CheckBox(self, label="")
+        self.diff_pair_gap_check.SetValue(False)
+        self.diff_pair_gap_check.SetToolTip(
+            "Override the pair gap (unchecked = use the board Default net-class "
+            "differential-pair gap)")
+        self.diff_pair_gap_check.Bind(wx.EVT_CHECKBOX, self._on_diff_geom_override_check)
         self.diff_pair_gap = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
                                                 initial=defaults.DIFF_PAIR_GAP, inc=r['inc'])
         self.diff_pair_gap.SetDigits(r['digits'])
         self.diff_pair_gap.SetToolTip("Gap between P and N traces")
-        param_grid.Add(self.diff_pair_gap, 0, wx.EXPAND)
+        self.diff_pair_gap.Enable(False)
+        dpg_sizer.Add(self.diff_pair_gap_check, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        dpg_sizer.Add(self.diff_pair_gap, 1, wx.EXPAND)
+        param_grid.Add(dpg_sizer, 0, wx.EXPAND)
 
         # Differential impedance (optional). When > 0 the per-layer trace width
         # is computed from the board stackup using Pair Gap as spacing and
@@ -640,8 +657,8 @@ class DifferentialTab(wx.Panel):
 
     def _short_params(self):
         """Current (track_width, gap, centerline_setback) driving the short test."""
-        return (self.diff_pair_width.GetValue(),
-                self.diff_pair_gap.GetValue(),
+        return (self._effective_diff_pair_width(),
+                self._effective_diff_pair_gap(),
                 self.centerline_setback.GetValue())
 
     def _is_short_pair(self, p_net_id, n_net_id):
@@ -904,6 +921,38 @@ class DifferentialTab(wx.Panel):
                 # Brief sleep releases GIL, allowing main thread to process CallAfter events
                 time.sleep(0.01)
 
+            # #439: build net_clearances from the live board so obstacles from
+            # nets in wider classes are priced at their own clearance (KiCad's
+            # cross-class max(A,B)) -- mirrors the single-ended route tab
+            # (swig_gui). Passing an explicit map STOPS the engine's internal
+            # always-cap auto-read, so honoring classes (Min Clearance override
+            # unchecked) actually reaches the router. Checking Min Clearance
+            # (== the CLI passing --clearance) caps each class at
+            # min(class, clearance); unchecked routes each class in full.
+            _diff_clearance = config.get('clearance', 0.1)
+            net_clearances = {}
+            try:
+                from .fanout_gui import _get_net_classes_from_board
+                from .routing_dialog import _get_netclass_parameters
+                all_net_to_class, all_class_names = _get_net_classes_from_board(self.pcb_data)
+                class_clearance_cache = {}
+                for cname in all_class_names:
+                    params = _get_netclass_parameters(cname, self.pcb_data)
+                    if params:
+                        class_clearance_cache[cname] = params.get('clearance', _diff_clearance)
+                    else:
+                        class_clearance_cache[cname] = _diff_clearance
+                for net in self.pcb_data.nets.values():
+                    cname = all_net_to_class.get(net.name, 'Default')
+                    net_clearances[net.net_id] = class_clearance_cache.get(
+                        cname, _diff_clearance)
+                if config.get('clamp_netclasses', False):
+                    net_clearances = {nid: min(clr, _diff_clearance)
+                                      for nid, clr in net_clearances.items()}
+            except Exception as e:
+                print(f"Warning: Could not get net class clearances: {e}")
+                net_clearances = None
+
             successful, failed, total_time, results_data = batch_route_diff_pairs(
                 input_file=self.board_filename,
                 output_file="",  # Not used when return_results=True
@@ -926,6 +975,8 @@ class DifferentialTab(wx.Panel):
                 keepout_enabled=config.get('keepout_enabled', False),
                 keepout_layer=config.get('keepout_layer', defaults.KEEPOUT_LAYER),
                 diff_pair_gap=config.get('diff_pair_gap', 0.101),
+                diff_pair_width_from_class=config.get('diff_pair_width_from_class', False),
+                diff_pair_gap_from_class=config.get('diff_pair_gap_from_class', False),
                 min_turning_radius=config.get('min_turning_radius', 0.2),
                 max_setback_angle=config.get('max_setback_angle', 45.0),
                 max_turn_angle=config.get('max_turn_angle', 180.0),
@@ -992,6 +1043,7 @@ class DifferentialTab(wx.Panel):
                                                 defaults.TIME_MATCH_TOLERANCE),
                 mps_reverse_rounds=config.get('mps_reverse_rounds', False),
                 mps_layer_swap=config.get('mps_layer_swap', False),
+                keep_input_copper=config.get('keep_input_copper', False),
                 mps_segment_intersection=config.get('mps_segment_intersection', False),
                 schematic_dir=config.get('schematic_dir'),
                 add_teardrops=config.get('add_teardrops', False),
@@ -999,6 +1051,7 @@ class DifferentialTab(wx.Panel):
                 debug_memory=config.get('debug_memory', False),
                 return_results=True,
                 pcb_data=self.pcb_data,
+                net_clearances=net_clearances,
                 cancel_check=check_cancel,
                 progress_callback=on_progress,
             )
@@ -1111,6 +1164,12 @@ class DifferentialTab(wx.Panel):
                 print(f"Warning: failed to build diff pair suggestions: {e}")
         msg += "\nUse Edit -> Undo to revert changes."
 
+        # Routing movie (#506): snapshot the board this step just produced,
+        # BEFORE the completion popup blocks on the user. No-op unless the
+        # Advanced tab's "Make routing movie" box is ticked.
+        from .movie_recorder import record_movie_step
+        record_movie_step(self, 'route_diff')
+
         if getattr(getattr(self, 'GetTopLevelParent', lambda: self)(), '_suppress_completion_popups', False):
             print(msg)  # unattended plan run: no per-step OK dialog
         else:
@@ -1171,15 +1230,23 @@ class DifferentialTab(wx.Panel):
         matching route_diff.py's --polarity-swap-nets semantics.
         """
         text = self.polarity_swap_nets_text.GetValue()
-        patterns = [t for t in text.replace(',', ' ').split() if t]
+        # _split_net_list, not split(): net names may contain spaces (#493).
+        # Commas stay a separator, so quote a name only if it has whitespace.
+        from .routing_dialog import _split_net_list
+        patterns = [t for t in _split_net_list(text.replace(',', ' ')) if t]
         return patterns or None
 
     def get_config(self):
         """Get the differential pair configuration."""
         setback = self.centerline_setback.GetValue()
         return {
-            'diff_pair_width': self.diff_pair_width.GetValue(),
-            'diff_pair_gap': self.diff_pair_gap.GetValue(),
+            'diff_pair_width': self._effective_diff_pair_width(),
+            'diff_pair_gap': self._effective_diff_pair_gap(),
+            # #435: override UNCHECKED -> resolve each pair's OWN netclass diff
+            # geometry engine-side (not the Default class the _effective_* value
+            # falls back to, which is only the fallback for classless pairs).
+            'diff_pair_width_from_class': not self.diff_pair_width_check.GetValue(),
+            'diff_pair_gap_from_class': not self.diff_pair_gap_check.GetValue(),
             'impedance': self.diff_impedance.GetValue() or None,  # 0 = off
             'min_turning_radius': self.min_turning_radius.GetValue(),
             'max_setback_angle': self.max_setback_angle.GetValue(),
@@ -1192,9 +1259,15 @@ class DifferentialTab(wx.Panel):
             'ac_couple_match': self.ac_couple_check.GetValue(),
         }
 
-    def _on_use_netclass_changed(self, event):
-        """Handle the 'Use net class definitions' checkbox toggle."""
-        use_netclass = self.use_netclass_check.GetValue()
+    def _on_diff_geom_override_check(self, event):
+        """Enable/disable the paired spinctrl for whichever override checkbox
+        fired. Unchecked = the value comes from the board Default net-class."""
+        chk = event.GetEventObject()
+        for name in ('diff_pair_width', 'diff_pair_gap'):
+            if getattr(self, name + '_check', None) is chk:
+                getattr(self, name).Enable(chk.GetValue())
+                break
+        event.Skip()
 
         if use_netclass:
             # Try to get net class from first selected pair, fall back to Default
@@ -1242,6 +1315,47 @@ class DifferentialTab(wx.Panel):
             return None
         except Exception:
             return None
+
+    def _fab_floor_via_parent(self, ctrl_name, val):
+        """Pin ``val`` UP to the parent dialog's fab floor for ``ctrl_name`` when
+        the top-level dialog exposes ``_fab_floored`` (parity with the Basic tab);
+        return ``val`` unchanged when the dialog isn't reachable."""
+        try:
+            import wx
+            top = wx.GetTopLevelParent(self)
+            if top is not None and hasattr(top, '_fab_floored'):
+                return top._fab_floored(ctrl_name, val)
+        except Exception:
+            pass
+        return val
+
+    def _effective_diff_pair_width(self):
+        """Diff-pair leg width to route with. CHECKED: the entered value.
+        UNCHECKED: the board Default net-class ``diff_pair_width`` (control value
+        fallback when the board has none). Floored at the parent's 'track_width'
+        fab floor when the parent dialog is reachable."""
+        if self.diff_pair_width_check.GetValue():
+            val = self.diff_pair_width.GetValue()
+        else:
+            from .routing_dialog import _get_netclass_parameters
+            nc = _get_netclass_parameters('Default', self.pcb_data) or {}
+            board_val = nc.get('diff_pair_width')
+            val = board_val if board_val else self.diff_pair_width.GetValue()
+        return self._fab_floor_via_parent('track_width', val)
+
+    def _effective_diff_pair_gap(self):
+        """Diff-pair gap to route with. CHECKED: the entered value. UNCHECKED:
+        the board Default net-class ``diff_pair_gap`` (control value fallback when
+        the board has none). Floored at the parent's 'clearance' fab floor when the
+        parent dialog is reachable."""
+        if self.diff_pair_gap_check.GetValue():
+            val = self.diff_pair_gap.GetValue()
+        else:
+            from .routing_dialog import _get_netclass_parameters
+            nc = _get_netclass_parameters('Default', self.pcb_data) or {}
+            board_val = nc.get('diff_pair_gap')
+            val = board_val if board_val else self.diff_pair_gap.GetValue()
+        return self._fab_floor_via_parent('clearance', val)
 
     def get_selected_pairs(self):
         """Get list of selected differential pair base names."""

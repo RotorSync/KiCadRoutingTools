@@ -70,6 +70,26 @@ class FanoutRoute:
         return self.pad.net_id
 
 
+_route_uid_counter = 0
+
+
+def route_uid(route) -> int:
+    """Stable per-route identity for track custody (#508 finding 6).
+
+    NOT id(): a replaced/dropped FanoutRoute's id() can be recycled by a later
+    allocation, silently aliasing two routes' tracks (the id()-keyed-set
+    keepalive footgun). The uid is stamped on the route object on first use
+    and monotonically unique for the process lifetime.
+    """
+    global _route_uid_counter
+    uid = getattr(route, '_track_uid', None)
+    if uid is None:
+        _route_uid_counter += 1
+        uid = _route_uid_counter
+        route._track_uid = uid
+    return uid
+
+
 def create_track(
     start: Tuple[float, float],
     end: Tuple[float, float],
@@ -78,12 +98,19 @@ def create_track(
     net_id: int,
     pair_id: Optional[str] = None,
     is_existing: bool = False,
+    route_uid: Optional[int] = None,
 ) -> dict:
     """
     Factory function to create a track dictionary.
 
     This provides a single point for track creation, making it easier to
     ensure consistency and eventually migrate to the Track dataclass.
+
+    route_uid (#508 finding 6): id() of the FanoutRoute this track was derived
+    from. _rebuild_track_for_route replaces a route's tracks by THIS key --
+    a net_id-scoped removal deleted every same-net ball's escape while only
+    one route's segments were re-added (multi-ball power rails shipped
+    via-in-pad balls with no track).
     """
     d = {
         'start': start,
@@ -96,4 +123,6 @@ def create_track(
         d['pair_id'] = pair_id
     if is_existing:
         d['is_existing'] = is_existing
+    if route_uid is not None:
+        d['route_uid'] = route_uid
     return d

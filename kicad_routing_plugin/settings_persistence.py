@@ -34,6 +34,8 @@ def get_dialog_settings(dialog):
         'max_ripup': dialog.max_ripup.GetValue(),
         'ripup_abandon_metric': dialog.ripup_abandon_metric.GetString(
             dialog.ripup_abandon_metric.GetSelection()),
+        'ripup_blocker_select': dialog.ripup_blocker_select.GetString(
+            dialog.ripup_blocker_select.GetSelection()),
         'obey_design_rules': dialog.obey_drc_check.GetValue(),
 
         # Layer selections
@@ -45,7 +47,6 @@ def get_dialog_settings(dialog):
         'add_teardrops_check': dialog.add_teardrops_check.GetValue(),
         'fix_drc_settings': dialog.fix_drc_check.GetValue(),
         'keep_thermal': dialog.keep_thermal_check.GetValue(),
-        'no_clamp_netclasses': dialog.no_clamp_netclasses_check.GetValue(),
         'power_nets': dialog.power_nets_ctrl.GetValue(),
         'power_widths': dialog.power_widths_ctrl.GetValue(),
         'no_bga_zones': dialog.no_bga_zones_ctrl.GetValue(),
@@ -55,6 +56,8 @@ def get_dialog_settings(dialog):
         # Advanced parameters
         'impedance_check': dialog.impedance_check.GetValue(),
         'impedance_value': dialog.impedance_value.GetValue(),
+        'coplanar_gap': dialog.coplanar_gap.GetValue(),
+        'coplanar_nets': dialog.coplanar_nets_ctrl.GetValue(),
         'max_iterations': dialog.max_iterations.GetValue(),
         'max_probe_iterations': dialog.max_probe_iterations.GetValue(),
         'heuristic_weight': dialog.heuristic_weight.GetValue(),
@@ -82,11 +85,20 @@ def get_dialog_settings(dialog):
         'hole_to_hole_clearance': dialog.hole_to_hole_clearance.GetValue(),
         'edge_clearance_check': dialog.edge_clearance_check.GetValue(),
         'board_edge_clearance': dialog.board_edge_clearance.GetValue(),
+        # #439 geometry-floor override checkboxes (checked = override, unchecked =
+        # use the board's own value). Restored to also enable/disable the spinctrl.
+        'track_width_override': dialog.track_width_check.GetValue(),
+        'clearance_override': dialog.clearance_check.GetValue(),
+        'via_size_override': dialog.via_size_check.GetValue(),
+        'via_drill_override': dialog.via_drill_check.GetValue(),
+        'hole_to_hole_clearance_override': dialog.hole_to_hole_clearance_check.GetValue(),
+        'board_edge_clearance_override': dialog.edge_clearance_check.GetValue(),
         'direction_choice': dialog.direction_choice.GetSelection(),
 
         # Advanced options
         'mps_reverse_rounds': dialog.mps_reverse_rounds.GetValue(),
         'mps_layer_swap': dialog.mps_layer_swap.GetValue(),
+        'keep_input_copper': dialog.keep_input_copper.GetValue(),
         'mps_segment_intersection': dialog.mps_segment_intersection.GetValue(),
         'no_crossing_layer_check': dialog.no_crossing_layer_check.GetValue(),
         'can_swap_to_top': dialog.can_swap_to_top.GetValue(),
@@ -122,6 +134,7 @@ def get_dialog_settings(dialog):
         'skip_routing_check': dialog.skip_routing_check.GetValue(),
         'debug_memory_check': dialog.debug_memory_check.GetValue(),
         'stats_check': dialog.stats_check.GetValue(),
+        'make_movie_check': dialog.make_movie_check.GetValue(),
 
         # Swappable nets options
         'update_schematic_check': dialog.update_schematic_check.GetValue(),
@@ -131,7 +144,6 @@ def get_dialog_settings(dialog):
         'net_panel_hide': dialog.net_panel.hide_check.GetValue() if dialog.net_panel.hide_check else False,
         'net_panel_hide_diff': dialog.net_panel.hide_diff_check.GetValue() if dialog.net_panel.hide_diff_check else False,
         'net_panel_separate_netclass': dialog.net_panel.separate_netclass_check.GetValue(),
-        'use_netclass_definitions': dialog.use_netclass_check.GetValue(),
         'swappable_hide': dialog.swappable_net_panel.hide_check.GetValue() if dialog.swappable_net_panel.hide_check else False,
         'diff_panel_hide': dialog.differential_tab.pair_panel.hide_check.GetValue() if dialog.differential_tab.pair_panel.hide_check else False,
         'fanout_hide': dialog.fanout_tab.net_panel.hide_check.GetValue() if dialog.fanout_tab.net_panel.hide_check else False,
@@ -149,7 +161,8 @@ def get_dialog_settings(dialog):
         'fanout_component': dialog.fanout_tab.net_panel.component_dropdown.GetSelection() if dialog.fanout_tab.net_panel.component_dropdown else 0,
 
         # Differential tab parameters
-        'diff_use_netclass': dialog.differential_tab.use_netclass_check.GetValue(),
+        'diff_pair_width_override': dialog.differential_tab.diff_pair_width_check.GetValue(),
+        'diff_pair_gap_override': dialog.differential_tab.diff_pair_gap_check.GetValue(),
         'diff_pair_width': dialog.differential_tab.diff_pair_width.GetValue(),
         'diff_pair_gap': dialog.differential_tab.diff_pair_gap.GetValue(),
         'diff_impedance': dialog.differential_tab.diff_impedance.GetValue(),
@@ -272,6 +285,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.max_ripup.SetValue(settings['max_ripup'])
     if 'ripup_abandon_metric' in settings:
         dialog.ripup_abandon_metric.SetStringSelection(settings['ripup_abandon_metric'])
+    if 'ripup_blocker_select' in settings:
+        dialog.ripup_blocker_select.SetStringSelection(settings['ripup_blocker_select'])
     if 'obey_design_rules' in settings:
         dialog.obey_drc_check.SetValue(settings['obey_design_rules'])
 
@@ -292,8 +307,6 @@ def restore_dialog_settings(dialog, settings):
         dialog.fix_drc_check.SetValue(settings['fix_drc_settings'])
     if 'keep_thermal' in settings:
         dialog.keep_thermal_check.SetValue(settings['keep_thermal'])
-    if 'no_clamp_netclasses' in settings:
-        dialog.no_clamp_netclasses_check.SetValue(settings['no_clamp_netclasses'])
     if 'power_nets' in settings:
         dialog.power_nets_ctrl.SetValue(settings['power_nets'])
     if 'power_widths' in settings:
@@ -310,6 +323,10 @@ def restore_dialog_settings(dialog, settings):
         dialog.impedance_check.SetValue(settings['impedance_check'])
     if 'impedance_value' in settings:
         dialog.impedance_value.SetValue(settings['impedance_value'])
+    if 'coplanar_gap' in settings:
+        dialog.coplanar_gap.SetValue(settings['coplanar_gap'])
+    if 'coplanar_nets' in settings:
+        dialog.coplanar_nets_ctrl.SetValue(settings['coplanar_nets'])
     if 'max_iterations' in settings:
         dialog.max_iterations.SetValue(settings['max_iterations'])
     if 'max_probe_iterations' in settings:
@@ -365,6 +382,26 @@ def restore_dialog_settings(dialog, settings):
         dialog.board_edge_clearance.Enable(settings['edge_clearance_check'])
     if 'board_edge_clearance' in settings:
         dialog.board_edge_clearance.SetValue(settings['board_edge_clearance'])
+    # #439 geometry-floor override checkboxes: restore checked state AND the
+    # matching spinctrl enable so the row round-trips like the edge control.
+    if 'track_width_override' in settings:
+        dialog.track_width_check.SetValue(settings['track_width_override'])
+        dialog.track_width.Enable(settings['track_width_override'])
+    if 'clearance_override' in settings:
+        dialog.clearance_check.SetValue(settings['clearance_override'])
+        dialog.clearance.Enable(settings['clearance_override'])
+    if 'via_size_override' in settings:
+        dialog.via_size_check.SetValue(settings['via_size_override'])
+        dialog.via_size.Enable(settings['via_size_override'])
+    if 'via_drill_override' in settings:
+        dialog.via_drill_check.SetValue(settings['via_drill_override'])
+        dialog.via_drill.Enable(settings['via_drill_override'])
+    if 'hole_to_hole_clearance_override' in settings:
+        dialog.hole_to_hole_clearance_check.SetValue(settings['hole_to_hole_clearance_override'])
+        dialog.hole_to_hole_clearance.Enable(settings['hole_to_hole_clearance_override'])
+    if 'board_edge_clearance_override' in settings:
+        dialog.edge_clearance_check.SetValue(settings['board_edge_clearance_override'])
+        dialog.board_edge_clearance.Enable(settings['board_edge_clearance_override'])
     if 'direction_choice' in settings:
         dialog.direction_choice.SetSelection(settings['direction_choice'])
 
@@ -373,6 +410,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.mps_reverse_rounds.SetValue(settings['mps_reverse_rounds'])
     if 'mps_layer_swap' in settings:
         dialog.mps_layer_swap.SetValue(settings['mps_layer_swap'])
+    if 'keep_input_copper' in settings:
+        dialog.keep_input_copper.SetValue(settings['keep_input_copper'])
     if 'mps_segment_intersection' in settings:
         dialog.mps_segment_intersection.SetValue(settings['mps_segment_intersection'])
     if 'no_crossing_layer_check' in settings:
@@ -430,6 +469,11 @@ def restore_dialog_settings(dialog, settings):
         dialog.debug_memory_check.SetValue(settings['debug_memory_check'])
     if 'stats_check' in settings:
         dialog.stats_check.SetValue(settings['stats_check'])
+    if 'make_movie_check' in settings:
+        # Restoring the box does NOT arm the recorder: its baseline is taken
+        # when the user ticks it (or when a plan run starts), so a restored
+        # tick still records from the board as it stands at that moment.
+        dialog.make_movie_check.SetValue(settings['make_movie_check'])
 
     # Restore swappable nets options
     if 'update_schematic_check' in settings:
@@ -449,11 +493,6 @@ def restore_dialog_settings(dialog, settings):
         dialog.net_panel.separate_netclass_check.SetValue(settings['net_panel_separate_netclass'])
         if settings['net_panel_separate_netclass']:
             dialog.net_panel._on_separate_netclass_changed(None)
-    # Restore use net class definitions checkbox and trigger its handler
-    if 'use_netclass_definitions' in settings:
-        dialog.use_netclass_check.SetValue(settings['use_netclass_definitions'])
-        if settings['use_netclass_definitions']:
-            dialog._on_use_netclass_changed(None)
     if 'swappable_hide' in settings and dialog.swappable_net_panel.hide_check:
         dialog.swappable_net_panel.hide_check.SetValue(settings['swappable_hide'])
     if 'diff_panel_hide' in settings and dialog.differential_tab.pair_panel.hide_check:
@@ -508,10 +547,13 @@ def restore_dialog_settings(dialog, settings):
         dialog.differential_tab.diff_pair_gap.SetValue(settings['diff_pair_gap'])
     if 'diff_impedance' in settings:
         dialog.differential_tab.diff_impedance.SetValue(settings['diff_impedance'])
-    if 'diff_use_netclass' in settings:
-        dialog.differential_tab.use_netclass_check.SetValue(settings['diff_use_netclass'])
-        # Trigger the change to enable/disable controls
-        dialog.differential_tab._on_use_netclass_changed(None)
+    # Restore the diff-pair width/gap override checkboxes and sync spinctrl enable
+    if 'diff_pair_width_override' in settings:
+        dialog.differential_tab.diff_pair_width_check.SetValue(settings['diff_pair_width_override'])
+        dialog.differential_tab.diff_pair_width.Enable(settings['diff_pair_width_override'])
+    if 'diff_pair_gap_override' in settings:
+        dialog.differential_tab.diff_pair_gap_check.SetValue(settings['diff_pair_gap_override'])
+        dialog.differential_tab.diff_pair_gap.Enable(settings['diff_pair_gap_override'])
     if 'min_turning_radius' in settings:
         dialog.differential_tab.min_turning_radius.SetValue(settings['min_turning_radius'])
     if 'max_setback_angle' in settings:

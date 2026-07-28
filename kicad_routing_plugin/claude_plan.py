@@ -61,15 +61,33 @@ PLAN_RESULT_SCHEMA = (
     'blocked by a signal trace (e.g. a connector GND pin) is connected by ripping '
     'the blocker out of the way; the ripped blocker is then left UNROUTED. So '
     'whenever rip_blocker_nets is set, add ONE more route step AFTER repair_planes '
-    '(nets "*" minus the plane net names) to reconnect the ripped blockers - route '
-    'handles rip-up/restore safely against the live obstacle map and reuses the '
+    'with nets ["*"] to reconnect the ripped blockers - do NOT exclude the plane '
+    'nets there: the router skips nets the pour already connects and track-patches '
+    'any pad the plane steps left disconnected. route handles rip-up/restore '
+    'safely against the live obstacle map and reuses the '
     'route step\'s power_nets/power_nets_widths. '
-    'The route step\'s "nets" globs support '
-    '"!" exclusions and MUST exclude any net that a route_planes step will handle, '
-    'e.g. ["*", "!GND", "!VCC"]. '
+    'The route step\'s "nets" globs support "!" exclusions; a route step that '
+    'runs BEFORE the route_planes step MUST exclude every net a route_planes '
+    'step will handle, e.g. ["*", "!GND", "!VCC"] - the final post-repair '
+    'route step must NOT repeat those exclusions. '
+    'Whenever any route/route_diff step runs AFTER the plane steps, END the '
+    'plan with one more repair_planes step (same assignments as the earlier '
+    'plane step): a late signal route can pinch part of a pour off, and the '
+    'final repair re-verifies and heals it (fill-aware, fast no-op when the '
+    'planes are intact). The executor appends this step automatically when '
+    'it is missing. '
     'Use only these actions; omit any parameter you have no recommendation for; '
     'all params are optional.'
 )
+
+
+def _join_nets(values):
+    """Space-join net names for a whitespace-separated GUI field, quoting any
+    that contain spaces. KiCad net names may ('/Management Interface/VDDA');
+    unquoted, one such name splits into two on read and every consumer that
+    pairs names with widths/groups mismatches (#493)."""
+    import shlex
+    return " ".join(shlex.quote(str(v)) for v in values)
 
 
 def parse_plan_result(value):
@@ -104,6 +122,7 @@ def parse_plan_result(value):
     if not steps:
         return None, errors + ["no usable steps in plan"]
     _insert_cap_optimization(steps)
+    _append_final_plane_verify(steps)
     return steps, errors
 
 
@@ -122,6 +141,39 @@ def _insert_cap_optimization(steps):
             last_bga = i
     if last_bga is not None:
         steps.insert(last_bga + 1, {"action": "optimize_caps", "cap_prefix": "C,R,FB"})
+
+
+def _append_final_plane_verify(steps):
+    """Late-pinch guard (#479 wave finding): a route/route_diff/fanout step
+    that runs AFTER the last plane step can sever plane fill -- a signal
+    trace laid late pinches an island off the pour, and nothing re-checks
+    (ch32v203's In1.Cu GND shipped severed behind an all-green chain; same
+    mechanism on ch32v203_ev +3.3V). Whenever copper-modifying steps follow
+    the last plane step, append ONE final repair_planes verify step with the
+    same assignments: fill-aware, so on an intact plane it is a fast no-op,
+    and when a late route did pinch the pour it re-joins the regions."""
+    plane_actions = {"route_planes", "repair_planes"}
+    copper_actions = {"route", "route_diff", "fanout", "optimize_caps"}
+    last_plane = None
+    for i, s in enumerate(steps):
+        if s["action"] in plane_actions:
+            last_plane = i
+    if last_plane is None:
+        return
+    if not any(s["action"] in copper_actions for s in steps[last_plane + 1:]):
+        return
+    # Clone assignments/params from the last repair_planes when there is one
+    # (its params are tuned for repair); else from the route_planes step.
+    src = steps[last_plane]
+    for s in reversed(steps):
+        if s["action"] == "repair_planes":
+            src = s
+            break
+    steps.append({
+        "action": "repair_planes",
+        "assignments": [dict(a) for a in (src.get("assignments") or [])],
+        "params": dict(src.get("params") or {}),
+    })
 
 
 def step_label(index, step):
@@ -177,13 +229,54 @@ _PARAM_CONTROL_ALIASES = {
     'time_matching': 'time_matching_check',
     'keepout': 'keepout_check',
     'guide_corridor': 'guide_corridor_check',
+    # #486: coplanar-waveguide declaration (the gap itself is a same-named
+    # SpinCtrlDouble and needs no alias).
+    'coplanar_nets': 'coplanar_nets_ctrl',
+    # #489 section 9: one shared checkbox drives teardrops on every step.
+    'add_teardrops': 'add_teardrops_check',
 }
 # _PARAM_SPECIAL: params handled by _apply_special() (composite / inverted /
 # panel-backed controls that a plain SetValue can't fill).
 _PARAM_SPECIAL = {'layers', 'no_bga_zone', 'no_bga_zones', 'power_nets',
                   'power_nets_widths', 'escape_method', 'no_gnd_vias',
                   # #381 D5:
-                  'impedance', 'length_match_groups', 'swappable_nets'}
+                  'impedance', 'length_match_groups', 'swappable_nets',
+                  # #486:
+                  'coplanar_nets'}
+
+# #439: geometry-floor param -> its Basic-tab override checkbox attribute. A plan
+# step that names one of these is the GUI equivalent of the CLI passing that flag,
+# so setting the spinctrl must ALSO check the override box and enable the control
+# (otherwise _effective_<name>() ignores the typed value and uses the board's own).
+# The edge control's checkbox is named edge_clearance_check, not *_check.
+_GEOMETRY_OVERRIDE_CHECKS = {
+    'track_width': 'track_width_check',
+    'clearance': 'clearance_check',
+    'via_size': 'via_size_check',
+    'via_drill': 'via_drill_check',
+    'hole_to_hole_clearance': 'hole_to_hole_clearance_check',
+    'board_edge_clearance': 'edge_clearance_check',
+    # #435: diff-tab geometry overrides (differential panel). A plan step setting
+    # diff_pair_width/gap == the CLI passing --track-width/--diff-pair-gap, so the
+    # override box must be checked -- otherwise _effective_* ignores the typed value
+    # and each pair uses its OWN netclass diff geometry (the omitted-flag default).
+    'diff_pair_width': 'diff_pair_width_check',
+    'diff_pair_gap': 'diff_pair_gap_check',
+}
+
+
+def _enable_geometry_override(dialog, name):
+    """Check the override box + enable the spinctrl for a geometry floor set from
+    a plan step (no-op if `name` is not a geometry floor or the control is absent)."""
+    chk_attr = _GEOMETRY_OVERRIDE_CHECKS.get(name)
+    if not chk_attr:
+        return
+    chk = getattr(dialog, chk_attr, None)
+    if chk is not None:
+        chk.SetValue(True)
+    ctrl = getattr(dialog, name, None)
+    if ctrl is not None and hasattr(ctrl, 'Enable'):
+        ctrl.Enable(True)
 
 
 def apply_step_params(step, dialog):
@@ -298,7 +391,15 @@ def apply_step_params(step, dialog):
             ctl = getattr(dialog, 'power_nets_ctrl', None)
             if ctl is None:
                 return False
-            ctl.SetValue(' '.join(str(v) for v in value))
+            ctl.SetValue(_join_nets(value))
+            return True
+        if name == 'coplanar_nets':
+            # #486: list of glob patterns -> the space-separated text control.
+            ctl = getattr(dialog, 'coplanar_nets_ctrl', None)
+            if ctl is None:
+                return False
+            ctl.SetValue(_join_nets(value) if isinstance(value, (list, tuple))
+                         else str(value or ''))
             return True
         if name == 'power_nets_widths' and isinstance(value, (list, tuple)):
             ctl = getattr(dialog, 'power_widths_ctrl', None)
@@ -361,9 +462,9 @@ def apply_step_params(step, dialog):
             if isinstance(value, str):
                 text = value
             elif value and isinstance(value[0], (list, tuple)):
-                text = ', '.join(' '.join(str(p) for p in g) for g in value)
+                text = ', '.join(_join_nets(g) for g in value)
             else:
-                text = ' '.join(str(p) for p in (value or []))
+                text = _join_nets(value or [])
             ctl.SetValue(text)
             return True
         if name == 'swappable_nets':
@@ -399,6 +500,8 @@ def apply_step_params(step, dialog):
         for owner in _owners():
             if owner is not None and _set_control(owner, lookup, value):
                 notes.append(f"set {name}={value}")
+                # #439: a plan value for a geometry floor enables its override.
+                _enable_geometry_override(dialog, lookup)
                 placed = True
                 break
         if not placed:
@@ -409,6 +512,9 @@ def apply_step_params(step, dialog):
             if name in params:
                 try:
                     getattr(dialog, name).SetValue(float(params[name]))
+                    # #439: an explicit plan value == the CLI passing the flag; check
+                    # the override box + enable so _effective_<name>() uses it.
+                    _enable_geometry_override(dialog, name)
                     notes.append(f"set {name}={params[name]}")
                 except (TypeError, ValueError):
                     notes.append(f"ignored non-numeric {name}={params[name]!r}")
@@ -416,7 +522,13 @@ def apply_step_params(step, dialog):
         widths = params.get("power_nets_widths")
         if power:
             if widths and len(widths) == len(power):
-                dialog.power_nets_ctrl.SetValue(" ".join(str(p) for p in power))
+                # Quote names containing spaces: the control is whitespace
+                # separated and KiCad net names may contain spaces
+                # ('/Management Interface/VDDA'). Unquoted, one such net split
+                # into two on read, the power-net/width counts disagreed, and
+                # identify_power_nets raised inside the routing worker -- the
+                # step then reported FINISHED having routed nothing (#493).
+                dialog.power_nets_ctrl.SetValue(_join_nets(power))
                 dialog.power_widths_ctrl.SetValue(" ".join(f"{float(w):g}" for w in widths))
                 notes.append(f"set power_nets={list(power)} widths={list(widths)}")
             else:
@@ -429,13 +541,14 @@ def apply_step_params(step, dialog):
                 notes.append(f"ignored non-numeric layer_costs={costs!r}")
     elif action == "route_diff":
         tab = dialog.differential_tab
-        if "diff_pair_width" in params or "diff_pair_gap" in params:
-            # Explicit values from the plan override netclass-derived ones
-            tab.use_netclass_check.SetValue(False)
-            tab.diff_pair_width.Enable(True)
-            tab.diff_pair_gap.Enable(True)
+        # An explicit diff_pair_width/gap in the plan overrides the board
+        # net-class value: check that param's override box and enable its spinctrl
+        # so _effective_diff_pair_width/gap return the plan value (an omitted param
+        # leaves the box unchecked -> board Default net-class value is used).
         for name in ("diff_pair_width", "diff_pair_gap"):
             if name in params:
+                getattr(tab, name + "_check").SetValue(True)
+                getattr(tab, name).Enable(True)
                 try:
                     getattr(tab, name).SetValue(float(params[name]))
                 except (TypeError, ValueError):
@@ -456,6 +569,14 @@ def apply_step_params(step, dialog):
             except (TypeError, ValueError):
                 notes.append(f"ignored non-numeric layer_costs={costs!r}")
     elif action == "route_planes":
+        if "zone_clearance" in params and params["zone_clearance"] is not None:
+            _pop = getattr(dialog.planes_tab, "create_options", None)
+            if _pop is not None and hasattr(_pop, "zone_clearance_check"):
+                # explicit plan value checks the override box (basic-tab
+                # convention: checked = use the typed value)
+                _pop.zone_clearance_check.SetValue(True)
+                if hasattr(_pop, "zone_clearance"):
+                    _pop.zone_clearance.Enable(True)
         opts = dialog.planes_tab.create_options
         # A plan step is a COMPLETE spec of feature toggles: absent means
         # OFF. Leaving the persisted/panel state in place let a previously
@@ -481,6 +602,8 @@ def apply_step_params(step, dialog):
             if name in params:
                 try:
                     getattr(dialog, name).SetValue(float(params[name]))
+                    # #439: via_size/via_drill are override-gated (grid_step is not).
+                    _enable_geometry_override(dialog, name)
                 except (TypeError, ValueError):
                     notes.append(f"ignored non-numeric {name}={params[name]!r}")
         opts = dialog.planes_tab.repair_options
@@ -534,15 +657,80 @@ def apply_step_params(step, dialog):
     return notes
 
 
-def apply_step_selection(step, dialog):
+def _plan_plane_nets(steps, dialog):
+    """Plane nets a step running BEFORE the plane steps must not route/fan
+    out as signals: the union of every route_planes/repair_planes step's
+    exact assignment net names in the PLAN (a whole-chain declaration, so it
+    covers fanout/route steps that run before the planes exist -- the
+    ottercast stub-clutter class). Steps AFTER the planes may include these
+    nets freely: the engine's fill-aware selection skips a plane-connected
+    net untouched and track-patches only genuinely disconnected pads (#479)."""
+    nets = set()
+    for s in steps or []:
+        if s.get("action") in ("route_planes", "repair_planes"):
+            for a in s.get("assignments") or []:
+                nets.update(n for n in a.get("nets") or [] if n)
+            nets.update(n for n in s.get("nets") or [] if n)
+    return nets
+
+
+def _precedes_first_plane_step(step, all_steps):
+    """True when `step` runs before the plan's first route_planes/repair_planes
+    step (or when its position is unknown). Identity comparison: the runner
+    passes the same step dicts it iterates."""
+    if not all_steps:
+        return True
+    first = next((i for i, s in enumerate(all_steps)
+                  if s.get("action") in ("route_planes", "repair_planes")), None)
+    if first is None:
+        return True
+    idx = next((i for i, s in enumerate(all_steps) if s is step), None)
+    return idx is None or idx < first
+
+
+def _drop_plane_nets(names, globs, plane_nets, notes, label):
+    """Drop the plan's declared plane nets from a WILDCARD-matched selection;
+    a glob naming one verbatim keeps it (explicit override).
+
+    This is a SAFETY NET for plans that never spelled the exclusion (an LLM-
+    authored plan, or the ottercast stub-clutter class). A plan converted from a
+    recorded chain normally carries `!GND` itself, and since #493 that exclusion
+    actually bites in both fronts -- so on a faithful replay this finds nothing
+    left to drop and the GUI and CLI select the same nets.
+    """
+    if not plane_nets:
+        return names
+    from net_queries import net_pattern_matches
+    # "Names it verbatim" is sheet-path aware too (#493): a plan that says 'GND'
+    # is explicitly asking for the board's '/GND'. Wildcards never count as
+    # explicit -- dropping wildcard-selected plane nets is the whole point.
+    literal = {n for n in plane_nets
+               for g in (globs or [])
+               if '*' not in g and '?' not in g and net_pattern_matches(n, g)}
+    excluded = sorted(n for n in names if n in plane_nets and n not in literal)
+    if excluded:
+        notes.append(f"{label}: plan plane nets excluded {', '.join(excluded)}")
+        return [n for n in names if n not in set(excluded)]
+    return names
+
+
+def apply_step_selection(step, dialog, all_steps=None):
     """Apply the step's net/pair/component/assignment selection (also re-run
     right before executing the step, since consecutive steps of the same
     action share one tab's selection state). Returns notes."""
     notes = []
     action = step["action"]
+    plane_nets = _plan_plane_nets(all_steps, dialog)
     if action == "route":
         globs = step.get("nets") or ["*"]
         names = _match_net_names(dialog.pcb_data, globs)
+        # Drop wildcard-selected plane nets only from route steps that run
+        # BEFORE the first plane step (routing a whole rail as tracks there
+        # fights the later pour). A route step AFTER the planes keeps them:
+        # the engine skips plane-connected nets and track-patches only pads
+        # the plane steps left disconnected (#479).
+        if _precedes_first_plane_step(step, all_steps):
+            names = _drop_plane_nets(names, globs, plane_nets, notes, "route")
         if not names:
             notes.append(f"route: no nets match {globs}")
         dialog.net_panel.set_selected_nets(names)
@@ -576,6 +764,7 @@ def apply_step_selection(step, dialog):
             notes.append(f"fanout: component {ref} not in dropdown")
         globs = step.get("nets") or ["*"]
         names = _component_net_names(dialog.pcb_data, ref, globs)
+        names = _drop_plane_nets(names, globs, plane_nets, notes, "fanout")
         if not names:
             notes.append(f"fanout: no nets match {globs} on {ref}")
         tab.net_panel.set_selected_nets(names)
@@ -648,7 +837,7 @@ def _match_net_names(pcb_data, globs):
     Uses the shared split_net_patterns helper so a literal active-low net name
     like "!RESET" stays selectable rather than being read as an exclusion
     (issue #177)."""
-    from net_queries import split_net_patterns
+    from net_queries import split_net_patterns, net_pattern_matches
     known_names = {net.name for net in pcb_data.nets.values() if net.name}
     includes, excludes = split_net_patterns(globs, known_names)
     if not includes:
@@ -657,19 +846,38 @@ def _match_net_names(pcb_data, globs):
     for net in pcb_data.nets.values():
         if not net.net_id or not net.name:
             continue
-        if any(fnmatch.fnmatch(net.name, g) for g in includes) and \
-                not any(fnmatch.fnmatch(net.name, g) for g in excludes):
+        # CLI parity: expand_net_patterns drops KiCad no-connect nets
+        # ('unconnected-*') from every selection; the plan executor must not
+        # hand the net panel nets the CLI would never route.
+        if net.name.lower().startswith('unconnected-'):
+            continue
+        # Sheet-path aware, like the CLI's expand_net_patterns (#493): an
+        # unqualified '!GND' must exclude the board's '/GND'.
+        if any(net_pattern_matches(net.name, g) for g in includes) and \
+                not any(net_pattern_matches(net.name, g) for g in excludes):
             names.append(net.name)
     return names
 
 
 def _component_net_names(pcb_data, ref, globs):
+    """The component's nets that the step's globs select.
+
+    #493 item 2: this used to test `any(glob matches)` across the WHOLE glob
+    list, so a step's "!" exclusions were ignored outright -- '*' always matched
+    and pulled every net back in. A fanout step recorded as
+    `--nets '*' '!GND' '!3V3'` therefore fanned out GND/3V3 in the GUI, and only
+    looked correct on boards where _drop_plane_nets happened to remove the same
+    nets afterwards; any non-plane exclusion was silently a no-op. Use the shared
+    include/exclude semantics (matches_net_filter) so a replayed plan selects the
+    same nets the recorded CLI command did.
+    """
     footprint = pcb_data.footprints.get(ref)
     if footprint is None:
         return []
+    from net_queries import matches_net_filter
     names = set()
     for pad in footprint.pads:
-        if pad.net_id and pad.net_name and any(fnmatch.fnmatch(pad.net_name, g) for g in globs):
+        if pad.net_id and pad.net_name and matches_net_filter(pad.net_name, globs):
             names.add(pad.net_name)
     return sorted(names)
 
@@ -799,10 +1007,52 @@ class PlanExecutor:
 
     # -- sequencing ----------------------------------------------------------
 
+    def _join_worker_threads(self, timeout=60.0):
+        """Wait for every tab's routing worker thread to be fully dead.
+
+        _poll_until_idle decides a step is done by polling a CONTROL's state
+        (plus the tab's _apply_pending latch); it never touches the thread. So
+        in principle _finish could run while a worker was still tearing down,
+        and everything after it would race that. This makes the guarantee
+        explicit instead of assumed. Bounded and best-effort: a stuck worker
+        must never hang the GUI, so a timeout is logged and execution
+        continues.
+
+        HONEST SCOPE: this does NOT fix the headless segfault, and in practice
+        it is usually a no-op -- the thread has already exited by the time the
+        control reports idle. Measured: with the join in place a 1-step replay
+        still crashed on run 1. Kept because polling a button to infer that a
+        thread is finished is a real (if currently latent) hazard, not because
+        it fixed anything. See the crash note in git history for what IS known.
+        """
+        import threading
+        me = threading.current_thread()
+        owners = [self.dialog]
+        for attr in ('differential_tab', 'planes_tab', 'fanout_tab'):
+            owner = getattr(self.dialog, attr, None)
+            if owner is not None:
+                owners.append(owner)
+        for owner in owners:
+            t = getattr(owner, '_routing_thread', None)
+            if t is None or t is me:
+                continue
+            try:
+                if not t.is_alive():
+                    continue
+                t.join(timeout)
+                if t.is_alive():
+                    self.log(f"Claude plan: worker thread on "
+                             f"{type(owner).__name__} still alive after "
+                             f"{timeout}s; continuing without it")
+            except Exception as e:
+                self.log(f"Claude plan: worker-thread join skipped ({e})")
+
     def _finish(self, aborted_reason):
         self._current_action = None
         self.dialog._suppress_plane_offer = False
         self.dialog._suppress_completion_popups = False
+        # Before any heavy Python work below (see _join_worker_threads).
+        self._join_worker_threads()
         self._write_drc_floors()
         # Prep the GUI for the NEXT step to run, so its params are shown (and
         # editable) after this batch finishes (Andy's requested behavior: run the
@@ -820,7 +1070,8 @@ class PlanExecutor:
                 if hasattr(self.dialog, 'reset_params_to_defaults'):
                     self.dialog.reset_params_to_defaults()
                 apply_step_params(self.steps[nxt], self.dialog)
-                apply_step_selection(self.steps[nxt], self.dialog)
+                apply_step_selection(self.steps[nxt], self.dialog,
+                                     all_steps=self.steps)
                 self.log(f"Claude plan: GUI prepped for step {nxt + 1} "
                          f"({self.steps[nxt]['action']})")
             except Exception as e:
@@ -869,6 +1120,22 @@ class PlanExecutor:
             # pick these up; the write only ever loosens floors and never
             # touches the .kicad_pcb, so it is never harmful.
             if board_file and os.path.isfile(board_file):
+                # #439: clamp non-Default classes in the written .kicad_pro only when
+                # this plan routed with a --clearance ceiling (the Min-Clearance
+                # override the executor checks when a step sets clearance), matching
+                # the interactive route tab -- not unconditionally (the function default).
+                _cc = getattr(self.dialog, 'clearance_check', None)
+                _clamp = bool(_cc.GetValue()) if _cc is not None else False
+                # No `minima=` here (the SWIG GUI passes
+                # gui_utils.board_minima_from_live): that argument exists only to
+                # keep fix_project_for_output from re-parsing the board file
+                # inside a wx TIMER dispatch, where the allocation burst
+                # segfaults pcbnew mid-collection. The IPC plugin holds no live
+                # pcbnew board at all, so there is nothing to read the minima
+                # from -- and no segfault to dodge, since the parse happens in
+                # our own process. minima=None (the default) makes
+                # fix_project_for_output scan the file itself, which is the same
+                # five values by the same code the CLI uses.
                 from fix_kicad_drc_settings import fix_project_for_output
                 fix_project_for_output(
                     board_file, input_pcb=board_file,
@@ -879,7 +1146,8 @@ class PlanExecutor:
                     hole_to_hole=floors.get('hole_to_hole_clearance'),
                     edge_clearance=floors.get('board_edge_clearance'),
                     diff_pair_width=floors.get('diff_pair_width'),
-                    diff_pair_gap=floors.get('diff_pair_gap'))
+                    diff_pair_gap=floors.get('diff_pair_gap'),
+                    clamp_nondefault_netclasses=_clamp)
                 self.log(f"Claude plan: recorded DRC floors in the project "
                          f"file (min clearance {eff:.4g}mm); reload the project "
                          f"in KiCad for a manual DRC to use them")
@@ -929,7 +1197,7 @@ class PlanExecutor:
             # re-apply, e.g. a fine-pitch route step and a general route step
             # would both run at whichever was applied last.
             notes = apply_step_params(step, self.dialog)
-            notes += apply_step_selection(step, self.dialog)
+            notes += apply_step_selection(step, self.dialog, all_steps=self.steps)
             for note in notes:
                 self.log(f"Claude plan: {note}")
             invoke, busy = self._action_parts(step["action"])

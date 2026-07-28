@@ -49,6 +49,7 @@ SCALAR_FLAGS = {
 BOOL_FLAGS = {
     '--no-bga-zones': 'no_bga_zone', '--no-bga-zone': 'no_bga_zone',
     '--no-gnd-vias': 'no_gnd_vias', '--rip-blocker-nets': 'rip_blocker_nets',
+    '--keep-input-copper': 'keep_input_copper',
 }
 # Per-action overrides of SCALAR_FLAGS. #381 D4: route_diff.py's trace width is
 # --track-width, but its GUI home is the diff tab's diff_pair_width control (not
@@ -103,6 +104,59 @@ def _plane_layers(argv):
     return out
 
 
+def _positional_pairs(argv):
+    """The pair globs a route_diff command passes POSITIONALLY.
+
+    Derived independently of manifest_to_plan (that is the point of this gate):
+    take the tokens after the tool name up to the FIRST option, and drop the
+    input/output boards. route_diff.py has no --pairs flag -- the patterns are
+    positional -- and the converter used to collect them into a local it never
+    read, so every recorded diff step became `pairs: []`. The GUI reads an empty
+    pairs list as "route every auto-detected pair", so 204 of the corpus's 206
+    diff steps replayed wider than the chain they came from.
+    """
+    tool_i = None
+    for i, a in enumerate(argv):
+        if os.path.basename(a) == 'route_diff.py':
+            tool_i = i
+            break
+    if tool_i is None:
+        return []
+    out = []
+    for a in argv[tool_i + 1:]:
+        if a.startswith('-'):
+            break
+        if not a.endswith('.kicad_pcb'):
+            out.append(a)
+    return out
+
+
+def _positional_nets(argv):
+    """The net names a route command passes POSITIONALLY.
+
+    Same shape as _positional_pairs, and the same defect: route.py accepts net
+    names positionally after the input/output boards (--nets is optional), the
+    converter read only lists['--nets'], and an empty list fell through to the
+    `or ['*']` default. So a step that retried three specific failed nets
+    converted to "route EVERY net on the board" -- the exact opposite of what
+    was recorded. eth_tap steps 12 and 16 are both positional retries.
+    """
+    tool_i = None
+    for i, a in enumerate(argv):
+        if os.path.basename(a) == 'route.py':
+            tool_i = i
+            break
+    if tool_i is None:
+        return []
+    out = []
+    for a in argv[tool_i + 1:]:
+        if a.startswith('-'):
+            break
+        if not a.endswith('.kicad_pcb'):
+            out.append(a)
+    return out
+
+
 def check_pair(argv, step):
     """Return list of (flag, reason) mismatches for one command/step pair."""
     params = step.get('params', {})
@@ -133,6 +187,31 @@ def check_pair(argv, step):
             i += 1
             continue
         i += 1
+    # Positional diff-pair globs must survive into step['pairs'].
+    if step.get('action') == 'route_diff':
+        want_pairs = _positional_pairs(argv)
+        if want_pairs:
+            got_pairs = [str(x) for x in (step.get('pairs') or [])]
+            n += 1
+            if not set(want_pairs).issubset(set(got_pairs)):
+                missing = [g for g in want_pairs if g not in got_pairs]
+                bad.append(('<positional pairs>',
+                            f"want {want_pairs} got {got_pairs} "
+                            f"(missing {missing})"))
+
+    # Positional net names must survive into step['nets'] -- and must NOT be
+    # silently widened to the ['*'] catch-all.
+    if step.get('action') == 'route':
+        want_nets = _positional_nets(argv)
+        if want_nets:
+            got_nets = [str(x) for x in (step.get('nets') or [])]
+            n += 1
+            if not set(want_nets).issubset(set(got_nets)):
+                missing = [g for g in want_nets if g not in got_nets]
+                bad.append(('<positional nets>',
+                            f"want {want_nets} got {got_nets} "
+                            f"(missing {missing})"))
+
     # --plane-layers must survive as the assignment layers
     pl = _plane_layers(argv)
     if pl:

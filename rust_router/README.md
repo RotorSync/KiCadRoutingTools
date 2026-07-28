@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.18.1**
+**Current Version: 0.19.0**
 
 ## Features
 
@@ -305,6 +305,85 @@ src/
 - **Costs**: ORTHO_COST=1000, DIAG_COST=1414 (sqrt(2) * 1000), DEFAULT_TURN_COST=1000
 
 ## Version History
+
+- **0.19.0**: **#156 fractional per-layer track_margin** — `route_multi` /
+  `route_with_frontier` accept `track_margin` as a FLOAT (scalar) or a
+  per-layer `list[float]`, in fractional grid cells, instead of an integer
+  Chebyshev cell count. The margin feeds the existing swept-capsule
+  `segment_blocked` check per destination layer, so wide (power) and
+  impedance-width nets reserve their exact extra half-width — no `ceil`,
+  no blunt `+1` cell of over-blocking. Integer arguments still coerce
+  (backward compatible). Python side now computes
+  `(net_width(layer) - reserved_width(layer)) / 2 / grid_step` per layer.
+- **0.18.5**: **P3 attraction-field precompute** (soft-knobs review) -- new
+  `build_attraction_field(radius, bonus)` on `GridObstacleMap` precomputes the
+  per-layer max cross-layer attraction bonus once per net (entries x disk x
+  layers, <= 8 layers), turning `get_cross_layer_attraction` from an
+  O(radius^2)-per-candidate-move scan into an O(1) lookup with identical
+  falloff semantics; empty field = the scan fallback, so callers on an older
+  Python side (no build call) are unaffected. Cleared with
+  `clear_cross_layer_tracks`.
+- **0.18.4**: **cross-layer bus attraction** (#296 R9 phase B) — new
+  `GridRouter` kwarg `attraction_cross_layer_pct` (default 0 = legacy): when
+  > 0, the bus attraction-path bonus is granted at that percentage on layers
+  OTHER than the path point's layer (same-layer points still win at 100%),
+  so a planned bus corridor keeps guiding a member after a via transition
+  instead of going silent. Wildcard-layer bucket keys added to the
+  attraction spatial hash (only consulted when the fraction is enabled).
+  Also converts the bus path attraction from a subtractive bonus to a
+  multiplicative step DISCOUNT (0-90%; 50 legacy bonus units = 1%, so the
+  default 5000 = full strength): the old subtraction exceeded the move cost
+  (~1000), creating negative-cost edges that break A*'s first-arrival
+  invariant, and once floored it saturated -- collapsing every proximity/
+  alignment/layer gradation (soft-knobs review finding #2). The vertical
+  (cross-layer copper) attraction stays subtractive but is now capped so a
+  step can never go below a tenth of the base move cost (router.rs +
+  pose_router.rs). Riders from the soft-knobs audit: the attraction path
+  lookup now uses a spatial POINT index instead of a whole-path linear scan
+  per candidate move (P2); attraction distance is Euclidean instead of
+  Manhattan-vs-Euclidean-radius, which halved diagonal reach (N4); the
+  stub-proximity endpoint-exemption scan runs only on a nonzero cost hit
+  (P4); VisualRouter now passes layer direction preferences through, so
+  --visualize replays the production cost model (C2); and the turn cost is
+  ANGLE-PROPORTIONAL (N5): the knob is the 90-degree anchor -- 45-degree
+  kinks cost half, 135-degree hairpins 1.5x, reversals 2x (was a flat
+  charge that priced a gentle jog like a hairpin).
+
+- **0.18.3**: **#452 direction preference no longer bypassed by diagonals** — the
+  per-layer H/V preference penalty (`direction_preference_cost`, applied via
+  `layer_direction_preferences`) charged only PURE axis moves against the
+  preference (`dy != 0 && dx == 0` on a horizontal layer). A 45 diagonal
+  satisfies neither test, so it cost ZERO on every layer — and since the router
+  moves 8-way, the cheapest way to travel along the non-preferred axis was a
+  chain of free diagonals. The preference was not weak, it was *bypassed*:
+  raising the knob could not restore discipline. The penalty now charges any
+  move that advances along the non-preferred axis, diagonals included (one cell
+  of wrong-axis progress either way, so the same charge). Deliberately gentle:
+  50 vs DIAG_COST 1414 is a ~3.5% nudge that tips ties toward the preferred
+  axis without discouraging useful 45 routing. Measured motivation (#296 corpus
+  study): humans hold per-layer discipline (urchin F.Cu 68% H / B.Cu 86% V) and
+  spend 1.67 vias/net; we spent 2.41 (+44%) while routing SHORTER, i.e. paying
+  for length in layer changes, and our texture showed the staircase signature
+  (segments/mm 0.80 vs 0.49 human, off-grid bends 0.13 vs 0.02).
+
+- **0.18.2**: **#422 static keep-out bitmap (memory)** — permanent board
+  geometry (board-edge clearance band, off-board / outside-outline area, board
+  cutouts / switch holes) is now stored in a separate never-cleared per-layer
+  **static bitmap** (`add_static_blocked_cell[s_batch]` / `..._via[s_batch]`)
+  instead of the `blocked_cells` / `blocked_vias` refcount hashmaps. These cells
+  never change during routing, so a set bit (1 bit/cell) suffices where a hashmap
+  entry costs ~16 B (u64 key + u16 refcount padded to a 16 B bucket + control byte
+  + power-of-two slack). `is_blocked` / `is_via_blocked` OR the static bitmap with
+  the dynamic map, so a statically-blocked cell behaves **byte-identically** to a
+  refcounted one (same source/target override) — it is simply cheaper to store
+  and immune to the per-net remove/restore cycle (no coincident-cell desync: the
+  two structures are independent). On sparse large boards (split keyboards: many
+  switch-hole cutouts + big off-board area) this static class is ~60% of all
+  blocked cells; moving it out of the hashmaps cuts the obstacle-map (and its
+  per-run working clone) memory proportionally. New pymethods:
+  `add_static_blocked_cell(s_batch)`, `add_static_blocked_via(s_batch)`,
+  `get_static_stats()`. `clone`/`clone_fresh`/`shrink_to_fit` handle the new
+  bitmaps; `get_stats()` arity is unchanged. Routing results are identical.
 
 - **0.18.1**: **S3-b (#385)** — admissible bounding-box heuristic for large
   target lists. `heuristic_to_targets` was O(targets) per push (min octile

@@ -89,6 +89,51 @@ within a board. `<SET>` below is `_set<N>` (e.g. `_set1` for set 1, `_set2` for 
    `boards_set1/`, `results_set1/`; set 2 → `boards_unrouted_set2/`, `runs_set2/`,
    `boards_set2/`, `results_set2/`)
 
+## Run artifacts: final snapshot + routing movie (#482)
+
+At the end of each board's run the harness renders, into the run dir, via the
+fast geometry renderer (`tests/stress/render_run.py` → `route_render` +
+`animate_route`; no KiCad / kicad-cli / browser, ~2 s/board — this replaced the
+old kicad-cli + headless-Chrome `board_layer_images` path):
+
+- `<final-board>.png` — combined all-copper snapshot of the final board.
+- `<final-board>_<layer>.png` — one snapshot per copper layer (plane vs signal
+  at a glance; plane pours render natively).
+- `<run-dir>/routing.mp4` — a movie of the WHOLE run: each chain board's copper
+  delta is revealed in chain order (so fanout, diff pairs, planes, signal, and
+  repair all appear), with fine per-copper rip/restore animation spliced in for
+  any step that recorded a trace. New copper flashes white, reroutes/restores
+  green, rips flash red. Written as **H.264 `.mp4`** (≈10-50× smaller than GIF,
+  plays everywhere) when `imageio-ffmpeg` is installed, else falls back to
+  `routing.gif`.
+
+Both the live worker (`run_board.sh`) and the no-LLM replay
+(`redo_stress_test.py`) produce these automatically.
+
+**By hand, for any run dir** (same movie, same code — `render_run.py` now calls
+`make_movie.py`, which is also what the GUI's "Routing Movie..." button runs):
+
+```bash
+python3 make_movie.py runs_set1/myboard              # -> runs_set1/myboard/routing.mp4
+python3 make_movie.py step1.kicad_pcb step2.kicad_pcb -o out.mp4
+```
+
+**For these to be created correctly:**
+- The movie discovers the chain boards automatically: it prefers a `stepN` in
+  the filename (`step6_route` or `board_step6_route`, sub-steps `step2a/2b`
+  ordered correctly); when a chain names outputs semantically instead
+  (`diff_groupA`, `planes`, `final_board`), it falls back to **write-time
+  order**. An explicit `final*` board is used as the final/substrate, else the
+  last in order. (mp4 needs `pip install imageio imageio-ffmpeg`.)
+- **Route tracing is ON by default** (`KICAD_ROUTE_TRACE=1`, exported by
+  `run_board.sh`, set by `redo_stress_test.py`). Each `route.py`, `route_diff.py`,
+  `route_planes.py`, and `route_disconnected_planes.py` step then drops a sibling
+  `<output>_routetrace.json` recording every segment/via committed, ripped, and
+  restored — which the movie splices in for fine animation. Set
+  `KICAD_ROUTE_TRACE=0` in the environment to skip tracing (leaner/faster runs;
+  the movie falls back to a coarse per-step reveal from the step boards alone).
+  Tracing is read-only over routing and never changes the routed result.
+
 ## Building a board set (source → validate → prep)
 
 How the `boards_setN/` (routed reference) and `boards_unrouted_setN/` (stripped
@@ -228,6 +273,16 @@ harmless.
      signal params + `--power-nets`/`--power-nets-widths`) to reconnect the nets
      Step 5 ripped. route.py routes against the live obstacle map with safe
      rip-up/restore, so it reconnects them without shorts.
+   - FINAL PLANE VERIFY (Step 5d, mandatory whenever ANY route/route_diff/
+     fanout step runs after the plane steps): end the chain with one more
+     route_disconnected_planes pass (same params as Step 5). A late signal
+     route can pinch part of a pour off -- ch32v203's In1.Cu GND shipped
+     severed behind an all-green chain (the set6 wave's only incomplete net);
+     the final verify healed it in ~5s. Fill-aware, so on an intact plane it
+     is a fast near-no-op (it may add one small strap where the conservative
+     model over-splits -- harmless same-net copper). The GUI plan executor
+     appends this step automatically (claude_plan._append_final_plane_verify);
+     recorded CLI chains must include it explicitly.
    - TRACK WIDTH: the net-class `track_width` is a MINIMUM (keep it for the signal
      baseline); real boards widen power/high-current nets to many distinct widths
      (2-4mm buses) — widen those explicitly via `--power-nets`.
@@ -357,6 +412,16 @@ harmless.
    copper_edge_clearance on edge-connector fingers is design intent, not a
    routing defect. The no-LLM replay grader (ab_replay_grade.py) now records
    the same fields automatically.
+   CONNECTION_WIDTH (#406): the cross-check also grades KiCad's min-copper-web
+   class, SEPARATELY from the copper classes (check_drc has no counterpart --
+   the artifact lives in KiCad's own float-borderline web measurement, so web
+   items never count as KICAD-ONLY). KiCad ships the checker OFF
+   (min_connection 0, warning severity); the staged copy turns it on at the
+   author's min_connection when set, else the project's min_track_width (the
+   post-route ledger floors it at the smallest object on the board). Recorded
+   as `kicad_connection_width` (None = not graded: no recorded floor) +
+   `connection_width_min`; ab_replay_grade compares the count per board (connw
+   column) and gates the A/B verdict on its delta.
 8. OOM REGRESSION CHECK (issue #81, fixed): the obstacle-map polygon pass is
    now chunked; DEFAULT grids should stay well under the 4 GB cap on every
    board. Use the default --grid-step unless component pitch demands finer.
@@ -529,5 +594,95 @@ grade stricter or you manufacture phantom grazes.
   flagged boards' `kicad_*` to `--out-dir`. Much faster than the full chain; use it
   when the change only touches fanout / diff-pair routing.
 
+- **Whole set, from a mid-chain step (reuse a prior wave's upstream boards):**
+  `python3 tests/stress/partial_replay_from_planes.py --set runs_setN --seed
+  <prior_wave>/setN --out <fresh_wave>/setN [--only b1,b2] [--from-script route_planes.py]`.
+  Cuts each board's manifest over at the first `--from-script` command (default the
+  first `route_planes.py`), stages the boards that step reads from upstream out of
+  `--seed` (with their `.kicad_pro` DRC floors), and replays only the tail via
+  `redo_stress_test`. Use it when a change only touches the later stages (plane
+  routing, reconnect, grading) so the expensive fanout/diff/`route.py` signal
+  routing is skipped. Grade the finals yourself (`ab_replay_grade.py --regrade` or
+  `kicad_drc_compare.py`).
+
 Rule of thumb: full-chain regressions → `ab_replay_grade.py`; diff-pair
-regressions → `redo_diff_stage.py`.
+regressions → `redo_diff_stage.py`; plane/reconnect/grading-only changes →
+`partial_replay_from_planes.py` (reuses a prior wave's upstream boards).
+
+## Multi-set waves & release sign-off
+
+`ab_replay_grade.py` grades **one set**. A release decision (should this become a
+tag?) spans the whole corpus and more than one baseline, which is what these two
+add. Both keep `ab_replay_grade`'s grading semantics and `summary.json` schema, so
+they interoperate with `--compare` and `--regrade`.
+
+- **`ab_wave_driver.py`** — replays many sets under ONE global queue, so `--jobs`
+  boards stay in flight **across set boundaries** (`ab_replay_grade --set` drains
+  each set's tail to idle before the next starts — over 11 sets that dominates).
+  It calls `ab_replay_grade.do_board` per board, so grading, the per-board
+  `--clearance`, and the #405 baseline subtraction are unchanged.
+
+  ```bash
+  # candidate wave, sets 1-11, 5 boards in flight at all times
+  nohup caffeinate -s python3 -u tests/stress/ab_wave_driver.py wave \
+      --out ~/Documents/kicad_stress_test/ab_main_0728a --label head --jobs 5 \
+      --cost-baseline ~/Documents/kicad_stress_test/ab_main_0726a \
+      > ~/wave.log 2>&1 &
+
+  # re-grade an existing wave in place with today's grader (no re-routing)
+  python3 tests/stress/ab_wave_driver.py regrade \
+      --out ~/Documents/kicad_stress_test/ab_main_0726a --label base --jobs 5
+  ```
+
+  Scheduling: **longest-processing-time-first** from `--cost-baseline` (else the
+  corpus's 2 h board can start last holding 4 cores idle), plus **memory
+  admission** — at most `--heavy-slots` boards over `--heavy-mb` run at once
+  (~11 corpus boards exceed 2.5 GB and one peaks at 6.6 GB; five at once on an
+  8 GB box swaps and gets workers OOM-killed, surfacing as NORESULT rows hours
+  in). A blocked heavy board does **not** hold a worker slot — the scheduler
+  starts the next eligible board — so `--jobs` stay in flight regardless.
+
+- **`ab_wave_report.py`** — rolls a candidate wave up against one or more
+  baseline arms, all sets at once, ranking the per-board regressions.
+
+  ```bash
+  python3 tests/stress/ab_wave_report.py \
+      --new  ~/Documents/kicad_stress_test/ab_main_0728a \
+      --base 0726a=~/Documents/kicad_stress_test/ab_main_0726a \
+      --base dp250=~/Documents/kicad_stress_test/ab_dp250
+  ```
+
+  Grades on `drc_real` / `nets_incomplete` / `kicad_connection_width` /
+  `diff_pairs_coupled` (negative is better except diff-pairs) — never raw `drc`
+  (counts pre-existing input copper) and never `conn` alone (a net that loses its
+  copper entirely moves from the conn bucket to the unrouted bucket, so `conn`
+  can drop while the board got worse). A baseline covering only some sets (e.g.
+  `ab_dp250` = sets 6-11) reports on the sets it has. Boards whose **chain broke**
+  are listed separately and are a release blocker — they can never show up as a
+  DRC delta, because a broken chain has no final board to grade.
+
+### Running a wave that lasts hours
+
+- **Detach it**: `nohup … &`, and verify it reparented to init
+  (`ps -eo pid,ppid,etime,command | grep ab_wave_driver`). A foreground wave dies
+  with the terminal or the agent session.
+- **`caffeinate -s`** around the whole driver — a mid-wave sleep suspends every
+  worker and corrupts the timing columns.
+- **Attach a monitor** that greps for *both* progress and every failure shape;
+  one that matches only the happy path is silent through a crashloop:
+  `tail -f wave.log | grep -E --line-buffered
+  "chain=BROKEN|NORESULT|ALL DONE|Traceback|Killed|MemoryError|PROGRESS"`.
+- **Freeze the working tree for the whole wave.** Manifests bake tool paths
+  absolutely, so a replay runs whatever is checked out *right now*; editing a
+  routing module mid-wave means early boards ran different code than late ones,
+  silently. Adding new files is safe. Two waves must therefore run sequentially.
+- **Regrade the baseline — never diff against stored numbers.** Every grader here
+  is under active development, so an old `summary.json` is a snapshot of code that
+  no longer exists; re-grading an old wave's own copper has moved rows in both
+  directions and once turned a real −24 into an apparent −72. `regrade` rewrites
+  `summary.json` in place, so `cp summary.json summary_orig.json` first. If a
+  regrade reproduces well under ~100 % of the stored rows, that table was never a
+  usable baseline.
+- **Wave dirs are write-once** (`ab_<what>_MMDD` + same-day `a`/`b`/`c`): re-running
+  into an existing dir reads back the sibling `.kicad_pro` DRC floor and silently
+  changes the routing — it looks like non-determinism but isn't.

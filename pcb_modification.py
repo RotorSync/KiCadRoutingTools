@@ -88,7 +88,8 @@ def _point_anchored(x: float, y: float, layer: str, via_pts, pad_pts,
 def prune_dead_end_segments(prunable: List[Segment], anchor_segments: List[Segment] = None,
                             vias: List = None, pads: List = None,
                             tol: float = 0.05,
-                            keep_terminal_escapes: bool = True) -> Tuple[List[Segment], List[Segment]]:
+                            keep_terminal_escapes: bool = True,
+                            fill_anchor=None) -> Tuple[List[Segment], List[Segment]]:
     """Iteratively drop a net's dead-end segments (issue #84).
 
     A dead end is a segment endpoint of degree 1 -- no other same-net segment
@@ -154,10 +155,14 @@ def prune_dead_end_segments(prunable: List[Segment], anchor_segments: List[Segme
             ek = key(s.end_x, s.end_y, s.layer)
             start_free = (degree[sk] == 1 and
                           not _point_anchored(s.start_x, s.start_y, s.layer,
-                                              via_pts, pad_pts, seg_index, _CELL, s, tol))
+                                              via_pts, pad_pts, seg_index, _CELL, s, tol)
+                          and not (fill_anchor is not None
+                                   and fill_anchor(s.start_x, s.start_y, s.layer)))
             end_free = (degree[ek] == 1 and
                         not _point_anchored(s.end_x, s.end_y, s.layer,
-                                            via_pts, pad_pts, seg_index, _CELL, s, tol))
+                                            via_pts, pad_pts, seg_index, _CELL, s, tol)
+                        and not (fill_anchor is not None
+                                 and fill_anchor(s.end_x, s.end_y, s.layer)))
             remove = False
             if start_free and end_free:
                 remove = True                      # isolated fragment
@@ -199,7 +204,7 @@ _STRICT_GATE_WIDTH = COINCIDENCE_TOL  # one constant (#320): strict twin gate wi
 
 
 def _strict_conn_graph(net_id, universe, vias, pads, zones,
-                       zone_credit_validator=None):
+                       zone_credit_validator=None, pcb_data=None):
     """check_net_connectivity graph over width-clamped copies of ``universe``
     (same order, so analyze_conn_excluding indices are interchangeable with
     the physical graph's). Returns (result_dict, graph_or_None)."""
@@ -212,7 +217,8 @@ def _strict_conn_graph(net_id, universe, vias, pads, zones,
         clamped.append(c)
     r = check_net_connectivity(net_id, clamped, vias, pads, zones,
                                return_graph=True,
-                               zone_credit_validator=zone_credit_validator)
+                               zone_credit_validator=zone_credit_validator,
+                               pcb_data=pcb_data)
     return r, r.get('graph')
 
 
@@ -254,7 +260,8 @@ def _base_disconnected_component_ids(graph, base_result_pads=None):
 
 def _safe_prune_net(net_id, prunable, vias, pads, zones,
                     anchor_segments=None, aggressive=False, tol=None,
-                    zone_credit_validator=None):
+                    zone_credit_validator=None, fill_anchor_validator=None,
+                    pcb_data=None):
     """Prune a net's dead ends, but never at the cost of pad connectivity.
 
     prune_dead_end_segments works on an endpoint-coincidence model that does not
@@ -273,9 +280,25 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
     if tol is None:
         from connectivity import COINCIDENCE_TOL
         tol = COINCIDENCE_TOL  # #320: the one strict coincidence tolerance
+    # #479 duodyne C12: an endpoint landing on ANY same-net fill (whatever
+    # fill COMPONENT the model assigns it) is an anchor, never a dead end.
+    # Without this, a model fill-split (our pour model diverging from
+    # KiCad's) marks a strap-served pad disconnected in the BASE count, and
+    # the per-candidate gate below then happily unwinds the strap "without
+    # raising the count" -- converting a grading false-negative into real
+    # board damage (the cleanup trimmed 144 live gate-repair segments).
+    # Over-keeping a genuinely dead fill-touching stub is harmless copper.
+    # Anchoring wants the OPPOSITE conservatism from crediting: the credit
+    # validator's 0.25mm interior margin (bitaxe Q2 over-credit guard) makes
+    # a strap landed on a narrow fill neck read as UN-anchored and the whole
+    # join chain unwinds (duodyne fill-path joins: 64 -> 8 emitted segs).
+    # Callers pass a near-zero-margin validator for anchoring; the credit
+    # validator stays the fallback.
+    _fa = fill_anchor_validator or zone_credit_validator
     _, candidates = prune_dead_end_segments(prunable, anchor_segments=anchor_segments,
                                             vias=vias, pads=pads, tol=tol,
-                                            keep_terminal_escapes=not aggressive)
+                                            keep_terminal_escapes=not aggressive,
+                                            fill_anchor=_fa)
     if not candidates:
         return prunable, []
 
@@ -292,12 +315,13 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
     universe = anchor + list(prunable)
     graph = check_net_connectivity(
         net_id, universe, vias, pads, zones, return_graph=True,
-        zone_credit_validator=zone_credit_validator).get('graph')
+        zone_credit_validator=zone_credit_validator,
+        pcb_data=pcb_data).get('graph')
     # Strict twin (#322): removals must ALSO not worsen coincidence-level
     # connectivity, or fat-cap lenses let a chain be chipped hole by hole.
     _, graph_strict = _strict_conn_graph(
         net_id, universe, vias, pads, zones,
-        zone_credit_validator=zone_credit_validator)
+        zone_credit_validator=zone_credit_validator, pcb_data=pcb_data)
     seg_pos = {id(s): i for i, s in enumerate(universe)}
     prunable_ids = [id(s) for s in prunable]
     _verify = _PRUNE_CONN_VERIFY
@@ -310,7 +334,8 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
             if _verify:
                 ref = len(check_net_connectivity(
                     net_id, anchor + segs, vias, pads, zones,
-                    zone_credit_validator=zone_credit_validator)['disconnected_pads'])
+                    zone_credit_validator=zone_credit_validator,
+                    pcb_data=pcb_data)['disconnected_pads'])
                 assert n == ref, \
                     f"safe-prune fast-path mismatch: net {net_id} ({n} vs {ref})"
             ns = (len(analyze_conn_excluding(graph_strict, excl)['disconnected_pads'])
@@ -318,7 +343,8 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
             return (n, ns)
         return (len(check_net_connectivity(
             net_id, anchor + segs, vias, pads, zones,
-            zone_credit_validator=zone_credit_validator)['disconnected_pads']), 0)
+            zone_credit_validator=zone_credit_validator,
+            pcb_data=pcb_data)['disconnected_pads']), 0)
 
     base = disconnected(list(prunable))
     # Protect components of base-disconnected pads (see helper docstring):
@@ -378,7 +404,8 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
                 break
         _, candidates = prune_dead_end_segments(kept, anchor_segments=anchor_segments,
                                                 vias=vias, pads=pads, tol=tol,
-                                                keep_terminal_escapes=not aggressive)
+                                                keep_terminal_escapes=not aggressive,
+                                                fill_anchor=_fa)
     return kept, removed
 
 
@@ -519,14 +546,312 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                                              end_y=yj, width=w, layer=layer, net_id=net_id))
                     used.add(i); used.add(j)
                     break
-    if new_conns:
-        for c in new_conns:
+
+    # Via->pad graze bridge (#470 class 1): a same-net via whose barrel edge
+    # sits within a graze of an SMD pad's copper -- a rescue/late-pass
+    # terminal via parked BESIDE the ball it serves, barrel microns short of
+    # the pad, electrically credited only through other copper. Neither party
+    # is a segment dangle (the via anchors its own termini; the pad has no
+    # free end), so the cap-overlap pass above never sees this joint class.
+    # Firm it the soft-joint way: a short stub from via center to pad center
+    # (both ends deep inside own copper), same clears() gate, never moving
+    # the via. Joints already served by a DIRECT stub (an existing segment
+    # with one endpoint on the barrel and the other inside the pad -- every
+    # healthy dogbone) are skipped.
+    via_pad_conns = []
+    # Some plane-flow callers pass a minimal namespace config with no
+    # track_width (only clearance); fall back to the stock default.
+    _vp_tw = getattr(config, 'track_width', 0) or 0.127
+    for vp_net, vlist in via_by_net.items():
+        if scope_net_ids is not None and vp_net not in scope_net_ids:
+            continue
+        vp_pads = [p for p in pcb_data.pads_by_net.get(vp_net, [])
+                   if not getattr(p, 'drill', 0) and p.size_x and p.size_y]
+        if not vp_pads:
+            continue
+        vp_segs = [s for s in pcb_data.segments
+                   if s.net_id == vp_net and not getattr(s, 'graphic', False)]
+        for vx, vy, vr in vlist:
+            if vr <= 0:
+                continue
+            for p in vp_pads:
+                if (abs(vx - p.global_x) > p.size_x / 2 + vr + 0.2 or
+                        abs(vy - p.global_y) > p.size_y / 2 + vr + 0.2):
+                    continue
+                g = point_to_pad_distance(vx, vy, p) - vr
+                # Graze class only: barrel edge within (-0.05, +track_width)
+                # of the pad copper edge. Deeper bites are genuine joints;
+                # farther apart is a route's business, not a joint's.
+                if g < -0.05 or g >= _vp_tw:
+                    continue
+                vp_layers = [L for L in p.layers if L.endswith('.Cu')]
+                if not vp_layers:
+                    continue
+                vp_layer = vp_layers[0]
+                served = False
+                for s2 in vp_segs:
+                    if s2.layer != vp_layer:
+                        continue
+                    for (ax, ay, bx2, by2) in (
+                            (s2.start_x, s2.start_y, s2.end_x, s2.end_y),
+                            (s2.end_x, s2.end_y, s2.start_x, s2.start_y)):
+                        if (math.hypot(ax - vx, ay - vy) <= vr + 1e-6 and
+                                point_to_pad_distance(bx2, by2, p) <= 1e-3):
+                            served = True
+                            break
+                    if served:
+                        break
+                if served:
+                    continue
+                w2 = min(_vp_tw, p.size_x, p.size_y, 2 * vr)
+                if not clears(vp_net, vx, vy, p.global_x, p.global_y,
+                              vp_layer, w2):
+                    continue  # bridge would graze foreign copper: leave for DRC
+                via_pad_conns.append(Segment(
+                    start_x=vx, start_y=vy,
+                    end_x=p.global_x, end_y=p.global_y,
+                    width=w2, layer=vp_layer, net_id=vp_net))
+
+    # Terminal corner-graze web (issue #416): a degree-1 free end whose cap
+    # overlaps a same-net pad only near a CORNER joins through a sub-floor copper
+    # web -- connected and DRC-clean, but a fab hazard. Firm it the soft-joint
+    # way (add copper, never move the routed track): a short connector from the
+    # endpoint to a point deep enough inside the pad that the connector's OWN
+    # overlap with the pad is a full floor-width band -- a parallel path that
+    # lifts the joint web to the floor (see the header above terminal_pad_web_
+    # shortfall). Same clears() gate as the bridges above; it lands on the net's
+    # OWN pad, so it cannot short or disconnect anything.
+    from routing_utils import _to_pad_frame
+    web_conns = []
+    F416 = _board_min_track_width(pcb_data, scope_net_ids, config)
+    e416 = F416 / 2.0
+    for s in list(pcb_data.segments):
+        if scope_net_ids is not None and s.net_id not in scope_net_ids:
+            continue
+        if getattr(s, 'graphic', False):
+            continue
+        w = s.width
+        r = w / 2.0
+        if r < e416 - 1e-9:
+            continue  # track thinner than the floor: no floor-width web exists
+        for (ex, ey, nx, ny) in ((s.start_x, s.start_y, s.end_x, s.end_y),
+                                 (s.end_x, s.end_y, s.start_x, s.start_y)):
+            if ep_count[(s.net_id, s.layer, rk(ex, ey))] != 1:
+                continue  # not a free end
+            if any(math.hypot(ex - vx, ey - vy) <= vr + 0.01
+                   for vx, vy, vr in via_by_net.get(s.net_id, [])):
+                continue  # anchored on a same-net via: a via terminal, not this
+            target = None
+            for pad in pcb_data.pads_by_net.get(s.net_id, []):
+                if getattr(pad, 'shape', None) not in ('rect', 'roundrect', 'oval'):
+                    continue  # sharp-corner necks: skip circle/custom pads
+                if not pad.size_x or not pad.size_y:
+                    continue
+                if not (s.layer in pad.layers or any('*' in L for L in pad.layers)):
+                    continue
+                if point_to_pad_distance(ex, ey, pad) < r - 1e-6:
+                    target = pad
+                    break
+            if target is None:
+                continue
+            elx, ely = _to_pad_frame(ex, ey, target)
+            nlx, nly = _to_pad_frame(nx, ny, target)
+            is_neck, tloc = terminal_pad_web_shortfall(
+                nlx, nly, elx, ely, target.size_x / 2.0, target.size_y / 2.0,
+                r, e416)
+            if not is_neck:
+                continue
+            # Confirm the cheap (over-reporting) pre-filter with KiCad's exact
+            # erosion, so a perpendicular shallow entry that only trips the
+            # filter is left alone; False = provably not a neck, None = shapely
+            # unavailable (keep the conservative verdict).
+            if terminal_web_neck_exact(pcb_data, s.net_id, s.layer,
+                                       ex, ey, F416) is False:
+                continue
+            tlx, tly = tloc
+            rad = math.radians(getattr(target, 'rect_rotation', 0.0) or 0.0)
+            cc, ssn = math.cos(rad), math.sin(rad)
+            bx = round(target.global_x + tlx * cc - tly * ssn, 4)
+            by = round(target.global_y + tlx * ssn + tly * cc, 4)
+            if math.hypot(bx - ex, by - ey) < 1e-4:
+                continue
+            if not clears(s.net_id, ex, ey, bx, by, s.layer, w):
+                continue  # connector would graze foreign copper: leave for DRC
+            web_conns.append(Segment(start_x=ex, start_y=ey, end_x=bx, end_y=by,
+                                     width=w, layer=s.layer, net_id=s.net_id))
+            break  # one connector firms the joint; move to the next segment
+
+    if new_conns or web_conns or via_pad_conns:
+        for c in new_conns + web_conns + via_pad_conns:
             pcb_data.segments.append(c)
         # Tagged so accounting/summary code can tell this cleanup copper from a
         # net's routed result (it has no net-level identity of its own).
-        results.append({'new_segments': new_conns, 'new_vias': [],
-                        'cleanup': 'soft_joint_bridge'})
-    return len(new_conns)
+        if new_conns:
+            results.append({'new_segments': new_conns, 'new_vias': [],
+                            'cleanup': 'soft_joint_bridge'})
+        if web_conns:
+            results.append({'new_segments': web_conns, 'new_vias': [],
+                            'cleanup': 'terminal_web_connector'})
+        if via_pad_conns:
+            results.append({'new_segments': via_pad_conns, 'new_vias': [],
+                            'cleanup': 'via_pad_bridge'})
+    return len(new_conns) + len(web_conns) + len(via_pad_conns)
+
+
+# ---------------------------------------------------------------------------
+# Corner-graze terminal joint web (issue #416)
+# ---------------------------------------------------------------------------
+# The A* terminal cell is grid-quantised: a track can terminate so its round END
+# CAP overlaps only the CORNER of its target SMD pad. The joint is electrically
+# connected and DRC-clean (the caps touch), so no gap-closer fires -- but the
+# only copper joining track to pad is a thin corner sliver, narrower than the
+# board's minimum track width (KiCad's connection_width class): a fab hazard, the
+# joint can etch open. This is NOT an open, so it is a natural extension of
+# close_soft_joints, which already firms up fragile same-net joints with a short
+# added connector -- here the second endpoint is a PAD rather than a dangle, and
+# the connector adds a PARALLEL wide copper path into the pad interior so the
+# thin corner sliver is no longer the sole connection.
+#
+# The min-web test is KiCad's own: union the joint's copper and erode by floor/2;
+# a web >= floor survives connected, a sub-floor web splits/vanishes
+# (tests/stress/classify_connection_width.py). Specialised to a terminal (a
+# round-capped segment meeting a convex pad rectangle) that erosion has an exact
+# closed form -- no shapely, so it runs in the KiCad-python GUI front too: in the
+# pad's axis-aligned local frame the eroded track is the segment buffered by
+# (r - e) (r = track half-width, e = floor/2, and r >= e because floor is the
+# thinnest track on the board), and the eroded pad is the rectangle shrunk by e.
+# The joint survives IFF that buffered segment reaches the shrunk rectangle, i.e.
+#   dist(segment, pad_rect_shrunk_by_e) <= r - e.
+# When it does not, close_soft_joints adds a short connector from the endpoint to
+# the nearest point INSIDE the shrunk rectangle: the connector's far cap then
+# lands deep enough that its own overlap with the pad is a full floor-width band,
+# a parallel path that survives the erosion. The connector is clearance-checked
+# against every foreign object and the board edge, and lands on the SAME net's
+# own pad, so it can never disconnect or short anything.
+
+
+def terminal_pad_web_shortfall(nlx, nly, elx, ely, hx, hy, r, e,
+                               target_margin=0.0):
+    """CONSERVATIVE pre-filter for a sub-floor terminal joint, plus the connector
+    target -- in the pad's axis-aligned LOCAL frame (pad centred at the origin).
+
+    This tests the union-OF-erosions (does the eroded track reach the eroded
+    pad), which is a SUBSET of the erosion-OF-union KiCad actually measures, so
+    it never MISSES a real neck but it over-reports (a perpendicular shallow
+    entry crossing an edge far from a corner is fine yet trips it). Callers use
+    it as a cheap reject and CONFIRM a positive with ``terminal_web_neck_exact``
+    (exact shapely erosion, matches kicad-cli's connection_width). Kept separate
+    so the confirm runs only on the handful of candidates, and so a shapely-less
+    environment still has a safe (conservative) fallback.
+
+    Args:
+        nlx, nly: neighbour (non-terminal) segment vertex, local frame.
+        elx, ely: terminal endpoint (the cap centre), local frame.
+        hx, hy:   pad rectangle half-extents.
+        r:        track half-width (cap radius).
+        e:        erosion radius = floor / 2.
+        target_margin: extra inset for the connector target (0 for a pure test).
+
+    Returns ``(maybe_neck, target_local_or_None)``. ``target_local`` is the
+    nearest point inside the (e + target_margin)-eroded rectangle -- the far end
+    of the short connector that firms the joint -- or None when the pad is too
+    small in some dimension to host a floor-width web (< 2e wide: unfixable)."""
+    from check_drc import segment_to_rect_distance
+    ex_half, ey_half = hx - e, hy - e
+    if ex_half <= 1e-6 or ey_half <= 1e-6:
+        return False, None  # pad narrower than the floor: no floor-width web exists
+    reach = max(0.0, r - e)
+    d, _ = segment_to_rect_distance(nlx, nly, elx, ely, 0.0, 0.0, ex_half, ey_half)
+    if d <= reach + 1e-4:
+        return False, None  # eroded track already reaches the eroded pad: web OK
+    # Candidate neck: the connector target is the nearest point inside the
+    # (e+margin)-shrunk rectangle (margin capped so the rectangle stays non-empty).
+    ti = min(e + target_margin, hx - 1e-3, hy - 1e-3)
+    if ti < e:
+        return False, None  # cannot reach even the bare erosion floor: unfixable
+    txh, tyh = hx - ti, hy - ti
+    tlx = max(-txh, min(txh, elx))
+    tly = max(-tyh, min(tyh, ely))
+    return True, (tlx, tly)
+
+
+def _pad_web_polygon(pad):
+    """Shapely polygon of a pad's copper for the connection_width erosion test
+    (mirrors tests/stress/classify_connection_width.py). None for no-copper
+    NPTH pads or degenerate sizes."""
+    from shapely.geometry import Point, box
+    import shapely.affinity as aff
+    if getattr(pad, 'pad_type', None) == 'np_thru_hole':
+        return None
+    w = (pad.size_x or 0) / 2.0
+    h = (pad.size_y or 0) / 2.0
+    if w <= 0 or h <= 0:
+        return None
+    if pad.shape == 'circle':
+        return Point(pad.global_x, pad.global_y).buffer(w, quad_segs=32)
+    shp = box(pad.global_x - w, pad.global_y - h, pad.global_x + w, pad.global_y + h)
+    if pad.shape in ('oval', 'roundrect'):
+        rr = min(w, h) * (1.0 if pad.shape == 'oval'
+                          else (getattr(pad, 'roundrect_rratio', 0.25) or 0.25))
+        if rr > 1e-6:
+            shp = shp.buffer(-rr).buffer(rr, quad_segs=16)
+    rot = getattr(pad, 'rect_rotation', 0) or 0
+    if rot:
+        shp = aff.rotate(shp, rot, origin=(pad.global_x, pad.global_y))
+    return shp
+
+
+def terminal_web_neck_exact(pcb_data, net_id, layer, ex, ey, floor,
+                            radius=3.0):
+    """EXACT connection_width neck test at a terminal endpoint (ex, ey), by
+    KiCad's own method: union the net's LOCAL copper on ``layer`` (same-net
+    round-capped segments + pads within ``radius`` mm), erode by floor/2, and
+    test whether the component nearest the endpoint stays connected. Returns
+    True for a real sub-floor neck, False when the web clears the floor, or None
+    when the geometry cannot be built (shapely missing / no local copper) so the
+    caller keeps the conservative pre-filter verdict. Same erosion as
+    tests/stress/classify_connection_width.py -- detection and repair agree."""
+    try:
+        from shapely.geometry import LineString, Point
+        from shapely.ops import unary_union
+    except Exception:
+        return None
+    e = floor / 2.0
+    P = Point(ex, ey)
+    shapes = []
+    for s in pcb_data.segments:
+        if s.net_id != net_id or s.layer != layer:
+            continue
+        seg = LineString([(s.start_x, s.start_y), (s.end_x, s.end_y)])
+        if seg.distance(P) < radius:
+            shapes.append(seg.buffer(s.width / 2.0, quad_segs=32))
+    for pad in pcb_data.pads_by_net.get(net_id, []):
+        if not (layer in pad.layers or any('*' in L for L in pad.layers)):
+            continue
+        if abs(pad.global_x - ex) < radius and abs(pad.global_y - ey) < radius:
+            shp = _pad_web_polygon(pad)
+            if shp is not None:
+                shapes.append(shp)
+    if not shapes:
+        return None
+    union = unary_union(shapes)
+    comps = list(union.geoms) if union.geom_type == 'MultiPolygon' else [union]
+    comp = min(comps, key=lambda c: c.distance(P))
+    eroded = comp.buffer(-e * (1.0 - 1e-3))
+    if eroded.is_empty:
+        return True
+    return eroded.geom_type == 'MultiPolygon' and len(list(eroded.geoms)) > 1
+
+
+def _board_min_track_width(pcb_data, scope_net_ids, config) -> float:
+    """The connection_width grading floor: the thinnest track on the board
+    (KiCad's scan_board_minima). Falls back to the configured track width."""
+    widths = [s.width for s in pcb_data.segments
+              if not getattr(s, 'graphic', False) and s.width and s.width > 0]
+    cfg_w = getattr(config, 'track_width', 0.0) or 0.0
+    if cfg_w > 0:
+        widths.append(cfg_w)
+    return min(widths) if widths else (cfg_w or 0.1)
 
 
 def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
@@ -546,7 +871,10 @@ def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
     the connector to ``results`` (and pcb_data) so both the CLI writer and the GUI
     pick it up. Returns the number of connectors added.
     """
-    coord_clear = config.clearance
+    # #436/#438: connector clearance = the stub net's own floor (foreign class
+    # excess folded per-object in _connector_clear); edge at the board rule.
+    _nc = getattr(config, 'net_clearances', None) or None
+    _bec = getattr(config, 'board_edge_clearance', 0.0) or 0.0
     added = 0
     new_conns = []
 
@@ -570,6 +898,8 @@ def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
         net = pcb_data.nets.get(net_id)
         if net is None:
             continue
+        coord_clear = (config.obstacle_clearance(net_id)
+                       if hasattr(config, 'obstacle_clearance') else config.clearance)
         net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
         net_pads = pcb_data.pads_by_net.get(net_id, [])
         for (nid, lyr), segs in list(segs_by_net_layer.items()):
@@ -655,13 +985,13 @@ def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
                                                     edge_cutouts)):
                             continue
                         if _segment_to_rings_distance(px, py, tx, ty, edge_rings) \
-                                < w / 2 + coord_clear - 1e-6:
+                                < w / 2 + max(coord_clear, _bec) - 1e-6:
                             continue
 
                     # Clearance check: the connector must keep `clearance` from
                     # every OTHER net's copper.
                     if not _connector_clear(px, py, tx, ty, w, lyr, net_id,
-                                            pcb_data, coord_clear):
+                                            pcb_data, coord_clear, net_clearances=_nc):
                         continue
                     conn = Segment(start_x=px, start_y=py, end_x=tx, end_y=ty,
                                    width=w, layer=lyr, net_id=net_id)
@@ -680,15 +1010,26 @@ def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
     return added
 
 
-def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance):
+def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance,
+                     net_clearances=None):
     """True if a candidate connector segment keeps `clearance` from all OTHER
     nets' copper (segments on its layer, vias on any layer, pads on its layer)
-    and the higher NPTH-to-track floor from copper-less drill holes."""
+    and the higher NPTH-to-track floor from copper-less drill holes.
+
+    #436: `clearance` is the connector net's own floor; when `net_clearances`
+    is given each foreign object is cleared at the pairwise max(clearance, its
+    class), so an added connector never grazes a wider (impedance) neighbour."""
     from geometry_utils import segment_to_segment_distance, point_to_segment_distance
     from check_drc import segment_to_rect_distance
     from single_ended_routing import _seg_foreign_hole_dist
     from routing_defaults import NPTH_TO_TRACK_CLEARANCE
     half = width / 2
+
+    def _req(fnid):
+        if not net_clearances:
+            return clearance
+        return max(clearance, net_clearances.get(fnid, clearance))
+
     # NPTH (no-copper) drill holes (#370 B2): the pad/via/segment loops below
     # all measure to COPPER, so a connector drawn straight across a mounting
     # hole passed every check. Slot/offset drills handled by the capsule.
@@ -701,13 +1042,13 @@ def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance):
             continue
         if segment_to_segment_distance(x1, y1, x2, y2,
                                        s.start_x, s.start_y, s.end_x, s.end_y) \
-                < clearance + half + s.width / 2:
+                < _req(s.net_id) + half + s.width / 2:
             return False
     for v in pcb_data.vias:
         if v.net_id == net_id:
             continue
         if point_to_segment_distance(v.x, v.y, x1, y1, x2, y2) \
-                < clearance + half + getattr(v, 'size', 0.0) / 2:
+                < _req(v.net_id) + half + getattr(v, 'size', 0.0) / 2:
             return False
     for nid, pads in pcb_data.pads_by_net.items():
         if nid == net_id:
@@ -721,7 +1062,7 @@ def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance):
             rx2, ry2 = into_pad_frame_point(x2, y2, pad)
             d, _ = segment_to_rect_distance(rx1, ry1, rx2, ry2, pad.global_x, pad.global_y,
                                             pad.size_x / 2, pad.size_y / 2)
-            if d < clearance + half:
+            if d < max(_req(nid), getattr(pad, 'local_clearance', 0.0) or 0.0) + half:
                 return False
     # Other-net copper pours (planes): a connector must not enter or graze them.
     zones = getattr(pcb_data, 'zones', None)
@@ -735,7 +1076,7 @@ def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance):
                 t = i / n
                 px, py = x1 + t * (x2 - x1), y1 + t * (y2 - y1)
                 if point_in_polygon(px, py, z.polygon) or \
-                        point_to_polygon_edge_distance(px, py, z.polygon) < clearance + half:
+                        point_to_polygon_edge_distance(px, py, z.polygon) < _req(z.net_id) + half:
                     return False
     return True
 
@@ -945,7 +1286,9 @@ def _restore_soft_joint_bridges(kept, removed, vias, pads):
 
 
 def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
-                    tol: float = None) -> Tuple[int, int, List[Segment]]:
+                    protect_net_ids=None,
+                    tol: float = None,
+                    keep_input_copper: bool = False) -> Tuple[int, int, List[Segment]]:
     """Final whole-net dead-end sweep, after routing has settled (issue #84).
 
     the per-commit self-intersection clean (removed #159) used to fix
@@ -966,7 +1309,11 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
 
     ``scope_net_ids`` limits the sweep to the nets this run was asked to route
     (so untouched planes / excluded nets are never altered); None sweeps every net
-    with copper. Returns ``(segments_removed, vias_removed, original_segments_to_remove)``.
+    with copper. ``keep_input_copper`` makes original input-file copper read-only:
+    it still anchors degree / T-junction / connectivity decisions (as
+    ``anchor_segments``) but is never a removal candidate — for chained flows
+    whose earlier stages author escape stubs that a later run must still see.
+    Returns ``(segments_removed, vias_removed, original_segments_to_remove)``.
     """
     from collections import defaultdict
 
@@ -989,18 +1336,47 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
     original_to_remove = []
     kept_segs_by_net = {}
     for net_id, net_segs in segs_by_net.items():
+        # Nets with UNFINISHED pads keep everything: their "dead ends" are
+        # the landing sites the next chain step (or the #468 restore, or a
+        # rescue) routes to. The sweep's own docstring says it prunes stubs
+        # a net "never completed" -- for a net still failed this run that is
+        # exactly the copper a later pass needs, and sweeping it each step
+        # ERODED failed nets across a chain (the #473 USB_D_N trunk decay:
+        # rip gaps -> fragments graded dead -> swept -> next step starts
+        # with less copper, repeat).
+        if protect_net_ids and net_id in protect_net_ids:
+            kept_segs_by_net[net_id] = net_segs
+            continue
         vias = [v for v in pcb_data.vias if v.net_id == net_id]
         pads = pcb_data.pads_by_net.get(net_id, [])
         zones = [z for z in all_zones if z.net_id == net_id]
         _zcv = None
+        _zfa = None
         if zones:
             from check_connected import make_real_fill_validator
-            _zcv = make_real_fill_validator(pcb_data, net_id)
+            _fvb = {}
+            _zcv = make_real_fill_validator(pcb_data, net_id,
+                                            shared_buckets=_fvb)
+            _zfa = make_model_fill_anchor(
+                pcb_data, net_id,
+                fallback=make_real_fill_validator(pcb_data, net_id,
+                                                  margin=0.02,
+                                                  shared_buckets=_fvb))
+        anchor = []
+        if keep_input_copper:
+            # Input copper is read-only: anchor it (counts for degree/T-junction/
+            # connectivity in the pruner) instead of offering it as a candidate.
+            anchor = [s for s in net_segs if id(s) not in routed_seg_ids]
+            net_segs = [s for s in net_segs if id(s) in routed_seg_ids]
         kept, removed = _safe_prune_net(net_id, net_segs, vias, pads, zones,
+                                        anchor_segments=anchor or None,
                                         zone_credit_validator=_zcv,
-                                        aggressive=True, tol=tol)
+                                        fill_anchor_validator=_zfa,
+                                        aggressive=True, tol=tol,
+                                        pcb_data=pcb_data)
         # #319: never delete a coincident bridge and leave a soft joint.
-        kept, removed = _restore_soft_joint_bridges(kept, removed, vias, pads)
+        kept, removed = _restore_soft_joint_bridges(list(kept) + anchor, removed,
+                                                    vias, pads)
         # Copper graphics (#337) participate in the connectivity ANALYSIS above
         # (a routed stub may genuinely continue through one) but are immutable
         # input art: force-keep any the pruner selected (the writer has no
@@ -1078,10 +1454,12 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
                 from check_connected import make_real_fill_validator
                 _zcv3 = make_real_fill_validator(pcb_data, net_id)
             before = check_net_connectivity(net_id, kept, net_vias_all, pads,
-                                            zones, zone_credit_validator=_zcv3)
+                                            zones, zone_credit_validator=_zcv3,
+                                            pcb_data=pcb_data)
             keep_v = [v for v in net_vias_all if id(v) not in removed_via_ids]
             after = check_net_connectivity(net_id, kept, keep_v, pads, zones,
-                                           zone_credit_validator=_zcv3)
+                                           zone_credit_validator=_zcv3,
+                                           pcb_data=pcb_data)
             if (before.get('connected') and not after.get('connected')) or \
                len(after.get('disconnected_pads') or []) > len(before.get('disconnected_pads') or []) or \
                (after.get('num_components') or 1) > (before.get('num_components') or 1):
@@ -1120,7 +1498,8 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
     return segs_removed, len(removed_via_ids), original_to_remove
 
 
-def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None
+def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None,
+                              keep_input_copper: bool = False
                               ) -> Tuple[int, List[Segment]]:
     """Remove segments that are redundant under the STRICT width-clamped
     connectivity graph (#217 removable-segment classes 1-2): superseded
@@ -1231,10 +1610,17 @@ def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None
         # leftover run and keeps the short live path. Multiple rounds until
         # a full pass accepts nothing (chains peel one end-piece per test,
         # so one pass in peel order usually suffices; rounds guarantee it).
+        # Geometric tie-break: equal-length segments fell back to index, i.e.
+        # to the order copper sits in the board, which differs between fronts.
         order = sorted(range(len(net_segs)),
-                       key=lambda i: -math.hypot(
+                       key=lambda i: (-math.hypot(
                            net_segs[i].end_x - net_segs[i].start_x,
-                           net_segs[i].end_y - net_segs[i].start_y))
+                           net_segs[i].end_y - net_segs[i].start_y),
+                           net_segs[i].layer,
+                           min((net_segs[i].start_x, net_segs[i].start_y),
+                               (net_segs[i].end_x, net_segs[i].end_y)),
+                           max((net_segs[i].start_x, net_segs[i].start_y),
+                               (net_segs[i].end_x, net_segs[i].end_y))))
         _rounds = 0
         while True:
             _rounds += 1
@@ -1247,6 +1633,8 @@ def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None
                 s = net_segs[i]
                 if getattr(s, 'graphic', False):
                     continue
+                if keep_input_copper and id(s) not in seg_owner:
+                    continue  # input copper is read-only; it still shapes both graphs
                 if _buried(s.start_x, s.start_y) and _buried(s.end_x, s.end_y):
                     continue  # in-pad/in-via wiggle: kept by choice
                 excl = tuple(accepted) + (i,)
@@ -1296,7 +1684,8 @@ def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None
     return len(removed_ids), originals
 
 
-def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None
+def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None,
+                          keep_input_copper: bool = False
                           ) -> Tuple[int, int, List[Segment]]:
     """Remove same-net track-copper components that reach NO pad of the net
     (#217 orphan-island class): dead copper stranded by rip/reroute churn
@@ -1347,7 +1736,8 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None
         if not net_segs:
             continue
         r = check_net_connectivity(net_id, net_segs, net_vias, pads,
-                                   net_zones, return_graph=True)
+                                   net_zones, return_graph=True,
+                                   pcb_data=pcb_data)
         graph = r.get('graph')
         if not graph:
             continue
@@ -1365,6 +1755,13 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None
                 continue
             if any(getattr(s, 'graphic', False) for s in segs):
                 continue  # immutable input art anchors the island
+            if keep_input_copper and (
+                    any(id(s) not in seg_owner for s in segs)
+                    or any(via_reprs.get(j) is not None
+                           and uf.find(via_reprs[j]) == root
+                           and id(v) not in via_owner
+                           for j, v in enumerate(net_vias))):
+                continue  # island contains read-only input copper: keep it whole
             islands_removed += 1
             for s in segs:
                 removed_ids.add(id(s))
@@ -1398,7 +1795,8 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None
 
 
 def trim_dangles_past_body_anchor(results, pcb_data: PCBData, scope_net_ids=None,
-                                  tol: float = None) -> Tuple[int, List[Segment]]:
+                                  tol: float = None,
+                                  keep_input_copper: bool = False) -> Tuple[int, List[Segment]]:
     """Shorten a dead-end segment back to the LAST same-net anchor on its BODY
     (#347, core1106 CLK1P tail).
 
@@ -1445,8 +1843,11 @@ def trim_dangles_past_body_anchor(results, pcb_data: PCBData, scope_net_ids=None
     for net_id, all_net_segs in segs_by_net.items():
         # Graphics copper (#337) is immutable but CONDUCTS: it participates in
         # the degree map, the tee-anchor scan and the connectivity gate; only
-        # non-graphic segments are trim candidates.
-        net_segs = [s for s in all_net_segs if not getattr(s, 'graphic', False)]
+        # non-graphic segments are trim candidates. Under keep_input_copper,
+        # input segments are read-only too: they anchor (all_net_segs feeds
+        # every model) but are never split-trimmed.
+        net_segs = [s for s in all_net_segs if not getattr(s, 'graphic', False)
+                    and not (keep_input_copper and id(s) not in routed_seg_ids)]
         if not net_segs:
             continue
         vias = [v for v in pcb_data.vias if v.net_id == net_id]
@@ -1633,16 +2034,25 @@ def neck_wide_segments_grazing_pads(results, pcb_data, config) -> int:
         for pad in fp.pads:
             for layer in expand_pad_layers(pad.layers, config.layers):
                 pads_by_layer[layer].append(pad)
-    clr = config.clearance
+    # #436: pairwise clearance = max(seg-net floor, foreign-pad class,
+    # pad local_clearance override), not the flat global clearance.
+    nc = getattr(config, 'net_clearances', None) or None
+    def _own(nid):
+        if not nc:
+            return config.clearance
+        return max(config.clearance, nc.get(nid, config.clearance))
     necked = 0
     for r in results:
         for seg in r.get('new_segments', []):
             default_w = config.get_track_width(seg.layer)
             if seg.width <= default_w + 1e-9:
                 continue
+            own = _own(seg.net_id)
             for pad in pads_by_layer.get(seg.layer, []):
                 if pad.net_id == seg.net_id or pad.net_id == 0:
                     continue
+                clr = max(own, _own(pad.net_id),
+                          getattr(pad, 'local_clearance', 0.0) or 0.0)
                 d = _pt_seg_dist(pad.global_x, pad.global_y,
                                  seg.start_x, seg.start_y, seg.end_x, seg.end_y)
                 # Bounding-circle pad half (conservative: never misses a violation).
@@ -1656,7 +2066,8 @@ def neck_wide_segments_grazing_pads(results, pcb_data, config) -> int:
 
 
 def _prune_net_cycles(net_id: int, net_segs: List[Segment], net_vias, net_pads,
-                      fgrid, fcell: float, fmax_rad: float, clearance: float):
+                      fgrid, fcell: float, fmax_rad: float, clearance: float,
+                      protected_ids=None):
     """Reduce one net's routed copper to a spanning tree (forest if split).
 
     Builds a spanning tree by union-find over the segments, so every segment that
@@ -1844,6 +2255,8 @@ def _prune_net_cycles(net_id: int, net_segs: List[Segment], net_vias, net_pads,
     safe_removed = []
     for s in sorted(removed, key=lambda s: (not grazes(s),
                     -math.hypot(s.end_x - s.start_x, s.end_y - s.start_y))):
+        if protected_ids and id(s) in protected_ids:
+            continue  # read-only input copper: a loop through it stays closed
         trial = [x for x in cur if x is not s]
         t = check_net_connectivity(net_id, trial, net_vias, net_pads)
         if not (t.get('connected') and (t.get('num_components') or 1) <= base_comps
@@ -1863,7 +2276,8 @@ def _prune_net_cycles(net_id: int, net_segs: List[Segment], net_vias, net_pads,
 
 
 def prune_redundant_cycles(results, pcb_data: PCBData, scope_net_ids=None,
-                           clearance: float = 0.1) -> Tuple[int, int, List[Segment]]:
+                           clearance: float = 0.1,
+                           keep_input_copper: bool = False) -> Tuple[int, int, List[Segment]]:
     """Enforce the per-net TREE invariant: remove redundant cycle edges (the cycle
     analog of sweep_dead_ends).
 
@@ -1932,8 +2346,11 @@ def prune_redundant_cycles(results, pcb_data: PCBData, scope_net_ids=None,
             continue
         net_pads = pcb_data.pads_by_net.get(net_id, [])
         net_vias = vias_by_net.get(net_id, [])
+        _protected = ({id(s) for s in net_segs if id(s) not in routed_seg_ids}
+                      if keep_input_copper else None)
         kept, removed = _prune_net_cycles(net_id, net_segs, net_vias,
-                                          net_pads, fgrid, _FCELL, fmax_rad, clearance)
+                                          net_pads, fgrid, _FCELL, fmax_rad, clearance,
+                                          protected_ids=_protected)
         # #319: never break a "loop" whose alternate path is only a soft joint.
         kept, removed = _restore_soft_joint_bridges(kept, removed, net_vias, net_pads)
         if not removed:
@@ -1985,9 +2402,333 @@ def _seg_seg_min_dist(ax, ay, bx, by, cx, cy, dx, dy) -> float:
                pt_seg(cx, cy, ax, ay, bx, by), pt_seg(dx, dy, ax, ay, bx, by))
 
 
+def weld_redundant_grazing_detours(results, pcb_data: PCBData, scope_net_ids=None,
+                                   clearance: float = 0.1,
+                                   keep_input_copper: bool = False,
+                                   net_clearances=None) -> Tuple[int, int, List[Segment]]:
+    """Remove a redundant out-and-back DETOUR whose middle vertex nubs a foreign
+    net, welding the two solidly-overlapping neighbour endpoints coincident so the
+    connection also survives at the STRICT (coincidence) level (#441 picodvi DVI_CK).
+
+    Pattern -- ``A --s1--> B --s2--> C`` on ONE net, where:
+      * ``B`` is a vertex touched by ONLY ``s1`` and ``s2`` (no via/pad there),
+      * ``s1``/``s2`` are ROUTED short jogs (a grid->float bridge, not a real run),
+      * ``A`` and ``C`` are each anchored to the net's MAIN path (another same-net
+        segment / via / pad),
+      * ``A`` and ``C`` already OVERLAP in copper -- ``dist(A,C) < (wA+wC)/2`` -- so
+        the pair is *physically connected already*; welding only FORMALISES that
+        overlap, it never invents a new connection, and
+      * ``s1`` or ``s2`` grazes FOREIGN copper below clearance (the reason to act).
+
+    route_diff's hybrid leaves this when a terminal leg's A* near-end lands ~half a
+    grid step off the coupled-middle end: ``_path_to_segments_vias`` bridges the gap
+    with an out-and-back jog that pokes at the partner track.
+    :func:`prune_grazing_segments` detects that graze but its strict connectivity
+    gate (#322) refuses to drop the jog -- the surviving ``A~C`` overlap is
+    non-coincident, so the strict graph sees the removal as a split -- and necking
+    can't clear it (already at the fab floor). Here we instead WELD ``C`` onto ``A``
+    (a ``< (wA+wC)/2`` move, i.e. entirely inside the copper the pair already
+    shares), re-anchor ``C``'s main segment to ``A``, and delete ``s1``/``s2`` --
+    but ONLY when the re-anchored segment still clears foreign copper and the net's
+    connectivity is no worse. The join is coincident afterwards, so the strict gate
+    is satisfied and the graze is gone. Widths/positions of unrelated copper are
+    untouched, and a weld that can't provably clear foreign copper is skipped (the
+    graze then ships honestly), so this cannot manufacture a new violation.
+
+    Returns (detours_welded, nets_touched, original_segments_removed)."""
+    from collections import defaultdict
+    from single_ended_routing import _seg_foreign_pad_dist, _seg_foreign_via_dist
+    from check_connected import check_net_connectivity
+
+    routed_seg_ids = set()
+    for r in results:
+        for s in r.get('new_segments') or []:
+            routed_seg_ids.add(id(s))
+
+    def _eff(nid):
+        if not net_clearances:
+            return clearance
+        return max(clearance, net_clearances.get(nid, clearance))
+
+    def clears(x0, y0, x1, y1, w, layer, nid):
+        """True iff a segment at these coords clears ALL foreign copper by the
+        pairwise clearance (same metric as prune_grazing_segments.grazes)."""
+        eff = _eff(nid)
+        thr = eff + w / 2.0 - 1e-4
+        if _seg_foreign_pad_dist(pcb_data, nid, x0, y0, x1, y1, layer,
+                                 base_clearance=eff, net_clearances=net_clearances) < thr:
+            return False
+        if _seg_foreign_via_dist(pcb_data, nid, x0, y0, x1, y1, layer,
+                                 base_clearance=eff, net_clearances=net_clearances) < thr:
+            return False
+        for o in pcb_data.segments:
+            if o.net_id == nid or o.layer != layer:
+                continue
+            d = _seg_seg_min_dist(x0, y0, x1, y1, o.start_x, o.start_y, o.end_x, o.end_y)
+            if d - (w + o.width) / 2.0 < max(eff, _eff(o.net_id)) - 1e-4:
+                return False
+        return True
+
+    def _worse(before, after):
+        return ((before.get('connected') and not after.get('connected')) or
+                len(after.get('disconnected_pads') or []) > len(before.get('disconnected_pads') or []) or
+                (after.get('num_components') or 1) > (before.get('num_components') or 1))
+
+    vias_by_net = defaultdict(list)
+    for v in pcb_data.vias:
+        vias_by_net[v.net_id].append(v)
+    segs_by_net = defaultdict(list)
+    _seen = set()
+    for s in pcb_data.segments:
+        if scope_net_ids is None or s.net_id in scope_net_ids:
+            if id(s) in _seen:
+                continue
+            _seen.add(id(s))
+            segs_by_net[s.net_id].append(s)
+
+    def kk(x, y):
+        return (round(x, 4), round(y, 4))
+
+    welded = 0
+    nets = set()
+    original_to_remove = []
+    removed_routed_ids = set()
+
+    for net_id, net_segs in segs_by_net.items():
+        net_vias = vias_by_net.get(net_id, [])
+        net_pads = pcb_data.pads_by_net.get(net_id, [])
+        via_pts = {kk(v.x, v.y) for v in net_vias}
+        pad_pts = {kk(pd.global_x, pd.global_y) for pd in net_pads}
+        touch = defaultdict(list)
+        for s in net_segs:
+            touch[kk(s.start_x, s.start_y)].append((s, 's'))
+            touch[kk(s.end_x, s.end_y)].append((s, 'e'))
+        before = check_net_connectivity(net_id, net_segs, net_vias, net_pads, [])
+
+        for Bxy, inc in list(touch.items()):
+            if len(inc) != 2 or Bxy in via_pts or Bxy in pad_pts:
+                continue
+            (s1, e1), (s2, e2) = inc
+            if s1 is s2 or s1.layer != s2.layer:
+                continue
+            if id(s1) not in routed_seg_ids or id(s2) not in routed_seg_ids:
+                continue
+            if id(s1) in removed_routed_ids or id(s2) in removed_routed_ids:
+                continue
+            Axy = kk(s1.end_x, s1.end_y) if e1 == 's' else kk(s1.start_x, s1.start_y)
+            Cxy = kk(s2.end_x, s2.end_y) if e2 == 's' else kk(s2.start_x, s2.start_y)
+            if Axy == Cxy:
+                continue
+
+            def anchored(xy, excl):
+                if any(t[0] is not excl and t[0] not in (s1, s2) for t in touch.get(xy, [])):
+                    return True
+                return xy in via_pts or xy in pad_pts
+
+            if not anchored(Axy, s1) or not anchored(Cxy, s2):
+                continue
+            wA, wC = s1.width, s2.width
+            g = math.hypot(Axy[0] - Cxy[0], Axy[1] - Cxy[1])
+            if g >= (wA + wC) / 2.0 - 1e-6:
+                continue  # not already overlapping -> welding would INVENT a link; skip
+            if not (not clears(s1.start_x, s1.start_y, s1.end_x, s1.end_y, s1.width, s1.layer, net_id)
+                    or not clears(s2.start_x, s2.start_y, s2.end_x, s2.end_y, s2.width, s2.layer, net_id)):
+                continue  # neither jog grazes foreign copper -> leave clean detours alone
+
+            def try_weld(keepxy, movexy):
+                movers = [(s, end) for (s, end) in touch.get(movexy, []) if s is not s1 and s is not s2]
+                if not movers or any(id(s) not in routed_seg_ids for (s, _) in movers):
+                    return None  # nothing to move, or would mutate an ORIGINAL seg in place
+                snap = [(s, s.start_x, s.start_y, s.end_x, s.end_y) for (s, _) in movers]
+                for (s, end) in movers:
+                    if end == 's':
+                        s.start_x, s.start_y = keepxy
+                    else:
+                        s.end_x, s.end_y = keepxy
+                if all(clears(s.start_x, s.start_y, s.end_x, s.end_y, s.width, s.layer, net_id)
+                       for (s, _) in movers):
+                    return snap
+                for (s, sx, sy, ex, ey) in snap:  # revert
+                    s.start_x, s.start_y, s.end_x, s.end_y = sx, sy, ex, ey
+                return None
+
+            snap = try_weld(Axy, Cxy)              # weld C onto A (move C's main seg)
+            if snap is None:
+                snap = try_weld(Cxy, Axy)          # else weld A onto C
+            if snap is None:
+                continue
+            trial = [s for s in net_segs if s is not s1 and s is not s2]
+            if _worse(before, check_net_connectivity(net_id, trial, net_vias, net_pads, [])):
+                for (s, sx, sy, ex, ey) in snap:   # revert the weld
+                    s.start_x, s.start_y, s.end_x, s.end_y = sx, sy, ex, ey
+                continue
+            for s in (s1, s2):
+                if id(s) in routed_seg_ids:
+                    removed_routed_ids.add(id(s))
+                else:
+                    original_to_remove.append(s)
+            welded += 1
+            nets.add(net_id)
+
+    if removed_routed_ids:
+        for r in results:
+            segs = r.get('new_segments')
+            if segs:
+                r['new_segments'] = [s for s in segs if id(s) not in removed_routed_ids]
+    if removed_routed_ids or original_to_remove:
+        orig_ids = {id(s) for s in original_to_remove}
+        pcb_data.segments = [s for s in pcb_data.segments
+                             if id(s) not in removed_routed_ids and id(s) not in orig_ids]
+    return welded, len(nets), original_to_remove
+
+
+def make_model_fill_anchor(pcb_data, net_id, fallback=None):
+    """Fill-anchor for dead-end pruning backed by the (KiCad-parity)
+    ZoneFillModel (#483 item 4): an endpoint is anchored iff real fill
+    EXISTS there per the model. The old local-disc validator answered
+    "fill COULD exist here" -- generous by design when the model was
+    untrustworthy -- which kept stubs whose ends KiCad grades
+    track_dangling (no actual fill under them). Model false-positives
+    (~1%) only KEEP ends (safe); false-negatives (~0.1%) trim a stub the
+    real pour anchors, which is harmless same-net copper next to the pour
+    and still connectivity-gated. Falls back to `fallback` (or True) when
+    no model is available."""
+    try:
+        from plane_fill_model import get_fill_models
+        models = get_fill_models(pcb_data, net_id)
+    except Exception:
+        models = {}
+    if not models:
+        return fallback
+
+    def _anchor(x, y, layer):
+        ms = models.get(layer)
+        if not ms:
+            return fallback(x, y, layer) if fallback else False
+        for m in ms:
+            c = m.query_component(x, y, size=0.05)
+            if c is not None and c > 0:
+                return True
+        return False
+    return _anchor
+
+
+def drop_orphan_restore_pieces(keep_segs, keep_vias, net_id, pcb_data,
+                               eps=1e-3):
+    """Connectivity-filter a partial-restore keep-set (the XTAL_O debris
+    class): the collision filter drops restored pieces one by one and can
+    orphan the survivors -- the dropped pieces were their only bridges to
+    the trunk. Pad-less remnants then ship forever: the pads-only
+    "connected" verdict never flags them, every cleanup's input-copper
+    guard protects them, and KiCad demands a ratsnest link to the stranded
+    cluster on every future run (quickfeather Net-(U6-XTAL_O), 2 fragments).
+
+    A kept piece survives only if it reaches an ANCHOR -- a pad of the net,
+    or net copper already on the board (not part of this restore) --
+    transitively through other kept pieces. Contact tests are GENEROUS
+    (cap reach + circumscribed pad circle): over-keeping is harmless (the
+    oracle debris pass backstops), over-dropping would delete live copper.
+    Mutates both lists in place; returns the number of orphans dropped."""
+    import math as _m
+    if not keep_segs and not keep_vias:
+        return 0
+    n_s = len(keep_segs)
+    n_v = len(keep_vias)
+    parent = list(range(n_s + n_v + 1))
+    ANCHOR = n_s + n_v
+
+    def _find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def _union(a, b):
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    def _d_pt_seg(px, py, s):
+        dx, dy = s.end_x - s.start_x, s.end_y - s.start_y
+        L2 = dx * dx + dy * dy
+        t = max(0.0, min(1.0, ((px - s.start_x) * dx
+                               + (py - s.start_y) * dy) / L2)) if L2 else 0.0
+        return _m.hypot(px - (s.start_x + t * dx), py - (s.start_y + t * dy))
+
+    def _seg_touch(a, b):
+        if a.layer != b.layer:
+            return False
+        r = (a.width + b.width) / 2.0 + eps
+        return (_d_pt_seg(a.start_x, a.start_y, b) < r
+                or _d_pt_seg(a.end_x, a.end_y, b) < r
+                or _d_pt_seg(b.start_x, b.start_y, a) < r
+                or _d_pt_seg(b.end_x, b.end_y, a) < r)
+
+    def _via_seg_touch(v, s):
+        return _d_pt_seg(v.x, v.y, s) < v.size / 2.0 + s.width / 2.0 + eps
+
+    def _via_via_touch(a, b):
+        return _m.hypot(a.x - b.x, a.y - b.y) < (a.size + b.size) / 2.0 + eps
+
+    # intra-keep-set edges
+    for i in range(n_s):
+        for j in range(i + 1, n_s):
+            if _seg_touch(keep_segs[i], keep_segs[j]):
+                _union(i, j)
+        for j in range(n_v):
+            if _via_seg_touch(keep_vias[j], keep_segs[i]):
+                _union(i, n_s + j)
+    for i in range(n_v):
+        for j in range(i + 1, n_v):
+            if _via_via_touch(keep_vias[i], keep_vias[j]):
+                _union(n_s + i, n_s + j)
+
+    # anchors: pads of the net (circumscribed circle, generous)...
+    for p in pcb_data.pads_by_net.get(net_id, []):
+        pr = max(p.size_x, p.size_y) / 2.0
+        for i, s in enumerate(keep_segs):
+            if _d_pt_seg(p.global_x, p.global_y, s) < pr + s.width / 2.0 + eps:
+                _union(ANCHOR, i)
+        for j, v in enumerate(keep_vias):
+            if _m.hypot(p.global_x - v.x, p.global_y - v.y) \
+                    < pr + v.size / 2.0 + eps:
+                _union(ANCHOR, n_s + j)
+    # ...and net copper already on the board (trunk not part of this restore)
+    _keep_ids = {id(x) for x in keep_segs} | {id(x) for x in keep_vias}
+    for s in pcb_data.segments:
+        if s.net_id != net_id or id(s) in _keep_ids:
+            continue
+        for i, k in enumerate(keep_segs):
+            if _seg_touch(s, k):
+                _union(ANCHOR, i)
+        for j, v in enumerate(keep_vias):
+            if _via_seg_touch(v, s):
+                _union(ANCHOR, n_s + j)
+    for v in pcb_data.vias:
+        if v.net_id != net_id or id(v) in _keep_ids:
+            continue
+        for i, k in enumerate(keep_segs):
+            if _via_seg_touch(v, k):
+                _union(ANCHOR, i)
+        for j, kv in enumerate(keep_vias):
+            if _via_via_touch(v, kv):
+                _union(ANCHOR, n_s + j)
+
+    root = _find(ANCHOR)
+    ok_s = [s for i, s in enumerate(keep_segs) if _find(i) == root]
+    ok_v = [v for j, v in enumerate(keep_vias) if _find(n_s + j) == root]
+    dropped = (n_s - len(ok_s)) + (n_v - len(ok_v))
+    if dropped:
+        keep_segs[:] = ok_s
+        keep_vias[:] = ok_v
+    return dropped
+
+
 def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                            clearance: float = 0.1,
-                           check_foreign_segments: bool = False) -> Tuple[int, int, List[Segment]]:
+                           check_foreign_segments: bool = False,
+                           keep_input_copper: bool = False,
+                           net_clearances=None) -> Tuple[int, int, List[Segment]]:
     """Drop a segment that grazes a FOREIGN pad/via below clearance when the net
     stays fully connected without it (issue #224).
 
@@ -2045,17 +2786,28 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                 for cy in range(olo_y, ohi_y + 1):
                     seg_grid[(o.layer, cx, cy)].append(o)
 
+    def _eff(nid):
+        # #436: moving net's own floor; foreign class excess folded by the dist
+        # fns (inert on all-Default boards).
+        if not net_clearances:
+            return clearance
+        return max(clearance, net_clearances.get(nid, clearance))
+
     def grazes(s):
-        thr = clearance + s.width / 2.0 - 1e-4
+        eff = _eff(s.net_id)
+        thr = eff + s.width / 2.0 - 1e-4
         if (_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                   s.end_x, s.end_y, s.layer,
-                                  base_clearance=clearance) < thr or
+                                  base_clearance=eff, net_clearances=net_clearances) < thr or
                 _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                      s.end_x, s.end_y, s.layer) < thr):
+                                      s.end_x, s.end_y, s.layer,
+                                      base_clearance=eff, net_clearances=net_clearances) < thr):
             return True
         if check_foreign_segments:
             slo_x, shi_x = min(s.start_x, s.end_x), max(s.start_x, s.end_x)
             slo_y, shi_y = min(s.start_y, s.end_y), max(s.start_y, s.end_y)
+            # widest possible pairwise clearance bounds the bbox prefilter
+            _cmax = max(eff, max(net_clearances.values()) if net_clearances else eff)
             cx0 = int(slo_x // _CELL) - 1; cx1 = int(shi_x // _CELL) + 1
             cy0 = int(slo_y // _CELL) - 1; cy1 = int(shi_y // _CELL) + 1
             seen = set()
@@ -2065,13 +2817,14 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                         if o.net_id == s.net_id or id(o) in seen:
                             continue
                         seen.add(id(o))
-                        margin = clearance + (s.width + o.width) / 2.0
+                        req = max(eff, _eff(o.net_id))   # #436 pairwise clearance
+                        margin = _cmax + (s.width + o.width) / 2.0
                         if (max(o.start_x, o.end_x) < slo_x - margin or min(o.start_x, o.end_x) > shi_x + margin or
                                 max(o.start_y, o.end_y) < slo_y - margin or min(o.start_y, o.end_y) > shi_y + margin):
                             continue  # bbox prefilter
                         d = _seg_seg_min_dist(s.start_x, s.start_y, s.end_x, s.end_y,
                                               o.start_x, o.start_y, o.end_x, o.end_y)
-                        if d - (s.width + o.width) / 2.0 < clearance - 1e-4:
+                        if d - (s.width + o.width) / 2.0 < req - 1e-4:
                             return True
         return False
 
@@ -2103,7 +2856,9 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
     original_to_remove = []
     nets_pruned = 0
     for net_id, net_segs in segs_by_net.items():
-        grazing = [s for s in net_segs if grazes(s)]
+        grazing = [s for s in net_segs
+                   if (not keep_input_copper or id(s) in routed_seg_ids)
+                   and grazes(s)]
         if not grazing:
             continue
         net_pads = pcb_data.pads_by_net.get(net_id, [])
@@ -2122,7 +2877,8 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
             _zcv = make_real_fill_validator(pcb_data, net_id)
         before = check_net_connectivity(net_id, net_segs, net_vias, net_pads,
                                         net_zones, return_graph=True,
-                                        zone_credit_validator=_zcv)
+                                        zone_credit_validator=_zcv,
+                                        pcb_data=pcb_data)
         graph = before.get('graph')
         # Components holding base-disconnected pads are off-limits (their
         # copper is that pad's only hope -- Q2 GND stubs round two).
@@ -2132,7 +2888,7 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
         # gate sees the split immediately.
         before_strict, graph_strict = _strict_conn_graph(
             net_id, net_segs, net_vias, net_pads, net_zones,
-            zone_credit_validator=_zcv)
+            zone_credit_validator=_zcv, pcb_data=pcb_data)
         seg_pos = {id(s): i for i, s in enumerate(net_segs)}
         _verify = _PRUNE_CONN_VERIFY
         dropped = []
@@ -2149,7 +2905,11 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
         # the coincident chain); only remove when even the fab floor cannot
         # clear. Baseline joints (pre-existing) never block a removal.
         baseline_joints = _soft_joint_pairs(net_segs, net_vias, net_pads)
-        for s in sorted(grazing, key=lambda s: math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)):
+        # Geometric tie-break -- equal-length grazers fell back to board order.
+        for s in sorted(grazing, key=lambda s: (
+                math.hypot(s.end_x - s.start_x, s.end_y - s.start_y), s.layer,
+                min((s.start_x, s.start_y), (s.end_x, s.end_y)),
+                max((s.start_x, s.start_y), (s.end_x, s.end_y)))):
             if _prot_roots and _prot_uf is not None and \
                     _prot_uf.find(2 * seg_pos[id(s)]) in _prot_roots:
                 continue  # base-disconnected pad's component: off-limits
@@ -2158,12 +2918,14 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                 after = analyze_conn_excluding(graph, trial_excl)
                 if _verify:
                     trial = [x for i, x in enumerate(net_segs) if i not in trial_excl]
-                    ref = check_net_connectivity(net_id, trial, net_vias, net_pads, net_zones)
+                    ref = check_net_connectivity(net_id, trial, net_vias, net_pads, net_zones,
+                                                 pcb_data=pcb_data)
                     assert worse(before, after) == worse(before, ref), \
                         f"prune-conn fast-path mismatch: net {net_id}, seg {seg_pos[id(s)]}"
             else:
                 trial = [x for i, x in enumerate(net_segs) if i not in trial_excl]
-                after = check_net_connectivity(net_id, trial, net_vias, net_pads, net_zones)
+                after = check_net_connectivity(net_id, trial, net_vias, net_pads, net_zones,
+                                               pcb_data=pcb_data)
             if worse(before, after):
                 continue
             if graph_strict is not None and worse(
@@ -2175,20 +2937,24 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                 from single_ended_routing import (_seg_foreign_pad_dist as _fpd,
                                                   _seg_foreign_via_dist as _fvd,
                                                   _fab_track_floor)
+                eff = _eff(s.net_id)  # #436 own-net floor; foreign class folded
                 d = min(_fpd(pcb_data, s.net_id, s.start_x, s.start_y,
                              s.end_x, s.end_y, s.layer,
-                             base_clearance=clearance),
+                             base_clearance=eff, net_clearances=net_clearances),
                         _fvd(pcb_data, s.net_id, s.start_x, s.start_y,
-                             s.end_x, s.end_y, s.layer))
+                             s.end_x, s.end_y, s.layer,
+                             base_clearance=eff, net_clearances=net_clearances))
                 if check_foreign_segments:
                     for o in pcb_data.segments:
                         if o.net_id == s.net_id or o.layer != s.layer or o is s:
                             continue
                         dd = _seg_seg_min_dist(s.start_x, s.start_y, s.end_x, s.end_y,
                                                o.start_x, o.start_y, o.end_x, o.end_y) - o.width / 2.0
+                        if net_clearances:
+                            dd -= max(0.0, _eff(o.net_id) - eff)  # #436 fold class
                         if dd < d:
                             d = dd
-                allowed = 2.0 * (d - clearance - 1e-4)
+                allowed = 2.0 * (d - eff - 1e-4)
                 floor = _fab_track_floor(pcb_data)
                 if (allowed >= floor - 1e-9 and allowed < s.width - 1e-9
                         and id(s) in routed_seg_ids):
@@ -2212,7 +2978,8 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                     _kept_now = [x for i, x in enumerate(net_segs)
                                  if i not in dropped_idx]
                     if worse(before, check_net_connectivity(
-                            net_id, _kept_now, net_vias, net_pads, net_zones)):
+                            net_id, _kept_now, net_vias, net_pads, net_zones,
+                            pcb_data=pcb_data)):
                         s.width = _old_w  # neck would break a contact: defer
                         continue
                     continue  # necked clear; keep the coincident bridge
@@ -2277,7 +3044,10 @@ def _octolinear_bends(A, B):
 
 
 def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
-                             clearance: float = 0.1) -> Tuple[int, int, List[Segment]]:
+                             clearance: float = 0.1,
+                             keep_input_copper: bool = False,
+                             net_clearances=None,
+                             board_edge_clearance: float = 0.0) -> Tuple[int, int, List[Segment]]:
     """Re-bend a foreign-pad-grazing octolinear jog so it clears the pad (issue #224).
 
     The complement to prune_grazing_segments: when a grazing segment is LOAD-BEARING
@@ -2303,18 +3073,28 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
     # sibling gained this term for #308, this re-bend path never did).
     npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE)
 
+    def eff_clr(nid):
+        # #436: the moving net's own clearance floor = max(global, its netclass).
+        # Foreign-net class EXCESS above this is folded in by the distance
+        # functions when net_clearances is passed. Inert on all-Default boards.
+        if not net_clearances:
+            return clearance
+        return max(clearance, net_clearances.get(nid, clearance))
+
     routed_seg_result = {}
     for r in results:
         for s in r.get('new_segments') or []:
             routed_seg_result[id(s)] = r
 
     def grazes(s):
-        thr = clearance + s.width / 2.0 - 1e-4
+        eff = eff_clr(s.net_id)
+        thr = eff + s.width / 2.0 - 1e-4
         return (_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                       s.end_x, s.end_y, s.layer,
-                                      base_clearance=clearance) < thr or
+                                      base_clearance=eff, net_clearances=net_clearances) < thr or
                 _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                      s.end_x, s.end_y, s.layer) < thr)
+                                      s.end_x, s.end_y, s.layer,
+                                      base_clearance=eff, net_clearances=net_clearances) < thr)
 
     # A re-bent jog must also respect the board edge: the octolinear candidates
     # only clear FOREIGN COPPER, so a bend could otherwise be pushed off-board /
@@ -2323,9 +3103,13 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
     from check_drc import board_edge_geometry, _point_on_board, _segment_to_rings_distance
     edge_rings, edge_outer, edge_cutouts = board_edge_geometry(pcb_data.board_info)
     board_bounds = pcb_data.board_info.board_bounds
+    # #438: honor the board's own copper-edge rule (0.5mm on strict boards), not
+    # the flat routing clearance -- a re-bend must not re-open the edge band the
+    # base A* map kept clear.
+    _edge_clr = max(clearance, board_edge_clearance)
 
     def edge_clears(x1, y1, x2, y2, w):
-        required = clearance + w / 2.0 - 1e-4
+        required = _edge_clr + w / 2.0 - 1e-4
         if edge_rings:
             if not _point_on_board(x1, y1, edge_outer, edge_cutouts) or \
                not _point_on_board(x2, y2, edge_outer, edge_cutouts):
@@ -2343,15 +3127,18 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
         # Foreign VIAS must be checked too: grazes() fires on via proximity, so
         # omitting them here let a re-bend that fixed a pad graze land within
         # clearance of (or onto) a foreign via (#254 neo6502 /GPIO1 vs /GPIO2).
+        eff = eff_clr(net_id)  # #436 own-net floor; foreign class excess folded in
         d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      base_clearance=clearance),
-                _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
-                _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer))
+                                      base_clearance=eff, net_clearances=net_clearances),
+                _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                                      net_clearances=net_clearances, base_clearance=eff),
+                _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                                      net_clearances=net_clearances, base_clearance=eff))
         # NPTH drill holes at the higher NPTH-to-track floor (#370 B2): the
         # copper terms above never see a copper-less hole, so a re-bend could
         # land the jog across a mounting hole.
         hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2)
-        return (d >= clearance + w / 2.0 - 1e-4 and
+        return (d >= eff + w / 2.0 - 1e-4 and
                 hd >= npth_clr + w / 2.0 - 1e-4 and
                 edge_clears(x1, y1, x2, y2, w))
 
@@ -2386,13 +3173,16 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
     # their grazing taps (e.g. a GND tap pinched against a connector pad) get
     # re-bent too. The connectivity check is run WITH the net's pour.
     for net_id, net_segs in segs_by_net.items():
-        grazing = [s for s in net_segs if grazes(s)]
+        grazing = [s for s in net_segs
+                   if (not keep_input_copper or id(s) in routed_seg_result)
+                   and grazes(s)]
         if not grazing:
             continue
         net_pads = pcb_data.pads_by_net.get(net_id, [])
         net_vias = vias_by_net.get(net_id, [])
         net_zones = zones_by_net.get(net_id, [])
-        before = check_net_connectivity(net_id, net_segs, net_vias, net_pads, net_zones)
+        before = check_net_connectivity(net_id, net_segs, net_vias, net_pads,
+                                        net_zones, pcb_data=pcb_data)
 
         # Group the grazing segments into simple chains: a vertex touching exactly
         # one grazing segment is an ANCHOR (it ties into non-grazing copper / a
@@ -2445,7 +3235,9 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
                            for i in range(len(pts) - 1)
                            if (pts[i][0], pts[i][1]) != (pts[i + 1][0], pts[i + 1][1])]
                     trial = [s for s in net_segs if s not in chain] + new
-                    if worse(before, check_net_connectivity(net_id, trial, net_vias, net_pads, net_zones)):
+                    if worse(before, check_net_connectivity(net_id, trial, net_vias,
+                                                            net_pads, net_zones,
+                                                            pcb_data=pcb_data)):
                         continue
                     # Commit: drop the chain, splice in the new octolinear segments.
                     res = None
@@ -2460,6 +3252,17 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
                         results.append(res)
                     res['new_segments'] = list(res.get('new_segments') or []) + new
                     added_segments.extend(new)
+                    # #508 finding 5: splice pcb_data NOW, per commit, not
+                    # after the whole loop -- later nets' clears()/grazes()
+                    # read foreign copper from pcb_data, and a deferred splice
+                    # let two nets be re-bent into the SAME free pocket (an
+                    # earlier commit's added copper invisible, its removed
+                    # chain still blocking).
+                    _chain_ids = {id(s) for s in chain}
+                    pcb_data.segments = [s for s in pcb_data.segments
+                                         if id(s) not in _chain_ids] + new
+                    if hasattr(pcb_data, '_foreign_seg_arr_cache'):
+                        pcb_data._foreign_seg_arr_cache = None
                     net_segs = trial
                     net_changed = True
                     break
@@ -2471,13 +3274,9 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
             segs = r.get('new_segments')
             if segs:
                 r['new_segments'] = [s for s in segs if id(s) not in removed_ids]
-    if removed_ids or original_to_remove:
-        orig_ids = {id(s) for s in original_to_remove}
-        pcb_data.segments = [s for s in pcb_data.segments
-                             if id(s) not in removed_ids and id(s) not in orig_ids]
-    pcb_data.segments = list(pcb_data.segments) + added_segments
-    # foreign-copper caches read pcb_data.segments; invalidate so later passes /
-    # the next call see the spliced geometry.
+    # pcb_data was spliced per commit above (#508 finding 5); a final flush
+    # keeps the next pass's foreign caches honest even when nothing changed
+    # here but the caller mutated segments between calls.
     if hasattr(pcb_data, '_foreign_seg_arr_cache'):
         pcb_data._foreign_seg_arr_cache = None
 
@@ -2485,16 +3284,30 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
             nets_changed, original_to_remove, added_segments)
 
 
-def _seg_worst_offender(pcb_data, net_id, s, clearance):
+def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None):
     """The single worst foreign-copper offender below clearance of segment `s`:
     returns (shortfall_mm, t, away_x, away_y) or None. t is the parameter of the
     closest approach along `s`; (away_x, away_y) is the unit direction that
     increases the distance. Distances are edge-to-centreline, sampled like the
-    _seg_foreign_*_dist trio (pads as their board-axis rect)."""
+    _seg_foreign_*_dist trio (pads as their board-axis rect).
+
+    #436: `clearance` should be the moving net's own floor (max(global, own
+    class)); when `net_clearances` (net_id -> class clr) is given, each foreign
+    element's class EXCESS over `clearance` is subtracted from its distance, so
+    the shortfall ranking and the away-shift honor KiCad's pairwise max(own,
+    foreign) per offender (e.g. a signal grazing an SMA-class trace is ranked by
+    its 0.35 shortfall, not the 0.1 global)."""
     import numpy as np
     from single_ended_routing import (_foreign_pad_arrays, _foreign_seg_arrays,
                                       _foreign_via_arrays, _foreign_hole_capsules)
     from routing_defaults import NPTH_TO_TRACK_CLEARANCE
+
+    def _excess(fnids):
+        # per-foreign class clearance above `clearance` (the moving net's floor)
+        if not net_clearances:
+            return np.zeros(len(fnids), dtype=float)
+        return np.array([max(0.0, net_clearances.get(int(f), clearance) - clearance)
+                         for f in fnids], dtype=float)
     required = clearance + s.width / 2.0
     # NPTH mounting/mechanical holes carry no copper, so the pad/seg/via terms
     # miss them; a track crossing one is graded at the higher NPTH-to-track floor
@@ -2516,7 +3329,33 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance):
         if best is None or sf > best[0]:
             best = (sf, float(ts[i]), float(qx), float(qy))
 
-    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc = _foreign_pad_arrays(pcb_data, s.layer)
+    nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc, _custom = \
+        _foreign_pad_arrays(pcb_data, s.layer)
+    # CUSTOM (polygon) pads are kept out of the rounded-rect arrays and get the
+    # exact check_drc outline distance instead (the bbox model both manufactured
+    # phantom grazes and mis-sized real ones). The away direction uses the
+    # closest point on the pad's bbox as a proxy; the shifted result is
+    # re-validated with the exact kernels, so an imperfect direction can only
+    # make the shift fail, never ship a graze.
+    if _custom:
+        from check_drc import point_to_pad_distance as _p2pd
+        for _cnid, _cpad in _custom:
+            if _cnid == net_id:
+                continue
+            _exc = max((getattr(_cpad, 'local_clearance', 0.0) or 0.0) - clearance, 0.0)
+            _ex = _cpad.size_x / 2.0
+            _ey = _cpad.size_y / 2.0
+            if (abs((sx.min() + sx.max()) / 2 - _cpad.global_x) >
+                    R + _ex + (sx.max() - sx.min()) / 2 or
+                    abs((sy.min() + sy.max()) / 2 - _cpad.global_y) >
+                    R + _ey + (sy.max() - sy.min()) / 2):
+                continue
+            for _i in range(len(sx)):
+                _d = _p2pd(float(sx[_i]), float(sy[_i]), _cpad) - _exc
+                if best is None or (required - _d) > best[0]:
+                    _qx = min(max(float(sx[_i]), _cpad.global_x - _ex), _cpad.global_x + _ex)
+                    _qy = min(max(float(sy[_i]), _cpad.global_y - _ey), _cpad.global_y + _ey)
+                    consider(_d, _i, _qx, _qy)
     if cx.size:
         # Per-pad local/footprint clearance overrides (#326): widen the window
         # by the largest excess and subtract each pad's excess from its
@@ -2529,7 +3368,7 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance):
         if near.any():
             fcx, fcy, fhx, fhy, fcr = cx[near], cy[near], hx[near], hy[near], cr[near]
             frc, frs = rc[near], rs[near]
-            fexc = np.maximum(plc[near] - clearance, 0.0)
+            fexc = np.maximum(plc[near] - clearance, 0.0) + _excess(nids[near])  # +#436 class
             # Work in each pad's LOCAL frame (query offsets rotated by R(-rot),
             # identity for axis-aligned pads) so tilted pads use their true
             # outline (#356). Closest point on the pad's rounded-rect boundary:
@@ -2570,6 +3409,7 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance):
             qx = ax[None, :] + tt * abx[None, :]
             qy = ay[None, :] + tt * aby[None, :]
             d = np.hypot(sx[:, None] - qx, sy[:, None] - qy) - hw[None, :]
+            d = d - _excess(fnid[near])[None, :]  # #436 class-excess
             i, j = np.unravel_index(int(np.argmin(d)), d.shape)
             consider(float(d[i, j]), i, qx[i, j], qy[i, j])
 
@@ -2581,6 +3421,7 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance):
         if near.any():
             fcx, fcy, fr = vx[near], vy[near], vr[near]
             d = np.hypot(sx[:, None] - fcx[None, :], sy[:, None] - fcy[None, :]) - fr[None, :]
+            d = d - _excess(vnid[near])[None, :]  # #436 class-excess
             i, j = np.unravel_index(int(np.argmin(d)), d.shape)
             consider(float(d[i, j]), i, fcx[j], fcy[j])
 
@@ -2616,7 +3457,10 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance):
 
 def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                              clearance: float = 0.1,
-                             max_shift: float = 0.025) -> Tuple[int, int, List[Segment], List[Segment]]:
+                             max_shift: float = 0.025,
+                             keep_input_copper: bool = False,
+                             net_clearances=None,
+                             board_edge_clearance: float = 0.0) -> Tuple[int, int, List[Segment], List[Segment]]:
     """Micro-shift copper that still grazes after prune / re-bend / neck (#276).
 
     Complements nudge_grazing_octolinear, which keeps a jog's anchor endpoints
@@ -2658,6 +3502,14 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
     # and the copper distance terms don't see them (issue #308, urti GND vs J3).
     npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE)
 
+    def eff_clr(nid):
+        # #436: the moving net's own clearance floor = max(global, its netclass).
+        # Foreign-net class EXCESS above this is folded in by the distance
+        # functions / _seg_worst_offender when net_clearances is passed.
+        if not net_clearances:
+            return clearance
+        return max(clearance, net_clearances.get(nid, clearance))
+
     routed_seg_result = {}
     for r in results:
         for s in r.get('new_segments') or []:
@@ -2666,9 +3518,10 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
     from check_drc import board_edge_geometry, _point_on_board, _segment_to_rings_distance
     edge_rings, edge_outer, edge_cutouts = board_edge_geometry(pcb_data.board_info)
     board_bounds = pcb_data.board_info.board_bounds
+    _edge_clr = max(clearance, board_edge_clearance)  # #438 honor board edge rule
 
     def edge_clears(x1, y1, x2, y2, w):
-        required = clearance + w / 2.0 - 1e-4
+        required = _edge_clr + w / 2.0 - 1e-4
         if edge_rings:
             if not _point_on_board(x1, y1, edge_outer, edge_cutouts) or \
                not _point_on_board(x2, y2, edge_outer, edge_cutouts):
@@ -2681,12 +3534,15 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
         return True
 
     def clears(x1, y1, x2, y2, layer, net_id, w):
+        eff = eff_clr(net_id)  # #436 own-net floor; foreign class excess folded in
         d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      base_clearance=clearance),
-                _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer),
-                _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer))
+                                      base_clearance=eff, net_clearances=net_clearances),
+                _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                                      net_clearances=net_clearances, base_clearance=eff),
+                _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                                      net_clearances=net_clearances, base_clearance=eff))
         hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2)
-        return (d >= clearance + w / 2.0 - 1e-4 and
+        return (d >= eff + w / 2.0 - 1e-4 and
                 hd >= npth_clr + w / 2.0 - 1e-4 and
                 edge_clears(x1, y1, x2, y2, w))
 
@@ -2720,14 +3576,17 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
         # Cheap 0.02-sampled prefilter (incl. foreign TRACKS -- cynthion's
         # offender is a track); the precise 0.005-sampled offender scan runs
         # only on the handful that fail this.
-        thr = clearance + s.width / 2.0 - 1e-4
+        eff = eff_clr(s.net_id)  # #436 own floor; foreign class excess folded in
+        thr = eff + s.width / 2.0 - 1e-4
         if min(_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                      s.end_x, s.end_y, s.layer,
-                                     base_clearance=clearance),
+                                     base_clearance=eff),
                _seg_foreign_seg_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                     s.end_x, s.end_y, s.layer),
+                                     s.end_x, s.end_y, s.layer,
+                                     net_clearances=net_clearances, base_clearance=eff),
                _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                     s.end_x, s.end_y, s.layer)) < thr:
+                                     s.end_x, s.end_y, s.layer,
+                                     net_clearances=net_clearances, base_clearance=eff)) < thr:
             return True
         # NPTH-hole graze uses the higher NPTH-to-track floor (issue #308).
         hole_thr = npth_clr + s.width / 2.0 - 1e-4
@@ -2748,15 +3607,20 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
         # can expose the second-worst on the same segment); foreign copper is
         # static during the pass.
         for _round in range(MAX_ROUNDS):
-            grazing = [s for s in net_segs if grazes(s)]
-            offenders = [(s, _seg_worst_offender(pcb_data, net_id, s, clearance))
+            grazing = [s for s in net_segs
+                       if (not keep_input_copper or id(s) in routed_seg_result
+                           or id(s) in added_ids)
+                       and grazes(s)]
+            offenders = [(s, _seg_worst_offender(pcb_data, net_id, s, eff_clr(net_id),
+                                                 net_clearances=net_clearances))
                          for s in grazing]
             offenders = [(s, o) for s, o in offenders if o is not None]
             if not offenders:
                 break
             if before is None:
                 before = check_net_connectivity(net_id, net_segs, net_vias,
-                                                net_pads, net_zones)
+                                                net_pads, net_zones,
+                                                pcb_data=pcb_data)
             round_changed = False
 
             for s, (shortfall, t, awx, awy) in offenders:
@@ -2774,6 +3638,11 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                                 or vk(g.end_x, g.end_y) == vk(px, py)]
                     if any(g.layer != s.layer for g in incident):
                         return  # cross-layer joint without a recorded via: leave it
+                    if keep_input_copper and any(
+                            id(g) not in routed_seg_result and id(g) not in added_ids
+                            for g in incident):
+                        return  # a vertex move rewrites every incident segment;
+                                # read-only input copper pins this joint in place
                     for m in (1.0, 1.8, 3.0):
                         d = (shortfall + MARGIN) * m
                         if d > max_shift:
@@ -2837,7 +3706,8 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                         continue
                     trial = [g for g in net_segs if g not in old] + new
                     if worse(before, check_net_connectivity(net_id, trial, net_vias,
-                                                            net_pads, net_zones)):
+                                                            net_pads, net_zones,
+                                                            pcb_data=pcb_data)):
                         continue
                     res = None
                     for g in old:
@@ -2847,7 +3717,13 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                             # never splice it into pcb_data)
                             removed_ids.add(id(g))
                             added_ids.discard(id(g))
-                            added_segments.remove(g)
+                            # by IDENTITY, not value (#508 finding 18):
+                            # Segment is a plain dataclass, so list.remove()
+                            # matches the first VALUE-equal element -- a
+                            # look-alike same-net segment from another round
+                            # could be removed while g stayed live.
+                            added_segments[:] = [x for x in added_segments
+                                                 if x is not g]
                         elif id(g) in routed_seg_result:
                             removed_ids.add(id(g))
                             res = res or routed_seg_result[id(g)]
@@ -2859,6 +3735,15 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                     res['new_segments'] = list(res.get('new_segments') or []) + new
                     added_segments.extend(new)
                     added_ids.update(id(g) for g in new)
+                    # #508 finding 5 (microshift twin of the octolinear fix):
+                    # splice pcb_data per commit -- later nets' clears() reads
+                    # foreign copper from pcb_data, and a deferred splice let
+                    # two nets shift into the same pocket.
+                    _old_ids = {id(g) for g in old}
+                    pcb_data.segments = [g for g in pcb_data.segments
+                                         if id(g) not in _old_ids] + new
+                    if hasattr(pcb_data, '_foreign_seg_arr_cache'):
+                        pcb_data._foreign_seg_arr_cache = None
                     net_segs = trial
                     net_changed = True
                     round_changed = True
@@ -2874,11 +3759,8 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
             segs = r.get('new_segments')
             if segs:
                 r['new_segments'] = [s for s in segs if id(s) not in removed_ids]
-    if removed_ids or original_to_remove:
-        orig_ids = {id(s) for s in original_to_remove}
-        pcb_data.segments = [s for s in pcb_data.segments
-                             if id(s) not in removed_ids and id(s) not in orig_ids]
-    pcb_data.segments = list(pcb_data.segments) + added_segments
+    # pcb_data was spliced per commit above (#508 finding 5); final cache
+    # flush only.
     if hasattr(pcb_data, '_foreign_seg_arr_cache'):
         pcb_data._foreign_seg_arr_cache = None
 
@@ -2889,7 +3771,9 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
 def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
                        clearance: float = 0.1, hole_to_hole: float = 0.20,
                        max_shift: float = 0.025,
-                       allowed_via_ids=None) -> Tuple[int, int, List[Tuple]]:
+                       allowed_via_ids=None,
+                       net_clearances=None,
+                       board_edge_clearance: float = 0.0) -> Tuple[int, int, List[Tuple]]:
     """Sub-grid nudge for a VIA that grazes foreign copper or a drill (#280).
 
     Two vias snapped to the routing grid can land a few µm inside clearance
@@ -2910,8 +3794,9 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
         stays visible in DRC;
       * a candidate is committed only when the via clears EVERY foreign
         object at its new spot (segment/via/pad body, drill hole-to-hole
-        incl. same-net, and the board edge) -- strictly fewer grazes, never a
-        new one;
+        incl. same-net, via COPPER to an unplated NPTH hole at the pad's
+        clearance (#441), and the board edge) -- strictly fewer grazes, never
+        a new one;
       * connectivity is re-checked per net and the move reverted if worse.
 
     Only vias CREATED BY THIS RUN may move: the writers re-emit this run's
@@ -2938,6 +3823,19 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
     edge_rings, edge_outer, edge_cutouts = board_edge_geometry(board_info)
     MARGIN = 0.002
     WINDOW = 2.0     # local object window around a flagged via (mm)
+    _edge_clr = max(clearance, board_edge_clearance)  # #438 honor board edge rule
+
+    def eff_clr(nid):
+        # #436: moving net's own floor = max(global, its netclass).
+        if not net_clearances:
+            return clearance
+        return max(clearance, net_clearances.get(nid, clearance))
+
+    def pair_clr(own, foreign_nid):
+        # #436: KiCad's pairwise requirement max(own floor, foreign class).
+        if not net_clearances:
+            return own
+        return max(own, net_clearances.get(foreign_nid, clearance))
 
     def worse(before, after):
         return ((before.get('connected') and not after.get('connected')) or
@@ -2967,6 +3865,28 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
     hole_y = _np.asarray([h[2] for h in hole_list], dtype=float)
     hole_r = _np.asarray([h[3] for h in hole_list], dtype=float)
 
+    # Unplated (NPTH) pad holes carry a COPPER-to-hole clearance (KiCad's
+    # hole_clearance rule): a via's COPPER -- not just its drill -- must clear an
+    # unplated hole edge by the pad's clearance. A plated pad's copper already
+    # enforces this through near_pads, but an np_thru_hole pad has NO copper, so
+    # gather_near skips it and the drill-to-drill hole_to_hole check (a looser floor)
+    # is all that would otherwise apply. Model it here (#441 ghoul: a GND via sat
+    # 6.5um inside SW13's mounting-hole 0.30 local_clearance -- clear on the 0.20
+    # hole-to-hole rule, so the nudge never saw the graze). Pairwise clearance is
+    # max(via floor, pad local_clearance).
+    npth_holes = []
+    for fp in pcb_data.footprints.values():
+        for p in fp.pads:
+            if getattr(p, 'pad_type', '') != 'np_thru_hole' or (p.drill or 0) <= 0:
+                continue
+            pc = getattr(p, 'local_clearance', 0.0) or 0.0
+            for hx, hy, hd in pad_drill_circles(p):
+                npth_holes.append((hx, hy, hd / 2.0, pc))
+    npth_x = _np.asarray([h[0] for h in npth_holes], dtype=float)
+    npth_y = _np.asarray([h[1] for h in npth_holes], dtype=float)
+    npth_r = _np.asarray([h[2] for h in npth_holes], dtype=float)
+    npth_c = _np.asarray([h[3] for h in npth_holes], dtype=float)
+
     vias_by_net = defaultdict(list)
     for v in pcb_data.vias:
         vias_by_net[v.net_id].append(v)
@@ -2979,16 +3899,20 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
 
     def copper_flagged(v):
         """Cheap numpy prefilter: via body sub-clearance to any foreign copper."""
-        thr = clearance + v.size / 2.0 - 1e-4
+        eff = eff_clr(v.net_id)
+        thr = eff + v.size / 2.0 - 1e-4
         if _seg_foreign_via_dist(pcb_data, v.net_id, v.x, v.y, v.x, v.y,
-                                 copper_layers[0]) < thr:
+                                 copper_layers[0], base_clearance=eff,
+                                 net_clearances=net_clearances) < thr:
             return True
         for lyr in copper_layers:
             if _seg_foreign_seg_dist(pcb_data, v.net_id, v.x, v.y, v.x, v.y,
-                                     lyr) < thr:
+                                     lyr, base_clearance=eff,
+                                     net_clearances=net_clearances) < thr:
                 return True
             if _seg_foreign_pad_dist(pcb_data, v.net_id, v.x, v.y, v.x, v.y,
-                                     lyr, base_clearance=clearance) < thr:
+                                     lyr, base_clearance=eff,
+                                     net_clearances=net_clearances) < thr:
                 return True
         return False
 
@@ -3002,6 +3926,15 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
         if i is not None:
             mask[i] = False
         return bool(mask.any())
+
+    def npth_copper_flagged(v):
+        """Via COPPER sub-clearance to an unplated (NPTH) hole edge (#441)."""
+        if npth_x.size == 0:
+            return False
+        own = eff_clr(v.net_id)
+        req = _np.maximum(own, npth_c)   # pairwise max(via floor, pad clearance)
+        d = _np.hypot(npth_x - v.x, npth_y - v.y)
+        return bool((d < v.size / 2.0 + npth_r + req - 1e-4).any())
 
     def gather_near(v):
         """Foreign copper + all holes within WINDOW of the via, evaluated exactly."""
@@ -3027,14 +3960,17 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
         for hid, hx, hy, hr in hole_list:
             if hid != me and abs(hx - x) <= WINDOW and abs(hy - y) <= WINDOW:
                 near_holes.append((hx, hy, hr))
-        return near_segs, near_vias, near_pads, near_holes
+        near_npth = [(hx, hy, hr, pc) for (hx, hy, hr, pc) in npth_holes
+                     if abs(hx - x) <= WINDOW and abs(hy - y) <= WINDOW]
+        return near_segs, near_vias, near_pads, near_holes, near_npth
 
     def worst_gap(x, y, v, near):
         """(gap, ux, uy): most negative clearance surplus at (x, y) and the unit
         direction AWAY from that offender. Positive gap = fully clear."""
-        near_segs, near_vias, near_pads, near_holes = near
+        near_segs, near_vias, near_pads, near_holes, near_npth = near
         r = v.size / 2.0
         vd = (getattr(v, 'drill', 0) or 0) / 2.0
+        own = eff_clr(v.net_id)  # #436 moving via's own floor
         best = (float('inf'), 1.0, 0.0)
 
         def consider(gap, ox, oy):
@@ -3046,28 +3982,37 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
                 else:
                     best = (gap, 1.0, 0.0)
 
+        # #436: each foreign object's required clearance is the pairwise
+        # max(own floor, that net's class), not the flat routing clearance.
         for s in near_segs:
             d, t = _pt_seg_dist_t(x, y, s)
-            consider(d - (r + s.width / 2.0 + clearance),
+            consider(d - (r + s.width / 2.0 + pair_clr(own, s.net_id)),
                      s.start_x + t * (s.end_x - s.start_x),
                      s.start_y + t * (s.end_y - s.start_y))
         for o in near_vias:
             d = math.hypot(x - o.x, y - o.y)
-            consider(d - (r + o.size / 2.0 + clearance), o.x, o.y)
+            consider(d - (r + o.size / 2.0 + pair_clr(own, o.net_id)), o.x, o.y)
         for p in near_pads:
             tp, g = _nearest_pad_point(x, y, p)
-            consider(g - (r + clearance), tp[0], tp[1])
+            consider(g - (r + max(pair_clr(own, p.net_id),
+                                  getattr(p, 'local_clearance', 0.0) or 0.0)),
+                     tp[0], tp[1])
         if vd > 0:
             for hx, hy, hr in near_holes:
                 d = math.hypot(x - hx, y - hy)
                 consider(d - (vd + hr + hole_to_hole), hx, hy)
+        # #441: via COPPER vs unplated (NPTH) hole edge at max(own, pad clearance)
+        # -- the copper-to-hole rule an NPTH pad enforces without any copper.
+        for hx, hy, hr, pc in near_npth:
+            d = math.hypot(x - hx, y - hy)
+            consider(d - (r + hr + max(own, pc)), hx, hy)
         # board edge: include in the gap so a candidate never trades a copper
         # graze for an edge one (no direction needed -- it's a veto, not a target)
         if edge_rings:
             if not _point_on_board(x, y, edge_outer, edge_cutouts):
                 best = (min(best[0], -1.0), best[1], best[2])
             else:
-                eg = _point_to_rings_distance(x, y, edge_rings) - (r + clearance)
+                eg = _point_to_rings_distance(x, y, edge_rings) - (r + _edge_clr)
                 if eg < best[0]:
                     best = (eg, best[1], best[2])
         return best
@@ -3084,7 +4029,7 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
               if id(v) in own_ids
               and (scope_net_ids is None or v.net_id in scope_net_ids)]
     for v in scoped:
-        if not (copper_flagged(v) or hole_flagged(v)):
+        if not (copper_flagged(v) or hole_flagged(v) or npth_copper_flagged(v)):
             continue
         near = gather_near(v)
         gap, ux, uy = worst_gap(v.x, v.y, v, near)
@@ -3109,7 +4054,7 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
         net_vias = vias_by_net.get(v.net_id, [])
         net_zones = zones_by_net.get(v.net_id, [])
         before = check_net_connectivity(v.net_id, net_segs, net_vias, net_pads,
-                                        net_zones)
+                                        net_zones, pcb_data=pcb_data)
 
         for ang in (0.0, 30.0, -30.0, 60.0, -60.0, 90.0, -90.0):
             a = math.radians(ang)
@@ -3129,7 +4074,7 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
             old_x, old_y = v.x, v.y
             v.x, v.y = nx, ny
             after = check_net_connectivity(v.net_id, net_segs, net_vias, net_pads,
-                                           net_zones)
+                                           net_zones, pcb_data=pcb_data)
             if worse(before, after):
                 v.x, v.y = old_x, old_y
                 continue
@@ -3210,6 +4155,22 @@ def merge_close_same_net_vias(all_new_vias, all_new_segments, pcb_data,
             continue
         survivors_by_net.setdefault(v.net_id, []).append(
             (v.x, v.y, v.drill, _span(v.layers)))
+    # #479 reuse-audit gap 3: plated THT PAD barrels are reuse targets too --
+    # they span every copper layer, and a new via within hole-to-hole of one
+    # is the U12.10 class (KiCad's hole_to_hole is net-independent, so the
+    # pair ships as a real DRC hit our via-only survivor set never saw).
+    # Anchor at the HOLE position (h2h-correct for offset-hole pads); the
+    # annular ring carries re-anchored segment endpoints on every layer.
+    from kicad_parser import pad_is_plated_through
+    _all_cu = _span(getattr(getattr(pcb_data, 'board_info', None),
+                            'copper_layers', None) or ['F.Cu', 'B.Cu'])
+    for _pads in getattr(pcb_data, 'pads_by_net', {}).values():
+        for _p in _pads:
+            if pad_is_plated_through(_p):
+                survivors_by_net.setdefault(_p.net_id, []).append(
+                    (_p.hole_x if _p.hole_x is not None else _p.global_x,
+                     _p.hole_y if _p.hole_y is not None else _p.global_y,
+                     _p.drill, _all_cu))
 
     kept, merged, unmergeable = [], 0, 0
     for nv in all_new_vias:
@@ -3232,6 +4193,23 @@ def merge_close_same_net_vias(all_new_vias, all_new_segments, pcb_data,
                     _set_end(s, 'start', survivor)
                 if b and abs(b[0] - nx) < EPS and abs(b[1] - ny) < EPS:
                     _set_end(s, 'end', survivor)
+            # #508 finding 12: the plane engines stamp the new via and its tap
+            # segments into pcb_data as OBJECTS during routing; updating only
+            # the write-list dicts left the BOARD carrying a via the file
+            # won't have, and board segment ends at the dropped position --
+            # every later pass (obstacle maps, connectivity gates, ledger)
+            # then reasons about copper that never ships. Mirror the merge.
+            pcb_data.vias[:] = [pv for pv in pcb_data.vias
+                                if not (pv.net_id == nid
+                                        and abs(pv.x - nx) < EPS
+                                        and abs(pv.y - ny) < EPS)]
+            for ps in (getattr(pcb_data, 'segments', None) or []):
+                if ps.net_id != nid:
+                    continue
+                if abs(ps.start_x - nx) < EPS and abs(ps.start_y - ny) < EPS:
+                    ps.start_x, ps.start_y = survivor
+                if abs(ps.end_x - nx) < EPS and abs(ps.end_y - ny) < EPS:
+                    ps.end_x, ps.end_y = survivor
             merged += 1
             continue
         if blocked:
@@ -3278,18 +4256,33 @@ def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
     zones), so a load-bearing tap that actually carries a pad to the plane is kept
     and only genuinely redundant/dead copper goes.
 
-    Returns (all_new_segments, n_removed, n_nudged, n_swept).
+    Returns (all_new_segments, n_removed, n_nudged, n_swept, input_strips).
+    input_strips (#508 finding 2): removed segments that matched NO write-list
+    dict are INPUT-board copper -- the passes delete them from pcb_data, but
+    the writer re-emits input text (and the GUI board still holds them), so
+    the caller must forward these to its strip channel or board != file.
     """
     def sig(sx, sy, ex, ey, layer):
         a, b = (round(sx, 3), round(sy, 3)), (round(ex, 3), round(ey, 3))
         return (min(a, b), max(a, b), layer)
 
+    input_strips: List = []
+
     def strip(segs, removed):
         if not removed:
             return segs, 0
         rm = {sig(s.start_x, s.start_y, s.end_x, s.end_y, s.layer) for s in removed}
+        matched = {sig(d['start'][0], d['start'][1], d['end'][0], d['end'][1],
+                       d['layer'])
+                   for d in segs
+                   if sig(d['start'][0], d['start'][1], d['end'][0], d['end'][1],
+                          d['layer']) in rm}
         out = [d for d in segs
                if sig(d['start'][0], d['start'][1], d['end'][0], d['end'][1], d['layer']) not in rm]
+        input_strips.extend(
+            s for s in removed
+            if sig(s.start_x, s.start_y, s.end_x, s.end_y, s.layer)
+            not in matched)
         return out, len(segs) - len(out)
 
     # Copper protection for pads the repair ITSELF proved fill-unreachable
@@ -3414,12 +4407,28 @@ def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
             continue
         p_ids = {id(s) for s in prunable}
         anchor = [s for s in segs if id(s) not in p_ids]
+        _zones_n = [z for z in all_zones if z.net_id == net_id]
+        _zcv3 = None
+        _zfa3 = None
+        if _zones_n:
+            from check_connected import make_real_fill_validator
+            _fvb3 = {}
+            _zcv3 = make_real_fill_validator(pcb_data, net_id,
+                                             shared_buckets=_fvb3)
+            _zfa3 = make_model_fill_anchor(
+                pcb_data, net_id,
+                fallback=make_real_fill_validator(pcb_data, net_id,
+                                                  margin=0.02,
+                                                  shared_buckets=_fvb3))
         _, removed = _safe_prune_net(
             net_id, prunable,
             [v for v in pcb_data.vias if v.net_id == net_id],
             pcb_data.pads_by_net.get(net_id, []),
-            [z for z in all_zones if z.net_id == net_id],
-            anchor_segments=anchor, aggressive=True)
+            _zones_n,
+            anchor_segments=anchor, aggressive=True,
+            zone_credit_validator=_zcv3,
+            fill_anchor_validator=_zfa3,
+            pcb_data=pcb_data)
         de_removed.extend(removed)
     de_removed = _veto(de_removed)
     all_new_segments, n_swept = strip(all_new_segments, de_removed)
@@ -3427,7 +4436,7 @@ def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
         rm_ids = {id(s) for s in de_removed}
         pcb_data.segments = [s for s in pcb_data.segments if id(s) not in rm_ids]
 
-    return all_new_segments, n_removed, n_nudged, n_swept
+    return all_new_segments, n_removed, n_nudged, n_swept, input_strips
 
 
 def swap_pad_nets_in_pcb_data(pcb_data: PCBData, pad_a, pad_b) -> None:
@@ -3455,8 +4464,14 @@ def swap_pad_nets_in_pcb_data(pcb_data: PCBData, pad_a, pad_b) -> None:
             new_net_obj.pads.append(pad)
 
 
-def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = False) -> None:
-    """Add routed segments and vias to PCB data for subsequent routes to see."""
+def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = False,
+                          trace_event: str = 'route') -> None:
+    """Add routed segments and vias to PCB data for subsequent routes to see.
+
+    ``trace_event`` labels the commit for the route trace (#482): 'route' for a
+    normal/initial commit, 'restore' when re-adding ripped copper. Inert unless
+    a RouteTrace is attached at ``pcb_data._route_trace`` (KICAD_ROUTE_TRACE=1).
+    """
     new_segments = result['new_segments']
     if not new_segments:
         return
@@ -3545,12 +4560,22 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
         net_pads = pcb_data.pads_by_net.get(net_id, [])
         net_zones = [z for z in all_zones if z.net_id == net_id]
         _zcv2 = None
+        _zfa2 = None
         if net_zones:
             from check_connected import make_real_fill_validator
-            _zcv2 = make_real_fill_validator(pcb_data, net_id)
+            _fvb2 = {}
+            _zcv2 = make_real_fill_validator(pcb_data, net_id,
+                                             shared_buckets=_fvb2)
+            _zfa2 = make_model_fill_anchor(
+                pcb_data, net_id,
+                fallback=make_real_fill_validator(pcb_data, net_id,
+                                                  margin=0.02,
+                                                  shared_buckets=_fvb2))
         kept_net, _ = _safe_prune_net(net_id, net_new, net_vias, net_pads, net_zones,
                                       zone_credit_validator=_zcv2,
-                                      anchor_segments=anchor, aggressive=False)
+                                      fill_anchor_validator=_zfa2,
+                                      anchor_segments=anchor, aggressive=False,
+                                      pcb_data=pcb_data)
         pruned_segments.extend(kept_net)
     cleaned_segments = pruned_segments
 
@@ -3560,6 +4585,12 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
         pcb_data.vias.append(via)
     # Update result so output file also gets cleaned segments
     result['new_segments'] = cleaned_segments
+
+    _rt = getattr(pcb_data, '_route_trace', None)
+    if _rt is not None:
+        _record_copper_trace(_rt, pcb_data, cleaned_segments,
+                             result.get('new_vias') or [], result, trace_event,
+                             added=True)
 
 
 def drop_phantom_copper(results, pcb_data: PCBData,
@@ -3641,7 +4672,28 @@ def _via_rip_sig(via):
     return (round(via.x, POSITION_DECIMALS), round(via.y, POSITION_DECIMALS), via.net_id)
 
 
-def remove_route_from_pcb_data(pcb_data: PCBData, result: dict) -> None:
+def _record_copper_trace(rt, pcb_data, segments, vias, result, event, added):
+    """Feed one add/remove event to the route trace (#482). net_id/name are
+    resolved from the result dict, else the first segment. Best-effort: any
+    failure here must never disturb routing."""
+    try:
+        nid = result.get('net_id') if isinstance(result, dict) else None
+        if nid is None and segments:
+            nid = segments[0].net_id
+        nm = ''
+        nets = getattr(pcb_data, 'nets', None) or {}
+        if nid in nets:
+            nm = nets[nid].name
+        if added:
+            rt.record_add(segments, vias, net_id=nid, net_name=nm, event=event)
+        else:
+            rt.record_remove(segments, vias, net_id=nid, net_name=nm, event=event)
+    except Exception:
+        pass
+
+
+def remove_route_from_pcb_data(pcb_data: PCBData, result: dict,
+                               trace_event: str = 'rip') -> None:
     """Remove routed segments and vias from PCB data (for rip-up and reroute).
 
     Removal is by OBJECT IDENTITY: a result's ``new_segments``/``new_vias``
@@ -3663,6 +4715,11 @@ def remove_route_from_pcb_data(pcb_data: PCBData, result: dict) -> None:
 
     if not segments_to_remove and not vias_to_remove:
         return
+
+    _rt = getattr(pcb_data, '_route_trace', None)
+    if _rt is not None:
+        _record_copper_trace(_rt, pcb_data, segments_to_remove, vias_to_remove,
+                             result, trace_event, added=False)
 
     if segments_to_remove:
         remove_ids = {id(s) for s in segments_to_remove}

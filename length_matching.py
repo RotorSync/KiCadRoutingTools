@@ -754,9 +754,15 @@ def generate_trombone_meander(
 
     # Generate meander bumps
     direction = 1  # Alternates: 1 = up (positive perpendicular), -1 = down
-    first_bump_direction = None  # Track direction of first bump for exit chamfer
     prev_bump_direction = None  # Track previous bump direction for same-direction spacing
     blocked_direction = None  # Track which direction is completely blocked (safe_amp=0)
+    # Which perpendicular side (+1/-1) the meander baseline currently sits at,
+    # or None when the cursor is on the original centerline. After a bump the
+    # cursor rests chamfer (0.1mm) off the centerline; copper emitted there
+    # WITHOUT a clearance check (the skip-forward walk, the lead-out) can graze
+    # the very neighbor that blocked the bumps (#449: sata_sniffer skip trains
+    # printed 0.1mm from an adjacent DDR net's trunk -> 151 shorting_items).
+    offset_dir = None
     bump_count = 0
 
     # Leave some margin at start and end
@@ -791,8 +797,10 @@ def generate_trombone_meander(
         # Determine amplitude for this bump
         bump_amplitude = amplitude
 
-        # First bump includes entry chamfer, subsequent bumps don't
-        is_first = (bump_count == 0)
+        # A bump starting from the centerline (the very first, or the first
+        # after a skip returned the cursor to the centerline) needs an entry
+        # chamfer; bumps chained from the ±chamfer baseline don't.
+        is_first = (offset_dir is None)
         has_entry_chamfer = is_first
 
         # Calculate the ACTUAL bump start position (after any same-direction spacing)
@@ -844,7 +852,27 @@ def generate_trombone_meander(
                     needs_same_dir_spacing = other_needs_spacing
                     check_cx, check_cy = other_check_cx, other_check_cy
                 else:
-                    # No room for a bump here, skip forward with a straight segment
+                    # No room for a bump here. If the cursor sits at the
+                    # ±chamfer meander baseline, chamfer back to the original
+                    # centerline FIRST: the skip segments below are emitted
+                    # without any clearance check, and walking them at the
+                    # offset lays copper 0.1mm off the DRC-clean route -- into
+                    # the clearance band of the neighbor that blocked the
+                    # bumps (#449). The centerline is the original routed
+                    # corridor, so skipping along it is safe by construction.
+                    if offset_dir is not None:
+                        new_x = cx + ux * chamfer - px * chamfer * offset_dir
+                        new_y = cy + uy * chamfer - py * chamfer * offset_dir
+                        new_segments.append(Segment(
+                            start_x=cx, start_y=cy,
+                            end_x=new_x, end_y=new_y,
+                            width=segment.width, layer=segment.layer, net_id=segment.net_id
+                        ))
+                        cx, cy = new_x, new_y
+                        offset_dir = None
+                        prev_bump_direction = None  # next bump re-enters with its own chamfer
+                        continue
+                    # On the centerline: skip forward with a straight segment
                     skip_dist = 0.2
                     new_x = cx + ux * skip_dist
                     new_y = cy + uy * skip_dist
@@ -928,9 +956,9 @@ def generate_trombone_meander(
                 ))
                 cx, cy = nx, ny
 
-        # Entry chamfer (only for first bump)
+        # Entry chamfer (only for bumps starting from the centerline)
         if has_entry_chamfer:
-            first_bump_direction = direction  # Record direction for exit chamfer
+            offset_dir = direction  # baseline moves to ±chamfer off centerline
             # Direction switching already ensured we're going in the unblocked direction
             nx = cx + ux * chamfer + px * chamfer * direction
             ny = cy + uy * chamfer + py * chamfer * direction
@@ -992,20 +1020,15 @@ def generate_trombone_meander(
         # Alternate direction for next bump
         direction *= -1
 
-    # Add exit chamfer to return to centerline
-    # After any number of bumps, we're at ±chamfer from centerline.
-    # Use first_bump_direction to determine the exit direction.
-    if bump_count > 0 and first_bump_direction is not None:
-        # Check if exit chamfer would go into blocked direction
-        exit_direction = -first_bump_direction
-        if blocked_direction is not None and exit_direction == blocked_direction:
-            # Can't return to centerline in blocked direction, use flat segment
-            nx = cx + ux * chamfer
-            ny = cy + uy * chamfer
-        else:
-            # Normal exit chamfer
-            nx = cx + ux * chamfer - px * chamfer * first_bump_direction
-            ny = cy + uy * chamfer - py * chamfer * first_bump_direction
+    # Add exit chamfer to return to centerline. offset_dir tracks which side
+    # the baseline sits at (None = a skip already returned us to centerline).
+    # Always exit to the centerline: the old "blocked direction" flat kept the
+    # tail at the offset, sending the unchecked lead-out 0.1mm off the routed
+    # corridor (#449) -- returning TO the original centerline is safe even when
+    # full bumps toward that side don't fit.
+    if bump_count > 0 and offset_dir is not None:
+        nx = cx + ux * chamfer - px * chamfer * offset_dir
+        ny = cy + uy * chamfer - py * chamfer * offset_dir
         new_segments.append(Segment(
             start_x=cx, start_y=cy,
             end_x=nx, end_y=ny,
@@ -1443,6 +1466,59 @@ def _apply_meanders_to_net_with_iteration(
         return new_segments, new_segments, bump_count, new_metric
 
 
+def _seed_group_members_from_board(
+    net_names: List[str],
+    have_names,
+    pcb_data: PCBData,
+) -> Dict[str, dict]:
+    """Pseudo-results for group members with NO in-run routing result, measured
+    from the copper already on the board (#489 §7).
+
+    Matching was same-run only: a group whose members the planner routed in
+    DIFFERENT chain steps was skipped entirely with "fewer than 2 routed nets",
+    even though the earlier step's copper is sitting in pcb_data. Seeding those
+    members lets them set the group TARGET, which is the whole point -- this
+    run's nets then meander up to the net routed earlier.
+
+    The returned dicts are deliberately NOT inserted into net_results and carry
+    'from_board': True so the meander loop skips them: their copper is already
+    written, so "adding length" to them would emit a duplicate copy.
+    """
+    from net_queries import calculate_route_length
+
+    if pcb_data is None:
+        return {}
+    wanted = {}
+    for nid, net in pcb_data.nets.items():
+        if net.name and net.name in net_names and net.name not in have_names:
+            wanted[nid] = net.name
+    if not wanted:
+        return {}
+
+    segs_by: Dict[int, List[Segment]] = {}
+    vias_by: Dict[int, List] = {}
+    for s in pcb_data.segments:
+        if s.net_id in wanted:
+            segs_by.setdefault(s.net_id, []).append(s)
+    for v in pcb_data.vias:
+        if v.net_id in wanted:
+            vias_by.setdefault(v.net_id, []).append(v)
+
+    seeded = {}
+    for nid, name in wanted.items():
+        segs = segs_by.get(nid, [])
+        if not segs:
+            continue  # no copper on the board either -- genuinely unrouted
+        vias = vias_by.get(nid, [])
+        seeded[name] = {
+            'new_segments': segs,
+            'new_vias': vias,
+            'route_length': calculate_route_length(segs, vias, pcb_data),
+            'from_board': True,
+        }
+    return seeded
+
+
 def apply_length_matching_to_group(
     net_results: Dict[str, dict],
     net_names: List[str],
@@ -1483,9 +1559,21 @@ def apply_length_matching_to_group(
                     group_results[name] = result
                     processed_result_ids.add(result_id)
 
+    # Members routed in an EARLIER chain step have no in-run result; measure
+    # them from board copper so they can still set the target (#489 §7).
+    board_seeded = _seed_group_members_from_board(net_names, set(group_results), pcb_data)
+    group_results.update(board_seeded)
+
     if len(group_results) < 2:
         print(f"  Length matching group: fewer than 2 routed nets, skipping")
         return net_results
+    if len(board_seeded) == len(group_results):
+        print(f"  Length matching group: no nets routed this run, skipping")
+        return net_results
+    if board_seeded:
+        print(f"  Length matching group: {len(board_seeded)} member(s) measured "
+              f"from existing board copper (routed in an earlier step): "
+              f"{', '.join(sorted(board_seeded))}")
 
     # Identify diff pairs vs single-ended
     diff_pair_count = sum(1 for r in group_results.values() if r.get('is_diff_pair'))
@@ -1500,6 +1588,10 @@ def apply_length_matching_to_group(
     already_processed_vias: List = list(prev_group_vias) if prev_group_vias else []
 
     for result in group_results.values():
+        # Board-seeded members are already in pcb_data (the index reads it), so
+        # adding their copper here would only duplicate it.
+        if result.get('from_board'):
+            continue
         if result.get('new_segments'):
             already_processed_segments.extend(result['new_segments'])
         if result.get('new_vias'):
@@ -1524,6 +1616,12 @@ def apply_length_matching_to_group(
     for net_name, result in group_results.items():
         current_length = result['route_length']
         delta = target_length - current_length
+
+        if result.get('from_board'):
+            # Copper already written in an earlier step: it sets the target, it
+            # cannot be lengthened here.
+            print(f"    {net_name}: {current_length:.2f}mm (existing board copper, not modified)")
+            continue
 
         if delta <= config.length_match_tolerance:
             suffix = " (diff pair)" if result.get('is_diff_pair') else ""
@@ -1623,9 +1721,21 @@ def apply_time_matching_to_group(
                     group_results[name] = result
                     processed_result_ids.add(result_id)
 
+    # Members routed in an EARLIER chain step: measured from board copper so
+    # they can set the target (#489 §7). Never meandered -- already written.
+    board_seeded = _seed_group_members_from_board(net_names, set(group_results), pcb_data)
+    group_results.update(board_seeded)
+
     if len(group_results) < 2:
         print(f"  Time matching group: fewer than 2 routed nets, skipping")
         return net_results
+    if len(board_seeded) == len(group_results):
+        print(f"  Time matching group: no nets routed this run, skipping")
+        return net_results
+    if board_seeded:
+        print(f"  Time matching group: {len(board_seeded)} member(s) measured "
+              f"from existing board copper (routed in an earlier step): "
+              f"{', '.join(sorted(board_seeded))}")
 
     # Identify diff pairs vs single-ended
     diff_pair_count = sum(1 for r in group_results.values() if r.get('is_diff_pair'))
@@ -1649,6 +1759,9 @@ def apply_time_matching_to_group(
     already_processed_vias: List = list(prev_group_vias) if prev_group_vias else []
 
     for result in group_results.values():
+        # Board-seeded members already live in pcb_data (see the length path).
+        if result.get('from_board'):
+            continue
         if result.get('new_segments'):
             already_processed_segments.extend(result['new_segments'])
         if result.get('new_vias'):
@@ -1666,6 +1779,10 @@ def apply_time_matching_to_group(
     for net_name, result in group_results.items():
         current_time = net_times[net_name]
         delta_time = target_time - current_time
+
+        if result.get('from_board'):
+            print(f"    {net_name}: {current_time:.2f}ps (existing board copper, not modified)")
+            continue
 
         if delta_time <= config.time_match_tolerance:
             suffix = " (diff pair)" if result.get('is_diff_pair') else ""
@@ -2012,7 +2129,11 @@ def generate_centerline_meander(
 
     # Meander generation
     direction = 1
-    first_bump_direction = None
+    # Which perpendicular side (+1/-1) the meander baseline currently sits at,
+    # or None when the cursor is on the original centerline (see #449: copper
+    # emitted at the offset without a clearance check can graze the neighbor
+    # that blocked the bumps).
+    offset_dir = None
     bump_count = 0
     total_extra_added = 0.0
 
@@ -2040,9 +2161,11 @@ def generate_centerline_meander(
         if dist_to_end < bump_width + margin:
             break
 
-        # Find safe amplitude at this position
+        # Find safe amplitude at this position. A bump starting from the
+        # centerline (first, or first after a skip returned there) needs an
+        # entry chamfer; bumps chained from the ±chamfer baseline don't.
         bump_amplitude = amplitude
-        is_first = (bump_count == 0)
+        is_first = (offset_dir is None)
 
         if pcb_data is not None:
             # Adjust clearance for diff pair width
@@ -2062,7 +2185,19 @@ def generate_centerline_meander(
                     direction = -direction
                     safe_amp = safe_amp_other
                 else:
-                    # Skip forward
+                    # No room for a bump here. Chamfer back to the original
+                    # centerline first when sitting at the ±chamfer baseline:
+                    # the skip points below are emitted without any clearance
+                    # check, and walking them at the offset lays the pair
+                    # off the DRC-clean corridor, into the clearance band of
+                    # the neighbor that blocked the bumps (#449).
+                    if offset_dir is not None:
+                        cx += ux * 2 * chamfer - px * chamfer * offset_dir
+                        cy += uy * 2 * chamfer - py * chamfer * offset_dir
+                        new_path.append((cx, cy, layer))
+                        offset_dir = None
+                        continue
+                    # Skip forward along the centerline
                     skip_count += 1
                     if skip_count > max_skips:
                         break
@@ -2081,7 +2216,7 @@ def generate_centerline_meander(
         # Calculate extra length for this bump
         # All chamfers are wider (2:1 ratio) for P/N track spacing
         chamfer_diag_wide = chamfer * math.sqrt(5)  # wider chamfer (2:1)
-        has_entry_chamfer = (bump_count == 0)
+        has_entry_chamfer = is_first
 
         if has_entry_chamfer:
             # wide entry chamfer + 2 wide top chamfers + risers
@@ -2096,7 +2231,7 @@ def generate_centerline_meander(
 
         # Generate bump points
         if has_entry_chamfer:
-            first_bump_direction = direction
+            offset_dir = direction  # baseline moves to ±chamfer off centerline
             # Entry chamfer - wider (2x forward) to give P/N tracks room
             cx += ux * 2 * chamfer + px * chamfer * direction
             cy += uy * 2 * chamfer + py * chamfer * direction
@@ -2126,10 +2261,11 @@ def generate_centerline_meander(
         bump_count += 1
         direction *= -1
 
-    # Exit chamfer - wider (2x forward) to match entry
-    if bump_count > 0 and first_bump_direction is not None:
-        cx += ux * 2 * chamfer - px * chamfer * first_bump_direction
-        cy += uy * 2 * chamfer - py * chamfer * first_bump_direction
+    # Exit chamfer - wider (2x forward) to match entry (skipped when a skip
+    # already returned the cursor to the centerline)
+    if bump_count > 0 and offset_dir is not None:
+        cx += ux * 2 * chamfer - px * chamfer * offset_dir
+        cy += uy * 2 * chamfer - py * chamfer * offset_dir
         new_path.append((cx, cy, layer))
 
     # Lead-out to end: use wider chamfer (2:1) to smoothly transition back to path
@@ -2695,8 +2831,8 @@ def apply_intra_pair_length_matching(
     # Debug: show length breakdown
     if config.verbose:
         from net_queries import calculate_via_barrel_length
-        p_seg_only = sum(segment_length(s) for s in p_segments)
-        n_seg_only = sum(segment_length(s) for s in n_segments)
+        p_seg_only = math.fsum(segment_length(s) for s in p_segments)
+        n_seg_only = math.fsum(segment_length(s) for s in n_segments)
         p_via_barrel = calculate_via_barrel_length(p_vias, pcb_data)
         n_via_barrel = calculate_via_barrel_length(n_vias, pcb_data)
         print(f"      P breakdown: {len(p_segments)} segs={p_seg_only:.3f}mm + {len(p_vias)} vias={p_via_barrel:.3f}mm + stub={p_stub_length:.3f}mm = {p_length:.3f}mm")
@@ -2849,9 +2985,11 @@ def apply_ac_coupled_length_matching(xnet, routed_results, config, pcb_data):
     time (never a concatenated list -- each half's own copper would otherwise read
     as a foreign net at zero clearance). Length-only, mirroring intra-pair.
 
-    Edits each member result's 'new_segments' in place. Returns the final
-    end-to-end skew in mm (or None if a member was not fully routed); degrades
-    gracefully on congestion and never falsely claims a match it could not make.
+    Edits each member result's 'new_segments' in place. Reverts all member
+    edits and returns the original delta when the end-to-end skew would not
+    improve (mirroring intra-pair's guard, #460). Returns the final end-to-end
+    skew in mm (or None if a member was not fully routed); degrades gracefully
+    on congestion and never falsely claims a match it could not make.
     """
     tol = config.length_match_tolerance
     name = "+".join(xnet.base_names)
@@ -2867,8 +3005,12 @@ def apply_ac_coupled_length_matching(xnet, routed_results, config, pcb_data):
         md['base'] = m.base_name
         members.append(md)
 
-    total_p = sum(md['p_len'] for md in members)
-    total_n = sum(md['n_len'] for md in members)
+    # math.fsum, not the builtin sum() (#493): Python 3.12 switched sum() to
+    # compensated summation, so a float sum differs by an ULP or two between
+    # KiCad's bundled python and the system one -- enough to flip a decision
+    # made from it and make routing depend on the interpreter.
+    total_p = math.fsum(md['p_len'] for md in members)
+    total_n = math.fsum(md['n_len'] for md in members)
     delta = abs(total_p - total_n)
     bridges = ", ".join(xnet.bridge_refs)
     print(f"    AC-couple {name}: end-to-end P={total_p:.3f}mm, N={total_n:.3f}mm, "
@@ -2909,6 +3051,7 @@ def apply_ac_coupled_length_matching(xnet, routed_results, config, pcb_data):
 
     # Apply: lengthen each planned member's S net once (never re-meander a net).
     added_total = 0.0
+    snapshots = {}  # id(res) -> (res, pre-pass new_segments) for the #460 revert
     for i, want in enumerate(plan):
         if want <= tol:
             continue
@@ -2925,6 +3068,8 @@ def apply_ac_coupled_length_matching(xnet, routed_results, config, pcb_data):
             continue
         added = new_len - cur
         res = md['result']
+        if id(res) not in snapshots:
+            snapshots[id(res)] = (res, list(res['new_segments']))
         res['new_segments'] = [s for s in res['new_segments']
                                if s.net_id != s_id] + new_segs
         md[f'{S}_len'] = new_len
@@ -2934,6 +3079,15 @@ def apply_ac_coupled_length_matching(xnet, routed_results, config, pcb_data):
     new_total_s = (total_p if S == 'p' else total_n) + added_total
     new_total_l = total_n if S == 'p' else total_p
     new_delta = abs(new_total_l - new_total_s)
+    if added_total > tol and new_delta >= delta:
+        # Mirror intra-pair's guard: a matching pass never degrades the board.
+        # End-to-end compare only -- the phase-2 spill member is deliberately
+        # overshot locally, so a per-member guard would reject valid plans.
+        for res_obj, orig_segs in snapshots.values():
+            res_obj['new_segments'] = orig_segs
+        print(f"    AC-couple {name}: meanders would increase end-to-end delta "
+              f"({new_delta:.3f}mm >= {delta:.3f}mm), reverting")
+        return delta
     if added_total <= tol:
         print(f"    AC-couple {name}: could not fit end-to-end meanders "
               f"(residual delta={delta:.3f}mm)")

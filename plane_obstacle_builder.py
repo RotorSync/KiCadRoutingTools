@@ -28,6 +28,7 @@ import sys
 import os
 import routing_defaults as defaults
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
+import rust_alloc  # noqa: E402,F401  # issue #419: set MIMALLOC_PURGE_DELAY before grid_router loads
 from grid_router import GridObstacleMap
 
 
@@ -423,11 +424,17 @@ def build_via_obstacle_map(
     # blocked and a new via could land within clearance of it. Group by actual
     # via size so each size gets its own keep-out disc.
     t0 = time.time()
-    centers_by_size: Dict[float, List[Tuple[int, int]]] = {}
+    # #434: foreign vias are priced at config.obstacle_clearance(net_id) --
+    # max(run clearance, their netclass clearance) -- so tap vias honor KiCad's
+    # pairwise max(classA, classB); same-net vias keep the run clearance.
+    # Group by (size, clearance); all-Default boards collapse to the old groups.
+    centers_by_size: Dict[Tuple[float, float], List[Tuple[int, int]]] = {}
     for via in pcb_data.vias:
-        centers_by_size.setdefault(via.size, []).append(coord.to_grid(via.x, via.y))
-    for vsize, via_centers in centers_by_size.items():
-        via_via_expansion_mm = vsize / 2 + config.via_size / 2 + config.clearance + grid_cushion
+        _clr = (config.clearance if via.net_id == exclude_net_id
+                else config.obstacle_clearance(via.net_id))
+        centers_by_size.setdefault((via.size, _clr), []).append(coord.to_grid(via.x, via.y))
+    for (vsize, _clr), via_centers in centers_by_size.items():
+        via_via_expansion_mm = vsize / 2 + config.via_size / 2 + _clr + grid_cushion
         circle_offsets = _precompute_circle_offsets((via_via_expansion_mm / config.grid_step) ** 2)
         _batch_block_circles_via(obstacles, via_centers, circle_offsets)
     if verbose:
@@ -444,8 +451,10 @@ def build_via_obstacle_map(
         if not seg.layer.endswith('.Cu'):
             continue
         # Use actual segment width for clearance calculation (not config.track_width)
-        # Include grid cushion for discretization
-        seg_expansion_mm = config.via_size / 2 + seg.width / 2 + config.clearance + grid_cushion
+        # Include grid cushion for discretization; price the segment's net at its
+        # netclass clearance (#434 cross-class).
+        seg_expansion_mm = (config.via_size / 2 + seg.width / 2
+                            + config.obstacle_clearance(seg.net_id) + grid_cushion)
         _add_segment_via_obstacle(obstacles, seg, coord, seg_expansion_mm)
         seg_count += 1
     if verbose:
@@ -529,8 +538,10 @@ def _add_pad_via_obstacle(obstacles: GridObstacleMap, pad: Pad,
     gx, gy = coord.to_grid(pad.global_x, pad.global_y)
     half_width = pad.size_x / 2
     half_height = pad.size_y / 2
-    # Add half grid step buffer to account for grid quantization errors
-    clearance = config.clearance if clearance_override is None else clearance_override
+    # Add half grid step buffer to account for grid quantization errors.
+    # Foreign pads are priced at their net's netclass clearance (#434).
+    clearance = (config.obstacle_clearance(pad.net_id)
+                 if clearance_override is None else clearance_override)
     # Honor a per-pad local clearance override (fiducial keep-clear rings etc.)
     # unless an explicit same-net override was supplied.
     if clearance_override is None:
@@ -590,6 +601,89 @@ def _edge_band_grid(gmin_x: int, gmin_y: int, gmax_x: int, gmax_y: int, grid_mar
     gy_range = np.arange(gmin_y - grid_margin, gmax_y + grid_margin + 1, dtype=np.int32)
     gx_grid, gy_grid = np.meshgrid(gx_range, gy_range)
     return gx_grid.ravel(), gy_grid.ravel()
+
+
+def _board_edge_cell_mask_cached(pcb_data, coord: GridCoord, board_outline,
+                                 gmin_x: int, gmin_y: int, gmax_x: int,
+                                 gmax_y: int, grid_margin: int,
+                                 edge_clearance: float):
+    """Memoized _board_edge_cell_mask, cached on pcb_data. The mask is a pure
+    function of the (static) board outline, the grid, and the clearance band,
+    yet every via/routing obstacle-map build re-rasterized it from scratch --
+    171 identical ray-cast + edge-distance passes on scalenode_cm4's polygon
+    outline (~1/3 of the whole route_planes step). Consumers only READ the
+    returned arrays (boolean indexing / column_stack), so sharing is safe."""
+    cache = getattr(pcb_data, '_edge_mask_cache', None)
+    if cache is None:
+        cache = {}
+        pcb_data._edge_mask_cache = cache
+    # Outline identity in the key (same #490 lesson as _cutout_fingerprint):
+    # the cache dict rides along on make_local_window's shallow copies, and
+    # keys must never assume the caller's outline is the whole board's.
+    if not board_outline:
+        _ol_fp = None
+    elif isinstance(board_outline[0][0], (int, float)):
+        _ol_fp = _cutout_fingerprint(board_outline)  # single ring
+    else:
+        _ol_fp = tuple(_cutout_fingerprint(o)        # #304 multi-outline
+                       for o in board_outline)
+    key = (_ol_fp, round(coord.grid_step, 9), gmin_x, gmin_y, gmax_x, gmax_y,
+           grid_margin, round(edge_clearance, 9))
+    hit = cache.get(key)
+    if hit is None:
+        hit = _board_edge_cell_mask(coord, board_outline, gmin_x, gmin_y,
+                                    gmax_x, gmax_y, grid_margin, edge_clearance)
+        cache[key] = hit
+    return hit
+
+
+def _cutout_fingerprint(cutout):
+    """Geometry identity for the cutout-mask cache key. NEVER key by list
+    index: make_local_window FILTERS board_cutouts to the window, reindexing
+    from 0, and the cache dict rides along on the shallow copy -- so window A
+    cached cutout #56's mask under index 0 and window B (near cutout #12) hit
+    that key and stamped the WRONG cutout's band, leaving its real cutout
+    unguarded (crkbd: 105 tap grazes on the 72 key-switch cutouts, #490)."""
+    n = len(cutout)
+    return (n, cutout[0], cutout[n // 2], cutout[-1])
+
+
+def _rasterize_cutout_cached(pcb_data, cutout_idx: int, cutout, coord: GridCoord,
+                             clearance: float, band_only: bool = False,
+                             clip_bounds=None):
+    """Memoized cutout rasterization (same rationale as the edge-mask cache):
+    board cutouts are static, but each obstacle build re-rasterized every one
+    per layer. Returns (cgx, cgy, cmask) with the clearance band applied.
+    Keyed by geometry fingerprint, not list index (see _cutout_fingerprint).
+
+    ``band_only`` (#505) drops the interior term, leaving just the clearance
+    band around the boundary -- for a milled INNER contour, which is a mill line
+    rather than an opening: its inside is still board (it encloses pads by
+    definition), so blocking the interior would blank the plane.
+
+    ``clip_bounds`` restricts rasterization to the map's real extent. A milled
+    inner contour is typically BOARD-SIZED (crkbd's is the whole outline), and
+    without clipping every local-window build would rasterize the entire board
+    -- the exact cost _rasterize_polygon's own docstring warns about. Clipping
+    is a pure optimisation: no cell inside the map changes."""
+    cache = getattr(pcb_data, '_cutout_mask_cache', None)
+    if cache is None:
+        cache = {}
+        pcb_data._cutout_mask_cache = cache
+    key = (_cutout_fingerprint(cutout), round(coord.grid_step, 9),
+           round(clearance, 9), band_only,
+           tuple(round(b, 6) for b in clip_bounds) if clip_bounds else None)
+    hit = cache.get(key)
+    if hit is None:
+        cgx, cgy, c_inside, c_edge = _rasterize_polygon(
+            cutout, coord, clearance, clip_bounds=clip_bounds)
+        if cgx is None:
+            hit = (None, None, None)
+        else:
+            band = c_edge < clearance
+            hit = (cgx, cgy, band if band_only else (c_inside | band))
+        cache[key] = hit
+    return hit
 
 
 def _board_edge_cell_mask(coord: GridCoord, board_outline, gmin_x: int, gmin_y: int,
@@ -666,8 +760,9 @@ def _add_board_edge_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         # via edge clearance. Same vectorized kernels as the signal router's
         # obstacle_map._add_polygon_edge_obstacles - the per-cell Python scan and
         # its band optimization are no longer needed (issue #81).
-        gx_flat, gy_flat, via_mask = _board_edge_cell_mask(
-            coord, board_outline, gmin_x, gmin_y, gmax_x, gmax_y, grid_margin, via_edge_clearance)
+        gx_flat, gy_flat, via_mask = _board_edge_cell_mask_cached(
+            pcb_data, coord, board_outline, gmin_x, gmin_y, gmax_x, gmax_y,
+            grid_margin, via_edge_clearance)
         if via_mask.any():
             obstacles.add_blocked_vias_batch(np.column_stack([gx_flat[via_mask], gy_flat[via_mask]]))
     else:
@@ -679,19 +774,33 @@ def _add_board_edge_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
             obstacles.add_blocked_vias_batch(np.column_stack([gx_flat[mask], gy_flat[mask]]))
 
     # Block vias inside board cutouts
-    for cutout in pcb_data.board_info.board_cutouts:
+    for _ci, cutout in enumerate(pcb_data.board_info.board_cutouts):
         if len(cutout) < 3:
             continue
-        cgx, cgy, c_inside, c_edge = _rasterize_polygon(cutout, coord, via_edge_clearance)
+        cgx, cgy, cmask = _rasterize_cutout_cached(
+            pcb_data, _ci, cutout, coord, via_edge_clearance)
         if cgx is None:
             continue
-        cmask = c_inside | (c_edge < via_edge_clearance)
+        if cmask.any():
+            obstacles.add_blocked_vias_batch(np.column_stack([cgx[cmask], cgy[cmask]]))
+
+    # Milled inner contours (#505): band only -- a mill line, not an opening.
+    for _ei, _ec in enumerate(getattr(pcb_data.board_info,
+                                      'board_edge_contours', None) or []):
+        if len(_ec) < 3:
+            continue
+        cgx, cgy, cmask = _rasterize_cutout_cached(
+            pcb_data, _ei, _ec, coord, via_edge_clearance, band_only=True,
+            clip_bounds=pcb_data.board_info.board_bounds)
+        if cgx is None:
+            continue
         if cmask.any():
             obstacles.add_blocked_vias_batch(np.column_stack([cgx[cmask], cgy[cmask]]))
 
 
 def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
-                                     config: GridRouteConfig, layer_idx: int):
+                                     config: GridRouteConfig, layer_idx: int,
+                                     track_width: Optional[float] = None):
     """Block track routing near board edges on a single layer.
 
     Supports both rectangular and non-rectangular board outlines.
@@ -705,7 +814,12 @@ def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
     min_x, min_y, max_x, max_y = board_bounds
 
     edge_clearance = config.board_edge_clearance if config.board_edge_clearance > 0 else config.clearance
-    track_edge_clearance = edge_clearance + config.track_width / 2
+    # #447: use the width the map is STAMPED at, not always config.track_width.
+    # build_routing_obstacle_map stamps at the per-layer route_track_w (wider than
+    # config.track_width on impedance boards); a config.track_width edge band would
+    # let those wider tracks graze the outline sub-fab. Callers pass the stamp width.
+    _edge_tw = track_width if track_width is not None else config.track_width
+    track_edge_clearance = edge_clearance + _edge_tw / 2
     track_expand = coord.to_grid_dist_safe(track_edge_clearance)
 
     gmin_x, gmin_y = coord.to_grid(min_x, min_y)
@@ -727,8 +841,9 @@ def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
         # Polygon board: rasterize the outline bbox + margin once and block (on this
         # one layer) every cell outside the board plus inside cells within the track
         # edge clearance. Mirrors obstacle_map._add_polygon_edge_obstacles (issue #81).
-        gx_flat, gy_flat, cell_mask = _board_edge_cell_mask(
-            coord, board_outline, gmin_x, gmin_y, gmax_x, gmax_y, grid_margin, track_edge_clearance)
+        gx_flat, gy_flat, cell_mask = _board_edge_cell_mask_cached(
+            pcb_data, coord, board_outline, gmin_x, gmin_y, gmax_x, gmax_y,
+            grid_margin, track_edge_clearance)
         _block_cells_on_layers(obstacles, gx_flat, gy_flat, cell_mask, [layer_idx])
     else:
         # Rectangular board - simple bounding box band, vectorized.
@@ -738,13 +853,25 @@ def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
         _block_cells_on_layers(obstacles, gx_flat, gy_flat, mask, [layer_idx])
 
     # Block tracks inside board cutouts
-    for cutout in pcb_data.board_info.board_cutouts:
+    for _ci, cutout in enumerate(pcb_data.board_info.board_cutouts):
         if len(cutout) < 3:
             continue
-        cgx, cgy, c_inside, c_edge = _rasterize_polygon(cutout, coord, track_edge_clearance)
+        cgx, cgy, cmask = _rasterize_cutout_cached(
+            pcb_data, _ci, cutout, coord, track_edge_clearance)
         if cgx is None:
             continue
-        cmask = c_inside | (c_edge < track_edge_clearance)
+        _block_cells_on_layers(obstacles, cgx, cgy, cmask, [layer_idx])
+
+    # Milled inner contours (#505): band only -- a mill line, not an opening.
+    for _ei, _ec in enumerate(getattr(pcb_data.board_info,
+                                      'board_edge_contours', None) or []):
+        if len(_ec) < 3:
+            continue
+        cgx, cgy, cmask = _rasterize_cutout_cached(
+            pcb_data, _ei, _ec, coord, track_edge_clearance, band_only=True,
+            clip_bounds=pcb_data.board_info.board_bounds)
+        if cgx is None:
+            continue
         _block_cells_on_layers(obstacles, cgx, cgy, cmask, [layer_idx])
 
 
@@ -873,8 +1000,16 @@ def build_routing_obstacle_map(
                     # keep-clear rings carry a clearance far larger than the
                     # board global), else copper routes within the pad's
                     # required clearance (no-net fiducial DRC, upduino #146).
-                    pad_clr = max(config.clearance, getattr(pad, 'local_clearance', 0.0) or 0.0)
-                    margin = route_track_w / 2 + pad_clr
+                    pad_clr = max(config.obstacle_clearance(net_id),  # #434 cross-class
+                                  getattr(pad, 'local_clearance', 0.0) or 0.0)
+                    # Half-grid discretization cushion, matching this file's own
+                    # via/segment stamps and build_base_obstacles (#173): cells
+                    # are blocked by CENTER distance, so without the cushion a
+                    # tap trace through a barely-free cell can sit up to
+                    # ~grid/2 inside the pad's clearance ring (orangecrab
+                    # step11: GND jog 1.5um under the U9 custom pad's ring --
+                    # a real KiCad clearance violation).
+                    margin = route_track_w / 2 + pad_clr + config.grid_step / 2
                     if getattr(pad, 'polygons', None):
                         _block_custom_pad_polys(obstacles, pad, coord, margin,
                                                 via_mode=False, layer_idx=layer_idx)
@@ -915,7 +1050,8 @@ def build_routing_obstacle_map(
         # The exact capsule keep-out measures from the real segment, so the blocked
         # halo matches the true clearance envelope without the grid-rounding that used
         # to leave connection traces within clearance of signal copper (#146/#173).
-        seg_expansion_mm = route_track_w / 2 + seg.width / 2 + config.clearance
+        seg_expansion_mm = (route_track_w / 2 + seg.width / 2
+                            + config.obstacle_clearance(seg.net_id))  # #434
         _add_segment_routing_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_mm)
         seg_count += 1
     if verbose:
@@ -933,7 +1069,8 @@ def build_routing_obstacle_map(
         # so a sub-cell via offset can't let a 0.3 mm plane trace sit inside the
         # clearance envelope (#70). The grid-circle-on-quantised-cell form lost up
         # to ~half a cell on the via side.
-        r_mm = via.size / 2 + route_track_w / 2 + config.clearance + config.grid_step / 2
+        r_mm = (via.size / 2 + route_track_w / 2
+                + config.obstacle_clearance(via.net_id) + config.grid_step / 2)  # #434
         rg = coord.to_grid_dist_safe(r_mm)
         r_sq = r_mm * r_mm
         # Vectorized real-centre disc (bit-identical to the scalar double loop:
@@ -983,7 +1120,8 @@ def build_routing_obstacle_map(
 
     # Add board edge track blocking (supports non-rectangular boards)
     t0 = time.time()
-    _add_board_edge_track_obstacles(obstacles, pcb_data, config, layer_idx)
+    _add_board_edge_track_obstacles(obstacles, pcb_data, config, layer_idx,
+                                    track_width=route_track_w)
     if verbose:
         print(f"  Board edge: {time.time() - t0:.2f}s")
 

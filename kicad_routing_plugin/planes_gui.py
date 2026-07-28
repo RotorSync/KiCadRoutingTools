@@ -15,6 +15,7 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 import routing_defaults as defaults
+from kicad_parser import mm_to_iu
 from .fanout_gui import NetSelectionPanel
 from .gui_utils import StdoutRedirector
 
@@ -247,12 +248,29 @@ class CreatePlanesOptionsPanel(wx.Panel):
 
         # Zone clearance
         grid.Add(wx.StaticText(self, label="Zone Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
+        # Checkbox + spin row, SAME convention as the basic tab's geometry
+        # floors (track width etc.): UNCHECKED = automatic (pour follows the
+        # routed Min Clearance, auto-stepping toward the fab floor when a
+        # dense BGA lattice can't be threaded -- the ottercast sealed-field
+        # fix); CHECKING the box overrides with the typed value.
         r = defaults.PARAM_RANGES['plane_zone_clearance']
+        _zrow = wx.BoxSizer(wx.HORIZONTAL)
+        self.zone_clearance_check = wx.CheckBox(self, label="")
+        self.zone_clearance_check.SetValue(False)
+        self.zone_clearance_check.SetToolTip(
+            "Override the zone (pour) clearance (unchecked = follow Min "
+            "Clearance, auto-reduced to thread dense BGA fields).")
         self.zone_clearance = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
                                                  initial=defaults.PLANE_ZONE_CLEARANCE, inc=r['inc'])
         self.zone_clearance.SetDigits(r['digits'])
         self.zone_clearance.SetToolTip("Clearance from zone fill to other copper")
-        grid.Add(self.zone_clearance, 0, wx.EXPAND)
+        self.zone_clearance.Enable(False)
+        self.zone_clearance_check.Bind(
+            wx.EVT_CHECKBOX,
+            lambda evt: self.zone_clearance.Enable(evt.IsChecked()))
+        _zrow.Add(self.zone_clearance_check, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        _zrow.Add(self.zone_clearance, 1, wx.EXPAND)
+        grid.Add(_zrow, 0, wx.EXPAND)
 
         # Max search radius
         grid.Add(wx.StaticText(self, label="Max Search Radius (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
@@ -342,7 +360,11 @@ class CreatePlanesOptionsPanel(wx.Panel):
 
         gnd_grid.Add(wx.StaticText(self, label="GND Net Name:"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.gnd_via_net = wx.TextCtrl(self, value=defaults.GND_VIA_NET)
-        self.gnd_via_net.SetToolTip("Net name for GND vias (e.g., GND)")
+        self.gnd_via_net.SetToolTip(
+            "Pin GND return vias to this net. Leave EMPTY for auto: each signal "
+            "returns to its own ground domain (plain GND on a board with one "
+            "ground; AGND/DGND matched per signal on a split-ground board). "
+            "Matches the CLI --gnd-via-net default.")
         gnd_grid.Add(self.gnd_via_net, 0, wx.EXPAND)
 
         gnd_sizer.Add(gnd_grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
@@ -361,7 +383,8 @@ class CreatePlanesOptionsPanel(wx.Panel):
         else:
             same_net_clr = self.same_net_pad_clearance.GetValue()
         return {
-            'zone_clearance': self.zone_clearance.GetValue(),
+            'zone_clearance': (self.zone_clearance.GetValue()
+                               if self.zone_clearance_check.GetValue() else None),
             'max_search_radius': self.max_search_radius.GetValue(),
             'rip_blocker_nets': self.rip_blocker_check.GetValue(),            'add_gnd_vias': self.add_gnd_vias_check.GetValue(),
             'gnd_via_distance': self.gnd_via_distance.GetValue(),
@@ -975,10 +998,46 @@ class PlanesTab(wx.Panel):
         # copper cleanup (CLI parity) scopes to them (see _apply_results_to_board).
         self._plane_net_names = list(dict.fromkeys(expanded_nets))
 
+        # #439: build net_clearances from the live board so plane taps/vias and
+        # ripped-net reroutes honor KiCad's cross-class max(A,B) -- mirrors
+        # route_planes.py and the route tab (swig_gui). Passing an explicit map
+        # STOPS the engine's internal always-cap auto-read, so honoring classes
+        # (Min Clearance override unchecked) actually reaches the router.
+        # Checking Min Clearance (== the CLI passing --clearance) caps each class
+        # at min(class, clearance); unchecked routes each class in full. The
+        # clamp/ceiling params are also threaded so create_plane's OWN internal
+        # auto-read (the ripped-net reroute path) honors/caps the same way.
+        _plane_clearance = config.get('clearance', defaults.CLEARANCE)
+        _plane_clamp = config.get('clamp_netclasses', False)
+        _plane_ceiling = _plane_clearance if _plane_clamp else None
+        _plane_net_clearances = {}
+        try:
+            from .fanout_gui import _get_net_classes_from_board
+            from .routing_dialog import _get_netclass_parameters
+            all_net_to_class, all_class_names = _get_net_classes_from_board(self.pcb_data)
+            class_clearance_cache = {}
+            for cname in all_class_names:
+                params = _get_netclass_parameters(cname, self.pcb_data)
+                if params:
+                    class_clearance_cache[cname] = params.get('clearance', _plane_clearance)
+                else:
+                    class_clearance_cache[cname] = _plane_clearance
+            for net in self.pcb_data.nets.values():
+                cname = all_net_to_class.get(net.name, 'Default')
+                _plane_net_clearances[net.net_id] = class_clearance_cache.get(
+                    cname, _plane_clearance)
+            if _plane_clamp:
+                _plane_net_clearances = {nid: min(clr, _plane_clearance)
+                                         for nid, clr in _plane_net_clearances.items()}
+        except Exception as e:
+            print(f"Warning: Could not get net class clearances: {e}")
+            _plane_net_clearances = None
+
         failed_pads = 0
         try:
             (vias, traces, pads_needing, new_vias, new_segments, new_zones,
-             failed_pads, ripped_net_ids) = create_plane(
+             failed_pads, ripped_net_ids, reconnect_swap_data,
+             reconnect_strips) = create_plane(
                 input_file=self.board_filename,
                 output_file="",
                 net_names=expanded_nets,
@@ -987,7 +1046,7 @@ class PlanesTab(wx.Panel):
                 via_drill=config.get('via_drill', defaults.VIA_DRILL),
                 track_width=config.get('track_width', defaults.TRACK_WIDTH),
                 clearance=config.get('clearance', defaults.CLEARANCE),
-                zone_clearance=config.get('zone_clearance', defaults.PLANE_ZONE_CLEARANCE),
+                zone_clearance=config.get('zone_clearance'),
                 min_thickness=config.get('min_thickness', defaults.PLANE_MIN_THICKNESS),
                 grid_step=config.get('grid_step', defaults.GRID_STEP),
                 max_search_radius=config.get('max_search_radius', defaults.PLANE_MAX_SEARCH_RADIUS),
@@ -1042,6 +1101,9 @@ class PlanesTab(wx.Panel):
                 # should skip re-emitting an existing zone. A plan can override
                 # to False (the CLI default) to match a route_planes.py replay.
                 skip_existing_zones=config.get('skip_existing_zones', True),
+                net_clearances=_plane_net_clearances,
+                clamp_netclasses=_plane_clamp,
+                clearance_ceiling=_plane_ceiling,
                 progress_callback=self._make_progress_callback(),
                 cancel_check=lambda: self._cancel_requested,
             )
@@ -1053,6 +1115,11 @@ class PlanesTab(wx.Panel):
             self._new_segments = new_segments
             self._new_zones = new_zones
             self._ripped_net_ids = ripped_net_ids
+            self._reconnect_swap_data = reconnect_swap_data or {}
+            # #508 finding 1: input copper the in-memory reconnect's cleanup
+            # withdrew from pcb_data -- the applier deletes these individually
+            # (the whole-net delete only covers ripped nets).
+            self._strip_segments = reconnect_strips or []
 
             # Add GND return vias if enabled
             if config.get('add_gnd_vias', False):
@@ -1151,6 +1218,34 @@ class PlanesTab(wx.Panel):
         # Nets this repair touched, for the post-apply plane copper cleanup.
         self._plane_net_names = list(dict.fromkeys(net_names))
 
+        # #439: same live-board net_clearances map as the create path, so repair
+        # taps/reconnects honor cross-class max(A,B). Explicit map stops the
+        # engine's internal always-cap auto-read; clamp/ceiling threaded so the
+        # ripped-net reconnect sub-runs honor/cap identically.
+        _plane_clearance = config.get('clearance', defaults.CLEARANCE)
+        _plane_clamp = config.get('clamp_netclasses', False)
+        _plane_ceiling = _plane_clearance if _plane_clamp else None
+        _plane_net_clearances = {}
+        try:
+            from .fanout_gui import _get_net_classes_from_board
+            from .routing_dialog import _get_netclass_parameters
+            all_net_to_class, all_class_names = _get_net_classes_from_board(self.pcb_data)
+            class_clearance_cache = {}
+            for cname in all_class_names:
+                params = _get_netclass_parameters(cname, self.pcb_data)
+                class_clearance_cache[cname] = (params.get('clearance', _plane_clearance)
+                                                if params else _plane_clearance)
+            for net in self.pcb_data.nets.values():
+                cname = all_net_to_class.get(net.name, 'Default')
+                _plane_net_clearances[net.net_id] = class_clearance_cache.get(
+                    cname, _plane_clearance)
+            if _plane_clamp:
+                _plane_net_clearances = {nid: min(clr, _plane_clearance)
+                                         for nid, clr in _plane_net_clearances.items()}
+        except Exception as e:
+            print(f"Warning: Could not get net class clearances: {e}")
+            _plane_net_clearances = None
+
         print(f"Repairing zones: {list(zip(net_names, plane_layers))}")
 
         try:
@@ -1174,12 +1269,17 @@ class PlanesTab(wx.Panel):
                 # clearance) threads but the GUI repair dropped. Config-driven,
                 # defaulting to the same PLANE_* values the CLI uses, so current
                 # behavior is unchanged unless a plan sets them.
-                zone_clearance=config.get('zone_clearance', defaults.PLANE_ZONE_CLEARANCE),
+                zone_clearance=config.get('zone_clearance'),
                 track_via_clearance=config.get('track_via_clearance',
                                                defaults.PLANE_TRACK_VIA_CLEARANCE),
                 reroute_ripped_nets=config.get('reroute_ripped_nets', False),
                 debug_lines=config.get('debug_lines', False),
                 verbose=config.get('verbose', False),
+                # #489 §9: CLI parity for the shared "Add teardrops" checkbox.
+                # This path is in-memory (output_file=""), so the engine's own
+                # file-side pass is a no-op here -- the pcbnew applier after the
+                # apply is what actually lands them (see _apply_repair_results).
+                add_teardrops=config.get('add_teardrops', False),
                 via_size=config.get('via_size', defaults.VIA_SIZE),
                 via_drill=config.get('via_drill', defaults.VIA_DRILL),
                 grid_step=config.get('grid_step', defaults.GRID_STEP),
@@ -1212,6 +1312,9 @@ class PlanesTab(wx.Panel):
                 dry_run=True,  # Don't write to file, apply via pcbnew
                 pcb_data=self.pcb_data,
                 return_results=True,
+                net_clearances=_plane_net_clearances,
+                clamp_netclasses=_plane_clamp,
+                clearance_ceiling=_plane_ceiling,
                 progress_callback=self._make_progress_callback(),
                 cancel_check=lambda: self._cancel_requested,
             )
@@ -1324,6 +1427,12 @@ class PlanesTab(wx.Panel):
                 print(f"Warning: failed to build plane suggestions: {e}")
 
         msg += "\nUse Edit -> Undo to revert changes."
+        # Routing movie (#506): snapshot the board this step just produced,
+        # BEFORE the completion popup blocks on the user. No-op unless the
+        # Advanced tab's "Make routing movie" box is ticked.
+        from .movie_recorder import record_movie_step
+        record_movie_step(self, 'planes')
+
         if getattr(getattr(self, 'GetTopLevelParent', lambda: self)(), '_suppress_completion_popups', False):
             print(msg)  # unattended plan run: no per-step OK dialog
         else:
@@ -1361,11 +1470,18 @@ class PlanesTab(wx.Panel):
             from routing_config import GridRouteConfig
             from kicad_ipc_adapter import apply_oracle_reconnect
             cfg_src = getattr(self, '_plane_drc_config', {}) or {}
+            # The PLANE nets only -- exactly the `net_names` the CLI hands
+            # oracle_reconnect (route_disconnected_planes.main). #493: this used
+            # to append cfg_src['power_nets'] as well, but power_nets is a track
+            # WIDTH assignment for the repair router, not a set of nets to
+            # reconnect. Feeding them to the oracle made the GUI hunt "missing
+            # links" on nets the CLI never examines: on nano_eeprom_prog it
+            # reported 4 missing links on +5V, failed to clear them across all 3
+            # rounds, and routed 11 of them anyway -- 30 segments of +5V copper
+            # the CLI board does not have, under an otherwise green grade.
             nets = []
             for a in (cfg_src.get('assignments') or []):
                 nets.extend(a[0])
-            for n in (cfg_src.get('power_nets') or []):
-                nets.append(n)
             if not nets:
                 return
             # #338 (CLI parity with route_disconnected_planes main): resolve
@@ -1417,7 +1533,8 @@ class PlanesTab(wx.Panel):
 
             # Snapshot-save + oracle-route + apply the copper all happen inside
             # the IPC adapter (the only module that touches kipy); here we just
-            # build the config, net list, and progress callback.
+            # build the config, net list, and progress callback. The adapter
+            # also stages the real project's netclasses onto its snapshot (#490).
             orc = apply_oracle_reconnect(
                 board, nets=nets, config=ocfg, pcb_data=self.pcb_data,
                 track_via_clearance=cfg_src.get(
@@ -1476,6 +1593,10 @@ class PlanesTab(wx.Panel):
                 # (blocking) tracks/vias before adding the re-routed copper in
                 # the same commit, or the repair trace would short them (#112).
                 ripped_net_ids=getattr(self, '_ripped_net_ids', None),
+                # #484 H3: the in-memory reconnect's target/pad swaps and
+                # segment layer mods can touch NON-ripped nets' copper, which
+                # the whole-net delete above does not cover.
+                swap_data=getattr(self, '_reconnect_swap_data', None),
                 message="KiCadRoutingTools: planes",
             )
         except Exception as e:
@@ -1492,6 +1613,13 @@ class PlanesTab(wx.Panel):
         print(f"Added to board: {counts['zones']} zones, "
               f"{counts['vias']} vias, {counts['tracks']} tracks "
               f"({counts['zones_skipped']} zones skipped as duplicates)")
+        if counts.get('swapped_items'):
+            print(f"Applied {counts['swapped_items']} reconnect swap/"
+                  f"modification item(s) to the live board (#484)")
+        # One-shot: the repair path never assigns this, so a create-then-repair
+        # sequence would otherwise re-apply the create run's swaps (#508
+        # finding 19's shape).
+        self._reconnect_swap_data = {}
 
         # KiCad fills zones server-side on commit; no separate ZoneFiller
         # needed under IPC. If a fill is missing, the user can press B in

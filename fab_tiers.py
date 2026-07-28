@@ -30,7 +30,7 @@ import re
 
 # Flat floor keys every tier dict carries. Also the set an override file may set.
 FLOOR_KEYS = ('clearance', 'track_width', 'via_diameter', 'via_drill',
-              'hole_to_hole', 'pad_hole_to_hole', 'annular')
+              'hole_to_hole', 'pad_hole_to_hole', 'annular', 'board_edge')
 
 # _FAB_FLOORS[layer_count][tier] -> flat floor dict. Layer count is bucketed to
 # 2 (1-2 layer) vs 4 (multilayer). 'standard' preserves the historical floors so a
@@ -43,21 +43,21 @@ _FAB_FLOORS = {
         'standard': {'clearance': 0.127, 'track_width': 0.127,
                      'via_diameter': 0.45, 'via_drill': 0.20,
                      'hole_to_hole': 0.20, 'pad_hole_to_hole': 0.45,
-                     'annular': 0.25},
+                     'annular': 0.25, 'board_edge': 0.20},
         'advanced': {'clearance': 0.10, 'track_width': 0.10,
                      'via_diameter': 0.25, 'via_drill': 0.15,
                      'hole_to_hole': 0.20, 'pad_hole_to_hole': 0.45,
-                     'annular': 0.18},
+                     'annular': 0.18, 'board_edge': 0.20},
     },
     4: {
         'standard': {'clearance': 0.10, 'track_width': 0.0889,
                      'via_diameter': 0.45, 'via_drill': 0.20,
                      'hole_to_hole': 0.20, 'pad_hole_to_hole': 0.45,
-                     'annular': 0.20},
+                     'annular': 0.20, 'board_edge': 0.20},
         'advanced': {'clearance': 0.09, 'track_width': 0.0762,
                      'via_diameter': 0.25, 'via_drill': 0.15,
                      'hole_to_hole': 0.20, 'pad_hole_to_hole': 0.45,
-                     'annular': 0.15},
+                     'annular': 0.15, 'board_edge': 0.20},
     },
 }
 
@@ -166,6 +166,14 @@ _PARAM_FLOOR_KEY = {
     'via_drill': 'via_drill',
     'hole_to_hole_clearance': 'hole_to_hole',
     'hole_to_hole': 'hole_to_hole',
+    # Copper-to-board-edge: JLC routed-outline min 0.2 mm. A board declaring a
+    # smaller (or 0.0) min_copper_edge_clearance is pinned up so routed copper does
+    # not run to the milled edge (#439 follow-up).
+    'board_edge_clearance': 'board_edge',
+    'board_edge': 'board_edge',
+    # The diff-pair P/N gap is copper-to-copper spacing, so it floors at the same
+    # copper-clearance minimum (parity with the GUI, which floors it at 'clearance').
+    'diff_pair_gap': 'clearance',
 }
 
 
@@ -202,7 +210,7 @@ def enforce_fab_floors(copper_layer_count, tier=None, overrides=None, **params):
     viols = check_param_floors(copper_layer_count, tier, overrides, **params)
     pinned = {}
     for name, val, floor in viols:
-        print(f"  ⚠ --{name.replace('_', '-')} {val} is below the fab floor {floor} "
+        print(f"  WARNING: --{name.replace('_', '-')} {val} is below the fab floor {floor} "
               f"for the selected --fab-tier; pinning up to {floor} (the fab can't "
               f"make it smaller). Pass --fab-overrides to declare a smaller fab "
               f"capability, or raise the value to silence this.")
@@ -229,7 +237,7 @@ def warn_fab_escalation(context):
     if not context or context in _escalation_warned:
         return
     _escalation_warned.add(context)
-    print(f"  ⚠ {context}: escalated standard→advanced fab floor "
+    print(f"  WARNING: {context}: escalated standard->advanced fab floor "
           f"(0.25/0.15 via etc., more costly to fab); pass --fab-tier advanced to "
           f"silence, or --fab-overrides to pin your own floor (forbids escalation)")
 

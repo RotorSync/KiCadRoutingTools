@@ -289,12 +289,50 @@ def read_project_edge_clearance(pcb_path: str):
     return 0.0
 
 
-def effective_board_edge_clearance(pcb_path: str, cli_value: float) -> float:
-    """The copper-to-Edge.Cuts clearance a route/grade step must honor
-    (issue #338): the LARGER of the board's own min_copper_edge_clearance
-    (KiCad enforces it) and the explicit --board-edge-clearance. 0.0 = neither
-    set (callers keep their track-clearance fallback)."""
-    return max(cli_value or 0.0, read_project_edge_clearance(pcb_path))
+def fab_edge_floor(pcb_path=None) -> float:
+    """The fab-process copper-to-Edge.Cuts minimum (JLC routed-outline 0.20 mm)
+    for the active fab tier -- the hard lower bound below which routed copper
+    runs into the milled board edge. Independent of what the board declares: a
+    board whose min_copper_edge_clearance is below this (or 0) is pinned UP to it
+    for both routing and grading (#441). Copper-to-edge is a hard fab defect, so
+    -- unlike the aspirational copper netclasses (#439), which clamp DOWN -- the
+    edge floor is only ever raised, never relaxed below the fab minimum. Returns
+    0.0 only if the active fab tier explicitly sets board_edge to 0 (a custom
+    tier that genuinely allows edge copper -- via ``--fab-overrides board_edge=0``,
+    the way to disable the pin for a board with intentional edge copper)."""
+    try:
+        from fab_tiers import fab_floor_min
+        ncu = 2
+        if pcb_path:
+            try:
+                from list_nets import _count_copper_layers
+                with open(pcb_path, encoding='utf-8') as f:
+                    ncu = _count_copper_layers(f.read()) or 2
+            except Exception:
+                pass
+        return float(fab_floor_min(ncu).get('board_edge') or 0.0)
+    except Exception:
+        # fab_tiers is the single source of the copper-to-edge floor; if it cannot
+        # be imported (broken install) degrade to no pin rather than duplicate the
+        # magic value here.
+        return 0.0
+
+
+def effective_board_edge_clearance(pcb_path: str, cli_value: float,
+                                   fab_floor: bool = True) -> float:
+    """The copper-to-Edge.Cuts clearance a route/grade step must honor.
+
+    An EXPLICIT ``--board-edge-clearance`` (cli_value > 0) OVERRIDES the board's
+    own min_copper_edge_clearance -- a CLI value should be able to relax an
+    aspirational board rule the way every other routing param does (a 0.5-declaring
+    board routed at --board-edge-clearance 0.2, parity with the GUI's override +
+    Obey-DRC-off path), floored ONLY at the fab copper-to-edge minimum. When
+    OMITTED, the board's own rule is used (issue #338, KiCad enforces it). Either
+    way it is pinned UP to the fab floor (#441) unless ``fab_floor`` is False, so a
+    board declaring a sub-fab (or 0) edge rule is never routed/graded with copper
+    against the milled edge (80/184 corpus boards declare < 0.20 mm)."""
+    base = cli_value if (cli_value and cli_value > 0) else read_project_edge_clearance(pcb_path)
+    return max(base, fab_edge_floor(pcb_path)) if fab_floor else base
 
 
 def scan_board_minima(pcb_path: str):
@@ -345,7 +383,7 @@ def scan_board_minima(pcb_path: str):
 
 def compute_targets(clearance=None, hole_clearance=None, hole_to_hole=None,
                     edge_clearance=None, track_width=None, via_diameter=None,
-                    via_drill=None, minima=None):
+                    via_drill=None, minima=None, fab_edge=None):
     """Map KiCad rule keys -> target floor (mm) from the routing parameters.
     Each value, when given, becomes a floor; sizes fall back to the board's
     smallest such object (``minima`` from :func:`scan_board_minima`) when the
@@ -364,10 +402,15 @@ def compute_targets(clearance=None, hole_clearance=None, hole_to_hole=None,
     # "lower the rule to zero" -- writing 0.0 erased the board's own
     # min_copper_edge_clearance so neither KiCad nor check_drc could grade the
     # rule the design demands (issue #338, core1106_cam's 0.5 -> 0.0 clobber).
-    # The routers now route to max(--board-edge-clearance, the board rule), so
-    # a real enforced value is always >= the rule and only-lower keeps it.
-    if edge_clearance:
-        targets["min_copper_edge_clearance"] = edge_clearance
+    # The routers route to max(--board-edge-clearance, the board rule), so a real
+    # enforced value is always >= the rule. Unlike the other (aspirational) floors
+    # this one is PINNED to the fab copper-to-edge minimum (#441): copper closer
+    # to the milled edge than the fab can make is a hard defect, so the recorded
+    # floor is max(the routed edge clearance, fab_edge) and apply_targets is
+    # allowed to RAISE it above a sub-fab board rule (never lower it below fab).
+    edge_target = max(edge_clearance or 0.0, fab_edge or 0.0)
+    if edge_target > 0:
+        targets["min_copper_edge_clearance"] = round(edge_target, 6)
 
     # Size minima: take the SMALLER of the routing param and the smallest such
     # object already on the board. A multi-step chain leaves thinner tracks /
@@ -381,6 +424,22 @@ def compute_targets(clearance=None, hole_clearance=None, hole_to_hole=None,
     tw = _floor(track_width, minima.get("min_track_width"))
     if tw is not None:
         targets["min_track_width"] = tw
+        # Min copper WEB (#505). KiCad's connection_width rule grades the
+        # narrowest copper joining two areas, so a web floor left ABOVE the
+        # track floor condemns copper we deliberately routed: a track IS the
+        # web wherever it is the sole connection. Left unclamped this was the
+        # single largest DRC number in the corpus and none of it was real --
+        # ulx5m_gatemate's stock 0.127 web rule against its 0.0889 routed floor
+        # flagged 4749 items (13495 of its 14515 tracks sit under 0.127);
+        # clamped to the routed floor the same board grades 2, with every other
+        # DRC count unchanged. Same principle as the clearance ceiling (#439):
+        # grade what was actually built, not the stock aspiration.
+        # ONLY-LOWER, like every floor here (apply_* enforces it), and never
+        # TURNS THE CHECKER ON: a board with no min_connection (or 0) has
+        # KiCad's connection_width check disabled, and enabling it would invent
+        # a constraint the author never asked for. See the guard in
+        # apply_targets_to_project.
+        targets["min_connection"] = tw
     vd = _floor(via_diameter, minima.get("min_via_diameter"))
     if vd is not None:
         targets["min_via_diameter"] = vd
@@ -417,7 +476,7 @@ def severity_plan(keep_courtyards=False, keep_mask=False, keep_footprint=False,
 def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
                              ignore_current_warnings=False,
                              diff_pair_gap=None, diff_pair_width=None,
-                             clamp_nondefault_netclasses=True):
+                             clamp_nondefault_netclasses=False):
     """Apply the floors + severity plan to a parsed ``.kicad_pro`` dict, only
     ever loosening (lowering a constraint / lowering a severity rank), never
     tightening. Returns a list of human-readable change strings.
@@ -430,14 +489,20 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
     minimum -- they are draw defaults -- so lowering them cannot create a new
     violation, consistent with the only-loosen guarantee.
 
-    ``clamp_nondefault_netclasses`` (default True, #295 addendum) clamps the
-    NON-Default net classes' clearance/track/via floors down to the routed values
-    too. Disable it (CLI ``--no-clamp-netclasses``) for a FINAL impedance-
-    controlled board, where the impedance classes' 0.125 mm clearance and wide
-    track/via ARE the spec and must survive -- clamping them would erase the
-    impedance intent (and silence genuine impedance-clearance shortfalls). Leave
-    it ON for mid-chain / mixed-clearance boards so KiCad's per-net-class DRC does
-    not storm the copper legitimately routed at the smaller run clearance."""
+    ``clamp_nondefault_netclasses`` clamps the NON-Default net classes'
+    clearance/track/via floors DOWN to the routed values. The real entry points
+    (``fix_project_for_output`` and the CLI) default it ON (#439) because stock net
+    classes are largely ASPIRATIONAL: corpus and real boards route below them (even
+    the human-routed references violate their own class -- zynq has 499 clearance
+    violations at its 0.2 class, routed ~0.1), so keeping the stock class in the
+    output manufactures phantom sub-class DRC on copper that was routed correctly at
+    the fab floor. The router honors min(class, --clearance) in-run and the writeback
+    records that same floor, so KiCad grades exactly what was routed. Passing False
+    (the caller routed without a --clearance ceiling, i.e. it HONORED the classes)
+    PRESERVES the original class spec. The Default-class /
+    rules.min_clearance write below is UNRELATED to this flag and stays: it records
+    the actual ROUTING clearance (the router's config.clearance), only-lowering so a
+    board routed tighter than its stock Default class does not storm."""
     EPS = 1e-9
     ds = proj.setdefault("board", {}).setdefault("design_settings", {})
     rules = ds.setdefault("rules", {})
@@ -449,6 +514,25 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
             continue
         target = round(float(target), 6)
         cur = rules.get(key)
+        # min_copper_edge_clearance is the one floor that may RAISE (#441): it is
+        # pinned to max(board rule, fab copper-to-edge minimum) because sub-fab
+        # edge copper is a hard defect, so a board declaring a tiny/zero edge rule
+        # is lifted to the fab floor rather than kept. `target` already carries
+        # max(routed edge, fab_edge); take max with cur so a board rule ABOVE the
+        # fab floor (e.g. 0.5) is preserved.
+        # Min copper WEB (#505): only ever LOWER an existing, ENABLED rule.
+        # KiCad's connection_width checker is off at 0 (and absent means 0), so
+        # writing a value where the board had none would switch on a check the
+        # author never enabled -- the opposite of this function's only-loosen
+        # guarantee, even though the number itself is a loosening.
+        if key == "min_connection" and not cur:
+            continue
+        if key == "min_copper_edge_clearance":
+            new = max(cur or 0.0, target)
+            if cur is None or abs(new - cur) > EPS:
+                changes.append(f"rules.{key}: {cur} -> {new} mm (fab-edge pin)")
+                rules[key] = new
+            continue
         if cur is None or cur > target + EPS:        # lower only; never raise
             changes.append(f"rules.{key}: {cur} -> {target} mm")
             rules[key] = target
@@ -481,17 +565,12 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
             if cur is None or cur > target + EPS:
                 changes.append(f"net_class[Default].{field}: {cur} -> {target} mm")
                 default_cls[field] = target
-    # NON-Default classes too (#295 follow-up): the original design's classes
-    # (e.g. kuchen's HDMI/USB at 0.125mm) survive into the routed board's
-    # project, and KiCad enforces THEIR clearance on their nets -- copper we
-    # legitimately routed at the (smaller) run clearance then storms with
-    # netclass-clearance violations the moment the user opens the board. The
-    # router does not read per-class clearances from the project, so after
-    # routing the class floors must be clamped down to what was actually
-    # routed (only-lower, same guarantee as everything else here). Via sizes /
-    # diff-pair geometry are draw defaults, clamped for planner consistency.
-    # Skipped when clamp_nondefault_netclasses is False (--no-clamp-netclasses):
-    # a final impedance board keeps its impedance classes as the enforced spec.
+    # NON-Default classes (#295 follow-up; ON by default since #439): stock net
+    # classes are largely aspirational, so copper routed at the real fab floor
+    # (min(class, --clearance)) would storm KiCad's per-net-class DRC if the output
+    # kept the stock class. Clamp each non-Default class DOWN to the routed values
+    # so grading matches the copper. clamp=False (the caller routed WITHOUT a
+    # --clearance ceiling, honoring the classes) preserves the original class rules.
     if clamp_nondefault_netclasses:
         for cls in classes:
             if cls is default_cls or not isinstance(cls, dict):
@@ -540,12 +619,6 @@ def add_drc_fix_args(parser, *, include_no_fix=True):
     g.add_argument("--keep-thermal", action="store_true",
                    help="When fixing DRC settings, leave thermal-relief severity (starved_thermal) "
                         "untouched instead of demoting it to a warning.")
-    g.add_argument("--no-clamp-netclasses", action="store_true",
-                   help="Do not clamp NON-Default net classes' clearance/track/via floors down to "
-                        "the routed values (issue #295). By default every non-Default class "
-                        "(impedance, power, etc.) IS clamped so KiCad's per-net-class DRC does not "
-                        "flag copper routed at the smaller run clearance. Pass this for a FINAL "
-                        "board whose net-class rules ARE the spec and must survive.")
     g.add_argument("--enable-used-layers", action="store_true",
                    help="Add any layer the board uses but that is missing from its (layers) table "
                         "back into the .kicad_pcb, so KiCad shows it as selectable and stops "
@@ -558,8 +631,40 @@ def drc_fix_kwargs(args):
     """Map args parsed via :func:`add_drc_fix_args` to :func:`fix_project_for_output`
     keyword arguments (the shared DRC-fix flags only -- per-script routing floors
     like clearance/track/via are passed separately by each caller)."""
+    # #439: clamp NON-Default classes to the routed clearance whenever the caller
+    # routed with an explicit --clearance ceiling (args._clamp_netclasses, set by
+    # route.py / route_diff.py main); when --clearance was omitted the classes were
+    # honored in full, so the writeback preserves them. Callers that do not set the
+    # attribute (fanout, standalone runs) clamp by default -- the safe choice, since
+    # clamping only ever lowers the output class to the copper actually routed.
+    clamp = getattr(args, "_clamp_netclasses", True)
     return dict(keep_thermal=args.keep_thermal, enable_layers=args.enable_used_layers,
-                clamp_nondefault_netclasses=not args.no_clamp_netclasses)
+                clamp_nondefault_netclasses=clamp)
+
+
+def warn_if_missing_project_floor(input_pcb) -> bool:
+    """Warn loudly when an input board arrives WITHOUT its sibling ``.kicad_pro`` (#441).
+
+    The ``.kicad_pro`` carries the DRC floor -- the Default-netclass clearance/width the
+    board was actually routed to. A bare ``cp board.kicad_pcb copy.kicad_pcb`` that omits
+    the sibling ``.kicad_pro`` strands that floor: the next routing step reads NO project,
+    resolves its floor from the STOCK (looser) netclass, and its writeback then stamps that
+    looser floor over copper routed tighter -- so KiCad grades correct sub-floor copper as
+    a clearance violation (icepi_zero: a dropped 0.09 floor became 0.10 -> 160 phantom
+    grazes). Keep the ``.kicad_pro`` with the board (copy both, or use ``copy_board.py``).
+
+    Returns True iff the project is missing (so callers may also record it in a summary)."""
+    if not input_pcb:
+        return False
+    proj = os.path.splitext(input_pcb)[0] + ".kicad_pro"
+    if os.path.isfile(proj):
+        return False
+    print(f"WARNING: input board '{os.path.basename(input_pcb)}' has NO sibling "
+          f".kicad_pro -- its DRC floor is unknown. This routing step will resolve the "
+          f"floor from the STOCK netclass, which can be LOOSER than the copper already on "
+          f"the board and make KiCad report phantom sub-clearance DRC (#441). If the board "
+          f"was copied/renamed, copy its .kicad_pro too (or use copy_board.py).")
+    return True
 
 
 def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
@@ -568,8 +673,8 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
                            diff_pair_gap=None, diff_pair_width=None,
                            keep_courtyards=False, keep_mask=False, keep_footprint=False,
                            keep_thermal=False, enable_layers=False,
-                           clamp_nondefault_netclasses=True,
-                           extra_ignore=(), verbose=True):
+                           clamp_nondefault_netclasses=True,  # #439: clamp by default
+                           extra_ignore=(), verbose=True, minima=None):
     """Make the DRC settings of a freshly written board consistent with the
     routing floors (issue #160 auto-invoke). Ensures ``output_pcb`` has a sibling
     ``.kicad_pro`` -- copying the input board's project if the output is a new
@@ -602,12 +707,21 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
 
     with open(out_pro) as f:
         proj = json.load(f)
-    minima = scan_board_minima(output_pcb)
+    # `minima` lets a caller that ALREADY has the board in memory supply these
+    # instead of us re-parsing the file. The GUI does: scan_board_minima ->
+    # parse_kicad_pcb allocates thousands of GC-tracked objects, and the GUI
+    # calls this from inside a wx timer dispatch where that allocation burst
+    # triggers a mid-dispatch collection that segfaults (see
+    # gui_utils.board_minima_from_live). CLI callers pass nothing and scan as
+    # before, so file-to-file behaviour is unchanged.
+    if minima is None:
+        minima = scan_board_minima(output_pcb)
     clr = clearance if clearance is not None else project_copper_clearance(proj)
     targets = compute_targets(clearance=clr, hole_clearance=hole_clearance,
                               hole_to_hole=hole_to_hole, edge_clearance=edge_clearance,
                               track_width=track_width, via_diameter=via_diameter,
-                              via_drill=via_drill, minima=minima)
+                              via_drill=via_drill, minima=minima,
+                              fab_edge=fab_edge_floor(output_pcb))
     plan = severity_plan(keep_courtyards=keep_courtyards, keep_mask=keep_mask,
                          keep_footprint=keep_footprint, keep_thermal=keep_thermal,
                          extra_ignore=extra_ignore)
@@ -630,18 +744,19 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
 
 def apply_targets_to_board(board, targets: dict, sev_plan: dict,
                            diff_pair_gap=None, diff_pair_width=None,
-                           clamp_nondefault_netclasses=True):
+                           clamp_nondefault_netclasses=False):
     """GUI path: apply the same floors + severity plan to a live pcbnew BOARD
     via BOARD_DESIGN_SETTINGS (issue #160). Best-effort and defensive -- the
     pcbnew API field/severity names vary across KiCad versions, so each step is
     guarded. Returns a list of change strings. Caller should mark the board
     modified so the user's next save persists the change.
 
-    ``clamp_nondefault_netclasses`` (default True, #295 parity with
-    apply_targets_to_project) also clamps the NON-Default net classes' floors down
-    to the routed values; disable it (GUI "Keep impedance net-class clearances" /
-    CLI ``--no-clamp-netclasses``) for a final impedance board whose class spec
-    must survive."""
+    ``clamp_nondefault_netclasses`` (parity with apply_targets_to_project) clamps
+    the NON-Default net classes' floors down to the routed values. Driven by whether
+    routing used a --clearance ceiling (#439: stock classes are aspirational; keeping
+    them manufactures phantom sub-class DRC). Pass False (routing HONORED the classes
+    -- no --clearance / GUI Min-Clearance override unchecked) to preserve the original
+    class spec, for a genuine impedance board whose classes are met."""
     import pcbnew
     MM = 1e6  # mm -> internal nm
     EPS = 1.0  # nm
@@ -657,13 +772,35 @@ def apply_targets_to_board(board, targets: dict, sev_plan: dict,
         "min_hole_to_hole": "m_HoleToHoleMin",
         "min_copper_edge_clearance": "m_CopperEdgeClearance",
         "min_hole_clearance": "m_HoleClearance",
+        # #439 parity with apply_targets_to_project (annular is ignore-severity by
+        # default, so usually moot, but the CLI lowers it -- keep the two paths
+        # writing the same rule set). Guarded by hasattr below for older KiCad.
+        "min_via_annular_width": "m_ViasMinAnnularWidth",
+        # #505 min copper web. Name varies by KiCad version; the hasattr guard
+        # below skips it where absent, and the `not cur` guard keeps a disabled
+        # checker disabled (parity with apply_targets_to_project).
+        "min_connection": "m_MinConn",
     }
     for key, target in targets.items():
         a = attr.get(key)
         if a is None or target is None or not hasattr(bds, a):
             continue
+        if key == "min_connection" and not getattr(bds, a, 0):
+            continue    # checker was OFF -- do not switch it on
         tgt_nm = round(float(target) * MM)
         cur = getattr(bds, a)
+        # Edge clearance may RAISE to the fab copper-to-edge floor (#441); every
+        # other rule is only-lower. `target` already carries max(routed, fab_edge);
+        # max with cur preserves a board rule above the fab floor.
+        if key == "min_copper_edge_clearance":
+            new_nm = max(cur or 0, tgt_nm)
+            if cur is None or abs(new_nm - cur) > EPS:
+                try:
+                    setattr(bds, a, new_nm)
+                    changes.append(f"{a}: {(cur or 0)/MM:.4g} -> {new_nm/MM:.4g} mm (fab-edge pin)")
+                except Exception:
+                    pass
+            continue
         if cur is None or cur > tgt_nm + EPS:
             try:
                 setattr(bds, a, tgt_nm)
@@ -723,7 +860,12 @@ def apply_targets_to_board(board, targets: dict, sev_plan: dict,
         nd_map = {"SetClearance": targets.get("min_clearance"),
                   "SetTrackWidth": targets.get("min_track_width"),
                   "SetViaDiameter": targets.get("min_via_diameter"),
-                  "SetViaDrill": targets.get("min_through_hole_diameter")}
+                  "SetViaDrill": targets.get("min_through_hole_diameter"),
+                  # #439 parity with apply_targets_to_project's non-Default clamp:
+                  # lower the diff-pair draw defaults on non-Default classes too.
+                  "SetDiffPairGap": diff_pair_gap,
+                  "SetDiffPairViaGap": diff_pair_gap,
+                  "SetDiffPairWidth": diff_pair_width}
         if any(v is not None for v in nd_map.values()):
             other = {}
             ns2 = getattr(bds, "m_NetSettings", None)
@@ -887,7 +1029,7 @@ def main():
         track_width=args.track_width if args.track_width is not None else _fab['track_width'],
         via_diameter=args.via_size if args.via_size is not None else _fab['via_diameter'],
         via_drill=args.via_drill if args.via_drill is not None else _fab['via_drill'],
-        minima=minima)
+        minima=minima, fab_edge=fab_edge_floor(pcb_path))
     plan = severity_plan(keep_courtyards=args.keep_courtyards, keep_mask=args.keep_mask,
                          keep_footprint=args.keep_footprint, keep_thermal=args.keep_thermal,
                          extra_ignore=args.ignore)
@@ -895,7 +1037,7 @@ def main():
                                        ignore_current_warnings=args.ignore_warnings,
                                        diff_pair_gap=args.diff_pair_gap,
                                        diff_pair_width=args.diff_pair_width,
-                                       clamp_nondefault_netclasses=not args.no_clamp_netclasses)
+                                       clamp_nondefault_netclasses=True)  # #439: clamp to the routed floor
 
     if not changes:
         print(f"{pro}: already consistent, nothing to change.")

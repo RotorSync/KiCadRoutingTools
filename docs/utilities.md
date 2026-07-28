@@ -361,11 +361,14 @@ Options:
 
 ### Design rules
 
-The routers do **not** read the board's net classes — they fall back to a
-generic `--clearance 0.25` / default track width, which is often wider than the
-board's own rule and can box pads in (nets then fail with "no rippable
-blockers"). `--design-rules` reads the real rules so you can pass them
-explicitly:
+The routers **auto-read** the board's net classes from the sibling `.kicad_pro`
+and honor KiCad's cross-class `max(classA, classB)` spacing. `--clearance` is a
+**ceiling**: given, every class (Default included) is capped at `min(class,
+--clearance)`; omitted, each net routes at its own net-class clearance (base = the
+board's Default class), and `--hole-to-hole-clearance` / `--board-edge-clearance`
+default to the board's own `min_hole_to_hole` / `min_copper_edge_clearance`
+constraint (#439). They do **not** infer per-net track/via nominals on their own,
+so `--design-rules` reads the real rules for you to pass explicitly:
 
 ```bash
 python list_nets.py board.kicad_pcb --design-rules
@@ -517,11 +520,17 @@ Options:
   --grid-step         Routing grid step in mm (default: 0.1). Escape stub ends
                       are snapped to this grid so the router gets on-grid
                       terminals; MATCH the --grid-step you pass to route.py
-  --escape-method     auto (default), channel, or underpad. "channel" is the
-                      45-stub + channel router; "underpad" vias each ball in
-                      its pad and routes under the pad field (dense arrays);
-                      "auto" runs channel and, if it drops any ball, retries
-                      with underpad and keeps whichever escapes more
+  --escape-method     auto (default), channel, underpad, or dogbone.
+                      "channel" is the 45-stub + channel router; "underpad"
+                      vias each ball in its pad and routes under the pad
+                      field (dense arrays), working outside-in: outer rings
+                      first escape as deep as possible on the pad layer, and
+                      only the balls that cannot reach the edge via out;
+                      "dogbone" places the classic offset via on the channel
+                      diagonal beside each ball (opt-in, human-style; never
+                      chosen by auto); "auto" runs channel and, if it drops
+                      any ball, retries with underpad and keeps whichever
+                      escapes more
   --layer-costs       One value per --layers entry, matching route.py semantics:
                       negative = forbidden (no escape copper there, e.g. a
                       soon-to-be-plane inner layer), otherwise a weight in
@@ -585,7 +594,9 @@ Options:
                       terminals; MATCH the --grid-step you pass to route.py
   --escape-method     stub (default) = surface 45-degree fan; underpad = drop a
                       through-via just past each pad and escape on an inner layer
-                      (issue #164), for crowded fine-pitch edges
+                      (issue #164), for crowded fine-pitch edges. With --nets,
+                      underpad also escapes interior (under-body) pads; unscoped
+                      runs never via-drop the exposed/thermal pad (issue #410)
   --via-size          Underpad escape via outer diameter in mm (default: 0.45)
   --via-drill         Underpad escape via drill diameter in mm (default: 0.25)
   --board-edge-clearance  Min clearance from stub/via copper to the Edge.Cuts
@@ -1000,6 +1011,14 @@ file with no project yet, they copy the input board's `.kicad_pro` (or seed a
 complete one when the input has none). Pass `--no-fix-drc-settings` to skip it, or
 `--keep-thermal` to leave `starved_thermal` at its original severity instead of
 demoting it to a warning (all four routing CLIs accept both flags).
+
+When routing used an explicit `--clearance` ceiling, the writeback also **clamps**
+each NON-Default net class' clearance/track/via floor DOWN to the routed value
+(#439), so KiCad grades the copper at what was actually routed rather than at the
+(usually aspirational) stock class. When `--clearance` was omitted the classes are
+preserved (each net routed at its own class). There is no separate flag — the
+`--clearance` ceiling is the switch; in the GUI, checking the **Min Clearance**
+override box is the equivalent (unchecked = honor classes, checked = clamp).
 
 The **GUI plugin** does the equivalent on the live board via the pcbnew API
 (`BOARD_DESIGN_SETTINGS` + the Default net class + severities) after routing, and

@@ -17,6 +17,59 @@ from routing_constants import FORBIDDEN_LAYER_COST
 # default grid changes, so the two are intentionally separate constants.
 REFERENCE_GRID_STEP = 0.1  # mm
 
+# Lattice geometry for the #505 margin correction. The A* margin is measured
+# from the outermost BLOCKED CELL, so it can only ever "act" at a distance that
+# actually occurs between two lattice cells -- sqrt(i^2+j^2). A margin landing
+# between two such distances rejects exactly what the lower one rejects, so the
+# margin must be SNAPPED UP to a real lattice distance to have any effect.
+_SQRT2 = math.sqrt(2.0)
+# Only the {n, sqrt(n^2+1)} family can ever be the NEAREST blocked cell: the
+# blocked region is convex-ish around the obstacle, so if a cell two rows off
+# the axis is blocked then one closer in this family is blocked too. Brute
+# forcing the lattice (tests/test_505_diagonal_margin.py) bears this out --
+# every minimal safe margin it finds is 1, sqrt(2), 2, sqrt(5), 3, sqrt(10),
+# 4 ...; 2*sqrt(2) and sqrt(13) never appear. Including them would let the
+# snap stop one family member short and under-reject.
+# Range covers the widest realistic case: a 0.8mm plane strap over a 0.127mm
+# reserve on a 0.05 grid is e~6.7, needing a reach ~9.5 -- running off the end
+# of the table would return an UNSNAPPED value, i.e. an inert margin.
+_LATTICE_REACH = sorted({float(n) for n in range(1, 65)}
+                        | {math.hypot(n, 1) for n in range(1, 65)})
+
+
+def _snap_to_lattice_reach(margin: float, e: float) -> float:
+    """Round `margin` up to the smallest cell-to-cell lattice distance that can
+    reject everything inside the true keep-out radius (#505).
+
+    Two failures the raw orthogonal margin has:
+
+    1. It is derived from AXIS-ALIGNED rows (1 cell apart), but the router also
+       moves at 45 degrees, where rows sit 1/sqrt(2) cells apart and the step
+       from the stamp shell to the next row is sqrt(2). Worst case over all
+       obstacle orientations and sub-cell phases, the margin has to reach
+       e*sqrt(2) (brute-forced over the lattice in tests/test_505_*).
+    2. Any value strictly between two lattice distances behaves like the lower
+       one, so a margin of 1.25 rejects exactly what 1.0 rejects.
+
+    Snapping to the lattice is what makes the margin bite while staying below
+    the blunt e+1 wherever a lattice distance falls in between (e=1.25 -> 2.0,
+    not 2.25). Measured: polykit_x let a 45-degree power track sit at 0.565685mm
+    against a 0.575 requirement (kicad-cli "actual 0.1907 vs 0.2") x39, and
+    caravel_nucleo at 0.388909 vs 0.400 x7; both grade clean with this snap."""
+    # The 45-degree reach must be STRICTLY above e*sqrt(2): when the two are
+    # equal (e=1.0 -> e*sqrt(2) = sqrt(2) exactly) the sqrt(2) row is the one
+    # that still has to be rejected, so landing ON it is one row short -- the
+    # brute force puts need(1.0) at 2.0, not sqrt(2).
+    diag = next((r for r in _LATTICE_REACH if r > e * _SQRT2 + 1e-12),
+                e * _SQRT2)
+    # `margin` (the axis-aligned term) is already an integer row, itself a
+    # lattice distance, so max() cannot land between two of them.
+    need = max(margin, diag)
+    # Nudge past the lattice distance: the router blocks on d <= margin with d
+    # computed from exact integer offsets, and a margin computed as a quotient
+    # can land one ULP BELOW the very distance it must reject.
+    return need * (1.0 + 1e-12)
+
 
 @dataclass
 class DiffPairNet:
@@ -55,6 +108,9 @@ class GridRouteConfig:
     bga_exclusion_zones: List[Tuple[float, float, float, float]] = field(default_factory=list)
     stub_proximity_radius: float = 2.0  # mm - radius around stubs to penalize
     stub_proximity_cost: float = 0.2  # mm equivalent cost at stub center
+    # NOTE (soft-knobs C6): in the Rust via branch this also MULTIPLIES the
+    # summed stub+layer proximity at the via site (track-proximity and
+    # ripped-corridor soft costs included), not just stub/BGA-zone costs.
     via_proximity_cost: float = 10.0  # via cost multiplier in stub/BGA proximity zones (0 = block vias)
     bga_proximity_radius: float = 7.0  # mm - distance from BGA edges to penalize
     bga_proximity_cost: float = 0.2  # mm equivalent cost at BGA edge
@@ -81,6 +137,15 @@ class GridRouteConfig:
     # phase3_routing.ABANDON_METRICS: stranded | total-pads | complete-nets |
     # congestion | history | weighted | probe | weighted-probe
     ripup_abandon_metric: str = 'stranded'
+    # Blocker SELECTION algorithm for the rip-up ladders (#424 audit;
+    # blocking_analysis.rank_blockers / mincut_probe_order):
+    # count | near-target | bidir | mincut
+    ripup_blocker_select: str = 'count'
+    # Bus rip resistance: >1.0 divides bus-group members' blocker scores so
+    # the rip ladder prefers bystanders over tearing up a settled bus river;
+    # the mincut probe prices member cells higher by the same factor.
+    # 1.0 = off (legacy). bus_member_net_ids is attached by the SE loop.
+    bus_rip_resistance: float = 1.0
     max_setback_angle: float = 45.0  # Maximum angle (degrees) for setback position search
     track_proximity_distance: float = 2.0  # mm - radius around routed tracks to penalize (same layer)
     stub_layer_swap: bool = True  # Enable stub layer switching optimization
@@ -102,7 +167,7 @@ class GridRouteConfig:
     neckdown_taper_length: float = 0.5  # mm narrow->wide taper (0 = abrupt width step)
     gnd_via_enabled: bool = True  # Enable GND via placement near diff pair signal vias
     # Vertical alignment attraction - encourages tracks on different layers to stack
-    vertical_attraction_radius: float = 0.2  # mm - radius for attraction lookup (0 = disabled)
+    vertical_attraction_radius: float = 1.0  # mm - radius for attraction lookup (0 = disabled); matches routing_defaults.VERTICAL_ATTRACTION_RADIUS (N1)
     vertical_attraction_cost: float = 0.0  # mm equivalent bonus for aligned positions
     # Ripped route avoidance - soft penalty for routing through a ripped net's former corridor
     ripped_route_avoidance_radius: float = 1.0  # mm - radius around ripped route segments/vias
@@ -127,18 +192,34 @@ class GridRouteConfig:
     # Impedance-controlled routing
     impedance_target: Optional[float] = None  # Target impedance in ohms (None = use fixed track_width)
     layer_widths: Dict[str, float] = field(default_factory=dict)  # Per-layer widths for impedance control
+    # Coplanar-waveguide-over-ground declaration (#486). A trace running through
+    # a ground pour on its OWN layer is a CPW, not a microstrip: the side ground
+    # pulls Z0 down, so hitting the target needs a NARROWER trace. The pour does
+    # not exist yet at route time, so this is a DESIGN DECLARATION -- the plane
+    # step must be run with a matching zone clearance, and check_impedance.py
+    # verifies afterwards that the geometry actually came out that way.
+    coplanar_gap: float = 0.0  # Design trace-edge-to-pour-edge gap in mm (0 = not coplanar)
+    # Empty coplanar_net_ids with a non-zero gap means the WHOLE call is
+    # coplanar, and layer_widths already carries the CPW widths. A non-empty set
+    # means only these nets are, and coplanar_layer_widths holds their widths
+    # while layer_widths keeps the microstrip answer for everyone else.
+    coplanar_net_ids: set = field(default_factory=set)
+    coplanar_layer_widths: Dict[str, float] = field(default_factory=dict)
+    # Obstacle-stamp reserve policy (#156). False (single-ended engine): stamps
+    # reserve the NOMINAL track_width around obstacles and every net's extra
+    # width (power override OR impedance layer width) rides its own fractional
+    # per-layer track_margin -- exact, per-net, no over-block. True (diff-pair
+    # engine): stamps bake the full per-layer impedance width into the map
+    # (the pose router has no track_margin channel), margins then compute 0
+    # for impedance-width nets -- today's mm-exact behaviour, unchanged.
+    reserve_layer_widths: bool = False
     # Power net routing - per-net width overrides
     power_net_widths: Dict[int, float] = field(default_factory=dict)  # net_id -> width in mm
-    # Per-net netclass clearances (issue #326 B5): net_id -> clearance mm,
-    # from the board's netclasses (populated by batch_route's net_clearances
-    # kwarg -- the GUI passes it today). A net's OWN copper is stamped into
-    # the shared map / per-net cache at max(clearance, its class value), so
-    # every same-run sibling keeps the class spacing to it. (A net routing at
-    # a LOWER class can still approach at its own smaller clearance only up to
-    # the stamped halo -- the pair max holds whenever the STAMPED net's class
-    # is the larger one; full per-pair enforcement would need per-net query
-    # margins in the A* itself.)
-    net_clearances: Dict[int, float] = field(default_factory=dict)
+    # Per-net netclass track width (auto-read from the .kicad_pro when --track-width
+    # is omitted). Unlike power_net_widths this is the net's OWN class width and may
+    # be SMALLER than the global track_width (a narrower class), floored at the fab
+    # minimum by the caller. Lower priority than a manual power_net_widths override.
+    net_track_widths: Dict[int, float] = field(default_factory=dict)  # net_id -> width in mm
     # Layer cost weights - prefer certain layers over others (1.0 = normal, 1.5 = 50% more expensive)
     layer_costs: List[float] = field(default_factory=list)  # Per-layer cost multipliers
     # Debug options
@@ -146,7 +227,7 @@ class GridRouteConfig:
     # Heuristic tuning
     proximity_heuristic_factor: float = 0.02  # Factor for proximity heuristic (higher = tighter heuristic, faster but may overestimate)
     # Layer direction preference - alternates H/V starting with horizontal on top
-    direction_preference_cost: int = 50  # Cost penalty for non-preferred direction (0 = disabled)
+    direction_preference_cost: int = 250  # Cost penalty for non-preferred direction (0 = disabled); see routing_defaults
     # Bus routing - auto-detection and parallel routing of grouped nets
     bus_enabled: bool = False  # Enable bus detection and routing
     bus_detection_radius: float = 5.0  # mm - max endpoint distance to form bus
@@ -161,6 +242,48 @@ class GridRouteConfig:
     # Keepout zone - keep routed tracks out of a user-drawn polygon (issue #27)
     keepout_enabled: bool = False  # Block routed tracks from a drawn keepout polygon
     keepout_layer: str = "User.2"  # User layer the keepout polygon is drawn on
+    # Cross-class clearance (KiCad semantics, issue: PR392). Each entry maps a
+    # net_id to that net's own net-class clearance (mm). KiCad's required spacing
+    # between two nets of different classes is max(classA, classB); the obstacle
+    # maps price every foreign/in-run obstacle at obstacle_clearance() below.
+    # Auto-read from the .kicad_pro netclasses by route.py/route_diff.py (or
+    # supplied via --net-clearances); the GUI derives it from the live board.
+    # net_clearance_floor is the routing-side floor (max clearance among the nets
+    # being routed in THIS call, >= config.clearance); set at run start. An empty
+    # map + None floor reproduces plain config.clearance behaviour exactly.
+    # This also subsumes #326 B5: a net's OWN copper is stamped at
+    # obstacle_clearance() = max(floor, its class), so every same-run sibling keeps
+    # at least the class spacing to it (get_net_clearance() is the #326-only view).
+    net_clearances: Dict[int, float] = field(default_factory=dict)
+    net_clearance_floor: Optional[float] = None
+
+    def obstacle_clearance(self, net_id: int) -> float:
+        """KiCad cross-class clearance for an obstacle belonging to `net_id`.
+
+        Returns max(routing-side floor, that obstacle net's own class clearance).
+        The floor (net_clearance_floor) defaults to config.clearance, and an
+        absent net falls back to config.clearance, so an empty net_clearances map
+        yields exactly config.clearance -- byte-identical to pre-PR392 behaviour.
+        Consumers (base map builder + every incremental obstacle stamper) MUST
+        route their foreign-copper clearance through this one method so the ADD
+        and REMOVE paths derive an identical per-obstacle value (ref-count
+        symmetry, issue #208/#309)."""
+        floor = self.net_clearance_floor if self.net_clearance_floor is not None else self.clearance
+        return max(floor, self.net_clearances.get(net_id, self.clearance))
+
+    def set_net_clearances(self, net_clearances, routed_net_ids) -> None:
+        """Install the cross-class clearance map and compute the routing-side
+        floor over the nets being routed in this call. Inert (floor == clearance)
+        when the map is empty. Restricting the floor to the ROUTED nets keeps a
+        foreign class from inflating it (which would over-block every routed
+        net)."""
+        self.net_clearances = dict(net_clearances) if net_clearances else {}
+        if self.net_clearances and routed_net_ids:
+            routed = [self.net_clearances[nid] for nid in routed_net_ids
+                      if nid in self.net_clearances]
+            self.net_clearance_floor = max([self.clearance] + routed)
+        else:
+            self.net_clearance_floor = self.clearance
 
     def get_track_width(self, layer: str) -> float:
         """Get track width for a specific layer (impedance-aware).
@@ -172,6 +295,95 @@ class GridRouteConfig:
             return self.layer_widths[layer]
         return self.track_width
 
+    def route_reserve_width(self, layer: str) -> float:
+        """Routing-side track width (mm) the obstacle stamps reserve on `layer`
+        for the FUTURE routed track (#156). This is the single source of truth
+        for the stamp side of the margin mechanism: per-net track_margins are
+        always computed AGAINST this value, so stamps and margins cannot drift.
+
+        - reserve_layer_widths=False (single-ended engine): the NOMINAL
+          track_width, floored to the layer width when the impedance width is
+          narrower (never reserve more than the widest narrow case needs);
+          any net routing wider -- power override or impedance layer width --
+          covers its extra half-width via its own fractional track_margin.
+        - reserve_layer_widths=True (diff-pair engine): the full per-layer
+          impedance width, baked mm-exact into the map (pose router has no
+          margin channel)."""
+        lw = self.get_track_width(layer)
+        if self.reserve_layer_widths:
+            return lw
+        return lw if lw < self.track_width else self.track_width
+
+    def _phase_exact_margin(self, layer: str, net_width: float) -> float:
+        """Fractional A* track margin (grid cells) on `layer` for a track of
+        `net_width` (#156).
+
+        Base value: the exact extra half-width over the stamps' reserve,
+        e = (net_width - route_reserve_width)/2/grid -- no ceil, no +1.
+
+        Phase correction: a margin measures to the outermost BLOCKED CELL
+        (the stamp's shell), which sits up to one cell inside the true
+        keep-out radius, so a bare `e` can sit fractionally below the
+        integer row distance that must be rejected (berkeley In2: e=0.988
+        vs a violating row at n=1 -> 77um grazes between same-run tracks).
+        mm-exact baking never has this problem because its stamp radius IS
+        the requirement. For each dominant obstacle class -- a foreign
+        track at the reserve width (narrow stubs), the layer's routing
+        width (same-run impedance peers), or this track's own width (power
+        peers) -- compute the margin that rejects EXACTLY the grid rows
+        baking at the true requirement would reject, and take the largest.
+        Rows are counted on BOTH movement axes: the axis-aligned rows (1 cell
+        apart) and the 45-degree rows (1/sqrt(2) cells apart, #505) -- an
+        orthogonally-derived margin can sit below the sqrt(2) shell step and
+        so reject nothing at all diagonally.
+        The result is then snapped onto the lattice (_snap_to_lattice_reach),
+        because a margin BETWEEN two cell-to-cell distances rejects exactly what
+        the lower one rejects. It is always >= e, and usually still under the
+        blunt e+1 (e=1.25 -> 2.0, not 2.25) -- but NOT always: where the reach
+        e*sqrt(2) crosses a lattice distance the snap can exceed e+1 (e=1.70 ->
+        3.0). Correctness wins there; an undershoot is a clearance violation,
+        an overshoot only costs some routability."""
+        reserve = self.route_reserve_width(layer)
+        e = (net_width - reserve) / 2.0 / self.grid_step
+        if e <= 1e-9:
+            return 0.0
+        # Predict the stamp shell with the same clearance most stamps price
+        # obstacles at: the cross-class routing-side floor when one is active
+        # (obstacle_clearance() maxes it per obstacle), else the base clearance.
+        clr = self.net_clearance_floor if self.net_clearance_floor is not None else self.clearance
+        margin = e
+        for w_obs in (reserve, self.get_track_width(layer), net_width):
+            # Stamped keep-out and true requirement around this obstacle
+            # class, in grid cells (both measured from the track CENTER).
+            r_stamp = (w_obs / 2.0 + clr + reserve / 2.0) / self.grid_step
+            r_need = r_stamp + e
+            shell = math.ceil(r_stamp - 1e-9) - 1     # outermost blocked row
+            n_max = math.ceil(r_need - 1e-9) - 1 - shell  # last row to reject
+            if n_max > margin:
+                margin = float(n_max)
+        return _snap_to_lattice_reach(margin, e)
+
+    def track_margins_for_net(self, net_id: int) -> List[float]:
+        """Per-layer FRACTIONAL A* track margins (grid cells) for `net_id`
+        (#156): the net's extra half-width over what the obstacle stamps
+        already reserve on each layer, phase-corrected per obstacle class
+        (see _phase_exact_margin). Uniform for power nets, per-layer for
+        impedance widths, all-zero for base-width nets."""
+        return [self._phase_exact_margin(layer, self.get_net_track_width(net_id, layer))
+                for layer in self.layers]
+
+    def track_margins_for_width(self, width: float) -> List[float]:
+        """Per-layer track margins (grid cells) for a track of uniform `width`
+        (the power neck-down ladder's reduced widths, #156)."""
+        return [self._phase_exact_margin(layer, width) for layer in self.layers]
+
+    def base_track_margins(self) -> List[float]:
+        """Per-layer track margins (grid cells) for a route at each layer's OWN
+        base routing width (a necked-down power trunk, #156): zero on plain
+        runs, the impedance extra on impedance runs."""
+        return [self._phase_exact_margin(layer, self.get_track_width(layer))
+                for layer in self.layers]
+
     def get_max_track_width(self) -> float:
         """Get the maximum track width across all layers.
 
@@ -179,31 +391,45 @@ class GridRouteConfig:
         for the widest possible track (e.g., when a via connects two layers
         with different impedance-controlled widths).
         """
-        if self.layer_widths:
-            return max(self.layer_widths.values(), default=self.track_width)
+        if self.layer_widths or self.coplanar_layer_widths:
+            # Both maps can be live at once when only SOME nets are coplanar
+            # (#486); the widest track on any layer is what via clearance has
+            # to cover, so take the max over both.
+            return max(list(self.layer_widths.values())
+                       + list(self.coplanar_layer_widths.values()),
+                       default=self.track_width)
         return self.track_width
 
     def get_net_track_width(self, net_id: int, layer: str) -> float:
         """Get track width for a specific net on a specific layer.
 
         Priority order:
-        1. Per-net power width override (power_net_widths)
-        2. Layer-specific width (layer_widths, for impedance control)
-        3. Default track_width
-
-        The returned width is always at least track_width (power net widths
-        cannot be smaller than the base track width).
+        1. Per-net power width override (power_net_widths) -- floored UP to track_width
+        2. Per-net netclass width (net_track_widths) -- the net's OWN class width,
+           EXACTLY (may be narrower than the global track_width); floored at the fab
+           minimum by the caller. Only populated when --track-width was omitted.
+        3. Per-net COPLANAR impedance width (coplanar_layer_widths, #486) -- the
+           net was declared to run through a ground pour, so its width comes
+           from the CPW-over-ground model rather than microstrip.
+        4. Layer-specific width (layer_widths, for impedance control)
+        5. Default track_width
 
         Args:
             net_id: The net ID to get width for
             layer: The layer name
 
         Returns:
-            Track width in mm (never less than track_width)
+            Track width in mm
         """
         if net_id in self.power_net_widths:
             # Ensure power net width is at least the base track width
             return max(self.power_net_widths[net_id], self.track_width)
+        if self.net_track_widths and net_id in self.net_track_widths:
+            # #435 companion: route this net at its OWN class width (either direction).
+            return self.net_track_widths[net_id]
+        if self.coplanar_net_ids and net_id in self.coplanar_net_ids \
+                and layer in self.coplanar_layer_widths:
+            return self.coplanar_layer_widths[layer]
         return self.get_track_width(layer)
 
     def get_net_clearance(self, net_id: int) -> float:
@@ -264,12 +490,20 @@ class GridRouteConfig:
         independent of --grid-step (a finer grid visits proportionally more
         cells). At 0.1mm this reproduces the historical values exactly.
         """
-        return int(cost_mm * 1000 / REFERENCE_GRID_STEP * (self.grid_step / REFERENCE_GRID_STEP))
+        # soft-knobs B5: per-cell units are CONSTANT per cell (no grid_step
+        # factor). The old extra (grid_step/REFERENCE) factor made every
+        # per-cell knob relatively 2x/4x weaker at fine grids (0.05/0.025 --
+        # exactly the fine-pitch ladder and net_rescue grids) and 2x stronger
+        # at 0.2, because the base move cost per mm is 1000/grid_step, not
+        # constant. Identical to the old value at the 0.1 reference grid.
+        return int(cost_mm * 1000 / REFERENCE_GRID_STEP)
 
     def scaled_cell_units(self, units: float) -> int:
-        """Grid-invariant scaling for per-cell cost knobs given in raw cost
-        units calibrated at REFERENCE_GRID_STEP (e.g. bus_attraction_bonus)."""
-        return int(units * (self.grid_step / REFERENCE_GRID_STEP))
+        """Per-cell cost knobs in raw units calibrated at REFERENCE_GRID_STEP
+        (e.g. bus_attraction_bonus). soft-knobs B5: constant per cell -- the
+        old (grid_step/REFERENCE) factor broke relative strength vs the move
+        cost at non-reference grids. Identical at 0.1."""
+        return int(units)
 
     def via_cost_units(self) -> int:
         """Per-via penalty in cost units.
@@ -279,6 +513,17 @@ class GridRouteConfig:
         same mm-equivalent detour at any --grid-step.
         """
         return int(self.via_cost * 1000 * (REFERENCE_GRID_STEP / self.grid_step))
+
+    def via_proximity_cost_int(self) -> int:
+        """Rust-facing integer via-proximity multiplier.
+
+        0 stays 0 (its special meaning: BLOCK vias near obstacles instead of
+        penalizing); any positive fraction rounds to at least 1 (soft-knobs
+        review B3: a GUI value of 0.5 passed through bare int() became 0 --
+        neither blocked nor penalized, weaker than both settings around it).
+        """
+        c = self.via_proximity_cost
+        return 0 if c == 0 else max(1, int(round(c)))
 
     def get_proximity_heuristic_cost(self) -> int:
         """Get the maximum proximity heuristic cost for the Rust router.

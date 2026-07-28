@@ -133,7 +133,7 @@ def read_design_rules(pcb_path):
     """
     classes = {}
     assignments = {}
-    patterns = []
+    patterns = []       # list of (glob_pattern, class_name) from netclass_patterns
     constraints = {}
     source = None
 
@@ -149,18 +149,31 @@ def read_design_rules(pcb_path):
                                  ('clearance', 'track_width', 'via_diameter',
                                   'via_drill', 'diff_pair_gap', 'diff_pair_width')
                                  if k in c}
-            # net -> class assignment (dict in newer files; list of pairs in some)
+            # net -> class assignment (dict in newer files; list of pairs in some).
+            # KiCad 9 values can be a LIST of class names (a net may belong to
+            # several classes); normalize to a single class name (prefer the first
+            # non-Default) so downstream consumers see {net: classname}.
             na = ns.get('netclass_assignments') or {}
             if isinstance(na, dict):
-                assignments = dict(na)
-            # Wildcard assignments (KiCad 8+ netclass_patterns): resolve each
-            # net whose name matches the pattern into the class, UNLESS an
-            # explicit assignment already claims it (explicit wins in KiCad).
-            # Kept as an ordered list; consumers fnmatch net names against it.
+                # KiCad 9 values can be a LIST of class names (a net may belong to
+                # several classes); normalize to a single class name (prefer the
+                # first non-Default) so downstream consumers see {net: classname}.
+                for _net, _cls in na.items():
+                    if isinstance(_cls, list):
+                        _nd = [c for c in _cls if c and c != 'Default']
+                        assignments[_net] = _nd[0] if _nd else (_cls[0] if _cls else 'Default')
+                    elif _cls:
+                        assignments[_net] = _cls
+            # Wildcard assignments / net-name -> class glob patterns (KiCad 8+
+            # net_settings.netclass_patterns): the primary membership mechanism on
+            # many boards (explicit assignments are often empty). Consumers fnmatch
+            # net names against it; explicit assignment wins. Kept as (pattern,
+            # class) pairs, in file order.
             for pe in ns.get('netclass_patterns') or []:
                 try:
-                    patterns.append((pe['pattern'], pe['netclass']))
-                except (KeyError, TypeError):
+                    if pe.get('netclass'):
+                        patterns.append((pe.get('pattern', ''), pe['netclass']))
+                except (KeyError, TypeError, AttributeError):
                     continue
             # DRC-enforced Board Constraints (what humans actually route against).
             rules = ((pro.get('board', {}) or {}).get('design_settings', {}) or {}).get('rules', {}) or {}
@@ -204,11 +217,152 @@ def read_design_rules(pcb_path):
     except OSError:
         pass
 
-    return {'classes': classes, 'assignments': assignments,
-            'patterns': patterns,
+    return {'classes': classes, 'assignments': assignments, 'patterns': patterns,
             'constraints': constraints, 'copper_layers': copper_layers,
             'effective': effective_floors(constraints, copper_layers),
             'source': source}
+
+
+def board_default_netclass_param(pcb_path, key, design_rules=None):
+    """Return the board's **Default** net-class value for ``key`` -- one of
+    ``clearance``, ``track_width``, ``via_diameter``, ``via_drill`` -- from the
+    sibling .kicad_pro (mm), or ``None`` when there is no project / no Default
+    class / that value is unset. The routing CLIs and GUI use these as the default
+    clearance/track/via when the corresponding flag/override is omitted (#439
+    follow-up), so a board routes to its OWN Default class instead of the generic
+    ``routing_defaults`` constants. Pass a cached ``read_design_rules`` result as
+    ``design_rules`` to avoid re-reading."""
+    try:
+        dr = design_rules if design_rules is not None else read_design_rules(pcb_path)
+    except Exception:
+        return None
+    v = ((dr.get('classes') or {}).get('Default') or {}).get(key)
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def board_default_netclass_clearance(pcb_path, design_rules=None):
+    """The board's Default net-class **clearance** (mm), or ``None``. Thin wrapper
+    over :func:`board_default_netclass_param` kept for existing callers."""
+    return board_default_netclass_param(pcb_path, 'clearance', design_rules)
+
+
+def board_constraint(pcb_path, key, design_rules=None):
+    """Return a DRC-enforced Board Constraint (mm) from the sibling .kicad_pro's
+    ``design_settings.rules`` -- e.g. ``min_hole_to_hole``,
+    ``min_copper_edge_clearance``, ``min_clearance`` -- or ``None`` when there is
+    no project / that constraint is unset. The routing CLIs use this so an omitted
+    ``--hole-to-hole-clearance`` / ``--board-edge-clearance`` defaults to the
+    board's OWN minimum (#439 follow-up) instead of a generic constant. Pass a
+    cached ``read_design_rules`` result as ``design_rules`` to avoid re-reading."""
+    try:
+        dr = design_rules if design_rules is not None else read_design_rules(pcb_path)
+    except Exception:
+        return None
+    v = (dr.get('constraints') or {}).get(key)
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def net_clearance_map_by_id(pcb_path, nets, design_rules=None):
+    """Resolve each net to its net-class clearance (mm) from the sibling
+    .kicad_pro netclasses, for the routing CLIs' cross-class clearance map.
+
+    KiCad's required spacing between two nets of different classes is
+    max(classA, classB). The router carries a {net_id: class_clearance} map and
+    prices every foreign/in-run obstacle at max(routing-side floor, that net's
+    class clearance). This helper builds that map so route.py / route_diff.py can
+    auto-honor the board's netclasses without a hand-written --net-clearances JSON.
+
+    `nets` is {net_id: net_name} (e.g. {nid: n.name for nid, n in pcb.nets.items()}).
+    A net's classes come from BOTH the explicit ``netclass_assignments`` and every
+    matching ``netclass_patterns`` glob (KiCad merges memberships); its effective
+    clearance is the MAX over those classes' clearances (KiCad enforces the strictest).
+
+    A net is returned iff it belongs to at least one NON-Default net class -- with
+    that class's clearance, EVEN WHEN it equals or is below the Default class
+    clearance (#439). This is the fix for the old "eff > Default" gate, which
+    dropped a net whose class equalled Default: on an all-0.2-classes board (zynq
+    -- Default/ADDRES/DQ* all 0.2) the map came back EMPTY, so those nets routed
+    at the smaller ``--clearance`` instead of their 0.2 class and shipped
+    DRC-violating. Nets that resolve ONLY to Default are still omitted (they use
+    the router's config.clearance = ``--clearance``, which IS the Default/routing
+    clearance). The map value is a FLOOR the caller max()es with config.clearance,
+    so a non-Default class BELOW ``--clearance`` is inert -- correct: ``--clearance``
+    is the routing floor for those too. Returns {net_id: clearance_mm}.
+
+    Pattern matching is glob-style (KiCad ``*``/``?`` wildcards). Exotic patterns that
+    do not translate to a glob simply fail to match -> that net falls back to
+    config.clearance (the safe/inert direction), never over-blocked.
+    """
+    import fnmatch
+    dr = design_rules if design_rules is not None else read_design_rules(pcb_path)
+    classes = dr.get('classes') or {}
+    assignments = dr.get('assignments') or {}
+    patterns = dr.get('patterns') or []
+
+    def _class_clr(cname):
+        c = classes.get(cname) or {}
+        v = c.get('clearance')
+        return float(v) if isinstance(v, (int, float)) else None
+
+    out = {}
+    for nid, name in nets.items():
+        if not name:
+            continue
+        cand = set()
+        a = assignments.get(name)
+        if a:
+            cand.add(a)
+        for pat, cname in patterns:
+            if not pat:
+                continue  # empty pattern = the Default catch-all
+            try:
+                if fnmatch.fnmatchcase(name, pat):
+                    cand.add(cname)
+            except Exception:
+                pass
+        # Only NON-Default class memberships matter: a Default-only net routes at
+        # config.clearance. Take the strictest (max) NON-Default class clearance.
+        clrs = [c for c in (_class_clr(cn) for cn in cand if cn != 'Default')
+                if c is not None]
+        if not clrs:
+            continue
+        out[nid] = max(clrs)
+    return out
+
+
+def net_track_width_map_by_id(pcb_path, nets, design_rules=None):
+    """Resolve each net to its net-class TRACK WIDTH (mm) -- the single-ended
+    companion to net_clearance_map_by_id, so route.py can route each net at its OWN
+    class width when --track-width is omitted (a controlled-impedance signal class or
+    a power class, each with a different width). Unlike clearance (KiCad enforces the
+    strictest max), a net's width is the width of its ASSIGNED class, so this uses
+    resolve_net_class (explicit assignment, else the first matching pattern).
+
+    `nets` is {net_id: net_name}. Returns {net_id: width_mm} for nets whose resolved
+    class is NON-Default AND defines a track_width (Default-only nets use
+    config.track_width = the board Default class width already). Empty when the board
+    has no netclass widths. The caller floors each value at the fab minimum."""
+    dr = design_rules if design_rules is not None else read_design_rules(pcb_path)
+    classes = dr.get('classes') or {}
+    if not classes:
+        return {}
+    out = {}
+    for nid, name in nets.items():
+        if not name:
+            continue
+        cname = resolve_net_class(name, dr)
+        if cname == 'Default':
+            continue
+        w = (classes.get(cname) or {}).get('track_width')
+        if isinstance(w, (int, float)):
+            out[nid] = float(w)
+    return out
 
 
 def resolve_net_class(net_name, rules):
@@ -589,4 +743,6 @@ def main():
 
 
 if __name__ == '__main__':
+    from console_encoding import enable_utf8_console
+    enable_utf8_console()  # cp1252-safe non-ASCII prints (issue #152)
     exit(main())

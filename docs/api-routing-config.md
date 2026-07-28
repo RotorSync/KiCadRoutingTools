@@ -66,7 +66,7 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 | Field | Default | Meaning |
 |-------|---------|---------|
 | `layer_costs` | `[]` | Per-layer cost multipliers (1.0 = neutral), parallel to `layers` |
-| `direction_preference_cost` | `50` | Penalty for off-direction moves; layers alternate H/V starting horizontal on top (0 = off) |
+| `direction_preference_cost` | `250` | Penalty for off-direction moves; layers alternate H/V starting horizontal on top (0 = off). 250 (~25% of a move) nudges toward H/V lanes without starving routability; diagonal moves charge the wrong-axis component. Higher values (e.g. 5000 = 5x a move) enforce strict human-style lanes but make dense boards' short diagonal hops unroutable (sets 6-11 A/B regression) |
 | `vertical_attraction_radius` | `0.2` | Radius for cross-layer alignment bonus (0 = off) |
 | `vertical_attraction_cost` | `0.0` | Bonus (negative cost) for vertically aligned positions |
 
@@ -82,7 +82,12 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 |-------|---------|---------|
 | `impedance_target` | `None` | Target Z0 in Ω; when set, per-layer widths come from `layer_widths` |
 | `layer_widths` | `{}` | Layer name → width (filled by `impedance.calculate_layer_widths_for_impedance`) |
+| `coplanar_gap` | `0.0` | #486 **declaration**: design gap (mm) from a controlled-impedance trace's edge to the same-layer ground pour. `> 0` means outer-layer widths came from the coplanar-waveguide-over-ground model rather than microstrip. Set from `route.py --coplanar-gap` / `route_diff.py --coplanar-gap` |
+| `coplanar_net_ids` | `set()` | #486: net ids the coplanar declaration applies to. **Empty with a non-zero `coplanar_gap` means the whole call is coplanar**, and `layer_widths` already holds the CPW widths. Non-empty means only these nets are, and their widths live in `coplanar_layer_widths` |
+| `coplanar_layer_widths` | `{}` | #486: layer name → CPW-derived width, used only for `coplanar_net_ids`. Lets one call mix coplanar and microstrip nets |
+| `reserve_layer_widths` | `False` | Obstacle-stamp reserve policy (#156): `False` = stamps reserve nominal `track_width`, wide/impedance nets ride per-net fractional `track_margin`; `True` (diff engine) = stamps bake the full per-layer width |
 | `power_net_widths` | `{}` | net_id → width override for power nets (never below `track_width`) |
+| `net_track_widths` | `{}` | net_id → the net's OWN netclass width (mm, #435), used EXACTLY (may be *narrower* than `track_width`); auto-read from the `.kicad_pro` only when `--track-width` is omitted, floored at the fab minimum by the caller. Lower priority than a manual `power_net_widths` override |
 | `net_clearances` | `{}` | net_id → netclass clearance (mm, #326): each net's own copper is stamped as an obstacle at `max(clearance, its value)` so same-run nets keep the class spacing to it; `get_net_clearance(net_id)` resolves it (never below `clearance`) |
 
 ### Differential pairs
@@ -127,6 +132,50 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 | `routing_clearance_margin` | `1.0` | Multiplier on track-to-via clearance (1.0 = exact DRC minimum) |
 | `hole_to_hole_clearance` | `0.25` | Drill-to-drill clearance, edge to edge |
 | `board_edge_clearance` | `0.0` | Clearance from board edge (0 = use `clearance`) |
+| `net_clearances` | `{}` | `{net_id: class_clearance_mm}` — per-net **net-class** clearance for KiCad's cross-class rule (see below) |
+| `net_clearance_floor` | `None` | Routing-side floor (max class clearance among the nets being routed this call); set by `set_net_clearances()` |
+
+#### Cross-class clearance (KiCad `max(classA, classB)`)
+
+KiCad's required spacing between two nets of **different** net classes is
+`max(classA, classB)`. The router honors this: every foreign obstacle — pre-placed
+copper **and** copper routed earlier in the same call (in-run) — is priced at
+`max(routing-side floor, that obstacle net's own class clearance)`. `config.clearance`
+remains the Default/routing-side clearance; `net_clearances` carries the non-Default
+classes. An **empty** map reproduces plain `config.clearance` behaviour exactly
+(byte-identical — the feature is inert until a map is supplied).
+
+```python
+from routing_config import GridRouteConfig
+config = GridRouteConfig(track_width=0.15, clearance=0.15)
+power_hi_net_id, sig_a, sig_b, some_default_net = 1, 2, 3, 4
+config.set_net_clearances({power_hi_net_id: 0.25}, routed_net_ids=[sig_a, sig_b])
+assert config.obstacle_clearance(power_hi_net_id) == 0.25   # max(floor 0.15, class 0.25)
+assert config.obstacle_clearance(some_default_net) == 0.15  # not in the map -> config.clearance
+```
+
+- `set_net_clearances(net_clearances, routed_net_ids)` installs the map and computes
+  `net_clearance_floor` (over the routed nets only, so a foreign class cannot inflate
+  the floor and over-block every routed net). `batch_route` / `batch_route_diff_pairs`
+  call it once per run.
+- `obstacle_clearance(net_id)` is the single accessor the base-map builder **and** every
+  incremental obstacle stamper read, so ADD and REMOVE derive an identical per-obstacle
+  clearance (ref-count symmetry).
+- The map is **auto-read** from the sibling `.kicad_pro` netclasses by `route.py` /
+  `route_diff.py` / the fanout and plane CLIs (and inside `batch_route` for any other
+  caller). Only non-Default classes appear, so an all-Default board yields `{}`.
+  Supply `--net-clearances <json>` (net name → mm) to override. The GUI derives the
+  same map from the live board.
+- **`--clearance` is a ceiling on the map (#439).** When `--clearance` is GIVEN, each
+  auto-read class is capped at it (`net_clearances[nid] = min(class, clearance)`) before
+  it is installed — a class *tighter* than `--clearance` survives; a *looser* one is
+  capped, because stock net classes are largely aspirational (real boards, and even the
+  human-routed references, route below them). The output `.kicad_pro` writeback then
+  clamps each non-Default class to that same routed floor, so KiCad grades exactly what
+  was routed. When `--clearance` is OMITTED there is no ceiling: each net routes at its
+  own class and the writeback preserves the classes (base = the board's Default class).
+  An explicit `--net-clearances` map is used as given (not capped). In the GUI, checking
+  the **Min Clearance** override box is the "`--clearance` given" signal.
 
 ### Strategies and recovery
 
@@ -134,6 +183,8 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 |-------|---------|---------|
 | `max_rip_up_count` | `3` | Max blocking routes ripped up at once (progressive 1..N) |
 | `ripup_abandon_metric` | `'stranded'` | Keep-retry vs abandon rule for multipoint tap rip-ups (see [rip-up-reroute.md](rip-up-reroute.md#abandon-metrics)) |
+| `ripup_blocker_select` | `'count'` | Blocker-ordering algorithm for the rip-up ladder: `'count'`, `'near-target'`, `'bidir'`, `'mincut'` (see [rip-up-reroute.md](rip-up-reroute.md#blocker-selection-algorithms)) |
+| `bus_rip_resistance` | `1.0` | >1 divides bus-group members' blocker scores so the ladder prefers ripping bystanders over a settled bus river; mincut prices member cells higher by the same factor. Env: `KICAD_BUS_RIP_RESISTANCE` |
 | `stub_layer_swap` | `True` | Allow moving stubs to other layers to resolve conflicts (never moves an SMD pad's stub off the one layer that pad lives on — that would orphan the pad) |
 | `target_swap_crossing_penalty` | `1000.0` | Penalty for crossing assignments during target swap |
 | `crossing_layer_check` | `True` | Only count crossings between routes sharing a layer |
@@ -181,13 +232,47 @@ Layer-aware width: `layer_widths[layer]` if impedance-controlled, else
 ```python
 config.get_net_track_width(net_id, layer) -> float
 ```
-Net- and layer-aware width. Priority: `power_net_widths[net_id]` →
-`layer_widths[layer]` → `track_width`. This is what obstacle expansion uses.
+Net- and layer-aware width. Priority: `power_net_widths[net_id]` (floored up to
+`track_width`) → `net_track_widths[net_id]` (the net's own class width, used
+exactly, #435) → `coplanar_layer_widths[layer]` when `net_id` is in
+`coplanar_net_ids` (#486) → `layer_widths[layer]` → `track_width`. This is what
+obstacle expansion uses.
+
+**The coplanar rung is a declaration, not a measurement.** At route time the
+pour does not exist yet, so `coplanar_gap` states what the plane step is going
+to do. Pour with a matching `route_planes --zone-clearance`, then verify the
+geometry actually came out that way with
+`check_impedance.py --coplanar-gap <same value>`. Nothing in the router enforces
+the gap — a coplanar-declared net whose pour never arrives is simply routed at a
+width that assumes a ground it does not have.
 
 ```python
 config.get_max_track_width() -> float
 ```
 Maximum width across layers (for worst-case via clearance).
+
+```python
+config.route_reserve_width(layer) -> float
+```
+Routing-side width the obstacle stamps reserve for the *future* routed track
+(#156). With `reserve_layer_widths=False` (single-ended engine, the default)
+this is the nominal `track_width` (floored to a narrower impedance layer
+width), and any net routing wider — power override or impedance layer width —
+covers its extra half-width through its own fractional `track_margin`. With
+`reserve_layer_widths=True` (the diff-pair engine) it is the full
+`get_track_width(layer)`, baked mm-exact into the maps. Track margins are
+always computed against this value, so stamps and margins cannot drift.
+
+```python
+config.track_margins_for_net(net_id) -> List[float]   # grid cells, per layer
+config.track_margins_for_width(width) -> List[float]  # for a uniform width
+config.base_track_margins() -> List[float]            # each layer's own base width
+```
+Per-layer **fractional** A* track margins (#156): the exact extra half-width
+over `route_reserve_width(layer)`, in grid cells — no ceil, no `+1` (the Rust
+swept-capsule `segment_blocked` covers diagonals precisely). Passed to
+`route_multi` / `route_with_frontier`, which accept a float or a per-layer
+`list[float]`.
 
 ```python
 config.get_layer_costs() -> List[int]            # ×1000 for the Rust router

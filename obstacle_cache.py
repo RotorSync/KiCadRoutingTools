@@ -23,6 +23,12 @@ from net_queries import expand_pad_layers
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
+import rust_alloc  # noqa: E402,F401  # issue #419: set MIMALLOC_PURGE_DELAY before grid_router loads
+
+# Over-blocking audit F3 A/B kill-switch: 1 restores the pre-fix cache stamps
+# (obstacle net's CONFIGURED width for narrow existing copper + via->track
+# rings). Temporary -- remove once the actual-width fix is validated corpus-wide.
+_LEGACY_CACHE_WIDTH = os.environ.get('KICAD_OBSCACHE_LEGACY_WIDTH', '') in ('1', 'true', 'on')
 
 try:
     from grid_router import GridObstacleMap
@@ -270,6 +276,14 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     num_layers = len(config.layers)
     layer_map = build_layer_map(config.layers)
 
+    # Cross-class clearance (PR392): this per-net cache is the keep-out that OTHER
+    # routed nets must respect around net_id's copper, so it is priced at net_id's
+    # own KiCad pairwise clearance = max(routing-side floor, net_id's class). A
+    # single value per net keeps the per-layer precompute cheap (one lookup, no
+    # per-obstacle branching). Inert (== config.clearance) when no map is set, so
+    # the whole function is byte-identical to pre-PR392 then.
+    obs_clearance = config.obstacle_clearance(net_id)
+
     # Collect cell arrays; deduplicated with np.unique at the end (same
     # unique-cell semantics as the per-cell sets this replaces)
     blocked_cells_set: List["np.ndarray"] = []
@@ -277,47 +291,72 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
 
     # Precompute per-layer expansion values for impedance-controlled and power net routing
     # Use to_grid_dist_safe for via-related clearances to avoid grid quantization DRC errors
-    # Per-net netclass clearance (#326 B5): this net's copper reserves its OWN
-    # class spacing, so same-run siblings keep the class distance to it.
-    net_cl = config.get_net_clearance(net_id)
     expansion_mm_by_layer = {}
     via_block_mm_by_layer = {}
     layer_widths = []  # per-layer future-routing-track width (impedance / power)
     for layer_name in config.layers:
         # Use per-net width for power nets, otherwise layer width (impedance) or default
         layer_width = config.get_net_track_width(net_id, layer_name)
-        layer_widths.append(layer_width)
-        expansion_mm = layer_width / 2 + net_cl + config.track_width / 2 + extra_clearance
+        # Routing-side width for the via->track ring: the FUTURE track that must
+        # clear this net's vias belongs to whatever net routes next, so its
+        # half-width is the routing-side RESERVE width (#156: nominal for the
+        # single-ended engine, the impedance layer width for the diff engine) --
+        # never this net's own configured (power) width, which the routed net's
+        # track_margin already covers. Matches _via_track_expansion_per_layer
+        # (obstacle_map), whose docstring calls the wider variant out as
+        # double-counting.
+        # KICAD_OBSCACHE_LEGACY_WIDTH=1 restores the pre-fix stamps (A/B only).
+        layer_widths.append(layer_width if _LEGACY_CACHE_WIDTH
+                            else config.route_reserve_width(layer_name))
+        expansion_mm = layer_width / 2 + obs_clearance + config.route_reserve_width(layer_name) / 2 + extra_clearance
         # Float keep-out half-width for the capsule segment stamp (no floor): the
         # true perpendicular clearance, so off-grid / diagonal tracks are covered.
         expansion_mm_by_layer[layer_name] = max(coord.grid_step, expansion_mm)
         # Segment via-block: future ROUTE via (config.via_size) near this net's copper.
-        via_block_mm = config.via_size / 2 + layer_width / 2 + net_cl + extra_clearance
+        via_block_mm = config.via_size / 2 + layer_width / 2 + obs_clearance + extra_clearance
         via_block_mm_by_layer[layer_name] = via_block_mm
 
-    # Process segments. Keep-out from the segment's ACTUAL width, not just the
-    # net's configured width: a pre-existing wide/diff-pair trace (e.g. a 0.2mm
-    # trunk placed by route_diff) under-reserved when stamped at the default
-    # 0.127 track width, letting a later track graze its edge (#172). Mirror the
-    # via path below, which already keeps out from the via's actual size. Only
-    # segments wider than the configured width grow their keep-out, so normal
-    # tracks (seg.width == configured) are unaffected - no blanket margin.
+    # Process segments. Keep-out from the segment's ACTUAL width in BOTH
+    # directions, not the net's configured width: a pre-existing wide/diff-pair
+    # trace (e.g. a 0.2mm trunk placed by route_diff) under-reserved when
+    # stamped at the default 0.127 track width (#172); and a wide-CONFIGURED
+    # net's narrow pre-existing copper (a 0.1mm fanout stub on a net configured
+    # 0.3 via --power-nets) over-blocked by (configured-actual)/2 per side when
+    # the old max(layer_w, seg_w) let the configured width win -- sealing real
+    # escape corridors past power stubs (over-blocking audit F3). The base map
+    # (build_base_obstacle_map) already stamps foreign copper at seg.width;
+    # this keeps the cache at parity. Normal tracks (seg.width == configured)
+    # are unaffected - no blanket margin.
     for seg in pcb_data.segments:
         if seg.net_id != net_id:
             continue
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
+            # Copper on a layer OUTSIDE config.layers: tracks cannot go there,
+            # but a VIA spans the whole stack and must respect it (butterstick
+            # DQ11 class -- see build_base_obstacle_map). Via keep-out only.
+            if seg.layer.endswith('.Cu'):
+                seg_w = seg.width if (getattr(seg, 'width', 0) and seg.width > 0) \
+                    else config.track_width
+                via_block_mm = (config.via_size / 2 + seg_w / 2 + obs_clearance
+                                + extra_clearance)
+                cells = segment_blocked_cells_array(
+                    seg.start_x, seg.start_y, seg.end_x, seg.end_y,
+                    via_block_mm, coord.grid_step)
+                if len(cells):
+                    blocked_vias_set.append(np.asarray(cells, dtype=np.int32))
             continue
         layer_w = config.get_net_track_width(net_id, seg.layer)
         seg_w = seg.width if (getattr(seg, 'width', 0) and seg.width > 0) else layer_w
-        own_half = max(layer_w, seg_w) / 2
-        if seg_w <= layer_w:
+        own_half = (max(layer_w, seg_w) if _LEGACY_CACHE_WIDTH else seg_w) / 2
+        if (seg_w <= layer_w) if _LEGACY_CACHE_WIDTH else (seg_w == layer_w):
             expansion_mm = expansion_mm_by_layer.get(seg.layer, coord.grid_step)
             via_block_mm = via_block_mm_by_layer.get(seg.layer)
         else:
             expansion_mm = max(coord.grid_step,
-                               own_half + net_cl + config.track_width / 2 + extra_clearance)
-            via_block_mm = config.via_size / 2 + own_half + net_cl + extra_clearance
+                               own_half + obs_clearance
+                               + config.route_reserve_width(seg.layer) / 2 + extra_clearance)
+            via_block_mm = config.via_size / 2 + own_half + obs_clearance + extra_clearance
         _collect_segment_obstacles(seg, coord, layer_idx, expansion_mm,
                                    blocked_cells_set, blocked_vias_set, via_block_mm)
 
@@ -332,19 +371,42 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             continue
         vs = via.size if (getattr(via, 'size', 0) and via.size > 0) else config.via_size
         via_track_list = [max(1, coord.to_grid_dist_safe(
-            vs / 2 + lw / 2 + net_cl + extra_clearance)) for lw in layer_widths]
+            vs / 2 + lw / 2 + obs_clearance + extra_clearance)) for lw in layer_widths]
         # Via-via: this via (actual size) vs a future ROUTE via (config.via_size).
         # Float radius (no floor) so the disc threshold blocks the true clearance.
-        via_via_radius = max(1.0, (vs / 2 + config.via_size / 2 + net_cl) * coord.inv_step)
+        via_via_radius = max(1.0, (vs / 2 + config.via_size / 2 + obs_clearance) * coord.inv_step)
         _collect_via_obstacles(via, coord, num_layers, via_track_list,
                                 via_via_radius, diagonal_margin,
                                 blocked_cells_set, blocked_vias_set)
+        # #441: net-INDEPENDENT drill hole-to-hole keepout, stamped into the via
+        # map IN ADDITION to the copper via-via disc above (which is copper-only:
+        # vs/2 + via_size/2 + clearance). A future ROUTE via must also clear this
+        # via's DRILL by the fab hole-to-hole floor -- without it two different-net
+        # vias drill within it (vis_nir_spec / cryologger_aws: diff-net via drills
+        # ~0.26mm overlap on boards whose min_hole_to_hole > the copper spacing).
+        # Mirrors precompute_via_placement_obstacles's plane-path disc exactly
+        # (float-centre, strict <); added to blocked_vias_set so it is added AND
+        # removed with the whole NetObstacleData -- ref-count balanced (#208).
+        _h2h = getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0
+        if _h2h > 0 and getattr(via, 'drill', 0) > 0:
+            _gx, _gy = coord.to_grid(via.x, via.y)
+            _req = via.drill / 2.0 + config.via_drill / 2.0 + _h2h
+            _de = coord.to_grid_dist_safe(_req) + 1  # ceil + 1-cell bbox margin
+            _off = np.arange(-_de, _de + 1)
+            _dxg, _dyg = np.meshgrid(_off, _off, indexing="ij")
+            _cx = (_gx + _dxg) * config.grid_step
+            _cy = (_gy + _dyg) * config.grid_step
+            _dm = ((_cx - via.x) ** 2 + (_cy - via.y) ** 2) < _req * _req
+            if _dm.any():
+                blocked_vias_set.append(
+                    np.column_stack([(_gx + _dxg)[_dm], (_gy + _dyg)[_dm]]).astype(np.int32))
 
     # Process pads
     pads = pcb_data.pads_by_net.get(net_id, [])
     for pad in pads:
         _collect_pad_obstacles(pad, coord, layer_map, config, extra_clearance,
-                                blocked_cells_set, blocked_vias_set)
+                                blocked_cells_set, blocked_vias_set,
+                                obs_clearance=obs_clearance)
 
     # Concatenate and deduplicate (the Rust map refcounts batch adds, so
     # each cell must appear once per net - same as the old set semantics)
@@ -438,24 +500,31 @@ def _collect_via_obstacles(via, coord: GridCoord, num_layers: int,
 def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
                             config: GridRouteConfig, extra_clearance: float,
                             blocked_cells: List["np.ndarray"],
-                            blocked_vias: List["np.ndarray"]):
+                            blocked_vias: List["np.ndarray"],
+                            obs_clearance: float = None):
     """Collect pad obstacle cells into sets (no obstacle map modification).
 
     Uses rectangular-with-rounded-corners pattern matching other pad blocking functions.
+
+    obs_clearance: the pad net's KiCad cross-class clearance (== config.clearance
+    when no per-net map is active); priced by precompute_net_obstacles.
     """
+    if obs_clearance is None:
+        obs_clearance = config.clearance
     gx, gy = coord.to_grid(pad.global_x, pad.global_y)
     # Sub-cell offset of the real pad center from its grid cell (issue #70).
     off_x = pad.global_x - gx * coord.grid_step
     off_y = pad.global_y - gy * coord.grid_step
     half_width = pad.size_x / 2
     half_height = pad.size_y / 2
-    # Per-pad local/footprint clearance override (#326 B6): this per-net CACHE
-    # is what the routing loop actually consults for same-run nets' pads, so it
-    # must honor pad.local_clearance exactly like _add_pad_obstacle does --
-    # otherwise a to-be-routed net's fiducial/keep-clear pad is stamped at the
-    # bare global clearance and every sibling net may route inside its ring.
-    # The pad's netclass clearance (B5) participates the same way.
-    clearance = config.get_net_clearance(getattr(pad, 'net_id', 0))
+    # Cross-class clearance (PR392): obs_clearance already carries this pad net's
+    # KiCad pairwise clearance (max(routing-side floor, its class)). Per-pad
+    # local/footprint clearance override (#326 B6): this per-net CACHE is what the
+    # routing loop actually consults for same-run nets' pads, so it must honor
+    # pad.local_clearance exactly like _add_pad_obstacle does -- otherwise a
+    # to-be-routed net's fiducial/keep-clear pad is stamped at the bare clearance
+    # and every sibling net may route inside its ring.
+    clearance = obs_clearance
     lc = getattr(pad, 'local_clearance', 0.0) or 0.0
     if lc > clearance:
         clearance = lc

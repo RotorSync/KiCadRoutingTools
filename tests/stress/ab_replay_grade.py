@@ -138,40 +138,82 @@ def _diff_pair_stats(log_text):
             "diff_coupled_pct": round(100.0 * coupled / total, 1) if total else None}
 
 
+def manifest_baseline(txt, *search_dirs):
+    """Resolve the pristine UNROUTED input board = first .kicad_pcb token of the
+    first real command. Manifests reference it either by ABSOLUTE path or by a
+    bare relative name (e.g. `board0.kicad_pcb`); a relative/missing token is
+    resolved against the board's source/output dirs so the #405 symmetric
+    baseline subtraction actually fires. Without this, a relative baseline token
+    silently fails os.path.exists() and kicad_preexisting stays 0, phantom-
+    counting pre-existing edge/hole conditions as router-introduced (openstint:
+    6 pre-existing edge items surfaced as kicad_only). Returns the resolved path
+    (or the raw token, which grade() treats as an absent baseline)."""
+    tok = None
+    for line in txt.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        toks = [t.strip("'\"") for t in line.split()
+                if t.strip("'\"").endswith(".kicad_pcb")]
+        if toks:
+            tok = toks[0]
+            break
+    if not tok:
+        return None
+    if os.path.exists(tok):
+        return tok
+    for d in search_dirs:
+        cand = os.path.join(str(d), os.path.basename(tok))
+        if os.path.exists(cand):
+            return cand
+    return tok
+
+
 def _kicad_grade(pcb, clearance, baseline=None):
     """KiCad's own DRC verdict on the final board (#316): copper-class
     violation count + the two-sided diff vs check_drc, graded with the
-    netclass clearance equalized to the routed clearance (kicad_drc_compare's
-    staging). Returns Nones when kicad-cli is unavailable so replay grading
-    still works everywhere.
+    netclass clearance equalized to the routed clearance. Returns Nones when
+    kicad-cli is unavailable so replay grading still works everywhere.
 
-    `baseline` = the UNROUTED input board (#326/#338): its kicad items are
-    pre-existing design conditions (e.g. edge-connector pads inside the
-    board's own copper_edge rule) that no routing can fix -- they are matched
-    and subtracted so kicad_drc/kicad_only reflect ROUTER-introduced items;
-    the subtracted count is reported as kicad_preexisting."""
+    This is a THIN adapter over kicad_drc_compare.compare_board_data -- the
+    SHARED per-board grading core the `kicad_drc_compare` CLI also uses, so the
+    two tools produce identical numbers by construction (they no longer
+    reimplement baseline subtraction or matching). The core does symmetric
+    baseline subtraction (#405) on BOTH engines' items and the board-edge
+    anchor reconciliation.
+
+    `baseline` = the UNROUTED input board (#326/#338): its items are pre-existing
+    design conditions (e.g. edge-connector pads inside the board's own
+    copper_edge rule) that no routing can fix -- subtracted from both engines so
+    kicad_drc/kicad_only reflect ROUTER-introduced items; the subtracted count
+    is reported as kicad_preexisting."""
+    _none = {"kicad_drc": None, "kicad_only": None, "checkdrc_only": None,
+             "kicad_connection_width": None, "checkdrc_reconciled": None,
+             "checkdrc_preexisting": None}
     try:
         sys.path.insert(0, str(REPO / "tests" / "stress"))
-        from kicad_drc_compare import (KICAD_CLI, kicad_items_for,
-                                       run_check_drc, match)
+        from kicad_drc_compare import KICAD_CLI, compare_board_data
         if not os.path.exists(KICAD_CLI):
-            return {"kicad_drc": None, "kicad_only": None, "checkdrc_only": None}
-        kicad, err = kicad_items_for(pcb, float(clearance))
-        if err:
-            return {"kicad_drc": None, "kicad_only": None, "checkdrc_only": None}
-        pre = 0
-        if baseline and os.path.exists(baseline):
-            base_items, berr = kicad_items_for(baseline, float(clearance))
-            if not berr and base_items:
-                matched_pre, _, kicad = match(base_items, kicad)
-                pre = len(matched_pre)
-        cd = run_check_drc(pcb, float(clearance))
-        _, kicad_only, cd_only = match(kicad, cd)
-        return {"kicad_drc": len(kicad), "kicad_preexisting": pre,
-                "kicad_only": len(kicad_only),
-                "checkdrc_only": len(cd_only)}
+            return _none
+        data = compare_board_data(pcb, clearance=float(clearance), baseline=baseline)
+        if data is None or "skip" in data:
+            return _none
+        return {"kicad_drc": data["kicad"], "kicad_preexisting": data["kicad_preexisting"],
+                # baseline-subtracted + accepted-removed check_drc count (== the
+                # kicad_drc_compare CLI's `check_drc=N`): the ROUTER-ATTRIBUTABLE
+                # real DRC, used for drc_real below so pre-existing input copper
+                # doesn't inflate the summary.
+                "checkdrc_reconciled": data["check_drc"],
+                "checkdrc_preexisting": data["checkdrc_preexisting"],
+                "kicad_only": data["kicad_only"], "checkdrc_only": data["checkdrc_only"],
+                "kicad_matched": data["matched"],
+                "kicad_intentional_edge": data.get("kicad_intentional_edge", 0),
+                "checkdrc_intentional_edge": data.get("checkdrc_intentional_edge", 0),
+                # #406 min copper web (KiCad-only class; None = not graded).
+                "kicad_connection_width": data.get("kicad_connection_width"),
+                "connection_width_min": data.get("connection_width_min")}
     except Exception:
-        return {"kicad_drc": None, "kicad_only": None, "checkdrc_only": None}
+        return _none
 
 
 def grade(pcb, clearance, baseline=None):
@@ -213,7 +255,36 @@ def grade(pcb, clearance, baseline=None):
     out = {"drc": _drc_count(drc.stdout + drc.stderr), "conn": _conn_count(ctext),
            "nets_total": total, "nets_incomplete": incomplete, "completion_pct": pct}
     out.update(_kicad_grade(pcb, clearance, baseline=baseline))
+    # raw `drc` is the full check_drc count (NOT baseline-subtracted -- it counts
+    # pre-existing input copper like edge-connector pads and chassis-ground pours).
+    # `drc_real` is the ROUTER-ATTRIBUTABLE real DRC that compare()/the regression
+    # gate grade on: prefer the shared grading core's reconciled check_drc count
+    # (checkdrc_reconciled -- baseline-subtracted per #405 AND accepted-by-design
+    # removed, identical to the kicad_drc_compare CLI's check_drc=N), so a track
+    # routed into a pre-existing edge-exempt pad no longer looks like a regression
+    # (orangecrab: raw drc 3 tracks-into-connector-pads -> reconciled 0). Falls back
+    # to raw-minus-accepted-edge when kicad-cli (hence the core) is unavailable, and
+    # to raw drc for pre-#408 summaries that lack the field.
+    cie = out.get("checkdrc_intentional_edge") or 0
+    out["drc_intentional_edge"] = cie
+    recon = out.get("checkdrc_reconciled")
+    if recon is not None:
+        out["drc_real"] = recon
+    elif out["drc"] is not None:
+        out["drc_real"] = max(0, out["drc"] - cie)
+    else:
+        out["drc_real"] = None
     return out
+
+
+# Extra "OLD:NEW" prefix rewrites appended to every board's replay (--remap on
+# redo_stress_test is append-able). The reason this exists: manifests bake the
+# TOOL paths absolutely, so a replay always runs whatever lives at the recorded
+# repo path -- which means a wave cannot exercise a git WORKTREE without
+# rewriting that prefix. Pass
+#   --extra-remap /path/to/repo/:/path/to/repo/.claude/worktrees/<wt>/
+# to A/B a branch without disturbing the main checkout.
+EXTRA_REMAPS = []
 
 
 def do_board(set_dir, out_dir, label, board):
@@ -225,29 +296,49 @@ def do_board(set_dir, out_dir, label, board):
     clr = route_clearance(txt)
     timings_path = f"{dst}/timings.json"
     with open(f"{dst}/_replay.log", "w") as log:
+        # --workdir dst confines every command to the wave dir; combined with the
+        # --remap it makes redo_stress_test's clobber guard authoritative (a manifest
+        # whose baked paths don't match `src` aborts loudly instead of overwriting the
+        # original run dir -- the copied-set footgun).
+        _extra = []
+        for _r in EXTRA_REMAPS:
+            _extra += ["--remap", _r]
         rc = subprocess.run([sys.executable, str(REPO / "tests/stress/redo_stress_test.py"),
-                             str(manifest), "--remap", f"{src}:{dst}",
-                             "--skip-checks", "--continue-on-error",
-                             "--timings-out", timings_path],
+                             str(manifest), "--remap", f"{src}:{dst}"] + _extra
+                            + ["--workdir", dst,
+                               "--skip-checks", "--continue-on-error",
+                               "--timings-out", timings_path],
                             stdout=log, stderr=subprocess.STDOUT).returncode
     # Per-step wall-clock (for A/B timing comparison): keep the raw per-command
     # list and a per-tool sum (route.py / route_planes.py / ... -- where the
     # vectorization speedups land), plus the total.
     steps, time_by_tool, peak_by_tool, total_s, peak_board = [], {}, {}, 0.0, 0.0
+    peak_fp_by_tool, peak_fp_board = {}, 0.0
     if os.path.exists(timings_path):
         for c in json.loads(Path(timings_path).read_text()).get("commands", []):
             tool = _tool_of(c.get("argv", []))
             sec = c.get("seconds", 0.0)
             pk = c.get("peak_rss_mb", 0.0)
-            steps.append({"tool": tool, "seconds": sec, "peak_rss_mb": pk, "rc": c.get("returncode")})
+            # peak_footprint_mb (darwin only): the authoritative memory number
+            # RSS under-reports -- mimalloc-retained + IOAccelerator-tagged pages
+            # (issue #419). Absent on non-darwin timings; treated as 0 then.
+            fp = c.get("peak_footprint_mb", 0.0) or 0.0
+            step = {"tool": tool, "seconds": sec, "peak_rss_mb": pk, "rc": c.get("returncode")}
+            if fp:
+                step["peak_footprint_mb"] = fp
+            steps.append(step)
             time_by_tool[tool] = round(time_by_tool.get(tool, 0.0) + sec, 3)
             peak_by_tool[tool] = round(max(peak_by_tool.get(tool, 0.0), pk), 1)  # max, not sum
+            if fp:
+                peak_fp_by_tool[tool] = round(max(peak_fp_by_tool.get(tool, 0.0), fp), 1)
             total_s += sec
             peak_board = max(peak_board, pk)
+            peak_fp_board = max(peak_fp_board, fp)
     # Coupled diff-pair completion is parsed from route_diff's JSON_SUMMARY in the
     # replay log (captured above), so it reflects what actually coupled-routed.
     log_path = f"{dst}/_replay.log"
-    dp = _diff_pair_stats(Path(log_path).read_text(errors="replace") if os.path.exists(log_path) else "")
+    log_text = Path(log_path).read_text(errors="replace") if os.path.exists(log_path) else ""
+    dp = _diff_pair_stats(log_text)
     fname = final_output_name(txt)
     final = os.path.join(dst, fname) if fname else None
     done = bool(final) and os.path.exists(final)
@@ -258,26 +349,26 @@ def do_board(set_dir, out_dir, label, board):
            "total_seconds": round(total_s, 3), "peak_rss_mb": round(peak_board, 1),
            "time_by_tool": time_by_tool, "peak_by_tool": peak_by_tool, "steps": steps,
            **dp}
+    # Footprint (darwin) is the memory number that actually caught issue #419;
+    # keep it additive so non-darwin records are unchanged.
+    if peak_fp_board:
+        res["peak_footprint_mb"] = round(peak_fp_board, 1)
+        res["peak_footprint_by_tool"] = peak_fp_by_tool
     if done:
         # Unrouted-input baseline (#326/#338): the manifest's first command's
         # first .kicad_pcb argument is the pristine input board; its kicad
         # items are pre-existing design conditions subtracted from the
         # final's kicad grade (kicad_preexisting) so kicad_drc reflects
-        # router-introduced items.
-        baseline = None
-        for line in txt.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            toks = [t for t in line.split() if t.endswith(".kicad_pcb")]
-            if toks:
-                baseline = toks[0]
-                break
+        # router-introduced items. Resolve a relative token against the board's
+        # dest/src dirs (board0.kicad_pcb lives there after the remap).
+        baseline = manifest_baseline(txt, dst, src)
         res.update(grade(final, clr, baseline=baseline))
     dps = f"{res['diff_pairs_coupled']}/{res['diff_pairs_total']}" if res['diff_pairs_total'] else "-"
+    fp_note = f" fp={res['peak_footprint_mb']}MB" if res.get("peak_footprint_mb") else ""
     print(f"[{label}] {board}: chain={'ok' if done else 'BROKEN'} "
-          f"drc={res['drc']} kdrc={res.get('kicad_drc')} conn={res['conn']} compl={res['completion_pct']}% "
-          f"dpair={dps} t={res['total_seconds']}s peak={res['peak_rss_mb']}MB final={res['final']}", flush=True)
+          f"drc={res['drc']} kdrc={res.get('kicad_drc')} cw={res.get('kicad_connection_width')} "
+          f"conn={res['conn']} compl={res['completion_pct']}% "
+          f"dpair={dps} t={res['total_seconds']}s peak={res['peak_rss_mb']}MB{fp_note} final={res['final']}", flush=True)
     return res
 
 
@@ -342,21 +433,17 @@ def regrade(out_dir, set_dir):
         final = bdir / fname if fname else None
         done = bool(final) and final.exists()
         lp = bdir / "_replay.log"
-        dp = _diff_pair_stats(lp.read_text(errors="replace") if lp.exists() else "")
+        log_text = lp.read_text(errors="replace") if lp.exists() else ""
+        dp = _diff_pair_stats(log_text)
         res = {"board": b, "clearance": clr, "replay_rc": 0,
                "final": fname if done else None, "chain_complete": done,
                "drc": None, "conn": None, "nets_total": None, "nets_incomplete": None,
                "completion_pct": None, **dp}  # regrade re-runs no commands, so no timing
         if done:
-            baseline = None
-            for line in txt.splitlines():
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                toks = [t for t in line.split() if t.endswith(".kicad_pcb")]
-                if toks:
-                    baseline = toks[0]
-                    break
+            # Resolve the unrouted-input baseline against the wave board dir and
+            # the manifest's set dir (a relative board0.kicad_pcb token lives in
+            # both) so #405 symmetric subtraction fires (see manifest_baseline).
+            baseline = manifest_baseline(txt, bdir, set_dir / b)
             res.update(grade(str(final), clr, baseline=baseline))
         print(f"[regrade] {b}: chain={'ok' if done else 'BROKEN'} drc={res['drc']} "
               f"conn={res['conn']} compl={res['completion_pct']}%")
@@ -385,10 +472,20 @@ def compare(old_json, new_json):
     def _incompl(r):
         ni = r.get("nets_incomplete")
         return ni if ni is not None else r.get("conn")
-    print(f"{'board':14} {'drc o->n':>11} {'incompl o->n':>13} {'compl% o->n':>13} "
+    # #408: grade on drc_real (raw check_drc minus accepted-by-design edge items:
+    # copper the router had to run into the edge band to reach an edge connector /
+    # edge-mounted pad). Falls back to raw drc for pre-#408 summaries that lack it.
+    def _drc(r):
+        v = r.get("drc_real")
+        return v if v is not None else r.get("drc")
+    # #406 min copper web (kicad-cli class, graded when a floor is recorded).
+    # None (not graded / pre-#406 summary / no kicad-cli) contributes no delta.
+    def _cw(r):
+        return r.get("kicad_connection_width")
+    print(f"{'board':14} {'drc o->n':>11} {'connw o->n':>12} {'incompl o->n':>13} {'compl% o->n':>13} "
           f"{'dpair o->n':>13} {'time(s) o->n':>16} {'peakMB o->n':>15}  note")
-    print("-" * 128)
-    drc_delta = incompl_delta = dpair_delta = 0
+    print("-" * 140)
+    drc_delta = incompl_delta = dpair_delta = cw_delta = 0
     t_old = t_new = 0.0
     time_old, time_new = {}, {}   # per-tool wall-clock summed across boards (speedup view)
     pk_old, pk_new = {}, {}       # per-tool peak RSS = max across boards (memory view)
@@ -397,13 +494,16 @@ def compare(old_json, new_json):
         oc = o and o["chain_complete"]
         nc = n and n["chain_complete"]
         if not (oc and nc):
-            print(f"{b:14} {'-':>11} {'-':>13} {'-':>13} {'-':>13} {'-':>16} {'-':>15}  chain incomplete "
+            print(f"{b:14} {'-':>11} {'-':>12} {'-':>13} {'-':>13} {'-':>13} {'-':>16} {'-':>15}  chain incomplete "
                   f"(old={'ok' if oc else 'broken'}, new={'ok' if nc else 'broken'}) -- excluded")
             continue
         oi, ni = _incompl(o), _incompl(n)
-        dd = n["drc"] - o["drc"]
+        od, nd = _drc(o), _drc(n)
+        dd = (nd - od) if (od is not None and nd is not None) else 0
         cd = (ni - oi) if (oi is not None and ni is not None) else 0  # incomplete-net delta
-        drc_delta += dd; incompl_delta += cd
+        ocw, ncw = _cw(o), _cw(n)
+        cwd = (ncw - ocw) if (ocw is not None and ncw is not None) else 0  # web delta (#406)
+        drc_delta += dd; incompl_delta += cd; cw_delta += cwd
         # coupled diff-pair count (fewer coupled = quality regression)
         ocp, ncp = o.get("diff_pairs_coupled"), n.get("diff_pairs_coupled")
         odt, ndt = o.get("diff_pairs_total"), n.get("diff_pairs_total")
@@ -422,16 +522,28 @@ def compare(old_json, new_json):
                 dst[k] = round(max(dst.get(k, 0.0), v), 1)
         op, npc = o.get("completion_pct"), n.get("completion_pct")
         po, pn = o.get("peak_rss_mb"), n.get("peak_rss_mb")
+        # Footprint (darwin) -- the memory number that actually catches #419-class
+        # regressions RSS misses. Appended as an extra column only when present.
+        pfo, pfn = o.get("peak_footprint_mb"), n.get("peak_footprint_mb")
+        fp_col = f"  fp {_fmt(pfo):>6} -> {_fmt(pfn):<6}" if (pfo or pfn) else ""
         flag = ""
-        if dd > 0 or cd > 0 or dpd < 0:    flag = "  <-- REGRESSION"
-        elif dd < 0 or cd < 0 or dpd > 0:  flag = "  improved"
+        if dd > 0 or cd > 0 or dpd < 0 or cwd > 0:    flag = "  <-- REGRESSION"
+        elif dd < 0 or cd < 0 or dpd > 0 or cwd < 0:  flag = "  improved"
+        # #408: annotate when accepted-by-design edge items were subtracted, so a
+        # drop from raw drc to drc_real is visible rather than looking like noise.
+        nie = n.get("drc_intentional_edge") or 0
+        if nie:
+            flag += f"  (#408 -{nie} edge accepted)"
         speed = f"  ({to/tn:.2f}x)" if (to and tn) else ""
-        print(f"{b:14} {o['drc']:>4} -> {n['drc']:<4} {_fmt(oi):>5} -> {_fmt(ni):<5} "
+        print(f"{b:14} {_fmt(od):>4} -> {_fmt(nd):<4} {_fmt(ocw):>4} -> {_fmt(ncw):<4} "
+              f"{_fmt(oi):>5} -> {_fmt(ni):<5} "
               f"{_fmt(op):>5} -> {_fmt(npc):<5} {dp_o:>5} -> {dp_n:<5} "
-              f"{_fmt(to):>6} -> {_fmt(tn):<6}{speed:>9} {_fmt(po):>6} -> {_fmt(pn):<6}{flag}")
-    print("-" * 128)
-    verdict = "REGRESSION" if (drc_delta > 0 or incompl_delta > 0 or dpair_delta < 0) else "no regression"
-    print(f"net delta: drc {drc_delta:+d}, incomplete nets {incompl_delta:+d} "
+              f"{_fmt(to):>6} -> {_fmt(tn):<6}{speed:>9} {_fmt(po):>6} -> {_fmt(pn):<6}{fp_col}{flag}")
+    print("-" * 140)
+    verdict = ("REGRESSION" if (drc_delta > 0 or incompl_delta > 0
+                                or dpair_delta < 0 or cw_delta > 0) else "no regression")
+    print(f"net delta: drc {drc_delta:+d}, connection_width {cw_delta:+d} (#406), "
+          f"incomplete nets {incompl_delta:+d} "
           f"(unrouted + connectivity-issue), coupled diff-pairs {dpair_delta:+d}"
           f"  ==>  {verdict}")
     if t_old and t_new:
@@ -447,7 +559,8 @@ def compare(old_json, new_json):
     else:
         print("(timing/peak not available in one/both summaries -- re-run waves with the "
               "current ab_replay_grade to capture per-step timing + peak memory)")
-    return drc_delta <= 0 and incompl_delta <= 0 and dpair_delta >= 0
+    return (drc_delta <= 0 and incompl_delta <= 0 and dpair_delta >= 0
+            and cw_delta <= 0)
 
 
 def main():
@@ -461,7 +574,15 @@ def main():
                     help="Compare two wave summaries and print a regression table")
     ap.add_argument("--regrade", metavar="WAVE_DIR",
                     help="Re-grade an existing wave's finals (no re-routing) and rewrite its summary.json")
+    ap.add_argument("--extra-remap", action="append", default=[], metavar="OLD:NEW",
+                    help="Extra path-prefix rewrite for every replayed command. Manifests "
+                         "bake TOOL paths absolutely, so use this to point a wave at a git "
+                         "worktree: --extra-remap /repo/:/repo/.claude/worktrees/wt/")
     args = ap.parse_args()
+    for _r in args.extra_remap:
+        if ":" not in _r:
+            ap.error(f"--extra-remap needs OLD:NEW, got {_r!r}")
+    EXTRA_REMAPS[:] = args.extra_remap
 
     if args.compare:
         ok = compare(*args.compare)

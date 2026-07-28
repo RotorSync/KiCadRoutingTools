@@ -26,7 +26,20 @@ board with no routed-floor `.kicad_pro`).
 **Important caveat to include in the report:** `check_drc.py` does not check zone copper, minimum trace width, or netclass compliance. If the board has copper zones/planes, recommend the zone-aware check:
 
 ```bash
-kicad-cli pcb drc board.kicad_pcb --refill-zones
+kicad-cli pcb drc board.kicad_pcb --refill-zones --format json -o /tmp/drc.json
+```
+
+**Ignore silk and dangling violations** when reading that report — they are not
+routing/connectivity defects and are excluded by the harness graders
+(`kicad_drc_compare.py`, `kicad_oracle.py`) for exactly this reason. Filter them
+out before counting:
+
+```bash
+python3 -c "import json;v=json.load(open('/tmp/drc.json'))['violations'];\
+drop={'via_dangling','track_dangling','silk_overlap','silk_over_copper',\
+'silk_edge_clearance','silk_mask_clearance'};\
+c=[x for x in v if x['type'] not in drop];\
+print(f'{len(c)} copper/connectivity violations ({len(v)-len(c)} silk/dangling ignored)')"
 ```
 
 The cross-check is one-directional (#260): kicad-cli can refute a borderline
@@ -41,17 +54,33 @@ If the board has length-matched groups (DDR byte lanes, matched buses — detect
 
 ```python
 from kicad_parser import parse_kicad_pcb
-from net_queries import calculate_route_length
+from net_queries import net_copper_lengths, pin_pair_path_length
 
 pcb = parse_kicad_pcb('board.kicad_pcb')
+name_to_id = {n.name: nid for nid, n in pcb.nets.items()}
 for group_name, net_names in groups.items():
-    lengths = {}
-    for net in pcb.nets.values():
-        if net.name in net_names:
-            lengths[net.name] = calculate_route_length(pcb, net.net_id)
+    ids = [name_to_id[n] for n in net_names if n in name_to_id]
+    by_id = net_copper_lengths(pcb, ids)          # one pass over the copper
+    lengths = {n: by_id[name_to_id[n]] for n in net_names if n in name_to_id}
     spread = max(lengths.values()) - min(lengths.values())
     # PASS if spread <= tolerance (default 0.1 mm); report worst offender otherwise
 ```
+
+`net_copper_lengths` (and `net_copper_length` for one net) measures **total net
+copper**. That is the right number only for a clean point-to-point net. On a
+**multipoint or fly-by net, or any net with a stub**, total copper is the sum of
+every branch and matches no signal path — measure the driver→receiver path
+instead, and match on that:
+
+```python
+pads = pcb.pads_by_net[name_to_id['DQ0']]
+path_mm = pin_pair_path_length(pcb, name_to_id['DQ0'], pads[0], pads[1])
+# None = those two pads are not joined by TRACK copper (plane-only or broken)
+```
+
+Report both when they differ by more than the tolerance: a group that passes on
+total copper can fail on path length. Pads joined only through a zone return
+`None` — say so rather than reporting a length.
 
 For time-matched groups use `calculate_route_propagation_time_ps()` from `impedance.py` instead, and compare against the ps tolerance. Lengths include via barrels from the stackup, matching KiCad's measurement.
 
@@ -71,6 +100,44 @@ for via in pcb.vias:
         # Flag if nearest > recommended distance for the net's speed tier
         # (ultra-high: 2.0mm, high: 3.0mm, medium: 5.0mm)
 ```
+
+## Step 3b: Impedance & Return-Path Audit (#486)
+
+A controlled-impedance trace whose reference plane has a **gap under its path**
+gets the ideal-plane impedance anyway — the classic return-path discontinuity.
+It is not a DRC violation and ships silent, so check it explicitly:
+
+```bash
+# every routed signal net (plane nets are skipped automatically)
+python3 check_impedance.py board.kicad_pcb --verbose
+
+# narrow to the controlled-impedance nets when you know them
+python3 check_impedance.py board.kicad_pcb --nets "RF*" "/DDR*"
+
+# if the route step declared a coplanar gap, AUDIT that promise
+python3 check_impedance.py board.kicad_pcb --coplanar-gap 0.2
+```
+
+Reports per net: length over a reference-plane **void**, plane **split**
+crossings (the return current cannot follow the trace across either), the
+measured coplanar side-gap distribution, and the implied Z0 error vs. what the
+route call assumed. Exits 1 when anything is found.
+
+How to read it:
+
+- **Length over void on a controlled-impedance net is the finding that matters.**
+  Report it with the net, the layer, and the offending location; recommend a
+  reroute onto intact plane, or a stitching via pair straddling the gap where
+  the crossing is unavoidable.
+- **A "reference layer carries NO filled pour" note** is a stackup/flow problem,
+  not a per-net defect — it means nothing was poured on that layer at all. Say
+  so once rather than listing every net.
+- **Void on a plain low-speed net is usually noise.** Only escalate for nets that
+  are genuinely impedance-controlled or high-speed.
+- **If `--coplanar-gap` was declared**, the audit's "NO ground beside" and "gap
+  off-target" lengths are the real result: that copper was routed at a width
+  assuming a ground that is not there. Some off-target length near via antipads
+  and pads is normal; a net that is mostly off-target is a genuine defect.
 
 ## Step 4: Differential Pair Review
 

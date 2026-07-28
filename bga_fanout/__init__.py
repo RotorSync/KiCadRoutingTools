@@ -39,6 +39,7 @@ from bga_fanout.layer_balance import rebalance_layers
 from bga_fanout.layer_assignment import assign_layers_smart
 from bga_fanout.grid import (
     analyze_bga_grid,
+    staggered_lattice_diagnosis,
     calculate_channels,
     is_edge_pad,
 )
@@ -67,6 +68,9 @@ from obstacle_map import build_base_obstacle_map, build_layer_map
 from routing_config import GridRouteConfig
 from bga_fanout.collision import check_segment_collision
 from bga_fanout.diff_pair import find_differential_pairs
+
+# #472: nets deferred from fanout by the last generate_bga_fanout entry call
+_direct_route_nets: Set[str] = set()
 from bga_fanout.tracks import (
     detect_collisions,
     convert_segments_to_tracks,
@@ -547,7 +551,8 @@ def create_single_ended_route(
     channels: List[Channel],
     layers: List[str],
     exit_margin: float,
-    force_orientation: Optional[str] = None
+    force_orientation: Optional[str] = None,
+    preferred_dir: Optional[str] = None
 ) -> FanoutRoute:
     """
     Create a route for a single-ended (non-differential) signal.
@@ -565,7 +570,8 @@ def create_single_ended_route(
     """
     channel, escape_dir = find_escape_channel(
         pad.global_x, pad.global_y, grid, channels,
-        force_orientation=force_orientation
+        force_orientation=force_orientation,
+        preferred_dir=preferred_dir
     )
     is_edge = channel is None
 
@@ -1731,6 +1737,107 @@ def _strap_unescaped_extras(footprint: Footprint, pcb_data: PCBData,
     return strapped, still_bare
 
 
+def _underpad_shrink_rescue(footprint, pcb_data, grid, layers, up_kw,
+                            tracks, vias_to_add, failed_nets):
+    """Retry balls the under-pad escape DROPPED, at the FAB FLOOR (#505).
+
+    One rung, the tightest. Walking the whole ladder costs a full escape
+    rebuild per rung -- ~200s each on a 285-ball 0.5mm array, and the
+    escape-priority machinery already calls this more than once -- while an
+    intermediate rung cannot fit where the floor does not.
+
+    A dropped ball is an unrouted net the downstream router usually cannot
+    rescue either -- it has no copper to pick up. The nominal width is a
+    preference, not a constraint: the fab floor is what the board can actually
+    be built to, so shrink toward it rather than shipping a hole. Each rung
+    re-routes ONLY the still-failed balls, against the copper already
+    committed (appended to pcb_data so the retry's obstacle build and its
+    existing-copper checks both see it), so a narrower escape can thread a
+    channel the nominal width could not while never grazing what shipped.
+
+    Track, via AND clearance shrink together, because on a fine-pitch array the
+    binding constraint is usually the CLEARANCE, not the track: between adjacent
+    0.23mm pads on a 0.5mm pitch the gap is 0.27mm and a track needs
+    `track + 2*clearance`, so orangecrab U3 does not fit at 0.1/0.1 (0.30), nor
+    even at the 0.0762 track floor (0.276) -- only dropping clearance to the
+    0.09 floor (0.256) opens it. Shrinking track/via alone rescued nothing
+    there. Each rung is a real fab floor, and the caller's `--clearance` is a
+    preference the ladder is explicitly allowed to escalate below (the same
+    standard->advanced escalation the via clamp and the plane taps already do);
+    the routed floor is what the .kicad_pro writeback records, so the board is
+    graded at what actually shipped.
+    """
+    from bga_fanout.underpad import generate_underpad_escape
+    from kicad_parser import Segment as _Seg, Via as _Via
+
+    ncu = (len(pcb_data.board_info.copper_layers)
+           if pcb_data.board_info.copper_layers else 4)
+    tw0 = up_kw['track_width']
+    vs0, vd0 = up_kw['via_size'], up_kw['via_drill']
+    cl0 = up_kw['clearance']
+    # Ladder rungs strictly smaller than what we just tried.
+    rungs = []
+    for f in fab_floor_ladder(ncu):
+        tw = min(tw0, f['track_width'])
+        vs, vd = min(vs0, f['via_diameter']), min(vd0, f['via_drill'])
+        cl = min(cl0, f['clearance'])
+        if (tw, vs, vd, cl) != (tw0, vs0, vd0, cl0) and (tw, vs, vd, cl) not in rungs:
+            rungs.append((tw, vs, vd, cl))
+    # Only the TIGHTEST rung (the fab floor). Walking the whole ladder costs a
+    # full escape rebuild per rung -- on a 285-ball 0.5mm array that is ~200s
+    # EACH, and the escape-priority machinery already calls us more than once.
+    # An intermediate rung that fits where the floor does not cannot exist
+    # (the floor is a subset of every rung's freedom), so the extra passes buy
+    # only slightly wider copper on the rescued balls, at multiples of the cost.
+    # Sort so the tightest (smallest track/via/clearance) is last, whatever
+    # order the ladder yielded.
+    rungs.sort(reverse=True)
+    rungs = rungs[-1:]
+    if not rungs:
+        return tracks, vias_to_add, failed_nets
+
+    for (tw, vs, vd, cl) in rungs:
+        still = set(failed_nets)
+        keys = {(p.global_x, p.global_y) for p in footprint.pads
+                if p.net_name in still}
+        if not keys:
+            break
+        n_seg0, n_via0 = len(pcb_data.segments), len(pcb_data.vias)
+        try:
+            for t in tracks:
+                pcb_data.segments.append(_Seg(
+                    start_x=t['start'][0], start_y=t['start'][1],
+                    end_x=t['end'][0], end_y=t['end'][1],
+                    width=t['width'], layer=t['layer'], net_id=t['net_id']))
+            for v in vias_to_add:
+                pcb_data.vias.append(_Via(
+                    x=v['x'], y=v['y'], size=v['size'], drill=v['drill'],
+                    layers=v.get('layers') or ['F.Cu', 'B.Cu'],
+                    net_id=v['net_id']))
+            kw = dict(up_kw)
+            kw.update(track_width=tw, via_size=vs, via_drill=vd, clearance=cl,
+                      only_pad_keys=keys, verbose=False)
+            t2, v2, f2 = generate_underpad_escape(
+                footprint, pcb_data, grid, layers, **kw)
+        finally:
+            del pcb_data.segments[n_seg0:]
+            del pcb_data.vias[n_via0:]
+        rescued = still - set(f2)
+        # Always report the attempt: a silent no-op rung is indistinguishable
+        # from "the rescue never ran", which cost a debugging round.
+        print(f"  Under-pad shrink rescue @ track {tw:.4f}mm / via {vs:.2f}mm / "
+              f"clearance {cl:.4f}mm (nominal {tw0:.4f}/{vs0:.2f}/{cl0:.4f}): "
+              f"rescued {len(rescued)} of {len(still)} dropped ball(s)")
+        if rescued:
+            tracks = tracks + t2
+            vias_to_add = vias_to_add + v2
+            failed_nets = [n for n in failed_nets if n not in rescued]
+            warn_fab_escalation('under-pad escape rescue')
+        if not failed_nets:
+            break
+    return tracks, vias_to_add, failed_nets
+
+
 def generate_bga_fanout(footprint: Footprint,
                         pcb_data: PCBData,
                         net_filter: Optional[List[str]] = None,
@@ -1793,6 +1900,21 @@ def generate_bga_fanout(footprint: Footprint,
     Returns:
         Tuple of (tracks, vias_to_add, vias_to_remove, failed_nets)
     """
+    # Config-parity probe (#493). The plane engines have dumped their kwargs
+    # since #362; fanout did not, which is why a GUI/CLI escape divergence here
+    # had to be chased by eye. Same contract: only active under
+    # KICAD_DUMP_BATCH_KWARGS + ..._CONTINUE=1, never alters routing. footprint
+    # and pcb_data are dropped (board payload); the component ref is kept so
+    # calls pair up across the two captures.
+    try:
+        from route import _dump_engine_config as _dump
+        _cfg = {k: v for k, v in locals().items()
+                if k not in ('footprint', 'pcb_data', '_dump')}
+        _cfg['component'] = getattr(footprint, 'reference', None)
+        _dump('bga_fanout', _cfg)
+    except Exception:
+        pass
+
     if layers is None:
         layers = ["F.Cu", "B.Cu"]
 
@@ -1817,6 +1939,33 @@ def generate_bga_fanout(footprint: Footprint,
             grid_step=grid_step, layer_costs=layer_costs)
         back_transform_results(tracks, vias_to_add, vias_to_remove, back)
         return tracks, vias_to_add, vias_to_remove, failed_nets
+
+    # #472 direct-route deferral (KICAD_FANOUT_DIRECT=1): balls whose nearest
+    # target is surface-reachable get NO stub -- the stub carpet is itself the
+    # wall that seals the pocket (human ottercast: USB_D pure F.Cu, 0 vias).
+    # Applied ONCE at entry as '!' net-filter exclusions so both engines and
+    # both escape-priority passes inherit; qualifying diff pairs are dropped
+    # at the pair-discovery sites via _direct_route_nets. The route steps'
+    # bare-ball zone exemption (setup_bga_exclusion_zones) keeps the deferred
+    # balls routable.
+    global _direct_route_nets
+    if (_pad_filter is None and not _single_pass
+            and os.environ.get('KICAD_FANOUT_DIRECT', '') in ('1', 'true', 'on')):
+        from bga_fanout.escape import direct_route_candidates
+        _dp_probe = (find_differential_pairs(footprint, diff_pair_patterns)
+                     if diff_pair_patterns else None)
+        _names, _notes = direct_route_candidates(
+            pcb_data, footprint, net_filter=net_filter,
+            diff_pairs=_dp_probe, clearance=clearance)
+        if _names:
+            print(f"  #472 direct-route deferral: {len(_names)} net(s) skip "
+                  f"fanout (surface-reachable):")
+            for _nm, _pn, _why in _notes:
+                print(f"    {_nm} (ball {_pn}): {_why}")
+            net_filter = list(net_filter or ['*']) + ['!' + n for n in _names]
+            _direct_route_nets = set(_names)
+    elif _pad_filter is None and not _single_pass:
+        _direct_route_nets = set()
 
     # Escape priority for multi-ball nets (issue #129). Escape channels are
     # the scarce resource on a dense array (#122), and a net only NEEDS one
@@ -2121,7 +2270,7 @@ def generate_bga_fanout(footprint: Footprint,
         if keep[0][0] not in balance_layers:
             # rebalance treats its first entry as the top layer (edge escapes)
             balance_layers = [keep[0][0]] + balance_layers
-        if escape_method == 'underpad':
+        if escape_method in ('underpad', 'dogbone'):
             layers = underpad_layers
         else:
             layers = [keep[0][0]] + [l for l, _ in
@@ -2171,7 +2320,7 @@ def generate_bga_fanout(footprint: Footprint,
     # deficit -- and the run still reports failed:0, since the success metric ignores
     # sub-clearance grazes. We have all four numbers here, so warn (don't silently
     # ship the graze). Doesn't apply to underpad, which routes under the pad field.
-    if escape_method != 'underpad':
+    if escape_method not in ('underpad', 'dogbone'):
         half_pitch = min(grid.pitch_x, grid.pitch_y) / 2.0
         need = via_size / 2.0 + track_width / 2.0 + clearance
         if need > half_pitch + 1e-6:
@@ -2184,7 +2333,9 @@ def generate_bga_fanout(footprint: Footprint,
                   f"escape layers. See issue #158.")
 
     # Under-pad grid escape (issue #122) - a separate engine for dense arrays.
-    if escape_method == 'underpad':
+    # Dog-bone (#128) is the same engine with gap-site vias instead of
+    # via-in-pad: ball -> 45-stub -> via in the diagonal inter-ball gap.
+    if escape_method in ('underpad', 'dogbone'):
         from bga_fanout.underpad import generate_underpad_escape
         net_filter_fn = None
         if net_filter:
@@ -2193,17 +2344,31 @@ def generate_bga_fanout(footprint: Footprint,
         # can pick the two halves up (without this they go single-ended).
         up_diff_pairs = (find_differential_pairs(footprint, diff_pair_patterns)
                          if diff_pair_patterns else {})
+        if _direct_route_nets:
+            up_diff_pairs = {k: v for k, v in up_diff_pairs.items()
+                             if not ((v.p_pad and v.p_pad.net_name in _direct_route_nets)
+                                     or (v.n_pad and v.n_pad.net_name in _direct_route_nets))}
         if up_diff_pairs:
             print(f"  Found {len(up_diff_pairs)} differential pair(s) to escape coupled")
-        tracks, vias_to_add, failed_nets = generate_underpad_escape(
-            footprint, pcb_data, grid, layers,
+        _up_kw = dict(
             track_width=track_width, clearance=clearance,
             via_size=via_size, via_drill=via_drill, exit_margin=exit_margin,
             net_filter_fn=net_filter_fn,
             diff_pairs=up_diff_pairs, diff_pair_gap=diff_pair_gap,
             grid_step=grid_step,
             only_pad_keys=_pad_filter,
+            dogbone=(escape_method == 'dogbone'),
         )
+        tracks, vias_to_add, failed_nets = generate_underpad_escape(
+            footprint, pcb_data, grid, layers, **_up_kw)
+        # #505 fab-floor rescue. NOT during the _single_pass coverage probe:
+        # that run's only job is to answer "did the legacy pass drop anything",
+        # and rescuing there both wastes a full escape build and changes the
+        # gate's answer. The escape-priority passes below it get the rescue.
+        if failed_nets and not _single_pass:
+            tracks, vias_to_add, failed_nets = _underpad_shrink_rescue(
+                footprint, pcb_data, grid, layers, _up_kw,
+                tracks, vias_to_add, failed_nets)
         return tracks, vias_to_add, [], failed_nets
 
     channels = calculate_channels(grid)
@@ -2227,8 +2392,13 @@ def generate_bga_fanout(footprint: Footprint,
     # Find differential pairs if patterns specified
     diff_pairs: Dict[str, DiffPairPads] = {}
     pair_escape_assignments: Dict[str, Tuple[Optional[Channel], str]] = {}
+    _pair_toward: Dict[str, str] = {}  # #469 pair target-side preference
     if diff_pair_patterns:
         diff_pairs = find_differential_pairs(footprint, diff_pair_patterns)
+        if _direct_route_nets:
+            diff_pairs = {k: v for k, v in diff_pairs.items()
+                          if not ((v.p_pad and v.p_pad.net_name in _direct_route_nets)
+                                  or (v.n_pad and v.n_pad.net_name in _direct_route_nets))}
         original_pair_count = len(diff_pairs)
 
         # Filter out pairs that already have fanouts
@@ -2251,6 +2421,16 @@ def generate_bga_fanout(footprint: Footprint,
         # Pre-assign escape directions for all pairs to avoid overlaps
         force_str = " (forced)" if force_escape_direction else ""
         print(f"  Assigning escape directions (primary: {primary_escape}{force_str})...")
+        # Target-side preference for PAIRS (#469): one shared direction per
+        # pair (coupling untouched), biasing which direction the assigner
+        # tries first. Same env gate as the single-ended preference.
+        _pair_toward = {}
+        if os.environ.get('KICAD_FANOUT_TOWARD_TARGETS', '') in ('1', 'true', 'on'):
+            from bga_fanout.escape import preferred_pair_dirs
+            _pair_toward = preferred_pair_dirs(pcb_data, footprint, diff_pairs)
+            if _pair_toward:
+                print(f"  Target-side pair escape preference active for "
+                      f"{len(_pair_toward)} pair(s)")
         pair_escape_assignments, pair_layer_assignments = assign_pair_escapes(
             diff_pairs, grid, channels, layers,
             primary_orientation=primary_escape,
@@ -2260,7 +2440,8 @@ def generate_bga_fanout(footprint: Footprint,
             via_size=via_size,
             rebalance=rebalance_escape,
             pre_occupied=pre_occupied_exits,
-            force_escape_direction=force_escape_direction
+            force_escape_direction=force_escape_direction,
+            pair_preferred=_pair_toward
         )
 
     # Build lookup from net_name to pair info
@@ -2392,10 +2573,14 @@ def generate_bga_fanout(footprint: Footprint,
             cur_orientation = 'horizontal' if cur_dir in ('left', 'right') else 'vertical'
             secondary_orientation = 'vertical' if cur_orientation == 'horizontal' else 'horizontal'
             fpair = diff_pairs[fp]
+            # The forced-orientation retry picks the SIDE within the
+            # orthogonal orientation; the target-side preference (#469 v3)
+            # chooses it when the preference lies in that orientation.
             new_ch, new_dir = find_diff_pair_escape(
                 fpair.p_pad.global_x, fpair.p_pad.global_y,
                 fpair.n_pad.global_x, fpair.n_pad.global_y,
-                grid, channels, secondary_orientation
+                grid, channels, secondary_orientation,
+                preferred_dir=_pair_toward.get(fp)
             )
             # Only overwrite if we actually got a usable orthogonal direction.
             new_orientation = None
@@ -2408,6 +2593,18 @@ def generate_bga_fanout(footprint: Footprint,
 
         routes: List[FanoutRoute] = []
         processed_pairs: Set[str] = set()
+
+        # Target-side escape preference (#469, KICAD_FANOUT_TOWARD_TARGETS=1):
+        # each pad's escape direction biases toward its net's nearest
+        # off-footprint pad; the smart layer assignment then spreads the
+        # extra same-direction competition across layers.
+        _toward_targets = {}
+        if os.environ.get('KICAD_FANOUT_TOWARD_TARGETS', '') in ('1', 'true', 'on'):
+            from bga_fanout.escape import preferred_escape_dirs
+            _toward_targets = preferred_escape_dirs(pcb_data, footprint)
+            if _toward_targets:
+                print(f"  Target-side escape preference active for "
+                      f"{len(_toward_targets)} pad(s)")
 
         for pad in footprint.pads:
             if not pad.net_name or pad.net_id == 0:
@@ -2460,7 +2657,9 @@ def generate_bga_fanout(footprint: Footprint,
                 # Single-ended signal (not part of a pair)
                 force_orient = primary_escape if force_escape_direction else None
                 route = create_single_ended_route(
-                    pad, grid, channels, layers, exit_margin, force_orient
+                    pad, grid, channels, layers, exit_margin, force_orient,
+                    preferred_dir=_toward_targets.get(
+                        (round(pad.global_x, 3), round(pad.global_y, 3)))
                 )
                 routes.append(route)
 
@@ -2564,11 +2763,17 @@ def generate_bga_fanout(footprint: Footprint,
         # (#253) are dropped: without the via their inner-layer copper is
         # disconnected decoration. Remove their tracks and report the nets as
         # failed so the main router picks them up from the bare ball.
+        # #508 finding 6 coherence: the net's OTHER balls' routes are dropped
+        # WITH their tracks (the old code removed tracks net-wide but left
+        # the sibling routes in `routes` -- still counted escaped, shipping
+        # via-in-pad balls with no track).
         if via_blocked_routes:
+            from bga_fanout.reroute import _remove_route_tracks
             blocked_net_ids = {r.net_id for r in via_blocked_routes}
-            blocked_routes = set(id(r) for r in via_blocked_routes)
-            tracks = [t for t in tracks if t.get('net_id') not in blocked_net_ids]
-            routes = [r for r in routes if id(r) not in blocked_routes]
+            for r in routes:
+                if r.net_id in blocked_net_ids:
+                    _remove_route_tracks(tracks, r)
+            routes = [r for r in routes if r.net_id not in blocked_net_ids]
             for r in via_blocked_routes:
                 name = r.pad.net_name or f"net{r.net_id}"
                 if name not in failed_nets:
@@ -2639,6 +2844,34 @@ def generate_bga_fanout(footprint: Footprint,
                 if nm not in failed_nets:
                     failed_nets.append(nm)
             print(f"  Pad-aware: removed {len(pad_failed)} unroutable net(s): {pad_failed}")
+
+        # #508 finding 7: vias_to_add/vias_to_remove were derived from the
+        # PRE-repair route layers, and repair_pad_crossings mutates
+        # route.layer -- a route moved to the top layer shipped its (now
+        # pointless) via-in-pad next to top-layer-only copper
+        # (spartan6_6layer step1: 7 F.Cu balls, via + seglayers=['F.Cu']
+        # from a via-less input), and a route moved OFF the top layer never
+        # got the via its inner copper needs. Re-derive both lists from the
+        # FINAL routes; newly via-blocked routes are dropped exactly like
+        # the in-pass path. This also un-stales the via-vs-foreign-track
+        # guard below, which previously scanned pre-repair vias against
+        # post-repair tracks.
+        vias_to_add, vias_to_remove, _reblocked = manage_vias(
+            best_routes, pcb_data, layers[0], via_size, via_drill, clearance)
+        if _reblocked:
+            from bga_fanout.reroute import _remove_route_tracks
+            _rb_net_ids = {r.net_id for r in _reblocked}
+            for r in best_routes:
+                if r.net_id in _rb_net_ids:
+                    _remove_route_tracks(tracks, r)
+            best_routes[:] = [r for r in best_routes
+                              if r.net_id not in _rb_net_ids]
+            for r in _reblocked:
+                name = r.pad.net_name or f"net{r.net_id}"
+                if name not in failed_nets:
+                    failed_nets.append(name)
+            print(f"  Pad-aware: {len(_reblocked)} repaired route(s) newly "
+                  f"via-blocked; dropped (#253 semantics)")
 
     # Clearance-aware escape clearing (issue #123 PAD-SEGMENT). The repair above
     # fires only on true crossings; a route's outer escape can still graze a
@@ -2728,6 +2961,27 @@ def generate_bga_fanout(footprint: Footprint,
         print(f"  Under-pad escape did not improve ({len(up_failed)} dropped) - "
               f"keeping the channel result")
 
+    # Write-list invariant (#508 findings 6/7): every surviving FanoutRoute
+    # must have at least one track in the write list -- a route still counted
+    # as escaped but with no copper ships a via-in-pad ball with NO track (a
+    # dead drill that consumes hole-to-hole budget downstream; cparti_fpga
+    # +1V8/+1V0). This divergence lives entirely inside the write lists
+    # (tracks vs routes vs vias_to_add), so no pcb_data-vs-file ledger can
+    # see it -- it is asserted here instead.
+    from bga_fanout.types import route_uid as _ruid
+    _names_by_net = {r.net_id: (r.pad.net_name or f"net{r.net_id}")
+                     for r in best_routes}
+    _tracked_uids = {t.get('route_uid') for t in tracks}
+    _failed_set = set(failed_nets)
+    _orphans = [r for r in best_routes
+                if _ruid(r) not in _tracked_uids
+                and _names_by_net.get(r.net_id) not in _failed_set]
+    if _orphans:
+        print(f"  WARNING (#508 invariant): {len(_orphans)} escaped route(s) "
+              f"have no track in the write list -- their balls would ship a "
+              f"dead via-in-pad: "
+              f"{sorted({_names_by_net[r.net_id] for r in _orphans})}")
+
     return tracks, vias_to_add, vias_to_remove, failed_nets
 
 
@@ -2777,13 +3031,17 @@ def main():
     parser.add_argument('--no-inner-top-layer', action='store_true',
                         help='Prevent inner pads from using F.Cu (top layer). '
                              'Use when there is not enough clearance on top layer for inner routes.')
-    parser.add_argument('--escape-method', choices=['auto', 'channel', 'underpad'], default='auto',
+    parser.add_argument('--escape-method', choices=['auto', 'channel', 'underpad', 'dogbone'], default='auto',
                         help='Fanout engine (default: auto). "channel" = 45-stub + '
                              'channel router with diff-pair support. "underpad" = dense-array '
                              'grid escape (issue #122): each signal vias in its pad and routes '
                              'under the pad field on inner layers, escaping fully-populated '
                              'arrays (e.g. ulx3s 22x22) the channel router cannot. Use a small '
                              'via/track for dense pitches (e.g. via 0.35, track 0.12 at 0.8mm). '
+                             '"dogbone" = underpad with the escape via in the diagonal '
+                             'inter-ball gap instead of in the pad (issue #128): ball -> 45 '
+                             'stub -> staggered gap via, keeping ball-grid positions free of '
+                             'barrels on the inner layers (the standard hand-layout escape). '
                              '"auto" = channel first, and if it drops any ball, retry with '
                              'underpad and keep whichever escapes more (issue #288).')
     parser.add_argument('--grid-step', type=float, default=0.1,
@@ -2797,6 +3055,10 @@ def main():
                              'layer), otherwise a weight in [1.0, 1000] - the channel '
                              'engine fills cheaper layers first. Pass the same values '
                              'you give route.py --layer-costs.')
+    # #489 section 9: fanout is where a teardrop matters most (a 0.1mm trace
+    # meeting a 0.25mm via pad), and this step had no way to ask for one.
+    parser.add_argument('--add-teardrops', action='store_true',
+                        help='Add teardrop settings to all pads and vias in the output file')
 
     from fab_tiers import (add_fab_tier_args, fab_tier_from_args, set_default_fab_tier,
                            enforce_fab_floors, count_copper_layers_in_file)
@@ -2846,6 +3108,30 @@ def main():
     print(f"  Rotation: {footprint.rotation}deg")
     print(f"  Pads: {len(footprint.pads)}")
 
+    # Staggered-lattice guard (#500). bga_fanout models a BALL GRID. A staggered
+    # multi-row no-lead package (AQFN and friends) is not one: its two offset
+    # rows project onto each axis at HALF the real pad spacing, so the detected
+    # pitch is half the truth and every downstream escape budget is computed
+    # against it. osprey_kb's Nordic_AQFN-73 reports pitch 0.25 where no two
+    # pads are closer than 0.5, its escape budget evaluates to `via <= -0.20mm`
+    # (impossible for any via), and the run took 2967s of dropping balls and
+    # retrying under-pad before finishing. qfn_fanout does the same chip in
+    # 2.4s, 39/39, DRC-clean. Fail in a second with that command instead.
+    _grid_for_guard = analyze_bga_grid(footprint)
+    _stagger_why = staggered_lattice_diagnosis(footprint, _grid_for_guard)
+    if _stagger_why and not os.environ.get('KICAD_ALLOW_STAGGERED_BGA'):
+        print(f"\nERROR: {footprint.reference} ({footprint.footprint_name}) is "
+              f"not a grid array: {_stagger_why}.")
+        print("  bga_fanout models a ball grid; on a staggered package its "
+              "pitch reads half the real pad spacing, so the escape budget is "
+              "impossible and the run takes minutes to hours.")
+        print("  Use qfn_fanout, which handles these:")
+        print(f"    python3 qfn_fanout.py <board> --component "
+              f"{footprint.reference} --escape-method underpad "
+              f"--allow-via-in-pad ...")
+        print("  Set KICAD_ALLOW_STAGGERED_BGA=1 to run anyway.")
+        return 1
+
     tracks, vias_to_add, vias_to_remove, _failed_nets = generate_bga_fanout(
         footprint,
         pcb_data,
@@ -2876,7 +3162,8 @@ def main():
             print(f"  Removing {len(vias_to_remove)} vias")
         net_names = {nid: net.name for nid, net in pcb_data.nets.items()}
         add_tracks_and_vias_to_pcb(args.pcb, args.output, tracks, vias_to_add,
-                                   vias_to_remove, net_id_to_name=net_names)
+                                   vias_to_remove, net_id_to_name=net_names,
+                                   add_teardrops=args.add_teardrops)
         print("Done!")
     else:
         print("\nNo fanout tracks generated")
@@ -2950,7 +3237,8 @@ def main():
                 clearance=eff_clearance,
                 track_width=args.track_width,
                 via_diameter=getattr(args, 'via_size', None),
-                via_drill=getattr(args, 'via_drill', None))
+                via_drill=getattr(args, 'via_drill', None),
+                clamp_nondefault_netclasses=True)  # #439: fanout escapes route to --clearance; always clamp
         except Exception as _e:
             print(f"  (skipped DRC-settings fix: {_e})")
     summary = {
@@ -2969,8 +3257,13 @@ def main():
         # Smallest copper clearance any step actually routed at; downstream steps
         # and check_drc grade the board at this floor.
         'min_clearance_used': eff_clearance,
+        # #472: nets deliberately DEFERRED from fanout (surface-reachable,
+        # direct-routed by a later step). Not failures. The route steps'
+        # bare-ball zone exemption keeps them routable automatically.
+        'deferred_fanout_nets': sorted(_direct_route_nets),
     }
     print(f"JSON_SUMMARY: {_json.dumps(summary)}")
+
 
     return 0
 

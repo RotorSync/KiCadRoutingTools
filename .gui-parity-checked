@@ -1,65 +1,392 @@
-6e09425 2026-07-14 parity sweep 066fc7d..6e09425 (#326/#338/#331/#371/#373/#379/#380/#389/#390/#393/#396/#405). No wiring gaps; one documented asymmetry (net_clearances).
+b9f56e4 2026-07-23 parity sweep f445d6b..b9f56e4 (the 0.19.0 release range:
+#156 fractional per-layer track_margin / Rust 0.19.0, #465 env-gated impedance
+neck-down, #477 copperpour keep-outs in the plane fill model, #478 footprint-
+nested zone parsing, and the direction-preference default 5000->250 routability
+fix). Outcome: parity CONFIRMED via both no-wx gates + a per-commit code audit;
+NO gaps found, NO batch_route*/create_plane/generate_*_fanout kwarg added or
+removed (the 77-key param set is UNCHANGED). Release: v0.19.0.
 
-Pure AUDIT (no parity fix needed this pass): every engine change since the
-previous marker landed in SHARED modules or was already threaded through both
-fronts. 24 commits swept; no new CLI argparse flag, no new CLI-only post-pass.
+  * #156 track_margin (dab9168, Rust 0.19.0): INTERNAL engine change --
+    route_multi/route_with_frontier take a fractional track_margin computed
+    inside the shared config (route_reserve_width / _phase_exact_margin /
+    track_margins_for_net) from EXISTING params (track_width, per-net widths,
+    impedance). No new CLI flag (route*/route_diff argparse unchanged this
+    range), no new batch_route kwarg; both fronts inherit. reserve_layer_widths
+    is an internal diff-engine stamp policy, not user-facing.
+  * #465 impedance neck-down (a6461a4): ENV-GATED (KICAD_IMPEDANCE_NECKDOWN,
+    default '1' = allow). No add_argument, no dialog control -- per the env-knob
+    convention (inert unless set, default = prior behavior, no front divergence).
+  * #477 copperpour keep-outs -> plane fill model (44fd129): extract_keepouts
+    records copper_pour_allowed; the pcbnew builder reads keepouts through the
+    SAME extract_keepouts(file text) (kicad_parser build_pcb_data_from_board
+    ~L3519), so the field flows to the GUI for free (per the commit's own note).
+    ZoneFillModel (plane_fill_model, consumed by the shared check_net_
+    connectivity that both the CLI grader and swig_gui import) blocks copperpour-
+    banned cells on both fronts. No gap.
+  * #478 footprint-nested zones (9de56d2): TEXT-parser catch-up -- footprint-
+    owned zones (KiCad 7+) were invisible to extract_zones/extract_keepouts,
+    but pcbnew loads them NATIVELY, so this brings the text parser UP to the
+    pcbnew path's behavior (the CLAUDE.md parser-parity direction that needs no
+    mirror). The GUI keepout read (extract_keepouts on the file) also benefits.
+  * direction-preference 5000->250 (b9f56e4): value-only default change in
+    routing_defaults + the GridRouteConfig dataclass; swig_gui reads the default
+    SYMBOLICALLY (control default L832, reset L2270, config fallbacks L2990 /
+    differential_gui L1001), so the GUI inherits 250 with no literal 5000
+    anywhere. Doc table updated. Fixes the sets-6-11 dp=5000 routability
+    regression (+104 incomplete nets, kbic65 98.9%->15.1%).
 
-WHAT WAS CHECKED (all parity-clean):
-  * #326 pad/footprint clearance overrides -> pad.local_clearance is resolved in
-    BOTH parse_kicad_pcb (route.py:1988) AND build_pcb_data_from_board
-    (kicad_parser.py:3112-3140, incl. fp.GetLocalClearance inheritance), and the
-    two are diffed by the parser-parity validator (kicad_parser.py:3659/3726).
-  * #338 board-edge rule reader (effective_board_edge_clearance /
-    read_project_edge_clearance) is used CLI-side (route/route_diff/route_planes/
-    route_disconnected_planes/kicad_oracle) AND GUI-side
-    (swig_gui._effective_board_edge_clearance in 4 config builds; every tab's
-    board_edge_clearance kwarg; settings_persistence). Oracle-reconnect edge
-    threading (175bac1) present in both route_disconnected_planes and the GUI
-    planes path.
-  * #331/#371/#396 net_rescue: rescue_failed_nets runs INSIDE batch_route
-    (route.py:1077), so the GUI's batch_route call gets it free. Always-on, no
-    flag.
-  * #373 plane-pad plain-track fallback: _try_trace_to_same_net_copper lives in
-    the shared plane_pad_tap.py (called at :775/:917), reached by both fronts via
-    route_disconnected_planes.route_planes (GUI: planes_gui.py:1125).
-  * #379 GND-net match, #380 target-swap permutation, #389/#390 rip-by-identity /
-    NPTH seed floor, #393 underpad off-centre-via/home-lens: all in shared engine
-    modules (single_ended_routing, target_swap, obstacle_map, plane_pad_tap) ->
-    both fronts free.
-  * #405 kicad_drc_compare symmetric baseline subtraction: grader-only, no
-    routing surface.
+GATES RUN GREEN AT HEAD:
+  * test_manifest_plan_parity.py: 11736 flag-checks across 307 manifests, 0
+    mismatches; param->control 12/12, 0 unresolved.
+  * test_cli_postpass_coverage.py: 4 registered, 10 in active CLI use, 0
+    failures, 0 warnings (bga/qfn run_drc the acknowledged CLI-only report-only
+    pass).
 
-GATES RUN GREEN:
-  * test_manifest_plan_parity.py: 6201 flag-checks / 157 manifests, 0 mismatch;
+NOT RUN THIS PASS: tests/gui_parity/test_gui_engine_parity.py (no wx/pcbnew in
+this session) -- carried over. The 77-key batch_route param set is UNCHANGED
+this range, so the prior marker's wx VERDICT still covers the engine signature.
+Still pending a KiCad-python session (carried from prior markers) PLUS new this
+sweep: a GUI net-list/plane check on a copperpour-keepout / footprint-nested-
+zone board (e.g. the #217 oracle board) to confirm the pcbnew build_pcb_data
+keepout read matches the CLI fill-model split.
+
+--- prior sweeps ---
+9466342 2026-07-22 parity sweep 143d097..9473bf8 (the bus-corridor-planning +
+dogbone-escape-128 merges and the fill-model / rescue / tap-relocation wave --
+93 files, +8067 lines: #128 dog-bone escape, #296-R9 bus corridor planning,
+#424 tap relocation / congestion field, #444 SE seam re-ask, #470 via->pad
+graze class, #472 direct-first ordering, #473 checkpoint/dead-end hardening,
+#475 gr_poly outline, the plane-net manifest sidecar, and the fill-COMPONENT-
+aware zone credit). Outcome: parity CONFIRMED via both no-wx gates + a
+per-commit code audit, with ONE gap found and fixed (9466342, below). The
+recorded SHA (9466342) is the fix commit -- one commit past merge HEAD 9473bf8.
+
+  * GAP FOUND + FIXED (9466342): route_planes' --zone-clearance is `type=float`
+    (a NEW flag this range, 0efffb2) but was placed in manifest_to_plan
+    BOOL_FLAGS. A recorded `--zone-clearance 0.12` converted to
+    `zone_clearance: True`, dropping the value; the plan executor's generic
+    param->control loop then set the plane zone-clearance SpinCtrlDouble to
+    float(True)=1.0 (range max 2.0, unclamped) and the route_planes block
+    checked the override box -- replaying a 0.12 mm pour clearance at 1.0 mm.
+    Moved to FLAG_PARAMS. The GUI value path (planes_gui checkbox+spin,
+    claude_plan route_planes block, swig_gui reset) was already correct; only
+    the converter classification was wrong. The manifest_plan_parity gate
+    structurally could not catch this -- no corpus manifest yet uses the new
+    flag, and its 12-param control-resolution set doesn't include it.
+
+  * ONE NEW batch_route KWARG -> 76-key set becomes 77:
+    - ripup_blocker_select (--ripup-blocker-select, #424 audit; routing_config
+      field default 'count'). Threaded through ALL FOUR route mains
+      (route/route_diff/route_planes/route_disconnected_planes) AND fully GUI-
+      wired: swig_gui wx.Choice (defaults.RIPUP_BLOCKER_SELECT_CHOICES) + config
+      dict + reset_params_to_defaults + the batch_route call site;
+      settings_persistence save/restore; manifest_to_plan FLAG_PARAMS
+      (--ripup-blocker-select); test_gui_engine_parity config map. Default
+      'count' matches on both fronts (byte-identical when unset).
+  * NEW GUI-VISIBLE CHOICES / CONTROLS, all wired:
+    - --ordering gains a `bus` choice (ec8e21a) -> ordering_strategy: swig_gui
+      dropdown adds "bus"; manifest_to_plan maps --ordering -> ordering_strategy
+      (121fb40, was carried as the no-match 'ordering'); wx test now step-drives
+      ordering_strategy.
+    - --escape-method gains `dogbone` (#128, 27b35b4): fanout_gui BGA panel
+      ESCAPE_METHODS tuple + dropdown entry + tooltip; claude_plan _apply_special
+      reads opts.ESCAPE_METHODS dynamically so 'dogbone' round-trips; converter
+      carries it via the generic unknown-flag fallthrough (verified 'dogbone').
+    - --zone-clearance override: planes_gui CreatePlanesOptionsPanel gets a
+      checkbox+spin row (unchecked = follow routed clearance auto-stepping to
+      the fab floor; checked = typed value); get_config returns None when
+      unchecked; PlanesTab create_plane / repair passes config.get('zone_
+      clearance') (no default -> None); swig_gui reset unchecks + disables;
+      claude_plan checks the box when a plan value is present.
+    - --vertical-attraction-radius (new route.py argparse exposure of the
+      existing net-agnostic cross-layer stacking radius): existing swig_gui
+      control + generic fallthrough (verified 0.6 round-trips); tooltips
+      reworded on both fronts to the net-agnostic meaning.
+  * SHARED-FUNCTION features -> both fronts inherit, no per-front wiring:
+    - Plane-net manifest sidecar (075d1bf/d1cca2f/8bc7ba7): CLI mains write via
+      plane_io.record_plane_manifest / carry_plane_manifest and pre-filter net
+      selection via apply_plane_manifest_exclusions (a PRE-engine selection
+      filter, correctly NOT a post-pass). GUI mirror: claude_plan._plan_plane_
+      nets (whole-plan plane steps UNION the on-disk manifest -- covers steps
+      that run before the plane step, the CLI's fanout-before-planes hole) +
+      _drop_plane_nets on route/fanout selection; planes_gui writes the manifest
+      after a plane run. Both fronts wired.
+    - Fill-COMPONENT-aware zone credit (607f856/8779b70/d5b2aea/f9c703c/
+      9473bf8): check_net_connectivity (defined in check_connected.py, imported
+      by BOTH the CLI grader and swig_gui) gained a pcb_data param + the
+      plane_fill_model component-labeling credit. GUI-parity fix: swig_gui's
+      net-list "hide connected" now passes pcb_data=self.pcb_data (without it a
+      pinched pour island graded connected here while KiCad DRC showed it open).
+    - #444 SE seam re-ask, #470 via->pad graze close_soft_joints class, #424 tap
+      relocation / congestion field / fragility field, #472 direct-first
+      ordering, #473 dead-end/checkpoint protection, rip_restore, stub layer
+      switching, bus_corridor/bus_detection, congestion_field: all inside the
+      shared engine (single_ended_*, phase3_routing, diff_pair_routing,
+      batch_route path) -> both fronts inherit. Rust 0.18.4/0.18.5 (cross-layer
+      bus attraction, P2/P3 precompute) below the Python API, front-agnostic.
+    - #475 gr_poly free-form outline crash fix + zone_clearance=None repair
+      (741bfe8): parser/engine + planes path; the GUI crash fix is in the shared
+      planes flow.
+  * ENV-GATED DEBUG KNOBS (inert unless set, default = prior behavior, no
+    dialog control by convention): KICAD_BUS_STRICT/OFFLANE_MULT/RIP_RESISTANCE,
+    KICAD_DIRECT_FIRST (default '1', inside the shared engine ordering),
+    KICAD_FANOUT_DIRECT / _TOWARD_TARGETS, KICAD_ISLAND_LAUNCH,
+    KICAD_UNDERPAD_OUTER_RINGS, KICAD_STOP_AFTER/_FILE/_CLEANUP (checkpoint
+    abort; only conditionally SKIPS the shared run_post_route_cleanup, off by
+    default so both fronts run cleanup identically), KICAD_NET_STORY. None
+    change a default that diverges between fronts.
+  * CLI-only, no GUI surface (grading/corpus/debug): grade_final honest-DRC,
+    kicad_unconnected authoritative count, net_forensics/net_story debug dumps,
+    stress harness (run_board/run_queue/board_layer_images, set3monster corpus).
+
+GATES RUN GREEN AT HEAD (post-fix):
+  * test_manifest_plan_parity.py: 11736 flag-checks across 307 manifests, 0
+    mismatches; param->control resolution 12/12, 0 unresolved.
+  * test_cli_postpass_coverage.py: 4 registered, 10 in active CLI use, 0
+    failures, 0 warnings (bga/qfn run_drc the one acknowledged CLI-only
+    report-only pass).
+
+NOT RUN THIS PASS: tests/gui_parity/test_gui_engine_parity.py (no wx/pcbnew in
+this session) -- carried over. NOTE the batch_route param set GREW this range
+(76 -> 77: +ripup_blocker_select), so the prior marker's wx VERDICT no longer
+covers the exact signature; the config map IS updated and both fronts pass the
+new kwarg with matching 'count' default, but a KiCad-python session should
+re-run the wx engine-parity test to reconfirm. Still pending a KiCad-python
+session (carried): multi-class net_clearances convergence, a GUI-engine diff
+route, a QFN GUI fanout on zynq_ad9364 U11 (#446 tips on-grid), a slotted-board
+(sofle) GUI plane vs the CLI copperpour keepout sexprs -- and NEW this sweep:
+(1) a GUI route_planes with an explicit --zone-clearance to confirm the fixed
+converter value reaches create_plane; (2) a dog-bone (#128) GUI BGA fanout;
+(3) a GUI net-list check on a fill-COMPONENT board to confirm the pcb_data zone
+credit matches check_connected.
+
+--- prior sweeps ---
+143d097 2026-07-20 parity sweep a92ccec..143d097 (the #446 QFN fan-tip
+re-snap, #452 Rust diagonal direction cost / rust_router 0.18.3, the corpus
+expansion to sets 11-25, and a self-reverted bga_fanout experiment). Outcome:
+parity CONFIRMED via both no-wx gates + a per-commit code audit. NO
+batch_route*/create_plane/generate_*_fanout kwarg was added or removed, so the
+76-key param set is IDENTICAL to the a92ccec marker. Release: v0.18.3.
+
+  * SHARED engine functions -> both fronts inherit, no wiring:
+    - #446 QFN fan-tip re-snap (c0737e9): _snap_tip_on_grid is a PRIVATE helper
+      called from inside generate_qfn_fanout's #123 foreign-pad clearance pass.
+      fanout_gui._run_qfn_fanout imports and calls generate_qfn_fanout directly
+      (fanout_gui.py ~L1366), so the GUI inherits it. No new parameter: grid_step
+      and the `grazes` gate are both already in scope at the call site, and the
+      generate_qfn_fanout signature is untouched (the def line appears only as a
+      diff hunk header). Nothing to add to claude_plan / manifest_to_plan /
+      reset_params_to_defaults.
+    - #452 diagonal direction cost (a0e7fd4, rust_router 0.18.3): router.rs
+      charges the wrong-axis component of DIAGONAL moves. Below the Python API
+      and therefore front-agnostic -- both fronts load the same grid_router.
+  * NO-OP (self-reverted, nothing survives at HEAD):
+    - 16d3822 bga_fanout snap_exit_end candidate ladder, reverted by 143d097.
+      Net diff over the pair is empty; no audit surface.
+  * NO GUI SURFACE (corpus/test data only):
+    - c82a7ff corpus expansion to sets 11-25 (+223 boards): tests/stress
+      manifests + fetch/prep scripts only. Note this GREW the manifest_plan
+      parity corpus -- the converter gate now sweeps 158 manifests / 6229
+      flag-checks (was 6201), all still 0 mismatches.
+
+GATES RUN GREEN AT HEAD:
+  * test_manifest_plan_parity.py: 6229 flag-checks across 158 manifests,
+    0 mismatches; param->control resolution 12/12, 0 unresolved.
+  * test_cli_postpass_coverage.py: 4 registered, 10 in active CLI use,
+    0 failures, 0 warnings (bga/qfn run_drc remains the one acknowledged
+    CLI-only report-only pass).
+
+NOT RUN THIS PASS: tests/gui_parity/test_gui_engine_parity.py (no wx/pcbnew in
+this session) -- carried over. With the 76-key param set unchanged the prior wx
+VERDICT PARITY still covers the engine signature. Still pending a KiCad-python
+session (carried): multi-class net_clearances convergence, a GUI-engine diff
+route, a QFN GUI fanout -- and, carried from the a92ccec marker, creating a
+plane via the GUI on a slotted board (sofle) to confirm the pcbnew rule areas
+match the CLI's copperpour keepout sexprs. NEW for next wx session: a GUI QFN
+fanout on zynq_ad9364 U11 to confirm the #446 tips land on-grid there too.
+
+--- prior sweeps ---
+a92ccec 2026-07-20 parity sweep ada9778..a92ccec (the #448/#449/#450/#451/#445
+burndown: NPTH-slot-as-edge family, meander skip-offset, custom-pad anchor
+tessellation, fanout rect-pad stamps, cap-mover via gate, plus the grading/
+compare work). Outcome: parity CONFIRMED via both no-wx gates + a per-commit
+code audit. NO batch_route*/create_plane kwarg was added or removed (route.py /
+route_diff.py untouched in the whole range), so the 76-key param set is
+IDENTICAL to the ada9778 marker. Every behavioral change is one of:
+
+  * SHARED engine functions -> both fronts inherit, no wiring:
+    - #449 meander skip-offset (c71d5a8): generate_trombone_meander /
+      generate_centerline_meander internals (batch_route length matching).
+    - #448 slot obstacle band (1ddf220): add_drill_hole_obstacles grows slot
+      keep-outs to the edge clearance (shared obstacle map).
+    - #448 in-pad via edge floor (7492ae9): _place_shrunk_via_in_pad
+      (single_ended_routing, shared last-resort rescue).
+    - #451 fanout rect-pad stamps (b3e7ace): bga_fanout/underpad occupancy --
+      fanout_gui calls generate_bga_fanout, inherits.
+    - #445 cap-mover via gate (a92ccec): placement/fanout_clearance
+      _via_shortfalls + hard/cost gates -- fanout_gui calls
+      repair_fanout_clearance, inherits.
+    - #447 stamped-width edge band (0bb71e4): add_board_edge_obstacles callers
+      audited -- all engine-side (obstacle_map x2, plane_region_connector).
+    - #441 plane edge pin (ab2d523): effective_board_edge_clearance resolver
+      inside repair_planes (engine); registered DISCOVERY_EXEMPT (16e6407).
+  * NEW GUI WIRING (done with the engine change, this sweep's one addition):
+    - #448 NPTH-slot copperpour keepouts (1ddf220): create_plane computes them
+      BEFORE the dry_run/write split; CLI writes generate_keepout_zone_sexpr,
+      planes_gui applies pcbnew RULE AREAS ({'keepout': True} entries in the
+      EXISTING new_zones list -- no return-shape change, no new param, so
+      claude_plan / manifest_to_plan / reset need nothing; dedupe by zone name
+      both fronts).
+  * PARSER PARITY (the CLAUDE.md text-vs-pcbnew rule), checked explicitly:
+    - #450 custom-pad anchor tessellation (35a7f88) is a TEXT-parser fix; the
+      pcbnew path already uses pad.GetEffectivePolygon() (KiCad-exact, finer
+      than the new adaptive 5um polygon) -- parity holds with NO mirror needed.
+    - Copper-GRAPHIC circles remain a 16-gon in BOTH paths (kicad_parser
+      gr_circle + the pcbnew _CIRC branch) -- equally coarse on both fronts,
+      noted as a shared-precision observation, not a front divergence.
+  * GRADING/COMPARE TOOLS only, NO GUI surface: check_drc (2ce4fcb slot edge +
+    accepted publications, 3839c6e capsule helper + derive-once margin +
+    worst-overlap bbox checks, 35a7f88 pad-via pair dedupe),
+    kicad_drc_compare (respect_edge_severity, copper-anchored edge items,
+    all-pad hole_clearance design-condition drop), ab_replay_grade (4abb1b3),
+    fix_outline_gaps.py (corpus board-prep, b13675c).
+
+GATES RUN GREEN AT HEAD:
+  * test_manifest_plan_parity.py: param->control 12/12, 0 unresolved.
+  * test_cli_postpass_coverage.py: 0 failures (bga/qfn run_drc the one
+    acknowledged CLI-only report-only pass; effective_board_edge_clearance
+    registered DISCOVERY_EXEMPT).
+
+NOT RUN THIS PASS: tests/gui_parity/test_gui_engine_parity.py (no wx/pcbnew in
+this session) -- carried over; with the 76-key param set unchanged the prior wx
+VERDICT PARITY still covers the engine signature. Still pending a KiCad-python
+session (carried): multi-class net_clearances convergence, a GUI-engine diff
+route, a QFN GUI fanout -- plus NEW for next wx session: create one plane via
+the GUI on a slotted board (sofle) and confirm the pcbnew rule areas match the
+CLI's copperpour keepout sexprs.
+
+--- prior sweeps ---
+ada9778 2026-07-19 parity sweep ad1bd5e..ada9778 (the #441 residual-DRC wave:
+h2h / hole_clearance / shorting_items / edge fab-floor / diff-pair gap floor /
+cp-drop-floor prevention / picodvi detour weld / ghoul NPTH nudge, plus the #442
+Class-B grading fix). Outcome: parity CONFIRMED via both no-wx gates + a
+per-commit code audit. No new CLI-visible engine param requires GUI wiring -- the
+76-key batch_route* signature set is UNCHANGED (no engine kwarg added/removed),
+and every behavioral change is one of:
+
+  * SHARED engine/cleanup/obstacle functions -> both fronts inherit, no wiring:
+    - h2h (ade0fe9/83afbac): drill hole-to-hole disc added to obstacle_cache
+      precompute_net_obstacles + obstacle_map add/remove-vias stampers.
+    - hole_clearance (b74c3e3/ef3e0f9): ring-uncovered plated pad treated as
+      NPTH in obstacle_map.add_drill_hole_obstacles (+ check_drc, grading-side).
+    - shorting_items (4b955ce/f60273d): per-net accept gate in
+      placement/fanout_clearance.repair_fanout_clearance.
+    - edge sub-class C (964ccce): per-layer pad-own-copper landing exemption in
+      obstacle_map (replaced the removed net-agnostic reach exemption; JSON
+      intentional_edge_band emission removed from the route mains + grader).
+    - picodvi detour weld (52f9661): weld_redundant_grazing_detours wired INTO
+      the shared run_post_route_cleanup graze stage -- both fronts' route calls
+      run the pipeline, so the GUI inherits it.
+    - ghoul NPTH nudge (54ed114): via-copper-vs-NPTH-hole term added inside the
+      shared nudge_grazing_vias.
+    - edge fab-floor + explicit override (b1e5ced/32d9434):
+      fix_kicad_drc_settings.effective_board_edge_clearance / fab_edge_floor --
+      the ENGINE reads these; both route mains AND the GUI writeback call them.
+  * ALREADY GUI-WIRED this session:
+    - diff-pair gap floor (ffea47e): engine batch_route_diff_pairs floors
+      diff_pair_gap up to clearance FIRST (GUI routing inherits, since the GUI
+      calls that engine fn); differential_gui writeback ALSO floors the recorded
+      gap = max(cfg gap, cfg clearance) (~L1281). It's an automatic floor on the
+      EXISTING diff_pair_gap param (no new control), so claude_plan /
+      manifest_to_plan / reset need no change.
+    - GUI edge re-clamp removal (3b9fdff): swig_gui _effective_board_edge_
+      clearance dropped its redundant route-time board-min re-clamp so the edge
+      param matches the other five basic-tab floors (the shared Obey-DRC
+      interactive validation still enforces the board minimum).
+  * GRADING-TOOL only, NO GUI surface: check_drc.py (b1e5ced edge floor,
+    b74c3e3 ring-uncovered hole, ada9778 #442 same-net track->own-hole exemption).
+  * CLI-only, no GUI counterpart (the GUI operates on the LIVE board and never
+    cp's a file): copy_board.py (new) + fix_kicad_drc_settings.warn_if_missing_
+    project_floor wired into the 4 route mains (65078be) -- registered
+    DISCOVERY_EXEMPT in test_cli_postpass_coverage.
+
+GATES RUN GREEN AT HEAD:
+  * test_manifest_plan_parity.py: param->control 12/12, 0 unresolved.
+  * test_cli_postpass_coverage.py: 0 failures (bga/qfn run_drc the one
+    acknowledged CLI-only report-only pass; weld_redundant_grazing_detours +
+    warn_if_missing_project_floor both registered).
+
+NOT RUN THIS PASS: tests/gui_parity/test_gui_engine_parity.py (no wx/pcbnew in
+this session) -- carried over, as in the prior two markers. No batch_route*
+kwarg changed, so the 76-key param set is IDENTICAL to the ad1bd5e marker and
+that marker's wx VERDICT PARITY still covers the engine signature. Still pending
+a KiCad-python session (carried from prior markers): multi-class net_clearances
+convergence, a GUI-engine diff route, a QFN GUI fanout.
+
+--- prior sweeps ---
+ad1bd5e 2026-07-19 parity sweep 810ce7d..ad1bd5e (the #436/#438 cross-class
+cleanup umbrella, #426/#427/#429 agent fixes, the replay clobber guard, and
+#435 per-pair diff geometry + single-ended per-net track width). Outcome:
+parity CONFIRMED -- wx test_gui_engine_parity VERDICT PARITY (kicad unconnected
+0/0, drc 0/0) + both no-wx gates pass. New CLI-visible engine params and their
+GUI wiring:
+  * #436/#438 umbrella (cross-class + board-edge aware cleanup): entirely inside
+    the shared cleanup_pipeline, which reads config.net_clearances /
+    config.board_edge_clearance -- both fronts inherit, no per-front wiring.
+  * #435 diff geometry: diff_pair_{width,gap}_from_class threaded through
+    route_diff main (argparse absence) AND differential_gui (override checkbox);
+    claude_plan _GEOMETRY_OVERRIDE_CHECKS extended with diff_pair_width/gap ->
+    their diff-tab boxes; manifest_to_plan already maps --diff-pair-gap and
+    route_diff --track-width; reset already resets the boxes.
+  * #435 single-ended companion: track_width_from_class threaded through route.py
+    main (argparse absence) AND swig_gui (track_width_check unchecked + no
+    impedance); track_width_check already in claude_plan's override map + reset.
+  * #427 edge-severity + clobber guard: check_drc.py / tests-stress only (no GUI
+    surface). No wiring gaps found.
+
+--- prior sweeps ---
+810ce7d 2026-07-17 parity sweep 6e88568..810ce7d (the #217/#412 connectivity
+wave, ~37 commits: Tier-1 levers, T5 custody + SE member fallback, net-tie
+support, rescue-window fence, full-stack layer normalization, #416 terminal
+connector, #418 pad stroke extent, #419 mimalloc purge, #420 oracle fast
+project, #422 static bitmap / Rust 0.18.2, #265 per-cluster swaps, PR415
+connection_width grading merge). Outcome: parity CONFIRMED via the no-wx
+gates + placement audit; no wiring gaps found.
+
+AUDIT: no new CLI flags survive at HEAD. The one flag added during the wave
+(--failed-first-restart, with full CLI/GUI/manifest/parity threading) was
+REVERTED after measuring zero real-board wins — its threading went with it.
+Every behavioral change of the wave lives inside shared engine functions
+(batch_route, batch_route_diff_pairs, create_plane, the
+route_disconnected_planes repair path, close_soft_joints,
+apply_single_ended_layer_swaps, plane_pad_tap/try_tap_pad), so both fronts
+inherit them with no per-front wiring:
+  * PlaneComponentOracle: internal to the shared repair path (plane_oracle
+    param defaults None; oracle-less callers byte-identical).
+  * T5 casualty reconcile + coverage gate + honest sweep: inside batch_route;
+    additive results keys only.
+  * Diff pair_reports / casualty_reconcile / single_ended_fallback: inside
+    batch_route_diff_pairs; keys mirrored into GUI results_data by the same
+    engine code.
+  * Full-stack layer normalization: inside the three shared engine functions
+    (route_disconnected_planes exempt by design, documented inline).
+  * #416 connector + narrow_pad_joint: close_soft_joints + check_weird
+    (shared cleanup/checker).
+  * #265 per-cluster assignment: PHASE 3 of apply_single_ended_layer_swaps.
+  * rust_alloc.py (MIMALLOC_PURGE_DELAY=0): wired at every CLI entry point
+    AND both GUI call sites (per #419 agent; spot-verified imports).
+  * Rust 0.18.2 static bitmap: below the Python API, front-agnostic;
+    neutrality proven bit-identical (total_iterations).
+
+GATES RUN GREEN AT HEAD:
+  * test_manifest_plan_parity.py: 6201 flag-checks, 0 mismatches;
     param->control resolution 12/12.
-  * test_cli_postpass_coverage.py: 4 registered, 8 in active use, 0 failures
-    (bga/qfn run_drc remains the one acknowledged CLI-only report-only pass).
-  * test_gui_engine_parity.py (KiCad python, pcbnew 10.0.0, default power board):
-    VERDICT PARITY -- CLI & GUI both conn_full=True, drc=0, kicad_unconnected=0.
-    Copper sets DIFFER (~264 cli-only / ~293 gui-only of ~1250 segs) -- larger
-    than the pure A*-tie-break/UUID class, consistent with the net_clearances
-    asymmetry below firing on this board's power net classes.
+  * test_cli_postpass_coverage.py: 0 failures (bga/qfn run_drc remains the
+    one acknowledged CLI-only report-only pass).
 
-OPEN ASYMMETRY (documented design state from 5b4c191, NOT fixed here -- fixing
-is a CLI behavioral change needing a full corpus A/B, out of scope for a marker
-update):
-  * net_clearances (#326 B5, GridRouteConfig): the GUI BUILDS it from the live
-    board's netclasses and passes it to batch_route (swig_gui.py:2854/2994/3121),
-    so the GUI router reserves each net's OWN class clearance as an obstacle. The
-    CLI main() does NOT build it (route.py:578 comment: "GUI-fed today; harmless
-    when empty") -- the CLI instead routes at the flat run clearance and clamps
-    the non-Default netclasses DOWN in the output .kicad_pro
-    (apply_targets_to_project clamp_nondefault_netclasses). Net effect: on a
-    MULTI-NETCLASS board with larger non-Default clearances the two fronts
-    produce DIFFERENT copper (GUI more conservative), though both stay
-    functionally parity-clean (0 DRC / 0 unconnected). 5b4c191's message aspired
-    to a CLI auto-build "from the sibling .kicad_pro"; that was not implemented.
-    RESOLVE next: decide whether the CLI should auto-build net_clearances (then
-    A/B the corpus) or whether the route-flat-then-clamp approach is the intended
-    CLI contract; file an issue either way. Empty/all-Default boards are already
-    identical.
-
-STILL NOT DIRECTLY GUI-ENGINE-TESTED (structurally covered by the no-wx gates;
-the KiCad-python test only ran a single-ended+power board): a diff route through
-the GUI engine (D1 ordering/rip-up/costs) and a QFN GUI fanout at the D7
-defaults. Next audit picks up from this marker.
+NOT RUN THIS PASS: tests/gui_parity/test_gui_engine_parity.py (needs KiCad
+python/wx). No batch_route kwarg was added or removed at final HEAD, so the
+76-key param set is unchanged from the prior marker. Carried over from the
+prior marker and still pending a KiCad-python session: the multi-class
+net_clearances convergence check, a GUI-engine diff route, and a QFN GUI
+fanout. Next audit picks up from this marker.

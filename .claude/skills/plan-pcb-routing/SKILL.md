@@ -119,6 +119,7 @@ for ref, fp in pcb.footprints.items():
 | PGA (through-hole grid) | `bga_fanout.py` | Same tool works for PGA |
 | LGA / WLCSP / CGA (land/chip-scale grid) | `bga_fanout.py` | Grid escape; interior lands strand without it (issue #144) |
 | QFN/QFP/DFN (perimeter SMD) | `qfn_fanout.py` | Stub routing for quad/dual no-lead and flat packages |
+| **AQFN / staggered multi-row no-lead** | `qfn_fanout.py` **`--escape-method underpad --allow-via-in-pad`** | Inner rows the surface fan cannot reach - see below. **Never `bga_fanout.py`** |
 | DIP/SOIC (through-hole/SMD rows) | None needed | Standard routing handles these |
 
 ### When to Use Fanout for BGA/PGA/LGA
@@ -156,6 +157,34 @@ only. On a 4+ layer board, pass ALL the board's copper layers, e.g.
 `--layers F.Cu In1.Cu In2.Cu B.Cu` — otherwise deep balls have nowhere to escape to
 and those nets are dropped from the fanout. `qfn_fanout.py` is perimeter-only and
 doesn't take escape layers.
+
+**Staggered multi-row no-lead packages (AQFN) - use via-in-pad (#500).** An
+AQFN (e.g. `Nordic_AQFN-73-1EP_7x7mm_P0.5mm`, on osprey_kb / hex_gateway /
+mikoto_nrf52840) puts its pads in TWO OR MORE staggered rows per side. The
+surface 45-degree stub fan reaches only the outermost row, so the default
+silently drops the rest. Measured on osprey_kb U1 (78 pads, 39 nets):
+
+| command | escaped | time |
+|---|---|---|
+| `qfn_fanout.py` (default stub) | 26/40 | 2.4s |
+| `qfn_fanout.py --escape-method underpad` | 35/40 | 2.6s |
+| **`qfn_fanout.py --escape-method underpad --allow-via-in-pad`** | **39/39, DRC-clean** | **2.4s** |
+| `bga_fanout.py` | 39/39 | **2967s** |
+
+So: **for any AQFN or staggered multi-row no-lead part, plan
+`qfn_fanout.py --escape-method underpad --allow-via-in-pad`.** Via-in-pad is
+what reaches the innermost row; without it 5 pads drop.
+
+Do NOT send these to `bga_fanout.py`. It models a ball grid, and a staggered
+package's two offset rows project onto each axis at HALF the real pad spacing -
+so its detected pitch is half the truth, its escape budget evaluates to a
+NEGATIVE via size, and it grinds for ~50 minutes to reach the same answer.
+`bga_fanout.py` now refuses these outright with the qfn_fanout command to use
+(override: `KICAD_ALLOW_STAGGERED_BGA=1`).
+
+Spotting one: the footprint name contains `AQFN`, or the part has far more pads
+than a single peripheral ring of its size would hold (73-90 pads on a 7x7mm
+body), or `bga_fanout.py` reports a pitch that is half the name's `P<pitch>mm`.
 
 **Crowded fine-pitch QFN edge (surface fan has no room):** if a `qfn_fanout`
 stub (especially a diff pair) is boxed in by a neighbour pair and a foreign
@@ -392,6 +421,9 @@ Use the printed flags as-is:
   (NOT the wide net-class values), plus `--impedance` when the interface is
   impedance-controlled; shrink track/gap/via further toward the fab floor for any
   pair that fails or grazes (see "Diff-pair sizing default + shrink-to-succeed").
+  **Never set `--diff-pair-gap` below the same command's `--clearance`** — KiCad
+  grades the pair's P↔N coupling as a plain clearance violation, so `route_diff`
+  floors the gap up to clearance (#441). Set the two equal (both at the fab floor).
 
 **Verification (DRC/connectivity) grades at the manufacturing floor**, not the
 inflated net-class clearance — that is the same rule the human original passes, so
@@ -523,6 +555,59 @@ Thread these into the plan:
   antenna region and `--keepout`, and route it short/direct on an outer layer.
 
 If no controlled-impedance nets are found, omit Step 2b.
+
+### Step 2b-i: Coplanar (CPW-over-ground) — decide this WITH the plane step (#486)
+
+An impedance trace on an **outer layer that will also carry a GND pour** is not a
+microstrip: the side ground pulls Z0 down hard, so hitting the target needs a
+**narrower** trace (e.g. 0.277 mm instead of 0.376 mm for 50 Ω on 0.2 mm FR4).
+Routing the microstrip width through a pour lands the trace well below target.
+
+The router cannot detect this — at route time the pour does not exist yet. So
+this is **your decision to make in the plan**, and it must be coordinated across
+two steps that run at different times.
+
+**Declare coplanar when ALL of these hold:**
+1. The impedance net routes on an **outer layer** (`F.Cu` / `B.Cu`). Inner layers
+   are stripline; the flag is ignored there.
+2. A `route_planes` step in this plan pours **GND on that same layer** — or the
+   board already has an outer-layer GND pour that will survive.
+3. You can name the gap: it is the pour's zone clearance.
+
+**If you are not pouring on the signal's own layer, do NOT pass `--coplanar-gap`.**
+A coplanar declaration whose pour never arrives leaves the trace too narrow, i.e.
+impedance too HIGH — the opposite error, equally wrong.
+
+**Coordination — one number, three places:**
+
+```bash
+# choose ONE gap G (the pour's clearance; near the fab floor, e.g. 0.2)
+# 1. route the impedance nets, declaring G
+python3 route.py in.kicad_pcb s2b.kicad_pcb --nets "RF*" \
+    --impedance 50 --coplanar-gap 0.2 --clearance 0.2
+
+# 2. pour GND on the SAME layer with a MATCHING zone clearance
+python3 route_planes.py s2b.kicad_pcb s5.kicad_pcb \
+    --nets GND GND --plane-layers F.Cu B.Cu --zone-clearance 0.2
+
+# 3. verify the declaration actually held
+python3 check_impedance.py s5.kicad_pcb --coplanar-gap 0.2 --nets "RF*"
+```
+
+- `--coplanar-nets "<patterns>"` narrows the declaration to some nets in a call;
+  omit it and every net in that call is treated as coplanar. Since Step 2b is
+  already a dedicated impedance pass over exactly those nets, omitting it is
+  usually right.
+- `route_diff.py` takes `--coplanar-gap` but has **no** `--coplanar-nets` (the
+  diff engine bakes one width per layer). Split interfaces into separate calls.
+- The gap must be **achievable**: it is a pour clearance, so it cannot be below
+  the fab floor, and near via antipads / pads the real gap will be wider. The
+  Step-3 audit reports how much of each net actually achieved it.
+
+**Report to the user** which nets you declared coplanar, the gap, and the plane
+step it is tied to — this is a coupled choice they may want to override. If the
+board has no outer-layer pour planned, say so explicitly and note that the
+impedance nets are being routed as plain microstrip.
 
 ## Step 5: Review Power and Ground Net Strategy (delegate to /recommend-plane-mappings)
 
@@ -818,7 +903,20 @@ width, not the signal default. route.py routes against the live obstacle map
 (planes + repairs included) with safe rip-up/restore, so it reconnects them without
 the shorts the old in-step reroute caused. This produces the canonical final board
 `board_step5.kicad_pcb`. (If Step 5 reports it ripped nothing, you may skip this and
-rename board_step5_repair.kicad_pcb -> board_step5.kicad_pcb.)
+copy board_step5_repair.kicad_pcb -> board_step5.kicad_pcb **with `copy_board.py`, not
+bare `cp`** — see the warning below.)
+
+> **Never `cp` a board without its `.kicad_pro`.** A bare `cp step5_repair.kicad_pcb
+> step5.kicad_pcb` copies only the board and strands the sibling `.kicad_pro`, which
+> holds the DRC floor (the Default-netclass clearance/track/via the chain routed to).
+> The next routing step then reads no project, resolves its floor from the STOCK
+> (looser) netclass, and its writeback stamps that looser floor over tighter copper —
+> so KiCad grades correct sub-floor copper as phantom clearance violations (icepi_zero:
+> a dropped 0.09 floor became 0.10 → 160 phantom grazes). Use
+> **`python3 copy_board.py src.kicad_pcb dst.kicad_pcb`** — it copies the board plus every
+> sibling (`.kicad_pro`/`.kicad_prl`) and self-records into the redo manifest — or, if you
+> must use `cp`, copy the `.kicad_pro` too. The routing scripts also WARN when an input
+> board has no sibling `.kicad_pro` (#441).
 
 python3 -X utf8 route.py board_step5_repair.kicad_pcb board_step5.kicad_pcb \
     --nets "*" "!GND" "!<other_plane_nets...>" \
@@ -914,6 +1012,16 @@ insufficient routing channels. Options:
 - Accept partial fanout; router will complete remaining connections
 - Skip fanout entirely; direct routing often works for through-hole PGA
 
+**Dense 2-layer boards: treat B.Cu as a real routing layer, not a plane.**
+Reserving B.Cu for a GND plane (and/or pricing it 3×) turns a congested
+2-layer board into single-layer routing — neo6502's human original carries
+47% of its routed length on B.Cu and pours GND *around* the routes on both
+sides afterwards; our plane-first chain left 25 nets open. On a dense 2-layer
+board: route signals on BOTH layers at cost 1.0 (long-haul nets cross on the
+back), then pour GND last (`route_planes.py` after the signal steps — the pour
+flows around existing copper). Only plane-first on 2-layer boards with light
+signal content.
+
 **Important:** If you skip fanout for a BGA/PGA component but still need to connect its
 internal pads, use `--no-bga-zone <component>` to disable the automatic exclusion zone
 and allow the router to enter the dense pin area:
@@ -930,9 +1038,27 @@ leave internal pads unconnected if they weren't fanned out.
 
 ### Multi-Layer Boards (4+ layers)
 
-- Use inner layers for planes (In1.Cu for GND, In2.Cu for VCC). **Roughly half
-  the copper layers should be planes** — on a 4-layer board that's In1+In2 as
-  planes, F.Cu+B.Cu for signals.
+- Use inner layers for planes (In1.Cu for GND, In2.Cu for VCC). On a board with
+  light-to-moderate routing density, **roughly half the copper layers as
+  planes** works — on a 4-layer board that's In1+In2 as planes, F.Cu+B.Cu for
+  signals.
+- **EXCEPTION — dense boards (any BGA ≥ ~100 balls, DDR/SDRAM buses, or a
+  signal step that already failed >5 nets): never plane ALL inner layers.**
+  Corpus triage of the worst-connectivity boards (ulx3s, butterstick,
+  orangecrab, zynq_ad9364) found this the single most damaging planning error:
+  solid planes on both inner layers + 3× inner costs leaves a 2-layer board
+  around the BGA, and 20–50 nets ship open while the human-routed originals
+  route their long-haul nets *through* inner layers (1–2 vias each, the
+  "cross-under highway"). On these boards: GND plane on ONE inner layer, and
+  either keep the other inner layer a plain routing layer, or make it a SPLIT
+  power plane (region pours per rail — `/recommend-plane-mappings` Step 3b) and
+  keep its layer cost low (≤1.5) so signals can still cross in the gaps. On 6+
+  layers, plane the middle layers and keep the layers at the BGA escape depth
+  routable (human butterstick: planes In3/In4, DDR3 on In2/In5).
+- **Check where the BGA fanout escapes landed before finalizing the plane
+  layers** — a plane on a layer full of escape stubs forces `--rip-blocker-nets`
+  to shred those escapes during tap placement (each rip risks a permanent
+  casualty). Pick plane layers the escapes avoid.
 - More fanout options available.
 
 **Derive `--layer-costs` from the plane plan — penalize the plane-reserved
@@ -947,9 +1073,14 @@ signal layers and leave the inner layers clean for the pour:
 # GND plane on In1.Cu, power plane on In2.Cu -> penalize In1/In2 for signals:
 route.py ... --layers F.Cu In1.Cu In2.Cu B.Cu --layer-costs 1.0 3.0 3.0 1.0
 ```
-- **~3× is the sweet spot.** Any value ≥2× keeps signals off the planes and
-  doesn't hurt completion; ≥5× just adds vias/copper for negligible further gain.
-  Order matches `--layers`; keep the real signal layers (F.Cu/B.Cu) at 1.0.
+- **~3× is the sweet spot on boards where F/B alone can carry the signals.**
+  Any value ≥2× keeps signals off the planes and doesn't hurt completion; ≥5×
+  just adds vias/copper for negligible further gain. Order matches `--layers`;
+  keep the real signal layers (F.Cu/B.Cu) at 1.0. **On dense boards (BGA ≥
+  ~100 balls / DDR buses) where an inner layer was deliberately left
+  signal-routable (see the dense-board exception above), keep that layer at
+  1.0–1.5** — 3× on the only spare layer starves the long-haul nets that need
+  it (ulx3s failed 72 nets at 3×; its retry at 1.5 was the correct call).
 - **Why it matters — it's a cascade, not just tidiness.** Signals crossing a
   plane layer fragment the pour into islands; `route_disconnected_planes` then
   carpets the layer with island-stitching tracks. Keep signals off the plane
@@ -1034,6 +1165,17 @@ python3 route.py board.kicad_pcb \
 
 First matching pattern determines width. Useful when not using planes.
 
+**Size power widths for the destination pitch, not just the current.** A
+0.3–0.5 mm trunk physically cannot reach interior balls of a ≤0.8 mm-pitch
+BGA (at 0.5 mm pitch only one ~0.09 mm track fits between balls; at 0.8 mm a
+0.25 mm trace + 0.09 clearance is a knife-edge). The power step's automatic
+tap neck-down helps at the pad, but if a rail feeds MANY interior balls
+(core rails like +1V1/P1.35V/VCC_1V8), a fat-track tree through the ball
+field fails outright — the human originals feed such rails with zones on
+every layer plus 0.09–0.2 mm necks. For those rails prefer a plane/region
+(`/recommend-plane-mappings`), or set the rail's width to what the ball
+field admits (e.g. 0.15–0.2) rather than the open-field ideal.
+
 ### Target Swap Optimization (Memory Routing)
 
 For swappable signals (e.g., memory data lanes where any DQ can connect to any):
@@ -1061,6 +1203,16 @@ python3 route_diff.py board.kicad_pcb \
 ```
 
 This updates the `.kicad_sch` files with any pad swaps made during routing.
+
+**Shared symbols are refused, not rewritten (#489 §3).** Pin numbers live in the
+file's `lib_symbols` definition, which every instance of that `lib_id` shares. When
+a second component uses the same symbol — the common case for connectors, identical
+channels, and multi-channel analog — the swap is **refused** for that file with a
+message naming the sharers, because applying it would silently re-pin those other
+components too. The units of one multi-unit part (U2A/U2B) share the definition
+legitimately and are still updated. A refused swap means board and schematic
+disagree on those pins: report it and tell the user to fix it by hand (or give the
+component its own uniquely-named symbol) before fabricating.
 
 **Important:** After routing with swaps, ask the user:
 > "The router performed X polarity swaps and Y target swaps. Would you like to
@@ -1259,6 +1411,61 @@ The JSON_SUMMARY line contains structured data including:
 - `failed_single`: List of failed single-ended net names
 - `failed_multipoint`: List of nets with unconnected pads (includes pad coordinates)
 - `multipoint_pads_connected` vs `multipoint_pads_total`: Connection success rate
+
+### Tune mode (issue #153) — opt-in per-board feedback loop
+
+When the user asks for **tune** (e.g. "plan routing with tune", "tune mode"),
+don't just run the standard pipeline once with defaults: close the loop.
+After EACH step, read the step's own diagnostics and adjust that board's
+options before moving on. Off unless requested — the standard plan stays
+deterministic and fast.
+
+Rules of the loop:
+- **Bounded, guided adjustment — not a grid sweep.** At most 2–3 targeted
+  re-runs per step, each driven by a diagnosed failure mode (the symptom→knob
+  table below and the failure-pattern table in Diagnose and Retry). Never
+  loosen below the fab/board-constraint floor.
+- **Signals to read after each step:** the `JSON_SUMMARY` line (failed nets,
+  `rescue` block, `single_ended_diff_pairs`/`failed_diff_pairs`,
+  `drc_grazes`), the FAILED NET HISTORIES block (`preexisting_blockers`
+  hints, `no rippable blockers`, iteration exhaustion), fanout escape
+  tallies (unescaped balls), and plane-step tap/`ripped`/`STILL FLOATING`
+  reports. `/diagnose-routing-failures` automates most of this.
+- **Symptom → knob map** (beyond the Diagnose and Retry table):
+  - Fanout drops balls in one quadrant → re-run that fanout with
+    `--escape-method underpad`, a smaller via from the fab ladder
+    (0.30/0.15 → 0.25/0.15), or different `--primary-escape` direction.
+  - Signal step fails a cluster of long cross-board nets while an inner
+    layer is plane-reserved → revisit the plane→layer map (dense-board
+    exception above): free one inner layer, drop its `--layer-costs` entry
+    to 1.0–1.5, re-run the failed nets.
+  - `preexisting_blockers` hints repeat for the same nets → re-run those
+    nets with the hinted `--rip-existing-nets` set (the engine now
+    self-escalates once in reconciliation; a manual retry may widen the set).
+  - Power multipoint pads fail inside a BGA courtyard → shrink that rail's
+    `--power-nets-widths` entry toward the ball-field width (0.15–0.2) or
+    promote the rail to a plane/region and re-run.
+  - Diff pairs deferred single-ended → re-run the pairs with smaller
+    `--diff-pair-gap`/width/vias toward the fab floor (keep `--impedance`).
+  - Plane step ships tap failures with fill nearby → re-run
+    route_disconnected_planes with a larger `--max-search-radius`, or at the
+    advanced fab tier so smaller tap vias fit.
+  - A handful of nets fail on a NOT-saturated board (few failed nets, short
+    detours available, failures share a corridor with early-routed nets) →
+    try a **failed-first split**: re-run the step as two invocations, first
+    `--nets <the failed nets>` on the clean input, then everything else to a
+    fresh output. Ordering is the cheapest knob but rarely decisive:
+    measured on castor / butterstick / ddr5 / glasgow, an automatic
+    failed-first restart NEVER beat the normal order (twice it graded
+    worse), so an in-engine restart was tried and removed — only reach for
+    this manually when the failure histories actually show corridor
+    competition, and expect it to matter on few boards.
+- **Explainability:** keep a short tuning log per board — which knob changed,
+  the before/after metric (completion / DRC / coupled pairs), and whether it
+  helped. Revert a change that didn't help before trying the next.
+- **Honest gates:** grade every accepted retry with `check_connected` AND
+  `check_drc` at the routed clearance (plus the kicad oracle for final
+  boards) — never accept a retry that trades new DRC for completion.
 
 ### Diagnose and Retry
 

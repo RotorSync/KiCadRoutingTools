@@ -38,6 +38,19 @@ FLAG_PARAMS = {
     '--max-iterations': 'max_iterations',
     '--max-ripup': 'max_ripup',
     '--ripup-abandon-metric': 'ripup_abandon_metric',
+    '--ripup-blocker-select': 'ripup_blocker_select',
+    # route.py spells the strategy flag --ordering; the GUI control (and the
+    # plan executor's param name) is ordering_strategy. Without this mapping
+    # the generic fallthrough carried it as 'ordering', which matches no
+    # dialog control, so a replayed plan silently routed in default order.
+    '--ordering': 'ordering_strategy',
+    # route_planes' --zone-clearance is type=float (a value, NOT a toggle); it
+    # must consume its argument here. It briefly lived in BOOL_FLAGS, which
+    # dropped the value and set zone_clearance=True -> the plan executor's
+    # generic loop stamped float(True)=1.0 onto the plane zone-clearance
+    # SpinCtrlDouble (range max 2.0, so unclamped), replaying a board routed at
+    # e.g. 0.12 mm pour clearance with a 1.0 mm clearance instead.
+    '--zone-clearance': 'zone_clearance',
     '--hole-to-hole-clearance': 'hole_to_hole_clearance',
     '--board-edge-clearance': 'board_edge_clearance',
     '--via-cost': 'via_cost',
@@ -45,6 +58,7 @@ FLAG_PARAMS = {
     '--turn-cost': 'turn_cost',
     '--diff-pair-gap': 'diff_pair_gap',
     '--impedance': 'impedance',
+    '--coplanar-gap': 'coplanar_gap',
     '--gnd-via-distance': 'gnd_via_distance',
     '--exit-margin': 'exit_margin',
     '--extension': 'extension',
@@ -62,6 +76,9 @@ LIST_FLAGS = {
     # allowlist survives as a list param that claude_plan's alias routes to the
     # diff tab's polarity_swap_nets_text field.
     '--polarity-swap-nets': 'polarity_swap_nets',
+    # #486: route.py's coplanar-waveguide net allowlist (nargs='+' globs).
+    # LIST, not FLAG_PARAMS -- as a scalar flag only the FIRST pattern survived.
+    '--coplanar-nets': 'coplanar_nets',
     '--nets': None,  # handled per action
     '--pairs': None,
     '--plane-layers': None,
@@ -74,11 +91,17 @@ BOOL_FLAGS = {
     # singular. Both map to the GUI's no_bga_zone special (bare = exclude ALL).
     '--no-bga-zone': 'no_bga_zone',
     '--no-bga-zones': 'no_bga_zone',
+    # #489 section 9: now on every step that writes pad/via copper (route,
+    # route_diff, route_planes, route_disconnected_planes, bga/qfn fanout).
+    '--add-teardrops': 'add_teardrops',
 }
 
 # Flags whose values are file paths / bookkeeping -- consumed, never params.
-# --output still feeds the chain-pruning file list.
-IGNORE_FLAGS = {'--output', '--summary-json', '--schematic-dir', '--report'}
+# --output still feeds the chain-pruning file list. --net-clearances is a
+# board-specific JSON path; the GUI derives the same map from the board's live
+# net classes, so a replayed plan carries no param for it.
+IGNORE_FLAGS = {'--output', '--summary-json', '--schematic-dir', '--report',
+                '--net-clearances'}
 
 # Per-tool flag renames: bga_fanout calls the trace width --width (routed to the
 # Basic-tab track_width, which BGA fanout reads). qfn_fanout also uses --width
@@ -127,6 +150,13 @@ def parse_command(argv):
     step = {'action': action, 'params': {}}
     step['_files'] = []  # positional .kicad_pcb args (input/output), for pruning
     lists = {}
+    # Normalize `--flag=value` to `--flag value` (recorded manifests mix both
+    # forms; core64_logic's `--nets=-BATT` otherwise fell into the unknown-flag
+    # branch as a mangled param, left --nets empty, and cascaded into EMPTY
+    # plane assignments even though --plane-layers parsed fine).
+    argv = [t for a in argv
+            for t in (a.split('=', 1) if a.startswith('--') and '=' in a
+                      else (a,))]
     i = argv.index([a for a in argv if os.path.basename(a) == tool][0]) + 1
     positional = []
     aliases = TOOL_FLAG_ALIASES.get(tool, {})
@@ -178,9 +208,35 @@ def parse_command(argv):
 
     nets = lists.get('--nets', [])
     if action in ('route',):
-        step['nets'] = [str(n) for n in nets] or ['*']
+        # route.py also takes net names POSITIONALLY, after the input and output
+        # boards -- --nets is optional:
+        #     route.py in.kicad_pcb out.kicad_pcb '/Mgmt/LED0' '/Mgmt/VSMPS' ...
+        # Same defect as the route_diff branch below: those positionals were
+        # collected and dropped, so the step converted to nets: ['*'] -- the
+        # exact OPPOSITE of what was recorded, routing every net on the board
+        # instead of the handful the CLI retried. eth_tap steps 12 and 16 are
+        # both positional retries of specific failed nets.
+        # Empty still legitimately means "all nets" (what the CLI does with no
+        # net args), so the ['*'] fallback stays for genuinely net-less steps.
+        net_globs = [p for p in positional if not p.endswith('.kicad_pcb')]
+        step['nets'] = [str(n) for n in (nets or net_globs)] or ['*']
     elif action == 'route_diff':
-        step['pairs'] = [str(n) for n in lists.get('--pairs', nets)]
+        # route_diff.py takes its pair patterns POSITIONALLY, after the input and
+        # output boards -- there is no --pairs flag on the real CLI:
+        #     route_diff.py in.kicad_pcb out.kicad_pcb '*ETH0_A_*' '*ETH0_B_*' ...
+        # Those were collected into `positional` and then dropped on the floor,
+        # so every recorded diff step converted to `pairs: []`. The GUI reads an
+        # empty pairs list as "route every auto-detected pair", so a replayed
+        # plan routed pairs the CLI never touched (eth_tap: +22 segments on
+        # VCP_P/N and C2_P/N, two pairs absent from the recorded chain, which
+        # then cascaded through every later step). 204 of the corpus's 206
+        # recorded diff steps were affected.
+        # Empty still legitimately means "all pairs" -- that is what the CLI does
+        # when given no patterns -- so the ambiguity resolves itself once the
+        # patterns actually survive.
+        pair_globs = [p for p in positional if not p.endswith('.kicad_pcb')]
+        step['pairs'] = [str(n) for n in
+                         (lists.get('--pairs') or nets or pair_globs)]
     elif action in ('route_planes', 'repair_planes'):
         layers = [str(l) for l in lists.get('--plane-layers', [])]
         net_names = [str(n) for n in nets]
@@ -202,7 +258,7 @@ def parse_command(argv):
         step['kind'] = 'bga' if tool == 'bga_fanout.py' else 'qfn'
         step['nets'] = [str(n) for n in nets] or ['*']
     for k in ('--power-nets', '--power-nets-widths', '--layer-costs',
-              '--layers', '--polarity-swap-nets'):
+              '--layers', '--polarity-swap-nets', '--coplanar-nets'):
         if k in lists:
             step['params'][LIST_FLAGS[k]] = lists[k]
     return step
@@ -249,12 +305,17 @@ def cap_optimization_step(argv):
     return step
 
 
-def main():
-    if len(sys.argv) < 3:
-        print(__doc__)
-        return 2
-    manifest, out = sys.argv[1], sys.argv[2]
+def plan_steps_from_manifest(manifest, keep_files=False):
+    """(steps, skipped_count) for a recorded manifest -- the whole conversion.
 
+    THE single implementation: main() (and make_plan.py) dump these steps as the
+    plan JSON, and tests/gui_parity/replay_plan_vs_run.py calls it with
+    ``keep_files=True`` to pair each step with the CLI chain board it produced.
+    It used to be a loop in main() with a hand-kept copy in the parity harness.
+
+    ``keep_files``: keep each step's private ``_files`` (its CLI input/output
+    boards). The plan JSON must NOT carry them, so main() leaves this False.
+    """
     # Prune with redo_stress_test's canonical file-dependency logic so the plan
     # is EXACTLY the simplified/deduplicated chain a replay runs -- the same
     # "N of M commands" set, with superseded retries and dead-end branches
@@ -277,7 +338,9 @@ def main():
             continue  # pruned out, or a check/grade command (no GUI step)
         if any(os.path.basename(a) == 'place_fanout_clearance.py' for a in argv):
             # standalone optimize_caps step, matching the live GUI plan (see above)
-            steps.append(cap_optimization_step(argv))
+            step = cap_optimization_step(argv)
+            step['_files'] = [a for a in argv if a.endswith('.kicad_pcb')]
+            steps.append(step)
             continue
         step = parse_command(argv)
         if step is None:
@@ -294,8 +357,18 @@ def main():
                     break
         steps.append(step)
 
-    for s in steps:
-        s.pop('_files', None)
+    if not keep_files:
+        for s in steps:
+            s.pop('_files', None)
+    return steps, skipped
+
+
+def main():
+    if len(sys.argv) < 3:
+        print(__doc__)
+        return 2
+    manifest, out = sys.argv[1], sys.argv[2]
+    steps, skipped = plan_steps_from_manifest(manifest)
     with open(out, 'w', encoding='utf-8') as f:
         json.dump({'steps': steps}, f, indent=2)
     print(f"{len(steps)} step(s) written to {out} "

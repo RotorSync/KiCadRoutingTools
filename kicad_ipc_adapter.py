@@ -829,6 +829,22 @@ def apply_routing_results(board, results_data: dict, *,
                     commit.remove(t)
                     counts["removed"] += 1
 
+        # Remove original-board VIAS the pipeline flagged (#508 finding 11:
+        # route_diff returns vias_to_remove alongside segments_to_remove).
+        # Without this the IPC apply strips the flagged TRACKS but leaves their
+        # vias behind, so a ripped-up route keeps stale barrels on the board.
+        vias_to_remove = results_data.get("vias_to_remove") or []
+        if vias_to_remove:
+            via_keys = {(pos_key(v.x, v.y), net_name_for(v.net_id))
+                        for v in vias_to_remove}
+            for vv in board.get_vias():
+                vx, vy = _vec_xy_mm(vv.position)
+                vname = ((getattr(vv.net, "name", "") or "")
+                         if vv.net is not None else "")
+                if (pos_key(vx, vy), vname) in via_keys:
+                    commit.remove(vv)
+                    counts["removed"] += 1
+
         # Segments + vias from each net's result
         for result in results_data.get("results", []):
             for seg in result.get("new_segments", []):
@@ -846,6 +862,20 @@ def apply_routing_results(board, results_data: dict, *,
         for via in results_data.get("all_swap_vias", []):
             commit.add(_via_from_obj(commit.net_map, via, net_name_for))
             counts["vias"] += 1
+        # Reuse-connector segments from inter-layer swapping (#340 / #508
+        # finding 9): when a swap anchors its transition on an EXISTING same-net
+        # via instead of placing a new one, the pad->via connector copper rides
+        # the all_swap_segments channel rather than a result's new_segments.
+        # Dropping it leaves the swapped net floating -- DRC-clean but OPEN,
+        # which connectivity checks catch and DRC never does.
+        for seg in results_data.get("all_swap_segments", []):
+            commit.add(make_track(
+                commit.net_map,
+                seg.start_x, seg.start_y, seg.end_x, seg.end_y,
+                seg.width, seg.layer,
+                net_name=net_name_for(seg.net_id),
+            ))
+            counts["tracks"] += 1
         # Optional debug lines on User layers
         if add_debug_lines:
             counts["debug_lines"] = _add_debug_lines(commit, results_data)
@@ -854,7 +884,7 @@ def apply_routing_results(board, results_data: dict, *,
 
 def apply_planes_results(board, *, pcb_data,
                          new_vias=None, new_segments=None, new_zones=None,
-                         ripped_net_ids=None,
+                         ripped_net_ids=None, swap_data=None,
                          message: str = "KiCadRoutingTools: planes") -> dict:
     """Apply planes-tab results (zones + stitch vias + tracks) in one commit.
 
@@ -865,6 +895,12 @@ def apply_planes_results(board, *, pcb_data,
     ripped_net_ids: nets whose existing tracks/vias were ripped to clear a
     blocked pad repair - their old copper is deleted in this same commit before
     the re-routed copper (in new_segments/new_vias) is added (issue #112).
+
+    swap_data: the in-memory ripped-net reconnect's swap/modification channels
+    (#484 H3). A target swap exchanges stubs between two nets, so it can touch
+    the copper of nets that were never ripped - which the whole-net delete above
+    does not cover. Applied BEFORE any new copper, because the routes were
+    computed assuming the swaps.
     """
     counts = {"tracks": 0, "vias": 0, "zones": 0, "zones_skipped": 0, "removed": 0}
     skipped: list[tuple[str, str]] = []
@@ -889,6 +925,15 @@ def apply_planes_results(board, *, pcb_data,
                     if tn in ripped_names:
                         commit.remove(item)
                         counts["removed"] += 1
+        # Reconnect swap/modification channels (#484 H3), before the adds: the
+        # new copper was routed assuming these swaps are already in place.
+        if swap_data and any(swap_data.get(k) for k in
+                             ('single_ended_target_swap_info',
+                              'target_swap_info',
+                              'all_segment_modifications',
+                              'pad_swaps')):
+            counts["swapped_items"] = _apply_board_swaps(
+                commit, board, swap_data, pcb_data)
         for vd in (new_vias or []):
             layers = vd.get('layers') or ['F.Cu', 'B.Cu']
             top = layers[0]
@@ -952,6 +997,7 @@ def apply_oracle_reconnect(board, *, nets, config, pcb_data,
     skips quietly when kicad-cli is unavailable or anything fails. The IPC
     analogue of the SWIG planes tab's temp-save + PCB_TRACK/PCB_VIA apply."""
     from kicad_oracle import oracle_reconnect, find_kicad_cli
+    from routing_utils import pos_key
     import os
     import tempfile
     if find_kicad_cli() is None or not nets:
@@ -967,8 +1013,18 @@ def apply_oracle_reconnect(board, *, nets, config, pcb_data,
         tmp = f.name
     try:
         save_board_snapshot(tmp)
+        # #490: the snapshot is written with include_project=False, so it has NO
+        # sibling .kicad_pro. Without project_from the exact-fill link source
+        # refills at STOCK netclass rules instead of the ones the board routed
+        # to, and the resulting phantom divergence looks like a routing bug.
+        # Stage the REAL project's netclasses off the open board's own path.
+        try:
+            _proj_from = get_board_full_path()
+        except Exception:
+            _proj_from = None
         orc = oracle_reconnect(
             tmp, nets, config,
+            project_from=_proj_from,
             track_via_clearance=track_via_clearance,
             hole_to_hole_clearance=hole_to_hole_clearance,
             progress_callback=progress_callback)
@@ -980,8 +1036,37 @@ def apply_oracle_reconnect(board, *, nets, config, pcb_data,
 
     new_segments = orc.get('new_segments') or []
     new_vias = orc.get('new_vias') or []
-    if new_segments or new_vias:
+    removed_segments = orc.get('removed_segments') or []
+    removed_vias = orc.get('removed_vias') or []
+    if new_segments or new_vias or removed_segments or removed_vias:
         with begin_commit(board, message) as commit:
+            # #508 finding 15: the oracle strips its stranded fragments from the
+            # temp file and from pcb_data, but the LIVE board still holds that
+            # copper. Delete it FIRST, so a new emission at the same position is
+            # never collateral damage of the removal pass.
+            if removed_segments:
+                _seg_keys = set()
+                for s in removed_segments:
+                    a = pos_key(s.start_x, s.start_y)
+                    b = pos_key(s.end_x, s.end_y)
+                    _seg_keys.add((frozenset((a, b)), name_for(s.net_id) or ''))
+                for t in board.get_tracks():
+                    sx, sy = _vec_xy_mm(t.start)
+                    ex, ey = _vec_xy_mm(t.end)
+                    tname = ((getattr(t.net, "name", "") or "")
+                             if t.net is not None else "")
+                    if (frozenset((pos_key(sx, sy), pos_key(ex, ey))),
+                            tname) in _seg_keys:
+                        commit.remove(t)
+            if removed_vias:
+                _via_keys = {(pos_key(v.x, v.y), name_for(v.net_id) or '')
+                             for v in removed_vias}
+                for vv in board.get_vias():
+                    vname = ((getattr(vv.net, "name", "") or "")
+                             if vv.net is not None else "")
+                    vx, vy = _vec_xy_mm(vv.position)
+                    if (pos_key(vx, vy), vname) in _via_keys:
+                        commit.remove(vv)
             for s in new_segments:
                 commit.add(make_track(
                     commit.net_map, s.start_x, s.start_y, s.end_x, s.end_y,
@@ -1101,7 +1186,8 @@ def write_drc_settings_to_project(board, *, clearance=None, hole_to_hole=None,
 
 # --- Footprint moves (decoupling-cap optimization, issue #130) --------------
 
-def apply_footprint_moves(board, placements,
+def apply_footprint_moves(board, placements, via_moves=None, new_segments=None,
+                          pcb_data=None,
                           message: str = "KiCadRoutingTools: optimize cap placement") -> int:
     """Move footprints to new positions / orientations in one commit (#130).
 
@@ -1112,16 +1198,40 @@ def apply_footprint_moves(board, placements,
     orientation set; the IPC analogue of the SWIG GUI's
     FindFootprintByReference / SetPosition / SetOrientationDegrees. Returns the
     number of footprints actually moved.
+
+    `via_moves` / `new_segments` carry the via NUDGE with reconnect (#313): the
+    same repair engine also shifts a boxed-in cap's offending fanout via off the
+    pad and adds connector copper back to the stub start. The CLI applies these
+    through write_placed_output; without them here the via stays put and the
+    graze the summary claims to have fixed persists. `via_moves` is a list of
+    (old_x, old_y, via_dict) as the engine returns it. Moves ride the SAME
+    commit as the placements so the board never sits in a half-repaired state.
     """
     from kicad_parser import _fp_reference
+    from routing_utils import pos_key
     try:
         from kipy.geometry import Angle
     except Exception:
         Angle = None
 
     placements = list(placements or [])
-    if not placements:
+    via_moves = list(via_moves or [])
+    new_segments = list(new_segments or [])
+    if not placements and not via_moves and not new_segments:
         return 0
+
+    def _net_name_of(d):
+        """Engine dicts carry pcb_data's synthetic net_id; kipy needs the NAME
+        (kipy.Net.code is unreliable on KiCad 10). Prefer an explicit net_name
+        when the engine supplied one."""
+        name = d.get('net_name')
+        if name:
+            return name
+        if pcb_data is None:
+            return None
+        net = pcb_data.nets.get(d.get('net_id'))
+        return net.name if net is not None else None
+
     moved = 0
     with begin_commit(board, message) as commit:
         fps = {}
@@ -1141,6 +1251,38 @@ def apply_footprint_moves(board, placements,
                     pass  # leave orientation unchanged if the API shape differs
             commit.update(fp)
             moved += 1
+
+        # Via nudge (#313). Match the OLD position AND the net: a position-only
+        # match could delete a DIFFERENT net's via sitting within a micron of the
+        # moved via's old spot (parity with
+        # placement/writer._remove_vias_at_positions).
+        for old_x, old_y, vd in via_moves:
+            old_key = pos_key(old_x, old_y)
+            want_net = _net_name_of(vd)
+            for vv in board.get_vias():
+                vname = ((getattr(vv.net, "name", "") or "")
+                         if vv.net is not None else "")
+                if want_net is not None and vname != want_net:
+                    continue
+                vx, vy = _vec_xy_mm(vv.position)
+                if pos_key(vx, vy) == old_key:
+                    commit.remove(vv)
+                    break
+            layers = vd.get('layers') or ['F.Cu', 'B.Cu']
+            commit.add(make_via(
+                commit.net_map, vd['x'], vd['y'], vd['size'], vd['drill'],
+                top_layer=layers[0], bottom_layer=layers[-1],
+                net_name=want_net))
+
+        # Reconnect copper from the same repair (stub start -> nudged via).
+        for nsd in new_segments:
+            commit.add(make_track(
+                commit.net_map,
+                nsd['start'][0], nsd['start'][1],
+                nsd['end'][0], nsd['end'][1],
+                nsd['width'], nsd['layer'],
+                net_name=_net_name_of(nsd),
+            ))
     return moved
 
 

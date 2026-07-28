@@ -8,7 +8,10 @@ Tests for issue #369 A5 + A12 (zone/keepout reader fixes).
       - rule areas with `*.Cu` / `F&B.Cu` layer specs actually BLOCK tracks
         in the obstacle map (they silently disabled themselves before).
   A12: - plane_io.extract_zones sees multi-layer (layers ...) pours, so
-         check_existing_zones refuses to pour a conflicting plane over them;
+         check_existing_zones reports them as contending instead of pouring a
+         full-layer plane over them unseen (it no longer ABORTS on one -- KiCad
+         allows different nets to share a layer, so the plane is poured alongside
+         at a higher fill priority);
        - zone net_name is unescaped like every other net name.
 
 Run:
@@ -116,10 +119,15 @@ def main():
     check("multi-layer pour visible on BOTH layers (was invisible)",
           {z.layer for z in zinfos} == {'In1.Cu', 'In2.Cu'}
           and all(z.net_name == '+3V3' for z in zinfos))
-    should_create, should_continue, _ = plane_io.check_existing_zones(
+    # The point of A12 is VISIBILITY: this pour used to be invisible to the plane
+    # step, which then poured a full-layer GND zone over it. It is now seen as a
+    # contending foreign pour on In1.Cu. (Seeing it no longer ABORTS the run --
+    # KiCad allows different nets to share a layer, so the plane is poured
+    # alongside at a higher fill priority instead.)
+    should_create, should_continue, _repl, foreign = plane_io.check_existing_zones(
         zinfos, 'In1.Cu', 'GND', 2)
-    check("GND plane on In1.Cu refused (conflicting +3V3 pour there)",
-          not should_create and not should_continue)
+    check("conflicting +3V3 pour on In1.Cu is SEEN (was invisible)",
+          [z.net_name for z in foreign] == ['+3V3'] and should_continue)
 
     # -- A12: zone net_name unescaped -----------------------------------------
     print("\nA12: zone net_name unescaped")

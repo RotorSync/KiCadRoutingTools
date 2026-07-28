@@ -93,6 +93,18 @@ class RoutingState:
     # net_id -> net_name.
     diff_pair_single_ended_nets: Dict[int, str] = field(default_factory=dict)
 
+    # Casualty custody (diff_pair_custody.run_casualty_reconcile): every
+    # COMMITTED rip (ripper's route landed; the ripped net's copper is gone
+    # unless a later reroute succeeds) records rid -> (canonical_net_id,
+    # saved_result, ripped_ids, was_in_results) so the end-of-run
+    # casualties-only reconcile can restore the exact pre-rip copper if the
+    # reroute never lands. Inert unless the engine runs the reconcile pass
+    # (batch_route_diff_pairs does; route.py has its own #134 recovery).
+    casualty_custody: Dict[int, Tuple] = field(default_factory=dict)
+    # Per-pair failure diagnostics for JSON_SUMMARY pair_reports:
+    # pair_name -> {'reason', 'stage', 'blocking_nets', 'casualty', ...}.
+    pair_diagnostics: Dict[str, Dict] = field(default_factory=dict)
+
     # Environment
     all_unrouted_net_ids: Set[int] = field(default_factory=set)
     gnd_net_id: Optional[int] = None
@@ -115,6 +127,16 @@ class RoutingState:
     all_segment_modifications: List = field(default_factory=list)
     all_swap_vias: List = field(default_factory=list)
     pad_swaps: List[Dict] = field(default_factory=list)
+
+    # Tap-relocation custody (#508 finding 3): a COMMITTED relocation removes
+    # a PRE-EXISTING plane-net via + stub from pcb_data, but plane nets are
+    # deliberately outside the sweep/strip scope (they are never in
+    # routed_results), so without these lists the writer re-emits the removed
+    # copper from the input text -- a short in the file that exists in no
+    # in-memory state -- and the replacement re-tap via never ships.
+    # batch_route drains them into segments_to_remove / vias_to_remove.
+    tap_relocation_removed_segments: List = field(default_factory=list)
+    tap_relocation_removed_vias: List = field(default_factory=list)
 
     # Obstacle maps (set by caller)
     base_obstacles: Any = None
@@ -194,14 +216,25 @@ def create_routing_state(
         total_routes=total_routes,
         enable_layer_switch=enable_layer_switch,
         debug_lines=debug_lines,
-        target_swaps=target_swaps or {},
-        target_swap_info=target_swap_info or [],
-        single_ended_target_swaps=single_ended_target_swaps or {},
-        single_ended_target_swap_info=single_ended_target_swap_info or [],
-        all_segment_modifications=all_segment_modifications or [],
-        all_swap_vias=all_swap_vias or [],
+        # `x if x is not None else ...`, NEVER `x or ...`: the caller's lists
+        # are ALIASES the engine appends into (stub-swap/relocation mods and
+        # vias flow to the output writer through them). `or` silently breaks
+        # the alias whenever the caller's list is EMPTY at creation time --
+        # a run with no upfront layer swaps then drops every engine-side
+        # swap from the written file (the phase-1 stub-switch keeps landed
+        # in state while the writer saw a different, empty list).
+        target_swaps=target_swaps if target_swaps is not None else {},
+        target_swap_info=target_swap_info if target_swap_info is not None else [],
+        single_ended_target_swaps=(single_ended_target_swaps
+                                   if single_ended_target_swaps is not None else {}),
+        single_ended_target_swap_info=(single_ended_target_swap_info
+                                       if single_ended_target_swap_info is not None else []),
+        all_segment_modifications=(all_segment_modifications
+                                   if all_segment_modifications is not None else []),
+        all_swap_vias=all_swap_vias if all_swap_vias is not None else [],
         total_layer_swaps=total_layer_swaps,
-        net_obstacles_cache=net_obstacles_cache or {},
+        net_obstacles_cache=(net_obstacles_cache
+                             if net_obstacles_cache is not None else {}),
         working_obstacles=working_obstacles,
         cancel_check=cancel_check,
         progress_callback=progress_callback,

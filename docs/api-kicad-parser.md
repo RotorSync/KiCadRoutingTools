@@ -147,6 +147,14 @@ whose resolved copper overlaps a different-net neighbour (a modelling error).
 | `net_id` | int | Net ID |
 | `uuid` | str | UUID from the file |
 | `free` | bool | `(free yes)` flag — KiCad won't reassign the net from overlapping copper |
+| `tenting_attrs` | Dict[str, str] | Protection spec as `{token: raw inner s-expr}` for `tenting`/`covering`/`plugging`/`capping`/`filling`, e.g. `{'covering': '(front no) (back no)', 'capping': 'no'}`. `{}` = the board specified nothing (KiCad inherits its board default). Read by **both** parse paths (text and `build_pcb_data_from_board`) in the same normalized form. |
+
+Pass `tenting_attrs` back to `generate_via_sexpr` for any via that already
+existed, so a ripped-and-re-placed via keeps its real spec instead of being
+re-stamped with front+back tenting (#489 §8) — that matters most for via-in-pad,
+which needs IPC-4761 Type VII (filled + capped + plated). `kicad_writer.
+prevailing_via_protection(vias)` gives the board's own convention to use as the
+default for vias you ADD.
 
 ### `Net`
 
@@ -168,6 +176,7 @@ whose resolved copper overlaps a different-net neighbour (a modelling error).
 | `pads` | List[Pad] | The footprint's pads |
 | `value` | str | Component value (`'100nF'`, `'MCF5213'`) |
 | `clearance` | float | Footprint-level `(clearance …)` override in mm (0 = none). Already **resolved into** each pad's `local_clearance` at parse time — read that field for clearance decisions; this records the raw footprint value (issue #326). |
+| `net_tie_groups` | List[List[str]] | Pad-number groups the footprint deliberately shorts (`(net_tie_pad_groups "1, 2")` — Kelvin shunts, net-ties). KiCad's clearance exemption between the grouped pads is **local**: a tied net's copper may contact the partner pad only where the contact lies on its own pad. Query per-net via `pcb.net_tie_exempt_pad_ids(net_id)`. |
 
 ### `Zone`
 
@@ -180,6 +189,7 @@ whose resolved copper overlaps a different-net neighbour (a modelling error).
 | `priority` | int | `(priority N)`; higher-priority zones win where outlines overlap (0 when absent) |
 | `island_removal_mode` | int | 0 = always remove isolated islands (KiCad default), 1 = never, 2 = below `island_area_min` |
 | `island_area_min` | float | mm² floor for mode 2 (0.0 when absent) |
+| `in_footprint` | bool | Zone is owned by a footprint (nested in its `(footprint ...)` block); points are still board coordinates. Plane creation neither replaces nor aborts on these |
 
 ### `BoardInfo`
 
@@ -191,7 +201,7 @@ whose resolved copper overlaps a different-net neighbour (a modelling error).
 | `board_outline` | List[Tuple[float, float]] | Outline polygon for non-rectangular boards (empty if rectangular) |
 | `board_cutouts` | List[List[Tuple]] | Interior cutout polygons |
 | `stackup` | List[StackupLayer] | Physical stackup, top to bottom (empty if the board has none) |
-| `keepouts` | List[dict] | KiCad keepout rule areas: `{'polygon': [...], 'layers': set, 'tracks_allowed': bool, 'vias_allowed': bool}` |
+| `keepouts` | List[dict] | KiCad keepout rule areas (board-level AND footprint-owned): `{'polygon': [...], 'holes': [...], 'layers': set, 'tracks_allowed': bool, 'vias_allowed': bool, 'copper_pour_allowed': bool, 'in_footprint': bool}` |
 
 ### `StackupLayer`
 

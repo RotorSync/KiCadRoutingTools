@@ -63,6 +63,15 @@ impl BlockedBitmap {
         }
     }
 
+    /// Total number of set bits across all layers plus overflow cells (#422:
+    /// used only by get_static_stats for memory diagnostics -- popcount is O(bits)
+    /// but this is off the routing hot path).
+    fn population(&self) -> usize {
+        let bits: usize = self.bits.iter().map(|w| w.count_ones() as usize).sum();
+        let ov: usize = self.overflow.iter().map(|s| s.len()).sum();
+        bits + ov
+    }
+
     /// Hot-path test: is the cell's blocked bit set?
     #[inline]
     fn test(&self, gx: i32, gy: i32, layer: usize) -> bool {
@@ -191,6 +200,23 @@ pub struct GridObstacleMap {
     /// S2: per-layer bitmap CACHE of "blocked_cells refcount > 0". Written only
     /// at 0->1 / 1->0 transitions inside the refcount-mutating functions.
     blocked_bitmap: BlockedBitmap,
+    /// #422: per-layer bitmap of PERMANENT keep-out cells (board-edge clearance,
+    /// off-board / outside-outline area, board cutouts / switch holes). These
+    /// regions never change during routing, so they need only a set bit -- NOT a
+    /// refcount `blocked_cells` entry (~38 B/cell vs 1 bit). On a large sparse
+    /// board (split keyboard: 73 switch-hole cutouts + outside-outline) this is
+    /// ~60% of all blocked cells; storing them as bits instead of hashmap entries
+    /// is the #422 memory fix. is_blocked ORs this with `blocked_bitmap`, so a
+    /// statically-blocked cell behaves identically to a refcounted one; it is
+    /// simply never cleared by per-net remove/restore (no coincident-cell desync,
+    /// because the two structures are independent -- a net's own copper still
+    /// refcounts through `blocked_cells`, and removing it leaves the static bit).
+    static_blocked_bitmap: BlockedBitmap,
+    /// #422: single-"layer" bitmap of PERMANENT via keep-out cells (edge/cutout/
+    /// outside). Mirrors static_blocked_bitmap for is_via_blocked. Vias span all
+    /// copper layers, so one layer suffices (matches `blocked_vias` being a single
+    /// map, not per-layer).
+    static_via_bitmap: BlockedBitmap,
     /// Blocked via positions: packed (gx, gy) -> ref count
     pub blocked_vias: FxHashMap<u64, u16>,
     /// Stub proximity costs: (gx, gy) -> cost
@@ -214,6 +240,11 @@ pub struct GridObstacleMap {
     /// Key: packed (gx, gy), Value: bitmask of layers that have tracks here
     /// (B3, issue #386: u32 -- the old u8 wrapped/panicked on layers >= 8)
     pub cross_layer_tracks: FxHashMap<u64, u32>,
+    /// P3 (#424 soft-knobs review): per-layer precomputed max attraction
+    /// bonus, built once per net by build_attraction_field(); empty = the
+    /// O(radius^2)-per-move scan fallback. attraction_field[L] answers
+    /// "max falloff bonus at this cell from tracks on any layer != L".
+    pub attraction_field: Vec<FxHashMap<u64, i32>>,
     /// Endpoint positions exempt from stub proximity costs (source and target)
     pub endpoint_exempt_positions: Vec<(i32, i32)>,
     /// Radius around endpoints to exempt from stub proximity costs
@@ -236,6 +267,8 @@ impl GridObstacleMap {
         Self {
             blocked_cells: (0..num_layers).map(|_| FxHashMap::default()).collect(),
             blocked_bitmap: BlockedBitmap::new(num_layers),
+            static_blocked_bitmap: BlockedBitmap::new(num_layers),
+            static_via_bitmap: BlockedBitmap::new(1),
             blocked_vias: FxHashMap::default(),
             stub_proximity: FxHashMap::default(),
             layer_proximity_costs: (0..num_layers).map(|_| FxHashMap::default()).collect(),
@@ -245,6 +278,7 @@ impl GridObstacleMap {
             allowed_cells: FxHashSet::default(),
             source_target_cells: (0..num_layers).map(|_| FxHashSet::default()).collect(),
             cross_layer_tracks: FxHashMap::default(),
+            attraction_field: Vec::new(),
             endpoint_exempt_positions: Vec::new(),
             endpoint_exempt_radius: 0,
             free_via_positions: FxHashSet::default(),
@@ -290,6 +324,8 @@ impl GridObstacleMap {
         Self {
             blocked_cells: self.blocked_cells.clone(),
             blocked_bitmap: self.blocked_bitmap.clone(),
+            static_blocked_bitmap: self.static_blocked_bitmap.clone(),
+            static_via_bitmap: self.static_via_bitmap.clone(),
             blocked_vias: self.blocked_vias.clone(),
             stub_proximity: self.stub_proximity.clone(),
             layer_proximity_costs: self.layer_proximity_costs.clone(),
@@ -299,6 +335,7 @@ impl GridObstacleMap {
             allowed_cells: self.allowed_cells.clone(),
             source_target_cells: self.source_target_cells.clone(),
             cross_layer_tracks: self.cross_layer_tracks.clone(),
+            attraction_field: self.attraction_field.clone(),
             endpoint_exempt_positions: self.endpoint_exempt_positions.clone(),
             endpoint_exempt_radius: self.endpoint_exempt_radius,
             free_via_positions: self.free_via_positions.clone(),
@@ -314,6 +351,8 @@ impl GridObstacleMap {
         Self {
             blocked_cells: self.blocked_cells.clone(),
             blocked_bitmap: self.blocked_bitmap.clone(),
+            static_blocked_bitmap: self.static_blocked_bitmap.clone(),
+            static_via_bitmap: self.static_via_bitmap.clone(),
             blocked_vias: self.blocked_vias.clone(),
             stub_proximity: self.stub_proximity.clone(),
             layer_proximity_costs: self.layer_proximity_costs.clone(),
@@ -323,6 +362,7 @@ impl GridObstacleMap {
             allowed_cells: self.allowed_cells.clone(),
             source_target_cells: (0..self.num_layers).map(|_| FxHashSet::default()).collect(),
             cross_layer_tracks: self.cross_layer_tracks.clone(),
+            attraction_field: self.attraction_field.clone(),
             endpoint_exempt_positions: self.endpoint_exempt_positions.clone(),
             endpoint_exempt_radius: self.endpoint_exempt_radius,
             free_via_positions: self.free_via_positions.clone(),
@@ -344,6 +384,55 @@ impl GridObstacleMap {
 
         (blocked_cells_count, blocked_vias_count, stub_proximity_count,
          layer_proximity_count, cross_layer_count, source_target_count, free_vias_count)
+    }
+
+    /// #422: Promote ALL current dynamic blocked cells/vias into the permanent
+    /// static bitmaps, then empty the dynamic refcount maps. Valid ONLY on a map
+    /// that will never have any of these cells individually removed again -- i.e.
+    /// the BASE obstacle map, which holds non-target, non-rippable copper + board
+    /// geometry and is never mutated after construction (target nets and rippable
+    /// pre-existing nets live in the per-net caches added on top of a CLONE, not
+    /// in base). After freezing, is_blocked/is_via_blocked read these cells from
+    /// the static bitmap (identical result); the working clone then carries the
+    /// frozen base as cheap bits and only the mutable per-net caches as refcount
+    /// entries. Cuts the working map's hashmap to just the cache cells.
+    pub fn freeze_dynamic_to_static(&mut self) {
+        for layer in 0..self.num_layers {
+            // Take the layer map out to avoid borrowing self while mutating the
+            // static bitmap; the dynamic layer map is left empty.
+            let m = std::mem::take(&mut self.blocked_cells[layer]);
+            for &key in m.keys() {
+                let (gx, gy) = unpack_xy(key);
+                self.static_blocked_bitmap.set(gx, gy, layer);
+            }
+        }
+        // The dynamic bitmap cached exactly these (now-frozen) cells; reset it.
+        self.blocked_bitmap = BlockedBitmap::new(self.num_layers);
+        let mv = std::mem::take(&mut self.blocked_vias);
+        for &key in mv.keys() {
+            let (gx, gy) = unpack_xy(key);
+            self.static_via_bitmap.set(gx, gy, 0);
+        }
+    }
+
+    /// #422 diagnostic: (distinct_cells, cells_with_refcount>=2, max_refcount,
+    /// distinct_vias, vias_refcount>=2) across the DYNAMIC refcount maps. Sizes
+    /// the potential "bitmap + overflow" sparse rewrite (only refcount>=2 cells
+    /// truly need a hashmap entry; refcount-1 cells are redundant with the bitmap).
+    pub fn dynamic_refcount_stats(&self) -> (usize, usize, usize, usize, usize) {
+        let mut distinct = 0usize;
+        let mut ge2 = 0usize;
+        let mut maxc = 0usize;
+        for layer in &self.blocked_cells {
+            for &c in layer.values() {
+                distinct += 1;
+                if c >= 2 { ge2 += 1; }
+                if c as usize > maxc { maxc = c as usize; }
+            }
+        }
+        let vd = self.blocked_vias.len();
+        let vge2 = self.blocked_vias.values().filter(|&&c| c >= 2).count();
+        (distinct, ge2, maxc, vd, vge2)
     }
 
     /// Clear stub proximity costs and zone centers (for reuse with different stubs).
@@ -382,6 +471,8 @@ impl GridObstacleMap {
         self.cross_layer_tracks.shrink_to_fit();
         self.free_via_positions.shrink_to_fit();
         self.stub_via_block_cells.shrink_to_fit();
+        self.static_blocked_bitmap.bits.shrink_to_fit();
+        self.static_via_bitmap.bits.shrink_to_fit();
     }
 
     /// Clear allowed cells (for reuse with different source/target)
@@ -444,6 +535,59 @@ impl GridObstacleMap {
             let key = pack_xy(gx, gy);
             *self.blocked_vias.entry(key).or_insert(0) += 1;
         }
+    }
+
+    /// #422: Add a single PERMANENT (static) blocked cell (bitmap only, no
+    /// refcount entry). Mirrors add_blocked_cell for board geometry.
+    pub fn add_static_blocked_cell(&mut self, gx: i32, gy: i32, layer: usize) {
+        if layer < self.num_layers {
+            self.static_blocked_bitmap.set(gx, gy, layer);
+        }
+    }
+
+    /// #422: Add a single PERMANENT (static) blocked via cell (bitmap only).
+    pub fn add_static_blocked_via(&mut self, gx: i32, gy: i32) {
+        self.static_via_bitmap.set(gx, gy, 0);
+    }
+
+    /// #422: Batch add PERMANENT (static) blocked cells from numpy array
+    /// (shape: N x 3, columns gx, gy, layer). These cells are set in the static
+    /// keep-out bitmap ONLY -- no `blocked_cells` refcount entry -- because they
+    /// are board geometry (edge clearance, off-board area, cutouts) that never
+    /// changes during routing. is_blocked ORs the static bitmap with the dynamic
+    /// one, so routing sees them identically to refcounted blocks; they are just
+    /// stored as 1 bit instead of a ~38 B hashmap entry, and are immune to the
+    /// per-net remove/restore cycle (never cleared).
+    pub fn add_static_blocked_cells_batch(&mut self, cells: PyReadonlyArray2<i32>) {
+        let arr = cells.as_array();
+        for row in arr.rows() {
+            let gx = row[0];
+            let gy = row[1];
+            let layer = row[2] as usize;
+            if layer < self.num_layers {
+                self.static_blocked_bitmap.set(gx, gy, layer);
+            }
+        }
+    }
+
+    /// #422: Batch add PERMANENT (static) blocked via cells (shape: N x 2,
+    /// columns gx, gy). Set in the static via bitmap only (no `blocked_vias`
+    /// refcount entry). Mirrors add_static_blocked_cells_batch for vias.
+    pub fn add_static_blocked_vias_batch(&mut self, vias: PyReadonlyArray2<i32>) {
+        let arr = vias.as_array();
+        for row in arr.rows() {
+            let gx = row[0];
+            let gy = row[1];
+            self.static_via_bitmap.set(gx, gy, 0);
+        }
+    }
+
+    /// #422: (static_blocked_cells, static_blocked_vias) population counts, for
+    /// memory diagnostics only. Kept separate from get_stats() so its tuple arity
+    /// (and every existing caller) is unchanged.
+    pub fn get_static_stats(&self) -> (usize, usize) {
+        (self.static_blocked_bitmap.population(),
+         self.static_via_bitmap.population())
     }
 
     /// Merge blocked cells and vias from another obstacle map into this one
@@ -566,7 +710,12 @@ impl GridObstacleMap {
         // Check if cell is in blocked_cells (tracks, stubs, pads from other nets).
         // S2: the per-layer bitmap caches "refcount > 0" (the refcount hashmaps
         // stay authoritative; the bitmap is written only at their transitions).
-        if self.blocked_bitmap.test(gx, gy, layer) {
+        // #422: OR the static keep-out bitmap (board edge / off-board / cutouts).
+        // A statically-blocked cell behaves identically to a refcounted one --
+        // same source/target override -- it is just stored as a bit, not a
+        // hashmap entry, and never cleared by per-net remove/restore.
+        if self.blocked_bitmap.test(gx, gy, layer)
+            || self.static_blocked_bitmap.test(gx, gy, layer) {
             // Blocked by other nets' obstacles - check if it's a source/target cell.
             // source_target_cells can override blocking for exact endpoint positions
             // only; this takes precedence over BGA zone allowed_cells.
@@ -677,6 +826,12 @@ impl GridObstacleMap {
         if self.blocked_vias.contains_key(&pack_xy(gx, gy)) {
             return true;
         }
+        // #422: static (permanent) via keep-outs (edge/cutout/outside) live in a
+        // bitmap, not the refcount map -- check it too. Unconditional block, same
+        // as a blocked_vias entry (vias never get a source/target override here).
+        if self.static_via_bitmap.test(gx, gy, 0) {
+            return true;
+        }
         // Check BGA zones - vias blocked inside unless allowed
         let key = pack_xy(gx, gy);
         for (min_gx, min_gy, max_gx, max_gy) in &self.bga_zones {
@@ -747,7 +902,13 @@ impl GridObstacleMap {
     /// Returns 0 if position is within endpoint_exempt_radius of any endpoint
     #[inline]
     pub fn get_stub_proximity_cost(&self, gx: i32, gy: i32) -> i32 {
-        // Check if exempt due to being near an endpoint (source/target)
+        // Lookup FIRST, exemption scan only on a nonzero hit (soft-knobs P4:
+        // the exempt loop ran per lookup even for cells with no stub cost --
+        // and the C5 single-ended exemptions made the list longer).
+        let cost = match self.stub_proximity.get(&pack_xy(gx, gy)) {
+            Some(&c) if c != 0 => c,
+            _ => return 0,
+        };
         if self.endpoint_exempt_radius > 0 {
             let radius_sq = self.endpoint_exempt_radius * self.endpoint_exempt_radius;
             for (ex, ey) in &self.endpoint_exempt_positions {
@@ -758,7 +919,7 @@ impl GridObstacleMap {
                 }
             }
         }
-        self.stub_proximity.get(&pack_xy(gx, gy)).copied().unwrap_or(0)
+        cost
     }
 
     /// Set layer-specific proximity cost (for track proximity on same layer)
@@ -847,6 +1008,16 @@ impl GridObstacleMap {
             return 0;
         }
 
+        // P3: precomputed field short-circuit (exact same semantics as the
+        // scan below; the field was built with identical falloff math).
+        if !self.attraction_field.is_empty() {
+            if current_layer < self.attraction_field.len() {
+                return *self.attraction_field[current_layer]
+                    .get(&pack_xy(gx, gy)).unwrap_or(&0);
+            }
+            return 0;
+        }
+
         let radius_sq = attraction_radius * attraction_radius;
         let mut max_bonus = 0;
 
@@ -880,6 +1051,51 @@ impl GridObstacleMap {
     /// Clear cross-layer track data
     pub fn clear_cross_layer_tracks(&mut self) {
         self.cross_layer_tracks.clear();
+        self.attraction_field.clear();
+    }
+
+    /// P3: precompute the per-layer attraction field so the hot path is an
+    /// O(1) lookup instead of an O(radius^2) scan per candidate move. Call
+    /// after the per-net add_cross_layer_track loop; cleared with the
+    /// tracks. Gated to <= 8 layers (field memory is entries x disk x
+    /// layers); more layers keep the scan fallback.
+    pub fn build_attraction_field(&mut self, attraction_radius: i32, attraction_bonus: i32) {
+        self.attraction_field.clear();
+        if attraction_radius <= 0 || attraction_bonus <= 0 || self.num_layers > 8
+            || self.cross_layer_tracks.is_empty() {
+            return;
+        }
+        let radius_sq = attraction_radius * attraction_radius;
+        let mut field: Vec<FxHashMap<u64, i32>> =
+            (0..self.num_layers).map(|_| FxHashMap::default()).collect();
+        for (&key, &mask) in self.cross_layer_tracks.iter() {
+            let (cx, cy) = unpack_xy(key);
+            for dx in -attraction_radius..=attraction_radius {
+                for dy in -attraction_radius..=attraction_radius {
+                    let dist_sq = dx * dx + dy * dy;
+                    if dist_sq > radius_sq {
+                        continue;
+                    }
+                    let dist = (dist_sq as f32).sqrt();
+                    let falloff = 1.0 - (dist / attraction_radius as f32);
+                    let bonus = (falloff * attraction_bonus as f32) as i32;
+                    if bonus <= 0 {
+                        continue;
+                    }
+                    let ckey = pack_xy(cx + dx, cy + dy);
+                    for l in 0..self.num_layers {
+                        let own_bit = if l < 32 { 1u32 << l } else { 0 };
+                        if mask & !own_bit != 0 {
+                            let e = field[l].entry(ckey).or_insert(0);
+                            if bonus > *e {
+                                *e = bonus;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.attraction_field = field;
     }
 
     /// Add a free via position (layer change here has zero cost)

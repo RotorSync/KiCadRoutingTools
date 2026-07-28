@@ -45,9 +45,51 @@ Validate routed boards against the *real* spec, with the right checker — most
   to the same output path reads it back and silently changes the routing (looks
   like non-determinism; it isn't). For clean A/B comparisons, route to a FRESH
   output path each run (or `rm` the `.kicad_pro` first).
+- **Never `cp` a board without its `.kicad_pro` (#441).** The sibling `.kicad_pro`
+  carries the DRC floor (the Default-netclass clearance/track/via the chain routed
+  to). A bare `cp a.kicad_pcb b.kicad_pcb` strands it: the next route step reads no
+  project, resolves its floor from the STOCK (looser) netclass, and stamps that over
+  tighter copper — so KiCad grades correct sub-floor copper as phantom clearance DRC
+  (icepi_zero: a dropped 0.09 floor became 0.10 → 160 phantom grazes). Use
+  `python3 copy_board.py src.kicad_pcb dst.kicad_pcb` (copies `.kicad_pcb` + every
+  sibling, self-records into the redo manifest), or copy the `.kicad_pro` too. The
+  route scripts WARN when an input board has no sibling `.kicad_pro`.
 - **Routers can report false success.** A router's own "routed" tally may come from
   a local/heuristic proxy while pads stay disconnected; re-verify with the
   authoritative, zone/fill-aware `check_net_connectivity` before trusting it.
+- **Net classes are RESPECTED (PR392), and `--clearance` is a pure CEILING over ALL
+  of them (#439).** The router honors KiCad's pairwise `max(classA, classB)` between
+  nets of different classes — including copper routed earlier in the SAME call (in-run)
+  — pricing each foreign obstacle at `config.obstacle_clearance(net_id)` (see
+  `docs/api-routing-config.md`). `route.py` / `route_diff.py` / the fanout and plane
+  scripts **always auto-read** every net's class clearance from the sibling `.kicad_pro`
+  (override with `--net-clearances <json>`; all-Default boards are inert). **The
+  PRESENCE of `--clearance` is the clamp switch, and there is nothing special about the
+  Default class:**
+  - **`--clearance` GIVEN** → it is a ceiling on *every* class (Default included): each
+    net routes and grades at `min(its class, --clearance)` (the base/Default-net
+    clearance is `min(Default class, --clearance)`; non-Default classes are capped in
+    the map). A class tighter than `--clearance` survives; a looser one is capped. The
+    output `.kicad_pro` writeback clamps every class DOWN to the routed floor so KiCad
+    grades exactly what was routed.
+  - **`--clearance` OMITTED** → no ceiling: each net routes at its OWN net-class
+    clearance (base = the board's Default class, else `routing_defaults.CLEARANCE`
+    0.25), and the writeback PRESERVES the classes. This is how you honor a genuine
+    impedance board's class spec — just don't pass `--clearance`.
+  - `--hole-to-hole-clearance` / `--board-edge-clearance` work the same way: omitted →
+    the board's own `min_hole_to_hole` / `min_copper_edge_clearance` constraint (via
+    `list_nets.board_constraint`), else the fixed default.
+  **Why clamp on a ceiling:** stock net classes are largely *aspirational* — corpus and
+  real boards route below them, and even the human-routed references violate their own
+  class (zynq: 499 clearance violations at its 0.2 class, routed ~0.1), so keeping the
+  stock class in the output manufactures phantom sub-class DRC on copper routed
+  correctly at the fab floor. Helpers: `list_nets.board_default_netclass_clearance` /
+  `board_constraint`; the GUI mirrors this with per-floor **override checkboxes** (Min
+  Clearance / Min Hole-to-Hole / Min Edge Clearance — unchecked = use the board's own
+  minimum, checked = clamp to the entered value). The old `--clamp-netclasses` **and**
+  `--no-clamp-netclasses` flags are **removed** (the `--clearance` ceiling replaces
+  both; `--net-clearances <json>` gives explicit per-net control). Grade multi-class
+  boards at the netclasses that survived (`kicad_drc_compare._staged_copy`).
 
 ## Stress testing & A/B replay
 
@@ -88,10 +130,14 @@ picked up by both for free. The gaps appear at the edges:
   it to `reset_params_to_defaults` (the plan executor resets through
   that, or the param leaks between steps); (2) add the `--flag` →
   param-name mapping to `tests/stress/manifest_to_plan.py` `FLAG_PARAMS`
-  so recorded manifests convert to `*_plan.json` with the param intact;
-  (3) mirror it in `tests/gui_parity/test_gui_engine_parity.py`'s config
-  map. Verify with: convert a manifest carrying the flag and check the
-  plan JSON step params include it.
+  so recorded manifests convert to `*_plan.json` with the param intact.
+  Verify with: convert a manifest carrying the flag and check the plan
+  JSON step params include it. (There is **no longer a third step**: the
+  GUI-parity gates used to hand-mirror a config map in
+  `test_gui_engine_parity.py`, which had to be kept in sync by hand and
+  silently drifted. Both gates now drive the REAL dialog through a plan,
+  so a new param needs no mirroring — if it reaches the dialog control it
+  reaches the engine.)
 - **A changed default** must match in both places — the GUI sets its own
   values from UI controls and does not inherit argparse defaults.
 - **Parser/obstacle/writer fixes** in shared low-level modules are used by
@@ -176,6 +222,12 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 - `footprint.x`, `footprint.y` - Footprint position
 - `footprint.rotation` - Rotation in degrees
 - `footprint.layer` - Layer (e.g., 'F.Cu')
+- `footprint.net_tie_groups` - List[List[str]] of pad-number groups the
+  footprint deliberately shorts (`(net_tie_pad_groups "1, 2")`, Kelvin shunts /
+  net-ties). KiCad's clearance exemption between the grouped pads is LOCAL:
+  the tied net's copper may contact the partner pad only where the contact
+  lies on its own pad. Consumers: `PCBData.net_tie_exempt_pad_ids(net_id)`,
+  the obstacle builders (own-pad-sliver lift), and check_drc's waiver.
 
 ### Pad Attributes
 
@@ -239,3 +291,14 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 - `via.drill` - Drill diameter
 - `via.layers` - Layer span
 - `via.net_id` - Net ID
+- `via.tenting_attrs` - Protection spec `{token: raw inner s-expr}` for
+  `tenting`/`covering`/`plugging`/`capping`/`filling` (#489 §8); `{}` = the board
+  specified nothing. Read by BOTH parse paths in the same normalized form. Pass it
+  back via `generate_via_sexpr(..., tenting_attrs=...)` for any via that already
+  existed — a RE-PLACED via (rip-up, sub-grid nudge, tap relocation) otherwise
+  loses its spec and is re-stamped with front+back tenting, which is wrong for
+  via-in-pad (needs IPC-4761 Type VII filled+capped+plated). Vias the tool ADDS
+  default to `kicad_writer.prevailing_via_protection(pcb.vias)` — the board's own
+  convention — instead of a hardcoded policy. GUI side:
+  `gui_utils.apply_via_protection(pcb_via, attrs)`. `fab_notes.print_via_in_pad_note`
+  emits the IPC-4761 note from the shared engines when a run puts vias in pads.

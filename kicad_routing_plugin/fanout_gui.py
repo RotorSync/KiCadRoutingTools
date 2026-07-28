@@ -15,6 +15,7 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 import routing_defaults as defaults
+from kicad_parser import mm_to_iu
 
 
 def _get_net_classes_from_board(pcb_data):
@@ -497,11 +498,24 @@ class NetSelectionPanel(wx.Panel):
             self._notify_selection_changed()
 
     def get_selected_nets(self):
-        """Get list of selected net names."""
+        """Get selected net names, in a DETERMINISTIC (sorted) order.
+
+        `_checked_nets` is a set, and `list(set_of_str)` follows Python's
+        per-process randomized string hashing -- so this returned a different
+        ORDER on every launch. The router routes nets in the order it is given,
+        so that made the whole GUI non-deterministic: three runs of the same
+        plan on the same board produced 3425, 3433 and 3431 segments (measured
+        on eth_tap step 11; with PYTHONHASHSEED=0 pinned, two runs were
+        bit-identical). It also made the GUI disagree with the CLI, which
+        passes `expand_net_patterns`' SORTED list -- the same 295 nets in a
+        different order.
+
+        Sorted matches the CLI exactly, so both fronts route in one order.
+        """
         # Sync from the current view
         self._sync_checked_state_from_view()
         # Return all checked nets
-        return list(self._checked_nets)
+        return sorted(self._checked_nets)
 
     def set_selected_nets(self, net_names):
         """Pre-check the given net names (only those present in this panel).
@@ -697,7 +711,7 @@ class BGAOptionsPanel(wx.ScrolledWindow):
     """
 
     # wx.Choice index -> engine escape_method value (order matches the dropdown)
-    ESCAPE_METHODS = ('auto', 'channel', 'underpad')
+    ESCAPE_METHODS = ('auto', 'channel', 'underpad', 'dogbone')
 
     def __init__(self, parent, on_differential_changed=None):
         """
@@ -798,7 +812,8 @@ class BGAOptionsPanel(wx.ScrolledWindow):
         self.escape_method_choice = wx.Choice(
             self, choices=["Auto (channel, under-pad retry)",
                            "Channel",
-                           "Under-pad (dense BGA)"])
+                           "Under-pad (dense BGA)",
+                           "Dog-bone (gap vias)"])
         self.escape_method_choice.SetSelection(0)
         self.escape_method_choice.SetToolTip(
             "Auto (default): run the channel router and, if it drops any ball, "
@@ -807,7 +822,11 @@ class BGAOptionsPanel(wx.ScrolledWindow):
             "each signal vias in its pad and routes under the pad field on "
             "inner layers - escapes fully-populated arrays the channel router "
             "can't (#122); use a small via/track for dense pitch (e.g. via "
-            "0.35, track 0.12).")
+            "0.35, track 0.12). Dog-bone: under-pad with each escape via in "
+            "the diagonal inter-ball gap instead of in the pad (#128) - the "
+            "standard hand-layout escape; keeps ball-grid positions free of "
+            "barrels on inner layers and avoids via-vs-neighbour-ball grazes "
+            "on small balls.")
         esc_method_row.Add(self.escape_method_choice, 1)
         options_sizer.Add(esc_method_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
@@ -1038,7 +1057,7 @@ class FanoutTab(wx.Panel):
 
     def __init__(self, parent, pcb_data, board_filename,
                  get_shared_params=None, on_fanout_complete=None,
-                 get_connectivity_check=None):
+                 get_connectivity_check=None, sync_pcb_data_callback=None):
         """
         Create the fanout tab.
 
@@ -1057,6 +1076,9 @@ class FanoutTab(wx.Panel):
         self.get_shared_params = get_shared_params
         self.on_fanout_complete = on_fanout_complete
         self.get_connectivity_check = get_connectivity_check
+        # Keeps the dialog's in-memory pcb_data in step with the board after a
+        # fanout applies copper (see _apply_fanout_results).
+        self.sync_pcb_data_callback = sync_pcb_data_callback
 
         self._create_ui()
 
@@ -1265,7 +1287,23 @@ class FanoutTab(wx.Panel):
                 layers=layers,
                 track_width=track_width,
                 clearance=clearance,
-                diff_pair_gap=shared.get('diff_pair_gap', defaults.DIFF_PAIR_GAP),
+                # BGA_DIFF_PAIR_GAP, and NOT shared['diff_pair_gap'] (#493).
+                # Two bugs in one line: the fallback named the signal-routing
+                # constant (DIFF_PAIR_GAP 0.101) instead of the fanout one
+                # (BGA_DIFF_PAIR_GAP 0.1) -- every neighbouring param here
+                # correctly uses its BGA_* default -- and the shared lookup
+                # leaked the DIFFERENTIAL tab's _effective_diff_pair_gap() into
+                # fanout, which resolves to the board's Default net-class gap
+                # when its override box is unchecked. On eth_tap that handed the
+                # escape router 0.125 where the CLI's bga_fanout uses 0.1, and
+                # the ball field escaped down different channels (BOOT0 at
+                # x=123.275 vs 122.625, FPGA_I on F.Cu vs In1.Cu) -- which then
+                # cascaded through the whole chain. Same leak class as the
+                # no_bga_zone/max_iterations bleed from the route tab into the
+                # plane step. bga_fanout.py's --diff-pair-gap likewise defaults
+                # to BGA_DIFF_PAIR_GAP and does not consult the net class, so
+                # this is the value the recorded chains were routed at.
+                diff_pair_gap=defaults.BGA_DIFF_PAIR_GAP,
                 exit_margin=config['exit_margin'],
                 primary_escape=config['primary_escape'],
                 force_escape_direction=config['force_escape_direction'],
@@ -1294,7 +1332,14 @@ class FanoutTab(wx.Panel):
                     'track_width': track_width, 'clearance': clearance,
                     'via_size': via_size, 'via_drill': via_drill,
                     'grid_step': shared.get('grid_step', defaults.GRID_STEP),
-                })
+                    # Advanced cap-placement knobs (#130) so the inline checkbox
+                    # path honours them too, not just defaults.
+                    **{k: v for k, v in config.items() if k.startswith('cap_')},
+                    # Shared "Add teardrops" checkbox (#489 section 9).
+                    'add_teardrops': shared.get('add_teardrops', False),
+                },
+                optimize_caps=config.get('optimize_caps', False),
+                vias_to_remove=vias_to_remove)
 
         except Exception as e:
             import traceback
@@ -1362,6 +1407,8 @@ class FanoutTab(wx.Panel):
                 fanout_config={
                     'track_width': track_width,
                     'extension': extension,
+                    # Shared "Add teardrops" checkbox (#489 section 9).
+                    'add_teardrops': shared.get('add_teardrops', False),
                 },
                 fanout_kind='qfn')
 
@@ -1378,13 +1425,31 @@ class FanoutTab(wx.Panel):
             self.progress_bar.SetValue(0)
 
     def _apply_fanout_results(self, tracks, vias, failed_nets=None,
-                              fanout_config=None, fanout_kind='bga'):
+                              fanout_config=None, fanout_kind='bga',
+                              optimize_caps=False, vias_to_remove=None):
         """Apply fanout results to the board via the IPC adapter.
 
         Fanout produces dict-shaped tracks/vias (different from the
         results_data shape the routing tabs use), so we drive the
         adapter's begin_commit + make_track + make_via primitives
         directly rather than going through apply_routing_results.
+
+        Args:
+            tracks: list of track dicts to add
+            vias: list of via dicts to add
+            failed_nets: optional list of net names that couldn't be fanned
+                out (BGA) or whose stub endpoints landed too close to
+                another net's (QFN) - used to build a suggestion block in
+                the completion dialog.
+            fanout_config: optional dict of the parameters used so
+                suggestions can reference the user's actual values.
+            fanout_kind: 'bga' or 'qfn' - selects which suggestion helper
+                to use when displaying parameter advice.
+            vias_to_remove: optional list of via dicts (x, y, net_id) that
+                manage_vias decided are superseded (a route moved to the
+                top layer no longer needs its via). The CLI writer strips
+                them from the file; the GUI must delete them from the live
+                board too (#508 finding 17 -- they were silently discarded).
         """
         from kicad_ipc_adapter import (
             begin_commit, get_board, make_track, make_via,
@@ -1407,6 +1472,27 @@ class FanoutTab(wx.Panel):
         vias_added = 0
         try:
             with begin_commit(board, f"KiCadRoutingTools: {fanout_kind} fanout") as commit:
+                # Remove superseded existing vias BEFORE the adds (#508 finding
+                # 17): manage_vias decides a via is no longer needed once its
+                # route moved to the top layer. The CLI writer strips them from
+                # the file; without this the live board keeps the stale barrel.
+                # Matched by position AND net, like the adapter's other strips.
+                if vias_to_remove:
+                    from routing_utils import pos_key
+                    _rm_keys = {(pos_key(v['x'], v['y']),
+                                 name_for(v.get('net_id')) or '')
+                                for v in vias_to_remove}
+                    _n_rm = 0
+                    for _vv in board.get_vias():
+                        _vname = ((getattr(_vv.net, "name", "") or "")
+                                  if _vv.net is not None else "")
+                        _vx, _vy = _vv.position.x_mm, _vv.position.y_mm
+                        if (pos_key(_vx, _vy), _vname) in _rm_keys:
+                            commit.remove(_vv)
+                            _n_rm += 1
+                    if _n_rm:
+                        print(f"Removed {_n_rm} superseded fanout via(s) "
+                              f"(top-layer routes, #508)")
                 for td in tracks:
                     start = td['start']
                     end = td['end']
@@ -1446,6 +1532,23 @@ class FanoutTab(wx.Panel):
         if (fanout_config or {}).get('optimize_caps') and fanout_kind == 'bga':
             cap_summary = self._optimize_decoupling_caps(board, dict(fanout_config))
 
+        # Sync the dialog's in-memory pcb_data from the board.
+        #
+        # The fanout tab was the ONLY tab that never did this: it added tracks
+        # and vias to the live board but left pcb_data untouched, so every later
+        # step routed against a board model missing all the fanout copper. The
+        # CLI never sees this because it is file-to-file -- each step re-parses
+        # the previous step's output and therefore sees everything.
+        #
+        # Measured on eth_tap (SWIG): each fanout step's BOARD matched the CLI
+        # bit-exactly, yet by step 11 the GUI laid 3514 segments / 366 vias
+        # against the CLI's 3428 / 334 -- more copper, because the router saw
+        # fewer obstacles. The IPC front caches pcb_data across plan steps the
+        # same way, so it needs the same re-read. Runs AFTER the cap repair so
+        # the rebuilt model also carries the moved footprints.
+        if self.sync_pcb_data_callback:
+            self.sync_pcb_data_callback()
+
         msg = f"Fanout complete!\n\n"
         msg += f"Added to board:\n"
         msg += f"  {tracks_added} tracks\n"
@@ -1480,7 +1583,18 @@ class FanoutTab(wx.Panel):
                 print(f"Warning: failed to build fanout suggestions: {e}")
         msg += "\nUse Edit -> Undo to revert changes."
 
-        wx.MessageBox(msg, "Fanout Complete", wx.OK | wx.ICON_INFORMATION)
+        # Routing movie (#506): snapshot the board this step just produced,
+        # BEFORE the completion popup blocks on the user. No-op unless the
+        # Advanced tab's "Make routing movie" box is ticked.
+        from .movie_recorder import record_movie_step
+        record_movie_step(self, 'fanout')
+
+        if getattr(getattr(self, 'GetTopLevelParent', lambda: self)(), '_suppress_completion_popups', False):
+            print(msg)  # unattended plan run: no per-step OK dialog
+        else:
+            wx.MessageBox(msg, "Fanout Complete", wx.OK | wx.ICON_INFORMATION)
+
+        # Callback
         if self.on_fanout_complete:
             self.on_fanout_complete()
 
@@ -1524,7 +1638,18 @@ class FanoutTab(wx.Panel):
                 allow_rotations=cfg.get('cap_allow_rotation', True),
             )
 
-            moved = apply_footprint_moves(board, result.get('placements', []))
+            # Via nudge with reconnect (#313): the shared engine also moves a
+            # boxed-in cap's offending fanout via off the pad and adds connector
+            # segment(s) back to the stub start. The CLI applies these via
+            # write_placed_output; the adapter lands them in the SAME commit as
+            # the footprint moves, so the board is never half-repaired.
+            via_moves = result.get('via_moves', []) or []
+            moved = apply_footprint_moves(
+                board, result.get('placements', []),
+                via_moves=via_moves,
+                new_segments=result.get('new_segments', []) or [],
+                pcb_data=self.pcb_data)
+            nudged = len(via_moves)
             unresolved = result.get('unresolved', [])
             summary = f"Decoupling caps optimized: {moved} moved"
             if nudged:

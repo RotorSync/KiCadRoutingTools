@@ -2,7 +2,14 @@
 Plane resistance and current capacity calculations.
 
 Provides functions to calculate resistance of copper plane polygons and
-maximum current capacity based on IPC-2152 guidelines.
+maximum current capacity from the IPC current-carrying charts.
+
+Which standard: the closed-form `I = k * dT^0.44 * A^0.725` here is the
+**IPC-2221** chart fit -- it was labeled IPC-2152 throughout for a long time
+(#489 §6). IPC-2152 came later and specifically overturned 2221's 2x derating of
+internal layers. Both are offered explicitly; neither is a substitute for the
+standard's own charts outside their data range, which is why results carry an
+`in_chart_range` flag instead of being printed as bare ratings.
 """
 from __future__ import annotations
 
@@ -10,6 +17,14 @@ import math
 from typing import List, Dict, Tuple, Optional
 from shapely.geometry import Polygon as ShapelyPolygon, LineString, Point
 from shapely.validation import make_valid
+
+from routing_constants import (
+    IPC_2221_EXPONENT_DT,
+    IPC_2221_EXPONENT_AREA,
+    IPC_2221_K_INTERNAL,
+    IPC_2221_K_EXTERNAL,
+    IPC_2221_MAX_AREA_MILS2,
+)
 
 
 # Physical constants
@@ -276,24 +291,47 @@ def calculate_resistance(
     return COPPER_RESISTIVITY * length_m / (width_m * thickness_m)
 
 
-def calculate_max_current_ipc(
+def cross_section_mils2(avg_width_mm: float, copper_oz: float) -> float:
+    """Conductor cross-section in mils², the x-axis of the IPC current charts."""
+    thickness_mm = copper_oz * OZ_TO_METERS * 1e3  # 1 oz = 35 µm
+    return (avg_width_mm * thickness_mm) * (1000 / 25.4) ** 2
+
+
+def ipc2221_area_in_range(avg_width_mm: float, copper_oz: float = 1.0) -> bool:
+    """Is this conductor inside the IPC-2221 chart's data range?
+
+    False means the number the fit produces is an EXTRAPOLATION, not a rating --
+    the case that printed "Avg width 52.2 mm -> Max current 21.05 A" for a pour
+    (#489 §6).
+    """
+    return cross_section_mils2(avg_width_mm, copper_oz) <= IPC_2221_MAX_AREA_MILS2
+
+
+def calculate_max_current_ipc2221(
     avg_width_mm: float,
     copper_oz: float = 1.0,
     temp_rise_c: float = 10.0,
     is_internal: bool = True
 ) -> float:
     """
-    Calculate max current using IPC-2152 formula.
+    Max current from the IPC-2221 chart fit.
 
-    I = k * ΔT^0.44 * A^0.725
-    where A is cross-sectional area in mils²
-    k = 0.024 for internal, 0.048 for external layers
+        I = k * ΔT^0.44 * A^0.725     (A in mils²)
+        k = 0.024 internal, 0.048 external
+
+    This function was named `calculate_max_current_ipc` and documented as
+    IPC-2152 in four places (#489 §6); the formula and both k values are
+    IPC-2221's. The 2x internal derating is 2221's, and IPC-2152 overturned it
+    -- see `calculate_max_current_ipc2152`.
+
+    The result is only a rating inside the chart's data range; check
+    `ipc2221_area_in_range` before presenting it (a wide pour extrapolates).
 
     Args:
-        avg_width_mm: Average width in mm
-        copper_oz: Copper weight in oz
+        avg_width_mm: Conductor width in mm
+        copper_oz: Copper weight in oz (1 oz = 35 µm)
         temp_rise_c: Allowed temperature rise in °C
-        is_internal: True for internal layers
+        is_internal: True for internal layers (applies 2221's 2x derating)
 
     Returns:
         Maximum current in amps
@@ -301,12 +339,68 @@ def calculate_max_current_ipc(
     if avg_width_mm < 0.001:
         return 0.0
 
-    thickness_mm = copper_oz * 0.035
-    cross_section_mm2 = avg_width_mm * thickness_mm
-    cross_section_mils2 = cross_section_mm2 * (1000 / 25.4)**2
+    area = cross_section_mils2(avg_width_mm, copper_oz)
+    k = IPC_2221_K_INTERNAL if is_internal else IPC_2221_K_EXTERNAL
+    return k * (temp_rise_c ** IPC_2221_EXPONENT_DT) * (area ** IPC_2221_EXPONENT_AREA)
 
-    k = 0.024 if is_internal else 0.048
-    return k * (temp_rise_c ** 0.44) * (cross_section_mils2 ** 0.725)
+
+def calculate_max_current_ipc2152(
+    avg_width_mm: float,
+    copper_oz: float = 1.0,
+    temp_rise_c: float = 10.0,
+    is_internal: bool = True
+) -> float:
+    """
+    Max current with IPC-2152's internal/external correction applied.
+
+    IPC-2152 replaced IPC-2221's charts after measuring that an INTERNAL trace
+    in FR4 runs cooler than an external trace in still air -- the opposite of the
+    2x internal derating 2221 applied. So the correction that matters here is to
+    stop derating inner layers: this uses the external k for both.
+
+    HONEST SCOPE: this is the 2221 functional form with 2152's internal/external
+    finding applied, NOT a reproduction of the IPC-2152 charts. 2152's real model
+    also depends on the thermal environment (copper area around the conductor,
+    board thickness, adjacent planes), none of which is modelled here. Treat it
+    as an estimate, and the same chart-range caveat applies.
+
+    Args:
+        avg_width_mm: Conductor width in mm
+        copper_oz: Copper weight in oz
+        temp_rise_c: Allowed temperature rise in °C
+        is_internal: Accepted for signature parity; 2152 does not derate on it
+
+    Returns:
+        Maximum current in amps
+    """
+    if avg_width_mm < 0.001:
+        return 0.0
+
+    area = cross_section_mils2(avg_width_mm, copper_oz)
+    return (IPC_2221_K_EXTERNAL * (temp_rise_c ** IPC_2221_EXPONENT_DT)
+            * (area ** IPC_2221_EXPONENT_AREA))
+
+
+# Back-compat alias. Kept so an external caller does not break, but the name
+# hides which standard is being applied -- prefer the explicit functions above.
+calculate_max_current_ipc = calculate_max_current_ipc2221
+
+
+def stackup_copper_oz(pcb_data, layer: str, default_oz: float = 1.0) -> float:
+    """Copper weight in oz for `layer`, read from the board's own stackup.
+
+    Both plane call sites omitted copper_oz, so every board was graded at 1 oz
+    even when its stackup said 2 (#489 §6) -- while the thickness sat unread in
+    the same PCBData. Falls back to `default_oz` when the board has no stackup
+    or the layer is absent from it.
+    """
+    stackup = getattr(getattr(pcb_data, 'board_info', None), 'stackup', None) or []
+    for entry in stackup:
+        if entry.name == layer and entry.layer_type == 'copper':
+            thickness_mm = entry.thickness or 0.0
+            if thickness_mm > 0:
+                return thickness_mm / (OZ_TO_METERS * 1e3)
+    return default_oz
 
 
 def analyze_single_net_plane(
@@ -355,18 +449,37 @@ def analyze_single_net_plane(
         if avg_width < 0.001:
             avg_width = shapely_poly.area / path_length
 
-        resistance = calculate_resistance(path_length, avg_width, copper_oz)
-        is_internal = layer.startswith('In')
-        max_current = calculate_max_current_ipc(avg_width, copper_oz, temp_rise_c, is_internal)
-
-        return {
-            'path_length': path_length,
-            'avg_width': avg_width,
-            'resistance': resistance,
-            'max_current': max_current
-        }
+        return _plane_metrics(path_length, avg_width, layer, copper_oz, temp_rise_c)
     except Exception:
         return None
+
+
+def _plane_metrics(path_length: float, avg_width: float, layer: str,
+                   copper_oz: float, temp_rise_c: float) -> Dict:
+    """Resistance + both ampacity estimates for one measured plane path.
+
+    Shared by the single-net and multi-net analyzers so they cannot drift, and so
+    the inputs actually used (copper weight, temperature rise) travel WITH the
+    result -- these were print-and-discard, leaving nothing to gate on (#489 §6).
+    """
+    is_internal = layer.startswith('In')
+    return {
+        'path_length': path_length,
+        'avg_width': avg_width,
+        'resistance': calculate_resistance(path_length, avg_width, copper_oz),
+        # 'max_current' keeps its meaning (IPC-2221, the value this has always
+        # reported); the 2152-corrected figure sits alongside it.
+        'max_current': calculate_max_current_ipc2221(
+            avg_width, copper_oz, temp_rise_c, is_internal),
+        'max_current_ipc2152': calculate_max_current_ipc2152(
+            avg_width, copper_oz, temp_rise_c, is_internal),
+        'current_standard': 'IPC-2221',
+        'copper_oz': copper_oz,
+        'temp_rise_c': temp_rise_c,
+        'is_internal': is_internal,
+        'cross_section_mils2': cross_section_mils2(avg_width, copper_oz),
+        'in_chart_range': ipc2221_area_in_range(avg_width, copper_oz),
+    }
 
 
 def analyze_multi_net_plane(
@@ -410,18 +523,18 @@ def analyze_multi_net_plane(
         if avg_width < 0.001:
             avg_width = shapely_poly.area / path_length
 
-        resistance = calculate_resistance(path_length, avg_width, copper_oz)
-        is_internal = layer.startswith('In')
-        max_current = calculate_max_current_ipc(avg_width, copper_oz, temp_rise_c, is_internal)
-
-        return {
-            'path_length': path_length,
-            'avg_width': avg_width,
-            'resistance': resistance,
-            'max_current': max_current
-        }
+        return _plane_metrics(path_length, avg_width, layer, copper_oz, temp_rise_c)
     except Exception:
         return None
+
+
+def _conditions_label(result: Dict) -> str:
+    """"(2 oz copper, 10°C rise)" from the conditions the result was computed at
+    -- the header used to assert "1 oz" regardless of what was used."""
+    oz = result.get('copper_oz', 1.0)
+    rise = result.get('temp_rise_c', 10.0)
+    oz_str = f"{oz:.2f}".rstrip('0').rstrip('.')
+    return f"({oz_str} oz copper, {rise:g}°C rise)"
 
 
 def print_single_net_resistance(result: Dict, net_name: str):
@@ -429,13 +542,24 @@ def print_single_net_resistance(result: Dict, net_name: str):
     if not result:
         return
 
-    print(f"\n  Plane Resistance Analysis (1 oz copper, 10°C rise):")
+    print(f"\n  Plane Resistance Analysis {_conditions_label(result)}:")
     print(f"    Path length: {result['path_length']:.1f} mm (diagonal)")
     print(f"    Avg width:   {result['avg_width']:.1f} mm")
     r_str = f"{result['resistance']*1000:.3f} mΩ" if result['resistance'] < float('inf') else "N/A"
-    i_str = f"{result['max_current']:.2f} A" if result['max_current'] > 0 else "N/A"
     print(f"    Resistance:  {r_str}")
-    print(f"    Max current: {i_str}")
+    # An out-of-range area is NOT a rating: say so instead of printing a bare
+    # number the reader will take as one (#489 §6).
+    if result.get('max_current', 0) <= 0:
+        print(f"    Max current: N/A")
+    elif result.get('in_chart_range', True):
+        print(f"    Max current: {result['max_current']:.2f} A (IPC-2221"
+              + (f"; {result['max_current_ipc2152']:.2f} A IPC-2152-corrected"
+                 if result.get('is_internal') else "") + ")")
+    else:
+        print(f"    Max current: not rated -- {result['cross_section_mils2']:.0f} mils² "
+              f"cross-section is past the IPC-2221 chart range "
+              f"({IPC_2221_MAX_AREA_MILS2:.0f} mils²); the fit would say "
+              f"{result['max_current']:.2f} A by extrapolation")
 
 
 def print_multi_net_resistance(results: Dict[str, Dict]):
@@ -448,18 +572,32 @@ def print_multi_net_resistance(results: Dict[str, Dict]):
     if not results:
         return
 
-    print(f"\n  Plane Resistance Analysis (1 oz copper, 10°C rise):")
-    print(f"  {'-'*70}")
-    print(f"  {'Net':<25} {'Path(mm)':<10} {'AvgW(mm)':<10} {'R(mΩ)':<10} {'Imax(A)':<10}")
-    print(f"  {'-'*70}")
+    first = next((r for r in results.values() if r), None)
+    label = _conditions_label(first) if first else "(1 oz copper, 10°C rise)"
+    print(f"\n  Plane Resistance Analysis {label}:")
+    print(f"  {'-'*74}")
+    print(f"  {'Net':<25} {'Path(mm)':<10} {'AvgW(mm)':<10} {'R(mΩ)':<10} {'Imax(A)':<12}")
+    print(f"  {'-'*74}")
 
+    any_extrapolated = False
     for net_name, result in results.items():
         if result:
             r_str = f"{result['resistance']*1000:.3f}" if result['resistance'] < float('inf') else "N/A"
-            i_str = f"{result['max_current']:.2f}" if result['max_current'] > 0 else "N/A"
-            print(f"  {net_name:<25} {result['path_length']:<10.1f} {result['avg_width']:<10.1f} {r_str:<10} {i_str:<10}")
+            if result['max_current'] <= 0:
+                i_str = "N/A"
+            elif result.get('in_chart_range', True):
+                i_str = f"{result['max_current']:.2f}"
+            else:
+                i_str = f"{result['max_current']:.2f}*"
+                any_extrapolated = True
+            print(f"  {net_name:<25} {result['path_length']:<10.1f} {result['avg_width']:<10.1f} {r_str:<10} {i_str:<12}")
         else:
-            print(f"  {net_name:<25} {'N/A':<10} {'N/A':<10} {'N/A':<10} {'N/A':<10}")
+            print(f"  {net_name:<25} {'N/A':<10} {'N/A':<10} {'N/A':<10} {'N/A':<12}")
 
-    print(f"  {'-'*70}")
+    print(f"  {'-'*74}")
     print(f"  Path = longest MST route, AvgW = avg polygon width along path")
+    print(f"  Imax = IPC-2221 chart fit; inner layers carry 2221's 2x derating, "
+          f"which IPC-2152 overturned")
+    if any_extrapolated:
+        print(f"  * extrapolated past the IPC-2221 chart range "
+              f"({IPC_2221_MAX_AREA_MILS2:.0f} mils²) -- not a rating")

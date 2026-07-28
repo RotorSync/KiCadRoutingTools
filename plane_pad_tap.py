@@ -88,6 +88,100 @@ def note_clearance_used(pcb_data: PCBData, clearance: float) -> None:
     clearance_ledger.record(clearance)
 
 
+def _cap_move_within_pad(x0: float, y0: float, x1: float, y1: float,
+                         pad: Pad) -> Tuple[float, float]:
+    """Farthest point on the segment (x0,y0)->(x1,y1) still inside the pad
+    copper. (x0,y0) is assumed in-pad; returns (x1,y1) when it too is in-pad,
+    otherwise the in-pad boundary point (binary search)."""
+    if point_in_pad_rect(x1, y1, pad, 1e-6):
+        return x1, y1
+    lo, hi = 0.0, 1.0
+    for _ in range(24):
+        mid = (lo + hi) / 2.0
+        mx, my = x0 + (x1 - x0) * mid, y0 + (y1 - y0) * mid
+        if point_in_pad_rect(mx, my, pad, 1e-6):
+            lo = mid
+        else:
+            hi = mid
+    return x0 + (x1 - x0) * lo, y0 + (y1 - y0) * lo
+
+
+def clamp_tap_via_to_edge(via_pos: Tuple[float, float], pad: Pad,
+                          pcb_data: PCBData, config: GridRouteConfig,
+                          via_size: float) -> Tuple[Tuple[float, float], bool]:
+    """Nudge an in-pad tap via toward the board interior so its copper clears
+    the project's min_copper_edge_clearance (``config.board_edge_clearance``),
+    capped to stay inside the pad copper so the via-in-pad connection holds.
+
+    The grid-resolution board-edge keep-out in the via obstacle map blocks via
+    CELLS, but a via-in-pad is placed at the pad's true (off-grid) centre, which
+    can sit a fraction of a grid step closer to the edge than the blocked band
+    and slip a #338-style copper_edge_clearance violation past the map. This
+    float-exact clamp closes that gap, measuring against the REAL Edge.Cuts
+    outline (the same geometry check_drc / the KiCad oracle use).
+
+    Returns ``(new_pos, moved)``. Inert (returns ``via_pos, False``) when the
+    project records no edge rule (``board_edge_clearance<=0``), when the via is
+    not inside the pad (grid-aligned via sites already clear at the map's
+    resolution), or when the via already clears the edge. For a pad whose OWN
+    copper is inside the band (the board's own design, mirroring the #338
+    in-band-pad reach exemption) it moves the via as far interior as the pad
+    allows -- best effort -- and never fails the tap.
+    """
+    edge_clr = config.board_edge_clearance
+    if not edge_clr or edge_clr <= 0:
+        return via_pos, False
+    # Only in-pad vias reach here off-grid; grid-aligned via sites clear the
+    # map's edge band by construction, so leave them untouched.
+    if not point_in_pad_rect(via_pos[0], via_pos[1], pad, 1e-6):
+        return via_pos, False
+
+    from check_drc import (board_edge_geometry, _point_to_rings_distance,
+                           _point_on_board)
+    bi = pcb_data.board_info
+    required = edge_clr + via_size / 2.0
+    rings, outer, cutouts = board_edge_geometry(bi)
+    bb = getattr(bi, 'board_bounds', None)
+
+    def edist(x: float, y: float) -> float:
+        """Signed distance to the board edge: + inside, - off-board/in-cutout."""
+        if rings:
+            d = _point_to_rings_distance(x, y, rings)
+            return d if _point_on_board(x, y, outer, cutouts) else -d
+        if bb:
+            return min(x - bb[0], bb[2] - x, y - bb[1], bb[3] - y)
+        return float('inf')
+
+    vx, vy = via_pos
+    if edist(vx, vy) >= required:
+        return via_pos, False
+
+    # Walk along the gradient of the edge-distance field (toward the interior),
+    # capping each step to stay inside the pad. Numeric gradient handles
+    # rectangular and polygonal outlines uniformly; iterate so a corner (two
+    # nearby edges) converges.
+    h = 1e-3
+    for _ in range(6):
+        d0 = edist(vx, vy)
+        if d0 >= required:
+            break
+        gx = (edist(vx + h, vy) - edist(vx - h, vy)) / (2.0 * h)
+        gy = (edist(vx, vy + h) - edist(vx, vy - h)) / (2.0 * h)
+        glen = math.hypot(gx, gy)
+        if glen < 1e-9:
+            break
+        step = required - d0
+        cx = vx + gx / glen * step
+        cy = vy + gy / glen * step
+        cx, cy = _cap_move_within_pad(vx, vy, cx, cy, pad)
+        if abs(cx - vx) < 1e-9 and abs(cy - vy) < 1e-9:
+            break  # pad boundary reached -- in-band pad, best effort
+        vx, vy = cx, cy
+
+    moved = abs(vx - via_pos[0]) > 1e-9 or abs(vy - via_pos[1]) > 1e-9
+    return (vx, vy), moved
+
+
 def _clearance_ladder(nominal: float, fab_floor: float, n_steps: int) -> List[float]:
     """Descending clearances from just below ``nominal`` down to ``fab_floor``
     (inclusive) in ``n_steps`` even steps. If ``nominal`` is already at/below the
@@ -253,6 +347,12 @@ def make_local_window(pcb_data: PCBData, cx: float, cy: float,
 
     board_info = copy.copy(pcb_data.board_info)
     board_info.board_bounds = (min_x, min_y, max_x, max_y)
+    # Real board bounds, so the edge-band pad exemption (#338) can tell a pad
+    # at the TRUE board edge from one merely straddling the synthetic window
+    # boundary (the latter must not punch reach holes in the window fence).
+    board_info.parent_board_bounds = (getattr(pcb_data.board_info,
+                                              'parent_board_bounds', None)
+                                      or bb)
     # A rectangular board's outline is no longer rectangular W.R.T. the window's
     # clamped bounds, so the edge-blocking rectangularity test would send the
     # WINDOW build down the polygon path while the whole-board map uses the
@@ -596,7 +696,7 @@ class TapResult:
 
 
 def _try_distant_pad_trace(pad, pad_layer, net_id, local, routing_obs, config,
-                           route_multi_fn, radius: float):
+                           route_multi_fn, radius: float, plane_oracle=None):
     """Last-resort connection: route a trace from `pad` to the nearest same-net
     via or same-net pad reachable on `pad_layer`, like a human routing a USB
     connector's GND pin to its adjacent shield pad. Used when no via can be
@@ -612,6 +712,11 @@ def _try_distant_pad_trace(pad, pad_layer, net_id, local, routing_obs, config,
     cands: List[Tuple[float, Tuple[float, float]]] = []
     for v in local.vias:
         if v.net_id == net_id:
+            # T6 island guard: only target vias the oracle ties to the MAIN
+            # plane component -- a floating same-net via would "connect" the
+            # pad to nothing (mutual-floating-strap false success).
+            if plane_oracle is not None and not plane_oracle.via_on_plane(v.x, v.y):
+                continue
             d = math.hypot(v.x - px, v.y - py)
             if 1e-6 < d <= radius:
                 cands.append((d, (v.x, v.y)))
@@ -623,6 +728,11 @@ def _try_distant_pad_trace(pad, pad_layer, net_id, local, routing_obs, config,
                      or any(l.startswith('*') for l in opad.layers)
                      or pad_is_plated_through(opad))  # any-layer / plated barrel (#328)
         if not reachable:
+            continue
+        # T6 island guard: a same-net pad is only a valid target when it is
+        # itself on the main plane (a fellow floating pad would just bond two
+        # disconnected pads and report success for both).
+        if plane_oracle is not None and not plane_oracle.pad_on_plane(opad):
             continue
         d = math.hypot(opad.global_x - px, opad.global_y - py)
         if 1e-6 < d <= radius:
@@ -659,7 +769,7 @@ def _pad_has_same_net_copper(opad, net_id, local, tol: float = 0.2) -> bool:
 
 
 def _try_trace_to_plane_connected(pad, pad_layer, net_id, local, routing_obs, config,
-                                  route_multi_fn, radius: float):
+                                  route_multi_fn, radius: float, plane_oracle=None):
     """Issue #180: before dropping a NEW via, connect the pad by a trace to the
     nearest EXISTING same-net copper within `radius`:
       - a same-net via (spans to the plane layer) or through-hole pad -- always
@@ -679,6 +789,12 @@ def _try_trace_to_plane_connected(pad, pad_layer, net_id, local, routing_obs, co
     cands: List[Tuple[float, Tuple[float, float]]] = []
     for v in local.vias:
         if v.net_id == net_id:
+            # T6 island guard: "always plane-connected" only holds for a via
+            # the oracle ties to the MAIN plane component; a floating same-net
+            # via (another tap's island strap, a stale input via) is not a
+            # plane connection at all.
+            if plane_oracle is not None and not plane_oracle.via_on_plane(v.x, v.y):
+                continue
             d = math.hypot(v.x - px, v.y - py)
             if 1e-6 < d <= radius:
                 cands.append((d, (v.x, v.y)))
@@ -697,6 +813,12 @@ def _try_trace_to_plane_connected(pad, pad_layer, net_id, local, routing_obs, co
         same_layer = (pad_layer in opad.layers
                       or any(l.startswith('*') for l in opad.layers))
         if pad_is_plated_through(opad) or (same_layer and _pad_has_same_net_copper(opad, net_id, local)):
+            # T6 island guard: the "already escaped" proxy above only proves
+            # the pad has copper ON it, not that the copper reaches the plane
+            # -- and even a plated through-hole can float (outside every zone
+            # outline). Require the oracle's main-component membership.
+            if plane_oracle is not None and not plane_oracle.pad_on_plane(opad):
+                continue
             d = math.hypot(opad.global_x - px, opad.global_y - py)
             if 1e-6 < d <= radius:
                 cands.append((d, (opad.global_x, opad.global_y)))
@@ -714,7 +836,8 @@ def _try_trace_to_plane_connected(pad, pad_layer, net_id, local, routing_obs, co
 
 
 def _same_net_copper_targets(pad, pad_layer, net_id, local, pcb_data, config,
-                             radius: float) -> List[Tuple[float, float]]:
+                             radius: float,
+                             plane_oracle=None) -> List[Tuple[float, float]]:
     """Target (x, y) points on ``pad_layer`` for a last-resort plane-pad track
     (issue #373): the nearest point on each same-net SEGMENT within ``radius``,
     plus points stepping out from the pad that sit on REAL same-net zone FILL --
@@ -728,6 +851,11 @@ def _same_net_copper_targets(pad, pad_layer, net_id, local, pcb_data, config,
     for s in local.segments:
         if s.net_id != net_id or s.layer != pad_layer:
             continue
+        # T6 island guard: a floating same-net segment (another pad's island
+        # strap) is not plane copper -- tracking to it just bonds two
+        # disconnected pads. Only main-component segments are targets.
+        if plane_oracle is not None and not plane_oracle.segment_on_plane(s):
+            continue
         cx, cy = closest_point_on_segment(px, py, s.start_x, s.start_y,
                                           s.end_x, s.end_y)
         d = math.hypot(cx - px, cy - py)
@@ -737,10 +865,12 @@ def _same_net_copper_targets(pad, pad_layer, net_id, local, pcb_data, config,
     # 2. Same-net pour on the pad's layer: step outward in rings and keep the
     #    first ring's points that provably sit on real fill. The pad is boxed
     #    out of the pour by its clearance cutout; a short track across that gap
-    #    onto the fill connects it (the human plane-pad fix).
+    #    onto the fill connects it (the human plane-pad fix). A disconnected
+    #    zone fragment's outline is skipped when an oracle is provided (T6).
     zone_polys = [z.polygon for z in (getattr(pcb_data, 'zones', None) or [])
                   if z.net_id == net_id and z.layer == pad_layer
-                  and getattr(z, 'polygon', None)]
+                  and getattr(z, 'polygon', None)
+                  and (plane_oracle is None or plane_oracle.zone_on_plane(z))]
     if zone_polys:
         from plane_region_connector import _real_fill_point
         track_half = config.track_width / 2
@@ -765,7 +895,8 @@ def _same_net_copper_targets(pad, pad_layer, net_id, local, pcb_data, config,
 
 
 def _try_trace_to_same_net_copper(pad, pad_layer, net_id, local, routing_obs,
-                                  config, route_multi_fn, pcb_data, radius: float):
+                                  config, route_multi_fn, pcb_data, radius: float,
+                                  plane_oracle=None):
     """Last-resort plane-pad connection (issue #373): when no via can tie the
     pad to the plane, route a plain track from the pad to the nearest same-net
     copper (segment) or its own pour fill on the pad's layer, using the existing
@@ -773,7 +904,7 @@ def _try_trace_to_same_net_copper(pad, pad_layer, net_id, local, routing_obs,
     if not pad_layer or radius <= 0:
         return None
     positions = _same_net_copper_targets(pad, pad_layer, net_id, local, pcb_data,
-                                         config, radius)
+                                         config, radius, plane_oracle=plane_oracle)
     if not positions:
         return None
     segs, pos = route_multi_fn(positions, pad, pad_layer, net_id, routing_obs,
@@ -802,6 +933,7 @@ def try_tap_pad(
     disable_reuse: bool = False,
     shared_via_maps: Optional[SharedViaMaps] = None,
     pour_trace_only: bool = False,
+    plane_oracle=None,
 ) -> TapResult:
     """Attempt to connect one pad to the plane with the given parameters.
 
@@ -810,6 +942,12 @@ def try_tap_pad(
     placing a NEW via. The caller uses it to force a real via when a prior
     reuse-tap reported success but the pad turned out not to actually reach the
     plane (a stale/ripped or not-itself-plane-connected reuse target).
+
+    ``plane_oracle`` (plane_component_oracle.PlaneComponentOracle, T6): when
+    provided, every reuse/trace TARGET must belong to the net's MAIN plane
+    component (floating islands/straps are rejected), new vias are constrained
+    to MAIN zone outlines, and a would-be success that the oracle cannot tie to
+    the main component is returned as an honest failure instead.
 
     Builds via-placement and routing obstacle maps on a local window around
     the pad (cheap even at fine grid steps), then tries:
@@ -826,6 +964,14 @@ def try_tap_pad(
     # Imported lazily: route_planes imports this module at top level.
     from route_planes import (find_via_position, route_via_to_pad,
                               route_multi_source_to_pad)
+
+    def _gate(res: TapResult) -> TapResult:
+        """T6 oracle-strict terminal rung: a success the oracle cannot tie to
+        the main plane component becomes an honest failure (the caller falls
+        through its ladder / reports the pad failed)."""
+        if plane_oracle is not None and res.success and not plane_oracle.verify_tap(res):
+            return TapResult(success=False)
+        return res
 
     if max_search_radius > 0:
         half_size = max_search_radius + _WINDOW_MARGIN
@@ -917,14 +1063,21 @@ def try_tap_pad(
         r = _try_trace_to_same_net_copper(
             pad, pad_layer, net_id, local, routing_obs, config,
             route_multi_source_to_pad, pcb_data,
-            distant_trace_radius or max_search_radius)
-        return r if r is not None else TapResult(success=False)
+            distant_trace_radius or max_search_radius,
+            plane_oracle=plane_oracle)
+        return _gate(r) if r is not None else TapResult(success=False)
 
     # 1. Try reusing a close same-net via (mirrors route_planes' close-via path)
     close_radius = via_size * 2.5
     best = None
     for v in local.vias:
         if v.net_id != net_id:
+            continue
+        # T6 island guard: never reuse a via the oracle says is FLOATING (not
+        # in the main plane component) -- that is the mutual-floating-strap
+        # false success: the trace lands, the tap reports success, and the pad
+        # stays disconnected from the plane.
+        if plane_oracle is not None and not plane_oracle.via_on_plane(v.x, v.y):
             continue
         d2 = (v.x - pad.global_x) ** 2 + (v.y - pad.global_y) ** 2
         if d2 <= close_radius * close_radius and (best is None or d2 < best[0]):
@@ -933,8 +1086,11 @@ def try_tap_pad(
         segs = route_via_to_pad(best[1], pad, pad_layer, net_id,
                                 routing_obs, config, verbose=False)
         if segs:  # non-empty trace: actually connects the pad to the via
-            return TapResult(success=True, via=None, segments=segs,
-                             reused_via_pos=best[1])
+            r = _gate(TapResult(success=True, via=None, segments=segs,
+                                reused_via_pos=best[1]))
+            if r.success:
+                return r
+            # oracle rejected the reuse target: fall through the ladder
 
     # 1b. Before placing a NEW via, prefer a trace to an existing same-net via /
     # through-hole pad within the distant-trace radius -- that copper already
@@ -944,9 +1100,13 @@ def try_tap_pad(
     if pad_layer and distant_trace_radius > 0 and not disable_reuse:
         r = _try_trace_to_plane_connected(
             pad, pad_layer, net_id, local, routing_obs, config,
-            route_multi_source_to_pad, distant_trace_radius)
+            route_multi_source_to_pad, distant_trace_radius,
+            plane_oracle=plane_oracle)
         if r is not None:
-            return r
+            r = _gate(r)
+            if r.success:
+                return r
+            # oracle rejected the trace target: fall through to via placement
 
     # 2. Place a new via near the pad. When the net has zone outline(s), the
     # via must land INSIDE one of them (issue #287, neptune): on a Voronoi-
@@ -957,6 +1117,14 @@ def try_tap_pad(
     _net_zone_polys = [z.polygon for z in (getattr(pcb_data, 'zones', None) or [])
                        if z.net_id == net_id and getattr(z, 'polygon', None)
                        and len(z.polygon) >= 3]
+    if plane_oracle is not None and not plane_oracle.inert:
+        # T6: constrain new vias to the MAIN plane component's zone outlines --
+        # a via inside a floating zone fragment's outline taps the island, not
+        # the plane. Falls back to all outlines when no zone has credited
+        # copper yet (nothing provably main; don't brick via placement).
+        _main_polys = plane_oracle.main_zone_polygons()
+        if _main_polys:
+            _net_zone_polys = _main_polys
     if _net_zone_polys:
         from check_connected import point_in_polygon
 
@@ -983,11 +1151,25 @@ def try_tap_pad(
         # rip-up caller free the path.
         if distant_trace_radius > 0:
             r = _try_distant_pad_trace(pad, pad_layer, net_id, local, routing_obs,
-                                       config, route_multi_source_to_pad, distant_trace_radius)
+                                       config, route_multi_source_to_pad, distant_trace_radius,
+                                       plane_oracle=plane_oracle)
             if r is not None:
-                return r
+                gated = _gate(r)
+                if gated.success or not r.success:
+                    # A success, or the helper's own failure (keeps its
+                    # blocked_cells diagnostics for rip-up callers).
+                    return gated
+                # oracle rejected a false success: report blocked placement
         # No via site anywhere in the search radius - via placement is blocked.
         return TapResult(success=False, via_blocked=True)
+
+    # Board-edge clamp: a via-in-pad placed at the pad's true (off-grid) centre
+    # can sit sub-grid closer to the edge than the obstacle map's grid keep-out
+    # blocks; pull it interior to honor min_copper_edge_clearance (inert when
+    # the project sets no edge rule / the via already clears). See
+    # clamp_tap_via_to_edge.
+    via_pos, _edge_moved = clamp_tap_via_to_edge(
+        via_pos, pad, pcb_data, config, via_size)
 
     segments: List[Dict] = []
     # A via landing inside the pad's own copper connects it directly (via-in-pad)
@@ -1015,7 +1197,7 @@ def try_tap_pad(
 
     via = {'x': via_pos[0], 'y': via_pos[1], 'size': via_size,
            'drill': via_drill, 'layers': ['F.Cu', 'B.Cu'], 'net_id': net_id}
-    return TapResult(success=True, via=via, segments=segments)
+    return _gate(TapResult(success=True, via=via, segments=segments))
 
 
 def tap_pad_with_escalation(
@@ -1038,6 +1220,7 @@ def tap_pad_with_escalation(
     disable_reuse: bool = False,
     shared_via_maps: Optional[SharedViaMaps] = None,
     pour_trace_only: bool = False,
+    plane_oracle=None,
 ) -> TapResult:
     """Tap a pad, escalating to scoped fine parameters for fine-pitch pads.
 
@@ -1058,7 +1241,8 @@ def tap_pad_with_escalation(
             via_size, via_drill, same_net_pad_clearance,
             pending_pads, extra_vias, extra_segments, verbose,
             distant_trace_radius=distant_trace_radius, disable_reuse=disable_reuse,
-            shared_via_maps=shared_via_maps, pour_trace_only=pour_trace_only)
+            shared_via_maps=shared_via_maps, pour_trace_only=pour_trace_only,
+            plane_oracle=plane_oracle)
         if result.success:
             result.params_label = 'default'
             result.clearance_used = config.clearance
@@ -1112,7 +1296,8 @@ def tap_pad_with_escalation(
                 pending_pads, extra_vias, extra_segments, verbose,
                 routing_clearance_cushion=True,
                 distant_trace_radius=distant_trace_radius, disable_reuse=disable_reuse,
-                shared_via_maps=shared_via_maps, pour_trace_only=pour_trace_only)
+                shared_via_maps=shared_via_maps, pour_trace_only=pour_trace_only,
+                plane_oracle=plane_oracle)
             if result.success:
                 result.params_label = 'fine'
                 result.clearance_used = fine_config.clearance
@@ -1172,6 +1357,52 @@ def find_unconnected_plane_pads(
                for zl in zone_layers):
             continue
         unconnected.append((pad, pad_layer))
+
+    # Validator-parity second opinion: the geometric test above credits a pad
+    # whose via merely REACHES a zone layer -- but a via landing in a pinched
+    # fill island (the ottercast dogbone class: pour physically cannot thread
+    # to the barrel) is NOT plane-connected, and the island repair pass's
+    # coarse raster cannot see a 0.2mm ring either, so those balls shipped
+    # open at fab with no repair attempted. The fill-component-aware
+    # connectivity check (check_net_connectivity + plane_fill_model) grades
+    # exactly like KiCad; any pad it reports disconnected joins the repair
+    # list. Additive only -- it never removes a geometrically-found pad.
+    try:
+        from check_connected import check_net_connectivity
+        _segs = [s for s in pcb_data.segments if s.net_id == net_id]
+        _vias = [v for v in pcb_data.vias if v.net_id == net_id]
+        _pads = pcb_data.pads_by_net.get(net_id, [])
+        _zones = [z for z in (getattr(pcb_data, 'zones', None) or [])
+                  if z.net_id == net_id]
+        if _zones:
+            _res = check_net_connectivity(net_id, _segs, _vias, _pads, _zones,
+                                          tolerance=0.02, pcb_data=pcb_data)
+            _have = {(round(p.global_x, 3), round(p.global_y, 3))
+                     for p, _l in unconnected}
+            for _dp in (_res.get('disconnected_pads') or []):
+                # entries are (x, y, layer, component_ref) tuples
+                _dx_, _dy_ = _dp[0], _dp[1]
+                _key = (round(_dx_, 3), round(_dy_, 3))
+                if _key in _have:
+                    continue
+                _pad = next((p for p in _pads
+                             if abs(p.global_x - _dx_) < 1e-3
+                             and abs(p.global_y - _dy_) < 1e-3), None)
+                if _pad is None or pad_is_plated_through(_pad):
+                    continue
+                if off_board is not None and off_board(_pad.global_x, _pad.global_y):
+                    continue
+                _pl = next((l for l in _pad.layers
+                            if l.endswith('.Cu') and not l.startswith('*')),
+                           None)
+                if _pl is None:
+                    continue
+                print(f"    fill-model: pad {_pad.component_ref}.{_pad.pad_number} "
+                      f"reaches only a pinched fill island -- queued for repair")
+                unconnected.append((_pad, _pl))
+                _have.add(_key)
+    except Exception as _e:
+        print(f"    (fill-model pad check skipped: {_e})")
     if skipped_off_board:
         print(f"  Skipped {skipped_off_board} pad(s) OUTSIDE the board outline "
               f"(unreachable, no repair copper drawn, #291)")

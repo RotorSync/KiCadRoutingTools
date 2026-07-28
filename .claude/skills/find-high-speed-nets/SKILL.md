@@ -294,6 +294,17 @@ pairs** (the rest — handled by `route_diff.py --impedance`).
 > `/plan-pcb-routing` Step 2 / `/recommend-stackup`), the width will be wrong —
 > flag this and recommend running `/recommend-stackup` first.
 
+> **Coplanar check (#486).** `--impedance` alone assumes a plain microstrip: the
+> only ground is the plane *below*. If an outer-layer impedance net will also sit
+> in a **GND pour on its own layer**, it is a coplanar waveguide, needs a
+> **narrower** trace, and the plan must pass `--coplanar-gap <pour clearance>`
+> matched to the plane step's `--zone-clearance`. This matters most for exactly
+> the nets this skill finds — RF feeds are usually poured around. Note per net
+> whether an outer-layer pour is expected, and hand that to `/plan-pcb-routing`
+> Step 2b-i, which owns the decision. Do **not** recommend `--coplanar-gap`
+> unless a pour on that same layer is actually planned: declaring it without the
+> pour leaves the trace too narrow (impedance too high).
+
 ## Step 5: Trace High-Speed Signals Through Series Passives
 
 High-speed signals often pass through series components (termination resistors, AC coupling
@@ -425,7 +436,8 @@ python3 -X utf8 route.py board_diff.kicad_pcb board_imp.kicad_pcb \
 ```
 
 **Differential impedance pairs** keep being routed in the diff-pair step (Step 2),
-just add `--impedance` — **and ride the fab floor for the gap and clearance:**
+just add `--impedance` — **and ride the fab floor for the gap and clearance,
+keeping the two EQUAL:**
 
 ```bash
 python3 -X utf8 route_diff.py board.kicad_pcb board_diff.kicad_pcb \
@@ -433,6 +445,16 @@ python3 -X utf8 route_diff.py board.kicad_pcb board_diff.kicad_pcb \
     --diff-pair-gap 0.1 --clearance 0.1 \
     --layers F.Cu In1.Cu In2.Cu B.Cu
 ```
+
+**The coupling gap may NEVER be set below `--clearance` (#441).** KiCad grades a
+pair's P↔N coupling under the *plain copper-clearance rule* (P and N are different
+nets), so a gap tighter than clearance is reported as a **clearance violation on
+every coupled segment** — e.g. `stm32g474_fc` routed at `--diff-pair-gap 0.1
+--clearance 0.15` produced 9–14 KiCad clearance errors along its USB pair. We are
+not allowed to lower the board-wide clearance, so the engine now **floors the gap up
+to clearance** (`route_diff` raises `diff_pair_gap` to `max(gap, clearance)` before
+routing). Plan the two so this floor never has to bite: **pick `--clearance` first,
+then set `--diff-pair-gap` ≥ that** — for tight coupling, put BOTH at the fab floor.
 
 **Width and spacing: choose them near the fab floor (~0.1 mm), overriding the
 net class.** The stock Default net class is usually wide (e.g. `diff_pair_gap`
@@ -442,13 +464,18 @@ pairs it would otherwise route — measured: on `glasgow_revC` all 13 FPGA pairs
 couple at `--diff-pair-gap 0.1`, but 2 fail at `0.25`. So for every
 impedance-controlled net:
 
-- **Spacing (`--diff-pair-gap`) and `--clearance`: the fab floor (~0.1 mm).** Do
-  NOT read the net-class `diff_pair_gap`; recommend the floor. Tighter coupling
-  is also better signal integrity for the pair.
+- **Spacing (`--diff-pair-gap`) and `--clearance`: the fab floor (~0.1 mm), set
+  EQUAL.** Do NOT read the net-class `diff_pair_gap`; recommend the floor. Tighter
+  coupling is also better signal integrity for the pair. Never recommend a gap below
+  the clearance the same command uses (see the #441 note above).
 - **Width: keep `--impedance` (it computes the per-layer width from the stackup
-  for the target ohms), but the result is clamped to the fab floor (~0.1 mm) — it
-  will not go thinner than the board can make.** Width stays impedance-correct;
-  only the gap/clearance are forced tight.
+  for the target ohms at the ACTUAL, floored gap), but the result is clamped to the
+  fab floor (~0.1 mm) — it will not go thinner than the board can make.** Width stays
+  impedance-correct; only the gap/clearance are forced tight. **If a board forces a
+  wider clearance** (so the gap floors up with it), the impedance solver is fed that
+  wider gap and widens the trace to still hit the target ohms — a wider gap raises
+  Z_diff, so to hold e.g. 90 Ω the trace grows. Expect the width to track the gap;
+  do not hand-pin `--track-width` below what `--impedance` computes at the real gap.
 
 **These override the net class, and the routed board's net class is updated to
 match.** `route_diff.py` auto-invokes `fix_kicad_drc_settings.py` after routing,

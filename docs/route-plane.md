@@ -6,7 +6,7 @@ The `route_planes.py` script creates copper pour zones and places vias to connec
 
 When creating a ground or power plane on an inner or bottom layer, SMD pads on other layers need via connections to reach the plane. This tool automates:
 
-1. **Zone creation** - Creates a copper pour zone covering the board. Replaces existing zones for the same net/layer with new parameters
+1. **Zone creation** - Creates a copper pour zone covering the board. Replaces an existing zone for the same net/layer with new parameters; coexists with other nets' pours on that layer (warning + explicit fill priority)
 2. **Pad classification** - Identifies which pads need vias vs direct zone connection
 3. **Via placement** - Places vias near pads, avoiding obstacles on all copper layers
 4. **Trace routing** - Routes traces from offset vias to pads using A* pathfinding
@@ -65,7 +65,7 @@ When specifying multiple nets, each net is paired with its corresponding plane l
 |--------|---------|-------------|
 | `--zone-clearance` | 0.2 | Zone clearance from other copper in mm |
 | `--min-thickness` | 0.1 | Minimum zone copper thickness in mm |
-| `--skip-existing-zones` | off | Keep an existing same-net zone on the target layer instead of replacing it (place stitching vias only), and tolerate other-net zones on the same layer (e.g. a GND island under an RF feed). When off (the CLI default), an existing same-net zone on the target layer is replaced |
+| `--skip-existing-zones` | off | Keep an existing same-net zone on the target layer instead of replacing it (place stitching vias only). When off (the CLI default), an existing same-net zone on the target layer is replaced. **Other nets' pours on the layer are tolerated either way** — see below |
 
 ### Algorithm Options
 
@@ -135,14 +135,74 @@ This feature is for single-ended signal vias placed by `route.py`.
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--add-gnd-vias` | off | Enable GND return via placement near signal vias |
-| `--gnd-via-net` | GND | Net name for the GND vias |
+| `--gnd-via-net` | *auto* | Pin every return via to this net. Empty (the default) matches each signal to **its own ground domain** |
 | `--gnd-via-distance` | 2.0 | Maximum distance from signal via to place GND via (mm) |
 
 The algorithm:
-1. Finds all signal vias (non-GND nets)
-2. Skips signal vias that already have a GND via or through-hole GND pad within the distance threshold
+1. Finds all signal vias (nets that are not a ground net)
+2. Skips signal vias that already have a **same-domain** GND via or through-hole GND pad within the distance threshold
 3. For each remaining signal via, searches outward from the minimum viable distance (via-to-via clearance) in 24 angles (every 15°)
-4. Places the GND via at the closest valid position that respects track clearances
+4. Places the GND via at the closest valid position that respects track clearances, on the signal's own ground net
+
+#### Split grounds (#489 §5)
+
+Ground used to collapse to one board-global net, so every signal via -- analog
+included -- was stitched to it. On a split-ground board that is worse than doing
+nothing: it can bridge the very domains the split exists to separate, while
+connectivity and DRC both report green.
+
+Each ground-family net (`GND*`, `AGND`, `DGND`, `PGND`, ...) is now a **domain**,
+seeded with the components that touch it. The single-point tie between domains --
+a ferrite, a 0 Ω link, a net tie -- is detected structurally (a populated 2-pad
+part with one pad on each ground) and excluded from that seeding, so membership
+cannot leak across the split. A signal's return domain is then the domain of its
+endpoint components; anything ambiguous falls back to the board-global answer, so
+behaviour never gets worse than before.
+
+Boards with one ground resolve exactly as before (verified across the corpus set:
+12 single-ground boards unchanged for every net, 3 split-ground boards corrected).
+A run on a multi-domain board prints the domains, the tie, and the per-domain via
+count. `--gnd-via-net AGND` still pins everything to one net board-wide.
+
+Helpers: `net_queries.resolve_ground_domains`, `ground_domain_bridges`,
+`resolve_return_net_id`, `describe_ground_domains`.
+
+#### Sharing a layer with another net's pour
+
+A pour belonging to a **different net** on the target layer used to abort the run
+("Cannot create *net* zone on same layer. Aborting.") — so a plane could not be
+added to any board that already had a pour on that layer, and the abort then
+crashed the post-passes on the output file it never wrote. KiCad itself allows
+zones of different nets to share a layer: it fills them by priority and holds
+normal clearance between nets.
+
+The run now **warns and continues**, naming the other nets, and gives the new
+plane a fill priority **one above the highest incumbent** so KiCad resolves the
+overlap in favour of the plane you just asked for — the existing pours pull back
+around it rather than the outcome depending on zone UUID order. The incumbent
+zones themselves are left untouched. Point `--plane-layers` at a free layer if
+you want the opposite. Priority is chosen upward because KiCad zone priority is
+non-negative: a value below the incumbent is written but read back as 0.
+
+Footprint-owned pours (a shield or thermal pour inside a footprint) neither
+contend nor get replaced (#478).
+
+#### Replacing a same-net pour
+
+An existing pour for the **same** net on the target layer is replaced by default
+(`--skip-existing-zones` keeps it instead). Two cases used to go wrong silently:
+
+- **KiCad 10 boards.** Zones carry `(net "NAME")`, and the replacement filter was
+  only given numeric `(net <id>)` pairs, so it never matched: the old pour shipped
+  next to its replacement while the log said "Replacing existing zone", and every
+  re-run stacked another duplicate. The name pairs are passed now.
+- **Multi-layer pours.** `(layers "F.Cu" "B.Cu")` is **one** zone. It is *not*
+  deleted to replace one of its layers -- that would destroy the copper on the
+  others. The run warns, keeps the pour, and pours the new plane over it at a
+  higher fill priority (same net, so no short); replace it outright by running
+  those layers together or by deleting it in KiCad.
+
+A pour is therefore removed only when every layer it covers is being replaced.
 
 #### Choosing `--gnd-via-distance`
 
@@ -275,11 +335,12 @@ After zone creation, the tool calculates and displays approximate plane resistan
 
 **Calculations:**
 - **Resistance:** `R = ρ × L / (W × t)` where ρ = 1.68×10⁻⁸ Ω·m (copper), L = path length, W = average width, t = copper thickness
-- **Max current:** IPC-2152 formula `I = k × ΔT^0.44 × A^0.725` where k = 0.024 for internal layers, 0.048 for external, A = cross-sectional area in mils²
+- **Max current:** the **IPC-2221** chart fit `I = k × ΔT^0.44 × A^0.725`, k = 0.024 internal / 0.048 external, A = cross-sectional area in mils². This was documented as IPC-2152, but the formula and both k values are 2221's (#489 §6). IPC-2152 came later and specifically **overturned** 2221's 2× derating of internal layers — an inner trace in FR4 runs *cooler* than an external one in still air — so `Imax` under-credits inner planes by roughly 2×. `plane_resistance.calculate_max_current_ipc2152()` gives the corrected estimate, and it is printed alongside for internal layers.
 
 **Assumptions:**
-- 1 oz copper (35 µm thickness)
+- Copper weight is read from the board's own **stackup**, per layer (1 oz / 35 µm only when the board has no stackup)
 - 10°C maximum temperature rise
+- **Chart range:** the 2221 curves are drawn for cross-sections up to ~700 mils². A plane pour is far outside that, so a result past the range is reported as *not rated* instead of as a current, with the extrapolated number shown only for reference — this is why the example below no longer states "21.05 A" as fact.
 
 **Example output (single-net layer):**
 ```
@@ -287,24 +348,30 @@ Plane Resistance Analysis (1 oz copper, 10°C rise):
   Path length: 117.0 mm (diagonal)
   Avg width:   52.2 mm
   Resistance:  1.075 mΩ
-  Max current: 21.05 A
+  Max current: not rated -- 2832 mils² cross-section is past the IPC-2221
+               chart range (700 mils²); the fit would say 21.05 A by extrapolation
 ```
 
 **Example output (multi-net layer):**
 ```
 Plane Resistance Analysis (1 oz copper, 10°C rise):
-----------------------------------------------------------------------
+--------------------------------------------------------------------------
 Net                       Path(mm)   AvgW(mm)   R(mΩ)      Imax(A)
-----------------------------------------------------------------------
+--------------------------------------------------------------------------
 /fpga_adc/VA19            33.6       3.6        4.457      3.03
-/fpga_adc/VA11            96.3       5.7        8.121      4.22
-/fpga_adc/VLVDS           28.4       78.1       0.175      28.18
+/fpga_adc/VA11            96.3       5.7        8.121      4.22*
+/fpga_adc/VLVDS           28.4       78.1       0.175      28.18*
 /fpga_adc/VD11            31.7       4.3        3.537      3.44
-----------------------------------------------------------------------
+--------------------------------------------------------------------------
 Path = longest MST route, AvgW = avg polygon width along path
+Imax = IPC-2221 chart fit; inner layers carry 2221's 2x derating, which IPC-2152 overturned
+* extrapolated past the IPC-2221 chart range (700 mils²) -- not a rating
 ```
 
 This helps identify potential current bottlenecks in power distribution networks. Narrow polygon sections (low AvgW) will have higher resistance and lower current capacity.
+
+Each zone's numbers are also returned with the zone data (`resistance_analysis`),
+so a caller can gate on them instead of scraping the printout.
 
 ## Error Messages
 
@@ -497,7 +564,8 @@ The plane generation code is organized into several modules:
 
 **plane_io.py:**
 - `extract_zones()` - Reads existing zones from PCB file
-- `check_existing_zones()` - Validates zone conflicts
+- `check_existing_zones()` - Reports what already occupies the target layer: the same-net pour to replace, plus other nets' pours to coexist with (it no longer aborts the run over a foreign pour)
+- `shared_layer_zone_priority()` - Fill priority for a plane sharing a layer with another net's pour: one above the highest incumbent, so the overlap resolves deterministically
 - `write_plane_output()` - Writes vias, traces, and zones to output file
 
 **plane_obstacle_builder.py:**
@@ -521,7 +589,10 @@ The plane generation code is organized into several modules:
 - `find_mst_diameter_path()` - Finds longest path through MST (tree diameter)
 - `calculate_average_width_along_path()` - Samples polygon width perpendicular to path
 - `calculate_resistance()` - Computes R = ρL/Wt
-- `calculate_max_current_ipc()` - Computes max current using IPC-2152 formula
+- `calculate_max_current_ipc2221()` - Max current from the IPC-2221 chart fit (was `calculate_max_current_ipc`, which is kept as an alias)
+- `calculate_max_current_ipc2152()` - Same fit with IPC-2152's internal/external correction (no 2× inner-layer derating)
+- `ipc2221_area_in_range()` - Whether the conductor is inside the 2221 chart's data range (False ⇒ the number is an extrapolation, not a rating)
+- `stackup_copper_oz()` - Copper weight in oz for a layer, read from the board's stackup
 
 ## Repairing Disconnected Plane Regions
 

@@ -50,6 +50,36 @@ def split_net_patterns(patterns: List[str],
     return include_patterns, exclude_patterns
 
 
+def net_pattern_matches(net_name: str, pattern: str) -> bool:
+    """Match one net name against one fnmatch pattern, sheet-path aware (#493).
+
+    KiCad qualifies a net with the sheet it was declared on, so the board's net
+    is '/GND' or '/Management Interface/VSMPS', not 'GND'. A plain
+    `fnmatch(net_name, pattern)` therefore makes the unqualified spelling people
+    actually write -- `--nets '*' '!GND'` -- match NOTHING, so the exclusion
+    silently no-ops and the net gets routed anyway. That is issue #292
+    (core1106_cam routed its plane nets as traces) and it recurred on eth_tap,
+    whose step-1 fanout shipped 267 '/GND' + 171 '/3V3' segments out of 750 from
+    a command that asked to exclude both.
+
+    So: a pattern that names NO path ('GND', 'VCC*') is understood as naming the
+    net itself and is matched against the trailing path component as well. A
+    pattern that DOES carry a path ('/GND', '/Sheet/*') is taken literally and
+    only ever full-matched, so an explicit spelling stays exact.
+
+        net_pattern_matches('/GND', 'GND')                  -> True
+        net_pattern_matches('/Analog/GND', 'GND')           -> True
+        net_pattern_matches('/GND_A', 'GND')                -> False
+        net_pattern_matches('/GND', '/GND')                 -> True
+        net_pattern_matches('/Analog/GND', '/GND')          -> False  (path given)
+    """
+    if fnmatch.fnmatch(net_name, pattern):
+        return True
+    if '/' not in pattern and '/' in net_name:
+        return fnmatch.fnmatch(net_name.rsplit('/', 1)[-1], pattern)
+    return False
+
+
 def matches_net_filter(net_name: str, patterns: List[str]) -> bool:
     """
     Check if a net name matches a list of filter patterns.
@@ -89,13 +119,13 @@ def matches_net_filter(net_name: str, patterns: List[str]) -> bool:
     # Check exclusion first: if net matches any exclude pattern, reject it
     if exclude_patterns:
         for pattern in exclude_patterns:
-            if fnmatch.fnmatch(net_name, pattern):
+            if net_pattern_matches(net_name, pattern):
                 return False
 
     # Check inclusion: if there are include patterns, must match at least one
     if include_patterns:
         for pattern in include_patterns:
-            if fnmatch.fnmatch(net_name, pattern):
+            if net_pattern_matches(net_name, pattern):
                 return True
         return False  # Has include patterns but didn't match any
 
@@ -175,6 +205,344 @@ def calculate_via_barrel_length(vias: List[Via], pcb_data) -> float:
     return total
 
 
+def net_copper_length(pcb_data: PCBData, net_id: int,
+                      include_vias: bool = True) -> float:
+    """Total copper length of ONE net already on a board, in mm (#489 §7).
+
+    The supported way to ask "how long is this net?" from a parsed board --
+    `calculate_route_length` takes a SEGMENT LIST, not a PCBData + net id, and
+    every caller that guessed otherwise (the review-routed-board recipe did)
+    raised. Sums the net's segments plus, with include_vias, its via barrels
+    from the stackup, matching KiCad's measurement.
+
+    NOTE this is TOTAL net copper, not a pin-to-pin path: on a multipoint or
+    fly-by net (or one with stubs) it exceeds every actual signal path. Use
+    `pin_pair_path_length` when the number has to mean electrical delay.
+    """
+    segments = [s for s in pcb_data.segments if s.net_id == net_id]
+    vias = [v for v in pcb_data.vias if v.net_id == net_id] if include_vias else None
+    return calculate_route_length(segments, vias, pcb_data)
+
+
+def net_copper_lengths(pcb_data: PCBData, net_ids=None,
+                       include_vias: bool = True) -> Dict[int, float]:
+    """{net_id: total copper length mm} in ONE pass over the board's copper.
+
+    Same measurement as `net_copper_length`, but for many nets at once -- a
+    length-match group audit would otherwise rescan every segment per net.
+    net_ids=None covers every net that has copper.
+    """
+    wanted = set(net_ids) if net_ids is not None else None
+    segs_by: Dict[int, List[Segment]] = {}
+    vias_by: Dict[int, List[Via]] = {}
+    for s in pcb_data.segments:
+        if wanted is None or s.net_id in wanted:
+            segs_by.setdefault(s.net_id, []).append(s)
+    if include_vias:
+        for v in pcb_data.vias:
+            if wanted is None or v.net_id in wanted:
+                vias_by.setdefault(v.net_id, []).append(v)
+    out = {}
+    for nid in (wanted if wanted is not None else set(segs_by) | set(vias_by)):
+        out[nid] = calculate_route_length(segs_by.get(nid, []),
+                                         vias_by.get(nid), pcb_data)
+    return out
+
+
+def _pad_holds_point(pad: Pad, x: float, y: float, tol: float = 0.02) -> bool:
+    """Is (x, y) inside the pad's copper (bbox test + tolerance)?"""
+    hx = pad.size_x / 2 + tol
+    hy = pad.size_y / 2 + tol
+    return abs(x - pad.global_x) <= hx and abs(y - pad.global_y) <= hy
+
+
+def pin_pair_path_length(pcb_data: PCBData, net_id: int,
+                         pad_a: Pad, pad_b: Pad,
+                         tolerance: float = 0.02) -> Optional[float]:
+    """Shortest copper path length between TWO PADS of one net, in mm (#489 §7).
+
+    The pin-pair ("from-to") measurement length matching actually needs, and
+    what `net_copper_length` cannot give: on a multipoint net -- a fly-by DDR
+    address bus, a daisy-chained clock, anything with a stub -- total net copper
+    is the sum of every branch and matches no signal path at all.
+
+    Walks a WEIGHTED graph over the net's own copper: each segment contributes
+    an edge of its own length, coincident endpoints and T-junctions (an endpoint
+    landing on another segment's interior) join at zero cost, and a via joins
+    the layers it spans at its barrel length from the stackup. Pads attach to
+    any endpoint or T-point that falls inside their copper.
+
+    Returns None when the two pads are not joined by copper (an unrouted or
+    broken net) -- distinguish that from 0.0, which means pad-to-pad direct
+    contact. Zone/pour connections are NOT traversed: a net that reaches its
+    pads only through a plane has no track path and returns None.
+    """
+    segments = [s for s in pcb_data.segments if s.net_id == net_id]
+    if not segments:
+        return None
+
+    # Point interning: endpoints within `tolerance` are ONE node (the same
+    # coincidence rule check_connected unions at). Bucketing on round(x/tol)
+    # would NOT do -- two points 2 um apart straddling a bucket edge land in
+    # different buckets, which silently breaks the walk at a joint.
+    q = max(tolerance, 1e-9)
+    _buckets: Dict[Tuple[int, int, str], List[Tuple[float, float, int]]] = {}
+    _node_xy: List[Tuple[float, float, str]] = []
+
+    def key(x: float, y: float, layer: str) -> int:
+        bx, by = int(math.floor(x / q)), int(math.floor(y / q))
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for (ex, ey, nid) in _buckets.get((bx + dx, by + dy, layer), ()):
+                    if math.hypot(ex - x, ey - y) <= tolerance:
+                        return nid
+        nid = len(_node_xy)
+        _node_xy.append((x, y, layer))
+        _buckets.setdefault((bx, by, layer), []).append((x, y, nid))
+        return nid
+
+    adjacency: Dict[int, List[Tuple[int, float]]] = {}
+
+    def add_edge(n1, n2, w: float):
+        if n1 == n2:
+            return
+        adjacency.setdefault(n1, []).append((n2, w))
+        adjacency.setdefault(n2, []).append((n1, w))
+
+    copper_layers = list(getattr(pcb_data.board_info, 'copper_layers', None) or [])
+    from kicad_parser import pad_is_plated_through
+
+    # Vias and the two pads are DISCS of copper, not points: a track ends
+    # anywhere inside them, not on their centre (real boards miss the centre by
+    # tens of um). Each disc is a landing zone -- any segment node inside it
+    # joins at no cost, and a segment passing THROUGH it gets split there so a
+    # via mid-run is reachable.
+    discs = []  # (cx, cy, radius, layers, hit_test, kind, obj)
+    for v in pcb_data.vias:
+        if v.net_id != net_id or len(v.layers or ()) < 2:
+            continue
+        span = list(v.layers)
+        if copper_layers and span[0] in copper_layers and span[1] in copper_layers:
+            i, j = copper_layers.index(span[0]), copper_layers.index(span[1])
+            spanned = copper_layers[min(i, j):max(i, j) + 1]
+        else:
+            spanned = span
+        radius = max((getattr(v, 'size', 0) or 0) / 2, tolerance)
+        discs.append((v.x, v.y, radius, spanned,
+                      lambda x, y, _v=v, _r=radius: math.hypot(x - _v.x, y - _v.y) <= _r + tolerance,
+                      'via', v))
+    for pad in (pad_a, pad_b):
+        pad_layers = [l for l in expand_pad_layers(pad.layers, copper_layers)]
+        radius = max(pad.size_x, pad.size_y) / 2
+        discs.append((pad.global_x, pad.global_y, radius, pad_layers,
+                      lambda x, y, _p=pad: _pad_holds_point(_p, x, y, tolerance),
+                      'pad', pad))
+
+    # Cut each segment at every T-junction (another segment's endpoint on its
+    # interior) and at every disc it passes through, then chain the pieces.
+    endpoints_by_layer: Dict[str, List[Tuple[float, float]]] = {}
+    for s in segments:
+        endpoints_by_layer.setdefault(s.layer, []).extend(
+            [(s.start_x, s.start_y), (s.end_x, s.end_y)])
+
+    for s in segments:
+        length = segment_length(s)
+        if length < 1e-9:
+            continue
+        ux = (s.end_x - s.start_x) / length
+        uy = (s.end_y - s.start_y) / length
+        cuts = [0.0, length]
+
+        def _project(px: float, py: float, max_perp: float):
+            """Along-segment distance where (px, py) meets this segment, or
+            None when it is farther off the line than max_perp."""
+            t = (px - s.start_x) * ux + (py - s.start_y) * uy
+            if t <= tolerance or t >= length - tolerance:
+                return None
+            perp = abs(-(px - s.start_x) * uy + (py - s.start_y) * ux)
+            return t if perp <= max_perp else None
+
+        for (px, py) in endpoints_by_layer.get(s.layer, ()):
+            t = _project(px, py, tolerance)
+            if t is not None:
+                cuts.append(t)
+        for (cx, cy, radius, dlayers, _hit, _kind, _obj) in discs:
+            if s.layer not in dlayers:
+                continue
+            t = _project(cx, cy, radius + tolerance)
+            if t is not None:
+                cuts.append(t)
+
+        cuts.sort()
+        for t1, t2 in zip(cuts, cuts[1:]):
+            if t2 - t1 < 1e-9:
+                continue
+            n1 = key(s.start_x + ux * t1, s.start_y + uy * t1, s.layer)
+            n2 = key(s.start_x + ux * t2, s.start_y + uy * t2, s.layer)
+            add_edge(n1, n2, t2 - t1)
+
+    # Attach each disc: one synthetic node per layer it spans, joined at no cost
+    # to every segment node inside its copper on that layer. A via's barrel then
+    # links its own per-layer nodes at the length KiCad measures (charged once
+    # across the span, so a mid-span layer change isn't billed twice); a plated
+    # pad barrel links its layers at no cost.
+    def _new_node(x: float, y: float, layer: str) -> int:
+        nid = len(_node_xy)
+        _node_xy.append((x, y, layer))
+        return nid
+
+    track_nodes = list(adjacency.keys())
+    pad_nodes: Dict[int, List[int]] = {}
+    for (cx, cy, radius, dlayers, hit, kind, obj) in discs:
+        layer_nodes: Dict[str, int] = {}
+        for layer in dlayers:
+            hub = _new_node(cx, cy, layer)
+            joined = False
+            for node in track_nodes:
+                nx, ny, nlayer = _node_xy[node]
+                if nlayer != layer:
+                    continue
+                if hit(nx, ny):
+                    add_edge(hub, node, 0.0)
+                    joined = True
+            if joined or kind == 'pad':
+                layer_nodes[layer] = hub
+
+        if kind == 'via':
+            barrel = 0.0
+            if hasattr(pcb_data, 'get_via_barrel_length'):
+                barrel = pcb_data.get_via_barrel_length(dlayers[0], dlayers[-1])
+            per_step = barrel / max(1, len(dlayers) - 1)
+            for l1, l2 in zip(dlayers, dlayers[1:]):
+                if l1 in layer_nodes and l2 in layer_nodes:
+                    add_edge(layer_nodes[l1], layer_nodes[l2], per_step)
+                elif l1 in layer_nodes or l2 in layer_nodes:
+                    # An intermediate layer with no copper of this net still has
+                    # to be walked THROUGH -- keep the chain intact.
+                    for l in (l1, l2):
+                        layer_nodes.setdefault(l, _new_node(cx, cy, l))
+                    add_edge(layer_nodes[l1], layer_nodes[l2], per_step)
+        else:
+            hubs = list(layer_nodes.values())
+            if pad_is_plated_through(obj) and len(hubs) > 1:
+                for other in hubs[1:]:
+                    add_edge(hubs[0], other, 0.0)
+            pad_nodes[id(obj)] = hubs
+
+    starts = pad_nodes.get(id(pad_a)) or []
+    goals = set(pad_nodes.get(id(pad_b)) or [])
+    if not starts or not goals:
+        return None
+
+    import heapq
+    dist = {n: 0.0 for n in starts}
+    heap = [(0.0, i, n) for i, n in enumerate(starts)]
+    heapq.heapify(heap)
+    counter = len(starts)
+    while heap:
+        d, _, node = heapq.heappop(heap)
+        if d > dist.get(node, float('inf')) + 1e-12:
+            continue
+        if node in goals:
+            return d
+        for nxt, w in adjacency.get(node, ()):
+            nd = d + w
+            if nd < dist.get(nxt, float('inf')) - 1e-12:
+                dist[nxt] = nd
+                heapq.heappush(heap, (nd, counter, nxt))
+                counter += 1
+    return None
+
+
+def routable_pad_count(pcb_data: PCBData, net_id: int, off_board=None) -> int:
+    """Number of the net's pads that sit ON the board -- the pads the router can
+    actually reach as endpoints. Off-board pads (#291) are dropped before
+    routing, so they don't count. Pass a shared `off_board` predicate
+    (check_drc.make_off_board_test) to avoid rebuilding it per net."""
+    pads = pcb_data.pads_by_net.get(net_id, ())
+    if off_board is None:
+        return len(pads)
+    return sum(1 for p in pads if not off_board(p.global_x, p.global_y))
+
+
+def filter_routable_nets(pcb_data: PCBData, net_ids: List[Tuple[str, int]]
+                         ) -> List[Tuple[str, int]]:
+    """Drop nets with <2 ON-BOARD pads from a [(name, id), ...] routing list and
+    warn LOUDLY, listing them -- a 0/1-endpoint net can never complete a
+    connection, so attempting it only wastes the router (bus_pirate5 ground for
+    ~3h on nets whose pads were all read as off-board). Counts on-board pads so
+    it catches BOTH genuinely <2-pad nets AND nets whose pads are off-board /
+    outside a mis-parsed outline. Returns the kept list."""
+    from check_drc import make_off_board_test
+    off_board = make_off_board_test(pcb_data.board_info)
+    skipped = [(nm, nid) for (nm, nid) in net_ids
+               if routable_pad_count(pcb_data, nid, off_board) < 2]
+    if skipped:
+        print("\n" + "=" * 64)
+        print(f"WARNING: {len(skipped)} net(s) have fewer than 2 routable (on-board) "
+              f"pads and CANNOT be routed -- skipping them (a connection needs "
+              f">=2 endpoints):")
+        for nm, nid in skipped:
+            total = len(pcb_data.pads_by_net.get(nid, ()))
+            onb = routable_pad_count(pcb_data, nid, off_board)
+            extra = f" ({total-onb} off-board)" if onb < total else ""
+            print(f"    - {nm} (net {nid}): {onb} on-board pad(s){extra}")
+        print("  If a net you expected to route is here, its pads may be off-board "
+              "or the Edge.Cuts outline mis-parsed -- check the board outline.")
+        print("=" * 64)
+        skip_ids = {nid for _nm, nid in skipped}
+        return [(nm, nid) for (nm, nid) in net_ids if nid not in skip_ids]
+    return net_ids
+
+
+def log_net_health(pcb_data: PCBData, log=print) -> Tuple[int, int, int]:
+    """Emit one warning line per problematic net -- for the GUI Log tab (and CLI).
+
+    Flags, per net (skipping KiCad's `unconnected-*` single-pin nets):
+      * fewer than 2 ON-BOARD pads  -> unroutable (a route needs >=2 endpoints);
+      * some (but not all) pads off the board edge -> likely a placement mistake.
+    Also emits board-level parse warnings first: no Edge.Cuts outline, or an
+    outline so mis-parsed that most pads read as off-board (the bus_pirate5 class,
+    where a bad inner contour made every pad look off-board). Call at board load
+    so issues surface before routing. Returns (n_unroutable, n_offboard, n_parse).
+    """
+    from check_drc import make_off_board_test
+    bi = pcb_data.board_info
+    n_parse = 0
+    if not getattr(bi, 'board_bounds', None):
+        n_parse += 1
+        log("WARNING: board outline (Edge.Cuts) did not parse -- board bounds "
+            "unknown; off-board / edge checks unavailable.")
+    off_board = make_off_board_test(bi)
+    all_pads = [(p.global_x, p.global_y)
+                for pads in pcb_data.pads_by_net.values() for p in pads]
+    if off_board and all_pads:
+        frac = sum(1 for x, y in all_pads if off_board(x, y)) / len(all_pads)
+        if frac > 0.4:
+            n_parse += 1
+            log(f"WARNING: {frac*100:.0f}% of pads read as OFF-BOARD -- the Edge.Cuts "
+                f"outline is probably mis-parsed (bad cutout / open contour); the "
+                f"per-net warnings below may be spurious until the outline is fixed.")
+
+    n_unroutable = n_offboard = 0
+    for nid, net in pcb_data.nets.items():
+        if nid <= 0 or not net.name or net.name.lower().startswith('unconnected-'):
+            continue
+        pads = pcb_data.pads_by_net.get(nid, [])
+        n_off = sum(1 for p in pads if off_board(p.global_x, p.global_y)) if off_board else 0
+        n_on = len(pads) - n_off
+        if n_on < 2:
+            n_unroutable += 1
+            extra = f" ({n_off} off-board)" if n_off else ""
+            log(f"WARNING: net '{net.name}' has {n_on} on-board pad(s) of "
+                f"{len(pads)}{extra} -- cannot be routed (needs >=2 endpoints).")
+        elif n_off:
+            n_offboard += 1
+            log(f"WARNING: net '{net.name}' has {n_off}/{len(pads)} pad(s) off the "
+                f"board edge.")
+    return n_unroutable, n_offboard, n_parse
+
+
 def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
                         exclude_unconnected: bool = True) -> List[str]:
     """
@@ -246,50 +614,59 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
             pattern = raw_pattern                          # include (covers literal "!FOO" nets)
 
         # Check for exclusion pattern (starts with !)
+        # Both branches below resolve through net_pattern_matches, so the
+        # unqualified spelling ('!GND') excludes the board's sheet-qualified
+        # '/GND' instead of silently matching nothing (#292/#493).
         if is_exclude:
             exclude_pattern = pattern[1:]  # Remove the !
-            if '*' in exclude_pattern or '?' in exclude_pattern:
-                # Wildcard exclusion
-                matches = [name for name in all_net_names if fnmatch.fnmatch(name, exclude_pattern)]
-                if matches:
-                    print(f"Exclusion pattern '!{exclude_pattern}' matched {len(matches)} nets")
-                else:
-                    print(f"WARNING: Exclusion pattern '!{exclude_pattern}' matched no nets"
-                          f"{_did_you_mean(exclude_pattern)}")
-                for name in matches:
-                    excluded.add(name)
-                    if name in seen:
-                        result.remove(name)
-                        seen.remove(name)
+            matches = [name for name in all_net_names
+                       if net_pattern_matches(name, exclude_pattern)]
+            is_wildcard = '*' in exclude_pattern or '?' in exclude_pattern
+            if matches:
+                label = (f"Exclusion pattern '!{exclude_pattern}'" if is_wildcard
+                         else f"Exclusion '!{exclude_pattern}'")
+                print(f"{label} matched {len(matches)} net(s): "
+                      f"{', '.join(sorted(matches)[:5])}"
+                      f"{' ...' if len(matches) > 5 else ''}")
             else:
-                # Literal exclusion
+                label = ("Exclusion pattern" if is_wildcard else "Exclusion")
+                print(f"WARNING: {label} '!{exclude_pattern}' matched no nets"
+                      f"{_did_you_mean(exclude_pattern)}")
+            if not is_wildcard:
+                # Keep the literal in `excluded` too, so a later literal include
+                # of the same spelling stays suppressed even when it named no net.
                 excluded.add(exclude_pattern)
-                if exclude_pattern in seen:
-                    result.remove(exclude_pattern)
-                    seen.remove(exclude_pattern)
-                    print(f"Excluded net '{exclude_pattern}'")
-                elif exclude_pattern not in known_net_names:
-                    print(f"WARNING: Exclusion '!{exclude_pattern}' names no net on this "
-                          f"board - it excludes nothing{_did_you_mean(exclude_pattern)}")
-        elif '*' in pattern or '?' in pattern:
-            # It's a wildcard pattern - find all matching nets
-            matches = sorted([name for name in all_net_names
-                            if fnmatch.fnmatch(name, pattern) and name not in excluded])
-            if not matches:
-                print(f"Warning: Pattern '{pattern}' matched no nets")
-            else:
-                print(f"Pattern '{pattern}' matched {len(matches)} nets")
             for name in matches:
-                if name not in seen:
-                    result.append(name)
-                    seen.add(name)
+                excluded.add(name)
+                if name in seen:
+                    result.remove(name)
+                    seen.remove(name)
         else:
-            # Literal net name - allow even if it would be excluded
-            # (user explicitly requested it), unless explicitly excluded
-            if pattern not in seen and pattern not in excluded:
-                result.append(pattern)
-                seen.add(pattern)
-                if pattern not in known_net_names:
+            matches = sorted([name for name in all_net_names
+                              if net_pattern_matches(name, pattern)
+                              and name not in excluded])
+            if '*' in pattern or '?' in pattern:
+                if not matches:
+                    print(f"Warning: Pattern '{pattern}' matched no nets")
+                else:
+                    print(f"Pattern '{pattern}' matched {len(matches)} nets")
+                for name in matches:
+                    if name not in seen:
+                        result.append(name)
+                        seen.add(name)
+            elif matches:
+                # Literal that resolves to real net(s) -- including the
+                # sheet-qualified form of an unqualified spelling.
+                for name in matches:
+                    if name not in seen:
+                        result.append(name)
+                        seen.add(name)
+            else:
+                # Literal naming no net: preserved as-is (callers may pass names
+                # this board does not carry) with the long-standing warning.
+                if pattern not in seen and pattern not in excluded:
+                    result.append(pattern)
+                    seen.add(pattern)
                     print(f"WARNING: Net '{pattern}' does not exist on this board"
                           f"{_did_you_mean(pattern)}")
 
@@ -384,6 +761,139 @@ def resolve_gnd_net_id(pcb_data: PCBData,
         fam.sort(key=lambda kv: (len(kv[1].name), kv[0]))
         return fam[0][0], fam[0][1].name
     return None, None
+
+
+def _ground_family_net_ids(pcb_data: PCBData) -> List[Tuple[int, str]]:
+    """[(net_id, name)] of every ground-family net, deterministically ordered."""
+    fam = [(nid, net.name) for nid, net in pcb_data.nets.items()
+           if nid != 0 and net.name and is_ground_net_name(net.name)]
+    fam.sort(key=lambda kv: (len(kv[1]), kv[1], kv[0]))
+    return fam
+
+
+def ground_domain_bridges(pcb_data: PCBData) -> List[Dict]:
+    """Components that deliberately TIE two ground nets together.
+
+    A split-ground board joins its domains at exactly one point, through a
+    ferrite, a 0 Ohm link or a net tie. Such a part touches BOTH grounds, so it
+    must not be used to decide which domain a signal returns to -- otherwise the
+    two domains look like one through it.
+
+    Detected structurally (no datasheet needed): a populated part with exactly
+    two electrically-distinct pads, one on each of two different ground-family
+    nets. Net ties are included via footprint.net_tie_groups. Returns
+    [{'ref', 'net_ids'}].
+    """
+    fam_ids = {nid for nid, _ in _ground_family_net_ids(pcb_data)}
+    bridges = []
+    for ref, fp in sorted(pcb_data.footprints.items()):
+        if fp.dnp:
+            continue  # a no-pop link is an OPEN: it bridges nothing
+        pad_nets = {p.net_id for p in fp.pads if p.net_id}
+        if len(pad_nets) != 2:
+            continue
+        if pad_nets <= fam_ids:
+            bridges.append({'ref': ref, 'net_ids': sorted(pad_nets)})
+    return bridges
+
+
+def resolve_ground_domains(pcb_data: PCBData) -> Dict[int, Set[str]]:
+    """{ground net_id: {component refs returning to it}} (#489 §5).
+
+    `resolve_gnd_net_id` resolves ONE board-global ground, so on a split-ground
+    board with AGND + DGND and no plain 'GND' it picks one arbitrarily and the
+    return-via features stitch every signal via -- analog included -- to that one
+    net. That is worse than doing nothing: it can bridge the very domains the
+    designer built the split to separate, while connectivity and DRC both stay
+    green.
+
+    Each ground-family net is a domain, seeded with the components that touch it.
+    Bridge parts (see ground_domain_bridges) are excluded so a domain's membership
+    does not leak across the split. A component touching two domains directly
+    (not through a bridge) is left out of both -- it is genuinely ambiguous, and
+    guessing is what caused the bug.
+    """
+    cached = getattr(pcb_data, '_ground_domains', None)
+    if cached is not None:
+        return cached
+
+    fam = _ground_family_net_ids(pcb_data)
+    bridge_refs = {b['ref'] for b in ground_domain_bridges(pcb_data)}
+
+    touches: Dict[str, Set[int]] = {}
+    for nid, _name in fam:
+        for pad in pcb_data.pads_by_net.get(nid, ()) or ():
+            ref = pad.component_ref
+            if not ref or ref in bridge_refs:
+                continue
+            touches.setdefault(ref, set()).add(nid)
+
+    domains: Dict[int, Set[str]] = {nid: set() for nid, _ in fam}
+    for ref, nids in touches.items():
+        if len(nids) == 1:
+            domains[next(iter(nids))].add(ref)
+    pcb_data._ground_domains = domains
+    return domains
+
+
+def resolve_return_net_id(pcb_data: PCBData, net_id: Optional[int] = None,
+                          preferred_name: Optional[str] = None
+                          ) -> Tuple[Optional[int], Optional[str]]:
+    """The ground net a given signal net should return to (#489 §5).
+
+    Same contract as `resolve_gnd_net_id`, and IDENTICAL to it whenever the board
+    has 0 or 1 ground domains (the overwhelmingly common case) or the caller
+    passes `preferred_name` (--gnd-via-net still wins outright).
+
+    With several ground domains, the signal's own endpoint components decide:
+    the domain shared by the components its pads sit on. Ambiguous or unknown
+    falls back to the board-global answer, so behaviour never gets worse than
+    before -- it just stops being confidently wrong on the boards where grounding
+    matters most.
+    """
+    if preferred_name:
+        return resolve_gnd_net_id(pcb_data, preferred_name)
+
+    domains = resolve_ground_domains(pcb_data)
+    if net_id is None or len([d for d in domains if domains[d]]) < 2:
+        return resolve_gnd_net_id(pcb_data)
+
+    refs = {p.component_ref for p in pcb_data.pads_by_net.get(net_id, ()) or ()
+            if p.component_ref}
+    if not refs:
+        return resolve_gnd_net_id(pcb_data)
+
+    hits = [nid for nid, members in sorted(domains.items()) if refs & members]
+    if len(hits) == 1:
+        net = pcb_data.nets.get(hits[0])
+        return hits[0], (net.name if net else None)
+    return resolve_gnd_net_id(pcb_data)
+
+
+def describe_ground_domains(pcb_data: PCBData,
+                            preferred_name: Optional[str] = None
+                            ) -> Optional[str]:
+    """A one-shot warning when a board has SEVERAL ground domains and the user
+    has not disambiguated, or None when there is nothing to say (#489 §5)."""
+    if preferred_name:
+        return None
+    domains = {nid: refs for nid, refs in resolve_ground_domains(pcb_data).items() if refs}
+    if len(domains) < 2:
+        return None
+    parts = []
+    for nid, refs in sorted(domains.items(), key=lambda kv: -len(kv[1])):
+        net = pcb_data.nets.get(nid)
+        parts.append(f"{net.name if net else nid} ({len(refs)} components)")
+    bridges = ground_domain_bridges(pcb_data)
+    bridge_txt = ""
+    if bridges:
+        bridge_txt = (" Tied by " +
+                      ", ".join(b['ref'] for b in bridges[:4]) +
+                      (", ..." if len(bridges) > 4 else "") + ".")
+    return (f"NOTE: {len(domains)} ground domains found: {'; '.join(parts)}."
+            f"{bridge_txt} Return vias are matched to each signal's own domain "
+            f"from its endpoint components; pass --gnd-via-net to force one net "
+            f"for the whole board.")
 
 
 def gnd_candidate_names(pcb_data: PCBData) -> List[str]:
@@ -672,7 +1182,11 @@ def expand_pad_layers(pad_layers: List[str], routing_layers: List[str]) -> List[
     # Remove duplicates while preserving routing_layers order (deterministic)
     unique = set(expanded)
     layer_order = {layer: i for i, layer in enumerate(routing_layers)}
-    return sorted(unique, key=lambda l: layer_order.get(l, len(routing_layers)))
+    # Tie-break on the layer NAME: every layer absent from routing_layers maps
+    # to the same fallback rank, so they tied and fell back to `unique` order --
+    # and `unique` is a set of STRINGS, whose order CPython randomizes per
+    # process. Layer order feeds pad expansion and per-layer passes.
+    return sorted(unique, key=lambda l: (layer_order.get(l, len(routing_layers)), l))
 
 
 def get_all_unrouted_net_ids(pcb_data: PCBData) -> List[int]:
@@ -916,7 +1430,13 @@ def get_unit_routing_info(
         if len(net_segments) < 2:
             continue
 
-        groups = find_connected_groups(net_segments)
+        # Via-AWARE grouping: without vias= a route that changes layers
+        # falls apart into per-layer fragments, and a fully-routed coupled
+        # net then warns "Could not find pads for both stub groups" and
+        # loses its MPS unit info (ordering-only impact, but noisy and
+        # wrong). Same call shape as get_net_endpoints Case 1.
+        net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+        groups = find_connected_groups(net_segments, vias=net_vias)
         if len(groups) < 2:
             continue
 
@@ -934,9 +1454,27 @@ def get_unit_routing_info(
                         return pad
             return None
 
-        # Get pad for each group
+        # Get pad for each group.
+        #
+        # groups[:2] took whichever two groups owned the earliest segments in
+        # the board -- and the GUI and CLI hold identical copper in different
+        # order. Rank by COPPER first (more segments, then more length, geometry
+        # last) so "the two main stub groups" is a property of the net, not of
+        # the file. Same rule as the source/target ranking in
+        # connectivity.get_net_endpoints.
+        def _grp_rank(g):
+            total = 0.0
+            anchor = None
+            for _s in g:
+                total += math.hypot(_s.end_x - _s.start_x, _s.end_y - _s.start_y)
+                a = (min((_s.start_x, _s.start_y), (_s.end_x, _s.end_y)),
+                     max((_s.start_x, _s.start_y), (_s.end_x, _s.end_y)), _s.layer)
+                if anchor is None or a < anchor:
+                    anchor = a
+            return (-len(g), -total, anchor)
+
         group_pads = []
-        for group in groups[:2]:  # Only first two groups
+        for group in sorted(groups, key=_grp_rank)[:2]:
             pad = get_group_pad(group)
             if pad:
                 group_pads.append((pad.component_ref, group, pad))
@@ -948,7 +1486,12 @@ def get_unit_routing_info(
 
         # Sort by component_ref alphabetically for consistent source/target assignment
         # First component (alphabetically) = source, second = target
-        group_pads.sort(key=lambda x: x[0])
+        # Tie-break beyond component_ref: both stubs of a net frequently land on
+        # the SAME component, so the alphabetical sort tied and fell back to the
+        # order the groups were discovered in -- board order again. Add the pad
+        # number and position so source/target assignment is geometric.
+        group_pads.sort(key=lambda x: (x[0], str(x[2].pad_number),
+                                       x[2].global_x, x[2].global_y))
         source_segs = group_pads[0][1]
         target_segs = group_pads[1][1]
         source_pad = group_pads[0][2]
@@ -1222,7 +1765,14 @@ def _greedy_order_mps_units(
     # Build ordered list, sort each round by distance
     ordered_units = []
     for round_winners, orig_round_num in all_rounds:
-        sorted_winners = sorted(round_winners, key=lambda uid: unit_distances.get(uid, 0))
+        # Tie-break on uid: sorting by distance alone is STABLE, so units at
+        # equal distance kept round_winners order. That order is itself
+        # deterministic, but any upstream wobble in a float distance flips
+        # neighbouring units and reorders the whole round -- and routing order
+        # is board-wide. uid is a stable identity, so equal-distance units now
+        # have one canonical order on both fronts.
+        sorted_winners = sorted(round_winners,
+                                key=lambda uid: (unit_distances.get(uid, 0), uid))
         ordered_units.extend(sorted_winners)
         if sorted_winners:
             winner_names = [unit_names.get(uid, f"Net {uid}") for uid in sorted_winners]

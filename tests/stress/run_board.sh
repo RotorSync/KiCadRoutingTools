@@ -94,6 +94,11 @@ When fully done:
   echo "[run_board] result=$RESULT"
 } > "$RUNDIR/worker.log"
 
+# Record a per-copper route trace for each route.py / route_diff.py step the
+# agent runs (#482), so render_run.py can build a whole-run movie afterward.
+# Default-on; set KICAD_ROUTE_TRACE=0 in the outer env to skip.
+export KICAD_ROUTE_TRACE="${KICAD_ROUTE_TRACE:-1}"
+
 # Capture the agent transcript as JSONL (stream-json) so we can derive a routing
 # narrative; worker.log keeps the wrapper markers + stderr.
 ( cd "$RUNDIR" && claude -p "$PROMPT" \
@@ -117,6 +122,32 @@ MIS=""
 if [ -f "$RESULT" ]; then
   python3 "$REPO/tests/stress/grade_final.py" "$RUNDIR" "$RESULT" >> "$RUNDIR/worker.log" 2>&1 || true
   MIS=$(python3 -c "import json; print('MISGRADE' if json.load(open('$RUNDIR/authoritative_grade.json')).get('misgrade') else '')" 2>/dev/null)
+
+  # Final-board snapshot (combined + per-layer PNGs, #424 layer-role study) AND
+  # the whole-run routing movie (#482), via the fast geometry renderer
+  # (render_run.py -> route_render + animate_route), replacing the old kicad-cli
+  # + headless-Chrome board_layer_images path. Drops <board>.png,
+  # <board>_<layer>.png, and <rundir>/routing.gif. This MIRRORS the no-LLM
+  # replay path (redo_stress_test.py). Non-fatal; needs no KiCad/browser.
+  FB=$(python3 -c "import json,os,sys
+d=json.load(open('$RUNDIR/authoritative_grade.json'))
+fb=d.get('final_board') or ''
+if fb and not os.path.isabs(fb) and not os.path.exists(fb): fb=os.path.join('$RUNDIR', fb)
+print(fb if fb and os.path.exists(fb) else '')" 2>/dev/null)
+  if [ -n "$FB" ]; then
+    python3 "$REPO/tests/stress/render_run.py" "$RUNDIR" "$FB" >> "$RUNDIR/worker.log" 2>&1 || true
+
+    # Parser-parity validation of the FINAL board (headless twin of the GUI's
+    # "Validate PCB Data" button): the pcbnew-built PCBData and the text parse
+    # must describe the same board, else the CLI and GUI route different worlds.
+    # Mirrors redo_stress_test.py; non-fatal -- a FAIL is a parser bug to file,
+    # not a routing failure. validate_pcb_data.py self-execs into KiCad's python.
+    if python3 "$REPO/validate_pcb_data.py" "$FB" > "$RUNDIR/validate_pcb_data.txt" 2>&1; then
+      :
+    else
+      echo "[run_board] PARSER-PARITY FAIL on $(basename "$FB") -- see validate_pcb_data.txt" >> "$RUNDIR/worker.log"
+    fi
+  fi
 fi
 
 # GUI-loadable plan JSON from the recorded manifest (non-fatal). Lets this board's

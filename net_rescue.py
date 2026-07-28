@@ -65,7 +65,8 @@ def _net_component_info(pcb_data, net_id):
     net_pads = pcb_data.pads_by_net.get(net_id, [])
 
     res = check_net_connectivity(net_id, net_segments, net_vias, net_pads,
-                                 net_zones, return_graph=True)
+                                 net_zones, return_graph=True,
+                                 pcb_data=pcb_data)
     graph = res.get('graph') or {}
     uf = UnionFind()
     for a, b in graph.get('edges', []):
@@ -131,7 +132,12 @@ def _rescue_rungs(config, fine_grid, pcb_data, net_id):
     """The scoped retry ladder for one net (see module docstring)."""
     from plane_pad_tap import _clearance_ladder, fab_floor_clearance_track
 
-    max_iters = min(config.max_iterations, defaults.RESCUE_MAX_ITERATIONS)
+    # Rescue runs at ITS OWN budget, not the step's: the windowed scope
+    # bounds the search spatially, and min()-ing with a 200k step default
+    # throttled the fine-grid rungs into false negatives (SDC0_CMD's
+    # human-obvious path needs ~1.4M cumulative iterations at 0.025 --
+    # found instantly once uncapped; 'no route' at 200k for years of runs).
+    max_iters = max(config.max_iterations, defaults.RESCUE_MAX_ITERATIONS)
     rungs = []
     # Rung 0: nominal geometry at the finer grid only. Skipped when the run
     # already routes at (or below) the rescue grid - identical to what failed.
@@ -144,11 +150,37 @@ def _rescue_rungs(config, fine_grid, pcb_data, net_id):
     rescue_track = min(nominal_w, fab_track)  # never widen a sub-floor choice
     power_widths = dict(config.power_net_widths)
     power_widths.pop(net_id, None)  # this net necks down; other nets are obstacles
+    floor_clearance = config.clearance
     for clearance in _clearance_ladder(config.clearance, fab_clear,
                                        defaults.RESCUE_CLEARANCE_STEPS):
+        floor_clearance = clearance
         rungs.append(replace(config, grid_step=fine_grid, clearance=clearance,
                              track_width=rescue_track, layer_widths={},
                              power_net_widths=power_widths,
+                             max_iterations=max_iters))
+    # Via step-down rungs: the ladder above never shrinks the VIA, so a
+    # trivially-closable cross-layer gap stays unroutable when the run's via
+    # (e.g. 0.5/0.3) cannot drop inside a dense pin field -- the tail-triage
+    # "missing layer transition" class (same-net copper <0.25mm away on
+    # another layer, one via finishes the net). Re-try the floor rung with
+    # each smaller via from the fab ladder (0.30/0.15 fine rung, then the
+    # advanced 0.25/0.15), mirroring the plane-tap escalation. Only rungs
+    # strictly smaller than the run's via are added; the escalation warning
+    # matches the tap path's.
+    from fab_tiers import fab_floor_ladder, warn_fab_escalation
+    n_layers = len(pcb_data.board_info.copper_layers) or 2
+    _ladder = fab_floor_ladder(n_layers)
+    for floor in _ladder:
+        v_dia, v_drill = floor['via_diameter'], floor['via_drill']
+        if v_dia >= config.via_size - 1e-9:
+            continue
+        if v_dia < _ladder[0]['via_diameter'] - 1e-9:
+            warn_fab_escalation(f"net rescue net_{net_id}")
+        rungs.append(replace(config, grid_step=fine_grid,
+                             clearance=floor_clearance,
+                             track_width=rescue_track, layer_widths={},
+                             power_net_widths=power_widths,
+                             via_size=v_dia, via_drill=v_drill,
                              max_iterations=max_iters))
     return rungs
 
@@ -197,16 +229,43 @@ def _attempt_edge(pcb_data, net_id, gap, config, net_clearances):
     fine_grid = _choose_grid(config, half)
     window = make_local_window(pcb_data, cx, cy, half)
 
+    # BGA exclusion zones are ADVISORY router policy, not DRC geometry -- and
+    # the last-resort rescue is exactly where they turn self-defeating: the
+    # human-routable SDC0_CMD path skirts U1's top ball row and crosses U7's
+    # sparse 0.9mm field on F.Cu, DRC-clean, but every zoned retry frontier-
+    # exhausted in ~6k iterations because we walled the only corridor west
+    # ourselves. Rescue routes are windowed, connectivity-verified, and
+    # DRC-graded afterwards, so drop the zones here (real copper/clearance
+    # obstacles still apply in full).
+    if config.bga_exclusion_zones:
+        config = replace(config, bga_exclusion_zones=[])
     for cfg in _rescue_rungs(config, fine_grid, pcb_data, net_id):
         # Rung 0 keeps the run's exact clearance semantics (incl. per-netclass
-        # spacing); the neck-down rungs drop net_clearances - their whole point
-        # is spacing below the batch maximum, and the builder applies
-        # max(config.clearance, max(net_clearances)) globally.
+        # spacing). The neck-down rungs' whole point is spacing below nominal
+        # FOR THE RESCUED NET, so its own map entry is dropped (the builder's
+        # routing-side floor maxes over the routed nets, and the rescued net's
+        # nominal class value would snap the necked cfg.clearance back up).
+        # Foreign obstacles KEEP their per-net class clearance: the builder
+        # prices each obstacle at max(cfg.clearance, its own class), so a
+        # POWER_HI via stays 0.25-priced even while the rescued net necks down
+        # (dropping the whole map under-blocked exactly that cross-class pair).
         at_nominal = cfg.clearance >= config.clearance - 1e-9
+        rung_clearances = net_clearances
+        if not at_nominal and net_clearances:
+            rung_clearances = {k: v for k, v in net_clearances.items() if k != net_id}
         obstacles = build_base_obstacle_map(
             window, cfg, [net_id],
-            net_clearances=net_clearances if at_nominal else None)
+            net_clearances=rung_clearances)
         _fence_window(obstacles, window, cfg)
+        # #470: existing same-net vias/through-holes in the window are FREE
+        # layer transitions. The rescue map never registered them (unlike the
+        # main-loop working map), so a rescue route paid full via cost
+        # everywhere, felt no pull toward the net's own barrels, and dropped a
+        # fresh via sub-mm from an existing one (USB_D_P's 0.94mm pair).
+        # Conversion suppresses the duplicate emit at these cells
+        # (get_same_net_through_hole_positions), completing the reuse.
+        from routing_context import _add_free_via_positions
+        _add_free_via_positions(obstacles, window, [net_id], cfg)
         # Constrain the route to the window: drop endpoints outside it and keep the
         # source/target overrides from punching the fence, so the A* can never leave
         # the stamped region and cross foreign copper the window never modelled (#396).
@@ -217,10 +276,67 @@ def _attempt_edge(pcb_data, net_id, gap, config, net_clearances):
             _g0 = wcoord.to_grid(_wx0, _wy0)
             _g1 = wcoord.to_grid(_wx1, _wy1)
             bounds = (_g0[0], _g0[1], _g1[0], _g1[1])
-        result = route_net_with_obstacles(window, net_id, cfg, obstacles, bounds=bounds)
+        if os.environ.get('KICAD_RESCUE_DEBUG_VIA'):
+            # Debug probe: report the window box and whether a named via cell
+            # is blocked in THIS rung's map (KICAD_RESCUE_DEBUG_VIA="x,y").
+            try:
+                from routing_config import GridCoord as _GC
+                _dx, _dy = (float(t) for t in
+                            os.environ['KICAD_RESCUE_DEBUG_VIA'].split(','))
+                _c = _GC(cfg.grid_step)
+                _g = _c.to_grid(_dx, _dy)
+                print(f"    RESCUE-DEBUG net={net_id} window="
+                      f"{window.board_info.board_bounds} via_size={cfg.via_size} "
+                      f"probe=({_dx},{_dy}) blocked={obstacles.is_via_blocked(_g[0], _g[1])} "
+                      f"segs_in_window={len(window.segments)}")
+            except Exception as _e:
+                print(f"    RESCUE-DEBUG failed: {_e}")
+        # Aim the route at THIS gap's two islands. The window crop severs
+        # copper, and get_net_endpoints' largest-two-groups split then picks
+        # two fragments of the same trunk as the route's sides, dropping the
+        # island the gap analysis chose (USB_D_P: target set was the far
+        # trunk half parked in the fence ring; the BGA ball was never aimed
+        # at, so the small-via rungs never even pointed at the pocket).
+        from connectivity import get_net_endpoints_anchor_split
+        src_over, tgt_over, split_err = get_net_endpoints_anchor_split(
+            window, net_id, cfg, (ax, ay), (bx, by))
+        if split_err:
+            src_over = tgt_over = None
+        result = route_net_with_obstacles(window, net_id, cfg, obstacles, bounds=bounds,
+                                          sources_override=src_over,
+                                          targets_override=tgt_over)
         if result and not result.get('failed'):
+            if _result_escapes_window(result, window, cfg):
+                print(f"    rescue rung rejected: route escaped the window "
+                      f"bounds (fence leak) net={net_id}")
+                continue
             return result, cfg
     return None, None
+
+
+def _result_escapes_window(result, window, cfg):
+    """True when any NEW copper lands outside the rescue window (+1 grid step).
+
+    Belt-and-braces behind the #396 fence: the window obstacle map models
+    nothing beyond its bounds, so copper placed out there was routed blind
+    (butterstick DQ11: a #338 exemption hole let the A* slip past the fence
+    and drop a via on unseen +3V3 copper). Any escape = the rung failed."""
+    bb = window.board_info.board_bounds
+    if not bb:
+        return False
+    tol = cfg.grid_step + 1e-6
+    x0, y0, x1, y1 = bb[0] - tol, bb[1] - tol, bb[2] + tol, bb[3] + tol
+
+    def _out(x, y):
+        return not (x0 <= x <= x1 and y0 <= y <= y1)
+
+    for s in result.get('new_segments', []) or []:
+        if _out(s.start_x, s.start_y) or _out(s.end_x, s.end_y):
+            return True
+    for v in result.get('new_vias', []) or []:
+        if _out(v.x, v.y):
+            return True
+    return False
 
 
 def _unconnected_pads_info(comp_pads):
@@ -352,10 +468,9 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None):
             'iterations': sum(r.get('iterations', 0) for r in edge_results),
             'is_rescue': True,
         }
-        state.results.append(merged)
-
         fully = num <= 1
         if kind == 'failed':
+            state.results.append(merged)
             if not fully:
                 merged['failed_pads_info'] = _unconnected_pads_info(comp_pads)
             routed_results[net_id] = merged
@@ -364,9 +479,19 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None):
             if net_id not in state.routed_net_ids:
                 state.routed_net_ids.append(net_id)
         else:
-            # Partial multipoint net: patch ITS result's accounting; the
-            # rescue copper ships via `merged` in state.results.
+            # Partial multipoint net: fold the rescue copper INTO the net's
+            # AUTHORITATIVE result. A separate `merged` entry in
+            # state.results is dropped by route.py's #87 superseded-result
+            # filter (only routed_results survive) and the phantom pass then
+            # orphan-strips its copper from the board -- successful partial
+            # rescues shipped BROKEN (the k_seam SDC0_CMD netstory shows
+            # rescue_succeeded fully_connected=True while the file stayed
+            # open; reproduced deterministically on the parity board).
             prev = routed_results[net_id]
+            prev['new_segments'] = (list(prev.get('new_segments') or [])
+                                    + list(merged['new_segments']))
+            prev['new_vias'] = (list(prev.get('new_vias') or [])
+                                + list(merged['new_vias']))
             prev_failed = prev.get('failed_pads_info') or []
             still = ({} if fully else
                      {(p['component_ref'], p['pad_number'])

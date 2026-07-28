@@ -61,6 +61,70 @@ def find_all_schematics_for_component(schematic_dir: str, component_ref: str) ->
     return matching_files
 
 
+# A multi-unit part's units are separate symbol instances that legitimately
+# SHARE one lib_symbol definition -- "U2A" and "U2B" are one physical package, so
+# rewriting their shared pinout is correct. Two references that differ before the
+# unit letter ("U2" vs "U3") are different components and must not share an edit.
+_UNIT_SUFFIX_RE = re.compile(r'^(.*\d)[A-Za-z]$')
+
+
+def _base_reference(ref: str) -> str:
+    """"U2A" -> "U2"; "U2" -> "U2". Strips a trailing unit letter only when what
+    precedes it still ends in a digit, so "R10" is untouched."""
+    m = _UNIT_SUFFIX_RE.match(ref)
+    return m.group(1) if m else ref
+
+
+def _sexpr_block_end(content: str, start_pos: int) -> int:
+    """Index just past the balanced-paren block that starts at start_pos."""
+    depth = 0
+    for i, c in enumerate(content[start_pos:]):
+        if c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+            if depth == 0:
+                return start_pos + i + 1
+    return start_pos
+
+
+def iter_symbol_instances(content: str):
+    """Yield (lib_id, reference, start, end) for each symbol INSTANCE placed on
+    the sheet.
+
+    Only instances match: they open with `(symbol (lib_id "...")`, whereas a
+    lib_symbols *definition* opens with `(symbol "Library:Name"`.
+    """
+    instance_pattern = re.compile(r'\(symbol\s*\n?\s*\(lib_id\s+"([^"]+)"\)', re.DOTALL)
+    for match in instance_pattern.finditer(content):
+        start_pos = match.start()
+        end_pos = _sexpr_block_end(content, start_pos)
+        block = content[start_pos:end_pos]
+        ref_match = re.search(r'\(property\s+"Reference"\s+"([^"]*)"', block)
+        yield match.group(1), (ref_match.group(1) if ref_match else ''), start_pos, end_pos
+
+
+def components_sharing_lib_symbol(content: str, lib_id: str,
+                                  exclude_ref: str = None) -> List[str]:
+    """Base references of the components using `lib_id` in this file, minus
+    `exclude_ref`'s own component (#489 §3).
+
+    A non-empty result means the file's single `lib_symbols` definition for
+    `lib_id` is shared, so editing its pin numbers would silently re-pin those
+    other components too.
+    """
+    exclude_base = _base_reference(exclude_ref) if exclude_ref else None
+    others = []
+    for inst_lib_id, ref, _s, _e in iter_symbol_instances(content):
+        if inst_lib_id != lib_id or not ref:
+            continue
+        base = _base_reference(ref)
+        if base == exclude_base or base in others:
+            continue
+        others.append(base)
+    return others
+
+
 def swap_pins_in_schematic(schematic_path: str, component_ref: str,
                            pad1: str, pad2: str, verbose: bool = False) -> bool:
     """
@@ -68,6 +132,14 @@ def swap_pins_in_schematic(schematic_path: str, component_ref: str,
 
     This swaps the (number "...") values in the lib_symbols section,
     which changes which physical pin each signal is assigned to.
+
+    REFUSES when more than one component shares that lib_symbol definition
+    (#489 §3): the definition is shared by every instance of the same lib_id in
+    the file, and there was no instance guard -- so pin-swapping U1 also re-pinned
+    an identical U2, U3, ..., silently corrupting the user's schematic, on exactly
+    the common cases (connectors, identical channels, multi-channel analog). The
+    units of one multi-unit part (U2A/U2B) legitimately share the definition and
+    are still swapped.
 
     Args:
         schematic_path: Path to .kicad_sch file
@@ -87,44 +159,31 @@ def swap_pins_in_schematic(schematic_path: str, component_ref: str,
             print(f"    Error reading {schematic_path}: {e}")
         return False
 
-    # First, find which lib_symbol this component uses by finding a symbol instance
-    # Symbol instances look like: (symbol (lib_id "Library:SymbolName") ... (property "Reference" "U3") ...)
-
-    # Find symbol instance with matching Reference
-    symbol_instance_pattern = re.compile(
-        r'\(symbol\s*\n?\s*\(lib_id\s+"([^"]+)"\)',
-        re.DOTALL
-    )
-
+    # Which lib_symbol does this component use? Symbol instances look like:
+    # (symbol (lib_id "Library:SymbolName") ... (property "Reference" "U3") ...)
     lib_id = None
-    for match in symbol_instance_pattern.finditer(content):
-        # Find the end of this symbol block
-        start_pos = match.start()
-        depth = 0
-        end_pos = start_pos
-        for i, c in enumerate(content[start_pos:]):
-            if c == '(':
-                depth += 1
-            elif c == ')':
-                depth -= 1
-                if depth == 0:
-                    end_pos = start_pos + i + 1
-                    break
-
-        symbol_block = content[start_pos:end_pos]
-
-        # Check if this symbol has our Reference
-        ref_match = re.search(
-            r'\(property\s+"Reference"\s+"' + re.escape(component_ref) + r'"',
-            symbol_block
-        )
-        if ref_match:
-            lib_id = match.group(1)
+    for inst_lib_id, ref, _s, _e in iter_symbol_instances(content):
+        if ref == component_ref:
+            lib_id = inst_lib_id
             break
 
     if not lib_id:
         if verbose:
             print(f"    Component {component_ref} not found in {schematic_path}")
+        return False
+
+    # The lib_symbols definition below is shared by every instance of this
+    # lib_id. Editing it when another component uses it would re-pin that
+    # component too -- refuse, loudly, rather than corrupt the schematic.
+    shared_with = components_sharing_lib_symbol(content, lib_id, component_ref)
+    if shared_with:
+        print(f"  REFUSING to swap {component_ref}:{pad1} <-> {pad2} in "
+              f"{os.path.basename(schematic_path)}: its symbol definition "
+              f"'{lib_id}' is shared with {', '.join(sorted(shared_with))}, and "
+              f"editing it would silently re-pin {'them' if len(shared_with) > 1 else 'that component'} too.")
+        print(f"    The PCB swap still applies -- update this schematic by hand, "
+              f"or give {component_ref} its own symbol (a uniquely-named "
+              f"lib_symbols entry) first.")
         return False
 
     # Now find the lib_symbols section and the symbol definition for this lib_id
@@ -292,6 +351,15 @@ def apply_swaps_to_schematics(schematic_dir: str, swap_list: List[Dict],
             else:
                 print(f"  Warning: Failed to swap {component_ref}:{pad1} <-> {pad2}")
                 swaps_failed += 1
+
+    # A failed schematic swap means the BOARD carries a pin swap the schematic
+    # does not -- say so once, plainly, instead of leaving it to be inferred from
+    # per-swap warnings (#489 §3).
+    if swaps_failed:
+        print(f"\n  {swaps_failed} of {swaps_applied + swaps_failed} pad swap(s) "
+              f"were NOT written to the schematic: the board and schematic now "
+              f"disagree on those pins. Re-run the netlist/ERC comparison in "
+              f"KiCad and fix them by hand before fabricating.")
 
     return (swaps_applied, swaps_failed)
 

@@ -426,11 +426,13 @@ def get_power_net_recommendations(pcb_data: PCBData,
                             net_currents[net_name] = 0.0
                         net_currents[net_name] += current
 
-    # Convert current to track width using IPC-2152 guidelines with 2x safety factor
+    # Convert current to track width from the IPC-2221 width table (see
+    # docs/power-nets.md) with a 2x safety factor. That table is IPC-2221's, not
+    # IPC-2152's as this claimed before #489 §6.
     def current_to_width(current_ma: float) -> float:
         """Convert current in mA to recommended track width in mm.
 
-        Applies a 2x safety factor beyond IPC-2152 guidelines for:
+        Applies a 2x safety factor beyond the IPC-2221 table for:
         - Manufacturing tolerance margin
         - Thermal headroom
         - Trace resistance reduction

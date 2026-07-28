@@ -68,7 +68,7 @@ python route.py in.kicad_pcb out.kicad_pcb --nets "*" --rip-existing-nets "*"
 |--------|---------|-------------|
 | `--track-width` | 0.3 | Track width in mm (ignored if `--impedance` specified) |
 | `--impedance` | - | Target single-ended impedance in ohms (calculates width per layer from stackup) |
-| `--clearance` | 0.25 | Track-to-track clearance in mm |
+| `--clearance` | board's Default net-class clearance (else 0.25) | Copper clearance **ceiling** in mm. **Given** → every net class (Default included) is capped at `min(class, --clearance)` and the output `.kicad_pro` clamps to the routed floor. **Omitted** → each net routes at its own net-class clearance and the classes are preserved (base = the board's own Default class from the sibling `.kicad_pro`) (#439). Use `--net-clearances <json>` for explicit per-net values |
 | `--via-size` | 0.5 | Via outer diameter in mm |
 | `--via-drill` | 0.3 | Via drill diameter in mm |
 | `--grid-step` | 0.1 | Grid resolution in mm |
@@ -155,7 +155,6 @@ live board via the pcbnew API.
 |--------|---------|-------------|
 | `--no-fix-drc-settings` | off (fix is on) | Do **not** adjust the output's `.kicad_pro` DRC constraints afterwards; leave KiCad's stock floors |
 | `--keep-thermal` | off | Leave `starved_thermal` (thermal-relief) severity untouched instead of demoting it to a warning |
-| `--no-clamp-netclasses` | off (clamp is on) | Do **not** clamp non-Default net classes' clearance/track/via floors down to the routed values (issue #295). Pass this for a **final** board whose net-class rules *are* the spec and must survive |
 | `--enable-used-layers` | off | Add any layer the board uses but is missing from its `(layers)` table back into the `.kicad_pcb`, so KiCad stops flagging `item_on_disabled_layer`. Off by default because it edits the board, not just DRC settings |
 
 ### Power Net Options
@@ -178,7 +177,7 @@ python route.py input.kicad_pcb output.kicad_pcb --nets "Net*" \
 
 Patterns are matched in order - first match determines width. Obstacle clearances automatically adjust for wider power traces.
 
-See [Power Net Analysis](power-nets.md) for automatic detection, AI-powered analysis, and IPC-2152 track width guidelines.
+See [Power Net Analysis](power-nets.md) for automatic detection, AI-powered analysis, and IPC-2221 track width guidelines.
 
 ### Algorithm Options
 
@@ -192,8 +191,8 @@ See [Power Net Analysis](power-nets.md) for automatic detection, AI-powered anal
 | `--max-ripup` | 3 | Max blockers to rip up at once during rip-up and retry |
 | `--ripup-abandon-metric` | `stranded` | Keep-retry vs abandon rule for multipoint tap rip-ups (see [rip-up-reroute.md](rip-up-reroute.md#abandon-metrics)) |
 | `--routing-clearance-margin` | 1.0 | Multiplier on track-via clearance (1.0 = minimum DRC) |
-| `--hole-to-hole-clearance` | 0.20 | Minimum drill hole edge-to-edge clearance (mm) |
-| `--board-edge-clearance` | 0.0 | Clearance from board edge in mm (0 = use track clearance) |
+| `--hole-to-hole-clearance` | board's `min_hole_to_hole` (else 0.20) | Minimum drill hole edge-to-edge clearance (mm). Omitted → the board's own constraint minimum (#439) |
+| `--board-edge-clearance` | board's `min_copper_edge_clearance` (else 0.0) | Clearance from board edge in mm. Omitted → the board's own constraint minimum (#439) |
 | `--proximity-heuristic-factor` | 0.02 | Factor for proximity-aware A* heuristic (higher = faster but may find suboptimal paths, 0 = disabled) |
 | `--ripped-route-avoidance-radius` | 1.0 | Radius around ripped route corridors to apply soft penalty (mm) |
 | `--ripped-route-avoidance-cost` | 0.1 | Cost penalty for routing through ripped corridors (0 = disabled) |
@@ -370,6 +369,17 @@ These options control stub layer switching, which moves stubs to different layer
   layer; bare SMD pads fix their copper layers; already-connected pad-to-pad copper never
   moves), picking the destination layer that needs the fewest new pad vias. Nets with no
   feasible common layer are left unchanged
+- The **pad via sizes itself to fit**: a switch leaving the pad's layer drops a
+  through-via at the pad, at the run's nominal via size when it clears the
+  surrounding copper, else the first smaller via from the fab-tier ladder that
+  does (with the standard fab-escalation warning). A nominal 0.5mm via never
+  fits a 0.65mm-pitch ball field boxed by neighboring fanout vias; the 0.3/0.25
+  rungs do — so a stub walled in on its own layer can still switch to an open
+  layer and escape. Applies everywhere the switch machinery is used: the
+  routing-failure rescue rungs (single-ended and diff-pair fallback swaps), and
+  the diff-pair multipoint chain, which moves blocked terminals' stubs to the
+  most-open layer as its last resort before deferring the pair to single-ended
+  (moving a stub also removes the copper that walls its coupled twin)
 
 ### Length Matching Options
 
@@ -453,7 +463,7 @@ Available in `route.py` only (not `route_diff.py` or `route_planes.py`). See the
 | `--skip-routing` | false | Skip actual routing, only do swaps and write debug info |
 | `--debug-memory` | false | Print memory usage statistics at key points during routing |
 | `--stats` | false | Print A* search statistics (cells expanded, heuristic efficiency) |
-| `--add-teardrops` | false | Add teardrop settings to all pads in output file |
+| `--add-teardrops` | false | Add teardrop settings to all pads **and vias** in the output file. Available on every step that writes pad/via copper: `route.py`, `route_diff.py`, `route_planes.py`, `route_disconnected_planes.py`, `bga_fanout.py`, `qfn_fanout.py` (#489 §9). In the GUI it is the one shared "Add teardrops" checkbox, which now reaches the fanout and planes tabs too. |
 
 ## GridRouteConfig Class
 

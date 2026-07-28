@@ -22,6 +22,7 @@ from obstacle_cache import ViaPlacementObstacleData, precompute_via_placement_ob
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
+import rust_alloc  # noqa: E402,F401  # issue #419: set MIMALLOC_PURGE_DELAY before grid_router loads
 from grid_router import GridObstacleMap
 
 
@@ -438,6 +439,9 @@ def _settle_ripped_nets(ripped_data, pcb_data, via_obstacle_cache, obstacles,
                 dropped += 1
             else:
                 keep_vias.append(rv)
+        from pcb_modification import drop_orphan_restore_pieces
+        dropped += drop_orphan_restore_pieces(
+            keep_segs, keep_vias, blocker_id, pcb_data)
         if not keep_segs and not keep_vias:
             # Nothing restorable: leave fully ripped for the caller's honest
             # reroute handoff (net excluded from output + reported).

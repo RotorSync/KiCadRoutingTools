@@ -304,7 +304,8 @@ def get_terminal_component_info(
     net_pads = pcb_data.pads_by_net.get(net_id, [])
 
     res = check_net_connectivity(net_id, net_segments, net_vias, net_pads,
-                                 net_zones, return_graph=True)
+                                 net_zones, return_graph=True,
+                                 pcb_data=pcb_data)
     graph = res.get('graph') or {}
     uf = UnionFind()
     for a, b in graph.get('edges', []):
@@ -357,6 +358,47 @@ def get_terminal_component_info(
         root = uf.find(2 * si)
         copper_count[root] = copper_count.get(root, 0) + 1
         segs_by_component.setdefault(root, []).append(seg)
+
+    # CANONICAL component LABELS. uf.find() returns an arbitrary representative
+    # decided by the union ORDER, which follows the order segments sit in the
+    # board -- and the GUI and CLI hold identical copper in different order. The
+    # partition is the same either way, but the LABELS are not, and downstream
+    # code sorts on them: compute_component_mst_edges does
+    # `comp_ids = sorted(comp_terminals)` and starts its tree from comp_ids[0],
+    # so the whole MST (and the "longest edge" the multipoint router picks
+    # first) depended on which copper happened to be written first. Measured on
+    # eth_tap: both fronts found a 2.10mm longest edge but different pad pairs
+    # (0-3 vs 3-1).
+    #
+    # Relabel by the component's own content: the smallest terminal index it
+    # owns, else the smallest segment anchor. That is a property of the net, so
+    # both fronts agree, and terminal-bearing components keep low ids (their
+    # natural pad order), which preserves the previous "start from the first
+    # terminal's component" behaviour on boards where order never differed.
+    _first_term: Dict[int, int] = {}
+    for i, r in components.items():
+        if r not in _first_term or i < _first_term[r]:
+            _first_term[r] = i
+    _anchor: Dict[int, tuple] = {}
+    for r, segs in segs_by_component.items():
+        a = None
+        for _s in segs:
+            k = (min((_s.start_x, _s.start_y), (_s.end_x, _s.end_y)),
+                 max((_s.start_x, _s.start_y), (_s.end_x, _s.end_y)), _s.layer)
+            if a is None or k < a:
+                a = k
+        _anchor[r] = a
+
+    _roots = set(components.values()) | set(copper_count) | set(segs_by_component)
+    _BIG = len(pad_info) + 1
+
+    def _canon_key(r):
+        return (_first_term.get(r, _BIG), _anchor.get(r) is None, _anchor.get(r) or ())
+
+    remap = {r: i for i, r in enumerate(sorted(_roots, key=_canon_key))}
+    components = {i: remap[r] for i, r in components.items()}
+    copper_count = {remap[r]: c for r, c in copper_count.items()}
+    segs_by_component = {remap[r]: v for r, v in segs_by_component.items()}
     return components, copper_count, segs_by_component
 
 
@@ -481,8 +523,13 @@ def find_stub_free_ends(segments: List[Segment], pads: List[Pad],
             in_cluster = next(pi for pi in pis if pi // 2 == si)
             far = ((seg.end_x, seg.end_y) if in_cluster % 2 == 0
                    else (seg.start_x, seg.start_y))
+            # Deterministic tie-break: max() returns the FIRST maximal item,
+            # so two equidistant members were resolved by iteration order --
+            # i.e. by the order segments happen to sit in the board. Fold the
+            # point itself into the key so the winner is geometric.
             x, y, layer = max((points[pi] for pi in pis),
-                              key=lambda p: (p[0]-far[0])**2 + (p[1]-far[1])**2)
+                              key=lambda p: ((p[0]-far[0])**2 + (p[1]-far[1])**2,
+                                             p[0], p[1], p[2]))
             if not _near_pad(x, y):
                 free_ends.append((round(x, POSITION_DECIMALS),
                                   round(y, POSITION_DECIMALS), layer))
@@ -497,7 +544,11 @@ def find_stub_free_ends(segments: List[Segment], pads: List[Pad],
                     seen.add(key)
                     free_ends.append(key)
 
-    return free_ends
+    # Sort: clusters are walked in `members` insertion order, which follows the
+    # order segments sit in the board, so the free-end LIST order was
+    # board-order dependent. Consumers take [0] as the representative endpoint
+    # (see get_net_endpoints), so that leaked straight into routing decisions.
+    return sorted(free_ends)
 
 
 def get_stub_direction(segments: List[Segment], stub_x: float, stub_y: float, stub_layer: str,
@@ -719,8 +770,121 @@ def drop_off_board_pads(pcb_data: PCBData, pads: List[Pad]) -> List[Pad]:
     return [p for p in pads if not off_board(p.global_x, p.global_y)]
 
 
+def get_net_endpoints_anchor_split(pcb_data: PCBData, net_id: int,
+                                   config: GridRouteConfig,
+                                   anchor_a: Tuple[float, float],
+                                   anchor_b: Tuple[float, float]
+                                   ) -> Tuple[List, List, Optional[str]]:
+    """Endpoint derivation for a KNOWN gap (the scoped net_rescue window).
+
+    get_net_endpoints keeps only the two LARGEST copper groups as the
+    route's two sides -- correct on a whole board, wrong inside a cropped
+    rescue window: the crop can sever the main trunk into two large
+    fragments that then win both slots, silently dropping the small island
+    the rescue was aimed at (USB_D_P: the window cut the trunk at the USB
+    connector, the A* tried to re-join trunk-to-trunk with its target
+    parked in the fence ring, and the BGA ball island was never a target).
+
+    Here the caller knows the gap: every copper endpoint, pad, and via of
+    the net is assigned to the nearer of the two anchor points (the gap's
+    ends, board mm). Trunk fragments land together on the trunk side no
+    matter where the crop cut them; the rescued island lands opposite.
+    Rows are get_net_endpoints-shaped: (gx, gy, layer_idx, orig_x, orig_y).
+    A sloppy mid-gap assignment is tolerable -- net_rescue verifies the
+    component count actually dropped and undoes the copper otherwise.
+    """
+    from net_queries import expand_pad_layers
+
+    coord = GridCoord(config.grid_step)
+    layer_map = build_layer_map(config.layers)
+    ax, ay = anchor_a
+    bx, by = anchor_b
+    side_a: List = []
+    side_b: List = []
+
+    def _add(x, y, layer_idx, gx, gy):
+        da = (x - ax) ** 2 + (y - ay) ** 2
+        db = (x - bx) ** 2 + (y - by) ** 2
+        (side_a if da <= db else side_b).append((gx, gy, layer_idx, x, y))
+
+    for seg in pcb_data.segments:
+        if seg.net_id != net_id:
+            continue
+        layer_idx = layer_map.get(seg.layer)
+        if layer_idx is None:
+            continue
+        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+        _add(seg.start_x, seg.start_y, layer_idx, gx1, gy1)
+        if (gx1, gy1) != (gx2, gy2):
+            _add(seg.end_x, seg.end_y, layer_idx, gx2, gy2)
+    for pad in drop_off_board_pads(pcb_data, pcb_data.pads_by_net.get(net_id, [])):
+        gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+        for layer in expand_pad_layers(pad.layers, config.layers):
+            layer_idx = layer_map.get(layer)
+            if layer_idx is not None:
+                _add(pad.global_x, pad.global_y, layer_idx, gx, gy)
+    for via in pcb_data.vias:
+        if via.net_id != net_id:
+            continue
+        gx, gy = coord.to_grid(via.x, via.y)
+        for layer in config.layers:
+            layer_idx = layer_map.get(layer)
+            if layer_idx is not None:
+                _add(via.x, via.y, layer_idx, gx, gy)
+
+    if not side_a or not side_b:
+        return side_a, side_b, "anchor split produced an empty side"
+    return side_a, side_b, None
+
+
 def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                       use_stub_free_ends: bool = False) -> Tuple[List, List, str]:
+    """Deterministic wrapper: sort the endpoint lists by POSITION.
+
+    The candidate lists are built by walking pcb_data.segments / pads, so their
+    ORDER follows the order copper happens to sit in the board. Consumers take
+    `sources[0]` / `targets[0]` as the net's representative endpoint -- notably
+    layer_swap_optimization, which derives each net's src/tgt LAYER from them --
+    so a different segment order silently flipped which end is "source".
+
+    That is a real cross-front divergence, not a theoretical one. The GUI adds
+    copper to the live board in its own order while the CLI writer emits it in
+    another, so the same board (identical segment SET, 1159 of 1159) yields
+    different segment ORDER. Measured on eth_tap step 11:
+
+        /Thru Path/ETH0_MDC   run A: src=In1.Cu tgt=F.Cu
+                              run B: src=F.Cu  tgt=In1.Cu   (flipped)
+
+    which made the greedy swap-pair test `src1 == tgt2 and tgt1 == src2` match
+    for two extra pairs (7 applied vs 5), changed MPS crossing conflicts
+    (346 vs 348) and hence the routing order, and left 27 of 295 nets routed
+    differently -- 3486 segments vs the CLI's 3428. Every earlier comparison
+    used SETS, which is why the order difference stayed invisible.
+
+    Sorting by the endpoint tuple (grid x, grid y, layer index, x, y) makes the
+    representative a function of GEOMETRY rather than of board order, so both
+    fronts agree regardless of how the copper got there. This is a behaviour
+    change for the CLI too (its own order was equally arbitrary) and wants a
+    corpus A/B before being treated as settled.
+    """
+    sources, targets, err = _get_net_endpoints_ordered(
+        pcb_data, net_id, config, use_stub_free_ends)
+    if sources:
+        sources = sorted(sources)
+    if targets:
+        targets = sorted(targets)
+    # Role assignment is left to the derivation below -- see the group-ordering
+    # note in _get_net_endpoints_ordered. A blanket "smallest coordinate wins"
+    # swap was tried TWICE and regressed both times (CLI 3538 vs GUI 3526/3516):
+    # it is deterministic but routing-hostile, because it makes "source" an
+    # arbitrary geometric corner and discards the meaning the derivation encodes
+    # (route FROM established copper TO the unconnected end).
+    return sources, targets, err
+
+
+def _get_net_endpoints_ordered(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
+                               use_stub_free_ends: bool = False) -> Tuple[List, List, str]:
     """
     Find source and target endpoints for a net, considering segments, pads, and existing vias.
 
@@ -790,8 +954,39 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                     if sources and targets:
                         return sources, targets, None
 
-            source_segs = groups[0]
-            target_segs = groups[1]
+            # Which group is the SOURCE must not depend on board order.
+            # find_connected_groups walks net_segments in order, so groups[0]
+            # was simply whichever group owned the earliest segment in the
+            # board -- and the GUI and CLI emit copper in different orders.
+            # Measured on eth_tap: identical copper, identical endpoint
+            # coordinates, but /Thru Path/ETH0_MDC read src=In1.Cu/tgt=F.Cu in
+            # one front and src=F.Cu/tgt=In1.Cu in the other. That flip fed the
+            # greedy swap-pair test and cascaded into a board-wide re-route.
+            #
+            # Rank by COPPER, not by coordinates. Routing extends from the
+            # established trunk toward the smaller stub: the bigger group offers
+            # more anchor points for the search to launch from, and the smaller
+            # one is a tighter, better-defined goal. Coordinates enter only as a
+            # last-resort tie-break, so the rule stays geometric but is never
+            # decided by an arbitrary corner (that variant was tried twice and
+            # regressed both fronts).
+            def _group_rank(g):
+                total = 0.0
+                anchor = None
+                for _sg in g:
+                    total += math.hypot(_sg.end_x - _sg.start_x,
+                                        _sg.end_y - _sg.start_y)
+                    a = (min((_sg.start_x, _sg.start_y), (_sg.end_x, _sg.end_y)),
+                         max((_sg.start_x, _sg.start_y), (_sg.end_x, _sg.end_y)),
+                         _sg.layer)
+                    if anchor is None or a < anchor:
+                        anchor = a
+                # more segments first, then more copper, then geometry
+                return (-len(g), -total, anchor)
+
+            _ranked = sorted(groups, key=_group_rank)
+            source_segs = _ranked[0]
+            target_segs = _ranked[1]
 
             if use_stub_free_ends:
                 # For diff pairs: use only stub free ends (tips not connected to pads)
@@ -975,7 +1170,34 @@ def get_net_endpoints(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
     return [], [], f"Cannot determine endpoints: {len(net_segments)} segments, {len(net_pads)} pads"
 
 
-def get_multipoint_net_pads(
+def get_multipoint_net_pads(*args, **kwargs):
+    """Deterministic wrapper: order multi-point terminals by POSITION.
+
+    The terminal list is assembled by walking connected groups / pads, so its
+    ORDER follows the order copper sits in the board -- and the GUI and CLI hold
+    identical copper in different order. Terminal INDICES are the identity used
+    downstream: get_terminal_component_info keys components by them and
+    compute_component_mst_edges builds its tree over them, so a relabelling
+    changes which MST edge is "pads 0 and 3" versus "pads 3 and 1" and hence
+    which leg Phase 1 routes first.
+
+    Measured on eth_tap /Thru Path/ETH0_A1V2 (5 pads): the two fronts produced
+    the SAME five points and geometrically the SAME tree (edges 1.7, 2.100001,
+    1.600001, 2.0) with terminals 0 and 1 swapped -- (58.7,37.5) and
+    (58.7,40.5). Sorting by position makes the labelling a property of the net.
+    Geometry is unchanged, so this cannot pick a worse tree; it only fixes which
+    equivalent labelling both fronts agree on.
+    """
+    out = _get_multipoint_net_pads_unordered(*args, **kwargs)
+    if not out:
+        return out
+    try:
+        return sorted(out, key=lambda t: (t[3], t[4], t[2]))
+    except (IndexError, TypeError):
+        return out
+
+
+def _get_multipoint_net_pads_unordered(
     pcb_data: PCBData,
     net_id: int,
     config: GridRouteConfig
@@ -1305,8 +1527,12 @@ def get_net_mst_segments(pcb_data: PCBData, net_id: int) -> List[Tuple[Tuple[flo
                     for seg in group:
                         pts.append((seg.start_x, seg.start_y))
                         pts.append((seg.end_x, seg.end_y))
-                    cx = sum(p[0] for p in pts) / len(pts)
-                    cy = sum(p[1] for p in pts) / len(pts)
+                    # math.fsum, not the builtin sum() (#493): Python 3.12 switched sum() to
+                    # compensated summation, so a float sum differs by an ULP or two between
+                    # KiCad's bundled python and the system one -- enough to flip a decision
+                    # made from it and make routing depend on the interpreter.
+                    cx = math.fsum(p[0] for p in pts) / len(pts)
+                    cy = math.fsum(p[1] for p in pts) / len(pts)
                     points.append((cx, cy))
             return compute_mst_segments(points)
 
@@ -1337,15 +1563,36 @@ def get_net_routing_endpoints(pcb_data: PCBData, net_id: int) -> List[Tuple[floa
     if len(net_segments) >= 2:
         groups = find_connected_groups(net_segments, vias=net_vias)
         if len(groups) >= 2:
+            # centroids[:2] took the first two groups in BOARD order, so a net
+            # with 3+ stub groups handed MPS a different pair of representative
+            # points per front. That feeds unit_distances, which orders every
+            # round: measured on eth_tap, /Thru Path/ETH0_A3V3 came out
+            # dist=6.075 on one front and 6.897 on the other with an IDENTICAL
+            # conflict graph. Rank by COPPER (more segments, then more length,
+            # geometry last) -- the same rule used for source/target selection
+            # -- so "the two main stub groups" is a property of the net.
+            def _grp_rank(g):
+                total = 0.0
+                anchor = None
+                for _s in g:
+                    total += math.hypot(_s.end_x - _s.start_x,
+                                        _s.end_y - _s.start_y)
+                    a = (min((_s.start_x, _s.start_y), (_s.end_x, _s.end_y)),
+                         max((_s.start_x, _s.start_y), (_s.end_x, _s.end_y)),
+                         _s.layer)
+                    if anchor is None or a < anchor:
+                        anchor = a
+                return (-len(g), -total, anchor)
+
             centroids = []
-            for group in groups:
+            for group in sorted(groups, key=_grp_rank):
                 points = []
                 for seg in group:
                     points.append((seg.start_x, seg.start_y))
                     points.append((seg.end_x, seg.end_y))
                 if points:
-                    cx = sum(p[0] for p in points) / len(points)
-                    cy = sum(p[1] for p in points) / len(points)
+                    cx = math.fsum(p[0] for p in points) / len(points)
+                    cy = math.fsum(p[1] for p in points) / len(points)
                     centroids.append((cx, cy))
             return centroids[:2]
 
@@ -1364,8 +1611,8 @@ def get_net_routing_endpoints(pcb_data: PCBData, net_id: int) -> List[Tuple[floa
             for seg in group:
                 stub_pts.append((seg.start_x, seg.start_y))
                 stub_pts.append((seg.end_x, seg.end_y))
-            stub_cx = sum(p[0] for p in stub_pts) / len(stub_pts)
-            stub_cy = sum(p[1] for p in stub_pts) / len(stub_pts)
+            stub_cx = math.fsum(p[0] for p in stub_pts) / len(stub_pts)
+            stub_cy = math.fsum(p[1] for p in stub_pts) / len(stub_pts)
 
             # Find unconnected pads
             unconnected_pads = []
@@ -1381,16 +1628,16 @@ def get_net_routing_endpoints(pcb_data: PCBData, net_id: int) -> List[Tuple[floa
 
             if unconnected_pads:
                 # Compute centroid of unconnected pads
-                pad_cx = sum(p.global_x for p in unconnected_pads) / len(unconnected_pads)
-                pad_cy = sum(p.global_y for p in unconnected_pads) / len(unconnected_pads)
+                pad_cx = math.fsum(p.global_x for p in unconnected_pads) / len(unconnected_pads)
+                pad_cy = math.fsum(p.global_y for p in unconnected_pads) / len(unconnected_pads)
                 return [(stub_cx, stub_cy), (pad_cx, pad_cy)]
 
     # Case 3: No stubs, just pads - use first pad and centroid of rest
     if len(net_segments) == 0 and len(net_pads) >= 2:
         first_pad = net_pads[0]
         other_pads = net_pads[1:]
-        other_cx = sum(p.global_x for p in other_pads) / len(other_pads)
-        other_cy = sum(p.global_y for p in other_pads) / len(other_pads)
+        other_cx = math.fsum(p.global_x for p in other_pads) / len(other_pads)
+        other_cy = math.fsum(p.global_y for p in other_pads) / len(other_pads)
         return [(first_pad.global_x, first_pad.global_y), (other_cx, other_cy)]
 
     return []

@@ -28,6 +28,55 @@ from qfn_fanout.layout import analyze_qfn_layout, analyze_pad
 from qfn_fanout.geometry import calculate_fanout_stub
 
 
+def _snap_tip_on_grid(corner, tip, net_id, grid_step, grazes):
+    """Move a shortened fan tip back ONTO the routing grid (#446).
+
+    `corner` is the (on-grid-by-construction) start of the 45 fan, `tip` the
+    clearance-shortened end, `grazes(p1, p2, nid)` the caller's foreign-copper
+    gate. Returns an on-grid point when one is safe, else `tip` unchanged.
+
+    Why: an off-grid stub terminal cannot be reached exactly by the on-grid
+    router, which then stops a cell short and leaves a cap-overlap soft joint.
+
+    Safety contract -- this can never introduce a clearance violation:
+      * every candidate is re-tested with the caller's own `grazes` gate;
+      * candidates are constrained to lie no FURTHER from the corner than the
+        clearing tip (searching inward only, never back out toward the graze);
+      * if nothing on-grid clears, the unsnapped clearing tip is returned.
+    """
+    if not grid_step or grid_step <= 0:
+        return tip
+    cx, cy = corner
+    tx, ty = tip
+    span = math.hypot(tx - cx, ty - cy)
+    if span < 1e-9:
+        return tip  # fan fully collapsed onto the corner; nothing to snap
+
+    def on_grid(v):
+        return abs(round(v / grid_step) - v / grid_step) < 1e-6
+
+    if on_grid(tx) and on_grid(ty):
+        return tip  # already there
+
+    # Walk inward from the clearing tip; at each step consider the four grid
+    # points bracketing that position, nearest first.
+    for frac in (1.0, 0.85, 0.7, 0.55, 0.4, 0.25):
+        px, py = cx + (tx - cx) * frac, cy + (ty - cy) * frac
+        gx0, gy0 = math.floor(px / grid_step), math.floor(py / grid_step)
+        cands = []
+        for gx in (gx0, gx0 + 1):
+            for gy in (gy0, gy0 + 1):
+                qx, qy = gx * grid_step, gy * grid_step
+                # never further out than the clearing tip
+                if math.hypot(qx - cx, qy - cy) > span + 1e-9:
+                    continue
+                cands.append(((qx - px) ** 2 + (qy - py) ** 2, (qx, qy)))
+        for _d, cand in sorted(cands):
+            if not grazes(corner, cand, net_id):
+                return cand
+    return tip  # nothing on-grid is safe: keep the clear (off-grid) tip
+
+
 # Public API
 __all__ = [
     'generate_qfn_fanout',
@@ -98,7 +147,11 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     keeping whichever escapes the most pads (issue #161 follow-up). The default
     (forward, nearest-offset-first) is tried first, so when it already escapes
     every pad nothing changes. A pad with no clear offset under any configuration
-    is dropped. Returns (tracks, vias, dropped_net_names)."""
+    is dropped. Returns (tracks, vias, dropped_net_names).
+
+    Interior ('center') pads form their own by_side group on net-scoped runs
+    (issue #410); each uses its own long-axis escape direction from analyze_pad
+    -- nothing here assumes a group shares an edge axis."""
     from obstacle_map import (build_base_obstacle_map, build_layer_map,
                               check_line_clearance, point_to_segment_distance)
     from bga_fanout.reroute import _seg_hits_pad
@@ -127,8 +180,21 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     # Foreign obstacles, keyed by net so the via's OWN net is exempt at check
     # time. A through-via spans every copper layer, so foreign tracks on ANY
     # layer matter -- don't filter tracks by layer.
-    foreign_vias = [(v.x, v.y, v.size, v.net_id) for v in pcb_data.vias]
+    foreign_vias = [(v.x, v.y, v.size, v.net_id, v.drill) for v in pcb_data.vias]
     foreign_pads = [p for plist in pcb_data.pads_by_net.values() for p in plist]
+    # #479 reuse-audit gap 2: existing same-net vias are REUSE targets (a
+    # re-run / post-route fanout used to drop a fresh drill ON one), and
+    # every drill on the board -- same-net included -- bounds new via holes
+    # net-independently (KiCad hole_to_hole).
+    _own_via_pos: Dict[int, List[Tuple[float, float]]] = {}
+    for v in pcb_data.vias:
+        _own_via_pos.setdefault(v.net_id, []).append((v.x, v.y))
+    from kicad_parser import pad_drill_circles as _pdc
+    import routing_defaults as _rd
+    _h2h = _rd.HOLE_TO_HOLE_CLEARANCE
+    _drilled_pad_holes = [(hx, hy, hd)
+                          for p in foreign_pads if p.drill and p.drill > 0
+                          for (hx, hy, hd) in _pdc(p)]
     foreign_tracks = [(s.start_x, s.start_y, s.end_x, s.end_y, s.width, s.net_id)
                       for s in pcb_data.segments]
 
@@ -149,10 +215,18 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 return False
             if _pt_rings_dist(vx, vy, _edge_rings) < via_size / 2 + _edge_clear - 1e-6:
                 return False
-        for fx, fy, fs, fn in foreign_vias:
+        for fx, fy, fs, fn, fd in foreign_vias:
             if fn == net_id:
+                # Same-net copper is no obstacle, but the DRILLS still are:
+                # hole-to-hole is net-independent (#282/#479 audit gap 2).
+                if math.hypot(vx - fx, vy - fy) < (via_drill + fd) / 2 + _h2h - 1e-6:
+                    return False
                 continue
             if math.hypot(vx - fx, vy - fy) < via_size / 2 + fs / 2 + clearance - 1e-6:
+                return False
+        for hx, hy, hd in _drilled_pad_holes:
+            # Net-independent drill floor vs every drilled pad (slot-exact).
+            if math.hypot(vx - hx, vy - hy) < (via_drill + hd) / 2 + _h2h - 1e-6:
                 return False
         for pad in foreign_pads:
             if pad.net_id == net_id:            # own net (incl. via-in-pad) is fine
@@ -169,7 +243,10 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                     < via_size / 2 + sw / 2 + clearance - 1e-6:
                 return False
         for qx, qy, qn in placed:
-            floor = (via_size + clearance) if qn != net_id else (via_size * 0.5)
+            # Same-net floor was via_size*0.5 -- BELOW drill hole-to-hole for
+            # standard vias (#479 audit gap 2); both holes are via_drill here.
+            floor = (via_size + clearance) if qn != net_id \
+                else max(via_size * 0.5, via_drill + _h2h)
             if math.hypot(vx - qx, vy - qy) < floor - 1e-6:
                 return False
         return True
@@ -205,6 +282,21 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     def place_pin(pi, mode, placed):
         ex, ey = pi.escape_direction
         px, py = pi.pad.global_x, pi.pad.global_y
+        # #479 audit gap 2 (reuse): an existing same-net via within stub
+        # reach makes a new drill pointless (and often sub-h2h illegal).
+        # Bridge to it instead; the commit loop skips the via emission.
+        _best = None
+        for (ovx, ovy) in _own_via_pos.get(pi.pad.net_id, ()):
+            _d = math.hypot(ovx - px, ovy - py)
+            if _d < pi.pad_width / 2 + via_size / 2 + 0.1 \
+                    and (_best is None or _d < _best[0]):
+                _best = (_d, ovx, ovy)
+        if _best is not None:
+            _rvx, _rvy = _best[1], _best[2]
+            if (obs_layer_idx is None or
+                    check_line_clearance(obstacles, px, py, _rvx, _rvy,
+                                         obs_layer_idx, cfg)):
+                return (_rvx, _rvy)
         for d in candidate_offsets(pi.pad_width, mode):
             vx, vy = snap(px + ex * d), snap(py + ey * d)
             stub_ok = (obs_layer_idx is None or
@@ -275,6 +367,16 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
             vx, vy = pos
             placed_global.append((vx, vy, pi.pad.net_id))
             px, py = pi.pad.global_x, pi.pad.global_y
+            # Reused an existing same-net via (#479 audit gap 2): emit only
+            # the bridging stub, never a duplicate drill.
+            if any(abs(vx - ox) < 1e-4 and abs(vy - oy) < 1e-4
+                   for ox, oy in _own_via_pos.get(pi.pad.net_id, ())):
+                if math.hypot(vx - px, vy - py) > POSITION_TOLERANCE:
+                    tracks.append({'start': (px, py), 'end': (vx, vy),
+                                   'width': track_width,
+                                   'layer': footprint.layer,
+                                   'net_id': pi.pad.net_id})
+                continue
             # Zero-length stub (via centred on the pad) needs no track.
             # The connecting stub bridges the pad to the via, so it must live on
             # the pad's own copper layer (the footprint mount layer) -- the
@@ -306,6 +408,10 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
         print(f"    dropped (no clear via offset): {dropped}")
     if clamp_n:
         print(f"    clamped {clamp_n} via-in-pad(s) to fit their pad edge (#202)")
+    # The FAB requirement this escape may have just created (#489 §8). Emitted
+    # from the shared engine path so the GUI fanout tab reports it too.
+    from fab_notes import print_via_in_pad_note
+    print_via_in_pad_note(vias, pcb_data.pads_by_net, context="QFN underpad escape")
     if escalated_n:
         warn_fab_escalation(f"{escalated_n} via-in-pad(s) (sub-0.45mm pads)")
     if floor_n:
@@ -336,7 +442,8 @@ def generate_qfn_fanout(footprint: Footprint,
     2. 45 degree segment fanning outward from center
 
     Edge pads get short straight (just past pad) + long 45 degree for maximum fan.
-    Center pads get full straight (no 45 degree) since already separated.
+    Center (interior/EP) pads are skipped by the surface fan; on a net-scoped
+    underpad run they escape via a via-drop instead (issue #410).
 
     Args:
         footprint: The QFN/QFP footprint
@@ -408,8 +515,14 @@ def generate_qfn_fanout(footprint: Footprint,
             continue
 
         pad_info = analyze_pad(pad, layout)
-        if pad_info.side == 'center':
-            continue  # Skip center/EP pads
+        if pad_info.side == 'center' and not (escape_method == "underpad"
+                                              and net_filter):
+            # Interior/EP pads have no free surface edge for the 45-deg fan,
+            # but a via-drop straight down doesn't need one (issue #410). Let
+            # them through ONLY on a net-scoped underpad run: requiring --nets
+            # is a deliberate safety guard so an unscoped run never via-drops
+            # the exposed/thermal pad.
+            continue
 
         pad_infos.append(pad_info)
         side_counts[pad_info.side] += 1
@@ -610,6 +723,24 @@ def generate_qfn_fanout(footprint: Footprint,
                 if not _seg_grazes(stub.corner_pos, cand, nid):
                     new_end = cand
                     break
+            # Re-snap the shortened tip ON GRID (#446). calculate_fanout_stub
+            # lands the tip on the routing grid (#149) so the router gets an
+            # on-grid terminal it can END on; this shortening then moved it to
+            # an arbitrary ninth of the way in, silently discarding that
+            # guarantee. An off-grid terminal cannot be reached exactly by the
+            # on-grid router: it stops a cell short, its cap merely OVERLAPS
+            # the stub cap (which already reads as "connected"), and the board
+            # ships a fragile soft joint -- zynq_ad9364 VCC_3V3, a 0.068mm
+            # near-open that close_soft_joints then could not bridge at the
+            # run's clearance.
+            #
+            # Every candidate is re-tested with the SAME _seg_grazes gate, so
+            # the #123 clearance guarantee is preserved exactly; candidates are
+            # searched INWARD of the clearing point only (never back out toward
+            # the graze). If nothing on-grid clears, keep the unsnapped point --
+            # a clear-but-off-grid tip is strictly better than a violation.
+            new_end = _snap_tip_on_grid(stub.corner_pos, new_end, nid,
+                                        grid_step, _seg_grazes)
             stub.stub_end = new_end
             n_short += 1
         kept_stubs.append(stub)
@@ -738,6 +869,10 @@ def main():
                              '(via-in-pad), so a via boxed in on the outward side can '
                              'stagger inward toward the chip instead of being dropped. '
                              'The via still must clear other-net pads, vias and tracks.')
+    # #489 section 9: fanout is where a teardrop matters most (a 0.1mm trace
+    # meeting a 0.25mm via pad), and this step had no way to ask for one.
+    parser.add_argument('--add-teardrops', action='store_true',
+                        help='Add teardrop settings to all pads and vias in the output file')
     from fab_tiers import (add_fab_tier_args, fab_tier_from_args, set_default_fab_tier,
                            enforce_fab_floors, count_copper_layers_in_file)
     add_fab_tier_args(parser)
@@ -814,11 +949,14 @@ def main():
         allow_via_in_pad=args.allow_via_in_pad
     )
 
-    if tracks:
-        print(f"\nWriting {len(tracks)} tracks to {args.output}...")
+    if tracks or vias:
+        # vias can be non-empty with zero tracks: a via-in-pad centred on its
+        # pad emits no stub, so an underpad run can be vias-only.
+        print(f"\nWriting {len(tracks)} tracks and {len(vias)} vias to {args.output}...")
         net_id_to_name = {nid: net.name for nid, net in pcb_data.nets.items()}
         add_tracks_and_vias_to_pcb(args.pcb, args.output, tracks, vias,
-                                   net_id_to_name=net_id_to_name)
+                                   net_id_to_name=net_id_to_name,
+                                   add_teardrops=args.add_teardrops)
         print("Done!")
     else:
         print("\nNo fanout tracks generated")
@@ -840,7 +978,10 @@ def main():
     # Mirrors bga_fanout (#130/#122). Best-effort: a DRC hiccup must never fail the
     # fanout. drc_grazes is graded at --clearance.
     import json as _json
-    escaped_net_ids = {t['net_id'] for t in tracks if t.get('net_id') is not None}
+    # A stub-less via-in-pad escape emits a via but no track, so vias count as
+    # escapes too -- tracks alone undercounts and grades those pads as failed.
+    escaped_net_ids = ({t['net_id'] for t in tracks if t.get('net_id') is not None}
+                       | {v['net_id'] for v in vias if v.get('net_id') is not None})
     unescaped = sorted(set(_failed_nets))
     escaped = len(escaped_net_ids)
     requested = escaped + len(unescaped)
@@ -880,7 +1021,8 @@ def main():
                 clearance=eff_clearance,
                 track_width=args.width,
                 via_diameter=getattr(args, 'via_size', None),
-                via_drill=getattr(args, 'via_drill', None))
+                via_drill=getattr(args, 'via_drill', None),
+                clamp_nondefault_netclasses=True)  # #439: fanout escapes route to --clearance; always clamp
         except Exception as _e:
             print(f"  (skipped DRC-settings fix: {_e})")
     summary = {
@@ -903,6 +1045,7 @@ def main():
         'min_clearance_used': eff_clearance,
     }
     print(f"JSON_SUMMARY: {_json.dumps(summary)}")
+
 
     return 0
 
