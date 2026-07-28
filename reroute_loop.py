@@ -21,6 +21,7 @@ from diff_pair_routing import (route_diff_pair_with_obstacles, get_diff_pair_end
                                _route_direct_coupled_middle)
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
 from rip_up_reroute import rip_up_net, restore_net
+from leg_rip import LEG_RIP_ENABLED, select_blocking_branch  # #510
 from polarity_swap import apply_polarity_swap, get_canonical_net_id, rip_combo_already_tried
 from layer_swap_fallback import try_fallback_layer_swap, add_own_stubs_as_obstacles_for_diff_pair
 from routing_context import (
@@ -338,13 +339,18 @@ def run_reroute_loop(
                                 blocker = rippable_blockers[i]
                                 if blocker.net_id not in routed_results:
                                     continue
+                                # #510: rip only the blocking branch (reroute N-extend blocker).
+                                _only = None
+                                if LEG_RIP_ENABLED and blocker.net_id not in diff_pair_by_net_id:
+                                    _only = select_blocking_branch(
+                                        pcb_data, blocker.net_id, blocked_cells, config, verbose=True)
                                 saved_result_tmp, ripped_ids, was_in_results = rip_up_net(
                                     blocker.net_id, pcb_data, routed_net_ids, routed_net_paths,
                                     routed_results, diff_pair_by_net_id, remaining_net_ids,
                                     results, config, track_proximity_cache,
                                     state.working_obstacles, state.net_obstacles_cache,
                                     state.ripped_route_layer_costs, state.ripped_route_via_positions,
-                                    layer_map
+                                    layer_map, only_segments=_only
                                 )
                                 if saved_result_tmp is None:
                                     rip_successful = False
@@ -750,13 +756,18 @@ def run_reroute_loop(
                                 blocker = rippable_blockers[i]
                                 if blocker.net_id not in routed_results:
                                     continue
+                                # #510: rip only the blocking branch (reroute N-extend blocker).
+                                _only = None
+                                if LEG_RIP_ENABLED and blocker.net_id not in diff_pair_by_net_id:
+                                    _only = select_blocking_branch(
+                                        pcb_data, blocker.net_id, blocked_cells, config, verbose=True)
                                 saved_result_tmp, ripped_ids, was_in_results = rip_up_net(
                                     blocker.net_id, pcb_data, routed_net_ids, routed_net_paths,
                                     routed_results, diff_pair_by_net_id, remaining_net_ids,
                                     results, config, track_proximity_cache,
                                     state.working_obstacles, state.net_obstacles_cache,
                                     state.ripped_route_layer_costs, state.ripped_route_via_positions,
-                                    layer_map
+                                    layer_map, only_segments=_only
                                 )
                                 if saved_result_tmp is None:
                                     rip_successful = False
