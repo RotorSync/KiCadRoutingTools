@@ -485,6 +485,57 @@ def seed_input_boards(manifest, cmds, dest_dir):
     return seeded
 
 
+# Flags whose VALUE is a file the command WRITES. A produced file may already
+# exist in the original run dir, so copying it would pre-seed a stale output.
+_OUTPUT_FLAGS = frozenset({
+    "-o", "--out", "--output", "--json-out", "--timings-out", "--routetrace",
+    "--report", "--log", "--save", "--dump",
+})
+
+
+def seed_side_files(manifest, cmds, dest_dir):
+    """Copy relative NON-BOARD side-files (e.g. `--net-clearances foo.json`)
+    into the replay dest dir.
+
+    seed_input_boards only carries .kicad_pcb. A manifest step may also take a
+    file argument that lives in the original run dir and is produced by no
+    recorded command -- artix_devboard's
+    `--net-clearances net_clearances_1v8.json`. Under --remap/--workdir that
+    file does not exist in the fresh dir, so the step dies with
+    FileNotFoundError while the replay still exits rc=0: the chain is silently
+    TRUNCATED and the missing final board looks like a routing failure.
+
+    A token is seeded only when it EXISTS as a file next to the manifest AND
+    carries an alphabetic extension. Existence alone is not enough and an
+    extension test alone is not enough: manifests are full of numeric values
+    (`--clearance 0.25` parses as extension `.25`) and net names (`+3.3V` ->
+    `.3V`), so a run dir happening to contain a file named `0.25` must not make
+    a flag VALUE look seedable. Requiring `.json`/`.txt`-style alphabetic
+    extensions rejects both. Values of known output flags are skipped so a
+    produced file is never pre-seeded. Returns the seeded relative paths."""
+    src_dir = os.path.dirname(os.path.abspath(manifest))
+    seeded = []
+    for _cwd, argv in cmds:
+        for i, tok in enumerate(argv):
+            if not tok or tok.startswith("-") or os.path.isabs(tok):
+                continue
+            if tok.endswith((".kicad_pcb", ".kicad_pro", ".py")):
+                continue  # boards/projects: seed_input_boards + mirror_project_sibling
+            if i and argv[i - 1] in _OUTPUT_FLAGS:
+                continue
+            ext = os.path.splitext(tok)[1]
+            if len(ext) < 2 or not ext[1:].isalpha():
+                continue  # 0.25 -> '.25', +3.3V -> '.3V': flag values, not files
+            src = os.path.join(src_dir, tok)
+            dst = os.path.join(dest_dir, tok)
+            if not os.path.isfile(src) or os.path.exists(dst):
+                continue
+            os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+            shutil.copy2(src, dst)
+            seeded.append(tok)
+    return seeded
+
+
 def main():
     ap = argparse.ArgumentParser(description="Replay a recorded stress-test manifest (no LLM).")
     ap.add_argument("manifest", help="Path to redo_commands.sh manifest")
@@ -588,6 +639,9 @@ def main():
         seeded = seed_input_boards(args.manifest, cmds, d)
         if seeded:
             print(f"Seeded input board(s) into {d}: {', '.join(seeded)}")
+        side = seed_side_files(args.manifest, cmds, d)
+        if side:
+            print(f"Seeded side-file(s) into {d}: {', '.join(side)}")
 
     failures = 0
     timings = []   # per-command (index, seconds, returncode, argv) for later comparison
