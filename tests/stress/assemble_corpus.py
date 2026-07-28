@@ -8,9 +8,10 @@ Run with plain python3 (the prep step itself uses KiCad's python separately)."""
 import json, os, shutil, subprocess
 from pathlib import Path
 
-STRESS = Path.home() / "Documents/kicad_stress_test"
+STRESS = Path(os.environ.get("STRESS_DIR", str(Path.home() / "Documents/kicad_stress_test")))
 CAND = STRESS / "sources/candidates"
-STRESS_TESTS = Path("/Users/andy/Documents/KiCadRoutingTools/tests/stress")
+# This script's own directory IS tests/stress -- never a hardcoded home dir.
+STRESS_TESTS = Path(__file__).resolve().parent
 cur = json.load(open(CAND / "curation.json"))
 
 TIER_PKG = {"easy": "2-layer,MCU", "medium": "4-layer,USB,MCU", "hard": "BGA,FPGA/SoC,high-speed"}

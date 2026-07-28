@@ -2,7 +2,10 @@
 netclass (CLI parity), or fall back to defaults.TRACK_WIDTH like the shim?"""
 import os, sys
 os.environ.setdefault('WXSUPPRESS_SIZER_FLAGS_CHECK', '1')
-R='/Users/andy/Documents/KiCadRoutingTools'; sys.path.insert(0,R); sys.path.insert(0, os.path.dirname(R))
+# Repo root from THIS file's location (tests/gui_parity/ -> repo), never a
+# hardcoded home dir -- the sibling gates all derive it this way.
+R = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, R); sys.path.insert(0, os.path.dirname(R))
 import wx, pcbnew, json
 import routing_defaults as defaults
 from kicad_parser import build_pcb_data_from_board

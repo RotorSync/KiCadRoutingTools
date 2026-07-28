@@ -64,7 +64,10 @@ def _stage_from_raw(b, dest):
 
 
 def _stage_from_local(b, dest):
-    src = Path(b["local_path"])
+    # expanduser: the manifest stores `~/Downloads/...`, never an absolute home
+    # dir, so the fallback is at least meaningful on another machine (it still
+    # only fires when the download failed AND the user has the file there).
+    src = Path(b["local_path"]).expanduser()
     if not src.exists():
         return None
     shutil.copyfile(src, dest)
