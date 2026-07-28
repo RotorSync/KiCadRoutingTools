@@ -275,7 +275,8 @@ def _gui_control_attrs():
     files -- the universe of control attributes an alias may target."""
     attrs = set()
     gui_dir = REPO / "kicad_routing_plugin"
-    for fn in ("swig_gui.py", "differential_gui.py", "fanout_gui.py",
+    # routing_dialog.py is this branch's swig_gui.py (renamed by the IPC port).
+    for fn in ("routing_dialog.py", "differential_gui.py", "fanout_gui.py",
                "planes_gui.py"):
         tree = ast.parse((gui_dir / fn).read_text())
         for node in ast.walk(tree):
