@@ -7,12 +7,13 @@ chain as steps. This module executes one exactly the way a person would --
 
     open the board -> Claude tab -> Load... -> Run All Selected Steps
 
--- but with no window and no clicks: ``swig_gui.RoutingDialog`` is constructed
+-- but with no window and no clicks: ``routing_dialog.RoutingDialog`` is constructed
 with parent None and never shown, and the real ``claude_plan.PlanExecutor``
 drives its tabs inside a wx MainLoop. Nothing is re-implemented or mirrored, so
 what runs here is what the buttons run.
 
-It therefore needs a Python with **pcbnew and wx** -- KiCad's bundled one.
+It therefore needs a Python with **wx and kipy** -- KiCad's bundled python plus
+`pip install --user kicad-python` (it ships wx but not kipy).
 ``reexec_into_kicad()`` finds it and re-execs, so a plain ``python3 run_plan.py``
 still works.
 
@@ -37,7 +38,14 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-# Where KiCad's bundled python (the one with pcbnew + wx) lives per platform.
+# The IPC plugin needs wx (the dialog) and kipy (the adapter) -- NOT pcbnew.
+# KiCad's bundled python ships wx but not kipy; install it once with
+#     <kicad_python> -m pip install --user 'kicad-python>=0.7.0'
+# (KiCad provisions the same dependency into a venv for a real PCM install --
+# see requirements.txt.)
+PLUGIN_IMPORTS = 'import wx, kipy'
+
+# Where KiCad's bundled python (the one with wx) lives per platform.
 KICAD_PYTHONS = [
     "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3",
     "/usr/bin/python3",
@@ -47,17 +55,17 @@ KICAD_PYTHONS = [
 
 
 def have_kicad_python() -> bool:
-    """True when THIS interpreter can drive the plugin (pcbnew + wx present)."""
+    """True when THIS interpreter can drive the plugin (wx + kipy present)."""
     try:
-        import pcbnew  # noqa: F401
-        import wx      # noqa: F401
+        import wx    # noqa: F401
+        import kipy  # noqa: F401
         return True
     except Exception:
         return False
 
 
 def reexec_into_kicad(script=None, argv=None):
-    """Re-exec the current script under a python that has pcbnew + wx.
+    """Re-exec the current script under a python that has wx + kipy.
 
     Returns (never returns on success) only if no such interpreter is found.
     """
@@ -66,7 +74,7 @@ def reexec_into_kicad(script=None, argv=None):
     for cand in KICAD_PYTHONS:
         if cand == sys.executable or not os.path.exists(cand):
             continue
-        if subprocess.run([cand, '-c', 'import pcbnew, wx'],
+        if subprocess.run([cand, '-c', PLUGIN_IMPORTS],
                           capture_output=True).returncode == 0:
             os.execv(cand, [cand, script] + argv)
     return False
@@ -114,7 +122,6 @@ def run_plan(board_path, steps, indices=None, snapshot_dir=None,
     aborted, timed_out, snapshots, log, seconds.
     """
     import wx
-    import pcbnew
 
     board_path = os.path.abspath(board_path)
     indices = list(range(len(steps))) if indices is None else list(indices)
@@ -140,15 +147,23 @@ def run_plan(board_path, steps, indices=None, snapshot_dir=None,
 
     wx.MessageDialog = _NoModal
 
-    board = pcbnew.LoadBoard(board_path)
-    pcbnew.GetBoard = lambda: board   # the plugin reads the "live" board through this
+    # The IPC plugin has no in-process board: it reaches a RUNNING KiCad through
+    # kicad_ipc_adapter's kipy socket. FakeIpcBoard restores what the SWIG
+    # harness got from `pcbnew.GetBoard = lambda: board` -- a "live board" that
+    # is really `board_path` on disk, flushed back after every commit -- so the
+    # dialog, plan executor and engines all run UNMODIFIED and each step leaves
+    # a real .kicad_pcb to grade. See tests/gui_parity/fake_ipc_board.py for
+    # what this does and does not prove.
+    sys.path.insert(0, os.path.join(ROOT_DIR, 'tests', 'gui_parity'))
+    from fake_ipc_board import install as _install_fake_board
+    board = _install_fake_board(board_path)
 
     from kicad_parser import build_pcb_data_from_board
-    from kicad_routing_plugin import swig_gui
+    from kicad_routing_plugin import routing_dialog
     from kicad_routing_plugin.claude_plan import PlanExecutor, step_label
 
     pcb_data = build_pcb_data_from_board(board)
-    dialog = swig_gui.RoutingDialog(None, pcb_data, board_path)
+    dialog = routing_dialog.RoutingDialog(None, pcb_data, board_path)
 
     result = {'board': board_path, 'steps': [], 'completed': 0, 'aborted': None,
               'timed_out': False, 'snapshots': [], 'log': []}
@@ -173,7 +188,9 @@ def run_plan(board_path, steps, indices=None, snapshot_dir=None,
             snap = os.path.join(snapshot_dir, snapshot_format.format(
                 prefix=snapshot_prefix, n=index + 1, action=action))
             try:
-                pcbnew.SaveBoard(snap, board)
+                # The fake board keeps board_path current after every commit,
+                # so a snapshot is just a copy of it.
+                board.save_as(snap)
                 result['snapshots'].append(snap)
             except Exception as e:
                 result['log'].append(f"snapshot step {index + 1} failed: {e}")
@@ -186,7 +203,9 @@ def run_plan(board_path, steps, indices=None, snapshot_dir=None,
                 # Save back to the same path, beside the .kicad_pro that
                 # PlanExecutor._write_drc_floors just stamped with the routed
                 # floors -- a board without its floor grades wrong (#441).
-                pcbnew.SaveBoard(board_path, board)
+                # Already there: every commit flushed to board_path. Kept as an
+                # explicit no-op copy so the contract survives if that changes.
+                board.save_as(board_path)
             except Exception as e:
                 result['log'].append(f"final save failed: {e}")
         app.ExitMainLoop()
