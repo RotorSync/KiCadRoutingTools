@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from terminal_colors import YELLOW, GREEN, RESET
 
 from dataclasses import replace
-from kicad_parser import PCBData, Segment, Via
+from kicad_parser import PCBData, Segment, Via, pad_is_plated_through
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import build_layer_map, pad_rect_halfspan
 from connectivity import (
@@ -4043,6 +4043,47 @@ def _drop_segments_already_present(segments: List[Segment],
     return [s for s in segments if _key(s) not in existing_keys]
 
 
+def _terminal_copper_on_layer(pcb_data, net_id, x, y, layer) -> bool:
+    """True if this net already has copper at (x, y) on `layer`.
+
+    The terminal connectors below project the ORIGINAL endpoint XY onto the
+    layer the A* actually finished on. That is correct for a plated-through
+    pad or a via -- the barrel carries own-net copper on every layer it spans,
+    so the stub lands on real copper. It is a fabrication when the terminal
+    only exists on its own layer: the projected stub then joins nothing, and
+    because terminal cells are obstacle-EXEMPT it can be stamped straight
+    through foreign copper (#505 cparti_fpga: a +3V3 plane-repair stub laid
+    along an FPGA_CFG_D3 track on In2.Cu, a dead short at 0.000mm).
+    """
+    if pcb_data is None:
+        return False
+    tol = 1e-6
+    pads = (getattr(pcb_data, 'pads_by_net', None) or {}).get(net_id) or ()
+    for p in pads:
+        if not pad_is_plated_through(p):
+            continue
+        hw = (getattr(p, 'size_x', 0) or 0) / 2.0
+        hh = (getattr(p, 'size_y', 0) or 0) / 2.0
+        if abs(x - p.global_x) <= hw + tol and abs(y - p.global_y) <= hh + tol:
+            return True
+    copper_layers = list(getattr(pcb_data.board_info, 'copper_layers', None) or [])
+    for v in pcb_data.vias:
+        if v.net_id != net_id or len(v.layers or ()) < 2:
+            continue
+        radius = max((getattr(v, 'size', 0) or 0) / 2.0, tol)
+        if math.hypot(x - v.x, y - v.y) > radius + tol:
+            continue
+        span = list(v.layers)
+        if copper_layers and span[0] in copper_layers and span[1] in copper_layers:
+            i, j = copper_layers.index(span[0]), copper_layers.index(span[1])
+            spanned = copper_layers[min(i, j):max(i, j) + 1]
+        else:
+            spanned = span
+        if layer in spanned:
+            return True
+    return False
+
+
 def _path_to_segments_vias(
     path: List[Tuple[int, int, int]],
     coord: GridCoord,
@@ -4103,7 +4144,13 @@ def _path_to_segments_vias(
         # Use the actual path layer, not the original pad layer
         # (through-hole pads may have orig_layer=F.Cu but router chose In1.Cu)
         path_start_layer = layer_names[path_start[2]]
-        if abs(orig_x - first_grid_x) > 0.001 or abs(orig_y - first_grid_y) > 0.001:
+        # ...but only when the terminal really has copper there (#505): a
+        # layer-specific target projected onto a layer the A* merely ended on
+        # joins nothing and can short whatever occupies that layer.
+        if ((abs(orig_x - first_grid_x) > 0.001 or abs(orig_y - first_grid_y) > 0.001)
+                and (orig_layer == path_start_layer or pcb_data is None
+                     or _terminal_copper_on_layer(pcb_data, net_id, orig_x, orig_y,
+                                                  path_start_layer))):
             seg = Segment(
                 start_x=orig_x, start_y=orig_y,
                 end_x=first_grid_x, end_y=first_grid_y,
@@ -4158,7 +4205,12 @@ def _path_to_segments_vias(
         orig_x, orig_y, orig_layer = end_original
         # Use the actual path layer, not the original pad layer
         path_end_layer = layer_names[path_end[2]]
-        if abs(orig_x - last_grid_x) > 0.001 or abs(orig_y - last_grid_y) > 0.001:
+        # ...but only when the terminal really has copper there (#505) -- see
+        # the start-side note above.
+        if ((abs(orig_x - last_grid_x) > 0.001 or abs(orig_y - last_grid_y) > 0.001)
+                and (orig_layer == path_end_layer or pcb_data is None
+                     or _terminal_copper_on_layer(pcb_data, net_id, orig_x, orig_y,
+                                                  path_end_layer))):
             seg = Segment(
                 start_x=last_grid_x, start_y=last_grid_y,
                 end_x=orig_x, end_y=orig_y,
