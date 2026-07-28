@@ -34,6 +34,8 @@ TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, ROOT_DIR)
 
+import list_nets
+
 BOARD = os.path.join(ROOT_DIR, "kicad_files", "tigard.kicad_pcb")
 NETS = ["/USB_DP", "/USB_DN"]
 CLEARANCE = "0.15"
@@ -66,7 +68,15 @@ def _run(args, verbose):
 
 
 def _drc_clean(board, verbose):
-    txt = _run(["check_drc.py", board, "--clearance", CLEARANCE,
+    # Grade at the clearance the chain actually routed to, never a fixed
+    # number: the fan-out step needs (and writes back) a 0.1 floor for the
+    # fine-pitch QFN, and --clearance is a pure CEILING (#439), so every
+    # later route step routes those nets at min(netclass floor, CLEARANCE).
+    # Grading the fan-out variants at a flat 0.15 manufactures ~20um phantom
+    # grazes on copper that is legal at its routed 0.1 floor (#491).
+    floor = list_nets.board_default_netclass_clearance(board)
+    clearance = str(min(float(CLEARANCE), floor)) if floor else CLEARANCE
+    txt = _run(["check_drc.py", board, "--clearance", clearance,
                 "--nets", *NETS, "--clearance-margin", "0.1"], verbose)
     return "NO DRC VIOLATIONS" in txt
 

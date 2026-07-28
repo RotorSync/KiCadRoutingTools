@@ -859,6 +859,38 @@ def _pad_edge_launch(pcb_data, net_id, cx, cy, route_x, route_y, config, tol=0.0
     return cx + dx * shift, cy + dy * shift, shift
 
 
+def _min_via_center_distance(config):
+    """Minimum centre-to-centre distance between two via drills (#491).
+
+    Two INDEPENDENT rules bind here and the code used only the first:
+      copper: via_size + clearance
+      drill : drill/2 + drill/2 + hole_to_hole  ==  via_drill + hole_to_hole
+    On lvds_rx1_10 (0.3 via / 0.2 drill / 0.09 clearance, board
+    min_hole_to_hole 0.3) the copper rule asks 0.39mm and the drill rule 0.5mm,
+    so a pair placed to the copper rule ships 0.088mm inside the fab's drill
+    spacing -- legal copper, unmanufacturable holes. The router READ the board
+    constraint correctly and then never applied it to via placement.
+    """
+    return max(config.via_size + config.clearance,
+               config.via_drill
+               + (getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0))
+
+
+def _pair_via_offset(config, spacing_mm):
+    """Perpendicular offset of each P/N transition via from the centerline.
+
+    Shared by the via placer and the companion-GND placer so the two cannot
+    drift: the GND placer previously measured its gap from `spacing_mm`, which
+    is NOT where the vias land (0.100 assumed vs 0.206 actual), and so
+    under-estimated its own clearance by exactly the overlap it shipped.
+    """
+    max_track_width = config.get_max_track_width()
+    track_via_clearance = (config.clearance + max_track_width / 2
+                           + config.via_size / 2) * config.routing_clearance_margin
+    return max(spacing_mm, _min_via_center_distance(config) / 2.0,
+               track_via_clearance - spacing_mm)
+
+
 def _create_gnd_vias(simplified_path, coord, config, layer_names, spacing_mm, gnd_net_id, gnd_via_dirs):
     """Create GND vias at layer changes in the centerline path.
 
@@ -883,6 +915,17 @@ def _create_gnd_vias(simplified_path, coord, config, layer_names, spacing_mm, gn
     max_track_width = config.get_max_track_width()
     gnd_via_perp_mm = spacing_mm + max_track_width/2 + config.clearance + config.via_size/2
     via_via_dist_mm = config.via_size + config.clearance
+    # #491: keep the companion GND via clear of the P/N vias on the DRILL rule
+    # too, measured from where those vias actually land (_pair_via_offset), not
+    # from spacing_mm. Scaling the offset pair preserves the placement
+    # direction the Rust router chose.
+    _need_c2c = _min_via_center_distance(config)
+    _perp_gap = gnd_via_perp_mm - _pair_via_offset(config, spacing_mm)
+    _cur_c2c = math.hypot(_perp_gap, via_via_dist_mm)
+    if 0.0 < _cur_c2c < _need_c2c:
+        _k = _need_c2c / _cur_c2c
+        gnd_via_perp_mm = _pair_via_offset(config, spacing_mm) + _perp_gap * _k
+        via_via_dist_mm *= _k
 
     # Track which layer change we're processing to get direction from gnd_via_dirs
     via_idx = 0
@@ -4591,7 +4634,8 @@ def _process_via_positions(simplified_path, p_float_path, n_float_path, coord, c
     Adds approach and exit tracks to keep main P/N tracks parallel while routing to vias.
     Handles multiple layer changes by processing in reverse order.
     """
-    min_via_spacing = config.via_size + config.clearance  # Minimum center-to-center distance
+    # #491: the drill rule (hole-to-hole) binds independently of the copper rule.
+    min_via_spacing = _min_via_center_distance(config)
     # Use max track width for clearance since via connects layers with potentially different widths
     max_track_width = config.get_max_track_width()
     track_via_clearance = (config.clearance + max_track_width / 2 + config.via_size / 2) * config.routing_clearance_margin
@@ -4649,8 +4693,7 @@ def _process_via_positions(simplified_path, p_float_path, n_float_path, coord, c
             perp_x, perp_y = -in_dir_y, in_dir_x
 
         # Use larger spacing for vias if needed
-        min_via_spacing_for_track = track_via_clearance - spacing_mm
-        via_spacing = max(spacing_mm, min_via_spacing / 2, min_via_spacing_for_track)
+        via_spacing = _pair_via_offset(config, spacing_mm)
 
         # Calculate P and N via positions perpendicular to centerline
         p_via_x = cx + perp_x * p_sign * via_spacing
