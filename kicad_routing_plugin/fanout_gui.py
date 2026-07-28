@@ -1514,7 +1514,7 @@ class FanoutTab(wx.Panel):
                     get_layer_id(via_dict['layers'][1])
                 )
             # Keep a re-placed via's own tenting/plugging/filling (#489 §8).
-            from gui_utils import apply_via_protection
+            from .gui_utils import apply_via_protection
             apply_via_protection(via, via_dict.get('tenting_attrs'))
             board.Add(via)
             vias_added += 1
@@ -1717,7 +1717,7 @@ class FanoutTab(wx.Panel):
                 if len(vd.get('layers', [])) >= 2:
                     nv.SetLayerPair(_layer_id(vd['layers'][0]),
                                     _layer_id(vd['layers'][1]))
-                from gui_utils import apply_via_protection
+                from .gui_utils import apply_via_protection
                 apply_via_protection(nv, moved_attrs)
                 board.Add(nv)
 
