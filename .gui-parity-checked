@@ -1,3 +1,93 @@
+c99ffb4 2026-07-28 parity sweep b9f56e4..937b745 (139 commits: the #486
+impedance/coplanar merge, the GUI/CLI order-canonicalisation wave, #479 plane
+region joins, #482 route trace + movie, #483/#484/#489/#490 audit fixes, #494,
+#496, #499, #500, #505, #506/#507, #508 write-list divergence, #509 plane
+custody, #463 and #491). Outcome: ONE gap found and FIXED (c99ffb4, this
+commit); the marker SHA is the fix commit, per the 9466342 precedent. Both
+no-wx gates green. Audited read-only while a corpus A/B wave and an LLM stress
+run were live, so the fix was staged as a patch and applied after they finished.
+
+  * GAP FOUND + FIXED (c99ffb4): #486 added `coplanar_gap` to BOTH
+    batch_route and batch_route_diff_pairs, and route_diff.py threads it
+    (route_diff.py:1898). Every GUI wiring point existed -- control
+    (swig_gui.py:932 + coplanar_nets_ctrl 1196), routing_config
+    (swig_gui.py:2678-2679), the diff tab's merge
+    (differential_gui.py:845 `{**routing_config, **diff_config}`),
+    settings_persistence, claude_plan `_PARAM_CONTROLS` + the coplanar_nets
+    special-case, manifest_to_plan FLAG_PARAMS + the nargs list, and
+    reset_params_to_defaults -- and the SINGLE-ENDED call passed it
+    (swig_gui.py:3120-3121). Only the diff-pair engine call
+    (differential_gui.py:953) dropped it. Effect: Coplanar Gap + a diff
+    impedance target silently routed MICROSTRIP instead of CPW-over-ground;
+    CPW needs a NARROWER trace for the same ohms, so every coupled pair
+    shipped too wide and missed its differential target -- silently, because
+    route_diff's "coplanar-gap without --impedance" warning lives in the CLI
+    main() the GUI never runs. A GUI-routed board could carry correctly
+    narrowed single-ended CPW traces alongside wrongly-wide diff pairs on the
+    same impedance spec. Neither no-wx gate could catch it structurally: the
+    converter gate checks flag->param survival (which was correct) and the
+    post-pass gate checks main() post-engine passes, not engine kwargs.
+
+  * ENGINE SIGNATURE GREW +2 (86->88 batch_route, 83->84
+    batch_route_diff_pairs): `coplanar_gap` (both) and `coplanar_nets`
+    (route.py only -- route_diff has no --coplanar-nets, so the diff engine
+    correctly takes only the gap). create_plane 44 params UNCHANGED;
+    generate_bga_fanout 22 and generate_qfn_fanout 13 UNCHANGED.
+
+  * create_plane RETURN SHAPE 8 -> 10 tuple, GUI already correct:
+    planes_gui.py:1039 unpacks exactly 10 (+ reconnect_swap_data #484 H3,
+    + reconnect_strips #508). Every validation early-exit routes through
+    _empty_plane_results(return_results), which returns 10 for the GUI and 3
+    for the CLI -- the guard that makes a short-tuple ValueError structurally
+    impossible. No gap.
+
+  * NEW CLI FLAGS, all wired: --coplanar-gap (route.py, route_diff.py),
+    --coplanar-nets (route.py), --add-teardrops extended to route_diff /
+    route_planes / route_disconnected_planes (#489 §9) -- GUI counterparts at
+    differential_gui.py:1046, planes_gui.py:1070/1281 and the in-memory
+    apply_teardrops_to_board at planes_gui.py:1903-1910. --gnd-via-net default
+    moved "GND" -> defaults.GND_VIA_NET ("" = auto per ground domain, #489 §5);
+    the GUI reads it SYMBOLICALLY everywhere (planes_gui.py:362 control,
+    swig_gui.py:2290 reset, planes_gui.py:1127 config fallback) -- no literal
+    "GND" survives.
+
+  * RESULTS-DATA KEYS the GUI must ACT on, both already handled: zone
+    `priority` (9e6c48c deterministic overlapping-zone fill) -> planes_gui.py:
+    1867-1877 via SetAssignedPriority with a SetPriority fallback, the GUI
+    equivalent of the CLI's `(priority N)` s-expr; and `vias_to_remove` ->
+    planes_gui.py:2027, differential_gui.py:1230-1235, fanout_gui.py:1367.
+
+  * SHARED-ENGINE waves -> both fronts inherit, no wiring: #479 region joins,
+    #483/#484 audit fixes, #490 deterministic oracle, #494, #496, #499, #500,
+    #505, #508 write-list/pcb_data reconcile (new shared
+    plane_write_reconcile.py), #509 plane rip/restore custody, #463, #491.
+    The order-canonicalisation wave (5421a56/6acdc1b/e6d925a/727f2f9/7dcbeb2/
+    6515b1c/950aebe/2df22ca/6a012c8) is specifically GUI/CLI CONVERGENCE work.
+
+  * NO absolute intra-package imports remain in kicad_routing_plugin/ (the
+    #506/#507 class where an absolute sibling import resolves ONLY inside
+    KiCad and elsewhere aborts the apply while the step reports done, fixed at
+    9e93fc8) -- every sibling import is relative. Re-scanned this sweep.
+
+GATES RUN GREEN AT HEAD:
+  * test_manifest_plan_parity.py: 12017 flag-checks across 310 manifests,
+    0 mismatches; param->control resolution 12/12, 0 unresolved.
+  * test_cli_postpass_coverage.py: 4 registered, 10 in active CLI use, 0
+    failures, 0 warnings (bga/qfn run_drc the acknowledged CLI-only
+    report-only pass).
+
+NOT RUN THIS PASS: tests/gui_parity/test_gui_engine_parity.py (no wx/pcbnew in
+this session) -- carried over. NOTE the batch_route param set GREW this range
+(+coplanar_gap, +coplanar_nets), so the prior marker's wx VERDICT no longer
+covers the exact signature; a KiCad-python session should re-run it. NEW for
+the next wx session, on top of the carried items: (1) a GUI diff-pair route
+with Coplanar Gap set, confirming the fix reaches batch_route_diff_pairs and
+narrows the pairs (check_impedance.py); (2) a GUI plane run on overlapping
+zones confirming SetAssignedPriority matches the CLI (priority N); (3) a GUI
+plane run confirming the create_plane 10-tuple unpack plus the vias_to_remove /
+reconnect_strips deletions match the CLI writer.
+
+--- prior sweeps ---
 b9f56e4 2026-07-23 parity sweep f445d6b..b9f56e4 (the 0.19.0 release range:
 #156 fractional per-layer track_margin / Rust 0.19.0, #465 env-gated impedance
 neck-down, #477 copperpour keep-outs in the plane fill model, #478 footprint-

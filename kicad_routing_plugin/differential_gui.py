@@ -961,6 +961,11 @@ class DifferentialTab(wx.Panel):
                 layer_costs=config.get('layer_costs') or None,  # per-layer bias (#193); None -> all 1.0
                 track_width=config.get('diff_pair_width', defaults.DIFF_PAIR_WIDTH),
                 impedance=config.get('impedance'),  # when set, overrides per-layer width
+                # #486: CPW-over-ground vs microstrip. route_diff.py passes
+                # args.coplanar_gap here; without it the shared Coplanar Gap
+                # control is honoured for single-ended routing but silently
+                # dropped for diff pairs, shipping every coupled pair too wide.
+                coplanar_gap=config.get('coplanar_gap', 0.0),
                 clearance=config.get('clearance', 0.1),
                 via_size=config.get('via_size', 0.3),
                 via_drill=config.get('via_drill', 0.2),

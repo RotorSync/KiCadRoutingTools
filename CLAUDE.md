@@ -170,6 +170,51 @@ through there too.
   plan through the GUI engine path and grades against the CLI chain
   (`KICAD_DUMP_BATCH_KWARGS` diffs the 76-key param set).
 
+  **How to run it (it is NOT a special-session thing — just run it):**
+
+  ```bash
+  python3 tests/gui_parity/test_gui_engine_parity.py            # default board
+  python3 tests/gui_parity/test_gui_engine_parity.py [board.kicad_pcb] [--workdir DIR]
+  ```
+
+  It **re-execs into KiCad's bundled python automatically** (it probes
+  `/Applications/KiCad/KiCad.app/.../bin/python3`, then `/usr/bin/python3`, then
+  the Windows path), so plain `python3` is the correct way to launch it — you do
+  NOT need to find the interpreter yourself. The dialog is constructed HEADLESS
+  (`parent=None`, never shown, `WXSUPPRESS_SIZER_FLAGS_CHECK=1`), so no window
+  appears and no display setup is needed. It routes the small in-repo board
+  `kicad_files/splitflap_driver.kicad_pcb` (~9 s of chain), so it costs a couple
+  of minutes, not an afternoon.
+
+  Verify the prerequisites in one line before concluding you can't run it:
+
+  ```bash
+  /Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3 \
+      -c "import pcbnew, wx; print(pcbnew.GetBuildVersion(), wx.version())"
+  ```
+
+  **Do not skip this gate on the assumption that "this session has no wx/pcbnew"**
+  — six consecutive `.gui-parity-checked` markers carried it over as "pending a
+  KiCad-python session" while the prerequisites were installed and working the
+  whole time. CHECK with the line above; only record it as not-run if that
+  actually fails.
+
+  Two caveats when reading its output:
+  - It **REPORTS divergence; it is not pass/fail.** Known-deliberate divergences
+    exist (the CLI mains' kicad-oracle recheck, `clean_plane_copper`, end-of-run
+    reconciliation, `.kicad_pro` floor carryover, the plan-parameter whitelist),
+    so read the printed diff rather than trusting an exit code.
+  - Its plan is a **signal + plane** chain, so it does NOT exercise diff-pair or
+    impedance/coplanar parameters. A gap on those (e.g. the `coplanar_gap` one
+    fixed in `c99ffb4`) can pass this gate untouched — cover such params with a
+    diff-pair board and `check_impedance.py`.
+
+  Siblings worth running the same way: `test_gui_livechain_rp2350.py`, and
+  `replay_plan_vs_run.py` — the latter is the *general* harness (a real headless
+  `RoutingDialog` + real `PlanExecutor`, nothing mocked; it caught #493's
+  one-ULP netclass clearance bug on its first run). See
+  `tests/gui_parity/README.md`.
+
 **Tracking the last-audited commit:** `.gui-parity-checked` (repo root,
 git-committed) holds the SHA of the last commit a full CLI/GUI parity audit
 covered, plus the date and outcome. To bring it up to date: `git log
