@@ -54,6 +54,8 @@ def profile(path):
     for z in (getattr(pcb, 'zones', []) or []):
         if getattr(z, 'net_id', 0):
             seg_nets.add(z.net_id)
+    n_multi_pad = sum(1 for nid, net in pcb.nets.items()
+                      if len(pcb.pads_by_net.get(nid, [])) >= 2)
     return {
         "layers": list(pcb.board_info.copper_layers),
         "n_segments": len(pcb.segments),
@@ -64,8 +66,23 @@ def profile(path):
         "via_count": {f"{s}/{d}": c for (s, d), c in via_count.items()},
         "distinct_widths": len(width_count),
         "nets_with_copper": len(seg_nets),
+        "n_multi_pad_nets": n_multi_pad,
         "n_nets": len(pcb.nets),
     }
+
+
+def original_degeneracy(orig: dict):
+    """Classify a 'human-routed original' whose copper cannot serve as ground
+    truth (#513 item 11): 7/75 wave references had NO copper at all, so every
+    DRC-delta / via / width / layer-balance comparison silently meant nothing.
+    Returns 'empty' (0 segments and 0 vias), 'incomplete' (under half of the
+    multi-pad nets have any copper), or None (usable)."""
+    if orig["n_segments"] == 0 and orig["n_vias"] == 0:
+        return "empty"
+    if orig["n_multi_pad_nets"] and \
+            orig["nets_with_copper"] < 0.5 * orig["n_multi_pad_nets"]:
+        return "incomplete"
+    return None
 
 
 def design_clearance(orig_path):
@@ -94,6 +111,21 @@ def main():
         return round(a / b, 2) if b else None
 
     suggestions = []
+
+    # #513 item 11: 7/75 wave 'human originals' had no (or materially
+    # incomplete) copper, so every comparison below silently meant nothing.
+    # Flag it FIRST so aggregators skip the comparison instead of reading 0s.
+    degenerate = original_degeneracy(orig)
+    if degenerate:
+        print(f"\nWARNING: the ORIGINAL board is {degenerate.upper()} as a "
+              f"routing reference ({orig['n_segments']} segments, "
+              f"{orig['n_vias']} vias; {orig['nets_with_copper']}/"
+              f"{orig['n_multi_pad_nets']} multi-pad nets have copper). "
+              f"DRC-delta and via/width/layer comparisons against it are "
+              f"MEANINGLESS -- skip them for this board (#513 item 11).")
+        suggestions.append(
+            f"REFERENCE-{degenerate.upper()}: the original board is not a "
+            f"usable routing reference; ignore the comparison metrics.")
 
     # 1. Via usage
     if orig["n_vias"] and ours["n_vias"] > 1.3 * orig["n_vias"]:
@@ -163,6 +195,8 @@ def main():
 
     if args.json:
         blob = {"design_clearance": cl, "ours": ours, "original": orig, "suggestions": suggestions}
+        if degenerate:
+            blob["original_degenerate"] = degenerate
         print("\nJSON_COMPARISON: " + json.dumps(blob))
 
 
