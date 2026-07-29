@@ -175,6 +175,180 @@ def test_swap_cap_above_displacement_is_rejected():
                              "against a 3.0mm --max-displacement")
 
 
+# --- the round tally (issue #458 item 1) -------------------------------
+#
+# route.py runs an end-of-run reconciliation pass exactly when the first pass
+# left failures, and prints a second JSON_SUMMARY scoped to the retried nets.
+# The loop used to read the FIRST summary, so every net the reconciliation
+# recovered still counted as failed. The logs below are trimmed to the lines
+# the loop actually parses.
+
+LOG_TWO_PASS = '''Frontier blocking analysis:
+  1. /VBUS: 46 (31.7%), 12 uniq (26%)
+  2. /GND: 20 (13.8%), 4 uniq (20%)
+JSON_SUMMARY: {"failed_single": ["/A", "/B"], "failed_multipoint": \
+[{"net_name": "/C", "failed_pads": [{"component_ref": "U1", \
+"pad_number": "3"}, {"component_ref": "U2", "pad_number": "7"}]}], \
+"multipoint_pads_total": 20, "multipoint_pads_connected": 18, \
+"total_iterations": 1000, "total_vias": 300, "total_time": 12.5}
+
+Final reconciliation: retrying 3 incomplete net(s) against the finished \
+board: /A, /B, /C
+Frontier blocking analysis:
+  1. /MD1: 7 (9.1%), 2 uniq (28%)
+JSON_SUMMARY: {"failed_single": ["/B"], "failed_multipoint": \
+[{"net_name": "/C", "failed_pads": [{"component_ref": "U1", \
+"pad_number": "3"}]}], "multipoint_pads_total": 12, \
+"multipoint_pads_connected": 11, "total_iterations": 40, "total_vias": 7, \
+"total_time": 0.4}
+Note: the JSON_SUMMARY above covers only the reconciliation subset; the \
+run's full tally is the earlier JSON_SUMMARY plus these recoveries.
+'''
+
+LOG_ONE_PASS = '''  Single-ended:  4/4 routed
+JSON_SUMMARY: {"failed_single": [], "failed_multipoint": [], \
+"multipoint_pads_total": 20, "multipoint_pads_connected": 20, \
+"total_iterations": 777, "total_vias": 42, "total_time": 9.0}
+'''
+
+# The reconciliation pass may escalate to rip authority over hinted blockers,
+# and its own coverage gate then reports a net that was never in the retry
+# set: a net the reconciliation itself broke.
+LOG_RECON_BROKE = '''JSON_SUMMARY: {"failed_single": ["/A"], \
+"failed_multipoint": [], "multipoint_pads_total": 20, \
+"multipoint_pads_connected": 20, "total_iterations": 900, "total_vias": 50, \
+"total_time": 8.0}
+
+Final reconciliation: retrying 1 incomplete net(s) against the finished \
+board: /A
+JSON_SUMMARY: {"failed_single": [], "failed_multipoint": \
+[{"net_name": "/GND_RET", "failed_pads": [{"component_ref": "J1", \
+"pad_number": "1"}, {"component_ref": "J1", "pad_number": "2"}]}], \
+"coverage_gate_nets": ["/GND_RET"], "multipoint_pads_total": 6, \
+"multipoint_pads_connected": 6, "total_iterations": 60, "total_vias": 3, \
+"total_time": 0.6}
+'''
+
+# The sub-run prints its summary BEFORE the board is written, so an exception
+# during the write leaves the pass-1 board on disk under a summary that
+# advertises recoveries. route.py:2295 wraps that message in RED/RESET.
+LOG_RECON_ABORTED = '''JSON_SUMMARY: {"failed_single": ["/A", "/B"], \
+"failed_multipoint": [], "multipoint_pads_total": 10, \
+"multipoint_pads_connected": 10, "total_iterations": 500, "total_vias": 20, \
+"total_time": 5.0}
+
+Final reconciliation: retrying 2 incomplete net(s) against the finished \
+board: /A, /B
+JSON_SUMMARY: {"failed_single": [], "failed_multipoint": [], \
+"multipoint_pads_total": 4, "multipoint_pads_connected": 4, \
+"total_iterations": 30, "total_vias": 2, "total_time": 0.3}
+\033[91m  final reconciliation pass failed: [Errno 28] No space left on \
+device\033[0m
+'''
+
+LOG_RECON_NO_SUMMARY = '''JSON_SUMMARY: {"failed_single": ["/A"], \
+"failed_multipoint": [], "multipoint_pads_total": 0, \
+"multipoint_pads_connected": 0, "total_iterations": 300, "total_vias": 11, \
+"total_time": 3.0}
+
+Final reconciliation: retrying 1 incomplete net(s) against the finished \
+board: /A
+All nets are already fully connected - nothing to route!
+'''
+
+
+def _metrics_for(log_text, rc=0):
+    """Drive run_route against a canned route.py log, no child process."""
+    work = tempfile.mkdtemp()
+    calls = []
+
+    def fake(cmd, log_file):
+        calls.append(list(cmd))
+        with open(log_file, 'w', encoding='utf-8') as f:
+            f.write(log_text)
+        return rc
+
+    saved = prl._run_route_cmd
+    prl._run_route_cmd = fake
+    try:
+        metrics = prl.run_route(os.path.join(work, 'in.kicad_pcb'),
+                                os.path.join(work, 'out.kicad_pcb'),
+                                '--nets *', os.path.join(work, 'route.log'))
+    finally:
+        prl._run_route_cmd = saved
+        shutil.rmtree(work, ignore_errors=True)
+    return metrics, calls
+
+
+def test_reconciliation_recoveries_are_not_counted_as_failures():
+    """/A was recovered by the reconciliation pass, /B is still open and /C
+    recovered one of its two open pads. Reading the first summary gave 4."""
+    metrics, _ = _metrics_for(LOG_TWO_PASS)
+    assert metrics['failures'] == 2, metrics
+    assert '/A' not in metrics['failed_nets'], metrics['failed_nets']
+    assert set(metrics['failed_nets']) == {'/B', '/C'}, metrics['failed_nets']
+
+
+def test_effort_counters_are_summed_across_passes():
+    """Both passes are work this placement cost the router, so better()'s
+    iteration tiebreak has to see both."""
+    metrics, _ = _metrics_for(LOG_TWO_PASS)
+    assert metrics['iterations'] == 1040, metrics
+    assert metrics['vias'] == 307, metrics
+
+
+def test_blockers_are_unioned_across_both_passes():
+    """The blocker scrape reads the whole log, so it already spans both
+    passes. Pinned so a future switch to a summary key cannot narrow it."""
+    metrics, _ = _metrics_for(LOG_TWO_PASS)
+    assert metrics['blockers'] == ['/GND', '/MD1', '/VBUS'], metrics
+
+
+def test_single_summary_run_is_unchanged():
+    """A clean run has no reconciliation pass and one summary, which is both
+    the first and the last: same numbers as before the fix, effort not
+    doubled."""
+    metrics, _ = _metrics_for(LOG_ONE_PASS)
+    assert metrics['failures'] == 0
+    assert metrics['failed_nets'] == []
+    assert metrics['iterations'] == 777
+    assert metrics['vias'] == 42
+
+
+def test_a_net_the_reconciliation_broke_is_reported_and_weighed():
+    """A coverage-gate net has no routed result, so its pads never reach
+    multipoint_pads_total and it would otherwise weigh zero: the loop would
+    read failures=0 on a board shipping disconnected copper and stop."""
+    metrics, _ = _metrics_for(LOG_RECON_BROKE)
+    assert metrics['failed_nets'] == ['/GND_RET'], metrics['failed_nets']
+    assert '/A' not in metrics['failed_nets']
+    assert metrics['failures'] >= 1, metrics
+
+
+def test_aborted_reconciliation_falls_back_to_the_first_summary():
+    """The sub-run printed a summary and then died, so the board on disk is
+    still the first pass's. Failure state falls back; effort still sums."""
+    metrics, _ = _metrics_for(LOG_RECON_ABORTED)
+    assert metrics['failures'] == 2, metrics
+    assert set(metrics['failed_nets']) == {'/A', '/B'}, metrics['failed_nets']
+    assert metrics['iterations'] == 530, metrics
+
+
+def test_reconciliation_without_a_summary_degrades_to_the_first():
+    """The sub-run can return before printing anything, e.g. when every
+    retried net turns out to be connected already."""
+    metrics, _ = _metrics_for(LOG_RECON_NO_SUMMARY)
+    assert metrics['failures'] == 1, metrics
+    assert metrics['failed_nets'] == ['/A']
+    assert metrics['iterations'] == 300
+
+
+def test_merge_returns_none_without_a_summary():
+    assert prl.merge_route_summaries('') is None
+    assert prl.merge_route_summaries('Traceback (most recent call last):\n') \
+        is None
+
+
 TESTS = [
     test_swap_cap_held_while_displacement_widens,
     test_swap_cap_held_when_quench_finds_nothing,
@@ -182,6 +356,14 @@ TESTS = [
     test_rotate_and_swap_flags_reach_quench,
     test_kwargs_match_the_real_quench_signature,
     test_swap_cap_above_displacement_is_rejected,
+    test_reconciliation_recoveries_are_not_counted_as_failures,
+    test_effort_counters_are_summed_across_passes,
+    test_blockers_are_unioned_across_both_passes,
+    test_single_summary_run_is_unchanged,
+    test_a_net_the_reconciliation_broke_is_reported_and_weighed,
+    test_aborted_reconciliation_falls_back_to_the_first_summary,
+    test_reconciliation_without_a_summary_degrades_to_the_first,
+    test_merge_returns_none_without_a_summary,
 ]
 
 

@@ -40,19 +40,100 @@ import routing_defaults as defaults
 from placement.quench import quench
 from placement.writer import write_placed_output
 
+_SUMMARY_RE = re.compile(r'JSON_SUMMARY: (\{.*\})')
+
+# route.py prints this from the except around its reconciliation self-invoke
+# (route.py:2294). The sub-run prints its JSON_SUMMARY BEFORE the board is
+# written, so a summary followed by this marker advertises recoveries that may
+# never have reached the file on disk.
+_RECONCILE_ABORTED = 'final reconciliation pass failed:'
+
+# Counters that measure WORK DONE, so they add across passes. Everything else
+# in a summary is state, and state is whatever the LAST pass measured.
+_EFFORT_KEYS = ('total_iterations', 'total_vias', 'total_time')
+
+
+def merge_route_summaries(log: str):
+    """Reduce every JSON_SUMMARY in a route.py log to one honest tally.
+
+    route.py runs an end-of-run reconciliation pass (route.py:2144, #348)
+    exactly when the first pass left failures. It self-invokes batch_route one
+    level deep on the written board and prints a SECOND JSON_SUMMARY, scoped
+    to the retried nets, whose failure lists route.py itself calls "the honest
+    still-open set". Reading only the first summary counted every
+    reconciliation recovery as a failure: the loop quenched parts anchoring
+    nets that were already solved, and better() compared tallies taken at
+    different points in the run.
+
+    Per field class:
+
+    * FAILURE STATE (failed_single / failed_multipoint / multipoint_pads_*)
+      comes from the LAST summary, and is exact rather than a delta. Every net
+      with a nonzero failure term is in the retry set by construction, and the
+      sub-run re-derives each retried net's pad counts over ALL of that net's
+      pads from the final-board union-find (route.py:1840), so the last
+      summary's numbers are absolute. Summing pad counts would double-count.
+    * EFFORT (total_iterations / total_vias / total_time) is SUMMED: both
+      passes are work this placement cost the router, and better()'s iteration
+      tiebreak should see all of it. Taking effort from the last summary would
+      make a badly failing candidate look cheap, since the reconciliation pass
+      only re-routes a handful of nets.
+    * Anything else is last-wins.
+
+    Degrades to the single-summary case unchanged: no failures, or a sub-run
+    that returned before printing, leaves one summary that is both the first
+    and the last. Returns None when the log carries no summary at all.
+    """
+    raw = _SUMMARY_RE.findall(log)
+    if not raw:
+        return None
+    summaries = [json.loads(s) for s in raw]
+
+    # A reconciliation that raised AFTER printing its summary claims
+    # recoveries the board write may never have committed; fall back to the
+    # first pass, which is what is definitely on disk.
+    aborted = log.rfind(_RECONCILE_ABORTED) > log.rfind(raw[-1])
+    merged = dict(summaries[0] if aborted else summaries[-1])
+
+    for key in _EFFORT_KEYS:
+        merged[key] = sum(s.get(key, 0) for s in summaries)
+
+    # Coverage-gate nets (route.py:1881) have NO routed result, so their pads
+    # never reach multipoint_pads_total and the caller's
+    # failures = len(failed_single) + pad-deficit weighs them ZERO, though
+    # they ship at broken copper. Give each one weight 1, matching what
+    # failed_single gives a net that produced no result at all, by widening
+    # the pad denominator. They are in neither failed_single nor the pad
+    # tallies (route.py:1887 excludes single_ended_nets and routed_results),
+    # so this cannot double-count. It matters most on the LAST summary: those
+    # are nets the reconciliation pass ITSELF broke through its rip
+    # escalation, and without this the loop can read failures=0 on a board
+    # shipping disconnected copper and stop.
+    gate = merged.get('coverage_gate_nets') or []
+    if gate:
+        merged['multipoint_pads_total'] = (
+            merged.get('multipoint_pads_total', 0) + len(gate))
+    return merged
+
+
+def _run_route_cmd(cmd, log_file):
+    """Launch route.py with stdout and stderr captured to log_file; return its
+    exit code. Split out from run_route so the whole tally can be driven
+    against a canned log without launching a child process."""
+    with open(log_file, 'w') as f:
+        return subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT).returncode
+
 
 def run_route(pcb_file: str, routed_file: str, route_args: str, log_file: str):
     """Run route.py, return (metrics dict, log text)."""
     cmd = [sys.executable, 'route.py', pcb_file, routed_file] + \
         shlex.split(route_args)
-    with open(log_file, 'w') as f:
-        subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT)
+    _run_route_cmd(cmd, log_file)
     log = open(log_file).read()
 
-    m = re.search(r'JSON_SUMMARY: (\{.*\})', log)
-    if not m:
+    summary = merge_route_summaries(log)
+    if summary is None:
         raise RuntimeError(f"route.py produced no JSON_SUMMARY (see {log_file})")
-    summary = json.loads(m.group(1))
 
     failed_nets = list(summary.get('failed_single', []))
     # failed_multipoint entries are dicts {net_name, failed_pads}; keep just the
