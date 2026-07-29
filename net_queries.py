@@ -578,12 +578,36 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
                 break  # Only need one pad's net_name per net
 
     # Filter out unconnected nets (KiCad pins not connected in schematic)
-    # and empty net names
+    # and empty net names. Literal-name lookups ("does not exist" check,
+    # did-you-mean) still see the unfiltered set, so explicitly naming an
+    # 'unconnected-*' net works without a spurious warning (#513 item 7).
+    unfiltered_net_names = set(all_net_names)
     if exclude_unconnected:
         all_net_names = {name for name in all_net_names
                         if name and not name.lower().startswith('unconnected-')}
+        # #513 item 7: an 'unconnected-*' net with >=2 pads is NOT always a
+        # true no-connect -- reversible footprints (XIAO, ProMicro) get their
+        # doubled pin positions auto-named this way and the pads DO need a
+        # trace (klein_kb shipped 4 such nets open). But USB-shield tabs share
+        # the same shape and are correctly left unrouted (#479, joined by the
+        # connector shell) -- so warn with names rather than auto-route.
+        _multi_nc = []
+        for _nid, _net in pcb_data.nets.items():
+            _nm = _net.name or ''
+            if not _nm.lower().startswith('unconnected-'):
+                continue
+            _np = len(pcb_data.pads_by_net.get(_nid, []))
+            if _np >= 2:
+                _multi_nc.append((_nm, _np))
+        if _multi_nc:
+            _lst = ', '.join(f"'{n}' ({c} pads)" for n, c in sorted(_multi_nc)[:8])
+            print(f"WARNING: {len(_multi_nc)} 'unconnected-*' net(s) with >=2 pads "
+                  f"excluded from the wildcard: {_lst}. If these are a reversible "
+                  f"footprint's doubled pins they DO need a trace -- route them "
+                  f"explicitly by naming them in --nets. Shield/mounting tabs "
+                  f"joined mechanically can stay unrouted (#513 item 7).")
 
-    known_net_names = set(all_net_names)
+    known_net_names = unfiltered_net_names
     all_net_names = list(all_net_names)
     result = []
     seen = set()
@@ -661,6 +685,13 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
                     if name not in seen:
                         result.append(name)
                         seen.add(name)
+            elif pattern in known_net_names:
+                # Literal naming a real net that the wildcard pool filtered out
+                # (an 'unconnected-*' no-connect): explicit naming includes it
+                # without the spurious does-not-exist warning (#513 item 7).
+                if pattern not in seen and pattern not in excluded:
+                    result.append(pattern)
+                    seen.add(pattern)
             else:
                 # Literal naming no net: preserved as-is (callers may pass names
                 # this board does not carry) with the long-standing warning.

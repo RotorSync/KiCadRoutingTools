@@ -1221,6 +1221,7 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
     # Find unrouted nets (pads but no segments) unless routed_only
     unrouted_nets = []
     skipped_noconnect = 0
+    skipped_noconnect_multi = []  # (name, pad_count) with >=2 pads (#513 item 7)
     if not routed_only:
         copper_layers = pcb_data.board_info.copper_layers or ['F.Cu', 'B.Cu']
         for net_id, net_info in pcb_data.nets.items():
@@ -1260,6 +1261,14 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                 # ch32v006_dev). An explicit --nets pattern still checks them.
                 if not net_patterns and net_info.name.lower().startswith('unconnected-'):
                     skipped_noconnect += 1
+                    # #513 item 7: >=2 pads under one auto-named no-connect can
+                    # be a reversible footprint's doubled pins that DO need a
+                    # trace (klein_kb) -- surface them by name instead of
+                    # hiding them in the skip count (shield tabs, #479, are
+                    # the benign case; the human reference disambiguates).
+                    if len(pads_by_net[net_id]) >= 2:
+                        skipped_noconnect_multi.append(
+                            (net_info.name, len(pads_by_net[net_id])))
                     continue
                 # Multi-board: only an outline holding >=2 of the net's pads
                 # has anything routable. A one-pad-per-board net is purely a
@@ -1286,6 +1295,14 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
         if skipped_noconnect:
             print(f"  Skipped {skipped_noconnect} unrouted no-connect net(s) "
                   f"('unconnected-*'); pass --nets to check them")
+        if skipped_noconnect_multi:
+            _lst = ', '.join(f"'{n}' ({c} pads)"
+                             for n, c in sorted(skipped_noconnect_multi)[:8])
+            print(f"  WARNING: {len(skipped_noconnect_multi)} of the skipped "
+                  f"no-connect net(s) have >=2 pads: {_lst}. A reversible "
+                  f"footprint's doubled pins are auto-named this way and DO "
+                  f"need a trace -- check the human reference and route them "
+                  f"by name if so (#513 item 7).")
         if _outlines:
             print(f"  Multi-board file: {len(_outlines)} board outlines; "
                   f"nets graded per outline (board-to-board links exempt)")
