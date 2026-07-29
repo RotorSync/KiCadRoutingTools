@@ -606,6 +606,17 @@ def apply_step_params(step, dialog):
                     _enable_geometry_override(dialog, name)
                 except (TypeError, ValueError):
                     notes.append(f"ignored non-numeric {name}={params[name]!r}")
+        # Same handling as the create action above: the control lives on the
+        # Create panel, but repair-mode config borrows it since the #511
+        # engine-coverage sweep (PlanesTab._build_mode_config), matching the
+        # CLI's route_disconnected_planes.py --zone-clearance. Before that,
+        # a repair step's zone_clearance had NO path to the engine at all.
+        if "zone_clearance" in params and params["zone_clearance"] is not None:
+            _pop = getattr(dialog.planes_tab, "create_options", None)
+            if _pop is not None and hasattr(_pop, "zone_clearance_check"):
+                _pop.zone_clearance_check.SetValue(True)
+                if hasattr(_pop, "zone_clearance"):
+                    _pop.zone_clearance.Enable(True)
         opts = dialog.planes_tab.repair_options
         _repair_ctrls = {"max_track_width": opts.max_track_width,
                          "min_track_width": opts.min_track_width,

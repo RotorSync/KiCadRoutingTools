@@ -833,22 +833,9 @@ class PlanesTab(wx.Panel):
             )
             return
 
-        # Get shared parameters
-        shared_params = {}
-        if self.get_shared_params:
-            shared_params = self.get_shared_params()
-
-        # Get mode-specific config
-        if mode == 0:
-            config = self.create_options.get_config()
-        else:
-            config = self.repair_options.get_config()
-
+        config = self._build_mode_config(mode)
         # Both modes use assignments
         config['assignments'] = assignments
-
-        config.update(shared_params)
-        config['mode'] = 'create' if mode == 0 else 'repair'
 
         # Disable UI
         self.action_btn.Disable()
@@ -871,6 +858,37 @@ class PlanesTab(wx.Panel):
 
         # Poll for completion
         self._poll_operation()
+
+    def _build_mode_config(self, mode):
+        """Assemble the engine config for a create (0) or repair (1) run.
+
+        The ONE assembly point for both modes (the kwarg-parity gate drives
+        this method directly, so what it returns IS what the engine call
+        reads -- no hand-mirrored dict to drift). Repair borrows the two
+        Create-panel knobs that govern its via placement too:
+
+        - max_search_radius: the repair call site has read this since #180
+          ("honor the panel's slider on Repair too"), but the slider lives on
+          the Create panel and repair config never included it, so the read
+          fell to the default forever -- the Repair-mode twin of the #511
+          dead-control class.
+        - zone_clearance: override-gated (unchecked box -> None -> engine
+          default, same as the CLI omitting --zone-clearance), so merging it
+          changes nothing unless the user explicitly declared a plane zone
+          clearance -- which route_disconnected_planes.py --zone-clearance
+          honors on the CLI.
+        """
+        if mode == 0:
+            config = self.create_options.get_config()
+        else:
+            config = self.repair_options.get_config()
+            config['max_search_radius'] = self.create_options.max_search_radius.GetValue()
+            config['zone_clearance'] = (
+                self.create_options.zone_clearance.GetValue()
+                if self.create_options.zone_clearance_check.GetValue() else None)
+        config.update(self.get_shared_params() if self.get_shared_params else {})
+        config['mode'] = 'create' if mode == 0 else 'repair'
+        return config
 
     def _run_planes_operation(self, config):
         """Run plane operation in background thread."""
@@ -1308,7 +1326,16 @@ class PlanesTab(wx.Panel):
                 routing_layers=all_layers,
                 repair_pads=config.get('repair_pads', True),
                 rip_blocker_nets=config.get('rip_blocker_nets', False),
-                max_rip_nets=config.get('max_rip_nets', defaults.PLANE_MAX_RIP_NETS),                power_nets=config.get('power_nets'),
+                # #424's third front: route_disconnected_planes.py passes
+                # --ripup-blocker-select and get_shared_params supplies the
+                # shared dropdown's value, but this call never forwarded it,
+                # so repair rip-up silently stayed on 'count' (the fix
+                # covered create_plane and missed repair, exactly as #489's
+                # add_teardrops covered planes and missed the diff tab).
+                ripup_blocker_select=config.get('ripup_blocker_select',
+                                                defaults.RIPUP_BLOCKER_SELECT),
+                max_rip_nets=config.get('max_rip_nets', defaults.PLANE_MAX_RIP_NETS),
+                power_nets=config.get('power_nets'),
                 power_nets_widths=config.get('power_nets_widths'),
                 # The route tab's "ALL" no-BGA-zones intent, mirrored when
                 # re-routing ripped nets on a BGA board (issue #88).

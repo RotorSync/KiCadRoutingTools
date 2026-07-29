@@ -1,24 +1,40 @@
-HEAD 2026-07-29 parity audit e8c72fe..c501a80 (the #513 fix wave: 18 commits,
-17 issue items + the #514->#261 pair-report fix). Outcome: NO GAPS, gate PASSED
-with copper sets IDENTICAL.
+HEAD 2026-07-29 parity audit c501a80..335e88d (the #511 config-builder wave:
+2 commits). Outcome: GAPS FOUND AND FIXED, all gates PASSED, chain copper
+sets IDENTICAL, live diff-route smoke 2/2 coupled.
 
-  * NO new engine kwarg shipped: the --force-reroute prototype (batch_route
-    kwarg + GUI checkbox + FLAG_PARAMS) was REVERTED and filed as #515 per the
-    new-param policy; the rescue-gap flag went to #516 unbuilt. Everything
-    committed lives INSIDE shared engine/checker functions (both fronts inherit):
-    check_net_connectivity graphic exclusion, plane_region_connector chain-union
-    + join skip, plane_pad_tap grader pruning, layer_swap/diff_multipoint
-    local_clearance gates, fab_tiers min_track_width mapping, seed_project_
-    for_output in all four writers, route_diff partial_diff_pairs (results-data
-    key is ADDITIVE; GUI ignores unknown keys).
-  * qfn_fanout main() gained edge-clearance default resolution + fab pinning --
-    CLI-side parity with the GUI's unchecked Min Edge Clearance override
-    (the GUI already resolved the board minimum; no control change needed).
-  * Gates: test_manifest_plan_parity 14767 checks 0 mismatches;
-    test_cli_postpass_coverage clean (seed_project_for_output is in the shared
-    writers, not a main() post-pass); test_gui_engine_parity VERDICT: PARITY --
-    segments CLI=GUI=1307, vias 144=144, copper sets identical, DRC 0/0,
-    kicad_unconnected 0/0.
-  * Session note: the wx gate hung ONCE at ~0 CPU -- the macOS restore-windows
-    alert again (ApplePersistenceIgnoreState had reverted/was unset). Re-set
-    with: defaults write -g ApplePersistenceIgnoreState -bool YES.
+  * #511 CLOSED (169f6b8): the Differential tab's hand-maintained ~30-key
+    get_routing_config now DELEGATES to _build_routing_config. Revived the
+    25 baselined dead controls PLUS ~12 more behind differently-named
+    controls the gate's bare-hasattr probe missed (keepout_check,
+    time_matching_check, length_match_groups_ctrl, direction_choice,
+    schematic_dir_ctrl, swappable nets, skip_routing_check, ...) and one
+    hidden from the AST scan by `not config.get(...)`. Planes tab had the
+    same class for debug_lines/verbose (found by the hardened probe the
+    moment it learned the _check suffix) -- supplied in get_shared_params.
+  * Engine-coverage sweep (335e88d): gated the three ungated call sites
+    (repair_planes alias-aware, generate_bga_fanout, generate_qfn_fanout).
+    Caught + fixed: ripup_blocker_select never FORWARDED at the repair call
+    (#424's fix covered create only), and max_search_radius/zone_clearance
+    read at the repair call but never supplied (the Create-panel slider was
+    claimed honored on Repair since #180 -- it never was). Repair config
+    assembly refactored into PlanesTab._build_mode_config; the gate drives
+    that real method, no hand-mirrored dict. Plan executor zone_clearance
+    handling extended to repair_planes steps. Fanout: CLEAN both classes
+    once Class 1 learned to prefer the args-reading CLI-main call over
+    bga_fanout's internal recursive calls.
+  * Gate hardening: KNOWN_DEAD_DIFF_KEYS EMPTY (a key landing there is a
+    new bug, not a baseline); control probe tries _check/_ctrl/_choice +
+    aliases; receiver-aware Class 2 (fanout reads from TWO dicts); three
+    permanent non-default-value cases (#486 coplanar, #511 delegation x8
+    controls, #511 repair x3 knobs).
+  * Residue FILED not fixed: #518 (repair track_via_clearance/max_rip_nets/
+    reroute_ripped_nets have no GUI/plan path -- product decision), #519
+    (BGA under-pad fallback retry drops soft layer-cost weights;
+    engine-internal, both fronts equally).
+  * Gates: test_engine_kwarg_parity 6 engines Class 1 + 5 call sites
+    Class 2 all OK; test_manifest_plan_parity 14767 checks 0 mismatches;
+    test_cli_postpass_coverage clean; test_gui_engine_parity VERDICT:
+    PARITY -- segments CLI=GUI=1307, vias 144=144, DRC 0/0. Live smoke:
+    KICAD_DUMP_BATCH_KWARGS through the diff tab's real _run_diff_routing
+    proved 7 non-default values arrive at batch_route_diff_pairs, then a
+    real run routed 2/2 pairs coupled.
