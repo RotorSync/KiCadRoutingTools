@@ -461,18 +461,46 @@ def _regions_from_fill_models(net_id, pcb_data, coord, plane_layer,
     if not cells_by_comp:
         return None
 
-    # Union islands through same-net copper: a segment on a zone layer whose
-    # endpoints touch two islands joins them (tracks are exact copper); a
-    # same-net via / plated barrel joins every island it touches across the
-    # zone layers.
+    # Union islands through same-net copper. #513 item 8: the old per-segment
+    # test (both endpoints on fill) could never credit a MULTI-segment join
+    # strap -- its middle endpoints sit in the gap on no fill -- so a rerun on
+    # an already-repaired plane re-detected the same regions and laid the
+    # same straps again, every time (peaksat +154 segments per pass;
+    # din41612 even re-introduced a fixed pinch). Build point-connectivity
+    # CHAINS over the net's segments (all layers -- a strap may jog through a
+    # non-zone layer) with vias joining layers at their position, then union
+    # every island any single chain touches.
     uf = UnionFind()
-    for s in pcb_data.segments:
-        if s.net_id != net_id or s.layer not in zone_layers:
+    _pt_uf = UnionFind()
+
+    def _pk(layer, x, y):
+        return (layer, round(x, 3), round(y, 3))
+
+    _net_segs = [s for s in pcb_data.segments
+                 if s.net_id == net_id and not getattr(s, 'graphic', False)]
+    _chain_layers = {s.layer for s in _net_segs} | set(zone_layers)
+    for s in _net_segs:
+        _pt_uf.union(_pk(s.layer, s.start_x, s.start_y),
+                     _pk(s.layer, s.end_x, s.end_y))
+    for v in pcb_data.vias:
+        if v.net_id != net_id:
             continue
-        ka = _comp_key_at(s.layer, s.start_x, s.start_y, size=s.width)
-        kb = _comp_key_at(s.layer, s.end_x, s.end_y, size=s.width)
-        if ka is not None and kb is not None and ka != kb:
-            uf.union(ka, kb)
+        _ks = [_pk(l, v.x, v.y) for l in _chain_layers]
+        for _k2 in _ks[1:]:
+            _pt_uf.union(_ks[0], _k2)
+    _islands_by_chain: Dict[tuple, Set[tuple]] = {}
+    for s in _net_segs:
+        if s.layer not in zone_layers:
+            continue  # island-touch tests only make sense on zone layers
+        _chain = _pt_uf.find(_pk(s.layer, s.start_x, s.start_y))
+        for (ex, ey) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
+            k = _comp_key_at(s.layer, ex, ey, size=s.width)
+            if k is not None:
+                _islands_by_chain.setdefault(_chain, set()).add(k)
+    for _ik in _islands_by_chain.values():
+        _il = sorted(_ik)
+        for _k2 in _il[1:]:
+            uf.union(_il[0], _k2)
     _th_pts = [(v.x, v.y) for v in pcb_data.vias if v.net_id == net_id]
     for p in pcb_data.pads_by_net.get(net_id, []):
         if pad_is_plated_through(p):
@@ -1782,6 +1810,32 @@ def route_disconnected_regions(
         n_anchors = len(region_anchors[0]) if region_anchors else 0
         print(f"  Zone is fully connected ({n_anchors} anchors in 1 region)")
         return [], [], 0, [], connectivity_paths
+
+    # #513 item 8 (idempotency): the region model can read a plane as split
+    # when existing copper it cannot chain (T-junction straps, prior-run
+    # repairs) in fact bridges it -- and each rerun then re-laid the same
+    # joins (peaksat, rc2014, nesora; din41612 even re-introduced a fixed
+    # pinch via the recomputed multi-net Voronoi). When EVERY detected region
+    # carries anchors (no pad-less orphan islands, which the net-level check
+    # cannot speak for) and the authoritative fill-aware grader says the net
+    # is fully connected, the split is a model artifact: skip the joins.
+    if all(region_anchors):
+        try:
+            from check_connected import check_net_connectivity as _cnc8
+            _segs8 = [s for s in pcb_data.segments if s.net_id == net_id]
+            _vias8 = [v for v in pcb_data.vias if v.net_id == net_id]
+            _pads8 = pcb_data.pads_by_net.get(net_id, [])
+            _zones8 = [z for z in (getattr(pcb_data, 'zones', None) or [])
+                       if z.net_id == net_id]
+            _res8 = _cnc8(net_id, _segs8, _vias8, _pads8, _zones8,
+                          tolerance=0.02, pcb_data=pcb_data)
+            if _res8.get('connected'):
+                print(f"  {len(region_anchors)} model region(s) already "
+                      f"bridged by existing copper per the fill-aware grader "
+                      f"-- skipping joins (idempotent rerun, #513 item 8)")
+                return [], [], 0, [], connectivity_paths
+        except Exception:
+            pass
 
     # Count total anchors per region for display
     total_anchors = sum(len(anchors) for anchors in region_anchors)

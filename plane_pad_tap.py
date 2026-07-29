@@ -1377,6 +1377,26 @@ def find_unconnected_plane_pads(
         if _zones:
             _res = check_net_connectivity(net_id, _segs, _vias, _pads, _zones,
                                           tolerance=0.02, pcb_data=pcb_data)
+            # #513 item 8 (idempotency): the geometric walk above is exact-
+            # endpoint / zone-LAYER-goal based, so it re-flags a pad whose
+            # existing repair web reaches the plane through a T-junction or
+            # through copper the walk cannot chain -- and each rerun then laid
+            # ANOTHER identical repair web on an already-connected pad
+            # (peaksat: 8 GND pads re-repaired per pass on a board the
+            # authoritative grader calls fully connected). The fill-aware
+            # grader is the SAME check that later declares the net complete:
+            # a pad it does not report disconnected needs no repair. Prune.
+            _dis_keys = {(round(_d[0], 3), round(_d[1], 3))
+                         for _d in (_res.get('disconnected_pads') or [])}
+            _keep = [(p, l) for (p, l) in unconnected
+                     if (round(p.global_x, 3), round(p.global_y, 3))
+                     in _dis_keys]
+            _skipped = len(unconnected) - len(_keep)
+            if _skipped:
+                print(f"    {_skipped} geometrically-flagged pad(s) are "
+                      f"already plane-connected per the fill-aware grader "
+                      f"-- skipped (idempotent rerun, #513 item 8)")
+            unconnected = _keep
             _have = {(round(p.global_x, 3), round(p.global_y, 3))
                      for p, _l in unconnected}
             for _dp in (_res.get('disconnected_pads') or []):
