@@ -29,6 +29,9 @@ GATES AT HEAD -- ALL RUN, ALL GREEN (see the wx-blockage correction below):
     with NON-DEFAULT values actually arriving: coplanar_gap = 0.25 (want 0.25),
     add_teardrops = True (want True), and the call site forwards coplanar_gap.
     That is the verification c99ffb4 lacked when it shipped inert.
+  * test_gui_livechain_rp2350.py: PASS -- GUI and CLI chains both grade CLEAN
+    (0 DRC @ 0.09) at every stage: create / repair / reconnect / final. The GUI
+    arm ran the real dialog through all 4 plan steps (22s / 534s / 21s / 249s).
   * test_plane_all_layers_parity.py: PASS.
   * test_footprint_position_sync.py: PASS.
   * test_manifest_plan_parity.py: 14199 flag-checks / 365 manifests, 0 mismatches;
