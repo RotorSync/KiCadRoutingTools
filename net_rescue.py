@@ -23,8 +23,10 @@ Design constraints (#331/#371 review):
     window around the remaining GAP (the #329/#134 partial restores mean
     the gap is usually a short missing link, not the whole net).
     Board-global 0.025 is ~9M cells/layer and would exhaust memory. The
-    compute limits (grid, window margin, cell budget, max gap span, max
-    attempts) are the RESCUE_* constants in routing_defaults.
+    compute limits (grid, window margin, cell budget, max attempts) are
+    the RESCUE_* constants in routing_defaults. Gap LENGTH is deliberately
+    unbounded (#516): the cell budget is what bounds compute — a longer
+    gap gets a coarser grid, not a bigger search.
   - Always on, no flags: lives inside batch_route so the CLI and the GUI
     plugin share it (CLAUDE.md parity rule). Set KICAD_NET_RESCUE=0 to
     disable for A/B debugging.
@@ -120,12 +122,16 @@ def _closest_pair(points_a, points_b):
 
 
 def _choose_grid(config, half_size):
-    """Finest rescue grid whose window fits the per-layer cell budget."""
+    """Finest rescue grid whose window fits the per-layer cell budget.
+
+    May come out COARSER than the run's own grid_step for a very long gap
+    (#516): the cell budget, not the gap length, is what bounds rescue
+    compute, so the grid keeps doubling until the window fits.
+    """
     fine = min(config.grid_step, defaults.RESCUE_GRID_STEP)
-    while (fine < config.grid_step - 1e-9
-           and (2 * half_size / fine) ** 2 > defaults.RESCUE_MAX_WINDOW_CELLS):
+    while (2 * half_size / fine) ** 2 > defaults.RESCUE_MAX_WINDOW_CELLS:
         fine *= 2
-    return min(fine, config.grid_step)
+    return fine
 
 
 def _rescue_rungs(config, fine_grid, pcb_data, net_id):
@@ -420,10 +426,6 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None):
                 break
             gaps.sort(key=lambda g: g[1][0])
             key, gap = gaps[0]
-            if gap[0] > defaults.RESCUE_MAX_GAP_MM:
-                print(f"    {YELLOW}gap {gap[0]:.1f}mm exceeds rescue limit "
-                      f"{defaults.RESCUE_MAX_GAP_MM:g}mm - skipped{RESET}")
-                break
             attempts += 1
             result, used_cfg = _attempt_edge(pcb_data, net_id, gap, config,
                                              net_clearances)

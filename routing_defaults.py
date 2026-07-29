@@ -232,14 +232,16 @@ REPAIR_ANALYSIS_GRID_STEP = 0.5  # mm - grid step for connectivity analysis
 # finer grid, with the track narrowed to the fab floor and the clearance
 # stepped down toward the fab floor (mirrors the plane-tap fine ladder, #226).
 # The limits below bound the compute: the window is sized to the gap (never
-# the board), the grid auto-coarsens until the window fits the cell budget,
-# and gaps longer than RESCUE_MAX_GAP_MM are a re-thread, not a gap - skipped.
+# the board), and the grid auto-coarsens until the window fits the cell
+# budget — even past the run's own grid_step for a very long gap, so gap
+# LENGTH needs no cap of its own (#516: the old 40mm RESCUE_MAX_GAP_MM skip
+# shipped >40mm connector nets disconnected while saving nothing — the cell
+# budget already bounds the search).
 RESCUE_GRID_STEP = 0.025          # mm - fine grid for the scoped rescue retry
 RESCUE_CLEARANCE_STEPS = 4        # clearance rungs from nominal down to the fab floor
 RESCUE_WINDOW_MARGIN = 4.0        # mm of window past the gap bbox on every side
 RESCUE_MIN_WINDOW_HALF = 6.0      # mm - minimum window half-size (detour room)
 RESCUE_MAX_WINDOW_CELLS = 4_000_000  # per-layer cell budget; grid coarsens to fit
-RESCUE_MAX_GAP_MM = 40.0          # mm - skip gaps longer than this
 RESCUE_MAX_EDGES_PER_NET = 8      # max gap-closing attempts per rescued net
 RESCUE_MAX_ITERATIONS = 1_000_000  # per-rung A* backstop. Deliberately generous:
                                    # hopeless rungs exhaust the small fenced window
