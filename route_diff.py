@@ -1204,6 +1204,14 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     routed_diff_pairs = []
     failed_diff_pairs = []
     single_ended_diff_pairs = []
+    partial_diff_pairs = []
+    # #514 (-> #261): the MEMBER AUDIT already knows when a "routed" pair left
+    # member pads disconnected, but the summary lists ignored it -- so
+    # JSON_SUMMARY said successful while check_connected showed 0% members
+    # (peaksat_comms CAN_A/CAN_B/RX09; muzy_zynq4, lwdo_sdr, sipm_bias).
+    # A pair the audit flags is reported PARTIAL, never routed.
+    _partial_by_audit = {r['pair'] for r in pair_reports
+                         if r.get('member_audit_mismatch')}
     for pair_name, pair in diff_pair_ids_to_route:
         _rr_p = routed_results.get(pair.p_net_id)
         _rr_n = routed_results.get(pair.n_net_id)
@@ -1214,7 +1222,10 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             # coupled route -- without the flag check, a deferred/failed pair
             # whose members were both connected single-ended would count as a
             # routed diff pair.
-            routed_diff_pairs.append(pair_name)
+            if pair_name in _partial_by_audit:
+                partial_diff_pairs.append(pair_name)
+            else:
+                routed_diff_pairs.append(pair_name)
         elif (pair.p_net_id in state.diff_pair_single_ended_nets
               or pair.n_net_id in state.diff_pair_single_ended_nets):
             # Intentionally left for single-ended routing (electrically short, or
@@ -1234,6 +1245,10 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         print(f"  {RED}Diff pairs:    {len(routed_diff_pairs)}/{len(diff_pair_ids_to_route)} routed ({len(failed_diff_pairs)} FAILED){RESET}")
     else:
         print(f"  Diff pairs:    {len(routed_diff_pairs)}/{len(diff_pair_ids_to_route)} routed")
+    if partial_diff_pairs:
+        print(f"  {RED}Partial:       {len(partial_diff_pairs)} pair(s) whose coupled "
+              f"route left member pads disconnected (see MEMBER AUDIT): "
+              f"{', '.join(sorted(partial_diff_pairs))}{RESET}")
     if ripup_success_pairs:
         print(f"  Rip-up success: {len(ripup_success_pairs)} (routes that ripped blockers)")
     if rerouted_pairs:
@@ -1260,6 +1275,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     summary = {
         'routed_diff_pairs': routed_diff_pairs,
         'failed_diff_pairs': failed_diff_pairs,
+        'partial_diff_pairs': sorted(partial_diff_pairs),
         'single_ended_diff_pairs': single_ended_diff_pairs,
         'ripup_success_pairs': sorted(ripup_success_pairs),
         'rerouted_pairs': sorted(rerouted_pairs),
