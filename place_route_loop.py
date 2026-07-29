@@ -121,7 +121,13 @@ def main():
                         help="Max repair rounds (default: 5)")
     parser.add_argument("--max-displacement", type=float, default=3.0,
                         help="Initial displacement cap per round in mm "
-                             "(default: 3; widened 1.5x after a rejected round)")
+                             "(default: 3; widened 1.5x after a rejected "
+                             "round - nudges only, never swaps)")
+    parser.add_argument("--swap-max-displacement", type=float, default=None,
+                        help="Displacement cap for same-footprint swaps in mm; "
+                             "must not exceed --max-displacement and is NOT "
+                             "widened between rounds (default: the initial "
+                             "--max-displacement)")
     parser.add_argument("--max-target-pins", type=int, default=40,
                         help="Don't move parts with more connected pins than "
                              "this (default: 40)")
@@ -142,10 +148,26 @@ def main():
     parser.add_argument("--grid-step", type=float, default=defaults.GRID_STEP)
     parser.add_argument("--ignore-nets", nargs="+", default=None)
     parser.add_argument("--lock", nargs="+", default=None)
+    parser.add_argument("--no-rotate", action="store_true",
+                        help="Disable rotation moves")
+    parser.add_argument("--no-swap", action="store_true",
+                        help="Disable same-footprint swap moves")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="Print each accepted quench move and the "
+                             "per-pass swap-capped count")
     parser.add_argument("--work-dir", default=None,
                         help="Directory for intermediate files "
                              "(default: alongside output)")
     args = parser.parse_args()
+
+    if args.max_displacement < 0:
+        parser.error("--max-displacement must be >= 0")
+    if args.swap_max_displacement is not None:
+        if args.swap_max_displacement < 0:
+            parser.error("--swap-max-displacement must be >= 0")
+        if args.swap_max_displacement > args.max_displacement:
+            parser.error("--swap-max-displacement must not exceed "
+                         "--max-displacement")
 
     work = args.work_dir or os.path.dirname(os.path.abspath(args.output_file))
     os.makedirs(work, exist_ok=True)
@@ -160,6 +182,14 @@ def main():
           f" vias={best['vias']}")
 
     max_disp = args.max_displacement
+    # The swap cap is pinned to the BASE displacement and never widened (#458).
+    # A rejected round widens the NUDGE radius, a local search around each
+    # part's own seed that a real re-route then validates. Widening the swap
+    # cap in lockstep turns a 3mm budget into a 15mm teleport after four
+    # rejections, which is the #430 stranding failure coming back through the
+    # loop. Swaps get one fixed budget for the whole run.
+    swap_cap = (args.max_displacement if args.swap_max_displacement is None
+                else args.swap_max_displacement)
 
     for rnd in range(1, args.rounds + 1):
         if best['failures'] == 0:
@@ -182,11 +212,14 @@ def main():
         print(f"  blockers={best['blockers'][:8]}"
               f"{'...' if len(best['blockers']) > 8 else ''}")
         print(f"  targeting {len(targets)} parts"
-              f" (max_disp={max_disp:.1f}mm): {', '.join(sorted(targets))}")
+              f" (max_disp={max_disp:.1f}mm, swap cap={swap_cap:.1f}mm):"
+              f" {', '.join(sorted(targets))}")
 
         placements = quench(
             pcb_data, pcb_file=cur_file,
-            max_displacement=max_disp, step=args.step,
+            max_displacement=max_disp,
+            swap_max_displacement=swap_cap,
+            step=args.step,
             grid_step=args.grid_step, clearance=args.clearance,
             board_edge_clearance=args.board_edge_clearance,
             crossing_penalty=args.crossing_penalty,
@@ -194,12 +227,16 @@ def main():
             halo_base=args.halo_base, halo_coef=args.halo_coef,
             halo_weight=args.halo_weight,
             edge_halo=args.edge_halo, edge_weight=args.edge_weight,
+            allow_rotations=not args.no_rotate,
+            allow_swaps=not args.no_swap,
             ignore_nets=args.ignore_nets, lock_refs=args.lock,
             move_refs=targets, net_weights=net_weights,
+            verbose=args.verbose,
         )
 
         if not placements:
-            print("  Quench found no improving moves - widening cap.")
+            print(f"  Quench found no improving moves - widening the nudge cap"
+                  f" (swap cap stays {swap_cap:.1f}mm).")
             max_disp *= 1.5
             continue
 
@@ -219,7 +256,8 @@ def main():
             cur_file = cand_file
             max_disp = args.max_displacement
         else:
-            print("  REJECTED - reverting, widening displacement cap.")
+            print(f"  REJECTED - reverting, widening the nudge cap"
+                  f" (swap cap stays {swap_cap:.1f}mm).")
             max_disp *= 1.5
 
     shutil.copy(cur_file, args.output_file)
