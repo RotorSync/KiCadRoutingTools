@@ -280,6 +280,122 @@ def _metrics_for(log_text, rc=0):
     return metrics, calls
 
 
+# --- the #432 keys across the merge (pad_pairs_* and blockers) ---------
+#
+# The pad-pair tallies are whole-board in the first summary but
+# reconcile-subset-scoped in the sub-run's, so last-wins would swap a 40/30
+# whole-board reading for the sub-run's subset numbers (or 0/0). Rebuilt:
+# total from pass 1, connected = total - the deficit still open at END.
+
+LOG_PP_TWO_PASS = '''JSON_SUMMARY: {"failed_single": ["/A"], \
+"failed_multipoint": [{"net_name": "/B", "failed_pads": []}, \
+{"net_name": "/C", "failed_pads": []}], "multipoint_pads_total": 20, \
+"multipoint_pads_connected": 14, "total_iterations": 1000, "total_vias": 300, \
+"total_time": 12.5, "pad_pairs_connected": 30, "pad_pairs_total": 40, \
+"pad_pairs_open": [{"net": "/A", "pairs_connected": 0, "pairs_total": 2, \
+"outcome": "open", "open_subtype": "unrouted"}, {"net": "/B", \
+"pairs_connected": 2, "pairs_total": 5, "outcome": "open", \
+"open_subtype": "partial"}, {"net": "/C", "pairs_connected": 5, \
+"pairs_total": 8, "outcome": "open", "open_subtype": "partial"}]}
+
+Final reconciliation: retrying 3 incomplete net(s) against the finished \
+board: /A, /B, /C
+JSON_SUMMARY: {"failed_single": [], "failed_multipoint": \
+[{"net_name": "/B", "failed_pads": []}, {"net_name": "/C", \
+"failed_pads": []}], "multipoint_pads_total": 15, \
+"multipoint_pads_connected": 10, "total_iterations": 40, "total_vias": 7, \
+"total_time": 0.4, "pad_pairs_connected": 9, "pad_pairs_total": 15, \
+"pad_pairs_open": [{"net": "/B", "pairs_connected": 3, "pairs_total": 5, \
+"outcome": "open", "open_subtype": "partial"}, {"net": "/C", \
+"pairs_connected": 5, "pairs_total": 8, "outcome": "open", \
+"open_subtype": "partial"}]}
+'''
+
+# Sub-run recovered /A and emitted its own (empty-ish) blockers key: pinned
+# that an explicit empty list does NOT regress to the whole-log regex, which
+# would scrape the transient pass-1 analysis of a net that later routed.
+LOG_BLOCKERS_RECOVERED_ALL = '''Frontier blocking analysis:
+  1. /VBUS: 46 (31.7%), 12 uniq (26%)
+JSON_SUMMARY: {"failed_single": ["/A"], "failed_multipoint": [], \
+"multipoint_pads_total": 4, "multipoint_pads_connected": 4, \
+"total_iterations": 500, "total_vias": 20, "total_time": 5.0, \
+"blockers": [{"net": "/A", "stage": "single_ended", "blocked_by": \
+[{"net": "/VBUS", "blocked_count": 46}]}]}
+
+Final reconciliation: retrying 1 incomplete net(s) against the finished \
+board: /A
+JSON_SUMMARY: {"failed_single": [], "failed_multipoint": [], \
+"multipoint_pads_total": 2, "multipoint_pads_connected": 2, \
+"total_iterations": 30, "total_vias": 2, "total_time": 0.3}
+'''
+
+# Sub-run kept /B failed but emitted no blockers key of its own: pass 1's
+# attribution survives for /B only; recovered /A's entry dies with it.
+LOG_BLOCKERS_PARTIAL = '''JSON_SUMMARY: {"failed_single": ["/A", "/B"], \
+"failed_multipoint": [], "multipoint_pads_total": 4, \
+"multipoint_pads_connected": 4, "total_iterations": 500, "total_vias": 20, \
+"total_time": 5.0, "blockers": [{"net": "/A", "stage": "single_ended", \
+"blocked_by": [{"net": "/VBUS", "blocked_count": 46}]}, {"net": "/B", \
+"stage": "phase3", "blocked_by": [{"net": "/MD1", "blocked_count": 7}]}]}
+
+Final reconciliation: retrying 2 incomplete net(s) against the finished \
+board: /A, /B
+JSON_SUMMARY: {"failed_single": ["/B"], "failed_multipoint": [], \
+"multipoint_pads_total": 2, "multipoint_pads_connected": 2, \
+"total_iterations": 30, "total_vias": 2, "total_time": 0.3}
+'''
+
+# Sub-run's summary carries no pad-pair keys at all (its emission is
+# defensively try/except'd): pass 1's numbers are the newest that exist.
+LOG_PP_SUBRUN_WITHOUT_KEYS = '''JSON_SUMMARY: {"failed_single": ["/A"], \
+"failed_multipoint": [], "multipoint_pads_total": 4, \
+"multipoint_pads_connected": 4, "total_iterations": 500, "total_vias": 20, \
+"total_time": 5.0, "pad_pairs_connected": 30, "pad_pairs_total": 40, \
+"pad_pairs_open": [{"net": "/A", "pairs_connected": 0, "pairs_total": 2, \
+"outcome": "open", "open_subtype": "unrouted"}]}
+
+Final reconciliation: retrying 1 incomplete net(s) against the finished \
+board: /A
+JSON_SUMMARY: {"failed_single": ["/A"], "failed_multipoint": [], \
+"multipoint_pads_total": 2, "multipoint_pads_connected": 2, \
+"total_iterations": 30, "total_vias": 2, "total_time": 0.3}
+'''
+
+
+def test_pad_pairs_keep_the_whole_board_denominator():
+    """Pass 1 graded the whole board 30/40 (open: /A 0/2, /B 2/5, /C 5/8);
+    the sub-run recovered /A and half of /B's deficit. Last-wins would
+    report the subset's 9/15; the honest whole-board reading is
+    40 - (2 + 3) = 35 connected of 40."""
+    metrics, _ = _metrics_for(LOG_PP_TWO_PASS)
+    assert metrics['pad_pairs_total'] == 40, metrics
+    assert metrics['pad_pairs_connected'] == 35, metrics
+
+
+def test_pad_pairs_survive_a_sub_run_without_the_keys():
+    """A sub-run summary with no pad-pair keys must not zero the metrics."""
+    metrics, _ = _metrics_for(LOG_PP_SUBRUN_WITHOUT_KEYS)
+    assert metrics['pad_pairs_total'] == 40, metrics
+    assert metrics['pad_pairs_connected'] == 30, metrics
+
+
+def test_empty_structured_blockers_do_not_regress_to_the_regex():
+    """The reconciliation recovered every failure; the merged blockers are
+    an explicit empty set, NOT the whole-log regex scrape (which would
+    resurrect /VBUS, the blocker of a net that ultimately routed)."""
+    metrics, _ = _metrics_for(LOG_BLOCKERS_RECOVERED_ALL)
+    assert metrics['failures'] == 0, metrics
+    assert metrics['blockers'] == [], metrics
+
+
+def test_blockers_filtered_to_still_failed_when_sub_run_omits_the_key():
+    """/B is still failed and keeps pass 1's attribution (/MD1); recovered
+    /A's blocker (/VBUS) dies with it."""
+    metrics, _ = _metrics_for(LOG_BLOCKERS_PARTIAL)
+    assert set(metrics['failed_nets']) == {'/B'}, metrics['failed_nets']
+    assert metrics['blockers'] == ['/MD1'], metrics
+
+
 def test_reconciliation_recoveries_are_not_counted_as_failures():
     """/A was recovered by the reconciliation pass, /B is still open and /C
     recovered one of its two open pads. Reading the first summary gave 4."""
@@ -396,6 +512,10 @@ TESTS = [
     test_reconciliation_recoveries_are_not_counted_as_failures,
     test_effort_counters_are_summed_across_passes,
     test_blockers_are_unioned_across_both_passes,
+    test_pad_pairs_keep_the_whole_board_denominator,
+    test_pad_pairs_survive_a_sub_run_without_the_keys,
+    test_empty_structured_blockers_do_not_regress_to_the_regex,
+    test_blockers_filtered_to_still_failed_when_sub_run_omits_the_key,
     test_single_summary_run_is_unchanged,
     test_a_net_the_reconciliation_broke_is_reported_and_weighed,
     test_aborted_reconciliation_falls_back_to_the_first_summary,

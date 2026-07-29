@@ -86,6 +86,17 @@ def merge_route_summaries(log: str):
       tiebreak should see all of it. Taking effort from the last summary would
       make a badly failing candidate look cheap, since the reconciliation pass
       only re-routes a handful of nets.
+    * The #432 keys are REBUILT, because they are whole-board in the first
+      summary but reconcile-subset-scoped in the sub-run's: pad_pairs_total
+      keeps pass 1's whole-board denominator, pad_pairs_connected = that
+      total minus the deficit of every net still open at END of run (the
+      last summary's pad_pairs_open -- every pass-1 open net is in the retry
+      set by construction, so absence from the sub-run's list means
+      recovered). A sub-run that printed no pad-pair keys at all restores
+      pass 1's, the newest numbers that exist. 'blockers' is last-wins when
+      the sub-run emitted the key; when it did not, pass 1's entries are kept
+      filtered to the nets still failed, so a recovered net's attribution
+      dies with it and run_route never regresses to the whole-log regex.
     * Anything else is last-wins.
 
     Degrades to the single-summary case unchanged: no failures, or a sub-run
@@ -105,6 +116,44 @@ def merge_route_summaries(log: str):
 
     for key in _EFFORT_KEYS:
         merged[key] = sum(s.get(key, 0) for s in summaries)
+
+    # #432 x #458: rebuild the pad-pair tallies and the blockers key, which
+    # last-wins would silently narrow to the reconcile subset (a 50/40
+    # whole-board reading becomes the sub-run's 3/2, or vanishes entirely).
+    # Skipped when aborted: merged is already pass 1 wholesale, which is
+    # what is on disk.
+    if len(summaries) > 1 and not aborted:
+        first, last = summaries[0], summaries[-1]
+        if 'pad_pairs_total' in first:
+            if 'pad_pairs_total' in last:
+                # Denominator: pass 1's whole board. Connected: that total
+                # minus what is STILL open at end of run. A net the
+                # reconciliation itself broke that pass 1 never graded
+                # subtracts its deficit without widening the denominator --
+                # conservative, same spirit as the coverage-gate widening
+                # below. merged's pad_pairs_open is already the last
+                # summary's, which is the correct final open set.
+                _deficit = sum(
+                    e.get('pairs_total', 0) - e.get('pairs_connected', 0)
+                    for e in (last.get('pad_pairs_open') or []))
+                _total = first['pad_pairs_total']
+                merged['pad_pairs_total'] = _total
+                merged['pad_pairs_connected'] = max(0, _total - _deficit)
+            else:
+                # The sub-run printed a summary without pad-pair keys (its
+                # emission is defensively try/except'd): pass 1's numbers are
+                # the newest that exist.
+                merged['pad_pairs_total'] = first['pad_pairs_total']
+                merged['pad_pairs_connected'] = first.get(
+                    'pad_pairs_connected', 0)
+                if 'pad_pairs_open' in first:
+                    merged['pad_pairs_open'] = first['pad_pairs_open']
+        if 'blockers' in first and 'blockers' not in merged:
+            _failed = set(merged.get('failed_single') or [])
+            _failed |= {d.get('net_name') if isinstance(d, dict) else d
+                        for d in (merged.get('failed_multipoint') or [])}
+            merged['blockers'] = [e for e in first['blockers']
+                                  if e.get('net') in _failed]
 
     # Coverage-gate nets (route.py:1881) have NO routed result, so their pads
     # never reach multipoint_pads_total and the caller's
@@ -183,7 +232,11 @@ def run_route(pcb_file: str, routed_file: str, route_args: str, log_file: str):
     # "  1. /MD1: 46 (31.7%) ..." line in the whole log (includes blockers of
     # nets that later routed and every N-retry re-analysis).
     jb = summary.get('blockers')
-    if jb:
+    if jb is not None:
+        # An explicit empty list means "structured emitter, nothing left to
+        # attribute" (e.g. the reconciliation recovered every failure) -- do
+        # NOT regress to the whole-log regex, which would scrape transient
+        # blocks of nets that later routed.
         blockers = {b['net'] for e in jb for b in e.get('blocked_by', [])}
     else:
         blockers = set(re.findall(r'^\s+\d+\.\s+(\S+?):\s+\d+\s+\(', log, re.M))
