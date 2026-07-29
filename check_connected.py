@@ -489,6 +489,17 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
 
     # Add segment endpoints
     for seg_idx, seg in enumerate(segments):
+        if getattr(seg, 'graphic', False):
+            # Net-tagged copper GRAPHICS (gr_line/gr_rect fingers etc.) are
+            # DRC-real obstacles but NOT electrical connections: KiCad's
+            # connectivity engine never credits them, so copper that only
+            # joins "through" a graphic is electrically split (#513 item 6 --
+            # opengammakit shipped 5 nets open while this model read them
+            # connected through the card-edge finger graphics). Allocate the
+            # two point ids (callers rely on "segment i -> ids 2i / 2i+1")
+            # but keep the points out of the join graph entirely.
+            point_id += 2
+            continue
         start_id = point_id
         all_points.append((seg.start_x, seg.start_y, seg.layer, start_id, seg.width))
         point_info[start_id] = ('segment_start', seg_idx, seg.layer, seg.start_x, seg.start_y)
@@ -738,6 +749,8 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     if pad_repr_id and segments:
         endpoint_index = SpatialIndex(cell_size=1.0)
         for seg_idx, seg in enumerate(segments):
+            if getattr(seg, 'graphic', False):
+                continue  # graphics never conduct (#513 item 6, see above)
             if seg.layer.endswith('.Cu'):
                 endpoint_index.add(seg.start_x, seg.start_y, seg.layer, seg_idx * 2, seg.width)
                 endpoint_index.add(seg.end_x, seg.end_y, seg.layer, seg_idx * 2 + 1, seg.width)
@@ -764,6 +777,9 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     _max_reach = max((max_point_size + max_seg_width) / 2, tolerance)
     seg_index = SegmentIndex(cell_size=max(_max_reach * 1.01, 0.05))
     for seg_idx, seg in enumerate(segments):
+        if getattr(seg, 'graphic', False):
+            continue  # graphics never conduct (#513 item 6): a point lying on
+            # a graphic must not union through it (T-junction/through-pad rules)
         seg_start_id = seg_idx * 2
         seg_index.add(seg, seg_start_id)
 

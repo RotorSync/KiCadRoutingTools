@@ -2646,6 +2646,34 @@ def _extract_via_protection_attrs(content: str) -> Dict[str, Dict[str, str]]:
     return out
 
 
+def warn_net_tagged_graphics(segments, name_to_id=None) -> int:
+    """Warn loudly when a board carries NET-TAGGED copper graphics (#513 item 6).
+
+    KiCad allows a ``gr_line``/``gr_rect``/... on a copper layer to carry a
+    ``(net ...)`` field (card-edge/pogo connector fingers drawn as graphics),
+    but its connectivity engine does NOT treat graphics as electrical
+    connections. These parse as ``Segment(graphic=True)`` and are modelled as
+    obstacles/DRC-real copper ONLY -- the router cannot route TO them and the
+    connectivity model must not credit joins THROUGH them, or a physically
+    open net reads "already fully connected" (opengammakit: 5 nets shipped
+    split with 0 DRC violations). Returns the number of net-tagged graphic
+    segments found. Called by BOTH parse paths (file text and pcbnew build)."""
+    tagged = [s for s in segments
+              if getattr(s, 'graphic', False) and getattr(s, 'net_id', 0)]
+    if not tagged:
+        return 0
+    id_to_name = {v: k for k, v in (name_to_id or {}).items()}
+    nets = sorted({id_to_name.get(s.net_id, f'net {s.net_id}') for s in tagged})
+    preview = ', '.join(nets[:6]) + (', ...' if len(nets) > 6 else '')
+    print(f"WARNING: {len(tagged)} NET-TAGGED copper graphic segment(s) on "
+          f"{len(nets)} net(s) ({preview}). KiCad does NOT treat graphics as "
+          f"electrical connections: they are obstacles only, the router cannot "
+          f"target them, and copper joined only through them is electrically "
+          f"OPEN. Convert them to footprint pads or tracks if they must "
+          f"conduct (#513).")
+    return len(tagged)
+
+
 def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Segment]:
     """Extract all track segments from PCB file."""
     segments = []
@@ -2832,6 +2860,7 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                                     c[1] + r * math.sin(k * math.pi / 8))
                                    for k in range(16)], w, layer, nid, uuid)
 
+    warn_net_tagged_graphics(segments, name_to_id)
     return segments
 
 
@@ -3877,6 +3906,10 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                     pass
     except Exception:
         pass  # older pcbnew APIs: best-effort
+
+    # Parity with parse_kicad_pcb: net-tagged graphics never conduct (#513).
+    warn_net_tagged_graphics(segments,
+                             {n.name: nid for nid, n in nets.items()})
 
     guide_paths = extract_guide_paths_from_board(board, guide_layer)
 
