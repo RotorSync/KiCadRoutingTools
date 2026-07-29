@@ -162,10 +162,16 @@ class _Part:
         else:
             lb = compute_footprint_bbox_local(fp)
         self.bounds_by_rot = {r: _rotate_local_bounds(*lb, r) for r in ROTATIONS}
-        # Non-90-degree seed rotations keep their own bounds entry
-        if fp.rotation % 90 != 0:
-            self.bounds_by_rot[fp.rotation % 360] = _rotate_local_bounds(
-                *lb, fp.rotation)
+        # A non-90-degree seed rotation brings its WHOLE 90-degree lattice:
+        # those are the poses _candidate_rotations offers such a part, and
+        # build_neighbor_lists unions bounds_by_rot over the movable
+        # same-footprint group, so recording them here is what keeps the
+        # pruning boxes covering every pose the group can reach.
+        base = fp.rotation % 90
+        if base:
+            for r in ROTATIONS:
+                rot = (base + r) % 360
+                self.bounds_by_rot[rot] = _rotate_local_bounds(*lb, rot)
         self.seed_x, self.seed_y = fp.x, fp.y
         self.x, self.y, self.rot = fp.x, fp.y, fp.rotation % 360
         self.orig_rot = fp.rotation % 360
@@ -419,7 +425,11 @@ class QuenchState:
         # A swap can hand a part any rotation currently held by a movable
         # same-footprint partner (the swap path adds the bounds entry lazily,
         # after this build), so each part's union box must cover its whole
-        # group's rotation set, not just its own bounds_by_rot entries.
+        # group's rotation set, not just its own bounds_by_rot entries. Since
+        # _Part records the full 90-degree lattice of a non-orthogonal seed,
+        # that union is exactly {seed angle + 90k} over every movable part of
+        # the group, which is the closure of what a swap can hand over and a
+        # nudge can then rotate within.
         group_rots: Dict[str, set] = {}
         for p in self.parts.values():
             if not p.locked:
@@ -475,6 +485,32 @@ def _candidate_positions(part: _Part, max_disp: float, step: float,
                 seen.add(key)
                 out.append((cx, cy))
     return out
+
+
+def _candidate_rotations(part: _Part, allow_rotations: bool) -> List[float]:
+    """Rotation candidates for a nudge move.
+
+    The 90-degree lattice through the part's CURRENT angle, plus the lattice
+    through its seed angle when a swap has moved it off that one. Two
+    consequences beyond the old "the four axis rotations, but only if the seed
+    is orthogonal" rule: a part placed at 45 degrees can rotate at all, to
+    135/225/315, staying on its own lattice rather than being snapped onto the
+    axes; and the current pose is always among the candidates, so such a part
+    can be MOVED while KEEPING its angle.
+
+    Generated in ROTATIONS order from a base of rot % 90, so for any part
+    sitting at a multiple of 90, which is every part on a board with only
+    orthogonal footprint rotations, this returns exactly ROTATIONS: same
+    values, same order. The order is load-bearing, not style: the caller keeps
+    the FIRST strict minimum, so a reordered list would silently change which
+    pose wins a tie. Do not rewrite this as a set.
+    """
+    if not allow_rotations:
+        return [part.rot]
+    bases = [part.rot % 90]
+    if part.orig_rot % 90 != bases[0]:
+        bases.append(part.orig_rot % 90)
+    return [(b + r) % 360 for b in bases for r in ROTATIONS]
 
 
 def quench(pcb_data: PCBData, pcb_file: str,
@@ -573,8 +609,17 @@ def quench(pcb_data: PCBData, pcb_file: str,
                 return net_cost + geo_cost
 
             current_cost = eval_at(part.x, part.y, part.rot)
-            rotations = (ROTATIONS if allow_rotations and part.orig_rot % 90 == 0
-                         else [part.rot])
+            rotations = _candidate_rotations(part, allow_rotations)
+            for rot in rotations:
+                # A swap can hand a part an angle from ANOTHER seed's lattice,
+                # in a group holding two different non-orthogonal seeds. Add
+                # the bounds entry so rect() does not silently fall back to
+                # rot-0 geometry. Every such angle is already inside the group
+                # closure build_neighbor_lists unioned, so this cannot
+                # invalidate the pruning. No-op for orthogonal parts.
+                if rot not in part.bounds_by_rot:
+                    part.bounds_by_rot[rot] = _rotate_local_bounds(
+                        *part.bounds_by_rot[0.0], rot)
 
             best = (current_cost, part.x, part.y, part.rot)
             for cx, cy in _candidate_positions(part, max_displacement, step,
