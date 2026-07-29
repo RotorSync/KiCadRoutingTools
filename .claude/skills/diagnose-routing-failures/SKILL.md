@@ -18,10 +18,37 @@ grep "JSON_SUMMARY" /tmp/route_output.txt | sed 's/.*JSON_SUMMARY: //' | python3
 Key fields:
 - `failed_single`: failed single-ended net names
 - `failed_multipoint`: nets with unconnected pads, including pad coordinates
+- `blockers`: per still-failed net, the run's LAST frontier blocking analysis
+  (#409): `{net, stage, blocked_by: [{net, blocked_count, unique_cells,
+  track_cells, via_cells, near_target_cells, near_source_cells}], more?}` —
+  "net X failed BECAUSE nets Y,Z wall it off" as data. Key absent when no
+  failed net has an attributable (routed-copper) blocker.
 - `multipoint_pads_connected` vs `multipoint_pads_total`: connection success rate.
   Derived from the final-board union-find (the same check `check_connected.py`
   uses), so it credits pads reached via planes/zones, fanout stubs, and
   rip-up/retry reroutes and agrees with `check_connected.py` (issue #184).
+- `pad_pairs_connected` / `pad_pairs_total`: pad-pair routability tallies
+  (#409 follow-up; PRR = connected/total downstream). Per graded multi-pad
+  net: connected = |pads| − pad components from the same final-board
+  union-find, total = |pads| − 1 (clamped so a net whose pads are invisible
+  to the union-find grades as connected). Population: the routing scope
+  after already-routed filtering, pre-existing rippable nets the run graded,
+  and disturbed coverage-gate nets. NOT reconcilable with
+  `multipoint_edges_*` (those count component-MST edges — pre-existing
+  copper joins terminals first, so there are fewer edges than pad pairs).
+  Computed before the final reconciliation, like `blockers`. Single-outline
+  semantics for now (a cross-outline split counts as open pairs).
+- `pad_pairs_open`: per net shipping a pair deficit: `{net, pairs_connected,
+  pairs_total, outcome, open_subtype}`, sorted by net; key absent when none.
+  `outcome` is always `"open"` today — route.py runs no DRC, so a route-time
+  failure is definitionally an open; shorts are `check_drc.py`'s domain and
+  the field exists so a DRC-integrated emitter can add `"short"` without a
+  schema break. (Distinct namespace from route_diff `pair_reports.outcome`.)
+  `open_subtype`: `collision_refused` (left open because restoring the
+  ripped track would collide — a short was averted, #134), `coverage_gate`
+  (disturbed out-of-scope net shipping broken), `unrouted` (scope net, no
+  result at all), `partial` (routed a result but left pads disconnected).
+  Join with `blockers` on `net` for cause + outcome per failed net.
 
 ### Failed net histories
 
@@ -40,6 +67,8 @@ grep -B2 -A8 -i "blocked by\|no rippable blockers\|Route stuck" /tmp/route_outpu
 ```
 
 These name the previously-routed nets occupying the failed route's frontier and where the search got stuck (position + layer).
+
+Note: the final `JSON_SUMMARY` carries the same attribution structured — the `blockers` key (#409) holds each still-failed net's last analysis. Prefer it for final-state diagnosis; the greps above remain useful for transient mid-run analyses (blockers of nets that later routed).
 
 ## Step 2: Correlate Failures Spatially
 

@@ -21,7 +21,7 @@ from routing_state import RoutingState, record_net_event
 from routing_context import build_single_ended_obstacles, build_incremental_obstacles
 from single_ended_routing import route_multipoint_taps, route_net_with_obstacles, route_multipoint_main
 from connectivity import get_multipoint_net_pads, get_copper_connected_terminal_groups
-from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
+from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache, record_frontier_blocking
 from rip_up_reroute import rip_up_net, restore_net
 from leg_rip import LEG_RIP_ENABLED, select_blocking_branch  # #510
 from polarity_swap import get_canonical_net_id
@@ -892,6 +892,7 @@ def try_phase3_ripup(
     apply_known_blockers(blockers, _known, exclude_ids, pcb_data)
     rank_blockers(blockers, getattr(config, 'ripup_blocker_select', 'count'),
                   config=config, pcb_data=pcb_data)
+    record_frontier_blocking(state, net_id, blockers, "phase3")
 
     if not blockers:
         return None
@@ -944,6 +945,7 @@ def try_phase3_ripup(
                 target_xy=_tgt_for_rank,
                 obstacle_cache=obstacle_cache
             )
+            record_frontier_blocking(state, net_id, fresh_blockers, "phase3")
             print_blocking_analysis(fresh_blockers, prefix="      ")
 
             # Find the most-blocking net that isn't already ripped
@@ -1349,6 +1351,7 @@ def _retry_victim_main_with_ripup(
         blocked, pcb_data, config, routed_net_paths,
         exclude_net_ids=exclude_ids,
         target_xy=_v_tgt_xy, source_xy=_v_src_xy)
+    record_frontier_blocking(state, victim_id, blockers, "phase3_victim")
     if not blockers:
         return None, []
     rippable_blockers, seen_canonical_ids = filter_rippable_blockers(
@@ -1366,6 +1369,7 @@ def _retry_victim_main_with_ripup(
                 last_blocked, pcb_data, config, routed_net_paths,
                 exclude_net_ids=exclude_ids,
                 target_xy=_v_tgt_xy, source_xy=_v_src_xy)
+            record_frontier_blocking(state, victim_id, fresh, "phase3_victim")
             next_blocker = None
             for b in fresh:
                 if b.net_id in routed_results:
