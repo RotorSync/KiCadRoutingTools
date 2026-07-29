@@ -60,7 +60,13 @@ def _cluster_positions(values, tol: float = _COORD_TOL) -> List[float]:
 
 def analyze_bga_grid(footprint: Footprint) -> Optional[BGAGrid]:
     """Analyze a footprint to extract BGA grid parameters."""
-    pads = footprint.pads
+    # Mechanical NPTH pads (mounting holes baked into the footprint) carry no
+    # copper and are never balls, but their outlier coordinates split the
+    # dominant-pitch vote -- granit_cm5's CM4 carrier has 4 corner mounting
+    # holes that made a 200-pad 0.4mm-pitch connector read as "not a BGA"
+    # (#513 item 3). Cluster only real copper pads; net-0 SMD balls stay (a
+    # depopulated/unconnected ball is still a grid member).
+    pads = [p for p in footprint.pads if p.pad_type != 'np_thru_hole']
     if len(pads) < 4:
         return None
 

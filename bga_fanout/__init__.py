@@ -2296,6 +2296,9 @@ def generate_bga_fanout(footprint: Footprint,
     grid = analyze_bga_grid(footprint)
     if grid is None:
         print(f"Warning: {footprint.reference} doesn't appear to be a BGA")
+        print(f"  For a perimeter/2-row connector or staggered package, try: "
+              f"qfn_fanout.py --component {footprint.reference} "
+              f"--escape-method underpad --allow-via-in-pad")
         return [], [], [], []
 
     # Sanity-check pad geometry before escaping (see qfn_fanout): overlapping
