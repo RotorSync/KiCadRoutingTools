@@ -609,6 +609,17 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
 
     known_net_names = unfiltered_net_names
     all_net_names = list(all_net_names)
+
+    # #513 item 19: an exclusion-ONLY pattern list means "everything else".
+    # A bare "!GND" used to match ZERO nets ("No nets matched the given
+    # patterns!") instead of the obvious intent -- imply the '*' inclusion.
+    def _is_exclusion(rp):
+        return (rp.startswith('!') and not rp.startswith('\\!')
+                and rp not in known_net_names)
+    if patterns and all(_is_exclusion(rp) for rp in patterns):
+        print("Exclusion-only net patterns given: implying '*' "
+              "(everything except the exclusions)")
+        patterns = ['*'] + list(patterns)
     result = []
     seen = set()
     excluded = set()
@@ -652,6 +663,24 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
                 print(f"{label} matched {len(matches)} net(s): "
                       f"{', '.join(sorted(matches)[:5])}"
                       f"{' ...' if len(matches) > 5 else ''}")
+                # #513 item 19: the #292 trailing-path-component heuristic can
+                # sweep up a DISTINCT net that merely shares the leaf name --
+                # wrass_audio_card's '!GND' also excluded '/Expansion/GND' (a
+                # separate 2-pad net, never tied to main GND), which then
+                # silently got zero copper. Warn when an unqualified literal
+                # exclusion matched extra differently-qualified nets.
+                if not is_wildcard:
+                    _exact = {exclude_pattern, '/' + exclude_pattern.lstrip('/')}
+                    _others = [m for m in matches if m not in _exact
+                               and m.lstrip('/') != exclude_pattern.lstrip('/')]
+                    if _others:
+                        print(f"  WARNING: unqualified exclusion "
+                              f"'!{exclude_pattern}' ALSO excluded "
+                              f"{len(_others)} distinct net(s) sharing the "
+                              f"leaf name: {', '.join(sorted(_others)[:5])}"
+                              f"{' ...' if len(_others) > 5 else ''}. If any "
+                              f"is a separate net that needs routing, exclude "
+                              f"by fully-qualified name instead (#513 item 19).")
             else:
                 label = ("Exclusion pattern" if is_wildcard else "Exclusion")
                 print(f"WARNING: {label} '!{exclude_pattern}' matched no nets"
