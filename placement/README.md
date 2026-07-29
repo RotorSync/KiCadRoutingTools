@@ -128,6 +128,26 @@ so `place_fanout_clearance.py`, the GUI, and the engine itself behave exactly
 as before when it is unused. Requires `pygame` (render) and `Pillow` (GIF
 encode) — both already used elsewhere in this repo; no matplotlib/ffmpeg.
 
+## Testing
+
+The placement tests are standalone scripts (no pytest needed), all in
+`tests/run_all.py`'s `--fast` lane:
+
+```bash
+python3 tests/test_quench_swap_cap.py        # swap displacement cap (#430)
+python3 tests/test_quench_neighbor_lists.py  # pruned-scan bit-exactness (#430)
+python3 tests/test_458_loop_steering.py      # loop caps, tally, summary merge
+python3 tests/test_458_quench_net_weights.py # weighted crossings
+python3 tests/test_458_quench_rotations.py   # rotation lattice, --no-rotate
+python3 tests/test_fanout_clearance.py       # cap clearance repair (#130)
+```
+
+One caveat when comparing quench *outputs*: results currently differ across
+processes unless `PYTHONHASHSEED` is pinned (set-order airwire iteration
+feeds MST tie-breaks, #457). Same-process runs are deterministic — the
+parity tests rely on that — so A/B two placements inside one process, or
+export `PYTHONHASHSEED=0` for both runs.
+
 ## Module layout
 
 | File | Purpose |
