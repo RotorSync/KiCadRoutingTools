@@ -2243,6 +2243,7 @@ def generate_bga_fanout(footprint: Footprint,
     # it). The under-pad engine keeps the user's physical order (its via spans
     # use layers[0]/layers[-1]) and applies only the forbidden-layer exclusion.
     underpad_layers = layers
+    underpad_layer_costs = None  # costs aligned with underpad_layers (#519)
     balance_layers = layers
     if layer_costs:
         if len(layer_costs) != len(layers):
@@ -2261,6 +2262,15 @@ def generate_bga_fanout(footprint: Footprint,
             print(f"  Layer costs: excluding forbidden layer(s) "
                   f"{', '.join(dropped_layers)} from the fanout")
         underpad_layers = [l for l, _ in keep]
+        # #519: hand the auto-fallback retry the costs for the SURVIVING
+        # layers (len-aligned with underpad_layers, all >= 0) so the recursive
+        # call sees exactly what a direct --escape-method underpad run sees.
+        # MEASURED INERT today (529-ball A/B: identical copper): the under-pad
+        # engine ignores positive weights by design -- its via spans need the
+        # physical layer order (see above) -- so only the forbidden-layer
+        # exclusion shapes its copper. This is consistency, not behavior;
+        # weighted under-pad layer assignment would be a new measured feature.
+        underpad_layer_costs = [c for _, c in keep]
         # The even-distribution rebalance would spread escapes right back onto
         # the costly layers the greedy assignment just avoided, so it only
         # balances across the cheapest tier; costlier layers keep only the
@@ -2727,11 +2737,15 @@ def generate_bga_fanout(footprint: Footprint,
                     print(f"    - {net_name}")
                 print(f"  These nets have been removed from the output.\n")
 
-            if reassigned > 0:
-                # Recount collisions after resolution
-                new_collision_count, _ = detect_collisions(tracks, existing_tracks, min_spacing, max_pairs=0)
-                print(f"  After resolution: {new_collision_count} collisions remaining")
-                collisions_remaining = new_collision_count
+            # Recount UNCONDITIONALLY: resolve_collisions also strips failed
+            # nets' tracks, so the count changes even when reassigned == 0 --
+            # and the reassigned-only recount left collisions_remaining
+            # UNBOUND on that path, crashing the whole fanout at the
+            # rebalance check below (hit by the #519 verification run:
+            # collisions found, zero routes reassignable).
+            new_collision_count, _ = detect_collisions(tracks, existing_tracks, min_spacing, max_pairs=0)
+            print(f"  After resolution: {new_collision_count} collisions remaining")
+            collisions_remaining = new_collision_count
         else:
             print(f"  Validated: No collisions")
             collisions_remaining = 0
@@ -2947,6 +2961,7 @@ def generate_bga_fanout(footprint: Footprint,
         up_tracks, up_vias, up_vias_rm, up_failed = generate_bga_fanout(
             footprint, pcb_data, net_filter=net_filter,
             diff_pair_patterns=diff_pair_patterns, layers=underpad_layers,
+            layer_costs=underpad_layer_costs,  # filtered to match (#519)
             track_width=track_width, clearance=clearance,
             diff_pair_gap=diff_pair_gap, exit_margin=exit_margin,
             primary_escape=primary_escape,
