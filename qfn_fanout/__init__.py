@@ -703,14 +703,35 @@ def generate_qfn_fanout(footprint: Footprint,
 
     qfn_dropped: List[str] = []
     n_short = 0
+    n_ext_short = 0
     kept_stubs: List[FanoutStub] = []
-    for stub in stubs:
+    for stub, pad_info in zip(stubs, pad_infos):
         nid = stub.net_id
         if _seg_grazes(stub.pad_pos, stub.corner_pos, nid):
-            # The perpendicular escape itself hits a foreign pad - cannot fan out.
-            if stub.pad.net_name and stub.pad.net_name not in qfn_dropped:
-                qfn_dropped.append(stub.pad.net_name)
-            continue
+            # #513 item 15 (ice4pi): a straight escape toward a nearby board
+            # edge used to be DROPPED outright; on an edge-hugging row that
+            # left the whole side unescaped unless the operator hand-tuned
+            # --extension 0.0. When the ONLY offender is the board edge,
+            # shrink the extension toward 0 first -- the escape still clears
+            # the pad, it just bends sooner.
+            recovered = False
+            if _seg_hits_edge(stub.pad_pos, stub.corner_pos):
+                for _t in [1.0 - i / 9.0 for i in range(1, 9)] + [0.0]:
+                    _sl = pad_info.pad_width / 2 + extension * _t
+                    _c2, _e2 = calculate_fanout_stub(
+                        pad_info, layout, _sl, max_diagonal_length, grid_step,
+                        angle_ref_off=side_max_off.get(pad_info.side, 0.0))
+                    if not _seg_grazes(stub.pad_pos, _c2, nid):
+                        stub.corner_pos, stub.stub_end = _c2, _e2
+                        recovered = True
+                        n_ext_short += 1
+                        break
+            if not recovered:
+                # The perpendicular escape itself hits a foreign pad (or even
+                # the zero-extension escape violates the edge) - cannot fan out.
+                if stub.pad.net_name and stub.pad.net_name not in qfn_dropped:
+                    qfn_dropped.append(stub.pad.net_name)
+                continue
         if _seg_grazes(stub.corner_pos, stub.stub_end, nid):
             # Shorten the 45 fan toward the corner until it clears (worst case
             # collapse it entirely - the straight escape is already clear).
@@ -744,9 +765,10 @@ def generate_qfn_fanout(footprint: Footprint,
             stub.stub_end = new_end
             n_short += 1
         kept_stubs.append(stub)
-    if n_short or qfn_dropped:
-        print(f"  Pad-clearance: shortened {n_short} fan(s); dropped {len(qfn_dropped)} "
-              f"stub(s) grazing a foreign pad (issue #123)")
+    if n_short or n_ext_short or qfn_dropped:
+        print(f"  Pad-clearance: shortened {n_short} fan(s), "
+              f"{n_ext_short} straight escape(s) near the board edge (#513); "
+              f"dropped {len(qfn_dropped)} stub(s) grazing a foreign pad (issue #123)")
     stubs = kept_stubs
 
     # Generate tracks - two segments per stub
@@ -883,6 +905,21 @@ def main():
     from fix_kicad_drc_settings import add_drc_fix_args
     add_drc_fix_args(parser)
     args = parser.parse_args()
+    # #513 item 15: default the edge keep-out to the BOARD'S OWN
+    # min_copper_edge_clearance (route.py's documented behavior and the GUI's
+    # unchecked-override behavior), not the copper-copper --clearance. ice4pi
+    # shipped 7 SEGMENT-BOARD-EDGE violations because stubs were kept 0.09mm
+    # from Edge.Cuts while the board's rule (and check_drc) demanded 0.2mm.
+    if (args.board_edge_clearance or 0) <= 0:
+        try:
+            from list_nets import board_constraint
+            _edge = board_constraint(args.pcb, 'min_copper_edge_clearance')
+        except Exception:
+            _edge = None
+        if _edge:
+            args.board_edge_clearance = _edge
+            print(f"--board-edge-clearance not given; using the board "
+                  f"min_copper_edge_clearance {_edge}mm.")
     set_default_fab_tier(*fab_tier_from_args(args))
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.pcb),
@@ -890,7 +927,11 @@ def main():
         clearance=getattr(args, 'clearance', None),
         via_size=getattr(args, 'via_size', None),
         via_drill=getattr(args, 'via_drill', None),
-        hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None))
+        hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None),
+        # #513 item 15: the resolved edge keep-out must be manufacturable too
+        # (a board declaring 0.025mm is pinned up to the 0.2 fab edge floor,
+        # which is also what check_drc grades at).
+        board_edge_clearance=(args.board_edge_clearance or None))
     # Below-floor params are pinned up to the fab floor (warned); apply the clamps
     # (#513 item 1: discarding this dict shipped sub-floor vias after the warning).
     for _pname, _pfloor in _pinned_floors.items():
