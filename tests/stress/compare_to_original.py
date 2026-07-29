@@ -46,6 +46,14 @@ def profile(path):
     via_count = Counter()
     for v in pcb.vias:
         via_count[(round(v.size, 3), round(v.drill, 3))] += 1
+        if v.net_id:
+            seg_nets.add(v.net_id)
+    # A net realized as a zone/plane pour (or via-only stitching) has copper
+    # too -- counting only track segments reported a phantom 1-net completion
+    # gap on every plane board (#513 item 13).
+    for z in (getattr(pcb, 'zones', []) or []):
+        if getattr(z, 'net_id', 0):
+            seg_nets.add(z.net_id)
     return {
         "layers": list(pcb.board_info.copper_layers),
         "n_segments": len(pcb.segments),
