@@ -799,7 +799,25 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         _write_passthrough_output(input_file, output_file)
         return 0, 0, 0.0
 
-    net_ids, _ = filter_already_routed(pcb_data, net_ids, config)
+    net_ids, _already_routed = filter_already_routed(pcb_data, net_ids, config)
+    # #515: --rip-existing-nets only rips copper that BLOCKS a net being
+    # routed; a net dropped here as already-connected never routes, so naming
+    # it in both --nets and --rip-existing-nets is a no-op. Warn instead of
+    # staying silent (the flag for a true rip+re-route was declined in #515;
+    # recipe: delete the net's copper first, then route it normally).
+    if rip_existing_nets and net_names:
+        from net_queries import matches_net_filter as _mnf_ripwarn
+        _rip_noop = [n for n, _reason in _already_routed
+                     if not _reason.startswith('Only')
+                     and _mnf_ripwarn(n, rip_existing_nets)]
+        if _rip_noop:
+            print(f"WARNING: {len(_rip_noop)} net(s) named in both --nets and "
+                  f"--rip-existing-nets are already fully connected and will "
+                  f"NOT be re-routed ({', '.join(_rip_noop[:6])}"
+                  f"{', ...' if len(_rip_noop) > 6 else ''}). "
+                  f"--rip-existing-nets only rips nets that block another "
+                  f"route; to force a fresh re-route, delete the net's copper "
+                  f"first and route it again (#515).")
     if not net_ids:
         print("All nets are already fully connected - nothing to route!")
         if return_results:
