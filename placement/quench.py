@@ -5,7 +5,9 @@ Greedy quench placement optimizer: perturbative refinement of an existing
 Starts from the current placement and repeatedly tries, for each component,
 small moves within --max-displacement of its seed position plus 90-degree
 rotations and same-footprint swaps, accepting only improvements
-(zero-temperature anneal). Locked components never move.
+(zero-temperature anneal). Same-footprint swaps are accepted only if both
+parts land within swap_max_displacement (default: max_displacement) of
+their own seed positions. Locked components never move.
 
 Cost = total airwire length
      + crossing_penalty * airwire crossings
@@ -15,6 +17,12 @@ Cost = total airwire length
 The halo term spreads apart parts that are not pulled together by shared
 nets — things that *can* be far apart may as well be, to leave routing room,
 especially around high-pin-count parts.
+
+Both airwire terms accept optional per-net weights (`net_weights`): a net's
+airwire length is scaled by its weight, and each crossing is priced by the
+larger of the two crossing nets' weights, so place_route_loop.py can bias the
+whole objective toward the nets the router failed on. An unweighted board is
+untouched, since max(1, 1) = 1.
 """
 from __future__ import annotations
 
@@ -72,11 +80,20 @@ def _aw_array(airwires) -> np.ndarray:
     return np.asarray(airwires, dtype=float)
 
 
-def _count_crossings_np(a: np.ndarray, b: np.ndarray) -> int:
+def _count_crossings_np(a: np.ndarray, b: np.ndarray,
+                        net_w: Optional[np.ndarray] = None):
     """Count crossings between airwire sets a (n,5) and b (m,5), skipping
-    same-net pairs and pairs sharing an endpoint (within 1um)."""
+    same-net pairs and pairs sharing an endpoint (within 1um).
+
+    Returns (count, weighted). `count` is the raw unweighted pair count, kept
+    as an int for reporting. `weighted` prices each crossing at
+    max(net_w[net_a], net_w[net_b]), the per-net weighting from #458, where
+    net_w is a net-id-indexed weight lookup (QuenchState._net_w). With net_w
+    None the two are equal and `weighted` is exactly float(count), so
+    unweighted callers get bit-identical costs.
+    """
     if len(a) == 0 or len(b) == 0:
-        return 0
+        return 0, 0.0
     eps = 0.001
     a1x = a[:, 0][:, None]; a1y = a[:, 1][:, None]
     a2x = a[:, 2][:, None]; a2y = a[:, 3][:, None]
@@ -98,15 +115,35 @@ def _count_crossings_np(a: np.ndarray, b: np.ndarray) -> int:
         (ccw(a1x, a1y, b1x, b1y, b2x, b2y) != ccw(a2x, a2y, b1x, b1y, b2x, b2y)) &
         (ccw(a1x, a1y, a2x, a2y, b1x, b1y) != ccw(a1x, a1y, a2x, a2y, b2x, b2y))
     )
-    return int(np.count_nonzero(inter & ~same_net & ~shared))
+    hits = inter & ~same_net & ~shared
+    count = int(np.count_nonzero(hits))
+    if net_w is None:
+        return count, float(count)
+    # Column 4 carries the net id as a float; every id that can appear there
+    # is a key of QuenchState.net_airwires, which net_w is sized to cover.
+    wa = net_w[a[:, 4].astype(np.intp)]
+    wb = net_w[b[:, 4].astype(np.intp)]
+    return count, float(np.sum(np.maximum(wa[:, None], wb[None, :])[hits]))
 
 
-def _count_crossings_within(a: np.ndarray) -> int:
-    """Crossings among one airwire set (each unordered pair counted once)."""
+def _count_crossings_within(a: np.ndarray,
+                            net_w: Optional[np.ndarray] = None):
+    """Crossings among one airwire set (each unordered pair counted once).
+    Returns (count, weighted), as _count_crossings_np."""
     if len(a) < 2:
-        return 0
-    total = _count_crossings_np(a, a)
-    return total // 2
+        return 0, 0.0
+    total, weighted = _count_crossings_np(a, a, net_w)
+    half = total // 2
+    if net_w is None:
+        # Keep the historical integer halving bit-exact. The ccw predicate for
+        # (i,j) and (j,i) are different floating point expressions of the same
+        # orientation, so `total` is not PROVABLY even and float(total)/2 is
+        # not always float(total // 2). Do not "simplify" this branch away.
+        return half, float(half)
+    # max(w_i, w_j) is symmetric and so is the crossing relation, so every
+    # unordered pair contributes twice with the same weight; dividing by 2.0
+    # is exact in binary floating point.
+    return half, weighted / 2.0
 
 
 class _Part:
@@ -125,10 +162,16 @@ class _Part:
         else:
             lb = compute_footprint_bbox_local(fp)
         self.bounds_by_rot = {r: _rotate_local_bounds(*lb, r) for r in ROTATIONS}
-        # Non-90-degree seed rotations keep their own bounds entry
-        if fp.rotation % 90 != 0:
-            self.bounds_by_rot[fp.rotation % 360] = _rotate_local_bounds(
-                *lb, fp.rotation)
+        # A non-90-degree seed rotation brings its WHOLE 90-degree lattice:
+        # those are the poses _candidate_rotations offers such a part, and
+        # build_neighbor_lists unions bounds_by_rot over the movable
+        # same-footprint group, so recording them here is what keeps the
+        # pruning boxes covering every pose the group can reach.
+        base = fp.rotation % 90
+        if base:
+            for r in ROTATIONS:
+                rot = (base + r) % 360
+                self.bounds_by_rot[rot] = _rotate_local_bounds(*lb, rot)
         self.seed_x, self.seed_y = fp.x, fp.y
         self.x, self.y, self.rot = fp.x, fp.y, fp.rotation % 360
         self.orig_rot = fp.rotation % 360
@@ -211,6 +254,23 @@ class QuenchState:
         for net_id in self.net_refs:
             self.net_airwires[net_id] = self._build_net_airwires(net_id)
 
+        # Dense net_id -> weight lookup for the crossing kernel, derived once
+        # from net_weights (which is not mutated after construction) and sized
+        # to cover every net id that can appear in an airwire array's column 4.
+        # None when there is nothing to weight, which short-circuits the
+        # crossing kernel back onto its exact integer path.
+        self._net_w = None
+        if self.net_weights:
+            size = max(max(self.net_weights),
+                       max(self.net_airwires, default=-1)) + 1
+            self._net_w = np.ones(size)
+            for net_id, w in self.net_weights.items():
+                if net_id >= 0:
+                    self._net_w[net_id] = w
+
+        # Optional pruned neighbour lists (see build_neighbor_lists)
+        self._neighbors = None
+
     # ----- airwire helpers -------------------------------------------------
 
     def _net_points(self, net_id, override_ref=None, override_pads=None):
@@ -260,7 +320,11 @@ class QuenchState:
         part = self.parts[ref]
         rect = part.rect(x, y, rot)
         pen = self._edge_penalty(rect)
-        for other_ref, other in self.parts.items():
+        if self._neighbors is not None and ref in self._neighbors:
+            others = ((o, self.parts[o]) for o in self._neighbors[ref])
+        else:
+            others = self.parts.items()
+        for other_ref, other in others:
             if other_ref == ref or (exclude and other_ref in exclude):
                 continue
             pen += self._halo_pair_penalty(part, rect, other, other.rect())
@@ -272,7 +336,11 @@ class QuenchState:
         if (rect[0] < self.usable[0] or rect[1] < self.usable[1]
                 or rect[2] > self.usable[2] or rect[3] > self.usable[3]):
             return False
-        for other_ref, other in self.parts.items():
+        if self._neighbors is not None and ref in self._neighbors:
+            others = ((o, self.parts[o]) for o in self._neighbors[ref])
+        else:
+            others = self.parts.items()
+        for other_ref, other in others:
             if other_ref == ref or (exclude and other_ref in exclude):
                 continue
             r = other.rect()
@@ -294,22 +362,32 @@ class QuenchState:
     def nets_cost(self, net_airwires_subset: Dict[int, List],
                   other_airwires: np.ndarray):
         """Length + crossing cost of the given nets' airwires, counting
-        crossings against `other_airwires` and among themselves."""
+        crossings against `other_airwires` and among themselves.
+
+        Returns (cost, crossings). The cost prices each crossing at the larger
+        of the two nets' weights (#458), so a weighted net's crossings, not
+        just its far cheaper length, carry the weight; `crossings` stays the
+        raw unweighted count for reporting."""
         own = []
         for lst in net_airwires_subset.values():
             own.extend(lst)
         own_arr = _aw_array(own)
         length = self._weighted_length(own_arr)
-        crossings = _count_crossings_np(own_arr, other_airwires)
-        crossings += _count_crossings_within(own_arr)
-        return self.length_weight * length + self.crossing_penalty * crossings, crossings
+        n_out, w_out = _count_crossings_np(own_arr, other_airwires, self._net_w)
+        n_in, w_in = _count_crossings_within(own_arr, self._net_w)
+        return (self.length_weight * length
+                + self.crossing_penalty * (w_out + w_in)), n_out + n_in
 
     # ----- full cost (for reporting) ---------------------------------------
 
     def total_cost(self):
         all_aw = _aw_array([aw for lst in self.net_airwires.values() for aw in lst])
         length = self._weighted_length(all_aw)
-        crossings = _count_crossings_within(all_aw)
+        # `crossings` stays the raw unweighted count so the pass banner and
+        # any count-based expectation are unchanged; `total` is the objective
+        # the quench actually minimizes, which is weighted (#458), matching
+        # `length`, which has always been weighted.
+        crossings, w_crossings = _count_crossings_within(all_aw, self._net_w)
         halo = 0.0
         edge = 0.0
         refs = list(self.parts)
@@ -321,7 +399,7 @@ class QuenchState:
                 pb = self.parts[rb]
                 halo += self._halo_pair_penalty(pa, rect_a, pb, pb.rect())
         total = (self.length_weight * length
-                 + self.crossing_penalty * crossings + halo + edge)
+                 + self.crossing_penalty * w_crossings + halo + edge)
         return {'total': total, 'length': length, 'crossings': crossings,
                 'halo': halo, 'edge': edge}
 
@@ -332,6 +410,60 @@ class QuenchState:
         part.x, part.y, part.rot = x, y, rot
         for net_id in part.nets:
             self.net_airwires[net_id] = self._build_net_airwires(net_id)
+
+    def build_neighbor_lists(self, travel_budget):
+        """Per-movable-part pruned neighbour lists (perf, mirrors the
+        fanout_clearance pattern from #213 profiling). A movable part's live
+        position stays within travel_budget of its seed (nudge candidates are
+        radius-checked against the seed; swaps are capped by swap_cap <=
+        max_displacement), and rect() only ever reads bounds_by_rot, so the
+        union-of-rotations box at the seed inflated by the budget contains
+        every rect the part can ever occupy. Any pair whose per-axis seed gap
+        exceeds both budgets plus the largest interaction reach (hard
+        clearance / summed halos) can NEVER interact -- excluding it is exact
+        for candidate_valid AND part_geometry_cost, not an approximation."""
+        # A swap can hand a part any rotation currently held by a movable
+        # same-footprint partner (the swap path adds the bounds entry lazily,
+        # after this build), so each part's union box must cover its whole
+        # group's rotation set, not just its own bounds_by_rot entries. Since
+        # _Part records the full 90-degree lattice of a non-orthogonal seed,
+        # that union is exactly {seed angle + 90k} over every movable part of
+        # the group, which is the closure of what a swap can hand over and a
+        # nudge can then rotate within.
+        group_rots: Dict[str, set] = {}
+        for p in self.parts.values():
+            if not p.locked:
+                group_rots.setdefault(p.footprint_name, set()).update(
+                    p.bounds_by_rot)
+        geom = {}
+        for ref, p in self.parts.items():
+            if p.locked:
+                geom[ref] = (p.rect(), 0.0)
+            else:
+                boxes = [p.bounds_by_rot[r] if r in p.bounds_by_rot
+                         else _rotate_local_bounds(*p.bounds_by_rot[0.0], r)
+                         for r in group_rots[p.footprint_name]]
+                u0 = min(b[0] for b in boxes)
+                u1 = min(b[1] for b in boxes)
+                u2 = max(b[2] for b in boxes)
+                u3 = max(b[3] for b in boxes)
+                geom[ref] = ((p.seed_x + u0, p.seed_y + u1,
+                              p.seed_x + u2, p.seed_y + u3), travel_budget)
+        self._neighbors = {}
+        for ref, p in self.parts.items():
+            if p.locked:
+                continue
+            ra, ba = geom[ref]
+            lst = []
+            for oref, (rb, bb) in geom.items():
+                if oref == ref:
+                    continue
+                m = ba + bb + max(self.clearance,
+                                  p.halo + self.parts[oref].halo) + 1e-9
+                if (ra[2] + m >= rb[0] and rb[2] + m >= ra[0]
+                        and ra[3] + m >= rb[1] and rb[3] + m >= ra[1]):
+                    lst.append(oref)
+            self._neighbors[ref] = lst
 
 
 def _candidate_positions(part: _Part, max_disp: float, step: float,
@@ -355,8 +487,35 @@ def _candidate_positions(part: _Part, max_disp: float, step: float,
     return out
 
 
+def _candidate_rotations(part: _Part, allow_rotations: bool) -> List[float]:
+    """Rotation candidates for a nudge move.
+
+    The 90-degree lattice through the part's CURRENT angle, plus the lattice
+    through its seed angle when a swap has moved it off that one. Two
+    consequences beyond the old "the four axis rotations, but only if the seed
+    is orthogonal" rule: a part placed at 45 degrees can rotate at all, to
+    135/225/315, staying on its own lattice rather than being snapped onto the
+    axes; and the current pose is always among the candidates, so such a part
+    can be MOVED while KEEPING its angle.
+
+    Generated in ROTATIONS order from a base of rot % 90, so for any part
+    sitting at a multiple of 90, which is every part on a board with only
+    orthogonal footprint rotations, this returns exactly ROTATIONS: same
+    values, same order. The order is load-bearing, not style: the caller keeps
+    the FIRST strict minimum, so a reordered list would silently change which
+    pose wins a tie. Do not rewrite this as a set.
+    """
+    if not allow_rotations:
+        return [part.rot]
+    bases = [part.rot % 90]
+    if part.orig_rot % 90 != bases[0]:
+        bases.append(part.orig_rot % 90)
+    return [(b + r) % 360 for b in bases for r in ROTATIONS]
+
+
 def quench(pcb_data: PCBData, pcb_file: str,
            max_displacement: float = 10.0,
+           swap_max_displacement: Optional[float] = None,
            step: float = 1.0,
            grid_step: float = 0.1,
            clearance: float = 0.25,
@@ -378,9 +537,24 @@ def quench(pcb_data: PCBData, pcb_file: str,
            verbose: bool = False) -> List[Dict]:
     """Greedy quench: iterate over parts, accept only cost-reducing moves.
 
+    net_weights: optional {net_id: weight} priority multipliers. A weighted
+    net's airwire length is scaled by its weight and every crossing it takes
+    part in is priced at max(weight_a, weight_b). Absent or all-ones leaves
+    the cost exactly unchanged.
+
     Returns a list of placement dicts (reference/new_x/new_y/new_rotation)
     for every movable part, whether or not it moved.
     """
+    if swap_max_displacement is not None:
+        if swap_max_displacement < 0:
+            raise ValueError("swap_max_displacement must be >= 0")
+        if swap_max_displacement > max_displacement + 1e-9:
+            raise ValueError(
+                "swap_max_displacement must be <= max_displacement "
+                "(each part must stay within max_displacement of its seed)")
+    swap_cap = (max_displacement if swap_max_displacement is None
+                else swap_max_displacement)
+
     ignore_net_ids: Set[int] = set()
     if ignore_nets:
         import fnmatch
@@ -404,6 +578,7 @@ def quench(pcb_data: PCBData, pcb_file: str,
                         extra_locked_refs=extra_locked,
                         move_refs=move_refs,
                         net_weights=net_weights)
+    state.build_neighbor_lists(max_displacement + grid_step)
 
     before = state.total_cost()
     print(f"Initial: length={before['length']:.1f}mm "
@@ -416,6 +591,7 @@ def quench(pcb_data: PCBData, pcb_file: str,
     for pass_num in range(1, max_passes + 1):
         improved = 0.0
         moves = 0
+        swaps_skipped = 0
 
         # --- single-part moves (nudge + rotate) ---
         for ref in movable:
@@ -433,8 +609,17 @@ def quench(pcb_data: PCBData, pcb_file: str,
                 return net_cost + geo_cost
 
             current_cost = eval_at(part.x, part.y, part.rot)
-            rotations = (ROTATIONS if allow_rotations and part.orig_rot % 90 == 0
-                         else [part.rot])
+            rotations = _candidate_rotations(part, allow_rotations)
+            for rot in rotations:
+                # A swap can hand a part an angle from ANOTHER seed's lattice,
+                # in a group holding two different non-orthogonal seeds. Add
+                # the bounds entry so rect() does not silently fall back to
+                # rot-0 geometry. Every such angle is already inside the group
+                # closure build_neighbor_lists unioned, so this cannot
+                # invalidate the pruning. No-op for orthogonal parts.
+                if rot not in part.bounds_by_rot:
+                    part.bounds_by_rot[rot] = _rotate_local_bounds(
+                        *part.bounds_by_rot[0.0], rot)
 
             best = (current_cost, part.x, part.y, part.rot)
             for cx, cy in _candidate_positions(part, max_displacement, step,
@@ -472,6 +657,33 @@ def quench(pcb_data: PCBData, pcb_file: str,
                     for j in range(i + 1, len(refs)):
                         ra, rb = refs[i], refs[j]
                         pa, pb = state.parts[ra], state.parts[rb]
+                        # A swap exchanges FULL poses, rotation included, so a
+                        # mixed-angle pair rotates both parts. --no-rotate
+                        # promises that no move changes any part's rotation:
+                        # restrict swaps to pairs that already share one, which
+                        # also keeps the exchange rotation-neutral and so
+                        # preserves the occupied-space invariance that lets
+                        # swaps skip candidate_valid. Checked before the cap so
+                        # swaps_skipped keeps counting cap rejections only.
+                        if not allow_rotations and abs(pa.rot - pb.rot) > 1e-9:
+                            continue
+                        # Swapping must keep each part within swap_cap of
+                        # its OWN seed position
+                        if (math.hypot(pb.x - pa.seed_x, pb.y - pa.seed_y) > swap_cap + 1e-9
+                                or math.hypot(pa.x - pb.seed_x, pa.y - pb.seed_y) > swap_cap + 1e-9):
+                            swaps_skipped += 1
+                            continue
+                        # Courtyards are extracted per-ref, so the same
+                        # footprint_name doesn't guarantee identical bounds
+                        if pa.bounds_by_rot[0.0] != pb.bounds_by_rot[0.0]:
+                            continue
+                        # rect() falls back to rot-0 bounds for unknown
+                        # rotations; add the partner's rotation lazily so
+                        # non-90-degree swaps use correct geometry
+                        for p_dst, inherited in ((pa, pb.rot % 360), (pb, pa.rot % 360)):
+                            if inherited not in p_dst.bounds_by_rot:
+                                p_dst.bounds_by_rot[inherited] = _rotate_local_bounds(
+                                    *p_dst.bounds_by_rot[0.0], inherited)
                         involved = set(pa.nets) | set(pb.nets)
                         other_aw = state.airwires_excluding(involved)
 
@@ -515,13 +727,18 @@ def quench(pcb_data: PCBData, pcb_file: str,
                             state.apply_move(ra, pb.x, pb.y, pb.rot)
                             state.apply_move(rb, ax, ay, arot)
                             if verbose:
-                                print(f"  swap {ra} <-> {rb} gain={gain:.1f}")
+                                da = math.hypot(pa.x - pa.seed_x, pa.y - pa.seed_y)
+                                db = math.hypot(pb.x - pb.seed_x, pb.y - pb.seed_y)
+                                print(f"  swap {ra} <-> {rb} gain={gain:.1f}"
+                                      f" (d[{ra}]={da:.1f}mm, d[{rb}]={db:.1f}mm)")
 
         stats = state.total_cost()
+        swap_note = (f" swap-capped={swaps_skipped}"
+                     if verbose and swaps_skipped else "")
         print(f"Pass {pass_num}: {moves} moves, gain {improved:.1f} -> "
               f"length={stats['length']:.1f}mm crossings={stats['crossings']} "
               f"halo={stats['halo']:.1f} edge={stats['edge']:.1f} "
-              f"total={stats['total']:.1f}")
+              f"total={stats['total']:.1f}{swap_note}")
         if moves == 0:
             break
 
