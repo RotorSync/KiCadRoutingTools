@@ -3073,13 +3073,17 @@ def main():
     add_drc_fix_args(parser)
     args = parser.parse_args()
     set_default_fab_tier(*fab_tier_from_args(args))
-    enforce_fab_floors(
+    _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.pcb),
         track_width=getattr(args, 'track_width', None),
         clearance=getattr(args, 'clearance', None),
         via_size=getattr(args, 'via_size', None),
         via_drill=getattr(args, 'via_drill', None),
         hole_to_hole_clearance=getattr(args, 'hole_to_hole_clearance', None))
+    # Below-floor params are pinned up to the fab floor (warned); apply the clamps
+    # (#513 item 1: discarding this dict shipped sub-floor vias after the warning).
+    for _pname, _pfloor in _pinned_floors.items():
+        setattr(args, _pname, _pfloor)
 
     print(f"Parsing {args.pcb}...")
     pcb_data = parse_kicad_pcb(args.pcb)
