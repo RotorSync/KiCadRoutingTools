@@ -2486,86 +2486,24 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     'accepted': 'quantization-margin',
                 })
 
-        # Check ZONE/pour copper (#513 item 18): kicad-cli flags
-        # copper_edge_clearance on a plane pour (healthypi 1.8V near the
-        # outline) that the track/pad/via passes above cannot see. Grade ONLY
-        # the STORED (filled_polygon ...) geometry -- that is the actual
-        # copper KiCad grades. The zone OUTLINE is deliberately NOT graded:
-        # KiCad's refiller clips fill at the board edge with clearance, so an
-        # outline drawn to (or past) Edge.Cuts is normal and refills clean --
-        # outline grading manufactured 3 phantom violations on healthypi
-        # step9 (kicad-cli: zero zone-edge findings there). One violation per
-        # zone+layer (the worst overlap), so a grazing boundary doesn't spam.
-        if use_poly:
-            _zone_polys = []  # (net_str, layer, [pts])
-            try:
-                with open(pcb_file, encoding='utf-8') as _zf:
-                    _ztxt = _zf.read()
-                from kicad_parser import _iter_zone_blocks
-                import re as _re
-                for _zbody, _infp in _iter_zone_blocks(_ztxt):
-                    # Net name: KiCad<=9 zones carry (net N)+(net_name "X");
-                    # KiCad-10 name-net boards carry (net "X") only (#344
-                    # class: numeric-net matchers go blind on KiCad-10 files).
-                    _znm = (_re.search(r'\(net_name\s+"([^"]*)"\)', _zbody)
-                            or _re.search(r'\(net\s+"([^"]*)"\)', _zbody))
-                    if _znm:
-                        _zname = _znm.group(1)
-                    else:
-                        _zn_id = _re.search(r'\(net\s+(\d+)\)', _zbody)
-                        _zn_obj = (pcb_data.nets.get(int(_zn_id.group(1)))
-                                   if _zn_id else None)
-                        _zname = _zn_obj.name if _zn_obj else '?'
-                    _fps = 0
-                    for _fpm in _re.finditer(r'\(filled_polygon\b', _zbody):
-                        _fpend = _zbody.find('(pts', _fpm.start())
-                        if _fpend < 0:
-                            continue
-                        _lay = _re.search(r'\(layer\s+"([^"]+)"\)',
-                                          _zbody[_fpm.start():_fpm.start() + 200])
-                        _laynm = _lay.group(1) if _lay else None
-                        if not _laynm or not _laynm.endswith('.Cu'):
-                            continue
-                        # points until the matching close of this filled_polygon:
-                        # approximate by scanning to the next filled_polygon or end
-                        _nxt = _zbody.find('(filled_polygon', _fpm.start() + 10)
-                        _chunk = _zbody[_fpm.start():_nxt if _nxt > 0 else len(_zbody)]
-                        _pts = [(float(a), float(b)) for a, b in
-                                _re.findall(r'\(xy\s+([-\d.]+)\s+([-\d.]+)\)', _chunk)]
-                        if len(_pts) >= 3:
-                            _zone_polys.append((_zname, _laynm, _pts))
-                            _fps += 1
-            except OSError:
-                pass
-            _zone_worst = {}  # (name, layer) -> worst overlap
-            _req_z = effective_board_edge_clearance
-            for _zname, _laynm, _pts in _zone_polys:
-                if matching_seg_net_set is not None:
-                    _zids = [nid for nid, n in pcb_data.nets.items()
-                             if n.name == _zname]
-                    if _zids and _zids[0] not in matching_seg_net_set:
-                        continue
-                _ring_pts = _pts + [_pts[0]]
-                for (_x1, _y1), (_x2, _y2) in zip(_ring_pts, _ring_pts[1:]):
-                    # cheap lower bound: dist(seg) >= dist(p1) - seg_len
-                    _d1 = _point_to_rings_distance(_x1, _y1, edge_rings)
-                    _slen = math.hypot(_x2 - _x1, _y2 - _y1)
-                    if _d1 - _slen > _req_z:
-                        continue
-                    _d = _segment_to_rings_distance(_x1, _y1, _x2, _y2, edge_rings)
-                    if _d < _req_z - 1e-9:
-                        _ov = _req_z - _d
-                        _k = (_zname, _laynm)
-                        if _ov > _zone_worst.get(_k, (0.0, None))[0]:
-                            _zone_worst[_k] = (_ov, (_x1, _y1))
-            for (_zname, _laynm), (_ov, _loc) in sorted(_zone_worst.items()):
-                _rec = {'type': 'zone-board-edge', 'net1': _zname,
-                        'layer': _laynm, 'overlap_mm': _ov, 'seg_loc': _loc}
-                if _ov > effective_board_edge_clearance * clearance_margin:
-                    violations.append(_rec)
-                else:
-                    _rec['accepted'] = 'quantization-margin'
-                    _accepted_edge.append(_rec)
+        # ZONE/pour copper is INTENTIONALLY not edge-graded here (#513 item 18,
+        # implemented in c7fb340 and then deliberately reverted). KiCad's filler
+        # clips fill at the board outline by the ZONE's clearance only, so when
+        # the copper_edge_clearance rule is larger the fill genuinely violates
+        # it and kicad-cli flags it (healthypi_sensor's 1.8V pour, rule 0.2 vs
+        # zone clearance 0.09) -- but we leave that class to the KiCad oracle
+        # (kicad_drc_compare's refilled staged copy) on purpose:
+        #  - our own outputs carry NO stored (filled_polygon ...) geometry, so
+        #    a stored-fill check never fires on them, and grading zone OUTLINES
+        #    instead manufactures phantoms (KiCad refills clip at the outline;
+        #    measured: 3 phantom findings on healthypi step9, kicad-cli zero);
+        #  - on human/reference boards the fab-floor-pinned grade flagged fills
+        #    kicad-cli accepts (14/59 corpus originals, e.g. rc2014's 0.1mm
+        #    fill vs its own 0.075 rule), inflating original_routed_violations
+        #    baselines with a class kicad never confirms.
+        # If this is ever revisited, grade STORED fills only, at the board's
+        # OWN copper_edge_clearance (un-pinned), to fire exactly where kicad
+        # fires.
 
         # NPTH SLOT (milled oval) holes are board edge to KiCad (#448): its edge
         # provider grades copper proximity to a slot's hole wall as
@@ -2886,10 +2824,6 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"  Pad:{v['net1']} ({v['pad_ref']}) {where}")
                         print(f"    Overlap: {v['overlap_mm']:.3f}mm")
                         print(f"    Pad: ({v['pad_loc'][0]:.2f},{v['pad_loc'][1]:.2f})")
-                    elif vtype == 'zone-board-edge':
-                        print(f"  Zone:{v['net1']} pour too close to board edge")
-                        print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
-                        print(f"    Near: ({v['seg_loc'][0]:.2f},{v['seg_loc'][1]:.2f})")
                     elif vtype == 'track-width':
                         print(f"  {v['net1']} track too thin for fab")
                         print(f"    Layer: {v['layer']}, Width: {v['width']:.4f}mm "
