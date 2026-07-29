@@ -23,8 +23,10 @@ import shutil
 import sys
 
 # Sibling extensions that must travel with a board. .kicad_pro is the DRC floor
-# (the whole point); .kicad_prl is per-board local state (harmless to carry).
-SIBLING_EXTS = (".kicad_pro", ".kicad_prl")
+# (the whole point); .kicad_prl is per-board local state (harmless to carry);
+# .kicad_dru carries the board's custom rules (#498: per-layer clearances the
+# router honors and kicad-cli grades -- stranding it silently drops them).
+SIBLING_EXTS = (".kicad_pro", ".kicad_prl", ".kicad_dru")
 
 
 def copy_board(src_pcb: str, dst_pcb: str) -> list:

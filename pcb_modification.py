@@ -989,9 +989,12 @@ def snap_stub_gaps(results, pcb_data: PCBData, scope_net_ids, config,
                             continue
 
                     # Clearance check: the connector must keep `clearance` from
-                    # every OTHER net's copper.
+                    # every OTHER net's copper. #498: a .kicad_dru layer rule
+                    # replaces the net/class value on the connector's layer.
+                    _lyr_clear = (config.layer_clearance(lyr, coord_clear)
+                                  if hasattr(config, 'layer_clearance') else coord_clear)
                     if not _connector_clear(px, py, tx, ty, w, lyr, net_id,
-                                            pcb_data, coord_clear, net_clearances=_nc):
+                                            pcb_data, _lyr_clear, net_clearances=_nc):
                         continue
                     conn = Segment(start_x=px, start_y=py, end_x=tx, end_y=ty,
                                    width=w, layer=lyr, net_id=net_id)

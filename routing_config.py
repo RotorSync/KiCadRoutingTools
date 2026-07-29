@@ -256,6 +256,40 @@ class GridRouteConfig:
     # at least the class spacing to it (get_net_clearance() is the #326-only view).
     net_clearances: Dict[int, float] = field(default_factory=dict)
     net_clearance_floor: Optional[float] = None
+    # Per-layer clearance from the board's .kicad_dru custom rules (#498),
+    # {layer_name: mm}. REPLACEMENT semantics, mirroring KiCad's precedence
+    # (custom rules outrank netclasses and the CLI ceiling, tightening OR
+    # relaxing): on a ruled layer the value replaces the resolved pair
+    # clearance for EVERY pair there; unruled layers keep net/class
+    # resolution. Auto-read by the engines from the sibling .kicad_dru
+    # (kicad_dru.read_board_layer_clearances, fab-floor pinned); an empty map
+    # is a strict no-op. There is deliberately NO CLI flag or GUI control --
+    # the rules file is the one source of truth, and the graders (check_drc,
+    # staged kicad-cli) read the same file.
+    layer_clearances: Dict[str, float] = field(default_factory=dict)
+
+    def layer_clearance(self, layer: str, fallback: float) -> float:
+        """#498 pair clearance on `layer`: the .kicad_dru rule value when the
+        layer is ruled (replacement -- may be below `fallback`), else
+        `fallback` (the caller's net/class-resolved value). Single-layer
+        copper (segments, SMD pads) resolves through this; stack-spanning
+        copper uses stack_clearance()."""
+        if self.layer_clearances:
+            v = self.layer_clearances.get(layer)
+            if v is not None:
+                return v
+        return fallback
+
+    def stack_clearance(self, fallback: float) -> float:
+        """#498 clearance for STACK-SPANNING pairs (via barrels, TH drills):
+        KiCad evaluates the pair on every layer both coppers exist on, so the
+        requirement is the max over the stack. max(fallback, all rule values)
+        -- conservatively keeps `fallback` even when every routed layer is
+        ruled lower, since the board may have copper on layers outside
+        config.layers."""
+        if not self.layer_clearances:
+            return fallback
+        return max([fallback] + list(self.layer_clearances.values()))
 
     def obstacle_clearance(self, net_id: int) -> float:
         """KiCad cross-class clearance for an obstacle belonging to `net_id`.

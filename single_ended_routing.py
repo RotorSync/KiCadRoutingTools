@@ -620,11 +620,14 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
         # closer. Pad distances are override-adjusted (#326): a pad's local/
         # footprint clearance above the base is subtracted, so the allowed_half
         # below necks to the pad's OWN required clearance.
+        # #498: a .kicad_dru layer rule replaces the pair clearance on s.layer.
+        own_l = (config.layer_clearance(s.layer, own)
+                 if hasattr(config, 'layer_clearance') else own)
         d = min(_seg_foreign_pad_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer,
-                                      base_clearance=own, net_clearances=nc),
+                                      base_clearance=own_l, net_clearances=nc),
                 _seg_foreign_seg_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer,
-                                      net_clearances=nc, base_clearance=own))
-        allowed_half = d - own - 1e-4  # 1e-4: stay just inside the rule
+                                      net_clearances=nc, base_clearance=own_l))
+        allowed_half = d - own_l - 1e-4  # 1e-4: stay just inside the rule
         if allowed_half < s.width / 2.0 - 1e-9:
             new_w = max(floor, 2.0 * allowed_half)
             if new_w < s.width - 1e-9:

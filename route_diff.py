@@ -105,6 +105,9 @@ from grid_router import GridObstacleMap, GridRouter
 def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
                 layer_costs: Optional[List[float]] = None,
+                # #498: {layer: mm} per-layer clearance. None (both fronts) ->
+                # auto-read the sibling .kicad_dru; explicit dict (tests) wins.
+                layer_clearances: Optional[Dict[str, float]] = None,
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
                 direction_order: str = None,
                 ordering_strategy: str = "inside_out",
@@ -651,6 +654,10 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # stamper (partner-leg segs/vias, phase-3 taps) price foreign copper at KiCad's
     # pairwise max(classA, classB). Floor is over the ROUTED nets. Inert when empty.
     config.set_net_clearances(net_clearances, [nid for _, nid in net_ids])
+    # #498: per-layer .kicad_dru clearance rules, installed engine-side so the
+    # GUI inherits them with no wiring (see kicad_dru.install_layer_clearances).
+    from kicad_dru import install_layer_clearances
+    install_layer_clearances(config, layer_clearances, input_file, pcb_data)
 
     # Upfront layer swap optimization: analyze all diff pairs and apply beneficial swaps
     # BEFORE MPS ordering, so ordering sees correct segment layers

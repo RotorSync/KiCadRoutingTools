@@ -731,6 +731,16 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
                            "meta": {"filename": os.path.basename(out_pro), "version": 1},
                            "net_settings": {"classes": [], "meta": {"version": 0}}},
                           f, indent=2)
+    # #498: carry the input's custom-rules file to the output the same way --
+    # the router routed to its per-layer clearances, and every grader
+    # (check_drc, staged kicad-cli, the next chain step) resolves them from the
+    # OUTPUT board's sibling. Never overwrite an existing output dru.
+    if input_pcb:
+        in_dru = os.path.splitext(input_pcb)[0] + ".kicad_dru"
+        out_dru = os.path.splitext(output_pcb)[0] + ".kicad_dru"
+        if os.path.isfile(in_dru) and not os.path.isfile(out_dru) \
+                and os.path.abspath(in_dru) != os.path.abspath(out_dru):
+            shutil.copyfile(in_dru, out_dru)
 
     with open(out_pro) as f:
         proj = json.load(f)
@@ -749,6 +759,18 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
                               track_width=track_width, via_diameter=via_diameter,
                               via_drill=via_drill, minima=minima,
                               fab_edge=fab_edge_floor(output_pcb))
+    # #498: a .kicad_dru rule may legally RELAX clearance on its layer, and
+    # KiCad's rules.min_clearance is an ABSOLUTE floor that outranks custom
+    # rules -- cap the recorded floor at the smallest rule value, or the ruled
+    # layers re-manufacture phantom violations on copper routed at the rule.
+    try:
+        from kicad_dru import min_rule_clearance
+        _dru_min = min_rule_clearance(output_pcb)
+        if _dru_min is not None and targets.get("min_clearance") \
+                and _dru_min < targets["min_clearance"]:
+            targets["min_clearance"] = _dru_min
+    except Exception:
+        pass
     plan = severity_plan(keep_courtyards=keep_courtyards, keep_mask=keep_mask,
                          keep_footprint=keep_footprint, keep_thermal=keep_thermal,
                          extra_ignore=extra_ignore)
@@ -793,6 +815,19 @@ def apply_targets_to_board(board, targets: dict, sev_plan: dict,
     EPS = 1.0  # nm
     bds = board.GetDesignSettings()
     changes = []
+
+    # #498 parity with fix_project_for_output: cap min_clearance at the
+    # smallest .kicad_dru layer rule (an absolute board floor above a relaxing
+    # rule re-manufactures phantom violations on that rule's layer).
+    try:
+        from kicad_dru import min_rule_clearance
+        _dru_min = min_rule_clearance(board.GetFileName() or "")
+        if _dru_min is not None and targets.get("min_clearance") \
+                and _dru_min < targets["min_clearance"]:
+            targets = dict(targets)
+            targets["min_clearance"] = _dru_min
+    except Exception:
+        pass
 
     # rule key -> BOARD_DESIGN_SETTINGS attribute (units: nm). Only loosen.
     attr = {

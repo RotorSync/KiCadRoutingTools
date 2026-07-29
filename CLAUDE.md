@@ -79,6 +79,21 @@ Validate routed boards against the *real* spec, with the right checker — most
   - `--hole-to-hole-clearance` / `--board-edge-clearance` work the same way: omitted →
     the board's own `min_hole_to_hole` / `min_copper_edge_clearance` constraint (via
     `list_nets.board_constraint`), else the fixed default.
+- **Per-layer clearance comes from the board's `.kicad_dru` (#498) and OUTRANKS
+  `--clearance`.** KiCad stores layer-scoped clearance in custom rules
+  (`(rule x (layer inner) (constraint clearance (min 0.15mm)))`); netclasses can't
+  express it. The engines auto-read the sibling `.kicad_dru`
+  (`kicad_dru.install_layer_clearances`) with **replacement** semantics — a rule
+  value replaces the net/class pair clearance on its layer, tightening or
+  relaxing, exactly like KiCad's own precedence (custom rules outrank classes;
+  only the fab floor pins them up). There is deliberately **no CLI flag and no
+  GUI control** — the rules file is the single source of truth; `check_drc` and
+  the staged kicad-cli grade read the same file, `copy_board`/
+  `fix_project_for_output` carry it as a sibling, and the DRC writeback caps
+  `min_clearance` at the smallest rule so a relaxing rule isn't floored away.
+  Grade a ruled board with plain `check_drc.py` (it auto-reads); a hand-rolled
+  checker that ignores the dru will manufacture phantom flags on relaxed layers
+  and miss real ones on tightened layers.
   **Why clamp on a ceiling:** stock net classes are largely *aspirational* — corpus and
   real boards route below them, and even the human-routed references violate their own
   class (zynq: 499 clearance violations at its 0.2 class, routed ~0.1), so keeping the

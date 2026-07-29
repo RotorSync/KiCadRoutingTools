@@ -50,12 +50,24 @@ def _copper_conflicts(pcb_data: PCBData, config: GridRouteConfig,
     from geometry_utils import point_to_segment_distance
     clr_of = (config.obstacle_clearance
               if hasattr(config, 'obstacle_clearance') else lambda n: config.clearance)
+
+    def _pair_clr(a_net, b_net, layer=None):
+        # KiCad pairwise max of the two nets' resolutions; #498: a .kicad_dru
+        # rule for the layer the coppers meet on replaces that (stack max for
+        # via-via, where they meet on every layer).
+        v = max(clr_of(a_net), clr_of(b_net))
+        if layer is not None and hasattr(config, 'layer_clearance'):
+            return config.layer_clearance(layer, v)
+        if layer is None and hasattr(config, 'stack_clearance'):
+            return config.stack_clearance(v)
+        return v
+
     for cand in segments:
         c_clr_half = cand.width / 2
         for s in pcb_data.segments:
             if s.net_id in own_ids or s.layer != cand.layer:
                 continue
-            need = c_clr_half + s.width / 2 + max(clr_of(cand.net_id), clr_of(s.net_id))
+            need = c_clr_half + s.width / 2 + _pair_clr(cand.net_id, s.net_id, cand.layer)
             if any(point_to_segment_distance(px, py, s.start_x, s.start_y,
                                              s.end_x, s.end_y) < need
                    for px, py in _seg_points(cand)):
@@ -63,20 +75,20 @@ def _copper_conflicts(pcb_data: PCBData, config: GridRouteConfig,
         for v in pcb_data.vias:
             if v.net_id in own_ids:
                 continue
-            need = c_clr_half + v.size / 2 + max(clr_of(cand.net_id), clr_of(v.net_id))
+            need = c_clr_half + v.size / 2 + _pair_clr(cand.net_id, v.net_id, cand.layer)
             if any(math.hypot(px - v.x, py - v.y) < need for px, py in _seg_points(cand)):
                 return True
     for cv in vias:
         for v in pcb_data.vias:
             if v.net_id in own_ids:
                 continue
-            need = cv.size / 2 + v.size / 2 + max(clr_of(cv.net_id), clr_of(v.net_id))
+            need = cv.size / 2 + v.size / 2 + _pair_clr(cv.net_id, v.net_id)
             if math.hypot(cv.x - v.x, cv.y - v.y) < need:
                 return True
         for s in pcb_data.segments:
             if s.net_id in own_ids:
                 continue
-            need = cv.size / 2 + s.width / 2 + max(clr_of(cv.net_id), clr_of(s.net_id))
+            need = cv.size / 2 + s.width / 2 + _pair_clr(cv.net_id, s.net_id, s.layer)
             if point_to_segment_distance(cv.x, cv.y, s.start_x, s.start_y,
                                          s.end_x, s.end_y) < need:
                 return True

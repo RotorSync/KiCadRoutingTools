@@ -342,6 +342,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 vis_callback=None,
                 schematic_dir: Optional[str] = None,
                 layer_costs: Optional[List[float]] = None,
+                # #498: {layer: mm} per-layer clearance. None (both fronts) ->
+                # auto-read the sibling .kicad_dru; explicit dict (tests) wins.
+                layer_clearances: Optional[Dict[str, float]] = None,
                 final_reconcile: bool = True,
                 add_teardrops: bool = False,
                 collect_stats: bool = False,
@@ -1074,6 +1077,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # computed over the ROUTED nets (== base map's nets_to_route) so the base map
     # and the incremental stampers agree. Inert when net_clearances is empty.
     config.set_net_clearances(net_clearances, base_map_exclusions)
+    # #498: per-layer .kicad_dru clearance rules, installed engine-side so the
+    # GUI inherits them with no wiring (see kicad_dru.install_layer_clearances).
+    from kicad_dru import install_layer_clearances
+    install_layer_clearances(config, layer_clearances, input_file, pcb_data)
     if visualize:
         base_obstacles, base_vis_data = build_base_obstacle_map_with_vis(
             pcb_data, config, base_map_exclusions,

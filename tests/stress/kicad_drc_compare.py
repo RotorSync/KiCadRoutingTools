@@ -459,6 +459,13 @@ def _staged_copy(board: str, clearance: float):
     d = tempfile.mkdtemp(prefix="kdrc_")
     b2 = os.path.join(d, os.path.basename(board))
     shutil.copy(board, b2)
+    # #498: stage the custom-rules file too -- kicad-cli only honors rules
+    # sitting next to the staged project, and the router routes to the board's
+    # per-layer clearance rules, so grading without them manufactures phantom
+    # violations on ruled layers (or misses real ones).
+    dru = os.path.splitext(board)[0] + ".kicad_dru"
+    if os.path.exists(dru):
+        shutil.copy(dru, os.path.splitext(b2)[0] + ".kicad_dru")
     pro = os.path.splitext(board)[0] + ".kicad_pro"
     pro2 = os.path.splitext(b2)[0] + ".kicad_pro"
     try:

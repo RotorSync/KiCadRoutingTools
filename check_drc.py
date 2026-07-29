@@ -1508,14 +1508,71 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             if c > clearance:
                 _ncl_by_id[nid] = c
 
-    def _pair_cl(net_a: int, net_b: int) -> float:
-        if not _ncl_by_id:
-            return clearance
-        return max(clearance,
-                   _ncl_by_id.get(net_a, 0.0), _ncl_by_id.get(net_b, 0.0))
+    # #498: per-layer clearance rules from the board's own sibling .kicad_dru,
+    # auto-read exactly like netclasses. A rule REPLACES the net/class-resolved
+    # pair value on its layer (KiCad precedence: custom rules outrank classes,
+    # tightening or relaxing); a pad's local override stays above (KiCad gives
+    # local overrides precedence over rules). The router routes to the same map
+    # (kicad_dru.install_layer_clearances), so grading without it would
+    # manufacture phantom flags on relaxed layers and miss real ones on
+    # tightened layers.
+    _board_copper = list(getattr(pcb_data.board_info, 'copper_layers', None) or [])
+    from kicad_dru import read_board_layer_clearances
+    _lcl, _dru_notes = read_board_layer_clearances(pcb_file, _board_copper)
+    if not quiet:
+        for _n in _dru_notes:
+            print(f"  .kicad_dru: {_n}")
+        if _lcl:
+            print("Per-layer clearance rules (.kicad_dru, #498): "
+                  + ", ".join(f"{l}:{v:g}" for l, v in sorted(_lcl.items())))
 
-    def _pad_pair_cl(pad, other_net: int) -> float:
+    def _layer_cl(layer: str, eff: float) -> float:
+        v = _lcl.get(layer) if _lcl else None
+        return v if v is not None else eff
+
+    def _stack_cl(eff: float) -> float:
+        # Stack-spanning pairs (via-via): the barrels meet on every copper
+        # layer -> max over the rules, same formula the router stamps with.
+        return max([eff] + list(_lcl.values())) if _lcl else eff
+
+    def _pad_copper(pad):
+        out = set()
+        for l in (pad.layers or []):
+            if l in ('*.Cu', 'F&B.Cu'):
+                out |= set(_board_copper) if l == '*.Cu' else {'F.Cu', 'B.Cu'}
+            elif l.endswith('.Cu'):
+                out.add(l)
+        return out
+
+    def _pads_cl(eff: float, pad, other_pad=None) -> float:
+        # Pad-vs-via / pad-vs-pad meet on their SHARED copper layers; TH
+        # geometry is identical on every layer, so the max over shared layers
+        # is the exact requirement.
+        if not _lcl:
+            return eff
+        shared = _pad_copper(pad)
+        if other_pad is not None:
+            shared &= _pad_copper(other_pad)
+        vals = [_lcl[l] for l in shared if l in _lcl]
+        if not vals:
+            return eff
+        if len([l for l in shared if l not in _lcl]) == 0:
+            return max(vals)  # every shared layer ruled: rules replace
+        return max([eff] + vals)
+
+    def _pair_cl(net_a: int, net_b: int, layer: str = None) -> float:
+        base = clearance if not _ncl_by_id else \
+            max(clearance, _ncl_by_id.get(net_a, 0.0), _ncl_by_id.get(net_b, 0.0))
+        if layer is not None:
+            return _layer_cl(layer, base)
+        return base
+
+    def _pad_pair_cl(pad, other_net: int, layer: str = None, other_pad=None) -> float:
         eff = _pair_cl(pad.net_id, other_net)
+        if layer is not None:
+            eff = _layer_cl(layer, eff)
+        else:
+            eff = _pads_cl(eff, pad, other_pad)
         lc = getattr(pad, 'local_clearance', 0.0) or 0.0
         return lc if lc > eff else eff
 
@@ -1640,7 +1697,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 continue
             checked_pairs.add(pair_key)
 
-            _eff = _pair_cl(net1, net2)
+            _eff = _pair_cl(net1, net2, layer=seg1.layer)
             has_violation, overlap, pt1, pt2 = check_segment_overlap(seg1, seg2, _eff, clearance_margin)
             if has_violation and _graphic_pair_is_same_net(seg1, seg2, net1, net2):
                 has_violation = False
@@ -1787,7 +1844,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 if not via_net_matches and not seg_net_matches:
                     continue
 
-                _eff = _pair_cl(via_net, seg_net)
+                _eff = _pair_cl(via_net, seg_net, layer=seg.layer)
                 has_violation, overlap = check_via_segment_overlap(via, seg, _eff, clearance_margin)
                 if has_violation and _graphic_pair_is_same_net(seg, None, seg_net, via_net):
                     has_violation = False
@@ -1827,7 +1884,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 continue
             via_via_checked.add(pair_key)
 
-            _eff = _pair_cl(net1, net2) if net1 != net2 else clearance
+            _eff = _stack_cl(_pair_cl(net1, net2) if net1 != net2 else clearance)
             has_violation, overlap = check_via_via_overlap(via1, via2, _eff, clearance_margin)
             if has_violation:
                 net1_name = pcb_data.nets.get(net1, None)
@@ -1875,7 +1932,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             if not seg_net_matches and not pad_net_matches:
                 continue
 
-            _eff = _pad_pair_cl(pad, seg_net)
+            _eff = _pad_pair_cl(pad, seg_net, layer=seg.layer)
             has_violation, overlap, closest_pt = check_pad_segment_overlap(
                 pad, seg, _eff, routing_layers, clearance_margin
             )
@@ -1981,7 +2038,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         continue
                     pad_pad_checked.add(pair_key)
                     _lc2 = getattr(pad2, 'local_clearance', 0.0) or 0.0
-                    _eff = max(_pad_pair_cl(pad1, pad2_net), _lc2)
+                    _eff = max(_pad_pair_cl(pad1, pad2_net, other_pad=pad2), _lc2)
                     has_violation, overlap, closest_pt = check_pad_pad_overlap(
                         pad1, pad2, _eff, routing_layers, clearance_margin)
                     if has_violation:

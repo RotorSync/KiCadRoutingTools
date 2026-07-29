@@ -466,7 +466,20 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
                 iu = board_min_iu if iu is None else min(iu, board_min_iu)
             if getattr(bds, attr) > iu:
                 setattr(bds, attr, iu)
-        lower('m_MinClearance', clearance)
+        # #498 parity with fix_project_for_output: cap the board's ABSOLUTE
+        # min-clearance floor at the smallest .kicad_dru layer rule -- the
+        # floor outranks custom rules, so leaving it above a relaxing rule
+        # re-manufactures phantom violations on that rule's layer.
+        _clr_floor = clearance
+        try:
+            from kicad_dru import min_rule_clearance
+            _dru_min = min_rule_clearance(board.GetFileName() or "")
+            if _dru_min is not None and _clr_floor is not None \
+                    and _dru_min < float(_clr_floor):
+                _clr_floor = _dru_min
+        except Exception:
+            pass
+        lower('m_MinClearance', _clr_floor)
         lower('m_TrackMinWidth', track_width, min_w)
         lower('m_ViasMinSize', via_size, min_via)
         lower('m_MinThroughDrill', via_drill, min_drill)

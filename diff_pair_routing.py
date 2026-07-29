@@ -2313,8 +2313,14 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
     # real spacing (this gate previously used only config.clearance). Falls back to the
     # base clearance when the config carries no net-clearance map.
     _oc = getattr(config, 'obstacle_clearance', None)
-    def _obs_clr(net_id):
-        return _oc(net_id) if _oc is not None else clearance
+    _lc = getattr(config, 'layer_clearance', None)
+    def _obs_clr(net_id, layer=None):
+        v = _oc(net_id) if _oc is not None else clearance
+        # #498: the pair copper meets every foreign obstacle ON the seg's layer,
+        # so a .kicad_dru rule for that layer replaces the net/class value.
+        if layer is not None and _lc is not None:
+            v = _lc(layer, v)
+        return v
     pads_by_net = getattr(pcb_data, 'pads_by_net', None) or {}
     vias = getattr(pcb_data, 'vias', None) or []
     # Foreign tracks (not on either pair net), bucketed by layer for a cheap prefilter.
@@ -2331,7 +2337,7 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
         for pad_net, pads in pads_by_net.items():
             if pad_net == seg.net_id:
                 continue  # the connector legitimately lands on its own-net pad
-            pclr = _obs_clr(pad_net)
+            pclr = _obs_clr(pad_net, seg.layer)
             for pad in pads:
                 # per-pad override (#326) wins where larger (keep-clear rings etc.)
                 pc = max(pclr, getattr(pad, 'local_clearance', 0.0) or 0.0)
@@ -2348,7 +2354,7 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
         for via in vias:
             if via.net_id == seg.net_id:
                 continue  # the connector legitimately lands on its own-net via
-            vclr = _obs_clr(via.net_id)
+            vclr = _obs_clr(via.net_id, seg.layer)
             vm = vclr + seg.width / 2 + via.size / 2
             if (via.x < sxmin - vm or via.x > sxmax + vm or
                     via.y < symin - vm or via.y > symax + vm):
@@ -2360,7 +2366,7 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
         # vs foreign tracks on the same layer (issue #246)
         for o in foreign_tracks_by_layer.get(seg.layer, ()):
             ow = o.width if getattr(o, 'width', 0) else seg.width
-            need = _obs_clr(o.net_id) + seg.width / 2 + ow / 2 - _DRC_CLEARANCE_MARGIN
+            need = _obs_clr(o.net_id, seg.layer) + seg.width / 2 + ow / 2 - _DRC_CLEARANCE_MARGIN
             if need <= 0:
                 continue
             if (max(o.start_x, o.end_x) < sxmin - need or
