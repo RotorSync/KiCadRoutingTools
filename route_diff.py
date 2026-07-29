@@ -170,6 +170,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 length_match_groups: Optional[List[List[str]]] = None,
                 length_match_tolerance: float = defaults.LENGTH_MATCH_TOLERANCE,
                 meander_amplitude: float = defaults.MEANDER_AMPLITUDE,
+                meander_spacing: float = defaults.MEANDER_SPACING,
                 time_matching: bool = defaults.TIME_MATCHING,
                 time_match_tolerance: float = defaults.TIME_MATCH_TOLERANCE,
                 diff_chamfer_extra: float = defaults.DIFF_PAIR_CHAMFER_EXTRA,
@@ -414,6 +415,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         ripped_route_avoidance_cost=ripped_route_avoidance_cost,
         length_match_groups=length_match_groups,
         length_match_tolerance=length_match_tolerance, meander_amplitude=meander_amplitude,
+        meander_spacing=meander_spacing,
         time_matching=time_matching, time_match_tolerance=time_match_tolerance,
         debug_memory=debug_memory
     )
@@ -1657,6 +1659,11 @@ Examples:
                         help="Acceptable length variance within group in mm (default: 0.1)")
     parser.add_argument("--meander-amplitude", type=float, default=1.0,
                         help="Height of meander perpendicular to trace in mm (default: 1.0)")
+    parser.add_argument("--meander-spacing", type=float, default=defaults.MEANDER_SPACING,
+                        help="Centre-to-centre spacing of adjacent single-ended meander arms, in "
+                             "multiples of the net's routed track width; used for intra-pair P/N "
+                             "and AC-coupled matching (default: 2.0 = 2W). Pair-centerline "
+                             "meanders scale with the pair gap instead (--diff-chamfer-extra).")
 
     # Time matching options (alternative to length matching)
     parser.add_argument("--time-matching", action="store_true",
@@ -1973,6 +1980,7 @@ Examples:
                 length_match_groups=args.length_match_groups,
                 length_match_tolerance=args.length_match_tolerance,
                 meander_amplitude=args.meander_amplitude,
+                meander_spacing=args.meander_spacing,
                 time_matching=args.time_matching,
                 time_match_tolerance=args.time_match_tolerance,
                 diff_chamfer_extra=args.diff_chamfer_extra,

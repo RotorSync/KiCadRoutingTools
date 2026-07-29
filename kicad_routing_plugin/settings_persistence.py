@@ -127,6 +127,7 @@ def get_dialog_settings(dialog):
         'length_match_groups': dialog.length_match_groups_ctrl.GetValue(),
         'length_match_tolerance': dialog.length_match_tolerance.GetValue(),
         'meander_amplitude': dialog.meander_amplitude.GetValue(),
+        'meander_spacing': dialog.meander_spacing.GetValue(),
         'time_matching_check': dialog.time_matching_check.GetValue(),
         'time_match_tolerance': dialog.time_match_tolerance.GetValue(),
         'debug_lines_check': dialog.debug_lines_check.GetValue(),
@@ -456,6 +457,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.length_match_tolerance.SetValue(settings['length_match_tolerance'])
     if 'meander_amplitude' in settings:
         dialog.meander_amplitude.SetValue(settings['meander_amplitude'])
+    if 'meander_spacing' in settings:
+        dialog.meander_spacing.SetValue(settings['meander_spacing'])
     if 'time_matching_check' in settings:
         dialog.time_matching_check.SetValue(settings['time_matching_check'])
     if 'time_match_tolerance' in settings:

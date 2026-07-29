@@ -176,6 +176,14 @@ class GridRouteConfig:
     length_match_groups: List[List[str]] = field(default_factory=list)  # Groups of net patterns to match
     length_match_tolerance: float = 0.1  # mm - acceptable length variance within group
     meander_amplitude: float = 1.0  # mm - height of meander perpendicular to trace
+    # Single-ended meander arm pitch (#501), in MULTIPLES of the net's routed
+    # track width, centre-to-centre. The historical geometry hardcoded a 0.2mm
+    # pitch regardless of track width (a 4:1 coupled comb at impedance widths,
+    # so length matching under-delivered DELAY matching). 2.0 = 2W pitch = 1W
+    # edge gap between arms; identical to the old geometry at the 0.1mm default
+    # width. Same-net arms are excluded from every clearance check by design,
+    # so this arithmetic is the only arm-spacing guarantee.
+    meander_spacing: float = 2.0  # arm pitch as a multiple of net track width
     diff_chamfer_extra: float = 1.5  # Chamfer multiplier for diff pair meanders (>1 avoids P/N crossings)
     diff_pair_intra_match: bool = False  # Enable intra-pair P/N length matching (meander shorter track)
     ac_couple_match: bool = False  # End-to-end length-match AC-coupled pairs split by series caps (#196)

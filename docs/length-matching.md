@@ -21,6 +21,7 @@ For multi-point nets this happens between Phase 1 and Phase 3 of the MST-based a
 | `--length-match-group <patterns...>` | none | Define a match group by net name patterns (repeatable, one group per flag). The special value `auto` enables DDR4 auto-grouping |
 | `--length-match-tolerance` | 0.1 | Acceptable length variance within a group (mm) |
 | `--meander-amplitude` | 1.0 | Maximum meander bump height perpendicular to the trace (mm) |
+| `--meander-spacing` | 2.0 | Centre-to-centre spacing of adjacent meander arms, in multiples of the net's routed track width (2.0 = 2W pitch = 1W edge gap) |
 | `--time-matching` | false | Match propagation delay instead of physical length |
 | `--time-match-tolerance` | 1.0 | Acceptable delay variance within a group (ps) |
 | `--diff-pair-intra-match` | false | (`route_diff.py`) Match P and N lengths *within* each differential pair |
@@ -59,7 +60,7 @@ Each `--length-match-group` flag defines one group; nets matching *any* pattern 
 
 ## The Trombone Meander
 
-Meanders are rectangular bumps perpendicular to the trace, with 45° chamfered corners (chamfer size 0.1mm), alternating up/down along the run:
+Meanders are rectangular bumps perpendicular to the trace, with 45° chamfered corners, alternating up/down along the run. The chamfer is half the arm pitch: adjacent risers sit `--meander-spacing` × the net's routed track width apart centre-to-centre (#501), so wider (impedance/power) nets automatically spread their arms; the chamfer never drops below 0.1mm, which reproduces the historical geometry exactly at the default 0.1mm track width. Same-net copper is exempt from every clearance check by design, so this pitch arithmetic — not DRC — is what keeps the arms from forming a tightly coupled comb that would add less *delay* than *length*:
 
 ```
 Original:  ────────────────────────>
@@ -69,7 +70,7 @@ Meander:   ──╮╭──╮╭──╮╭──>
              ╰╯  ╰╯  ╰╯
 ```
 
-`apply_meanders_to_route()` finds all straight runs in the route (minimum length 2× amplitude) and tries them longest-first until one accepts the required extra length. Within a run, `generate_trombone_meander()` distributes bumps with alternating direction. Each bump of amplitude *A* adds roughly `2A − 2.34 × chamfer` of extra length (≈1.77mm at the default 1.0mm amplitude).
+`apply_meanders_to_route()` finds all straight runs in the route (minimum length 2× amplitude) and tries them longest-first. If the best run cannot absorb the whole target — common at wider pitches, which fit fewer bumps per run — the remainder **spills across further straight runs**: after each run is meandered, the straight runs are re-derived from the modified segment list and the next-best run takes the rest, until the target is met, progress stalls, or a round cap is hit. Within a run, `generate_trombone_meander()` distributes bumps with alternating direction. Each bump of amplitude *A* adds roughly `2A − 2.34 × chamfer` of extra length (≈1.77mm at the default 1.0mm amplitude and 0.1mm chamfer).
 
 ### Per-Bump Clearance Checking
 
@@ -121,7 +122,7 @@ To size the meanders, the required extra delay is converted to extra length usin
 
 ## Limitations
 
-- Meanders are added to one straight run per route; if no run can absorb the required extra length within clearance limits, the route may end outside tolerance (a warning is printed).
+- Meanders spill across multiple straight runs when one run cannot absorb the required extra length; if the runs together still cannot absorb it within clearance limits, the route may end outside tolerance (a warning is printed).
 - Very tight surroundings can force the amplitude to its 0.2mm minimum, limiting how much length a run can add.
 - Meanders are not placed across layer changes.
 - `--ac-couple-match` runs after `--length-match-group`; a pair that is both an XNet member and in a match group may be meandered again by the end-to-end pass, perturbing its group-matched length. Keep AC-coupled pairs out of match groups.

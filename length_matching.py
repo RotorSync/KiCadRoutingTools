@@ -32,6 +32,32 @@ CORNER_BLOAT_FACTOR = 0.42  # sqrt(2) - 1, extra copper extension at 90-degree c
 SPATIAL_CELL_SIZE = 2.0  # mm - spatial index cell size
 
 
+def resolve_meander_chamfer(
+    config: Optional[GridRouteConfig],
+    net_id: Optional[int] = None,
+    layer: Optional[str] = None,
+    own_width: float = 0.0,
+) -> float:
+    """Chamfer (= half the riser pitch) for single-ended meander arms (#501).
+
+    Adjacent risers sit 2*chamfer centre-to-centre, so the fixed CHAMFER_SIZE
+    packed arms 0.2mm apart regardless of track width. Same-net arms are
+    excluded from every clearance checker by design, so the pitch arithmetic
+    here is the only arm-spacing guarantee: pitch = config.meander_spacing *
+    the net's actual routed width on this layer (own_width covers segments
+    widened beyond their class).
+    """
+    if config is None:
+        return CHAMFER_SIZE
+    width = max(getattr(config, 'track_width', 0.0), own_width)
+    if net_id is not None and layer is not None:
+        width = max(width, config.get_net_track_width(net_id, layer))
+    spacing = getattr(config, 'meander_spacing', 2.0)
+    if not spacing or spacing <= 0:
+        spacing = 2.0
+    return max(CHAMFER_SIZE, spacing * width / 2.0)
+
+
 class ClearanceIndex:
     """
     Spatial index for efficient clearance checking.
@@ -319,7 +345,8 @@ def get_safe_amplitude_at_point(
     is_first_bump: bool = True,
     paired_net_id: int = None,
     clearance_index: 'ClearanceIndex' = None,
-    own_width: float = 0.0
+    own_width: float = 0.0,
+    chamfer: float = None
 ) -> float:
     """
     Find the maximum safe amplitude for a meander bump at a specific point.
@@ -344,6 +371,9 @@ def get_safe_amplitude_at_point(
             the segment's real width so a segment widened beyond its netclass (e.g. a
             hand-placed wide trunk) is honored, matching obstacle_cache's max(net_w,
             seg.width). 0 = fall back to the net's configured width only.
+        chamfer: Chamfer size the caller will emit bumps with (#501). Pass the
+            generator's resolved value so the checked geometry matches the
+            emitted geometry; None = resolve from config/net width here.
 
     Returns:
         Safe amplitude, or 0 if no safe amplitude found
@@ -369,7 +399,8 @@ def get_safe_amplitude_at_point(
     required_clearance = net_half + config.track_width / 2 + config.clearance + meander_clearance_margin + corner_margin
     via_clearance = config.via_size / 2 + net_half + config.clearance + meander_clearance_margin + corner_margin
     paired_clearance = net_half + config.track_width / 2 + config.clearance
-    chamfer = CHAMFER_SIZE
+    if chamfer is None:
+        chamfer = resolve_meander_chamfer(config, net_id, layer, own_width)
 
     # Board-edge keep-out (meanders overran the board outline). The A* router avoids
     # the edge via add_board_edge_obstacles, but this geometric meander pass never
@@ -723,8 +754,9 @@ def generate_trombone_meander(
     px = -uy
     py = ux
 
-    # 45° chamfer size - use a small chamfer for smooth corners
-    chamfer = CHAMFER_SIZE  # mm - small 45° chamfer at corners
+    # 45° chamfer size = half the riser pitch: scale it with the net's routed
+    # width so adjacent arms keep their spacing at any width (#501)
+    chamfer = resolve_meander_chamfer(config, segment.net_id, segment.layer, segment.width)
     min_amplitude = MIN_AMPLITUDE  # mm - minimum useful amplitude
 
     # Horizontal distance consumed by one bump (just the chamfers' horizontal components)
@@ -821,7 +853,7 @@ def generate_trombone_meander(
                 check_cx, check_cy, ux, uy, px, py, direction, amplitude, min_amplitude,
                 segment.layer, pcb_data, segment.net_id, config, extra_segments, extra_vias, is_first,
                 paired_net_id=paired_net_id, clearance_index=clearance_index,
-                own_width=segment.width
+                own_width=segment.width, chamfer=chamfer
             )
             if safe_amp < min_amplitude:
                 # Try the other direction
@@ -838,7 +870,7 @@ def generate_trombone_meander(
                     other_check_cx, other_check_cy, ux, uy, px, py, other_dir, amplitude, min_amplitude,
                     segment.layer, pcb_data, segment.net_id, config, extra_segments, extra_vias, is_first,
                     paired_net_id=paired_net_id, clearance_index=clearance_index,
-                    own_width=segment.width
+                    own_width=segment.width, chamfer=chamfer
                 )
                 if safe_amp_other >= min_amplitude:
                     # Mark the original direction as blocked if safe_amp was 0
@@ -1147,28 +1179,21 @@ def apply_meanders_to_route(
         net_id: Net ID of this route (optional, for clearance checking)
         extra_segments: Additional segments to check against (e.g., from already-processed nets)
         extra_vias: Additional vias to check against (e.g., from already-processed nets)
-        min_bumps: Minimum number of bumps to generate
+        min_bumps: Minimum number of bumps to generate, as a TOTAL across all
+            straight runs the meanders spill over (#501)
         amplitude_override: Override amplitude (for scaling down to hit target length)
         paired_net_id: Optional paired net ID to also exclude (for intra-pair diff pair matching)
         excluded_centerline_ranges: List of (start, end) position ranges to avoid (e.g., inter-pair meanders)
         clearance_index: Pre-built spatial index for clearance checking (optional, built if not provided)
 
     Returns:
-        Tuple of (modified segment list, bump_count)
+        Tuple of (modified segment list, total bump_count across all runs)
     """
     if extra_length <= 0 or not segments:
         return segments, 0
 
     # Use override amplitude if provided
     amplitude = amplitude_override if amplitude_override is not None else config.meander_amplitude
-
-    # Find all straight runs, sorted by length
-    min_length = amplitude * 2  # Reduced minimum for more options
-    runs = find_all_straight_runs(segments, min_length=min_length)
-
-    if not runs:
-        print(f"    Warning: No suitable straight run found for meanders (need >= {min_length:.1f}mm)")
-        return segments, 0
 
     # Use provided index or build one for efficient clearance checking
     if clearance_index is None and pcb_data is not None and config is not None:
@@ -1189,80 +1214,126 @@ def apply_meanders_to_route(
             origin_x = first_seg.start_x
             origin_y = first_seg.start_y
 
-    # Try each straight run until we find one that works
-    min_amplitude = MIN_AMPLITUDE  # Minimum useful amplitude
+    min_length = amplitude * 2  # Reduced minimum for more options
 
-    # Track run status for verbose output
-    run_status = []  # List of (length, status) where status is 'inter-meander', 'clearance', 'used', 'too-short'
+    # Spill across multiple straight runs (#501): with the arm pitch scaled to
+    # the net's width, one run holds fewer bumps, so a single run often cannot
+    # satisfy extra_length (or min_bumps) alone. Each round meanders the best
+    # available run, then re-finds straight runs on the MODIFIED list -- the
+    # meandered region is no longer colinear so it will not be re-picked, but
+    # its lead-in/lead-out and every untouched run remain candidates. min_bumps
+    # is a TOTAL across runs (remaining = requested - placed so far).
+    current_segments = segments
+    original_length = sum(segment_length(s) for s in segments)
+    total_bumps = 0
+    added_so_far = 0.0
+    max_spill_rounds = 10  # cap: a round that stalls breaks out below anyway
 
-    for start_idx, end_idx, run_length in runs:
-        # Check if this run is long enough for meanders
-        if run_length < amplitude * 2:
-            run_status.append((run_length, 'too-short'))
-            continue
+    for round_idx in range(max_spill_rounds):
+        remaining_bumps = (min_bumps - total_bumps) if min_bumps > 0 else 0
+        remaining_extra = extra_length - added_so_far
+        if min_bumps > 0:
+            if remaining_bumps <= 0:
+                break
+        elif remaining_extra <= POSITION_TOLERANCE:
+            break
 
-        # Check if this run overlaps with excluded centerline ranges (e.g., inter-pair meanders)
-        if excluded_centerline_ranges and (main_ux != 0 or main_uy != 0):
-            run_range = get_segment_centerline_range(
-                segments, start_idx, end_idx, main_ux, main_uy, origin_x, origin_y
-            )
-            overlaps = any(ranges_overlap(run_range, excluded) for excluded in excluded_centerline_ranges)
-            if overlaps:
-                run_status.append((run_length, 'inter-meander'))
+        runs = find_all_straight_runs(current_segments, min_length=min_length)
+        if not runs:
+            if round_idx == 0:
+                print(f"    Warning: No suitable straight run found for meanders (need >= {min_length:.1f}mm)")
+                return segments, 0
+            break
+
+        # Track run status for verbose output
+        run_status = []  # List of (length, status): 'inter-meander', 'no-bumps', 'used', 'too-short'
+        round_bumps = 0
+
+        for start_idx, end_idx, run_length in runs:
+            # Check if this run is long enough for meanders
+            if run_length < amplitude * 2:
+                run_status.append((run_length, 'too-short'))
                 continue
 
-        # Create a merged segment from the run
-        first_seg = segments[start_idx]
-        last_seg = segments[end_idx]
-        merged_seg = Segment(
-            start_x=first_seg.start_x,
-            start_y=first_seg.start_y,
-            end_x=last_seg.end_x,
-            end_y=last_seg.end_y,
-            width=first_seg.width,
-            layer=first_seg.layer,
-            net_id=first_seg.net_id
-        )
+            # Check if this run overlaps with excluded centerline ranges (e.g., inter-pair meanders)
+            if excluded_centerline_ranges and (main_ux != 0 or main_uy != 0):
+                run_range = get_segment_centerline_range(
+                    current_segments, start_idx, end_idx, main_ux, main_uy, origin_x, origin_y
+                )
+                overlaps = any(ranges_overlap(run_range, excluded) for excluded in excluded_centerline_ranges)
+                if overlaps:
+                    run_status.append((run_length, 'inter-meander'))
+                    continue
 
-        # Generate meanders - per-bump clearance checking will adjust amplitudes
-        meander_segs, bump_count = generate_trombone_meander(
-            merged_seg,
-            extra_length,
-            amplitude,
-            config.track_width,
-            pcb_data=pcb_data,
-            config=config,
-            extra_segments=extra_segments,
-            extra_vias=extra_vias,
-            min_bumps=min_bumps,
-            paired_net_id=paired_net_id,
-            clearance_index=clearance_index
-        )
+            first_seg = current_segments[start_idx]
+            last_seg = current_segments[end_idx]
 
-        if bump_count == 0:
-            # Per-bump clearance checking rejected all positions
-            run_status.append((run_length, 'no-bumps'))
-            continue
+            # The run must hold lead-in + one bump + end margin at THIS net's
+            # width-scaled pitch (#501), or the generator returns zero bumps.
+            chamfer = resolve_meander_chamfer(config, first_seg.net_id, first_seg.layer, first_seg.width)
+            if run_length < 3 * (4 * chamfer):
+                run_status.append((run_length, 'too-short'))
+                continue
 
-        run_status.append((run_length, 'used'))
+            # Create a merged segment from the run
+            merged_seg = Segment(
+                start_x=first_seg.start_x,
+                start_y=first_seg.start_y,
+                end_x=last_seg.end_x,
+                end_y=last_seg.end_y,
+                width=first_seg.width,
+                layer=first_seg.layer,
+                net_id=first_seg.net_id
+            )
 
-        # Replace original segment run with meanders
-        new_segments = segments[:start_idx] + meander_segs + segments[end_idx + 1:]
+            # Generate meanders - per-bump clearance checking will adjust amplitudes
+            meander_segs, bump_count = generate_trombone_meander(
+                merged_seg,
+                remaining_extra,
+                amplitude,
+                config.track_width,
+                pcb_data=pcb_data,
+                config=config,
+                extra_segments=extra_segments,
+                extra_vias=extra_vias,
+                min_bumps=remaining_bumps,
+                paired_net_id=paired_net_id,
+                clearance_index=clearance_index
+            )
 
-        # Print verbose status only if there were rejections before success
-        if config and config.verbose and len(run_status) > 1:
+            if bump_count == 0:
+                # Per-bump clearance checking rejected all positions
+                run_status.append((run_length, 'no-bumps'))
+                continue
+
+            run_status.append((run_length, 'used'))
+
+            # Replace original segment run with meanders
+            current_segments = current_segments[:start_idx] + meander_segs + current_segments[end_idx + 1:]
+            round_bumps = bump_count
+            break
+
+        # Print verbose status when there were rejections before success, or
+        # when no run in this round worked at all
+        if config and config.verbose and run_status and (round_bumps == 0 or len(run_status) > 1):
             status_str = ', '.join(f"{length:.2f}({status})" for length, status in run_status)
             print(f"      Straight runs: {status_str}")
 
-        return new_segments, bump_count
+        if round_bumps == 0:
+            break  # no run can take another bump; keep what earlier rounds placed
 
-    # Print verbose status when no run worked
-    if config and config.verbose and run_status:
-        status_str = ', '.join(f"{length:.2f}({status})" for length, status in run_status)
-        print(f"      Straight runs: {status_str}")
+        total_bumps += round_bumps
+        new_added = sum(segment_length(s) for s in current_segments) - original_length
+        if min_bumps <= 0 and new_added - added_so_far < POSITION_TOLERANCE:
+            added_so_far = new_added
+            break  # progress guard: bumps placed but ~zero length gained
+        added_so_far = new_added
 
-    print(f"    Warning: No straight run with clearance found for meanders")
-    return segments, 0
+    if total_bumps == 0:
+        print(f"    Warning: No straight run with clearance found for meanders")
+        return segments, 0
+
+    return current_segments, total_bumps
 
 
 def _apply_meanders_to_net_with_iteration(
@@ -2686,7 +2757,14 @@ def _lengthen_net_with_meanders(
     """
     # Meander geometry: entry chamfer + 2 risers + 2 top chamfers + exit chamfer.
     # For n bumps: extra ~= n * (2*amplitude - 2.34*chamfer).
-    chamfer = CHAMFER_SIZE
+    # Match the generator's width-scaled chamfer (#501) or the bump-count /
+    # initial-amplitude estimate here diverges from what actually gets emitted.
+    chamfer = resolve_meander_chamfer(
+        config,
+        net_id,
+        segments[0].layer if segments else None,
+        max((s.width for s in segments), default=0.0),
+    )
     min_amplitude = 0.1  # Minimum useful amplitude (smaller for small deltas)
     max_amplitude = config.meander_amplitude  # Default 1.0mm
 

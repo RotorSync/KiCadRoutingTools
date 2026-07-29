@@ -84,8 +84,10 @@ def test_board_edge_keepout():
     # must not print past it. Centerline at (5,0), bump goes +y; a 0.4mm-wide net's
     # copper edge (centerline + net_half 0.2) must stay edge_clearance inside max_y.
     # edge_clearance falls back to config.clearance (0.15). So the bump peak must be
-    # <= max_y - (0.15 + 0.2). With max_y=0.7 -> peak <= 0.35.
-    max_y = 0.7
+    # <= max_y - (0.15 + 0.2). The width-scaled pitch (#501) gives a 0.4 net a 0.4
+    # chamfer, so its bump reach floors at 2*0.4 + 0.1 = 0.9 -- max_y=1.3 leaves a
+    # 0.95 budget that rejects full amplitude (reach 1.0) but accepts the 0.7 rung.
+    max_y = 1.3
     limit = max_y - (0.15 + 0.4 / 2)   # clearance + net_half
     near = get_safe_amplitude_at_point(pcb_data=_pcb_no_obstacles(bounds=(-5.0, -5.0, 15.0, max_y)),
                                        net_id=MEANDER_NET, config=_cfg(power_w=0.4), **_COMMON)
@@ -104,43 +106,45 @@ def test_board_edge_keepout():
 
 
 def test_single_ended_widths():
-    offset = 1.2  # loose enough that both widths can meander, so amps are comparable
-    base = get_safe_amplitude_at_point(pcb_data=_pcb_with_neighbor(offset),
+    # With the width-scaled pitch (#501) a 0.5 net's chamfer is 0.5, so its bump
+    # reach floors at 2*0.5 + 0.1 = 1.1: it either fits near-full amplitude or not
+    # at all. At a loose offset both widths meander; at 1.2 only the base width does
+    # (the wide net's keep-out AND its pitch-scaled bump both outgrow the gap).
+    loose = 2.2
+    base = get_safe_amplitude_at_point(pcb_data=_pcb_with_neighbor(loose),
                                        net_id=MEANDER_NET, config=_cfg(), **_COMMON)
-    wide_power = get_safe_amplitude_at_point(pcb_data=_pcb_with_neighbor(offset),
+    wide_power = get_safe_amplitude_at_point(pcb_data=_pcb_with_neighbor(loose),
                                              net_id=MEANDER_NET,
                                              config=_cfg(power_w=0.5), **_COMMON)
-    wide_imp = get_safe_amplitude_at_point(pcb_data=_pcb_with_neighbor(offset),
+    wide_imp = get_safe_amplitude_at_point(pcb_data=_pcb_with_neighbor(loose),
                                            net_id=MEANDER_NET,
                                            config=_cfg(layer_w=0.5), **_COMMON)
 
     if not (base > 0 and wide_power > 0):
-        _fail(f"expected both to meander at offset {offset} (base={base}, wide={wide_power})")
-    # The wide net must pull its arm back: its own half-width contribution grew from
-    # track_width/2 to net_w/2 (plus the corner-bloat that scales with it). The exact
-    # value is quantized by the binary search's geometric amplitude ladder, so assert
-    # the ordering, not a precise delta.
-    if not (wide_power < base):
-        _fail(f"wide power net should pull meander back (base={base}, wide={wide_power})")
+        _fail(f"expected both to meander at offset {loose} (base={base}, wide={wide_power})")
     if abs(wide_imp - wide_power) > 1e-9:
         _fail(f"impedance layer width should match power width keep-out "
               f"({wide_imp:.4f} vs {wide_power:.4f})")
 
-    # A wide net must also REFUSE a gap that only a base-width arm fits.
-    tight = 0.8
-    base_tight = get_safe_amplitude_at_point(pcb_data=_pcb_with_neighbor(tight),
-                                             net_id=MEANDER_NET, config=_cfg(), **_COMMON)
-    wide_tight = get_safe_amplitude_at_point(pcb_data=_pcb_with_neighbor(tight),
-                                             net_id=MEANDER_NET,
-                                             config=_cfg(power_w=0.5), **_COMMON)
-    if not (base_tight > 0 and wide_tight == 0):
-        _fail(f"tight gap: base should fit ({base_tight}) and wide should not ({wide_tight})")
+    # A wide net must REFUSE a gap that only a base-width arm fits: its half-width
+    # keep-out contribution grew from track_width/2 to net_w/2 (plus corner bloat),
+    # and its minimum bump reach is pitch-scaled.
+    for tight in (0.8, 1.2):
+        base_tight = get_safe_amplitude_at_point(pcb_data=_pcb_with_neighbor(tight),
+                                                 net_id=MEANDER_NET, config=_cfg(), **_COMMON)
+        wide_tight = get_safe_amplitude_at_point(pcb_data=_pcb_with_neighbor(tight),
+                                                 net_id=MEANDER_NET,
+                                                 config=_cfg(power_w=0.5), **_COMMON)
+        if not (base_tight > 0 and wide_tight == 0):
+            _fail(f"gap {tight}: base should fit ({base_tight}) and wide should not ({wide_tight})")
 
 
 def test_own_width_override():
     # A segment widened beyond its netclass (no impedance/power config) must still
     # pull its meander back, driven purely by own_width (mirrors obstacle_cache's
     # max(net_w, seg.width)). This is the width the meander arms actually carry.
+    # Post-#501 the pull-back shows as refusal: own_width scales the pitch too, so
+    # the 0.5-wide arm's minimum bump no longer fits the 1.2 gap the 0.15 arm does.
     offset = 1.2
     base = get_safe_amplitude_at_point(pcb_data=_pcb_with_neighbor(offset),
                                        net_id=MEANDER_NET, config=_cfg(),
@@ -148,10 +152,13 @@ def test_own_width_override():
     wide = get_safe_amplitude_at_point(pcb_data=_pcb_with_neighbor(offset),
                                        net_id=MEANDER_NET, config=_cfg(),
                                        own_width=0.5, **_COMMON)
-    if not (base > 0 and wide > 0):
-        _fail(f"own_width: expected both to meander (base={base}, wide={wide})")
-    if not (wide < base):
-        _fail(f"own_width=0.5 should pull meander back vs 0.15 (base={base}, wide={wide})")
+    if not (base > 0 and wide == 0):
+        _fail(f"own_width=0.5 should refuse the 1.2 gap the 0.15 arm fits (base={base}, wide={wide})")
+    loose = get_safe_amplitude_at_point(pcb_data=_pcb_with_neighbor(2.2),
+                                        net_id=MEANDER_NET, config=_cfg(),
+                                        own_width=0.5, **_COMMON)
+    if not (loose > 0):
+        _fail(f"own_width=0.5 should still meander at a loose offset (got {loose})")
     # own_width == track_width must be identical to not passing it at all.
     default = get_safe_amplitude_at_point(pcb_data=_pcb_with_neighbor(offset),
                                           net_id=MEANDER_NET, config=_cfg(), **_COMMON)

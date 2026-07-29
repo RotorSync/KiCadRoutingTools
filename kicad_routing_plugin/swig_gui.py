@@ -1470,6 +1470,17 @@ class RoutingDialog(wx.Dialog):
         length_params_sizer.Add(self.meander_amplitude, 0)
         options_inner.Add(length_params_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
+        # Own row: a third spin control overflows the Tolerance/Amplitude row
+        spacing_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        spacing_sizer.Add(wx.StaticText(options_scroll, label="Arm spacing (x width):"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        r = defaults.PARAM_RANGES['meander_spacing']
+        self.meander_spacing = wx.SpinCtrlDouble(options_scroll, min=r['min'], max=r['max'],
+                                                 initial=defaults.MEANDER_SPACING, inc=r['inc'])
+        self.meander_spacing.SetDigits(r['digits'])
+        self.meander_spacing.SetToolTip("Centre-to-centre spacing of adjacent meander arms, in multiples of the track width (2 = 2W)")
+        spacing_sizer.Add(self.meander_spacing, 0)
+        options_inner.Add(spacing_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
         # Time matching option
         time_match_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.time_matching_check = wx.CheckBox(options_scroll, label="Time matching")
@@ -2414,6 +2425,7 @@ class RoutingDialog(wx.Dialog):
         self.length_match_groups_ctrl.SetValue("")
         self.length_match_tolerance.SetValue(defaults.LENGTH_MATCH_TOLERANCE)
         self.meander_amplitude.SetValue(defaults.MEANDER_AMPLITUDE)
+        self.meander_spacing.SetValue(defaults.MEANDER_SPACING)
         self.time_matching_check.SetValue(defaults.TIME_MATCHING)
         self.time_match_tolerance.SetValue(defaults.TIME_MATCH_TOLERANCE)
         self.debug_lines_check.SetValue(False)
@@ -2723,6 +2735,7 @@ class RoutingDialog(wx.Dialog):
             'length_match_groups': self._parse_length_match_groups(),
             'length_match_tolerance': self.length_match_tolerance.GetValue(),
             'meander_amplitude': self.meander_amplitude.GetValue(),
+            'meander_spacing': self.meander_spacing.GetValue(),
             # Time matching
             'time_matching': self.time_matching_check.GetValue(),
             'time_match_tolerance': self.time_match_tolerance.GetValue(),
@@ -3145,6 +3158,7 @@ class RoutingDialog(wx.Dialog):
                     length_match_groups=config.get('length_match_groups'),
                     length_match_tolerance=config.get('length_match_tolerance', 0.1),
                     meander_amplitude=config.get('meander_amplitude', 1.0),
+                    meander_spacing=config.get('meander_spacing', defaults.MEANDER_SPACING),
                     time_matching=config.get('time_matching', False),
                     time_match_tolerance=config.get('time_match_tolerance', 1.0),
                     add_teardrops=config.get('add_teardrops', False),

@@ -332,6 +332,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 length_match_groups: Optional[List[List[str]]] = None,
                 length_match_tolerance: float = 0.1,
                 meander_amplitude: float = 1.0,
+                meander_spacing: float = 2.0,
                 time_matching: bool = False,
                 time_match_tolerance: float = 1.0,
                 debug_memory: bool = False,
@@ -687,6 +688,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         ripped_route_avoidance_cost=ripped_route_avoidance_cost,
         length_match_groups=length_match_groups,
         length_match_tolerance=length_match_tolerance, meander_amplitude=meander_amplitude,
+        meander_spacing=meander_spacing,
         time_matching=time_matching, time_match_tolerance=time_match_tolerance,
         debug_memory=debug_memory, layer_costs=layer_costs
     )
@@ -2724,6 +2726,9 @@ For differential pair routing, use route_diff.py:
                         help="Acceptable length variance within group in mm (default: 0.1)")
     parser.add_argument("--meander-amplitude", type=float, default=1.0,
                         help="Height of meander perpendicular to trace in mm (default: 1.0)")
+    parser.add_argument("--meander-spacing", type=float, default=defaults.MEANDER_SPACING,
+                        help="Centre-to-centre spacing of adjacent meander arms, in multiples of "
+                             "the net's routed track width (default: 2.0 = 2W)")
 
     # Time matching options (alternative to length matching)
     parser.add_argument("--time-matching", action="store_true",
@@ -3081,6 +3086,7 @@ For differential pair routing, use route_diff.py:
                 length_match_groups=args.length_match_groups,
                 length_match_tolerance=args.length_match_tolerance,
                 meander_amplitude=args.meander_amplitude,
+                meander_spacing=args.meander_spacing,
                 time_matching=args.time_matching,
                 time_match_tolerance=args.time_match_tolerance,
                 debug_memory=args.debug_memory,

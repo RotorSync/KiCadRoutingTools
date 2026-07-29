@@ -78,6 +78,9 @@ MAX_PROBE_ITERATIONS = 5000
 # Length matching
 LENGTH_MATCH_TOLERANCE = 0.1  # mm
 MEANDER_AMPLITUDE = 1.0  # mm
+# Meander arm pitch centre-to-centre, in MULTIPLES of the net's routed track
+# width (#501). 2.0 = 2W pitch = 1W edge gap between adjacent arms.
+MEANDER_SPACING = 2.0  # x track width
 
 # Time matching (alternative to length matching)
 TIME_MATCHING = False  # If True, match propagation time instead of length
@@ -293,6 +296,7 @@ PARAM_RANGES = {
     'max_probe_iterations': {'min': 100, 'max': 100000},
     'length_match_tolerance': {'min': 0.01, 'max': 5.0, 'inc': 0.01, 'digits': 2},
     'meander_amplitude': {'min': 0.1, 'max': 10.0, 'inc': 0.1, 'digits': 1},
+    'meander_spacing': {'min': 1.0, 'max': 10.0, 'inc': 0.5, 'digits': 1},
     'time_match_tolerance': {'min': 0.1, 'max': 50.0, 'inc': 0.1, 'digits': 1},
     'gnd_via_distance': {'min': 0.5, 'max': 10.0, 'inc': 0.5, 'digits': 1},
     # Fanout parameters
