@@ -156,7 +156,7 @@ Other useful skills:
 
 See [Claude Skills](docs/claude-skills.md) for what each skill does and how they fit together.
 
-All of these are also available inside KiCad without leaving the plugin - see [AI assistance in the plugin](#ai-assistance-claude-tab) below.
+All of these are also available inside KiCad without leaving the plugin - see [AI assistance in the plugin](#ai-assistance-claude-tab) below. The plugin can run the same skills through [opencode](https://opencode.ai) instead of Claude Code (issue #503) - a Backend dropdown on the AI tab selects the agent CLI, and opencode's `provider/model` strings open the door to other model providers. The skills' output contracts are tuned on Claude models; smaller models may follow them less reliably.
 
 **Option C: Manual Command Line (For scripting and automation)**
 
@@ -194,9 +194,9 @@ The plugin provides a full graphical interface for all routing features, running
   <img src="docs/claude_tab.png" alt="Claude tab: planned steps, controls, and live transcript" width="700">
 </p>
 
-With [Claude Code](https://claude.ai/claude-code) installed, the routing dialog gains AI assistance throughout (the plugin spawns `claude` headless, streams a live transcript, and fills GUI controls from the results):
+With [Claude Code](https://claude.ai/claude-code) or [opencode](https://opencode.ai) installed, the routing dialog gains AI assistance throughout (the plugin spawns the selected agent CLI headless, streams a live transcript, and fills GUI controls from the results). The **Backend** dropdown on the AI tab picks the CLI: Claude Code runs Anthropic models; opencode takes `provider/model` strings for many providers (including its built-in free tier), with `opencode auth login` adding provider accounts. Both discover the same `.claude/skills/`; opencode runs them under a read-only `pcb-analysis` agent defined in `opencode.json` (the equivalent of the Claude run's read-only tool allowlist):
 
-- **Claude tab** - *Plan Routing* runs `/plan-pcb-routing`: the plan fills the parameter fields across the tabs and appears as a checkable step list, which *Run Selected Steps* executes sequentially in-process on the live board with per-step status marks. *Review Routed Board* and *Diagnose Routing Failures* give post-route QA and failure root-causing. Model and effort dropdowns control every AI run and persist with the dialog settings.
+- **Claude tab** - *Plan Routing* runs `/plan-pcb-routing`: the plan fills the parameter fields across the tabs and appears as a checkable step list, which *Run Selected Steps* executes sequentially in-process on the live board with per-step status marks. *Review Routed Board* and *Diagnose Routing Failures* give post-route QA and failure root-causing. Backend, model, and effort selectors control every AI run and persist with the dialog settings (model/effort remembered per backend).
 - **Save / Load a plan** - *Save…* writes the generated step list to a JSON file; *Load…* reads one back and runs it with **no Claude call** — handy for replaying a workflow that worked on another board. A recorded stress-test chain converts to a loadable plan too (`tests/stress/manifest_to_plan.py <board>/redo_commands.sh plan.json`).
 - **Per-field "Ask Claude" buttons** - power nets/widths (Basic tab), stackup check (Layers), differential-pair verification by pin function (Differential tab), net-to-plane layer mappings and GND return via distance (Planes tab).
 

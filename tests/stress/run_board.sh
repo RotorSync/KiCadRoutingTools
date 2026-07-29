@@ -1,17 +1,24 @@
 #!/bin/bash
 # Headless per-board stress worker.
 #
-# Runs a non-interactive `claude -p` agent that follows tests/stress/RUNBOOK.md
+# Runs a non-interactive agent (`claude -p` by default, or `opencode run`
+# with STRESS_AI_BACKEND=opencode, #503) that follows tests/stress/RUNBOOK.md
 # to route ONE board, then writes the results JSON (RUNBOOK schema) and a
 # concise FINDINGS.md into the board's run dir. Decouples board execution from
 # the harness notification stream — the queue manager just watches files.
 #
 # Also captures the agent transcript (transcript.jsonl) and derives a compact
-# routing decision trail (agent_narrative.md) via extract_narrative.py.
+# routing decision trail (agent_narrative.md) via extract_narrative.py —
+# both backends' JSON event schemas are supported there.
 #
 # Usage: run_board.sh <board> <set:1|2|3...> [model]
+#   model: claude backend takes tier aliases (default: sonnet); opencode takes
+#          provider/model (e.g. anthropic/claude-sonnet-4-5; default: the
+#          user's configured opencode default model).
 set -u
-BOARD="${1:?board}"; SET="${2:?set}"; MODEL="${3:-sonnet}"
+BOARD="${1:?board}"; SET="${2:?set}"; MODEL="${3:-}"
+BACKEND="${STRESS_AI_BACKEND:-claude}"
+if [ "$BACKEND" = "claude" ] && [ -z "$MODEL" ]; then MODEL=sonnet; fi
 # Repo root is derived from this script's own location (tests/stress/run_board.sh),
 # so the script is portable; override with STRESS_REPO if needed.
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,9 +51,9 @@ PROMPT="Stress-test the KiCadRoutingTools autorouter on ONE board: **$BOARD** (s
 FIRST read $REPO/tests/stress/RUNBOOK.md and obey EVERY rule exactly. Do NOT ask
 anything (you are non-interactive) — use the skill's inline heuristics and your judgment.
 
-You ARE the one and only worker for THIS board. Any run_board.sh or 'claude -p'
-process you notice for '$BOARD' (or touching $RUNDIR) is YOUR OWN launcher and
-yourself — NOT a competing/duplicate worker. Do NOT check whether the board is
+You ARE the one and only worker for THIS board. Any run_board.sh or headless
+agent process ('claude -p' / 'opencode run') you notice for '$BOARD' (or
+touching $RUNDIR) is YOUR OWN launcher and yourself — NOT a competing/duplicate worker. Do NOT check whether the board is
 'already being routed', do NOT wait for or defer to 'another worker', and do NOT
 skip routing to avoid 'collisions'. Start routing immediately and produce the
 results JSON yourself; if you don't, the board is recorded as a failure.
@@ -90,7 +97,7 @@ When fully done:
   3. Print the single line: BOARD_DONE $BOARD"
 
 {
-  echo "[run_board] board=$BOARD set=$SET model=$MODEL start=$(date)"
+  echo "[run_board] board=$BOARD set=$SET backend=$BACKEND model=${MODEL:-(backend default)} start=$(date)"
   echo "[run_board] result=$RESULT"
 } > "$RUNDIR/worker.log"
 

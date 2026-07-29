@@ -994,36 +994,21 @@ class RoutingDialog(wx.Dialog):
         return layer_box_sizer
 
     def _on_check_stackup(self, event):
-        """Run /recommend-stackup headless and show the report (issue #40)."""
-        from .claude_gui import find_claude, ClaudeSkillDialog, board_path_for_analysis
+        """Run recommend-stackup headless and show the report (issue #40)."""
+        from .claude_gui import run_skill_dialog, board_path_for_analysis
 
-        claude_path = find_claude()
-        if claude_path is None:
-            wx.MessageBox(
-                "Claude Code CLI not found. Install it (https://claude.com/claude-code) "
-                "and make sure `claude` is on your PATH.",
-                "Claude", wx.OK | wx.ICON_WARNING)
-            return
         board = board_path_for_analysis(self.board_filename)
         if board is None:
             return
-
-        prompt = (
-            f"/recommend-stackup {os.path.abspath(board)} — analysis only, do not "
-            "modify any files. After the report, end your reply with exactly one "
-            "line of the form RESULT=<copper layer count you recommend> "
-            "(a bare integer), e.g. RESULT=4"
-        )
-        dlg = ClaudeSkillDialog(
-            self, "Claude: check stackup", prompt,
-            claude_path=claude_path,
-            model=self.claude_tab.get_model_value(),
-            effort=self.claude_tab.get_effort_value(),
-            intro=f"Running /recommend-stackup on {os.path.basename(board)} ...\n"
-                  "(local analysis; typically a minute or two)")
-        dlg.ShowModal()
-        value = dlg.result_value
-        dlg.Destroy()
+        value = run_skill_dialog(
+            self, "AI: check stackup",
+            "recommend-stackup", os.path.abspath(board),
+            "analysis only, do not modify any files. After the report, end "
+            "your reply with exactly one line of the form RESULT=<copper "
+            "layer count you recommend> (a bare integer), e.g. RESULT=4",
+            intro=f"Running recommend-stackup on {os.path.basename(board)} ...\n"
+                  "(local analysis; typically a minute or two)",
+            claude_params=self._ai_params())
         if value is not None:
             board_layers = len(self.pcb_data.board_info.copper_layers)
             note = ""
@@ -1033,7 +1018,7 @@ class RoutingDialog(wx.Dialog):
                             "Board Setup before impedance-controlled routing)")
             except ValueError:
                 pass
-            self._append_log(f"Claude recommends {value} copper layers{note}\n")
+            self._append_log(f"AI recommends {value} copper layers{note}\n")
 
     def _on_browse_fab_overrides(self, event):
         """Browse for a fab-floor override file; remember it as a recent favourite."""
@@ -1274,38 +1259,24 @@ class RoutingDialog(wx.Dialog):
         return options_box_sizer
 
     def _on_ask_claude_power_nets(self, event):
-        """Run /analyze-power-nets headless and fill the Power Nets and
+        """Run analyze-power-nets headless and fill the Power Nets and
         Power Widths fields from its recommendation (issue #34)."""
-        from .claude_gui import find_claude, ClaudeSkillDialog, board_path_for_analysis
+        from .claude_gui import run_skill_dialog, board_path_for_analysis
 
-        claude_path = find_claude()
-        if claude_path is None:
-            wx.MessageBox(
-                "Claude Code CLI not found. Install it (https://claude.com/claude-code) "
-                "and make sure `claude` is on your PATH.",
-                "Claude", wx.OK | wx.ICON_WARNING)
-            return
         board = board_path_for_analysis(self.board_filename)
         if board is None:
             return
-
-        prompt = (
-            f"/analyze-power-nets {os.path.abspath(board)} — analysis only, do not "
-            "modify any files. After the report, end your reply with exactly one "
-            "line of the form RESULT=--power-nets <space-separated glob patterns> "
+        value = run_skill_dialog(
+            self, "AI: analyze power nets",
+            "analyze-power-nets", os.path.abspath(board),
+            "analysis only, do not modify any files. After the report, end "
+            "your reply with exactly one line of the form "
+            "RESULT=--power-nets <space-separated glob patterns> "
             "--power-nets-widths <space-separated widths in mm>, "
-            'e.g. RESULT=--power-nets "*GND*" "*VCC*" --power-nets-widths 0.5 0.4'
-        )
-        dlg = ClaudeSkillDialog(
-            self, "Claude: analyze power nets", prompt,
-            claude_path=claude_path,
-            model=self.claude_tab.get_model_value(),
-            effort=self.claude_tab.get_effort_value(),
-            intro=f"Running /analyze-power-nets on {os.path.basename(board)} ...\n"
-                  "(datasheet lookups; typically a few minutes)")
-        dlg.ShowModal()
-        value = dlg.result_value
-        dlg.Destroy()
+            'e.g. RESULT=--power-nets "*GND*" "*VCC*" --power-nets-widths 0.5 0.4',
+            intro=f"Running analyze-power-nets on {os.path.basename(board)} ...\n"
+                  "(datasheet lookups; typically a few minutes)",
+            claude_params=self._ai_params())
         if value is not None:
             self._apply_power_nets_recommendation(value)
 
@@ -1736,13 +1707,9 @@ class RoutingDialog(wx.Dialog):
                 'verbose': self.verbose_check.GetValue(),
             }
 
-        def get_claude_params():
-            # Deferred: the Claude tab is created after the Planes tab,
-            # but this is only called on button click.
-            return {
-                'model': self.claude_tab.get_model_value(),
-                'effort': self.claude_tab.get_effort_value(),
-            }
+        # Deferred: the AI tab is created after the Planes tab, but this
+        # is only called on button click.
+        get_claude_params = self._ai_params
 
         return PlanesTab(
             self.notebook,
@@ -1757,7 +1724,7 @@ class RoutingDialog(wx.Dialog):
         )
 
     def _create_claude_tab(self):
-        """Create the Claude tab for running AI skills headless (issue #40)."""
+        """Create the AI tab for running AI skills headless (issue #40)."""
         from .claude_gui import ClaudeTab
 
         return ClaudeTab(
@@ -1766,6 +1733,15 @@ class RoutingDialog(wx.Dialog):
             log_callback=self._append_log,
             routing_dialog=self,
         )
+
+    def _ai_params(self):
+        """The AI tab's backend/model/effort selection, for the other tabs'
+        'Ask AI' buttons (passed to claude_gui.run_skill_dialog)."""
+        return {
+            'backend': self.claude_tab.get_backend_value(),
+            'model': self.claude_tab.get_model_value(),
+            'effort': self.claude_tab.get_effort_value(),
+        }
 
     def _create_differential_tab(self):
         """Create the Differential tab for differential pair routing."""
@@ -1818,12 +1794,9 @@ class RoutingDialog(wx.Dialog):
             get_routing_config=get_routing_config,
             append_log=self._append_log,
             sync_pcb_data_callback=sync_pcb_data,
-            # Deferred: the Claude tab is created after this tab, but the
+            # Deferred: the AI tab is created after this tab, but the
             # callback only fires on button click.
-            get_claude_params=lambda: {
-                'model': self.claude_tab.get_model_value(),
-                'effort': self.claude_tab.get_effort_value(),
-            }
+            get_claude_params=self._ai_params
         )
         # Wire the Differential tab's "Hide short routes" to the Basic net list:
         # short (deferred) pairs stay visible there under "Hide differential" so
@@ -2475,9 +2448,10 @@ class RoutingDialog(wx.Dialog):
         self.fanout_tab.net_panel.filter_ctrl.SetValue("")
         self.planes_tab.net_panel.filter_ctrl.SetValue("")
 
-        # Reset Claude tab model/effort to Default
-        self.claude_tab.model_choice.SetSelection(0)
-        self.claude_tab.effort_choice.SetSelection(0)
+        # Reset AI tab backend/model/effort to defaults
+        self.claude_tab.set_backend_value(None)
+        self.claude_tab.set_model_value(None)
+        self.claude_tab.set_effort_value(None)
 
         # Reset component dropdowns to "All"
         if self.net_panel.component_dropdown:

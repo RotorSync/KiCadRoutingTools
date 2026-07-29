@@ -225,9 +225,15 @@ def get_dialog_settings(dialog):
         'planes_repair_pads': dialog.planes_tab.repair_options.repair_pads.GetValue(),
         'planes_repair_rip_blocker_check': dialog.planes_tab.repair_options.rip_blocker_check.GetValue(),
 
-        # Claude tab settings (issue #40)
-        'claude_model': dialog.claude_tab.get_model_value(),
-        'claude_effort': dialog.claude_tab.get_effort_value(),
+        # AI tab settings (issue #40; backend selection #503). Model/effort
+        # entries are stored per backend so switching backends doesn't lose
+        # e.g. an opencode provider/model string; 'claude_model'/'claude_effort'
+        # keep their pre-#503 meaning (the Claude Code backend's entries).
+        'ai_backend': dialog.claude_tab.get_backend_value(),
+        'claude_model': dialog.claude_tab.get_model_value_for('claude'),
+        'claude_effort': dialog.claude_tab.get_effort_value_for('claude'),
+        'opencode_model': dialog.claude_tab.get_model_value_for('opencode'),
+        'opencode_effort': dialog.claude_tab.get_effort_value_for('opencode'),
         'claude_plan': dialog.claude_tab.get_plan_state(),
 
         # Log content
@@ -676,13 +682,20 @@ def restore_dialog_settings(dialog, settings):
     if 'planes_repair_rip_blocker_check' in settings:
         dialog.planes_tab.repair_options.rip_blocker_check.SetValue(settings['planes_repair_rip_blocker_check'])
 
-    # Restore Claude tab model/effort (issue #40). The setters validate
-    # against the current dropdown choices, so a saved model or effort
-    # level that's no longer offered reverts to Default.
+    # Restore AI tab backend/model/effort (issue #40; #503). Per-backend
+    # model/effort entries first, then the backend selection LAST so its
+    # refresh loads the right entries into the combos; an unknown saved
+    # backend id reverts to the default (Claude Code).
     if 'claude_model' in settings:
-        dialog.claude_tab.set_model_value(settings['claude_model'])
+        dialog.claude_tab.set_model_value(settings['claude_model'], backend_id='claude')
     if 'claude_effort' in settings:
-        dialog.claude_tab.set_effort_value(settings['claude_effort'])
+        dialog.claude_tab.set_effort_value(settings['claude_effort'], backend_id='claude')
+    if 'opencode_model' in settings:
+        dialog.claude_tab.set_model_value(settings['opencode_model'], backend_id='opencode')
+    if 'opencode_effort' in settings:
+        dialog.claude_tab.set_effort_value(settings['opencode_effort'], backend_id='opencode')
+    if 'ai_backend' in settings:
+        dialog.claude_tab.set_backend_value(settings['ai_backend'])
     if 'claude_plan' in settings:
         dialog.claude_tab.restore_plan_state(settings['claude_plan'])
 

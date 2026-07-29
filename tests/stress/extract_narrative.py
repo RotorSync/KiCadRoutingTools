@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Turn a stress-test agent transcript into a compact routing decision trail.
 
-Reads a JSONL agent transcript (either a `claude -p --output-format stream-json`
-capture or a session/sub-agent transcript) and writes a Markdown file pairing the
+Reads a JSONL agent transcript (a `claude -p --output-format stream-json`
+capture, an `opencode run --format json` capture (#503), or a session/
+sub-agent transcript) and writes a Markdown file pairing the
 agent's narration with the **routing-pipeline commands** it issued
 (route / route_diff / route_planes / route_disconnected_planes / bga_fanout /
 qfn_fanout). Analysis, file reads, and verification (check_*/compare/list_nets)
@@ -33,15 +34,19 @@ _EXEC = re.compile(r'python3[^\n|]*?' + _TOOL)
 
 def _ts(rec):
     try:
+        ts = rec['timestamp']
+        if isinstance(ts, (int, float)):   # opencode: milliseconds since epoch
+            return datetime.datetime.fromtimestamp(
+                ts / 1000, datetime.timezone.utc).strftime('%H:%M:%S')
         return datetime.datetime.fromisoformat(
-            rec['timestamp'].replace('Z', '+00:00')).strftime('%H:%M:%S')
+            ts.replace('Z', '+00:00')).strftime('%H:%M:%S')
     except Exception:
         return ""
 
 
 def _routing_cmd(block):
     """If a tool_use Bash block executes a routing tool, return a clean one-liner."""
-    if block.get('name') != 'Bash':
+    if str(block.get('name')).lower() != 'bash':
         return None
     cmd = (block.get('input') or {}).get('command', '')
     m = _EXEC.search(cmd)
@@ -74,16 +79,7 @@ def build(records, board=None):
     out.append("---\n")
     turns = cmds_n = 0
     for rec in recs:
-        if rec.get('type') != 'assistant':
-            continue
-        content = (rec.get('message') or {}).get('content')
-        if not isinstance(content, list):
-            continue
-        txt = " ".join(
-            b.get('text', '').strip() for b in content
-            if isinstance(b, dict) and b.get('type') == 'text' and b.get('text', '').strip())
-        cmds = [c for b in content if isinstance(b, dict)
-                for c in [_routing_cmd(b)] if c]
+        txt, cmds = _turn_content(rec)
         if not txt and not cmds:
             continue
         turns += 1
@@ -94,6 +90,35 @@ def build(records, board=None):
             cmds_n += 1
         out.append("")
     return "\n".join(out).rstrip() + "\n", turns, cmds_n
+
+
+def _turn_content(rec):
+    """(narration text, [routing command, ...]) for one transcript record.
+
+    Handles both transcript schemas: Claude Code stream-json (type
+    'assistant' with message.content blocks) and opencode --format json
+    (#503: type 'text'/'tool_use' with a 'part' payload).
+    """
+    rtype = rec.get('type')
+    if rtype == 'assistant':                      # Claude Code
+        content = (rec.get('message') or {}).get('content')
+        if not isinstance(content, list):
+            return "", []
+        txt = " ".join(
+            b.get('text', '').strip() for b in content
+            if isinstance(b, dict) and b.get('type') == 'text' and b.get('text', '').strip())
+        cmds = [c for b in content if isinstance(b, dict)
+                for c in [_routing_cmd(b)] if c]
+        return txt, cmds
+    if rtype == 'text':                           # opencode: completed text part
+        return ((rec.get('part') or {}).get('text') or '').strip(), []
+    if rtype == 'tool_use':                       # opencode: completed tool part
+        part = rec.get('part') or {}
+        block = {'name': part.get('tool', ''),
+                 'input': (part.get('state') or {}).get('input') or {}}
+        c = _routing_cmd(block)
+        return "", [c] if c else []
+    return "", []
 
 
 def main():

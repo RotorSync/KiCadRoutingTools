@@ -26,7 +26,9 @@ notification stream entirely.
 
 **Prereqs on a fresh machine:**
 - Build the corpus first (README → "Pipeline" and "Two 15-board sets").
-- Workers run `claude -p --dangerously-skip-permissions`, which the harness
+- Workers run `claude -p --dangerously-skip-permissions` (or, with
+  `STRESS_AI_BACKEND=opencode`, `opencode run --auto` with any
+  `provider/model` opencode supports, #503), which the harness
   blocks by default. Authorize it once: add a Bash allow-rule for
   `bash tests/stress/run_board.sh:*` and `bash tests/stress/run_queue.sh:*`
   to your local `.claude/settings.local.json` (gitignored, so it is NOT

@@ -706,44 +706,27 @@ class DifferentialTab(wx.Panel):
                 self.on_hide_short_changed()
 
     def _on_ask_claude_diff_pairs(self):
-        """Run /identify-diff-pairs headless and update the pair selection
+        """Run identify-diff-pairs headless and update the pair selection
         from its findings (issue #40)."""
-        from .claude_gui import find_claude, ClaudeSkillDialog, board_path_for_analysis
+        from .claude_gui import run_skill_dialog, board_path_for_analysis
 
-        claude_path = find_claude()
-        if claude_path is None:
-            wx.MessageBox(
-                "Claude Code CLI not found. Install it (https://claude.com/claude-code) "
-                "and make sure `claude` is on your PATH.",
-                "Claude", wx.OK | wx.ICON_WARNING)
-            return
         board = board_path_for_analysis(self.board_filename)
         if board is None:
             return
-
-        prompt = (
-            f"/identify-diff-pairs {os.path.abspath(board)} — analysis only, do not "
-            "modify any files. After the report, end your reply with exactly one "
-            "line of the form RESULT=confirm:<pair base names verified as "
+        value = run_skill_dialog(
+            self, "AI: identify differential pairs",
+            "identify-diff-pairs", os.path.abspath(board),
+            "analysis only, do not modify any files. After the report, end "
+            "your reply with exactly one line of the form "
+            "RESULT=confirm:<pair base names verified as "
             "differential by pin function, comma-separated, P/N suffix stripped>"
             ";reject:<base names that name-matching paired but are NOT differential>"
             ";custom:<P|N net-name pairs found by pin function that do not follow "
             "P/N naming conventions>. Omit empty sections; use exact net names, "
-            "e.g. RESULT=confirm:/CLK,/DATA;custom:/TXP|/TXN"
-        )
-        model = effort = None
-        if self.get_claude_params:
-            claude_params = self.get_claude_params()
-            model = claude_params.get('model')
-            effort = claude_params.get('effort')
-        dlg = ClaudeSkillDialog(
-            self, "Claude: identify differential pairs", prompt,
-            claude_path=claude_path, model=model, effort=effort,
-            intro=f"Running /identify-diff-pairs on {os.path.basename(board)} ...\n"
-                  "(datasheet lookups; typically a few minutes)")
-        dlg.ShowModal()
-        value = dlg.result_value
-        dlg.Destroy()
+            "e.g. RESULT=confirm:/CLK,/DATA;custom:/TXP|/TXN",
+            intro=f"Running identify-diff-pairs on {os.path.basename(board)} ...\n"
+                  "(datasheet lookups; typically a few minutes)",
+            claude_params=self.get_claude_params() if self.get_claude_params else None)
         if value is not None:
             self._apply_diff_pairs_recommendation(value)
 

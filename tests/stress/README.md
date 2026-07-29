@@ -42,7 +42,7 @@ bash run_queue.sh [concurrency=4] [model=sonnet]   # from tests/stress/
 bash stress_status.sh                              # monitor: DONE/RUNNING/TODO + free slots
 ```
 
-`run_queue.sh` keeps N headless `claude -p` workers in flight until every board
+`run_queue.sh` keeps N headless agent workers (`claude -p` by default; `STRESS_AI_BACKEND=opencode` switches to `opencode run`, #503 - model arg is then `provider/model`) in flight until every board
 has a results JSON, deriving all state from disk (safe to stop and restart — it
 skips finished boards and won't double-launch running ones). Each worker
 (`run_board.sh <board> <set> [model]`) routes one board per `RUNBOOK.md`

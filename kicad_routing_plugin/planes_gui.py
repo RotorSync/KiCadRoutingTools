@@ -682,80 +682,46 @@ class PlanesTab(wx.Panel):
         self.Layout()
 
     def _on_ask_claude_gnd_via(self):
-        """Run /find-high-speed-nets headless and fill the GND via distance
+        """Run find-high-speed-nets headless and fill the GND via distance
         field from its recommendation (issue #39)."""
-        from .claude_gui import find_claude, ClaudeSkillDialog, board_path_for_analysis
+        from .claude_gui import run_skill_dialog, board_path_for_analysis
 
-        claude_path = find_claude()
-        if claude_path is None:
-            wx.MessageBox(
-                "Claude Code CLI not found. Install it (https://claude.com/claude-code) "
-                "and make sure `claude` is on your PATH.",
-                "Claude", wx.OK | wx.ICON_WARNING)
-            return
         board = board_path_for_analysis(self.board_filename)
         if board is None:
             return
-
-        prompt = (
-            f"/find-high-speed-nets {os.path.abspath(board)} — analysis only, do not "
-            "modify any files. After the report, end your reply with exactly one "
-            "line of the form RESULT=<recommended --gnd-via-distance in mm> "
-            "(a bare number), e.g. RESULT=2.5"
-        )
-        # Obey the model/effort selected on the Claude tab
-        model = effort = None
-        if self.get_claude_params:
-            claude_params = self.get_claude_params()
-            model = claude_params.get('model')
-            effort = claude_params.get('effort')
-        dlg = ClaudeSkillDialog(
-            self, "Claude: recommend GND via distance", prompt,
-            claude_path=claude_path, model=model, effort=effort,
-            intro=f"Running /find-high-speed-nets on {os.path.basename(board)} ...\n"
-                  "(datasheet lookups; typically a few minutes)")
-        dlg.ShowModal()
-        value = dlg.result_value
-        dlg.Destroy()
+        value = run_skill_dialog(
+            self, "AI: recommend GND via distance",
+            "find-high-speed-nets", os.path.abspath(board),
+            "analysis only, do not modify any files. After the report, end "
+            "your reply with exactly one line of the form "
+            "RESULT=<recommended --gnd-via-distance in mm> "
+            "(a bare number), e.g. RESULT=2.5",
+            intro=f"Running find-high-speed-nets on {os.path.basename(board)} ...\n"
+                  "(datasheet lookups; typically a few minutes)",
+            # Obey the backend/model/effort selected on the AI tab
+            claude_params=self.get_claude_params() if self.get_claude_params else None)
         if value is not None:
             self._apply_gnd_via_recommendation(value)
 
     def _on_ask_claude_plane_mappings(self):
-        """Run /recommend-plane-mappings headless and fill the assignment
+        """Run recommend-plane-mappings headless and fill the assignment
         list from its recommendation (issue #53)."""
-        from .claude_gui import find_claude, ClaudeSkillDialog, board_path_for_analysis
+        from .claude_gui import run_skill_dialog, board_path_for_analysis
 
-        claude_path = find_claude()
-        if claude_path is None:
-            wx.MessageBox(
-                "Claude Code CLI not found. Install it (https://claude.com/claude-code) "
-                "and make sure `claude` is on your PATH.",
-                "Claude", wx.OK | wx.ICON_WARNING)
-            return
         board = board_path_for_analysis(self.board_filename)
         if board is None:
             return
-
-        prompt = (
-            f"/recommend-plane-mappings {os.path.abspath(board)} — analysis only, "
-            "do not modify any files. After the report, end your reply with exactly "
-            "one line of the form RESULT=<net>:<layer>;<net>|<net>:<layer> "
+        value = run_skill_dialog(
+            self, "AI: recommend plane mappings",
+            "recommend-plane-mappings", os.path.abspath(board),
+            "analysis only, do not modify any files. After the report, end "
+            "your reply with exactly one line of the form "
+            "RESULT=<net>:<layer>;<net>|<net>:<layer> "
             "(groups separated by ';', nets sharing a layer joined by '|', exact "
-            "net names, one copper layer per group), e.g. RESULT=GND:In1.Cu;VCC:In2.Cu"
-        )
-        model = effort = None
-        if self.get_claude_params:
-            claude_params = self.get_claude_params()
-            model = claude_params.get('model')
-            effort = claude_params.get('effort')
-        dlg = ClaudeSkillDialog(
-            self, "Claude: recommend plane mappings", prompt,
-            claude_path=claude_path, model=model, effort=effort,
-            intro=f"Running /recommend-plane-mappings on {os.path.basename(board)} ...\n"
-                  "(board analysis; typically a few minutes)")
-        dlg.ShowModal()
-        value = dlg.result_value
-        dlg.Destroy()
+            "net names, one copper layer per group), e.g. RESULT=GND:In1.Cu;VCC:In2.Cu",
+            intro=f"Running recommend-plane-mappings on {os.path.basename(board)} ...\n"
+                  "(board analysis; typically a few minutes)",
+            claude_params=self.get_claude_params() if self.get_claude_params else None)
         if value is not None:
             self._apply_plane_mappings_recommendation(value)
 

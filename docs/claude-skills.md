@@ -14,6 +14,18 @@ claude
 
 Skills that look up datasheets (`/analyze-power-nets`, `/find-high-speed-nets`, `/identify-diff-pairs`, `/recommend-stackup`, `/recommend-plane-mappings`) use WebSearch and can take a few minutes on boards with many unique ICs.
 
+### Using them with opencode (#503)
+
+[opencode](https://opencode.ai) discovers the same `.claude/skills/` directory and loads skills on demand through its `skill` tool, so the whole set works there too - with any model provider opencode supports (it ships free gateway models out of the box; `opencode auth login` adds provider accounts):
+
+```bash
+cd /path/to/KiCadRoutingTools
+opencode run --agent pcb-analysis -m anthropic/claude-sonnet-4-5 \
+    "Load the 'plan-pcb-routing' skill with your skill tool and follow it for: /absolute/path/to/my_board.kicad_pcb"
+```
+
+The `pcb-analysis` agent (defined in the repo's `opencode.json`) denies file edits - the opencode equivalent of the read-only tool allowlist the Claude Code runs use. The skills' RESULT/plan output contracts are tuned on Claude models; smaller models may follow them less reliably.
+
 ## Plugin GUI Integration
 
 <p align="center">
@@ -21,8 +33,10 @@ Skills that look up datasheets (`/analyze-power-nets`, `/find-high-speed-nets`, 
 </p>
 
 All eight skills are reachable from the plugin's routing dialog (the GUI spawns
-`claude` headless with the working directory set to the plugin root, streams a live
-transcript, and parses a machine-readable `RESULT=` last line back into controls):
+the selected agent CLI - Claude Code or opencode, per the AI tab's **Backend**
+dropdown - headless with the working directory set to the plugin root, streams a
+live transcript, and parses a machine-readable `RESULT=` last line back into
+controls):
 
 | Where | Button | Skill | What it fills / shows |
 |-------|--------|-------|------------------------|
@@ -35,9 +49,11 @@ transcript, and parses a machine-readable `RESULT=` last line back into controls
 | Planes tab | **Ask Claude** (assignments) | `/recommend-plane-mappings` | Fills the net → layer assignment list (replace/merge prompt) |
 | Planes tab | **Ask Claude** (GND vias) | `/find-high-speed-nets` | Fills the GND via Max Distance field |
 
-The Claude tab's **Model** and **Effort** dropdowns apply to every button above and
-persist with the other dialog settings. Each run shows a startup header (Claude Code
-version, model, discovered skills) so you can confirm what actually ran.
+The AI tab's **Backend**, **Model**, and **Effort** selectors apply to every button
+above and persist with the other dialog settings (model/effort are remembered per
+backend; opencode models are `provider/model` strings, its effort maps to
+`--variant`). Claude Code runs show a startup header (version, model, discovered
+skills) so you can confirm what actually ran.
 
 **Recording a plan run.** Tick **Make routing movie** in the Advanced tab's *Debug*
 section (default off) and a plan run writes one movie covering every step it ran,
