@@ -868,6 +868,11 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
     Returns:
         True if successful
     """
+    # Seed the output's sibling .kicad_pro before the board exists (#513 item
+    # 12): a kill between this write and the post-write floor writeback must
+    # not strand the DRC floor (stock-netclass fallback, the #441/#338 class).
+    from fix_kicad_drc_settings import seed_project_for_output
+    seed_project_for_output(output_path, input_path)
     with open(input_path, 'r', encoding='utf-8') as f:
         content = f.read()
 

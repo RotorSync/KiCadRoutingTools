@@ -1470,6 +1470,10 @@ def route_planes(
                     os.unlink(_tmp.name)
                 except OSError:
                     pass
+                try:  # the seeded sibling .kicad_pro (#513 item 12)
+                    os.unlink(os.path.splitext(_tmp.name)[0] + '.kicad_pro')
+                except OSError:
+                    pass
                 return False if _links is None else _links
             except Exception as _oe:
                 print(f"  (gate oracle unavailable: {_oe})")
@@ -2156,6 +2160,12 @@ def _write_output(input_file: str, output_file: str, segments: List[Dict], vias:
     copper from pcb_data, and without a per-segment strip channel the writer
     re-emits it from the input text -- board != file).
     """
+    # Seed the output's sibling .kicad_pro before the board exists (#513 item
+    # 12): peaksat_obc_adcs hit the harness timeout after this board write but
+    # before fix_project_for_output, and the next step silently fell back to
+    # stock netclass floors. Also gives intermediate tmp boards their floor.
+    from fix_kicad_drc_settings import seed_project_for_output
+    seed_project_for_output(output_file, input_file)
     with open(input_file, 'r', encoding='utf-8') as f:
         content = f.read()
 

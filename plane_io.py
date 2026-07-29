@@ -419,6 +419,11 @@ def write_plane_output(
     Returns:
         True if successful, False otherwise
     """
+    # Seed the output's sibling .kicad_pro before the board exists (#513 item
+    # 12): a kill between this write and the post-write floor writeback must
+    # not strand the DRC floor (stock-netclass fallback, the #441/#338 class).
+    from fix_kicad_drc_settings import seed_project_for_output
+    seed_project_for_output(output_file, input_file)
     with open(input_file, 'r', encoding='utf-8') as f:
         content = f.read()
 

@@ -667,6 +667,33 @@ def warn_if_missing_project_floor(input_pcb) -> bool:
     return True
 
 
+def seed_project_for_output(output_pcb: str, input_pcb=None):
+    """Carry the input board's sibling ``.kicad_pro`` over to the output path
+    BEFORE the board file is written (#513 item 12). The full floor writeback
+    (``fix_project_for_output``) must run after the board exists because it scans
+    the written copper -- so a mid-run kill in that window used to leave a
+    valid board with NO sibling project, and the next step silently fell back
+    to stock netclass floors (the #441/#338 class; peaksat_obc_adcs, twice).
+    Seeding the input's project first means the window leaves the INPUT's
+    floors -- slightly stale at worst, never the stock fallback. Idempotent:
+    an existing output project is never touched. Returns the seeded path or
+    None."""
+    import shutil
+    if not output_pcb:
+        return None
+    out_pro = find_project(output_pcb)
+    if os.path.isfile(out_pro):
+        return None
+    in_pro = find_project(input_pcb) if input_pcb else None
+    if not (in_pro and os.path.isfile(in_pro)
+            and os.path.abspath(in_pro) != os.path.abspath(out_pro)):
+        return None
+    tmp = out_pro + '.tmp'
+    shutil.copyfile(in_pro, tmp)
+    os.replace(tmp, out_pro)
+    return out_pro
+
+
 def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
                            hole_clearance=None, hole_to_hole=None, edge_clearance=None,
                            track_width=None, via_diameter=None, via_drill=None,
@@ -733,9 +760,13 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
         if verbose:
             print(f"  DRC settings already consistent ({out_pro})")
         return out_pro
-    with open(out_pro, "w") as f:
+    # Atomic replace (#513 item 12): a kill mid-dump must not leave a
+    # truncated/unparseable project stranding the DRC floor.
+    _tmp_pro = out_pro + ".tmp"
+    with open(_tmp_pro, "w") as f:
         json.dump(proj, f, indent=2)
         f.write("\n")
+    os.replace(_tmp_pro, out_pro)
     if verbose:
         print(f"  DRC settings: updated {len(changes)} value(s) in {out_pro} "
               f"to match the routed floors (close+reopen in KiCad if it is open)")

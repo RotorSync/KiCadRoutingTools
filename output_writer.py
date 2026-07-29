@@ -69,6 +69,12 @@ def write_routed_output(
         return False
 
     print(f"\nWriting output to {output_file}...")
+    # Seed the output's sibling .kicad_pro from the input's BEFORE the board
+    # exists (#513 item 12): a kill between this write and the post-write floor
+    # writeback must not leave a board whose next step falls back to stock
+    # netclass floors.
+    from fix_kicad_drc_settings import seed_project_for_output
+    seed_project_for_output(output_file, input_file)
     with open(input_file, 'r', encoding='utf-8') as f:
         content = f.read()
 
