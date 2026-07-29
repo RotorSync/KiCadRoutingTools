@@ -4692,6 +4692,15 @@ def detect_package_type(footprint: Footprint) -> str:
         return 'QFN'
     if 'QFP' in fp_name or 'LQFP' in fp_name or 'TQFP' in fp_name:
         return 'QFP'
+    if 'PLCC' in fp_name:
+        # PLCC is a PERIMETER package (J-lead), never a ball array -- but the
+        # THT socket variant's staggered double-ring pin field reads as a
+        # sparse uniform grid and passed _is_ball_grid, so route.py walled a
+        # PLCC-44 socket behind a BGA exclusion zone and nearby nets burned
+        # ~1M A* iterations each (#513 item 16, rc2014_82c55_ide U1; the #82
+        # class). SMD PLCC gets QFN (perimeter) treatment; the THT socket
+        # needs no fanout at all -- its pins are reachable on every layer.
+        return 'OTHER' if any((p.drill or 0) > 0 for p in footprint.pads) else 'QFN'
     if 'SOIC' in fp_name or 'SOP' in fp_name or 'SSOP' in fp_name or 'TSSOP' in fp_name:
         return 'SOIC'
     if 'DIP' in fp_name or 'PDIP' in fp_name:
