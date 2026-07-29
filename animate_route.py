@@ -238,6 +238,13 @@ def discover_steps(run_dir: str) -> Tuple[List[Tuple[str, str, Optional[str]]], 
     stepped = [p for p in all_pcb if re.search(r'step\s*\d', os.path.basename(p), re.I)]
     if stepped:
         boards = sorted(stepped, key=_step_sort_key)
+        # A semantically-named final board (``final_board.kicad_pcb``) must not
+        # be dropped just because step-numbered boards exist -- the "explicit
+        # final* wins" rule below can only pick from ``boards`` (#513 item 10:
+        # a bare render_run.py rendered the second-to-last board as final).
+        finals = [p for p in all_pcb if p not in stepped
+                  and 'final' in os.path.basename(p).lower()]
+        boards += sorted(finals, key=lambda p: (os.path.getmtime(p), os.path.basename(p)))
     else:
         boards = sorted(all_pcb, key=lambda p: (os.path.getmtime(p), os.path.basename(p)))
     steps = []
