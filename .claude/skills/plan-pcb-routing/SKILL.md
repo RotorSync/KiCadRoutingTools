@@ -83,11 +83,27 @@ for ref, fp in pcb.footprints.items():
         'QFP',          # quad flat pack
     ))
 
+    # SMD vs through-hole FIRST -- it gates everything below (#513 item 16).
+    smd_count = sum(1 for p in fp.pads if p.drill == 0)
+    th_count = sum(1 for p in fp.pads if p.drill > 0)
+    mostly_tht = th_count > smd_count
+
+    # A THT part's pins are reachable on EVERY copper layer -- there is no
+    # "escape" problem to solve, so fanout buys nothing regardless of pad
+    # count. PLCC/DIP/ZIF SOCKETS are the trap: a PLCC-44 THT socket's
+    # staggered double-ring reads as a sparse uniform grid and used to be
+    # misdetected as a BGA (rc2014_82c55_ide U1 -- nets near it burned >1M
+    # A* iterations each behind a phantom exclusion zone, #513 item 16).
+    # Wide-pitch (>=2mm) PGAs route fine without fanout too; only reach for
+    # bga_fanout on a PGA when its channels are genuinely contested.
+    if mostly_tht and 'PGA' not in name_upper:
+        needs_fanout = False
+
     # Fine-pitch arrays strand even at low pad count: trigger by PITCH + interior
     # pads, not just pad_count > 40 (issue #144: LGA-12 at 0.5mm has only 12 pads
     # but its center lands box in). Compute the min pad-to-pad spacing and whether
     # any pad is interior (not on the bounding-box edge).
-    if not needs_fanout and pad_count >= 6:
+    if not needs_fanout and not mostly_tht and pad_count >= 6:
         xs = sorted({round(p.local_x, 3) for p in fp.pads})
         ys = sorted({round(p.local_y, 3) for p in fp.pads})
         def _min_step(v):
@@ -96,8 +112,11 @@ for ref, fp in pcb.footprints.items():
         minx, maxx, miny, maxy = xs[0], xs[-1], ys[0], ys[-1]
         has_interior = any(minx < round(p.local_x, 3) < maxx and
                            miny < round(p.local_y, 3) < maxy for p in fp.pads)
-        # Fine pitch (<=0.6mm) with interior pads, OR a large multi-row part.
-        if (pitch <= 0.6 and has_interior) or pad_count > 40:
+        # Fine pitch (<=0.6mm) with interior pads, OR a large multi-row part
+        # AT FINE PITCH. Raw pad_count > 40 alone is NOT a fanout signal: a
+        # 44-pin THT socket, a 2x20 header, or a 1.27mm connector trips it
+        # while gaining nothing from escape routing.
+        if (pitch <= 0.6 and has_interior) or (pad_count > 40 and pitch <= 0.8):
             needs_fanout = True
 
     if needs_fanout:
@@ -105,11 +124,31 @@ for ref, fp in pcb.footprints.items():
         xs = sorted(set(round(p.local_x, 2) for p in fp.pads))
         ys = sorted(set(round(p.local_y, 2) for p in fp.pads))
         grid_cols, grid_rows = len(xs), len(ys)
-
-        # Check SMD vs through-hole
-        smd_count = sum(1 for p in fp.pads if p.drill == 0)
-        th_count = sum(1 for p in fp.pads if p.drill > 0)
 ```
+
+### Does this part actually BENEFIT from fanout? (check before planning it)
+
+A name/pad-count match is a candidate, not a decision. Fanout (escape routing)
+exists to solve ONE problem: pads that cannot be reached by ordinary routing
+because neighboring pads at fine pitch box them in. Before adding a fanout
+step, confirm the geometry actually has that problem:
+
+1. **Through-hole part (most pads drilled)?** → **No fanout.** Every pin is
+   reachable on every layer; there is nothing to escape. This includes
+   PLCC/DIP/ZIF **sockets** (a PLCC-44 THT socket's staggered pin field looks
+   like a sparse grid but is just a socket, #513 item 16), headers, and DIN /
+   backplane connectors. Wide-pitch (>=2mm) PGAs also normally route fine
+   without fanout.
+2. **Wide-pitch SMD (>=1.27mm) perimeter part?** → No fanout; plain routing
+   handles it.
+3. **Interior pads at fine pitch (<=0.6mm), or a perimeter at <=0.65mm with
+   many pads?** → Yes, fanout genuinely helps (this is the boxed-in case).
+   Dense 2-row mezzanine/card-edge connectors at 0.4mm (CM4/CM5, 200+ pads)
+   DO benefit -- use `qfn_fanout.py --escape-method underpad --allow-via-in-pad`.
+4. **Unsure?** The fanout tools now refuse or warn on wrong shapes
+   (staggered arrays, non-arrays). Trust a refusal: if the tool says the part
+   is not an array and the geometry checks above say the pins are reachable,
+   plan ordinary routing instead of forcing a workaround.
 
 ### Fanout Tool Selection
 
@@ -121,6 +160,8 @@ for ref, fp in pcb.footprints.items():
 | QFN/QFP/DFN (perimeter SMD) | `qfn_fanout.py` | Stub routing for quad/dual no-lead and flat packages |
 | **AQFN / staggered multi-row no-lead** | `qfn_fanout.py` **`--escape-method underpad --allow-via-in-pad`** | Inner rows the surface fan cannot reach - see below. **Never `bga_fanout.py`** |
 | DIP/SOIC (through-hole/SMD rows) | None needed | Standard routing handles these |
+| PLCC (SMD J-lead or THT socket) | None needed | Perimeter part; the THT socket's pins reach every layer. Never a BGA (#513 item 16) |
+| Sockets / headers / backplane connectors (THT) | None needed | All-layer reachable; pad count alone is not a fanout signal |
 
 ### When to Use Fanout for BGA/PGA/LGA
 
