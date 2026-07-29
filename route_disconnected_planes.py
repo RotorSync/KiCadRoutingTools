@@ -752,6 +752,35 @@ def route_planes(
     all_new_segments: List[Dict] = []
     all_new_vias: List[Dict] = []
 
+    # #517 instrumentation: which PASS placed each piece of this run's new
+    # copper (pad-tap, region-join, partial-restore, reconnect, custody
+    # restore), so a custody REFUSED-restore can name the occupier class
+    # instead of just "copper routed meanwhile". Geometry-keyed (the same
+    # copper exists as pcb_data objects and write-list dicts; rounding
+    # matches consume_inner_strips). Anything unmatched is copper that
+    # predates this run -- a refusal against THAT means the collision test
+    # was conservative, itself a finding.
+    _copper_provenance: Dict[tuple, str] = {}
+
+    def _prov_seg(net_id, layer, sx, sy, ex, ey, tag):
+        a = (round(sx, 3), round(sy, 3))
+        b = (round(ex, 3), round(ey, 3))
+        _copper_provenance[(net_id, layer, a, b)] = tag
+        _copper_provenance[(net_id, layer, b, a)] = tag
+
+    def _prov_via(net_id, x, y, tag):
+        _copper_provenance[(net_id, round(x, 3), round(y, 3))] = tag
+
+    def _prov_lookup(kind, obj):
+        if kind == 'segment':
+            return _copper_provenance.get(
+                (obj.net_id, obj.layer,
+                 (round(obj.start_x, 3), round(obj.start_y, 3)),
+                 (round(obj.end_x, 3), round(obj.end_y, 3))),
+                'pre-existing')
+        return _copper_provenance.get(
+            (obj.net_id, round(obj.x, 3), round(obj.y, 3)), 'pre-existing')
+
     file_strip_segments: List = []
     file_strip_vias: List = []
 
@@ -944,6 +973,12 @@ def route_planes(
                             new_seg_objs.append(seg_obj)
                             pcb_data.segments.append(seg_obj)
                         shared_maps.note_pass_copper(new_via_objs, new_seg_objs)
+                        for _po in new_seg_objs:
+                            _prov_seg(_po.net_id, _po.layer, _po.start_x,
+                                      _po.start_y, _po.end_x, _po.end_y,
+                                      'pad-tap')
+                        for _po in new_via_objs:
+                            _prov_via(_po.net_id, _po.x, _po.y, 'pad-tap')
                         # T6: this tap was oracle-verified to reach the main
                         # plane; credit its pad + copper so later pads may
                         # strap to them (transitive, no graph rebuild).
@@ -1027,6 +1062,8 @@ def route_planes(
                     end_x=end[0], end_y=end[1],
                     width=s['width'], layer=s['layer'], net_id=s['net_id']
                 ))
+                _prov_seg(s['net_id'], s['layer'], start[0], start[1],
+                          end[0], end[1], 'region-join')
 
             # Add vias to pcb_data so subsequent nets see them as obstacles
             for v in region_vias:
@@ -1036,6 +1073,7 @@ def route_planes(
                     layers=['F.Cu', 'B.Cu'],  # Through-hole vias
                     net_id=v['net_id']
                 ))
+                _prov_via(v['net_id'], v['x'], v['y'], 'region-join')
             from route_trace import plane_capture as _plane_capture
             _plane_capture(pcb_data, 'plane-join', net_id, net_name)  # individual region-join frame
 
@@ -1068,12 +1106,15 @@ def route_planes(
                   'net_id': _pid}
             all_new_segments.append(_d)
             _partial_emitted_segs.append(_d)
+            _prov_seg(_pid, _ks.layer, _ks.start_x, _ks.start_y,
+                      _ks.end_x, _ks.end_y, 'partial-restore')
         for _kv in _kvias:
             _d = {'x': _kv.x, 'y': _kv.y, 'size': _kv.size,
                   'drill': _kv.drill, 'layers': _kv.layers,
                   'net_id': _pid}
             all_new_vias.append(_d)
             _partial_emitted_vias.append(_d)
+            _prov_via(_pid, _kv.x, _kv.y, 'partial-restore')
 
     # The ripped signal nets' old copper is excluded from the OUTPUT but still
     # sits in pcb_data here (stripped only at write time). Drop it before the
@@ -1173,14 +1214,20 @@ def route_planes(
                             'drill': _v.drill, 'layers': _v.layers,
                             'net_id': _v.net_id}
                 for _r in _rdata.get('results', []):
-                    all_new_segments.extend(
-                        _sd(_s) for _s in (_r.get('new_segments') or []))
-                    all_new_vias.extend(
-                        _vd(_v) for _v in (_r.get('new_vias') or []))
-                all_new_vias.extend(
-                    _vd(_v) for _v in (_rdata.get('all_swap_vias') or []))
-                all_new_segments.extend(
-                    _sd(_s) for _s in (_rdata.get('all_swap_segments') or []))
+                    for _s in (_r.get('new_segments') or []):
+                        all_new_segments.append(_sd(_s))
+                        _prov_seg(_s.net_id, _s.layer, _s.start_x, _s.start_y,
+                                  _s.end_x, _s.end_y, 'reconnect')
+                    for _v in (_r.get('new_vias') or []):
+                        all_new_vias.append(_vd(_v))
+                        _prov_via(_v.net_id, _v.x, _v.y, 'reconnect')
+                for _v in (_rdata.get('all_swap_vias') or []):
+                    all_new_vias.append(_vd(_v))
+                    _prov_via(_v.net_id, _v.x, _v.y, 'reconnect')
+                for _s in (_rdata.get('all_swap_segments') or []):
+                    all_new_segments.append(_sd(_s))
+                    _prov_seg(_s.net_id, _s.layer, _s.start_x, _s.start_y,
+                              _s.end_x, _s.end_y, 'reconnect')
                 _consume_inner_strips(_rdata, "reconnect")
                 # The reconnect mutated copper, and the plane fill models are
                 # cached on pcb_data (they subtract foreign-copper halos, so a
@@ -1272,14 +1319,33 @@ def route_planes(
                       # GPIO-P20: endpoints 1.600/0.400 vs a 0.230 rule,
                       # true crossing 0.000). It also tested only a
                       # segment's START point against restored vias.
-                      from rip_up_reroute import _saved_route_collides
-                      if _saved_route_collides(
-                              {'new_segments': _osegs, 'new_vias': _ovias},
-                              pcb_data, [_cid], clearance):
+                      from rip_up_reroute import _saved_route_colliders
+                      _culprits = _saved_route_colliders(
+                          {'new_segments': _osegs, 'new_vias': _ovias},
+                          pcb_data, [_cid], clearance)
+                      if _culprits:
                           print(f"  {YELLOW}REFUSED restore of {_nm}: copper "
                                 f"routed meanwhile occupies its corridor; "
                                 f"left unrouted rather than displacing it"
                                 f"{RESET}")
+                          # #517: name the pass that placed the occupying
+                          # copper -- residual refusals point at the next
+                          # custody lever. 'pre-existing' means the collision
+                          # test flagged copper this run never touched (a
+                          # conservative-test finding, not an occupier).
+                          _attr: Dict[tuple, int] = {}
+                          for _kind, _obj in _culprits:
+                              _tag = _prov_lookup(_kind, _obj)
+                              _onm = (pcb_data.nets[_obj.net_id].name
+                                      if _obj.net_id in pcb_data.nets
+                                      else f"net_{_obj.net_id}")
+                              _k = (_tag, _onm)
+                              _attr[_k] = _attr.get(_k, 0) + 1
+                          _parts = [
+                              f"{_t} {_n} x{_c}" for (_t, _n), _c in
+                              sorted(_attr.items(), key=lambda kv: -kv[1])]
+                          print(f"  {YELLOW}  occupied by: "
+                                f"{'; '.join(_parts)}{RESET}")
                           _cust['refused'] += 1
                           continue
                       # Corridor still clear: drop the failed reroute and
@@ -1298,6 +1364,13 @@ def route_planes(
                       # lists below
                       pcb_data.segments.extend(_osegs)
                       pcb_data.vias.extend(_ovias)
+                      for _po in _osegs:
+                          _prov_seg(_po.net_id, _po.layer, _po.start_x,
+                                    _po.start_y, _po.end_x, _po.end_y,
+                                    'custody-restore')
+                      for _po in _ovias:
+                          _prov_via(_po.net_id, _po.x, _po.y,
+                                    'custody-restore')
                       for _lst in (ripped_net_ids, partial_ids):
                           while _cid in _lst:
                               _lst.remove(_cid)

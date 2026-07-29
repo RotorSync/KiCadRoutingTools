@@ -299,11 +299,23 @@ def _saved_route_collides(saved_result: dict, pcb_data: PCBData,
     collides with copper that MOVED into its space while it was ripped -
     precisely the desync we want to refuse. Mirrors the plane fix (#88.1).
     """
+    return bool(_saved_route_colliders(saved_result, pcb_data, own_net_ids,
+                                       clearance, first_only=True))
+
+
+def _saved_route_colliders(saved_result: dict, pcb_data: PCBData,
+                           own_net_ids: List[int], clearance: float,
+                           first_only: bool = False) -> list:
+    """The items behind a _saved_route_collides verdict (#517 instrumentation):
+    every foreign pcb_data segment/via within clearance of the saved copper,
+    as ('segment'|'via', obj) pairs, deduplicated. Same geometry as the
+    boolean test; first_only preserves its early-exit for the hot path.
+    """
     own = set(own_net_ids)
     segs = saved_result.get('new_segments', []) or []
     vias = saved_result.get('new_vias', []) or []
     if not segs and not vias:
-        return False
+        return []
 
     # Bounding box of the saved route, expanded, to prefilter pcb_data copper.
     xs, ys = [], []
@@ -328,6 +340,14 @@ def _saved_route_collides(saved_result: dict, pcb_data: PCBData,
               if v.net_id not in own and v.net_id != 0
               and minx <= v.x <= maxx and miny <= v.y <= maxy]
 
+    hits = []
+    seen = set()
+
+    def _hit(kind, obj):
+        if id(obj) not in seen:
+            seen.add(id(obj))
+            hits.append((kind, obj))
+
     # Restored segments vs other-net segments (same layer) and vias (all layers).
     for s in segs:
         hw = s.width / 2.0
@@ -337,12 +357,16 @@ def _saved_route_collides(saved_result: dict, pcb_data: PCBData,
             thr = hw + o.width / 2.0 + clearance
             if _seg_seg_dist_sq(s.start_x, s.start_y, s.end_x, s.end_y,
                                 o.start_x, o.start_y, o.end_x, o.end_y) < thr * thr:
-                return True
+                _hit('segment', o)
+                if first_only:
+                    return hits
         for v in o_vias:
             thr = hw + v.size / 2.0 + clearance
             if _pt_seg_dist_sq(v.x, v.y, s.start_x, s.start_y,
                                s.end_x, s.end_y) < thr * thr:
-                return True
+                _hit('via', v)
+                if first_only:
+                    return hits
 
     # Restored vias (span layers) vs other-net vias and segments.
     for vv in vias:
@@ -350,14 +374,18 @@ def _saved_route_collides(saved_result: dict, pcb_data: PCBData,
         for v in o_vias:
             thr = vr + v.size / 2.0 + clearance
             if (vv.x - v.x) ** 2 + (vv.y - v.y) ** 2 < thr * thr:
-                return True
+                _hit('via', v)
+                if first_only:
+                    return hits
         for o in o_segs:
             thr = vr + o.width / 2.0 + clearance
             if _pt_seg_dist_sq(vv.x, vv.y, o.start_x, o.start_y,
                                o.end_x, o.end_y) < thr * thr:
-                return True
+                _hit('segment', o)
+                if first_only:
+                    return hits
 
-    return False
+    return hits
 
 
 def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
