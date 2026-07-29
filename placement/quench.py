@@ -612,6 +612,16 @@ def quench(pcb_data: PCBData, pcb_file: str,
                     for j in range(i + 1, len(refs)):
                         ra, rb = refs[i], refs[j]
                         pa, pb = state.parts[ra], state.parts[rb]
+                        # A swap exchanges FULL poses, rotation included, so a
+                        # mixed-angle pair rotates both parts. --no-rotate
+                        # promises that no move changes any part's rotation:
+                        # restrict swaps to pairs that already share one, which
+                        # also keeps the exchange rotation-neutral and so
+                        # preserves the occupied-space invariance that lets
+                        # swaps skip candidate_valid. Checked before the cap so
+                        # swaps_skipped keeps counting cap rejections only.
+                        if not allow_rotations and abs(pa.rot - pb.rot) > 1e-9:
+                            continue
                         # Swapping must keep each part within swap_cap of
                         # its OWN seed position
                         if (math.hypot(pb.x - pa.seed_x, pb.y - pa.seed_y) > swap_cap + 1e-9
