@@ -2571,7 +2571,8 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
         for v in pcb_data.vias:
             if v.net_id == net_id:
                 continue
-            req = half + v.size / 2.0 + config.obstacle_clearance(v.net_id)
+            req = half + v.size / 2.0 + config.layer_clearance(  # #498
+                layer, config.obstacle_clearance(v.net_id))
             if not (bb[0] - req <= v.x <= bb[2] + req
                     and bb[1] - req <= v.y <= bb[3] + req):
                 continue
@@ -2580,7 +2581,8 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
         for s in pcb_data.segments:
             if s.net_id == net_id or s.layer != layer:
                 continue
-            req = half + s.width / 2.0 + config.obstacle_clearance(s.net_id)
+            req = half + s.width / 2.0 + config.layer_clearance(  # #498
+                layer, config.obstacle_clearance(s.net_id))
             if not (bb[0] - req <= max(s.start_x, s.end_x)
                     and min(s.start_x, s.end_x) <= bb[2] + req
                     and bb[1] - req <= max(s.start_y, s.end_y)
@@ -2596,7 +2598,8 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
                 on_layer = ('*.Cu' in p.layers or layer in p.layers)
                 is_th = bool(p.drill and p.drill > 0)
                 if p.pad_type != 'np_thru_hole' and (on_layer or is_th):
-                    clr = max(config.obstacle_clearance(pnid),
+                    clr = max(config.layer_clearance(  # #498: meet on the leg's layer
+                                  layer, config.obstacle_clearance(pnid)),
                               getattr(p, 'local_clearance', 0.0) or 0.0)
                     pext = max(p.size_x, p.size_y) / 2.0
                     req = half + pext + clr
@@ -2690,7 +2693,10 @@ def build_base_obstacles(
     for via in pcb_data.vias:
         if via.net_id in exclude_net_ids:
             continue
-        _clr = config.obstacle_clearance(via.net_id)
+        # #498: one grouped value stamps ALL layers here, so take the stack max
+        # -- conservative on relaxed layers (over-blocks a repair join near a
+        # foreign via), never under the rule on tightened ones.
+        _clr = config.stack_clearance(config.obstacle_clearance(via.net_id))
         foreign_centers_by_size.setdefault((via.size, _clr), []).append(
             coord.to_grid(via.x, via.y))
     for (vsize, _clr), centers in foreign_centers_by_size.items():
@@ -2765,7 +2771,8 @@ def build_base_obstacles(
         if seg.net_id in exclude_net_ids:
             continue
         layer_idx = layer_map.get(seg.layer)
-        _seg_clr = config.obstacle_clearance(seg.net_id)  # #434 cross-class
+        _seg_clr = config.layer_clearance(  # #498 (#434 cross-class)
+            seg.layer, config.obstacle_clearance(seg.net_id))
         if layer_idx is None:
             # Copper on a layer OUTSIDE routing_layers (repair joins route on
             # the plane layers only): tracks cannot go there, but a repair
@@ -2821,8 +2828,16 @@ def build_base_obstacles(
             # Block rectangular area around pad with clearance for track routing.
             # Honor a per-pad local clearance override (fiducial keep-clear etc.)
             # and the pad net's netclass clearance (#434 cross-class).
-            pad_clr = max(config.obstacle_clearance(pad_net_id),
-                          getattr(pad, 'local_clearance', 0.0) or 0.0)
+            # #498: one value stamps every layer the pad is on -> max over the
+            # pad's per-layer resolution (conservative on relaxed layers).
+            _pc = config.obstacle_clearance(pad_net_id)
+            if getattr(config, 'layer_clearances', None):
+                _pls = [l for l in (pad.layers or [])
+                        if l.endswith('.Cu') and l != '*.Cu']
+                _pc = (config.stack_clearance(_pc)
+                       if ('*.Cu' in (pad.layers or []) or not _pls)
+                       else max(config.layer_clearance(l, _pc) for l in _pls))
+            pad_clr = max(_pc, getattr(pad, 'local_clearance', 0.0) or 0.0)
             pad_expansion_mm = track_width / 2 + pad_clr + cushion
             half_w, half_h = pad_rect_halfspan(pad, pad_expansion_mm)
             min_gx, _ = coord.to_grid(pad.global_x - half_w, 0)

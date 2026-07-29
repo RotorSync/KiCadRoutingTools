@@ -1690,6 +1690,8 @@ def _strap_unescaped_extras(footprint: Footprint, pcb_data: PCBData,
                 layers=[ball_layer], track_width=track_width,
                 clearance=clearance, via_size=via_size, via_drill=via_drill,
                 grid_step=strap_grid)
+            from kicad_dru import install_layer_clearances
+            install_layer_clearances(cfg, None, None, pcb_data)  # #498
             routing_obs = build_routing_obstacle_map(
                 pcb_data, cfg, net_id, ball_layer,
                 skip_pad_blocking=False, verbose=False)
@@ -1922,6 +1924,23 @@ def generate_bga_fanout(footprint: Footprint,
     # global-axis-bound, so rotate the whole board into this footprint's frame
     # (where its balls are axis-aligned), run the pipeline, and map the resulting
     # tracks/vias back. Orthogonal placements skip this and are unaffected.
+    # #498: fanout copper must obey the board's per-layer .kicad_dru clearance
+    # rules. The channel/under-pad engines are scalar-clearance throughout, so
+    # compose CONSERVATIVELY: floor the scalar at the largest rule on any layer
+    # this fanout may use (tighten only -- taking a relaxing rule from one
+    # layer would under-space the others). The obstacle maps below get the
+    # exact per-layer map; exact per-layer self-spacing inside the escape
+    # engines is future work. Placed BEFORE the rotated-frame recursion so the
+    # rotated run inherits the floored value (idempotent: re-floor is a no-op).
+    from kicad_dru import board_layer_clearance_map
+    _lcl_498 = board_layer_clearance_map(pcb_data)
+    _mx_498 = max((v for l, v in _lcl_498.items() if l in (layers or [])),
+                  default=None)
+    if _mx_498 is not None and _mx_498 > clearance:
+        print(f"  .kicad_dru: fanout clearance floored {clearance} -> {_mx_498} "
+              f"(largest per-layer rule on the escape layers, #498)")
+        clearance = _mx_498
+
     from bga_fanout.rotate_frame import (is_orthogonal, to_axis_aligned_frame,
                                          back_transform_results)
     if not is_orthogonal(footprint.rotation):
@@ -2535,6 +2554,8 @@ def generate_bga_fanout(footprint: Footprint,
         via_size=via_size,
         via_drill=via_drill,
     )
+    from kicad_dru import install_layer_clearances
+    install_layer_clearances(obstacle_cfg, None, None, pcb_data)  # #498
     obstacle_layer_map = build_layer_map(obstacle_cfg.layers)
     print(f"  Building pad-aware obstacle map ({len(fanned_net_ids)} fanned nets excluded)...")
     obstacles = build_base_obstacle_map(
@@ -2679,7 +2700,11 @@ def generate_bga_fanout(footprint: Footprint,
         print_route_statistics(routes)
 
         if not routes:
-            return [], [], [], []
+            # 5-tuple like the normal return below -- the caller unpacks
+            # (tracks, vias_to_add, vias_to_remove, failed_nets, routes); the
+            # old 4-tuple crashed any pass whose net filter matched no
+            # escapable ball (caught by the #498 e2e's single-net BGA probe).
+            return [], [], [], [], []
 
         # Connect adjacent same-net pads directly (before layer assignment)
         neighbor_connections = connect_adjacent_same_net_pads(routes, grid, track_width, clearance)

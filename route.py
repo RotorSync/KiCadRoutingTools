@@ -1081,6 +1081,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # GUI inherits them with no wiring (see kicad_dru.install_layer_clearances).
     from kicad_dru import install_layer_clearances
     install_layer_clearances(config, layer_clearances, input_file, pcb_data)
+    # Carry the RESOLVED map into the end-of-run reconciliation kwargs, exactly
+    # like board_edge_clearance above: the reconciliation self-invocation reads
+    # the OUTPUT file, whose sibling .kicad_dru does not exist yet (main()'s
+    # fix_project_for_output copies it after batch_route returns), so its own
+    # auto-read would find NOTHING and the sub-run would route blind to the
+    # rules (caught by test_dru_layer_clearance_e2e: a reconciliation +3V3 via
+    # 0.25mm inside the B.Cu rule against GND).
+    _reconcile_kwargs['layer_clearances'] = dict(config.layer_clearances)
     if visualize:
         base_obstacles, base_vis_data = build_base_obstacle_map_with_vis(
             pcb_data, config, base_map_exclusions,

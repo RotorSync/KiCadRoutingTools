@@ -199,6 +199,28 @@ def read_board_layer_clearances(board_path: str, copper_layers: List[str],
     return result, notes
 
 
+_ANNOUNCED = set()  # (board path, map items) already printed this process
+
+
+def board_layer_clearance_map(pcb_data) -> Dict[str, float]:
+    """Fab-pinned #498 layer-clearance map for a PCBData, discovered via its
+    ``source_path`` sibling .kicad_dru. Quiet ({} when there is none) -- for
+    engines that consume the map outside a GridRouteConfig (fanout scalars)."""
+    path = getattr(pcb_data, 'source_path', "") or ""
+    if not path:
+        return {}
+    copper = list(getattr(pcb_data.board_info, 'copper_layers', None) or [])
+    if not copper:
+        return {}
+    try:
+        from fab_tiers import fab_floors
+        floor = fab_floors(len(copper)).get('clearance')
+    except Exception:
+        floor = None
+    lmap, _ = read_board_layer_clearances(path, copper, fab_clearance_floor=floor)
+    return lmap
+
+
 def min_rule_clearance(board_path: str) -> Optional[float]:
     """Smallest honored .kicad_dru layer-rule clearance for ``board_path``'s
     project, or None (no dru / no layer clearance rules). The DRC-settings
@@ -224,6 +246,10 @@ def install_layer_clearances(config, layer_clearances, input_file, pcb_data=None
     if layer_clearances is not None:
         config.layer_clearances = dict(layer_clearances)
         return
+    if not input_file:
+        # Engines whose signatures carry no input path (planes, fanout, oracle
+        # sub-configs) discover the board file via PCBData.source_path.
+        input_file = getattr(pcb_data, 'source_path', "") or ""
     copper = None
     if pcb_data is not None and getattr(pcb_data, 'board_info', None) is not None:
         copper = list(pcb_data.board_info.copper_layers or [])
@@ -236,10 +262,16 @@ def install_layer_clearances(config, layer_clearances, input_file, pcb_data=None
         floor = None
     lmap, notes = read_board_layer_clearances(input_file or "", copper,
                                               fab_clearance_floor=floor)
-    for note in notes:
-        print(f"  .kicad_dru: {note}")
-    if lmap:
-        vals = ", ".join(f"{l}:{v:g}" for l, v in sorted(lmap.items()))
-        print(f"Per-layer clearance rules from the board's .kicad_dru (#498, "
-              f"replace net/class values on their layers): {vals}")
+    # One announcement per (board, map) per process -- plane/fanout runs build
+    # several configs for the same board and would repeat it.
+    _key = (os.path.abspath(input_file) if input_file else "",
+            tuple(sorted(lmap.items())))
+    if _key not in _ANNOUNCED:
+        _ANNOUNCED.add(_key)
+        for note in notes:
+            print(f"  .kicad_dru: {note}")
+        if lmap:
+            vals = ", ".join(f"{l}:{v:g}" for l, v in sorted(lmap.items()))
+            print(f"Per-layer clearance rules from the board's .kicad_dru (#498, "
+                  f"replace net/class values on their layers): {vals}")
     config.layer_clearances = lmap

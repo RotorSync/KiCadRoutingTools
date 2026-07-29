@@ -432,6 +432,7 @@ def build_via_obstacle_map(
     for via in pcb_data.vias:
         _clr = (config.clearance if via.net_id == exclude_net_id
                 else config.obstacle_clearance(via.net_id))
+        _clr = config.stack_clearance(_clr)  # #498: barrels meet on every layer
         centers_by_size.setdefault((via.size, _clr), []).append(coord.to_grid(via.x, via.y))
     for (vsize, _clr), via_centers in centers_by_size.items():
         via_via_expansion_mm = vsize / 2 + config.via_size / 2 + _clr + grid_cushion
@@ -454,7 +455,9 @@ def build_via_obstacle_map(
         # Include grid cushion for discretization; price the segment's net at its
         # netclass clearance (#434 cross-class).
         seg_expansion_mm = (config.via_size / 2 + seg.width / 2
-                            + config.obstacle_clearance(seg.net_id) + grid_cushion)
+                            + config.layer_clearance(  # #498: meet on seg.layer
+                                seg.layer, config.obstacle_clearance(seg.net_id))
+                            + grid_cushion)
         _add_segment_via_obstacle(obstacles, seg, coord, seg_expansion_mm)
         seg_count += 1
     if verbose:
@@ -542,6 +545,16 @@ def _add_pad_via_obstacle(obstacles: GridObstacleMap, pad: Pad,
     # Foreign pads are priced at their net's netclass clearance (#434).
     clearance = (config.obstacle_clearance(pad.net_id)
                  if clearance_override is None else clearance_override)
+    # #498: a via barrel meets the pad's copper on each layer the pad carries
+    # it -> max over the per-layer resolution ('*.Cu' = the whole stack).
+    # FOREIGN pads only: an explicit override (same-net pads) is not a KiCad
+    # clearance pair and keeps its value.
+    if clearance_override is None and getattr(config, 'layer_clearances', None):
+        _pls = [l for l in (pad.layers or []) if l.endswith('.Cu') and l != '*.Cu']
+        if '*.Cu' in (pad.layers or []) or not _pls:
+            clearance = config.stack_clearance(clearance)
+        else:
+            clearance = max(config.layer_clearance(l, clearance) for l in _pls)
     # Honor a per-pad local clearance override (fiducial keep-clear rings etc.)
     # unless an explicit same-net override was supplied.
     if clearance_override is None:
@@ -1000,7 +1013,8 @@ def build_routing_obstacle_map(
                     # keep-clear rings carry a clearance far larger than the
                     # board global), else copper routes within the pad's
                     # required clearance (no-net fiducial DRC, upduino #146).
-                    pad_clr = max(config.obstacle_clearance(net_id),  # #434 cross-class
+                    pad_clr = max(config.layer_clearance(  # #498: on route_layer
+                                      route_layer, config.obstacle_clearance(net_id)),
                                   getattr(pad, 'local_clearance', 0.0) or 0.0)
                     # Half-grid discretization cushion, matching this file's own
                     # via/segment stamps and build_base_obstacles (#173): cells
@@ -1051,7 +1065,8 @@ def build_routing_obstacle_map(
         # halo matches the true clearance envelope without the grid-rounding that used
         # to leave connection traces within clearance of signal copper (#146/#173).
         seg_expansion_mm = (route_track_w / 2 + seg.width / 2
-                            + config.obstacle_clearance(seg.net_id))  # #434
+                            + config.layer_clearance(  # #498 (#434 cross-class)
+                                route_layer, config.obstacle_clearance(seg.net_id)))
         _add_segment_routing_obstacle(obstacles, seg, coord, layer_idx, seg_expansion_mm)
         seg_count += 1
     if verbose:
@@ -1070,7 +1085,9 @@ def build_routing_obstacle_map(
         # clearance envelope (#70). The grid-circle-on-quantised-cell form lost up
         # to ~half a cell on the via side.
         r_mm = (via.size / 2 + route_track_w / 2
-                + config.obstacle_clearance(via.net_id) + config.grid_step / 2)  # #434
+                + config.layer_clearance(  # #498: the route meets it on route_layer
+                    route_layer, config.obstacle_clearance(via.net_id))
+                + config.grid_step / 2)
         rg = coord.to_grid_dist_safe(r_mm)
         r_sq = r_mm * r_mm
         # Vectorized real-centre disc (bit-identical to the scalar double loop:

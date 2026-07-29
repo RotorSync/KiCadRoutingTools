@@ -3,6 +3,7 @@ KiCad PCB Parser - Extracts pads, nets, tracks, vias, and board info from .kicad
 """
 from __future__ import annotations
 
+import os
 import re
 import math
 import json
@@ -393,6 +394,12 @@ class PCBData:
     net_id_to_name: Dict[int, str] = field(default_factory=dict)  # Synthetic ID -> net name (for KiCad 10 output)
     guide_paths: List[GuidePath] = field(default_factory=list)  # User-drawn guide corridors (issue #7)
     keepout_zones: List[GuidePath] = field(default_factory=list)  # User-drawn keepout polygons (issue #27)
+    # #498: absolute path of the board this data came from ("" = in-memory /
+    # unknown). Lets engines whose signatures carry no input_file (planes,
+    # fanout) auto-discover sibling project files -- today the .kicad_dru
+    # per-layer clearance rules. parse_kicad_pcb sets it from its argument;
+    # build_pcb_data_from_board from board.GetFileName().
+    source_path: str = ""
 
     def net_tie_exempt_pad_ids(self, net_id: int):
         """id()s of pads whose keep-out copper of `net_id` may IGNORE.
@@ -3166,7 +3173,8 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
         kicad_version=kicad_version,
         net_id_to_name=net_id_to_name,
         guide_paths=guide_paths,
-        keepout_zones=keepout_zones
+        keepout_zones=keepout_zones,
+        source_path=os.path.abspath(filepath) if filepath else ""
     )
 
 
@@ -3943,7 +3951,9 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         pads_by_net=pads_by_net,
         zones=zones,
         guide_paths=guide_paths,
-        keepout_zones=keepout_zones
+        keepout_zones=keepout_zones,
+        # #498 parity with parse_kicad_pcb: sibling-file discovery (.kicad_dru)
+        source_path=os.path.abspath(board.GetFileName()) if board.GetFileName() else ""
     )
 
 

@@ -172,6 +172,8 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     fanned_nets = {pi.pad.net_id for pi in pad_infos}
     cfg = GridRouteConfig(layers=list(pcb_data.board_info.copper_layers or [layer]),
                           track_width=track_width, clearance=clearance)
+    from kicad_dru import install_layer_clearances
+    install_layer_clearances(cfg, None, None, pcb_data)  # #498
     layer_map = build_layer_map(cfg.layers)
     obstacles = build_base_obstacle_map(pcb_data, cfg, nets_to_route=list(fanned_nets),
                                         extra_clearance=track_width / 2)
@@ -465,6 +467,17 @@ def generate_qfn_fanout(footprint: Footprint,
         print(f"Warning: {footprint.reference} doesn't appear to be a QFN/QFP")
         return [], [], []
 
+    # #498: a .kicad_dru rule for the (single) escape layer REPLACES the pair
+    # clearance -- QFN stubs live on exactly one layer, so the scalar swap is
+    # exact (tighten or relax). The obstacle maps below get the full per-layer
+    # map installed separately for their stack-aware via keep-outs.
+    from kicad_dru import board_layer_clearance_map
+    _lcl_498 = board_layer_clearance_map(pcb_data)
+    if _lcl_498.get(layer) is not None and _lcl_498[layer] != clearance:
+        print(f"  .kicad_dru: escape-layer clearance {layer} "
+              f"{clearance} -> {_lcl_498[layer]} (#498)")
+        clearance = _lcl_498[layer]
+
     # Fab-floor clamp (issue #223): an escape stub thinner than the board's
     # minimum manufacturable track width is un-routable at the stated fab class
     # (usb_sniffer's /T_USB_* bus emitted at 0.100mm against a 0.127mm 2-layer
@@ -604,6 +617,8 @@ def generate_qfn_fanout(footprint: Footprint,
     # a stub/fan that would extend into a foreign obstacle is shortened or dropped.
     _obs_cfg = GridRouteConfig(layers=list(pcb_data.board_info.copper_layers or [layer]),
                                track_width=track_width, clearance=clearance)
+    from kicad_dru import install_layer_clearances
+    install_layer_clearances(_obs_cfg, None, None, pcb_data)  # #498
     _obs_layer_map = build_layer_map(_obs_cfg.layers)
     _fanned_net_ids = [p.net_id for p in footprint.pads if p.net_id]
     _obstacles = build_base_obstacle_map(pcb_data, _obs_cfg, nets_to_route=_fanned_net_ids,

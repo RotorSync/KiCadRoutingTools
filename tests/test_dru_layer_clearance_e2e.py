@@ -105,5 +105,48 @@ with tempfile.TemporaryDirectory() as d:
     check("plain route grades clean at 0.2 (no-op baseline)", n3 == 0,
           f"{n3} violation(s)")
 
+    # --- 4. PLANE step obeys the rule (taps/joins on the ruled layer) ---
+    plane_out = os.path.join(d, "out_plane.kicad_pcb")
+    rp = subprocess.run(
+        [sys.executable, os.path.join(REPO, "route_planes.py"),
+         os.path.join(d, "in_dru.kicad_pcb"), "--output", plane_out,
+         "--nets", "GND", "--plane-layers", "B.Cu",
+         "--clearance", "0.2", "--track-width", "0.25"],
+        capture_output=True, text=True, timeout=1200)
+    check("route_planes (dru) completed", rp.returncode == 0 and os.path.isfile(plane_out),
+          f"rc={rp.returncode}")
+    check("plane engine announced the rule",
+          "Per-layer clearance rules" in rp.stdout and "B.Cu:0.5" in rp.stdout)
+    n4, _ = drc_violations(plane_out, 0.2)
+    check("plane output grades CLEAN at the rule", n4 == 0, f"{n4} violation(s)")
+
+# --- 5. FANOUT engines read the rules (announcement-level: QFN exact swap,
+#        BGA conservative floor) ---
+import shutil as _sh
+with tempfile.TemporaryDirectory() as d2:
+    fsrc = os.path.join(d2, "fan.kicad_pcb")
+    _sh.copy(os.path.join(REPO, "kicad_files", "fanout_starting_point.kicad_pcb"), fsrc)
+    open(os.path.join(d2, "fan.kicad_dru"), "w").write(
+        '(version 1)\n(rule t (layer "F.Cu") (constraint clearance (min 0.22mm)))\n')
+    rq = subprocess.run(
+        [sys.executable, os.path.join(REPO, "qfn_fanout.py"), fsrc,
+         "--component", "U2", "--width", "0.1", "--clearance", "0.1",
+         "--output", os.path.join(d2, "qfn_out.kicad_pcb")],
+        capture_output=True, text=True, timeout=900)
+    check("QFN swaps to the escape-layer rule",
+          "escape-layer clearance F.Cu 0.1 -> 0.22" in rq.stdout,
+          f"rc={rq.returncode}")
+    from kicad_parser import parse_kicad_pcb
+    from bga_fanout import generate_bga_fanout
+    import io, contextlib
+    pcb = parse_kicad_pcb(fsrc)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        generate_bga_fanout(pcb.footprints["IC1"], pcb, net_filter=["/fpga_adc/lvds_rx1_0*"],
+                            layers=["F.Cu", "In1.Cu"], track_width=0.1,
+                            clearance=0.1, via_size=0.3, via_drill=0.2)
+    check("BGA floors its scalar at the largest rule",
+          "fanout clearance floored 0.1 -> 0.22" in buf.getvalue())
+
 print(f"\n{passed}/{passed + failed} checks passed")
 sys.exit(1 if failed else 0)

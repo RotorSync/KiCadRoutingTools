@@ -82,8 +82,15 @@ Validate routed boards against the *real* spec, with the right checker — most
 - **Per-layer clearance comes from the board's `.kicad_dru` (#498) and OUTRANKS
   `--clearance`.** KiCad stores layer-scoped clearance in custom rules
   (`(rule x (layer inner) (constraint clearance (min 0.15mm)))`); netclasses can't
-  express it. The engines auto-read the sibling `.kicad_dru`
-  (`kicad_dru.install_layer_clearances`) with **replacement** semantics — a rule
+  express it. **Every routing step** auto-reads the sibling `.kicad_dru`
+  (`kicad_dru.install_layer_clearances`; engines without an `input_file`
+  discover it via `PCBData.source_path`): signal, diff pairs, plane
+  create/repair (taps, region joins, reconnects), BGA/QFN fanout (QFN swaps
+  its single escape layer exactly; BGA floors its scalar at the largest rule
+  on its escape layers — conservative, tighten-only), the oracle sub-routes
+  (config clones carry the map), and nested reconciliation sub-runs (the
+  parent forwards its resolved map — the output's dru sibling doesn't exist
+  yet mid-run). **Replacement** semantics — a rule
   value replaces the net/class pair clearance on its layer, tightening or
   relaxing, exactly like KiCad's own precedence (custom rules outrank classes;
   only the fab floor pins them up). There is deliberately **no CLI flag and no

@@ -666,6 +666,10 @@ def route_planes(
         board_edge_clearance=board_edge_clearance,
         ripup_blocker_select=ripup_blocker_select
     )
+    # #498: repair copper (region joins, pad taps, reconnects) must obey the
+    # board's per-layer .kicad_dru clearance rules like every routed copper.
+    from kicad_dru import install_layer_clearances
+    install_layer_clearances(config, None, input_file, None)
 
     # Cross-class clearance (#434): the repair step's own copper (region joins,
     # pad taps) and its ripped-blocker reconnects were priced at the uniform
@@ -2604,6 +2608,8 @@ Examples:
             via_size=args.via_size, via_drill=args.via_drill,
             grid_step=args.grid_step,
             board_edge_clearance=_oracle_edge)
+        from kicad_dru import install_layer_clearances
+        install_layer_clearances(_ocfg, None, args.input_file, None)  # #498
         _orc = oracle_reconnect(args.output_file, net_names, _ocfg,
                                 track_via_clearance=args.track_via_clearance,
                                 hole_to_hole_clearance=args.hole_to_hole_clearance,

@@ -1835,6 +1835,8 @@ def _finalize_plane_copper(all_new_segments, all_new_vias, pcb_data, clearance,
         cfg_sj = GridRouteConfig(track_width=track_width, clearance=clearance,
                                  grid_step=grid_step, via_size=via_size,
                                  via_drill=via_drill, layers=all_layers)
+        from kicad_dru import install_layer_clearances
+        install_layer_clearances(cfg_sj, None, None, pcb_data)  # #498
         nb = close_soft_joints(bridge_results, pcb_data, None, cfg_sj)
         if nb:
             for br in bridge_results:
@@ -2528,6 +2530,10 @@ def create_plane(
         layer_costs=layer_costs,
         ripup_blocker_select=ripup_blocker_select
     )
+    # #498: per-layer .kicad_dru clearance rules -- tap tracks/vias, region
+    # joins and blocker reroutes must obey them like every other routed copper.
+    from kicad_dru import install_layer_clearances
+    install_layer_clearances(config, None, input_file, pcb_data)
     # Cross-class clearance (#434, mirrors batch_route/repair): auto-read the
     # board's non-Default netclasses from the INPUT's sibling .kicad_pro when
     # no map was passed, so tap tracks/vias and blocker reroutes honor KiCad's
@@ -4088,6 +4094,8 @@ Examples:
             # enforces the real drill spacing (issue #125), not the 0.2mm default.
             hole_to_hole_clearance=args.hole_to_hole_clearance
         )
+        from kicad_dru import install_layer_clearances
+        install_layer_clearances(gnd_config, None, None, pcb_data)  # #498
         coord = GridCoord(gnd_config.grid_step)
 
         # Build obstacle map
