@@ -589,6 +589,13 @@ def route_planes(
         print(f"Loading PCB from {input_file}...")
         pcb_data = parse_kicad_pcb(input_file)
 
+    # #513 item 5: snapshot each net's dominant routed width BEFORE any rip
+    # mutates pcb_data, so the end-of-run reconnect of ripped blockers can
+    # re-route them at the width they arrived with (a rip-reconcile must not
+    # silently drop a power net's width). See the reconnect pass below.
+    from routing_common import dominant_net_widths as _dnw513
+    _input_net_widths = _dnw513(pcb_data.segments)
+
     # Canonicalise the starting copper ORDER, before anything reads it.
     # This is the plane-repair twin of the same call in route.batch_route: the
     # GUI adds tracks to a live pcbnew board and the CLI writer emits them from
@@ -1114,13 +1121,35 @@ def route_planes(
                     _edge = effective_board_edge_clearance(input_file, 0.0)
                 except Exception:
                     _edge = 0.0
+                # #513 item 5: re-route each ripped net at the width it ARRIVED
+                # with (snapshotted before any rip), not this invocation's
+                # default -- a repair retry that omitted --power-nets used to
+                # silently drop a 1.5mm power net to the 0.25 default (nascom
+                # VCC). A caller-supplied --power-nets entry for the net wins.
+                _pn = list(power_nets or [])
+                _pw = list(power_nets_widths or [])
+                if len(_pn) == len(_pw):  # only merge when the pair is coherent
+                    from net_queries import matches_net_filter as _mnf513
+                    for _cnid in _casualties:
+                        _cw = _input_net_widths.get(_cnid, 0.0)
+                        _cn = (pcb_data.nets[_cnid].name
+                               if _cnid in pcb_data.nets else None)
+                        if not _cn or _cw <= (track_width or 0.0) + 1e-6:
+                            continue
+                        if _pn and _mnf513(_cn, _pn):
+                            continue  # explicit power width wins
+                        _pn.append(_cn)
+                        _pw.append(_cw)
+                        print(f"  Preserving routed width {_cw}mm for ripped "
+                              f"net {_cn} across the reconnect (this run's "
+                              f"default is {track_width}mm)")
                 _ok, _fail, _t, _rdata = batch_route(
                     input_file, "", _cnames,
                     layers=routing_layers,
                     track_width=track_width, clearance=clearance,
                     via_size=via_size, via_drill=via_drill,
                     grid_step=grid_step, max_iterations=max_iterations,
-                    power_nets=power_nets, power_nets_widths=power_nets_widths,
+                    power_nets=_pn or None, power_nets_widths=_pw or None,
                     board_edge_clearance=_edge,
                     disable_bga_zones=([] if no_bga_zone else None),
                     # #434: forward the map resolved from the ORIGINAL input's

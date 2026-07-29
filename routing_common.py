@@ -150,6 +150,29 @@ def setup_bga_exclusion_zones(
     return existing_zones or []
 
 
+def dominant_net_widths(segments) -> Dict[int, float]:
+    """Per-net DOMINANT track width, weighted by copper length (#513 item 5).
+
+    A net's design width is the width most of its copper runs at -- max() would
+    be skewed by a single wide blob, an unweighted mode by many short neck
+    stubs. Used to preserve a ripped net's routed width across a same-run
+    reconciliation (a rip-reconcile must not silently change a power net's
+    width). Graphic and net-0 segments are ignored."""
+    import math as _math
+    acc: Dict[int, Dict[float, float]] = {}
+    for s in segments:
+        if getattr(s, 'graphic', False) or not s.net_id:
+            continue
+        L = _math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+        if L <= 0:
+            continue
+        acc.setdefault(s.net_id, {})
+        w = round(s.width, 4)
+        acc[s.net_id][w] = acc[s.net_id].get(w, 0.0) + L
+    return {nid: max(wl.items(), key=lambda kv: kv[1])[0]
+            for nid, wl in acc.items() if wl}
+
+
 def resolve_net_ids(pcb_data: PCBData, net_names: List[str]) -> List[Tuple[str, int]]:
     """
     Resolve net names to (name, id) tuples.

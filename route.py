@@ -1017,6 +1017,32 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # nets routed through the vacated corridor) and its reroute (#300
             # follow-up, rp2350_dev GPIO4).
             sweep_scope_ids |= set(existing_rippable)
+            # #513 item 5: a ripped-existing net re-routes at THIS invocation's
+            # width resolution, silently dropping e.g. a 1.5mm power width to
+            # the 0.25 default when the retry omitted --power-nets (nascom VCC;
+            # check_connected doesn't check width, so nothing caught it).
+            # Preserve each rippable net's routed width: inject its
+            # dominant-by-length input width into the per-net width map when it
+            # is wider than what this run would use. An explicit --power-nets
+            # entry for the net still wins (priority 1 in get_net_track_width).
+            from routing_common import dominant_net_widths
+            _in_widths = dominant_net_widths(pcb_data.segments)
+            for _rid in existing_rippable:
+                _w_in = _in_widths.get(_rid, 0.0)
+                if _w_in <= 0:
+                    continue
+                if _rid in (getattr(config, 'power_net_widths', None) or {}):
+                    continue  # explicit override this run wins
+                _w_now = config.get_net_track_width(_rid, config.layers[0])
+                if _w_in > _w_now + 1e-6:
+                    if config.net_track_widths is None:
+                        config.net_track_widths = {}
+                    config.net_track_widths[_rid] = _w_in
+                    _rn = pcb_data.nets[_rid].name if _rid in pcb_data.nets else _rid
+                    print(f"  Preserving routed width {_w_in}mm of rippable "
+                          f"existing net {_rn} (this run would re-route it at "
+                          f"{_w_now}mm; pass --power-nets/--power-nets-widths "
+                          f"to override)")
     if progress_callback:
         progress_callback(0, 0, "Building base obstacle map...")
     print("Building base obstacle map...")
@@ -2188,6 +2214,37 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 print(f"  Reconciliation rip authority (#103): "
                       f"--rip-existing-nets over hinted blockers "
                       f"{', '.join(_hinted)}")
+            # #513 item 5: the reconciliation re-routes each incomplete net at
+            # the forwarded kwargs' width resolution -- which silently dropped
+            # a ripped power net's 1.5mm width to the 0.25 default when this
+            # invocation carried no --power-nets (nascom VCC). Preserve each
+            # reconciled net's ORIGINAL dominant width (from the pre-routing
+            # input snapshot) via the power-width channel; an explicit
+            # --power-nets entry for the net still wins.
+            from routing_common import dominant_net_widths as _dnw5
+            _orig_w5 = _dnw5(_s for _lst in _orig_seg_by_net.values()
+                             for _s in _lst)
+            _pn5 = list(_rk.get('power_nets') or [])
+            _pw5 = list(_rk.get('power_nets_widths') or [])
+            if len(_pn5) == len(_pw5):
+                from net_queries import matches_net_filter as _mnf5
+                _tw5 = _rk.get('track_width') or config.track_width
+                for _nid5 in _rec_ids:
+                    _w5 = _orig_w5.get(_nid5, 0.0)
+                    _nm5 = (pcb_data.nets[_nid5].name
+                            if _nid5 in pcb_data.nets else None)
+                    if not _nm5 or _w5 <= (_tw5 or 0.0) + 1e-6:
+                        continue
+                    if _pn5 and _mnf5(_nm5, _pn5):
+                        continue  # explicit power width wins
+                    _pn5.append(_nm5)
+                    _pw5.append(_w5)
+                    print(f"  Preserving routed width {_w5}mm for reconciled "
+                          f"net {_nm5} (original copper was wider than this "
+                          f"run's {_tw5}mm default)")
+                if _pn5:
+                    _rk['power_nets'] = _pn5
+                    _rk['power_nets_widths'] = _pw5
             if return_results:
                 # GUI-parity reconciliation (gap-closure): re-invoke against
                 # the SAME in-memory board (the copper this run just
