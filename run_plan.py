@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Run a GUI routing plan on a board from the command line, headless (#507).
 
-Takes the plan JSON the Claude tab saves (or that ``make_plan.py`` converts from
+Takes the plan JSON the AI tab saves (or that ``make_plan.py`` converts from
 a recorded run) and executes it against a board through the REAL plugin dialog
-and plan executor -- no window, no clicks, no Claude:
+and plan executor -- no window, no clicks, no AI:
 
     python3 run_plan.py board.kicad_pcb plan.json -o routed.kicad_pcb
 
@@ -61,7 +61,7 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('board', help='input .kicad_pcb (never modified)')
-    ap.add_argument('plan', help='plan JSON (Claude tab Save..., or make_plan.py)')
+    ap.add_argument('plan', help='plan JSON (AI tab Save..., or make_plan.py)')
     ap.add_argument('-o', '--output', default=None,
                     help='output board (default: <board>_routed.kicad_pcb)')
     ap.add_argument('--steps', default=None,

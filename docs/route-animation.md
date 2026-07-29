@@ -75,7 +75,7 @@ writes the movie next to the board as `<board>_routing.mp4` (then `_routing_2`,
 - **Any single routing step** — Route, Route Diff Pairs, Create Planes, Repair
   Planes, Fanout — gets its own movie the moment it completes, animating just
   that step's new copper.
-- **A plan run** from the Claude tab (*Run Selected Steps* / *Run All Selected
+- **A plan run** from the AI tab (*Run Selected Steps* / *Run All Selected
   Steps*) gets **one** movie covering all of its steps together.
 
 The baseline is the board as it stood when you ticked the box (and the end state

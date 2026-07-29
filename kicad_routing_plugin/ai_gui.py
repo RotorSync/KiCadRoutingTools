@@ -7,12 +7,12 @@ Runs an agent CLI headless to drive the project's AI skills from the GUI
 Building blocks:
 - ai_backend.AIBackend: which CLI, its argv, and its stream-event format
   (Claude Code by default; opencode as the configurable alternative)
-- ClaudeSkillRunner: spawn the CLI, stream events to main-thread callbacks
-- ClaudeSkillDialog: modal dialog that runs one skill with a live transcript
+- AISkillRunner: spawn the CLI, stream events to main-thread callbacks
+- AISkillDialog: modal dialog that runs one skill with a live transcript
   and returns the machine-readable RESULT=<value> last line
 - run_skill_dialog(): the one-call helper the other tabs use (CLI-missing
   guard + prompt phrasing + modal run)
-- ClaudeTab: the AI tab in the routing dialog (backend/model/effort
+- AITab: the AI tab in the routing dialog (backend/model/effort
   selection, planning, plan execution, review, diagnosis)
 """
 
@@ -26,18 +26,13 @@ import wx
 
 from .ai_backend import (
     BACKENDS, BACKEND_IDS, DEFAULT_BACKEND_ID, get_backend,
-    extract_result_line, summarize_tool_use, tool_result_text,
-    format_claude_stream_event, CLAUDE_ALLOWED_TOOLS,
+    extract_result_line,
 )
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(PLUGIN_DIR)
 if ROOT_DIR not in sys.path:      # top-level modules
     sys.path.insert(0, ROOT_DIR)
-
-# Back-compat aliases (pre-#503 public names of this module).
-DEFAULT_ALLOWED_TOOLS = CLAUDE_ALLOWED_TOOLS
-format_stream_event = format_claude_stream_event
 
 # "Default" combo entry = don't pass the model/effort flag at all.
 DEFAULT_CHOICE = "Default"
@@ -83,19 +78,7 @@ def board_path_for_analysis(board_filename):
     return os.path.abspath(board_filename)
 
 
-def find_claude():
-    """Back-compat: the path to the claude CLI, or None if not installed."""
-    return BACKENDS["claude"].find_cli()
-
-
-def auth_error_hint(error, backend=None):
-    """Extra guidance when a run failed because the CLI isn't logged in -
-    e.g. Claude Code's own message ("Please run /login") assumes the user
-    knows /login is a command inside the claude terminal app."""
-    return (backend or BACKENDS["claude"]).auth_hint(error)
-
-
-class ClaudeSkillRunner:
+class AISkillRunner:
     """Runs the agent CLI headless on a background thread, streaming progress.
 
     Callbacks are invoked on the wx main thread:
@@ -104,9 +87,9 @@ class ClaudeSkillRunner:
                                     error="Cancelled."
     """
 
-    def __init__(self, claude_path, on_transcript, on_done, backend=None):
+    def __init__(self, cli_path, on_transcript, on_done, backend=None):
         self.backend = backend or BACKENDS[DEFAULT_BACKEND_ID]
-        self.claude_path = claude_path  # the backend's CLI path
+        self.cli_path = cli_path  # the backend's CLI path
         self.on_transcript = on_transcript
         self.on_done = on_done
         self._process = None
@@ -120,7 +103,7 @@ class ClaudeSkillRunner:
     def run(self, prompt, model=None, effort=None):
         if self.is_running():
             raise RuntimeError(f"a {self.backend.label} run is already in progress")
-        cmd = self.backend.build_cmd(self.claude_path, prompt,
+        cmd = self.backend.build_cmd(self.cli_path, prompt,
                                      model=model, effort=effort)
         self._stream_state = self.backend.stream_state()
         self._cancel_requested = False
@@ -190,15 +173,15 @@ class ClaudeSkillRunner:
         self.on_done(result_text, error)
 
 
-class ClaudeSkillDialog(wx.Dialog):
-    """Modal dialog that runs one Claude skill and shows the live transcript.
+class AISkillDialog(wx.Dialog):
+    """Modal dialog that runs one AI skill and shows the live transcript.
 
     After ShowModal() returns, `result_value` holds the parsed RESULT=<value>
     string (None if the run failed, was cancelled, or had no RESULT= line),
-    and `result_text` holds Claude's full final reply.
+    and `result_text` holds the AI's full final reply.
     """
 
-    def __init__(self, parent, title, prompt, claude_path=None,
+    def __init__(self, parent, title, prompt, cli_path=None,
                  intro=None, model=None, effort=None, backend=None):
         super().__init__(parent, title=title, size=(720, 520),
                          style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
@@ -234,8 +217,8 @@ class ClaudeSkillDialog(wx.Dialog):
         self.Bind(wx.EVT_TIMER, self._on_elapsed_tick, self._elapsed_timer)
         self._elapsed_timer.Start(1000)
 
-        self._runner = ClaudeSkillRunner(
-            claude_path or self._backend.find_cli(), self._append, self._on_done,
+        self._runner = AISkillRunner(
+            cli_path or self._backend.find_cli(), self._append, self._on_done,
             backend=self._backend)
         self._runner.run(prompt, model=model, effort=effort)
 
@@ -290,15 +273,15 @@ class ClaudeSkillDialog(wx.Dialog):
 
 
 def run_skill_dialog(parent, title, skill, skill_args, instructions, intro,
-                     claude_params=None):
+                     ai_params=None):
     """Run one skill modally and return its parsed RESULT= value (or None).
 
     The one-call helper for the other tabs' "Ask AI" buttons: resolves the
-    backend selected on the AI tab (claude_params from get_claude_params),
+    backend selected on the AI tab (ai_params from get_ai_params),
     guards the CLI-not-installed case with a message box, phrases the skill
     invocation for that backend, and shows the live-transcript dialog.
     """
-    params = claude_params or {}
+    params = ai_params or {}
     backend = get_backend(params.get('backend') or DEFAULT_BACKEND_ID)
     cli_path = backend.find_cli()
     if cli_path is None:
@@ -306,8 +289,8 @@ def run_skill_dialog(parent, title, skill, skill_args, instructions, intro,
                       wx.OK | wx.ICON_WARNING)
         return None
     prompt = backend.skill_prompt(skill, skill_args, instructions)
-    dlg = ClaudeSkillDialog(
-        parent, title, prompt, claude_path=cli_path, backend=backend,
+    dlg = AISkillDialog(
+        parent, title, prompt, cli_path=cli_path, backend=backend,
         model=params.get('model'), effort=params.get('effort'), intro=intro)
     dlg.ShowModal()
     value = dlg.result_value
@@ -315,7 +298,7 @@ def run_skill_dialog(parent, title, skill, skill_args, instructions, intro,
     return value
 
 
-class ClaudeTab(wx.Panel):
+class AITab(wx.Panel):
     """AI tab: run AI skills headless and bring results into the GUI."""
 
     def __init__(self, parent, board_filename, log_callback=None, routing_dialog=None):
@@ -348,7 +331,7 @@ class ClaudeTab(wx.Panel):
 
     def shutdown(self):
         """Stop background work before the dialog goes away: cancel the
-        claude subprocess, stop the plan executor and the elapsed timer."""
+        agent CLI subprocess, stop the plan executor and the elapsed timer."""
         if self._runner is not None:
             self._runner.cancel()
         if self._plan_executor is not None:
@@ -365,7 +348,7 @@ class ClaudeTab(wx.Panel):
         steps_sizer = wx.StaticBoxSizer(steps_box, wx.VERTICAL)
         self.plan_list = wx.CheckListBox(self, choices=[])
         self.plan_list.SetToolTip(
-            "The routing plan from Claude. Check the steps to run; review or "
+            "The routing plan from the AI. Check the steps to run; review or "
             "tweak each step's parameters on its own tab before running.")
         steps_sizer.Add(self.plan_list, 1, wx.EXPAND | wx.ALL, 3)
         top_sizer.Add(steps_sizer, 1, wx.EXPAND | wx.RIGHT, 8)
@@ -412,14 +395,14 @@ class ClaudeTab(wx.Panel):
         # Planning: the headline action with its Cancel right under it
         self.plan_btn = wx.Button(self, label="Plan Routing")
         self.plan_btn.SetToolTip(
-            "Run the /plan-pcb-routing skill headless on the current board. The "
+            "Run the plan-pcb-routing skill headless on the current board. The "
             "plan fills the tabs' parameter fields and appears in the step list "
             "you can review, edit (in each tab), select, and run.")
         self.plan_btn.Bind(wx.EVT_BUTTON, self._on_plan)
         ctrl_sizer.Add(self.plan_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
         self.cancel_btn = wx.Button(self, label="Cancel")
-        self.cancel_btn.SetToolTip("Cancel the running Claude analysis")
+        self.cancel_btn.SetToolTip("Cancel the running AI analysis")
         self.cancel_btn.Bind(wx.EVT_BUTTON, self._on_cancel)
         self.cancel_btn.Disable()
         ctrl_sizer.Add(self.cancel_btn, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
@@ -459,7 +442,7 @@ class ClaudeTab(wx.Panel):
         # Post-route skills: QA sign-off and failure diagnosis
         self.review_btn = wx.Button(self, label="Review Routed Board")
         self.review_btn.SetToolTip(
-            "Run the /review-routed-board skill: DRC, connectivity, and orphan-stub "
+            "Run the review-routed-board skill: DRC, connectivity, and orphan-stub "
             "checks, match-group and GND-via coverage review. The report shows in "
             "the transcript with a PASS/FAIL verdict.")
         self.review_btn.Bind(wx.EVT_BUTTON, self._on_review)
@@ -467,7 +450,7 @@ class ClaudeTab(wx.Panel):
 
         self.diagnose_btn = wx.Button(self, label="Diagnose Routing Failures")
         self.diagnose_btn.SetToolTip(
-            "Run the /diagnose-routing-failures skill on the board plus this "
+            "Run the diagnose-routing-failures skill on the board plus this "
             "session's Log tab content: root-causes failed routes and recommends "
             "a targeted retry. Run a routing operation first.")
         self.diagnose_btn.Bind(wx.EVT_BUTTON, self._on_diagnose)
@@ -510,13 +493,13 @@ class ClaudeTab(wx.Panel):
                          wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         self.parsed_ctrl = wx.TextCtrl(self, style=wx.TE_READONLY)
         self.parsed_ctrl.SetToolTip(
-            "The machine-readable last line of Claude's reply (RESULT=...), "
+            "The machine-readable last line of the AI's reply (RESULT=...), "
             "demonstrating how skill output will populate GUI fields.")
         parsed_sizer.Add(self.parsed_ctrl, 1, wx.EXPAND)
         self.save_plan_btn = wx.Button(self, label="Save...")
         self.save_plan_btn.SetToolTip(
             "Save the current plan steps to a JSON file (replay later with "
-            "Load - no Claude run needed)")
+            "Load - no AI run needed)")
         self.save_plan_btn.Bind(wx.EVT_BUTTON, self._on_save_plan)
         parsed_sizer.Add(self.save_plan_btn, 0, wx.LEFT, 5)
         self.load_plan_btn = wx.Button(self, label="Load...")
@@ -700,7 +683,7 @@ class ClaudeTab(wx.Panel):
         self._log(f"{backend.label}: {intro.splitlines()[0]}"
                   + (f" | model={model}" if model else "")
                   + (f" | effort={effort}" if effort else ""))
-        self._runner = ClaudeSkillRunner(
+        self._runner = AISkillRunner(
             cli_path, self._append_transcript, self._on_done, backend=backend)
         self._runner.run(prompt, model=model, effort=effort)
 
@@ -757,7 +740,7 @@ class ClaudeTab(wx.Panel):
         board = self._board_path_or_warn()
         if board is None:
             return
-        from .claude_plan import PLAN_RESULT_SCHEMA
+        from .ai_plan import PLAN_RESULT_SCHEMA
         self._start_run(
             "plan-pcb-routing", board,
             "analysis and planning only: do not execute any routing commands "
@@ -816,7 +799,7 @@ class ClaudeTab(wx.Panel):
 
     def _handle_plan_result(self, value):
         """Parse the plan JSON, fill the tabs, and populate the step list."""
-        from .claude_plan import parse_plan_result, step_label, \
+        from .ai_plan import parse_plan_result, step_label, \
             apply_step_params, apply_step_selection
 
         if value is None:
@@ -825,7 +808,7 @@ class ClaudeTab(wx.Panel):
         steps, errors = parse_plan_result(value)
         for message in errors:
             self.output_ctrl.AppendText(f"plan: {message}\n")
-            self._log(f"Claude plan: {message}")
+            self._log(f"AI plan: {message}")
         if steps is None:
             self.output_ctrl.AppendText("\nPlan was unusable - nothing applied.\n")
             return
@@ -835,21 +818,21 @@ class ClaudeTab(wx.Panel):
     def _install_plan_steps(self, steps):
         """Adopt a validated step list (from a fresh plan OR a loaded plan
         file): populate the checklist and pre-fill the tabs."""
-        from .claude_plan import step_label, apply_step_params, \
+        from .ai_plan import step_label, apply_step_params, \
             apply_step_selection
         # A new plan supersedes the session's panel tweaks: reset every
         # routing parameter to defaults BEFORE applying the plan's values,
         # so options the plan does not specify run at CLI-default-
         # equivalent state (the add_gnd_vias leak, generalized). Applies to
-        # both a fresh Claude plan and a Load...-ed file.
+        # both a fresh AI plan and a Load...-ed file.
         try:
             if self.routing_dialog is not None and \
                     hasattr(self.routing_dialog, 'reset_params_to_defaults'):
                 self.routing_dialog.reset_params_to_defaults()
-                self._log("Claude plan: options reset to defaults before "
+                self._log("AI plan: options reset to defaults before "
                           "applying the plan")
         except Exception as e:
-            self._log(f"Claude plan: defaults reset skipped: {e}")
+            self._log(f"AI plan: defaults reset skipped: {e}")
         self._plan_steps = steps
         self.plan_list.Set([step_label(i + 1, s) for i, s in enumerate(steps)])
         self.plan_list.SetCheckedItems(range(len(steps)))
@@ -868,7 +851,7 @@ class ClaudeTab(wx.Panel):
                 notes.append(f"applying {step['action']}: {e}")
         for note in notes:
             self.output_ctrl.AppendText(f"plan: {note}\n")
-            self._log(f"Claude plan: {note}")
+            self._log(f"AI plan: {note}")
         self.output_ctrl.AppendText(
             f"\nPlan loaded: {len(steps)} step(s). Parameters were applied to the "
             "tabs - review/tweak them there, uncheck steps you don't want, then "
@@ -876,7 +859,7 @@ class ClaudeTab(wx.Panel):
             "unattended, without the per-step completion popup).\n")
         self.run_plan_btn.Enable()
         self.run_all_plan_btn.Enable(self.run_plan_btn.IsEnabled())
-        self._log(f"Claude plan: {len(steps)} steps loaded")
+        self._log(f"AI plan: {len(steps)} steps loaded")
 
     def _on_save_plan(self, event):
         if not self._plan_steps:
@@ -893,14 +876,14 @@ class ClaudeTab(wx.Panel):
             import json
             with open(path, "w", encoding="utf-8") as f:
                 json.dump({"steps": self._plan_steps}, f, indent=2)
-            self._log(f"Claude plan: saved {len(self._plan_steps)} step(s) to {path}")
+            self._log(f"AI plan: saved {len(self._plan_steps)} step(s) to {path}")
             self.output_ctrl.AppendText(f"\nPlan saved to {path}\n")
         except Exception as e:
             wx.MessageBox(f"Could not save plan:\n{e}", "AI",
                           wx.OK | wx.ICON_ERROR)
 
     def _on_load_plan(self, event):
-        from .claude_plan import parse_plan_result
+        from .ai_plan import parse_plan_result
         with wx.FileDialog(self, "Load plan (.json - other files are shown greyed by macOS)", wildcard="*.json",
                            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
             if dlg.ShowModal() != wx.ID_OK:
@@ -921,7 +904,7 @@ class ClaudeTab(wx.Panel):
                           "for details).", "AI", wx.OK | wx.ICON_ERROR)
             return
         self.parsed_ctrl.SetValue(f"Loaded from {path}")
-        self._log(f"Claude plan: loaded {len(steps)} step(s) from {path}")
+        self._log(f"AI plan: loaded {len(steps)} step(s) from {path}")
         self._install_plan_steps(steps)
 
     def _on_run_all_selected(self, event):
@@ -929,7 +912,7 @@ class ClaudeTab(wx.Panel):
         self._on_run_selected(event, quiet=True)
 
     def _on_run_selected(self, event, quiet=False):
-        from .claude_plan import PlanExecutor
+        from .ai_plan import PlanExecutor
 
         if self._plan_executor is not None or not self._plan_steps:
             return
@@ -961,7 +944,7 @@ class ClaudeTab(wx.Panel):
         if self._plan_executor is not None:
             self._plan_executor.stop()
             self.stop_plan_btn.Disable()
-            self._log("Claude plan: stop requested (cancelling current step)")
+            self._log("AI plan: stop requested (cancelling current step)")
 
     def _on_plan_step_progress(self, index, step, label, value, rng,
                                elapsed, is_busy):
@@ -987,7 +970,7 @@ class ClaudeTab(wx.Panel):
     def _on_plan_step_status(self, index, status):
         if not self:
             return
-        from .claude_plan import step_label
+        from .ai_plan import step_label
         mark = {"running": "> ", "done": "[ok] ", "failed": "[FAIL] ",
                 "stopped": "[stopped] "}[status]
         self.plan_list.SetString(index, mark + step_label(index + 1, self._plan_steps[index]))
@@ -1025,9 +1008,9 @@ class ClaudeTab(wx.Panel):
         self.run_all_plan_btn.Enable(self.run_plan_btn.IsEnabled())
         self.plan_btn.Enable()
         if aborted_reason:
-            message = f"Claude plan: stopped after {completed} step(s): {aborted_reason}"
+            message = f"AI plan: stopped after {completed} step(s): {aborted_reason}"
         else:
-            message = f"Claude plan: all {completed} selected step(s) completed"
+            message = f"AI plan: all {completed} selected step(s) completed"
         self.output_ctrl.AppendText(f"\n{message}\n")
         self._log(message)
 
@@ -1055,7 +1038,7 @@ class ClaudeTab(wx.Panel):
     def _log(self, message):
         if self.log_callback:
             # Plan progress lines arrived without terminators and ran
-            # together in the Log tab ('step 4 finishedClaude plan: ...').
+            # together in the Log tab ('step 4 finishedAI plan: ...').
             if not message.endswith(chr(10)):
                 message += chr(10)
             self.log_callback(message)

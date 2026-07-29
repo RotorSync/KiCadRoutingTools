@@ -207,7 +207,7 @@ step). Post-fix: every plane call MATCHes, GUI board 0 DRC / plane-copper delta
 
 The harness above proves the ENGINE half (same batch_route kwargs -> same
 board) but hand-mirrors the plan->params mapping, so it can't catch a bug in
-`manifest_to_plan` (converter) or `claude_plan.apply_step_params` (apply).
+`manifest_to_plan` (converter) or `ai_plan.apply_step_params` (apply).
 Those two translation layers are where the set11 rp2350_fpga_eensy GUI replay
 silently diverged from its CLI board (242 DRC violations vs 0; issue #361).
 
@@ -223,7 +223,7 @@ a converter that drops a flag fails even though it agrees with itself).
 Current: 0 mismatches over ~6200 flag-checks / 157 corpus manifests. Catches
 all three converter-side gaps from the set11 regression (--no-bga-zones drop,
 diff pairs emitted as net names, layerless repair_planes). The apply-side
-gaps (escape_method value->index, no_gnd_vias inversion) are claude_plan.py's
+gaps (escape_method value->index, no_gnd_vias inversion) are ai_plan.py's
 job and belong to the wx harness / a future stub-dialog apply test.
 
 ## Class-2 post-pass coverage (test_cli_postpass_coverage.py)
@@ -276,7 +276,7 @@ skip cleanly without KiCad python). Run any directly:
   create_plane to capture the kwarg).
 - `test_movie_recorder.py` -- the Advanced tab's **Make routing movie** debug
   checkbox (#506): default OFF and inert while off; one routing step renders
-  ONE movie; a plan run (`begin_group`/`end_group`, what the Claude tab's Run
+  ONE movie; a plan run (`begin_group`/`end_group`, what the AI tab's Run
   Selected Steps brackets) renders ONE movie for ALL its steps; the path is
   logged in GREEN; and `reset_params_to_defaults` must NOT untick it (the plan
   executor calls that before every step, so a reset there would abandon the
@@ -293,7 +293,7 @@ skip cleanly without KiCad python). Run any directly:
 Every stress board leaves a GUI-loadable plan beside its chain (`run_board.sh`
 → `manifest_to_plan.py` → `<board>_plan.json`; `make_plan.py` builds the same
 file from any recorded manifest). This driver does what a user does with it —
-open the unrouted board, Claude tab → **Load...** → **Run All Selected Steps** —
+open the unrouted board, AI tab → **Load...** → **Run All Selected Steps** —
 with no buttons and no LLM, then diffs the result against the CLI chain.
 
 The headless driving itself lives in the repo-root **`headless_plan.py`**, which
@@ -309,7 +309,7 @@ Unlike `test_gui_engine_parity.py`, **nothing is mirrored**. The real
 `swig_gui.RoutingDialog` is constructed headless (`parent=None`, never shown —
 wx needs `WXSUPPRESS_SIZER_FLAGS_CHECK=1`, which the script sets, because
 `about_tab`'s `wxEXPAND|wxALIGN_*` sizer flags trip a debug assert) with its
-real tabs and controls, and the real `claude_plan.PlanExecutor` drives it inside
+real tabs and controls, and the real `ai_plan.PlanExecutor` drives it inside
 a `wx.MainLoop`. So the whole `parse_plan_result` → `reset_params_to_defaults` →
 `apply_step_params` → `apply_step_selection` → `tab._on_*()` path is under test,
 including the two translation layers the engine harness cannot see (the
@@ -369,7 +369,7 @@ surface as a failing DRC or connectivity number. All five are now fixed.
    fix. Now a pattern naming no path also matches the trailing component
    (`net_pattern_matches`), shared by the CLI, engine and GUI matchers.
 2. **The GUI's fanout ignored "!" exclusions outright** —
-   `claude_plan._component_net_names` tested `any(glob matches)` over the whole
+   `ai_plan._component_net_names` tested `any(glob matches)` over the whole
    list, so `'*'` always won. It only looked right where `_drop_plane_nets`
    happened to remove the same nets.
 3. **The GUI routed against a slightly different clearance.** `swig_gui` read

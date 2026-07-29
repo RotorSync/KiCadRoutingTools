@@ -1,12 +1,12 @@
 """
-KiCad Routing Tools - Claude routing-plan integration (issue #40)
+KiCad Routing Tools - AI routing-plan integration (issue #40)
 
 Turns /plan-pcb-routing output into GUI state and executes it:
 - parse_plan_result(): validate the machine-readable JSON plan
 - apply_step_params() / apply_step_selection(): fill tab controls so the
   user reviews each step in the tab they already know
 - PlanExecutor: run checked steps sequentially through the tabs' own
-  in-process machinery (Claude only plans; the GUI routes the live board)
+  in-process machinery (the AI only plans; the GUI routes the live board)
 """
 
 import json
@@ -978,7 +978,7 @@ class PlanExecutor:
 
     def _status_source(self, action):
         """The (status_text, progress_bar) pair of the tab actually doing
-        the work, so the Claude tab's status bar can MIRROR it live -- a
+        the work, so the AI tab's status bar can MIRROR it live -- a
         route_diff step shows exactly what the differential tab shows."""
         owner = self._action_owner(action)
         if owner is None:
@@ -989,7 +989,7 @@ class PlanExecutor:
     def _action_parts(self, action):
         """(invoke callable, busy predicate) for an action. The handlers run
         fine without their tab being the visible page, so execution stays on
-        the Claude tab."""
+        the AI tab."""
         d = self.dialog
         return {
             "route": (lambda: d._on_route(None),
@@ -1046,11 +1046,11 @@ class PlanExecutor:
                     continue
                 t.join(timeout)
                 if t.is_alive():
-                    self.log(f"Claude plan: worker thread on "
+                    self.log(f"AI plan: worker thread on "
                              f"{type(owner).__name__} still alive after "
                              f"{timeout}s; continuing without it")
             except Exception as e:
-                self.log(f"Claude plan: worker-thread join skipped ({e})")
+                self.log(f"AI plan: worker-thread join skipped ({e})")
 
     def _finish(self, aborted_reason):
         self._current_action = None
@@ -1077,10 +1077,10 @@ class PlanExecutor:
                 apply_step_params(self.steps[nxt], self.dialog)
                 apply_step_selection(self.steps[nxt], self.dialog,
                                      all_steps=self.steps)
-                self.log(f"Claude plan: GUI prepped for step {nxt + 1} "
+                self.log(f"AI plan: GUI prepped for step {nxt + 1} "
                          f"({self.steps[nxt]['action']})")
             except Exception as e:
-                self.log(f"Claude plan: end-of-run prep skipped: {e}")
+                self.log(f"AI plan: end-of-run prep skipped: {e}")
         self.on_finished(self._completed, aborted_reason)
 
     def _write_drc_floors(self):
@@ -1162,11 +1162,11 @@ class PlanExecutor:
                                     _set(_m2i(_mm))
                     except Exception:
                         pass
-                    self.log(f"Claude plan: live DRC settings updated "
+                    self.log(f"AI plan: live DRC settings updated "
                              f"(min clearance {eff:.4g}mm, clamped to "
                              f"board minima)")
             except Exception as e:
-                self.log(f"Claude plan: live DRC settings skipped: {e}")
+                self.log(f"AI plan: live DRC settings skipped: {e}")
             # Best-effort persistence for a later close/reopen; note KiCad
             # may overwrite this if it saves its in-memory project state.
             if board_file and os.path.isfile(board_file):
@@ -1197,11 +1197,11 @@ class PlanExecutor:
                     diff_pair_gap=floors.get('diff_pair_gap'),
                     clamp_nondefault_netclasses=_clamp,
                     minima=_minima)
-                self.log(f"Claude plan: recorded DRC floors in the project "
+                self.log(f"AI plan: recorded DRC floors in the project "
                          f"file (clearance {eff:.4g}; live session already "
                          f"updated via the API)")
         except Exception as e:
-            self.log(f"Claude plan: DRC floor write skipped: {e}")
+            self.log(f"AI plan: DRC floor write skipped: {e}")
 
     def _next_step(self):
         if self._stop_requested:
@@ -1214,7 +1214,7 @@ class PlanExecutor:
         step = self.steps[index]
         self._current_action = step['action']
         self.on_status(index, "running")
-        self.log(f"Claude plan: step {index + 1} ({step['action']}) starting")
+        self.log(f"AI plan: step {index + 1} ({step['action']}) starting")
         try:
             # Reset every routing PARAMETER to its default BEFORE applying this
             # step's params, so a SHARED control an earlier step set doesn't leak
@@ -1238,7 +1238,7 @@ class PlanExecutor:
                 try:
                     self.dialog.reset_params_to_defaults()
                 except Exception as _e:
-                    self.log(f"Claude plan: per-step reset skipped: {_e}")
+                    self.log(f"AI plan: per-step reset skipped: {_e}")
             # Re-apply BOTH this step's parameters and its selection right before
             # running it: consecutive steps of the same action share one tab's
             # controls, so plan-time fill leaves only the last such step's
@@ -1248,14 +1248,14 @@ class PlanExecutor:
             notes = apply_step_params(step, self.dialog)
             notes += apply_step_selection(step, self.dialog, all_steps=self.steps)
             for note in notes:
-                self.log(f"Claude plan: {note}")
+                self.log(f"AI plan: {note}")
             invoke, busy = self._action_parts(step["action"])
             import time as _time
             self._step_started = _time.time()
             invoke()
         except Exception as e:
             self.on_status(index, "failed")
-            self.log(f"Claude plan: step {index + 1} failed: {e}")
+            self.log(f"AI plan: step {index + 1} failed: {e}")
             self._finish(f"step {index + 1} raised: {e}")
             return
         self._poll_until_idle(index, busy, polls=0, seen_busy=False)
@@ -1269,7 +1269,7 @@ class PlanExecutor:
             return
         if self.on_progress is not None:
             # Mirror the working tab's own status bar (label + gauge) into
-            # the Claude tab, with per-step elapsed time.
+            # the AI tab, with per-step elapsed time.
             try:
                 import time as _time
                 st, pb = self._status_source(self.steps[index]["action"])
@@ -1299,10 +1299,10 @@ class PlanExecutor:
                 # re-run), never "[ok]". A non-cancellable tab (fanout) ran
                 # its step to completion, so it falls through to "done".
                 self.on_status(index, "stopped")
-                self.log(f"Claude plan: step {index + 1} stopped (cancelled)")
+                self.log(f"AI plan: step {index + 1} stopped (cancelled)")
                 self._next_step()
                 return
         self._completed += 1
         self.on_status(index, "done")
-        self.log(f"Claude plan: step {index + 1} finished")
+        self.log(f"AI plan: step {index + 1} finished")
         self._next_step()

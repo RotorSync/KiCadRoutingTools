@@ -11,7 +11,7 @@ Two scopes, which is the whole point of the design:
 * **One routing step** (Route / Route Diff Pairs / Create Planes / Repair Planes
   / Fanout pressed on its own tab) -> that step gets its OWN movie, rendered as
   soon as it completes: baseline board -> the board it produced.
-* **A plan run** (the Claude tab's *Run Selected Steps* / *Run All Selected
+* **A plan run** (the AI tab's *Run Selected Steps* / *Run All Selected
   Steps*) -> ONE movie for all of the steps combined. ``begin_group()`` /
   ``end_group()`` bracket the run, so the per-step renders are held back and a
   single movie spans the whole plan.

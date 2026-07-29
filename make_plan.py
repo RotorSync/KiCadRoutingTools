@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Make a GUI routing plan (plan.json) from a recorded command chain (#507).
 
-A plan JSON is what the GUI's Claude tab loads (Load... next to "Parsed result")
+A plan JSON is what the GUI's AI tab loads (Load... next to "Parsed result")
 and what ``run_plan.py`` executes headless. Every stress run writes one; this
 makes the same file on demand from any recorded manifest:
 
@@ -132,7 +132,7 @@ def main():
             print("  " + describe(step, i))
     rel = os.path.relpath(out)
     shown = out if rel.startswith('..') else rel
-    print("Load it in the GUI (Claude tab -> Load... -> Run Selected Steps), "
+    print("Load it in the GUI (AI tab -> Load... -> Run Selected Steps), "
           "or run it headless:")
     print(f"  python3 run_plan.py <board>.kicad_pcb {shown} -o routed.kicad_pcb")
     return 0

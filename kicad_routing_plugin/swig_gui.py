@@ -62,13 +62,13 @@ def _split_net_list(text):
     identify_power_nets raises "patterns (6) and widths (5) must have same
     length". In the GUI that exception killed the routing worker thread after
     the engine had printed its header; the tab re-enabled its button, so the
-    Claude-tab plan executor recorded the step as FINISHED and moved on. eth_tap
+    AI-tab plan executor recorded the step as FINISHED and moved on. eth_tap
     step 11 silently routed nothing at all -- 2270 segments of signal routing
     lost with no error shown (#493 follow-up).
 
     shlex.split accepts the plain space-separated form unchanged and additionally
     understands quotes, so a name with spaces survives when written by
-    claude_plan (which now quotes) or typed by a user.
+    ai_plan (which now quotes) or typed by a user.
     """
     import shlex
     text = (text or '').strip()
@@ -367,9 +367,9 @@ class RoutingDialog(wx.Dialog):
         self.planes_tab = self._create_planes_tab()
         self.notebook.AddPage(self.planes_tab, "Planes")
 
-        # Tab 6: Claude (AI skills, issue #40)
-        self.claude_tab = self._create_claude_tab()
-        self.notebook.AddPage(self.claude_tab, "Claude")
+        # Tab 6: AI (AI skills, issue #40)
+        self.ai_tab = self._create_ai_tab()
+        self.notebook.AddPage(self.ai_tab, "AI")
 
         # Tab 7: Log
         log_panel = self._create_log_tab()
@@ -984,9 +984,9 @@ class RoutingDialog(wx.Dialog):
         layer_scroll.SetSizer(layer_inner)
         layer_box_sizer.Add(layer_scroll, 1, wx.EXPAND)
 
-        self.check_stackup_btn = wx.Button(panel, label="Check Stackup (Claude)")
+        self.check_stackup_btn = wx.Button(panel, label="Check Stackup (AI)")
         self.check_stackup_btn.SetToolTip(
-            "Run the /recommend-stackup skill: reviews the board's physical stackup, "
+            "Run the recommend-stackup skill: reviews the board's physical stackup, "
             "flags untouched KiCad defaults (which skew impedance calculations), and "
             "recommends a fab-realistic stackup. Analysis only - shows a report.")
         self.check_stackup_btn.Bind(wx.EVT_BUTTON, self._on_check_stackup)
@@ -995,7 +995,7 @@ class RoutingDialog(wx.Dialog):
 
     def _on_check_stackup(self, event):
         """Run recommend-stackup headless and show the report (issue #40)."""
-        from .claude_gui import run_skill_dialog, board_path_for_analysis
+        from .ai_gui import run_skill_dialog, board_path_for_analysis
 
         board = board_path_for_analysis(self.board_filename)
         if board is None:
@@ -1008,7 +1008,7 @@ class RoutingDialog(wx.Dialog):
             "layer count you recommend> (a bare integer), e.g. RESULT=4",
             intro=f"Running recommend-stackup on {os.path.basename(board)} ...\n"
                   "(local analysis; typically a minute or two)",
-            claude_params=self._ai_params())
+            ai_params=self._ai_params())
         if value is not None:
             board_layers = len(self.pcb_data.board_info.copper_layers)
             note = ""
@@ -1168,13 +1168,13 @@ class RoutingDialog(wx.Dialog):
         self.power_nets_ctrl = wx.TextCtrl(options_scroll)
         self.power_nets_ctrl.SetToolTip("Glob patterns for power nets (e.g., *GND* *VCC*)")
         power_sizer.Add(self.power_nets_ctrl, 1, wx.EXPAND | wx.RIGHT, 5)
-        self.ask_claude_power_btn = wx.Button(options_scroll, label="Ask Claude", style=wx.BU_EXACTFIT)
-        self.ask_claude_power_btn.SetToolTip(
-            "Run the /analyze-power-nets skill: looks up component datasheets to "
+        self.ask_ai_power_btn = wx.Button(options_scroll, label="Ask AI", style=wx.BU_EXACTFIT)
+        self.ask_ai_power_btn.SetToolTip(
+            "Run the analyze-power-nets skill: looks up component datasheets to "
             "identify power nets and recommend per-net track widths, then fills "
             "the Power Nets and Power Widths fields. Takes a few minutes (web lookups).")
-        self.ask_claude_power_btn.Bind(wx.EVT_BUTTON, self._on_ask_claude_power_nets)
-        power_sizer.Add(self.ask_claude_power_btn, 0)
+        self.ask_ai_power_btn.Bind(wx.EVT_BUTTON, self._on_ask_ai_power_nets)
+        power_sizer.Add(self.ask_ai_power_btn, 0)
         options_inner.Add(power_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
         # Coplanar nets (#486): which nets the Coplanar Gap applies to.
@@ -1258,10 +1258,10 @@ class RoutingDialog(wx.Dialog):
         options_box_sizer.Add(options_scroll, 1, wx.EXPAND)
         return options_box_sizer
 
-    def _on_ask_claude_power_nets(self, event):
+    def _on_ask_ai_power_nets(self, event):
         """Run analyze-power-nets headless and fill the Power Nets and
         Power Widths fields from its recommendation (issue #34)."""
-        from .claude_gui import run_skill_dialog, board_path_for_analysis
+        from .ai_gui import run_skill_dialog, board_path_for_analysis
 
         board = board_path_for_analysis(self.board_filename)
         if board is None:
@@ -1276,21 +1276,21 @@ class RoutingDialog(wx.Dialog):
             'e.g. RESULT=--power-nets "*GND*" "*VCC*" --power-nets-widths 0.5 0.4',
             intro=f"Running analyze-power-nets on {os.path.basename(board)} ...\n"
                   "(datasheet lookups; typically a few minutes)",
-            claude_params=self._ai_params())
+            ai_params=self._ai_params())
         if value is not None:
             self._apply_power_nets_recommendation(value)
 
     def _apply_power_nets_recommendation(self, value):
-        """Validate Claude's RESULT value and fill the power-net fields."""
+        """Validate the AI's RESULT value and fill the power-net fields."""
         parsed = self._parse_power_nets_result(value)
         if parsed is None:
-            self._append_log(f"Claude: unusable power-nets recommendation {value!r}\n")
+            self._append_log(f"AI: unusable power-nets recommendation {value!r}\n")
             return
         patterns, widths = parsed
         self.power_nets_ctrl.SetValue(" ".join(patterns))
         self.power_widths_ctrl.SetValue(" ".join(f"{w:g}" for w in widths))
         self._append_log(
-            "Claude recommended power nets: "
+            "AI recommended power nets: "
             + ", ".join(f"{p} -> {w:g}mm" for p, w in zip(patterns, widths)) + "\n")
 
     @staticmethod
@@ -1520,7 +1520,7 @@ class RoutingDialog(wx.Dialog):
         self.make_movie_check.SetToolTip(
             "Record the routing and write a movie next to the board "
             "(<board>_routing.mp4, or .gif without imageio-ffmpeg). Each routing "
-            "step gets its own movie; a plan run from the Claude tab (Run "
+            "step gets its own movie; a plan run from the AI tab (Run "
             "Selected Steps / Run All Selected Steps) gets ONE movie covering "
             "all of its steps. New copper flashes white, rips flash red. The "
             "path is printed in green in the Log tab. Same movie as the command "
@@ -1709,7 +1709,7 @@ class RoutingDialog(wx.Dialog):
 
         # Deferred: the AI tab is created after the Planes tab, but this
         # is only called on button click.
-        get_claude_params = self._ai_params
+        get_ai_params = self._ai_params
 
         return PlanesTab(
             self.notebook,
@@ -1720,14 +1720,14 @@ class RoutingDialog(wx.Dialog):
             get_connectivity_check=self._get_connectivity_check_fn,
             append_log=self._append_log,
             sync_pcb_data_callback=self._sync_pcb_data_from_board,
-            get_claude_params=get_claude_params
+            get_ai_params=get_ai_params
         )
 
-    def _create_claude_tab(self):
+    def _create_ai_tab(self):
         """Create the AI tab for running AI skills headless (issue #40)."""
-        from .claude_gui import ClaudeTab
+        from .ai_gui import AITab
 
-        return ClaudeTab(
+        return AITab(
             self.notebook,
             self.board_filename,
             log_callback=self._append_log,
@@ -1736,11 +1736,11 @@ class RoutingDialog(wx.Dialog):
 
     def _ai_params(self):
         """The AI tab's backend/model/effort selection, for the other tabs'
-        'Ask AI' buttons (passed to claude_gui.run_skill_dialog)."""
+        'Ask AI' buttons (passed to ai_gui.run_skill_dialog)."""
         return {
-            'backend': self.claude_tab.get_backend_value(),
-            'model': self.claude_tab.get_model_value(),
-            'effort': self.claude_tab.get_effort_value(),
+            'backend': self.ai_tab.get_backend_value(),
+            'model': self.ai_tab.get_model_value(),
+            'effort': self.ai_tab.get_effort_value(),
         }
 
     def _create_differential_tab(self):
@@ -1796,7 +1796,7 @@ class RoutingDialog(wx.Dialog):
             sync_pcb_data_callback=sync_pcb_data,
             # Deferred: the AI tab is created after this tab, but the
             # callback only fires on button click.
-            get_claude_params=self._ai_params
+            get_ai_params=self._ai_params
         )
         # Wire the Differential tab's "Hide short routes" to the Basic net list:
         # short (deferred) pairs stay visible there under "Hide differential" so
@@ -2449,9 +2449,9 @@ class RoutingDialog(wx.Dialog):
         self.planes_tab.net_panel.filter_ctrl.SetValue("")
 
         # Reset AI tab backend/model/effort to defaults
-        self.claude_tab.set_backend_value(None)
-        self.claude_tab.set_model_value(None)
-        self.claude_tab.set_effort_value(None)
+        self.ai_tab.set_backend_value(None)
+        self.ai_tab.set_model_value(None)
+        self.ai_tab.set_effort_value(None)
 
         # Reset component dropdowns to "All"
         if self.net_panel.component_dropdown:
@@ -2562,7 +2562,7 @@ class RoutingDialog(wx.Dialog):
         SELECTED layers (what batch_route/generate_bga_fanout expect).
 
         The control's documented order is the board's full copper stack (its
-        defaults are generated per copper layer, and Claude plans emit costs
+        defaults are generated per copper layer, and AI plans emit costs
         "in board layer order") -- but the engines want one value per selected
         layer. With a subset of layers checked on a >N-layer board, the raw
         list crashed the fanout ("--layer-costs needs one value per layer").
@@ -2795,7 +2795,7 @@ class RoutingDialog(wx.Dialog):
         Returns True if the user accepted and was navigated to the Planes tab
         (so the caller should abort routing); False otherwise.
         """
-        # During an automated Claude plan run the plan sequences its own
+        # During an automated AI plan run the plan sequences its own
         # route_planes steps - don't interrupt or abort the route step.
         if getattr(self, '_suppress_plane_offer', False):
             return False

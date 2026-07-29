@@ -11,7 +11,7 @@ GUI-only half is what can silently rot, so this drives the REAL
   2. ticking it arms a baseline, and ONE routing step then renders ONE movie
      covering that step (the four tabs all report through
      `movie_recorder.record_movie_step`);
-  3. a plan run (`begin_group` ... `end_group`, what the Claude tab's Run
+  3. a plan run (`begin_group` ... `end_group`, what the AI tab's Run
      Selected Steps buttons bracket) renders ONE movie for ALL its steps,
      not one per step;
   4. the finished path is logged in GREEN (ANSI 92, which the Log tab renders);
@@ -165,10 +165,10 @@ def main():
 
     print("3. a plan run -> ONE movie for all its steps")
     log_lines.clear()
-    # The Claude tab is what brackets a real plan run (Run Selected Steps ->
+    # The AI tab is what brackets a real plan run (Run Selected Steps ->
     # begin_group, plan finished -> end_group); assert it resolves THIS recorder.
-    check("the Claude tab reaches the dialog's recorder",
-          dialog.claude_tab._movie_recorder() is recorder)
+    check("the AI tab reaches the dialog's recorder",
+          dialog.ai_tab._movie_recorder() is recorder)
     recorder.begin_group()
     record_movie_step(dialog, 'fanout')
     record_movie_step(dialog, 'route_diff')

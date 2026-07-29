@@ -10,7 +10,7 @@ on a real board without pressing buttons:
                exactly like a stress replay.
   GUI leg   -- GUI_PLAN below, run through the REAL headless
                swig_gui.RoutingDialog driven by the REAL
-               claude_plan.PlanExecutor (via replay_plan_vs_run.replay), on ONE
+               ai_plan.PlanExecutor (via replay_plan_vs_run.replay), on ONE
                live board carried in memory across steps -- the same
                parse_plan_result -> reset_params_to_defaults ->
                apply_step_params -> tab._on_*() path the buttons run.

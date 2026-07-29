@@ -64,7 +64,7 @@ class PlaneAssignmentPanel(wx.Panel):
     Each assignment maps a group of nets (joined with "|") to one or more target layers.
     """
 
-    def __init__(self, parent, pcb_data, get_selected_nets_callback, on_ask_claude=None):
+    def __init__(self, parent, pcb_data, get_selected_nets_callback, on_ask_ai=None):
         """
         Create a plane assignment panel.
 
@@ -72,13 +72,13 @@ class PlaneAssignmentPanel(wx.Panel):
             parent: Parent window
             pcb_data: PCBData object with board info
             get_selected_nets_callback: Function that returns currently selected nets
-            on_ask_claude: Callback for the "Ask Claude" button that recommends
+            on_ask_ai: Callback for the "Ask AI" button that recommends
                 net -> layer mappings (issue #53); button hidden if None.
         """
         super().__init__(parent)
         self.pcb_data = pcb_data
         self.get_selected_nets = get_selected_nets_callback
-        self.on_ask_claude = on_ask_claude
+        self.on_ask_ai = on_ask_ai
         self.assignments = []  # List of (nets_list, layers_list) tuples
 
         self._create_ui()
@@ -125,13 +125,13 @@ class PlaneAssignmentPanel(wx.Panel):
         self.remove_btn.Bind(wx.EVT_BUTTON, self._on_remove)
         btn_sizer.Add(self.remove_btn, 0)
 
-        if self.on_ask_claude is not None:
-            self.ask_claude_btn = wx.Button(self, label="Ask Claude", style=wx.BU_EXACTFIT)
+        if self.on_ask_ai is not None:
+            self.ask_claude_btn = wx.Button(self, label="Ask AI", style=wx.BU_EXACTFIT)
             self.ask_claude_btn.SetToolTip(
-                "Run the /recommend-plane-mappings skill: recommends which nets "
+                "Run the recommend-plane-mappings skill: recommends which nets "
                 "deserve planes and on which layers (GND adjacency, GND/VCC pairing), "
                 "then fills this assignment list. Takes a few minutes.")
-            self.ask_claude_btn.Bind(wx.EVT_BUTTON, lambda event: self.on_ask_claude())
+            self.ask_claude_btn.Bind(wx.EVT_BUTTON, lambda event: self.on_ask_ai())
             btn_sizer.Add(self.ask_claude_btn, 0, wx.LEFT, 5)
 
         sizer.Add(btn_sizer, 0, wx.EXPAND)
@@ -224,15 +224,15 @@ class PlaneAssignmentPanel(wx.Panel):
 class CreatePlanesOptionsPanel(wx.Panel):
     """Options panel for creating copper planes (route_planes.py)."""
 
-    def __init__(self, parent, on_ask_claude=None):
+    def __init__(self, parent, on_ask_ai=None):
         """Create the options panel.
 
         Args:
-            on_ask_claude: Callback for the "Ask Claude" button next to the
+            on_ask_ai: Callback for the "Ask AI" button next to the
                 GND via distance field (issue #39); button hidden if None.
         """
         super().__init__(parent)
-        self.on_ask_claude = on_ask_claude
+        self.on_ask_ai = on_ask_ai
         self._create_ui()
 
     def _create_ui(self):
@@ -344,15 +344,15 @@ class CreatePlanesOptionsPanel(wx.Panel):
                                                    initial=defaults.GND_VIA_DISTANCE, inc=r['inc'])
         self.gnd_via_distance.SetDigits(r['digits'])
         self.gnd_via_distance.SetToolTip("Maximum distance from signal via to place GND via")
-        if self.on_ask_claude is not None:
+        if self.on_ask_ai is not None:
             dist_sizer = wx.BoxSizer(wx.HORIZONTAL)
             dist_sizer.Add(self.gnd_via_distance, 1, wx.EXPAND | wx.RIGHT, 5)
-            self.ask_claude_btn = wx.Button(self, label="Ask Claude", style=wx.BU_EXACTFIT)
+            self.ask_claude_btn = wx.Button(self, label="Ask AI", style=wx.BU_EXACTFIT)
             self.ask_claude_btn.SetToolTip(
-                "Run the /find-high-speed-nets skill: looks up component datasheets to "
+                "Run the find-high-speed-nets skill: looks up component datasheets to "
                 "classify nets by speed and recommends this distance for GND return "
                 "vias. Takes a few minutes (web lookups).")
-            self.ask_claude_btn.Bind(wx.EVT_BUTTON, lambda event: self.on_ask_claude())
+            self.ask_claude_btn.Bind(wx.EVT_BUTTON, lambda event: self.on_ask_ai())
             dist_sizer.Add(self.ask_claude_btn, 0)
             gnd_grid.Add(dist_sizer, 0, wx.EXPAND)
         else:
@@ -524,7 +524,7 @@ class PlanesTab(wx.Panel):
     def __init__(self, parent, pcb_data, board_filename,
                  get_shared_params=None, on_planes_complete=None,
                  get_connectivity_check=None, append_log=None,
-                 sync_pcb_data_callback=None, get_claude_params=None):
+                 sync_pcb_data_callback=None, get_ai_params=None):
         """
         Create the planes tab.
 
@@ -537,14 +537,14 @@ class PlanesTab(wx.Panel):
             get_connectivity_check: Callback that returns connectivity check function
             append_log: Callback to append text to log
             sync_pcb_data_callback: Callback to sync pcb_data from board
-            get_claude_params: Callback returning the Claude tab's
+            get_ai_params: Callback returning the AI tab's
                 {'model', 'effort'} selections for headless runs
         """
         super().__init__(parent)
         self.pcb_data = pcb_data
         self.board_filename = board_filename
         self.get_shared_params = get_shared_params
-        self.get_claude_params = get_claude_params
+        self.get_ai_params = get_ai_params
         self.on_planes_complete = on_planes_complete
         self.get_connectivity_check = get_connectivity_check
         self.append_log = append_log
@@ -601,7 +601,7 @@ class PlanesTab(wx.Panel):
         self.assignment_panel = PlaneAssignmentPanel(
             self, self.pcb_data,
             get_selected_nets_callback=lambda: self.net_panel.get_selected_nets(),
-            on_ask_claude=self._on_ask_claude_plane_mappings
+            on_ask_ai=self._on_ask_ai_plane_mappings
         )
         self.assign_sizer.Add(self.assignment_panel, 1, wx.EXPAND | wx.ALL, 5)
 
@@ -616,7 +616,7 @@ class PlanesTab(wx.Panel):
 
         # Create options panel
         self.create_options = CreatePlanesOptionsPanel(
-            self.options_scroll, on_ask_claude=self._on_ask_claude_gnd_via)
+            self.options_scroll, on_ask_ai=self._on_ask_ai_gnd_via)
         options_scroll_sizer.Add(self.create_options, 0, wx.EXPAND | wx.BOTTOM, 5)
 
         # Repair options panel (initially hidden)
@@ -681,10 +681,10 @@ class PlanesTab(wx.Panel):
         self.options_scroll.FitInside()
         self.Layout()
 
-    def _on_ask_claude_gnd_via(self):
+    def _on_ask_ai_gnd_via(self):
         """Run find-high-speed-nets headless and fill the GND via distance
         field from its recommendation (issue #39)."""
-        from .claude_gui import run_skill_dialog, board_path_for_analysis
+        from .ai_gui import run_skill_dialog, board_path_for_analysis
 
         board = board_path_for_analysis(self.board_filename)
         if board is None:
@@ -699,14 +699,14 @@ class PlanesTab(wx.Panel):
             intro=f"Running find-high-speed-nets on {os.path.basename(board)} ...\n"
                   "(datasheet lookups; typically a few minutes)",
             # Obey the backend/model/effort selected on the AI tab
-            claude_params=self.get_claude_params() if self.get_claude_params else None)
+            ai_params=self.get_ai_params() if self.get_ai_params else None)
         if value is not None:
             self._apply_gnd_via_recommendation(value)
 
-    def _on_ask_claude_plane_mappings(self):
+    def _on_ask_ai_plane_mappings(self):
         """Run recommend-plane-mappings headless and fill the assignment
         list from its recommendation (issue #53)."""
-        from .claude_gui import run_skill_dialog, board_path_for_analysis
+        from .ai_gui import run_skill_dialog, board_path_for_analysis
 
         board = board_path_for_analysis(self.board_filename)
         if board is None:
@@ -721,28 +721,28 @@ class PlanesTab(wx.Panel):
             "net names, one copper layer per group), e.g. RESULT=GND:In1.Cu;VCC:In2.Cu",
             intro=f"Running recommend-plane-mappings on {os.path.basename(board)} ...\n"
                   "(board analysis; typically a few minutes)",
-            claude_params=self.get_claude_params() if self.get_claude_params else None)
+            ai_params=self.get_ai_params() if self.get_ai_params else None)
         if value is not None:
             self._apply_plane_mappings_recommendation(value)
 
     def _apply_plane_mappings_recommendation(self, value):
-        """Validate Claude's RESULT value and fill the assignment list."""
+        """Validate the AI's RESULT value and fill the assignment list."""
         net_names = {net.name for net in self.pcb_data.nets.values() if net.name}
         copper = self.assignment_panel._get_copper_layers()
         assignments, notes = parse_plane_mappings_result(value, copper, net_names)
         for note in notes:
             if self.append_log:
-                self.append_log(f"Claude: {note}\n")
+                self.append_log(f"AI: {note}\n")
         if not assignments:
             if self.append_log:
-                self.append_log(f"Claude: no usable plane mappings in {value!r}\n")
+                self.append_log(f"AI: no usable plane mappings in {value!r}\n")
             return
 
         existing = self.assignment_panel.get_assignments()
         if existing:
             choice = wx.MessageBox(
                 "The assignment list already has entries.\n\n"
-                "Yes = replace them with Claude's recommendation\n"
+                "Yes = replace them with the AI's recommendation\n"
                 "No = merge (keep existing, add new ones)",
                 "Plane mappings", wx.YES_NO | wx.CANCEL | wx.ICON_QUESTION)
             if choice == wx.CANCEL:
@@ -756,15 +756,15 @@ class PlanesTab(wx.Panel):
         if self.append_log:
             shown = ", ".join(f"{'|'.join(nets)} -> {'/'.join(layers)}"
                               for nets, layers in assignments)
-            self.append_log(f"Claude recommended plane mappings: {shown}\n")
+            self.append_log(f"AI recommended plane mappings: {shown}\n")
 
     def _apply_gnd_via_recommendation(self, value):
-        """Validate Claude's RESULT value and apply it to the GUI controls."""
+        """Validate the AI's RESULT value and apply it to the GUI controls."""
         try:
             distance = float(value)
         except ValueError:
             if self.append_log:
-                self.append_log(f"Claude: unusable GND via distance {value!r}\n")
+                self.append_log(f"AI: unusable GND via distance {value!r}\n")
             return
         r = defaults.PARAM_RANGES['gnd_via_distance']
         clamped = max(r['min'], min(r['max'], distance))
@@ -772,7 +772,7 @@ class PlanesTab(wx.Panel):
         self.create_options.add_gnd_vias_check.SetValue(True)
         if self.append_log:
             note = "" if clamped == distance else f" (clamped from {distance})"
-            self.append_log(f"Claude recommended GND via distance: {clamped} mm{note}; "
+            self.append_log(f"AI recommended GND via distance: {clamped} mm{note}; "
                             "enabled 'Add GND vias near signal vias'\n")
 
     def _on_cancel_or_close(self, event):
@@ -884,7 +884,7 @@ class PlanesTab(wx.Panel):
         """Engine progress hook (issue #364): marshals engine-thread milestone
         updates onto the UI thread so the status bar / gauge track the plane
         create/repair phases instead of freezing on "Creating planes...".
-        The plan executor mirrors status_text/progress_bar into the Claude
+        The plan executor mirrors status_text/progress_bar into the AI
         tab via _status_source, so it lights up there too."""
         import time as _time
 

@@ -229,12 +229,12 @@ def get_dialog_settings(dialog):
         # entries are stored per backend so switching backends doesn't lose
         # e.g. an opencode provider/model string; 'claude_model'/'claude_effort'
         # keep their pre-#503 meaning (the Claude Code backend's entries).
-        'ai_backend': dialog.claude_tab.get_backend_value(),
-        'claude_model': dialog.claude_tab.get_model_value_for('claude'),
-        'claude_effort': dialog.claude_tab.get_effort_value_for('claude'),
-        'opencode_model': dialog.claude_tab.get_model_value_for('opencode'),
-        'opencode_effort': dialog.claude_tab.get_effort_value_for('opencode'),
-        'claude_plan': dialog.claude_tab.get_plan_state(),
+        'ai_backend': dialog.ai_tab.get_backend_value(),
+        'claude_model': dialog.ai_tab.get_model_value_for('claude'),
+        'claude_effort': dialog.ai_tab.get_effort_value_for('claude'),
+        'opencode_model': dialog.ai_tab.get_model_value_for('opencode'),
+        'opencode_effort': dialog.ai_tab.get_effort_value_for('opencode'),
+        'ai_plan': dialog.ai_tab.get_plan_state(),
 
         # Log content
         'log_content': dialog.log_text.GetValue(),
@@ -687,17 +687,20 @@ def restore_dialog_settings(dialog, settings):
     # refresh loads the right entries into the combos; an unknown saved
     # backend id reverts to the default (Claude Code).
     if 'claude_model' in settings:
-        dialog.claude_tab.set_model_value(settings['claude_model'], backend_id='claude')
+        dialog.ai_tab.set_model_value(settings['claude_model'], backend_id='claude')
     if 'claude_effort' in settings:
-        dialog.claude_tab.set_effort_value(settings['claude_effort'], backend_id='claude')
+        dialog.ai_tab.set_effort_value(settings['claude_effort'], backend_id='claude')
     if 'opencode_model' in settings:
-        dialog.claude_tab.set_model_value(settings['opencode_model'], backend_id='opencode')
+        dialog.ai_tab.set_model_value(settings['opencode_model'], backend_id='opencode')
     if 'opencode_effort' in settings:
-        dialog.claude_tab.set_effort_value(settings['opencode_effort'], backend_id='opencode')
+        dialog.ai_tab.set_effort_value(settings['opencode_effort'], backend_id='opencode')
     if 'ai_backend' in settings:
-        dialog.claude_tab.set_backend_value(settings['ai_backend'])
-    if 'claude_plan' in settings:
-        dialog.claude_tab.restore_plan_state(settings['claude_plan'])
+        dialog.ai_tab.set_backend_value(settings['ai_backend'])
+    # 'claude_plan' is the pre-rename key for the same plan state (settings
+    # files saved by older versions) - honor it when 'ai_plan' is absent.
+    plan_state = settings.get('ai_plan', settings.get('claude_plan'))
+    if plan_state is not None:
+        dialog.ai_tab.restore_plan_state(plan_state)
 
     # Restore net selections LAST - after all filters/checkboxes are set
     # This prevents the selections from being cleared by filter change events

@@ -20,7 +20,7 @@ test_gui_engine_parity report a phantom 73-segment plane-tap "divergence" on
 splitflap that does not exist in the real GUI (the shim never ran
 _effective_track_width(), so it passed defaults.TRACK_WIDTH 0.3 where the real
 dialog resolves the board's 0.127). Now it runs the REAL headless
-swig_gui.RoutingDialog driven by the REAL claude_plan.PlanExecutor, via
+swig_gui.RoutingDialog driven by the REAL ai_plan.PlanExecutor, via
 replay_plan_vs_run.replay() -- the same machinery the corpus driver uses, which
 only needs {'input_board': path}, so it works on a checked-in board.
 

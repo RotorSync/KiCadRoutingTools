@@ -6,18 +6,18 @@ Every stress board leaves a GUI-loadable plan next to its chain
 (`run_board.sh` -> `manifest_to_plan.py` -> `<board>_plan.json`). This driver
 does, with no buttons and no LLM, exactly what a user does with it:
 
-    open the UNROUTED input board -> Claude tab -> Load... -> Run All Selected
+    open the UNROUTED input board -> AI tab -> Load... -> Run All Selected
 
 and then grades the result against the CLI chain the corpus run recorded.
 
 WHAT MAKES THIS DIFFERENT FROM test_gui_engine_parity.py: that harness
 hand-mirrors the plan->params mapping onto shimmed dialog objects, so it proves
 the ENGINE half only (same batch_route kwargs -> same board) and is blind to
-bugs in `manifest_to_plan` (converter) or `claude_plan.apply_step_params`
+bugs in `manifest_to_plan` (converter) or `ai_plan.apply_step_params`
 (apply) -- the two layers that silently diverged in the set11 rp2350 replay
 (#361). Here the REAL `swig_gui.RoutingDialog` is constructed headless (parent
 None, no Show()) with its REAL tabs and controls, and the REAL
-`claude_plan.PlanExecutor` drives it inside a wx MainLoop -- the same
+`ai_plan.PlanExecutor` drives it inside a wx MainLoop -- the same
 parse_plan_result -> reset_params_to_defaults -> apply_step_params ->
 apply_step_selection -> tab._on_*() path the buttons run. Nothing is mirrored,
 so a converter/apply bug shows up as a board difference.
@@ -316,7 +316,7 @@ def load_plan(info, source='saved', augment=True):
     if not augment:
         return raw, cli_names, notes
 
-    from kicad_routing_plugin.claude_plan import parse_plan_result
+    from kicad_routing_plugin.ai_plan import parse_plan_result
     steps, errors = parse_plan_result(json.dumps({'steps': raw}))
     if steps is None:
         raise RuntimeError(f"plan rejected by parse_plan_result: {errors}")
@@ -459,7 +459,7 @@ def replay(info, steps, workdir, timeout=7200, verbose=False, snapshots=True):
     log_path = os.path.join(workdir, 'replay.log')
     tee = _Tee(log_path, enabled=not verbose)
 
-    from kicad_routing_plugin.claude_plan import step_label
+    from kicad_routing_plugin.ai_plan import step_label
 
     def on_status(index, status):
         if status == 'running':

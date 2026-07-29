@@ -29,7 +29,7 @@ The `pcb-analysis` agent (defined in the repo's `opencode.json`) denies file edi
 ## Plugin GUI Integration
 
 <p align="center">
-  <img src="claude_tab.png" alt="Claude tab: planned steps, controls, and live transcript" width="700">
+  <img src="claude_tab.png" alt="AI tab: planned steps, controls, and live transcript" width="700">
 </p>
 
 All eight skills are reachable from the plugin's routing dialog (the GUI spawns
@@ -40,14 +40,14 @@ controls):
 
 | Where | Button | Skill | What it fills / shows |
 |-------|--------|-------|------------------------|
-| Claude tab | **Plan Routing** | `/plan-pcb-routing` | Fills parameters across the tabs and loads a checkable step list; **Run Selected Steps** executes them in-process |
-| Claude tab | **Review Routed Board** | `/review-routed-board` | QA report in the transcript with a PASS/FAIL verdict |
-| Claude tab | **Diagnose Routing Failures** | `/diagnose-routing-failures` | Root-cause report from the board + the Log tab content |
+| AI tab | **Plan Routing** | `/plan-pcb-routing` | Fills parameters across the tabs and loads a checkable step list; **Run Selected Steps** executes them in-process |
+| AI tab | **Review Routed Board** | `/review-routed-board` | QA report in the transcript with a PASS/FAIL verdict |
+| AI tab | **Diagnose Routing Failures** | `/diagnose-routing-failures` | Root-cause report from the board + the Log tab content |
 | Basic tab (Layers) | **Check Stackup (Claude)** | `/recommend-stackup` | Stackup report; recommended layer count logged |
-| Basic tab (Options) | **Ask Claude** (Power Nets) | `/analyze-power-nets` | Fills the Power Nets / Power Widths fields |
-| Differential tab | **Ask Claude** | `/identify-diff-pairs` | Checks confirmed pairs, unchecks name-matching false positives; unconventional pairs reported in the log |
-| Planes tab | **Ask Claude** (assignments) | `/recommend-plane-mappings` | Fills the net → layer assignment list (replace/merge prompt) |
-| Planes tab | **Ask Claude** (GND vias) | `/find-high-speed-nets` | Fills the GND via Max Distance field |
+| Basic tab (Options) | **Ask AI** (Power Nets) | `/analyze-power-nets` | Fills the Power Nets / Power Widths fields |
+| Differential tab | **Ask AI** | `/identify-diff-pairs` | Checks confirmed pairs, unchecks name-matching false positives; unconventional pairs reported in the log |
+| Planes tab | **Ask AI** (assignments) | `/recommend-plane-mappings` | Fills the net → layer assignment list (replace/merge prompt) |
+| Planes tab | **Ask AI** (GND vias) | `/find-high-speed-nets` | Fills the GND via Max Distance field |
 
 The AI tab's **Backend**, **Model**, and **Effort** selectors apply to every button
 above and persist with the other dialog settings (model/effort are remembered per
@@ -61,7 +61,7 @@ next to the board, with the path logged in green. A routing step run on its own 
 gets its own movie the same way. See
 [Board rendering & routing animation](route-animation.md).
 
-**Saving and replaying a plan.** Next to the step list the Claude tab has **Save…**
+**Saving and replaying a plan.** Next to the step list the AI tab has **Save…**
 and **Load…** buttons. **Save…** writes the current plan steps (actions, nets/pairs/
 assignments, and per-step parameters) to a JSON file; **Load…** reads one back into the
 step list so **Run Selected Steps** replays the exact same routing chain **without another
@@ -91,7 +91,7 @@ python3 make_plan.py .                              # -> plan JSON for the GUI
 The conversion prunes superseded retries and dead-end branches (the same file
 dependency chain a replay runs), drops check/grade commands, and carries every
 recognized `--flag` into the step's parameters — so the GUI routes the way the
-recorded commands did. Load the result with the Claude tab's **Load…** button.
+recorded commands did. Load the result with the AI tab's **Load…** button.
 
 ### Running a plan headless
 

@@ -23,7 +23,7 @@ create_plane / repair route_planes) when BOTH env vars are set:
 
 2. GUI capture -- launch pcbnew FROM A TERMINAL with the env vars (so the in-process
    plugin inherits them; launching from the Dock does NOT), open the unrouted board,
-   and run the plan from the Claude tab:
+   and run the plan from the AI tab:
        KICAD_DUMP_BATCH_KWARGS=/tmp/gui.jsonl KICAD_DUMP_BATCH_KWARGS_CONTINUE=1 \
          "/Applications/KiCad/KiCad.app/Contents/Applications/pcbnew.app/Contents/MacOS/pcbnew" board.kicad_pcb
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Convert a stress-test redo_commands.sh manifest into a GUI plan JSON.
 
-The Claude tab's Load button accepts the output, so a recorded stress chain
+The AI tab's Load button accepts the output, so a recorded stress chain
 can be replayed through the GUI plan executor without any LLM run:
 
     python3 tests/stress/manifest_to_plan.py runs_set1/<board>/redo_commands.sh plan.json
@@ -74,7 +74,7 @@ LIST_FLAGS = {
     '--layer-costs': 'layer_costs',
     # #381 D3: route_diff's polarity-swap allowlist (nargs='+' globs). Carried
     # explicitly (not via the generic unknown-flag fallthrough) so a scoped
-    # allowlist survives as a list param that claude_plan's alias routes to the
+    # allowlist survives as a list param that ai_plan's alias routes to the
     # diff tab's polarity_swap_nets_text field.
     '--polarity-swap-nets': 'polarity_swap_nets',
     # #486: route.py's coplanar-waveguide net allowlist (nargs='+' globs).
@@ -266,7 +266,7 @@ def parse_command(argv):
 
 
 # place_fanout_clearance.py has no standalone CLI-tool action, but in the GUI it
-# IS a plan step in its own right: the live Claude-plan format (claude_plan.py's
+# IS a plan step in its own right: the live Claude-plan format (ai_plan.py's
 # KNOWN_ACTIONS + _insert_cap_optimization) represents "Optimize decoupling cap
 # placement" (#130) as a SEPARATE `optimize_caps` step placed right after the last
 # BGA fanout, run via fanout_tab.run_cap_optimization() -- NOT as a param on the
@@ -288,7 +288,7 @@ CAP_BOOL_FLAGS = {'--no-rotate': ('cap_allow_rotation', False)}  # inverted sens
 
 def cap_optimization_step(argv):
     """A place_fanout_clearance.py invocation -> a standalone `optimize_caps` plan
-    step (matching claude_plan.py's live format), carrying the non-default cap_*
+    step (matching ai_plan.py's live format), carrying the non-default cap_*
     knobs so a loaded plan optimizes caps the way the recorded run did."""
     params = {}
     i = 0
@@ -401,7 +401,7 @@ def main():
         json.dump({'steps': steps}, f, indent=2)
     print(f"{len(steps)} step(s) written to {out} "
           f"({skipped} kept-but-non-GUI command(s) skipped)")
-    print("Load it in the Claude tab (Load... next to 'Parsed result') and "
+    print("Load it in the AI tab (Load... next to 'Parsed result') and "
           "press 'Run Selected Steps'.")
     return 0
 

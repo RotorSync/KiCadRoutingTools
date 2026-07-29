@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..',
                                 'kicad_routing_plugin'))
 
-from claude_plan import parse_plan_result  # noqa: E402
+from ai_plan import parse_plan_result  # noqa: E402
 
 ASSIGN = [{'nets': ['GND'], 'layer': 'In1.Cu'}]
 

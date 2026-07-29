@@ -147,7 +147,7 @@ picked up by both for free. The gaps appear at the edges:
   options panel, and `settings_persistence.py`). A new `batch_route`
   kwarg that only `route.py` passes silently does nothing in the GUI.
   It must also stay **Claude-settable end to end**: (1) the GUI plan
-  executor (`claude_plan.py`) applies any snake_case param whose name
+  executor (`ai_plan.py`) applies any snake_case param whose name
   matches a dialog control — so name the control after the param and add
   it to `reset_params_to_defaults` (the plan executor resets through
   that, or the param leaks between steps); (2) add the `--flag` →

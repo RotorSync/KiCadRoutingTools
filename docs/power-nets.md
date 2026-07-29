@@ -65,7 +65,7 @@ Use the `/analyze-power-nets` Claude Code skill for AI-powered datasheet lookup 
 ### How to Invoke
 
 ```
-# Ask Claude to analyze your board
+# Ask the AI to analyze your board
 Analyze the power nets in kicad_files/my_board.kicad_pcb and recommend track widths
 
 # Or invoke the skill directly

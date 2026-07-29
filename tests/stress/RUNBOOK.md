@@ -290,7 +290,7 @@ harmless.
      the final verify healed it in ~5s. Fill-aware, so on an intact plane it
      is a fast near-no-op (it may add one small strap where the conservative
      model over-splits -- harmless same-net copper). The GUI plan executor
-     appends this step automatically (claude_plan._append_final_plane_verify);
+     appends this step automatically (ai_plan._append_final_plane_verify);
      recorded CLI chains must include it explicitly.
    - TRACK WIDTH: the net-class `track_width` is a MINIMUM (keep it for the signal
      baseline); real boards widen power/high-current nets to many distinct widths

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Run a GUI routing plan with no GUI: the REAL plugin dialog, headless (#507).
 
-A plan JSON (what the Claude tab's Save.../Load... buttons write and read, and
+A plan JSON (what the AI tab's Save.../Load... buttons write and read, and
 what ``make_plan.py`` converts a recorded manifest into) describes a routing
 chain as steps. This module executes one exactly the way a person would --
 
-    open the board -> Claude tab -> Load... -> Run All Selected Steps
+    open the board -> AI tab -> Load... -> Run All Selected Steps
 
 -- but with no window and no clicks: ``swig_gui.RoutingDialog`` is constructed
-with parent None and never shown, and the real ``claude_plan.PlanExecutor``
+with parent None and never shown, and the real ``ai_plan.PlanExecutor``
 drives its tabs inside a wx MainLoop. Nothing is re-implemented or mirrored, so
 what runs here is what the buttons run.
 
@@ -73,16 +73,16 @@ def reexec_into_kicad(script=None, argv=None):
 
 
 def load_plan(path):
-    """(steps, messages) from a plan JSON file -- the same parse the Claude
+    """(steps, messages) from a plan JSON file -- the same parse the AI
     tab's Load... button uses, so a file that loads there loads here."""
-    from kicad_routing_plugin.claude_plan import parse_plan_result
+    from kicad_routing_plugin.ai_plan import parse_plan_result
     with open(path, encoding='utf-8') as f:
         text = f.read()
     return parse_plan_result(text)
 
 
 def step_labels(steps):
-    from kicad_routing_plugin.claude_plan import step_label
+    from kicad_routing_plugin.ai_plan import step_label
     return [step_label(i + 1, s) for i, s in enumerate(steps)]
 
 
@@ -145,7 +145,7 @@ def run_plan(board_path, steps, indices=None, snapshot_dir=None,
 
     from kicad_parser import build_pcb_data_from_board
     from kicad_routing_plugin import swig_gui
-    from kicad_routing_plugin.claude_plan import PlanExecutor, step_label
+    from kicad_routing_plugin.ai_plan import PlanExecutor, step_label
 
     pcb_data = build_pcb_data_from_board(board)
     dialog = swig_gui.RoutingDialog(None, pcb_data, board_path)

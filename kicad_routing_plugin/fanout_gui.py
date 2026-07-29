@@ -1020,7 +1020,7 @@ class QFNOptionsPanel(wx.ScrolledWindow):
         # QFN-tuned 0.1/0.1 (qfn_fanout.py --width/--clearance) instead of
         # inheriting the Basic-tab 0.3/0.25. Fine-pitch QFN/QFP fanouts fail at
         # 0.3 where they succeed at 0.1. Own controls so QFN doesn't inherit the
-        # BGA/route width and a plan can still set them (claude_plan routes a QFN
+        # BGA/route width and a plan can still set them (ai_plan routes a QFN
         # fanout step's width/clearance here).
         rw = defaults.PARAM_RANGES['track_width']
         grid.Add(wx.StaticText(self, label="Track width (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
@@ -1783,7 +1783,7 @@ class FanoutTab(wx.Panel):
     def run_cap_optimization(self, log=None):
         """Standalone decoupling-cap optimization on the live board (#130).
 
-        Entry point for the Claude-plan executor's "optimize_caps" step (and
+        Entry point for the AI-plan executor's "optimize_caps" step (and
         any caller that wants the repair without running a fanout). Reads the
         clearance/grid/via from the Basic tab and the advanced cap knobs from
         the BGA options panel, runs the shared engine, and applies the moves.

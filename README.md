@@ -15,7 +15,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiC
 
 - [Features](#features)
 - [Quick Start](#quick-start)
-- [KiCad Plugin](#kicad-plugin) — GUI, the AI **Claude tab**, installation
+- [KiCad Plugin](#kicad-plugin) — GUI, the AI **AI tab**, installation
 - [Command-Line Interface](#command-line-interface) — routing, planes, verification
 - [Documentation](#documentation) — full guide for every feature
 - [Project Structure](#project-structure) & [Module Overview](#module-overview)
@@ -62,7 +62,7 @@ Fast, grid-based A\* routing with a native Rust core (~10× faster than pure Pyt
 
 **Interfaces**
 - Full [KiCad plugin GUI](#kicad-plugin) (KiCad 9 & 10) and a scriptable [CLI](#command-line-interface)
-- [AI assistance](docs/claude-skills.md) — a **Claude tab** that plans an entire routing workflow, per-field "Ask Claude" helpers, and datasheet-driven power / high-speed / diff-pair analysis
+- [AI assistance](docs/claude-skills.md) — a **AI tab** that plans an entire routing workflow, per-field "Ask AI" helpers, and datasheet-driven power / high-speed / diff-pair analysis
 - Optional [real-time PyGame visualizer](pygame_visualizer/README.md) (`route.py --visualize`)
 - [Board rendering & routing animation](docs/route-animation.md) — fast geometry PNG renderer, plus a movie of the router laying/ripping/restoring copper (`make_movie.py`, or the Advanced tab's **Make routing movie** debug checkbox → `.mp4`/`.gif`)
 - [Routing plans as files](docs/claude-skills.md#plans-from-the-command-line) — save/load a whole routing chain as JSON: build one from a recorded command chain (`make_plan.py`), run it headless through the real plugin (`run_plan.py`), or load it in the GUI
@@ -156,7 +156,7 @@ Other useful skills:
 
 See [Claude Skills](docs/claude-skills.md) for what each skill does and how they fit together.
 
-All of these are also available inside KiCad without leaving the plugin - see [AI assistance in the plugin](#ai-assistance-claude-tab) below. The plugin can run the same skills through [opencode](https://opencode.ai) instead of Claude Code (issue #503) - a Backend dropdown on the AI tab selects the agent CLI, and opencode's `provider/model` strings open the door to other model providers. The skills' output contracts are tuned on Claude models; smaller models may follow them less reliably.
+All of these are also available inside KiCad without leaving the plugin - see [AI assistance in the plugin](#ai-assistance-ai-tab) below. The plugin can run the same skills through [opencode](https://opencode.ai) instead of Claude Code (issue #503) - a Backend dropdown on the AI tab selects the agent CLI, and opencode's `provider/model` strings open the door to other model providers. The skills' output contracts are tuned on Claude models; smaller models may follow them less reliably.
 
 **Option C: Manual Command Line (For scripting and automation)**
 
@@ -188,17 +188,17 @@ The plugin provides a full graphical interface for all routing features, running
   <img src="kicad_routing_plugin/gui.png" alt="KiCad Plugin GUI" width="600">
 </p>
 
-### AI assistance (Claude tab)
+### AI assistance (AI tab)
 
 <p align="center">
-  <img src="docs/claude_tab.png" alt="Claude tab: planned steps, controls, and live transcript" width="700">
+  <img src="docs/claude_tab.png" alt="AI tab: planned steps, controls, and live transcript" width="700">
 </p>
 
 With [Claude Code](https://claude.ai/claude-code) or [opencode](https://opencode.ai) installed, the routing dialog gains AI assistance throughout (the plugin spawns the selected agent CLI headless, streams a live transcript, and fills GUI controls from the results). The **Backend** dropdown on the AI tab picks the CLI: Claude Code runs Anthropic models; opencode takes `provider/model` strings for many providers (including its built-in free tier), with `opencode auth login` adding provider accounts. Both discover the same `.claude/skills/`; opencode runs them under a read-only `pcb-analysis` agent defined in `opencode.json` (the equivalent of the Claude run's read-only tool allowlist):
 
-- **Claude tab** - *Plan Routing* runs `/plan-pcb-routing`: the plan fills the parameter fields across the tabs and appears as a checkable step list, which *Run Selected Steps* executes sequentially in-process on the live board with per-step status marks. *Review Routed Board* and *Diagnose Routing Failures* give post-route QA and failure root-causing. Backend, model, and effort selectors control every AI run and persist with the dialog settings (model/effort remembered per backend).
+- **AI tab** - *Plan Routing* runs `/plan-pcb-routing`: the plan fills the parameter fields across the tabs and appears as a checkable step list, which *Run Selected Steps* executes sequentially in-process on the live board with per-step status marks. *Review Routed Board* and *Diagnose Routing Failures* give post-route QA and failure root-causing. Backend, model, and effort selectors control every AI run and persist with the dialog settings (model/effort remembered per backend).
 - **Save / Load a plan** - *Save…* writes the generated step list to a JSON file; *Load…* reads one back and runs it with **no Claude call** — handy for replaying a workflow that worked on another board. A recorded stress-test chain converts to a loadable plan too (`tests/stress/manifest_to_plan.py <board>/redo_commands.sh plan.json`).
-- **Per-field "Ask Claude" buttons** - power nets/widths (Basic tab), stackup check (Layers), differential-pair verification by pin function (Differential tab), net-to-plane layer mappings and GND return via distance (Planes tab).
+- **Per-field "Ask AI" buttons** - power nets/widths (Basic tab), stackup check (Layers), differential-pair verification by pin function (Differential tab), net-to-plane layer mappings and GND return via distance (Planes tab).
 
 The full button-to-skill map is in [Claude Skills - Plugin GUI Integration](docs/claude-skills.md#plugin-gui-integration). Datasheet-based skills use web lookups and take a few minutes; every run shows a live transcript with cancel.
 
@@ -489,7 +489,7 @@ See [Utilities](docs/utilities.md) for every checker and its options.
 Use the `/analyze-power-nets` skill to identify power nets and get track width recommendations:
 
 ```
-# Ask Claude to analyze your board with datasheet lookup
+# Ask the AI to analyze your board with datasheet lookup
 /analyze-power-nets kicad_files/my_board.kicad_pcb
 ```
 
@@ -507,7 +507,7 @@ See [Power Net Analysis](docs/power-nets.md) for detailed documentation.
 Use the `/find-high-speed-nets` skill to identify high-speed nets and get GND return via recommendations:
 
 ```
-# Ask Claude to analyze signal speeds with datasheet lookup
+# Ask the AI to analyze signal speeds with datasheet lookup
 /find-high-speed-nets kicad_files/my_board.kicad_pcb
 ```
 
@@ -664,8 +664,8 @@ KiCadRoutingTools/
 │   ├── differential_gui.py   # Differential pair routing tab
 │   ├── fanout_gui.py         # BGA/QFN fanout tab and net selection panel
 │   ├── planes_gui.py         # Power/ground planes tab
-│   ├── claude_gui.py         # Claude tab (spawns claude headless, streams transcript)
-│   ├── claude_plan.py        # Claude tab routing-plan orchestration
+│   ├── ai_gui.py         # AI tab (spawns claude headless, streams transcript)
+│   ├── ai_plan.py        # AI tab routing-plan orchestration
 │   ├── board_swaps.py        # Shared board pad/net swap helpers
 │   ├── deps_check.py         # Plugin dependency checks
 │   ├── about_tab.py          # About tab with version info

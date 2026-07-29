@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression: the Claude-plan executor must set rip_blocker_nets on the CORRECT
+"""Regression: the AI-plan executor must set rip_blocker_nets on the CORRECT
 plane options panel per action.
 
 `rip_blocker_check` exists on BOTH the Create and Repair plane options panels.
@@ -70,7 +70,7 @@ def main():
     sys.path.insert(0, os.path.join(REPO, 'kicad_routing_plugin'))
     from kicad_routing_plugin.planes_gui import (CreatePlanesOptionsPanel,
                                                  RepairPlanesOptionsPanel)
-    from kicad_routing_plugin import claude_plan
+    from kicad_routing_plugin import ai_plan
 
     app = wx.App(False)
     frame = wx.Frame(None)
@@ -94,7 +94,7 @@ def main():
         return co, ro, d
 
     co, ro, d = mk()
-    claude_plan.apply_step_params(
+    ai_plan.apply_step_params(
         {'action': 'repair_planes',
          'params': {'rip_blocker_nets': True, 'via_size': 0.25,
                     'via_drill': 0.15, 'grid_step': 0.05}}, d)
@@ -104,7 +104,7 @@ def main():
         "repair_planes wrongly set the Create panel's rip_blocker_check"
 
     co, ro, d = mk()
-    claude_plan.apply_step_params(
+    ai_plan.apply_step_params(
         {'action': 'route_planes',
          'params': {'rip_blocker_nets': True, 'add_gnd_vias': False}}, d)
     assert co.rip_blocker_check.GetValue() is True, \
