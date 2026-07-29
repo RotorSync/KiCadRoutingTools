@@ -199,6 +199,29 @@ through there too.
   whole time. CHECK with the line above; only record it as not-run if that
   actually fails.
 
+  **macOS: if a wx gate hangs at ~0 CPU, it is NOT wx, load, or a deadlock — it
+  is a modal alert you cannot see.** After a wx process is killed (a `pkill`, a
+  timeout, a crash), macOS decides the app "quit unexpectedly" and the NEXT
+  headless launch stops inside `NSApplication` bootstrap showing the
+  *restore-windows* alert: `-[NSPersistentUIRestorer
+  promptToIgnorePersistentState]` → `-[NSAlert runModal]`. Headless, nobody can
+  click it, so it waits forever — the process sits in state `SN` accruing ~0.3 s
+  of CPU over many minutes, which reads exactly like a hang. Diagnose it with:
+
+  ```bash
+  sample <pid> 3 -mayDie | grep -E "NSAlert|PersistentUI"
+  ```
+
+  The fix is a one-time user default (a sandboxed `HOME` does **not** work —
+  `cfprefsd` serves the pref per-user regardless of `HOME`):
+
+  ```bash
+  defaults write -g ApplePersistenceIgnoreState -bool YES
+  ```
+
+  This cost an entire session's worth of "wx is blocked, gate not run" marker
+  entries. With it set, `test_gui_engine_parity.py` completes in ~90 s.
+
   Two caveats when reading its output:
   - It **REPORTS divergence; it is not pass/fail.** Known-deliberate divergences
     exist (the CLI mains' kicad-oracle recheck, `clean_plane_copper`, end-of-run

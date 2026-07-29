@@ -23,6 +23,26 @@ fast. Needs KiCad python (wx + pcbnew); skips cleanly without it.
 
 Run:  python3 tests/gui_parity/test_plane_all_layers_parity.py
 """
+
+# ---------------------------------------------------------------------------
+# macOS: if this HANGS at ~0% CPU, it is NOT wx, machine load, or a deadlock.
+#
+# After any wx process here is killed (a pkill, a timeout, a crash), macOS
+# decides the app "quit unexpectedly", and the NEXT headless launch stops inside
+# NSApplication bootstrap showing the restore-windows alert you cannot see:
+#     -[NSPersistentUIRestorer promptToIgnorePersistentState]
+#         -> -[NSAlert runModal]
+# Headless, nobody can click it, so it waits forever: process state SN accruing
+# ~0.3s of CPU over many minutes, which reads exactly like a hang. This cost a
+# full session of ".gui-parity-checked" markers recording "wx blocked, gate NOT
+# RUN" -- the gates were fine the whole time.
+#
+#   diagnose:  sample <pid> 3 -mayDie | grep -E "NSAlert|PersistentUI"
+#   fix:       defaults write -g ApplePersistenceIgnoreState -bool YES
+#
+# A sandboxed HOME does NOT help -- cfprefsd serves that pref per-user
+# regardless of HOME. With the default set, test_gui_engine_parity.py runs ~90s.
+# ---------------------------------------------------------------------------
 import os
 import subprocess
 import sys

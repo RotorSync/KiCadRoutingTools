@@ -19,18 +19,38 @@ until this marker moved (it caught that engine files changed after c7babd4).
     KICAD_LEG_RIP, KICAD_BIG_NET_FACTOR, KICAD_RIP_DEFER_AFTER,
     KICAD_RIP_CALLER, KICAD_RIPUP_BLOCKER_SELECT.
 
-GATES AT HEAD:
-  * test_manifest_plan_parity.py: 14000 flag-checks / 360 manifests, 0 mismatches.
-  * test_cli_postpass_coverage.py: 4 registered, 10 in use, 0 failures.
-  * test_engine_kwarg_parity.py: CLASS 1 (static) OK on all three engines -- no
-    CLI-only kwargs. CLASS 2 (wx, dead-control detection) NOT RUN: the headless
-    RoutingDialog construction BLOCKED on the macOS window server under load (0.4s
-    CPU over 7.5min, sleeping in AppKit, twice). It completed repeatedly earlier
-    today on this same code when the box was quiet, so this is environmental, not
-    a regression -- re-run it on an idle machine. Class 1 is the class that covers
-    this merge, since the merge adds no kwargs.
-  * NOT RUN: test_gui_engine_parity.py (same wx blockage). It ran GREEN earlier
-    today at 4d99b23 with copper sets IDENTICAL (1307/1307 segments).
+GATES AT HEAD -- ALL RUN, ALL GREEN (see the wx-blockage correction below):
+  * test_gui_engine_parity.py: VERDICT PARITY. CLI and GUI both conn_full=True,
+    conn_issues=0, drc=0, kicad_unconnected=0, and the copper sets are IDENTICAL
+    (segments 1307/1307, vias 144/144, zero cli-only, zero gui-only).
+  * test_engine_kwarg_parity.py: OK -- BOTH classes, under KiCad python. CLASS 1
+    (static): no CLI-only kwargs on any of the three engines. CLASS 2 (live, the
+    dead-control detector) RAN FOR THE FIRST TIME and confirms the 26c51da fix
+    with NON-DEFAULT values actually arriving: coplanar_gap = 0.25 (want 0.25),
+    add_teardrops = True (want True), and the call site forwards coplanar_gap.
+    That is the verification c99ffb4 lacked when it shipped inert.
+  * test_plane_all_layers_parity.py: PASS.
+  * test_footprint_position_sync.py: PASS.
+  * test_manifest_plan_parity.py: 14199 flag-checks / 365 manifests, 0 mismatches;
+    param->control resolution 12 checked, 0 unresolved.
+  * test_cli_postpass_coverage.py: 4 registered, 10 in active CLI use, 1 CLI-only
+    acknowledged, 0 unreachable calls, 0 failures, 0 warnings.
+
+CORRECTION -- the "wx blockage" diagnosis in this file was WRONG, and it was
+wrong for six-plus markers running. It was recorded as "BLOCKED on the macOS
+window server under load ... environmental, not a regression". Load had nothing
+to do with it. `sample <pid>` on a QUIET box (load 2.4) showed the process
+sleeping in:
+    -[NSPersistentUIRestorer promptToIgnorePersistentState] -> -[NSAlert runModal]
+i.e. macOS was showing the INVISIBLE restore-windows alert, because earlier wx
+processes in the session had been killed and macOS concluded the app "quit
+unexpectedly". Headless, nobody clicks it, so it waits forever at ~0.3s CPU --
+which reads exactly like a hang or a deadlock. The fix is one user default:
+    defaults write -g ApplePersistenceIgnoreState -bool YES
+(a sandboxed HOME does NOT work; cfprefsd serves that pref per-user). With it
+set, test_gui_engine_parity.py completes in ~90s. Documented in CLAUDE.md and in
+a comment block in all 8 wx-touching files under tests/gui_parity/, so no future
+sweep re-derives it or writes another "gate NOT RUN, environmental" entry.
 
 CARRIED: the writer-level Edge.Cuts strip (ef87702) remains an OPEN GUI gap,
 recorded at c7babd4 -- unchanged by this merge.
