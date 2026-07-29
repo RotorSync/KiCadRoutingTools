@@ -349,6 +349,43 @@ def test_merge_returns_none_without_a_summary():
         is None
 
 
+# --- how route.py is invoked (issue #458 drive-by) ---------------------
+
+def test_route_py_is_invoked_by_absolute_path_in_utf8_mode():
+    """A bare relative 'route.py' only resolved from the repo root, and the
+    failure surfaced as "produced no JSON_SUMMARY" rather than the real
+    error."""
+    _, calls = _metrics_for(LOG_ONE_PASS)
+    cmd = calls[-1]
+    assert cmd[1:3] == ['-X', 'utf8'], cmd
+    assert os.path.isabs(cmd[3]), cmd
+    assert cmd[3] == os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        'route.py'), cmd
+
+
+def test_nonzero_exit_raises_and_names_the_real_error():
+    """route.py exits 0 even when nets fail, so a non-zero code is a crash or
+    a bad invocation. It used to be swallowed."""
+    try:
+        _metrics_for("No nets matched the given patterns!\n", rc=2)
+    except RuntimeError as exc:
+        assert 'exited 2' in str(exc), exc
+        assert 'No nets matched' in str(exc), exc
+    else:
+        raise AssertionError("a non-zero exit code must not be swallowed")
+
+
+def test_missing_summary_raises_with_the_log_tail():
+    try:
+        _metrics_for("Traceback (most recent call last):\nKeyError: 'nets'\n")
+    except RuntimeError as exc:
+        assert 'JSON_SUMMARY' in str(exc), exc
+        assert "KeyError: 'nets'" in str(exc), exc
+    else:
+        raise AssertionError("a log with no summary must raise")
+
+
 TESTS = [
     test_swap_cap_held_while_displacement_widens,
     test_swap_cap_held_when_quench_finds_nothing,
@@ -364,6 +401,9 @@ TESTS = [
     test_aborted_reconciliation_falls_back_to_the_first_summary,
     test_reconciliation_without_a_summary_degrades_to_the_first,
     test_merge_returns_none_without_a_summary,
+    test_route_py_is_invoked_by_absolute_path_in_utf8_mode,
+    test_nonzero_exit_raises_and_names_the_real_error,
+    test_missing_summary_raises_with_the_log_tail,
 ]
 
 

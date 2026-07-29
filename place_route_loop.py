@@ -40,6 +40,13 @@ import routing_defaults as defaults
 from placement.quench import quench
 from placement.writer import write_placed_output
 
+# The loop shells out to the route.py sitting NEXT TO THIS FILE. A bare
+# relative 'route.py' only resolved when the caller's cwd happened to be the
+# repo root, and the failure surfaced as the misleading "produced no
+# JSON_SUMMARY" instead of "no such file" (#458).
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_ROUTE_PY = os.path.join(_SCRIPT_DIR, 'route.py')
+
 _SUMMARY_RE = re.compile(r'JSON_SUMMARY: (\{.*\})')
 
 # route.py prints this from the except around its reconciliation self-invoke
@@ -116,24 +123,47 @@ def merge_route_summaries(log: str):
     return merged
 
 
+def _log_tail(log: str, lines: int = 15) -> str:
+    """Last few log lines, so an error names the real failure instead of
+    burying it behind a path the operator has to go open."""
+    return ''.join(f"  | {ln}\n" for ln in log.splitlines()[-lines:])
+
+
 def _run_route_cmd(cmd, log_file):
     """Launch route.py with stdout and stderr captured to log_file; return its
     exit code. Split out from run_route so the whole tally can be driven
     against a canned log without launching a child process."""
-    with open(log_file, 'w') as f:
+    with open(log_file, 'w', encoding='utf-8') as f:
         return subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT).returncode
 
 
 def run_route(pcb_file: str, routed_file: str, route_args: str, log_file: str):
     """Run route.py, return (metrics dict, log text)."""
-    cmd = [sys.executable, 'route.py', pcb_file, routed_file] + \
+    # Absolute path to the sibling route.py, so the loop runs from any cwd.
+    # No cwd= override: route.py resolves its own assets from __file__, and
+    # relative paths inside --route-args (--net-clearances foo.json) must keep
+    # resolving against the OPERATOR's cwd, which a cwd= would silently break.
+    # -X utf8 mirrors how the test suite invokes route.py.
+    cmd = [sys.executable, '-X', 'utf8', _ROUTE_PY, pcb_file, routed_file] + \
         shlex.split(route_args)
-    _run_route_cmd(cmd, log_file)
-    log = open(log_file).read()
+    rc = _run_route_cmd(cmd, log_file)
+    # errors='replace': route.py forces its own stream to UTF-8, but a cp1252
+    # default locale on the READING side would raise on the first non-ASCII
+    # glyph and lose the whole round.
+    with open(log_file, encoding='utf-8', errors='replace') as f:
+        log = f.read()
+    if rc != 0:
+        # route.py exits 0 even when nets fail; its only deliberate non-zero
+        # exit is "No nets matched the given patterns!". So non-zero means a
+        # crash, an unreadable board or a --route-args typo, none of which is
+        # a routing result.
+        raise RuntimeError(f"route.py exited {rc} (see {log_file})\n"
+                           + _log_tail(log))
 
     summary = merge_route_summaries(log)
     if summary is None:
-        raise RuntimeError(f"route.py produced no JSON_SUMMARY (see {log_file})")
+        raise RuntimeError(f"route.py produced no JSON_SUMMARY (see {log_file})"
+                           f"\n" + _log_tail(log))
 
     failed_nets = list(summary.get('failed_single', []))
     # failed_multipoint entries are dicts {net_name, failed_pads}; keep just the
