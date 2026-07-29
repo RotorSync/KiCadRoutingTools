@@ -100,15 +100,19 @@ class PlaneAssignmentPanel(wx.Panel):
         layer_label = wx.StaticText(self, label="Target Layers:")
         sizer.Add(layer_label, 0, wx.BOTTOM, 2)
 
-        # Create checkbox wrap sizer for layers (wraps to next line if needed)
+        # Checkbox grid for layers, 5 per row. A GridSizer (not WrapSizer) on
+        # purpose: WrapSizer's reported min height depends on the width of the
+        # last layout pass, and a pass at a narrow width can make it claim one
+        # row PER LAYER - on a 10-layer board that inflated the assignments
+        # box and crushed the options area below (user-reported mis-spacing).
         copper_layers = self._get_copper_layers()
-        layer_sizer = wx.WrapSizer(wx.HORIZONTAL)
+        layer_sizer = wx.GridSizer(cols=5, hgap=10, vgap=4)
         self.layer_checks = {}
         for layer in copper_layers:
             cb = wx.CheckBox(self, label=layer)
             cb.SetToolTip(f"Include {layer} in this assignment")
             self.layer_checks[layer] = cb
-            layer_sizer.Add(cb, 0, wx.RIGHT | wx.BOTTOM, 10)
+            layer_sizer.Add(cb, 0)
 
         sizer.Add(layer_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
 
@@ -632,6 +636,9 @@ class PlanesTab(wx.Panel):
         self.options_scroll.SetSizer(options_scroll_sizer)
         self.options_scroll.SetScrollRate(0, 10)
         self.options_scroll.FitInside()
+        # Floor: never let the surrounding boxes crush the options area below
+        # ~6 parameter rows (it scrolls internally beyond that).
+        self.options_scroll.SetMinSize((-1, 240))
         right_sizer.Add(self.options_scroll, 1, wx.EXPAND | wx.BOTTOM, 5)
 
         # Status
@@ -677,8 +684,11 @@ class PlanesTab(wx.Panel):
             self.action_btn.SetLabel("Repair")
         # Re-layout the scroll container so it recomputes the virtual size,
         # then the outer tab so the scrollbar appears/disappears as needed.
+        # Snap back to the top: a scroll offset kept from the other (taller)
+        # panel would strand the new panel's content out of view.
         self.options_scroll.Layout()
         self.options_scroll.FitInside()
+        self.options_scroll.Scroll(0, 0)
         self.Layout()
 
     def _on_ask_ai_gnd_via(self):
