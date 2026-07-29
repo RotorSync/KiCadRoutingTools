@@ -1,3 +1,41 @@
+HEAD 2026-07-28 parity sweep c7babd4..HEAD (the leg-rip merge: #510 rip-churn
+investigation, four levers ALL DEFAULT OFF). Outcome: NO GAPS -- the merge adds no
+CLI flag, no engine kwarg and no results-data key, so there is nothing to wire.
+Cut for the v0.19.1 release, which check_release_version.py correctly BLOCKED
+until this marker moved (it caught that engine files changed after c7babd4).
+
+  * NEW ENGINE FILES, all env-gated OFF: leg_rip.py, net_cost.py, rip_defer.py.
+    Verified inert on the MERGED tree with every knob unset -- rp2350_dev gives
+    27 rips / 4 restores / 366 segments torn, identical to pre-merge, and zero
+    calls into any lever.
+  * NO new batch_route / batch_route_diff_pairs / create_plane kwarg. The engine
+    signatures are unchanged; rip_up_net gained an internal `only_segments`
+    parameter, which is not a front-end surface.
+  * ONE new CLI surface: --ripup-blocker-select gains a 'cost' CHOICE. GUI parity
+    is AUTOMATIC -- swig_gui builds that dropdown from
+    defaults.RIPUP_BLOCKER_SELECT_CHOICES symbolically (swig_gui.py:655), so the
+    new choice appears without any plugin edit. Confirmed by reading the call site.
+  * ENV-GATED KNOBS (repo convention: inert unless set, no dialog control):
+    KICAD_LEG_RIP, KICAD_BIG_NET_FACTOR, KICAD_RIP_DEFER_AFTER,
+    KICAD_RIP_CALLER, KICAD_RIPUP_BLOCKER_SELECT.
+
+GATES AT HEAD:
+  * test_manifest_plan_parity.py: 14000 flag-checks / 360 manifests, 0 mismatches.
+  * test_cli_postpass_coverage.py: 4 registered, 10 in use, 0 failures.
+  * test_engine_kwarg_parity.py: CLASS 1 (static) OK on all three engines -- no
+    CLI-only kwargs. CLASS 2 (wx, dead-control detection) NOT RUN: the headless
+    RoutingDialog construction BLOCKED on the macOS window server under load (0.4s
+    CPU over 7.5min, sleeping in AppKit, twice). It completed repeatedly earlier
+    today on this same code when the box was quiet, so this is environmental, not
+    a regression -- re-run it on an idle machine. Class 1 is the class that covers
+    this merge, since the merge adds no kwargs.
+  * NOT RUN: test_gui_engine_parity.py (same wx blockage). It ran GREEN earlier
+    today at 4d99b23 with copper sets IDENTICAL (1307/1307 segments).
+
+CARRIED: the writer-level Edge.Cuts strip (ef87702) remains an OPEN GUI gap,
+recorded at c7babd4 -- unchanged by this merge.
+
+--- prior sweeps ---
 c7babd4 2026-07-28 parity sweep 81a50b9..c7babd4 (4 commits: the placement
 coordinate-precision fix, the corpus-prep and writer-level Edge.Cuts strips, and this
 lint note). Outcome: ONE PRE-EXISTING GAP CLOSED, ONE NEW GAP OPENED AND RECORDED.
