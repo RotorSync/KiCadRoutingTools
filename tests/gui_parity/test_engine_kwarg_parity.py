@@ -84,33 +84,40 @@ GUI_ONLY_OK = {
 # KNOWN pre-existing Class-2 divergence, RECORDED so this gate catches NEW ones
 # (the harness convention: gates lock in a fixed divergence, they don't hide it).
 #
-# ROOT CAUSE: the Differential tab hand-maintains its own routing-config builder
-# (swig_gui.get_routing_config, ~30 keys, defined inside _create_differential_tab)
-# while single-ended routing uses swig_gui._build_routing_config (~83 keys). 53
-# keys exist only in the latter; the 25 below are ones differential_gui actually
-# READS at its engine call, so those Basic-tab controls apply to single-ended
-# routing but are silently ignored for coupled pairs -- while route_diff.py's
-# argparse DOES pass every one of them.
-#
-# coplanar_gap and add_teardrops were two more instances, fixed this sweep by
-# adding them to get_routing_config. The structural fix is to make
-# get_routing_config delegate to _build_routing_config so the diff tab inherits
-# every knob and cannot drift again -- deliberately NOT done here because it
-# would make 25 currently-ignored controls take effect, changing GUI diff-routing
-# results. That is a product decision, not a parity cleanup.
-#
-# To re-measure: empty this set and re-run.
-KNOWN_DEAD_DIFF_KEYS = {
-    "bga_proximity_cost", "bga_proximity_radius", "bus_attraction_bonus",
-    "bus_attraction_radius", "bus_detection_radius", "bus_enabled", "bus_min_nets",
-    "crossing_penalty", "keep_input_copper", "length_match_tolerance",
-    "meander_amplitude", "mps_layer_swap", "mps_reverse_rounds",
-    "mps_segment_intersection", "ripped_route_avoidance_cost",
-    "ripped_route_avoidance_radius", "routing_clearance_margin",
-    "stub_proximity_cost", "stub_proximity_radius", "time_match_tolerance",
-    "track_proximity_cost", "track_proximity_distance", "vertical_attraction_cost",
-    "vertical_attraction_radius", "via_proximity_cost",
+# EMPTY since #511: the Differential tab used to hand-maintain its own routing-
+# config builder (~30 keys) while single-ended routing used
+# swig_gui._build_routing_config (~83 keys), leaving 25 same-named Basic-tab
+# controls dead for diff pairs -- plus a dozen MORE behind differently-named
+# controls (keepout_check, time_matching_check, length_match_groups_ctrl,
+# direction_choice, schematic_dir_ctrl, ...) that this gate could not even see.
+# get_routing_config now DELEGATES to _build_routing_config, so the diff tab
+# inherits every knob and cannot drift again. Any key landing here means a NEW
+# dead control -- fix the supplier, don't grow this baseline.
+KNOWN_DEAD_DIFF_KEYS = set()
+
+# Config key -> dialog control attr, for keys whose control is not named after
+# the key and not derivable by the _check/_ctrl/_choice suffix probe. Used only
+# to decide "a control EXISTS for this key" in Class 2.
+CTRL_NAME_ALIASES = {
+    "keepout_enabled": "keepout_check",
+    "can_swap_to_top_layer": "can_swap_to_top",
+    "swappable_nets": "swappable_net_panel",
 }
+
+
+def _has_control(objs, key):
+    """True if any dialog/tab object exposes a control for config key ``key``.
+
+    Probes the key itself, the common wx naming suffixes (_check, _ctrl,
+    _choice), and the explicit alias map -- the bare-hasattr version of this
+    missed 12 real dead controls in the #511 sweep (keepout, time_matching,
+    length_match_groups, ...), which is why they never made the baseline.
+    """
+    names = [key, key + "_check", key + "_ctrl", key + "_choice"]
+    alias = CTRL_NAME_ALIASES.get(key)
+    if alias:
+        names.append(alias)
+    return any(hasattr(o, n) for o in objs if o is not None for n in names)
 
 
 def _calls(path, fname):
@@ -129,6 +136,11 @@ def _calls(path, fname):
                 continue
             names.add(kw.arg)
             v = kw.value
+            # See through `not config.get('foo', ...)` (e.g. crossing_layer_check):
+            # the negation hid the read from this gate, so 'no_crossing_layer_check'
+            # never even made the #511 dead-key baseline.
+            if isinstance(v, ast.UnaryOp) and isinstance(v.op, ast.Not):
+                v = v.operand
             if (isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute)
                     and v.func.attr == "get" and v.args
                     and isinstance(v.args[0], ast.Constant) and isinstance(v.args[0].value, str)):
@@ -203,13 +215,12 @@ def check_class2():
             for kwarg, key in sorted(keys.items()):
                 if key in cfg:
                     continue
-                # No control of that name => the default fallback IS the design
+                # No control for that key => the default fallback IS the design
                 # (the CLI's argparse default matches); only a key with a real
                 # control behind it is a dead control.
-                has_ctrl = any(hasattr(o, key) for o in (dlg, d, p,
-                                                         getattr(p, "create_options", None),
-                                                         getattr(p, "repair_options", None))
-                               if o is not None)
+                has_ctrl = _has_control((dlg, d, p,
+                                         getattr(p, "create_options", None),
+                                         getattr(p, "repair_options", None)), key)
                 if has_ctrl:
                     dead.append((kwarg, key))
             known = [x for x in dead if x[1] in KNOWN_DEAD_DIFF_KEYS]
@@ -228,6 +239,7 @@ def check_class2():
                 print(f"      note: {len(revived)} recorded key(s) now supplied -- "
                       f"drop from KNOWN_DEAD_DIFF_KEYS: {revived}")
         failures += check_coplanar_case(dlg)
+        failures += check_delegation_case(dlg)
         return failures
     finally:
         dlg.Destroy()
@@ -264,6 +276,57 @@ def check_coplanar_case(dlg):
         print(f"  call site forwards:     {kw:16} {'OK' if ok else 'FAIL (not passed to the engine)'}")
         if not ok:
             out.append(f"coplanar case: differential_gui does not pass '{kw}' to the engine")
+    return out
+
+
+def check_delegation_case(dlg):
+    """The #511 delegation, end to end through the REAL dialog.
+
+    Sets NON-DEFAULT values on a sample of the controls that used to be dead
+    for diff pairs -- same-named ones from the old 25-key baseline AND the
+    differently-named ones the old bare-hasattr probe could not even see --
+    and asserts each value lands in the merged config the diff tab hands
+    batch_route_diff_pairs, and that the call site reads that key. A wiring
+    fix can be INERT (the c99ffb4 lesson): observing the non-default VALUE
+    arrive is the test, not the wiring's existence.
+    """
+    print("\n#511 DELEGATION CASE (formerly-dead controls reach the diff engine)")
+    out = []
+    d = dlg.differential_tab
+
+    def spin(ctrl, val):
+        ctrl.SetValue(val)
+        return ctrl.GetValue()  # post-clamp actual, so a range clamp can't lie
+
+    cases = []
+    # Same-named controls (were in the 25-key baseline):
+    cases.append(("crossing_penalty", spin(dlg.crossing_penalty, 12.5)))
+    cases.append(("length_match_tolerance", spin(dlg.length_match_tolerance, 3.25)))
+    dlg.mps_layer_swap.SetValue(True); cases.append(("mps_layer_swap", True))
+    dlg.bus_enabled.SetValue(True); cases.append(("bus_enabled", True))
+    # Differently-named controls (invisible to the old control probe):
+    dlg.keepout_check.SetValue(True); cases.append(("keepout_enabled", True))
+    dlg.time_matching_check.SetValue(True); cases.append(("time_matching", True))
+    dlg.length_match_groups_ctrl.SetValue("LMG_A* LMG_B*")
+    cases.append(("length_match_groups", [["LMG_A*", "LMG_B*"]]))
+    dlg.direction_choice.SetSelection(1); cases.append(("direction", "forward"))
+
+    cfg = {**d.get_routing_config(), **d.get_config()}
+    for key, want in cases:
+        got = cfg.get(key, "<ABSENT>")
+        ok = got == want
+        print(f"  control -> diff config: {key:24} = {got!r} (want {want!r})  {'OK' if ok else 'FAIL'}")
+        if not ok:
+            out.append(f"#511 case: diff config {key}={got!r}, expected {want!r} "
+                       f"-- the control does not reach batch_route_diff_pairs")
+    _, _, keys = _widest(_calls(os.path.join(REPO, "kicad_routing_plugin/differential_gui.py"),
+                                "batch_route_diff_pairs"))
+    read = set(keys.values())
+    for key, _ in cases:
+        ok = key in read
+        print(f"  call site reads:        {key:24} {'OK' if ok else 'FAIL (no kwarg reads this key)'}")
+        if not ok:
+            out.append(f"#511 case: differential_gui call site no longer reads config['{key}']")
     return out
 
 

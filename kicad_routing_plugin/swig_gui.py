@@ -1727,6 +1727,13 @@ class RoutingDialog(wx.Dialog):
                 # routing only, and plane rip-up silently keeps 'count'.
                 'ripup_blocker_select': self.ripup_blocker_select.GetString(
                     self.ripup_blocker_select.GetSelection()),
+                # #511 follow-on: both plane call sites read these
+                # (planes_gui 'debug_lines'/'verbose') but nothing supplied
+                # them, so the shared Basic-tab checkboxes were dead for
+                # planes -- found by the same gate sweep the moment its
+                # control probe learned the _check suffix.
+                'debug_lines': self.debug_lines_check.GetValue(),
+                'verbose': self.verbose_check.GetValue(),
             }
 
         def get_claude_params():
@@ -1776,57 +1783,26 @@ class RoutingDialog(wx.Dialog):
             }
 
         def get_routing_config():
-            """Get full routing configuration from the main dialog."""
-            # Per-layer cost multipliers from the shared Basic-tab control, so the
-            # Differential tab honors them too (issue #193). Empty/invalid -> [].
-            layer_costs = self._selected_layer_costs()
-            return {
-                'layers': self._get_selected_layers(),
-                'layer_costs': layer_costs,
-                'track_width': self._effective_track_width(),
-                'clearance': self._effective_clearance(),
-                'via_size': self._effective_via_size(),
-                'via_drill': self._effective_via_drill(),
-                'hole_to_hole_clearance': self._effective_hole_to_hole_clearance(),
-                'board_edge_clearance': self._effective_board_edge_clearance(),
-                'grid_step': self.grid_step.GetValue(),
-                'via_cost': self.via_cost.GetValue(),
-                'max_iterations': self.max_iterations.GetValue(),
-                'max_probe_iterations': self.max_probe_iterations.GetValue(),
-                'heuristic_weight': self.heuristic_weight.GetValue(),
-                'proximity_heuristic_factor': self.proximity_heuristic_factor.GetValue(),
-                'turn_cost': self.turn_cost.GetValue(),
-                'direction_preference_cost': self.direction_preference_cost.GetValue(),
-                'max_ripup': self.max_ripup.GetValue(),
-                'ripup_abandon_metric': self.ripup_abandon_metric.GetString(
-                    self.ripup_abandon_metric.GetSelection()),
-                'ripup_blocker_select': self.ripup_blocker_select.GetString(
-                    self.ripup_blocker_select.GetSelection()),
-                'ordering_strategy': self.ordering_strategy.GetString(self.ordering_strategy.GetSelection()),
-                'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
-                'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
-                'debug_lines': self.debug_lines_check.GetValue(),
-                'verbose': self.verbose_check.GetValue(),
-                'enable_layer_switch': self.enable_layer_switch.GetValue(),
-                # Shared Basic-tab toggle, inherited by the Differential tab (#160).
-                'fix_drc_settings': self.fix_drc_check.GetValue(),
-                'keep_thermal': self.keep_thermal_check.GetValue(),
-                'clamp_netclasses': self.clearance_check.GetValue(),
-                # #486: the shared Coplanar Gap control must reach the DIFF engine
-                # too. route_diff.py passes --coplanar-gap to batch_route_diff_pairs;
-                # without this key the diff tab's coplanar_gap read falls back to
-                # 0.0 forever, so coupled pairs silently route as microstrip (a
-                # WIDER trace than CPW-over-ground for the same ohms) and miss the
-                # impedance target. NOTE route_diff has no --coplanar-nets -- that
-                # allowlist is route.py-only -- so only the gap belongs here.
-                'coplanar_gap': self.coplanar_gap.GetValue(),
-                # #489 section 9: the ONE shared "Add teardrops" checkbox. The
-                # planes/fanout tabs get it via get_shared_params(); the Differential
-                # tab reads this dict instead, so without the key its teardrop pass
-                # was dead and GUI diff routing never matched route_diff
-                # --add-teardrops.
-                'add_teardrops': self.add_teardrops_check.GetValue(),
-            }
+            """Get full routing configuration from the main dialog.
+
+            #511: delegate to the single-ended builder so the Differential tab
+            inherits EVERY Basic/Advanced-tab knob and cannot drift again. This
+            closure used to hand-maintain a ~30-key subset that had fallen 53
+            keys behind _build_routing_config: 25 same-named controls (crossing
+            penalty, the MPS ordering toggles, proximity/attraction costs,
+            length/time-match tolerances, bus routing, ...) plus a dozen more
+            behind differently-named controls (keepout, length_match_groups,
+            time_matching, schematic_dir, direction, swappable nets, ...) were
+            silently ignored for diff pairs while route_diff.py passed all of
+            them on the CLI (#486 coplanar_gap, #489 add_teardrops and #424
+            ripup_blocker_select were earlier one-off instances of the same
+            drift). Keys the diff tab owns (impedance, diff_pair_width/gap,
+            geometry, polarity swaps) still win: the caller merges
+            {**this, **DifferentialTab.get_config()} with the diff keys last.
+            'nets' is inert here -- pair net names are passed to the engine
+            positionally -- so the Basic-tab net selection is not consulted.
+            """
+            return self._build_routing_config([], self._get_selected_layers())
 
         def sync_pcb_data():
             """Sync pcb_data from board after routing and clear connectivity cache."""
