@@ -143,7 +143,10 @@ crossing counter is the non-differentiable version of the same quantity —
 fine, since SA doesn't need gradients. The theory behind crossing counts is
 topological routing (SURF, DAC 1991): zero airwire crossings on a layer means
 a planar ratsnest, i.e. routable on that layer in the topological sense; every
-crossing costs a via pair or a detour.
+crossing costs a via pair or a detour. Because a crossing is a conflict
+*between two nets*, the natural way to prioritize one net is to price each
+crossing by the larger of the two nets' weights: the cost of a conflict then
+tracks the most important net it obstructs.
 
 For reference, RUDY (the standard VLSI congestion proxy) smears each net's
 expected wire area uniformly over its bounding box —
@@ -193,7 +196,9 @@ precedent), which is simpler and may capture most of the value:
   - *nudge*: translate within a window that shrinks as temperature drops;
     optionally bias toward the part's optimal region (median of connected
     nets' bounding boxes — O(pins) to compute)
-  - *rotate*: 0/90/180/270
+  - *rotate*: 0/90/180/270, relative to the part's own placement angle (a
+    45°-placed part rotates on the 45/135/225/315 lattice, so deliberate
+    non-orthogonal placement is preserved rather than snapped to the axes)
   - *swap*: same-footprint pairs (footprint-identical R/C swaps are free
     wins; mixed-size swaps are usually illegal anyway, so restrict by
     footprint compatibility)
@@ -212,6 +217,8 @@ precedent), which is simpler and may capture most of the value:
   - courtyard non-overlap via the existing rect machinery
   - decaps tethered to their IC (group membership or hard radius)
   - rotation disabled per-class where assembly conventions matter
+    (`--no-rotate`, which also restricts same-footprint swaps to equal-angle
+    pairs, since a swap exchanges full poses)
 - **Cost**: Δ(crossings)·penalty + Δ(airwire length) + density/halo term —
   all incrementally updatable (only airwires touching the moved part's nets
   change). Mostly already in `rust_placer`; extending the scorer to evaluate
@@ -277,7 +284,10 @@ Implemented as `place_optimize.py` + `placement/quench.py`: greedy quench
 pad-angle rewriting, displacement-capped same-footprint swaps), cost =
 `length_weight`·airwire
 length + `crossing_penalty`·crossings + pin-count-scaled halo + soft edge
-margin. Test board: `interf_u` (25 parts, PGA120 + bus connectors, 2 layers),
+margin. Both airwire terms take optional per-net weights: a net's length is
+multiplied by its weight, and each crossing is priced at the larger of the
+two crossing nets' weights, so an unweighted board is untouched
+(max(1, 1) = 1). Test board: `interf_u` (25 parts, PGA120 + bus connectors, 2 layers),
 pipeline `route_planes` → `bga_fanout U9` → `route.py` with the
 `tests/test_interf_u.py` arguments. Router iterations ≈ effort; vias and
 completion are the quality metrics.
@@ -359,7 +369,8 @@ Refined conclusions:
   ~3 mm was the sweet spot on both boards tested. The cap is now airtight:
   no move type — swaps included — can take a part beyond it, and
   `--swap-max-displacement` can tighten (never exceed) it for swaps
-  specifically.
+  specifically. The router-in-the-loop widening below widens **nudges only**:
+  the swap cap holds at its base value for the whole run.
 - The big halos backfire on dense boards: with `--halo-coef 0.5` the
   144-pin Xilinx demands a 6.5 mm halo that a dense board cannot satisfy, so
   the halo gradient dominates everything and scatters the layout. Modest
@@ -372,18 +383,34 @@ Refined conclusions:
 The proxy-only results above motivated closing the loop: use the *router's
 own failure diagnostics* to decide what to move. Each round:
 
-1. Route the board; parse the JSON summary (failed nets, iterations) and the
-   frontier blocking analysis (which nets wall off each failed route).
+1. Route the board; parse the run's JSON summaries and the frontier blocking
+   analysis (which nets wall off each failed route). Note the plural:
+   `route.py` runs an end-of-run reconciliation pass whenever the first pass
+   left failures, and prints a second summary scoped to the retried nets.
+   The failure lists in that last summary are the still-open set, while
+   router effort adds across both passes.
 2. Build the movable set: parts owning pads of the **failed nets** (move the
    endpoint out of the congested pocket) and of the **blocker nets** (move
    the anchor so the blocking wall re-routes) — excluding high-pin-count
    parts (`--max-target-pins 40`: moving a resistor that anchors a blocker
    is low-risk; dragging a 144-pin QFP is how placements get destroyed).
-3. Micro-quench only those parts, with failed nets' airwires weighted 3×.
+3. Micro-quench only those parts, with the failed nets weighted 3×
+   (`--failed-net-weight`) — both their airwire *length* and any *crossing*
+   they take part in, the latter priced at the larger of the two nets'
+   weights. Weighting length alone was near-inert: at the loop's own knobs
+   the crossing term is ~96% of the objective, so scaling a length
+   coefficient from 0.3 to 0.9 against a crossing coefficient of 30 moved a
+   typical failed net by less than the cost of a fifth of one crossing.
 4. Re-route. Accept only if (failures, then iterations) improves; otherwise
-   revert and widen the displacement cap 1.5× for the next attempt.
+   revert and widen the displacement cap 1.5× for the next attempt — the
+   nudge radius only. The swap cap stays at its base value, so a widened
+   round cannot become a long-range swap.
 
-Result on kit-dev-coldfire from the hand placement:
+Result on kit-dev-coldfire from the hand placement (recorded before #458;
+`failures` was then the pre-reconciliation count and `router iterations` the
+first pass only, so both columns would read slightly differently today: fewer
+failures where the reconciliation pass recovers a net, and more iterations
+because that pass's own effort is now counted):
 
 | round | action | failures | router iterations | vias |
 |---|---|---|---|---|
@@ -397,11 +424,12 @@ less router effort — by moving only resistors/caps/jumpers** (49 parts
 total; the ICs and connectors never moved). The reject-and-revert mechanism
 did real work: two of four candidate placements made things worse and were
 discarded, which is exactly the proxy-blindness the loop exists to catch.
-Costs: +36 vias, and same-footprint swaps are not displacement-capped (one
-resistor traveled 32 mm via swap — fine for generic pull-ups, but worth a
-cap or flag for parts where location is meaningful). DRC: the same
-PAD-SEGMENT micro-overlap artifact the router produces on the baseline (16
-occurrences) appears somewhat more often on the repaired board (30).
+Costs: +36 vias. (This run predates the swap displacement cap — one resistor
+traveled 32 mm via an uncapped swap, which is what #430 fixed. Swaps are now
+capped like every other move, and the loop holds that cap at its base value
+while it widens the nudge radius, #458.) DRC: the same PAD-SEGMENT
+micro-overlap artifact the router produces on the baseline (16 occurrences)
+appears somewhat more often on the repaired board (30).
 
 This validates the core hypothesis of the whole investigation: **proxies
 propose, the router disposes.** Wall-clock cost was ~5 routing runs

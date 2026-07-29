@@ -10,7 +10,8 @@ parts that could help those routes succeed:
   - parts owning pads of the blocker nets (move the anchor so the blocking
     wall re-routes),
 
-with the failed nets' airwires given extra weight in the quench cost.
+with the failed nets given extra weight in the quench cost: their airwire
+length and any crossing they take part in.
 High-pin-count parts are excluded from targeting (--max-target-pins) - moving
 a resistor that anchors a blocker net is low-risk; dragging a 144-pin QFP to
 fix one net is how placements get destroyed.
@@ -243,8 +244,9 @@ def main():
                         help="Don't move parts with more connected pins than "
                              "this (default: 40)")
     parser.add_argument("--failed-net-weight", type=float, default=3.0,
-                        help="Airwire weight multiplier for failed nets "
-                             "(default: 3.0)")
+                        help="Cost multiplier for failed nets: scales their "
+                             "airwire length and any crossing they take part "
+                             "in (default: 3.0)")
     parser.add_argument("--step", type=float, default=0.5,
                         help="Candidate grid step in mm (default: 0.5)")
     parser.add_argument("--length-weight", type=float, default=0.3)

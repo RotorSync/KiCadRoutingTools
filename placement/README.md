@@ -9,10 +9,12 @@ Two command-line tools sit on top of this module:
 
 ## place_optimize.py — greedy quench
 
-Small nudges (capped by `--max-displacement`), 90° rotations, and
-same-footprint swaps (capped by `--swap-max-displacement`, default: the same
-cap) that reduce airwire length + crossings + a whitespace (halo) penalty
-scaled by pin count + a soft board-edge margin. Locked footprints never move.
+Small nudges (capped by `--max-displacement`), 90° rotations (on each part's
+own angular lattice, so a part placed at 45° rotates to 135/225/315 rather
+than snapping to the axes), and same-footprint swaps (capped by
+`--swap-max-displacement`, default: the same cap) that reduce airwire length
++ crossings + a whitespace (halo) penalty scaled by pin count + a soft
+board-edge margin. Locked footprints never move.
 
 ```bash
 # Conservative polish (recommended starting point)
@@ -32,20 +34,31 @@ Key options:
 | `--ignore-nets` | – | Net patterns excluded from airwire scoring (plane-routed power nets) |
 | `--lock` | – | Reference patterns to pin in place (connectors, mounting-critical parts) |
 | `--halo-coef` | 0.25 | Extra whitespace per √(pin count); keep modest (~0.15) on dense boards |
-| `--no-rotate` / `--no-swap` | off | Disable rotation / swap moves |
+| `--no-rotate` / `--no-swap` | off | Disable rotation / swap moves. `--no-rotate` freezes every part's angle: nudges keep the current rotation, and same-footprint swaps are restricted to pairs that already share one, since a swap exchanges full poses and a mixed-angle pair would rotate both parts |
 
 ## place_route_loop.py — router-in-the-loop repair
 
 Routes the board with the real router, reads the failure diagnostics
 (failed nets + the blocker nets named in the frontier analysis), and
-micro-quenches only the small parts that could help those routes succeed.
-Re-routes and keeps the new placement only if (failures, router effort)
-actually improves; otherwise reverts and widens the search.
+micro-quenches only the small parts that could help those routes succeed,
+weighting the failed nets so both their airwire length and any crossing they
+take part in cost more. Re-routes and keeps the new placement only if
+(failures, router effort) actually improves; otherwise reverts and widens the
+search.
+
+The tally counts the router's end-of-run reconciliation pass, so a net that
+pass recovers is not treated as a failure in the next round. A rejected round
+widens the **nudge** search 1.5×; the swap cap does not move. It stays at
+`--swap-max-displacement` (default: the initial `--max-displacement`), so
+widening the search can never turn into a long-range swap.
+`--swap-max-displacement`, `--no-rotate` and `--no-swap` work here exactly as
+they do in `place_optimize.py`, and `--verbose` surfaces each accepted quench
+move plus the per-pass `swap-capped=N` count.
 
 ```bash
 python place_route_loop.py input.kicad_pcb repaired.kicad_pcb \
     --route-args '--nets "/*" "Net-*" --track-width 0.2 --clearance 0.2 ...' \
-    --ignore-nets GND "+3.3V" --lock "J*"
+    --ignore-nets GND "+3.3V" --lock "J*" --swap-max-displacement 2
 ```
 
 On the kit-dev-coldfire demo board this repaired the hand placement from
