@@ -100,6 +100,18 @@ def find_orphan_stubs(filename: str, net_name: Optional[str] = None,
             'width': getattr(seg, 'width', 0.0)
         })
 
+    # Zone outlines by (net_id, layer) (#513 item 17): a plane-repair strap
+    # whose free end lands INSIDE a same-net pour polygon is not an orphan --
+    # the checker only examined segments/vias/pads, so wide Voronoi straps
+    # (nesora_mixer) read as stubs. Outline containment slightly over-credits
+    # (a fill void under the endpoint), which is the right bias for an
+    # orphan REPORTER -- a missed orphan is noise, a phantom orphan drives
+    # pointless retries.
+    zones_by_net_layer: Dict[Tuple[int, str], List[List[Tuple[float, float]]]] = defaultdict(list)
+    for z in (getattr(pcb_data, 'zones', []) or []):
+        if z.net_id and z.layer.endswith('.Cu') and len(z.polygon or []) >= 3:
+            zones_by_net_layer[(z.net_id, z.layer)].append(list(z.polygon))
+
     # Determine which nets to check
     if net_name:
         # Find net_id for the given name
@@ -153,9 +165,19 @@ def find_orphan_stubs(filename: str, net_name: Optional[str] = None,
             # same-net segment (T-junction / near-coincident / overlap). Matching
             # the real copper geometry instead of a fixed centre tolerance keeps
             # connected stubs from being reported as dead ends.
+            zone_polys = zones_by_net_layer.get((net_id, lyr), [])
+
+            def _in_same_net_zone(pt):
+                if not zone_polys:
+                    return False
+                from connectivity import _point_in_polygon
+                return any(_point_in_polygon(pt[0], pt[1], poly)
+                           for poly in zone_polys)
+
             orphans = {pt for pt in single_endpoints
                        if not _endpoint_connected(pt, segments, vias,
-                                                  through_hole_pads, layer_pads)}
+                                                  through_hole_pads, layer_pads)
+                       and not _in_same_net_zone(pt)}
 
             if orphans:
                 net_results[lyr] = orphans
