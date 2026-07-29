@@ -160,6 +160,11 @@ def fab_floor_min(copper_layer_count, tier=None, overrides=None):
 # stop a track/clearance/via/drill/hole param being set below the fab can make.
 _PARAM_FLOOR_KEY = {
     'track_width': 'track_width',
+    # The plane-repair strap NECK floor (--min-track-width) is still copper the
+    # fab must etch, so it floors at the same track minimum (#513 item 9:
+    # allwinner_h3_ddr3 shipped 217 GND straps necked to 0.0889 on a 2-layer
+    # board because only --track-width was enforced).
+    'min_track_width': 'track_width',
     'clearance': 'clearance',
     'via_size': 'via_diameter',
     'via_diameter': 'via_diameter',

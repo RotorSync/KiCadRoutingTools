@@ -2446,6 +2446,8 @@ Examples:
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.input_file),
         track_width=getattr(args, 'track_width', None),
+        # The strap NECK floor must also be manufacturable (#513 item 9).
+        min_track_width=getattr(args, 'min_track_width', None),
         clearance=getattr(args, 'clearance', None),
         via_size=getattr(args, 'via_size', None),
         via_drill=getattr(args, 'via_drill', None),
