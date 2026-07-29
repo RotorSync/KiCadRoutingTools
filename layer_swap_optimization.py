@@ -90,8 +90,17 @@ def _bare_pad_pair_vias_fit(pcb_data, new_vias, config) -> Tuple[bool, str]:
         # short - the /SYZYGY1.C2P_CLK_P via-vs-C2P_CLK_N(J4.36) case.
         for pad_net, pads in pads_by_net.items():
             for pad in pads:
+                # Per-pad clearance override (#326/#513 item 2) wins where larger:
+                # a swap via validated at a relaxed/fine clearance can still graze
+                # a pad carrying its own (clearance ...) override, which KiCad
+                # grades at max(pair) -- pocat_comms LQFP/QFN 0.1524mm imports.
+                # No grading-margin slack when the override governs: the post-route
+                # via-nudge cannot fix a via boxed between two long override pads
+                # (moving off one worsens the other), so a margin-graze ships.
+                pad_clr = max(clearance, getattr(pad, 'local_clearance', 0.0) or 0.0)
+                pad_margin = margin if pad_clr == clearance else 0.0
                 if pad_net != v.net_id and check_pad_via_overlap(
-                        pad, v, clearance, routing_layers, margin)[0]:
+                        pad, v, pad_clr, routing_layers, pad_margin)[0]:
                     return False, "pad via grazes a foreign pad (pad-via)"
                 # drills: net-independent (same-net THT pad drill still conflicts)
                 if check_pad_drill_via_overlap(pad, v, h2h, margin)[0]:

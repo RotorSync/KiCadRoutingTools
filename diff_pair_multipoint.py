@@ -472,7 +472,13 @@ def _fans_fit(pcb_data, fans, relocated_pads, config) -> bool:
             for pad in pads:
                 if id(pad) in reloc_ids:
                     continue  # the via legitimately sits on its own relocated pad
-                if check_pad_via_overlap(pad, v, clearance, routing_layers, margin)[0]:
+                # Per-pad clearance override (#326/#513 item 2) wins where larger,
+                # mirroring _bare_pad_pair_vias_fit and check_drc's grading. No
+                # margin slack when the override governs (the via-nudge cannot fix
+                # a via boxed between two long override pads).
+                pad_clr = max(clearance, getattr(pad, 'local_clearance', 0.0) or 0.0)
+                pad_margin = margin if pad_clr == clearance else 0.0
+                if check_pad_via_overlap(pad, v, pad_clr, routing_layers, pad_margin)[0]:
                     return False
                 if h2h and check_pad_drill_via_overlap(pad, v, h2h, margin)[0]:
                     return False
