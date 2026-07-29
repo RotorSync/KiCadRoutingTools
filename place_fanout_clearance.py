@@ -148,6 +148,12 @@ Examples:
         # the #445 via gate declines to move caps, and the whole chain died
         # on the missing file). copy_board keeps the DRC-floor custody.
         print("No caps moved; passing the board through unchanged.")
+        if os.path.abspath(args.input_file) == os.path.abspath(args.output_file):
+            # In-place invocation (X X): the output already IS the input;
+            # copying a file onto itself raises SameFileError (recorded
+            # manifests use the in-place form, so a no-op crashed replays).
+            print(f"{args.output_file} unchanged (in-place)")
+            return
         try:
             from copy_board import copy_board
             copy_board(args.input_file, args.output_file)
