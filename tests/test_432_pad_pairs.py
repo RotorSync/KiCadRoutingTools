@@ -22,6 +22,13 @@ the left edge routes, the wall-crossing edge cannot. Pins the documented
 non-reconciliations on one run: pairs 2/3 != pads 2/4 != edges, and the open
 entry (M, 2/3, 'open', 'partial').
 
+Scenario D (multi-outline, #479 semantics): two outer Edge.Cuts outlines
+with a WALL sealing the corridor between them; 3-pad net Z has a routable
+pair in outline A and a lone pad in outline B. Cross-outline gaps are joined
+by a connector at assembly, never by copper, so Z grades 1/1 (the in-outline
+pair) with NO pad_pairs_open entry -- the raw union-find math (P=3, k=2)
+would have invented a phantom 'partial' 1/2 that no router can ever close.
+
     python3 tests/test_432_pad_pairs.py
 """
 import io
@@ -40,6 +47,7 @@ from synth import make_net, make_pad, make_pcb, make_seg
 BLOCKER, X, WALL = 1, 2, 3
 M = 1
 Y = 1
+Z = 1
 
 PAD_PAIRS_OPEN_KEYS = {'net', 'pairs_connected', 'pairs_total',
                        'outcome', 'open_subtype'}
@@ -127,6 +135,35 @@ def _multipoint_board():
     ]
     return make_pcb(
         nets={M: make_net(M, 'M'), WALL: make_net(WALL, 'WALL')},
+        segments=segs, pads_by_net=pads, board_info=bi)
+
+
+def _multi_outline_board():
+    """Two outer outlines (a split-board file, #479): A spans x in [0,10],
+    B spans x in [20,30]; a full-height static WALL at x=15 seals the only
+    routing layer between them. Net Z: a routable pad pair inside A plus a
+    lone pad inside B. The B pad can only ever be reached by the assembly
+    connector, so outline-aware pair credit is total=1 (A's pair), and once
+    that pair routes, connected=1 with no open entry."""
+    bi = BoardInfo(layers={0: 'F.Cu', 31: 'B.Cu'},
+                   copper_layers=['F.Cu', 'B.Cu'],
+                   board_bounds=(0.0, 0.0, 30.0, 10.0),
+                   board_outlines=[
+                       [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
+                       [(20.0, 0.0), (30.0, 0.0), (30.0, 10.0), (20.0, 10.0)],
+                   ])
+    pads = {
+        Z: [make_pad(Z, 2.0, 5.0, ref='U1', num='1', net_name='Z',
+                     size_x=0.3, size_y=0.3),
+            make_pad(Z, 8.0, 5.0, ref='U2', num='1', net_name='Z',
+                     size_x=0.3, size_y=0.3),
+            make_pad(Z, 25.0, 5.0, ref='U3', num='1', net_name='Z',
+                     size_x=0.3, size_y=0.3)],
+        WALL: [],
+    }
+    segs = [make_seg(15.0, 0.0, 15.0, 10.0, net_id=WALL, width=0.3)]
+    return make_pcb(
+        nets={Z: make_net(Z, 'Z'), WALL: make_net(WALL, 'WALL')},
         segments=segs, pads_by_net=pads, board_info=bi)
 
 
@@ -242,6 +279,30 @@ def scenario_c():
           results_data.get('pad_pairs_open') == summary.get('pad_pairs_open'))
 
 
+def scenario_d():
+    print("-" * 60)
+    print("Scenario D: multi-outline boards (#479 cross-outline semantics)")
+    summary, results_data, out = _route(_multi_outline_board(), ['Z'])
+
+    # The in-outline pair is the whole universe: 1/1, fully connected.
+    check("pad_pairs 1/1 (cross-outline gap is not a pair)",
+          summary.get('pad_pairs_connected') == 1
+          and summary.get('pad_pairs_total') == 1)
+    # The raw union-find view (P=3, k=2 -> 1/2 'partial') must NOT surface:
+    # no router can ever close a cross-outline gap, so an open entry here
+    # would be a permanent phantom.
+    check("no pad_pairs_open key (no phantom cross-outline 'partial')",
+          'pad_pairs_open' not in summary)
+    check("results_data pad_pairs_open empty (parity)",
+          results_data.get('pad_pairs_open') == [])
+    # And the failure lists agree: the sweep's net_break_within_outlines
+    # scrubbed the cross-outline split, so Z is not reported failed.
+    fm = [d.get('net_name') if isinstance(d, dict) else d
+          for d in summary.get('failed_multipoint', [])]
+    check("Z not in failed_multipoint", 'Z' not in fm)
+    check("Z not in failed_single", 'Z' not in summary.get('failed_single', []))
+
+
 def main():
     print("=" * 60)
     print("PR #432 follow-up: pad-pair tallies in JSON_SUMMARY")
@@ -249,6 +310,7 @@ def main():
     scenario_a()
     scenario_b()
     scenario_c()
+    scenario_d()
     failed = [n for n, okk in CHECKS if not okk]
     print("-" * 60)
     print(f"{len(CHECKS) - len(failed)}/{len(CHECKS)} checks passed")

@@ -400,6 +400,50 @@ def net_break_within_outlines(pcb_data, result):
     return True, (kept or dps)
 
 
+def net_pad_pairs_within_outlines(pcb_data, result, pads):
+    """Outline-aware pad-pair credit for route.py's #409 tallies. Pairs are
+    counted WITHIN each outer Edge.Cuts outline -- pads split across outlines
+    are joined by a board-to-board connector at assembly, never by copper
+    (#479), so a cross-outline gap is neither a routable pair nor an open one.
+    Returns (pairs_total, pairs_connected). Single-outline boards degenerate
+    to (P - 1, P - num_components) with the clamps the tally always applied:
+    num_components == 0 (no pad visible to the union-find -- the padless-copper
+    answer) grades as fully connected, and pads invisible to the union-find
+    can never push connected above total. The same clamps apply per outline."""
+    num_pads = len(pads)
+    k = result.get('num_components') or 0
+    outs = getattr(pcb_data.board_info, 'board_outlines', None) or []
+    if len(outs) < 2:
+        total = max(0, num_pads - 1)
+        conn = total if k <= 0 else min(total, max(0, num_pads - k))
+        return total, conn
+
+    def _which(px, py):
+        for _i, _poly in enumerate(outs):
+            if point_in_polygon(px, py, _poly):
+                return _i
+        return None
+
+    # Pads per outline (a pad outside every outline is its own None bucket,
+    # consistent with net_break_within_outlines), and the union-find's
+    # distinct components per outline.
+    pads_per: Dict[Optional[int], int] = {}
+    for _p in pads:
+        _oi = _which(_p.global_x, _p.global_y)
+        pads_per[_oi] = pads_per.get(_oi, 0) + 1
+    comps_per: Dict[Optional[int], Set[int]] = {}
+    for _loc, _comp in (result.get('pad_components') or {}).items():
+        comps_per.setdefault(_which(_loc[0], _loc[1]), set()).add(_comp)
+    total = 0
+    conn = 0
+    for _oi, _n in pads_per.items():
+        _t = _n - 1
+        _k = len(comps_per.get(_oi, ()))
+        total += _t
+        conn += _t if _k <= 0 else min(_t, max(0, _n - _k))
+    return total, conn
+
+
 def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via],
                            pads: List[Pad], zones: List[Zone] = None,
                            tolerance: float = 0.02,

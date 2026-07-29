@@ -1795,7 +1795,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # filter_already_routed and check_connected.py use); the stricter geometric
     # pad-group split wrongly splits genuinely-connected power/bus nets.
     from check_connected import (check_net_connectivity,
-                                 net_break_within_outlines)
+                                 net_break_within_outlines,
+                                 net_pad_pairs_within_outlines)
     # Per-net copper as it will be WRITTEN: the input board's original copper
     # MINUS everything the writer strips (cleanup strip lists + the #220/#284
     # stale strips of ripped/re-routed nets) plus the write-list's new copper.
@@ -1834,9 +1835,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _zones_by_net: Dict[int, list] = {}
     for _z in getattr(pcb_data, 'zones', []) or []:
         _zones_by_net.setdefault(_z.net_id, []).append(_z)
-    # (num_pads, pad_components) per graded net -- raw material for the
-    # pad-pair tallies emitted with the summary (#409 follow-up). Filled by
-    # the sweep below and by the straggler grading at summary time.
+    # (pairs_total, pairs_connected) per graded net, outline-aware -- raw
+    # material for the pad-pair tallies emitted with the summary (#409
+    # follow-up). Filled by the sweep below and by the straggler grading at
+    # summary time.
     _pad_pair_stats: Dict[int, Tuple[int, int]] = {}
     for _nid, _res in routed_results.items():
         if _nid in state.diff_pair_by_net_id:
@@ -1871,9 +1873,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         if _res.get('is_multipoint'):
             _res['tap_pads_total'] = len(_pads)
             _res['tap_pads_connected'] = len(_pads) - len(_dp)
-        # #409 follow-up: keep this net's pad/component counts for the pad-pair
-        # tallies (num_components is otherwise discarded by this sweep).
-        _pad_pair_stats[_nid] = (len(_pads), _r.get('num_components') or 0)
+        # #409 follow-up: keep this net's outline-aware pair credit for the
+        # pad-pair tallies (num_components is otherwise discarded by this
+        # sweep). Cross-outline gaps are neither routable nor open (#479).
+        _pad_pair_stats[_nid] = net_pad_pairs_within_outlines(
+            pcb_data, _r, _pads)
 
     # Collect multi-point tap routing stats and failed pad details
     tap_pads_connected = 0
@@ -2089,17 +2093,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         blockers_report = []
     # #409 follow-up: pad-pair routability tallies (PRR ingredients: connected
     # = |pads| - pad components from the authoritative union-find above, total
-    # = |pads| - 1) plus a per-open-net outcome. Population: every multi-pad
-    # net graded against the WRITTEN board -- the sweep over routed_results
-    # (which includes pre-existing rippable nets) plus scope nets with no
-    # result and coverage-gate nets, graded here identically. NOT reconcilable
-    # with multipoint_edges_* (component-MST: pre-existing copper joins
-    # terminals, so there are fewer edges than pad pairs). route.py runs no
-    # DRC, so every route-time deficit is an 'open'; shorts are check_drc.py's
-    # domain ('outcome' exists so a DRC-integrated emitter can add 'short'
-    # without a schema break). Computed before the final reconciliation, like
-    # 'blockers'. Single-outline semantics: once rebased onto #479's
-    # net_break_within_outlines, derive per-outline from pad_components.
+    # = |pads| - 1, both counted per outer outline -- a cross-outline gap is
+    # neither a routable pair nor an open one, matching #479's
+    # net_break_within_outlines semantics) plus a per-open-net outcome.
+    # Population: every multi-pad net graded against the WRITTEN board -- the
+    # sweep over routed_results (which includes pre-existing rippable nets)
+    # plus scope nets with no result and coverage-gate nets, graded here
+    # identically. NOT reconcilable with multipoint_edges_* (component-MST:
+    # pre-existing copper joins terminals, so there are fewer edges than pad
+    # pairs). route.py runs no DRC, so every route-time deficit is an 'open';
+    # shorts are check_drc.py's domain ('outcome' exists so a DRC-integrated
+    # emitter can add 'short' without a schema break). Computed before the
+    # final reconciliation, like 'blockers'.
     pad_pairs_open_report = []
     try:
         _straggler_ids = list(failed_single_ids) + \
@@ -2114,16 +2119,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 _nid, _segs_by_net.get(_nid, []), _vias_by_net.get(_nid, []),
                 _pads, _zones_by_net.get(_nid, []), tolerance=0.02,
                 pcb_data=pcb_data)
-            _pad_pair_stats[_nid] = (len(_pads), _r.get('num_components') or 0)
+            _pad_pair_stats[_nid] = net_pad_pairs_within_outlines(
+                pcb_data, _r, _pads)
         _pp_conn = 0
         _pp_total = 0
         _refused = set(state.collision_refused_net_ids or set())
-        for _nid, (_np, _k) in _pad_pair_stats.items():
-            _pt = _np - 1
-            # k == 0 means no pad was visible to the union-find (padless-copper
-            # answer from check_net_connectivity): grade as fully connected,
-            # and never let invisible pads push connected above total.
-            _pc = _pt if _k <= 0 else min(_pt, max(0, _np - _k))
+        for _nid, (_pt, _pc) in _pad_pair_stats.items():
+            # The k == 0 (padless-copper answer) and invisible-pad clamps live
+            # in net_pad_pairs_within_outlines, applied per outline.
             _pp_total += _pt
             _pp_conn += _pc
             if _pc >= _pt:
