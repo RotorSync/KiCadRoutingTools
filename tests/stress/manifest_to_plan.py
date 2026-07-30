@@ -61,6 +61,8 @@ FLAG_PARAMS = {
     '--impedance': 'impedance',
     '--coplanar-gap': 'coplanar_gap',
     '--gnd-via-distance': 'gnd_via_distance',
+    # #485: route_planes area via stitching -- lattice pitch (a value flag).
+    '--stitch-pitch': 'stitch_pitch',
     '--exit-margin': 'exit_margin',
     '--extension': 'extension',
     '--max-track-width': 'max_track_width',
@@ -87,6 +89,9 @@ LIST_FLAGS = {
 BOOL_FLAGS = {
     '--rip-blocker-nets': 'rip_blocker_nets',
     '--add-gnd-vias': 'add_gnd_vias',
+    # #485: route_planes area via stitching toggle (planes-tab checkbox
+    # stitch_vias, applied by the plan executor's generic loop).
+    '--stitch-vias': 'stitch_vias',
     '--no-gnd-vias': 'no_gnd_vias',
     # route.py spells it --no-bga-zones (plural, nargs='*'); bga_fanout uses the
     # singular. Both map to the GUI's no_bga_zone special (bare = exclude ALL).

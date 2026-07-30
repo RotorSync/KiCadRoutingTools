@@ -2278,6 +2278,10 @@ class RoutingDialog(wx.Dialog):
                 if hasattr(_po, 'zone_clearance'):
                     _po.zone_clearance.SetValue(defaults.PLANE_ZONE_CLEARANCE)
                     _po.zone_clearance.Enable(False)
+            if hasattr(_po, 'stitch_vias'):
+                _po.stitch_vias.SetValue(False)
+            if hasattr(_po, 'stitch_pitch'):
+                _po.stitch_pitch.SetValue(defaults.STITCH_PITCH)
             if hasattr(_po, 'add_gnd_vias_check'):
                 _po.add_gnd_vias_check.SetValue(False)
             if hasattr(_po, 'gnd_via_distance'):

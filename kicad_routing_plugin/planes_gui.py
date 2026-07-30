@@ -347,6 +347,35 @@ class CreatePlanesOptionsPanel(wx.Panel):
 
         sizer.Add(ripup_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
 
+        # Area via stitching (#485). Controls named after the engine params
+        # (stitch_vias / stitch_pitch) so AI plans can set them.
+        stitch_box = wx.StaticBox(self, label="Area Via Stitching")
+        stitch_sizer = wx.StaticBoxSizer(stitch_box, wx.VERTICAL)
+
+        self.stitch_vias = wx.CheckBox(self, label="Stitch plane layers with a via lattice")
+        self.stitch_vias.SetValue(False)
+        self.stitch_vias.SetToolTip(
+            "Bond each plane net's pours across layers with a periodic via "
+            "lattice (EMI/SI practice). Applies to the selected plane nets "
+            "that own 2+ plane layers; every site is checked against the "
+            "predicted zone fill and the same clearance/hole-to-hole/edge "
+            "rules as pad-tap vias.")
+        stitch_sizer.Add(self.stitch_vias, 0, wx.ALL, 5)
+
+        stitch_grid = wx.FlexGridSizer(cols=2, hgap=10, vgap=5)
+        stitch_grid.AddGrowableCol(1)
+        stitch_grid.Add(wx.StaticText(self, label="Lattice Pitch (mm):"), 0,
+                        wx.ALIGN_CENTER_VERTICAL)
+        r = defaults.PARAM_RANGES['stitch_pitch']
+        self.stitch_pitch = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
+                                              initial=defaults.STITCH_PITCH,
+                                              inc=r['inc'])
+        self.stitch_pitch.SetDigits(r['digits'])
+        self.stitch_pitch.SetToolTip("Spacing between stitching vias")
+        stitch_grid.Add(self.stitch_pitch, 0, wx.EXPAND)
+        stitch_sizer.Add(stitch_grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+        sizer.Add(stitch_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
+
         # GND Return Vias section
         gnd_box = wx.StaticBox(self, label="GND Return Vias")
         gnd_sizer = wx.StaticBoxSizer(gnd_box, wx.VERTICAL)
@@ -413,6 +442,8 @@ class CreatePlanesOptionsPanel(wx.Panel):
             'same_net_pad_clearance': same_net_clr,
             'thermal_relief': self.thermal_relief.GetValue(),
             'thermal_vias': self.thermal_vias.GetValue(),
+            'stitch_vias': self.stitch_vias.GetValue(),
+            'stitch_pitch': self.stitch_pitch.GetValue(),
         }
 
 
@@ -1062,6 +1093,8 @@ class PlanesTab(wx.Panel):
                 min_thickness=config.get('min_thickness', defaults.PLANE_MIN_THICKNESS),
                 thermal_relief=config.get('thermal_relief', False),
                 thermal_vias=config.get('thermal_vias', defaults.THERMAL_VIAS),
+                stitch_vias=config.get('stitch_vias', False),
+                stitch_pitch=config.get('stitch_pitch', defaults.STITCH_PITCH),
                 grid_step=config.get('grid_step', defaults.GRID_STEP),
                 max_search_radius=config.get('max_search_radius', defaults.PLANE_MAX_SEARCH_RADIUS),
                 max_via_reuse_radius=config.get('max_via_reuse_radius', defaults.PLANE_MAX_VIA_REUSE_RADIUS),

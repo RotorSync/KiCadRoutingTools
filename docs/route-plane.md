@@ -122,6 +122,37 @@ After writing output, `route_planes.py` runs a **geometric verification** pass: 
 | `--verbose`, `-v` | Print detailed debug messages |
 | `--debug-lines` | Draw MST routes on User.1, User.2, etc. per net |
 
+### Area Via Stitching (#485)
+
+A deliberate, periodic lattice of vias bonding a plane net's pours across the
+copper layers it owns — the standard SI/EMI/thermal practice of stitching a
+plane pair, rather than relying on wherever pad taps happened to land.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--stitch-vias` | off | Enable area via stitching on this run's plane nets |
+| `--stitch-pitch` | 20.0 | Lattice pitch (mm) |
+
+The stitched nets are always the `--nets` that own **two or more** of the
+`--plane-layers` — there is deliberately no net-selection flag. Each lattice
+site is accepted only when:
+
+1. The predicted zone fill (the same `ZoneFillModel` the tap placement uses)
+   contains the via **plus its clearance pocket plus a `min_thickness` ring**
+   inside the *main* fill component on at least 2 of the net's layers — so a
+   stitch never necks the pour below minimum thickness locally and never taps
+   an isolated fill island.
+2. The via obstacle map pad taps use clears the site (foreign copper at
+   cross-class clearance, drill hole-to-hole, board edge, per-layer
+   `.kicad_dru` rules).
+
+A site already within `pitch/2` of a same-net via or plated through-hole
+barrel is coverage-satisfied and skipped; a blocked site is nudged outward up
+to `pitch/4` before being given up. The pass reports a coverage metric (max
+lattice-site distance to the nearest same-net bond, before → after) and runs
+in `--dry-run` too. The GUI planes tab exposes the same controls ("Area Via
+Stitching").
+
 ### GND Return Via Placement
 
 When a signal transitions between layers via a via, the return current on the GND plane must also

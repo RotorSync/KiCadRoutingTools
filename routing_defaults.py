@@ -96,6 +96,13 @@ ADD_GND_VIAS = False  # If True, add GND vias near signal vias
 GND_VIA_NET = ""  # Net name for GND vias ("" = auto, per ground domain)
 GND_VIA_DISTANCE = 2.0  # mm - max distance from signal via to GND via
 
+# Area via stitching (#485): lattice pitch for bonding a plane net's pours
+# across the layers it owns. Off by default (route_planes --stitch-vias /
+# the planes tab checkbox turns it on); the stitched nets are always the
+# requested plane nets owning >= 2 plane layers -- deliberately no selection
+# knob.
+STITCH_PITCH = 20.0  # mm
+
 # Algorithm parameters
 MAX_ITERATIONS = 200000
 HEURISTIC_WEIGHT = 1.9
@@ -304,6 +311,7 @@ PARAM_RANGES = {
     'meander_spacing': {'min': 1.0, 'max': 10.0, 'inc': 0.5, 'digits': 1},
     'time_match_tolerance': {'min': 0.1, 'max': 50.0, 'inc': 0.1, 'digits': 1},
     'gnd_via_distance': {'min': 0.5, 'max': 10.0, 'inc': 0.5, 'digits': 1},
+    'stitch_pitch': {'min': 1.0, 'max': 100.0, 'inc': 1.0, 'digits': 1},
     # Fanout parameters
     'exit_margin': {'min': 0.1, 'max': 5.0, 'inc': 0.1, 'digits': 1},
     'diff_pair_gap': {'min': 0.05, 'max': 5.0, 'inc': 0.01, 'digits': 2},
