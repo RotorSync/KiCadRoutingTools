@@ -222,6 +222,10 @@ def get_dialog_settings(dialog):
         'planes_gnd_via_distance': dialog.planes_tab.create_options.gnd_via_distance.GetValue(),
         'planes_stitch_vias': dialog.planes_tab.create_options.stitch_vias.GetValue(),
         'planes_stitch_pitch': dialog.planes_tab.create_options.stitch_pitch.GetValue(),
+        'planes_stitch_edge_fence': dialog.planes_tab.create_options.stitch_edge_fence.GetValue(),
+        'planes_stitch_fence_pitch': dialog.planes_tab.create_options.stitch_fence_pitch.GetValue(),
+        'planes_stitch_inset': dialog.planes_tab.create_options.stitch_inset.GetValue(),
+        'planes_stitch_max_freq': dialog.planes_tab.create_options.stitch_max_freq.GetValue(),
         'planes_gnd_via_net': dialog.planes_tab.create_options.gnd_via_net.GetValue(),
         # Repair mode options
         'planes_repair_max_track_width': dialog.planes_tab.repair_options.max_track_width.GetValue(),
@@ -683,6 +687,14 @@ def restore_dialog_settings(dialog, settings):
         dialog.planes_tab.create_options.stitch_vias.SetValue(settings['planes_stitch_vias'])
     if 'planes_stitch_pitch' in settings:
         dialog.planes_tab.create_options.stitch_pitch.SetValue(settings['planes_stitch_pitch'])
+    if 'planes_stitch_edge_fence' in settings:
+        dialog.planes_tab.create_options.stitch_edge_fence.SetValue(settings['planes_stitch_edge_fence'])
+    if 'planes_stitch_fence_pitch' in settings:
+        dialog.planes_tab.create_options.stitch_fence_pitch.SetValue(settings['planes_stitch_fence_pitch'])
+    if 'planes_stitch_inset' in settings:
+        dialog.planes_tab.create_options.stitch_inset.SetValue(settings['planes_stitch_inset'])
+    if 'planes_stitch_max_freq' in settings:
+        dialog.planes_tab.create_options.stitch_max_freq.SetValue(settings['planes_stitch_max_freq'])
     if 'planes_gnd_via_net' in settings:
         dialog.planes_tab.create_options.gnd_via_net.SetValue(settings['planes_gnd_via_net'])
     # Repair mode options

@@ -2282,6 +2282,14 @@ class RoutingDialog(wx.Dialog):
                 _po.stitch_vias.SetValue(False)
             if hasattr(_po, 'stitch_pitch'):
                 _po.stitch_pitch.SetValue(defaults.STITCH_PITCH)
+            if hasattr(_po, 'stitch_edge_fence'):
+                _po.stitch_edge_fence.SetValue(False)
+            if hasattr(_po, 'stitch_fence_pitch'):
+                _po.stitch_fence_pitch.SetValue(0.0)  # 0 = follow lattice pitch
+            if hasattr(_po, 'stitch_inset'):
+                _po.stitch_inset.SetValue(0.0)        # 0 = auto
+            if hasattr(_po, 'stitch_max_freq'):
+                _po.stitch_max_freq.SetValue(0.0)     # 0 = off
             if hasattr(_po, 'add_gnd_vias_check'):
                 _po.add_gnd_vias_check.SetValue(False)
             if hasattr(_po, 'gnd_via_distance'):

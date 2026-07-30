@@ -132,6 +132,10 @@ plane pair, rather than relying on wherever pad taps happened to land.
 |--------|---------|-------------|
 | `--stitch-vias` | off | Enable area via stitching on this run's plane nets |
 | `--stitch-pitch` | 20.0 | Lattice pitch (mm) |
+| `--stitch-max-freq` | — | Maximum frequency of interest (MHz): derives the pitch as λ/20 using the largest dielectric ε_r in the board's stackup (FR-4 4.5 if none), overriding `--stitch-pitch` |
+| `--stitch-edge-fence` | off | Board-edge via fence: a via row tracking the board outline(s) (EMI guard ring); works with or without `--stitch-vias` |
+| `--stitch-fence-pitch` | *lattice pitch* | Via spacing along the fence (mm) |
+| `--stitch-inset` | *auto* | Fence distance from the board edge to the via centers (mm). Auto = the board edge clearance plus the fill-margin ring — as close as a via can sit and keep the pour intact |
 
 The stitched nets are always the `--nets` that own **two or more** of the
 `--plane-layers` — there is deliberately no net-selection flag. Each lattice
@@ -152,6 +156,13 @@ to `pitch/4` before being given up. The pass reports a coverage metric (max
 lattice-site distance to the nearest same-net bond, before → after) and runs
 in `--dry-run` too. The GUI planes tab exposes the same controls ("Area Via
 Stitching").
+
+The **edge fence** samples the true `Edge.Cuts` polygon(s) — a panelized
+board fences every outline — inset toward the interior, and validates each
+site with the exact same fill and obstacle gates as the lattice. The fence
+runs *before* the lattice, so fence vias count as existing bonds for the
+lattice's coverage rule and the rim is not stitched twice. Interior cutouts
+are not fenced.
 
 ### GND Return Via Placement
 

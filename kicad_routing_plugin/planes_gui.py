@@ -362,6 +362,16 @@ class CreatePlanesOptionsPanel(wx.Panel):
             "rules as pad-tap vias.")
         stitch_sizer.Add(self.stitch_vias, 0, wx.ALL, 5)
 
+        self.stitch_edge_fence = wx.CheckBox(
+            self, label="Board-edge via fence (EMI guard ring)")
+        self.stitch_edge_fence.SetValue(False)
+        self.stitch_edge_fence.SetToolTip(
+            "Add a row of stitching vias tracking the board outline(s). Same "
+            "net rule and site checks as the lattice; works with or without "
+            "it.")
+        stitch_sizer.Add(self.stitch_edge_fence, 0,
+                         wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
         stitch_grid = wx.FlexGridSizer(cols=2, hgap=10, vgap=5)
         stitch_grid.AddGrowableCol(1)
         stitch_grid.Add(wx.StaticText(self, label="Lattice Pitch (mm):"), 0,
@@ -373,6 +383,40 @@ class CreatePlanesOptionsPanel(wx.Panel):
         self.stitch_pitch.SetDigits(r['digits'])
         self.stitch_pitch.SetToolTip("Spacing between stitching vias")
         stitch_grid.Add(self.stitch_pitch, 0, wx.EXPAND)
+
+        stitch_grid.Add(wx.StaticText(self, label="Max Frequency (MHz, 0=off):"),
+                        0, wx.ALIGN_CENTER_VERTICAL)
+        r = defaults.PARAM_RANGES['stitch_max_freq']
+        self.stitch_max_freq = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
+                                                 initial=0.0, inc=r['inc'])
+        self.stitch_max_freq.SetDigits(r['digits'])
+        self.stitch_max_freq.SetToolTip(
+            "Maximum frequency of interest: derives the pitch as lambda/20 "
+            "from the stackup's dielectric (overrides Lattice Pitch). 0 = "
+            "use Lattice Pitch as-is.")
+        stitch_grid.Add(self.stitch_max_freq, 0, wx.EXPAND)
+
+        stitch_grid.Add(wx.StaticText(self, label="Fence Pitch (mm, 0=lattice):"),
+                        0, wx.ALIGN_CENTER_VERTICAL)
+        r = defaults.PARAM_RANGES['stitch_fence_pitch']
+        self.stitch_fence_pitch = wx.SpinCtrlDouble(self, min=r['min'],
+                                                    max=r['max'],
+                                                    initial=0.0, inc=r['inc'])
+        self.stitch_fence_pitch.SetDigits(r['digits'])
+        self.stitch_fence_pitch.SetToolTip(
+            "Via spacing along the edge fence. 0 = follow the lattice pitch.")
+        stitch_grid.Add(self.stitch_fence_pitch, 0, wx.EXPAND)
+
+        stitch_grid.Add(wx.StaticText(self, label="Fence Inset (mm, 0=auto):"),
+                        0, wx.ALIGN_CENTER_VERTICAL)
+        r = defaults.PARAM_RANGES['stitch_inset']
+        self.stitch_inset = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
+                                              initial=0.0, inc=r['inc'])
+        self.stitch_inset.SetDigits(r['digits'])
+        self.stitch_inset.SetToolTip(
+            "Distance from the board edge to the fence via centers. 0 = "
+            "auto (edge clearance + the pour's fill margin).")
+        stitch_grid.Add(self.stitch_inset, 0, wx.EXPAND)
         stitch_sizer.Add(stitch_grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
         sizer.Add(stitch_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
 
@@ -444,6 +488,11 @@ class CreatePlanesOptionsPanel(wx.Panel):
             'thermal_vias': self.thermal_vias.GetValue(),
             'stitch_vias': self.stitch_vias.GetValue(),
             'stitch_pitch': self.stitch_pitch.GetValue(),
+            # 0 = auto/off in the controls -> None for the engine (CLI parity)
+            'stitch_edge_fence': self.stitch_edge_fence.GetValue(),
+            'stitch_fence_pitch': self.stitch_fence_pitch.GetValue() or None,
+            'stitch_inset': self.stitch_inset.GetValue() or None,
+            'stitch_max_freq': self.stitch_max_freq.GetValue() or None,
         }
 
 
@@ -1095,6 +1144,10 @@ class PlanesTab(wx.Panel):
                 thermal_vias=config.get('thermal_vias', defaults.THERMAL_VIAS),
                 stitch_vias=config.get('stitch_vias', False),
                 stitch_pitch=config.get('stitch_pitch', defaults.STITCH_PITCH),
+                stitch_edge_fence=config.get('stitch_edge_fence', False),
+                stitch_fence_pitch=config.get('stitch_fence_pitch'),
+                stitch_inset=config.get('stitch_inset'),
+                stitch_max_freq=config.get('stitch_max_freq'),
                 grid_step=config.get('grid_step', defaults.GRID_STEP),
                 max_search_radius=config.get('max_search_radius', defaults.PLANE_MAX_SEARCH_RADIUS),
                 max_via_reuse_radius=config.get('max_via_reuse_radius', defaults.PLANE_MAX_VIA_REUSE_RADIUS),

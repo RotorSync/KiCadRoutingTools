@@ -2350,6 +2350,65 @@ def compute_thermal_via_array(pad, obstacles, coord, config, via_size,
     return sites
 
 
+def _stitch_pitch_from_freq(pcb_data: PCBData, max_freq_mhz: float,
+                            floor_mm: float = 1.0):
+    """lambda/20 stitching pitch for a maximum frequency of interest (#485).
+
+    Uses the LARGEST dielectric epsilon_r in the board's stackup
+    (conservative: the highest permittivity gives the shortest in-material
+    wavelength, hence the tightest pitch); FR-4's 4.5 when the board has no
+    stackup section. Floored at ``floor_mm`` -- below that the via-via
+    spacing floors reject most sites anyway and the lattice loop cost
+    explodes.
+
+    Returns (pitch_mm, epsilon_r, epsilon_from_stackup, lambda_mm).
+    """
+    import math
+    ers = [sl.epsilon_r for sl in (pcb_data.board_info.stackup or [])
+           if sl.layer_type in ('core', 'prepreg') and sl.epsilon_r]
+    er = max(ers) if ers else 4.5
+    lam_mm = 299792.458 / (max_freq_mhz * math.sqrt(er))  # c = 299792.458 mm*MHz
+    return max(lam_mm / 20.0, floor_mm), er, bool(ers), lam_mm
+
+
+def _fence_ring_points(pcb_data: PCBData, inset: float,
+                       pitch: float) -> List[Tuple[float, float]]:
+    """Candidate sites for a board-edge via fence (#485): the board outline(s)
+    offset ``inset`` toward the interior, sampled at ~``pitch`` arc-length
+    spacing. Uses the true Edge.Cuts polygon(s) when present -- a panelized
+    board fences EVERY outline (#304) -- else the bounding box. Interior
+    cutouts are not fenced. An inset that swallows a narrow board region
+    simply yields no ring there (shapely negative buffer)."""
+    from shapely.geometry import Polygon
+    bi = pcb_data.board_info
+    rings = [o for o in (getattr(bi, 'board_outlines', None) or [])
+             if len(o) >= 3]
+    if not rings:
+        if not bi.board_bounds:
+            return []
+        min_x, min_y, max_x, max_y = bi.board_bounds
+        rings = [[(min_x, min_y), (max_x, min_y),
+                  (max_x, max_y), (min_x, max_y)]]
+    pts: List[Tuple[float, float]] = []
+    for ring in rings:
+        try:
+            poly = Polygon(ring)
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            inner = poly.buffer(-inset, join_style=2)
+        except Exception:
+            continue
+        for g in getattr(inner, 'geoms', [inner]):
+            ext = getattr(g, 'exterior', None)
+            if g.is_empty or ext is None:
+                continue
+            n = max(4, int(round(ext.length / pitch)))
+            for i in range(n):
+                p = ext.interpolate(ext.length * i / n)
+                pts.append((p.x, p.y))
+    return pts
+
+
 def _stitch_plane_area_vias(
     pcb_data: PCBData,
     net_names: List[str],
@@ -2363,16 +2422,28 @@ def _stitch_plane_area_vias(
     via_drill: float,
     hole_to_hole_clearance: float,
     same_net_pad_clearance: float,
+    stitch_lattice: bool = True,
+    stitch_edge_fence: bool = False,
+    stitch_fence_pitch: Optional[float] = None,
+    stitch_inset: Optional[float] = None,
+    board_edge_clearance: float = defaults.PLANE_EDGE_CLEARANCE,
     progress_callback=None,
     cancel_check=None,
     verbose: bool = False,
 ) -> List[Dict]:
-    """Area via stitching (#485): bond each multi-layer plane net's pours
-    across layers with a periodic via lattice at ``stitch_pitch``.
+    """Area via stitching + board-edge via fence (#485): bond each
+    multi-layer plane net's pours across layers with a periodic via lattice
+    at ``stitch_pitch`` (``stitch_lattice``), and/or run a via row along the
+    board outline (``stitch_edge_fence``) at ``stitch_fence_pitch`` (default:
+    the lattice pitch), inset ``stitch_inset`` from the edge (default: the
+    board edge clearance plus the fill-margin ring, i.e. as close as a site
+    can sit and still pass the fill gate). The fence runs FIRST so the
+    lattice's coverage rule treats fence vias as existing bonds instead of
+    doubling them up near the rim.
 
     Nets stitched: exactly the requested plane nets that own >= 2 of the
-    requested plane layers (deliberately no CLI selection). Every lattice
-    site is gated twice:
+    requested plane layers (deliberately no CLI selection). Every site --
+    fence or lattice -- is gated twice:
 
     - Predicted fill (ZoneFillModel over this run's zone geometry, or a kept
       existing zone): the via disk PLUS its clearance pocket PLUS a
@@ -2426,13 +2497,12 @@ def _stitch_plane_area_vias(
     lattice = [(x0 + i * stitch_pitch, y0 + j * stitch_pitch)
                for j in range(ny) for i in range(nx)]
 
-    # Nudge-search geometry: rings at ~coarse steps out to pitch/4, each
+    # Nudge-search geometry: rings at ~coarse steps out to max_nudge, each
     # candidate snapped to the routing grid (an off-grid site can sit up to
     # half a cell inside an obstacle the grid check calls clear).
     nudge_step = max(config.grid_step, min(0.5, stitch_pitch / 40))
-    max_nudge = stitch_pitch / 4
 
-    def _candidates(cx, cy):
+    def _candidates(cx, cy, max_nudge):
         yield (round(cx / config.grid_step) * config.grid_step,
                round(cy / config.grid_step) * config.grid_step)
         r = nudge_step
@@ -2530,60 +2600,95 @@ def _stitch_plane_area_vias(
             return min((math.hypot(x - bx, y - by) for bx, by in bonds),
                        default=float('inf'))
 
-        print(f"\nVia stitching '{net_name}' across "
-              f"{'/'.join(sorted(models_by_layer))} at {stitch_pitch}mm pitch "
-              f"({len(lattice)} lattice sites)")
         obstacles = build_via_obstacle_map(
             pcb_data, config, net_id, verbose=False,
             same_net_pad_clearance=same_net_pad_clearance)
         # Vias stitched for earlier nets in this pass are already in
         # pcb_data.vias (appended below), so the map above blocks them.
 
-        placed = covered = no_fill = blocked = 0
-        max_dist_before = max_dist_after = 0.0
-        for cx, cy in lattice:
-            n_fill = _fill_layers_ok(cx, cy)
-            if n_fill < 2:
-                no_fill += 1
-                continue
+        def _try_site(cx, cy, pitch_local, max_nudge):
+            """Gate + place one site. Returns (outcome, d0) where outcome is
+            'no_fill' | 'covered' | 'blocked' | 'placed' and d0 the pre-place
+            distance to the nearest same-net bond (None for no_fill)."""
+            if _fill_layers_ok(cx, cy) < 2:
+                return 'no_fill', None
             d0 = _nearest_bond(cx, cy)
-            max_dist_before = max(max_dist_before, d0)
-            if d0 <= stitch_pitch / 2:
-                covered += 1
-                max_dist_after = max(max_dist_after, d0)
-                continue
-            site = None
-            for x, y in _candidates(cx, cy):
+            if d0 <= pitch_local / 2:
+                return 'covered', d0
+            for x, y in _candidates(cx, cy, max_nudge):
                 gx, gy = coord.to_grid(x, y)
                 if obstacles.is_via_blocked(gx, gy):
                     continue
                 if _fill_layers_ok(x, y) < 2:
                     continue
-                site = (x, y)
-                break
-            if site is None:
-                blocked += 1
-                max_dist_after = max(max_dist_after, d0)
-                continue
-            x, y = site
-            new_via_dicts.append({
-                'x': x, 'y': y, 'size': via_size, 'drill': via_drill,
-                'layers': ['F.Cu', 'B.Cu'], 'net_id': net_id,
-            })
-            pcb_data.vias.append(Via(x=x, y=y, size=via_size, drill=via_drill,
-                                     layers=['F.Cu', 'B.Cu'], net_id=net_id))
-            block_via_position(obstacles, x, y, coord, hole_to_hole_clearance,
-                               via_drill, via_size, config.clearance)
-            bonds.append((x, y))
-            placed += 1
-            max_dist_after = max(max_dist_after, _nearest_bond(cx, cy))
+                new_via_dicts.append({
+                    'x': x, 'y': y, 'size': via_size, 'drill': via_drill,
+                    'layers': ['F.Cu', 'B.Cu'], 'net_id': net_id,
+                })
+                pcb_data.vias.append(Via(x=x, y=y, size=via_size,
+                                         drill=via_drill,
+                                         layers=['F.Cu', 'B.Cu'],
+                                         net_id=net_id))
+                block_via_position(obstacles, x, y, coord,
+                                   hole_to_hole_clearance, via_drill,
+                                   via_size, config.clearance)
+                bonds.append((x, y))
+                return 'placed', d0
+            return 'blocked', d0
 
-        print(f"  Stitch vias placed: {placed}  "
-              f"(covered by existing via/barrel: {covered}, "
-              f"no 2-layer fill: {no_fill}, no clear site: {blocked})")
-        if max_dist_before > 0:
-            print(f"  Max lattice-site distance to nearest same-net bond: "
-                  f"{max_dist_before:.1f}mm -> {max_dist_after:.1f}mm")
+        # Board-edge via fence first: fence vias then count as bonds for the
+        # lattice's coverage rule, so the rim isn't stitched twice.
+        if stitch_edge_fence:
+            fpitch = stitch_fence_pitch or stitch_pitch
+            max_margin = max(m for lms in models_by_layer.values()
+                             for (_mod, _comp, m) in lms)
+            # Auto inset: edge clearance + the fill-margin ring puts the
+            # ring samples exactly ON the pour boundary, where model cell
+            # quantization flips sites arbitrarily -- cushion past it.
+            inset = stitch_inset if stitch_inset else \
+                board_edge_clearance + max_margin + 0.2
+            ring = _fence_ring_points(pcb_data, inset, fpitch)
+            print(f"\nEdge via fence '{net_name}' at {fpitch:g}mm pitch, "
+                  f"{inset:.2f}mm inset ({len(ring)} outline sites)")
+            f_counts = {'placed': 0, 'covered': 0, 'no_fill': 0, 'blocked': 0}
+            for cx, cy in ring:
+                outcome, _d0 = _try_site(cx, cy, fpitch, fpitch / 4)
+                f_counts[outcome] += 1
+            print(f"  Fence vias placed: {f_counts['placed']}  "
+                  f"(covered by existing via/barrel: {f_counts['covered']}, "
+                  f"no 2-layer fill: {f_counts['no_fill']}, "
+                  f"no clear site: {f_counts['blocked']})")
+
+        if stitch_lattice:
+            print(f"\nVia stitching '{net_name}' across "
+                  f"{'/'.join(sorted(models_by_layer))} at {stitch_pitch:g}mm "
+                  f"pitch ({len(lattice)} lattice sites)")
+            placed = covered = no_fill = blocked = 0
+            max_dist_before = max_dist_after = 0.0
+            for cx, cy in lattice:
+                outcome, d0 = _try_site(cx, cy, stitch_pitch,
+                                        stitch_pitch / 4)
+                if outcome == 'no_fill':
+                    no_fill += 1
+                    continue
+                max_dist_before = max(max_dist_before, d0)
+                if outcome == 'covered':
+                    covered += 1
+                    max_dist_after = max(max_dist_after, d0)
+                elif outcome == 'blocked':
+                    blocked += 1
+                    max_dist_after = max(max_dist_after, d0)
+                else:
+                    placed += 1
+                    max_dist_after = max(max_dist_after,
+                                         _nearest_bond(cx, cy))
+
+            print(f"  Stitch vias placed: {placed}  "
+                  f"(covered by existing via/barrel: {covered}, "
+                  f"no 2-layer fill: {no_fill}, no clear site: {blocked})")
+            if max_dist_before > 0:
+                print(f"  Max lattice-site distance to nearest same-net bond: "
+                      f"{max_dist_before:.1f}mm -> {max_dist_after:.1f}mm")
 
     if new_via_dicts:
         print(f"\nVia stitching total: {len(new_via_dicts)} via(s) added")
@@ -2639,6 +2744,10 @@ def create_plane(
     thermal_vias: bool = defaults.THERMAL_VIAS,
     stitch_vias: bool = False,
     stitch_pitch: float = defaults.STITCH_PITCH,
+    stitch_edge_fence: bool = False,
+    stitch_fence_pitch: Optional[float] = None,
+    stitch_inset: Optional[float] = None,
+    stitch_max_freq: Optional[float] = None,
 ) -> Union[Tuple[int, int, int],
            Tuple[int, int, int, list, list, list, int, list]]:
     """
@@ -3862,15 +3971,35 @@ def create_plane(
                 all_debug_lines.extend(debug_line_sexprs)
                 all_zone_data.extend(zone_data)
 
-    # Area via stitching (#485): AFTER every pour's geometry and this run's
-    # tap copper exist, BEFORE the finalize/write split so the CLI file write
-    # and the GUI results path emit identical stitch vias. The pass appends
-    # its vias to pcb_data.vias itself.
-    if stitch_vias and not (cancel_check and cancel_check()):
+    # Area via stitching + edge fence (#485): AFTER every pour's geometry and
+    # this run's tap copper exist, BEFORE the finalize/write split so the CLI
+    # file write and the GUI results path emit identical stitch vias. The
+    # pass appends its vias to pcb_data.vias itself.
+    if (stitch_vias or stitch_edge_fence) and \
+            not (cancel_check and cancel_check()):
+        # Frequency-derived pitch: lambda/20 at the maximum frequency of
+        # interest, from the stackup's own dielectric. Overrides
+        # --stitch-pitch (the more specific intent wins); the fence pitch
+        # follows unless --stitch-fence-pitch is explicit.
+        if stitch_max_freq:
+            _p, _er, _from_stackup, _lam = _stitch_pitch_from_freq(
+                pcb_data, stitch_max_freq)
+            _src = "board stackup" if _from_stackup else "FR-4 default"
+            print(f"\nStitch pitch from max frequency {stitch_max_freq:g} "
+                  f"MHz: lambda = {_lam:.1f}mm (epsilon_r {_er:g}, {_src}) "
+                  f"-> lambda/20 pitch {_p:.2f}mm"
+                  + (f" (overrides pitch {stitch_pitch:g}mm)"
+                     if abs(_p - stitch_pitch) > 1e-9 else ""))
+            stitch_pitch = _p
         stitch_via_dicts = _stitch_plane_area_vias(
             pcb_data, net_names, plane_layers, net_ids, all_zone_data,
             config, coord, stitch_pitch, via_size, via_drill,
             hole_to_hole_clearance, same_net_pad_clearance,
+            stitch_lattice=stitch_vias,
+            stitch_edge_fence=stitch_edge_fence,
+            stitch_fence_pitch=stitch_fence_pitch,
+            stitch_inset=stitch_inset,
+            board_edge_clearance=board_edge_clearance,
             progress_callback=progress_callback, cancel_check=cancel_check,
             verbose=verbose)
         all_new_vias.extend(stitch_via_dicts)
@@ -4309,6 +4438,24 @@ Examples:
              "pad-tap vias use.")
     parser.add_argument("--stitch-pitch", type=float, default=defaults.STITCH_PITCH,
         help=f"Lattice pitch for --stitch-vias in mm (default: {defaults.STITCH_PITCH})")
+    parser.add_argument("--stitch-max-freq", type=float, default=None,
+        help="Maximum frequency of interest in MHz: derives the stitching "
+             "pitch as lambda/20 using the largest dielectric epsilon_r in "
+             "the board's stackup (FR-4 4.5 if the board has none), "
+             "overriding --stitch-pitch. The fence pitch follows unless "
+             "--stitch-fence-pitch is given.")
+    parser.add_argument("--stitch-edge-fence", action="store_true",
+        help="Board-edge via fence: a row of stitching vias tracking the "
+             "board outline(s) (EMI guard ring). Same net rule and site "
+             "gates as --stitch-vias; works with or without it.")
+    parser.add_argument("--stitch-fence-pitch", type=float, default=None,
+        help="Via spacing along the edge fence in mm (default: the stitch "
+             "pitch)")
+    parser.add_argument("--stitch-inset", type=float, default=None,
+        help="Fence distance from the board edge to the via centers in mm "
+             "(default: auto -- the board edge clearance plus the fill-margin "
+             "ring, i.e. as close to the edge as a via can sit and keep the "
+             "pour intact)")
 
     # GND return vias
     parser.add_argument("--add-gnd-vias", action="store_true",
@@ -4462,6 +4609,10 @@ Examples:
         thermal_vias=args.thermal_vias,
         stitch_vias=args.stitch_vias,
         stitch_pitch=args.stitch_pitch,
+        stitch_edge_fence=args.stitch_edge_fence,
+        stitch_fence_pitch=args.stitch_fence_pitch,
+        stitch_inset=args.stitch_inset,
+        stitch_max_freq=args.stitch_max_freq,
         grid_step=args.grid_step,
         max_search_radius=args.max_search_radius,
         max_via_reuse_radius=args.max_via_reuse_radius,

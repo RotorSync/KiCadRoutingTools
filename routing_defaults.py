@@ -312,6 +312,10 @@ PARAM_RANGES = {
     'time_match_tolerance': {'min': 0.1, 'max': 50.0, 'inc': 0.1, 'digits': 1},
     'gnd_via_distance': {'min': 0.5, 'max': 10.0, 'inc': 0.5, 'digits': 1},
     'stitch_pitch': {'min': 1.0, 'max': 100.0, 'inc': 1.0, 'digits': 1},
+    # 0 = auto/off for the three below (GUI convention; the engine takes None)
+    'stitch_fence_pitch': {'min': 0.0, 'max': 100.0, 'inc': 1.0, 'digits': 1},
+    'stitch_inset': {'min': 0.0, 'max': 10.0, 'inc': 0.1, 'digits': 2},
+    'stitch_max_freq': {'min': 0.0, 'max': 20000.0, 'inc': 50.0, 'digits': 0},
     # Fanout parameters
     'exit_margin': {'min': 0.1, 'max': 5.0, 'inc': 0.1, 'digits': 1},
     'diff_pair_gap': {'min': 0.05, 'max': 5.0, 'inc': 0.01, 'digits': 2},
