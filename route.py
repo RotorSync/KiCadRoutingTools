@@ -2411,6 +2411,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         try:
             _rk = dict(_reconcile_kwargs)
             _rk.update(final_reconcile=False, skip_routing=False)
+            # #527 follow-up: the inner run forwards the SAME progress
+            # callback, so its routing/rescue/cleanup messages were pixel-
+            # identical to the first pass's and the GUI looked like it ran
+            # the whole process twice. Prefix them.
+            _outer_pcb = _rk.get('progress_callback')
+            if _outer_pcb:
+                _rk['progress_callback'] = (
+                    lambda c, t, m, _o=_outer_pcb: _o(
+                        c, t, f"Final reconcile: {m}"))
             # Rip-authority escalation (#103 self-applied): nets that died with
             # 'no rippable blockers found' were boxed by PRE-EXISTING copper
             # this run may not touch, and the router itself printed the
