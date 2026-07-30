@@ -1,11 +1,153 @@
 ---
 name: plan-pcb-routing
-description: Analyzes a KiCad PCB file and creates a comprehensive routing plan. Examines components for fanout needs (BGA/QFN/QFP/PGA), identifies differential pairs, categorizes power/ground nets, and presents a step-by-step routing workflow with explanations.
+description: Analyzes a KiCad PCB file and creates a comprehensive placement-and-routing plan. Detects unplaced boards and advises which parts to lock before any placement repair, examines components for fanout needs (BGA/QFN/QFP/PGA), identifies differential pairs, categorizes power/ground nets, and presents a step-by-step workflow with explanations.
 ---
 
 # Plan PCB Routing
 
 When this skill is invoked with a KiCad PCB file, perform a comprehensive analysis and present a routing plan to the user.
+
+## Step 0: Placement gate (usually SKIPPED — read the decision table)
+
+Before planning any routing, decide whether the board should be **placed** or
+**re-placed** at all. Most of the time the answer is no, and running placement on
+a good board makes it worse.
+
+```bash
+# Is the board even placed? (report-only, writes nothing, exits 3 if not)
+python3 -X utf8 place_optimize.py board.kicad_pcb --suggest-locks
+```
+
+### Decision table — when to run placement
+
+| board state | run placement? | tool |
+|---|---|---|
+| **unplaced** (the tools exit 3) | **NO** — out of scope; report and stop | — |
+| careful hand placement, routing not yet attempted | **NO** | — |
+| routing already completed clean | **NO** | — |
+| board already carries copper (the tools exit 3) | **NO** — placement moves footprints, not tracks | — |
+| rough / imported / auto-generated placement | yes | `place_optimize.py --max-displacement 3` |
+| routing FAILED and `/diagnose-routing-failures` blames **congestion / blockers** | yes | `place_route_loop.py` |
+| routing FAILED and the diagnosis is **parameters** (grid, ripup budget, layer costs) | **NO** — fix the parameters | — |
+
+`docs/placement-optimization.md`'s own measured verdict: ship the quench as a
+**repair** tool for rough/generated placements, **not** as a polish pass on
+careful hand placements — on a good hand placement the result was neutral at
+best, and the default weights *caused 2 new routing failures*.
+
+**Placement invalidates every downstream routed board.** Never run it mid-chain;
+re-run the whole chain from the placed board.
+
+### If the board is UNPLACED
+
+The tools exit **3** and say so. This toolchain **refines** an existing
+placement; it does not place a board from scratch. Report that plainly, tell the
+user to place the parts in KiCad, and offer to show them the current state:
+
+```bash
+python3 -X utf8 render_placement.py board.kicad_pcb -o /tmp/state.png
+```
+
+Do not pass `--allow-unplaced` to "make it work". On a pile of parts every
+candidate pose is illegal, so the run prints "0 parts moved" plus a legality
+block that *looks like a result*.
+
+### Step 0b: what to lock — advice only
+
+Run this **first**, and read the reasons. Nothing is locked automatically,
+deliberately: a wrong auto-lock silently freezes a part that needed to move, and
+that failure is invisible.
+
+```bash
+python3 -X utf8 place_optimize.py board.kicad_pcb --suggest-locks \
+    --suggest-locks-json /tmp/lock_advice.json
+```
+
+It reports mounting holes (structurally invisible to the airwire cost, so the
+optimizer will happily slide them), parts whose body overhangs the board outline
+(card edges, USB shells — the "HAT port" case), and connectors. Each finding
+carries its reason and a confidence; the lexical rules (footprint name,
+reference prefix) miss house libraries entirely, so treat a *quiet* result as
+"nothing detected", not "nothing to lock".
+
+### Step 0c: repair the placement, with those locks
+
+```bash
+python3 -X utf8 place_optimize.py board.kicad_pcb board_placed.kicad_pcb \
+    --max-displacement 3 --length-weight 0.3 --crossing-penalty 30 \
+    --halo-coef 0.15 --halo-weight 2 --edge-halo 2 \
+    --ignore-nets GND VCC \
+    --lock <the exact refs printed by 0b> \
+    2>&1 | tee /tmp/step0_place.txt
+```
+
+`--max-displacement 3` is the measured sweet spot on both test boards; 10 mm with
+strong halos destroyed a data-bus corridor (15 new failures). `--ignore-nets`
+must equal the Step 5 plane-net set — a plane-routed rail's airwire is a fiction
+the optimizer would otherwise chase across the board.
+
+**Acceptance rule — apply it, do not skip it.** Read the `JSON_SUMMARY:` line
+from 0c. If `crossings_after > crossings_before` or `hpwl_after > hpwl_before`,
+**discard the result and route from the original board.**
+
+When routing has already failed on congestion, use the loop instead — it consumes
+exactly the failed and blocker nets the router reported:
+
+```bash
+python3 -X utf8 place_route_loop.py board.kicad_pcb board_repaired.kicad_pcb \
+    --route-args '--nets "*" "!GND" "!VCC" --clearance <floor> --max-ripup 10' \
+    --max-displacement 3 --max-target-pins 40 --ratsnest-screen 20 \
+    --lock <refs from 0b> --ignore-nets GND VCC
+```
+
+Costly: it re-routes the whole board every round. `--ratsnest-screen 20` buys
+some of that back by skipping candidates whose ratsnest clearly regressed.
+
+### Step 0d: see it before trusting it
+
+```bash
+python3 -X utf8 render_placement.py board_placed.kicad_pcb \
+    --before board.kicad_pcb -o /tmp/placement_delta.png
+```
+
+Ghost rects mark seed positions, arrows show what moved, and the caption strip
+carries the real metrics.
+
+**The render is triage, not a verdict.** The verdict is the numbers —
+`crossings`/`hpwl` from the `JSON_SUMMARY`, and for the loop `failures` and
+`iterations`. Do **not** judge a placement by how much moved: "lots moved, looks
+broken" and "barely moved, looks safe" are both wrong.
+
+### Placement is CLI-only
+
+There is no placement tab and no `place` plan action, so a placement step
+**cannot** ride in a plan's `steps`. Run it on the command line *before* the
+plan and hand the plan the placed board. `make_plan.py` / `manifest_to_plan.py`
+**refuse** a recorded `place_optimize.py` / `place_route_loop.py` command loudly
+rather than convert it.
+
+### Scoping a run to one block (`--group`) — opt-in, off by default
+
+Both group features are **opt-in and the default chain is unchanged**.
+`--group-by` defaults to `none` on the placement CLIs and `route.py --group` is
+unset. **Do not add `--group*` to a plan or a command unless the user asked for
+it.**
+
+- Always list first: `python3 route.py board.kicad_pcb --list-groups --group-by auto`
+  (prints parts and touching/internal net counts, exits 0, routes nothing).
+- Which source: `kicad` groups exist on **0 of 27** in-repo boards; `sheet` is the
+  workhorse (**12 of 22**); `netprefix` is weakest; `decap` is strong but **0%
+  internal by construction**.
+- `--group-scope`: routing defaults to `touching` (routing a block's interface is
+  the point); `--undo` defaults to `internal`, because a block's touching set
+  contains GND/VCC and undoing those strips copper **board-wide** (measured on
+  rp2350: 170 segments vs 75).
+- For placement, `--group-by decap` is the one that measurably moves anything.
+  **Sheet blocks of 16-83 parts moved on no board tried** — don't burn a run
+  discovering that.
+- **Hard rule:** `route.py --group` is a *scope*. A routing run that silently
+  acquires one routes a fraction of the board and reports success on that
+  fraction — the same class of defect as a Step 5b coverage gap.
 
 ## Step 1: Load and Analyze PCB Structure
 
@@ -716,12 +858,35 @@ mechanically — do not eyeball it:
    and **never** leave it out (that leaves it unrouted). Give each its own `--nets`
    entry in the plane step, so it appears in BOTH lists in step 2 above.
 
+### Placement steps are NOT part of this partition
+
+`place_optimize.py` / `place_route_loop.py` move parts. They add no copper and
+connect nothing, so they claim no nets and must not appear in the handler
+assignment above — the ledger's assert would otherwise have to be bent around a
+step that routes nothing.
+
+Their `--ignore-nets` is a **scoring** exclusion (which nets the airwire cost
+ignores), not a coverage claim. It does get one reconciliation of its own, for
+the same reason the route exclusions do: a plane-routed rail's airwire is a
+fiction the optimizer would otherwise chase across the board.
+
+```python
+assert set(place_ignore_nets) == plane_nets, \
+    f"placement scored a plane net as an airwire: {set(place_ignore_nets) ^ plane_nets}"
+```
+
 ## Step 6: Generate Routing Plan
 
 Based on the analysis, generate a step-by-step plan. The general order is:
 
 ### Routing Order Rationale
 
+0. **Placement (conditional -- normally SKIPPED).** Run it ONLY for a rough /
+   imported / generated placement, or when routing has already FAILED and
+   `/diagnose-routing-failures` blames congestion rather than parameters. See
+   Step 0's decision table; the default is **do not run it**. Run the lock
+   advisor first and pass its `--lock` list. A placement step claims NO nets
+   (see the Step 5b carve-out) and invalidates every downstream routed board.
 1. **Fanout** (if needed) - Escape routing first, while the board is empty. Exclude
    nets that planes will handle (`"*" "!GND" "!VCC"`). **After each BGA/PGA
    fanout, run `place_fanout_clearance.py`** (Step 1b) to clear decoupling-cap /

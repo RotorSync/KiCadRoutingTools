@@ -352,6 +352,48 @@ def check_group_flags():
     return bad
 
 
+def check_refused_tools():
+    """#431: placement tools must be REFUSED loudly, and must not break the chain.
+
+    They mutate the board, so the recorded command has to stay in the manifest
+    to keep `compute_prune_keep` linking board -> board_placed. Dropping it
+    silently (the unknown-tool path, which only bumps a `skipped` counter)
+    leaves the next route step's input produced by nothing and the pruner then
+    discards legitimate upstream steps.
+    """
+    bad = []
+    for tool in ('place_optimize.py', 'place_route_loop.py', 'render_placement.py'):
+        step = m2p.parse_command(['python3', tool, 'a.kicad_pcb', 'b.kicad_pcb'])
+        if not step or '_refused' not in step:
+            bad.append((tool, f"NOT refused -- converted to {step!r}"))
+
+    # Chain integrity: a placement step between a fanout and a route must not
+    # take either of them with it.
+    import tempfile
+    d = tempfile.mkdtemp()
+    man = os.path.join(d, 'redo_commands.sh')
+    with open(man, 'w', encoding='utf-8', newline='\n') as f:
+        f.write("#!/bin/sh\n"
+                "python3 bga_fanout.py b.kicad_pcb -o s1.kicad_pcb "
+                "--component U1 --clearance 0.1\n"
+                "python3 place_optimize.py s1.kicad_pcb s2.kicad_pcb "
+                "--max-displacement 3\n"
+                "python3 route.py s2.kicad_pcb s3.kicad_pcb --nets '*' "
+                "--clearance 0.1\n")
+    try:
+        steps, _skipped = m2p.plan_steps_from_manifest(man)
+        actions = [s.get('action') for s in steps]
+        if actions != ['fanout', 'route']:
+            bad.append(('<chain>', f"expected ['fanout','route'], got {actions} "
+                                   f"-- a refused placement step broke the chain"))
+    except Exception as e:
+        bad.append(('<chain>', f"{type(e).__name__}: {e}"))
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+    return bad
+
+
 def main():
     # Corpus manifests give broad coverage; the checked-in fixture makes the gate
     # self-contained (runs on a fresh checkout with no corpus). Explicit args win.
@@ -402,7 +444,13 @@ def main():
     for f, why in grp_bad:
         print(f"    {f}: {why}")
 
-    return 1 if (total_bad or res_bad or grp_bad) else 0
+    ref_bad = check_refused_tools()
+    print(f"Placement tools: {'OK' if not ref_bad else 'FAILED'} "
+          f"(refused loudly, chain intact).")
+    for f, why in ref_bad:
+        print(f"    {f}: {why}")
+
+    return 1 if (total_bad or res_bad or grp_bad or ref_bad) else 0
 
 
 if __name__ == "__main__":

@@ -273,6 +273,86 @@ What `--undo` does **not** do, and says so at runtime:
 It also **refuses to run unscoped** — for a routing run "no scope" sensibly means
 the whole board, but for an undo that silently means erasing every track on it.
 
+## Board-state gates (#431)
+
+Both CLIs refuse, with **exit code 3**, two board states they cannot do anything
+useful with. `0` ok, `1` crash, `2` argparse, `3` "the board is not in a state
+this tool can work on" -- a distinct code so a caller branches on the number
+rather than scraping text.
+
+| state | why refusing beats trying | override |
+|---|---|---|
+| **unplaced** (parts stacked at one coordinate) | the quench REFINES a placement. On a pile every candidate pose is illegal, so the run prints "0 parts moved" plus a legality block that looks like a result, and a large `--max-displacement` yields a tiny scatter around the origin that looks like progress | `--allow-unplaced` |
+| **already routed** | the quench models no copper at all: legality is courtyard + outline, cost is pad-to-pad airwires, and `writer.write_placed_output` rewrites footprint positions only. Every track would be left behind, detached from its pad | `--allow-routed` |
+
+`place_route_loop` gates BEFORE round 0, which routes the whole board -- refusing
+there saves minutes-to-hours of A* that would fail everything and then quench a
+pile. `render_placement.py` WARNS and renders instead: being able to SEE an
+unplaced board is the point of having a renderer for one.
+
+Detection is board-relative. Coincident positions is the only signal strong
+enough to fire alone -- two parts at the *same* coordinate is physically
+impossible in a real placement, however dense. Low spread never fires alone. The
+outside-the-outline share fires at 0.9, not 0.5, because castellated boards
+legitimately overhang; and with no usable outline it is **unavailable**, never
+true, so a misparsed outline cannot condemn a placed board. Measured: none of
+the 27 tracked boards trips any of it, `watchy` included -- and `watchy` is the
+worst case, with 81 of 82 parts in courtyard violation. Density is not
+unplacedness, which is why this does not live in `legality.py`.
+
+## Lock advisor (#431)
+
+`--suggest-locks` on either CLI reports which parts look position-critical, with
+a reason each, and prints a paste-ready `--lock` list. It **never locks
+anything**: a wrong auto-lock silently freezes a part that needed to move, and
+the run just quietly does less.
+
+Its strongest rule is a code fact rather than folklore. `quench.py:207` keeps
+only `net_id > 0` pads, so a net-less NPTH mounting hole has `pin_count == 0`
+and no airwires -- while the only skip in the part loop is `if not fp.pads`, and
+a mounting hole HAS a pad. It is movable with **nothing opposing it but the halo
+term**. `tigard` ships four unlocked M3 holes in exactly that state.
+
+Geometric rules (NPTH, outline overhang, edge proximity) measure the board.
+Lexical ones (footprint name, reference prefix, pin function) guess from names
+and are asymmetric: near-exact on stock KiCad libraries, silent on a house
+library like `interf_u:PGA120`. False negatives are common, false positives
+rare, and the output says so -- treat a quiet result as "nothing detected", not
+"nothing to lock". A ref matched by rules from two different evidence channels
+promotes to high.
+
+High-pin parts are an **advisory**, not a suggestion: `place_route_loop` guards
+them with `--max-target-pins` but `place_optimize` does not, and "large" is not
+"position-critical". Exact refs by default, never invented globs -- a `J*` you
+did not inspect freezes parts you never looked at, which is the auto-lock
+failure merely deferred.
+
+```bash
+python3 place_optimize.py board.kicad_pcb --suggest-locks     --suggest-locks-json /tmp/locks.json     # writes NO board
+# review the reasons, then:
+python3 place_optimize.py board.kicad_pcb out.kicad_pcb --lock H1 J1 J2 ...
+# confirm you covered them -- unlocked_high must be 0:
+python3 place_optimize.py board.kicad_pcb --suggest-locks --lock H1 J1 J2 ...
+```
+
+## Reviewing a placement: render it (#431)
+
+```bash
+python3 render_placement.py placed.kicad_pcb --before seed.kicad_pcb -o delta.png
+python3 render_placement.py board.kicad_pcb --list-groups --group-by sheet
+python3 render_placement.py board.kicad_pcb --zoom-group sheet:58d913ec --per-side -o out/
+```
+
+Ghost rects at seed poses, displacement arrows, courtyards with locked parts
+dimmed, airwires with failed nets and blockers highlighted, per-part labels, and
+a metrics caption. `--zoom-group` takes the same block names as `route.py
+--group`. Toggles: `--no-borders` / `--no-labels` / `--no-ratsnest` /
+`--no-arrows`; `--ratsnest-all` is the deliberate hairball switch.
+
+**The render is triage, not a verdict.** The verdict is the caption's numbers.
+Do not judge a placement by how much moved -- "lots moved, looks broken" and
+"barely moved, looks safe" are both wrong.
+
 ## Module layout
 
 | File | Purpose |
@@ -281,6 +361,10 @@ the whole board, but for an undo that silently means erasing every track on it.
 | `../group_routing.py` | Block → net scoping, and the undo, for `route.py` (#459) |
 | `fanout_clearance.py` | Post-fanout decoupling-cap clearance repair (#130) |
 | `groups.py` | Placement blocks: which parts move as one rigid body (#459) |
+| `lock_advisor.py` | Which parts should not be moved, and why (#431). Advice only |
+| `placement_state.py` | Board-state gates: unplaced, and already-routed (#431) |
+| `cli_gates.py` | argparse shared by both placement CLIs so they cannot drift |
+| `../render_placement.py` | Headless PNG stills of placement status (#431) |
 | `legality.py` | Hard constraints shared by both engines: board side, real Edge.Cuts containment, and the OO/OoB graders (#456) |
 | `parser.py` | Courtyard boundary and locked-footprint extraction |
 | `writer.py` | Writes new positions/rotations (rotates pad angles with the footprint, as KiCad stores pad angle = footprint + pad rotation) |

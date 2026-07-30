@@ -29,6 +29,30 @@ TOOL_ACTIONS = {
     'qfn_fanout.py': 'fanout',
 }
 
+# Board-mutating tools with NO plan representation (#431). They are RECORDED in
+# the manifest (#132) so the file-dependency chain stays intact -- a
+# refused-but-PRESENT command keeps compute_prune_keep linking
+# board -> board_placed, whereas a missing one leaves the next step's input
+# produced by nothing and the pruner drops legitimate upstream steps.
+#
+# Refused rather than mapped, because there is nothing to map TO: placement is
+# CLI-only by design (there is no placement tab, so a plan step's
+# max_displacement/crossing_penalty/halo_* would resolve to nonexistent dialog
+# attributes and silently run at hardcoded defaults while the plan JSON claims
+# otherwise). And refused rather than DROPPED, because the unknown-tool path
+# only bumps a `skipped` counter -- a number, not a name -- so the converted
+# plan looks complete when it is not.
+REFUSED_TOOLS = {
+    'place_optimize.py': (
+        'moves footprints; the plan format has no placement step. Run it BEFORE '
+        'the plan and start the plan from the placed board'),
+    'place_route_loop.py': (
+        'routes and moves footprints in a loop; the plan format has no placement '
+        'step. Run it on the CLI'),
+    'render_placement.py': (
+        'renders a PNG; it changes no board and has nothing to replay'),
+}
+
 # CLI flag -> plan params key (numbers parsed; lists collected).
 FLAG_PARAMS = {
     '--track-width': 'track_width',
@@ -155,6 +179,9 @@ def parse_command(argv):
         if base in TOOL_ACTIONS:
             tool = base
             break
+        if base in REFUSED_TOOLS:
+            # Named and reported, not silently tallied into `skipped`.
+            return {'_refused': f"{base}: {REFUSED_TOOLS[base]}"}
     if tool is None:
         return None
     # A `--help` invocation (the agent inspecting a tool during the run) is not a

@@ -449,6 +449,26 @@ python route_disconnected_planes.py kicad_files/input.kicad_pcb kicad_files/outp
     --track-width 0.5 --clearance 0.2
 ```
 
+### 3c. Review a Placement (issue #431)
+
+Placement deltas are invisible in a board file; render them instead.
+
+```bash
+# what moved, and did it help? (ghosts at the seed poses, arrows, metrics caption)
+python3 render_placement.py placed.kicad_pcb --before seed.kicad_pcb -o delta.png
+
+# zoom to one placement block; same block names as route.py --group
+python3 render_placement.py board.kicad_pcb --list-groups --group-by sheet
+python3 render_placement.py board.kicad_pcb --zoom-group sheet:58d913ec --per-side -o out/
+
+# which parts should NOT be moved -- advice only, locks nothing, writes no board
+python3 place_optimize.py board.kicad_pcb --suggest-locks
+```
+
+Toggles for `--borders` / `--labels` / `--ratsnest` / `--arrows` / `--ghosts`;
+`--per-side` gives F and B panels rather than one flattened projection.
+The render is triage -- the verdict is the caption's `crossings` / `hpwl`.
+
 ### 4. Verify Results
 
 ```bash
