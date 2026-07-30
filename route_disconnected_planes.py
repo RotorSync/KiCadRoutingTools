@@ -221,6 +221,70 @@ try:
 except ValueError:
     _PLANE_IMMEDIATE_MAX_PENDING = 14
 
+# #540: the rip-pressure count above cannot see CORRIDOR COUPLING. A short
+# phase whose rips are bus siblings (allwinner_h3_ddr3: a 9-pad DDR phase, all
+# victims /DDR3 16x1/SDQ*, SA*, ...) passes the <=14 gate, and each immediate
+# reconnect then locks the shared corridor against the siblings ripped by the
+# NEXT pad (44 complete vs 53 under order-only). zynq2's 12-pad phase of
+# INDEPENDENT signals (+1V8, PL_CLK, /TX_EN, ...) is a genuine immediate win
+# (+4), so the fix is per-net, not a phase flip: a ripped net whose name is
+# bus-coupled to any PENDING casualty (this phase's rips or an earlier phase's
+# deferred batch) defers to the end-of-run batch (where siblings negotiate the
+# corridor together); uncoupled nets keep reconnecting immediately. Coupling = shared NON-ROOT sheet prefix (>=2 nets -- '/A5' and
+# '/TX1' live in the root sheet and do not couple) or shared digit-stripped
+# name stem (>=3 nets, stem >=2 chars, power-rail names excluded so +1V8/+1V0
+# never couple). KICAD_PLANE_IMMEDIATE_COUPLING=0 restores the pure count gate.
+_PLANE_IMMEDIATE_COUPLING = os.environ.get(
+    'KICAD_PLANE_IMMEDIATE_COUPLING', '1').strip().lower() \
+    not in ('0', 'off', 'no')
+_POWER_RAIL_RE = re.compile(r'^[+-]|^(vcc|vdd|vss|vbus|vbat|gnd)', re.IGNORECASE)
+_BUS_STEM_STRIP_RE = re.compile(r'(?:[0-9]+|[PN])+$')
+
+
+def _bus_group_keys(name: str) -> List[Tuple[str, str]]:
+    """Coupling-group keys for one net name: its hierarchical sheet path (if
+    not the root sheet) and its trailing-index-stripped stem (SDQ5/SDQ14 ->
+    'SDQ', SDQS0P/SDQS0N -> 'SDQS'; names without a trailing index have no
+    stem key -- SCAS/SRAS only couple through their sheet)."""
+    keys: List[Tuple[str, str]] = []
+    base = name
+    if '/' in name:
+        pfx, base = name.rsplit('/', 1)
+        if pfx:
+            keys.append(('sheet', pfx))
+    if base and not _POWER_RAIL_RE.match(base):
+        stem = _BUS_STEM_STRIP_RE.sub('', base)
+        if len(stem) >= 2 and stem != base:
+            keys.append(('stem', stem))
+    return keys
+
+
+def _corridor_coupled_ids(candidate_ids, pending_rip_ids, pcb_data) -> Set[int]:
+    """#540: the subset of candidate_ids that are bus-coupled to a PENDING
+    ripped casualty (pending_rip_ids includes the candidates themselves).
+    The population is every net currently off the board awaiting reconnect --
+    including earlier phases' deferred batches: allwinner's lone VCC-DRAM-phase
+    rip of SDQ1 had no phase sibling, but dozens of /DDR3 siblings from the
+    GND phase sat ripped, and its immediate reconnect claimed their corridors
+    with maximum freedom."""
+    if not _PLANE_IMMEDIATE_COUPLING:
+        return set()
+
+    def _nm(nid):
+        return pcb_data.nets[nid].name if nid in pcb_data.nets else ''
+
+    counts: Dict[Tuple[str, str], int] = {}
+    for nid in set(pending_rip_ids):
+        for k in _bus_group_keys(_nm(nid)):
+            counts[k] = counts.get(k, 0) + 1
+    coupled = set()
+    for nid in set(candidate_ids):
+        for k in _bus_group_keys(_nm(nid)):
+            if counts.get(k, 0) >= (2 if k[0] == 'sheet' else 3):
+                coupled.add(nid)
+                break
+    return coupled
+
 # #517 arm 4, DEFAULT ON: at the end-of-run reconnect, try a verbatim
 # identity-restore of each casualty's ORIGINAL copper before re-routing it
 # (only nets whose corridor is still free restore; the rest re-route as
@@ -1308,8 +1372,26 @@ def route_planes(
                         # #517 arm 3: this pad's rips (tap committed OR failed
                         # with unrestorable pieces) reconnect NOW, while their
                         # corridors are still exactly as the rip left them.
-                        _reconnect_ripped_now(
-                            list(ripped_net_ids[_rips_before:]))
+                        # #540: EXCEPT nets bus-coupled to a PENDING casualty
+                        # (this phase's rips or an earlier phase's deferred
+                        # batch) -- an early sibling's reconnect locks the
+                        # shared corridor against the rest, so coupled nets
+                        # wait and negotiate it together in the end-of-run
+                        # batch.
+                        _newly = list(ripped_net_ids[_rips_before:])
+                        _coupled = _corridor_coupled_ids(
+                            _newly, ripped_net_ids, pcb_data)
+                        if _coupled:
+                            _cnames = sorted(
+                                pcb_data.nets[_n].name for _n in _coupled
+                                if _n in pcb_data.nets)
+                            print(f"    (#540 coupling: deferred "
+                                  f"{len(_coupled)} bus-coupled net(s) to end "
+                                  f"batch: {', '.join(_cnames)})")
+                        _uncoupled = [_n for _n in _newly
+                                      if _n not in _coupled]
+                        if _uncoupled:
+                            _reconnect_ripped_now(_uncoupled)
 
         # Build obstacle map for this net
         if progress_callback:
