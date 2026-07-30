@@ -578,7 +578,10 @@ class SharedViaMaps:
         shim.vias = list(vias)
         chunks = []
         for nid in ({s.net_id for s in shim.segments} | {v.net_id for v in shim.vias}):
-            d = precompute_via_placement_obstacles(shim, nid, config, [])
+            # #543: exclude_net_id so the plane net's OWN tap vias price at the
+            # run clearance and foreign copper at its class, like the builder.
+            d = precompute_via_placement_obstacles(
+                shim, nid, config, [], exclude_net_id=self.exclude_net_id)
             if len(d.blocked_vias):
                 chunks.append(d.blocked_vias)
         if not chunks:
@@ -606,8 +609,9 @@ class SharedViaMaps:
         it); call resync() after the removal."""
         from obstacle_cache import precompute_via_placement_obstacles
         for entry in self._maps.values():
-            d = precompute_via_placement_obstacles(self.pcb_data, rip_net_id,
-                                                   entry[0], [])
+            d = precompute_via_placement_obstacles(
+                self.pcb_data, rip_net_id, entry[0], [],
+                exclude_net_id=self.exclude_net_id)  # #543
             if len(d.blocked_vias):
                 entry[2].remove_blocked_vias_batch(d.blocked_vias)
 
@@ -617,8 +621,9 @@ class SharedViaMaps:
         (the stamps are computed from it); calls resync() itself."""
         from obstacle_cache import precompute_via_placement_obstacles
         for entry in self._maps.values():
-            d = precompute_via_placement_obstacles(self.pcb_data, net_id,
-                                                   entry[0], [])
+            d = precompute_via_placement_obstacles(
+                self.pcb_data, net_id, entry[0], [],
+                exclude_net_id=self.exclude_net_id)  # #543
             if len(d.blocked_vias):
                 entry[2].add_blocked_vias_batch(d.blocked_vias)
         self.resync()
