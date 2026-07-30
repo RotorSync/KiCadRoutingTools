@@ -53,17 +53,64 @@ Gap FOUND AND FIXED in that commit (the Class-2 shape CLAUDE.md warns about):
   tests/gui_parity/test_group_scope_parity.py (re-execs into KiCad python;
   CLI vs GUI internal 14=14, touching 20=20).
 
-OPEN, PRE-EXISTING, NOT from this commit — test_gui_engine_parity copper sets:
-  segments CLI=1307 GUI=1308 (common 1249), vias 144=144, VERDICT: PARITY but
-  "copper sets DIFFER". The diff is GND on F.Cu at IDENTICAL coordinates with
-  DIFFERENT width — CLI 0.127, GUI 0.3 — plus one gui-only /CLOCK_IN segment.
-  ef4c19a recorded these sets as IDENTICAL, so it regressed somewhere in the
-  34-commit span. Attribution is measured, not assumed: the same 1307/1308 /
-  1249 / 58 / 59 numbers appear with this work stashed at HEAD, at HEAD+this
-  commit, and again after the #517/#523/#524 wave. Prime suspect is d9bccbd
-  ("#487: plane resistance reaches JSON_SUMMARY; power TRACES get ampacity
-  too") — a power-trace width path would explain a GND-only width delta.
-  Worth a bisect over ac2150a..HEAD by whoever picks up the next full audit.
+FOUND AND FIXED (was recorded here as open; the attribution below it was
+wrong and is corrected):
+  test_gui_engine_parity copper sets had gone from IDENTICAL at ef4c19a to
+  segments CLI=1307 / GUI=1308, the delta being 58 GND plane taps on F.Cu at
+  IDENTICAL coordinates with DIFFERENT width -- CLI 0.127, GUI 0.3. VERDICT
+  still printed "PARITY" because the graded metrics (DRC, kicad unconnected)
+  did not move; only the copper-set comparison saw it.
+
+  Root cause is ONE line, and it is not a routing change at all:
+      swig_gui.reset_params_to_defaults():  self.impedance_value.SetValue(50.0)
+  impedance_value is a wx.SpinCtrl (INTEGER); on wxPython 4.2 a float raises
+  TypeError. ai_plan's per-step reset CATCHES that and logs "per-step reset
+  skipped", so the reset ABANDONED ITSELF at that line -- and the #439 loop
+  that un-checks every geometry-floor override box sits ~80 lines BELOW it.
+  With those boxes left checked from an earlier step, _effective_geometry_floor
+  returned the just-reset routing_defaults value instead of the board's Default
+  net-class. Plan step 1 passes track_width 0.127; step 2 (route_planes) omits
+  it, meaning "use the board's" -- and got 0.3.
+
+  The design and the #439 un-check loop were both already CORRECT. Nothing
+  needed adding: a first attempt here added a second un-check loop and was
+  removed as redundant duplication once the real cause was found. The fix is
+  SetValue(defaults.IMPEDANCE_DEFAULT). After it: segments 1307=1307, vias
+  144=144, cli-only 0, gui-only 0, copper sets IDENTICAL.
+
+  Why this marker recorded IDENTICAL at ef4c19a while the same code diverged
+  here: the defect predates the marker (reset_params_to_defaults and the
+  hardcoded 50.0 both arrived in e8c72fe, an ANCESTOR of ef4c19a), so it is
+  not a regression in the 34-commit span. It is wxPython-build dependent --
+  older builds coerced a float into SpinCtrl.SetValue silently, this one
+  (wxPython 4.2.2 / wx 3.3.2, Windows) raises. The earlier suspicion recorded
+  here that d9bccbd ("power TRACES get ampacity") caused it was WRONG; no
+  bisect is needed.
+
+  Regression gate: tests/gui_parity/test_geometry_floor_leak.py, which asserts
+  the OBSERVABLE resolved floors rather than trusting that the reset ran --
+  a caught-and-logged exception in a reset is otherwise indistinguishable from
+  a reset that worked. Verified to fail (exit 1) with the fix reverted.
+
+FLAG AUDIT of the ef4c19a..HEAD span (the 34 commits this marker does not
+otherwise cover). New CLI flags, and where each lands in the GUI:
+  route_planes.py  --stitch-{vias,pitch,edge-fence,fence-pitch,inset,max-freq}
+                   -> in manifest_to_plan's tables; OK.
+  route_planes.py  --thermal-relief / --thermal-vias -> NOT in those tables, but
+                   they convert via the unknown-flag fallthrough to params
+                   {thermal_relief|thermal_vias: true} and ai_plan's generic
+                   param applier resolves both to real controls
+                   (planes_gui.create_options.thermal_relief / .thermal_vias,
+                   wx.CheckBox). Verified by conversion; they reach the GUI.
+  place_optimize.py / place_route_loop.py  --group-by, --ratsnest-screen
+                   -> N/A: kicad_routing_plugin/ references neither script nor
+                   quench/QuenchState, and neither is in the gate's CLI_MAINS.
+  route.py         --group/--group-by/--group-scope/--list-groups/--preview/
+                   --preview-png/--undo -> this wave; handled explicitly in
+                   parse_command (hoisted or refused), not via the tables.
+The SHA is still NOT bumped: this audited new FLAGS across the span, not every
+engine parameter, results-data key and post-pass, which is what a full audit
+means here.
 
 NOTE for anyone running the gate on Windows: KiCad's bundled python had no
 scipy (it is in requirements.txt), so run_all_checks raised StartupCheckError

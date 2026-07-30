@@ -2395,7 +2395,12 @@ class RoutingDialog(wx.Dialog):
 
         # Reset advanced parameters
         self.impedance_check.SetValue(False)
-        self.impedance_value.SetValue(50.0)
+        # int, not 50.0: impedance_value is a wx.SpinCtrl (integer), and on
+        # wxPython 4.2 a float raises TypeError. The plan executor CATCHES that
+        # and logs "per-step reset skipped", so a hardcoded float silently
+        # abandoned every reset from this line onward -- every control below
+        # kept the previous step's value. Use the control's own default.
+        self.impedance_value.SetValue(defaults.IMPEDANCE_DEFAULT)
         self.coplanar_gap.SetValue(defaults.COPLANAR_GAP)
         self.coplanar_nets_ctrl.SetValue("")
         self.max_iterations.SetValue(defaults.MAX_ITERATIONS)
