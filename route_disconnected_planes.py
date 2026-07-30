@@ -1723,6 +1723,69 @@ def route_planes(
                     if _cid not in _open_set:
                         corridor_ghosts.drop_net(_cid)
 
+    # #524 second path: a FAILED immediate reconnect leaves its partial copper
+    # in the write list; the end-of-run batch_route then rips that copper
+    # INTERNALLY (its own rip/refuse machinery, invisible to the
+    # _tap_pad_with_ripup purge), and LATER passes (graze/dead-end cleanup on
+    # the failed nets' dangling fragments) withdraw yet more board copper --
+    # while the write list still carries it (astro SDA x66 / +3.3V x230
+    # file-only ghosts, drc 39/kdrc 27; residual x24/x115 when this ran only
+    # once, post-custody). Reconcile the write list against the BOARD for
+    # every net any rip/reconnect touched, IMMEDIATELY BEFORE EACH WRITE, so
+    # no later withdrawal can slip past it. An emission with no matching
+    # board copper is withdrawn copper and must not ship.
+    _recon_scope_ids = (set(_casualties) | set(ripped_net_ids)
+                        | set(inplace_reconnected_ids))
+
+    def _reconcile_write_list_vs_board(_label):
+        # COUNTED multiset, not a set: the immediate reconnect and the
+        # end-of-run reconnect can emit the SAME copper twice (batch_route
+        # re-reports adopted existing pieces of a re-routed net), and a
+        # set-based keep let both copies ship while the board holds one
+        # (astro +3.3V x115 / SDA x24 duplicate emissions).
+        if not _recon_scope_ids:
+            return
+        from collections import Counter
+        _board_segs = Counter()
+        for _s in pcb_data.segments:
+            if _s.net_id in _recon_scope_ids:
+                _a = (round(_s.start_x, 3), round(_s.start_y, 3))
+                _b = (round(_s.end_x, 3), round(_s.end_y, 3))
+                _board_segs[(frozenset((_a, _b)), _s.layer, _s.net_id)] += 1
+        _board_vias = Counter()
+        for _v in pcb_data.vias:
+            if _v.net_id in _recon_scope_ids:
+                _board_vias[(round(_v.x, 3), round(_v.y, 3), _v.net_id)] += 1
+        _gs, _gv = 0, 0
+        _kept_s = []
+        for _d in all_new_segments:
+            if _d.get('net_id') in _recon_scope_ids:
+                _a = (round(_d['start'][0], 3), round(_d['start'][1], 3))
+                _b = (round(_d['end'][0], 3), round(_d['end'][1], 3))
+                _k = (frozenset((_a, _b)), _d['layer'], _d['net_id'])
+                if _board_segs.get(_k, 0) <= 0:
+                    _gs += 1
+                    continue
+                _board_segs[_k] -= 1
+            _kept_s.append(_d)
+        _kept_v = []
+        for _d in all_new_vias:
+            if _d.get('net_id') in _recon_scope_ids:
+                _k = (round(_d['x'], 3), round(_d['y'], 3), _d['net_id'])
+                if _board_vias.get(_k, 0) <= 0:
+                    _gv += 1
+                    continue
+                _board_vias[_k] -= 1
+            _kept_v.append(_d)
+        if _gs or _gv:
+            all_new_segments[:] = _kept_s
+            all_new_vias[:] = _kept_v
+            print(f"  (#524 write-list reconcile [{_label}]: dropped {_gs} "
+                  f"segment(s) and {_gv} via(s) withdrawn from the board "
+                  f"or duplicated)")
+
+    _reconcile_write_list_vs_board('post-custody')
+
     # A partial restore's kept-set is emitted into the write list ABOVE, before
     # the reconnect runs, and unconditionally. But the reconnect may RE-ROUTE
     # that same net (it is queued as a casualty) and delete the kept copper
@@ -1866,6 +1929,7 @@ def route_planes(
                 _nm10 = (pcb_data.net_id_to_name
                          if pcb_data.kicad_version >= KICAD_10_MIN_VERSION
                          else None)
+                _reconcile_write_list_vs_board('pre-oracle')
                 _write_output(input_file, _tmp.name, all_new_segments,
                               all_new_vias, None,
                               net_id_to_name=_nm10,
@@ -2443,6 +2507,8 @@ def route_planes(
     if _ptrace is not None:
         _ptrace.capture(pcb_data, 'plane-reconnect')
         _ptrace.dump(output_file, pcb_data)
+
+    _reconcile_write_list_vs_board('final')
 
     if return_results:
         # GUI/stress parity (gap closure): the CLI main runs post-passes on
