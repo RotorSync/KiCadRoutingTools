@@ -199,8 +199,10 @@ PLANE_EDGE_CLEARANCE = 0.5  # mm - zone clearance from board edge
 PLANE_MAX_SEARCH_RADIUS = 10.0  # mm - max radius to search for via position
 PLANE_MAX_VIA_REUSE_RADIUS = 1.0  # mm - max radius to reuse existing via
 # #487: an SMD plane-net pad at least this wide in BOTH axes is a thermal/
-# exposed pad and gets a via ARRAY (--thermal-vias) instead of one shared via.
+# exposed pad and gets a via ARRAY instead of one shared via. ON by default
+# (Andy 2026-07-29); --no-thermal-vias / the planes-tab checkbox disable it.
 THERMAL_PAD_MIN_MM = 2.0
+THERMAL_VIAS = True
 PLANE_PAD_STRAP_RADIUS = 1.5  # mm - max distance to strap a plane pad to an
                               # adjacent already-connected same-net pad instead
                               # of drilling another via (issue #349)

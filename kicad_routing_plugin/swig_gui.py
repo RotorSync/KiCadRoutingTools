@@ -2257,7 +2257,8 @@ class RoutingDialog(wx.Dialog):
             if hasattr(_po, 'thermal_relief'):
                 _po.thermal_relief.SetValue(False)
             if hasattr(_po, 'thermal_vias'):
-                _po.thermal_vias.SetValue(False)
+                import routing_defaults as _rd
+                _po.thermal_vias.SetValue(_rd.THERMAL_VIAS)
             if hasattr(_po, 'zone_clearance_check'):
                 # Default = unchecked = follow routed clearance (the
                 # ottercast sealed-field fix); a plan's explicit

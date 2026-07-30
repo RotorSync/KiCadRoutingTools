@@ -95,6 +95,10 @@ BOOL_FLAGS = {
     # #489 section 9: now on every step that writes pad/via copper (route,
     # route_diff, route_planes, route_disconnected_planes, bga/qfn fanout).
     '--add-teardrops': 'add_teardrops',
+    # #487: route_planes' default-on thermal-via arrays; the NEGATIVE flag
+    # must survive conversion or a replay re-enables what the run disabled
+    # (ai_plan's no_thermal_vias alias unchecks the planes checkbox).
+    '--no-thermal-vias': 'no_thermal_vias',
 }
 
 # Flags whose values are file paths / bookkeeping -- consumed, never params.

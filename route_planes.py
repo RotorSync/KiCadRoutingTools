@@ -10,6 +10,7 @@ Usage:
 from __future__ import annotations
 
 import env_knobs
+import re
 import sys
 import os
 import argparse
@@ -2245,6 +2246,54 @@ def _resolve_zone_clearance_impl(zone_clearance, clearance, min_thickness,
     return round(needed, 4)
 
 
+# #487 narrowing (Andy): thermal-via arrays belong on true EP/tab pads of
+# HEAT-MAKING parts, not on every big pad -- a 2512 sense resistor or bulk
+# cap pad clears 2mm easily. Reference prefixes of active devices:
+_THERMAL_REF_PREFIXES = ('U', 'Q', 'D', 'T', 'VR', 'IC', 'PS', 'LED')
+# Footprint-name tokens that name an exposed pad / power tab outright
+# (KiCad library convention: QFN-32-1EP_5x5mm, TO-252-2, HTSSOP...).
+_THERMAL_FP_TOKENS = re.compile(
+    r'(?i)(-\d?EP[_\b-]|_EP_|ThermalPad|ThermalVias|D2?PAK|TO-2(20|52|63)|'
+    r'PowerPAK|HTSSOP|HSOP|PowerSO|SOT-223|HSOF|Powermite|VREG)')
+
+
+def is_thermal_pad(pad, pcb_data, min_mm: float = None) -> bool:
+    """True when a plane-net pad deserves a thermal-via ARRAY (#487).
+
+    Size alone over-triggers (big cap/resistor pads), so require ALL of:
+      * SMD and >= min_mm in both axes (the copper must hold a lattice);
+      * an ACTIVE component reference prefix (U/Q/D/T/VR/IC/PS/LED) --
+        passives and connectors are excluded by name;
+      * the EP/tab SIGNATURE: this is the footprint's largest pad AND at
+        least 3x the median pad area (QFN/DFN center EPs, D-Pak drain
+        tabs), OR the footprint name itself declares an exposed pad
+        (-1EP / TO-252 / HTSSOP / ...).
+    """
+    if min_mm is None:
+        min_mm = defaults.THERMAL_PAD_MIN_MM
+    if pad.drill != 0 or min(pad.size_x, pad.size_y) < min_mm:
+        return False
+    ref = pad.component_ref or ''
+    m = re.match(r'([A-Za-z]+)', ref)
+    if not m or m.group(1).upper() not in _THERMAL_REF_PREFIXES:
+        return False
+    fp = pcb_data.footprints.get(ref)
+    if fp is None:
+        return False
+    if _THERMAL_FP_TOKENS.search(getattr(fp, 'footprint_name', '') or ''):
+        return True
+    areas = sorted(p.size_x * p.size_y for p in fp.pads
+                   if p.pad_type != 'np_thru_hole' and p.size_x and p.size_y)
+    if len(areas) < 2:
+        return False
+    my_area = pad.size_x * pad.size_y
+    median = areas[len(areas) // 2]
+    # 2.5x, not 3.0: corpus scan (406 boards) showed SOT-223 tabs at 2.9x
+    # and multi-big-pad power packages just under 3x -- the heat-makers
+    # this exists for -- while passives stay excluded by prefix anyway.
+    return my_area >= max(areas) - 1e-9 and my_area >= 2.5 * median
+
+
 def compute_thermal_via_array(pad, obstacles, coord, config, via_size,
                               via_drill, hole_to_hole_clearance, pcb_data,
                               pitch: float = None) -> List[Tuple[float, float]]:
@@ -2342,7 +2391,7 @@ def create_plane(
     clamp_netclasses: bool = True,
     clearance_ceiling: Optional[float] = None,
     thermal_relief: bool = False,
-    thermal_vias: bool = False,
+    thermal_vias: bool = defaults.THERMAL_VIAS,
 ) -> Union[Tuple[int, int, int],
            Tuple[int, int, int, list, list, list, int, list]]:
     """
@@ -2882,8 +2931,7 @@ def create_plane(
             # #487: an exposed/thermal pad gets a via ARRAY, not the shared
             # via the reuse/strap logic below would give it. Checked FIRST
             # so a nearby via cannot satisfy a 5x5mm EP with one drill.
-            if (thermal_vias and pad.drill == 0
-                    and min(pad.size_x, pad.size_y) >= defaults.THERMAL_PAD_MIN_MM):
+            if thermal_vias and is_thermal_pad(pad, pcb_data):
                 _arr = compute_thermal_via_array(
                     pad, obstacles, coord, config, via_size, via_drill,
                     hole_to_hole_clearance, pcb_data)
@@ -3911,9 +3959,11 @@ Examples:
     # Zone options
     parser.add_argument("--zone-clearance", type=float, default=None, help="Zone (pour) clearance from other copper in mm. Default: follow --clearance, auto-stepping down to the fab floor if the pour cannot thread the densest BGA via lattice")
     parser.add_argument("--min-thickness", type=float, default=defaults.PLANE_MIN_THICKNESS, help="Minimum zone copper thickness in mm (default: 0.1)")
-    parser.add_argument("--thermal-vias", action="store_true",
-                        help="Place a via ARRAY over exposed/thermal pads (SMD plane-net pads "
-                             f"wider than {2.0}mm both axes) instead of one shared via (#487)")
+    parser.add_argument("--thermal-vias", action=argparse.BooleanOptionalAction,
+                        default=defaults.THERMAL_VIAS,
+                        help="Via ARRAY over exposed/thermal pads (SMD plane-net pads wider than "
+                             f"{defaults.THERMAL_PAD_MIN_MM}mm both axes) instead of one shared "
+                             "via (#487). ON by default; --no-thermal-vias disables")
     parser.add_argument("--thermal-relief", action="store_true",
                         help="Connect pads to the pour with thermal-relief spokes instead of "
                              "solid copper (#487: the writer always supported it; nothing could ask)")

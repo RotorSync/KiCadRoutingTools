@@ -326,7 +326,7 @@ class CreatePlanesOptionsPanel(wx.Panel):
         zone_sizer.Add(self.thermal_relief, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
         self.thermal_vias = wx.CheckBox(self, label="Thermal via arrays under exposed pads")
-        self.thermal_vias.SetValue(False)
+        self.thermal_vias.SetValue(defaults.THERMAL_VIAS)
         self.thermal_vias.SetToolTip(
             "Give exposed/thermal pads (>= 2mm both axes) a lattice of vias into "
             "the plane instead of a single shared via (#487)")
@@ -1061,7 +1061,7 @@ class PlanesTab(wx.Panel):
                 zone_clearance=config.get('zone_clearance'),
                 min_thickness=config.get('min_thickness', defaults.PLANE_MIN_THICKNESS),
                 thermal_relief=config.get('thermal_relief', False),
-                thermal_vias=config.get('thermal_vias', False),
+                thermal_vias=config.get('thermal_vias', defaults.THERMAL_VIAS),
                 grid_step=config.get('grid_step', defaults.GRID_STEP),
                 max_search_radius=config.get('max_search_radius', defaults.PLANE_MAX_SEARCH_RADIUS),
                 max_via_reuse_radius=config.get('max_via_reuse_radius', defaults.PLANE_MAX_VIA_REUSE_RADIUS),

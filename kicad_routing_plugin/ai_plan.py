@@ -419,6 +419,16 @@ def apply_step_params(step, dialog):
                 return False
             chk.SetValue(not bool(value))
             return True
+        if name == 'no_thermal_vias':
+            # route_planes' NEGATIVE flag (--no-thermal-vias, default-on
+            # BooleanOptionalAction) vs the POSITIVE planes-tab checkbox --
+            # invert, like no_gnd_vias above.
+            chk = getattr(getattr(getattr(dialog, 'planes_tab', None),
+                                  'create_options', None), 'thermal_vias', None)
+            if chk is None:
+                return False
+            chk.SetValue(not bool(value))
+            return True
         if name == 'escape_method':
             # Fanout escape dropdown lives on the BGA options panel and shows
             # DISPLAY strings ("Auto (channel, under-pad retry)"), while the
@@ -586,7 +596,13 @@ def apply_step_params(step, dialog):
         if hasattr(opts, "thermal_relief"):
             opts.thermal_relief.SetValue(bool(params.get("thermal_relief")))
         if hasattr(opts, "thermal_vias"):
-            opts.thermal_vias.SetValue(bool(params.get("thermal_vias")))
+            # Default-ON param: absent means the DEFAULT (True), unlike the
+            # absent-means-off feature toggles above. A recorded
+            # --no-thermal-vias arrives as no_thermal_vias (see the alias).
+            import routing_defaults as _rd
+            opts.thermal_vias.SetValue(bool(params.get(
+                "thermal_vias", not params.get("no_thermal_vias",
+                                               not _rd.THERMAL_VIAS))))
         if not params.get("add_gnd_vias"):
             notes.append("add_gnd_vias off (not in plan step)")
         if "gnd_via_distance" in params:
