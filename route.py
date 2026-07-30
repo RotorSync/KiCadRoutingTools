@@ -360,7 +360,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 pcb_data=None,
                 net_clearances: dict = None,
                 keep_input_copper: bool = False,
-                rip_existing_nets: Optional[List[str]] = None) -> Tuple[int, int, float]:
+                rip_existing_nets: Optional[List[str]] = None,
+                force_reroute: bool = False,
+                # The RAW --nets patterns as the operator typed them, BEFORE
+                # main()'s expand_net_patterns. #521's protection override is
+                # "named EXACTLY, no glob" -- but expansion turns '/LED_*' into
+                # exact names, so the engine can't tell a typed name from a
+                # glob hit without this. None (the GUI, tests) = net_names ARE
+                # the operator's literal selection (per-net checkboxes).
+                net_name_patterns: Optional[List[str]] = None) -> Tuple[int, int, float]:
     """
     Route single-ended nets using the Rust router.
 
@@ -410,7 +418,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # forwarding a hand-picked subset silently dropped board_edge_clearance,
     # impedance, net_clearances, ordering and more (review finding).
     _reconcile_kwargs = dict(locals())
-    for _k in ('input_file', 'output_file', 'net_names', 'pcb_data'):
+    # net_name_patterns must not forward either: the reconcile sub-run scopes
+    # by exact retried-net names, which are then the correct override source.
+    for _k in ('input_file', 'output_file', 'net_names', 'pcb_data',
+               'net_name_patterns'):
         _reconcile_kwargs.pop(_k, None)
     if env_knobs.DUMP_BATCH_KWARGS:
         # Parameter-parity probe: dump THIS call's full parameter set so the
@@ -851,12 +862,71 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         _write_passthrough_output(input_file, output_file)
         return 0, 0, 0.0
 
+    # #515 follow-up (PR #533): --force-reroute is an explicit request to
+    # REPLACE the selected nets' existing routes. Strip their copper BEFORE the
+    # already-connected filter, so they re-enter the route set and replan from
+    # scratch. The originals were snapshotted into _orig_seg_by_net/_orig_via_
+    # by_net above, so on success the #220/#284 stale strip drops them from the
+    # written file; a net whose replan lands NO new copper gets them restored
+    # (identity-preserved) before the freeze -- see the custody block ahead of
+    # the #209 gate. Protection follows the rip-up rules exactly (#521):
+    # matched groups / diff pairs are skipped unless named EXACTLY (no glob) in
+    # --nets, KiCad-locked copper is never stripped, and plane (zone-owning)
+    # nets belong to route_planes.
+    force_ripped: Dict[int, Tuple[list, list]] = {}
+    if force_reroute and not net_names:
+        print("WARNING: --force-reroute requires an explicit --nets scope "
+              "(it rips every selected net); ignoring it for this run.")
+    elif force_reroute:
+        _fr_zone_nids = {z.net_id for z in pcb_data.zones}
+        _fr_copper_nids = ({s.net_id for s in pcb_data.segments}
+                           | {v.net_id for v in pcb_data.vias})
+        _fr_cand, _fr_skipped_plane = [], []
+        for _name, _nid in net_ids:
+            if _nid not in _fr_copper_nids:
+                continue  # no existing copper -- routes normally anyway
+            if _nid in _fr_zone_nids:
+                _fr_skipped_plane.append(_name)
+                continue
+            _fr_cand.append((_name, _nid))
+        if _fr_skipped_plane:
+            print(f"--force-reroute: skipping {len(_fr_skipped_plane)} plane "
+                  f"(zone-owning) net(s) -- planes belong to route_planes: "
+                  f"{', '.join(_fr_skipped_plane[:6])}"
+                  f"{', ...' if len(_fr_skipped_plane) > 6 else ''}")
+        if _fr_cand:
+            from protected_nets import protection_map, filter_rippable_names
+            _fr_prot = protection_map(pcb_data, input_file)
+            _fr_keep = set(_n for _n, _ in _fr_cand)
+            if _fr_prot:
+                _fr_keep = set(filter_rippable_names(
+                    [_n for _n, _ in _fr_cand], _fr_prot,
+                    override_patterns=list(net_name_patterns
+                                           if net_name_patterns is not None
+                                           else net_names),
+                    context="--force-reroute"))
+            for _name, _nid in _fr_cand:
+                if _name not in _fr_keep:
+                    continue
+                force_ripped[_nid] = (
+                    [s for s in pcb_data.segments if s.net_id == _nid],
+                    [v for v in pcb_data.vias if v.net_id == _nid])
+        if force_ripped:
+            pcb_data.segments = [s for s in pcb_data.segments
+                                 if s.net_id not in force_ripped]
+            pcb_data.vias = [v for v in pcb_data.vias
+                             if v.net_id not in force_ripped]
+            sweep_scope_ids |= set(force_ripped)
+            print(f"--force-reroute: stripped "
+                  f"{sum(len(s) for s, _ in force_ripped.values())} segment(s) / "
+                  f"{sum(len(v) for _, v in force_ripped.values())} via(s) from "
+                  f"{len(force_ripped)} net(s) for a from-scratch re-route")
+
     net_ids, _already_routed = filter_already_routed(pcb_data, net_ids, config)
     # #515: --rip-existing-nets only rips copper that BLOCKS a net being
     # routed; a net dropped here as already-connected never routes, so naming
     # it in both --nets and --rip-existing-nets is a no-op. Warn instead of
-    # staying silent (the flag for a true rip+re-route was declined in #515;
-    # recipe: delete the net's copper first, then route it normally).
+    # staying silent.
     if rip_existing_nets and net_names:
         from net_queries import matches_net_filter as _mnf_ripwarn
         _rip_noop = [n for n, _reason in _already_routed
@@ -868,8 +938,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"NOT be re-routed ({', '.join(_rip_noop[:6])}"
                   f"{', ...' if len(_rip_noop) > 6 else ''}). "
                   f"--rip-existing-nets only rips nets that block another "
-                  f"route; to force a fresh re-route, delete the net's copper "
-                  f"first and route it again (#515).")
+                  f"route; pass --force-reroute to rip and re-route them "
+                  f"from scratch (#515).")
     if not net_ids:
         print("All nets are already fully connected - nothing to route!")
         if return_results:
@@ -1089,9 +1159,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             from protected_nets import protection_map, filter_rippable_names
             _prot = protection_map(pcb_data, input_file)
             if _prot:
+                # Override source: the RAW --nets patterns when main() passed
+                # them -- expansion turns a glob into exact names, which made
+                # any glob-selected protected net "exactly named" here (#521's
+                # override is deliberately no-glob; found by the force-reroute
+                # test). rip_existing_nets is never expanded, so it stays as-is.
                 _keep = set(filter_rippable_names(
                     [pcb_data.nets[n].name for n in existing_rippable], _prot,
-                    override_patterns=list(rip_existing_nets) + list(net_names or []),
+                    override_patterns=list(rip_existing_nets)
+                    + list(net_name_patterns if net_name_patterns is not None
+                           else (net_names or [])),
                     context="--rip-existing-nets"))
                 existing_rippable = [n for n in existing_rippable
                                      if pcb_data.nets[n].name in _keep]
@@ -1132,6 +1209,28 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                           f"existing net {_rn} (this run would re-route it at "
                           f"{_w_now}mm; pass --power-nets/--power-nets-widths "
                           f"to override)")
+    # #513 item 5, --force-reroute edition: a force-ripped net replans at THIS
+    # invocation's width resolution; preserve its routed width the same way.
+    # Its input segments are already stripped from pcb_data, so source the
+    # dominant width from the force_ripped stash.
+    if force_ripped:
+        from routing_common import dominant_net_widths as _dnw_fr
+        _fr_widths = _dnw_fr([s for _segs, _ in force_ripped.values()
+                              for s in _segs])
+        for _rid, _w_in in _fr_widths.items():
+            if _w_in <= 0:
+                continue
+            if _rid in (getattr(config, 'power_net_widths', None) or {}):
+                continue  # explicit override this run wins
+            _w_now = config.get_net_track_width(_rid, config.layers[0])
+            if _w_in > _w_now + 1e-6:
+                if config.net_track_widths is None:
+                    config.net_track_widths = {}
+                config.net_track_widths[_rid] = _w_in
+                _rn = pcb_data.nets[_rid].name if _rid in pcb_data.nets else _rid
+                print(f"  Preserving routed width {_w_in}mm of force-rerouted "
+                      f"net {_rn} (this run would re-route it at {_w_now}mm; "
+                      f"pass --power-nets/--power-nets-widths to override)")
     if progress_callback:
         progress_callback(0, 0, "Building base obstacle map...")
     print("Building base obstacle map...")
@@ -1563,6 +1662,36 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if _stale:
         results[:] = [r for r in results if id(r) in _authoritative]
         print(f"Dropped {len(_stale)} superseded rip-reroute result(s) from the write-list")
+
+    # --force-reroute custody: a force-ripped net whose replan landed NO new
+    # copper gets its ORIGINAL copper back. Restore re-adds the SAVED objects
+    # (identity-preserved), so the freeze snapshot below includes them and the
+    # #220/#284 stale strip keeps them -- exactly the rip/restore contract
+    # _compute_stale_input_copper documents. Without this, a failed replan
+    # would strip a working route from the output in exchange for nothing.
+    # Partial replans (some new copper) keep the new copper and report through
+    # the normal failed-nets summary instead: restoring originals on top of a
+    # partial reroute would stack stale copper the replan deliberately left.
+    if force_ripped:
+        _fr_new_copper = set()
+        for _r in results:
+            for _s in _r.get('new_segments') or []:
+                _fr_new_copper.add(_s.net_id)
+            for _v in _r.get('new_vias') or []:
+                _fr_new_copper.add(_v.net_id)
+        _fr_restored = []
+        for _nid, (_segs, _vias) in force_ripped.items():
+            if _nid in _fr_new_copper:
+                continue
+            pcb_data.segments = list(pcb_data.segments) + _segs
+            pcb_data.vias = list(pcb_data.vias) + _vias
+            _fr_restored.append(pcb_data.nets[_nid].name
+                                if _nid in pcb_data.nets else str(_nid))
+        if _fr_restored:
+            print(f"--force-reroute: replan produced no copper for "
+                  f"{len(_fr_restored)} net(s); ORIGINAL copper restored: "
+                  f"{', '.join(_fr_restored[:6])}"
+                  f"{', ...' if len(_fr_restored) > 6 else ''}")
 
     # ---- Issue #209 fix C: catch cleanup passes that disconnect a completed route ----
     # Snapshot each in-scope multi-pad net's connectivity on the WRITE-LIST copper
@@ -2410,7 +2539,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
               f"net(s) against the finished board: {', '.join(_rec_names)}")
         try:
             _rk = dict(_reconcile_kwargs)
-            _rk.update(final_reconcile=False, skip_routing=False)
+            # force_reroute must NOT forward: the strip already happened in
+            # THIS run; a forwarded flag would re-strip the retried nets'
+            # partial copper (and thrash on a second failure).
+            _rk.update(final_reconcile=False, skip_routing=False,
+                       force_reroute=False)
             # #527 follow-up: the inner run forwards the SAME progress
             # callback, so its routing/rescue/cleanup messages were pixel-
             # identical to the first pass's and the GUI looked like it ran
@@ -2671,6 +2804,16 @@ For differential pair routing, use route_diff.py:
                              "(e.g. on a board routed by a previous run). Use '*' to allow "
                              "any non-plane net. Without this flag, committed tracks are "
                              "never ripped.")
+    parser.add_argument("--force-reroute", action="store_true",
+                        help="Rip and re-route from scratch every net selected by "
+                             "--nets, even if already fully connected (#515's "
+                             "manual recipe, automated; PR #533). Requires an "
+                             "explicit --nets scope. Protected nets (length-matched "
+                             "groups, routed diff pairs) are skipped unless named "
+                             "EXACTLY in --nets; KiCad-locked copper is never "
+                             "ripped; plane (zone-owning) nets are skipped -- use "
+                             "route_planes for those. If the re-route fails "
+                             "outright, the original copper is restored.")
     parser.add_argument("--layers", "-l", nargs="+",
                         default=None,
                         help="Routing layers to use (default: all of the board's "
@@ -3029,6 +3172,17 @@ For differential pair routing, use route_diff.py:
     if args.nets:
         all_patterns.extend(args.nets)
 
+    # --force-reroute rips every selected net; without an explicit scope the
+    # default-'*' below would silently select the WHOLE BOARD for rip+reroute.
+    # (batch_route can't tell the difference -- main() always passes expanded
+    # names -- so the guard lives here.) An explicit --nets '*' is honored:
+    # the operator said so, and #521 protection still shields matched groups
+    # (glob is not an override).
+    if args.force_reroute and not all_patterns and not args.component:
+        parser.error("--force-reroute requires an explicit net scope "
+                     "(--nets, positional patterns, or --component): it rips "
+                     "and re-routes every selected net from scratch.")
+
     # Default to "*" (all nets) if no patterns and no component specified
     if not all_patterns and not args.component:
         all_patterns = ["*"]
@@ -3129,6 +3283,10 @@ For differential pair routing, use route_diff.py:
                 ordering_strategy=args.ordering,
                 disable_bga_zones=args.no_bga_zones,
                 rip_existing_nets=args.rip_existing_nets,
+                force_reroute=args.force_reroute,
+                # RAW patterns (pre-expansion): the #521 protection override
+                # must see what the operator TYPED, not the expanded names.
+                net_name_patterns=all_patterns,
                 layers=args.layers,
                 track_width=args.track_width,
                 track_width_from_class=not _tw_explicit,

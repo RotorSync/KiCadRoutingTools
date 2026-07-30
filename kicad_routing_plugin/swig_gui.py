@@ -1238,6 +1238,21 @@ class RoutingDialog(wx.Dialog):
         rip_existing_sizer.Add(self.rip_existing_nets_ctrl, 1, wx.EXPAND)
         options_inner.Add(rip_existing_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
+        # Force re-route (#515 / PR #533): rip and re-route from scratch every
+        # net SELECTED for this run, even if already fully connected. Mirrors
+        # the CLI --force-reroute flag; the protection rules live engine-side
+        # (protected nets skipped unless named exactly, locked copper never
+        # ripped, plane nets skipped, originals restored on a no-copper replan).
+        self.force_reroute = wx.CheckBox(options_scroll, label="Force re-route selected nets")
+        self.force_reroute.SetToolTip(
+            "Rip and re-route from scratch every net selected for this run, even if "
+            "already fully connected (replaces a connected-but-unwanted route). "
+            "Protected nets (length-matched groups, routed diff pairs) are skipped "
+            "unless selected by exact name; KiCad-locked copper is never ripped; "
+            "plane nets are skipped (use the Planes tab). If the re-route fails "
+            "outright, the original copper is restored.")
+        options_inner.Add(self.force_reroute, 0, wx.ALL, 3)
+
         # Keep input copper (#84 / --keep-input-copper): the flip side of rip --
         # rip-existing gates whether the ROUTER may tear up pre-existing tracks
         # that block a retry; this gates whether the post-route CLEANUP passes
@@ -2391,6 +2406,7 @@ class RoutingDialog(wx.Dialog):
         self.power_widths_ctrl.SetValue("")
         self.no_bga_zones_ctrl.SetValue("")  # empty == CLI default (None: keep BGA zones)
         self.rip_existing_nets_ctrl.SetValue("")
+        self.force_reroute.SetValue(False)  # match creation default + CLI (store_true)
         self.layer_costs_ctrl.SetValue("")
 
         # Reset advanced parameters
@@ -2746,6 +2762,7 @@ class RoutingDialog(wx.Dialog):
             'mps_reverse_rounds': self.mps_reverse_rounds.GetValue(),
             'mps_layer_swap': self.mps_layer_swap.GetValue(),
             'keep_input_copper': self.keep_input_copper.GetValue(),
+            'force_reroute': self.force_reroute.GetValue(),
             'mps_segment_intersection': self.mps_segment_intersection.GetValue(),
             # Bus routing options
             'bus_enabled': self.bus_enabled.GetValue(),
@@ -3187,6 +3204,7 @@ class RoutingDialog(wx.Dialog):
                     power_nets_widths=config.get('power_nets_widths', []),
                     disable_bga_zones=config.get('no_bga_zones'),
                     rip_existing_nets=config.get('rip_existing_nets'),
+                    force_reroute=config.get('force_reroute', False),
                     layer_costs=config.get('layer_costs', []),
                     length_match_groups=config.get('length_match_groups'),
                     length_match_tolerance=config.get('length_match_tolerance', 0.1),

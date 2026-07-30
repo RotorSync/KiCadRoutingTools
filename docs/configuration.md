@@ -62,6 +62,39 @@ python route.py in.kicad_pcb out.kicad_pcb --nets "*CLK*" --rip-existing-nets "*
 python route.py in.kicad_pcb out.kicad_pcb --nets "*" --rip-existing-nets "*"
 ```
 
+### Forcing a Re-Route
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--force-reroute` | off | Rip and re-route **from scratch** every net selected by `--nets`, even if it is already fully connected |
+
+`--rip-existing-nets` only rips nets that *block* another route, so an
+already-connected net named in `--nets` is normally skipped ("already fully
+connected") — there is no way to make the router replace a
+connected-but-unwanted route (e.g. one that squeaked through a corridor you
+want cleared). `--force-reroute` is that way: every selected net has its
+copper stripped and is replanned from scratch. In the GUI it is the
+**Force re-route selected nets** checkbox on the Basic tab.
+
+Safety rails:
+
+- Requires an explicit net scope (`--nets`, positional patterns, or
+  `--component`) — without one the run is rejected rather than silently
+  ripping the whole board.
+- Protected nets (length-matched groups, routed diff pairs — see
+  [Length Matching](length-matching.md)) are skipped unless named **exactly**
+  (a glob is not an override); KiCad-**locked** copper is never ripped.
+- Plane (zone-owning) nets are skipped — use `route_planes.py` for those.
+- If the re-route produces no copper at all, the net's original copper is
+  restored, so a failed replan never trades a working route for nothing.
+- The net re-routes at its original dominant track width unless this run
+  specifies one (same width-preservation as ripped pre-existing nets).
+
+```bash
+# Replace the existing /CLK route with a fresh from-scratch plan
+python route.py in.kicad_pcb out.kicad_pcb --nets "/CLK" --force-reroute
+```
+
 ### Geometry Options
 
 | Option | Default | Description |

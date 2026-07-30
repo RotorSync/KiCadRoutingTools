@@ -116,6 +116,9 @@ BOOL_FLAGS = {
     # spokes (found by the ef4c19a..4db8c18 parity audit).
     '--thermal-relief': 'thermal_relief',
     '--thermal-vias': 'thermal_vias',
+    # #515 / PR #533: rip+re-route the selected nets from scratch. Same-named
+    # basic-tab checkbox; applied by the plan executor's generic loop.
+    '--force-reroute': 'force_reroute',
 }
 
 # Flags whose values are file paths / bookkeeping -- consumed, never params.
