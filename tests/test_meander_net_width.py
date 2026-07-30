@@ -20,6 +20,7 @@ Covers:
 
 Run with:  python3 tests/test_meander_net_width.py
 """
+import math
 import os
 import sys
 
@@ -268,6 +269,41 @@ def test_diff_pair_widths():
         _fail(f"diff-pair wide net should pull meander back (base={base}, wide={wide})")
 
 
+def test_oval_pad_is_bounded_exactly_not_by_the_diagonal():
+    """#504 follow-up to #526: an OVAL pad is a stadium -- a rect with
+    semicircular ends -- so its farthest copper is the end cap on the long axis
+    and its exact bounding radius is max(sx,sy)/2, same as a circle. It has no
+    corner to reach.
+
+    _pad_bounding_radius originally special-cased only 'circle', so every oval
+    was inflated by up to sqrt(2). Oval is the shape of essentially every
+    through-hole pad: across kicad_files/ all 1225 of them were over-modelled,
+    mean +274um, worst +966um (kit-dev J201.2, 5.0x4.8: 2.5 -> 3.466). That
+    also contradicted the convention the rest of the repo applies -- see
+    check_drc, obstacle_map, obstacle_cache, and diff_pair_routing's
+    `short if pad.shape in ('circle','oval') else short * sqrt(2)`, which is
+    this same corner correction."""
+    from length_matching import _pad_bounding_radius
+
+    class _P:
+        def __init__(s, shape, sx, sy):
+            s.shape, s.size_x, s.size_y = shape, sx, sy
+
+    for shape, sx, sy in (('oval', 2.4, 2.4), ('oval', 5.0, 4.801),
+                          ('oval', 1.7, 3.4), ('circle', 1.7, 1.7)):
+        got = _pad_bounding_radius(_P(shape, sx, sy))
+        want = max(sx, sy) / 2.0
+        if abs(got - want) > 1e-9:
+            _fail(f"{shape} {sx}x{sy}: radius {got:.4f}, want exactly {want:.4f}")
+
+    # rect/roundrect must KEEP the half-diagonal -- that is #526's fix.
+    for shape in ('rect', 'roundrect'):
+        got = _pad_bounding_radius(_P(shape, 1.09, 1.14))
+        want = math.hypot(1.09, 1.14) / 2.0
+        if abs(got - want) > 1e-9:
+            _fail(f"{shape}: radius {got:.4f}, want the half-diagonal {want:.4f}")
+
+
 if __name__ == "__main__":
     test_single_ended_widths()
     test_own_width_override()
@@ -275,4 +311,5 @@ if __name__ == "__main__":
     test_diff_pair_widths()
     test_board_edge_keepout()
     test_pad_corner_reach()
+    test_oval_pad_is_bounded_exactly_not_by_the_diagonal()
     print("PASS  meander keep-out sized from actual net width (#175)")

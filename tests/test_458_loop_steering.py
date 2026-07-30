@@ -81,9 +81,15 @@ def _loop_board():
     return path, tempfile.mkdtemp()
 
 
-def _run_loop(extra_args, rounds=4, quench_result=None):
+def _run_loop(extra_args, rounds=4, quench_result=None,
+              quench_metrics=None, route_calls=None):
     """Run main() with the routing step, the quench and the writer replaced.
-    Returns the list of kwargs quench was called with, one entry per round."""
+    Returns the list of kwargs quench was called with, one entry per round.
+
+    quench_metrics: optional {'before':..., 'after':...} the fake quench writes
+    into the caller's metrics_out, so the #504 ratsnest screen has numbers.
+    route_calls: optional list that receives one entry per run_route call, so a
+    test can assert the screen actually SKIPPED the routing run."""
     calls = []
     placements = ([{'reference': 'C1', 'new_x': 151.0, 'new_y': 100.0,
                     'new_rotation': 0.0}] if quench_result is None
@@ -91,9 +97,13 @@ def _run_loop(extra_args, rounds=4, quench_result=None):
 
     def fake_quench(pcb_data, **kw):
         calls.append(dict(kw))
+        if quench_metrics is not None and kw.get('metrics_out') is not None:
+            kw['metrics_out'].update(quench_metrics)
         return placements
 
     def fake_run_route(pcb_file, routed_file, route_args, log_file):
+        if route_calls is not None:
+            route_calls.append(pcb_file)
         # Every candidate scores exactly like round 0, so better() is False
         # and every round is REJECTED: the cap widens on every round.
         return {'failures': 2, 'failed_nets': ['NA'], 'blockers': [],
@@ -502,6 +512,64 @@ def test_missing_summary_raises_with_the_log_tail():
         raise AssertionError("a log with no summary must raise")
 
 
+# --- #504: the ratsnest screen ------------------------------------------------
+
+_WORSE = {'before': {'crossings': 100, 'hpwl': 1000.0, 'length': 1000.0,
+                     'total': 1.0},
+          'after': {'crossings': 130, 'hpwl': 1000.0, 'length': 1000.0,
+                    'total': 0.9}}
+_BETTER = {'before': {'crossings': 100, 'hpwl': 1000.0, 'length': 1000.0,
+                      'total': 1.0},
+           'after': {'crossings': 80, 'hpwl': 900.0, 'length': 900.0,
+                     'total': 0.5}}
+
+
+def test_screen_skips_the_routing_run_on_a_regressed_candidate():
+    """The whole point of #504 part 2: routing is minutes per round, so a
+    candidate whose ratsnest clearly got worse must not be paid for."""
+    routed = []
+    _run_loop(['--ratsnest-screen', '5'], rounds=3,
+              quench_metrics=_WORSE, route_calls=routed)
+    # round 0 always routes the initial placement; every candidate is screened.
+    assert len(routed) == 1,         f"expected only the round-0 route, got {len(routed)} routing runs"
+
+
+def test_screen_off_by_default_routes_every_candidate():
+    routed = []
+    _run_loop([], rounds=3, quench_metrics=_WORSE, route_calls=routed)
+    assert len(routed) == 4,         f"screen must be opt-in: expected 1 + 3 routing runs, got {len(routed)}"
+
+
+def test_screen_lets_an_improving_candidate_through():
+    routed = []
+    _run_loop(['--ratsnest-screen', '5'], rounds=3,
+              quench_metrics=_BETTER, route_calls=routed)
+    assert len(routed) == 4,         f"an improving candidate must still be routed, got {len(routed)}"
+
+
+def test_screen_is_inert_when_quench_reports_nothing():
+    """A fake/old quench that fills no metrics_out must never cause a skip."""
+    routed = []
+    _run_loop(['--ratsnest-screen', '5'], rounds=2,
+              quench_metrics=None, route_calls=routed)
+    assert len(routed) == 3, f"got {len(routed)}"
+
+
+def test_loop_passes_metrics_out_to_quench():
+    calls = _run_loop([], rounds=1)
+    assert 'metrics_out' in calls[0],         "the loop must ask quench for its ratsnest numbers"
+    assert isinstance(calls[0]['metrics_out'], dict)
+
+
+def test_negative_screen_is_rejected():
+    try:
+        _run_loop(['--ratsnest-screen', '-1'], rounds=1)
+    except SystemExit as e:
+        assert e.code == 2, f"argparse should exit 2, got {e.code}"
+        return
+    raise AssertionError("--ratsnest-screen -1 must be rejected")
+
+
 TESTS = [
     test_swap_cap_held_while_displacement_widens,
     test_swap_cap_held_when_quench_finds_nothing,
@@ -524,6 +592,12 @@ TESTS = [
     test_route_py_is_invoked_by_absolute_path_in_utf8_mode,
     test_nonzero_exit_raises_and_names_the_real_error,
     test_missing_summary_raises_with_the_log_tail,
+    test_screen_skips_the_routing_run_on_a_regressed_candidate,
+    test_screen_off_by_default_routes_every_candidate,
+    test_screen_lets_an_improving_candidate_through,
+    test_screen_is_inert_when_quench_reports_nothing,
+    test_loop_passes_metrics_out_to_quench,
+    test_negative_screen_is_rejected,
 ]
 
 

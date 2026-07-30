@@ -158,6 +158,35 @@ only each net's pad-position extremes, so unlike the MST length and the crossing
 count it is invariant to airwire order. If HPWL agrees and crossings do not, the
 two runs differ in tie-breaks rather than in placement quality.
 
+## Ratsnest metrics, and the pre-route screen (#504)
+
+The quench cost function computes airwire length and crossings on every pass, and
+`hpwl()` is pure pad geometry. Those numbers used to be printed and discarded.
+They are now exported:
+
+- `quench(..., metrics_out=d)` fills `d` with `{'before', 'after', 'legality'}` —
+  an out-param rather than a changed return, since the return is consumed
+  positionally by both CLIs and four test files.
+- `place_optimize.py` emits them as a `JSON_SUMMARY:` line, so a chain or grader
+  can gate on what a run achieved instead of scraping stdout.
+- `place_route_loop.py` records `ratsnest_crossings` / `ratsnest_hpwl` /
+  `ratsnest_length` in each round's metrics dict, report-only beside the
+  `pad_pairs_*` keys. `better()` is deliberately untouched — reworking the
+  comparator is #458.
+
+**Which numbers compare.** `crossings` (a raw count by contract) and `hpwl` are
+unweighted, so they are comparable across runs. `length` and `total` are scaled
+by `net_weights`, so they only compare between the `before` and `after` of the
+*same* call — which is why the screen thresholds on the first two.
+
+**`--ratsnest-screen N`** (percent, `0` = disabled, the default) skips the routing
+run when a candidate's crossings or HPWL regress by more than N% against the board
+it came from. Routing is the honest judge but an expensive one, often minutes per
+round; a candidate whose ratsnest clearly got worse is very unlikely to route
+better. The baseline is free — quench is handed the current best board, so its own
+`before` *is* that board's ratsnest. Every decision is logged with its numbers, so
+it is auditable whether the screen ever skipped a placement that would have won.
+
 ## Module layout
 
 | File | Purpose |

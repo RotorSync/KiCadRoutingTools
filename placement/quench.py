@@ -161,30 +161,35 @@ def _through_pad_bounds_local(fp):
     hole's own extent rather than the pad copper's -- the far side sees the
     barrel and the lead, and the annular ring on that side is part of it.
     """
-    # Inverse of local_to_global's rotation, for pads whose drill is OFFSET from
-    # their copper: hole_x/hole_y are BOARD coordinates, so the delta from the
-    # copper centre has to be rotated back into the footprint's local frame
-    # before it can be added to local_x/local_y.
-    ang = math.radians(-(fp.rotation or 0.0))
-    cos_a, sin_a = math.cos(ang), math.sin(ang)
+    # `local_x/local_y` is the pad ANCHOR in the footprint's frame, and for a
+    # drilled pad the anchor IS the hole: kicad_parser records hole_x/hole_y as
+    # the pre-offset position and only then shifts global_x/global_y to the
+    # copper centre. So the hole needs no offset correction at all -- an earlier
+    # version "corrected" local_* by (hole - global), which is minus the offset,
+    # landing the box one full offset on the WRONG side of the hole.
+    #
+    # size_x/size_y are BOARD-axis resolved (kicad_parser swaps them for a pad at
+    # ~90 degrees), so they cannot be used as local half-extents directly -- that
+    # transposed the box on every 90/270-degree footprint (kit-dev SW_ONOFF201
+    # modelled 2.54 x 13.97 where the truth is 3.81 x 12.70, under-blocking
+    # 1.27mm). Project them through the pad's local tilt exactly as
+    # placement/utility.compute_footprint_bbox_local does.
     xs, ys = [], []
     for p in (fp.pads or []):
         d = getattr(p, 'drill', 0) or 0
         if d <= 0:
             continue
-        lx, ly = p.local_x, p.local_y
-        hx, hy = getattr(p, 'hole_x', None), getattr(p, 'hole_y', None)
-        if hx is not None and hy is not None:
-            gdx, gdy = hx - p.global_x, hy - p.global_y
-            lx += gdx * cos_a + gdy * sin_a       # R(-ang) applied to the delta
-            ly += -gdx * sin_a + gdy * cos_a
-        r = d / 2.0
+        local_tilt = math.radians((getattr(p, 'rect_rotation', 0.0) or 0.0)
+                                  + (fp.rotation or 0.0))
+        c, s = abs(math.cos(local_tilt)), abs(math.sin(local_tilt))
+        hx, hy = (getattr(p, 'size_x', 0) or 0) / 2.0, (getattr(p, 'size_y', 0) or 0) / 2.0
         # An oval/slotted hole is bounded by the pad extent it sits in; taking
         # the larger of drill radius and half pad size keeps a slot covered.
-        rx = max(r, (getattr(p, 'size_x', 0) or 0) / 2.0)
-        ry = max(r, (getattr(p, 'size_y', 0) or 0) / 2.0)
-        xs += [lx - rx, lx + rx]
-        ys += [ly - ry, ly + ry]
+        r = d / 2.0
+        rx = max(r, hx * c + hy * s)
+        ry = max(r, hx * s + hy * c)
+        xs += [p.local_x - rx, p.local_x + rx]
+        ys += [p.local_y - ry, p.local_y + ry]
     if not xs:
         return None
     return (min(xs), min(ys), max(xs), max(ys))
@@ -637,13 +642,24 @@ class QuenchState:
                         legal = False
                         break
                     continue
-                # Fast path: two plain SMD parts. Same side, then the original
-                # inline AABB test -- no function calls, as before the side rule.
+                # Fast path: two plain SMD parts, same side. The per-axis test is
+                # an early-OUT, not the verdict -- clearing it on any axis proves
+                # the true gap clears too, but failing it does not prove the
+                # reverse, because the gap is EUCLIDEAN. Two rects offset
+                # diagonally by (0.2, 0.2) at clearance 0.25 fail every axis while
+                # rect_gap is hypot(0.2,0.2)=0.283, i.e. legal. Using the axis
+                # test as the answer made candidate_valid REJECT poses that
+                # violation_parts (:577) and _halo_pair_penalty (:447) both score
+                # as legal -- so violation()==0 did not imply the hard gate
+                # passes, and the unfreeze branch could walk a part into a pose
+                # the ordinary gate forbids.
                 if other.side != part.side:
                     continue
                 r = other.rect()
-                if not (rect[2] + clr <= r[0] or r[2] + clr <= rect[0]
+                if (rect[2] + clr <= r[0] or r[2] + clr <= rect[0]
                         or rect[3] + clr <= r[1] or r[3] + clr <= rect[1]):
+                    continue                    # provably clear
+                if rect_gap(rect, r) < clr:
                     legal = False
                     break
         if legal:
@@ -676,8 +692,11 @@ class QuenchState:
         Empty means the exact ring test is skippable for every pose it can take."""
         part = self.parts[ref]
         travel = 0.0 if part.locked else self._travel_budget
+        # center= the pose ORIGIN: a part ROTATES about it, so an off-centre
+        # courtyard's rect swings and the seed-rect-centred disk can miss an edge.
         return self.edge_gate.edges_near(
-            ref, part.rect(part.seed_x, part.seed_y, part.orig_rot), travel)
+            ref, part.rect(part.seed_x, part.seed_y, part.orig_rot), travel,
+            center=(part.seed_x, part.seed_y))
 
     def _edges_near_halo(self, ref) -> list:
         """Like _edges_near but sized to the SOFT edge_halo radius. Inflating
@@ -687,7 +706,7 @@ class QuenchState:
         travel = 0.0 if part.locked else self._travel_budget
         return self.edge_gate.edges_near(
             (ref, 'halo'), part.rect(part.seed_x, part.seed_y, part.orig_rot),
-            travel + self.edge_halo)
+            travel + self.edge_halo, center=(part.seed_x, part.seed_y))
 
     def _may_reach_edge(self, ref) -> bool:
         return bool(self._edges_near(ref))
@@ -953,6 +972,7 @@ def quench(pcb_data: PCBData, pcb_file: str,
            lock_refs: Optional[List[str]] = None,
            move_refs: Optional[Set[str]] = None,
            net_weights: Optional[Dict[int, float]] = None,
+           metrics_out: Optional[Dict] = None,
            verbose: bool = False) -> List[Dict]:
     """Greedy quench: iterate over parts, accept only cost-reducing moves.
 
@@ -960,6 +980,23 @@ def quench(pcb_data: PCBData, pcb_file: str,
     net's airwire length is scaled by its weight and every crossing it takes
     part in is priced at max(weight_a, weight_b). Absent or all-ones leaves
     the cost exactly unchanged.
+
+    metrics_out: optional dict, filled in place with the ratsnest and legality
+    numbers this function already computes and used to print and discard (#504):
+
+        {'before': {...}, 'after': {...}, 'legality': {...}}
+
+    where before/after are `QuenchState.total_cost()` -- length, crossings,
+    halo, edge, hpwl, total -- and legality is `legality_metrics()`. An
+    out-param rather than a changed return type on purpose: the return is
+    consumed positionally by both CLIs and four test files, and one of those
+    binds this signature with inspect.signature. Same note/consume shape as
+    plane_resistance's consume_resistance_results (#487).
+
+    Reading them: `crossings` and `hpwl` are UNWEIGHTED (crossings is a raw
+    count by contract; hpwl is pure pad geometry), so they are comparable
+    across calls. `length` and `total` are scaled by net_weights, so they are
+    only comparable between the before/after of the SAME call.
 
     Returns a list of placement dicts (reference/new_x/new_y/new_rotation)
     for every movable part, whether or not it moved.
@@ -1199,6 +1236,13 @@ def quench(pcb_data: PCBData, pcb_file: str,
           f"crossings {before['crossings']} -> {after['crossings']}, "
           f"hpwl {before['hpwl']:.1f} -> {after['hpwl']:.1f}mm, "
           f"total {before['total']:.1f} -> {after['total']:.1f}")
+
+    if metrics_out is not None:
+        # #504: hand back what we just printed, instead of discarding it. The
+        # caller owns the dict, so this cannot change the return contract.
+        metrics_out['before'] = dict(before)
+        metrics_out['after'] = dict(after)
+        metrics_out['legality'] = state.legality_metrics()
 
     return [{'reference': ref,
              'new_x': p.x, 'new_y': p.y, 'new_rotation': p.rot}
