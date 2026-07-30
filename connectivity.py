@@ -1028,6 +1028,44 @@ def _get_net_endpoints_ordered(pcb_data: PCBData, net_id: int, config: GridRoute
                         if (gx1, gy1) != (gx2, gy2):
                             targets.append((gx2, gy2, layer_idx, seg.end_x, seg.end_y))
 
+                # Each group's VIAS are route terminals on every routing layer
+                # (PR #534): a via spans the stack, and Case 2 below has
+                # exposed vias this way since the original import -- Case 1
+                # never did, an oversight, not a decision. The gap bites when
+                # a group's segments all sit on layers this run can't route
+                # (an F.Cu escape stub + via from a previous fanout step,
+                # routed --layers In*): the group's only terminals are on the
+                # FORBIDDEN full-stack-appended layer, and the net survives
+                # only through the stub-swap rescue ladder (measured on the
+                # repro: 18 segments + 2 via-in-pads vs a direct 3-segment
+                # route through the existing vias once vias are terminals).
+                # Membership mirrors find_connected_groups exactly: grouping
+                # unions across layers only where a via coincides with a
+                # segment ENDPOINT, so endpoint proximity IS the group's via
+                # set (same 0.05 box as Case 2's pad test). Sorted by
+                # position: net_vias arrives in board order, which differs
+                # between the text parser and pcbnew (the 6515b1c GUI/CLI
+                # order-independence class).
+                def _group_via_terminals(g):
+                    pts = set()
+                    for _sg in g:
+                        pts.add((_sg.start_x, _sg.start_y))
+                        pts.add((_sg.end_x, _sg.end_y))
+                    vlist = [v for v in net_vias
+                             if any(abs(v.x - px) < 0.05 and abs(v.y - py) < 0.05
+                                    for px, py in pts)]
+                    vlist.sort(key=lambda v: (round(v.x, POSITION_DECIMALS),
+                                              round(v.y, POSITION_DECIMALS)))
+                    return vlist
+                for _vlist, _side in ((_group_via_terminals(source_segs), sources),
+                                      (_group_via_terminals(target_segs), targets)):
+                    for _via in _vlist:
+                        gx, gy = coord.to_grid(_via.x, _via.y)
+                        for _vlayer in config.layers:
+                            layer_idx = layer_map.get(_vlayer)
+                            if layer_idx is not None:
+                                _side.append((gx, gy, layer_idx, _via.x, _via.y))
+
             if sources and targets:
                 return sources, targets, None
 
