@@ -1755,11 +1755,35 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None,
         for i, s in enumerate(net_segs):
             comp_segs[uf.find(2 * i)].append(s)
         via_reprs = graph.get('via_index_repr', {})
+        # #513 item 6 made graphics NON-conductive in the connectivity graph
+        # (correct for grading: KiCad never credits them), so a track that
+        # touches only a graphic is now its OWN pad-less component and the
+        # in-component graphic test below can no longer see the anchor. The
+        # copper still physically touches real (graphic) copper on the board,
+        # and deletion must stay conservative (#337) -- so anchor by GEOMETRY:
+        # an island whose copper overlaps a same-net graphic capsule is kept.
+        net_graphics = [g for g in net_segs if getattr(g, 'graphic', False)]
+
+        def _touches_graphic(segs):
+            from geometry_utils import segment_to_segment_distance
+            for s in segs:
+                for g in net_graphics:
+                    if s.layer != g.layer:
+                        continue
+                    d = segment_to_segment_distance(
+                        s.start_x, s.start_y, s.end_x, s.end_y,
+                        g.start_x, g.start_y, g.end_x, g.end_y)
+                    if d <= (s.width + g.width) / 2 + 1e-6:
+                        return True
+            return False
+
         for root, segs in comp_segs.items():
             if root in pad_roots:
                 continue
             if any(getattr(s, 'graphic', False) for s in segs):
                 continue  # immutable input art anchors the island
+            if net_graphics and _touches_graphic(segs):
+                continue  # copper abutting input art (#337): physically joined
             if keep_input_copper and (
                     any(id(s) not in seg_owner for s in segs)
                     or any(via_reprs.get(j) is not None
