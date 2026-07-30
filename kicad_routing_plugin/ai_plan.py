@@ -583,6 +583,8 @@ def apply_step_params(step, dialog):
         # enabled 'Add GND vias' leak into a loaded stress-manifest plan
         # that never asked for stitching (Andy's bitaxe DRC2 grazes).
         opts.add_gnd_vias_check.SetValue(bool(params.get("add_gnd_vias")))
+        if hasattr(opts, "thermal_relief"):
+            opts.thermal_relief.SetValue(bool(params.get("thermal_relief")))
         if not params.get("add_gnd_vias"):
             notes.append("add_gnd_vias off (not in plan step)")
         if "gnd_via_distance" in params:

@@ -1088,6 +1088,7 @@ def _generate_multinet_layer_zones(
     board_edge_clearance: float,
     debug_lines: bool,
     verbose: bool,
+    thermal_relief: bool = False,
     priority_offset: int = 0
 ) -> Tuple[List[str], List[str], List[Dict]]:
     """
@@ -1198,11 +1199,12 @@ def _generate_multinet_layer_zones(
                 polygon_points=zone_polygon,
                 clearance=zone_clearance,
                 min_thickness=min_thickness,
-                direct_connect=True,
+                direct_connect=not thermal_relief,
                 use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION
             )
             zone_sexprs.append(zone_sexpr)
             zone_data_list.append({
+                'thermal_relief': thermal_relief,
                 'net_id': net_id,
                 'net_name': net_name,
                 'layer': layer,
@@ -1484,11 +1486,12 @@ def _generate_multinet_layer_zones(
             polygon_points=zone_polygon,
             clearance=zone_clearance,
             min_thickness=min_thickness,
-            direct_connect=True,
+            direct_connect=not thermal_relief,
             use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION
         )
         zone_sexprs.append(zone_sexpr)
         zone_data_list.append({
+            'thermal_relief': thermal_relief,
             'net_id': net_id,
             'net_name': net_name,
             'layer': layer,
@@ -1538,12 +1541,13 @@ def _generate_multinet_layer_zones(
                 polygon_points=polygon,
                 clearance=zone_clearance,
                 min_thickness=min_thickness,
-                direct_connect=True,
+                direct_connect=not thermal_relief,
                 use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION,
                 priority=_prio_of.get((net_id, poly_idx), 0)
             )
             zone_sexprs.append(zone_sexpr)
             zone_data_list.append({
+                'thermal_relief': thermal_relief,
                 'net_id': net_id,
                 'net_name': net_name,
                 'layer': layer,
@@ -2286,6 +2290,7 @@ def create_plane(
     net_clearances: Optional[dict] = None,
     clamp_netclasses: bool = True,
     clearance_ceiling: Optional[float] = None,
+    thermal_relief: bool = False,
 ) -> Union[Tuple[int, int, int],
            Tuple[int, int, int, list, list, list, int, list]]:
     """
@@ -2462,10 +2467,16 @@ def create_plane(
             print(f"Error: Zone conflict for net '{net_name}' on layer {plane_layer}")
             return _empty_plane_results(return_results)
         should_create_zones.append(should_create)
-        if zone_to_replace:
-            zones_to_replace.append((zone_to_replace.net_id, zone_to_replace.layer))
         if foreign_zones:
             shared_layer_priority[net_name] = shared_layer_zone_priority(foreign_zones)
+        if zone_to_replace:
+            zones_to_replace.append((zone_to_replace.net_id, zone_to_replace.layer))
+            # #487: a REPLACED user pour keeps (at least) its own fill priority.
+            # Writing only the shared-layer computed value silently reset e.g.
+            # a priority-2 pour to 0, flipping which overlapping zone pulls back.
+            _zp = int(getattr(zone_to_replace, 'priority', 0) or 0)
+            if _zp > shared_layer_priority.get(net_name, 0):
+                shared_layer_priority[net_name] = _zp
 
     # Step 3: Get board bounds for zone polygon
     board_bounds = pcb_data.board_info.board_bounds
@@ -3334,7 +3345,7 @@ def create_plane(
                 polygon_points=zone_polygon,
                 clearance=zone_clearance,
                 min_thickness=min_thickness,
-                direct_connect=True,
+                direct_connect=not thermal_relief,
                 use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION,
                 priority=_prio
             )
@@ -3350,6 +3361,7 @@ def create_plane(
             note_resistance_result(net_name, result)
 
             all_zone_data.append({
+                'thermal_relief': thermal_relief,
                 'net_id': net_id,
                 'net_name': net_name,
                 'layer': plane_layer,
@@ -3443,6 +3455,7 @@ def create_plane(
                     progress_callback(0, 0, f"Computing Voronoi zones for {layer}...")
 
                 zone_sexprs, debug_line_sexprs, zone_data = _generate_multinet_layer_zones(
+                    thermal_relief=thermal_relief,
                     layer=layer,
                     nets_on_layer=nets_on_layer,
                     pcb_data=pcb_data,
@@ -3565,6 +3578,7 @@ def create_plane(
                         _cu, _pts, _kname,
                         use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION))
                     all_zone_data.append({
+                        'thermal_relief': thermal_relief,
                         'keepout': True, 'name': _kname, 'layers': _cu,
                         'polygon_points': _pts,
                     })
@@ -3815,6 +3829,9 @@ Examples:
     # Zone options
     parser.add_argument("--zone-clearance", type=float, default=None, help="Zone (pour) clearance from other copper in mm. Default: follow --clearance, auto-stepping down to the fab floor if the pour cannot thread the densest BGA via lattice")
     parser.add_argument("--min-thickness", type=float, default=defaults.PLANE_MIN_THICKNESS, help="Minimum zone copper thickness in mm (default: 0.1)")
+    parser.add_argument("--thermal-relief", action="store_true",
+                        help="Connect pads to the pour with thermal-relief spokes instead of "
+                             "solid copper (#487: the writer always supported it; nothing could ask)")
 
     # Algorithm options
     parser.add_argument("--grid-step", type=float, default=defaults.GRID_STEP, help="Grid resolution in mm (default: 0.1)")
@@ -4034,6 +4051,7 @@ Examples:
         clearance=args.clearance,
         zone_clearance=args.zone_clearance,
         min_thickness=args.min_thickness,
+        thermal_relief=args.thermal_relief,
         grid_step=args.grid_step,
         max_search_radius=args.max_search_radius,
         max_via_reuse_radius=args.max_via_reuse_radius,

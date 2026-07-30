@@ -315,6 +315,16 @@ class CreatePlanesOptionsPanel(wx.Panel):
         self.same_net_pad_clearance.Enable(False)  # sync with default-checked box
         zone_sizer.Add(self.via_in_pad_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
+        # #487: thermal-relief pad connections (the zone writer always
+        # supported them; every front hardcoded solid). Control named after
+        # the engine param so AI plans can set it.
+        self.thermal_relief = wx.CheckBox(self, label="Thermal relief pad connections")
+        self.thermal_relief.SetValue(False)
+        self.thermal_relief.SetToolTip(
+            "Connect pads to the pour with thermal-relief spokes instead of solid "
+            "copper (easier hand soldering/rework; solid = lowest impedance)")
+        zone_sizer.Add(self.thermal_relief, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
         sizer.Add(zone_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
 
         # Rip-up options
@@ -394,6 +404,7 @@ class CreatePlanesOptionsPanel(wx.Panel):
             'gnd_via_distance': self.gnd_via_distance.GetValue(),
             'gnd_via_net': self.gnd_via_net.GetValue(),
             'same_net_pad_clearance': same_net_clr,
+            'thermal_relief': self.thermal_relief.GetValue(),
         }
 
 
@@ -1041,6 +1052,7 @@ class PlanesTab(wx.Panel):
                 clearance=config.get('clearance', defaults.CLEARANCE),
                 zone_clearance=config.get('zone_clearance'),
                 min_thickness=config.get('min_thickness', defaults.PLANE_MIN_THICKNESS),
+                thermal_relief=config.get('thermal_relief', False),
                 grid_step=config.get('grid_step', defaults.GRID_STEP),
                 max_search_radius=config.get('max_search_radius', defaults.PLANE_MAX_SEARCH_RADIUS),
                 max_via_reuse_radius=config.get('max_via_reuse_radius', defaults.PLANE_MAX_VIA_REUSE_RADIUS),
@@ -1889,7 +1901,10 @@ class PlanesTab(wx.Panel):
                 # Set zone properties
                 zone.SetLocalClearance(mm_to_iu(zone_data.get('clearance', 0.2)))
                 zone.SetMinThickness(mm_to_iu(zone_data.get('min_thickness', 0.1)))
-                zone.SetPadConnection(pcbnew.ZONE_CONNECTION_FULL)  # Direct connect
+                zone.SetPadConnection(
+                    pcbnew.ZONE_CONNECTION_THERMAL
+                    if zone_data.get('thermal_relief')
+                    else pcbnew.ZONE_CONNECTION_FULL)
                 # Hatch the outline so the zone is visible immediately;
                 # the actual copper fill is computed below via ZONE_FILLER.
                 try:

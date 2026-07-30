@@ -214,6 +214,7 @@ def get_dialog_settings(dialog):
         'planes_component': dialog.planes_tab.net_panel.component_dropdown.GetSelection() if dialog.planes_tab.net_panel.component_dropdown else 0,
         # Create mode options
         'planes_zone_clearance': dialog.planes_tab.create_options.zone_clearance.GetValue(),
+        'planes_thermal_relief': dialog.planes_tab.create_options.thermal_relief.GetValue(),
         'planes_max_search_radius': dialog.planes_tab.create_options.max_search_radius.GetValue(),
         'planes_rip_blocker_check': dialog.planes_tab.create_options.rip_blocker_check.GetValue(),
         'planes_add_gnd_vias': dialog.planes_tab.create_options.add_gnd_vias_check.GetValue(),
@@ -663,6 +664,8 @@ def restore_dialog_settings(dialog, settings):
     # Create mode options
     if 'planes_zone_clearance' in settings:
         dialog.planes_tab.create_options.zone_clearance.SetValue(settings['planes_zone_clearance'])
+    if 'planes_thermal_relief' in settings:
+        dialog.planes_tab.create_options.thermal_relief.SetValue(settings['planes_thermal_relief'])
     if 'planes_max_search_radius' in settings:
         dialog.planes_tab.create_options.max_search_radius.SetValue(settings['planes_max_search_radius'])
     if 'planes_rip_blocker_check' in settings:

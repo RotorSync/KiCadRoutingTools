@@ -2254,6 +2254,8 @@ class RoutingDialog(wx.Dialog):
         # state (and the plan-side absent-means-off rules still apply).
         try:
             _po = self.planes_tab.create_options
+            if hasattr(_po, 'thermal_relief'):
+                _po.thermal_relief.SetValue(False)
             if hasattr(_po, 'zone_clearance_check'):
                 # Default = unchecked = follow routed clearance (the
                 # ottercast sealed-field fix); a plan's explicit
