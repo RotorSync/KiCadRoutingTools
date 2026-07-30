@@ -810,12 +810,13 @@ def route_planes(
     # signal nets are, and they are left unrouted for a subsequent route.py pass.
     plane_net_ids = set(unique_nets.keys())
     # #521: nets protected in the sibling .kicad_pro (length-matched groups,
-    # routed diff pairs) join the never-rip set -- a blocker rip here strips
-    # the net for a later generic route.py reconnect, which cannot reproduce
-    # matching/coupling. (The tap simply fails over its other candidates.)
+    # routed diff pairs) and nets with KiCad-LOCKED copper join the never-rip
+    # set -- a blocker rip here strips the net for a later generic route.py
+    # reconnect, which cannot reproduce matching/coupling/hand-routing. (The
+    # tap simply fails over its other candidates.)
     try:
-        from protected_nets import read_for_pcb_data
-        _prot_names = read_for_pcb_data(pcb_data)
+        from protected_nets import protection_map
+        _prot_names = protection_map(pcb_data)
         if _prot_names:
             _prot_ids = {nid for nid, n in pcb_data.nets.items()
                          if n.name in _prot_names}

@@ -131,8 +131,13 @@ Matching is a per-step feature but chains are multi-step: a later retry that run
 - `route.py --rip-existing-nets` **excludes protected nets from collateral rips** (a printed line lists the exclusions);
 - `route_disconnected_planes.py --rip-blocker-nets` never selects a protected net as a blocker to rip;
 - **override**: naming a net *exactly* (no glob) in `--nets` or `--rip-existing-nets` is the deliberate signal and lifts its protection for that step. There is no flag; edit the `.kicad_pro` to remove entries permanently.
+- **KiCad-locked copper**: a net with any `(locked yes)` segment or via is never rip-eligible, **with no override** — locked means never. This is read straight from the board (both parse paths), not from the `.kicad_pro`.
 
 The GUI inherits the same behavior (engine-side reads via the board's sibling project file; the AI-plan executor and per-step floor updates persist new entries).
+
+### Impedance declarations survive redos
+
+Impedance-routed nets stay *rippable* — but a step run with `--impedance` records each targeted net's declaration (`ohms`, `differential`, `pair_gap`, `coplanar_gap`) in the `.kicad_pro` (`kicad_routing_tools.net_impedance`). A later step that touches those nets **without** `--impedance` recomputes the same widths from the stackup and applies them per-net (`route.py`; the declaration — not the widths — is stored, so a stackup change recomputes correctly). `route_diff.py` reapplies call-level when every targeted pair shares one stored differential spec (the diff engine's obstacle stamps carry one width map), and warns when specs are mixed.
 - Very tight surroundings can force the amplitude to its 0.2mm minimum, limiting how much length a run can add.
 - Meanders are not placed across layer changes.
 - `--ac-couple-match` runs after `--length-match-group`; a pair that is both an XNet member and in a match group may be meandered again by the end-to-end pass, perturbing its group-matched length. Keep AC-coupled pairs out of match groups.

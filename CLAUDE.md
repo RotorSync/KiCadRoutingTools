@@ -88,6 +88,13 @@ Validate routed boards against the *real* spec, with the right checker — most
   `--rip-existing-nets` — there is deliberately no CLI flag or GUI control.
   Rationale: a retry step once ripped a whole DDR match group and rerouted it
   unmatched (allwinner_h3_ddr3, 40/41 nets unmatched, one net stranded).
+  **KiCad-LOCKED copper** (`segment.locked`/`via.locked`, both parse paths) makes
+  its net never-rippable with NO override. **Impedance declarations** persist
+  the same way (`net_impedance` key: ohms/differential/pair_gap/coplanar_gap):
+  impedance nets stay rippable, but a later step touching them without
+  `--impedance` recomputes the same widths from the stackup and applies them
+  per-net (config `net_layer_widths`; route_diff reapplies call-level, one
+  spec only).
 - **Per-layer clearance comes from the board's `.kicad_dru` (#498) and OUTRANKS
   `--clearance`.** KiCad stores layer-scoped clearance in custom rules
   (`(rule x (layer inner) (constraint clearance (min 0.15mm)))`); netclasses can't
@@ -382,6 +389,8 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 - `segment.width` - Track width
 - `segment.layer` - Layer name
 - `segment.net_id` - Net ID
+- `segment.locked` - KiCad `(locked yes)`: user-pinned copper; its net is never
+  rip-eligible (#521), no override
 
 ### Via Attributes
 
@@ -390,6 +399,7 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 - `via.drill` - Drill diameter
 - `via.layers` - Layer span
 - `via.net_id` - Net ID
+- `via.locked` - KiCad `(locked yes)` (see `segment.locked`)
 - `via.tenting_attrs` - Protection spec `{token: raw inner s-expr}` for
   `tenting`/`covering`/`plugging`/`capping`/`filling` (#489 §8); `{}` = the board
   specified nothing. Read by BOTH parse paths in the same normalized form. Pass it

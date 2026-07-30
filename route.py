@@ -652,9 +652,53 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                                  min_width=track_width,
                                                  coplanar_gap=coplanar_gap)
 
+    # #521: impedance declarations persist per net. A step routed WITH
+    # --impedance records {net: ohms/pair_gap/coplanar_gap} (persisted next to
+    # the DRC writeback); a later step touching those nets WITHOUT --impedance
+    # recomputes the SAME widths from the stackup and applies them per-net, so
+    # a rip/reroute keeps the impedance geometry instead of silently dropping
+    # to this call's default width.
+    net_layer_widths_map: Dict[int, Dict[str, float]] = {}
+    _targets = resolve_net_ids(pcb_data, net_names) if net_names else []
+    if impedance is not None:
+        from protected_nets import note_impedance_specs
+        note_impedance_specs({
+            _nm: {'ohms': impedance, 'differential': False,
+                  'coplanar_gap': (coplanar_gap if (coplanar_gap and coplanar_gap > 0
+                                   and (not coplanar_nets or _nid in coplanar_net_ids))
+                                   else 0.0)}
+            for _nm, _nid in _targets})
+    elif pcb_data.board_info.stackup:
+        from protected_nets import read_impedance_for_pcb_data
+        _stored = read_impedance_for_pcb_data(pcb_data, input_file)
+        _redo = [(nm, nid, _stored[nm]) for nm, nid in _targets if nm in _stored]
+        if _redo:
+            # One width map per distinct declaration; per-net application via
+            # config.net_layer_widths (single-ended engine margins ride
+            # get_net_track_width, so per-net widths need no stamp change).
+            _by_spec: Dict[tuple, list] = {}
+            for nm, nid, sp in _redo:
+                key = (float(sp.get('ohms', 0) or 0), bool(sp.get('differential')),
+                       float(sp.get('pair_gap', 0) or 0), float(sp.get('coplanar_gap', 0) or 0))
+                _by_spec.setdefault(key, []).append((nm, nid))
+            for (ohms, is_diff, pair_gap, cop_gap), members in sorted(_by_spec.items()):
+                if not ohms:
+                    continue
+                widths = calculate_layer_widths_for_impedance(
+                    pcb_data, layers, ohms,
+                    spacing=pair_gap, is_differential=is_diff,
+                    fallback_width=track_width, min_width=track_width,
+                    coplanar_gap=cop_gap)
+                for _nm, _nid in members:
+                    net_layer_widths_map[_nid] = widths
+                kind = 'differential' if is_diff else 'single-ended'
+                cop = f", coplanar gap {cop_gap}mm" if cop_gap else ""
+                print(f"  Reapplying stored {ohms:g} ohm {kind} impedance widths to "
+                      f"{len(members)} net(s){cop} (recorded in .kicad_pro by an "
+                      f"earlier --impedance step)")
+
     # Auto-detect BGA exclusion zones if not specified
-    _sel_ids = [nid for _nm, nid in resolve_net_ids(pcb_data, net_names)] \
-        if net_names else []
+    _sel_ids = [nid for _nm, nid in _targets]
     bga_exclusion_zones = setup_bga_exclusion_zones(
         pcb_data, disable_bga_zones, bga_exclusion_zones,
         selected_net_ids=_sel_ids)
@@ -705,6 +749,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if coplanar_net_ids and coplanar_layer_widths:
         config_kwargs['coplanar_net_ids'] = coplanar_net_ids
         config_kwargs['coplanar_layer_widths'] = coplanar_layer_widths
+    if net_layer_widths_map:
+        config_kwargs['net_layer_widths'] = net_layer_widths_map
     if collect_stats:
         config_kwargs['collect_stats'] = collect_stats
     config = GridRouteConfig(**config_kwargs)
@@ -1034,10 +1080,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # #521: protected nets (length-matched groups, routed diff pairs --
         # recorded in the sibling .kicad_pro by the step that made them) are
         # excluded from COLLATERAL rips. Naming a net exactly (no glob) in
-        # --rip-existing-nets or --nets is the deliberate override.
+        # --rip-existing-nets or --nets is the deliberate override. Nets with
+        # KiCad-LOCKED copper are excluded unconditionally (no override).
         if existing_rippable:
-            from protected_nets import read_for_pcb_data, filter_rippable_names
-            _prot = read_for_pcb_data(pcb_data, input_file)
+            from protected_nets import protection_map, filter_rippable_names
+            _prot = protection_map(pcb_data, input_file)
             if _prot:
                 _keep = set(filter_rippable_names(
                     [pcb_data.nets[n].name for n in existing_rippable], _prot,
@@ -3134,12 +3181,16 @@ For differential pair routing, use route_diff.py:
                 **drc_fix_kwargs(args))
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
-        # #521: record this step's protection-worthy nets (matched groups) in
-        # the output project so later chain steps refuse to rip them.
+        # #521: record this step's protection-worthy nets (matched groups) and
+        # impedance declarations in the output project so later chain steps
+        # refuse to rip the former and redo the latter at the same widths.
         try:
             from protected_nets import (consume_protection_candidates,
-                                        persist_protected_nets, pro_path_for_board)
-            persist_protected_nets(pro_path_for_board(args.output_file),
-                                   consume_protection_candidates())
+                                        consume_impedance_specs,
+                                        persist_protected_nets,
+                                        persist_impedance_specs, pro_path_for_board)
+            _pro = pro_path_for_board(args.output_file)
+            persist_protected_nets(_pro, consume_protection_candidates())
+            persist_impedance_specs(_pro, consume_impedance_specs())
         except Exception as e:
             print(f"  (skipped protected-nets record: {e})")

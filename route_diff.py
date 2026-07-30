@@ -382,9 +382,47 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                                         min_width=track_width,
                                         coplanar_gap=coplanar_gap)
 
+    # #521: impedance declarations persist per net (see route.py's twin).
+    # WITH --impedance: record the differential spec for every targeted member.
+    # WITHOUT: if every targeted net shares one stored differential spec,
+    # auto-reapply it CALL-level -- the diff engine bakes widths into its
+    # obstacle stamps globally (#156 reserve_layer_widths), so per-net widths
+    # are not expressible here; mixed specs warn and skip.
+    _targets = resolve_net_ids(pcb_data, net_names) if net_names else []
+    if impedance is not None:
+        from protected_nets import note_impedance_specs
+        note_impedance_specs({
+            _nm: {'ohms': impedance, 'differential': True,
+                  'pair_gap': diff_pair_gap,
+                  'coplanar_gap': coplanar_gap or 0.0}
+            for _nm, _nid in _targets})
+    elif pcb_data.board_info.stackup and _targets:
+        from protected_nets import read_impedance_for_pcb_data
+        _stored = read_impedance_for_pcb_data(pcb_data, input_file)
+        _specs = {(float(sp.get('ohms', 0) or 0), float(sp.get('pair_gap', 0) or 0),
+                   float(sp.get('coplanar_gap', 0) or 0))
+                  for nm, _nid in _targets
+                  for sp in [_stored.get(nm)] if sp and sp.get('differential')}
+        _uncovered = [nm for nm, _nid in _targets
+                      if not (_stored.get(nm) or {}).get('differential')]
+        if len(_specs) == 1 and not _uncovered:
+            _ohms, _pgap, _cgap = next(iter(_specs))
+            if _ohms:
+                print(f"  Reapplying stored {_ohms:g} ohm differential impedance "
+                      f"(gap {_pgap}mm{f', coplanar {_cgap}mm' if _cgap else ''}) "
+                      f"from .kicad_pro (recorded by an earlier --impedance step)")
+                layer_widths = calculate_layer_widths_for_impedance(
+                    pcb_data, layers, _ohms,
+                    spacing=_pgap or diff_pair_gap, is_differential=True,
+                    fallback_width=track_width, min_width=track_width,
+                    coplanar_gap=_cgap)
+        elif _specs:
+            print(f"  WARNING: targeted nets carry {len(_specs)} different stored "
+                  f"impedance spec(s){' (plus unspecified nets)' if _uncovered else ''} "
+                  f"-- cannot reapply call-level; pass --impedance explicitly")
+
     # Auto-detect BGA exclusion zones if not specified
-    _sel_ids = [nid for _nm, nid in resolve_net_ids(pcb_data, net_names)] \
-        if net_names else []
+    _sel_ids = [nid for _nm, nid in _targets]
     bga_exclusion_zones = setup_bga_exclusion_zones(
         pcb_data, disable_bga_zones, bga_exclusion_zones,
         selected_net_ids=_sel_ids)
@@ -2031,11 +2069,16 @@ Examples:
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
         # #521: record this step's protection-worthy nets (routed diff pairs,
-        # matched groups) in the output project so later steps refuse to rip them.
+        # matched groups) and impedance declarations in the output project so
+        # later steps refuse to rip the former and redo the latter at the same
+        # widths.
         try:
             from protected_nets import (consume_protection_candidates,
-                                        persist_protected_nets, pro_path_for_board)
-            persist_protected_nets(pro_path_for_board(args.output_file),
-                                   consume_protection_candidates())
+                                        consume_impedance_specs,
+                                        persist_protected_nets,
+                                        persist_impedance_specs, pro_path_for_board)
+            _pro = pro_path_for_board(args.output_file)
+            persist_protected_nets(_pro, consume_protection_candidates())
+            persist_impedance_specs(_pro, consume_impedance_specs())
         except Exception as e:
             print(f"  (skipped protected-nets record: {e})")

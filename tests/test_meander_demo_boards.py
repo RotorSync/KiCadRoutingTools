@@ -79,6 +79,11 @@ def write_synth_board(path):
 \t\t(33 "B.Fab" user)
 \t)
 \t(setup
+\t\t(stackup
+\t\t\t(layer "F.Cu" (type "copper") (thickness 0.035))
+\t\t\t(layer "dielectric 1" (type "core") (thickness 0.15) (material "FR4") (epsilon_r 4.5) (loss_tangent 0.02))
+\t\t\t(layer "B.Cu" (type "copper") (thickness 0.035))
+\t\t)
 \t\t(pad_to_mask_clearance 0)
 \t)"""]
     for ref, x, y, name in PADS:
@@ -315,6 +320,78 @@ def test_protected_nets(tmp):
           f"(lengths held); exact-name override made SE3 rip-eligible")
 
 
+def test_locked_nets(tmp):
+    """KiCad-locked copper: the net is never rip-eligible, even named exactly."""
+    src = os.path.join(tmp, "lock.kicad_pcb")
+    s1 = os.path.join(tmp, "lock_s1.kicad_pcb")
+    s2 = os.path.join(tmp, "lock_s2.kicad_pcb")
+    write_synth_board(src)
+    _run(["route.py", src, s1, "--nets", "SE2", "SE3",
+          "--track-width", "0.2", "--clearance", "0.15"])
+    # Lock SE2's copper the way KiCad writes it (token between layer and net).
+    txt = open(s1).read()
+    locked = txt.replace('(net "SE2")', '(locked yes)\n\t\t(net "SE2")')
+    if locked == txt:
+        _fail("could not inject (locked yes) into SE2 segments")
+    open(s1, "w").write(locked)
+
+    before = _net_len(s1, "SE2")
+    out = _run(["route.py", s1, s2, "--nets", "SE1", "--rip-existing-nets", "SE2",
+                "--track-width", "0.2", "--clearance", "0.15"])
+    if "PROTECTED net(s) excluded" not in out or "locked" not in out:
+        _fail("locked net was not excluded from an exact-name rip:\n" + out[-1200:])
+    if "eligible for rip-up" in out:
+        _fail("locked net became rip-eligible despite lock")
+    after = _net_len(s2, "SE2")
+    if abs(after - before) > 1e-6:
+        _fail(f"locked SE2 changed: {before:.3f} -> {after:.3f}")
+    print("PASS  locked nets: exact-name rip refused, copper untouched")
+
+
+def test_impedance_redo(tmp):
+    """#521: --impedance records the declaration in .kicad_pro; a later step
+    rerouting the net WITHOUT --impedance recomputes the same widths."""
+    src = os.path.join(tmp, "imp.kicad_pcb")
+    s1 = os.path.join(tmp, "imp_s1.kicad_pcb")
+    s1b = os.path.join(tmp, "imp_s1_stripped.kicad_pcb")
+    s2 = os.path.join(tmp, "imp_s2.kicad_pcb")
+    write_synth_board(src)
+    out = _run(["route.py", src, s1, "--nets", "SE2",
+                "--track-width", "0.15", "--clearance", "0.15", "--impedance", "60"])
+    pcb = parse_kicad_pcb(s1)
+    nid = {n.name: i for i, n in pcb.nets.items()}["SE2"]
+    w1 = max(s.width for s in pcb.segments if s.net_id == nid)
+    if abs(w1 - 0.15) < 1e-9:
+        _fail("impedance step routed at the fallback width; stackup not read?")
+
+    from protected_nets import read_impedance_specs, pro_path_for_board
+    spec = read_impedance_specs(pro_path_for_board(s1)).get("SE2")
+    if not spec or spec.get("ohms") != 60:
+        _fail(f"impedance spec not recorded: {spec}")
+
+    # Strip SE2's copper (simulating a rip) and reroute WITHOUT --impedance.
+    from kicad_writer import remove_segments_from_content, remove_vias_from_content
+    content = open(s1).read()
+    content, _ = remove_segments_from_content(
+        content, [s for s in pcb.segments if s.net_id == nid])
+    content, _ = remove_vias_from_content(
+        content, [v for v in pcb.vias if v.net_id == nid])
+    open(s1b, "w").write(content)
+    import shutil
+    shutil.copy(pro_path_for_board(s1), pro_path_for_board(s1b))
+    out = _run(["route.py", s1b, s2, "--nets", "SE2",
+                "--track-width", "0.15", "--clearance", "0.15"])
+    if "Reapplying stored 60 ohm" not in out:
+        _fail("redo step did not reapply the stored impedance spec:\n" + out[-1200:])
+    pcb2 = parse_kicad_pcb(s2)
+    nid2 = {n.name: i for i, n in pcb2.nets.items()}["SE2"]
+    w2 = max(s.width for s in pcb2.segments if s.net_id == nid2)
+    if abs(w2 - w1) > 1e-6:
+        _fail(f"redo width {w2:.4f} != impedance width {w1:.4f}")
+    print(f"PASS  impedance redo: 60 ohm spec persisted; reroute without "
+          f"--impedance came back at {w2:.3f}mm (not the 0.15 default)")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="meander_demo_")
     test_synth_demo(tmp)
@@ -322,6 +399,8 @@ def main():
     test_synth_demo(tmp, spacing=3.0, expect_pitch=0.6)
     test_lvds_intra_pair(tmp)
     test_protected_nets(tmp)
+    test_locked_nets(tmp)
+    test_impedance_redo(tmp)
     print("PASS  all meander demo chains")
 
 

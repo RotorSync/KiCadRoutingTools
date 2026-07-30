@@ -424,11 +424,14 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
     # caveat as the plan executor's best-effort persistence).
     try:
         from protected_nets import (consume_protection_candidates,
-                                    persist_protected_nets, pro_path_for_board)
+                                    consume_impedance_specs,
+                                    persist_protected_nets,
+                                    persist_impedance_specs, pro_path_for_board)
         _bf = board.GetFileName() if board is not None else ""
-        _cand = consume_protection_candidates()
-        if _bf and _cand:
-            persist_protected_nets(pro_path_for_board(_bf), _cand)
+        if _bf:
+            _pro = pro_path_for_board(_bf)
+            persist_protected_nets(_pro, consume_protection_candidates())
+            persist_impedance_specs(_pro, consume_impedance_specs())
     except Exception:
         pass
     try:

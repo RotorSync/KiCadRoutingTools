@@ -58,6 +58,8 @@ REGISTRY = {
     # writeback PERSISTS them: CLI mains here, GUI at plan end
     # (ai_plan._write_drc_floors) + per manual step (update_live_drc_floors).
     'persist_protected_nets': ['_write_drc_floors', 'update_live_drc_floors'],
+    # #521 companion: per-net impedance declarations recorded the same way.
+    'persist_impedance_specs': ['_write_drc_floors', 'update_live_drc_floors'],
     # GND return vias near signal vias
     'add_gnd_vias_to_existing_board': ['add_gnd_vias_to_existing_board'],
 }

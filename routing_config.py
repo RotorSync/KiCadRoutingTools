@@ -213,6 +213,11 @@ class GridRouteConfig:
     # while layer_widths keeps the microstrip answer for everyone else.
     coplanar_net_ids: set = field(default_factory=set)
     coplanar_layer_widths: Dict[str, float] = field(default_factory=dict)
+    # #521: per-net per-layer widths REAPPLIED from stored impedance
+    # declarations (.kicad_pro kicad_routing_tools.net_impedance) when a later
+    # step touches an impedance-routed net without --impedance. Consulted in
+    # get_net_track_width above the netclass scalar.
+    net_layer_widths: Dict[int, Dict[str, float]] = field(default_factory=dict)
     # Obstacle-stamp reserve policy (#156). False (single-ended engine): stamps
     # reserve the NOMINAL track_width around obstacles and every net's extra
     # width (power override OR impedance layer width) rides its own fractional
@@ -466,6 +471,15 @@ class GridRouteConfig:
         if net_id in self.power_net_widths:
             # Ensure power net width is at least the base track width
             return max(self.power_net_widths[net_id], self.track_width)
+        if self.net_layer_widths and net_id in self.net_layer_widths:
+            # #521: per-net per-layer widths reapplied from a stored impedance
+            # declaration (.kicad_pro net_impedance) -- a redo of an
+            # impedance-routed net must come back at ITS width, not this
+            # call's default. Outranks the netclass scalar for the same
+            # reason --impedance outranks --track-width.
+            w = self.net_layer_widths[net_id].get(layer)
+            if w:
+                return w
         if self.net_track_widths and net_id in self.net_track_widths:
             # #435 companion: route this net at its OWN class width (either direction).
             return self.net_track_widths[net_id]

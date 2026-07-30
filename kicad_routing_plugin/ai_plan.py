@@ -1202,10 +1202,13 @@ class PlanExecutor:
                 # steps) so later steps/chains refuse to rip them.
                 try:
                     from protected_nets import (consume_protection_candidates,
+                                                consume_impedance_specs,
                                                 persist_protected_nets,
+                                                persist_impedance_specs,
                                                 pro_path_for_board)
-                    persist_protected_nets(pro_path_for_board(board_file),
-                                           consume_protection_candidates())
+                    _pro = pro_path_for_board(board_file)
+                    persist_protected_nets(_pro, consume_protection_candidates())
+                    persist_impedance_specs(_pro, consume_impedance_specs())
                 except Exception as _pe:
                     self.log(f"AI plan: protected-nets record skipped: {_pe}")
                 self.log(f"AI plan: recorded DRC floors in the project "
