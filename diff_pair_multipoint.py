@@ -953,6 +953,21 @@ def _route_terminal_set(state, pair: DiffPairNet, pair_name: str,
             # write-list members (value-equality never matched the merged
             # dict, so ripped legs' copper shipped alongside the reroute).
             merged['leg_results'] = leg_results
+            # Group length matching (#520): a multipoint pair is matched on its
+            # LONGEST coupled leg (the longest MST edge) -- stamp that span's
+            # length so the pair participates in match groups (measure AND
+            # meander, via the leg splice in _apply_meanders_to_net_with_
+            # iteration) instead of falling back to board-copper seeding.
+            # Copper-only: leg dicts carry no combined stub bookkeeping, and
+            # the meander pass carries this same baseline as its offset.
+            from length_matching import pair_leg_metric
+            from net_queries import calculate_route_length
+            _pcb = state.pcb_data
+            merged['is_diff_pair'] = True
+            merged['is_multipoint'] = True
+            merged['route_length'] = max(
+                pair_leg_metric(lr, lambda s, v: calculate_route_length(s, v, _pcb))
+                for lr in leg_results)
             return leg_results, merged, se_terminals
     return None, None, []
 

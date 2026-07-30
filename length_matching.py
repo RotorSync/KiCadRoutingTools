@@ -82,6 +82,17 @@ def pair_leg_metric(result, metric_func, segments=None, vias=None):
                     [v for v in vs if v.net_id == n_id]))
 
 
+def multipoint_span_metric(result, metric_func):
+    """Metric of a pair's MATCHING SPAN. For a multipoint pair (a chain of
+    coupled 2-point legs) the span is the LONGEST leg -- the longest MST edge,
+    the same span the meander pass lengthens. Falls through to
+    pair_leg_metric for 2-point results (no leg_results)."""
+    legs = result.get('leg_results') if result.get('is_multipoint') else None
+    if not legs:
+        return pair_leg_metric(result, metric_func)
+    return max(pair_leg_metric(lr, metric_func) for lr in legs)
+
+
 class ClearanceIndex:
     """
     Spatial index for efficient clearance checking.
@@ -1404,12 +1415,23 @@ def _apply_meanders_to_net_with_iteration(
     is_diff_pair = result.get('is_diff_pair', False)
 
     if is_diff_pair:
+        # Multipoint pair (#520): the pair is a chain of coupled 2-point legs
+        # and its route_length is the LONGEST leg (the longest MST edge). That
+        # leg is itself a complete 2-point coupled result, so the centerline
+        # meander machinery below operates on the LEG; the splice at the end
+        # folds the meandered copper back into the chain bookkeeping.
+        mp_legs = result.get('leg_results') if result.get('is_multipoint') else None
+        if mp_legs:
+            span = max(mp_legs, key=lambda lr: pair_leg_metric(lr, metric_func))
+        else:
+            span = result
+
         # #520: measure ONE leg (max of P/N), not the sum of both legs, and
         # carry the entry offset (stub adders baked into current_metric that a
         # copper-only metric cannot see) forward so new_metric starts at
         # current_metric and the undershoot/scale loops act on commensurate
         # deltas against the single-leg target.
-        entry_leg = pair_leg_metric(result, metric_func)
+        entry_leg = pair_leg_metric(span, metric_func)
         stub_offset = current_metric - entry_leg
 
         def pair_metric(res):
@@ -1417,7 +1439,7 @@ def _apply_meanders_to_net_with_iteration(
 
         # Differential pair: apply meanders to centerline
         modified_result, bump_count = apply_meanders_to_diff_pair(
-            result, extra_length, config, pcb_data,
+            span, extra_length, config, pcb_data,
             extra_segments=already_processed_segments,
             extra_vias=already_processed_vias
         )
@@ -1433,7 +1455,7 @@ def _apply_meanders_to_net_with_iteration(
             extra_length = extra_length_func(metric_deficit)
 
             modified_result, actual_bumps = apply_meanders_to_diff_pair(
-                result, extra_length, config, pcb_data,
+                span, extra_length, config, pcb_data,
                 extra_segments=already_processed_segments,
                 extra_vias=already_processed_vias,
                 min_bumps=bump_count
@@ -1463,7 +1485,7 @@ def _apply_meanders_to_net_with_iteration(
                 scaled_amplitude = 0.2
 
             trial_result, trial_bumps = apply_meanders_to_diff_pair(
-                result, extra_length, config, pcb_data,
+                span, extra_length, config, pcb_data,
                 extra_segments=already_processed_segments,
                 extra_vias=already_processed_vias,
                 min_bumps=bump_count,
@@ -1471,7 +1493,10 @@ def _apply_meanders_to_net_with_iteration(
             )
             trial_metric = pair_metric(trial_result)
 
-            if trial_bumps > 0 and trial_metric >= best_metric:
+            # Keep the CLOSEST result to the target, not the largest (#520):
+            # bump-quantized overshoot (a wide multipoint span can land many mm
+            # over) must scale DOWN, which ">=" could never accept.
+            if trial_bumps > 0 and abs(trial_metric - target_metric) < abs(best_metric - target_metric):
                 modified_result = trial_result
                 new_metric = trial_metric
                 best_result = trial_result.copy()
@@ -1480,6 +1505,27 @@ def _apply_meanders_to_net_with_iteration(
                 modified_result = best_result
                 new_metric = best_metric
                 break
+
+        if mp_legs:
+            # Splice the meandered span back into the chain. The write list
+            # and rip-up custody carry the per-LEG dicts (#369 A2), so the
+            # meandered copper must land IN the leg dict, not just in the
+            # merged bookkeeping dict; the merged lists are then rebuilt from
+            # the legs, preserving any extra copper merged carries beyond the
+            # legs (relocation fanout segments). Old-identity sets are taken
+            # BEFORE the leg update so the extras are computed against the
+            # pre-meander lists.
+            leg_seg_ids = {id(s) for lr in mp_legs for s in lr.get('new_segments', [])}
+            leg_via_ids = {id(v) for lr in mp_legs for v in lr.get('new_vias', [])}
+            extra_segs = [s for s in result.get('new_segments', []) if id(s) not in leg_seg_ids]
+            extra_vs = [v for v in result.get('new_vias', []) if id(v) not in leg_via_ids]
+            span.update(modified_result)
+            merged_mod = {
+                'new_segments': [s for lr in mp_legs for s in lr.get('new_segments', [])] + extra_segs,
+                'new_vias': [v for lr in mp_legs for v in lr.get('new_vias', [])] + extra_vs,
+                'route_length': new_metric,
+            }
+            return merged_mod, merged_mod['new_segments'], bump_count, new_metric
 
         return modified_result, modified_result.get('new_segments', []), bump_count, new_metric
 
@@ -1553,7 +1599,8 @@ def _apply_meanders_to_net_with_iteration(
             )
             trial_metric = metric_func(trial_segments, new_vias)
 
-            if trial_bumps > 0 and trial_metric >= best_metric:
+            # Keep the CLOSEST result to the target, not the largest (#520).
+            if trial_bumps > 0 and abs(trial_metric - target_metric) < abs(best_metric - target_metric):
                 new_segments = trial_segments
                 new_metric = trial_metric
                 best_segments = trial_segments
@@ -1730,6 +1777,10 @@ def apply_length_matching_to_group(
             # Copper already written in an earlier step: it sets the target, it
             # cannot be lengthened here.
             print(f"    {net_name}: {current_length:.2f}mm (existing board copper, not modified)")
+            if delta > config.length_match_tolerance:
+                print(f"    WARNING: {net_name} is {delta:.2f}mm SHORT of the group target "
+                      f"but its copper was written in an earlier step -- the group is NOT "
+                      f"fully matched (route the whole group in one step to meander it)")
             continue
 
         if delta <= config.length_match_tolerance:
@@ -1862,9 +1913,10 @@ def apply_time_matching_to_group(
     for net_name, result in group_results.items():
         segments = result.get('new_segments', [])
         # A pair result's segment list holds BOTH legs' copper; time the
-        # limiting leg, not the sum (#520). Single-ended results fall through
-        # pair_leg_metric unchanged (no leg net ids).
-        net_times[net_name] = pair_leg_metric(
+        # limiting leg, not the sum (#520) -- and for a multipoint pair, the
+        # longest coupled leg (the matching span). Single-ended results fall
+        # through unchanged (no leg net ids).
+        net_times[net_name] = multipoint_span_metric(
             result, lambda s, v: calculate_route_propagation_time_ps(s, v, pcb_data))
         net_primary_layers[net_name] = get_route_primary_layer(segments)
 
@@ -1899,6 +1951,10 @@ def apply_time_matching_to_group(
 
         if result.get('from_board'):
             print(f"    {net_name}: {current_time:.2f}ps (existing board copper, not modified)")
+            if delta_time > config.time_match_tolerance:
+                print(f"    WARNING: {net_name} is {delta_time:.2f}ps SHORT of the group target "
+                      f"but its copper was written in an earlier step -- the group is NOT "
+                      f"fully matched (route the whole group in one step to meander it)")
             continue
 
         if delta_time <= config.time_match_tolerance:

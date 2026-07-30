@@ -34,10 +34,13 @@ from kicad_parser import parse_kicad_pcb  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-NETS = ["DP_A_P", "DP_A_N", "DP_B_P", "DP_B_N", "SE1", "SE2", "SE3"]
+NETS = ["DP_A_P", "DP_A_N", "DP_B_P", "DP_B_N", "DP_C_P", "DP_C_N",
+        "SE1", "SE2", "SE3"]
 
 # (ref, x, y, net). DP_A is a straight 40mm pair; DP_B ~32mm (needs +8mm of
-# centerline meanders to match); SE1/SE2/SE3 are 40/32/24mm (SE2+SE3 meander).
+# centerline meanders to match); DP_C is a MULTIPOINT pair (3 terminals, two
+# 20mm legs -- matched on its longest MST leg, #520); SE1/SE2/SE3 are
+# 40/32/24mm (SE2+SE3 meander).
 PADS = [
     ("P1", 10, 10, "DP_A_P"), ("P2", 10, 12, "DP_A_N"),
     ("P3", 50, 10, "DP_A_P"), ("P4", 50, 12, "DP_A_N"),
@@ -46,6 +49,9 @@ PADS = [
     ("P9", 10, 28, "SE1"), ("P10", 50, 28, "SE1"),
     ("P11", 14, 32, "SE2"), ("P12", 46, 32, "SE2"),
     ("P13", 18, 36, "SE3"), ("P14", 42, 36, "SE3"),
+    ("P15", 10, 40, "DP_C_P"), ("P16", 10, 42, "DP_C_N"),
+    ("P17", 30, 40, "DP_C_P"), ("P18", 30, 42, "DP_C_N"),
+    ("P19", 50, 40, "DP_C_P"), ("P20", 50, 42, "DP_C_N"),
 ]
 
 
@@ -183,14 +189,13 @@ def test_synth_demo(tmp, spacing=None, expect_pitch=None):
     write_synth_board(src)
     sp = ["--meander-spacing", str(spacing)] if spacing else []
 
-    dp_out = _run(["route_diff.py", src, mid, "DP_A_P", "DP_A_N", "DP_B_P", "DP_B_N",
+    dp_out = _run(["route_diff.py", src, mid,
+                   "DP_A_P", "DP_A_N", "DP_B_P", "DP_B_N", "DP_C_P", "DP_C_N",
                    "--track-width", "0.2", "--clearance", "0.15", "--diff-pair-gap", "0.15",
-                   "--length-match-group", "DP_A_*", "DP_B_*"] + sp)
+                   "--length-match-group", "DP_A_*", "DP_B_*", "DP_C_*"] + sp)
     s = _json_summary(dp_out)
-    if s.get("successful") != 2 or s.get("failed"):
-        _fail(f"[{tag}] expected 2/2 pairs routed, got {s.get('successful')}/{s.get('failed')}")
-    if any(r.get("outcome") != "coupled" for r in s.get("pair_reports", [])):
-        _fail(f"[{tag}] expected both pairs coupled: {s.get('pair_reports')}")
+    if s.get("successful") != 3 or s.get("failed"):
+        _fail(f"[{tag}] expected 3/3 pairs routed, got {s.get('successful')}/{s.get('failed')}")
 
     se_out = _run(["route.py", mid, out, "--nets", "SE1", "SE2", "SE3",
                    "--track-width", "0.2", "--clearance", "0.15",
@@ -219,8 +224,15 @@ def test_synth_demo(tmp, spacing=None, expect_pitch=None):
         _fail(f"[{tag}] DP_B_P has no meander risers (centerline meanders missing)")
     if dpp < 2.0 * width - 1e-6:
         _fail(f"[{tag}] DP_B_P arm pitch {dpp:.3f} < {2.0 * width:.3f}")
-    print(f"PASS  synth [{tag}]: 2/2 coupled + 3/3 SE, DRC-clean, connected; "
-          f"SE3 pitch {pitch:.3f} DP_B_P pitch {dpp:.3f} (>= {want:.2f})")
+    # DP_C is MULTIPOINT (two 20mm legs, span 20mm vs the 40mm target): the
+    # group pass must meander its longest MST leg (#520).
+    dpc = min_riser_pitch(out, "DP_C_P", run_dir=(1, 0))
+    if dpc is None:
+        _fail(f"[{tag}] DP_C_P has no meander risers (multipoint span not meandered)")
+    if dpc < 2.0 * width - 1e-6:
+        _fail(f"[{tag}] DP_C_P arm pitch {dpc:.3f} < {2.0 * width:.3f}")
+    print(f"PASS  synth [{tag}]: 3/3 pairs + 3/3 SE, DRC-clean, connected; "
+          f"SE3 pitch {pitch:.3f} DP_B_P pitch {dpp:.3f} DP_C_P pitch {dpc:.3f} (>= {want:.2f})")
 
 
 def test_lvds_intra_pair(tmp):
