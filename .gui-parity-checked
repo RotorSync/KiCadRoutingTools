@@ -29,3 +29,44 @@ Outcome: NO GAPS, all gates PASSED at HEAD, chain copper sets IDENTICAL.
     the chain gate: tests/test_meander_demo_boards.py drives the real CLIs
     over protection/locked/impedance-redo scenarios (the parity chain has no
     match groups, so those paths are inert in it by design).
+
+--------------------------------------------------------------------------
+2026-07-30 — PARTIAL audit only. The SHA above is deliberately NOT bumped.
+
+Scope actually covered: the #459-follow-on commit (route/preview/undo for a
+placement block) and nothing else. 34 commits now sit between ef4c19a and
+HEAD; they were NOT audited, so bumping the SHA would record "parity
+confirmed" for a span nobody checked.
+
+Gap FOUND AND FIXED in that commit (the Class-2 shape CLAUDE.md warns about):
+  --group / --preview / --undo all fell through manifest_to_plan into the
+  generic `params` bucket, where ai_plan drops any param with no matching
+  dialog control — and `nets` then defaults to ['*']. A recorded
+      route.py in.kicad_pcb out.kicad_pcb --undo --group decap:U3
+  converted to a plan step that ROUTES the whole board: the inverse operation
+  at ~100x the scope, silently. --group/--group-scope/--group-by are now
+  hoisted to the step (like --component) and resolved by
+  ai_plan._group_net_names; --undo/--preview/--list-groups are refused with a
+  loud per-command stderr warning. Two gates added, both verified to FAIL when
+  the fix is reverted rather than merely to pass:
+  test_manifest_plan_parity.check_group_flags (no wx) and
+  tests/gui_parity/test_group_scope_parity.py (re-execs into KiCad python;
+  CLI vs GUI internal 14=14, touching 20=20).
+
+OPEN, PRE-EXISTING, NOT from this commit — test_gui_engine_parity copper sets:
+  segments CLI=1307 GUI=1308 (common 1249), vias 144=144, VERDICT: PARITY but
+  "copper sets DIFFER". The diff is GND on F.Cu at IDENTICAL coordinates with
+  DIFFERENT width — CLI 0.127, GUI 0.3 — plus one gui-only /CLOCK_IN segment.
+  ef4c19a recorded these sets as IDENTICAL, so it regressed somewhere in the
+  34-commit span. Attribution is measured, not assumed: the same 1307/1308 /
+  1249 / 58 / 59 numbers appear with this work stashed at HEAD, at HEAD+this
+  commit, and again after the #517/#523/#524 wave. Prime suspect is d9bccbd
+  ("#487: plane resistance reaches JSON_SUMMARY; power TRACES get ampacity
+  too") — a power-trace width path would explain a GND-only width delta.
+  Worth a bisect over ac2150a..HEAD by whoever picks up the next full audit.
+
+NOTE for anyone running the gate on Windows: KiCad's bundled python had no
+scipy (it is in requirements.txt), so run_all_checks raised StartupCheckError
+inside the GUI leg and the gate reported GUI=0 segments — which reads like
+"the GUI routed nothing" rather than "the GUI never started". Fix:
+  "C:\Program Files\KiCad\10.0\bin\python.exe" -m pip install --user scipy
