@@ -198,6 +198,9 @@ PLANE_MIN_THICKNESS = 0.1  # mm - minimum zone copper thickness
 PLANE_EDGE_CLEARANCE = 0.5  # mm - zone clearance from board edge
 PLANE_MAX_SEARCH_RADIUS = 10.0  # mm - max radius to search for via position
 PLANE_MAX_VIA_REUSE_RADIUS = 1.0  # mm - max radius to reuse existing via
+# #487: an SMD plane-net pad at least this wide in BOTH axes is a thermal/
+# exposed pad and gets a via ARRAY (--thermal-vias) instead of one shared via.
+THERMAL_PAD_MIN_MM = 2.0
 PLANE_PAD_STRAP_RADIUS = 1.5  # mm - max distance to strap a plane pad to an
                               # adjacent already-connected same-net pad instead
                               # of drilling another via (issue #349)

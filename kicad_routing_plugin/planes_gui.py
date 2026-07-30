@@ -325,6 +325,13 @@ class CreatePlanesOptionsPanel(wx.Panel):
             "copper (easier hand soldering/rework; solid = lowest impedance)")
         zone_sizer.Add(self.thermal_relief, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
+        self.thermal_vias = wx.CheckBox(self, label="Thermal via arrays under exposed pads")
+        self.thermal_vias.SetValue(False)
+        self.thermal_vias.SetToolTip(
+            "Give exposed/thermal pads (>= 2mm both axes) a lattice of vias into "
+            "the plane instead of a single shared via (#487)")
+        zone_sizer.Add(self.thermal_vias, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
         sizer.Add(zone_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
 
         # Rip-up options
@@ -405,6 +412,7 @@ class CreatePlanesOptionsPanel(wx.Panel):
             'gnd_via_net': self.gnd_via_net.GetValue(),
             'same_net_pad_clearance': same_net_clr,
             'thermal_relief': self.thermal_relief.GetValue(),
+            'thermal_vias': self.thermal_vias.GetValue(),
         }
 
 
@@ -1053,6 +1061,7 @@ class PlanesTab(wx.Panel):
                 zone_clearance=config.get('zone_clearance'),
                 min_thickness=config.get('min_thickness', defaults.PLANE_MIN_THICKNESS),
                 thermal_relief=config.get('thermal_relief', False),
+                thermal_vias=config.get('thermal_vias', False),
                 grid_step=config.get('grid_step', defaults.GRID_STEP),
                 max_search_radius=config.get('max_search_radius', defaults.PLANE_MAX_SEARCH_RADIUS),
                 max_via_reuse_radius=config.get('max_via_reuse_radius', defaults.PLANE_MAX_VIA_REUSE_RADIUS),

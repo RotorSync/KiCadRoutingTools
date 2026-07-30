@@ -2245,6 +2245,57 @@ def _resolve_zone_clearance_impl(zone_clearance, clearance, min_thickness,
     return round(needed, 4)
 
 
+def compute_thermal_via_array(pad, obstacles, coord, config, via_size,
+                              via_drill, hole_to_hole_clearance, pcb_data,
+                              pitch: float = None) -> List[Tuple[float, float]]:
+    """Lattice of thermal-via sites over an exposed pad's REAL copper (#487).
+
+    A 5x5mm QFN exposed pad used to get ONE via out of the reuse/strap logic
+    ("share ONE via plus short pad-layer straps") -- electrically fine,
+    thermally backwards: the exposed pad's whole job is to pump heat into the
+    plane through a via field. Grid the pad at ``pitch`` (default: the
+    largest of 2 via diameters, drill + hole-to-hole, and 1.0mm -- classic
+    thermal-via spacing that also guarantees lattice-internal drill
+    clearance), keep only sites whose annulus sits fully on the (rotated)
+    pad copper, and cull each through the SAME predicates single-via
+    placement uses: obstacles.is_via_blocked + the board-edge clamp. The
+    caller re-checks blocked-ness as it commits sites (each placed via
+    blocks its hole-to-hole neighborhood). Returns world (x, y) sites,
+    possibly empty -- the caller then falls through to the normal path.
+    """
+    if pitch is None:
+        pitch = max(via_size * 2.0, via_drill + hole_to_hole_clearance, 1.0)
+    hw, hh = pad_rect_halfspan(pad)
+    inset = via_size / 2.0  # annulus fully on the pad copper
+    span_x, span_y = hw - inset, hh - inset
+    if span_x < 0 or span_y < 0:
+        return []
+    nx = max(1, int(span_x * 2 / pitch) + 1)
+    ny = max(1, int(span_y * 2 / pitch) + 1)
+    xs = ([pad.global_x] if nx == 1 else
+          [pad.global_x - span_x + i * (2 * span_x / (nx - 1)) for i in range(nx)])
+    ys = ([pad.global_y] if ny == 1 else
+          [pad.global_y - span_y + i * (2 * span_y / (ny - 1)) for i in range(ny)])
+    is_circle = getattr(pad, 'shape', '') == 'circle'
+    r_max = min(pad.size_x, pad.size_y) / 2.0 - inset
+    sites = []
+    for y in ys:
+        for x in xs:
+            if is_circle:
+                if ((x - pad.global_x) ** 2 + (y - pad.global_y) ** 2) > r_max ** 2:
+                    continue
+            elif getattr(pad, 'rect_rotation', 0.0) and not point_in_pad_rect(x, y, pad):
+                continue
+            gx, gy = coord.to_grid(x, y)
+            if obstacles.is_via_blocked(gx, gy):
+                continue
+            pos, _ = clamp_tap_via_to_edge((x, y), pad, pcb_data, config, via_size)
+            if abs(pos[0] - x) > pitch / 2 or abs(pos[1] - y) > pitch / 2:
+                continue  # clamp had to drag it off its lattice cell
+            sites.append(pos)
+    return sites
+
+
 def create_plane(
     input_file: str,
     output_file: str,
@@ -2291,6 +2342,7 @@ def create_plane(
     clamp_netclasses: bool = True,
     clearance_ceiling: Optional[float] = None,
     thermal_relief: bool = False,
+    thermal_vias: bool = False,
 ) -> Union[Tuple[int, int, int],
            Tuple[int, int, int, list, list, list, int, list]]:
     """
@@ -2826,6 +2878,36 @@ def create_plane(
                 )
 
             print(f"  Pad {pad.component_ref}.{pad.pad_number}...", end=" ")
+
+            # #487: an exposed/thermal pad gets a via ARRAY, not the shared
+            # via the reuse/strap logic below would give it. Checked FIRST
+            # so a nearby via cannot satisfy a 5x5mm EP with one drill.
+            if (thermal_vias and pad.drill == 0
+                    and min(pad.size_x, pad.size_y) >= defaults.THERMAL_PAD_MIN_MM):
+                _arr = compute_thermal_via_array(
+                    pad, obstacles, coord, config, via_size, via_drill,
+                    hole_to_hole_clearance, pcb_data)
+                _placed = 0
+                for (_ax, _ay) in _arr:
+                    _agx, _agy = coord.to_grid(_ax, _ay)
+                    if obstacles.is_via_blocked(_agx, _agy):
+                        continue  # a just-placed array via blocks this cell
+                    new_vias.append({'x': _ax, 'y': _ay, 'size': via_size,
+                                     'drill': via_drill,
+                                     'layers': ['F.Cu', 'B.Cu'], 'net_id': net_id})
+                    available_vias.append((_ax, _ay))
+                    via_index.add(_ax, _ay)
+                    block_via_position(obstacles, _ax, _ay, coord,
+                                       hole_to_hole_clearance, via_drill,
+                                       via_size, config.clearance)
+                    _placed += 1
+                if _placed:
+                    vias_placed += _placed
+                    print(f"thermal via array: {_placed} via(s) over "
+                          f"{pad.size_x:.1f}x{pad.size_y:.1f}mm pad")
+                    processed_pad_ids.add(current_pad_key)
+                    continue
+                # nothing fit: fall through to the normal single-via path
 
             # First, check if there's already a via very close by (within ~2 via diameters)
             # This handles cases like decoupling caps where both pads are on same net
@@ -3829,6 +3911,9 @@ Examples:
     # Zone options
     parser.add_argument("--zone-clearance", type=float, default=None, help="Zone (pour) clearance from other copper in mm. Default: follow --clearance, auto-stepping down to the fab floor if the pour cannot thread the densest BGA via lattice")
     parser.add_argument("--min-thickness", type=float, default=defaults.PLANE_MIN_THICKNESS, help="Minimum zone copper thickness in mm (default: 0.1)")
+    parser.add_argument("--thermal-vias", action="store_true",
+                        help="Place a via ARRAY over exposed/thermal pads (SMD plane-net pads "
+                             f"wider than {2.0}mm both axes) instead of one shared via (#487)")
     parser.add_argument("--thermal-relief", action="store_true",
                         help="Connect pads to the pour with thermal-relief spokes instead of "
                              "solid copper (#487: the writer always supported it; nothing could ask)")
@@ -4052,6 +4137,7 @@ Examples:
         zone_clearance=args.zone_clearance,
         min_thickness=args.min_thickness,
         thermal_relief=args.thermal_relief,
+        thermal_vias=args.thermal_vias,
         grid_step=args.grid_step,
         max_search_radius=args.max_search_radius,
         max_via_reuse_radius=args.max_via_reuse_radius,

@@ -585,6 +585,8 @@ def apply_step_params(step, dialog):
         opts.add_gnd_vias_check.SetValue(bool(params.get("add_gnd_vias")))
         if hasattr(opts, "thermal_relief"):
             opts.thermal_relief.SetValue(bool(params.get("thermal_relief")))
+        if hasattr(opts, "thermal_vias"):
+            opts.thermal_vias.SetValue(bool(params.get("thermal_vias")))
         if not params.get("add_gnd_vias"):
             notes.append("add_gnd_vias off (not in plan step)")
         if "gnd_via_distance" in params:
