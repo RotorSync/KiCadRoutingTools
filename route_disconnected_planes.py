@@ -190,28 +190,38 @@ _PLANE_PARTIAL_RESTORE = os.environ.get('KICAD_PLANE_PARTIAL_RESTORE') == '1'
 # board; the write-list purge fixed the re-rip double-emission but not this).
 # The window-shrink half needs its own debugging session; the ordering half
 # is measurable without it.
-_PLANE_REPAIR_ORDERING = os.environ.get('KICAD_PLANE_REPAIR_ORDERING', '') \
-    .lower() in ('1', 'order-only', 'orderonly', 'adaptive')
-_PLANE_IMMEDIATE_RECONNECT = os.environ.get(
-    'KICAD_PLANE_REPAIR_ORDERING', '').lower() == '1'
-# 'adaptive' (#517 arm I): immediate reconnects only when the phase-2
-# rip-requiring queue is SHORT at phase start. The G/H split was cleanly
-# predicted by rip pressure: boards whose phases held <=12 rip pads won with
-# immediate reconnects (astro +5, zynq2 +4, apple2e full), boards with >=19
-# lost hard (spartan6 -15, allwinner -12: each early reconnect locks routes
-# into a still-evolving world). Threshold sits between the two clusters.
-_PLANE_ADAPTIVE_RECONNECT = os.environ.get(
-    'KICAD_PLANE_REPAIR_ORDERING', '').lower() == 'adaptive'
+# #517: repair ordering + reconnect timing. DEFAULT is 'adaptive' -- the
+# arm-I winner from the 2026-07-30 A/B ladder: most-constrained-first net
+# order, two-phase pads (free-space taps first, rip-requiring pads last),
+# and immediate reconnects only when the phase-2 rip queue is SHORT at
+# phase start. The G/H split was cleanly predicted by rip pressure: boards
+# whose phases held <=12 rip pads won with immediate reconnects (astro +5,
+# zynq2 +4, apple2e full), boards with >=19 lost hard (spartan6 -15,
+# allwinner -12: each early reconnect locks routes into a still-evolving
+# world). Corpus gate (sets 1-5, 75 boards): completion flat, drc -7,
+# rips -58%, refusals -49%, ~15% faster.
+# KICAD_PLANE_REPAIR_ORDERING: 'adaptive' (default) | 'order-only' (no
+# immediate reconnects) | '1'/'full' (always-immediate) | '0'/'off'/'none'
+# (pre-#517 behavior, for A/B).
+_ORDERING_MODE = os.environ.get('KICAD_PLANE_REPAIR_ORDERING', 'adaptive') \
+    .strip().lower() or 'adaptive'
+_PLANE_REPAIR_ORDERING = _ORDERING_MODE in ('1', 'full', 'order-only',
+                                            'orderonly', 'adaptive')
+_PLANE_IMMEDIATE_RECONNECT = _ORDERING_MODE in ('1', 'full')
+_PLANE_ADAPTIVE_RECONNECT = _ORDERING_MODE == 'adaptive'
 try:
     _PLANE_IMMEDIATE_MAX_PENDING = int(os.environ.get(
         'KICAD_PLANE_IMMEDIATE_MAX_PENDING', '14') or 14)
 except ValueError:
     _PLANE_IMMEDIATE_MAX_PENDING = 14
 
-# #517 arm 4: at the end-of-run reconnect, try a verbatim identity-restore of
-# each casualty's ORIGINAL copper before re-routing it (only nets whose
-# corridor is still free restore; the rest re-route as before).
-_PLANE_RESTORE_FIRST = os.environ.get('KICAD_PLANE_RESTORE_FIRST') == '1'
+# #517 arm 4, DEFAULT ON: at the end-of-run reconnect, try a verbatim
+# identity-restore of each casualty's ORIGINAL copper before re-routing it
+# (only nets whose corridor is still free restore; the rest re-route as
+# before). Zero measured regressions; dormant under adaptive ordering but
+# covers the flows ordering does not. KICAD_PLANE_RESTORE_FIRST=0 disables.
+_PLANE_RESTORE_FIRST = os.environ.get(
+    'KICAD_PLANE_RESTORE_FIRST', '1').strip().lower() not in ('0', 'off', 'no')
 
 # Shared with route_planes (#508 finding 1: its GUI reconnect had neither
 # reconcile mechanism). Re-exported here so existing call sites and
