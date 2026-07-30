@@ -109,6 +109,13 @@ BOOL_FLAGS = {
     # must survive conversion or a replay re-enables what the run disabled
     # (ai_plan's no_thermal_vias alias unchecks the planes checkbox).
     '--no-thermal-vias': 'no_thermal_vias',
+    # The POSITIVE spellings must survive too: ai_plan already consumes
+    # both params (thermal_relief checkbox; thermal_vias with the
+    # default-ON absent-means-default rule), but a converted manifest that
+    # DROPPED the flag would replay a --thermal-relief run without relief
+    # spokes (found by the ef4c19a..4db8c18 parity audit).
+    '--thermal-relief': 'thermal_relief',
+    '--thermal-vias': 'thermal_vias',
 }
 
 # Flags whose values are file paths / bookkeeping -- consumed, never params.
