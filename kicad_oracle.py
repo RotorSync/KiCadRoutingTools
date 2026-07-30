@@ -1480,8 +1480,15 @@ def oracle_reconnect(board_file: str, net_names, config,
                     # removal below operates on the complete text.
                     if new_sexprs:
                         _idx = content.rfind(')')
-                        content = (content[:_idx] + ''.join(new_sexprs)
-                                   + content[_idx:])
+                        # '\n'-join + trailing '\n' (#523): the sexprs start
+                        # with '\t(' and end with '\t)', so a bare ''.join
+                        # emitted ')\t(segment' joined lines and a '\t))'
+                        # final line -- legal s-expr that KiCad reads, but it
+                        # broke every line-based text walker downstream
+                        # (filter_nets_from_content swallowed to EOF and ate
+                        # the root paren).
+                        content = (content[:_idx] + '\n'.join(new_sexprs)
+                                   + '\n' + content[_idx:])
                         new_sexprs = []
                         content_dirty = True
                     content, _nrs = remove_segments_from_content(
@@ -1695,7 +1702,9 @@ def oracle_reconnect(board_file: str, net_names, config,
         if new_sexprs or content_dirty:
             if new_sexprs:
                 idx = content.rfind(')')
-                content = content[:idx] + ''.join(new_sexprs) + content[idx:]
+                # '\n'-join + trailing '\n' (#523), same as the flush above.
+                content = (content[:idx] + '\n'.join(new_sexprs) + '\n'
+                           + content[idx:])
             with open(board_file, 'w', encoding='utf-8') as f:
                 f.write(content)
         if not progress:

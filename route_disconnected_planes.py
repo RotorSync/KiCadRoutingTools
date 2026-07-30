@@ -2665,6 +2665,11 @@ def _write_output(input_file: str, output_file: str, segments: List[Dict], vias:
         print(f"  Added teardrops to {_vtd} vias" if _vtd
               else "  No vias needed teardrops (none present, or all already set)")
 
+    # #523 backstop: never write a board whose s-expression structure broke
+    # in one of the text transforms above -- a truncated file loads in our
+    # text parsers but not in KiCad, so it would ship invisibly.
+    from kicad_writer import assert_balanced_sexpr
+    assert_balanced_sexpr(new_content, label=output_file)
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(new_content)
 
