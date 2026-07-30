@@ -59,6 +59,7 @@ Needs pcbnew; re-execs into KiCad's python automatically.
 # ---------------------------------------------------------------------------
 import os
 import shutil
+import glob
 import subprocess
 import sys
 
@@ -70,7 +71,25 @@ KICAD_PYTHONS = [
     "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3",
     "/usr/bin/python3",
     os.path.expandvars(r"C:\\Program Files\\KiCad\\bin\\python.exe"),
+    # KiCad 9/10 install under a VERSIONED directory on Windows
+    # (C:\Program Files\KiCad\10.0\bin), which the bare path above misses.
+    # Newest first, so the most recent KiCad wins.
+    *sorted(glob.glob(r"C:\Program Files\KiCad\*\bin\python.exe"), reverse=True),
 ]
+
+
+def _host_env():
+    """Environment for the CLI subprocesses, with KiCad's python wiring removed.
+
+    KiCad's bundled interpreter exports PYTHONUSERBASE (its own 3rdparty tree).
+    Once this gate re-execs into it, a plain `python3 route.py` child inherits
+    that and resolves USER site-packages inside KiCad's tree instead of its own,
+    so the host interpreter reports numpy/scipy/shapely missing and every CLI
+    step fails -- which reads as "no wx/pcbnew in this session" when in fact both
+    are present and working.
+    """
+    return {k: v for k, v in os.environ.items()
+            if k not in ('PYTHONUSERBASE', 'PYTHONHOME', 'PYTHONPATH')}
 
 DEFAULT_BOARD = os.path.join(REPO, "kicad_files", "splitflap_driver.kicad_pcb")
 
@@ -87,7 +106,14 @@ def _reexec_into_kicad():
             r = subprocess.run([cand, '-c', 'import pcbnew'],
                                capture_output=True)
             if r.returncode == 0:
-                os.execv(cand, [cand, os.path.abspath(__file__)] + sys.argv[1:])
+                argv = [cand, os.path.abspath(__file__)] + sys.argv[1:]
+                if os.name == 'nt':
+                    # os.execv goes through the CRT on Windows and re-splits the
+                    # argument vector on spaces, so a path like
+                    # "C:\Program Files\KiCad\10.0\bin\python.exe" is torn in two.
+                    # subprocess quotes it correctly.
+                    sys.exit(subprocess.run(argv).returncode)
+                os.execv(cand, argv)
     print("ERROR: no python with pcbnew found")
     sys.exit(2)
 
@@ -122,7 +148,8 @@ def run_cli_leg(board, workdir):
                   '--max-iterations', '1000000'])
     for i, cmd in enumerate(steps):
         print(f"[cli] step {i + 1}/4 ...", flush=True)
-        r = subprocess.run(cmd, capture_output=True, text=True, cwd=workdir)
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=workdir,
+                           env=_host_env())
         if r.returncode != 0:
             print(r.stdout[-3000:])
             print(r.stderr[-2000:])

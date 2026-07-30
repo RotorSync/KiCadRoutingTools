@@ -14,6 +14,14 @@ Cost = total airwire length
      + halo penalty (soft whitespace around parts, scaled by pin count)
      + edge penalty (soft margin inside the board edge)
 
+Legality (hard constraints, and the whole of what candidate_valid decides) lives
+in placement/legality.py, shared with the fanout-clearance repair pass: parts
+only collide with parts that share a board SIDE (a back-side decap under a
+front-side BGA is not an overlap; a through-hole part's lead field does reach the
+far side), and board containment measures against the real Edge.Cuts outline, not
+its bounding box. A part whose SEED pose is already illegal is not frozen: it may
+take any candidate that strictly reduces its violation.
+
 The halo term spreads apart parts that are not pulled together by shared
 nets — things that *can* be far apart may as well be, to leave routing room,
 especially around high-pin-count parts.
@@ -33,33 +41,31 @@ import numpy as np
 
 from kicad_parser import PCBData, local_to_global
 from connectivity import compute_mst_edges
-from placement.parser import extract_courtyard_bboxes, extract_locked_refs
+from placement.parser import (courtyard_for_side, extract_courtyard_sides,
+                              extract_locked_refs, warn_missing_courtyards)
 from placement.utility import compute_footprint_bbox_local, snap_to_grid
+from placement import legality
+from placement.legality import (BoardOutlineGate, footprint_has_through_pads,
+                                footprint_side, pair_min_gap, rect_gap,
+                                rotate_local_bounds, sides_occupied)
 
 ROTATIONS = [0.0, 90.0, 180.0, 270.0]
 EPS_IMPROVE = 1e-6
 
+# Both helpers now live in placement/legality.py, the single home shared with
+# fanout_clearance (which carried byte-identical copies). Kept as module-level
+# aliases: they are part of this module's de-facto surface (tests import them).
+_rotate_local_bounds = rotate_local_bounds
+_rect_gap = rect_gap
 
-def _rotate_local_bounds(lmin_x, lmin_y, lmax_x, lmax_y, rotation):
-    """Rotate a local bounding box by the footprint rotation (KiCad sign)."""
-    rot = rotation % 360
-    if abs(rot) < 0.01:
-        return lmin_x, lmin_y, lmax_x, lmax_y
-    angle = math.radians(-rot)
-    cos_a, sin_a = math.cos(angle), math.sin(angle)
-    corners = [(lmin_x, lmin_y), (lmax_x, lmin_y), (lmin_x, lmax_y), (lmax_x, lmax_y)]
-    xs = [x * cos_a - y * sin_a for x, y in corners]
-    ys = [x * sin_a + y * cos_a for x, y in corners]
-    return min(xs), min(ys), max(xs), max(ys)
+# Two courtyard boxes are the "same shape" for swap purposes. 1nm: far below any
+# real courtyard difference (KiCad writes 6 decimals of mm), far above the float
+# wobble that made two instances of one library footprint compare unequal.
+_BOUNDS_EPS = 1e-6
 
 
-def _rect_gap(a, b):
-    """Smallest axis-aligned gap between two rects (negative if overlapping)."""
-    dx = max(a[0] - b[2], b[0] - a[2])
-    dy = max(a[1] - b[3], b[1] - a[3])
-    if dx < 0 and dy < 0:
-        return max(dx, dy)  # overlap amount (negative)
-    return math.hypot(max(dx, 0), max(dy, 0)) if (dx > 0 and dy > 0) else max(dx, dy)
+def _bounds_match(a, b):
+    return all(abs(x - y) <= _BOUNDS_EPS for x, y in zip(a, b))
 
 
 def _airwires_for_points(points: List[Tuple[float, float]], net_id: int):
@@ -146,22 +152,68 @@ def _count_crossings_within(a: np.ndarray,
     return half, weighted / 2.0
 
 
+def _through_pad_bounds_local(fp):
+    """Local bbox over a footprint's DRILLED pads, or None if it has none.
+
+    This is the footprint's footprint on the OPPOSITE board side: its body and
+    courtyard live on its own side, but its leads pass through, so a part on the
+    far side may not sit inside this box (#456 item 1). Deliberately the drill
+    hole's own extent rather than the pad copper's -- the far side sees the
+    barrel and the lead, and the annular ring on that side is part of it.
+    """
+    # Inverse of local_to_global's rotation, for pads whose drill is OFFSET from
+    # their copper: hole_x/hole_y are BOARD coordinates, so the delta from the
+    # copper centre has to be rotated back into the footprint's local frame
+    # before it can be added to local_x/local_y.
+    ang = math.radians(-(fp.rotation or 0.0))
+    cos_a, sin_a = math.cos(ang), math.sin(ang)
+    xs, ys = [], []
+    for p in (fp.pads or []):
+        d = getattr(p, 'drill', 0) or 0
+        if d <= 0:
+            continue
+        lx, ly = p.local_x, p.local_y
+        hx, hy = getattr(p, 'hole_x', None), getattr(p, 'hole_y', None)
+        if hx is not None and hy is not None:
+            gdx, gdy = hx - p.global_x, hy - p.global_y
+            lx += gdx * cos_a + gdy * sin_a       # R(-ang) applied to the delta
+            ly += -gdx * sin_a + gdy * cos_a
+        r = d / 2.0
+        # An oval/slotted hole is bounded by the pad extent it sits in; taking
+        # the larger of drill radius and half pad size keeps a slot covered.
+        rx = max(r, (getattr(p, 'size_x', 0) or 0) / 2.0)
+        ry = max(r, (getattr(p, 'size_y', 0) or 0) / 2.0)
+        xs += [lx - rx, lx + rx]
+        ys += [ly - ry, ly + ry]
+    if not xs:
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
 class _Part:
     __slots__ = ('ref', 'pads_local', 'pin_count', 'bounds_by_rot',
                  'seed_x', 'seed_y', 'x', 'y', 'rot', 'locked',
-                 'nets', 'halo', 'footprint_name', 'orig_rot')
+                 'nets', 'halo', 'footprint_name', 'orig_rot',
+                 'side', 'has_tht', 'sides', 'tht_by_rot')
 
-    def __init__(self, ref, fp, courtyard_bboxes, locked, halo_base, halo_coef):
+    def __init__(self, ref, fp, courtyard_sides, locked, halo_base, halo_coef):
         self.ref = ref
         self.footprint_name = fp.footprint_name
         self.pads_local = [(p.local_x, p.local_y, p.net_id)
                            for p in fp.pads if p.net_id > 0]
         self.pin_count = len(self.pads_local)
-        if ref in courtyard_bboxes:
-            lb = courtyard_bboxes[ref]
-        else:
+        # Board side, and the sides this part physically obstructs: its own
+        # always, both when it has drilled pads (#456 item 1).
+        self.side = footprint_side(fp)
+        self.has_tht = footprint_has_through_pads(fp)
+        self.sides = sides_occupied(self.side, self.has_tht)
+        lb = courtyard_for_side(courtyard_sides.get(ref), self.side)
+        if lb is None:
             lb = compute_footprint_bbox_local(fp)
         self.bounds_by_rot = {r: _rotate_local_bounds(*lb, r) for r in ROTATIONS}
+        tlb = _through_pad_bounds_local(fp) if self.has_tht else None
+        self.tht_by_rot = ({r: _rotate_local_bounds(*tlb, r) for r in ROTATIONS}
+                           if tlb is not None else None)
         # A non-90-degree seed rotation brings its WHOLE 90-degree lattice:
         # those are the poses _candidate_rotations offers such a part, and
         # build_neighbor_lists unions bounds_by_rot over the movable
@@ -172,6 +224,8 @@ class _Part:
             for r in ROTATIONS:
                 rot = (base + r) % 360
                 self.bounds_by_rot[rot] = _rotate_local_bounds(*lb, rot)
+                if self.tht_by_rot is not None:
+                    self.tht_by_rot[rot] = _rotate_local_bounds(*tlb, rot)
         self.seed_x, self.seed_y = fp.x, fp.y
         self.x, self.y, self.rot = fp.x, fp.y, fp.rotation % 360
         self.orig_rot = fp.rotation % 360
@@ -187,6 +241,43 @@ class _Part:
         if b is None:
             b = self.bounds_by_rot[0.0]
         return (x + b[0], y + b[1], x + b[2], y + b[3])
+
+    def tht_rect(self, x=None, y=None, rot=None):
+        """The part's obstruction on the OPPOSITE side; None when it has no
+        drilled pads and therefore does not reach the far side at all."""
+        if self.tht_by_rot is None:
+            return None
+        x = self.x if x is None else x
+        y = self.y if y is None else y
+        rot = self.rot if rot is None else rot
+        b = self.tht_by_rot.get(rot % 360)
+        if b is None:
+            b = self.tht_by_rot[0.0]
+        return (x + b[0], y + b[1], x + b[2], y + b[3])
+
+    def rects(self, x=None, y=None, rot=None):
+        """(courtyard rect, far-side rect) at a pose -- what a pair test needs.
+
+        The far-side rect is None for the overwhelming majority of parts (no
+        drilled pads), and the pair tests fast-path on exactly that, so this
+        stays a single rect() call for them.
+        """
+        if self.tht_by_rot is None:
+            return self.rect(x, y, rot), None
+        return self.rect(x, y, rot), self.tht_rect(x, y, rot)
+
+    def gap_to(self, other, self_rects=None, other_rects=None):
+        """Smallest gap to another part over the board sides they SHARE, or None
+        when they share none -- then they cannot interact at all and every
+        consumer must skip the pair.
+
+        Both parts' rect pairs are passed in so a caller can hoist them out of a
+        loop; each defaults to the part's live pose.
+        """
+        sr = self.rects() if self_rects is None else self_rects
+        orr = other.rects() if other_rects is None else other_rects
+        return pair_min_gap(self.sides, self.side, sr[0], sr[1],
+                            other.sides, other.side, orr[0], orr[1])
 
     def pad_globals(self, x=None, y=None, rot=None):
         x = self.x if x is None else x
@@ -216,6 +307,13 @@ class QuenchState:
         margin = max(clearance, board_edge_clearance)
         self.usable = (bounds[0] + margin, bounds[1] + margin,
                        bounds[2] - margin, bounds[3] - margin)
+        # Real board outline / cutouts (#456 item 2): `usable` is a bbox inset,
+        # so on an L-shaped outline or a board with interior cutouts it happily
+        # nudges parts into the notch or the hole. The gate measures against the
+        # true Edge.Cuts rings and self-disables when the bbox inset is already
+        # exact (single rectangular ring, no cutouts) or when the parser found no
+        # usable ring at all -- in which case behaviour is unchanged.
+        self.edge_gate = BoardOutlineGate(pcb_data.board_info, margin)
         self.clearance = clearance
         self.crossing_penalty = crossing_penalty
         self.length_weight = length_weight
@@ -225,23 +323,27 @@ class QuenchState:
         self.edge_weight = edge_weight
         self.grid_step = grid_step
 
-        courtyards = extract_courtyard_bboxes(pcb_file)
+        courtyards = extract_courtyard_sides(pcb_file)
         locked_refs = set(extract_locked_refs(pcb_file))
         if extra_locked_refs:
             locked_refs |= extra_locked_refs
         ignore = ignore_net_ids or set()
 
         self.parts: Dict[str, _Part] = {}
+        no_courtyard = []
         for ref, fp in pcb_data.footprints.items():
             if not fp.pads:
                 continue
             locked = (ref in locked_refs
                       or (move_refs is not None and ref not in move_refs))
+            if ref not in courtyards:
+                no_courtyard.append(ref)
             self.parts[ref] = _Part(ref, fp, courtyards, locked,
                                     halo_base, halo_coef)
             # Ignored nets (e.g. plane-routed power) don't contribute airwires
             self.parts[ref].nets = [n for n in self.parts[ref].nets
                                     if n not in ignore]
+        warn_missing_courtyards(no_courtyard, 'quench')
 
         # net -> refs touching it
         self.net_refs: Dict[int, Set[str]] = {}
@@ -270,6 +372,14 @@ class QuenchState:
 
         # Optional pruned neighbour lists (see build_neighbor_lists)
         self._neighbors = None
+        # Displacement budget, for the outline gate's reachability prune. Unknown
+        # until build_neighbor_lists is told it, and UNBOUNDED until then so the
+        # prune can only ever be conservative (every part pays for the exact ring
+        # test) rather than skip a part that can in fact reach an edge.
+        self._travel_budget = float('inf')
+        # ref -> violation of its CURRENT pose; whole-dict invalidated on any
+        # move, since a move changes its neighbours' violations too.
+        self._inc_violation: Dict[str, float] = {}
 
     # ----- airwire helpers -------------------------------------------------
 
@@ -296,15 +406,68 @@ class QuenchState:
 
     # ----- cost terms ------------------------------------------------------
 
-    def _halo_pair_penalty(self, part_a: _Part, rect_a, part_b: _Part, rect_b):
+    def _halo_pair_penalty(self, part_a: _Part, rect_a, part_b: _Part, rect_b,
+                           rects_a=None, rects_b=None):
+        """Whitespace-shortfall penalty between two parts.
+
+        Zero for a cross-side pair that shares no board side: their whitespace is
+        not shared, so pushing them apart buys no routing room (#456 item 1). The
+        explicit rect_a / rect_b stay in the signature because every caller has
+        them already; rects_a / rects_b carry the far-side rects when the caller
+        has them (defaulting to the parts' live poses).
+        """
         required = part_a.halo + part_b.halo
-        gap = _rect_gap(rect_a, rect_b)
+        if not (part_a.has_tht or part_b.has_tht):
+            # Fast path (nearly every pair): plain SMD parts interact only when
+            # they are on the same side, and a per-axis separation of `required`
+            # already proves the true gap clears it -- so the exact gap is only
+            # computed for pairs that can actually be charged.
+            if part_a.side != part_b.side:
+                return 0.0
+            if (rect_a[2] + required <= rect_b[0]
+                    or rect_b[2] + required <= rect_a[0]
+                    or rect_a[3] + required <= rect_b[1]
+                    or rect_b[3] + required <= rect_a[1]):
+                return 0.0
+            gap = rect_gap(rect_a, rect_b)
+        else:
+            gap = part_a.gap_to(
+                part_b,
+                (rect_a, part_a.tht_rect()) if rects_a is None else rects_a,
+                (rect_b, part_b.tht_rect()) if rects_b is None else rects_b)
+            if gap is None:
+                return 0.0
         if gap >= required:
             return 0.0
         short = required - max(gap, 0.0)
         return self.halo_weight * short * short
 
-    def _edge_penalty(self, rect):
+    def _edge_penalty(self, rect, ref=None):
+        """Soft margin inside the board edge.
+
+        Measured to the real outline when we have one, so a part sitting in a
+        notch is charged for the notch's edges rather than for a bounding box it
+        is nowhere near (#456 item 2). Falls back to the four bbox gaps.
+        """
+        if self.edge_gate.active:
+            # Same prefilter as the hard gate, but sized to edge_halo, which is
+            # the radius this soft term cares about and is usually WIDER than the
+            # hard margin. Empty list = nothing within edge_halo, penalty 0.
+            near = (self.edge_gate.edges() if ref is None
+                    else self._edges_near_halo(ref))
+            if not near:
+                return 0.0
+            g = self.edge_gate.edge_clearance(rect, edges=near)
+            if g >= self.edge_halo:
+                return 0.0
+            short = self.edge_halo - max(g, 0.0)
+            # One charge on the NEAREST edge, matching what the per-axis sum
+            # below charges a part near a single edge -- which is the ordinary
+            # case the weights were tuned against. (Charging per-direction would
+            # need four directional distances to the outline; multiplying this
+            # one by four instead would bill every edge-adjacent part as though
+            # it were boxed in on all sides, a 4x distortion of the term.)
+            return self.edge_weight * short * short
         pen = 0.0
         gaps = (rect[0] - self.board[0], rect[1] - self.board[1],
                 self.board[2] - rect[2], self.board[3] - rect[3])
@@ -318,8 +481,9 @@ class QuenchState:
                            exclude: Optional[Set[str]] = None):
         """Halo + edge penalty contributions of one part at a position."""
         part = self.parts[ref]
-        rect = part.rect(x, y, rot)
-        pen = self._edge_penalty(rect)
+        rects = part.rects(x, y, rot)
+        rect = rects[0]
+        pen = self._edge_penalty(rect, ref)
         if self._neighbors is not None and ref in self._neighbors:
             others = ((o, self.parts[o]) for o in self._neighbors[ref])
         else:
@@ -327,27 +491,186 @@ class QuenchState:
         for other_ref, other in others:
             if other_ref == ref or (exclude and other_ref in exclude):
                 continue
-            pen += self._halo_pair_penalty(part, rect, other, other.rect())
+            pen += self._halo_pair_penalty(part, rect, other, other.rect(),
+                                           rects_a=rects)
         return pen
 
-    def candidate_valid(self, ref, x, y, rot, exclude: Optional[Set[str]] = None):
+    def violation(self, ref, x=None, y=None, rot=None,
+                  exclude: Optional[Set[str]] = None,
+                  limit: Optional[float] = None) -> float:
+        """Total illegality of a pose: 0.0 exactly when it is legal.
+
+        The sum of the two terms `violation_parts` returns; see there. This is
+        the number `placement/legality.py`'s graders report, so the optimizer and
+        the scorecard cannot disagree about what legal means.
+        """
+        board, overlap = self.violation_parts(ref, x, y, rot, exclude, limit)
+        return board + overlap
+
+    def violation_parts(self, ref, x=None, y=None, rot=None,
+                        exclude: Optional[Set[str]] = None,
+                        limit: Optional[float] = None):
+        """(board violation, overlap violation) of a pose; (0, 0) when legal.
+
+        Kept apart because only the BOARD term drives the unfreezing rule in
+        candidate_valid. The overlap term is the summed clearance shortfall
+        against every part this one shares a side with -- a DISTANCE, whereas the
+        overlap metric a placement is graded on is an AREA, and the two do not
+        move together: trading one deep narrow overlap for a shallow wide one
+        reduces the shortfall while increasing the area. So it can order poses,
+        but it must not be used to license a move.
+
+        `limit` lets the caller stop as soon as the running total exceeds it and
+        return some value above it -- the accept test only asks "is this worse
+        than X", and without the early exit an obviously-worse candidate still
+        pays a full neighbour sweep. Never pass a limit when you need the value.
+        """
         part = self.parts[ref]
-        rect = part.rect(x, y, rot)
-        if (rect[0] < self.usable[0] or rect[1] < self.usable[1]
-                or rect[2] > self.usable[2] or rect[3] > self.usable[3]):
-            return False
+        rects = part.rects(x, y, rot)
+        # Same reachability prune as candidate_valid: a part that cannot come
+        # near a ring pays only the bbox term (the ring terms cost ~100x), and
+        # one that can measures only against the edges it can actually reach.
+        near = self._edges_near(ref) if self.edge_gate.active else None
+        board = self.edge_gate.rect_outside_amount(
+            rects[0], exact=bool(near), edges=near)
+        overlap = 0.0
+        if limit is not None and board > limit:
+            return board, overlap
         if self._neighbors is not None and ref in self._neighbors:
             others = ((o, self.parts[o]) for o in self._neighbors[ref])
         else:
             others = self.parts.items()
+        clr = self.clearance
+        rect = rects[0]
+        tht = part.has_tht
         for other_ref, other in others:
             if other_ref == ref or (exclude and other_ref in exclude):
                 continue
-            r = other.rect()
-            if not (rect[2] + self.clearance <= r[0] or r[2] + self.clearance <= rect[0]
-                    or rect[3] + self.clearance <= r[1] or r[3] + self.clearance <= rect[1]):
-                return False
-        return True
+            if tht or other.has_tht:
+                gap = part.gap_to(other, rects)
+                if gap is None:
+                    continue
+            else:
+                if other.side != part.side:
+                    continue
+                r = other.rect()
+                if (rect[2] + clr <= r[0] or r[2] + clr <= rect[0]
+                        or rect[3] + clr <= r[1] or r[3] + clr <= rect[1]):
+                    continue        # clear, so no shortfall to add
+                gap = rect_gap(rect, r)
+            if gap < clr:
+                overlap += clr - gap
+                if limit is not None and board + overlap > limit:
+                    return board, overlap
+        return board, overlap
+
+    def candidate_valid(self, ref, x, y, rot, exclude: Optional[Set[str]] = None):
+        """True when the pose is legal, or -- when the part sits OFF THE BOARD --
+        when it moves strictly back toward the board without overlapping anything.
+
+        The second branch exists because only candidates were ever validated,
+        never the incumbent: a part outside the bbox inset, or (now that the real
+        outline is enforced) inside a notch or a cutout, had every candidate
+        rejected and could never move at all, not even toward the board (#456
+        item 1).
+
+        It is deliberately limited to the BOARD term. Extending it to overlaps --
+        "any pose no worse than the one you are in" -- measurably destroys the
+        constraint on a dense board: on watchy 81 of 82 parts start in violation
+        (its hand placement is tighter than the 0.25mm courtyard clearance quench
+        asks for), so almost every part gets a licence to slide, and total
+        courtyard overlap went 9.1 -> 37.9mm2 instead of the 9.1 -> 0.04mm2 the
+        strict gate achieves. Requiring a strict DECREASE instead only softened
+        that to 16.8mm2, because the violation measure is a distance while the
+        thing being wrecked is an area: trading one deep narrow overlap for a
+        shallow wide one lowers the shortfall and raises the area. An overlapping
+        part therefore keeps the original rule -- it may move only to a pose that
+        is fully legal.
+        """
+        part = self.parts[ref]
+        rects = part.rects(x, y, rot)
+        rect = rects[0]
+        legal = not (rect[0] < self.usable[0] or rect[1] < self.usable[1]
+                     or rect[2] > self.usable[2] or rect[3] > self.usable[3])
+        # Real outline / cutout gate, three-level short-circuit: board-level
+        # opt-out, cached per-part reachable-edge list, then the exact test
+        # against only those edges.
+        if legal and self.edge_gate.active:
+            near = self._edges_near(ref)
+            if near and self.edge_gate.rect_blocked(rect, edges=near):
+                legal = False
+        if legal:
+            if self._neighbors is not None and ref in self._neighbors:
+                others = ((o, self.parts[o]) for o in self._neighbors[ref])
+            else:
+                others = self.parts.items()
+            clr = self.clearance
+            tht = part.has_tht
+            for other_ref, other in others:
+                if other_ref == ref or (exclude and other_ref in exclude):
+                    continue
+                if tht or other.has_tht:
+                    # Either part reaches the far side: fall through to the
+                    # shared-side rule, which needs both parts' rect pairs.
+                    gap = part.gap_to(other, rects)
+                    if gap is not None and gap < clr:
+                        legal = False
+                        break
+                    continue
+                # Fast path: two plain SMD parts. Same side, then the original
+                # inline AABB test -- no function calls, as before the side rule.
+                if other.side != part.side:
+                    continue
+                r = other.rect()
+                if not (rect[2] + clr <= r[0] or r[2] + clr <= rect[0]
+                        or rect[3] + clr <= r[1] or r[3] + clr <= rect[1]):
+                    legal = False
+                    break
+        if legal:
+            return True
+        # Only now, on a rejected candidate, is the incumbent's legality worth
+        # computing -- and it is cached, because it is the same answer for every
+        # candidate of this part until something moves. Without the cache this
+        # branch runs a full neighbour sweep per rejected candidate, which on a
+        # dense board is most of them.
+        cur_board, cur_overlap = (
+            self.violation_parts(ref, exclude=exclude) if exclude
+            else self._incumbent_violation(ref))
+        if cur_overlap > EPS_IMPROVE or cur_board <= EPS_IMPROVE:
+            # Overlapping, or already legal: original rule, legal poses only.
+            return False
+        cand_board, cand_overlap = self.violation_parts(
+            ref, x, y, rot, exclude=exclude, limit=cur_board)
+        return (cand_overlap <= EPS_IMPROVE
+                and cand_board < cur_board - EPS_IMPROVE)
+
+    def _incumbent_violation(self, ref):
+        v = self._inc_violation.get(ref)
+        if v is None:
+            v = self.violation_parts(ref)
+            self._inc_violation[ref] = v
+        return v
+
+    def _edges_near(self, ref) -> list:
+        """Cached: the Edge.Cuts edges this part's reachable disk can touch.
+        Empty means the exact ring test is skippable for every pose it can take."""
+        part = self.parts[ref]
+        travel = 0.0 if part.locked else self._travel_budget
+        return self.edge_gate.edges_near(
+            ref, part.rect(part.seed_x, part.seed_y, part.orig_rot), travel)
+
+    def _edges_near_halo(self, ref) -> list:
+        """Like _edges_near but sized to the SOFT edge_halo radius. Inflating
+        `travel` by edge_halo is the conservative way to widen the gate's
+        margin-based reach without a second reach parameter."""
+        part = self.parts[ref]
+        travel = 0.0 if part.locked else self._travel_budget
+        return self.edge_gate.edges_near(
+            (ref, 'halo'), part.rect(part.seed_x, part.seed_y, part.orig_rot),
+            travel + self.edge_halo)
+
+    def _may_reach_edge(self, ref) -> bool:
+        return bool(self._edges_near(ref))
 
     def _weighted_length(self, arr: np.ndarray) -> float:
         if len(arr) == 0:
@@ -394,7 +717,7 @@ class QuenchState:
         for i, ra in enumerate(refs):
             pa = self.parts[ra]
             rect_a = pa.rect()
-            edge += self._edge_penalty(rect_a)
+            edge += self._edge_penalty(rect_a, ra)
             for rb in refs[i + 1:]:
                 pb = self.parts[rb]
                 halo += self._halo_pair_penalty(pa, rect_a, pb, pb.rect())
@@ -403,11 +726,40 @@ class QuenchState:
         return {'total': total, 'length': length, 'crossings': crossings,
                 'halo': halo, 'edge': edge}
 
+    def graded_parts(self):
+        """The placement as `legality.GradedPart` records, for the graders.
+
+        Lets a scorecard compute OO (overlap area) and OoB from the same
+        geometry and the same side rules the optimizer gated on, rather than
+        re-deriving courtyards and disagreeing about what legal means (#456).
+        """
+        return [legality.GradedPart(ref=ref, side=p.side, rect=p.rect(),
+                                    tht_rect=p.tht_rect(), has_tht=p.has_tht)
+                for ref, p in self.parts.items()]
+
+    def legality_metrics(self):
+        """{'overlap_area', 'oob_count', 'oob_amount', 'oob_area'} for the
+        current placement. Zero across the board means fully legal."""
+        parts = self.graded_parts()
+        oob_count = 0
+        oob_amount = 0.0
+        oob_area = 0.0
+        for p in parts:
+            amt = self.edge_gate.rect_outside_amount(p.rect)
+            if amt > legality.EPS:
+                oob_count += 1
+                oob_amount += amt
+                oob_area += self.edge_gate.out_of_board_area(p.rect)
+        return {'overlap_area': legality.placement_overlap_area(parts),
+                'oob_count': oob_count, 'oob_amount': oob_amount,
+                'oob_area': oob_area}
+
     # ----- move application -------------------------------------------------
 
     def apply_move(self, ref, x, y, rot):
         part = self.parts[ref]
         part.x, part.y, part.rot = x, y, rot
+        self._inc_violation.clear()
         for net_id in part.nets:
             self.net_airwires[net_id] = self._build_net_airwires(net_id)
 
@@ -421,7 +773,14 @@ class QuenchState:
         every rect the part can ever occupy. Any pair whose per-axis seed gap
         exceeds both budgets plus the largest interaction reach (hard
         clearance / summed halos) can NEVER interact -- excluding it is exact
-        for candidate_valid AND part_geometry_cost, not an approximation."""
+        for candidate_valid AND part_geometry_cost, not an approximation.
+
+        Exactness survives the side rule unchanged: the side filter only ever
+        REMOVES pairs from consideration, so an XY-only prune stays a superset of
+        what the checkers consult. It is deliberately not folded in here -- the
+        courtyard box is the pruning box, and a same-footprint swap must keep the
+        pair whether or not the pose it lands on shares a side."""
+        self._travel_budget = travel_budget
         # A swap can hand a part any rotation currently held by a movable
         # same-footprint partner (the swap path adds the bounds entry lazily,
         # after this build), so each part's union box must cover its whole
@@ -438,11 +797,23 @@ class QuenchState:
         geom = {}
         for ref, p in self.parts.items():
             if p.locked:
-                geom[ref] = (p.rect(), 0.0)
+                lr = p.rect()
+                tr = p.tht_rect()
+                geom[ref] = ((lr if tr is None else
+                              (min(lr[0], tr[0]), min(lr[1], tr[1]),
+                               max(lr[2], tr[2]), max(lr[3], tr[3]))), 0.0)
             else:
                 boxes = [p.bounds_by_rot[r] if r in p.bounds_by_rot
                          else _rotate_local_bounds(*p.bounds_by_rot[0.0], r)
                          for r in group_rots[p.footprint_name]]
+                # A THT part also presents its lead field on the far side; that
+                # box is normally inside the courtyard, but a badly drawn
+                # courtyard can be smaller, and the pruning box must bound EVERY
+                # rect the pair tests can ask about or the prune stops being exact.
+                if p.tht_by_rot is not None:
+                    boxes += [p.tht_by_rot[r] if r in p.tht_by_rot
+                              else _rotate_local_bounds(*p.tht_by_rot[0.0], r)
+                              for r in group_rots[p.footprint_name]]
                 u0 = min(b[0] for b in boxes)
                 u1 = min(b[1] for b in boxes)
                 u2 = max(b[2] for b in boxes)
@@ -592,6 +963,7 @@ def quench(pcb_data: PCBData, pcb_file: str,
         improved = 0.0
         moves = 0
         swaps_skipped = 0
+        swaps_skipped_shape = 0
 
         # --- single-part moves (nudge + rotate) ---
         for ref in movable:
@@ -673,9 +1045,23 @@ def quench(pcb_data: PCBData, pcb_file: str,
                                 or math.hypot(pa.x - pb.seed_x, pa.y - pb.seed_y) > swap_cap + 1e-9):
                             swaps_skipped += 1
                             continue
+                        # A swap exchanges poses within one board side; parts on
+                        # opposite sides (or one THT and one not) do not present
+                        # the same obstruction, so the occupied-space invariance
+                        # that lets swaps skip candidate_valid would not hold.
+                        if pa.side != pb.side or pa.has_tht != pb.has_tht:
+                            swaps_skipped_shape += 1
+                            continue
                         # Courtyards are extracted per-ref, so the same
-                        # footprint_name doesn't guarantee identical bounds
-                        if pa.bounds_by_rot[0.0] != pb.bounds_by_rot[0.0]:
+                        # footprint_name doesn't guarantee identical bounds.
+                        # Compared with a tolerance, not ==: two instances of one
+                        # library footprint should differ by nothing, and when
+                        # they differ by a float wobble refusing the swap costs a
+                        # free win silently (#456 item 3 made this fire on
+                        # identical parts whose neighbouring silk differed).
+                        if not _bounds_match(pa.bounds_by_rot[0.0],
+                                             pb.bounds_by_rot[0.0]):
+                            swaps_skipped_shape += 1
                             continue
                         # rect() falls back to rot-0 bounds for unknown
                         # rotations; add the partner's rotation lazily so
@@ -684,6 +1070,10 @@ def quench(pcb_data: PCBData, pcb_file: str,
                             if inherited not in p_dst.bounds_by_rot:
                                 p_dst.bounds_by_rot[inherited] = _rotate_local_bounds(
                                     *p_dst.bounds_by_rot[0.0], inherited)
+                            if (p_dst.tht_by_rot is not None
+                                    and inherited not in p_dst.tht_by_rot):
+                                p_dst.tht_by_rot[inherited] = _rotate_local_bounds(
+                                    *p_dst.tht_by_rot[0.0], inherited)
                         involved = set(pa.nets) | set(pb.nets)
                         other_aw = state.airwires_excluding(involved)
 
@@ -713,7 +1103,9 @@ def quench(pcb_data: PCBData, pcb_file: str,
                                                               exclude={ra})
                                    + state._halo_pair_penalty(
                                        pa, pa.rect(ax, ay, arot),
-                                       pb, pb.rect(bx, by, brot)))
+                                       pb, pb.rect(bx, by, brot),
+                                       rects_a=pa.rects(ax, ay, arot),
+                                       rects_b=pb.rects(bx, by, brot)))
                             return net_cost + geo
 
                         cur = eval_pair(pa.x, pa.y, pa.rot, pb.x, pb.y, pb.rot)
@@ -735,6 +1127,10 @@ def quench(pcb_data: PCBData, pcb_file: str,
         stats = state.total_cost()
         swap_note = (f" swap-capped={swaps_skipped}"
                      if verbose and swaps_skipped else "")
+        # Shape/side mismatches were silent before: two instances of one
+        # footprint that never swap look exactly like a pair with nothing to gain.
+        if verbose and swaps_skipped_shape:
+            swap_note += f" swap-mismatched={swaps_skipped_shape}"
         print(f"Pass {pass_num}: {moves} moves, gain {improved:.1f} -> "
               f"length={stats['length']:.1f}mm crossings={stats['crossings']} "
               f"halo={stats['halo']:.1f} edge={stats['edge']:.1f} "
