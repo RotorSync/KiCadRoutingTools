@@ -2538,7 +2538,13 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
     # without it a LOCKED via matched nothing at all (the segment-side #150
     # bug, via edition): never an obstacle, never protected.
     # (via blind ...) / (via micro ...): the type token precedes (at ...)
-    via_pattern = r'\(via\s+(?:blind\s+|micro\s+)?\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?(?:\(free\s+(yes|no)\)\s+)?(?:\(locked\s+yes\)\s+)?\(net\s+(\d+)\)\s+\(uuid\s+"([^"]+)"\)'
+    # uuid OPTIONAL (PR #534): KiCad itself accepts uuid-less copper (it mints
+    # one on load) and tool-injected copper often omits it. Requiring the
+    # token silently DROPPED such vias from the model -- invisible barrels the
+    # router then planned tracks through. uuid-less vias parse with uuid=""
+    # (they simply can't carry the uuid-keyed extras: v10 free-flag, tenting
+    # attrs, teardrop insertion -- all benign degradations).
+    via_pattern = r'\(via\s+(?:blind\s+|micro\s+)?\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?(?:\(free\s+(yes|no)\)\s+)?(?:\(locked\s+yes\)\s+)?\(net\s+(\d+)\)(?:\s+\(uuid\s+"([^"]+)"\))?'
 
     for m in re.finditer(via_pattern, content, re.DOTALL):
         free_value = m.group(7)  # "yes", "no", or None
@@ -2549,7 +2555,7 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
             drill=float(m.group(4)),
             layers=[m.group(5), m.group(6)],
             net_id=int(m.group(8)),
-            uuid=m.group(9),
+            uuid=m.group(9) or "",
             free=(free_value == "yes"),
             locked='(locked yes)' in m.group(0)
         )
@@ -2563,7 +2569,10 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
         # name-style via when any numeric one existed (issue #79).
         # Use flexible matching between layers and net to handle new v10 fields
         # (tenting, covering, plugging, capping, filling) that appear after layers.
-        via_pattern_v10 = r'\(via\s+(?:blind\s+|micro\s+)?\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\).*?\(net\s+"([^"]*)"\)\s+\(uuid\s+"([^"]+)"\)'
+        # uuid OPTIONAL here too (PR #534) -- the numeric fix alone left this
+        # dialect still dropping uuid-less vias (the #344/#369 "forgot the
+        # KiCad-10 twin" class).
+        via_pattern_v10 = r'\(via\s+(?:blind\s+|micro\s+)?\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\).*?\(net\s+"([^"]*)"\)(?:\s+\(uuid\s+"([^"]+)"\))?'
         for m in re.finditer(via_pattern_v10, content, re.DOTALL):
             net_name = m.group(7)
             via = Via(
@@ -2573,7 +2582,7 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
                 drill=float(m.group(4)),
                 layers=[m.group(5), m.group(6)],
                 net_id=name_to_id.get(net_name, 0),
-                uuid=m.group(8),
+                uuid=m.group(8) or "",
                 free=False,  # Parse free from content if present
                 locked='(locked yes)' in m.group(0)
             )
@@ -2781,7 +2790,9 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
     # emits it between width/layer or layer/net, so allow it at both spots -
     # otherwise a locked track parses to nothing, never becomes an obstacle, and
     # the router lays copper straight through it (issue #150).
-    segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+(?:\(locked\s+yes\)\s+)?\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?\(net\s+(\d+)\)\s+\(uuid\s+"([^"]+)"\)'
+    # uuid OPTIONAL (PR #534), same reason as the via pattern: KiCad accepts
+    # uuid-less copper, so requiring the token silently dropped real segments.
+    segment_pattern = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+(?:\(locked\s+yes\)\s+)?\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?\(net\s+(\d+)\)(?:\s+\(uuid\s+"([^"]+)"\))?'
 
     for m in re.finditer(segment_pattern, content, re.DOTALL):
         segment = Segment(
@@ -2792,7 +2803,7 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
             width=float(m.group(5)),
             layer=m.group(6),
             net_id=int(m.group(7)),
-            uuid=m.group(8),
+            uuid=m.group(8) or "",
             # Store original strings for exact file matching
             start_x_str=m.group(1),
             start_y_str=m.group(2),
@@ -2806,7 +2817,8 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
         # KiCad 10 format: (net "name"). Always run IN ADDITION to the numeric
         # pattern and merge — mixed-style files are legal and each segment
         # matches exactly one pattern (issue #79).
-        segment_pattern_v10 = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+(?:\(locked\s+yes\)\s+)?\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?\(net\s+"([^"]*)"\)\s+\(uuid\s+"([^"]+)"\)'
+        # uuid OPTIONAL here too (PR #534, the KiCad-10 twin).
+        segment_pattern_v10 = r'\(segment\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+\(end\s+([\d.-]+)\s+([\d.-]+)\)\s+\(width\s+([\d.-]+)\)\s+(?:\(locked\s+yes\)\s+)?\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?\(net\s+"([^"]*)"\)(?:\s+\(uuid\s+"([^"]+)"\))?'
         for m in re.finditer(segment_pattern_v10, content, re.DOTALL):
             net_name = m.group(7)
             segment = Segment(
@@ -2817,7 +2829,7 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                 width=float(m.group(5)),
                 layer=m.group(6),
                 net_id=name_to_id.get(net_name, 0),
-                uuid=m.group(8),
+                uuid=m.group(8) or "",
                 start_x_str=m.group(1),
                 start_y_str=m.group(2),
                 end_x_str=m.group(3),
@@ -2849,15 +2861,17 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                 start_x_str=repr(p0[0]), start_y_str=repr(p0[1]),
                 end_x_str=repr(p1[0]), end_y_str=repr(p1[1]), locked=locked))
 
-    for m in re.finditer(arc_fields + r'(\d+)\)\s+\(uuid\s+"([^"]+)"\)', content, re.DOTALL):
+    # uuid OPTIONAL in both dialects (PR #534), same as the segment/via
+    # patterns: a uuid-less hand-drawn arc otherwise vanished from the model.
+    for m in re.finditer(arc_fields + r'(\d+)\)(?:\s+\(uuid\s+"([^"]+)"\))?', content, re.DOTALL):
         _append_arc(float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4)),
                     float(m.group(5)), float(m.group(6)), float(m.group(7)), m.group(8),
-                    int(m.group(9)), m.group(10), '(locked yes)' in m.group(0))
+                    int(m.group(9)), m.group(10) or "", '(locked yes)' in m.group(0))
     if name_to_id:
-        for m in re.finditer(arc_fields + r'"([^"]*)"\)\s+\(uuid\s+"([^"]+)"\)', content, re.DOTALL):
+        for m in re.finditer(arc_fields + r'"([^"]*)"\)(?:\s+\(uuid\s+"([^"]+)"\))?', content, re.DOTALL):
             _append_arc(float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4)),
                         float(m.group(5)), float(m.group(6)), float(m.group(7)), m.group(8),
-                        name_to_id.get(m.group(9), 0), m.group(10), '(locked yes)' in m.group(0))
+                        name_to_id.get(m.group(9), 0), m.group(10) or "", '(locked yes)' in m.group(0))
 
     # Net-tied copper GRAPHICS (#337): KiCad renders gr_line / gr_arc drawn on
     # a copper layer as real copper (optionally carrying a (net ...)). They are
