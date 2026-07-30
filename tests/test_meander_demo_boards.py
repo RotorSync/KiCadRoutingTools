@@ -391,6 +391,28 @@ def test_impedance_redo(tmp):
     print(f"PASS  impedance redo: 60 ohm spec persisted; reroute without "
           f"--impedance came back at {w2:.3f}mm (not the 0.15 default)")
 
+    # check_impedance auto-reads the stored declarations (#521): SE2's entry
+    # (gap 0 = declared non-coplanar) is picked up with no flags at all.
+    out = _run(["check_impedance.py", s2, "--exit-zero"])
+    if "Auto-read 1 net impedance declaration(s)" not in out:
+        _fail("check_impedance did not auto-read the stored spec:\n" + out[:1200])
+
+    # Coplanar declaration: route SE3 as a declared CPW (gap 0.3). The board
+    # has no pour, so auditing SE3 at ITS recorded gap -- no --coplanar-gap
+    # flag passed -- must flag the broken promise (exit 1).
+    s3 = os.path.join(tmp, "imp_s3.kicad_pcb")
+    _run(["route.py", s2, s3, "--nets", "SE3", "--track-width", "0.15",
+          "--clearance", "0.15", "--impedance", "60", "--coplanar-gap", "0.3"])
+    r = subprocess.run([sys.executable, "check_impedance.py", s3, "--nets", "SE3"],
+                       capture_output=True, text=True, cwd=REPO)
+    if "(1 coplanar)" not in r.stdout:
+        _fail("stored coplanar declaration not auto-read:\n" + r.stdout[:1200])
+    if r.returncode != 1:
+        _fail(f"declared-coplanar net over no pour should exit 1 without any "
+              f"--coplanar-gap flag (rc={r.returncode}):\n{r.stdout[-1200:]}")
+    print("PASS  check_impedance audits per-net stored declarations "
+          "(coplanar promise flagged with no flags passed)")
+
 
 def main():
     tmp = tempfile.mkdtemp(prefix="meander_demo_")

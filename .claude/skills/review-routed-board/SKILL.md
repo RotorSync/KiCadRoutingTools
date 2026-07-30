@@ -157,6 +157,12 @@ python3 check_impedance.py board.kicad_pcb --nets "RF*" "/DDR*"
 python3 check_impedance.py board.kicad_pcb --coplanar-gap 0.2
 ```
 
+Boards routed by this tool need no `--coplanar-gap`: `--impedance` steps record
+each net's declaration (ohms + coplanar gap) in the sibling `.kicad_pro`
+(#521), and `check_impedance.py` auto-reads them — every net audits against its
+OWN recorded promise (an "Auto-read N net impedance declaration(s)" line
+confirms it). Pass the flag only for boards without records.
+
 Reports per net: length over a reference-plane **void**, plane **split**
 crossings (the return current cannot follow the trace across either), the
 measured coplanar side-gap distribution, and the implied Z0 error vs. what the
