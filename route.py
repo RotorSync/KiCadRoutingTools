@@ -2650,6 +2650,46 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--overwrite", "-O", action="store_true",
                         help="Overwrite input file instead of creating _routed copy")
     parser.add_argument("--component", "-C", help="Route all nets connected to this component (e.g., U1). Excludes GND/VCC/VDD unless net patterns also specified.")
+    parser.add_argument("--group", metavar="BLOCK",
+                        help="Route only the nets of one PLACEMENT BLOCK "
+                             "(#459), e.g. 'decap:U3' or a sheet block. The "
+                             "N-part generalization of --component; composes "
+                             "with net patterns the same way (patterns given -> "
+                             "intersect). Use --group-by to choose how blocks "
+                             "are derived, and --list-groups to see them.")
+    parser.add_argument("--group-by", default="auto", metavar="SOURCES",
+                        help="How to derive placement blocks for --group: comma "
+                             "list of kicad, sheet, netprefix, decap; 'auto' = "
+                             "kicad,sheet (default: auto)")
+    parser.add_argument("--group-scope", default=None,
+                        choices=("touching", "internal"),
+                        help="Which of a block's nets to act on: 'touching' = "
+                             "any pad in the block, including its interface to "
+                             "the rest of the board (what --component means); "
+                             "'internal' = every pad inside the block. A "
+                             "schematic sheet is 60-70%% internal; a decap block "
+                             "is 0%% internal, so 'touching' is the only useful "
+                             "reading there. DEFAULT DEPENDS ON THE OPERATION: "
+                             "'touching' when routing (route the block's "
+                             "interface too), 'internal' with --undo -- because "
+                             "a block's touching set includes GND/VCC, so an "
+                             "undo at 'touching' would strip those nets' copper "
+                             "across the WHOLE board, not just this block")
+    parser.add_argument("--list-groups", action="store_true",
+                        help="List the placement blocks --group-by would derive, "
+                             "with their net counts, and exit")
+    parser.add_argument("--preview", action="store_true",
+                        help="Route, report exactly what WOULD change, and write "
+                             "no output file. The engine already supports this; "
+                             "this exposes it on the CLI.")
+    parser.add_argument("--preview-png", metavar="FILE",
+                        help="With --preview, also render the board with the "
+                             "proposed copper highlighted (needs Pillow)")
+    parser.add_argument("--undo", action="store_true",
+                        help="Remove the scoped nets' routed copper instead of "
+                             "routing them, putting them back to unrouted. "
+                             "Refuses KiCad-locked copper. Does NOT invert pad "
+                             "swaps -- see the printed report.")
     # Ordering and strategy options
     parser.add_argument("--ordering", "-o", choices=["inside_out", "mps", "original", "bus"],
                         default=defaults.DEFAULT_ORDERING_STRATEGY,
@@ -3024,14 +3064,46 @@ For differential pair routing, use route_diff.py:
             print(f"Using all {len(args.layers)} copper layers: "
                   f"{' '.join(args.layers)} (override with --layers)")
 
+    if args.list_groups:
+        from group_routing import block_net_names
+        from placement.groups import (GroupError, derive_groups, parse_sources,
+                                      short_name)
+        try:
+            _srcs = parse_sources(args.group_by)
+        except GroupError as exc:
+            print(f"ERROR: {exc}")
+            sys.exit(2)
+        _blocks = derive_groups(pcb_data, _srcs)
+        if not _blocks:
+            print(f"No placement blocks from sources {args.group_by!r}. "
+                  f"Try --group-by sheet,netprefix,decap")
+            sys.exit(0)
+        print(f"{len(_blocks)} placement block(s) from {args.group_by!r}:")
+        for _n, _r in sorted(_blocks.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+            _t = len(block_net_names(pcb_data, _r, 'touching'))
+            _i = len(block_net_names(pcb_data, _r, 'internal'))
+            print(f"  {short_name(_n):34s} parts={len(_r):3d}  nets: "
+                  f"touching={_t:3d} internal={_i:3d}")
+        sys.exit(0)
+
+    # An EMPTY --group is a caller bug (a shell expansion that produced nothing).
+    # Left alone it is falsy, so the scope silently widens to "*" -- and with
+    # --undo that erases the board. Fail loudly instead of guessing.
+    if args.group is not None and not args.group.strip():
+        print("route.py: error: --group was given an empty name. Use "
+              "--list-groups to see what exists.", file=sys.stderr)
+        sys.exit(2)
+
     # Combine positional net_patterns and --nets argument
     all_patterns = list(args.net_patterns) if args.net_patterns else []
     if args.nets:
         all_patterns.extend(args.nets)
 
     # Default to "*" (all nets) if no patterns and no component specified
-    if not all_patterns and not args.component:
+    _scope_defaulted = False
+    if not all_patterns and not args.component and not args.group:
         all_patterns = ["*"]
+        _scope_defaulted = True   # nobody asked for "everything"; --undo checks this
 
     # Get nets from patterns and/or component
     if all_patterns:
@@ -3067,9 +3139,133 @@ For differential pair routing, use route_diff.py:
             net_names = sorted(filtered)
         print(f"Filtered to {len(net_names)} nets on component {args.component}")
 
+    # --group: the N-part generalization of --component (#459). Same composition
+    # rule -- patterns given, intersect; no patterns, take the block's nets.
+    if args.group:
+        from group_routing import (GroupRoutingError, block_net_names,
+                                   block_refs, describe_scope, resolved_name)
+        from placement.groups import GroupError, parse_sources
+        try:
+            _srcs = parse_sources(args.group_by)
+            _refs = block_refs(pcb_data, args.group, _srcs)
+        except (GroupError, GroupRoutingError) as exc:
+            print(f"ERROR: {exc}")
+            sys.exit(2)
+        # ECHO what a short/fuzzy name resolved to. '--group U3 --undo' can match
+        # 'decap:U3' and delete copper without ever naming the block it picked.
+        _resolved = resolved_name(pcb_data, args.group, _srcs)
+        if _resolved and _resolved != args.group:
+            print(f"  --group {args.group!r} resolved to block {_resolved!r}")
+        # Scope default depends on the OPERATION. A block's 'touching' set
+        # includes GND/VCC (a decap block is nothing BUT those), so an undo at
+        # 'touching' strips those nets across the whole board -- measured on the
+        # rp2350 fixture: 170 segments, 54 of them nowhere near the block.
+        # Routing that same set is fine and desirable: it routes the interface.
+        _scope = args.group_scope or ('internal' if args.undo else 'touching')
+        if args.undo and args.group_scope == 'touching':
+            print("  WARNING: --undo at --group-scope touching removes copper "
+                  "from nets that LEAVE this block (GND/VCC included), across "
+                  "the whole board -- not just the block's own copper.")
+        _gnets = set(block_net_names(pcb_data, _refs, _scope))
+        if all_patterns:
+            net_names = [n for n in net_names if n in _gnets]
+        else:
+            net_names = sorted(_gnets)
+        # Print the scope AFTER composing with any patterns, and report the count
+        # we will actually act on -- otherwise the banner advertises the block's
+        # full net count while an intersection quietly routes a fraction of it.
+        print(describe_scope(pcb_data, _refs, _scope,
+                             final=len(net_names) if all_patterns else None))
+
     if not net_names:
         print("No nets matched the given patterns!")
         sys.exit(1)
+
+    # --undo: strip the scoped nets' copper instead of routing them.
+    if args.undo:
+        # An unscoped run defaults to "*" (line ~3080) because routing the whole
+        # board is the sensible default for ROUTING. For an undo it is not: it
+        # silently means "erase every track on the board". Make the caller say so.
+        if _scope_defaulted:
+            print("route.py: error: --undo needs an explicit scope -- pass "
+                  "--group BLOCK, --component REF, or net patterns. It does NOT "
+                  "default to every net, because for an undo that would erase "
+                  "the whole board. To really do that, pass '*' explicitly.",
+                  file=sys.stderr)
+            sys.exit(2)
+        from group_routing import unroute_nets
+        with open(args.input_file, 'r', encoding='utf-8') as _f:
+            _content = _f.read()
+        _content, _rep = unroute_nets(_content, pcb_data, net_names,
+                                      args.input_file)
+        # Report arcs separately: `segments_found` counts each arc's LINEARIZED
+        # pieces (the parser expands one (arc) into many Segments), so a bare
+        # removed/found ratio reads like a failure on an arc-routed board even
+        # when every arc was deleted.
+        _arcs = (f", {_rep['arcs_removed']} arc track(s)"
+                 if _rep.get('arcs_removed') else "")
+        print(f"Undo: {_rep['segments_removed']}/{_rep['segments_found']} "
+              f"segment(s){_arcs} and {_rep['vias_removed']}/{_rep['vias_found']} "
+              f"via(s) removed across {len(_rep['nets'])} net(s)")
+        if _rep['locked_skipped']:
+            print(f"  REFUSED (KiCad-locked, no override by design, #521): "
+                  f"{', '.join(_rep['locked_skipped'][:8])}")
+        if _rep['protected_overridden']:
+            print(f"  protected nets removed by exact-name targeting: "
+                  f"{', '.join(_rep['protected_overridden'][:8])}")
+        if _rep['unmatched']:
+            # (arc) tracks and copper graphics: in pcb_data.segments, but not
+            # expressible as a (segment) deletion. Never report this as success.
+            print(f"  WARNING: {_rep['unmatched']} piece(s) of copper could NOT "
+                  f"be removed -- (arc) tracks or copper graphics have no "
+                  f"(segment) block to delete. Nets still carrying copper: "
+                  f"{', '.join(_rep['unmatched_nets'][:8])}. Remove them in "
+                  f"KiCad, or these nets are NOT fully unrouted.")
+        if _rep['zones_left']:
+            print(f"  NOTE: {len(_rep['zones_left'])} net(s) still have a filled "
+                  f"ZONE, which is copper: {', '.join(_rep['zones_left'][:8])}. "
+                  f"An undo strips tracks and vias, never a pour -- deleting a "
+                  f"plane is a plane decision. Re-routing these will produce a "
+                  f"track web beside the pour, not the original plane.")
+        print("  NOTE: pad/target swaps are NOT inverted -- no inverse exists, "
+              "and they can touch nets outside this scope. This returns the "
+              "named nets to 'no copper', not the board to a prior state.")
+        if args.preview:
+            print("Preview: no output file written")
+            sys.exit(0)
+        with open(args.output_file, 'w', encoding='utf-8') as _f:
+            _f.write(_content)
+        # Carry the sibling project files across VERBATIM (#441). An undo only
+        # REMOVES copper, so the board's DRC floor is unchanged and the input's
+        # floor is exactly the right one to keep -- unlike a routing step, there
+        # is nothing new to write back. Dropping them would strand the floor and
+        # make the next step resolve it from the looser stock netclass, which
+        # KiCad then grades as phantom sub-clearance DRC on correct copper.
+        import shutil
+        from copy_board import SIBLING_EXTS
+        # splitext, NOT a fixed [:-10] slice. Any output that is not *.kicad_pcb
+        # (os.devnull, a bare name) made that slice produce a WRONG base -- an
+        # empty one for 'nul', which then created a stray '.kicad_pro' dotfile in
+        # the CWD and printed "carried the DRC floor" about it. copy_board and
+        # protected_nets.pro_path_for_board both already do it this way.
+        _sb, _db = (os.path.splitext(args.input_file)[0],
+                    os.path.splitext(args.output_file)[0])
+        _carried = []
+        _real_out = args.output_file.endswith('.kicad_pcb')
+        for _ext in (SIBLING_EXTS if _real_out else ()):
+            if os.path.isfile(_sb + _ext) and os.path.abspath(_sb) != os.path.abspath(_db):
+                try:
+                    shutil.copy2(_sb + _ext, _db + _ext)
+                    _carried.append(_ext)
+                except OSError as _e:
+                    print(f"  WARNING: could not carry {_ext} (#441): {_e}")
+        if _carried:
+            print(f"  carried the DRC floor: {', '.join(_carried)}")
+        elif not os.path.isfile(_sb + '.kicad_pro'):
+            print("  NOTE: the input has no sibling .kicad_pro, so none was "
+                  "carried; the output's DRC floor stays undefined (#441).")
+        print(f"Wrote {args.output_file}")
+        sys.exit(0)
 
     print(f"Routing {len(net_names)} nets: {net_names[:5]}{'...' if len(net_names) > 5 else ''}")
 
@@ -3124,7 +3320,12 @@ For differential pair routing, use route_diff.py:
             print(f"Netclass clearances for {len(_net_clearances_map)} net(s), {_mode} "
                   f"(mm: {_classes}); cross-class max(A,B) respected.")
 
-    batch_route(args.input_file, args.output_file, net_names,
+    # --preview: the engine already supports this -- return_results=True with
+    # an empty output_file routes fully, mutates only the in-memory PCBData
+    # and writes nothing. This just exposes it on the CLI (#459 follow-on).
+    _preview_out = batch_route(args.input_file,
+                "" if args.preview else args.output_file, net_names,
+                return_results=args.preview,
                 direction_order=args.direction,
                 ordering_strategy=args.ordering,
                 disable_bga_zones=args.no_bga_zones,
@@ -3203,6 +3404,38 @@ For differential pair routing, use route_diff.py:
                 layer_costs=args.layer_costs,
                 add_teardrops=args.add_teardrops,
                 collect_stats=args.stats)
+
+    if args.preview:
+        _ok, _fail, _t, _data = _preview_out
+        _res = _data.get('results') or []
+        _segs = sum(len(r.get('new_segments', []) or []) for r in _res)
+        _vias = sum(len(r.get('new_vias', []) or []) for r in _res)
+        print("")
+        print("=== PREVIEW (no output file written) ===")
+        print(f"  routed       : {_ok} net(s) ok, {_fail} failed, {_t:.1f}s")
+        print(f"  would ADD    : {_segs} segment(s), {_vias} via(s)")
+        print(f"  would REMOVE : {len(_data.get('segments_to_remove') or [])} "
+              f"input segment(s), {len(_data.get('vias_to_remove') or [])} input via(s)")
+        _sw = len(_data.get('all_swap_vias') or []) + len(_data.get('pad_swaps') or [])
+        if _sw:
+            print(f"  would SWAP   : {_sw} pad/via swap(s) -- these can touch nets "
+                  f"OUTSIDE the scope and have no inverse, so they are the part an "
+                  f"--undo cannot take back")
+        if args.preview_png:
+            try:
+                from route_render import BoardRenderer
+                _new = [x for r in _res for x in (r.get('new_segments', []) or [])]
+                BoardRenderer(pcb_data).frame(
+                    highlight_segments=_new, label="preview").save(args.preview_png)
+                print(f"  rendered     : {args.preview_png}")
+            except Exception as _e:
+                print(f"  (render skipped: {_e})")
+        # Exit 0 even when nets failed: the PREVIEW succeeded, and the routing
+        # outcome is the report above (and the JSON_SUMMARY). A normal route.py
+        # run with failed nets also exits 0, so exiting 1 here would make the
+        # read-only mode the only one that can kill a `set -e` redo_commands.sh
+        # replay -- at a step that changes nothing.
+        sys.exit(0)
 
     # Make the written project's KiCad DRC constraints consistent with the
     # clearances/sizes we just routed to, so a manual DRC only flags genuine

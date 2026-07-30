@@ -161,6 +161,20 @@ def parse_command(argv):
     # routing step -- skip it so the plan doesn't carry no-op `help: true` steps.
     if '--help' in argv or '-h' in argv:
         return None
+    # #459: --preview writes no board and --undo REMOVES copper. The plan format
+    # has no way to say either, and the unknown-flag fallthrough turns both into
+    # an ordinary route step with nets ['*'] -- so a replayed --undo would ROUTE
+    # the whole board where the CLI unrouted a block, the exact inverse. There is
+    # no faithful conversion, so refuse loudly rather than emit a wrong one; the
+    # caller prints these so a dropped step is never silent.
+    for _flag, _why in (('--preview', 'writes no board; nothing to replay'),
+                        ('--list-groups', 'prints a listing and exits; '
+                                          'converting it would ROUTE the board'),
+                        ('--undo', 'removes copper; the plan format cannot '
+                                   'express an unroute, and converting it '
+                                   'would ROUTE those nets instead')):
+        if _flag in argv:
+            return {'_refused': f"{tool} {_flag}: {_why}"}
     action = TOOL_ACTIONS[tool]
     step = {'action': action, 'params': {}}
     step['_files'] = []  # positional .kicad_pcb args (input/output), for pruning
@@ -199,6 +213,14 @@ def parse_command(argv):
             lists[a] = vals
         elif a == '--component':
             step['component'] = argv[i + 1]
+            i += 2
+        elif a in ('--group', '--group-scope', '--group-by'):
+            # #459 placement blocks. HOIST these to the step, like --component,
+            # instead of letting them fall through to `params` -- a param with no
+            # matching dialog control is silently dropped, and `nets` then falls
+            # back to ['*'], so the GUI would route the WHOLE BOARD where the CLI
+            # routed one block. apply_step_selection() resolves them.
+            step[a.lstrip('-').replace('-', '_')] = argv[i + 1]
             i += 2
         elif a.startswith('--'):
             # unknown flag: skip it and any non-flag values (still carried
@@ -348,6 +370,7 @@ def plan_steps_from_manifest(manifest, keep_files=False):
 
     steps = []
     skipped = 0
+    refused = []
     for i, (_cwd, argv) in enumerate(cmds):
         if i not in keep or is_check_cmd(argv):
             continue  # pruned out, or a check/grade command (no GUI step)
@@ -363,6 +386,14 @@ def plan_steps_from_manifest(manifest, keep_files=False):
             # --help, ...): pruning already accounted for it -- just emit no step.
             skipped += 1
             continue
+        if '_refused' in step:
+            # A command with no faithful plan representation (#459 --undo /
+            # --preview). Emitting nothing is the safe half; the caller MUST
+            # report these, because an unroute silently missing from a replay
+            # leaves copper the recorded chain had removed.
+            refused.append(step['_refused'])
+            skipped += 1
+            continue
         if step['action'] == 'repair_planes' and 'assignments' not in step:
             # The repair CLI auto-detects zones; the GUI repair needs
             # explicit assignments -- inherit the last plane step's.
@@ -375,6 +406,14 @@ def plan_steps_from_manifest(manifest, keep_files=False):
     if not keep_files:
         for s in steps:
             s.pop('_files', None)
+    if refused:
+        # Loud, on stderr, every time -- never a silent drop.
+        print(f"WARNING: {len(refused)} command(s) have NO faithful plan "
+              f"representation and were NOT converted:", file=sys.stderr)
+        for r in refused:
+            print(f"  - {r}", file=sys.stderr)
+        print("  The replayed plan will DIVERGE from the recorded chain at "
+              "these steps. Run them on the CLI.", file=sys.stderr)
     return steps, skipped
 
 

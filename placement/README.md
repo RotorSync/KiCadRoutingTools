@@ -224,11 +224,61 @@ true: `build_neighbor_lists`' pruning stays exact rather than lossy, the outline
 gate's per-ref cached reach cannot be outrun, and the no-stranding invariant
 holds unchanged. Lifting it is precisely what makes the 80mm case hard.
 
+### Blocks are also a ROUTING scope
+
+The same blocks drive `route.py`: `--group BLOCK` scopes a routing run to a
+block's nets, `--preview` reports what a run would add without writing a board,
+and `--undo` strips a block's copper back to unrouted. `--list-groups` prints
+what is inferred, with both net counts, before you trust any of it.
+
+Which nets a block "owns" has two honest answers, so `--group-scope` picks:
+
+| scope | means | when it is the right one |
+|---|---|---|
+| `internal` | every pad of the net is inside the block | a schematic sheet — measured **60–70% internal** (glasgow's two 68-part sheets: 52 internal vs 23 boundary), so "route this sheet" is a real self-contained job |
+| `touching` | any pad inside the block, interface nets included | matches what `--component` already means, and it is the **only** useful reading for a `decap` block: those are **0% internal** by construction, since a decoupling cap bridges VCC to GND and both span the board |
+
+**The default depends on the operation**, because the same set of nets is right
+for one and dangerous for the other. Routing defaults to `touching` — routing a
+block's interface is the point. `--undo` defaults to `internal`, because a
+block's touching set contains GND/VCC, and undoing *those* strips their copper
+across the **whole board**: on the rp2350 fixture, `touching` removes 170
+segments, 54 of them nowhere near the block, versus 75 for `internal`. Asking
+for `--group-scope touching --undo` explicitly still works, and warns.
+
+`--undo` refuses KiCad-**locked** copper — `locked` gets no override anywhere
+else in the toolchain (#521) and an undo is not the place to invent one, in the
+segment path or the arc path. Nets protected for a *reason* (length-matched,
+diff-pair) are removed, because naming a net exactly is the deliberate targeting
+those reasons exist to allow. It carries the sibling `.kicad_pro` across (#441):
+an undo only removes copper, so the input's DRC floor is still the correct one
+and must travel.
+
+It removes `(segment ...)` **and** `(arc ...)` tracks. Arcs need their own pass:
+the parser *linearizes* them into `pcb_data.segments`, so an undo counts them,
+but the text writer only matches `(segment ...)` blocks — without the arc pass an
+arc-routed (i.e. hand-routed) net kept its copper while the run reported success.
+
+What `--undo` does **not** do, and says so at runtime:
+
+- **Zone pours.** A filled plane is copper, so a net with a surviving pour is not
+  back to "no copper". Deleting a pour is a plane decision, not an undo, so it
+  reports and leaves it — re-routing such a net gives a track web beside the
+  pour, not the original plane.
+- **Pad/target swaps.** No inverse exists, and they can touch nets outside the
+  scope. It returns the named nets to "no copper", not the board to a prior state.
+- **Copper graphics.** Net-tagged artwork has no `(segment)` block to delete; it
+  is counted and named rather than silently left behind.
+
+It also **refuses to run unscoped** — for a routing run "no scope" sensibly means
+the whole board, but for an undo that silently means erasing every track on it.
+
 ## Module layout
 
 | File | Purpose |
 |------|---------|
 | `quench.py` | The optimizer: cost terms, move generation, greedy quench |
+| `../group_routing.py` | Block → net scoping, and the undo, for `route.py` (#459) |
 | `fanout_clearance.py` | Post-fanout decoupling-cap clearance repair (#130) |
 | `groups.py` | Placement blocks: which parts move as one rigid body (#459) |
 | `legality.py` | Hard constraints shared by both engines: board side, real Edge.Cuts containment, and the OO/OoB graders (#456) |
