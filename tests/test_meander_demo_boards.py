@@ -320,6 +320,28 @@ def test_protected_nets(tmp):
           f"(lengths held); exact-name override made SE3 rip-eligible")
 
 
+def test_power_trace_ampacity(tmp):
+    """#487: power nets get a trace-side ampacity report (bottleneck segment
+    at the stackup copper weight), printed AND carried in JSON_SUMMARY."""
+    src = os.path.join(tmp, "amp.kicad_pcb")
+    out = os.path.join(tmp, "amp_out.kicad_pcb")
+    write_synth_board(src)
+    log = _run(["route.py", src, out, "--nets", "SE1", "SE2",
+                "--power-nets", "SE1", "--power-nets-widths", "0.8",
+                "--track-width", "0.2", "--clearance", "0.15"])
+    if "Power trace ampacity" not in log:
+        _fail("no trace-ampacity report printed")
+    s = _json_summary(log)
+    amp = {e["net"]: e for e in s.get("power_trace_ampacity", [])}
+    if "SE1" not in amp:
+        _fail(f"SE1 missing from power_trace_ampacity: {s.get('power_trace_ampacity')}")
+    e = amp["SE1"]
+    if abs(e["bottleneck_width_mm"] - 0.8) > 1e-3 or e["max_current_ipc2152_a"] <= 0:
+        _fail(f"implausible ampacity entry: {e}")
+    print(f"PASS  power trace ampacity: SE1 {e['max_current_ipc2152_a']}A at "
+          f"{e['bottleneck_width_mm']}mm / {e['copper_oz']:.0f}oz in JSON_SUMMARY")
+
+
 def test_locked_nets(tmp):
     """KiCad-locked copper: the net is never rip-eligible, even named exactly."""
     src = os.path.join(tmp, "lock.kicad_pcb")
@@ -423,6 +445,7 @@ def main():
     test_protected_nets(tmp)
     test_locked_nets(tmp)
     test_impedance_redo(tmp)
+    test_power_trace_ampacity(tmp)
     print("PASS  all meander demo chains")
 
 

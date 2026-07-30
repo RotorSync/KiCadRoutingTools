@@ -2248,6 +2248,35 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             summary['pad_pairs_open'] = pad_pairs_open_report
     except Exception:
         pad_pairs_open_report = []
+
+    # #487: trace-side ampacity for the POWER nets this call sized (the IPC
+    # model was plane-only; a routed power trace's capacity went unreported).
+    # Bottleneck segment at the layer's stackup copper weight; report-only,
+    # printed AND carried in the summary so chains/graders can gate on it.
+    try:
+        from plane_resistance import (analyze_power_trace_net,
+                                      print_power_trace_ampacity)
+        _amp = {}
+        for _pnid in sorted(config.power_net_widths or {}):
+            _r = analyze_power_trace_net(pcb_data, _pnid)
+            if _r:
+                _pname = (pcb_data.nets[_pnid].name
+                          if _pnid in pcb_data.nets else f"net_{_pnid}")
+                _amp[_pname] = _r
+        if _amp:
+            print_power_trace_ampacity(_amp)
+            summary['power_trace_ampacity'] = [
+                {'net': _n,
+                 'bottleneck_width_mm': round(_r['bottleneck_width'], 4),
+                 'bottleneck_layer': _r['bottleneck_layer'],
+                 'copper_oz': _r['copper_oz'],
+                 'max_current_a': round(_r['max_current'], 2),
+                 'max_current_ipc2152_a': round(_r['max_current_ipc2152'], 2),
+                 'temp_rise_c': _r['temp_rise_c'],
+                 'trace_length_mm': round(_r['trace_length'], 1)}
+                for _n, _r in sorted(_amp.items())]
+    except Exception:
+        pass
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
 
     # Write output file or return results for direct application

@@ -528,6 +528,78 @@ def analyze_multi_net_plane(
         return None
 
 
+def analyze_power_trace_net(pcb_data, net_id: int,
+                            temp_rise_c: float = 10.0) -> Optional[Dict]:
+    """Ampacity of a routed power net's TRACES (#487: the IPC model was
+    plane-only). A trace net's current capacity is its WORST segment -- the
+    narrowest copper on the thinnest layer -- so walk every segment, price
+    each at its layer's stackup copper weight, and report the bottleneck.
+    IPC-2152 chart fit, with the 2221 figure alongside (same convention as
+    the plane metrics). Report-only: nothing is gated on it."""
+    segs = [s for s in pcb_data.segments
+            if s.net_id == net_id and s.width and s.width > 0.001]
+    if not segs:
+        return None
+    oz_by_layer: Dict[str, float] = {}
+    worst = None
+    total_len = 0.0
+    for s in segs:
+        seg_len = math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+        total_len += seg_len
+        oz = oz_by_layer.get(s.layer)
+        if oz is None:
+            oz = stackup_copper_oz(pcb_data, s.layer)
+            oz_by_layer[s.layer] = oz
+        i2152 = calculate_max_current_ipc2152(
+            s.width, oz, temp_rise_c, s.layer.startswith('In'))
+        if worst is None or i2152 < worst[0]:
+            worst = (i2152, s)
+    i2152, s = worst
+    oz = oz_by_layer[s.layer]
+    is_internal = s.layer.startswith('In')
+    return {
+        'bottleneck_width': s.width,
+        'bottleneck_layer': s.layer,
+        'copper_oz': oz,
+        'max_current': calculate_max_current_ipc2221(
+            s.width, oz, temp_rise_c, is_internal),
+        'max_current_ipc2152': i2152,
+        'temp_rise_c': temp_rise_c,
+        'trace_length': total_len,
+        'segments': len(segs),
+    }
+
+
+def print_power_trace_ampacity(results: Dict[str, Dict]):
+    """Compact per-net table for the trace-side ampacity report (#487)."""
+    if not results:
+        return
+    print(f"\nPower trace ampacity (bottleneck segment, IPC-2152):")
+    for name, r in sorted(results.items()):
+        print(f"  {name}: {r['max_current_ipc2152']:.2f}A max "
+              f"({r['bottleneck_width']:.3f}mm on {r['bottleneck_layer']} "
+              f"{_conditions_label(r)}, IPC-2221: {r['max_current']:.2f}A)")
+
+
+# Process-local collector (#487): the plane analyzers run deep inside
+# create_plane (whose tuple return the GUI shares -- not extendable casually),
+# while route_planes' JSON_SUMMARY is assembled in main(). The call sites note
+# their results here; main consumes them into the summary instead of the
+# numbers living only in stdout. Same pattern as protected_nets' accumulator.
+_noted_results: Dict[str, Dict] = {}
+
+
+def note_resistance_result(net_name: str, result: Optional[Dict]) -> None:
+    if result and net_name:
+        _noted_results[net_name] = result
+
+
+def consume_resistance_results() -> Dict[str, Dict]:
+    global _noted_results
+    out, _noted_results = _noted_results, {}
+    return out
+
+
 def _conditions_label(result: Dict) -> str:
     """"(2 oz copper, 10°C rise)" from the conditions the result was computed at
     -- the header used to assert "1 oz" regardless of what was used."""

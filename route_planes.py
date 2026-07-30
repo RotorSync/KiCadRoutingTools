@@ -79,7 +79,8 @@ from plane_resistance import (
     analyze_multi_net_plane,
     print_single_net_resistance,
     print_multi_net_resistance,
-    stackup_copper_oz
+    stackup_copper_oz,
+    note_resistance_result
 )
 import routing_defaults as defaults
 
@@ -1569,6 +1570,8 @@ def _generate_multinet_layer_zones(
         result = analyze_multi_net_plane(largest_polygon, mst_edges, edge_routes, layer,
                                         copper_oz=copper_oz)
         resistance_results[net_name] = result
+        # #487: main() folds these into JSON_SUMMARY (stdout-only before).
+        note_resistance_result(net_name, result)
 
     print_multi_net_resistance(resistance_results)
 
@@ -3342,6 +3345,8 @@ def create_plane(
                 zone_polygon, plane_layer,
                 copper_oz=stackup_copper_oz(pcb_data, plane_layer))
             print_single_net_resistance(result, net_name)
+            # #487: main() folds these into JSON_SUMMARY (stdout-only before).
+            note_resistance_result(net_name, result)
 
             all_zone_data.append({
                 'net_id': net_id,
@@ -4187,6 +4192,26 @@ Examples:
         "min_clearance_used": _cl.effective(args.clearance),
         "plane_nets": sorted(set(args.nets)),
     }
+    # #487: the plane resistance/ampacity numbers used to live only in stdout
+    # ("report-only ... print and discard"). Fold the per-net results the
+    # engine noted into the machine-readable summary so chains/graders/skills
+    # can gate on them.
+    try:
+        from plane_resistance import consume_resistance_results
+        _res = consume_resistance_results()
+        if _res:
+            _summary["plane_resistance"] = [
+                {"net": _n,
+                 "resistance_ohms": round(_r.get("resistance", 0.0), 6),
+                 "max_current_a": round(_r.get("max_current", 0.0), 2),
+                 "max_current_ipc2152_a": round(_r.get("max_current_ipc2152", 0.0), 2),
+                 "copper_oz": _r.get("copper_oz"),
+                 "temp_rise_c": _r.get("temp_rise_c"),
+                 "path_length_mm": round(_r.get("path_length", 0.0), 2),
+                 "avg_width_mm": round(_r.get("avg_width", 0.0), 3)}
+                for _n, _r in sorted(_res.items())]
+    except Exception:
+        pass
     print("JSON_SUMMARY: " + _json.dumps(_summary))
 
 
