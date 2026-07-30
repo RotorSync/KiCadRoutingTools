@@ -38,6 +38,7 @@ import sys
 
 from kicad_parser import parse_kicad_pcb
 import routing_defaults as defaults
+from placement.groups import GroupError, derive_groups, describe, parse_sources
 from placement.quench import quench
 from placement.writer import write_placed_output
 
@@ -349,6 +350,13 @@ def main():
                         help="Cost multiplier for failed nets: scales their "
                              "airwire length and any crossing they take part "
                              "in (default: 3.0)")
+    parser.add_argument("--group-by", default="none",
+                        help="Move blocks of parts as one rigid body. Comma "
+                             "list of: kicad, sheet, netprefix, decap; 'auto' = "
+                             "kicad,sheet (default: none). A targeted part pulls "
+                             "in its whole block, so a block is no longer "
+                             "half-frozen because its IC exceeds "
+                             "--max-target-pins")
     parser.add_argument("--ratsnest-screen", type=float, default=0.0,
                         help="Skip the routing run when a candidate placement's "
                              "airwire crossings or HPWL regress by more than "
@@ -384,6 +392,10 @@ def main():
         parser.error("--max-displacement must be >= 0")
     if args.ratsnest_screen < 0:
         parser.error("--ratsnest-screen must be >= 0 (0 disables it)")
+    try:
+        group_sources = parse_sources(args.group_by)
+    except GroupError as exc:
+        parser.error(str(exc))
     if args.swap_max_displacement is not None:
         if args.swap_max_displacement < 0:
             parser.error("--swap-max-displacement must be >= 0")
@@ -427,6 +439,20 @@ def main():
             print("No movable target parts - stopping.")
             break
 
+        # #459: a targeted part pulls in its whole block, so the block moves as
+        # one body instead of its members fighting each other -- and a block is
+        # no longer half-frozen because its IC exceeds --max-target-pins.
+        blocks = {}
+        if group_sources:
+            blocks = derive_groups(pcb_data, group_sources)
+            pulled = {r for refs in blocks.values() for r in refs
+                      if any(m in targets for m in refs)}
+            if pulled - targets:
+                print(f"  blocks pull in {len(pulled - targets)} more part(s)")
+            targets |= pulled
+            blocks = {n: r for n, r in blocks.items()
+                      if any(m in targets for m in r)}
+
         name_to_id = {net.name: nid for nid, net in pcb_data.nets.items()}
         net_weights = {name_to_id[n]: args.failed_net_weight
                        for n in best['failed_nets'] if n in name_to_id}
@@ -456,6 +482,7 @@ def main():
             ignore_nets=args.ignore_nets, lock_refs=args.lock,
             move_refs=targets, net_weights=net_weights,
             metrics_out=ratsnest,
+            groups=blocks,
             verbose=args.verbose,
         )
 

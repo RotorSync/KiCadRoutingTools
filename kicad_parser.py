@@ -325,6 +325,16 @@ class Footprint:
     # The parser RESOLVES the inheritance into each pad's local_clearance at
     # parse time, so clearance consumers only ever read pad.local_clearance;
     # this field records the raw footprint value for fidelity (issue #326).
+    uuid: str = ""  # The footprint's own (uuid ...). KiCad's (group ...) blocks
+    # list their members BY UUID, so placement grouping (#459) needs it to
+    # resolve membership; it is also already the fallback dict key for a
+    # reference-less footprint ("#" + uuid), so both parse paths must agree.
+    sheet_path: str = ""  # (path "/sheet-uuid/.../symbol-uuid"). The LAST
+    # component is the symbol; the prefix is the schematic sheet, which is the
+    # functional block a floorplan thinks in and the most widely available
+    # grouping signal (12 of 22 corpus boards with paths have >1 sheet, where
+    # NONE has a (group ...) block). A bare single-uuid path is top level, i.e.
+    # an EMPTY sheet prefix -- those must not collapse into one bogus block.
     net_tie_groups: List[List[str]] = field(default_factory=list)
     # KiCad (net_tie_pad_groups "1,2" ...): pad-number groups this footprint
     # DELIBERATELY shorts (Kelvin shunts, net-tie parts). KiCad exempts copper
@@ -408,6 +418,14 @@ class PCBData:
     # per-layer clearance rules. parse_kicad_pcb sets it from its argument;
     # build_pcb_data_from_board from board.GetFileName().
     source_path: str = ""
+    # #459: KiCad (group "name" (uuid ...) (members <uuid> ...)) blocks, as
+    # {group name: [footprint reference, ...]}. The designer's own statement that
+    # these parts belong together, so placement grouping ranks it above any
+    # inferred signal. Members are stored by uuid in the file and resolved
+    # against Footprint.uuid here; non-footprint members (zones, graphics) are
+    # dropped. Empty on every board in the corpus -- no in-repo board uses
+    # groups -- so consumers must treat absence as normal, not as an error.
+    groups: Dict[str, List[str]] = field(default_factory=dict)
 
     def net_tie_exempt_pad_ids(self, net_id: int):
         """id()s of pads whose keep-out copper of `net_id` may IGNORE.
@@ -2208,6 +2226,19 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
                 if len(pads_in_group) >= 2:
                     net_tie_groups.append(pads_in_group)
 
+        # Own uuid + schematic sheet path, for placement grouping (#459). Both
+        # sit in the footprint header; bound the uuid search to before the first
+        # child so a PAD's or graphic's own (uuid ...) cannot win.
+        _uid_end = len(fp_text)
+        for _tok in ('(pad', '(fp_', '(zone', '(model', '(property'):
+            _i = fp_text.find(_tok)
+            if _i != -1:
+                _uid_end = min(_uid_end, _i)
+        _fp_uid = re.search(r'\(uuid\s+"([^"]+)"', fp_text[:_uid_end])
+        fp_uuid = _fp_uid.group(1) if _fp_uid else ""
+        _path_m = re.search(r'\(path\s+"([^"]*)"', fp_text)
+        fp_path = _path_m.group(1) if _path_m else ""
+
         footprint = Footprint(
             reference=reference,
             footprint_name=fp_name,
@@ -2219,6 +2250,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             dnp=is_dnp,
             locked=is_locked,
             clearance=fp_clearance,
+            uuid=fp_uuid,
+            sheet_path=fp_path,
             net_tie_groups=net_tie_groups
         )
 
@@ -2447,6 +2480,52 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
         footprints[reference] = footprint
 
     return footprints, pads_by_net
+
+
+
+def extract_groups(content: str, footprints: Dict[str, 'Footprint']) -> Dict[str, List[str]]:
+    """KiCad ``(group "name" (uuid ...) (members <uuid> ...))`` -> {name: [ref]}.
+
+    Groups are the designer's own statement that a set of parts belongs
+    together, which is why placement grouping ranks them above any inferred
+    signal (#459). Members are listed BY UUID; anything that does not resolve to
+    a footprint (a zone, a graphic, a nested group) is dropped rather than
+    guessed at.
+
+    Note the group's own ``(uuid ...)`` is its identity, NOT a member -- read the
+    members list explicitly rather than scooping every uuid in the block. The
+    block is bounded with find_matching_paren, not a flat regex, because
+    ``(members ...)`` is a nested s-expression (#113).
+
+    No board in the in-repo corpus has a single ``(group ...)`` block, so an
+    empty result is the normal case, not a parse failure.
+
+    A uuid is supposed to be unique, and in real KiCad exports it is -- but
+    hand-made and copy-pasted boards do repeat them (``cap_chain`` shares one
+    uuid across two footprints, and another across two more). A uuid->ref dict
+    would silently drop all but the last, so a member could resolve to the WRONG
+    part. Map to every ref that claims the uuid instead: they are genuinely
+    indistinguishable, and pulling both into the group is the conservative
+    reading.
+    """
+    by_uuid: Dict[str, List[str]] = {}
+    for ref, fp in footprints.items():
+        if fp.uuid:
+            by_uuid.setdefault(fp.uuid, []).append(ref)
+    out: Dict[str, List[str]] = {}
+    for m in re.finditer(r'\(group\s+"([^"]*)"', content):
+        block = content[m.start():find_matching_paren(content, m.start())]
+        mem = re.search(r'\(members\b', block)
+        if not mem:
+            continue
+        members = block[mem.start():find_matching_paren(block, mem.start())]
+        refs = [r for u in re.findall(r'"?([0-9a-fA-F-]{36})"?', members)
+                for r in by_uuid.get(u, ())]
+        if refs:
+            # Sorted + de-duplicated: this order reaches the placement engine,
+            # and anything that does must be deterministic (#457).
+            out[m.group(1)] = sorted(set(refs))
+    return out
 
 
 def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
@@ -3177,6 +3256,8 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
     # Drop Edge.Cuts contours mis-classified as cutouts (they enclose pads).
     drop_pad_containing_cutouts(board_info, pads_by_net)
 
+    groups = extract_groups(content, footprints)
+
     return PCBData(
         board_info=board_info,
         nets=nets,
@@ -3189,6 +3270,7 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
         net_id_to_name=net_id_to_name,
         guide_paths=guide_paths,
         keepout_zones=keepout_zones,
+        groups=groups,
         source_path=os.path.abspath(filepath) if filepath else ""
     )
 
@@ -3556,6 +3638,18 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         except Exception:
             fp_net_tie = []
 
+        # Own uuid + sheet path (#459), the pcbnew mirrors of the text parser's
+        # (uuid ...) / (path ...). Defensive: both accessors have moved across
+        # KiCad versions, and a missing one must not take the whole parse down.
+        try:
+            fp_uuid = str(fp.m_Uuid.AsString())
+        except Exception:
+            fp_uuid = ""
+        try:
+            fp_path = str(fp.GetPath().AsString())
+        except Exception:
+            fp_path = ""
+
         footprint = Footprint(
             reference=reference,
             footprint_name=fp_name,
@@ -3567,6 +3661,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             dnp=fp_dnp,
             locked=fp_locked,
             clearance=fp_clearance,
+            uuid=fp_uuid,
+            sheet_path=fp_path,
             net_tie_groups=fp_net_tie
         )
 
@@ -3957,6 +4053,21 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
     except Exception:
         pass
 
+    # --- KiCad (group ...) blocks (#459) ---
+    # Read from the board FILE rather than board.Groups(), for the same reason
+    # rule areas are above: it keeps this path bit-identical to parse_kicad_pcb's
+    # member resolution instead of maintaining a second uuid-walk against a SWIG
+    # API whose accessors move between KiCad versions. Best-effort -- an unsaved
+    # or missing file simply yields no groups, which is also the corpus norm.
+    groups = {}
+    try:
+        _bf = board.GetFileName()
+        if _bf:
+            with open(_bf, 'r', encoding='utf-8') as f:
+                groups = extract_groups(f.read(), footprints)
+    except Exception:
+        groups = {}
+
     # Drop Edge.Cuts contours mis-classified as cutouts (they enclose pads).
     drop_pad_containing_cutouts(board_info, pads_by_net)
 
@@ -3968,6 +4079,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         segments=segments,
         pads_by_net=pads_by_net,
         zones=zones,
+        groups=groups,
         guide_paths=guide_paths,
         keepout_zones=keepout_zones,
         # #498 parity with parse_kicad_pcb: sibling-file discovery (.kicad_dru)
