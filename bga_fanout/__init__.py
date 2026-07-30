@@ -1915,8 +1915,15 @@ def generate_bga_fanout(footprint: Footprint,
                 if k not in ('footprint', 'pcb_data', '_dump')}
         _cfg['component'] = getattr(footprint, 'reference', None)
         _dump('bga_fanout', _cfg)
-    except Exception:
-        pass
+    except Exception as _e:
+        # A missing dep / stale Rust router must NOT be swallowed here. Before
+        # #457 that surfaced as SystemExit -- a BaseException, which this clause
+        # never caught -- but the checks now raise StartupCheckError, which IS an
+        # Exception, so this debug probe silently ate a real startup failure on
+        # every fanout call.
+        from startup_checks import StartupCheckError
+        if isinstance(_e, StartupCheckError):
+            raise
 
     if layers is None:
         layers = ["F.Cu", "B.Cu"]

@@ -245,7 +245,7 @@ class BoardOutlineGate:
         return self._edges
 
     # -- level 2: cached reachability prune
-    def edges_near(self, key, seed_rect, travel: float) -> list:
+    def edges_near(self, key, seed_rect, travel: float, center=None) -> list:
         """Cached: the ring edges a part seeded at `seed_rect` could ever bring
         a pose within the edge margin of, given `travel` of displacement budget.
 
@@ -255,23 +255,39 @@ class BoardOutlineGate:
         the exact test should measure against instead of every ring, which is
         what keeps a dense candidate loop affordable (the segment-to-ring
         distances dominated a naive port).
+
+        `center` is the part's pose ORIGIN, and callers whose parts can ROTATE
+        must pass it. Measuring the span from the seed rect's own centre assumes
+        the rect stays centred there, which is false for a courtyard that is
+        off-centre from the footprint origin: a 90/180/270 pose swings it about
+        the origin, and the reachable disk drawn around the seed centre can then
+        miss an edge the part really can reach. Rotation preserves distance FROM
+        THE ORIGIN, so the max origin-to-corner distance bounds every pose
+        exactly. (Omitting it is safe only for parts that never rotate, or whose
+        courtyard is origin-symmetric -- the fanout caps this prune came from.)
         """
         near = self._near.get(key)
         if near is None:
-            cx = (seed_rect[0] + seed_rect[2]) / 2.0
-            cy = (seed_rect[1] + seed_rect[3]) / 2.0
-            span = math.hypot(seed_rect[2] - cx, seed_rect[3] - cy)
+            if center is not None:
+                cx, cy = center
+                span = max(math.hypot(px - cx, py - cy)
+                           for px in (seed_rect[0], seed_rect[2])
+                           for py in (seed_rect[1], seed_rect[3]))
+            else:
+                cx = (seed_rect[0] + seed_rect[2]) / 2.0
+                cy = (seed_rect[1] + seed_rect[3]) / 2.0
+                span = math.hypot(seed_rect[2] - cx, seed_rect[3] - cy)
             reach = travel + span + self.margin + EPS
-            # An edge farther than reach from the SEED centre cannot come within
+            # An edge farther than reach from that centre cannot come within
             # margin of any reachable pose: every point of a reachable rect lies
-            # within travel + span of that centre.
+            # within travel + span of it.
             near = [e for e in self.edges()
                     if point_to_seg_dist(cx, cy, *e) <= reach]
             self._near[key] = near
         return near
 
-    def may_reach(self, key, seed_rect, travel: float) -> bool:
-        return bool(self.edges_near(key, seed_rect, travel))
+    def may_reach(self, key, seed_rect, travel: float, center=None) -> bool:
+        return bool(self.edges_near(key, seed_rect, travel, center))
 
     # -- level 3: the exact tests
     def rect_blocked(self, rect, edges=None) -> bool:

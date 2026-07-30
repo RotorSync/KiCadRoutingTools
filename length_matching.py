@@ -40,10 +40,24 @@ def _pad_bounding_radius(pad) -> float:
     up to sqrt(2) beyond that. A time-match arm approaching a roundrect
     corner-on passed the check while physically grazing the corner 59um deep
     (a13 ddr-a3 vs GND pad C210.2: model 0.57, true corner reach 0.789).
-    Circle pads are exact at max/2; every other shape gets the half-diagonal
-    -- slightly conservative for oval/roundrect, the correct direction for a
-    placement check."""
-    if getattr(pad, 'shape', '') == 'circle':
+    Circle AND OVAL pads are exact at max/2: an oval is a stadium (a rect with
+    semicircular ends), so its farthest copper is the end cap on the long axis --
+    it has no corner to reach. Giving it the half-diagonal inflated every oval by
+    up to sqrt(2), which is the shape of essentially every through-hole pad
+    (measured: all 1225 ovals in kicad_files/, mean +274um, worst +966um), and it
+    contradicted the convention this repo applies everywhere else -- see
+    check_drc.py, obstacle_map.py, obstacle_cache.py, and especially
+    diff_pair_routing.py's `short if pad.shape in ('circle','oval') else
+    short * sqrt(2)`, which is this same corner correction.
+
+    Every other shape gets the half-diagonal -- exact for rect, slightly
+    conservative for roundrect (its corners are rounded by roundrect_rratio),
+    which is the correct direction for a placement check.
+
+    Known gap: a `custom` pad's copper lives in Pad.polygons, not size_x/size_y,
+    so this UNDER-bounds it. Pre-existing and out of scope here, but this helper
+    is where a fix belongs."""
+    if getattr(pad, 'shape', '') in ('circle', 'oval'):
         return max(pad.size_x or 0, pad.size_y or 0) / 2.0
     return math.hypot(pad.size_x or 0, pad.size_y or 0) / 2.0
 

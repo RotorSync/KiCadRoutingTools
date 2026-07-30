@@ -448,6 +448,87 @@ def test_state_legality_metrics_report_a_real_overlap():
     os.unlink(path)
 
 
+# --- #504 follow-up: defects in the merged #456 far-side model ----------------
+
+def test_far_side_box_is_not_transposed_on_a_rotated_footprint():
+    """D1: size_x/size_y are BOARD-axis resolved (kicad_parser swaps them for a
+    pad at ~90 degrees), so using them as LOCAL half-extents transposed the box
+    on every 90/270-degree footprint -- kit-dev SW_ONOFF201 was modelled
+    2.54 x 13.97 where the truth is 3.81 x 12.70, under-blocking 1.27mm on the
+    far side. The box must be projected through the pad's local tilt, exactly as
+    placement/utility.compute_footprint_bbox_local does."""
+    from placement.quench import _through_pad_bounds_local
+    board = os.path.join(KICAD_FILES, 'kit-dev-coldfire-xilinx_5213.kicad_pcb')
+    if not os.path.exists(board):
+        return
+    pcb = parse_kicad_pcb(board)
+    checked = 0
+    for ref, fp in pcb.footprints.items():
+        drilled = [p for p in fp.pads if (p.drill or 0) > 0]
+        if not drilled:
+            continue
+        b = _through_pad_bounds_local(fp)
+        xs, ys = [], []
+        for p in drilled:
+            sx, sy = p.size_x, p.size_y
+            if abs((fp.rotation % 180) - 90) < 1.0:   # board->local axis swap
+                sx, sy = sy, sx
+            rx, ry = max((p.drill or 0) / 2, sx / 2), max((p.drill or 0) / 2, sy / 2)
+            xs += [p.local_x - rx, p.local_x + rx]
+            ys += [p.local_y - ry, p.local_y + ry]
+        assert abs((b[2] - b[0]) - (max(xs) - min(xs))) < 1e-6,             f"{ref} (rot {fp.rotation}): width {b[2]-b[0]:.3f} vs {max(xs)-min(xs):.3f}"
+        assert abs((b[3] - b[1]) - (max(ys) - min(ys))) < 1e-6,             f"{ref} (rot {fp.rotation}): height {b[3]-b[1]:.3f} vs {max(ys)-min(ys):.3f}"
+        checked += 1
+    assert checked > 5, f"only checked {checked} THT footprints"
+    print(f"  PASS: {checked} THT footprints, no transposed far-side box")
+
+
+def test_far_side_box_sits_on_the_hole_not_offset_from_it():
+    """D2: local_x/local_y IS the hole for a drilled pad -- kicad_parser records
+    hole_x/hole_y BEFORE shifting global_x/global_y to the copper centre. The
+    old code 'corrected' by (hole - global), which is MINUS the offset, landing
+    the box a full offset on the wrong side."""
+    from placement.quench import _through_pad_bounds_local
+
+    class _P:
+        shape = 'circle'
+        rect_rotation = 0.0
+        def __init__(s):
+            s.local_x, s.local_y = 0.0, 0.0      # anchor == hole, local frame
+            s.size_x = s.size_y = 1.0
+            s.drill = 0.8
+            s.global_x, s.global_y = 10.3, 20.0  # copper, shifted +0.3 in x
+            s.hole_x, s.hole_y = 10.0, 20.0      # anchor in board coords
+
+    class _F:
+        rotation = 0.0
+        pads = [_P()]
+
+    b = _through_pad_bounds_local(_F())
+    cx, cy = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
+    assert abs(cx) < 1e-9 and abs(cy) < 1e-9,         f"far-side box centred at ({cx}, {cy}); the hole is at the local origin"
+
+
+def test_diagonal_near_miss_agrees_between_the_gate_and_the_grader():
+    """D4: candidate_valid's SMD fast path used the per-axis test as the VERDICT
+    while violation_parts falls through to the EUCLIDEAN gap. Two courtyards
+    offset diagonally by (0.2, 0.2) at clearance 0.25 have a true gap of 0.283 --
+    legal -- but failed every axis, so violation()==0 while candidate_valid()
+    said False."""
+    body = (_part('U1', 150.0, 100.0, 'F.Cu', 1, 'NA', cy=1.0)
+            + _part('C1', 165.0, 100.0, 'F.Cu', 2, 'NB', cy=1.0))
+    st, path = _state(body)
+    x = y = None
+    x, y = 150.0 + 2.0 + 0.2, 100.0 + 2.0 + 0.2      # dx = dy = 0.2 past U1
+    gap = legality.rect_gap(st.parts['C1'].rect(x, y, 0.0), st.parts['U1'].rect())
+    assert gap > st.clearance, f"fixture error: gap {gap} <= clearance"
+    assert st.violation('C1', x, y, 0.0) == 0.0, "grader should call this legal"
+    assert st.candidate_valid('C1', x, y, 0.0),         "the hard gate must agree with the grader on a diagonal near-miss"
+    # ... and a genuine same-side overlap is still rejected.
+    assert not st.candidate_valid('C1', 150.0, 100.0, 0.0)
+    os.unlink(path)
+
+
 TESTS = [
     test_back_side_part_under_front_part_is_not_a_collision,
     test_same_side_overlap_is_still_a_collision,
@@ -466,6 +547,9 @@ TESTS = [
     test_out_of_board_grader,
     test_state_legality_metrics_are_zero_on_a_legal_placement,
     test_state_legality_metrics_report_a_real_overlap,
+    test_far_side_box_is_not_transposed_on_a_rotated_footprint,
+    test_far_side_box_sits_on_the_hole_not_offset_from_it,
+    test_diagonal_near_miss_agrees_between_the_gate_and_the_grader,
 ]
 
 
