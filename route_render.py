@@ -140,6 +140,27 @@ def _geometry_bounds(pcb) -> Tuple[float, float, float, float]:
     return (min(xs), min(ys), max(xs), max(ys))
 
 
+_FONTS: Dict[int, "ImageFont.ImageFont"] = {}
+
+
+def load_font(px: int):
+    """A default PIL font at ``px``, memoized.
+
+    Pillow only grew ``load_default(size=)`` in 9.2; older builds raise, hence
+    the fallback. Shared so the caption strip and per-part labels don't each
+    copy the try/except -- and so they can't drift apart.
+    """
+    px = max(6, int(px))
+    f = _FONTS.get(px)
+    if f is None:
+        try:
+            f = ImageFont.load_default(size=px)
+        except Exception:
+            f = ImageFont.load_default()
+        _FONTS[px] = f
+    return f
+
+
 def _rot(cx: float, cy: float, dx: float, dy: float, ang_deg: float) -> Tuple[float, float]:
     """Rotate (dx,dy) about origin by ang_deg (CCW numerically; in the y-down
     image frame this reproduces KiCad's visual orientation), offset to (cx,cy)."""
@@ -163,7 +184,8 @@ class BoardRenderer:
                  margin_frac: float = 0.03, show_pads: bool = True,
                  show_zones: bool = True, layers: Optional[Sequence[str]] = None,
                  bg: Tuple[int, int, int] = _BG, layer_alpha: int = 150,
-                 dynamic_zones: bool = False):
+                 dynamic_zones: bool = False,
+                 view: Optional[Tuple[float, float, float, float]] = None):
         self.pcb = pcb
         # dynamic_zones: keep plane pours OUT of the static base so the animator
         # can reveal each plane's fill per frame (via frame(zone_net_ids=...)).
@@ -178,27 +200,51 @@ class BoardRenderer:
         # add on each other"); 255 = opaque (fast path, last layer wins).
         self.layer_alpha = max(1, min(255, int(layer_alpha)))
 
-        bounds = pcb.board_info.board_bounds or _geometry_bounds(pcb)
+        # The BOARD bounds fix the canvas size; the VIEW only aims the transform
+        # inside it. Keeping W/H off the board is what lets a camera change the
+        # view mid-movie: every frame stays the same size, which _write_mp4 and
+        # the Pillow GIF fallback both silently require (a size change mid-stream
+        # raises, is caught, and degrades the whole movie to GIF).
+        self.bounds = pcb.board_info.board_bounds or _geometry_bounds(pcb)
         # Aspect-fit the output box to the board so the image isn't mostly empty.
-        min_x, min_y, max_x, max_y = bounds
+        min_x, min_y, max_x, max_y = self.bounds
         bw, bh = max(max_x - min_x, 1e-6), max(max_y - min_y, 1e-6)
         if bw >= bh:
             self.W, self.H = size, max(1, int(round(size * bh / bw)))
         else:
             self.W, self.H = max(1, int(round(size * bw / bh))), size
-        Wp, Hp = self.W * self.ss, self.H * self.ss
-        self.tf = Transform(bounds, Wp, Hp, margin_frac * size * self.ss)
+        self._margin_px = margin_frac * size * self.ss
 
         self._show_pads = show_pads
-        self._base = Image.new('RGB', (Wp, Hp), bg)
+        self._show_zones = show_zones
+        self.set_view(view)
+
+    def set_view(self, view: Optional[Tuple[float, float, float, float]] = None) -> None:
+        """Aim the renderer at a world rect ``(min_x, min_y, max_x, max_y)``;
+        ``None`` = the whole board. This is the crop/zoom/pan seam -- a viewport
+        IS a pan and a zoom, and every world->pixel conversion already goes
+        through ``self.tf``, so nothing else has to know.
+
+        ``W``/``H`` never change, so frames rendered at different views encode
+        into one movie. A view whose aspect differs from the canvas letterboxes
+        automatically, because ``Transform`` min()-fits and centers.
+        """
+        self._view = view
+        Wp, Hp = self.W * self.ss, self.H * self.ss
+        self.tf = Transform(view or self.bounds, Wp, Hp, self._margin_px)
+        self._build_base()
+
+    def _build_base(self) -> None:
+        Wp, Hp = self.W * self.ss, self.H * self.ss
+        self._base = Image.new('RGB', (Wp, Hp), self.bg)
         d = ImageDraw.Draw(self._base)
         self._draw_outline(d)
-        if show_zones and not dynamic_zones:
+        if self._show_zones and not self.dynamic_zones:
             self._draw_zones(d)
         # With dynamic_zones the pours are drawn per-frame, so pads must be too
         # (drawn AFTER the pour so they read on top of it, as in the static base).
-        if show_pads and not dynamic_zones:
-            self._draw_pads(d)
+        if self._show_pads and not self.dynamic_zones:
+            self.draw_pads(d)
 
     # -- substrate -------------------------------------------------------
     def _draw_outline(self, d: ImageDraw.ImageDraw) -> None:
@@ -243,17 +289,31 @@ class BoardRenderer:
         return {z.net_id for z in (getattr(self.pcb, 'zones', []) or [])
                 if z.layer in self._layer_set and len(z.polygon) >= 3}
 
-    def _draw_pads(self, d: ImageDraw.ImageDraw) -> None:
-        for fp in self.pcb.footprints.values():
-            for p in fp.pads:
-                self._draw_pad(d, p)
+    def draw_pads(self, d: ImageDraw.ImageDraw, pads: Optional[Iterable] = None,
+                  fill_for=None) -> None:
+        """Draw pads (default: every pad on the board).
 
-    def _draw_pad(self, d: ImageDraw.ImageDraw, p) -> None:
+        ``fill_for(pad) -> color`` overrides the fill per pad, which is how a
+        caller distinguishes through-hole / front-SMD / back-SMD without
+        re-implementing pad rasterization -- custom copper polygons (#188),
+        capsules, roundrect ``rratio``, ``rect_rotation`` and offset drills all
+        live here and are easy to get subtly wrong a second time.
+        """
+        if pads is None:
+            pads = (p for fp in self.pcb.footprints.values() for p in fp.pads)
+        for p in pads:
+            self._draw_pad(d, p, fill=fill_for(p) if fill_for else None)
+
+    def _draw_pads(self, d: ImageDraw.ImageDraw) -> None:
+        self.draw_pads(d)
+
+    def _draw_pad(self, d: ImageDraw.ImageDraw, p, fill=None) -> None:
+        fill = fill or _PAD
         # Custom copper outline(s) take precedence (comb/finger pads, #188).
         if getattr(p, 'polygons', None):
             for poly in p.polygons:
                 if len(poly) >= 3:
-                    d.polygon([self.tf.pt(x, y) for x, y in poly], fill=_PAD)
+                    d.polygon([self.tf.pt(x, y) for x, y in poly], fill=fill)
             return
         cx, cy = self.tf.pt(p.global_x, p.global_y)
         sx, sy = self.tf.length(p.size_x), self.tf.length(p.size_y)
@@ -261,12 +321,12 @@ class BoardRenderer:
         rot = p.rect_rotation or 0.0
         if shape in ('circle', 'oval') and abs(sx - sy) < 0.5:
             r = max(sx, sy) / 2
-            d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=_PAD)
+            d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=fill)
         elif shape == 'oval':
-            self._capsule(d, cx, cy, sx, sy, rot, _PAD)
+            self._capsule(d, cx, cy, sx, sy, rot, fill)
         else:  # rect, roundrect, custom-without-polys, trapezoid...
             self._rrect(d, cx, cy, sx, sy, rot,
-                        getattr(p, 'roundrect_rratio', 0.0), _PAD)
+                        getattr(p, 'roundrect_rratio', 0.0), fill)
         # drilled hole for through-hole pads
         if getattr(p, 'drill', 0.0) and p.pad_type != 'connect':
             hx, hy = self.tf.pt(p.hole_x if p.hole_x is not None else p.global_x,
@@ -343,7 +403,8 @@ class BoardRenderer:
               highlight_segments: Optional[Iterable] = None,
               highlight_vias: Optional[Iterable] = None,
               highlight_color: Tuple[int, int, int] = _HILITE,
-              label: Optional[str] = None, zone_net_ids=None) -> Image.Image:
+              label: Optional[str] = None, zone_net_ids=None,
+              overlays: Optional[Sequence] = None) -> Image.Image:
         """Composite the given copper onto the static substrate and return an
         RGB image at output resolution.
 
@@ -352,6 +413,8 @@ class BoardRenderer:
         restored on this animation frame). ``label`` is stamped top-left.
         ``zone_net_ids`` (used with dynamic_zones) draws just those nets' plane
         pours under the copper, so a plane "fills in" on the frame its taps land.
+        ``overlays`` is a sequence of ``fn(draw, renderer)`` callables drawn at
+        SUPERSAMPLED resolution, above the copper and below the label.
         """
         segs = self.pcb.segments if segments is None else segments
         vs = self.pcb.vias if vias is None else vias
@@ -390,6 +453,14 @@ class BoardRenderer:
             self._draw_segments(d, highlight_segments, color=highlight_color)
         if highlight_vias:
             self._draw_vias(d, highlight_vias, color=highlight_color)
+        # Caller-supplied drawing, BEFORE the downsample so it antialiases like
+        # everything else (an overlay drawn after frame() returns would alias
+        # every diagonal at the default supersample=2) and UNDER the label HUD.
+        # Each overlay is `fn(draw, renderer)` and must work through
+        # `renderer.tf` -- this is what keeps placement vocabulary (courtyards,
+        # ghosts, arrows, airwires) out of this copper renderer entirely.
+        for fn in (overlays or ()):
+            fn(ImageDraw.Draw(img), self)
         if self.ss > 1:
             img = img.resize((self.W, self.H), Image.LANCZOS)
         if label:
@@ -402,10 +473,7 @@ class BoardRenderer:
 
     def _label(self, img: Image.Image, text: str) -> None:
         d = ImageDraw.Draw(img)
-        try:
-            font = ImageFont.load_default(size=max(12, self.H // 55))
-        except Exception:
-            font = ImageFont.load_default()
+        font = load_font(max(12, self.H // 55))
         pad = 6
         try:
             bb = d.textbbox((0, 0), text, font=font)

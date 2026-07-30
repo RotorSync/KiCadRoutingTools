@@ -216,6 +216,17 @@ def run_route(pcb_file: str, routed_file: str, route_args: str, log_file: str):
         raise RuntimeError(f"route.py produced no JSON_SUMMARY (see {log_file})"
                            f"\n" + _log_tail(log))
 
+    return metrics_from_summary(summary, log)
+
+
+def metrics_from_summary(summary: dict, log: str = '') -> dict:
+    """Round metrics from an already-merged JSON_SUMMARY.
+
+    Split out of run_route (#431) so a renderer can caption a recorded round
+    from its `loop_roundN_route.log` using THIS arithmetic rather than a second
+    implementation that drifts. Pure: no subprocess, no file IO. `log` is only
+    the pre-#409 blocker fallback.
+    """
     failed_nets = list(summary.get('failed_single', []))
     # failed_multipoint entries are dicts {net_name, failed_pads}; keep just the
     # name so failed_nets is uniformly net-name strings (downstream uses them as
@@ -254,6 +265,66 @@ def run_route(pcb_file: str, routed_file: str, route_args: str, log_file: str):
         'pad_pairs_connected': summary.get('pad_pairs_connected', 0),
         'pad_pairs_total': summary.get('pad_pairs_total', 0),
     }
+
+
+def write_round_sidecar(work: str, rnd: int, *, board: str, routed: str,
+                        parent: str, accepted: bool, screened: bool = False,
+                        targets=None, groups=None, moved=None, metrics=None
+                        ) -> str:
+    """Record one round as `loop_round{N}.json` next to its board (#431).
+
+    The boards alone are NOT a chain: a REJECTED loop_round2.kicad_pcb sits
+    between rounds 1 and 3 in both name and mtime order, and anything that
+    walks the directory would animate it as though it had been kept. `parent`
+    is the field that fixes that -- it names the board this round was actually
+    derived from, which is the last ACCEPTED one, not N-1.
+
+    An artifact rather than a callback, deliberately: it is how the rest of this
+    repo communicates between tools (make_movie reads directories), it needs no
+    hook in this monolithic main(), and both the renderer and the movie camera
+    can consume it without either importing the other.
+    """
+    path = os.path.join(work, f'loop_round{rnd}.json')
+    doc = {
+        'schema': 1,
+        'round': rnd,
+        'board': os.path.basename(board) if board else None,
+        'routed': os.path.basename(routed) if routed else None,
+        'parent': os.path.basename(parent) if parent else None,
+        'accepted': bool(accepted),
+        'screened': bool(screened),
+        'targets': sorted(targets or []),
+        'groups': {k: sorted(v) for k, v in sorted((groups or {}).items())},
+        'moved': moved or [],
+        'metrics': metrics or {},
+    }
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(doc, f, indent=1, sort_keys=True)
+    except OSError as e:      # best-effort: never lose a round over a sidecar
+        print(f"  (round sidecar not written: {e})")
+        return ''
+    return path
+
+
+def moves_from_placements(parent_pcb, placements) -> list:
+    """`[{reference, from:[x,y,rot], to:[x,y,rot]}]` for the movie's tween.
+
+    quench() returns only the destination pose, so the source is read off the
+    board the round started from. Also the degraded path when a work dir has no
+    sidecars: `moves_between(a, b)` is this with both poses read from files.
+    """
+    out = []
+    for p in placements or []:
+        fp = parent_pcb.footprints.get(p['reference']) if parent_pcb else None
+        if fp is None:
+            continue
+        out.append({'reference': p['reference'],
+                    'from': [round(fp.x, 4), round(fp.y, 4),
+                             round(fp.rotation or 0.0, 3)],
+                    'to': [round(p['new_x'], 4), round(p['new_y'], 4),
+                           round(p.get('new_rotation') or 0.0, 3)]})
+    return sorted(out, key=lambda m: m['reference'])
 
 
 def nets_to_refs(pcb_data, net_names, max_pins, locked_patterns):
@@ -415,6 +486,10 @@ def main():
                      args.route_args, os.path.join(work, 'loop_round0_route.log'))
     print(f"  failures={best['failures']} iterations={best['iterations']:,}"
           f" vias={best['vias']}")
+    # Round 0 is the baseline: its own parent, nothing moved, always "accepted".
+    write_round_sidecar(work, 0, board=cur_file,
+                        routed=os.path.join(work, 'loop_round0_routed.kicad_pcb'),
+                        parent=None, accepted=True, metrics=best)
 
     max_disp = args.max_displacement
     # The swap cap is pinned to the BASE displacement and never widened (#458).
@@ -505,6 +580,13 @@ def main():
             print(f"  SCREENED - skipping the routing run, widening the nudge cap"
                   f" (swap cap stays {swap_cap:.1f}mm).")
             screened += 1
+            # No board is written for a screened round, so without this record a
+            # consumer sees a gap in the numbering and cannot tell "screened"
+            # from "crashed".
+            write_round_sidecar(work, rnd, board=None, routed=None,
+                                parent=cur_file, accepted=False, screened=True,
+                                targets=targets, groups=blocks,
+                                moved=moves_from_placements(pcb_data, placements))
             max_disp *= 1.5
             continue
 
@@ -523,7 +605,17 @@ def main():
         print(f"  -> failures={metrics['failures']}"
               f" iterations={metrics['iterations']:,} vias={metrics['vias']}")
 
-        if better(metrics, best):
+        # Record BEFORE the accept/revert bookkeeping mutates cur_file, so
+        # `parent` names the board this candidate was actually derived from.
+        _accepted = better(metrics, best)
+        write_round_sidecar(work, rnd, board=cand_file,
+                            routed=os.path.join(
+                                work, f'loop_round{rnd}_routed.kicad_pcb'),
+                            parent=cur_file, accepted=_accepted,
+                            targets=targets, groups=blocks,
+                            moved=moves_from_placements(pcb_data, placements),
+                            metrics=metrics)
+        if _accepted:
             print(f"  ACCEPTED (was failures={best['failures']},"
                   f" iterations={best['iterations']:,})")
             best = metrics
