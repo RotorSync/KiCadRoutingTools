@@ -32,6 +32,22 @@ CORNER_BLOAT_FACTOR = 0.42  # sqrt(2) - 1, extra copper extension at 90-degree c
 SPATIAL_CELL_SIZE = 2.0  # mm - spatial index cell size
 
 
+def _pad_bounding_radius(pad) -> float:
+    """Conservative bounding-circle radius of a pad's copper (#526).
+
+    The meander clearance checks modelled every pad as a circle of radius
+    max(size_x, size_y)/2 -- but a RECT pad's corner reaches hypot(sx, sy)/2,
+    up to sqrt(2) beyond that. A time-match arm approaching a roundrect
+    corner-on passed the check while physically grazing the corner 59um deep
+    (a13 ddr-a3 vs GND pad C210.2: model 0.57, true corner reach 0.789).
+    Circle pads are exact at max/2; every other shape gets the half-diagonal
+    -- slightly conservative for oval/roundrect, the correct direction for a
+    placement check."""
+    if getattr(pad, 'shape', '') == 'circle':
+        return max(pad.size_x or 0, pad.size_y or 0) / 2.0
+    return math.hypot(pad.size_x or 0, pad.size_y or 0) / 2.0
+
+
 def resolve_meander_chamfer(
     config: Optional[GridRouteConfig],
     net_id: Optional[int] = None,
@@ -190,7 +206,7 @@ class ClearanceIndex:
         # Index pads and pre-compute expanded layers
         for pad_net_id, pad_list in pcb_data.pads_by_net.items():
             for pad in pad_list:
-                pad_radius = max(pad.size_x, pad.size_y) / 2 + margin
+                pad_radius = _pad_bounding_radius(pad) + margin
                 cells = self._cells_for_point(pad.global_x, pad.global_y, pad_radius)
 
                 # Pre-compute expanded layers once per pad
@@ -554,7 +570,7 @@ def get_safe_amplitude_at_point(
                         if layer not in expanded_pad_layers:
                             continue
                         # Treat pad as circle with radius = max(size_x, size_y)/2
-                        pad_radius = max(pad.size_x, pad.size_y) / 2
+                        pad_radius = _pad_bounding_radius(pad)
                         dist = point_to_segment_distance(pad.global_x, pad.global_y, bx1, by1, bx2, by2)
                         if dist < pad_radius + pad_clearance:
                             conflict_found = True
@@ -671,7 +687,7 @@ def get_safe_amplitude_at_point(
                             expanded_pad_layers = expand_pad_layers(pad.layers, config.layers)
                             if layer not in expanded_pad_layers:
                                 continue
-                            pad_radius = max(pad.size_x, pad.size_y) / 2
+                            pad_radius = _pad_bounding_radius(pad)
                             dist = point_to_segment_distance(pad.global_x, pad.global_y, bx1, by1, bx2, by2)
                             if dist < pad_radius + pad_clearance:
                                 conflict_found = True
@@ -2640,7 +2656,7 @@ def get_safe_amplitude_for_diff_pair(
                         if layer_name not in expanded_pad_layers:
                             continue
                         # Treat pad as circle with radius = max(size_x, size_y)/2
-                        pad_radius = max(pad.size_x, pad.size_y) / 2
+                        pad_radius = _pad_bounding_radius(pad)
                         dist = point_to_segment_distance(pad.global_x, pad.global_y, bx1, by1, bx2, by2)
                         if dist < pad_radius + pad_clearance:
                             conflict_found = True

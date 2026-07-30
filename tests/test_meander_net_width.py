@@ -166,6 +166,63 @@ def test_own_width_override():
         _fail(f"own_width==track_width not identical to default ({base} vs {default})")
 
 
+def test_pad_corner_reach():
+    """#526: a RECT pad's corner reaches hypot(sx,sy)/2, not max(sx,sy)/2.
+    The old circle model let a meander arm graze a pad corner-on (a13
+    ddr-a3 vs C210.2, 59um deep). Place a square foreign pad diagonally off
+    the bump path so the CORNER intrudes where the old circle said clear:
+    the safe amplitude must shrink versus the same pad rotated 45 degrees
+    (circle-equivalent presentation is not available, so compare against a
+    FAR pad instead)."""
+    from kicad_parser import Pad
+    from length_matching import _pad_bounding_radius, ClearanceIndex
+
+    def pad_at(x, y, sx=1.0, sy=1.0, shape='roundrect'):
+        p = Pad(pad_number='1', net_id=FOREIGN_NET, net_name='F',
+                global_x=x, global_y=y, local_x=0, local_y=0,
+                size_x=sx, size_y=sy, shape=shape,
+                layers=['F.Cu'], drill=0.0, component_ref='C1')
+        bi = BoardInfo(layers={}, board_bounds=None,
+                       copper_layers=["F.Cu", "B.Cu"])
+        return PCBData(board_info=bi, nets={}, footprints={}, vias=[],
+                       segments=[], pads_by_net={FOREIGN_NET: [p]}), p
+
+    # radius model itself
+    _, p = pad_at(0, 0)
+    if abs(_pad_bounding_radius(p) - (2 ** 0.5) / 2) > 1e-9:
+        _fail(f"square pad bounding radius should be half-diagonal, "
+              f"got {_pad_bounding_radius(p)}")
+    _, pc = pad_at(0, 0, shape='circle')
+    if abs(_pad_bounding_radius(pc) - 0.5) > 1e-9:
+        _fail("circle pad radius should stay exact size/2")
+
+    # placement: bump goes +y from (5,0); put the pad so its CORNER (at
+    # ~0.707 reach) intrudes into the arm corridor while the old 0.5-radius
+    # circle cleared it. Center distance from the riser tip region ~1.05.
+    pcb, _ = pad_at(5.75, 1.75)
+    idx = ClearanceIndex()
+    idx.build(pcb, _cfg(), None, None)
+    amp_near = get_safe_amplitude_at_point(pcb_data=pcb, net_id=MEANDER_NET,
+                                           config=_cfg(), clearance_index=idx,
+                                           **_COMMON)
+    pcb_far, _ = pad_at(5.75, 4.0)
+    idx2 = ClearanceIndex()
+    idx2.build(pcb_far, _cfg(), None, None)
+    amp_far = get_safe_amplitude_at_point(pcb_data=pcb_far, net_id=MEANDER_NET,
+                                          config=_cfg(), clearance_index=idx2,
+                                          **_COMMON)
+    if not (amp_near < amp_far):
+        _fail(f"corner-on pad should shrink the safe amplitude "
+              f"(near={amp_near}, far={amp_far})")
+    # the corner reach must be respected: with the pad corner at
+    # (5.25, 1.25), an arm at full amplitude 1.0 through x=5 would pass
+    # within the old model's blind wedge -- the new model must not allow
+    # the amplitude that grazes it.
+    reach = (2 ** 0.5) / 2
+    if amp_near > 1.75 - reach - 0.15:   # pad_cy - reach - (net_half+clr margin-ish)
+        _fail(f"amplitude {amp_near} still enters the corner wedge")
+
+
 def test_common_case_unchanged():
     # net_w == track_width everywhere -> keep-out must be identical to a config with
     # no impedance/power overrides at all. This guards the "byte-identical" promise.
@@ -217,4 +274,5 @@ if __name__ == "__main__":
     test_common_case_unchanged()
     test_diff_pair_widths()
     test_board_edge_keepout()
+    test_pad_corner_reach()
     print("PASS  meander keep-out sized from actual net width (#175)")
