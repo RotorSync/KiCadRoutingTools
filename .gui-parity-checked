@@ -1,31 +1,45 @@
-HEAD 2026-07-29 parity audit 015aaea..ef4c19a (the #520/#521 wave: multipoint
-matching, protected nets, locked copper, impedance persistence — 6 commits).
-Outcome: NO GAPS, all gates PASSED at HEAD, chain copper sets IDENTICAL.
+HEAD 2026-07-30 parity audit ef4c19a..4db8c18 (28 commits: the #487 thermal/
+env_knobs wave, #517 adaptive plane-repair ordering, #523/#524 writer fixes,
+#526 grader fixes, #527 progress/cancel threading, #504 ratsnest metrics,
+#485 stitching + fence + kbic65 gates, #456/#457/PR538 placement).
+Outcome: ONE GAP found and fixed in-audit (commit after 4db8c18):
+`--thermal-relief` and positive `--thermal-vias` were missing from
+manifest_to_plan BOOL_FLAGS — a converted manifest would have silently
+replayed a thermal-relief run without relief spokes. ai_plan already
+consumed both params (thermal_relief checkbox; thermal_vias with the
+default-ON absent-means-default rule), so only the converter needed the
+entries; verified by converting a synthetic manifest carrying all four of
+--thermal-relief --thermal-vias --stitch-vias --stitch-edge-fence and
+checking the plan step params.
 
-  * No new CLI flags or dialog params in the span — #521's protection/
-    impedance features are deliberately flagless (auto-read from the sibling
-    .kicad_pro via PCBData.source_path, the #498 dru pattern), so there was
-    nothing to thread through argparse/controls/FLAG_PARAMS.
-  * New CLI post-passes persist_protected_nets + persist_impedance_specs are
-    REGISTERED in test_cli_postpass_coverage with their GUI counterparts:
-    ai_plan._write_drc_floors (plan end), gui_utils.update_live_drc_floors
-    (diff-tab manual steps), swig_gui._apply_results_to_board (signal-tab
-    manual steps, ef4c19a). The gate's scanner now also walks the
-    `if __name__ == "__main__"` CLI blocks (route.py/route_diff.py have no
-    def main), so these passes are enforced, not just documented.
-  * Parser-parity edge (the one that CAN drift silently): Segment.locked /
-    Via.locked added to BOTH parse paths in the same commit — text parser
-    (incl. the v9 via pattern that previously dropped locked vias entirely,
-    and linearized arcs) and build_pcb_data_from_board (IsLocked()).
-  * Engine-internal changes (pair_leg_metric, multipoint span meandering,
-    protection enforcement in batch_route's rip expansion + plane repair's
-    never-rip set, net_layer_widths impedance reapply) live inside the shared
-    engine functions both fronts call — inherited, no per-front wiring.
-  * Gates at ef4c19a: test_engine_kwarg_parity OK under KiCad python;
-    test_manifest_plan_parity 14767 checks 0 mismatches;
-    test_cli_postpass_coverage 6 registered, 0 failures/warnings;
-    test_gui_engine_parity VERDICT: PARITY — segments CLI=GUI=1307, vias
-    144=144, DRC 0/0, copper sets IDENTICAL. Feature-level coverage beyond
-    the chain gate: tests/test_meander_demo_boards.py drives the real CLIs
-    over protection/locked/impedance-redo scenarios (the parity chain has no
-    match groups, so those paths are inert in it by design).
+  * New route_planes flags in span, all wired end to end: --thermal-vias /
+    --no-thermal-vias, --thermal-relief, --stitch-vias, --stitch-pitch,
+    --stitch-edge-fence, --stitch-fence-pitch, --stitch-inset,
+    --stitch-max-freq. Controls of the same snake_case names exist on the
+    planes-tab create_options, persisted in settings_persistence
+    (planes_thermal_*/planes_stitch_*), reset in reset_params_to_defaults,
+    applied by the plan executor, and mapped in manifest_to_plan
+    FLAG_PARAMS/BOOL_FLAGS (thermal entries added by this audit).
+  * No new flags on route.py / route_diff.py / route_disconnected_planes.py
+    in the span (their diffs are engine + progress threading).
+  * #517 KICAD_PLANE_REPAIR_ORDERING ('adaptive' default) is an env knob
+    read at route_disconnected_planes module level — both fronts inherit it
+    identically; NEITHER front has a control (the #517 memory's "CLI/GUI
+    surface" residual is a feature gap, not parity drift).
+  * #485 stitch-site gates (4db8c18: floating-pour anchor gate + lazy
+    exact-fill gate) are engine-side in _stitch_plane_area_vias; the GUI
+    planes tab passes input_file, so the exact validator works there too.
+  * Parser parity: the only kicad_parser change in span is PR538 (204cabc),
+    which added Footprint.uuid / sheet_path / PCBData.groups to BOTH parse
+    paths in the same commit (build_pcb_data_from_board reads m_Uuid /
+    GetPath and re-reads the board file for groups). Placement scripts have
+    no GUI surface (kicad_routing_plugin references none of quench /
+    place_optimize / place_route_loop).
+  * CLI post-passes: no new ones in span; 602f7f1's write-list reconcile is
+    inside the shared writer path. test_cli_postpass_coverage: 6 registered,
+    0 failures/warnings.
+  * Gates at HEAD (2026-07-30): test_manifest_plan_parity 14767 checks 0
+    mismatches (re-run after the BOOL_FLAGS fix); test_cli_postpass_coverage
+    0 failures; test_gui_engine_parity VERDICT: PARITY — segments
+    CLI=GUI=1307, vias 144=144, DRC 0/0, kicad_unconnected 0/0, copper sets
+    IDENTICAL.
