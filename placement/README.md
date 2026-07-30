@@ -125,8 +125,14 @@ python animate_fanout_clearance.py fanned.kicad_pcb capmove.gif --clearance 0.1
 
 This is a read-only visualization tool: the `on_move` hook defaults to `None`,
 so `place_fanout_clearance.py`, the GUI, and the engine itself behave exactly
-as before when it is unused. Requires `pygame` (render) and `Pillow` (GIF
-encode) — both already used elsewhere in this repo; no matplotlib/ffmpeg.
+as before when it is unused. Requires only **Pillow** -- as of #431 it renders
+through `route_render.BoardRenderer` and encodes through
+`animate_route.save_movie`, so it no longer carries its own world->pixel
+transform, GIF writer or font handling, and `pygame` is no longer needed. Two
+things came free with the port: the **real board** beneath the BGA field
+(outline, cutouts, zones), which the pygame version never drew, and `.mp4`
+output (extension picks the format, falling back to a sibling `.gif` when
+imageio-ffmpeg is absent).
 
 ## Testing
 
