@@ -114,14 +114,29 @@ def run():
     check("5 input-file via never moved",
           m5 == 0 and (b5.x, b5.y) == (60.40, 62.60))
 
+    # 6. Board-EDGE graze (#526, bbox fallback): the h3 SWE geometry -- a via
+    #    10um inside the 0.2 edge rule near max_y on a board with no parsed
+    #    outline. The edge is now a TRIGGER (was veto-only) and the nudge
+    #    direction points interior.
+    b6 = _via(132.15, 78.325, net=2)
+    pcb6 = _pcb([_seg(132.15, 78.325, 131.0, 78.325, net=2)], [b6])
+    pcb6.board_info.board_bounds = (109.22, 53.34, 152.4, 78.74)
+    m6, _, mv6 = nudge_grazing_vias([{'new_vias': [b6]}], pcb6, {2},
+                                    clearance=0.1, hole_to_hole=H2H,
+                                    max_shift=0.05, board_edge_clearance=0.2)
+    gap6 = 78.74 - b6.y - b6.size / 2.0
+    check("6 edge-grazing via moved interior",
+          m6 == 1 and b6.y < 78.325 and gap6 >= 0.2 - 1e-6)
+
     print("=" * 60)
     if fails:
         for f in fails:
             print(f"  FAIL  {f}")
         print(f"\n{len(fails)} failure(s)")
         return 1
-    print("  PASS  moves a grazing via by its sub-grid shortfall (copper and")
-    print("        hole-to-hole), refuses over-cap, boxed-in, and input-file vias (5 cases)")
+    print("  PASS  moves a grazing via by its sub-grid shortfall (copper,")
+    print("        hole-to-hole, and board edge #526), refuses over-cap,")
+    print("        boxed-in, and input-file vias (6 cases)")
     print("\nALL PASS")
     return 0
 
