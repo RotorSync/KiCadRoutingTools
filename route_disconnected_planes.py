@@ -809,6 +809,24 @@ def route_planes(
     # Plane nets are never ripped to clear a blocker (--rip-blocker-nets); only
     # signal nets are, and they are left unrouted for a subsequent route.py pass.
     plane_net_ids = set(unique_nets.keys())
+    # #521: nets protected in the sibling .kicad_pro (length-matched groups,
+    # routed diff pairs) join the never-rip set -- a blocker rip here strips
+    # the net for a later generic route.py reconnect, which cannot reproduce
+    # matching/coupling. (The tap simply fails over its other candidates.)
+    try:
+        from protected_nets import read_for_pcb_data
+        _prot_names = read_for_pcb_data(pcb_data)
+        if _prot_names:
+            _prot_ids = {nid for nid, n in pcb_data.nets.items()
+                         if n.name in _prot_names}
+            _prot_ids -= plane_net_ids
+            if _prot_ids and rip_blocker_nets:
+                _ex = sorted(pcb_data.nets[i].name for i in _prot_ids)[:4]
+                print(f"  {len(_prot_ids)} PROTECTED net(s) excluded from blocker "
+                      f"rip-up ({', '.join(_ex)}{'...' if len(_prot_ids) > 4 else ''})")
+            plane_net_ids |= _prot_ids
+    except Exception:
+        pass
     ripped_net_ids: List[int] = []
     # (net_id, kept_segs, kept_vias, dropped_count) for nets partially
     # restored by the success-path settle: input copper stripped at write,

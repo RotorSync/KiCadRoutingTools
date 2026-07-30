@@ -1154,6 +1154,21 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # Sync pcb_data with length-matched segments
     sync_pcb_data_segments(pcb_data, routed_results, original_segment_ids, state, config)
 
+    # #521: coupled pair copper is an invariant later chain steps cannot
+    # reproduce (P/N geometry, gap, polarity) -- mark routed members protected
+    # so downstream rip steps skip them. Engine-side: the GUI diff tab and the
+    # AI-plan executor inherit the noting; the writeback next to the DRC-floor
+    # persistence records it in the sibling .kicad_pro.
+    from protected_nets import note_protection_candidates
+    _prot = {}
+    for _nid, _res in routed_results.items():
+        if _res and _res.get('is_diff_pair') and not _res.get('failed'):
+            _net = pcb_data.nets.get(_nid)
+            if _net and _net.name:
+                _prot[_net.name] = 'diff-pair'
+    if _prot:
+        note_protection_candidates(_prot)
+
     # ----- Post-route cleanup (#215): the ONE shared pipeline ---------------
     # Same passes, ordering and strip plumbing as route.py's single-ended
     # cleanup (cleanup_pipeline.py), scoped to the diff-pair nets so other
@@ -2015,3 +2030,12 @@ Examples:
                 **drc_fix_kwargs(args))
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
+        # #521: record this step's protection-worthy nets (routed diff pairs,
+        # matched groups) in the output project so later steps refuse to rip them.
+        try:
+            from protected_nets import (consume_protection_candidates,
+                                        persist_protected_nets, pro_path_for_board)
+            persist_protected_nets(pro_path_for_board(args.output_file),
+                                   consume_protection_candidates())
+        except Exception as e:
+            print(f"  (skipped protected-nets record: {e})")

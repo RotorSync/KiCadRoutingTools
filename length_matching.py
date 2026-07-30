@@ -1731,6 +1731,13 @@ def apply_length_matching_to_group(
               f"from existing board copper (routed in an earlier step): "
               f"{', '.join(sorted(board_seeded))}")
 
+    # #521: a matched group's copper is an invariant later chain steps cannot
+    # reproduce -- mark every member (including pair-member aliases and
+    # board-seeded members) protected so downstream rip steps skip them.
+    from protected_nets import note_protection_candidates
+    note_protection_candidates({n: 'length-matched'
+                                for n in (set(group_results) | have_names)})
+
     # Identify diff pairs vs single-ended
     diff_pair_count = sum(1 for r in group_results.values() if r.get('is_diff_pair'))
     single_count = len(group_results) - diff_pair_count
@@ -1901,6 +1908,11 @@ def apply_time_matching_to_group(
         print(f"  Time matching group: {len(board_seeded)} member(s) measured "
               f"from existing board copper (routed in an earlier step): "
               f"{', '.join(sorted(board_seeded))}")
+
+    # #521: matched members are protected downstream (see the length path).
+    from protected_nets import note_protection_candidates
+    note_protection_candidates({n: 'time-matched'
+                                for n in (set(group_results) | have_names)})
 
     # Identify diff pairs vs single-ended
     diff_pair_count = sum(1 for r in group_results.values() if r.get('is_diff_pair'))

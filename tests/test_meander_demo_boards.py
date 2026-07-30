@@ -35,7 +35,7 @@ from kicad_parser import parse_kicad_pcb  # noqa: E402
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 NETS = ["DP_A_P", "DP_A_N", "DP_B_P", "DP_B_N", "DP_C_P", "DP_C_N",
-        "SE1", "SE2", "SE3"]
+        "SE1", "SE2", "SE3", "SE4"]
 
 # (ref, x, y, net). DP_A is a straight 40mm pair; DP_B ~32mm (needs +8mm of
 # centerline meanders to match); DP_C is a MULTIPOINT pair (3 terminals, two
@@ -52,6 +52,7 @@ PADS = [
     ("P15", 10, 40, "DP_C_P"), ("P16", 10, 42, "DP_C_N"),
     ("P17", 30, 40, "DP_C_P"), ("P18", 30, 42, "DP_C_N"),
     ("P19", 50, 40, "DP_C_P"), ("P20", 50, 42, "DP_C_N"),
+    ("P21", 10, 24, "SE4"), ("P22", 50, 24, "SE4"),   # spare target for rip tests
 ]
 
 
@@ -197,12 +198,12 @@ def test_synth_demo(tmp, spacing=None, expect_pitch=None):
     if s.get("successful") != 3 or s.get("failed"):
         _fail(f"[{tag}] expected 3/3 pairs routed, got {s.get('successful')}/{s.get('failed')}")
 
-    se_out = _run(["route.py", mid, out, "--nets", "SE1", "SE2", "SE3",
+    se_out = _run(["route.py", mid, out, "--nets", "SE1", "SE2", "SE3", "SE4",
                    "--track-width", "0.2", "--clearance", "0.15",
-                   "--length-match-group", "SE*"] + sp)
+                   "--length-match-group", "SE[1-3]"] + sp)
     s = _json_summary(se_out)
-    if s.get("successful") != 3:
-        _fail(f"[{tag}] expected 3/3 SE nets routed, got {s.get('successful')}")
+    if s.get("successful") != 4:
+        _fail(f"[{tag}] expected 4/4 SE nets routed, got {s.get('successful')}")
 
     _grade(out)
 
@@ -252,12 +253,75 @@ def test_lvds_intra_pair(tmp):
     print(f"PASS  lvds intra-pair: {bumps} bump(s), residual P/N delta {delta:.3f}mm")
 
 
+def _net_len(board, name):
+    from net_queries import net_copper_lengths
+    pcb = parse_kicad_pcb(board)
+    nid = {n.name: i for i, n in pcb.nets.items()}[name]
+    return net_copper_lengths(pcb, [nid])[nid]
+
+
+def test_protected_nets(tmp):
+    """#521: matched groups and routed pairs are recorded as protected in the
+    sibling .kicad_pro; a later step's glob rip skips them, an exact-name rip
+    overrides."""
+    src = os.path.join(tmp, "prot.kicad_pcb")
+    s1 = os.path.join(tmp, "prot_s1.kicad_pcb")
+    s2 = os.path.join(tmp, "prot_s2.kicad_pcb")
+    s3 = os.path.join(tmp, "prot_s3.kicad_pcb")
+    s4 = os.path.join(tmp, "prot_s4.kicad_pcb")
+    write_synth_board(src)
+    _run(["route_diff.py", src, s1,
+          "DP_A_P", "DP_A_N", "DP_B_P", "DP_B_N", "DP_C_P", "DP_C_N",
+          "--track-width", "0.2", "--clearance", "0.15", "--diff-pair-gap", "0.15",
+          "--length-match-group", "DP_A_*", "DP_B_*", "DP_C_*"])
+    # SE1 stays unrouted here: the attack step below needs a real routing
+    # target or the run no-ops before the rip expansion.
+    _run(["route.py", s1, s2, "--nets", "SE2", "SE3",
+          "--track-width", "0.2", "--clearance", "0.15", "--length-match-group", "SE*"])
+
+    from protected_nets import read_protected_nets, pro_path_for_board
+    prot = read_protected_nets(pro_path_for_board(s2))
+    for n in ("DP_A_P", "DP_A_N", "DP_C_N", "SE2", "SE3"):
+        if n not in prot:
+            _fail(f"{n} missing from protected nets after the chain: {prot}")
+    if prot.get("SE3") != "length-matched" or prot.get("DP_A_P") != "diff-pair":
+        _fail(f"unexpected protection reasons: {prot}")
+
+    # Attack step: route the fresh SE1 with a glob rip over everything.
+    # Protected nets must survive with their meandered lengths intact.
+    before = {n: _net_len(s2, n) for n in ("SE2", "SE3", "DP_B_P", "DP_C_P")}
+    out = _run(["route.py", s2, s3, "--nets", "SE1", "--rip-existing-nets", "*",
+                "--track-width", "0.2", "--clearance", "0.15"])
+    if "PROTECTED net(s) excluded" not in out:
+        _fail("glob rip printed no protected-nets exclusion")
+    if "eligible for rip-up" in out:
+        _fail("glob rip still made protected nets rip-eligible:\n" + out[-1200:])
+    for n, lb in before.items():
+        la = _net_len(s3, n)
+        if abs(la - lb) > 1e-6:
+            _fail(f"protected {n} changed under glob rip: {lb:.3f} -> {la:.3f}")
+
+    # Override: an exact (non-glob) name stays RIP-ELIGIBLE despite protection
+    # (whether it is actually ripped depends on congestion, so assert the
+    # policy decision -- the eligibility print -- not the rip). SE4 is the
+    # fresh routing target (SE1 was consumed by the attack step above).
+    out = _run(["route.py", s3, s4, "--nets", "SE4", "--rip-existing-nets", "SE3",
+                "--track-width", "0.2", "--clearance", "0.15"])
+    if "eligible for rip-up" not in out or "SE3" not in out.split("eligible for rip-up")[1][:80]:
+        _fail("exact-name override did not make SE3 rip-eligible:\n" + out[-1200:])
+    if "PROTECTED net(s) excluded" in out:
+        _fail("exact-name override still reported SE3 as excluded")
+    print(f"PASS  protected nets: {len(prot)} recorded; glob rip skipped them "
+          f"(lengths held); exact-name override made SE3 rip-eligible")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="meander_demo_")
     test_synth_demo(tmp)
     # Non-default spacing must reach the geometry: 3W on a 0.2 track = 0.6mm.
     test_synth_demo(tmp, spacing=3.0, expect_pitch=0.6)
     test_lvds_intra_pair(tmp)
+    test_protected_nets(tmp)
     print("PASS  all meander demo chains")
 
 

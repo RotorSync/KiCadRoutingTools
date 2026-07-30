@@ -79,6 +79,15 @@ Validate routed boards against the *real* spec, with the right checker — most
   - `--hole-to-hole-clearance` / `--board-edge-clearance` work the same way: omitted →
     the board's own `min_hole_to_hole` / `min_copper_edge_clearance` constraint (via
     `list_nets.board_constraint`), else the fixed default.
+- **Protected nets (#521): matched groups and routed diff pairs are recorded in
+  the sibling `.kicad_pro`** (`kicad_routing_tools.protected_nets`, written next
+  to the DRC-floor writeback, carried down chains by the project copy) and later
+  steps will NOT rip them: `--rip-existing-nets` globs skip them (printed
+  exclusion) and plane-repair `--rip-blocker-nets` never picks them as blockers.
+  The override is naming the net EXACTLY (no glob) in `--nets` or
+  `--rip-existing-nets` — there is deliberately no CLI flag or GUI control.
+  Rationale: a retry step once ripped a whole DDR match group and rerouted it
+  unmatched (allwinner_h3_ddr3, 40/41 nets unmatched, one net stranded).
 - **Per-layer clearance comes from the board's `.kicad_dru` (#498) and OUTRANKS
   `--clearance`.** KiCad stores layer-scoped clearance in custom rules
   (`(rule x (layer inner) (constraint clearance (min 0.15mm)))`); netclasses can't

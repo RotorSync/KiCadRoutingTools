@@ -53,6 +53,11 @@ REGISTRY = {
     'oracle_reconnect': ['_run_kicad_oracle_after_apply', 'oracle_reconnect'],
     # DRC-floor / project-file writeback after routing
     'fix_project_for_output': ['_write_drc_floors', 'update_live_drc_floors'],
+    # #521: protected-nets record in the sibling .kicad_pro after routing.
+    # Engines NOTE candidates (matched groups, routed pairs); each front's
+    # writeback PERSISTS them: CLI mains here, GUI at plan end
+    # (ai_plan._write_drc_floors) + per manual step (update_live_drc_floors).
+    'persist_protected_nets': ['_write_drc_floors', 'update_live_drc_floors'],
     # GND return vias near signal vias
     'add_gnd_vias_to_existing_board': ['add_gnd_vias_to_existing_board'],
 }
@@ -95,6 +100,9 @@ POSTPASS_MODULES = ['kicad_oracle', 'fix_kicad_drc_settings', 'check_drc']
 DISCOVERY_EXEMPT = {'add_drc_fix_args', 'drc_fix_kwargs', 'find_kicad_cli',
                     'compute_targets', 'severity_plan',
                     'read_project_edge_clearance',
+                    # the `if __name__ == "__main__"` dispatcher calling main()
+                    # (that block is scanned as a main scope since #521).
+                    'main',
                     # #441: pre-engine helper that WARNS when an input board has no
                     # sibling .kicad_pro (dropped DRC floor). Report-only, runs before
                     # routing, no board mutation; the GUI operates on the live board and
@@ -128,23 +136,36 @@ def _main_calls(path):
         tree = ast.parse(src)
     except SyntaxError:
         return set()
+    def _is_dunder_main_if(node):
+        # `if __name__ == "__main__":` -- route.py / route_diff.py run their
+        # whole CLI there instead of a def main(), so post-passes added in
+        # that block (#521 persist_protected_nets) must be scanned too.
+        if not isinstance(node, ast.If):
+            return False
+        t = node.test
+        return (isinstance(t, ast.Compare) and isinstance(t.left, ast.Name)
+                and t.left.id == '__name__')
+
     calls = set()
+    scopes = []
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == 'main':
-            aliases = {}  # local alias -> real imported name
-            for sub in ast.walk(node):
-                if isinstance(sub, ast.ImportFrom):
-                    for a in sub.names:
-                        if a.asname:
-                            aliases[a.asname] = a.name
-            for sub in ast.walk(node):
-                if isinstance(sub, ast.Call):
-                    f = sub.func
-                    if isinstance(f, ast.Name):
-                        calls.add(aliases.get(f.id, f.id))
-                    elif isinstance(f, ast.Attribute):
-                        calls.add(f.attr)
-            break
+            scopes.append(node)
+    scopes.extend(n for n in tree.body if _is_dunder_main_if(n))
+    for scope in scopes:
+        aliases = {}  # local alias -> real imported name
+        for sub in ast.walk(scope):
+            if isinstance(sub, ast.ImportFrom):
+                for a in sub.names:
+                    if a.asname:
+                        aliases[a.asname] = a.name
+        for sub in ast.walk(scope):
+            if isinstance(sub, ast.Call):
+                f = sub.func
+                if isinstance(f, ast.Name):
+                    calls.add(aliases.get(f.id, f.id))
+                elif isinstance(f, ast.Attribute):
+                    calls.add(f.attr)
     return calls
 
 

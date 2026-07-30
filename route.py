@@ -1031,6 +1031,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 continue
             if matches_net_filter(net.name, rip_existing_nets):
                 existing_rippable.append(nid)
+        # #521: protected nets (length-matched groups, routed diff pairs --
+        # recorded in the sibling .kicad_pro by the step that made them) are
+        # excluded from COLLATERAL rips. Naming a net exactly (no glob) in
+        # --rip-existing-nets or --nets is the deliberate override.
+        if existing_rippable:
+            from protected_nets import read_for_pcb_data, filter_rippable_names
+            _prot = read_for_pcb_data(pcb_data, input_file)
+            if _prot:
+                _keep = set(filter_rippable_names(
+                    [pcb_data.nets[n].name for n in existing_rippable], _prot,
+                    override_patterns=list(rip_existing_nets) + list(net_names or []),
+                    context="--rip-existing-nets"))
+                existing_rippable = [n for n in existing_rippable
+                                     if pcb_data.nets[n].name in _keep]
         if existing_rippable:
             names = [pcb_data.nets[n].name for n in existing_rippable[:6]]
             print(f"{len(existing_rippable)} pre-existing net(s) eligible for rip-up: "
@@ -3120,3 +3134,12 @@ For differential pair routing, use route_diff.py:
                 **drc_fix_kwargs(args))
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
+        # #521: record this step's protection-worthy nets (matched groups) in
+        # the output project so later chain steps refuse to rip them.
+        try:
+            from protected_nets import (consume_protection_candidates,
+                                        persist_protected_nets, pro_path_for_board)
+            persist_protected_nets(pro_path_for_board(args.output_file),
+                                   consume_protection_candidates())
+        except Exception as e:
+            print(f"  (skipped protected-nets record: {e})")

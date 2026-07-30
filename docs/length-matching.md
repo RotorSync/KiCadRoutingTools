@@ -123,6 +123,16 @@ To size the meanders, the required extra delay is converted to extra length usin
 ## Limitations
 
 - Meanders spill across multiple straight runs when one run cannot absorb the required extra length; if the runs together still cannot absorb it within clearance limits, the route may end outside tolerance (a warning is printed).
+
+## Protected Nets (#521)
+
+Matching is a per-step feature but chains are multi-step: a later retry that runs `--rip-existing-nets` over matched nets would rip the meanders and reroute at natural length, silently voiding the group. To prevent that, **every matched group member and every routed diff-pair member is recorded as a *protected net*** in the sibling `.kicad_pro` (under `kicad_routing_tools.protected_nets`, next to the DRC-floor writeback — so the list flows down the chain automatically and `copy_board.py` carries it):
+
+- `route.py --rip-existing-nets` **excludes protected nets from collateral rips** (a printed line lists the exclusions);
+- `route_disconnected_planes.py --rip-blocker-nets` never selects a protected net as a blocker to rip;
+- **override**: naming a net *exactly* (no glob) in `--nets` or `--rip-existing-nets` is the deliberate signal and lifts its protection for that step. There is no flag; edit the `.kicad_pro` to remove entries permanently.
+
+The GUI inherits the same behavior (engine-side reads via the board's sibling project file; the AI-plan executor and per-step floor updates persist new entries).
 - Very tight surroundings can force the amplitude to its 0.2mm minimum, limiting how much length a run can add.
 - Meanders are not placed across layer changes.
 - `--ac-couple-match` runs after `--length-match-group`; a pair that is both an XNet member and in a match group may be meandered again by the end-to-end pass, perturbing its group-matched length. Keep AC-coupled pairs out of match groups.

@@ -1197,6 +1197,17 @@ class PlanExecutor:
                     diff_pair_gap=floors.get('diff_pair_gap'),
                     clamp_nondefault_netclasses=_clamp,
                     minima=_minima)
+                # #521: persist the plan's protection-worthy nets (matched
+                # groups, routed diff pairs -- noted engine-side during the
+                # steps) so later steps/chains refuse to rip them.
+                try:
+                    from protected_nets import (consume_protection_candidates,
+                                                persist_protected_nets,
+                                                pro_path_for_board)
+                    persist_protected_nets(pro_path_for_board(board_file),
+                                           consume_protection_candidates())
+                except Exception as _pe:
+                    self.log(f"AI plan: protected-nets record skipped: {_pe}")
                 self.log(f"AI plan: recorded DRC floors in the project "
                          f"file (clearance {eff:.4g}; live session already "
                          f"updated via the API)")

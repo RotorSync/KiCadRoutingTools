@@ -417,6 +417,20 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
       DRC.rpt were this class.
 
     Best-effort: never raises."""
+    # #521: manual (non-plan) runs consume the engine-noted protection
+    # candidates here -- the per-step floor update is the GUI's step boundary.
+    # Written to the sibling .kicad_pro JSON like the CLI writeback; KiCad may
+    # overwrite it if the user saves the project from KiCad afterwards (same
+    # caveat as the plan executor's best-effort persistence).
+    try:
+        from protected_nets import (consume_protection_candidates,
+                                    persist_protected_nets, pro_path_for_board)
+        _bf = board.GetFileName() if board is not None else ""
+        _cand = consume_protection_candidates()
+        if _bf and _cand:
+            persist_protected_nets(pro_path_for_board(_bf), _cand)
+    except Exception:
+        pass
     try:
         import pcbnew
         # mm_to_iu, NOT pcbnew.FromMM: FromMM TRUNCATES (#493). Measured on this
