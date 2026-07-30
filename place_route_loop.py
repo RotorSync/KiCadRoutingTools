@@ -461,6 +461,13 @@ def main():
     parser.add_argument("--work-dir", default=None,
                         help="Directory for intermediate files "
                              "(default: alongside output)")
+    parser.add_argument("--movie", nargs='?', const='', default=None,
+                        metavar="OUT",
+                        help="render a movie of the whole repair when the loop "
+                             "finishes, with the placement camera on (#431): "
+                             "overview -> zoom to each round's moved parts -> "
+                             "pan when the work moves -> then play the moves. "
+                             "Default path: <work-dir>/placement.mp4")
     add_board_state_args(parser)
     add_lock_advisor_args(parser)
 
@@ -680,6 +687,18 @@ def main():
     print(f"Final: failures={best['failures']} iterations={best['iterations']:,}"
           f" vias={best['vias']}")
     print(f"Wrote {args.output_file}")
+
+    if args.movie is not None:
+        # The work dir already holds every round board plus the loop_round{N}.json
+        # sidecars, so this needs no extra plumbing -- make_movie reads a
+        # directory, and the sidecars are what make the set a chain.
+        try:
+            from make_movie import make_movie
+            out = args.movie or os.path.join(work, 'placement.mp4')
+            got = make_movie([work], out=out, camera='auto', quiet=False)
+            print(f"Movie: {got}" if got else "Movie: nothing to animate")
+        except Exception as e:
+            print(f"  (movie skipped: {e})")
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ Two things this deliberately does NOT do:
 from __future__ import annotations
 
 import math
+import os
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 Rect = Tuple[float, float, float, float]
@@ -322,3 +323,258 @@ def describe(shots: Sequence[Shot], fps: float = 6.0) -> str:
     for s in shots:
         bits.append(f"  {s.kind:9s} {s.frames:3d}f  {s.label}")
     return "\n".join(bits)
+
+
+# ---------------------------------------------------------------------------
+# Stage: drives the camera and part motion through the EXISTING Movie
+# ---------------------------------------------------------------------------
+class Stage:
+    """Camera + moving parts for a placement chain, as a driver over `Movie`.
+
+    `Movie` is not modified at all. This holds the real `BoardRenderer` and
+    mutates exactly two things between frames:
+
+      * ``r.pcb``  -> the board state of that step. With ``dynamic_zones=True``
+        (which ``build_boards`` already passes) ``frame()`` draws zones and pads
+        per frame from ``self.pcb``, so re-pointing it animates the FOOTPRINTS
+        with no new drawing code. Verified: the same call with
+        ``dynamic_zones=False`` produces an identical image, because pads are
+        baked into ``_base`` there.
+      * ``r.set_view(rect)`` -> the camera.
+
+    With ``stage=None`` in ``build_boards`` every hook below is skipped, so the
+    routing movie is bit-for-bit unchanged. That is the point: this adds a
+    driver, not a second pipeline.
+    """
+
+    def __init__(self, rounds, work_dir=None, *, opts=None, fps=6.0,
+                 budget=60.0, moving_parts=True, tween=8, quiet=False):
+        self.rounds = list(rounds)          # [dict] from loop_round{N}.json
+        self.work_dir = work_dir
+        self.opts = opts
+        self.fps = fps
+        self.budget = budget
+        self.moving_parts = moving_parts
+        self.tween_frames = max(2, int(tween))
+        self.quiet = quiet
+        self.movie = None
+        self.r = None
+        self.layers = None
+        self.shots = []
+        self._queue = []
+        self._by_board = {}
+        self._log = []                      # (shot_kind, first_frame, last_frame)
+
+    # -- wiring ---------------------------------------------------------
+    def attach(self, movie, renderer, layers):
+        self.movie = movie
+        self.r = renderer
+        self.layers = layers
+        self._overview = renderer.bounds
+        for rd in self.rounds:
+            if rd.get('board'):
+                self._by_board[os.path.basename(rd['board'])] = rd
+        self._plan()
+
+    def _emit(self, kind, views, label):
+        """One frame per view, at a FROZEN board. A frame either moves the
+        camera or changes the board -- never both."""
+        start = len(self.movie.frames)
+        for v in views:
+            self.r.set_view(v)
+            self.movie.snapshot(label)
+        self._log.append((kind, start, len(self.movie.frames)))
+
+    def _plan(self):
+        """Plan the WHOLE chain once, then consume shots per step.
+
+        Planning per step would restart from the overview every time -- an
+        establishing shot before each round and never a transit, because the
+        camera would always already be where a fresh plan puts it. The
+        hysteresis and travel rules only mean anything across a sequence.
+        """
+        from kicad_parser import parse_kicad_pcb
+        acts = []
+        for rd in self.rounds:
+            if not rd.get('accepted') or not rd.get('board'):
+                continue
+            pcb = None
+            moved = rd.get('moved') or []
+            if moved and self.work_dir:
+                try:
+                    pcb = parse_kicad_pcb(os.path.join(self.work_dir, rd['board']))
+                except Exception:
+                    pcb = None
+            acts.append(Action('place', f"round {rd['round']}",
+                               _moved_bbox(pcb, moved) if (pcb and moved) else None,
+                               _moved_side(pcb, moved) if pcb else None,
+                               frames=self.tween_frames))
+        self.shots = plan_shots(acts, self._overview, self.opts)
+        if self.budget:
+            self.shots = apply_budget(self.shots, self.budget, self.fps)
+        self._queue = list(self.shots)
+
+    def _drain_until_action(self, label):
+        """Emit every queued camera shot up to the next action, then stop.
+
+        This is the sequencing contract: the content frames are emitted by the
+        caller AFTER this returns, so a move never plays over a moving camera.
+        """
+        while self._queue:
+            s = self._queue[0]
+            if s.kind == 'action':
+                self._queue.pop(0)
+                return s
+            self._queue.pop(0)
+            self._emit(s.kind, views_for(s), s.label or label)
+        return None
+
+    # -- the build_boards hooks -----------------------------------------
+    def enter_step(self, label, board, pcb, seg_rows, via_rows):
+        """True = this stage handled the step itself.
+
+        A placement round is intercepted: the loop re-routes from scratch each
+        round, so routed(N) -> placed(N+1) legitimately loses ALL copper.
+        Letting `reveal_delta` handle that calls `remove()`, which flashes red
+        and labels it "(rip)" -- a lie. Clear silently, then tween the parts.
+        """
+        rd = self._by_board.get(os.path.basename(board))
+        if rd is None or not self.moving_parts:
+            return False
+        moved = rd.get('moved') or []
+        self._drain_until_action(label)
+
+        # silent clear: the copper of the PREVIOUS round is genuinely gone
+        self.movie.reconcile_to([], [], f"{label}: re-placing")
+        if moved:
+            self._tween(pcb, moved, label)
+        else:
+            self.movie.snapshot(label)
+        return True
+
+    def exit_step(self, label):
+        pass
+
+    def outro(self):
+        from movie_camera import lerp_rect, smoothstep
+        cur = getattr(self.r, '_view', None) or self._overview
+        n = (self.opts.outro if self.opts else 10)
+        start = len(self.movie.frames)
+        for k in range(n):
+            t = smoothstep((k + 1) / n)
+            self.r.set_view(lerp_rect(cur, self._overview, t))
+            self.movie.snapshot("overview")
+        self._log.append(('outro', start, len(self.movie.frames)))
+        self.r.set_view(None)
+
+    # -- part motion ----------------------------------------------------
+    def _tween(self, pcb, moved, label):
+        """Glide the moved parts from their source pose to the parsed one.
+
+        Built from the DESTINATION parse, offsetting backwards, always
+        recomputed from a cached home pose -- never accumulated, so there is no
+        float drift -- and t=1 on the last frame reproduces the parsed board
+        EXACTLY, so the hand-off to the copper reveal is seamless.
+
+        Rotation SNAPS rather than tweens: tweening it means re-deriving
+        global_x/y from local_x/y plus rect_rotation plus the >=90 deg
+        size_x/size_y swap the parser already resolved. Quench rotations are
+        90-degree multiples and rare.
+        """
+        from movie_camera import smoothstep
+        # Keyed by REFERENCE: Footprint is unhashable (no __hash__), so it
+        # cannot be a dict key.
+        home = {}
+        deltas = []
+        for m in moved:
+            ref = m['reference']
+            fp = pcb.footprints.get(ref)
+            if fp is None:
+                continue
+            home[ref] = (fp.x, fp.y,
+                         [(p, p.global_x, p.global_y) for p in fp.pads],
+                         [(p, [list(pt) for pt in (p.polygons or [])])
+                          for p in fp.pads if getattr(p, 'polygons', None)])
+            deltas.append((ref, fp, m['from'][0] - m['to'][0],
+                           m['from'][1] - m['to'][1]))
+        if not deltas:
+            self.movie.snapshot(label)
+            return
+        n = self.tween_frames
+        start = len(self.movie.frames)
+        for i in range(n):
+            t = smoothstep((i + 1) / n)
+            for ref, fp, dx, dy in deltas:
+                _offset_to(fp, home[ref], dx * (1 - t), dy * (1 - t))
+            self.movie.snapshot(f"{label}  moving {len(deltas)} part(s)")
+        for ref, fp, _dx, _dy in deltas:      # exact restore
+            _offset_to(fp, home[ref], 0.0, 0.0)
+        self._log.append(('action', start, len(self.movie.frames)))
+
+    # -- introspection for tests ----------------------------------------
+    def frame_log(self):
+        return list(self._log)
+
+
+def _offset_to(fp, home, dx, dy):
+    hx, hy, pads, polys = home
+    fp.x, fp.y = hx + dx, hy + dy
+    for p, gx, gy in pads:
+        p.global_x, p.global_y = gx + dx, gy + dy
+    for p, orig in polys:                     # custom pad copper is ABSOLUTE
+        p.polygons = [[(x + dx, y + dy) for x, y in poly] for poly in orig]
+
+
+def _moved_bbox(pcb, moved):
+    xs, ys = [], []
+    for m in moved:
+        fp = pcb.footprints.get(m['reference'])
+        if fp is None:
+            continue
+        for p in fp.pads:
+            r = max(p.size_x, p.size_y) / 2
+            xs += [p.global_x - r, p.global_x + r]
+            ys += [p.global_y - r, p.global_y + r]
+    if not xs:
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _moved_side(pcb, moved):
+    """Majority side of the parts that MOVED -- a block can straddle both
+    (ulx3s sheet:58d686d9 is 9 back / 11 front), so the side is a property of
+    this round's work, not of the block."""
+    f = b = 0
+    for m in moved:
+        fp = pcb.footprints.get(m['reference'])
+        if fp is None:
+            continue
+        if (fp.layer or '').startswith('B'):
+            b += 1
+        else:
+            f += 1
+    if not (f or b):
+        return None
+    return 'B' if b > f else 'F'
+
+
+def load_round_sidecars(work_dir):
+    """`loop_round{N}.json` records, ordered by round, accepted ones only.
+
+    Keyed on the SIDECARS rather than a loop_round*.kicad_pcb glob: --work-dir
+    defaults to the output board's directory, which may hold unrelated boards,
+    and mtime ordering would animate a REJECTED round as though it were kept.
+    """
+    import glob
+    import json
+    out = []
+    for p in sorted(glob.glob(os.path.join(work_dir, 'loop_round*.json'))):
+        try:
+            with open(p, encoding='utf-8') as f:
+                doc = json.load(f)
+        except Exception:
+            continue
+        if doc.get('schema') == 1 and 'round' in doc:
+            out.append(doc)
+    out.sort(key=lambda d: d['round'])
+    return out

@@ -279,20 +279,34 @@ def build_run(run_dir, size, ss, alpha, rip_hold, chunks):
     return build_boards(steps, final, size, ss, alpha, rip_hold, chunks)
 
 
-def build_boards(steps, final, size, ss, alpha, rip_hold, chunks):
+def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None):
     """Frames for a chain given as [(label, board, trace|None), ...] plus the
-    final board. ``build_run`` is this with the chain discovered from a run dir."""
+    final board. ``build_run`` is this with the chain discovered from a run dir.
+
+    ``stage`` (movie_camera.Stage, #431) adds a camera and animates FOOTPRINT
+    motion for placement rounds. With ``stage=None`` -- every existing caller --
+    the three hooks below are falsy branches and the routing movie is unchanged.
+    """
     from kicad_parser import parse_kicad_pcb
     if not final:
         return []
     # dynamic_zones: plane pours reveal as each plane is created, rather than
-    # sitting under every frame from the start.
+    # sitting under every frame from the start. It is ALSO what lets a Stage
+    # animate part motion: with it, frame() draws pads per frame from
+    # renderer.pcb, so re-pointing that attribute moves the parts.
     r, layers = _renderer(final, None, size, ss, alpha, dynamic_zones=True)
     m = Movie(r, layers, rip_hold=rip_hold)
+    if stage is not None:
+        stage.attach(m, r, layers)
     m.snapshot("input")
     for label, board, trace_path in steps:
         pcb = parse_kicad_pcb(board)
         seg_rows, via_rows = _board_rows(pcb, layers)
+        if stage is not None:
+            # The renderer draws footprints from THIS board from here on.
+            r.pcb = pcb
+            if stage.enter_step(label, board, pcb, seg_rows, via_rows):
+                continue        # a placement round; the stage emitted its frames
         # Reveal any plane whose pour exists on this step board but had no fine
         # plane-tap event (untraced plane step) so its fill still appears here.
         step_zone_nets = {z.net_id for z in (getattr(pcb, 'zones', None) or [])
@@ -313,9 +327,13 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks):
         m.reveal_delta(seg_rows, via_rows, label, chunks=chunks)
     # final trueup (in case the graded final differs from the last step board)
     fpcb = parse_kicad_pcb(final)
+    if stage is not None:
+        r.pcb = fpcb
     for _z in (getattr(fpcb, 'zones', None) or []):   # ensure every pour shows
         m.reveal_zone(_z.net_id)
     m.reconcile_to(*_board_rows(fpcb, layers), "routed")
+    if stage is not None:
+        stage.outro()
     return m.frames
 
 

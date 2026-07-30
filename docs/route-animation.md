@@ -207,3 +207,51 @@ per board:
 `KICAD_ROUTE_TRACE=1` is exported by default in stress runs (set
 `KICAD_ROUTE_TRACE=0` to skip; the movie then falls back to a coarse per-step
 reveal). See the [stress-test runbook](../tests/stress/RUNBOOK.md#run-artifacts-final-snapshot--routing-movie-482).
+
+## Placement movies: the camera (#431)
+
+`make_movie.py` animates a `place_route_loop` work dir as well as a routing
+chain. It detects one by the `loop_round{N}.json` sidecars the loop writes --
+never by a `loop_round*.kicad_pcb` glob, because `--work-dir` defaults to the
+output board's directory (which may hold unrelated boards) and mtime order would
+animate a REJECTED round as though it had been kept. Only ACCEPTED rounds enter
+the chain; the sidecar's `parent` is what makes the set a chain at all, since
+round N follows the last accepted board rather than N-1.
+
+```bash
+python3 make_movie.py WORKDIR --camera auto -o placement.mp4
+python3 place_route_loop.py board.kicad_pcb out.kicad_pcb --route-args '...' --movie
+KICAD_MOVIE_CAMERA=auto python3 make_movie.py WORKDIR     # env knob, same effect
+```
+
+The camera is **off by default**, everywhere. Every GUI movie is a routing
+movie, so turning it on there would be regression risk for no gain; the env knob
+exists so one variable covers the GUI recorder, `run_plan.py --movie` and the
+stress renderer at once.
+
+What it does: an establishing overview, a zoom to the parts a round actually
+moved, a pan when the next round works elsewhere, and the moves play only after
+the camera arrives. That last part is structural, not a timing guess --
+
+> a frame either MOVES THE CAMERA or CHANGES THE BOARD, never both
+
+-- so every transition happens over a frozen board, and a settle beat separates
+arrival from action. Long moves dolly out through a waypoint and back in, since
+a flat pan across a dense board at 6 fps is an unreadable smear. Nearly-identical
+consecutive rounds produce NO camera move at all (hysteresis): they nudge the
+same parts, and without it the camera vibrates while saying nothing.
+
+Two implementation notes worth knowing:
+
+* Part motion needs no new drawing code. `build_boards` already builds its
+  renderer with `dynamic_zones=True`, which draws pads per frame from
+  `renderer.pcb` -- so re-pointing that attribute animates the footprints. With
+  `dynamic_zones=False` pads are baked into the static base and the same
+  re-pointing does nothing.
+* Views are letterboxed in WORLD space so every frame is the same size.
+  `_write_mp4` fails on mixed sizes and the failure is SILENT: it is caught, and
+  the whole movie degrades to a GIF.
+
+Rotation snaps rather than tweening (quench rotations are 90-degree multiples and
+rare); `--camera-budget SECONDS` caps the runtime, scaling camera shots first and
+only touching the moves as a last resort.
