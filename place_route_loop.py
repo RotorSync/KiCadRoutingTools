@@ -468,6 +468,9 @@ def main():
                              "overview -> zoom to each round's moved parts -> "
                              "pan when the work moves -> then play the moves. "
                              "Default path: <work-dir>/placement.mp4")
+    parser.add_argument("--movie-tween", type=int, default=8, metavar="N",
+                        help="frames per placement glide in --movie; 0 = no "
+                             "glide, cut straight to the new placement")
     add_board_state_args(parser)
     add_lock_advisor_args(parser)
 

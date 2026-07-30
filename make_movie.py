@@ -217,7 +217,7 @@ def main():
                     metavar='SECONDS',
                     help='cap the camera runtime (0 = unlimited)')
     ap.add_argument('--tween', type=int, default=8,
-                    help='frames per placement glide (default: 8)')
+                    help='frames per placement glide; 0 = no glide, cut straight to the new placement (default: 8)')
     args = ap.parse_args()
 
     try:

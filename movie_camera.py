@@ -20,9 +20,12 @@ pygame tool) imports the easing helpers from here.
 
 Two things this deliberately does NOT do:
 
-* Mirror the back side. A mirrored view destroys XY registration with every
-  other frame, and `route_render` is already an un-mirrored X-ray projection of
-  all layers. A side change gets a labelled cross-fade instead.
+* Pretend the back side looks like the front. Going to B does what a person
+  does with a real board: it FLIPS, 180 degrees about the vertical axis, and
+  every frame after that is mirrored -- because you are now looking at the
+  other face. Reading a back-side placement off an un-mirrored X-ray means
+  mentally reversing every x coordinate, which is exactly the error a render is
+  supposed to remove.
 * Twitch. Consecutive loop rounds nudge the same parts, so without hysteresis
   the camera vibrates for a hundred frames saying nothing.
 """
@@ -159,13 +162,18 @@ class CameraOpts(NamedTuple):
     # Beyond this fraction of the board diagonal a straight pan is an
     # unreadable smear, so the camera pulls back, crosses, and dives in.
     travel_frac: float = 0.35
-    min_view_frac: float = 1 / 12
+    # How far in the camera may ever go, as a multiple of the whole-board view.
+    # Expressed as MAGNIFICATION rather than an absolute size because "1/12 of
+    # the diagonal" means a gentle zoom on a 300-part board and a 4x dive into
+    # featureless copper on a 13-part one -- you lose the context that makes the
+    # shot readable. 3x keeps the board recognisable at every zoom level.
+    max_zoom: float = 3.0
     min_view_mm: float = 8.0
 
 
 def _min_view(overview: Rect, o: CameraOpts) -> float:
     w, h = rect_size(overview)
-    return max(o.min_view_mm, math.hypot(w, h) * o.min_view_frac)
+    return max(o.min_view_mm, math.hypot(w, h) / max(1.0, o.max_zoom))
 
 
 def plan_shots(actions: Sequence[Action], overview: Rect,
@@ -355,10 +363,16 @@ class Stage:
         self.fps = fps
         self.budget = budget
         self.moving_parts = moving_parts
-        self.tween_frames = max(2, int(tween))
+        # 0 = no glide: cut straight to the new placement. The camera work is
+        # what carries the story; the glide is decoration, and on a long run it
+        # is most of the runtime. Anything else is clamped to >=2, since a
+        # 1-frame "glide" is just a cut with extra steps.
+        self.tween_frames = 0 if int(tween) <= 0 else max(2, int(tween))
         self.quiet = quiet
         self.movie = None
         self.r = None
+        self._mirror = False      # True once flipped to the back
+        self._mark = 0            # frames emitted before the last step
         self.layers = None
         self.shots = []
         self._queue = []
@@ -376,13 +390,79 @@ class Stage:
                 self._by_board[os.path.basename(rd['board'])] = rd
         self._plan()
 
-    def _emit(self, kind, views, label):
+    def _aim(self, view):
+        """Point the renderer at `view`, accounting for the flip.
+
+        The camera plans in un-mirrored world space, but once we are looking at
+        the BACK every frame is mirrored on the way out. Handing the transform
+        the raw rect therefore lands the zoom on the MIRROR IMAGE of the target
+        -- the parts you asked to see end up on the far side of the frame, or
+        off it entirely once you are zoomed in. Mirror the rect about the
+        board's vertical centre line first, so that after the frame is flipped
+        the target is where the camera said it would be.
+        """
+        if view is not None and self._mirror:
+            b = self._overview
+            cx2 = b[0] + b[2]
+            view = (cx2 - view[2], view[1], cx2 - view[0], view[3])
+        self.r.set_view(view)
+
+    def _snap(self, label):
+        """Snapshot, mirrored when we are looking at the back.
+
+        Applied at the FRAME level rather than inside the renderer so that
+        everything -- camera frames, part tweens, and the copper the routing
+        steps reveal through Movie's own path -- flips together. A movie where
+        the board is mirrored but the tracks are not would be worse than no
+        flip at all.
+        """
+        if not self._mirror:
+            self.movie.snapshot(label)
+            return
+        # Render WITHOUT the caption, mirror the board, then stamp the caption
+        # upright. Mirroring a frame that already carries its label reverses the
+        # text and throws it into the opposite corner -- it reads as a rendering
+        # fault, not as "you are looking at the back".
+        from PIL import ImageOps
+        img = self.r.frame(segments=list(self.movie.live_s.values()),
+                           vias=list(self.movie.live_v.values()),
+                           zone_net_ids=self.movie.revealed_zones)
+        img = ImageOps.mirror(img)
+        if label:
+            self.r._label(img, label)
+        self.movie.frames.append(img)
+
+    def _mirror_new_frames(self, label=''):
+        """Mirror frames appended by code that does not go through _snap --
+        i.e. the routing steps, which Movie renders and captions itself."""
+        if not self._mirror:
+            self._mark = len(self.movie.frames)
+            return
+        from PIL import ImageDraw, ImageOps
+        for i in range(self._mark, len(self.movie.frames)):
+            fr = ImageOps.mirror(self.movie.frames[i])
+            # Their caption was baked in before we saw the frame, so it mirrored
+            # with the board. Clear the whole top strip -- the caption bar's own
+            # territory -- and stamp it again upright.
+            d = ImageDraw.Draw(fr)
+            d.rectangle([0, 0, fr.size[0], max(18, fr.size[1] // 26)],
+                        fill=tuple(self.r.bg))
+            if label:
+                self.r._label(fr, label)
+            self.movie.frames[i] = fr
+        self._mark = len(self.movie.frames)
+
+    def _emit(self, kind, views, label, side=None):
         """One frame per view, at a FROZEN board. A frame either moves the
         camera or changes the board -- never both."""
         start = len(self.movie.frames)
-        for v in views:
-            self.r.set_view(v)
-            self.movie.snapshot(label)
+        if kind == 'flip':
+            self._emit_flip(views, label, side)
+        else:
+            for v in views:
+                self._aim(v)
+                self._snap(label)
+        self._mark = len(self.movie.frames)
         self._log.append((kind, start, len(self.movie.frames)))
 
     def _plan(self):
@@ -390,8 +470,8 @@ class Stage:
 
         Planning per step would restart from the overview every time -- an
         establishing shot before each round and never a transit, because the
-        camera would always already be where a fresh plan puts it. The
-        hysteresis and travel rules only mean anything across a sequence.
+        camera would always already be where a fresh plan puts it. Hysteresis
+        and travel only mean anything across a sequence.
         """
         from kicad_parser import parse_kicad_pcb
         acts = []
@@ -426,8 +506,65 @@ class Stage:
                 self._queue.pop(0)
                 return s
             self._queue.pop(0)
-            self._emit(s.kind, views_for(s), s.label or label)
+            self._emit(s.kind, views_for(s), s.label or label, side=s.side)
         return None
+
+    def _emit_flip(self, views, label, side):
+        """Turn the board over: a 180-degree flip about the VERTICAL axis.
+
+        This is what a person does with a real board, and it is why the frames
+        after it are mirrored -- you are looking at the other face. The
+        animation is the honest one: the board narrows to an edge as it rotates
+        past 90 degrees, then opens out again already reversed, so the moment
+        the handedness changes is visible rather than implied.
+
+        Rendering the far face means dropping the near copper layer, so the
+        traces you see belong to the side you are looking at.
+        """
+        from PIL import Image, ImageOps
+        from route_render import BoardRenderer
+
+        to_back = (side == 'B')
+        want = f'{side}.Cu'
+        layers = [ln for ln in self.r.copper_layers
+                  if ln == want or ln not in ('F.Cu', 'B.Cu')]
+        far = None
+        if want in self.r.copper_layers and layers:
+            far = BoardRenderer(self.r.pcb, size=self.r.W, supersample=self.r.ss,
+                                layers=layers, dynamic_zones=self.r.dynamic_zones,
+                                view=getattr(self.r, '_view', None))
+
+        segs = list(self.movie.live_s.values())
+        vias = list(self.movie.live_v.values())
+        zones = self.movie.revealed_zones
+        # No label on the faces: the board rotates, the HUD does not. Stamping
+        # it before the flip transform squashes and reverses the text with the
+        # board, which reads as a rendering fault rather than a flip.
+        near_img = self.r.frame(segments=segs, vias=vias, zone_net_ids=zones)
+        far_img = (far.frame(segments=segs, vias=vias, zone_net_ids=zones)
+                   if far is not None else near_img)
+        if self._mirror:                      # we were already looking at B
+            near_img = ImageOps.mirror(near_img)
+        # The far face, once turned toward us, reads mirrored relative to the
+        # near one.
+        far_img = far_img if self._mirror else ImageOps.mirror(far_img)
+
+        W, H = near_img.size
+        bg = tuple(self.r.bg)
+        n = max(2, len(views))
+        for i in range(n):
+            t = (i + 1) / n
+            ang = math.pi * t
+            k = abs(math.cos(ang))            # 1 -> 0 -> 1: edge-on at halfway
+            face = near_img if t < 0.5 else far_img
+            w = max(1, int(round(W * k)))
+            frame = Image.new('RGB', (W, H), bg)
+            frame.paste(face.resize((w, H), Image.BILINEAR), ((W - w) // 2, 0))
+            self.r._label(frame, label)       # upright, after the rotation
+            self.movie.frames.append(frame)
+        # From here on we are looking at the other face.
+        self._mirror = to_back
+        self._mark = len(self.movie.frames)
 
     # -- the build_boards hooks -----------------------------------------
     def enter_step(self, label, board, pcb, seg_rows, via_rows):
@@ -449,11 +586,15 @@ class Stage:
         if moved:
             self._tween(pcb, moved, label)
         else:
-            self.movie.snapshot(label)
+            self._snap(label)
+        self._mark = len(self.movie.frames)
         return True
 
     def exit_step(self, label):
-        pass
+        # Routing steps render through Movie's own path, not _snap, so their
+        # frames have to be flipped here or the board would be mirrored while
+        # the tracks landing on it were not.
+        self._mirror_new_frames(label)
 
     def outro(self):
         from movie_camera import lerp_rect, smoothstep
@@ -462,8 +603,8 @@ class Stage:
         start = len(self.movie.frames)
         for k in range(n):
             t = smoothstep((k + 1) / n)
-            self.r.set_view(lerp_rect(cur, self._overview, t))
-            self.movie.snapshot("overview")
+            self._aim(lerp_rect(cur, self._overview, t))
+            self._snap("overview")
         self._log.append(('outro', start, len(self.movie.frames)))
         self.r.set_view(None)
 
@@ -498,17 +639,29 @@ class Stage:
             deltas.append((ref, fp, m['from'][0] - m['to'][0],
                            m['from'][1] - m['to'][1]))
         if not deltas:
-            self.movie.snapshot(label)
+            self._snap(label)
             return
         n = self.tween_frames
         start = len(self.movie.frames)
-        for i in range(n):
-            t = smoothstep((i + 1) / n)
+        if n == 0:
+            # No glide: one BEFORE frame at the source poses, then one AFTER at
+            # the parsed board. The delta still reads -- it is a cut, not a
+            # missing beat -- and a long run stops spending most of its runtime
+            # on decoration.
             for ref, fp, dx, dy in deltas:
-                _offset_to(fp, home[ref], dx * (1 - t), dy * (1 - t))
-            self.movie.snapshot(f"{label}  moving {len(deltas)} part(s)")
-        for ref, fp, _dx, _dy in deltas:      # exact restore
-            _offset_to(fp, home[ref], 0.0, 0.0)
+                _offset_to(fp, home[ref], dx, dy)
+            self._snap(f"{label}  before ({len(deltas)} part(s))")
+            for ref, fp, _dx, _dy in deltas:
+                _offset_to(fp, home[ref], 0.0, 0.0)
+            self._snap(f"{label}  moved {len(deltas)} part(s)")
+        else:
+            for i in range(n):
+                t = smoothstep((i + 1) / n)
+                for ref, fp, dx, dy in deltas:
+                    _offset_to(fp, home[ref], dx * (1 - t), dy * (1 - t))
+                self._snap(f"{label}  moving {len(deltas)} part(s)")
+            for ref, fp, _dx, _dy in deltas:      # exact restore
+                _offset_to(fp, home[ref], 0.0, 0.0)
         self._log.append(('action', start, len(self.movie.frames)))
 
     # -- introspection for tests ----------------------------------------

@@ -349,15 +349,28 @@ def draw_ref_labels(d, r, model, refs, *, min_px=8):
                fill=C_LABEL, font=font, anchor='mm')
 
 
-def pad_fill_for(model):
+def _dim(c, k=0.32):
+    return (int(c[0] * k), int(c[1] * k), int(c[2] * k))
+
+
+def pad_fill_for(model, side=None):
     """OmniLayout's encoding: through-hole / front SMD / back SMD read
     differently. A colour and a filter over pads BoardRenderer already knows how
-    to rasterize -- custom polygons, capsules, roundrect, rotated rects."""
+    to rasterize -- custom polygons, capsules, roundrect, rotated rects.
+
+    On a PER-SIDE panel the far side's SMD pads are dimmed rather than dropped:
+    they are still context you need (a back-side part is why a front trace has
+    to go around), but they must not compete with the side you asked to see.
+    Through-hole pads stay full brightness on both panels, because they are
+    physically on both -- a hole cannot move on one side only.
+    """
     def fill(p):
         if getattr(p, 'drill', 0):
-            return C_PAD_THT
+            return C_PAD_THT               # on both sides, always full
         ref = getattr(p, 'component_ref', None)
-        return C_PAD_B if (ref and model.side(ref) == 'B') else C_PAD_F
+        own = model.side(ref) if ref else 'F'
+        base = C_PAD_B if own == 'B' else C_PAD_F
+        return base if (side is None or own == side) else _dim(base)
     return fill
 
 
@@ -411,7 +424,7 @@ def overlay_for(spec: PanelSpec):
                 draw_courtyards(d, r, m, context, side=spec.side, dim=True)
             draw_courtyards(d, r, m, prom, side=spec.side, locked=locked)
         if o.get('pads', True):
-            r.draw_pads(d, fill_for=pad_fill_for(m))
+            r.draw_pads(d, fill_for=pad_fill_for(m, spec.side))
         if o.get('ratsnest', True):
             ids = quiet_ids if quiet_ids is not None else None
             quiet = [a for a in m.airwires(ids)

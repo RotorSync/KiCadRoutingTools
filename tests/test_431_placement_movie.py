@@ -291,6 +291,150 @@ def test_camera_on_a_dir_with_no_sidecars_degrades_with_a_note():
         shutil.rmtree(d, ignore_errors=True)
 
 
+
+def test_tween_zero_cuts_instead_of_gliding():
+    """The glide is decoration and on a long run it is most of the runtime.
+    tween=0 must still show the delta -- a BEFORE frame at the source poses and
+    an AFTER at the parsed board -- so it is a cut, not a missing beat."""
+    d, _n = _work_dir()
+    try:
+        steps, final = MM.placement_chain(d)
+        st = Stage(load_round_sidecars(d), d, tween=0)
+        frames = A.build_boards(steps, final, 220, 1, 150, 2, 6, stage=st)
+        acts = [(a, b) for k, a, b in st.frame_log() if k == 'action']
+        assert acts, "no action frames at all"
+        for a, b in acts:
+            assert b - a == 2, f"tween=0 must emit exactly before+after, got {b - a}"
+            assert ImageChops.difference(frames[a], frames[b - 1]).getbbox()                 is not None, "the before/after cut shows no delta"
+        # and it is genuinely shorter than a glide
+        st2 = Stage(load_round_sidecars(d), d, tween=8)
+        long_frames = A.build_boards(steps, final, 220, 1, 150, 2, 6, stage=st2)
+        assert len(frames) < len(long_frames)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_going_to_the_back_flips_the_board_and_mirrors_what_follows():
+    """Going to B does what a person does with a real board: it turns over.
+
+    Every frame after the flip is mirrored, because you are looking at the other
+    face. Reading a back-side placement off an un-mirrored X-ray means mentally
+    reversing every x coordinate -- exactly the error a render should remove.
+    """
+    from PIL import ImageOps
+    d, _n = _work_dir()
+    try:
+        steps, final = MM.placement_chain(d)
+        st = Stage(load_round_sidecars(d), d, tween=0)
+        A.build_boards(steps, final, 200, 1, 150, 2, 6, stage=st)
+
+        # _snap is the single point every frame passes through, so assert the
+        # mirror there rather than on a pair of frames whose copper also
+        # changed (that comparison is real but muddy).
+        # Compare WITHOUT captions: a mirrored frame keeps its caption upright
+        # (a reversed caption in the wrong corner reads as a rendering fault,
+        # not as "you are looking at the back"), so a captioned frame is
+        # deliberately NOT a pure mirror of its unmirrored twin.
+        st._mirror = False
+        st._snap('')
+        plain = st.movie.frames[-1]
+        st._mirror = True
+        st._snap('')
+        flipped = st.movie.frames[-1]
+        assert flipped.tobytes() == ImageOps.mirror(plain).tobytes(),             "a frame emitted while looking at the back is not mirrored"
+        assert flipped.tobytes() != plain.tobytes(), "the board is symmetric?"
+
+        # ...and the caption survives the flip the right way up: a mirrored
+        # frame WITH a caption must differ from the plain mirror.
+        st._snap('round 2')
+        assert st.movie.frames[-1].tobytes() != flipped.tobytes()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_flip_is_a_turn_not_a_dissolve():
+    """The board narrows to an edge as it passes 90 degrees, so the moment the
+    handedness changes is visible rather than implied. A dissolve would hide it.
+    """
+    import json as _j
+    from movie_camera import Action, CameraOpts, plan_shots, views_for
+    shots = plan_shots([Action('place', 'front', (10, 10, 20, 20), 'F'),
+                        Action('place', 'back', (12, 11, 22, 21), 'B')],
+                       (0.0, 0.0, 100.0, 60.0), CameraOpts())
+    flips = [s for s in shots if s.kind == 'flip']
+    assert flips, [s.kind for s in shots]
+    assert flips[0].view_to is None, "a flip must not also move the camera"
+    assert len(views_for(flips[0])) == flips[0].frames
+    assert all(v == flips[0].view for v in views_for(flips[0])),         "the flip happens at a FROZEN view -- one thing at a time"
+
+
+def test_a_through_hole_part_moves_on_BOTH_sides():
+    """A hole cannot move on one side only. The data model enforces it -- a
+    through-hole pad has ONE global coordinate and layers '*.Cu' -- and the
+    offset helper must not break that by treating sides separately."""
+    from movie_camera import _offset_to
+    from placement.legality import footprint_has_through_pads
+    pcb = parse_kicad_pcb(os.path.join(KF, 'tigard.kicad_pcb'))
+    ref = next(r for r, f in sorted(pcb.footprints.items())
+               if f.pads and footprint_has_through_pads(f))
+    fp = pcb.footprints[ref]
+    tht = [p for p in fp.pads if getattr(p, 'drill', 0)]
+    assert tht, "fixture: expected a drilled pad"
+    home = (fp.x, fp.y, [(p, p.global_x, p.global_y) for p in fp.pads],
+            [(p, [list(pt) for pt in (p.polygons or [])])
+             for p in fp.pads if getattr(p, 'polygons', None)])
+    before = [(p.global_x, p.global_y) for p in fp.pads]
+    _offset_to(fp, home, 3.0, -2.0)
+    for (bx, by), p in zip(before, fp.pads):
+        assert abs((p.global_x - bx) - 3.0) < 1e-9
+        assert abs((p.global_y - by) - (-2.0)) < 1e-9
+    # every drilled pad spans both sides, so moving it moved both
+    for p in tht:
+        assert any(str(l).startswith('*') or l in ('F.Cu', 'B.Cu')
+                   for l in (p.layers or [])), p.layers
+    _offset_to(fp, home, 0.0, 0.0)
+    assert (fp.x, fp.y) == (home[0], home[1])
+
+
+def test_a_zoom_on_the_back_side_frames_the_back_parts():
+    """The bug this exists for: the camera plans in un-mirrored world space, but
+    once flipped every frame is mirrored on the way out. Handing the transform
+    the raw rect lands the zoom on the MIRROR IMAGE of the target -- the parts
+    you asked to see end up on the far side of the frame, or off it once you are
+    zoomed in. The overview hides it (a board is roughly symmetric); a zoom does
+    not, which is exactly how it was spotted.
+    """
+    d, _n = _work_dir()
+    try:
+        steps, final = MM.placement_chain(d)
+        st = Stage(load_round_sidecars(d), d, tween=0)
+        seen = []
+        real = st._aim
+
+        def spy(v):
+            real(v)
+            seen.append((v, st._mirror, st.r.tf))
+        st._aim = spy
+        A.build_boards(steps, final, 600, 1, 150, 2, 6, stage=st)
+
+        board_w = st._overview[2] - st._overview[0]
+        zoomed = [(v, tf) for v, m, tf in seen
+                  if m and v is not None and (v[2] - v[0]) < board_w * 0.9]
+        if not zoomed:
+            return          # this fixture did not flip AND zoom; nothing to check
+        v, tf = zoomed[-1]
+        # the centre of the requested view must land at the centre of the frame
+        # AFTER the mirror, not at its reflection
+        cx, cy = (v[0] + v[2]) / 2, (v[1] + v[3]) / 2
+        px, _py = tf.pt(cx, cy)
+        W = 600
+        assert abs((W - px) - W / 2) < W * 0.06, (
+            f"the back-side zoom is off centre by {abs((W - px) - W / 2):.0f}px "
+            f"of {W} -- the camera is aiming at the un-mirrored coordinates")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 TESTS = [
     test_no_stage_means_no_camera_and_one_renderer,
     test_build_boards_signature_keeps_stage_optional,
@@ -304,6 +448,11 @@ TESTS = [
     test_the_movie_writes_and_reports_its_path,
     test_camera_defaults_off_and_the_env_knob_turns_it_on,
     test_camera_on_a_dir_with_no_sidecars_degrades_with_a_note,
+    test_tween_zero_cuts_instead_of_gliding,
+    test_going_to_the_back_flips_the_board_and_mirrors_what_follows,
+    test_the_flip_is_a_turn_not_a_dissolve,
+    test_a_zoom_on_the_back_side_frames_the_back_parts,
+    test_a_through_hole_part_moves_on_BOTH_sides,
 ]
 
 
