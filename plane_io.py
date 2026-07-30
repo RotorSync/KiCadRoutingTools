@@ -232,56 +232,118 @@ def filter_nets_from_content(content: str, net_ids_to_exclude: List[int],
 
     net_id_set = set(net_ids_to_exclude) if net_ids_to_exclude else set()
     net_name_set = set(net_names_to_exclude) if net_names_to_exclude else set()
-    lines = content.split('\n')
-    result_lines = []
 
+    # Character-based, quote-aware block scan (#523). The old LINE-based
+    # collector counted parens per line, so a board where one element's
+    # closer and the next element's opener share a line -- the ')\t(segment'
+    # joins the KiCad-oracle's ''.join splice emitted (legal s-expr, KiCad
+    # reads it fine) -- never terminated its count: it swallowed every
+    # following element to EOF as ONE "element" and removed the lot when the
+    # FIRST net token matched, eating foreign-net copper and the file's root
+    # paren (the apple2e_mmu truncation: a board KiCad could not load while
+    # check_drc/check_connected graded it normally). A char walk with
+    # in-string tracking is immune to line layout, and parens inside quoted
+    # net names like (net "Net-(R2-Pad1)") never count.
+    out = []
+    pos = 0
+    n = len(content)
+    depth = 0
+    in_str = False
+    esc = False
     i = 0
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.strip()
-
-        # Check if this starts a segment or via (may be multi-line)
-        if stripped == '(segment' or stripped.startswith('(segment ') or \
-           stripped == '(via' or stripped.startswith('(via '):
-            # Collect all lines of this element
-            element_lines = [line]
-            open_parens = line.count('(') - line.count(')')
-            while open_parens > 0 and i + 1 < len(lines):
-                i += 1
-                element_lines.append(lines[i])
-                open_parens += lines[i].count('(') - lines[i].count(')')
-
-            # Check if any line contains net ID to exclude
-            element_text = '\n'.join(element_lines)
-            # Try KiCad 9 format: (net <id>)
-            net_match = re.search(r'\(net\s+(\d+)\)', element_text)
-            if net_match:
-                element_net_id = int(net_match.group(1))
-                if element_net_id in net_id_set:
-                    # Skip this element entirely
-                    i += 1
+    while i < n:
+        ch = content[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == '\\':
+                esc = True
+            elif ch == '"':
+                in_str = False
+            i += 1
+            continue
+        if ch == '"':
+            in_str = True
+            i += 1
+            continue
+        if ch == '(':
+            if depth == 1:
+                tok = None
+                if content.startswith('(segment', i) and \
+                        i + 8 < n and content[i + 8] in ' \t\r\n(':
+                    tok = 'segment'
+                elif content.startswith('(via', i) and \
+                        i + 4 < n and content[i + 4] in ' \t\r\n(':
+                    tok = 'via'
+                if tok is not None:
+                    # Quote-aware walk to this block's own closer.
+                    d2 = 0
+                    s2 = False
+                    e2 = False
+                    k = i
+                    while k < n:
+                        c2 = content[k]
+                        if s2:
+                            if e2:
+                                e2 = False
+                            elif c2 == '\\':
+                                e2 = True
+                            elif c2 == '"':
+                                s2 = False
+                        elif c2 == '"':
+                            s2 = True
+                        elif c2 == '(':
+                            d2 += 1
+                        elif c2 == ')':
+                            d2 -= 1
+                            if d2 == 0:
+                                k += 1
+                                break
+                        k += 1
+                    block = content[i:k]
+                    remove = False
+                    # Try KiCad 9 format: (net <id>)
+                    net_match = re.search(r'\(net\s+(\d+)\)', block)
+                    if net_match:
+                        remove = int(net_match.group(1)) in net_id_set
+                    elif net_name_set:
+                        # KiCad 10: (net "name"). The file stores the ESCAPED
+                        # name; the exclude set holds the parser's unescaped
+                        # names -- without unescaping, every backslash-named
+                        # ripped net evaded this filter and its stale copper
+                        # shipped OVERLAPPING the tap via route_planes placed
+                        # in the vacated spot (neo6502 GND-via-on-/GPIO9\OE2#,
+                        # found by the #319 DRC attribution; #312/#264
+                        # escaping family).
+                        m10 = re.search(
+                            r'\(net\s+"((?:[^"\\]|\\.)*)"\)', block)
+                        remove = bool(
+                            m10 and _unescape_kicad_string(m10.group(1))
+                            in net_name_set)
+                    if remove:
+                        # Trim the removed block's own leading indent from
+                        # the kept prefix, and swallow the trailing newline
+                        # only when the rest of its line is blank -- so a
+                        # removed block leaves neither a blank line nor a
+                        # stray tab, and joined-line inputs stay balanced.
+                        pre = i
+                        while pre > pos and content[pre - 1] in '\t ':
+                            pre -= 1
+                        out.append(content[pos:pre])
+                        k2 = k
+                        while k2 < n and content[k2] in '\t ':
+                            k2 += 1
+                        if k2 < n and content[k2] == '\n':
+                            k = k2 + 1
+                        pos = k
+                    i = k
                     continue
-            elif net_name_set:
-                # KiCad 10: (net "name")
-                net_match_v10 = re.search(r'\(net\s+"((?:[^"\\]|\\.)*)"\)', element_text)
-                # The file stores the ESCAPED name; the exclude set holds the
-                # parser's unescaped names -- without unescaping, every
-                # backslash-named ripped net evaded this filter and its stale
-                # copper shipped OVERLAPPING the tap via route_planes placed in
-                # the vacated spot (neo6502 GND-via-on-/GPIO9\OE2#, found by
-                # the #319 DRC attribution; #312/#264 escaping family).
-                if net_match_v10 and _unescape_kicad_string(net_match_v10.group(1)) in net_name_set:
-                    i += 1
-                    continue
-
-            # Keep this element
-            result_lines.extend(element_lines)
-        else:
-            result_lines.append(line)
-
+            depth += 1
+        elif ch == ')':
+            depth -= 1
         i += 1
-
-    return '\n'.join(result_lines)
+    out.append(content[pos:])
+    return ''.join(out)
 
 
 def _zone_layer_span(element_text: str) -> set:

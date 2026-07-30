@@ -934,8 +934,17 @@ def try_tap_pad(
     shared_via_maps: Optional[SharedViaMaps] = None,
     pour_trace_only: bool = False,
     plane_oracle=None,
+    corridor_ghosts=None,
+    ghost_exclude_ids=(),
 ) -> TapResult:
     """Attempt to connect one pad to the plane with the given parameters.
+
+    ``corridor_ghosts`` (#517 arm 2): a plane_corridor_ghosts.CorridorGhosts
+    registry of vacated ripped-net corridors. In soft mode its cost stamps are
+    merged into this tap's trace-routing map and its clear-site predicate is
+    passed to find_via_position as a SOFT preference. ``ghost_exclude_ids``
+    names nets ripped for THIS tap's own transaction -- the rip exists so this
+    tap can use the corridor, so their ghosts must not repel it.
 
     ``disable_reuse`` skips the "route a trace to existing same-net copper
     instead of dropping a via" shortcuts (steps 1 and 1b) and goes straight to
@@ -1051,6 +1060,12 @@ def try_tap_pad(
         routing_obs = build_routing_obstacle_map(
             local, routing_config, net_id, pad_layer,
             skip_pad_blocking=False, verbose=False)
+        if corridor_ghosts is not None:
+            # #517 arm 2: steer this tap's trace away from OTHER rips'
+            # vacated corridors (single-layer map: this layer is index 0).
+            corridor_ghosts.merge_into_routing_map(
+                routing_obs, routing_config, {pad_layer: 0},
+                exclude_net_ids=ghost_exclude_ids)
 
     coord = GridCoord(config.grid_step)
 
@@ -1131,6 +1146,16 @@ def try_tap_pad(
         def zone_filter(x, y):
             return any(point_in_polygon(x, y, poly) for poly in _net_zone_polys)
 
+    ghost_pref = None
+    if corridor_ghosts is not None:
+        # #517 arm 2: soft preference for via sites OUTSIDE vacated ripped
+        # corridors (never excludes -- find_via_position's contract).
+        _gx_ids = ghost_exclude_ids
+
+        def ghost_pref(x, y):
+            return corridor_ghosts.via_site_clear(x, y, via_size,
+                                                  exclude_net_ids=_gx_ids)
+
     failed_positions: Set[Tuple[int, int]] = set()
     via_pos = find_via_position(
         pad, obstacles, coord, max_search_radius,
@@ -1142,6 +1167,7 @@ def try_tap_pad(
         failed_route_positions=failed_positions,
         pending_pads=pending_pads,
         position_filter=zone_filter,
+        position_preference=ghost_pref,
     )
     if via_pos is None:
         # No via site anywhere in the search radius. Before giving up, try
@@ -1221,6 +1247,8 @@ def tap_pad_with_escalation(
     shared_via_maps: Optional[SharedViaMaps] = None,
     pour_trace_only: bool = False,
     plane_oracle=None,
+    corridor_ghosts=None,
+    ghost_exclude_ids=(),
 ) -> TapResult:
     """Tap a pad, escalating to scoped fine parameters for fine-pitch pads.
 
@@ -1242,7 +1270,8 @@ def tap_pad_with_escalation(
             pending_pads, extra_vias, extra_segments, verbose,
             distant_trace_radius=distant_trace_radius, disable_reuse=disable_reuse,
             shared_via_maps=shared_via_maps, pour_trace_only=pour_trace_only,
-            plane_oracle=plane_oracle)
+            plane_oracle=plane_oracle, corridor_ghosts=corridor_ghosts,
+            ghost_exclude_ids=ghost_exclude_ids)
         if result.success:
             result.params_label = 'default'
             result.clearance_used = config.clearance
@@ -1297,7 +1326,8 @@ def tap_pad_with_escalation(
                 routing_clearance_cushion=True,
                 distant_trace_radius=distant_trace_radius, disable_reuse=disable_reuse,
                 shared_via_maps=shared_via_maps, pour_trace_only=pour_trace_only,
-                plane_oracle=plane_oracle)
+                plane_oracle=plane_oracle, corridor_ghosts=corridor_ghosts,
+                ghost_exclude_ids=ghost_exclude_ids)
             if result.success:
                 result.params_label = 'fine'
                 result.clearance_used = fine_config.clearance

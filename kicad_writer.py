@@ -1202,6 +1202,40 @@ def swap_segment_nets_at_positions(content: str, positions: set,
     return result, count
 
 
+def assert_balanced_sexpr(text: str, label: str = 'board'):
+    """#523 backstop: refuse to write a structurally broken board.
+
+    Quote-aware paren balance of the full text must be exactly zero; a text
+    transform that ate or duplicated a paren otherwise ships a file KiCad
+    cannot load while check_drc/check_connected (text parsers) grade it
+    normally -- the worst kind of corruption, invisible to our own checkers.
+    Raises ValueError; callers must NOT catch-and-continue.
+    """
+    depth = 0
+    in_str = False
+    esc = False
+    for ch in text:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == '\\':
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+    if depth != 0 or in_str:
+        raise ValueError(
+            f"{label}: refusing to write structurally broken s-expression "
+            f"(paren depth {depth}, in_string={in_str}) -- a text transform "
+            f"corrupted the board (#523)")
+
+
 def remove_segments_from_content(content: str, segments: List,
                                  net_id_to_name: Dict = None,
                                  unmatched_out: List = None) -> Tuple[str, int]:

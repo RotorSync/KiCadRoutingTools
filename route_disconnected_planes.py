@@ -187,18 +187,67 @@ def _via_site_consensus_blocker(pad, pcb_data, blocker_config, net_id,
 # set KICAD_PLANE_PARTIAL_RESTORE=1 to A/B the old policy on a corpus replay.
 _PLANE_PARTIAL_RESTORE = env_knobs.PLANE_PARTIAL_RESTORE
 
+# #517 arm 3 (#480): most-constrained-first repair ordering + immediate
+# reconnect of ripped nets (ordering and window-shrinking are one knob).
+# Experiment knob, default off; every branch below is gated on it.
+# 'order-only' keeps the net ordering + two-phase pad schedule but SKIPS the
+# per-pad immediate reconnect: repeated in-process batch_route calls route
+# against a stale world (arm-D spartan6 hit 885 DRC from grazes all over the
+# board; the write-list purge fixed the re-rip double-emission but not this).
+# The window-shrink half needs its own debugging session; the ordering half
+# is measurable without it.
+# #517: repair ordering + reconnect timing. DEFAULT is 'adaptive' -- the
+# arm-I winner from the 2026-07-30 A/B ladder: most-constrained-first net
+# order, two-phase pads (free-space taps first, rip-requiring pads last),
+# and immediate reconnects only when the phase-2 rip queue is SHORT at
+# phase start. The G/H split was cleanly predicted by rip pressure: boards
+# whose phases held <=12 rip pads won with immediate reconnects (astro +5,
+# zynq2 +4, apple2e full), boards with >=19 lost hard (spartan6 -15,
+# allwinner -12: each early reconnect locks routes into a still-evolving
+# world). Corpus gate (sets 1-5, 75 boards): completion flat, drc -7,
+# rips -58%, refusals -49%, ~15% faster.
+# KICAD_PLANE_REPAIR_ORDERING: 'adaptive' (default) | 'order-only' (no
+# immediate reconnects) | '1'/'full' (always-immediate) | '0'/'off'/'none'
+# (pre-#517 behavior, for A/B).
+_ORDERING_MODE = os.environ.get('KICAD_PLANE_REPAIR_ORDERING', 'adaptive') \
+    .strip().lower() or 'adaptive'
+_PLANE_REPAIR_ORDERING = _ORDERING_MODE in ('1', 'full', 'order-only',
+                                            'orderonly', 'adaptive')
+_PLANE_IMMEDIATE_RECONNECT = _ORDERING_MODE in ('1', 'full')
+_PLANE_ADAPTIVE_RECONNECT = _ORDERING_MODE == 'adaptive'
+try:
+    _PLANE_IMMEDIATE_MAX_PENDING = int(os.environ.get(
+        'KICAD_PLANE_IMMEDIATE_MAX_PENDING', '14') or 14)
+except ValueError:
+    _PLANE_IMMEDIATE_MAX_PENDING = 14
+
+# #517 arm 4, DEFAULT ON: at the end-of-run reconnect, try a verbatim
+# identity-restore of each casualty's ORIGINAL copper before re-routing it
+# (only nets whose corridor is still free restore; the rest re-route as
+# before). Zero measured regressions; dormant under adaptive ordering but
+# covers the flows ordering does not. KICAD_PLANE_RESTORE_FIRST=0 disables.
+_PLANE_RESTORE_FIRST = os.environ.get(
+    'KICAD_PLANE_RESTORE_FIRST', '1').strip().lower() not in ('0', 'off', 'no')
+
 # Shared with route_planes (#508 finding 1: its GUI reconnect had neither
 # reconcile mechanism). Re-exported here so existing call sites and
 # tests/test_463_partial_restore_stale_emit.py keep driving the REAL function.
 from plane_write_reconcile import (consume_inner_strips,  # noqa: E402,F401
                                    drop_withdrawn_partial_restores)
 
+# #517 arm 2 (#343): reserve vacated ripped-net corridors against OTHER
+# claimants. 'soft' = cost stamps in tap/region routing maps + soft via-site
+# preference; 'hard' = pre-#342 via-map over-block baseline. None = off
+# (default; every hook below no-ops).
+from plane_corridor_ghosts import CorridorGhosts, softblock_mode
+
 
 def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_config,
                         max_search_radius, via_size, via_drill, max_rip_nets,
                         protected_net_ids, first_failure, ripped_net_ids, verbose,
                         distant_trace_radius=0.0, shared_via_maps=None,
-                        partial_restores=None, plane_oracle=None):
+                        partial_restores=None, plane_oracle=None,
+                        corridor_ghosts=None, write_lists=None):
     """A plane-net pad too small to drop a via in needs a trace to the plane (or
     to an adjacent same-net pad); if signal nets block that trace, rip them (up
     to max_rip_nets), retry the tap. Identifies the blocker from the failed
@@ -249,12 +298,30 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
             break
         bname = pcb_data.nets[blocker].name if blocker in pcb_data.nets else f"net_{blocker}"
         print(f"{RED}blocked by {bname} - ripping{RESET}...", end=" ", flush=True)
-        if shared_via_maps is not None:
+        if shared_via_maps is not None and \
+                not (corridor_ghosts is not None and corridor_ghosts.mode == 'hard'):
             # Remove the blocker's stamps from the shared via maps BEFORE its
             # copper leaves pcb_data (the stamps are computed from it), then
-            # resync the copper counts after the rip (#263).
+            # resync the copper counts after the rip (#263). In #517 arm 2
+            # HARD mode the stamps deliberately STAY (pre-#342 over-block
+            # baseline; note_net_restored below is gated symmetrically so the
+            # refcounts never double-add).
             shared_via_maps.note_net_ripped(blocker)
         rsegs, rvias = _rip_net_from_pcb(pcb_data, blocker)
+        if write_lists is not None:
+            # A net can already have THIS RUN's copper in the write list (arm
+            # 3's immediate reconnect routes mid-pad-loop; a later pad may rip
+            # that same net again). The rip edits pcb_data only, so without
+            # this purge the output ships the superseded copper on top of
+            # whatever routes through the corridor afterwards (muzy_zynq2:
+            # /G18 reconnected twice -> 99 kicad-DRC). board == write list.
+            _wsegs, _wvias = write_lists
+            _wsegs[:] = [d for d in _wsegs if d.get('net_id') != blocker]
+            _wvias[:] = [d for d in _wvias if d.get('net_id') != blocker]
+        if corridor_ghosts is not None:
+            # #517 arm 2: reserve the vacated corridor against other claimants
+            # while this net is off the board.
+            corridor_ghosts.set_net(blocker, rsegs, rvias)
         ripped_local.append((blocker, rsegs, rvias))
         ripped_ids_local.add(blocker)
         from route_trace import plane_capture as _plane_capture
@@ -269,7 +336,11 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
             pad, pad_layer, net_id, pcb_data, tap_config,
             max_search_radius=max_search_radius, via_size=via_size, via_drill=via_drill,
             verbose=verbose, fine_for_all=True, distant_trace_radius=distant_trace_radius,
-            shared_via_maps=shared_via_maps, plane_oracle=plane_oracle)
+            shared_via_maps=shared_via_maps, plane_oracle=plane_oracle,
+            corridor_ghosts=corridor_ghosts,
+            # This tap's own rips freed this corridor FOR the tap: their
+            # ghosts must not repel it.
+            ghost_exclude_ids=frozenset(ripped_ids_local))
         if result.success:
             # Collision-checked restore on SUCCESS too (#329): give back every
             # ripped net whose copper does not conflict with the NEW tap
@@ -307,10 +378,13 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
                     # Nothing restorable: honest full rip for the reconnect pass.
                     if blocker not in ripped_net_ids:
                         ripped_net_ids.append(blocker)
-                    continue
+                    continue  # (#517 arm 2: ghost stays FULL, set at the rip)
                 pcb_data.segments.extend(keep_segs)
                 pcb_data.vias.extend(keep_vias)
-                if shared_via_maps is not None:
+                if shared_via_maps is not None and \
+                        not (corridor_ghosts is not None
+                             and corridor_ghosts.mode == 'hard'):
+                    # (hard mode never removed the stamps at the rip)
                     shared_via_maps.note_net_restored(blocker)
                 if dropped:
                     # Partial: the writer must strip the net's input copper and
@@ -321,11 +395,22 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
                         partial_restores.append((blocker, keep_segs, keep_vias, dropped))
                         bn = pcb_data.nets[blocker].name if blocker in pcb_data.nets else blocker
                         print(f"(partial restore {bn}: -{dropped} piece(s))", end=" ", flush=True)
+                        if corridor_ghosts is not None:
+                            # Restored copper is its own obstacle; the ghost
+                            # shrinks to the genuinely dropped legs (#517).
+                            corridor_ghosts.set_net(
+                                blocker,
+                                [s for s in rsegs if s not in keep_segs],
+                                [v for v in rvias if v not in keep_vias])
                     elif blocker not in ripped_net_ids:
                         # No partial channel (defensive): fall back to full rip.
                         pcb_data.segments = [x for x in pcb_data.segments if x not in keep_segs]
                         pcb_data.vias = [x for x in pcb_data.vias if x not in keep_vias]
                         ripped_net_ids.append(blocker)
+                        # (#517 arm 2: ghost stays FULL)
+                elif corridor_ghosts is not None:
+                    # Fully restored: nothing vacated, nothing to reserve.
+                    corridor_ghosts.drop_net(blocker)
             from route_trace import plane_capture as _plane_capture
             _plane_capture(pcb_data, 'plane-restore', net_id)  # restored non-conflicting pieces
             return result
@@ -360,11 +445,20 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
                 # Nothing restorable: honest full rip for the reconnect pass.
                 if blocker not in ripped_net_ids:
                     ripped_net_ids.append(blocker)
-                continue
+                continue  # (#517 arm 2: ghost stays FULL, set at the rip)
             pcb_data.segments.extend(keep_segs)
             pcb_data.vias.extend(keep_vias)
-            if shared_via_maps is not None:
+            if shared_via_maps is not None and \
+                    not (corridor_ghosts is not None
+                         and corridor_ghosts.mode == 'hard'):
+                # (hard mode never removed the stamps at the rip)
                 shared_via_maps.note_net_restored(blocker)
+            if corridor_ghosts is not None:
+                # Ghost shrinks to what stayed off the board (empty = drop).
+                corridor_ghosts.set_net(
+                    blocker,
+                    [s for s in rsegs if s not in keep_segs],
+                    [v for v in rvias if v not in keep_vias])
             n_restored += 1
             if dropped:
                 # Partial: the writer must strip the net's input copper and
@@ -380,6 +474,9 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
                     pcb_data.vias = [x for x in pcb_data.vias if x not in keep_vias]
                     ripped_net_ids.append(blocker)
                     n_restored -= 1
+                    if corridor_ghosts is not None:
+                        # Back to a full rip: reserve the whole footprint again.
+                        corridor_ghosts.set_net(blocker, rsegs, rvias)
         print(f"(restored {n_restored}/{len(ripped_local)} ripped net(s))",
               end=" ", flush=True)
         from route_trace import plane_capture as _plane_capture
@@ -758,6 +855,43 @@ def route_planes(
     all_new_segments: List[Dict] = []
     all_new_vias: List[Dict] = []
 
+    # #517 arm 2: per-run corridor-ghost registry (None unless the
+    # KICAD_PLANE_RIP_SOFTBLOCK env knob is set; every consumer no-ops on
+    # None, so the default path is untouched).
+    _sb_mode = softblock_mode()
+    corridor_ghosts = CorridorGhosts(_sb_mode) if _sb_mode else None
+    if corridor_ghosts is not None:
+        print(f"  (#517 corridor ghosts armed: {_sb_mode} mode)")
+
+    # #517 instrumentation: which PASS placed each piece of this run's new
+    # copper (pad-tap, region-join, partial-restore, reconnect, custody
+    # restore), so a custody REFUSED-restore can name the occupier class
+    # instead of just "copper routed meanwhile". Geometry-keyed (the same
+    # copper exists as pcb_data objects and write-list dicts; rounding
+    # matches consume_inner_strips). Anything unmatched is copper that
+    # predates this run -- a refusal against THAT means the collision test
+    # was conservative, itself a finding.
+    _copper_provenance: Dict[tuple, str] = {}
+
+    def _prov_seg(net_id, layer, sx, sy, ex, ey, tag):
+        a = (round(sx, 3), round(sy, 3))
+        b = (round(ex, 3), round(ey, 3))
+        _copper_provenance[(net_id, layer, a, b)] = tag
+        _copper_provenance[(net_id, layer, b, a)] = tag
+
+    def _prov_via(net_id, x, y, tag):
+        _copper_provenance[(net_id, round(x, 3), round(y, 3))] = tag
+
+    def _prov_lookup(kind, obj):
+        if kind == 'segment':
+            return _copper_provenance.get(
+                (obj.net_id, obj.layer,
+                 (round(obj.start_x, 3), round(obj.start_y, 3)),
+                 (round(obj.end_x, 3), round(obj.end_y, 3))),
+                'pre-existing')
+        return _copper_provenance.get(
+            (obj.net_id, round(obj.x, 3), round(obj.y, 3)), 'pre-existing')
+
     file_strip_segments: List = []
     file_strip_vias: List = []
 
@@ -835,6 +969,16 @@ def route_planes(
     except Exception:
         pass
     ripped_net_ids: List[int] = []
+    # #517 arm 3 (#524 root cause): nets whose immediate reconnect SUCCEEDED
+    # leave ripped_net_ids (they are no longer casualties) -- but their
+    # ORIGINAL input copper was ripped and replaced by different copper, and
+    # ripped_net_ids doubles as the writer's input-copper exclusion list.
+    # Without this list the writer RESURRECTED the old copper at its old
+    # coordinates alongside the new (file-only ghosts over corridors other
+    # passes had since claimed: spartan6 885 DRC / 636 kicad-DRC, all
+    # file-vs-board). Members are excluded at write exactly like ripped nets;
+    # their live copper ships from the write list.
+    inplace_reconnected_ids: List[int] = []
     # (net_id, kept_segs, kept_vias, dropped_count) for nets partially
     # restored by the success-path settle: input copper stripped at write,
     # kept pieces emitted as new copper (board==file), gap left for reconnect.
@@ -854,6 +998,137 @@ def route_planes(
     # post-reconnect pass below can re-run the join for a fill the reconnect
     # re-pinched (hex_gateway C201/C205 -- see the reconnect block).
     _round2_ctx: Dict[int, dict] = {}
+
+    if _PLANE_REPAIR_ORDERING and repair_pads and unique_nets:
+        # #517 arm 3 (#480): most-constrained-first NET order -- the net with
+        # the most disconnected pads repairs first, while contested space is
+        # emptiest. Deterministic: count desc, then net name.
+        _ord_counts: Dict[int, int] = {}
+        for _onid, (_onm, _olyrs) in unique_nets.items():
+            try:
+                _ord_counts[_onid] = len(find_unconnected_plane_pads(
+                    pcb_data, _onid, _olyrs))
+            except Exception:
+                _ord_counts[_onid] = 0
+        unique_nets = dict(sorted(
+            unique_nets.items(),
+            key=lambda kv: (-_ord_counts.get(kv[0], 0), kv[1][0])))
+        print("  (#517 ordering: net repair order = "
+              + ", ".join(f"{unique_nets[_n][0]}[{_ord_counts.get(_n, 0)}]"
+                          for _n in unique_nets) + ")")
+
+    def _reconnect_ripped_now(_rip_ids):
+        """#517 arm 3: reconnect the nets ripped for the tap that JUST
+        committed, before any other pad, region join, or reconnect can claim
+        their vacated corridors (the window-shrink half of the #480 knob).
+        Successes leave ripped_net_ids -- their new copper enters the write
+        list here; failures stay queued for the end-of-run reconnect and its
+        custody. Mirrors the end-of-run batch (same batch_route call, same
+        #513 width preservation, same #338/#441 edge floor)."""
+        _names = [pcb_data.nets[_n].name for _n in _rip_ids
+                  if _n in pcb_data.nets]
+        if not _names:
+            return
+        print(f"    (#517 ordering: immediate reconnect of {len(_names)} "
+              f"ripped net(s): {', '.join(_names)})")
+        try:
+            from route import batch_route
+            try:
+                from fix_kicad_drc_settings import effective_board_edge_clearance
+                _edge = effective_board_edge_clearance(input_file, 0.0)
+            except Exception:
+                _edge = 0.0
+            _pn = list(power_nets or [])
+            _pw = list(power_nets_widths or [])
+            if len(_pn) == len(_pw):
+                from net_queries import matches_net_filter as _mnf517
+                for _cnid in _rip_ids:
+                    _cw = _input_net_widths.get(_cnid, 0.0)
+                    _cn = (pcb_data.nets[_cnid].name
+                           if _cnid in pcb_data.nets else None)
+                    if not _cn or _cw <= (track_width or 0.0) + 1e-6:
+                        continue
+                    if _pn and _mnf517(_cn, _pn):
+                        continue
+                    _pn.append(_cn)
+                    _pw.append(_cw)
+            _ok, _fail, _t, _rdata = batch_route(
+                input_file, "", _names,
+                layers=routing_layers,
+                track_width=track_width, clearance=clearance,
+                via_size=via_size, via_drill=via_drill,
+                grid_step=grid_step, max_iterations=max_iterations,
+                power_nets=_pn or None, power_nets_widths=_pw or None,
+                board_edge_clearance=_edge,
+                disable_bga_zones=([] if no_bga_zone else None),
+                net_clearances=net_clearances,
+                hole_to_hole_clearance=hole_to_hole_clearance,
+                return_results=True, pcb_data=pcb_data)
+            for _r in _rdata.get('results', []):
+                for _s in (_r.get('new_segments') or []):
+                    all_new_segments.append(
+                        {'start': (_s.start_x, _s.start_y),
+                         'end': (_s.end_x, _s.end_y),
+                         'width': _s.width, 'layer': _s.layer,
+                         'net_id': _s.net_id})
+                    _prov_seg(_s.net_id, _s.layer, _s.start_x, _s.start_y,
+                              _s.end_x, _s.end_y, 'reconnect')
+                for _v in (_r.get('new_vias') or []):
+                    all_new_vias.append(
+                        {'x': _v.x, 'y': _v.y, 'size': _v.size,
+                         'drill': _v.drill, 'layers': _v.layers,
+                         'net_id': _v.net_id})
+                    _prov_via(_v.net_id, _v.x, _v.y, 'reconnect')
+            for _v in (_rdata.get('all_swap_vias') or []):
+                all_new_vias.append(
+                    {'x': _v.x, 'y': _v.y, 'size': _v.size,
+                     'drill': _v.drill, 'layers': _v.layers,
+                     'net_id': _v.net_id})
+                _prov_via(_v.net_id, _v.x, _v.y, 'reconnect')
+            for _s in (_rdata.get('all_swap_segments') or []):
+                all_new_segments.append(
+                    {'start': (_s.start_x, _s.start_y),
+                     'end': (_s.end_x, _s.end_y),
+                     'width': _s.width, 'layer': _s.layer,
+                     'net_id': _s.net_id})
+                _prov_seg(_s.net_id, _s.layer, _s.start_x, _s.start_y,
+                          _s.end_x, _s.end_y, 'reconnect')
+            _consume_inner_strips(_rdata, "immediate-reconnect")
+            # A net is done only if it is CONNECTED now (batch_route's own
+            # success flag is not the arbiter -- #479's lesson).
+            from check_connected import check_net_connectivity as _cnc517
+            for _nid in list(_rip_ids):
+                if _nid not in pcb_data.nets:
+                    continue
+                _r517 = _cnc517(
+                    _nid,
+                    [s for s in pcb_data.segments if s.net_id == _nid],
+                    [v for v in pcb_data.vias if v.net_id == _nid],
+                    pcb_data.pads_by_net.get(_nid, []),
+                    [z for z in (getattr(pcb_data, 'zones', None) or [])
+                     if z.net_id == _nid],
+                    pcb_data=pcb_data)
+                if _r517.get('connected'):
+                    while _nid in ripped_net_ids:
+                        ripped_net_ids.remove(_nid)
+                    if _nid not in inplace_reconnected_ids:
+                        # The writer must still strip this net's INPUT copper
+                        # (ripped and replaced); see inplace_reconnected_ids.
+                        inplace_reconnected_ids.append(_nid)
+                    if corridor_ghosts is not None:
+                        corridor_ghosts.drop_net(_nid)
+                    print(f"    (#517 ordering: {pcb_data.nets[_nid].name} "
+                          f"reconnected in place)")
+            # The reconnect mutated copper; drop the cached plane fill models
+            # (mirrors the end-of-run reconnect).
+            try:
+                from plane_fill_model import _CACHE_ATTR as _PFM_CACHE_O
+                if hasattr(pcb_data, _PFM_CACHE_O):
+                    delattr(pcb_data, _PFM_CACHE_O)
+            except Exception:
+                pass
+        except Exception as _e:
+            print(f"{RED}    immediate reconnect failed: {_e}{RESET}")
 
     for net_id, (net_name, net_zone_layers) in unique_nets.items():
         if cancel_check and cancel_check():
@@ -905,7 +1180,36 @@ def route_planes(
                 if plane_oracle.n_floating_items:
                     print(f"    (plane oracle: {plane_oracle.n_floating_items} "
                           f"floating same-net item(s) excluded as tap targets)")
-                for _pr_idx, (pad, pad_layer) in enumerate(unconnected):
+                # #517 arm 3: under the ordering knob, pads run in two phases:
+                # phase 1 tries every pad WITHOUT rips (free-space claims
+                # first, none of them contested); pads that would need a rip
+                # are deferred to phase 2, where each rip's nets reconnect
+                # IMMEDIATELY after the tap commits, so at most one vacated
+                # corridor is ever open. Default: single phase, rips inline
+                # (allow_rip from the start), exactly the old loop.
+                _pad_queue = [(p, l, not _PLANE_REPAIR_ORDERING)
+                              for (p, l) in unconnected]
+                _deferred_rip: List = []
+                _phase2_immediate = False
+                _pr_idx = -1
+                while _pad_queue or _deferred_rip:
+                    if not _pad_queue:
+                        _phase2_immediate = _PLANE_IMMEDIATE_RECONNECT or (
+                            _PLANE_ADAPTIVE_RECONNECT
+                            and len(_deferred_rip)
+                            <= _PLANE_IMMEDIATE_MAX_PENDING)
+                        _mode_note = ""
+                        if _PLANE_ADAPTIVE_RECONNECT:
+                            _mode_note = (" [adaptive: immediate]"
+                                          if _phase2_immediate else
+                                          " [adaptive: deferred to end batch]")
+                        print(f"    (#517 ordering: phase 2 -- "
+                              f"{len(_deferred_rip)} rip-requiring pad(s)"
+                              f"{_mode_note})")
+                        _pad_queue = [(p, l, True) for (p, l) in _deferred_rip]
+                        _deferred_rip = []
+                    pad, pad_layer, _allow_rip = _pad_queue.pop(0)
+                    _pr_idx += 1
                     if cancel_check and cancel_check():
                         print("    (cancelled)")
                         break
@@ -924,9 +1228,19 @@ def route_planes(
                         fine_for_all=True,  # last-resort repair: escalate every failed pad
                         distant_trace_radius=distant_radius,
                         shared_via_maps=shared_maps,
-                        plane_oracle=plane_oracle
+                        plane_oracle=plane_oracle,
+                        corridor_ghosts=corridor_ghosts
                     )
+                    _rips_before = len(ripped_net_ids)
                     if not result.success and rip_blocker_nets:
+                        if not _allow_rip:
+                            # #517 arm 3 phase 1: this pad needs a rip --
+                            # defer it so the free-space pads claim first and
+                            # the rips run one-at-a-time with immediate
+                            # reconnects in phase 2.
+                            _deferred_rip.append((pad, pad_layer))
+                            print("(needs rip - deferred to phase 2)")
+                            continue
                         # Rip the signal net(s) blocking this pad's trace and retry
                         # (the ripped nets are re-routed after the repair pass).
                         rr = _tap_pad_with_ripup(
@@ -938,7 +1252,9 @@ def route_planes(
                             partial_restores=(partial_restores
                                               if _PLANE_PARTIAL_RESTORE
                                               else None),
-                            plane_oracle=plane_oracle)
+                            plane_oracle=plane_oracle,
+                            corridor_ghosts=corridor_ghosts,
+                            write_lists=(all_new_segments, all_new_vias))
                         if rr is not None:
                             result = rr
                     if result.success:
@@ -969,6 +1285,12 @@ def route_planes(
                             new_seg_objs.append(seg_obj)
                             pcb_data.segments.append(seg_obj)
                         shared_maps.note_pass_copper(new_via_objs, new_seg_objs)
+                        for _po in new_seg_objs:
+                            _prov_seg(_po.net_id, _po.layer, _po.start_x,
+                                      _po.start_y, _po.end_x, _po.end_y,
+                                      'pad-tap')
+                        for _po in new_via_objs:
+                            _prov_via(_po.net_id, _po.x, _po.y, 'pad-tap')
                         # T6: this tap was oracle-verified to reach the main
                         # plane; credit its pad + copper so later pads may
                         # strap to them (transitive, no graph rebuild).
@@ -980,6 +1302,14 @@ def route_planes(
                     else:
                         failed_repair_pads.append(f"{pad.component_ref}.{pad.pad_number} ({net_name})")
                         print(f"{RED}FAILED{RESET}")
+                    if (_phase2_immediate and _allow_rip
+                            and len(ripped_net_ids) > _rips_before
+                            and (return_results or not dry_run)):
+                        # #517 arm 3: this pad's rips (tap committed OR failed
+                        # with unrestorable pieces) reconnect NOW, while their
+                        # corridors are still exactly as the rip left them.
+                        _reconnect_ripped_now(
+                            list(ripped_net_ids[_rips_before:]))
 
         # Build obstacle map for this net
         if progress_callback:
@@ -999,6 +1329,12 @@ def route_planes(
             hole_to_hole_clearance=hole_to_hole_clearance
         )
         print("done")
+        if corridor_ghosts is not None:
+            # #517 arm 2: region-join straps were the second-largest occupier
+            # of refused-restore corridors (140 items in the arm-1 histogram);
+            # steer them away from every corridor vacated so far.
+            corridor_ghosts.merge_into_routing_map(base_obstacles, config,
+                                                   layer_map)
 
         _round2_ctx[net_id] = {
             'net_name': net_name, 'primary_layer': primary_layer,
@@ -1052,6 +1388,8 @@ def route_planes(
                     end_x=end[0], end_y=end[1],
                     width=s['width'], layer=s['layer'], net_id=s['net_id']
                 ))
+                _prov_seg(s['net_id'], s['layer'], start[0], start[1],
+                          end[0], end[1], 'region-join')
 
             # Add vias to pcb_data so subsequent nets see them as obstacles
             for v in region_vias:
@@ -1061,6 +1399,7 @@ def route_planes(
                     layers=['F.Cu', 'B.Cu'],  # Through-hole vias
                     net_id=v['net_id']
                 ))
+                _prov_via(v['net_id'], v['x'], v['y'], 'region-join')
             from route_trace import plane_capture as _plane_capture
             _plane_capture(pcb_data, 'plane-join', net_id, net_name)  # individual region-join frame
 
@@ -1093,12 +1432,15 @@ def route_planes(
                   'net_id': _pid}
             all_new_segments.append(_d)
             _partial_emitted_segs.append(_d)
+            _prov_seg(_pid, _ks.layer, _ks.start_x, _ks.start_y,
+                      _ks.end_x, _ks.end_y, 'partial-restore')
         for _kv in _kvias:
             _d = {'x': _kv.x, 'y': _kv.y, 'size': _kv.size,
                   'drill': _kv.drill, 'layers': _kv.layers,
                   'net_id': _pid}
             all_new_vias.append(_d)
             _partial_emitted_vias.append(_d)
+            _prov_via(_pid, _kv.x, _kv.y, 'partial-restore')
 
     # The ripped signal nets' old copper is excluded from the OUTPUT but still
     # sits in pcb_data here (stripped only at write time). Drop it before the
@@ -1132,6 +1474,53 @@ def route_planes(
     # happened, so the in-memory reconnect still runs (return_results). A CLI
     # --dry-run skips it.
     if _casualties and (return_results or not dry_run):
+        if _PLANE_RESTORE_FIRST and _casualties:
+            # #517 arm 4: BEFORE re-routing, try the cheapest reconnect there
+            # is -- put each casualty's ORIGINAL copper back verbatim where its
+            # corridor is still free (the rip cleared space for a tap; if the
+            # tap's copper does not actually conflict with the original run,
+            # nothing ever needed to move). Collision-checked with the shared
+            # #134 primitive; conflicting nets fall through to the re-route
+            # exactly as before. Runs at reconnect time, not end-of-run like
+            # custody, so other casualties' re-routes cannot claim the
+            # corridor first.
+            _rf = {'restored': 0, 'blocked': 0}
+            from rip_up_reroute import _saved_route_collides as _src517
+            for _cid in list(_casualties):
+                if _cid in partial_ids or _cid not in pcb_data.nets:
+                    continue  # partial kept-sets restore via their own channel
+                _osegs4 = [s for s in _orig_segments if s.net_id == _cid]
+                _ovias4 = [v for v in _orig_vias if v.net_id == _cid]
+                if not _osegs4 and not _ovias4:
+                    continue
+                if _src517({'new_segments': _osegs4, 'new_vias': _ovias4},
+                           pcb_data, [_cid], clearance):
+                    _rf['blocked'] += 1
+                    continue
+                pcb_data.segments.extend(_osegs4)
+                pcb_data.vias.extend(_ovias4)
+                for _po in _osegs4:
+                    _prov_seg(_po.net_id, _po.layer, _po.start_x, _po.start_y,
+                              _po.end_x, _po.end_y, 'restore-first')
+                for _po in _ovias4:
+                    _prov_via(_po.net_id, _po.x, _po.y, 'restore-first')
+                while _cid in ripped_net_ids:
+                    ripped_net_ids.remove(_cid)
+                while _cid in inplace_reconnected_ids:
+                    # Original copper is back verbatim; the writer must keep
+                    # the input text, not strip it (#524 resurrection guard).
+                    inplace_reconnected_ids.remove(_cid)
+                _casualties.remove(_cid)
+                if corridor_ghosts is not None:
+                    corridor_ghosts.drop_net(_cid)
+                _rf['restored'] += 1
+                print(f"  (#517 restore-first: {pcb_data.nets[_cid].name} "
+                      f"identity-restored, corridor still free)")
+            if _rf['restored'] or _rf['blocked']:
+                print(f"  (#517 restore-first: {_rf['restored']} restored "
+                      f"verbatim, {_rf['blocked']} corridor(s) occupied -> "
+                      f"re-route)")
+
         _cnames = [pcb_data.nets[n].name for n in _casualties if n in pcb_data.nets]
         if _cnames:
             print(f"\nReconnecting {len(_cnames)} net(s) this run ripped for pad "
@@ -1185,6 +1574,7 @@ def route_planes(
                     # project (batch_route's own auto-read would find no
                     # netclasses next to a not-yet-written output).
                     net_clearances=net_clearances,
+                    hole_to_hole_clearance=hole_to_hole_clearance,
                     # #527: forward progress/cancel -- a multi-net reconnect
                     # used to run minutes behind one static message.
                     progress_callback=(
@@ -1205,14 +1595,20 @@ def route_planes(
                             'drill': _v.drill, 'layers': _v.layers,
                             'net_id': _v.net_id}
                 for _r in _rdata.get('results', []):
-                    all_new_segments.extend(
-                        _sd(_s) for _s in (_r.get('new_segments') or []))
-                    all_new_vias.extend(
-                        _vd(_v) for _v in (_r.get('new_vias') or []))
-                all_new_vias.extend(
-                    _vd(_v) for _v in (_rdata.get('all_swap_vias') or []))
-                all_new_segments.extend(
-                    _sd(_s) for _s in (_rdata.get('all_swap_segments') or []))
+                    for _s in (_r.get('new_segments') or []):
+                        all_new_segments.append(_sd(_s))
+                        _prov_seg(_s.net_id, _s.layer, _s.start_x, _s.start_y,
+                                  _s.end_x, _s.end_y, 'reconnect')
+                    for _v in (_r.get('new_vias') or []):
+                        all_new_vias.append(_vd(_v))
+                        _prov_via(_v.net_id, _v.x, _v.y, 'reconnect')
+                for _v in (_rdata.get('all_swap_vias') or []):
+                    all_new_vias.append(_vd(_v))
+                    _prov_via(_v.net_id, _v.x, _v.y, 'reconnect')
+                for _s in (_rdata.get('all_swap_segments') or []):
+                    all_new_segments.append(_sd(_s))
+                    _prov_seg(_s.net_id, _s.layer, _s.start_x, _s.start_y,
+                              _s.end_x, _s.end_y, 'reconnect')
                 _consume_inner_strips(_rdata, "reconnect")
                 # The reconnect mutated copper, and the plane fill models are
                 # cached on pcb_data (they subtract foreign-copper halos, so a
@@ -1304,14 +1700,33 @@ def route_planes(
                       # GPIO-P20: endpoints 1.600/0.400 vs a 0.230 rule,
                       # true crossing 0.000). It also tested only a
                       # segment's START point against restored vias.
-                      from rip_up_reroute import _saved_route_collides
-                      if _saved_route_collides(
-                              {'new_segments': _osegs, 'new_vias': _ovias},
-                              pcb_data, [_cid], clearance):
+                      from rip_up_reroute import _saved_route_colliders
+                      _culprits = _saved_route_colliders(
+                          {'new_segments': _osegs, 'new_vias': _ovias},
+                          pcb_data, [_cid], clearance)
+                      if _culprits:
                           print(f"  {YELLOW}REFUSED restore of {_nm}: copper "
                                 f"routed meanwhile occupies its corridor; "
                                 f"left unrouted rather than displacing it"
                                 f"{RESET}")
+                          # #517: name the pass that placed the occupying
+                          # copper -- residual refusals point at the next
+                          # custody lever. 'pre-existing' means the collision
+                          # test flagged copper this run never touched (a
+                          # conservative-test finding, not an occupier).
+                          _attr: Dict[tuple, int] = {}
+                          for _kind, _obj in _culprits:
+                              _tag = _prov_lookup(_kind, _obj)
+                              _onm = (pcb_data.nets[_obj.net_id].name
+                                      if _obj.net_id in pcb_data.nets
+                                      else f"net_{_obj.net_id}")
+                              _k = (_tag, _onm)
+                              _attr[_k] = _attr.get(_k, 0) + 1
+                          _parts = [
+                              f"{_t} {_n} x{_c}" for (_t, _n), _c in
+                              sorted(_attr.items(), key=lambda kv: -kv[1])]
+                          print(f"  {YELLOW}  occupied by: "
+                                f"{'; '.join(_parts)}{RESET}")
                           _cust['refused'] += 1
                           continue
                       # Corridor still clear: drop the failed reroute and
@@ -1330,7 +1745,15 @@ def route_planes(
                       # lists below
                       pcb_data.segments.extend(_osegs)
                       pcb_data.vias.extend(_ovias)
-                      for _lst in (ripped_net_ids, partial_ids):
+                      for _po in _osegs:
+                          _prov_seg(_po.net_id, _po.layer, _po.start_x,
+                                    _po.start_y, _po.end_x, _po.end_y,
+                                    'custody-restore')
+                      for _po in _ovias:
+                          _prov_via(_po.net_id, _po.x, _po.y,
+                                    'custody-restore')
+                      for _lst in (ripped_net_ids, partial_ids,
+                                   inplace_reconnected_ids):
                           while _cid in _lst:
                               _lst.remove(_cid)
                       _still_open.remove(_cid)
@@ -1356,6 +1779,80 @@ def route_planes(
                       f"of {len(_casualties)} casualty net(s)")
             if _still_open:
                 _report_unrouted_ripped_nets(pcb_data, _still_open)
+            if corridor_ghosts is not None:
+                # #517 arm 2: custody-defined lifetime -- a casualty that is
+                # connected again (reconnected, or custody-restored) has real
+                # copper as its own obstacle; its ghost would only repel the
+                # fill-aware sweep below from a corridor that is no longer
+                # vacated. Still-open nets keep their reservation through the
+                # sweep.
+                _open_set = set(_still_open)
+                for _cid in _casualties:
+                    if _cid not in _open_set:
+                        corridor_ghosts.drop_net(_cid)
+
+    # #524 second path: a FAILED immediate reconnect leaves its partial copper
+    # in the write list; the end-of-run batch_route then rips that copper
+    # INTERNALLY (its own rip/refuse machinery, invisible to the
+    # _tap_pad_with_ripup purge), and LATER passes (graze/dead-end cleanup on
+    # the failed nets' dangling fragments) withdraw yet more board copper --
+    # while the write list still carries it (astro SDA x66 / +3.3V x230
+    # file-only ghosts, drc 39/kdrc 27; residual x24/x115 when this ran only
+    # once, post-custody). Reconcile the write list against the BOARD for
+    # every net any rip/reconnect touched, IMMEDIATELY BEFORE EACH WRITE, so
+    # no later withdrawal can slip past it. An emission with no matching
+    # board copper is withdrawn copper and must not ship.
+    _recon_scope_ids = (set(_casualties) | set(ripped_net_ids)
+                        | set(inplace_reconnected_ids))
+
+    def _reconcile_write_list_vs_board(_label):
+        # COUNTED multiset, not a set: the immediate reconnect and the
+        # end-of-run reconnect can emit the SAME copper twice (batch_route
+        # re-reports adopted existing pieces of a re-routed net), and a
+        # set-based keep let both copies ship while the board holds one
+        # (astro +3.3V x115 / SDA x24 duplicate emissions).
+        if not _recon_scope_ids:
+            return
+        from collections import Counter
+        _board_segs = Counter()
+        for _s in pcb_data.segments:
+            if _s.net_id in _recon_scope_ids:
+                _a = (round(_s.start_x, 3), round(_s.start_y, 3))
+                _b = (round(_s.end_x, 3), round(_s.end_y, 3))
+                _board_segs[(frozenset((_a, _b)), _s.layer, _s.net_id)] += 1
+        _board_vias = Counter()
+        for _v in pcb_data.vias:
+            if _v.net_id in _recon_scope_ids:
+                _board_vias[(round(_v.x, 3), round(_v.y, 3), _v.net_id)] += 1
+        _gs, _gv = 0, 0
+        _kept_s = []
+        for _d in all_new_segments:
+            if _d.get('net_id') in _recon_scope_ids:
+                _a = (round(_d['start'][0], 3), round(_d['start'][1], 3))
+                _b = (round(_d['end'][0], 3), round(_d['end'][1], 3))
+                _k = (frozenset((_a, _b)), _d['layer'], _d['net_id'])
+                if _board_segs.get(_k, 0) <= 0:
+                    _gs += 1
+                    continue
+                _board_segs[_k] -= 1
+            _kept_s.append(_d)
+        _kept_v = []
+        for _d in all_new_vias:
+            if _d.get('net_id') in _recon_scope_ids:
+                _k = (round(_d['x'], 3), round(_d['y'], 3), _d['net_id'])
+                if _board_vias.get(_k, 0) <= 0:
+                    _gv += 1
+                    continue
+                _board_vias[_k] -= 1
+            _kept_v.append(_d)
+        if _gs or _gv:
+            all_new_segments[:] = _kept_s
+            all_new_vias[:] = _kept_v
+            print(f"  (#524 write-list reconcile [{_label}]: dropped {_gs} "
+                  f"segment(s) and {_gv} via(s) withdrawn from the board "
+                  f"or duplicated)")
+
+    _reconcile_write_list_vs_board('post-custody')
 
     # A partial restore's kept-set is emitted into the write list ABOVE, before
     # the reconnect runs, and unconditionally. But the reconnect may RE-ROUTE
@@ -1500,10 +1997,12 @@ def route_planes(
                 _nm10 = (pcb_data.net_id_to_name
                          if pcb_data.kicad_version >= KICAD_10_MIN_VERSION
                          else None)
+                _reconcile_write_list_vs_board('pre-oracle')
                 _write_output(input_file, _tmp.name, all_new_segments,
                               all_new_vias, None,
                               net_id_to_name=_nm10,
-                              exclude_net_ids=ripped_net_ids + partial_ids)
+                              exclude_net_ids=(ripped_net_ids + partial_ids
+                                               + inplace_reconnected_ids))
                 _links = None
                 # DETERMINISTIC gate source (#490): kicad-cli DRC's threaded
                 # connectivity gives different link reports run-to-run on
@@ -1849,7 +2348,8 @@ def route_planes(
                             via_drill=dtry, verbose=verbose, fine_for_all=True,
                             distant_trace_radius=0.0, disable_reuse=True,
                             shared_via_maps=shared_maps,
-                            plane_oracle=sweep_oracle)
+                            plane_oracle=sweep_oracle,
+                            corridor_ghosts=corridor_ghosts)
                         if result.success and result.via is not None:
                             if (vtry, dtry) in _escalated_pairs:
                                 warn_fab_escalation(
@@ -1936,7 +2436,8 @@ def route_planes(
                             via_size=via_size, via_drill=via_drill,
                             verbose=verbose, fine_for_all=True, pour_trace_only=True,
                             distant_trace_radius=max_search_radius, disable_reuse=True,
-                            plane_oracle=sweep_oracle)
+                            plane_oracle=sweep_oracle,
+                            corridor_ghosts=corridor_ghosts)
                         if not (track_res.success and track_res.segments):
                             continue
                         new_seg_objs = []
@@ -2092,6 +2593,8 @@ def route_planes(
         _ptrace.capture(pcb_data, 'plane-reconnect')
         _ptrace.dump(output_file, pcb_data)
 
+    _reconcile_write_list_vs_board('final')
+
     if return_results:
         # GUI/stress parity (gap closure): the CLI main runs post-passes on
         # its written file that the GUI path used to skip -- the shared
@@ -2186,11 +2689,13 @@ def route_planes(
         if progress_callback:
             progress_callback(1, 1, "Plane repair complete")
         return (total_routes, total_regions, all_new_vias, all_new_segments,
-                ripped_net_ids + partial_ids, _strip_segments)
+                ripped_net_ids + partial_ids + inplace_reconnected_ids,
+                _strip_segments)
 
     if dry_run:
         print("\nDry run - no output file written")
-    elif total_routes > 0 or total_pads_repaired > 0 or ripped_net_ids or partial_ids:
+    elif total_routes > 0 or total_pads_repaired > 0 or ripped_net_ids \
+            or partial_ids or inplace_reconnected_ids:
         print(f"\nWriting output to {output_file}...")
         # Strip the ripped signal nets' copper from the output - they are left
         # unrouted for a subsequent route.py pass to reconnect (#141 reverted).
@@ -2198,7 +2703,8 @@ def route_planes(
         # all_new_segments/all_new_vias (replacement).
         _write_output(input_file, output_file, all_new_segments, all_new_vias, all_debug_lines,
                       net_id_to_name=kv10_names,
-                      exclude_net_ids=ripped_net_ids + partial_ids,
+                      exclude_net_ids=(ripped_net_ids + partial_ids
+                                       + inplace_reconnected_ids),
                       removed_segments=file_strip_segments,
                       removed_vias=file_strip_vias,
                       add_teardrops=add_teardrops)
@@ -2333,6 +2839,11 @@ def _write_output(input_file: str, output_file: str, segments: List[Dict], vias:
         print(f"  Added teardrops to {_vtd} vias" if _vtd
               else "  No vias needed teardrops (none present, or all already set)")
 
+    # #523 backstop: never write a board whose s-expression structure broke
+    # in one of the text transforms above -- a truncated file loads in our
+    # text parsers but not in KiCad, so it would ship invisibly.
+    from kicad_writer import assert_balanced_sexpr
+    assert_balanced_sexpr(new_content, label=output_file)
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(new_content)
 
