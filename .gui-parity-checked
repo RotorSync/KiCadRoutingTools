@@ -1,22 +1,31 @@
-HEAD 2026-07-29 parity audit 335e88d..015aaea (the #501 meander-spacing
-commit). Outcome: NO GAPS (new param threaded correctly on first pass),
-all gates PASSED, chain copper sets IDENTICAL.
+HEAD 2026-07-29 parity audit 015aaea..ef4c19a (the #520/#521 wave: multipoint
+matching, protected nets, locked copper, impedance persistence — 6 commits).
+Outcome: NO GAPS, all gates PASSED at HEAD, chain copper sets IDENTICAL.
 
-  * #501 (015aaea) added --meander-spacing / meander_spacing with the full
-    treatment in one commit: argparse (route.py + route_diff.py) ->
-    batch_route/batch_route_diff_pairs kwarg -> routing_common config
-    builder -> GridRouteConfig; GUI SpinCtrlDouble named meander_spacing
-    (own "Arm spacing (x width)" row -- a third spin overflowed the
-    Tolerance/Amplitude row, user-reported clipping), reset_params_to_
-    defaults, settings_persistence save/load, differential tab call site.
-    manifest_to_plan needs no FLAG_PARAMS entry: the generic unknown-flag
-    fallthrough carries --meander-spacing -> meander_spacing (same as
-    --meander-amplitude), verified by test_manifest_plan_parity.
-  * Gates at this commit: test_engine_kwarg_parity OK under KiCad python
-    (call-site forwarding checks OK); test_manifest_plan_parity 14767
-    checks 0 mismatches; test_cli_postpass_coverage clean (no new CLI-only
-    post-pass); test_gui_engine_parity VERDICT: PARITY -- segments
-    CLI=GUI=1307, vias 144=144, DRC 0/0, copper sets IDENTICAL.
-  * Note: the parity chain does not exercise length matching itself; the
-    meander geometry change was validated separately (unit sanity + two
-    demo boards, DRC-clean/connected, arm pitch measured 2W on copper).
+  * No new CLI flags or dialog params in the span — #521's protection/
+    impedance features are deliberately flagless (auto-read from the sibling
+    .kicad_pro via PCBData.source_path, the #498 dru pattern), so there was
+    nothing to thread through argparse/controls/FLAG_PARAMS.
+  * New CLI post-passes persist_protected_nets + persist_impedance_specs are
+    REGISTERED in test_cli_postpass_coverage with their GUI counterparts:
+    ai_plan._write_drc_floors (plan end), gui_utils.update_live_drc_floors
+    (diff-tab manual steps), swig_gui._apply_results_to_board (signal-tab
+    manual steps, ef4c19a). The gate's scanner now also walks the
+    `if __name__ == "__main__"` CLI blocks (route.py/route_diff.py have no
+    def main), so these passes are enforced, not just documented.
+  * Parser-parity edge (the one that CAN drift silently): Segment.locked /
+    Via.locked added to BOTH parse paths in the same commit — text parser
+    (incl. the v9 via pattern that previously dropped locked vias entirely,
+    and linearized arcs) and build_pcb_data_from_board (IsLocked()).
+  * Engine-internal changes (pair_leg_metric, multipoint span meandering,
+    protection enforcement in batch_route's rip expansion + plane repair's
+    never-rip set, net_layer_widths impedance reapply) live inside the shared
+    engine functions both fronts call — inherited, no per-front wiring.
+  * Gates at ef4c19a: test_engine_kwarg_parity OK under KiCad python;
+    test_manifest_plan_parity 14767 checks 0 mismatches;
+    test_cli_postpass_coverage 6 registered, 0 failures/warnings;
+    test_gui_engine_parity VERDICT: PARITY — segments CLI=GUI=1307, vias
+    144=144, DRC 0/0, copper sets IDENTICAL. Feature-level coverage beyond
+    the chain gate: tests/test_meander_demo_boards.py drives the real CLIs
+    over protection/locked/impedance-redo scenarios (the parity chain has no
+    match groups, so those paths are inert in it by design).
