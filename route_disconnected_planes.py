@@ -181,6 +181,16 @@ def _via_site_consensus_blocker(pad, pcb_data, blocker_config, net_id,
 # set KICAD_PLANE_PARTIAL_RESTORE=1 to A/B the old policy on a corpus replay.
 _PLANE_PARTIAL_RESTORE = os.environ.get('KICAD_PLANE_PARTIAL_RESTORE') == '1'
 
+# #517 arm 3 (#480): most-constrained-first repair ordering + immediate
+# reconnect of ripped nets (ordering and window-shrinking are one knob).
+# Experiment knob, default off; every branch below is gated on it.
+_PLANE_REPAIR_ORDERING = os.environ.get('KICAD_PLANE_REPAIR_ORDERING') == '1'
+
+# #517 arm 4: at the end-of-run reconnect, try a verbatim identity-restore of
+# each casualty's ORIGINAL copper before re-routing it (only nets whose
+# corridor is still free restore; the rest re-route as before).
+_PLANE_RESTORE_FIRST = os.environ.get('KICAD_PLANE_RESTORE_FIRST') == '1'
+
 # Shared with route_planes (#508 finding 1: its GUI reconnect had neither
 # reconcile mechanism). Re-exported here so existing call sites and
 # tests/test_463_partial_restore_stale_emit.py keep driving the REAL function.
@@ -912,6 +922,132 @@ def route_planes(
     # re-pinched (hex_gateway C201/C205 -- see the reconnect block).
     _round2_ctx: Dict[int, dict] = {}
 
+    if _PLANE_REPAIR_ORDERING and repair_pads and unique_nets:
+        # #517 arm 3 (#480): most-constrained-first NET order -- the net with
+        # the most disconnected pads repairs first, while contested space is
+        # emptiest. Deterministic: count desc, then net name.
+        _ord_counts: Dict[int, int] = {}
+        for _onid, (_onm, _olyrs) in unique_nets.items():
+            try:
+                _ord_counts[_onid] = len(find_unconnected_plane_pads(
+                    pcb_data, _onid, _olyrs))
+            except Exception:
+                _ord_counts[_onid] = 0
+        unique_nets = dict(sorted(
+            unique_nets.items(),
+            key=lambda kv: (-_ord_counts.get(kv[0], 0), kv[1][0])))
+        print("  (#517 ordering: net repair order = "
+              + ", ".join(f"{unique_nets[_n][0]}[{_ord_counts.get(_n, 0)}]"
+                          for _n in unique_nets) + ")")
+
+    def _reconnect_ripped_now(_rip_ids):
+        """#517 arm 3: reconnect the nets ripped for the tap that JUST
+        committed, before any other pad, region join, or reconnect can claim
+        their vacated corridors (the window-shrink half of the #480 knob).
+        Successes leave ripped_net_ids -- their new copper enters the write
+        list here; failures stay queued for the end-of-run reconnect and its
+        custody. Mirrors the end-of-run batch (same batch_route call, same
+        #513 width preservation, same #338/#441 edge floor)."""
+        _names = [pcb_data.nets[_n].name for _n in _rip_ids
+                  if _n in pcb_data.nets]
+        if not _names:
+            return
+        print(f"    (#517 ordering: immediate reconnect of {len(_names)} "
+              f"ripped net(s): {', '.join(_names)})")
+        try:
+            from route import batch_route
+            try:
+                from fix_kicad_drc_settings import effective_board_edge_clearance
+                _edge = effective_board_edge_clearance(input_file, 0.0)
+            except Exception:
+                _edge = 0.0
+            _pn = list(power_nets or [])
+            _pw = list(power_nets_widths or [])
+            if len(_pn) == len(_pw):
+                from net_queries import matches_net_filter as _mnf517
+                for _cnid in _rip_ids:
+                    _cw = _input_net_widths.get(_cnid, 0.0)
+                    _cn = (pcb_data.nets[_cnid].name
+                           if _cnid in pcb_data.nets else None)
+                    if not _cn or _cw <= (track_width or 0.0) + 1e-6:
+                        continue
+                    if _pn and _mnf517(_cn, _pn):
+                        continue
+                    _pn.append(_cn)
+                    _pw.append(_cw)
+            _ok, _fail, _t, _rdata = batch_route(
+                input_file, "", _names,
+                layers=routing_layers,
+                track_width=track_width, clearance=clearance,
+                via_size=via_size, via_drill=via_drill,
+                grid_step=grid_step, max_iterations=max_iterations,
+                power_nets=_pn or None, power_nets_widths=_pw or None,
+                board_edge_clearance=_edge,
+                disable_bga_zones=([] if no_bga_zone else None),
+                net_clearances=net_clearances,
+                return_results=True, pcb_data=pcb_data)
+            for _r in _rdata.get('results', []):
+                for _s in (_r.get('new_segments') or []):
+                    all_new_segments.append(
+                        {'start': (_s.start_x, _s.start_y),
+                         'end': (_s.end_x, _s.end_y),
+                         'width': _s.width, 'layer': _s.layer,
+                         'net_id': _s.net_id})
+                    _prov_seg(_s.net_id, _s.layer, _s.start_x, _s.start_y,
+                              _s.end_x, _s.end_y, 'reconnect')
+                for _v in (_r.get('new_vias') or []):
+                    all_new_vias.append(
+                        {'x': _v.x, 'y': _v.y, 'size': _v.size,
+                         'drill': _v.drill, 'layers': _v.layers,
+                         'net_id': _v.net_id})
+                    _prov_via(_v.net_id, _v.x, _v.y, 'reconnect')
+            for _v in (_rdata.get('all_swap_vias') or []):
+                all_new_vias.append(
+                    {'x': _v.x, 'y': _v.y, 'size': _v.size,
+                     'drill': _v.drill, 'layers': _v.layers,
+                     'net_id': _v.net_id})
+                _prov_via(_v.net_id, _v.x, _v.y, 'reconnect')
+            for _s in (_rdata.get('all_swap_segments') or []):
+                all_new_segments.append(
+                    {'start': (_s.start_x, _s.start_y),
+                     'end': (_s.end_x, _s.end_y),
+                     'width': _s.width, 'layer': _s.layer,
+                     'net_id': _s.net_id})
+                _prov_seg(_s.net_id, _s.layer, _s.start_x, _s.start_y,
+                          _s.end_x, _s.end_y, 'reconnect')
+            _consume_inner_strips(_rdata, "immediate-reconnect")
+            # A net is done only if it is CONNECTED now (batch_route's own
+            # success flag is not the arbiter -- #479's lesson).
+            from check_connected import check_net_connectivity as _cnc517
+            for _nid in list(_rip_ids):
+                if _nid not in pcb_data.nets:
+                    continue
+                _r517 = _cnc517(
+                    _nid,
+                    [s for s in pcb_data.segments if s.net_id == _nid],
+                    [v for v in pcb_data.vias if v.net_id == _nid],
+                    pcb_data.pads_by_net.get(_nid, []),
+                    [z for z in (getattr(pcb_data, 'zones', None) or [])
+                     if z.net_id == _nid],
+                    pcb_data=pcb_data)
+                if _r517.get('connected'):
+                    while _nid in ripped_net_ids:
+                        ripped_net_ids.remove(_nid)
+                    if corridor_ghosts is not None:
+                        corridor_ghosts.drop_net(_nid)
+                    print(f"    (#517 ordering: {pcb_data.nets[_nid].name} "
+                          f"reconnected in place)")
+            # The reconnect mutated copper; drop the cached plane fill models
+            # (mirrors the end-of-run reconnect).
+            try:
+                from plane_fill_model import _CACHE_ATTR as _PFM_CACHE_O
+                if hasattr(pcb_data, _PFM_CACHE_O):
+                    delattr(pcb_data, _PFM_CACHE_O)
+            except Exception:
+                pass
+        except Exception as _e:
+            print(f"{RED}    immediate reconnect failed: {_e}{RESET}")
+
     for net_id, (net_name, net_zone_layers) in unique_nets.items():
         if cancel_check and cancel_check():
             print("\nPlane repair cancelled")
@@ -962,7 +1098,25 @@ def route_planes(
                 if plane_oracle.n_floating_items:
                     print(f"    (plane oracle: {plane_oracle.n_floating_items} "
                           f"floating same-net item(s) excluded as tap targets)")
-                for _pr_idx, (pad, pad_layer) in enumerate(unconnected):
+                # #517 arm 3: under the ordering knob, pads run in two phases:
+                # phase 1 tries every pad WITHOUT rips (free-space claims
+                # first, none of them contested); pads that would need a rip
+                # are deferred to phase 2, where each rip's nets reconnect
+                # IMMEDIATELY after the tap commits, so at most one vacated
+                # corridor is ever open. Default: single phase, rips inline
+                # (allow_rip from the start), exactly the old loop.
+                _pad_queue = [(p, l, not _PLANE_REPAIR_ORDERING)
+                              for (p, l) in unconnected]
+                _deferred_rip: List = []
+                _pr_idx = -1
+                while _pad_queue or _deferred_rip:
+                    if not _pad_queue:
+                        print(f"    (#517 ordering: phase 2 -- "
+                              f"{len(_deferred_rip)} rip-requiring pad(s))")
+                        _pad_queue = [(p, l, True) for (p, l) in _deferred_rip]
+                        _deferred_rip = []
+                    pad, pad_layer, _allow_rip = _pad_queue.pop(0)
+                    _pr_idx += 1
                     if cancel_check and cancel_check():
                         print("    (cancelled)")
                         break
@@ -984,7 +1138,16 @@ def route_planes(
                         plane_oracle=plane_oracle,
                         corridor_ghosts=corridor_ghosts
                     )
+                    _rips_before = len(ripped_net_ids)
                     if not result.success and rip_blocker_nets:
+                        if not _allow_rip:
+                            # #517 arm 3 phase 1: this pad needs a rip --
+                            # defer it so the free-space pads claim first and
+                            # the rips run one-at-a-time with immediate
+                            # reconnects in phase 2.
+                            _deferred_rip.append((pad, pad_layer))
+                            print("(needs rip - deferred to phase 2)")
+                            continue
                         # Rip the signal net(s) blocking this pad's trace and retry
                         # (the ripped nets are re-routed after the repair pass).
                         rr = _tap_pad_with_ripup(
@@ -1045,6 +1208,14 @@ def route_planes(
                     else:
                         failed_repair_pads.append(f"{pad.component_ref}.{pad.pad_number} ({net_name})")
                         print(f"{RED}FAILED{RESET}")
+                    if (_PLANE_REPAIR_ORDERING and _allow_rip
+                            and len(ripped_net_ids) > _rips_before
+                            and (return_results or not dry_run)):
+                        # #517 arm 3: this pad's rips (tap committed OR failed
+                        # with unrestorable pieces) reconnect NOW, while their
+                        # corridors are still exactly as the rip left them.
+                        _reconnect_ripped_now(
+                            list(ripped_net_ids[_rips_before:]))
 
         # Build obstacle map for this net
         if progress_callback:
@@ -1209,6 +1380,49 @@ def route_planes(
     # happened, so the in-memory reconnect still runs (return_results). A CLI
     # --dry-run skips it.
     if _casualties and (return_results or not dry_run):
+        if _PLANE_RESTORE_FIRST and _casualties:
+            # #517 arm 4: BEFORE re-routing, try the cheapest reconnect there
+            # is -- put each casualty's ORIGINAL copper back verbatim where its
+            # corridor is still free (the rip cleared space for a tap; if the
+            # tap's copper does not actually conflict with the original run,
+            # nothing ever needed to move). Collision-checked with the shared
+            # #134 primitive; conflicting nets fall through to the re-route
+            # exactly as before. Runs at reconnect time, not end-of-run like
+            # custody, so other casualties' re-routes cannot claim the
+            # corridor first.
+            _rf = {'restored': 0, 'blocked': 0}
+            from rip_up_reroute import _saved_route_collides as _src517
+            for _cid in list(_casualties):
+                if _cid in partial_ids or _cid not in pcb_data.nets:
+                    continue  # partial kept-sets restore via their own channel
+                _osegs4 = [s for s in _orig_segments if s.net_id == _cid]
+                _ovias4 = [v for v in _orig_vias if v.net_id == _cid]
+                if not _osegs4 and not _ovias4:
+                    continue
+                if _src517({'new_segments': _osegs4, 'new_vias': _ovias4},
+                           pcb_data, [_cid], clearance):
+                    _rf['blocked'] += 1
+                    continue
+                pcb_data.segments.extend(_osegs4)
+                pcb_data.vias.extend(_ovias4)
+                for _po in _osegs4:
+                    _prov_seg(_po.net_id, _po.layer, _po.start_x, _po.start_y,
+                              _po.end_x, _po.end_y, 'restore-first')
+                for _po in _ovias4:
+                    _prov_via(_po.net_id, _po.x, _po.y, 'restore-first')
+                while _cid in ripped_net_ids:
+                    ripped_net_ids.remove(_cid)
+                _casualties.remove(_cid)
+                if corridor_ghosts is not None:
+                    corridor_ghosts.drop_net(_cid)
+                _rf['restored'] += 1
+                print(f"  (#517 restore-first: {pcb_data.nets[_cid].name} "
+                      f"identity-restored, corridor still free)")
+            if _rf['restored'] or _rf['blocked']:
+                print(f"  (#517 restore-first: {_rf['restored']} restored "
+                      f"verbatim, {_rf['blocked']} corridor(s) occupied -> "
+                      f"re-route)")
+
         _cnames = [pcb_data.nets[n].name for n in _casualties if n in pcb_data.nets]
         if _cnames:
             print(f"\nReconnecting {len(_cnames)} net(s) this run ripped for pad "
