@@ -334,6 +334,80 @@ def _points_edge_distance(px, py, x1, y1, x2, y2):
     return out
 
 
+def _scanline_inside_rows(px_axis, py_axis, x1, y1, x2, y2):
+    """Even-odd inside test for a (rows x cols) cell grid, one scanline per
+    row: O(rows x edges) instead of the dense (cells x edges) ray cast (#546
+    -- crkbd's 12M-cell x ~500-edge maps put 97s of a 360s profile window in
+    the broadcast kernel). Bit-identical to _points_inside_polygon at the
+    same cell centres: per edge the x-intercept is the same expression on the
+    same operands, and a point is inside iff the number of qualifying
+    intercepts STRICTLY greater than its px is odd -- counted here with
+    searchsorted on the sorted intercepts (side='right' counts xi <= px, so
+    ties are excluded exactly like the kernel's strict `px < xi`).
+    px_axis/py_axis must be ascending. Returns (ny, nx) bool."""
+    nx = px_axis.size
+    ny = py_axis.size
+    out = np.zeros((ny, nx), dtype=bool)
+    if nx == 0 or x1.size == 0:
+        return out
+    safe_dy = np.where(y2 - y1 == 0, 1.0, y2 - y1)
+    for j in range(ny):
+        py = py_axis[j]
+        cond = (y1 > py) != (y2 > py)
+        if not cond.any():
+            continue
+        xi = ((x2 - x1) * (py - y1) / safe_dy + x1)[cond]
+        xi.sort()
+        gt = xi.size - np.searchsorted(xi, px_axis, side='right')
+        out[j] = (gt & 1).astype(bool)
+    return out
+
+
+def _banded_edge_distance_rows(px_axis, py_axis, x1, y1, x2, y2, threshold):
+    """Min distance from each cell centre to the nearest polygon edge,
+    computed only where it can be < `threshold` (#546): each edge stamps
+    exact distances into the cells of its bbox expanded by threshold;
+    everywhere else the result stays +inf. For a cell whose TRUE min distance
+    is < threshold the value is bit-identical to _points_edge_distance -- the
+    minimizing edge's expanded bbox necessarily contains the cell (the
+    closest point lies on the segment, so |px - closest_x| <= dist <
+    threshold bounds px inside bbox_x +- threshold, same for y), the
+    per-element arithmetic is the same expression on the same operands, and
+    min over the containing-edge subset equals min over all edges. For a cell
+    at >= threshold the result is some value >= threshold (possibly inf), so
+    every consumer comparison against a clearance <= threshold -- `< clr`
+    and `>= clr` alike -- answers exactly like the dense kernel. Cost is
+    O(perimeter-band cells) instead of (cells x edges).
+    px_axis/py_axis must be ascending. Returns (ny, nx) float64."""
+    ny, nx = py_axis.size, px_axis.size
+    out_sq = np.full((ny, nx), np.inf)
+    if nx == 0 or ny == 0 or x1.size == 0:
+        return out_sq
+    for k in range(x1.size):
+        ex1, ey1, ex2, ey2 = x1[k], y1[k], x2[k], y2[k]
+        i0 = int(np.searchsorted(px_axis, min(ex1, ex2) - threshold, side='left'))
+        i1 = int(np.searchsorted(px_axis, max(ex1, ex2) + threshold, side='right'))
+        j0 = int(np.searchsorted(py_axis, min(ey1, ey2) - threshold, side='left'))
+        j1 = int(np.searchsorted(py_axis, max(ey1, ey2) + threshold, side='right'))
+        if i0 >= i1 or j0 >= j1:
+            continue
+        pxw = px_axis[i0:i1][np.newaxis, :]
+        pyw = py_axis[j0:j1][:, np.newaxis]
+        dx_e = ex2 - ex1
+        dy_e = ey2 - ey1
+        seg_len_sq = dx_e * dx_e + dy_e * dy_e
+        if seg_len_sq < 1e-10:
+            dist_sq = (pxw - ex1) ** 2 + (pyw - ey1) ** 2
+        else:
+            t = np.clip(((pxw - ex1) * dx_e + (pyw - ey1) * dy_e) / seg_len_sq,
+                        0.0, 1.0)
+            closest_x = ex1 + t * dx_e
+            closest_y = ey1 + t * dy_e
+            dist_sq = (pxw - closest_x) ** 2 + (pyw - closest_y) ** 2
+        np.minimum(out_sq[j0:j1, i0:i1], dist_sq, out=out_sq[j0:j1, i0:i1])
+    return np.sqrt(out_sq)
+
+
 def _rasterize_polygon(poly_points, coord: GridCoord, margin: float, clip_bounds=None):
     """Rasterize a closed polygon over its grid bounding box (expanded by `margin` mm).
 
@@ -380,13 +454,17 @@ def _rasterize_polygon(poly_points, coord: GridCoord, margin: float, clip_bounds
     gx_grid, gy_grid = np.meshgrid(gx_range, gy_range)
     gx_flat = gx_grid.ravel()
     gy_flat = gy_grid.ravel()
-    px = gx_flat.astype(np.float64) * coord.grid_step
-    py = gy_flat.astype(np.float64) * coord.grid_step
 
-    # Both kernels are chunked over points to bound the (points, edges)
-    # broadcast temporaries (issue #81).
-    inside = _points_inside_polygon(px, py, x1, y1, x2, y2)
-    edge_dist = _points_edge_distance(px, py, x1, y1, x2, y2)
+    # #546: row-scanline inside test + threshold-banded edge distance instead
+    # of the dense (cells x edges) kernels. edge_dist is exact wherever the
+    # true distance is < margin + grid_step and >= that bound (up to +inf)
+    # elsewhere; every caller thresholds it against a clearance <= margin, so
+    # the blocked sets are identical to the dense kernels'.
+    px_axis = gx_range.astype(np.float64) * coord.grid_step
+    py_axis = gy_range.astype(np.float64) * coord.grid_step
+    inside = _scanline_inside_rows(px_axis, py_axis, x1, y1, x2, y2).ravel()
+    edge_dist = _banded_edge_distance_rows(
+        px_axis, py_axis, x1, y1, x2, y2, margin + coord.grid_step).ravel()
 
     return gx_flat, gy_flat, inside, edge_dist
 
@@ -828,16 +906,20 @@ def _rasterize_polygon_banded(poly_points, coord: GridCoord, margin: float,
     if nx == 0 or gy_hi < gy_lo:
         return
     rows_per_band = max(1, band_cells // nx)
+    px_axis = gx_range.astype(np.float64) * coord.grid_step
     for band_lo in range(gy_lo, gy_hi + 1, rows_per_band):
         band_hi = min(band_lo + rows_per_band - 1, gy_hi)
         gy_range = np.arange(band_lo, band_hi + 1, dtype=np.int32)
         gx_grid, gy_grid = np.meshgrid(gx_range, gy_range)
         gx_flat = gx_grid.ravel()
         gy_flat = gy_grid.ravel()
-        px = gx_flat.astype(np.float64) * coord.grid_step
-        py = gy_flat.astype(np.float64) * coord.grid_step
-        inside = _points_inside_polygon(px, py, x1, y1, x2, y2)
-        edge_dist = _points_edge_distance(px, py, x1, y1, x2, y2)
+        # #546: scanline + threshold-banded kernels (see _rasterize_polygon);
+        # both consumers threshold edge_dist against clearances < margin.
+        py_axis = gy_range.astype(np.float64) * coord.grid_step
+        inside = _scanline_inside_rows(px_axis, py_axis, x1, y1, x2, y2).ravel()
+        edge_dist = _banded_edge_distance_rows(
+            px_axis, py_axis, x1, y1, x2, y2,
+            margin + coord.grid_step).ravel()
         yield gx_flat, gy_flat, inside, edge_dist
 
 
@@ -1021,18 +1103,22 @@ def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygons,
     # the same rule (outside -> all layers + via; inside within clearance ->
     # track/via), just in row-band order.
     rows_per_band = max(1, _EDGE_BAND_CELLS // nx)
+    px_axis = gx_range.astype(np.float64) * coord.grid_step
+    # #546: threshold for the banded distance kernel -- strictly above both
+    # consumer clearances so their `<` comparisons are exact.
+    _dist_thr = max(track_edge_clearance, via_edge_clearance) + coord.grid_step
     for band_lo in range(gy_lo, gy_hi + 1, rows_per_band):
         band_hi = min(band_lo + rows_per_band - 1, gy_hi)
         gy_range = np.arange(band_lo, band_hi + 1, dtype=np.int32)
         gx_grid, gy_grid = np.meshgrid(gx_range, gy_range)  # (nband, nx)
         gx_flat = gx_grid.ravel()
         gy_flat = gy_grid.ravel()
-        px = gx_flat.astype(np.float64) * coord.grid_step
-        py = gy_flat.astype(np.float64) * coord.grid_step
+        py_axis = gy_range.astype(np.float64) * coord.grid_step
 
         inside = None
         for (rx1, ry1, rx2, ry2) in ring_edges:
-            ins = _points_inside_polygon(px, py, rx1, ry1, rx2, ry2)
+            ins = _scanline_inside_rows(px_axis, py_axis,
+                                        rx1, ry1, rx2, ry2).ravel()
             inside = ins if inside is None else (inside | ins)
 
         outside_idx = np.where(~inside)[0]
@@ -1051,11 +1137,12 @@ def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygons,
                 obstacles.add_static_blocked_cells_batch(np.hstack([out_cells, layer_col]))
             obstacles.add_static_blocked_vias_batch(out_cells)
 
-        # Compute edge distances for inside points (chunked kernel, issue #81)
+        # Compute edge distances for inside points (#546: banded kernel --
+        # exact below _dist_thr, which caps both consumer clearances)
         if inside_idx.size > 0:
-            in_px = px[inside_idx]
-            in_py = py[inside_idx]
-            min_dist = _points_edge_distance(in_px, in_py, x1, y1, x2, y2)
+            min_dist = _banded_edge_distance_rows(
+                px_axis, py_axis, x1, y1, x2, y2,
+                _dist_thr).ravel()[inside_idx]
             in_gx = gx_flat[inside_idx]
             in_gy = gy_flat[inside_idx]
 

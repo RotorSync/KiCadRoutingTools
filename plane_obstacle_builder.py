@@ -21,7 +21,8 @@ from obstacle_map import (point_in_polygon, point_to_polygon_edge_distance,
                           block_track_cells_near_override_pad_holes,
                           _pad_has_copper,
                           _rasterize_polygon, _points_inside_polygon,
-                          _points_edge_distance, _block_cells_on_layers,
+                          _points_edge_distance, _scanline_inside_rows,
+                          _banded_edge_distance_rows, _block_cells_on_layers,
                           _batch_cells_one_layer, _batch_vias)
 
 import sys
@@ -706,14 +707,21 @@ def _board_edge_cell_mask(coord: GridCoord, board_outline, gmin_x: int, gmin_y: 
     ray cast + edge-distance (the same kernels the signal router uses). Returns
     (gx_flat, gy_flat, mask)."""
     gx_flat, gy_flat = _edge_band_grid(gmin_x, gmin_y, gmax_x, gmax_y, grid_margin)
-    px = gx_flat.astype(np.float64) * coord.grid_step
-    py = gy_flat.astype(np.float64) * coord.grid_step
+    # #546: row-scanline inside test + threshold-banded edge distance (see
+    # obstacle_map._scanline_inside_rows) -- the dense (cells x edges) kernels
+    # made this the second-hottest call of the crkbd plane repair.
+    gx_range = np.arange(gmin_x - grid_margin, gmax_x + grid_margin + 1,
+                         dtype=np.int32)
+    gy_range = np.arange(gmin_y - grid_margin, gmax_y + grid_margin + 1,
+                         dtype=np.int32)
+    px_axis = gx_range.astype(np.float64) * coord.grid_step
+    py_axis = gy_range.astype(np.float64) * coord.grid_step
 
     # One outer ring or a LIST of them (#304): inside ANY ring is on-board,
     # edge distance is the minimum over all rings' edges.
     rings = [board_outline] if board_outline and isinstance(board_outline[0], tuple) \
         else list(board_outline)
-    inside = None
+    inside2d = None
     ex1, ey1, ex2, ey2 = [], [], [], []
     for ring in rings:
         poly = np.array(ring, dtype=np.float64)
@@ -722,14 +730,17 @@ def _board_edge_cell_mask(coord: GridCoord, board_outline, gmin_x: int, gmin_y: 
         x2 = np.roll(poly[:, 0], -1)
         y2 = np.roll(poly[:, 1], -1)
         ex1.append(x1); ey1.append(y1); ex2.append(x2); ey2.append(y2)
-        ins = _points_inside_polygon(px, py, x1, y1, x2, y2)
-        inside = ins if inside is None else (inside | ins)
+        ins = _scanline_inside_rows(px_axis, py_axis, x1, y1, x2, y2)
+        inside2d = ins if inside2d is None else (inside2d | ins)
     x1, y1 = np.concatenate(ex1), np.concatenate(ey1)
     x2, y2 = np.concatenate(ex2), np.concatenate(ey2)
+    inside = inside2d.ravel()
     mask = ~inside
     in_idx = np.nonzero(inside)[0]
     if in_idx.size:
-        edge_dist = _points_edge_distance(px[in_idx], py[in_idx], x1, y1, x2, y2)
+        edge_dist = _banded_edge_distance_rows(
+            px_axis, py_axis, x1, y1, x2, y2,
+            edge_clearance + coord.grid_step).ravel()[in_idx]
         mask[in_idx[edge_dist < edge_clearance]] = True
     return gx_flat, gy_flat, mask
 
