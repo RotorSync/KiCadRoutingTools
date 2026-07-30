@@ -72,19 +72,28 @@ def test_local_to_global_snaps():
 def test_repo_board_pads_on_grid():
     """Every pad of every checked-in board must be grid-exact."""
     print("2. pad globals on checked-in boards are nm-grid exact")
+    # All TRACKED, so none of these can silently skip on a fresh clone.
+    # interf_u_connected was in this list and is neither tracked nor cheap to
+    # produce (it needs a full board route); interf_u_unrouted covers the same
+    # footprints. fanout_starting_point IS worth keeping -- a fanned-out board
+    # exercises generated copper rather than only hand-placed pads -- so it is
+    # built on demand from its tracked root instead of skipped.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from fixture_boards import ensure
     boards = [
-        'kicad_files/interf_u_connected.kicad_pcb',
+        'kicad_files/interf_u_unrouted.kicad_pcb',
         'kicad_files/glasgow_revC.kicad_pcb',
-        'kicad_files/fanout_starting_point.kicad_pcb',
         'kicad_files/tigard.kicad_pcb',
         'kicad_files/splitflap_driver.kicad_pcb',
     ]
+    paths = [os.path.join(ROOT_DIR, rel) for rel in boards]
+    paths.append(ensure('fanout_starting_point.kicad_pcb'))
     checked = 0
-    for rel in boards:
-        path = os.path.join(ROOT_DIR, rel)
+    for path in paths:
+        rel = os.path.relpath(path, ROOT_DIR)
         if not os.path.exists(path):
-            print(f"  SKIP {rel} not present")
-            continue
+            raise AssertionError(
+                f"{rel} is supposed to be tracked in git but is missing")
         pcb = parse_kicad_pcb(path)
         off = []
         npads = 0

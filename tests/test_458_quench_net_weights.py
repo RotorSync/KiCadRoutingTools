@@ -267,8 +267,9 @@ def test_weighting_flips_the_optimizer_choice():
 
 def test_all_ones_weights_are_a_no_op_on_a_real_board():
     """Backward compatibility end to end: weighting every net by 1.0 must
-    produce the same placement as passing no weights at all. Same process,
-    because quench output varies across processes with the hash seed (#457)."""
+    produce the same placement as passing no weights at all. (Run in one process
+    for speed; it no longer has to be — quench output stopped depending on the
+    hash seed in #457.)"""
     plain = quench(parse_kicad_pcb(INTERF_U), INTERF_U,
                    max_displacement=2.0, step=1.0, max_passes=2)
     pcb = parse_kicad_pcb(INTERF_U)

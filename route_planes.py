@@ -18,8 +18,13 @@ from typing import List, Optional, Tuple, Dict, Set, Union
 from dataclasses import dataclass
 
 # Run startup checks first (validates numpy, scipy, shapely are installed)
-from startup_checks import run_all_checks
-run_all_checks()
+from startup_checks import exit_on_error_if_main
+# Stays at module scope, ABOVE the heavy imports, so a missing dep is
+# reported before numpy/grid_router blow up with something cryptic. But it
+# raises instead of exiting when this module is IMPORTED rather than run,
+# so pytest can still collect a suite on a checkout with no built router
+# (#457 item 3).
+exit_on_error_if_main(__name__)
 
 # These imports are guaranteed to work after startup_checks passes
 import numpy as np

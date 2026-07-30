@@ -12,9 +12,12 @@ far pair is EXACT -- pruned pairs can neither collide nor contribute halo
 penalty -- so consumers must return bit-identical results with and without
 the lists. quench() builds the lists with budget max_displacement+grid_step.
 
-CROSS-PROCESS quench output is nondeterministic (pre-existing: _net_points
-iterates a set, so ordering follows PYTHONHASHSEED); every equality
-comparison here is same-process by construction.
+Every equality comparison here is same-process by construction, which is what a
+pruned-vs-unpruned parity test needs anyway. It used to be a REQUIREMENT: quench
+output varied across processes because _net_points iterated a set of ref strings
+and the order reached the MST tie-break. That is fixed (#457, net_refs is a sorted
+list) and pinned by tests/test_457_determinism.py, so cross-process comparison is
+now valid too.
 """
 
 import math

@@ -25,8 +25,13 @@ from dataclasses import replace
 from typing import List, Tuple, Dict, Optional, Set
 
 # Run startup checks first
-from startup_checks import run_all_checks
-run_all_checks()
+from startup_checks import exit_on_error_if_main
+# Stays at module scope, ABOVE the heavy imports, so a missing dep is
+# reported before numpy/grid_router blow up with something cryptic. But it
+# raises instead of exiting when this module is IMPORTED rather than run,
+# so pytest can still collect a suite on a checkout with no built router
+# (#457 item 3).
+exit_on_error_if_main(__name__)
 
 from kicad_parser import parse_kicad_pcb, PCBData, Segment, Via, KICAD_10_MIN_VERSION, pad_is_plated_through
 from kicad_writer import generate_segment_sexpr, generate_gr_line_sexpr, generate_via_sexpr

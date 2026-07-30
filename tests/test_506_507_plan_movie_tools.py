@@ -112,10 +112,12 @@ def test_make_movie(tmp):
     print("3. make_movie: inputs, defaults, and a real render")
     import make_movie
 
-    boards = sorted(glob.glob(os.path.join(ROOT, 'kicad_files', 'fanout_output*.kicad_pcb')))[:2]
-    if not boards:
-        check("board fixtures present", False, "no kicad_files/fanout_output*.kicad_pcb")
-        return
+    # These are produced by test_fanout_and_route.py, which run_all.py runs 54
+    # files LATER, and they are gitignored -- so on a clean tree this check
+    # reported a FAILURE for a missing fixture rather than testing make_movie.
+    # Build them from the tracked root instead.
+    from fixture_boards import ensure_many
+    boards = ensure_many('fanout_output1.kicad_pcb', 'fanout_output2.kicad_pcb')
 
     rundir = os.path.join(tmp, 'run')
     os.makedirs(rundir)

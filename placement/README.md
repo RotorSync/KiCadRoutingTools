@@ -140,13 +140,23 @@ python3 tests/test_458_loop_steering.py      # loop caps, tally, summary merge
 python3 tests/test_458_quench_net_weights.py # weighted crossings
 python3 tests/test_458_quench_rotations.py   # rotation lattice, --no-rotate
 python3 tests/test_fanout_clearance.py       # cap clearance repair (#130)
+python3 tests/test_456_courtyard_parser.py   # courtyard shapes + silk bleed (#456)
+python3 tests/test_456_side_and_outline.py   # board side, real outline, graders (#456)
 ```
 
-One caveat when comparing quench *outputs*: results currently differ across
-processes unless `PYTHONHASHSEED` is pinned (set-order airwire iteration
-feeds MST tie-breaks, #457). Same-process runs are deterministic — the
-parity tests rely on that — so A/B two placements inside one process, or
-export `PYTHONHASHSEED=0` for both runs.
+Quench output is reproducible across processes — the same board and arguments
+give the same placement, with no `PYTHONHASHSEED` pinning (#457). It used to
+depend on the hash seed: `net_refs` was a set of reference strings, its iteration
+order became the MST's point order, and Prim's tie-break is first-index-wins, so
+equidistant pads (uniform-pitch GND arrays, decaps on a grid, symmetric
+connectors) built a different tree per process. `interf_u_unrouted` scored 447 /
+457 / 450 crossings under three seeds before a single move was made. `net_refs`
+now holds sorted lists, and `tests/test_457_determinism.py` pins it.
+
+When comparing two placements, `hpwl` is the metric to reach for first: it reads
+only each net's pad-position extremes, so unlike the MST length and the crossing
+count it is invariant to airwire order. If HPWL agrees and crossings do not, the
+two runs differ in tie-breaks rather than in placement quality.
 
 ## Module layout
 
@@ -154,9 +164,61 @@ export `PYTHONHASHSEED=0` for both runs.
 |------|---------|
 | `quench.py` | The optimizer: cost terms, move generation, greedy quench |
 | `fanout_clearance.py` | Post-fanout decoupling-cap clearance repair (#130) |
+| `legality.py` | Hard constraints shared by both engines: board side, real Edge.Cuts containment, and the OO/OoB graders (#456) |
 | `parser.py` | Courtyard boundary and locked-footprint extraction |
 | `writer.py` | Writes new positions/rotations (rotates pad angles with the footprint, as KiCad stores pad angle = footprint + pad rotation) |
 | `utility.py` | Shared utilities (bbox from pads, grid snapping) |
+
+## Legality model (`legality.py`, #456)
+
+What counts as a *legal* placement is decided in one place, so the optimizer and
+any grader cannot disagree:
+
+- **Board side.** A part occupies its own side with its full courtyard, and the
+  opposite side only with the bounding box of its **drilled** pads. So a
+  back-side decoupling cap may sit under a front-side BGA (they overlap in XY,
+  not in copper), but not inside a front-side connector's pin field. Cross-side
+  pairs also pay no halo penalty — spreading them apart buys no routing room.
+  On a single-sided board every test reduces to plain courtyard-vs-courtyard.
+- **Board containment** measures against the real Edge.Cuts rings, not an inset
+  of the axis-aligned `board_bounds`, so parts are not nudged into an L-shaped
+  board's notch or an interior cutout. Three levels of short-circuit keep it
+  cheap: the gate self-disables when the outline *is* its bounding box (or when
+  the parser found no usable ring, where the bbox is all there is), then a cached
+  per-part reachable-disk prune, then the exact ring test.
+- **Off-board seeds are not frozen.** Only candidate poses are validated, never
+  the incumbent, so a part sitting outside the board had every alternative
+  rejected and could never move — not even toward the board. A part whose only
+  violation is board containment may now take a pose that moves it strictly back
+  toward the board without overlapping anything.
+
+  This is deliberately limited to the board term. An *overlapping* part keeps the
+  original rule (it may move only to a fully legal pose), because the violation
+  measure is a distance while the thing at stake is an area: trading one deep
+  narrow overlap for a shallow wide one lowers the distance and raises the area.
+  Measured on `watchy`, where 81 of 82 parts start in violation — its hand
+  placement is tighter than the 0.25 mm courtyard clearance quench asks for — a
+  permissive rule took total courtyard overlap from 9.1 mm² to 37.9 mm²
+  (strict-decrease: 16.8) where the board-only rule gets 0.23 while also walking
+  10 of the 13 off-board parts back on.
+- **Graders.** `placement_overlap_area` (OO, mm²) and `placement_out_of_board`
+  (OoB) report the same geometry the optimizer gates on;
+  `QuenchState.legality_metrics()` returns both for a live placement. All zero
+  means fully legal. Intended for the placement scorecard in #411/#110.
+
+**Cost on two-sided boards.** Side-awareness removes a large number of false
+collisions, so many candidate poses that used to be rejected outright now reach
+the cost function. On `glasgow_revC` (172 front / 92 back parts) a bounded 40-part
+pass makes **3.4× more airwire cost evaluations** than before (9.3k → 31.4k
+`_count_crossings_np` calls) and takes correspondingly longer. Nothing per-call
+got slower — the optimizer is searching the space it was previously, wrongly,
+skipping. Small boards are unaffected or faster (`watchy`: 69 s against 109 s
+before).
+
+Courtyard extraction (`parser.py`) reads `fp_line`/`fp_rect`/`fp_arc`/
+`fp_circle`/`fp_poly` per side. A footprint with no courtyard on any layer falls
+back to its pad bounding box — which carries no courtyard margin at all, so the
+part is modelled smaller than it is; that fallback now warns and names the refs.
 
 Note: an earlier from-scratch constructive placer (`place.py` +
 `rust_placer/`) was removed after experiments showed hand placements beat it

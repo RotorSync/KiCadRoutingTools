@@ -203,7 +203,10 @@ precedent), which is simpler and may capture most of the value:
     wins; mixed-size swaps are usually illegal anyway, so restrict by
     footprint compatibility)
   - *side flip* (optional; mirrored courtyard): treated as a first-class move
-    in recent PCB literature
+    in recent PCB literature. **Not implemented as a move.** Board side *is*
+    now modelled by the clearance/halo terms (#456): a part occupies its own
+    side with its courtyard and the far side only with its drilled-pad box, so
+    cross-side parts no longer collide or repel — but nothing flips a part.
   - *rigid-group moves*: an IC plus its decoupling caps moves/rotates as one
     super-component
 - **Constraints by construction, not penalty** (the discipline from analog-IC
@@ -214,7 +217,11 @@ precedent), which is simpler and may capture most of the value:
   - `--max-displacement` radius from the seed position — enforced for every
     move type, swaps included — so output reads as "your placement, nudged"
     and inherited human constraints survive
-  - courtyard non-overlap via the existing rect machinery
+  - courtyard non-overlap via the existing rect machinery — side-aware, and
+    against the real Edge.Cuts outline rather than an inset of the bounding box
+    (`placement/legality.py`, #456). A part sitting off the board is not frozen:
+    it may move strictly back toward the board. An overlapping one still may
+    only move to a fully legal pose.
   - decaps tethered to their IC (group membership or hard radius)
   - rotation disabled per-class where assembly conventions matter
     (`--no-rotate`, which also restricts same-footprint swaps to equal-angle
