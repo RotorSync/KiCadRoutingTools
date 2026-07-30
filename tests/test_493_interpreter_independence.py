@@ -96,10 +96,11 @@ def test_bga_grid_geometry_is_exact():
     """End-to-end on a checked-in BGA board: the grid bounds must be the same
     bit patterns on any interpreter."""
     print("3. BGA grid bounds on an in-repo board are exact")
-    board = os.path.join(ROOT_DIR, 'kicad_files', 'fanout_starting_point.kicad_pcb')
-    if not os.path.exists(board):
-        print(f"  SKIP {os.path.basename(board)} not present")
-        return
+    # Built on demand from the tracked haasoscope board rather than skipped:
+    # this fixture is produced by test_fanout_and_route.py, which run_all.py
+    # runs 60-odd files LATER, so the skip fired every time on a clean tree.
+    from fixture_boards import ensure
+    board = ensure('fanout_starting_point.kicad_pcb')
     from kicad_parser import parse_kicad_pcb
     from bga_fanout.grid import analyze_bga_grid
     pcb = parse_kicad_pcb(board)
