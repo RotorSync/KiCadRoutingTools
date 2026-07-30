@@ -209,7 +209,7 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
                         protected_net_ids, first_failure, ripped_net_ids, verbose,
                         distant_trace_radius=0.0, shared_via_maps=None,
                         partial_restores=None, plane_oracle=None,
-                        corridor_ghosts=None):
+                        corridor_ghosts=None, write_lists=None):
     """A plane-net pad too small to drop a via in needs a trace to the plane (or
     to an adjacent same-net pad); if signal nets block that trace, rip them (up
     to max_rip_nets), retry the tap. Identifies the blocker from the failed
@@ -270,6 +270,16 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
             # refcounts never double-add).
             shared_via_maps.note_net_ripped(blocker)
         rsegs, rvias = _rip_net_from_pcb(pcb_data, blocker)
+        if write_lists is not None:
+            # A net can already have THIS RUN's copper in the write list (arm
+            # 3's immediate reconnect routes mid-pad-loop; a later pad may rip
+            # that same net again). The rip edits pcb_data only, so without
+            # this purge the output ships the superseded copper on top of
+            # whatever routes through the corridor afterwards (muzy_zynq2:
+            # /G18 reconnected twice -> 99 kicad-DRC). board == write list.
+            _wsegs, _wvias = write_lists
+            _wsegs[:] = [d for d in _wsegs if d.get('net_id') != blocker]
+            _wvias[:] = [d for d in _wvias if d.get('net_id') != blocker]
         if corridor_ghosts is not None:
             # #517 arm 2: reserve the vacated corridor against other claimants
             # while this net is off the board.
@@ -1160,7 +1170,8 @@ def route_planes(
                                               if _PLANE_PARTIAL_RESTORE
                                               else None),
                             plane_oracle=plane_oracle,
-                            corridor_ghosts=corridor_ghosts)
+                            corridor_ghosts=corridor_ghosts,
+                            write_lists=(all_new_segments, all_new_vias))
                         if rr is not None:
                             result = rr
                     if result.success:
