@@ -184,7 +184,16 @@ _PLANE_PARTIAL_RESTORE = os.environ.get('KICAD_PLANE_PARTIAL_RESTORE') == '1'
 # #517 arm 3 (#480): most-constrained-first repair ordering + immediate
 # reconnect of ripped nets (ordering and window-shrinking are one knob).
 # Experiment knob, default off; every branch below is gated on it.
-_PLANE_REPAIR_ORDERING = os.environ.get('KICAD_PLANE_REPAIR_ORDERING') == '1'
+# 'order-only' keeps the net ordering + two-phase pad schedule but SKIPS the
+# per-pad immediate reconnect: repeated in-process batch_route calls route
+# against a stale world (arm-D spartan6 hit 885 DRC from grazes all over the
+# board; the write-list purge fixed the re-rip double-emission but not this).
+# The window-shrink half needs its own debugging session; the ordering half
+# is measurable without it.
+_PLANE_REPAIR_ORDERING = os.environ.get('KICAD_PLANE_REPAIR_ORDERING', '') \
+    .lower() in ('1', 'order-only', 'orderonly')
+_PLANE_IMMEDIATE_RECONNECT = os.environ.get(
+    'KICAD_PLANE_REPAIR_ORDERING', '').lower() == '1'
 
 # #517 arm 4: at the end-of-run reconnect, try a verbatim identity-restore of
 # each casualty's ORIGINAL copper before re-routing it (only nets whose
@@ -1219,7 +1228,7 @@ def route_planes(
                     else:
                         failed_repair_pads.append(f"{pad.component_ref}.{pad.pad_number} ({net_name})")
                         print(f"{RED}FAILED{RESET}")
-                    if (_PLANE_REPAIR_ORDERING and _allow_rip
+                    if (_PLANE_IMMEDIATE_RECONNECT and _allow_rip
                             and len(ripped_net_ids) > _rips_before
                             and (return_results or not dry_run)):
                         # #517 arm 3: this pad's rips (tap committed OR failed
