@@ -191,9 +191,22 @@ _PLANE_PARTIAL_RESTORE = os.environ.get('KICAD_PLANE_PARTIAL_RESTORE') == '1'
 # The window-shrink half needs its own debugging session; the ordering half
 # is measurable without it.
 _PLANE_REPAIR_ORDERING = os.environ.get('KICAD_PLANE_REPAIR_ORDERING', '') \
-    .lower() in ('1', 'order-only', 'orderonly')
+    .lower() in ('1', 'order-only', 'orderonly', 'adaptive')
 _PLANE_IMMEDIATE_RECONNECT = os.environ.get(
     'KICAD_PLANE_REPAIR_ORDERING', '').lower() == '1'
+# 'adaptive' (#517 arm I): immediate reconnects only when the phase-2
+# rip-requiring queue is SHORT at phase start. The G/H split was cleanly
+# predicted by rip pressure: boards whose phases held <=12 rip pads won with
+# immediate reconnects (astro +5, zynq2 +4, apple2e full), boards with >=19
+# lost hard (spartan6 -15, allwinner -12: each early reconnect locks routes
+# into a still-evolving world). Threshold sits between the two clusters.
+_PLANE_ADAPTIVE_RECONNECT = os.environ.get(
+    'KICAD_PLANE_REPAIR_ORDERING', '').lower() == 'adaptive'
+try:
+    _PLANE_IMMEDIATE_MAX_PENDING = int(os.environ.get(
+        'KICAD_PLANE_IMMEDIATE_MAX_PENDING', '14') or 14)
+except ValueError:
+    _PLANE_IMMEDIATE_MAX_PENDING = 14
 
 # #517 arm 4: at the end-of-run reconnect, try a verbatim identity-restore of
 # each casualty's ORIGINAL copper before re-routing it (only nets whose
@@ -1014,6 +1027,7 @@ def route_planes(
                 board_edge_clearance=_edge,
                 disable_bga_zones=([] if no_bga_zone else None),
                 net_clearances=net_clearances,
+                hole_to_hole_clearance=hole_to_hole_clearance,
                 return_results=True, pcb_data=pcb_data)
             for _r in _rdata.get('results', []):
                 for _s in (_r.get('new_segments') or []):
@@ -1141,11 +1155,22 @@ def route_planes(
                 _pad_queue = [(p, l, not _PLANE_REPAIR_ORDERING)
                               for (p, l) in unconnected]
                 _deferred_rip: List = []
+                _phase2_immediate = False
                 _pr_idx = -1
                 while _pad_queue or _deferred_rip:
                     if not _pad_queue:
+                        _phase2_immediate = _PLANE_IMMEDIATE_RECONNECT or (
+                            _PLANE_ADAPTIVE_RECONNECT
+                            and len(_deferred_rip)
+                            <= _PLANE_IMMEDIATE_MAX_PENDING)
+                        _mode_note = ""
+                        if _PLANE_ADAPTIVE_RECONNECT:
+                            _mode_note = (" [adaptive: immediate]"
+                                          if _phase2_immediate else
+                                          " [adaptive: deferred to end batch]")
                         print(f"    (#517 ordering: phase 2 -- "
-                              f"{len(_deferred_rip)} rip-requiring pad(s))")
+                              f"{len(_deferred_rip)} rip-requiring pad(s)"
+                              f"{_mode_note})")
                         _pad_queue = [(p, l, True) for (p, l) in _deferred_rip]
                         _deferred_rip = []
                     pad, pad_layer, _allow_rip = _pad_queue.pop(0)
@@ -1242,7 +1267,7 @@ def route_planes(
                     else:
                         failed_repair_pads.append(f"{pad.component_ref}.{pad.pad_number} ({net_name})")
                         print(f"{RED}FAILED{RESET}")
-                    if (_PLANE_IMMEDIATE_RECONNECT and _allow_rip
+                    if (_phase2_immediate and _allow_rip
                             and len(ripped_net_ids) > _rips_before
                             and (return_results or not dry_run)):
                         # #517 arm 3: this pad's rips (tap committed OR failed
@@ -1514,6 +1539,7 @@ def route_planes(
                     # project (batch_route's own auto-read would find no
                     # netclasses next to a not-yet-written output).
                     net_clearances=net_clearances,
+                    hole_to_hole_clearance=hole_to_hole_clearance,
                     return_results=True, pcb_data=pcb_data)
 
                 def _sd(_s):
