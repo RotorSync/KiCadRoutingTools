@@ -58,6 +58,30 @@ def resolve_meander_chamfer(
     return max(CHAMFER_SIZE, spacing * width / 2.0)
 
 
+def pair_leg_metric(result, metric_func, segments=None, vias=None):
+    """Single-leg metric for a diff-pair result (#520).
+
+    A pair result's ``new_segments``/``new_vias`` carry BOTH legs' copper, but
+    its ``route_length`` and every group-matching target are SINGLE-leg totals
+    (diff_pair_loop stamps ``max(p_total, n_total)`` or centerline+stubs).
+    Feeding the whole segment list to a metric therefore measures ~2x the
+    target scale, and the undershoot/scale loops compare incommensurate
+    numbers. Measure each leg's own copper and take the max (the pair's
+    limiting leg). Falls back to the whole-list metric when the result does
+    not carry leg net ids (hybrid/fallback shapes)."""
+    segs = result.get('new_segments', []) if segments is None else segments
+    vs = (result.get('new_vias', []) if vias is None else vias) or []
+    p_id = result.get('p_net_id')
+    n_id = result.get('n_net_id')
+    if p_id is None or n_id is None:
+        return metric_func(segs, vs)
+    return max(
+        metric_func([s for s in segs if s.net_id == p_id],
+                    [v for v in vs if v.net_id == p_id]),
+        metric_func([s for s in segs if s.net_id == n_id],
+                    [v for v in vs if v.net_id == n_id]))
+
+
 class ClearanceIndex:
     """
     Spatial index for efficient clearance checking.
@@ -1380,15 +1404,24 @@ def _apply_meanders_to_net_with_iteration(
     is_diff_pair = result.get('is_diff_pair', False)
 
     if is_diff_pair:
+        # #520: measure ONE leg (max of P/N), not the sum of both legs, and
+        # carry the entry offset (stub adders baked into current_metric that a
+        # copper-only metric cannot see) forward so new_metric starts at
+        # current_metric and the undershoot/scale loops act on commensurate
+        # deltas against the single-leg target.
+        entry_leg = pair_leg_metric(result, metric_func)
+        stub_offset = current_metric - entry_leg
+
+        def pair_metric(res):
+            return pair_leg_metric(res, metric_func) + stub_offset
+
         # Differential pair: apply meanders to centerline
         modified_result, bump_count = apply_meanders_to_diff_pair(
             result, extra_length, config, pcb_data,
             extra_segments=already_processed_segments,
             extra_vias=already_processed_vias
         )
-        new_segments = modified_result.get('new_segments', [])
-        new_vias = modified_result.get('new_vias', [])
-        new_metric = metric_func(new_segments, new_vias)
+        new_metric = pair_metric(modified_result)
 
         # Step 2: If we undershot, add more bumps
         max_bump_iterations = 20
@@ -1406,9 +1439,7 @@ def _apply_meanders_to_net_with_iteration(
                 min_bumps=bump_count
             )
             prev_metric = new_metric
-            new_segments = modified_result.get('new_segments', [])
-            new_vias = modified_result.get('new_vias', [])
-            new_metric = metric_func(new_segments, new_vias)
+            new_metric = pair_metric(modified_result)
 
             if actual_bumps < bump_count or new_metric <= prev_metric:
                 print(f"      Can't fit more bumps (got {actual_bumps}, need {bump_count})")
@@ -1438,9 +1469,7 @@ def _apply_meanders_to_net_with_iteration(
                 min_bumps=bump_count,
                 amplitude_override=scaled_amplitude
             )
-            trial_segments = trial_result.get('new_segments', [])
-            trial_vias = trial_result.get('new_vias', [])
-            trial_metric = metric_func(trial_segments, trial_vias)
+            trial_metric = pair_metric(trial_result)
 
             if trial_bumps > 0 and trial_metric >= best_metric:
                 modified_result = trial_result
@@ -1632,7 +1661,16 @@ def apply_length_matching_to_group(
 
     # Members routed in an EARLIER chain step have no in-run result; measure
     # them from board copper so they can still set the target (#489 §7).
-    board_seeded = _seed_group_members_from_board(net_names, set(group_results), pcb_data)
+    # The have-set must cover every ALIAS of an in-run result (#520): a pair's
+    # shared result dict is registered under BOTH member names, group_results
+    # dedups to the first, and seeding on group_results keys then "measured"
+    # the other member from the just-synced pcb_data -- claiming this run's
+    # own copper as earlier-step copper and skewing the group bookkeeping.
+    have_names = {name for name in net_names
+                  if net_results.get(name)
+                  and not net_results[name].get('failed')
+                  and 'route_length' in net_results[name]}
+    board_seeded = _seed_group_members_from_board(net_names, have_names, pcb_data)
     group_results.update(board_seeded)
 
     if len(group_results) < 2:
@@ -1794,7 +1832,12 @@ def apply_time_matching_to_group(
 
     # Members routed in an EARLIER chain step: measured from board copper so
     # they can set the target (#489 §7). Never meandered -- already written.
-    board_seeded = _seed_group_members_from_board(net_names, set(group_results), pcb_data)
+    # Alias-aware have-set, same as the length path (#520).
+    have_names = {name for name in net_names
+                  if net_results.get(name)
+                  and not net_results[name].get('failed')
+                  and 'route_length' in net_results[name]}
+    board_seeded = _seed_group_members_from_board(net_names, have_names, pcb_data)
     group_results.update(board_seeded)
 
     if len(group_results) < 2:
@@ -1818,8 +1861,11 @@ def apply_time_matching_to_group(
 
     for net_name, result in group_results.items():
         segments = result.get('new_segments', [])
-        vias = result.get('new_vias', [])
-        net_times[net_name] = calculate_route_propagation_time_ps(segments, vias, pcb_data)
+        # A pair result's segment list holds BOTH legs' copper; time the
+        # limiting leg, not the sum (#520). Single-ended results fall through
+        # pair_leg_metric unchanged (no leg net ids).
+        net_times[net_name] = pair_leg_metric(
+            result, lambda s, v: calculate_route_propagation_time_ps(s, v, pcb_data))
         net_primary_layers[net_name] = get_route_primary_layer(segments)
 
     target_time = max(net_times.values())
