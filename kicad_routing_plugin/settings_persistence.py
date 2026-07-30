@@ -127,6 +127,7 @@ def get_dialog_settings(dialog):
         'length_match_groups': dialog.length_match_groups_ctrl.GetValue(),
         'length_match_tolerance': dialog.length_match_tolerance.GetValue(),
         'meander_amplitude': dialog.meander_amplitude.GetValue(),
+        'meander_spacing': dialog.meander_spacing.GetValue(),
         'time_matching_check': dialog.time_matching_check.GetValue(),
         'time_match_tolerance': dialog.time_match_tolerance.GetValue(),
         'debug_lines_check': dialog.debug_lines_check.GetValue(),
@@ -213,10 +214,18 @@ def get_dialog_settings(dialog):
         'planes_component': dialog.planes_tab.net_panel.component_dropdown.GetSelection() if dialog.planes_tab.net_panel.component_dropdown else 0,
         # Create mode options
         'planes_zone_clearance': dialog.planes_tab.create_options.zone_clearance.GetValue(),
+        'planes_thermal_relief': dialog.planes_tab.create_options.thermal_relief.GetValue(),
+        'planes_thermal_vias': dialog.planes_tab.create_options.thermal_vias.GetValue(),
         'planes_max_search_radius': dialog.planes_tab.create_options.max_search_radius.GetValue(),
         'planes_rip_blocker_check': dialog.planes_tab.create_options.rip_blocker_check.GetValue(),
         'planes_add_gnd_vias': dialog.planes_tab.create_options.add_gnd_vias_check.GetValue(),
         'planes_gnd_via_distance': dialog.planes_tab.create_options.gnd_via_distance.GetValue(),
+        'planes_stitch_vias': dialog.planes_tab.create_options.stitch_vias.GetValue(),
+        'planes_stitch_pitch': dialog.planes_tab.create_options.stitch_pitch.GetValue(),
+        'planes_stitch_edge_fence': dialog.planes_tab.create_options.stitch_edge_fence.GetValue(),
+        'planes_stitch_fence_pitch': dialog.planes_tab.create_options.stitch_fence_pitch.GetValue(),
+        'planes_stitch_inset': dialog.planes_tab.create_options.stitch_inset.GetValue(),
+        'planes_stitch_max_freq': dialog.planes_tab.create_options.stitch_max_freq.GetValue(),
         'planes_gnd_via_net': dialog.planes_tab.create_options.gnd_via_net.GetValue(),
         # Repair mode options
         'planes_repair_max_track_width': dialog.planes_tab.repair_options.max_track_width.GetValue(),
@@ -456,6 +465,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.length_match_tolerance.SetValue(settings['length_match_tolerance'])
     if 'meander_amplitude' in settings:
         dialog.meander_amplitude.SetValue(settings['meander_amplitude'])
+    if 'meander_spacing' in settings:
+        dialog.meander_spacing.SetValue(settings['meander_spacing'])
     if 'time_matching_check' in settings:
         dialog.time_matching_check.SetValue(settings['time_matching_check'])
     if 'time_match_tolerance' in settings:
@@ -660,6 +671,10 @@ def restore_dialog_settings(dialog, settings):
     # Create mode options
     if 'planes_zone_clearance' in settings:
         dialog.planes_tab.create_options.zone_clearance.SetValue(settings['planes_zone_clearance'])
+    if 'planes_thermal_relief' in settings:
+        dialog.planes_tab.create_options.thermal_relief.SetValue(settings['planes_thermal_relief'])
+    if 'planes_thermal_vias' in settings:
+        dialog.planes_tab.create_options.thermal_vias.SetValue(settings['planes_thermal_vias'])
     if 'planes_max_search_radius' in settings:
         dialog.planes_tab.create_options.max_search_radius.SetValue(settings['planes_max_search_radius'])
     if 'planes_rip_blocker_check' in settings:
@@ -668,6 +683,18 @@ def restore_dialog_settings(dialog, settings):
         dialog.planes_tab.create_options.add_gnd_vias_check.SetValue(settings['planes_add_gnd_vias'])
     if 'planes_gnd_via_distance' in settings:
         dialog.planes_tab.create_options.gnd_via_distance.SetValue(settings['planes_gnd_via_distance'])
+    if 'planes_stitch_vias' in settings:
+        dialog.planes_tab.create_options.stitch_vias.SetValue(settings['planes_stitch_vias'])
+    if 'planes_stitch_pitch' in settings:
+        dialog.planes_tab.create_options.stitch_pitch.SetValue(settings['planes_stitch_pitch'])
+    if 'planes_stitch_edge_fence' in settings:
+        dialog.planes_tab.create_options.stitch_edge_fence.SetValue(settings['planes_stitch_edge_fence'])
+    if 'planes_stitch_fence_pitch' in settings:
+        dialog.planes_tab.create_options.stitch_fence_pitch.SetValue(settings['planes_stitch_fence_pitch'])
+    if 'planes_stitch_inset' in settings:
+        dialog.planes_tab.create_options.stitch_inset.SetValue(settings['planes_stitch_inset'])
+    if 'planes_stitch_max_freq' in settings:
+        dialog.planes_tab.create_options.stitch_max_freq.SetValue(settings['planes_stitch_max_freq'])
     if 'planes_gnd_via_net' in settings:
         dialog.planes_tab.create_options.gnd_via_net.SetValue(settings['planes_gnd_via_net'])
     # Repair mode options

@@ -16,6 +16,7 @@ Usage:
 """
 from __future__ import annotations
 
+import env_knobs
 import sys
 import os
 import math
@@ -24,8 +25,13 @@ from dataclasses import replace
 from typing import List, Tuple, Dict, Optional, Set
 
 # Run startup checks first
-from startup_checks import run_all_checks
-run_all_checks()
+from startup_checks import exit_on_error_if_main
+# Stays at module scope, ABOVE the heavy imports, so a missing dep is
+# reported before numpy/grid_router blow up with something cryptic. But it
+# raises instead of exiting when this module is IMPORTED rather than run,
+# so pytest can still collect a suite on a checkout with no built router
+# (#457 item 3).
+exit_on_error_if_main(__name__)
 
 from kicad_parser import parse_kicad_pcb, PCBData, Segment, Via, KICAD_10_MIN_VERSION, pad_is_plated_through
 from kicad_writer import generate_segment_sexpr, generate_gr_line_sexpr, generate_via_sexpr
@@ -179,7 +185,7 @@ def _via_site_consensus_blocker(pad, pcb_data, blocker_config, net_id,
 # The reconnect withdrew ~6.8 pieces per net across 36 nets there and re-threaded
 # them anyway, so the fragments were mostly wasted work. ONE BOARD, ONE STEP --
 # set KICAD_PLANE_PARTIAL_RESTORE=1 to A/B the old policy on a corpus replay.
-_PLANE_PARTIAL_RESTORE = os.environ.get('KICAD_PLANE_PARTIAL_RESTORE') == '1'
+_PLANE_PARTIAL_RESTORE = env_knobs.PLANE_PARTIAL_RESTORE
 
 # #517 arm 3 (#480): most-constrained-first repair ordering + immediate
 # reconnect of ripped nets (ordering and window-shrinking are one knob).
@@ -943,6 +949,25 @@ def route_planes(
     # Plane nets are never ripped to clear a blocker (--rip-blocker-nets); only
     # signal nets are, and they are left unrouted for a subsequent route.py pass.
     plane_net_ids = set(unique_nets.keys())
+    # #521: nets protected in the sibling .kicad_pro (length-matched groups,
+    # routed diff pairs) and nets with KiCad-LOCKED copper join the never-rip
+    # set -- a blocker rip here strips the net for a later generic route.py
+    # reconnect, which cannot reproduce matching/coupling/hand-routing. (The
+    # tap simply fails over its other candidates.)
+    try:
+        from protected_nets import protection_map
+        _prot_names = protection_map(pcb_data)
+        if _prot_names:
+            _prot_ids = {nid for nid, n in pcb_data.nets.items()
+                         if n.name in _prot_names}
+            _prot_ids -= plane_net_ids
+            if _prot_ids and rip_blocker_nets:
+                _ex = sorted(pcb_data.nets[i].name for i in _prot_ids)[:4]
+                print(f"  {len(_prot_ids)} PROTECTED net(s) excluded from blocker "
+                      f"rip-up ({', '.join(_ex)}{'...' if len(_prot_ids) > 4 else ''})")
+            plane_net_ids |= _prot_ids
+    except Exception:
+        pass
     ripped_net_ids: List[int] = []
     # #517 arm 3 (#524 root cause): nets whose immediate reconnect SUCCEEDED
     # leave ripped_net_ids (they are no longer casualties) -- but their
@@ -1550,6 +1575,13 @@ def route_planes(
                     # netclasses next to a not-yet-written output).
                     net_clearances=net_clearances,
                     hole_to_hole_clearance=hole_to_hole_clearance,
+                    # #527: forward progress/cancel -- a multi-net reconnect
+                    # used to run minutes behind one static message.
+                    progress_callback=(
+                        (lambda c, t, m: progress_callback(
+                            c, t, f"Reconnect: {m}"))
+                        if progress_callback else None),
+                    cancel_check=cancel_check,
                     return_results=True, pcb_data=pcb_data)
 
                 def _sd(_s):
@@ -1979,7 +2011,7 @@ def route_planes(
                 # ZONE_FILLER is measured-deterministic; exact_unconnected
                 # clusters its fill truth reproducibly.
                 # KICAD_LEGACY_GATE_ORACLE=1 restores kicad-cli for A/B.
-                if not os.environ.get('KICAD_LEGACY_GATE_ORACLE'):
+                if not env_knobs.LEGACY_GATE_ORACLE:
                     try:
                         from kicad_exact_fill import exact_unconnected
                         _gnames = [pcb_data.nets[g].name
@@ -2032,7 +2064,7 @@ def route_planes(
             # Oracle unavailable (no kicad-cli / DRC failed) => behave as
             # before. One DRC serves all gate nets (cached until a gate
             # repair adds copper). KICAD_NO_GATE_ORACLE=1 disables for A/B.
-            if not os.environ.get('KICAD_NO_GATE_ORACLE'):
+            if not env_knobs.NO_GATE_ORACLE:
                 if _gate_oracle_links[0] is None:
                     _gate_oracle_links[0] = _gate_oracle_query()
                 _gl = _gate_oracle_links[0]
@@ -2063,7 +2095,7 @@ def route_planes(
                 _sample = ', '.join(
                     f"{_l[3]}({_l[0]:.1f},{_l[1]:.1f})" for _l in _locs[:3])
                 print(f"    group {_cid}: {len(_locs)} pad(s): {_sample}")
-            if os.environ.get('KICAD_GATE_DEBUG'):
+            if env_knobs.GATE_DEBUG:
                 from plane_fill_model import get_fill_models as _gfm_dbg
                 _mods = _gfm_dbg(pcb_data, _nid)
                 for _cid, _locs in sorted(_bycomp.items(),
@@ -2108,6 +2140,13 @@ def route_planes(
                     power_nets=power_nets, power_nets_widths=power_nets_widths,
                     disable_bga_zones=([] if no_bga_zone else None),
                     net_clearances=net_clearances,
+                    # #527: forward progress/cancel into the region-join
+                    # sub-route (it can A* for minutes on a big pour).
+                    progress_callback=(
+                        (lambda c, t, m: progress_callback(
+                            c, t, f"Region join: {m}"))
+                        if progress_callback else None),
+                    cancel_check=cancel_check,
                     return_results=True, pcb_data=pcb_data)
                 for _r in _rdata3.get('results', []):
                     all_new_segments.extend(
@@ -2206,7 +2245,7 @@ def route_planes(
             # Launch layers per pad (#494) -- see plane_tap_launch_layers.
             # KICAD_NO_SWEEP_PLATED=1 restores the old single-concrete-layer
             # resolution + plated skip, for one-env-var A/B on identical code.
-            _no_plated = bool(os.environ.get('KICAD_NO_SWEEP_PLATED'))
+            _no_plated = env_knobs.NO_SWEEP_PLATED
             pad_by_key = {}
             for p in net_pads:
                 if _no_plated:
@@ -2243,11 +2282,21 @@ def route_planes(
             # are accepted. A repair is kept only if it STRICTLY reduces
             # this pad's count -- see pad_repair_made_progress.
             _cur_dp = res.get('disconnected_pads') or []
-            for (fx, fy, _flayer, fref) in res.get('disconnected_pads', []):
+            _sweep_pads = res.get('disconnected_pads', [])
+            for _sw_idx, (fx, fy, _flayer, fref) in enumerate(_sweep_pads):
+                if cancel_check and cancel_check():
+                    print("    (cancelled)")
+                    break
                 pp = pad_by_key.get((round(fx, 3), round(fy, 3), fref))
                 if pp is None:
                     continue
                 pad, pad_cands = pp
+                # #527: the via ladder below (sizes x layers x full-radius
+                # searches) can take many seconds per pad -- report each one.
+                if progress_callback:
+                    progress_callback(_sw_idx + 1, len(_sweep_pads),
+                                      f"{net_name}: forcing via "
+                                      f"{pad.component_ref}.{pad.pad_number}")
                 # #494: the old guard also skipped PLATED barrels, on the
                 # premise "plated barrels are already plane-tied by the
                 # fill". That cannot hold here -- this loop iterates

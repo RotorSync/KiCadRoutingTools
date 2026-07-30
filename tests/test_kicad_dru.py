@@ -89,4 +89,11 @@ with tempfile.TemporaryDirectory() as d:
     check("no dru -> empty no-op", (m2, n2), ({}, []))
 
 print(f"\n{passed}/{passed + failed} checks passed")
-sys.exit(1 if failed else 0)
+if __name__ == '__main__':
+    sys.exit(1 if failed else 0)
+elif failed:
+    # Imported (pytest collection). A module-scope sys.exit -- even sys.exit(0)
+    # -- escapes collection as an INTERNALERROR and takes the whole session with
+    # it, which is the same failure mode #457 item 3 fixes in startup_checks.
+    # Raise instead, so a real failure still surfaces, attributed to this file.
+    raise AssertionError(f"{failed} kicad_dru check(s) failed")

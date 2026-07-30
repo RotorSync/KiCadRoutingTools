@@ -5,6 +5,7 @@ Routes individual nets using A* pathfinding on a grid obstacle map.
 """
 from __future__ import annotations
 
+import env_knobs
 import math
 import time
 import numpy as np
@@ -38,15 +39,17 @@ except ImportError:
     GridRouter = None
     VisualRouter = None
 
-# Read once at import: checked inside per-via-record emit paths (hot).
 def _unblock_debug() -> bool:
-    """KICAD_UNBLOCK_DEBUG, read PER CALL (#382 E10).
+    """KICAD_UNBLOCK_DEBUG, from the read-once env_knobs cache.
 
-    Was a module-level constant frozen at import, so a GUI process that set the
-    env var after the module loaded (or unset it) saw the stale import-time
-    value. Reading os.environ each call matches every other KICAD_* debug flag.
+    History: a module-level constant frozen at import (stale for a GUI process
+    that set the var after load), then a per-call os.environ read (#382 E10) --
+    which put an environ lookup inside hot per-via-record emit paths. The
+    cache is the resolution of that tension: hot paths read a Python
+    attribute, and an in-process setter calls env_knobs.refresh() to be seen
+    (children spawned with a modified environment re-read at import).
     """
-    return bool(os.environ.get('KICAD_UNBLOCK_DEBUG'))
+    return env_knobs.UNBLOCK_DEBUG
 
 
 # Pads farther than this from a query point can't change a neck/merge decision:
@@ -1049,7 +1052,8 @@ def _probe_route_with_frontier_once(
 
     # Probe forward direction
     path, iterations, blocked_cells = router.route_with_frontier(
-        obstacles, forward_sources, forward_targets, probe_iterations, track_margin=track_margin, via_exclusion_radius=_ver)
+        obstacles, forward_sources, forward_targets, probe_iterations, track_margin=track_margin, via_exclusion_radius=_ver,
+        collinear_vias=env_knobs.COLLINEAR_VIAS)
     first_probe_iters = iterations
     first_total_iters = first_probe_iters
     first_blocked = blocked_cells
@@ -1087,7 +1091,8 @@ def _probe_route_with_frontier_once(
         # Forward probe reached max - do full search
         print(f"{print_prefix}Probe: {first_label}={first_probe_iters} iters [single-direction bus mode], trying full iterations...")
         path, full_iters, full_blocked = router.route_with_frontier(
-            obstacles, forward_sources, forward_targets, config.max_iterations, track_margin=track_margin, via_exclusion_radius=_ver)
+            obstacles, forward_sources, forward_targets, config.max_iterations, track_margin=track_margin, via_exclusion_radius=_ver,
+        collinear_vias=env_knobs.COLLINEAR_VIAS)
         first_total_iters += full_iters
         total_iterations += full_iters
 
@@ -1100,7 +1105,8 @@ def _probe_route_with_frontier_once(
 
     # Probe backward direction (bidirectional mode)
     path, iterations, blocked_cells = router.route_with_frontier(
-        obstacles, forward_targets, forward_sources, probe_iterations, track_margin=track_margin, via_exclusion_radius=_ver)
+        obstacles, forward_targets, forward_sources, probe_iterations, track_margin=track_margin, via_exclusion_radius=_ver,
+        collinear_vias=env_knobs.COLLINEAR_VIAS)
     second_probe_iters = iterations
     second_total_iters = second_probe_iters
     second_blocked = blocked_cells
@@ -1145,7 +1151,8 @@ def _probe_route_with_frontier_once(
     print(f"{print_prefix}Probe: {first_label}={first_probe_iters}, {second_label}={second_probe_iters} iters, trying {first_label} with full iterations...")
 
     path, full_iters, full_blocked = router.route_with_frontier(
-        obstacles, forward_sources, forward_targets, config.max_iterations, track_margin=track_margin, via_exclusion_radius=_ver)
+        obstacles, forward_sources, forward_targets, config.max_iterations, track_margin=track_margin, via_exclusion_radius=_ver,
+        collinear_vias=env_knobs.COLLINEAR_VIAS)
     first_total_iters += full_iters
     total_iterations += full_iters
 
@@ -1159,7 +1166,8 @@ def _probe_route_with_frontier_once(
     forward_blocked = full_blocked
 
     path, backward_full_iters, backward_full_blocked = router.route_with_frontier(
-        obstacles, forward_targets, forward_sources, config.max_iterations, track_margin=track_margin, via_exclusion_radius=_ver)
+        obstacles, forward_targets, forward_sources, config.max_iterations, track_margin=track_margin, via_exclusion_radius=_ver,
+        collinear_vias=env_knobs.COLLINEAR_VIAS)
     second_total_iters += backward_full_iters
     total_iterations += backward_full_iters
 
@@ -1420,7 +1428,7 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     bus_xlayer_pct = 0
     if getattr(config, 'bus_enabled', False) and bus_attraction_bonus > 0:
         try:
-            bus_xlayer_pct = int(os.environ.get('KICAD_BUS_XLAYER_PCT', '35'))
+            bus_xlayer_pct = env_knobs.BUS_XLAYER_PCT
         except ValueError:
             bus_xlayer_pct = 35
 
@@ -1502,7 +1510,8 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         else:
             stats_sources, stats_targets = forward_sources, forward_targets
         _, _, stats = router.route_multi(
-            obstacles, stats_sources, stats_targets, config.max_iterations, track_margin=track_margin)
+            obstacles, stats_sources, stats_targets, config.max_iterations, track_margin=track_margin,
+            collinear_vias=env_knobs.COLLINEAR_VIAS)
         print_route_stats(stats)
 
     if reversed_path:
@@ -1788,8 +1797,7 @@ def _impedance_neckdown_allowed():
     net). Set KICAD_IMPEDANCE_NECKDOWN=0 to forbid (strict impedance: the net
     fails instead of narrowing). Env-gated experiment -- flag promotion is
     tracked on #465."""
-    return os.environ.get('KICAD_IMPEDANCE_NECKDOWN', '1').strip().lower() \
-        not in ('0', 'false', 'no', 'off')
+    return env_knobs.IMPEDANCE_NECKDOWN
 
 
 def _track_margin_for_width(width, layer_width, grid_step):
@@ -2774,8 +2782,7 @@ def _select_multipoint_main_edge(pcb_data, pad_info, pad_components,
     def comp(i):
         return pad_components.get(i, i)
 
-    if attraction_path and os.environ.get(
-            'KICAD_BUS_MULTIPOINT_SPAN', '1') not in ('0', 'off', 'false'):
+    if attraction_path and env_knobs.BUS_MULTIPOINT_SPAN:
         p0 = attraction_path[0]
         p1 = attraction_path[-1]
         # Best cross-component terminal pair bridging the corridor's ends
@@ -2848,7 +2855,7 @@ def _select_multipoint_main_edge(pcb_data, pad_info, pad_components,
                         + mst_edges[pos + 1:])
             return mst_edges
 
-    if os.environ.get('KICAD_MULTIPOINT_DENSE_FIRST', '') in ('1', 'true', 'on'):
+    if env_knobs.MULTIPOINT_DENSE_FIRST:
         dense_refs = _dense_fanout_refs(pcb_data)
         if dense_refs:
             def on_dense(i):
@@ -2946,7 +2953,7 @@ def route_multipoint_main(
     pad_components, _isl_copper, _segs_by_comp = get_terminal_component_info(
         pcb_data, net_id, pad_info)
     _island_cells = None
-    if os.environ.get('KICAD_ISLAND_LAUNCH', '1') not in ('0', 'off', 'false'):
+    if env_knobs.ISLAND_LAUNCH:
         _net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
         _island_cells = {}
         for _cid, _segs in _segs_by_comp.items():
@@ -3100,7 +3107,7 @@ def route_multipoint_main(
     bus_xlayer_pct = 0
     if getattr(config, 'bus_enabled', False) and bus_attraction_bonus > 0:
         try:
-            bus_xlayer_pct = int(os.environ.get('KICAD_BUS_XLAYER_PCT', '35'))
+            bus_xlayer_pct = env_knobs.BUS_XLAYER_PCT
         except ValueError:
             bus_xlayer_pct = 35
 
@@ -3213,7 +3220,7 @@ def route_multipoint_main(
         }
 
     if path is None and state is not None and not _stub_switch_round \
-            and os.environ.get('KICAD_MULTIPOINT_STUB_SWITCH', '1') not in ('0', 'off', 'false'):
+            and env_knobs.MULTIPOINT_STUB_SWITCH:
         # Stub layer switch retry for the main edge (for a bus member, the
         # corridor-SPANNING edge -- the leg that must route first) when a
         # terminal's escape stub is walled in on its own layer. Move the

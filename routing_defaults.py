@@ -78,6 +78,9 @@ MAX_PROBE_ITERATIONS = 5000
 # Length matching
 LENGTH_MATCH_TOLERANCE = 0.1  # mm
 MEANDER_AMPLITUDE = 1.0  # mm
+# Meander arm pitch centre-to-centre, in MULTIPLES of the net's routed track
+# width (#501). 2.0 = 2W pitch = 1W edge gap between adjacent arms.
+MEANDER_SPACING = 2.0  # x track width
 
 # Time matching (alternative to length matching)
 TIME_MATCHING = False  # If True, match propagation time instead of length
@@ -92,6 +95,13 @@ ADD_GND_VIAS = False  # If True, add GND vias near signal vias
 # every return via to it, board-wide.
 GND_VIA_NET = ""  # Net name for GND vias ("" = auto, per ground domain)
 GND_VIA_DISTANCE = 2.0  # mm - max distance from signal via to GND via
+
+# Area via stitching (#485): lattice pitch for bonding a plane net's pours
+# across the layers it owns. Off by default (route_planes --stitch-vias /
+# the planes tab checkbox turns it on); the stitched nets are always the
+# requested plane nets owning >= 2 plane layers -- deliberately no selection
+# knob.
+STITCH_PITCH = 20.0  # mm
 
 # Algorithm parameters
 MAX_ITERATIONS = 200000
@@ -195,6 +205,11 @@ PLANE_MIN_THICKNESS = 0.1  # mm - minimum zone copper thickness
 PLANE_EDGE_CLEARANCE = 0.5  # mm - zone clearance from board edge
 PLANE_MAX_SEARCH_RADIUS = 10.0  # mm - max radius to search for via position
 PLANE_MAX_VIA_REUSE_RADIUS = 1.0  # mm - max radius to reuse existing via
+# #487: an SMD plane-net pad at least this wide in BOTH axes is a thermal/
+# exposed pad and gets a via ARRAY instead of one shared via. ON by default
+# (Andy 2026-07-29); --no-thermal-vias / the planes-tab checkbox disable it.
+THERMAL_PAD_MIN_MM = 2.0
+THERMAL_VIAS = True
 PLANE_PAD_STRAP_RADIUS = 1.5  # mm - max distance to strap a plane pad to an
                               # adjacent already-connected same-net pad instead
                               # of drilling another via (issue #349)
@@ -293,8 +308,14 @@ PARAM_RANGES = {
     'max_probe_iterations': {'min': 100, 'max': 100000},
     'length_match_tolerance': {'min': 0.01, 'max': 5.0, 'inc': 0.01, 'digits': 2},
     'meander_amplitude': {'min': 0.1, 'max': 10.0, 'inc': 0.1, 'digits': 1},
+    'meander_spacing': {'min': 1.0, 'max': 10.0, 'inc': 0.5, 'digits': 1},
     'time_match_tolerance': {'min': 0.1, 'max': 50.0, 'inc': 0.1, 'digits': 1},
     'gnd_via_distance': {'min': 0.5, 'max': 10.0, 'inc': 0.5, 'digits': 1},
+    'stitch_pitch': {'min': 1.0, 'max': 100.0, 'inc': 1.0, 'digits': 1},
+    # 0 = auto/off for the three below (GUI convention; the engine takes None)
+    'stitch_fence_pitch': {'min': 0.0, 'max': 100.0, 'inc': 1.0, 'digits': 1},
+    'stitch_inset': {'min': 0.0, 'max': 10.0, 'inc': 0.1, 'digits': 2},
+    'stitch_max_freq': {'min': 0.0, 'max': 20000.0, 'inc': 50.0, 'digits': 0},
     # Fanout parameters
     'exit_margin': {'min': 0.1, 'max': 5.0, 'inc': 0.1, 'digits': 1},
     'diff_pair_gap': {'min': 0.05, 'max': 5.0, 'inc': 0.01, 'digits': 2},

@@ -176,6 +176,14 @@ class GridRouteConfig:
     length_match_groups: List[List[str]] = field(default_factory=list)  # Groups of net patterns to match
     length_match_tolerance: float = 0.1  # mm - acceptable length variance within group
     meander_amplitude: float = 1.0  # mm - height of meander perpendicular to trace
+    # Single-ended meander arm pitch (#501), in MULTIPLES of the net's routed
+    # track width, centre-to-centre. The historical geometry hardcoded a 0.2mm
+    # pitch regardless of track width (a 4:1 coupled comb at impedance widths,
+    # so length matching under-delivered DELAY matching). 2.0 = 2W pitch = 1W
+    # edge gap between arms; identical to the old geometry at the 0.1mm default
+    # width. Same-net arms are excluded from every clearance check by design,
+    # so this arithmetic is the only arm-spacing guarantee.
+    meander_spacing: float = 2.0  # arm pitch as a multiple of net track width
     diff_chamfer_extra: float = 1.5  # Chamfer multiplier for diff pair meanders (>1 avoids P/N crossings)
     diff_pair_intra_match: bool = False  # Enable intra-pair P/N length matching (meander shorter track)
     ac_couple_match: bool = False  # End-to-end length-match AC-coupled pairs split by series caps (#196)
@@ -205,6 +213,11 @@ class GridRouteConfig:
     # while layer_widths keeps the microstrip answer for everyone else.
     coplanar_net_ids: set = field(default_factory=set)
     coplanar_layer_widths: Dict[str, float] = field(default_factory=dict)
+    # #521: per-net per-layer widths REAPPLIED from stored impedance
+    # declarations (.kicad_pro kicad_routing_tools.net_impedance) when a later
+    # step touches an impedance-routed net without --impedance. Consulted in
+    # get_net_track_width above the netclass scalar.
+    net_layer_widths: Dict[int, Dict[str, float]] = field(default_factory=dict)
     # Obstacle-stamp reserve policy (#156). False (single-ended engine): stamps
     # reserve the NOMINAL track_width around obstacles and every net's extra
     # width (power override OR impedance layer width) rides its own fractional
@@ -458,6 +471,15 @@ class GridRouteConfig:
         if net_id in self.power_net_widths:
             # Ensure power net width is at least the base track width
             return max(self.power_net_widths[net_id], self.track_width)
+        if self.net_layer_widths and net_id in self.net_layer_widths:
+            # #521: per-net per-layer widths reapplied from a stored impedance
+            # declaration (.kicad_pro net_impedance) -- a redo of an
+            # impedance-routed net must come back at ITS width, not this
+            # call's default. Outranks the netclass scalar for the same
+            # reason --impedance outranks --track-width.
+            w = self.net_layer_widths[net_id].get(layer)
+            if w:
+                return w
         if self.net_track_widths and net_id in self.net_track_widths:
             # #435 companion: route this net at its OWN class width (either direction).
             return self.net_track_widths[net_id]

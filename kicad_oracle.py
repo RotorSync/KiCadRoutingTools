@@ -15,6 +15,7 @@ CLI-only by design: it shells out to kicad-cli (auto-detected; skipped with
 a note when absent). The GUI runs inside pcbnew where real fills are native
 -- a future GUI equivalent should use them directly.
 """
+import env_knobs
 import json
 import math
 import os
@@ -932,7 +933,7 @@ def oracle_reconnect(board_file: str, net_names, config,
         # pcbnew's ZONE_FILLER is measured-deterministic -- exact_unconnected
         # clusters its fill truth reproducibly and anchors each link at the
         # true nearest approach. KICAD_LEGACY_ORACLE=1 restores kicad-cli.
-        if not os.environ.get('KICAD_LEGACY_ORACLE'):
+        if not env_knobs.LEGACY_ORACLE:
             try:
                 from kicad_exact_fill import exact_unconnected
                 links = exact_unconnected(board_file, names,
@@ -973,7 +974,7 @@ def oracle_reconnect(board_file: str, net_names, config,
         def _exact_islands_map():
             if not _exact_cache['fetched']:
                 _exact_cache['fetched'] = True
-                if not os.environ.get('KICAD_NO_EXACT_FILL'):
+                if not env_knobs.NO_EXACT_FILL:
                     try:
                         from kicad_exact_fill import refill_islands
                         print("  KiCad-oracle recheck: fetching exact fill "
@@ -1712,7 +1713,7 @@ def oracle_reconnect(board_file: str, net_names, config,
     else:
         # ran all rounds; get the final count (same source as the rounds)
         links = None
-        if not os.environ.get('KICAD_LEGACY_ORACLE'):
+        if not env_knobs.LEGACY_ORACLE:
             try:
                 from kicad_exact_fill import exact_unconnected
                 links = exact_unconnected(board_file, names,

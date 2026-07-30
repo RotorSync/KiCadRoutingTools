@@ -1,40 +1,31 @@
-HEAD 2026-07-29 parity audit c501a80..335e88d (the #511 config-builder wave:
-2 commits). Outcome: GAPS FOUND AND FIXED, all gates PASSED, chain copper
-sets IDENTICAL, live diff-route smoke 2/2 coupled.
+HEAD 2026-07-29 parity audit 015aaea..ef4c19a (the #520/#521 wave: multipoint
+matching, protected nets, locked copper, impedance persistence — 6 commits).
+Outcome: NO GAPS, all gates PASSED at HEAD, chain copper sets IDENTICAL.
 
-  * #511 CLOSED (169f6b8): the Differential tab's hand-maintained ~30-key
-    get_routing_config now DELEGATES to _build_routing_config. Revived the
-    25 baselined dead controls PLUS ~12 more behind differently-named
-    controls the gate's bare-hasattr probe missed (keepout_check,
-    time_matching_check, length_match_groups_ctrl, direction_choice,
-    schematic_dir_ctrl, swappable nets, skip_routing_check, ...) and one
-    hidden from the AST scan by `not config.get(...)`. Planes tab had the
-    same class for debug_lines/verbose (found by the hardened probe the
-    moment it learned the _check suffix) -- supplied in get_shared_params.
-  * Engine-coverage sweep (335e88d): gated the three ungated call sites
-    (repair_planes alias-aware, generate_bga_fanout, generate_qfn_fanout).
-    Caught + fixed: ripup_blocker_select never FORWARDED at the repair call
-    (#424's fix covered create only), and max_search_radius/zone_clearance
-    read at the repair call but never supplied (the Create-panel slider was
-    claimed honored on Repair since #180 -- it never was). Repair config
-    assembly refactored into PlanesTab._build_mode_config; the gate drives
-    that real method, no hand-mirrored dict. Plan executor zone_clearance
-    handling extended to repair_planes steps. Fanout: CLEAN both classes
-    once Class 1 learned to prefer the args-reading CLI-main call over
-    bga_fanout's internal recursive calls.
-  * Gate hardening: KNOWN_DEAD_DIFF_KEYS EMPTY (a key landing there is a
-    new bug, not a baseline); control probe tries _check/_ctrl/_choice +
-    aliases; receiver-aware Class 2 (fanout reads from TWO dicts); three
-    permanent non-default-value cases (#486 coplanar, #511 delegation x8
-    controls, #511 repair x3 knobs).
-  * Residue FILED not fixed: #518 (repair track_via_clearance/max_rip_nets/
-    reroute_ripped_nets have no GUI/plan path -- product decision), #519
-    (BGA under-pad fallback retry drops soft layer-cost weights;
-    engine-internal, both fronts equally).
-  * Gates: test_engine_kwarg_parity 6 engines Class 1 + 5 call sites
-    Class 2 all OK; test_manifest_plan_parity 14767 checks 0 mismatches;
-    test_cli_postpass_coverage clean; test_gui_engine_parity VERDICT:
-    PARITY -- segments CLI=GUI=1307, vias 144=144, DRC 0/0. Live smoke:
-    KICAD_DUMP_BATCH_KWARGS through the diff tab's real _run_diff_routing
-    proved 7 non-default values arrive at batch_route_diff_pairs, then a
-    real run routed 2/2 pairs coupled.
+  * No new CLI flags or dialog params in the span — #521's protection/
+    impedance features are deliberately flagless (auto-read from the sibling
+    .kicad_pro via PCBData.source_path, the #498 dru pattern), so there was
+    nothing to thread through argparse/controls/FLAG_PARAMS.
+  * New CLI post-passes persist_protected_nets + persist_impedance_specs are
+    REGISTERED in test_cli_postpass_coverage with their GUI counterparts:
+    ai_plan._write_drc_floors (plan end), gui_utils.update_live_drc_floors
+    (diff-tab manual steps), swig_gui._apply_results_to_board (signal-tab
+    manual steps, ef4c19a). The gate's scanner now also walks the
+    `if __name__ == "__main__"` CLI blocks (route.py/route_diff.py have no
+    def main), so these passes are enforced, not just documented.
+  * Parser-parity edge (the one that CAN drift silently): Segment.locked /
+    Via.locked added to BOTH parse paths in the same commit — text parser
+    (incl. the v9 via pattern that previously dropped locked vias entirely,
+    and linearized arcs) and build_pcb_data_from_board (IsLocked()).
+  * Engine-internal changes (pair_leg_metric, multipoint span meandering,
+    protection enforcement in batch_route's rip expansion + plane repair's
+    never-rip set, net_layer_widths impedance reapply) live inside the shared
+    engine functions both fronts call — inherited, no per-front wiring.
+  * Gates at ef4c19a: test_engine_kwarg_parity OK under KiCad python;
+    test_manifest_plan_parity 14767 checks 0 mismatches;
+    test_cli_postpass_coverage 6 registered, 0 failures/warnings;
+    test_gui_engine_parity VERDICT: PARITY — segments CLI=GUI=1307, vias
+    144=144, DRC 0/0, copper sets IDENTICAL. Feature-level coverage beyond
+    the chain gate: tests/test_meander_demo_boards.py drives the real CLIs
+    over protection/locked/impedance-redo scenarios (the parity chain has no
+    match groups, so those paths are inert in it by design).

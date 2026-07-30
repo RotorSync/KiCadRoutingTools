@@ -61,6 +61,11 @@ FLAG_PARAMS = {
     '--impedance': 'impedance',
     '--coplanar-gap': 'coplanar_gap',
     '--gnd-via-distance': 'gnd_via_distance',
+    # #485: route_planes area via stitching -- value flags.
+    '--stitch-pitch': 'stitch_pitch',
+    '--stitch-fence-pitch': 'stitch_fence_pitch',
+    '--stitch-inset': 'stitch_inset',
+    '--stitch-max-freq': 'stitch_max_freq',
     '--exit-margin': 'exit_margin',
     '--extension': 'extension',
     '--max-track-width': 'max_track_width',
@@ -87,6 +92,11 @@ LIST_FLAGS = {
 BOOL_FLAGS = {
     '--rip-blocker-nets': 'rip_blocker_nets',
     '--add-gnd-vias': 'add_gnd_vias',
+    # #485: route_planes area via stitching toggles (planes-tab checkboxes
+    # stitch_vias / stitch_edge_fence, applied by the plan executor's
+    # generic loop).
+    '--stitch-vias': 'stitch_vias',
+    '--stitch-edge-fence': 'stitch_edge_fence',
     '--no-gnd-vias': 'no_gnd_vias',
     # route.py spells it --no-bga-zones (plural, nargs='*'); bga_fanout uses the
     # singular. Both map to the GUI's no_bga_zone special (bare = exclude ALL).
@@ -95,6 +105,10 @@ BOOL_FLAGS = {
     # #489 section 9: now on every step that writes pad/via copper (route,
     # route_diff, route_planes, route_disconnected_planes, bga/qfn fanout).
     '--add-teardrops': 'add_teardrops',
+    # #487: route_planes' default-on thermal-via arrays; the NEGATIVE flag
+    # must survive conversion or a replay re-enables what the run disabled
+    # (ai_plan's no_thermal_vias alias unchecks the planes checkbox).
+    '--no-thermal-vias': 'no_thermal_vias',
 }
 
 # Flags whose values are file paths / bookkeeping -- consumed, never params.

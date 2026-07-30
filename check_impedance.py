@@ -356,7 +356,8 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
                       include_plane_nets: bool = False,
                       coplanar_gap: float = 0.0,
                       gap_tolerance: float = DEFAULT_GAP_TOLERANCE,
-                      board_name: str = "") -> BoardImpedanceReport:
+                      board_name: str = "",
+                      net_declared_gaps: Optional[Dict[int, float]] = None) -> BoardImpedanceReport:
     """Walk every routed segment and measure what the pre-route model assumed.
 
     Args:
@@ -375,6 +376,11 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
         gap_tolerance: How far the measured gap may stray from the declared
             one before it counts as broken, in mm.
         board_name: Label for the report.
+        net_declared_gaps: Per-net declared coplanar gaps (net_id -> mm),
+            auto-read from the sibling .kicad_pro's net_impedance records
+            (#521). A net with an entry audits at ITS declared gap (0 = that
+            net was declared non-coplanar); nets without one fall back to
+            ``coplanar_gap``.
 
     Returns:
         BoardImpedanceReport. Diagnostic only; pcb is not modified.
@@ -457,8 +463,10 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
                     report.notes.append(note)
 
     for net_id, net_name in selected:
+        # #521: a net's own recorded declaration outranks the call-level gap.
+        net_gap = (net_declared_gaps or {}).get(net_id, coplanar_gap)
         result = NetImpedance(net_id=net_id, net_name=net_name,
-                              declared_gap=coplanar_gap)
+                              declared_gap=net_gap)
         z0_weighted = 0.0
         z0_nom_weighted = 0.0
         weight = 0.0
@@ -549,12 +557,12 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
             # The declared gap is the design intent; the trace was ROUTED at a
             # width derived from it, so that width is what the nominal Z0 must
             # be scored at either way.
-            z0_nom = _nominal_z0(pcb, layer, seg.width, coplanar_gap=coplanar_gap)
+            z0_nom = _nominal_z0(pcb, layer, seg.width, coplanar_gap=net_gap)
 
             if not same_layer:
                 # No pour at all on this layer. If the route call declared a
                 # coplanar gap, that promise is broken over this whole segment.
-                if coplanar_gap > 0:
+                if net_gap > 0:
                     result.length_no_ground_mm += seg_len
                 continue
 
@@ -562,8 +570,8 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
             # ground at all", and far enough to characterize the distribution
             # either side of the ratio_limit * h threshold.
             max_probe = max(ratio_limit * h * 1.5, 0.5)
-            if coplanar_gap > 0:
-                max_probe = max(max_probe, coplanar_gap * 3.0)
+            if net_gap > 0:
+                max_probe = max(max_probe, net_gap * 3.0)
             dx, dy = seg.end_x - seg.start_x, seg.end_y - seg.start_y
             half_w = (seg.width or 0.0) / 2.0
 
@@ -572,12 +580,12 @@ def analyze_impedance(pcb, net_patterns: Optional[List[str]] = None,
                                        max_probe, net_id)
                 if gap is None:
                     z0_here = z0_nom
-                    if coplanar_gap > 0:
+                    if net_gap > 0:
                         result.length_no_ground_mm += per_sample
                 else:
                     result.gap_samples.append(gap)
-                    if coplanar_gap > 0 and \
-                            abs(gap - coplanar_gap) > gap_tolerance:
+                    if net_gap > 0 and \
+                            abs(gap - net_gap) > gap_tolerance:
                         result.length_gap_wrong_mm += per_sample
                     if cpwg_applies(gap, h, ratio_limit):
                         result.tight_gap_length_mm += per_sample
@@ -815,7 +823,11 @@ def main() -> int:
                         help='Audit a coplanar declaration: the --coplanar-gap '
                              'that route.py was run with. Every outer-layer '
                              'sample is checked for same-layer pour at that '
-                             'distance, and the shortfall is reported per net.')
+                             'distance, and the shortfall is reported per net. '
+                             'Nets with a recorded declaration in the sibling '
+                             '.kicad_pro (#521, written by --impedance steps) '
+                             'audit at THEIR OWN gap automatically; this flag '
+                             'is the fallback for nets without one.')
     parser.add_argument('--gap-tolerance', type=float, default=DEFAULT_GAP_TOLERANCE,
                         help=f'How far a measured gap may stray from the '
                              f'declared one before it counts as broken, in mm '
@@ -837,6 +849,27 @@ def main() -> int:
     from kicad_parser import parse_kicad_pcb
     pcb = parse_kicad_pcb(args.input)
 
+    # #521: route steps run with --impedance record each net's declaration
+    # (ohms + coplanar gap) in the sibling .kicad_pro. Auto-read them so the
+    # audit grades every net against ITS OWN recorded promise -- a stored
+    # entry (even gap 0 = declared non-coplanar) outranks --coplanar-gap,
+    # which remains the fallback for nets/boards without records.
+    net_declared_gaps = {}
+    try:
+        from protected_nets import read_impedance_specs, pro_path_for_board
+        _specs = read_impedance_specs(pro_path_for_board(args.input))
+        if _specs:
+            _n2i = {n.name: nid for nid, n in pcb.nets.items() if n.name}
+            net_declared_gaps = {
+                _n2i[nm]: float(sp.get('coplanar_gap', 0) or 0)
+                for nm, sp in _specs.items() if nm in _n2i}
+            _cop = sum(1 for g in net_declared_gaps.values() if g > 0)
+            print(f"Auto-read {len(net_declared_gaps)} net impedance "
+                  f"declaration(s) from the sibling .kicad_pro "
+                  f"({_cop} coplanar) -- per-net gaps outrank --coplanar-gap")
+    except Exception:
+        pass
+
     report = analyze_impedance(
         pcb,
         net_patterns=args.nets,
@@ -846,7 +879,8 @@ def main() -> int:
         include_plane_nets=args.include_plane_nets,
         coplanar_gap=args.coplanar_gap,
         gap_tolerance=args.gap_tolerance,
-        board_name=os.path.basename(args.input))
+        board_name=os.path.basename(args.input),
+        net_declared_gaps=net_declared_gaps)
 
     print(format_report(report, verbose=args.verbose, top=args.top))
 

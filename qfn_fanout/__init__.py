@@ -11,6 +11,7 @@ Works with any QFN/QFP package regardless of pin count or size.
 """
 from __future__ import annotations
 
+import env_knobs
 import math
 from typing import List, Dict, Tuple, Optional
 from collections import defaultdict
@@ -335,7 +336,7 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
         ]
     # Test/debug hook: pin the search to the default config to measure how many
     # pads the alternative-stagger search rescues. Not a user-facing option.
-    if os.environ.get("QFN_UNDERPAD_NO_ALT_STAGGER"):
+    if env_knobs.QFN_UNDERPAD_NO_ALT_STAGGER:
         configs = configs[:1]
 
     tracks, vias, dropped = [], [], []

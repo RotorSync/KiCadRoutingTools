@@ -114,6 +114,8 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 | `length_match_groups` | `[]` | Groups of net-name patterns to match |
 | `length_match_tolerance` | `0.1` | Allowed spread within a group (mm) |
 | `meander_amplitude` | `1.0` | Meander height |
+| `meander_spacing` | `2.0` | Centre-to-centre pitch of adjacent meander arms, in multiples of the net's routed track width (#501) |
+| `net_layer_widths` | `{}` | Per-net per-layer widths reapplied from stored `.kicad_pro` impedance declarations on a redo (#521); outranks the netclass scalar |
 | `time_matching` | `False` | Match propagation delay instead of length |
 | `time_match_tolerance` | `1.0` | Allowed spread (picoseconds) |
 

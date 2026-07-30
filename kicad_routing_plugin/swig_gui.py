@@ -21,6 +21,17 @@ import routing_defaults as defaults
 from kicad_parser import POSITION_DECIMALS
 from kicad_parser import mm_to_iu
 
+# What a failed startup check can look like coming out of `import route`.
+# SystemExit is the historical form; StartupCheckError is what the checks raise
+# now that they no longer kill an importing process (#457 item 3). Tolerant of an
+# old startup_checks with no such class, so a stale checkout still imports.
+try:
+    from startup_checks import StartupCheckError as _StartupCheckError
+    _STARTUP_FAILURES = (SystemExit, _StartupCheckError)
+except ImportError:  # pragma: no cover - stale checkout
+    _STARTUP_FAILURES = (SystemExit,)
+
+
 def _via_width(via):
     """KiCad 9/10 padstack vias can refuse layerless GetWidth() ('result
     with an error set', seen on vias ADDED in-session then re-synced);
@@ -1470,6 +1481,17 @@ class RoutingDialog(wx.Dialog):
         length_params_sizer.Add(self.meander_amplitude, 0)
         options_inner.Add(length_params_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
+        # Own row: a third spin control overflows the Tolerance/Amplitude row
+        spacing_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        spacing_sizer.Add(wx.StaticText(options_scroll, label="Arm spacing (x width):"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        r = defaults.PARAM_RANGES['meander_spacing']
+        self.meander_spacing = wx.SpinCtrlDouble(options_scroll, min=r['min'], max=r['max'],
+                                                 initial=defaults.MEANDER_SPACING, inc=r['inc'])
+        self.meander_spacing.SetDigits(r['digits'])
+        self.meander_spacing.SetToolTip("Centre-to-centre spacing of adjacent meander arms, in multiples of the track width (2 = 2W)")
+        spacing_sizer.Add(self.meander_spacing, 0)
+        options_inner.Add(spacing_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
         # Time matching option
         time_match_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.time_matching_check = wx.CheckBox(options_scroll, label="Time matching")
@@ -2243,6 +2265,11 @@ class RoutingDialog(wx.Dialog):
         # state (and the plan-side absent-means-off rules still apply).
         try:
             _po = self.planes_tab.create_options
+            if hasattr(_po, 'thermal_relief'):
+                _po.thermal_relief.SetValue(False)
+            if hasattr(_po, 'thermal_vias'):
+                import routing_defaults as _rd
+                _po.thermal_vias.SetValue(_rd.THERMAL_VIAS)
             if hasattr(_po, 'zone_clearance_check'):
                 # Default = unchecked = follow routed clearance (the
                 # ottercast sealed-field fix); a plan's explicit
@@ -2251,6 +2278,18 @@ class RoutingDialog(wx.Dialog):
                 if hasattr(_po, 'zone_clearance'):
                     _po.zone_clearance.SetValue(defaults.PLANE_ZONE_CLEARANCE)
                     _po.zone_clearance.Enable(False)
+            if hasattr(_po, 'stitch_vias'):
+                _po.stitch_vias.SetValue(False)
+            if hasattr(_po, 'stitch_pitch'):
+                _po.stitch_pitch.SetValue(defaults.STITCH_PITCH)
+            if hasattr(_po, 'stitch_edge_fence'):
+                _po.stitch_edge_fence.SetValue(False)
+            if hasattr(_po, 'stitch_fence_pitch'):
+                _po.stitch_fence_pitch.SetValue(0.0)  # 0 = follow lattice pitch
+            if hasattr(_po, 'stitch_inset'):
+                _po.stitch_inset.SetValue(0.0)        # 0 = auto
+            if hasattr(_po, 'stitch_max_freq'):
+                _po.stitch_max_freq.SetValue(0.0)     # 0 = off
             if hasattr(_po, 'add_gnd_vias_check'):
                 _po.add_gnd_vias_check.SetValue(False)
             if hasattr(_po, 'gnd_via_distance'):
@@ -2414,6 +2453,7 @@ class RoutingDialog(wx.Dialog):
         self.length_match_groups_ctrl.SetValue("")
         self.length_match_tolerance.SetValue(defaults.LENGTH_MATCH_TOLERANCE)
         self.meander_amplitude.SetValue(defaults.MEANDER_AMPLITUDE)
+        self.meander_spacing.SetValue(defaults.MEANDER_SPACING)
         self.time_matching_check.SetValue(defaults.TIME_MATCHING)
         self.time_match_tolerance.SetValue(defaults.TIME_MATCH_TOLERANCE)
         self.debug_lines_check.SetValue(False)
@@ -2723,6 +2763,7 @@ class RoutingDialog(wx.Dialog):
             'length_match_groups': self._parse_length_match_groups(),
             'length_match_tolerance': self.length_match_tolerance.GetValue(),
             'meander_amplitude': self.meander_amplitude.GetValue(),
+            'meander_spacing': self.meander_spacing.GetValue(),
             # Time matching
             'time_matching': self.time_matching_check.GetValue(),
             'time_match_tolerance': self.time_match_tolerance.GetValue(),
@@ -2947,7 +2988,12 @@ class RoutingDialog(wx.Dialog):
                     captured_output = captured.getvalue()
                 if captured_output:
                     self._append_log(captured_output)
-            except SystemExit as e:
+            except _STARTUP_FAILURES as e:
+                # StartupCheckError as well as SystemExit (#457 item 3): the
+                # checks now raise instead of exiting when route.py is IMPORTED,
+                # which is exactly what this call site does. Catching only
+                # SystemExit here would turn the friendly dependency dialog below
+                # into a raw traceback in the plugin.
                 captured_output = captured.getvalue() if 'captured' in dir() else ''
                 # Check which dependencies are missing
                 missing = []
@@ -3145,6 +3191,7 @@ class RoutingDialog(wx.Dialog):
                     length_match_groups=config.get('length_match_groups'),
                     length_match_tolerance=config.get('length_match_tolerance', 0.1),
                     meander_amplitude=config.get('meander_amplitude', 1.0),
+                    meander_spacing=config.get('meander_spacing', defaults.MEANDER_SPACING),
                     time_matching=config.get('time_matching', False),
                     time_match_tolerance=config.get('time_match_tolerance', 1.0),
                     add_teardrops=config.get('add_teardrops', False),
@@ -3426,6 +3473,24 @@ class RoutingDialog(wx.Dialog):
                           f"value(s) to the routed floors (save to persist)")
             except Exception as e:
                 print(f"(skipped DRC-settings write-back: {e})")
+
+        # #521: persist this run's protection-worthy nets (matched groups) and
+        # impedance declarations, engine-noted during batch_route. The diff tab
+        # does this via update_live_drc_floors; the signal tab's manual runs
+        # end here, so consume at this step boundary or the notes linger until
+        # some later consumer writes them.
+        try:
+            from protected_nets import (consume_protection_candidates,
+                                        consume_impedance_specs,
+                                        persist_protected_nets,
+                                        persist_impedance_specs, pro_path_for_board)
+            _bf = board.GetFileName()
+            if _bf:
+                _pro = pro_path_for_board(_bf)
+                persist_protected_nets(_pro, consume_protection_candidates())
+                persist_impedance_specs(_pro, consume_impedance_specs())
+        except Exception:
+            pass
 
         # Refresh the view
         pcbnew.Refresh()

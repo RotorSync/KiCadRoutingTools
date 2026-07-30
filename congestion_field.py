@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import math
 import os
+import env_knobs
 from typing import Dict
 
 import numpy as np
@@ -38,7 +39,7 @@ CONGESTION_CACHE_KEY = -2
 
 def congestion_cost_mm() -> float:
     try:
-        return float(os.environ.get('KICAD_CONGESTION_COST', '0') or 0)
+        return env_knobs.CONGESTION_COST
     except ValueError:
         return 0.0
 
@@ -56,8 +57,8 @@ def compute_congestion_cells(pcb_data: PCBData, config: GridRouteConfig,
     if cost_mm <= 0 or num_layers <= 0:
         return np.empty((0, 4), dtype=np.int32)
     try:
-        bin_mm = float(os.environ.get('KICAD_CONGESTION_BIN', '1.0') or 1.0)
-        threshold = float(os.environ.get('KICAD_CONGESTION_THRESHOLD', '0.30') or 0.30)
+        bin_mm = env_knobs.CONGESTION_BIN
+        threshold = env_knobs.CONGESTION_THRESHOLD
     except ValueError:
         bin_mm, threshold = 1.0, 0.30
     bin_mm = max(0.25, bin_mm)
@@ -161,18 +162,9 @@ def register_congestion_field(pcb_data: PCBData, config: GridRouteConfig,
 # KICAD_CONGESTION2_COST > 0.
 
 def congestion2_knobs():
-    def _f(name, dflt):
-        try:
-            return float(os.environ.get(name, str(dflt)) or dflt)
-        except ValueError:
-            return dflt
-    return {
-        'cost': _f('KICAD_CONGESTION2_COST', 0.0),
-        'thresh': _f('KICAD_CONGESTION2_THRESHOLD', 0.5),   # nets per mm^2 free
-        'bin': _f('KICAD_CONGESTION2_BIN', 1.0),
-        'exempt_r': _f('KICAD_CONGESTION2_EXEMPT_R', 1.0),
-        'ramp_top': _f('KICAD_CONGESTION2_RAMP_TOP', 2.0),  # ratio at full cost
-    }
+    # Read-once in env_knobs; copy so a caller mutating its dict cannot
+    # poison the cached values.
+    return dict(env_knobs.CONGESTION2)
 
 
 def build_congestion2(pcb_data, config, net_ids_to_route):

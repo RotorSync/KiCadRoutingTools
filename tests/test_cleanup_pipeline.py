@@ -26,6 +26,8 @@ import contextlib
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
+import env_knobs
+
 from kicad_parser import Segment
 from pcb_modification import _restore_soft_joint_bridges, sweep_dead_ends
 
@@ -127,6 +129,7 @@ def run_contract_checks():
 
     # Ledger must agree: board == orig - strips + emitted.
     os.environ['KICAD_BOARD_LEDGER'] = '1'
+    env_knobs.refresh()
     try:
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -143,6 +146,7 @@ def run_contract_checks():
         check("ledger FAILS when board and write model diverge", not ok)
     finally:
         del os.environ['KICAD_BOARD_LEDGER']
+        env_knobs.refresh()
 
 
 def main():

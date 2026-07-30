@@ -16,6 +16,7 @@ footprints never move.
 See docs/placement-optimization.md for the background research.
 """
 
+import json
 import os
 
 from kicad_parser import parse_kicad_pcb
@@ -106,6 +107,7 @@ Examples:
     print(f"Loading {args.input_file}...")
     pcb_data = parse_kicad_pcb(args.input_file)
 
+    ratsnest = {}
     placements = quench(
         pcb_data,
         pcb_file=args.input_file,
@@ -127,11 +129,32 @@ Examples:
         max_passes=args.max_passes,
         ignore_nets=args.ignore_nets,
         lock_refs=args.lock,
+        metrics_out=ratsnest,
         verbose=args.verbose,
     )
 
     print(f"{len(placements)} parts moved")
     write_placed_output(args.input_file, args.output_file, placements)
+
+    # #504: the ratsnest and legality numbers used to be printed and discarded,
+    # so nothing downstream could gate on what a quench run actually achieved.
+    # Same shape as route_planes.py's JSON_SUMMARY (#487's plane-resistance fix).
+    before, after = ratsnest.get('before', {}), ratsnest.get('after', {})
+    summary = {
+        'parts_moved': len(placements),
+        # UNWEIGHTED, comparable across runs.
+        'crossings_before': before.get('crossings'),
+        'crossings_after': after.get('crossings'),
+        'hpwl_before': before.get('hpwl'),
+        'hpwl_after': after.get('hpwl'),
+        # Scaled by net_weights -- compare before/after within THIS run only.
+        'airwire_length_before': before.get('length'),
+        'airwire_length_after': after.get('length'),
+        'cost_before': before.get('total'),
+        'cost_after': after.get('total'),
+    }
+    summary.update(ratsnest.get('legality', {}))
+    print("JSON_SUMMARY: " + json.dumps(summary))
 
 
 if __name__ == "__main__":

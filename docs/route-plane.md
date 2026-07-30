@@ -122,6 +122,48 @@ After writing output, `route_planes.py` runs a **geometric verification** pass: 
 | `--verbose`, `-v` | Print detailed debug messages |
 | `--debug-lines` | Draw MST routes on User.1, User.2, etc. per net |
 
+### Area Via Stitching (#485)
+
+A deliberate, periodic lattice of vias bonding a plane net's pours across the
+copper layers it owns — the standard SI/EMI/thermal practice of stitching a
+plane pair, rather than relying on wherever pad taps happened to land.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--stitch-vias` | off | Enable area via stitching on this run's plane nets |
+| `--stitch-pitch` | 20.0 | Lattice pitch (mm) |
+| `--stitch-max-freq` | — | Maximum frequency of interest (MHz): derives the pitch as λ/20 using the largest dielectric ε_r in the board's stackup (FR-4 4.5 if none), overriding `--stitch-pitch` |
+| `--stitch-edge-fence` | off | Board-edge via fence: a via row tracking the board outline(s) (EMI guard ring); works with or without `--stitch-vias` |
+| `--stitch-fence-pitch` | *lattice pitch* | Via spacing along the fence (mm) |
+| `--stitch-inset` | *auto* | Fence distance from the board edge to the via centers (mm). Auto = the board edge clearance plus the fill-margin ring — as close as a via can sit and keep the pour intact |
+
+The stitched nets are always the `--nets` that own **two or more** of the
+`--plane-layers` — there is deliberately no net-selection flag. Each lattice
+site is accepted only when:
+
+1. The predicted zone fill (the same `ZoneFillModel` the tap placement uses)
+   contains the via **plus its clearance pocket plus a `min_thickness` ring**
+   inside the *main* fill component on at least 2 of the net's layers — so a
+   stitch never necks the pour below minimum thickness locally and never taps
+   an isolated fill island.
+2. The via obstacle map pad taps use clears the site (foreign copper at
+   cross-class clearance, drill hole-to-hole, board edge, per-layer
+   `.kicad_dru` rules).
+
+A site already within `pitch/2` of a same-net via or plated through-hole
+barrel is coverage-satisfied and skipped; a blocked site is nudged outward up
+to `pitch/4` before being given up. The pass reports a coverage metric (max
+lattice-site distance to the nearest same-net bond, before → after) and runs
+in `--dry-run` too. The GUI planes tab exposes the same controls ("Area Via
+Stitching").
+
+The **edge fence** samples the true `Edge.Cuts` polygon(s) — a panelized
+board fences every outline — inset toward the interior, and validates each
+site with the exact same fill and obstacle gates as the lattice. The fence
+runs *before* the lattice, so fence vias count as existing bonds for the
+lattice's coverage rule and the rim is not stitched twice. Interior cutouts
+are not fenced.
+
 ### GND Return Via Placement
 
 When a signal transitions between layers via a via, the return current on the GND plane must also

@@ -91,9 +91,8 @@ def setup_bga_exclusion_zones(
             # net whose fanout dropped it. Auto-disable that component's zone.
             # Engine-level (batch_route/batch_route_diff_pairs), so the GUI
             # inherits; board-state-driven, so no sidecar file is load-bearing.
-            import os as _os
-            if (selected_net_ids and _os.environ.get(
-                    'KICAD_BARE_BALL_ZONE_EXEMPT', '1') not in ('0', 'off', 'false')):
+            import env_knobs
+            if selected_net_ids and env_knobs.BARE_BALL_ZONE_EXEMPT:
                 _sel = set(selected_net_ids)
                 # Only nets that can actually be ROUTED (>=2 pads): a
                 # single-pad net's ball is trivially bare and disabled
@@ -594,6 +593,7 @@ def get_common_config_kwargs(
     time_match_tolerance: float,
     debug_memory: bool,
     layer_costs: Optional[List[float]] = None,
+    meander_spacing: float = 2.0,
     guide_corridor_enabled: bool = False,
     guide_corridor_layer: str = "User.1",
     guide_corridor_spacing: float = 0.0,
@@ -657,6 +657,7 @@ def get_common_config_kwargs(
         length_match_groups=length_match_groups,
         length_match_tolerance=length_match_tolerance,
         meander_amplitude=meander_amplitude,
+        meander_spacing=meander_spacing,
         time_matching=time_matching,
         time_match_tolerance=time_match_tolerance,
         debug_memory=debug_memory,

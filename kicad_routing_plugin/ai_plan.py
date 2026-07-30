@@ -39,7 +39,11 @@ PLAN_RESULT_SCHEMA = (
     '{"action": "route_planes", "assignments": [{"nets": ["<exact net name>", ...], '
     '"layer": "<copper layer e.g. In1.Cu>"}], '
     '"params": {"add_gnd_vias": true|false, "gnd_via_distance": <mm>, '
-    '"gnd_via_net": "<net name>", "rip_blocker_nets": true|false}} | '
+    '"gnd_via_net": "<net name>", "rip_blocker_nets": true|false, '
+    '"stitch_vias": true|false, "stitch_pitch": <mm, default 20>, '
+    '"stitch_max_freq": <MHz, derives pitch as lambda/20 from the stackup>, '
+    '"stitch_edge_fence": true|false, "stitch_fence_pitch": <mm>, '
+    '"stitch_inset": <mm>}} | '
     '{"action": "repair_planes", '
     '"assignments": [{"nets": ["<exact net name>", ...], "layer": "<copper layer>"}], '
     '"params": {"via_size": <mm>, "via_drill": <mm>, "max_track_width": <mm>, '
@@ -419,6 +423,16 @@ def apply_step_params(step, dialog):
                 return False
             chk.SetValue(not bool(value))
             return True
+        if name == 'no_thermal_vias':
+            # route_planes' NEGATIVE flag (--no-thermal-vias, default-on
+            # BooleanOptionalAction) vs the POSITIVE planes-tab checkbox --
+            # invert, like no_gnd_vias above.
+            chk = getattr(getattr(getattr(dialog, 'planes_tab', None),
+                                  'create_options', None), 'thermal_vias', None)
+            if chk is None:
+                return False
+            chk.SetValue(not bool(value))
+            return True
         if name == 'escape_method':
             # Fanout escape dropdown lives on the BGA options panel and shows
             # DISPLAY strings ("Auto (channel, under-pad retry)"), while the
@@ -583,6 +597,16 @@ def apply_step_params(step, dialog):
         # enabled 'Add GND vias' leak into a loaded stress-manifest plan
         # that never asked for stitching (Andy's bitaxe DRC2 grazes).
         opts.add_gnd_vias_check.SetValue(bool(params.get("add_gnd_vias")))
+        if hasattr(opts, "thermal_relief"):
+            opts.thermal_relief.SetValue(bool(params.get("thermal_relief")))
+        if hasattr(opts, "thermal_vias"):
+            # Default-ON param: absent means the DEFAULT (True), unlike the
+            # absent-means-off feature toggles above. A recorded
+            # --no-thermal-vias arrives as no_thermal_vias (see the alias).
+            import routing_defaults as _rd
+            opts.thermal_vias.SetValue(bool(params.get(
+                "thermal_vias", not params.get("no_thermal_vias",
+                                               not _rd.THERMAL_VIAS))))
         if not params.get("add_gnd_vias"):
             notes.append("add_gnd_vias off (not in plan step)")
         if "gnd_via_distance" in params:
@@ -1197,6 +1221,20 @@ class PlanExecutor:
                     diff_pair_gap=floors.get('diff_pair_gap'),
                     clamp_nondefault_netclasses=_clamp,
                     minima=_minima)
+                # #521: persist the plan's protection-worthy nets (matched
+                # groups, routed diff pairs -- noted engine-side during the
+                # steps) so later steps/chains refuse to rip them.
+                try:
+                    from protected_nets import (consume_protection_candidates,
+                                                consume_impedance_specs,
+                                                persist_protected_nets,
+                                                persist_impedance_specs,
+                                                pro_path_for_board)
+                    _pro = pro_path_for_board(board_file)
+                    persist_protected_nets(_pro, consume_protection_candidates())
+                    persist_impedance_specs(_pro, consume_impedance_specs())
+                except Exception as _pe:
+                    self.log(f"AI plan: protected-nets record skipped: {_pe}")
                 self.log(f"AI plan: recorded DRC floors in the project "
                          f"file (clearance {eff:.4g}; live session already "
                          f"updated via the API)")

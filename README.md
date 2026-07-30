@@ -820,7 +820,9 @@ The shared option groups — geometry, power-net widths, algorithm/strategy, pro
 
 ## Requirements
 
-- Python 3.9+ (prebuilt binaries are abi3-py39; 3.7+ only if building from source)
+- Python 3.9+ (the router is built `abi3-py39` whether it is downloaded or built
+  from source, so building locally does not lower the floor — on 3.8 the module
+  compiles and then fails to load with `symbol not found ... _PyCMethod_New`)
 - numpy (`pip3 install numpy`)
 - scipy (`pip3 install scipy`) - used for optimal target assignment and Voronoi partitioning
 - shapely (`pip3 install shapely`) - used for polygon union in multi-net plane layers

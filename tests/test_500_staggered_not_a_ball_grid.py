@@ -43,6 +43,9 @@ class _Pad:
     def __init__(self, x, y):
         self.global_x, self.global_y = float(x), float(y)
         self.local_x, self.local_y = float(x), float(y)
+        # analyze_bga_grid filters mechanical NPTH pads out of the pitch vote
+        # (#513 item 3); these synthetic balls are copper pads.
+        self.pad_type = 'smd'
 
 
 class _FP:

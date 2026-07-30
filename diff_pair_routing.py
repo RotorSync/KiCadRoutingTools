@@ -5,6 +5,7 @@ Routes differential pairs (P and N nets) together using centerline + offset appr
 """
 from __future__ import annotations
 
+import env_knobs
 import math
 import numpy as np
 from typing import List, Optional, Tuple, Dict
@@ -2906,7 +2907,7 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
             # with sibling-room margin so the lane it claims can actually hold
             # both tracks -- the bus corridor trick. Prevents the P/N
             # split-around-the-keepout class (EPHY_TX shipped 13% coupled).
-            _couple = os.environ.get('KICAD_HYBRID_COUPLE', '') not in ('0', 'off', 'false')
+            _couple = env_knobs.HYBRID_COUPLE
             _sib_margin = int(math.ceil(max(
                 0.0, config.track_width + config.diff_pair_gap - config.clearance)
                 / config.grid_step)) if _couple else 0
@@ -3011,7 +3012,7 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
             # handoff). Re-ask each net's WHOLE connection with ONE A* --
             # partner's final copper as obstacle AND attractor -- and swap it
             # in only when strictly better and every assembly gate passes.
-            if os.environ.get('KICAD_SEAM_REASK', '') not in ('0', 'off', 'false'):
+            if env_knobs.SEAM_REASK:
                 def _reask_net(_net, _partner, _cur_segs, _cur_vias):
                     """One whole-connection A* for _net against _partner's
                     CURRENT copper (obstacle + attractor). Returns (segs,
@@ -3446,7 +3447,7 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
         # short of a hard obstacle -- "almost forced", same layer only
         # (attraction_cross_layer_pct=0 never rewards a different layer).
         try:
-            _att_mm = float(os.environ.get('KICAD_HYBRID_COUPLE_RADIUS', '1.0'))
+            _att_mm = env_knobs.HYBRID_COUPLE_RADIUS
         except ValueError:
             _att_mm = 1.0
         _att_radius = max(2, int(round(_att_mm / config.grid_step)))
@@ -3623,12 +3624,12 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
         obstacles.clear_source_target_cells()
         if path is None:
             import os as _os
-            if _os.environ.get('KICAD_HYBRID_LEG_DEBUG'):
+            if env_knobs.HYBRID_LEG_DEBUG:
                 print(f"      LEG FAIL net={net_id} term=({term[0]:.2f},{term[1]:.2f},L{term[2]}) "
                       f"anchor=({ax:.2f},{ay:.2f},L{alayer},via={on_via}) "
                       f"mid=({mid_pt[0]:.2f},{mid_pt[1]:.2f},L{mid_pt[2]}) "
                       f"src_cells={sources} tgt_layers={mid_target_layers or [mid_pt[2]]} iters={it}")
-                if _os.environ.get('KICAD_HYBRID_LEG_DEBUG') == '2':
+                if env_knobs.HYBRID_LEG_DEBUG == '2':
                     for lyr in range(nlayers):
                         print(f"        map L{lyr} around term (x: {tgx-20}..{tgx+20}, y: {tgy-10}..{tgy+70}):")
                         for gy2 in range(tgy - 10, tgy + 71, 2):
@@ -3672,7 +3673,7 @@ def seam_reask_chain_leg(pcb_data, pair, config, leg_obstacles, layer_names,
     score. Mutates pcb_data and leg_result in place on accept. Returns True
     when the leg was replaced."""
     import os as _os
-    if _os.environ.get('KICAD_SEAM_REASK', '') in ('0', 'off', 'false'):
+    if not env_knobs.SEAM_REASK:
         return False
     terms = leg_result.get('_leg_terms')
     if not terms:

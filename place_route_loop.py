@@ -288,6 +288,41 @@ def better(a, b):
     return a['iterations'] < b['iterations'] * 0.95
 
 
+def _ratsnest_screen(before, after, pct):
+    """(skip, note) -- should this candidate skip its routing run? (#504)
+
+    Routing is the honest judge but an expensive one, often minutes per round.
+    A candidate whose ratsnest got clearly WORSE than the board it came from is
+    very unlikely to route better, so it is not worth paying for.
+
+    Screens on `crossings` and `hpwl` only. Both are unweighted -- crossings is
+    a raw count by contract, hpwl is pure pad geometry -- whereas `length` and
+    `total` are scaled by the per-round net_weights this loop sets from
+    --failed-net-weight. (before/after share the weights within one quench call,
+    so length is safe to REPORT; it just is not a stable thing to threshold on.)
+
+    pct <= 0 disables the screen, which is the default: skipping a placement
+    that would in fact have won is a real cost, so this is opt-in and every
+    decision is logged with its numbers.
+    """
+    if not pct or pct <= 0 or not before or not after:
+        return False, ""
+    worse = []
+    note = []
+    for key, label in (('crossings', 'crossings'), ('hpwl', 'hpwl')):
+        b, a = before.get(key), after.get(key)
+        if b is None or a is None:
+            continue
+        delta = (a - b) / b * 100.0 if b else (100.0 if a else 0.0)
+        note.append(f"{label} {b:g}->{a:g} ({delta:+.1f}%)")
+        if delta > pct:
+            worse.append(f"{label} {delta:+.1f}%")
+    txt = ", ".join(note)
+    if worse:
+        return True, f"{txt}  [regressed > {pct:g}%: {', '.join(worse)}]"
+    return False, txt
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Router-in-the-loop placement repair.",
@@ -314,6 +349,11 @@ def main():
                         help="Cost multiplier for failed nets: scales their "
                              "airwire length and any crossing they take part "
                              "in (default: 3.0)")
+    parser.add_argument("--ratsnest-screen", type=float, default=0.0,
+                        help="Skip the routing run when a candidate placement's "
+                             "airwire crossings or HPWL regress by more than "
+                             "this percent against the board it came from -- a "
+                             "cheap pre-route filter (0 = disabled, the default)")
     parser.add_argument("--step", type=float, default=0.5,
                         help="Candidate grid step in mm (default: 0.5)")
     parser.add_argument("--length-weight", type=float, default=0.3)
@@ -342,6 +382,8 @@ def main():
 
     if args.max_displacement < 0:
         parser.error("--max-displacement must be >= 0")
+    if args.ratsnest_screen < 0:
+        parser.error("--ratsnest-screen must be >= 0 (0 disables it)")
     if args.swap_max_displacement is not None:
         if args.swap_max_displacement < 0:
             parser.error("--swap-max-displacement must be >= 0")
@@ -355,6 +397,7 @@ def main():
     cur_file = os.path.join(work, 'loop_round0.kicad_pcb')
     shutil.copy(args.input_file, cur_file)
 
+    screened = 0
     print("Round 0: routing initial placement...")
     best = run_route(cur_file, os.path.join(work, 'loop_round0_routed.kicad_pcb'),
                      args.route_args, os.path.join(work, 'loop_round0_route.log'))
@@ -395,6 +438,7 @@ def main():
               f" (max_disp={max_disp:.1f}mm, swap cap={swap_cap:.1f}mm):"
               f" {', '.join(sorted(targets))}")
 
+        ratsnest = {}
         placements = quench(
             pcb_data, pcb_file=cur_file,
             max_displacement=max_disp,
@@ -411,6 +455,7 @@ def main():
             allow_swaps=not args.no_swap,
             ignore_nets=args.ignore_nets, lock_refs=args.lock,
             move_refs=targets, net_weights=net_weights,
+            metrics_out=ratsnest,
             verbose=args.verbose,
         )
 
@@ -420,12 +465,34 @@ def main():
             max_disp *= 1.5
             continue
 
+        # #504: quench was handed the CURRENT best board, so its own 'before' IS
+        # that board's ratsnest and 'after' is the candidate's -- the screen gets
+        # its baseline for free, with no second QuenchState (which would re-read
+        # the board for courtyards and locked refs) and no round-0 bootstrap.
+        rn_before = ratsnest.get('before', {})
+        rn_after = ratsnest.get('after', {})
+        skip, why = _ratsnest_screen(rn_before, rn_after, args.ratsnest_screen)
+        if why:
+            print(f"  ratsnest: {why}")
+        if skip:
+            print(f"  SCREENED - skipping the routing run, widening the nudge cap"
+                  f" (swap cap stays {swap_cap:.1f}mm).")
+            screened += 1
+            max_disp *= 1.5
+            continue
+
         cand_file = os.path.join(work, f'loop_round{rnd}.kicad_pcb')
         write_placed_output(cur_file, cand_file, placements)
 
         metrics = run_route(
             cand_file, os.path.join(work, f'loop_round{rnd}_routed.kicad_pcb'),
             args.route_args, os.path.join(work, f'loop_round{rnd}_route.log'))
+        # Report-only, exactly like the pad_pairs_* keys above: every round now
+        # records placement quality next to the routing result. better() is
+        # deliberately untouched -- reworking the comparator is #458's scope.
+        metrics['ratsnest_crossings'] = rn_after.get('crossings')
+        metrics['ratsnest_hpwl'] = rn_after.get('hpwl')
+        metrics['ratsnest_length'] = rn_after.get('length')
         print(f"  -> failures={metrics['failures']}"
               f" iterations={metrics['iterations']:,} vias={metrics['vias']}")
 
@@ -441,6 +508,9 @@ def main():
             max_disp *= 1.5
 
     shutil.copy(cur_file, args.output_file)
+    if args.ratsnest_screen > 0:
+        print(f"Ratsnest screen: {screened} round(s) skipped the routing run"
+              f" at {args.ratsnest_screen:g}% regression.")
     print(f"Final: failures={best['failures']} iterations={best['iterations']:,}"
           f" vias={best['vias']}")
     print(f"Wrote {args.output_file}")

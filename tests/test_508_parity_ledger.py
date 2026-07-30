@@ -30,6 +30,8 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import env_knobs
+
 fails = []
 
 
@@ -93,6 +95,7 @@ def test_live_ledger():
     if not _rust_available():
         return
     os.environ['KICAD_BOARD_LEDGER'] = '1'
+    env_knobs.refresh()
     try:
         import route
         import route_planes
@@ -158,6 +161,7 @@ def test_live_ledger():
                       f"{str(e)[:80]})", False)
     finally:
         os.environ.pop('KICAD_BOARD_LEDGER', None)
+        env_knobs.refresh()
 
 
 # --------------------------------------------------------------------------

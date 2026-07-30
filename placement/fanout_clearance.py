@@ -43,9 +43,19 @@ import routing_defaults as defaults
 from bga_fanout.grid import analyze_bga_grid
 from placement.parser import extract_courtyard_bboxes, extract_locked_refs
 from placement.utility import compute_footprint_bbox_local, snap_to_grid
+from placement.legality import (BoardOutlineGate, point_to_seg_dist, rect_gap,
+                                ring_is_rect, rotate_local_bounds)
 
 ROTATIONS = [0.0, 90.0, 180.0, 270.0]
 EPS = 1e-6
+
+# These four moved to placement/legality.py, the shared home with quench.py
+# (which carried byte-identical copies of the first two). Aliased rather than
+# renamed: the names are used throughout this module and imported by tests.
+_rotate_local_bounds = rotate_local_bounds
+_ring_is_rect = ring_is_rect
+_rect_gap = rect_gap
+_point_to_seg_dist = point_to_seg_dist
 
 # Objective weights. Foreign-copper clearance (via + track + pad grazes, see
 # graze_penalty) dominates everything, then pulling pads onto same-net balls,
@@ -55,47 +65,6 @@ EPS = 1e-6
 VIA_WEIGHT = 50.0
 ATTRACT_WEIGHT = 1.0
 DISPLACEMENT_WEIGHT = 0.3
-
-
-def _rotate_local_bounds(lmin_x, lmin_y, lmax_x, lmax_y, rotation):
-    """Rotate a local bounding box by the footprint rotation (KiCad sign)."""
-    rot = rotation % 360
-    if abs(rot) < 0.01:
-        return lmin_x, lmin_y, lmax_x, lmax_y
-    angle = math.radians(-rot)
-    cos_a, sin_a = math.cos(angle), math.sin(angle)
-    corners = [(lmin_x, lmin_y), (lmax_x, lmin_y),
-               (lmin_x, lmax_y), (lmax_x, lmax_y)]
-    xs = [x * cos_a - y * sin_a for x, y in corners]
-    ys = [x * sin_a + y * cos_a for x, y in corners]
-    return min(xs), min(ys), max(xs), max(ys)
-
-
-def _ring_is_rect(ring):
-    """True when an outline ring is an axis-aligned rectangle equal to its own
-    bbox (shoelace area == bbox area) -- then the bbox inset test is exact and
-    the per-candidate ring checks can be skipped entirely (#370 B2)."""
-    xs = [p[0] for p in ring]
-    ys = [p[1] for p in ring]
-    bbox_area = (max(xs) - min(xs)) * (max(ys) - min(ys))
-    if bbox_area <= 0:
-        return False
-    a = 0.0
-    n = len(ring)
-    for i in range(n):
-        x1, y1 = ring[i]
-        x2, y2 = ring[(i + 1) % n]
-        a += x1 * y2 - x2 * y1
-    return abs(abs(a) / 2.0 - bbox_area) <= max(1e-6, 1e-3 * bbox_area)
-
-
-def _rect_gap(a, b):
-    """Smallest axis-aligned gap between two rects (negative if overlapping)."""
-    dx = max(a[0] - b[2], b[0] - a[2])
-    dy = max(a[1] - b[3], b[1] - a[3])
-    if dx < 0 and dy < 0:
-        return max(dx, dy)
-    return math.hypot(max(dx, 0), max(dy, 0)) if (dx > 0 and dy > 0) else max(dx, dy)
 
 
 def _point_to_rect_dist(px, py, rect):
@@ -118,16 +87,6 @@ def _pad_pair_shortfall(pads_a, pads_b, clearance):
             if gap < clearance - EPS:
                 pen += (clearance - gap)
     return pen
-
-
-def _point_to_seg_dist(px, py, x1, y1, x2, y2):
-    """Distance from a point to a line segment."""
-    dx, dy = x2 - x1, y2 - y1
-    L2 = dx * dx + dy * dy
-    if L2 < 1e-12:
-        return math.hypot(px - x1, py - y1)
-    t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / L2))
-    return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
 
 
 def _segs_cross(ax, ay, bx, by, cx, cy, dx, dy):
@@ -283,17 +242,12 @@ class _Repair:
         # outline is not exactly the bbox (or cutouts exist), candidate rects
         # are additionally gated against the true Edge.Cuts rings in
         # _blocked_geom. Per-cap laziness: only caps whose reachable disk can
-        # touch a ring pay for the exact test.
-        from check_drc import board_edge_geometry
-        e_rings, e_outer, e_cuts = board_edge_geometry(pcb_data.board_info)
-        self._edge_rings, self._edge_outer, self._edge_cutouts = \
-            e_rings, e_outer, e_cuts
+        # touch a ring pay for the exact test. The gate itself now lives in
+        # placement/legality.py, shared with quench (#456 item 2).
+        self.edge_gate = BoardOutlineGate(pcb_data.board_info, margin)
         self._edge_margin = margin
-        self._edge_active = bool(e_rings) and (
-            bool(e_cuts) or len(e_rings) > 1 or
-            not _ring_is_rect(e_rings[0]))
+        self._edge_active = self.edge_gate.active
         self._max_disp_cap = max_displacement_cap
-        self._cap_near_edge: Dict[str, bool] = {}
         self.clearance = clearance
         self.grid_step = grid_step
         self.capture_radius = capture_radius
@@ -561,46 +515,15 @@ class _Repair:
         """Cached prune for the real-outline gate (#370 B2): a cap moves at
         most max_displacement_cap from its seed, so only caps whose reachable
         disk can touch an Edge.Cuts ring ever need the exact ring test."""
-        near = self._cap_near_edge.get(ref)
-        if near is None:
-            r = cap.rect(cap.seed_x, cap.seed_y, cap.seed_rot)
-            cx, cy = (r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0
-            span = math.hypot(r[2] - cx, r[3] - cy)
-            reach = self._max_disp_cap + span + self._edge_margin + EPS
-            near = False
-            for ring in self._edge_rings:
-                n = len(ring)
-                for i in range(n):
-                    x1, y1 = ring[i]
-                    x2, y2 = ring[(i + 1) % n]
-                    if _point_to_seg_dist(cx, cy, x1, y1, x2, y2) <= reach:
-                        near = True
-                        break
-                if near:
-                    break
-            self._cap_near_edge[ref] = near
-        return near
+        return self.edge_gate.may_reach(
+            ref, cap.rect(cap.seed_x, cap.seed_y, cap.seed_rot),
+            self._max_disp_cap)
 
     def _rect_edge_blocked(self, rect):
         """True when a candidate courtyard rect leaves the REAL board outline,
         enters a cutout, or comes within the edge margin of either (#370 B2 --
         the bbox `usable` inset is blind to cutouts / curved outlines)."""
-        from check_drc import _point_on_board, _segment_to_rings_distance
-        x0, y0, x1, y1 = rect
-        for (px, py) in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
-            if not _point_on_board(px, py, self._edge_outer, self._edge_cutouts):
-                return True
-        for (ax, ay, bx, by) in ((x0, y0, x1, y0), (x1, y0, x1, y1),
-                                 (x1, y1, x0, y1), (x0, y1, x0, y0)):
-            if _segment_to_rings_distance(ax, ay, bx, by, self._edge_rings) \
-                    < self._edge_margin:
-                return True
-        # A cutout ring FULLY INSIDE the rect evades both tests above.
-        for cut in self._edge_cutouts:
-            cx, cy = cut[0]
-            if x0 <= cx <= x1 and y0 <= cy <= y1:
-                return True
-        return False
+        return self.edge_gate.rect_blocked(rect)
 
     def _overlap(self, a, b):
         """Courtyard-clearance shortfall between two rects (0 if clear)."""

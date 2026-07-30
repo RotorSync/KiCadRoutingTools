@@ -9,6 +9,8 @@ Usage:
 """
 from __future__ import annotations
 
+import env_knobs
+import re
 import sys
 import os
 import argparse
@@ -16,8 +18,13 @@ from typing import List, Optional, Tuple, Dict, Set, Union
 from dataclasses import dataclass
 
 # Run startup checks first (validates numpy, scipy, shapely are installed)
-from startup_checks import run_all_checks
-run_all_checks()
+from startup_checks import exit_on_error_if_main
+# Stays at module scope, ABOVE the heavy imports, so a missing dep is
+# reported before numpy/grid_router blow up with something cryptic. But it
+# raises instead of exiting when this module is IMPORTED rather than run,
+# so pytest can still collect a suite on a checkout with no built router
+# (#457 item 3).
+exit_on_error_if_main(__name__)
 
 # These imports are guaranteed to work after startup_checks passes
 import numpy as np
@@ -79,7 +86,8 @@ from plane_resistance import (
     analyze_multi_net_plane,
     print_single_net_resistance,
     print_multi_net_resistance,
-    stackup_copper_oz
+    stackup_copper_oz,
+    note_resistance_result
 )
 import routing_defaults as defaults
 
@@ -449,7 +457,7 @@ def find_via_position(
         ms_iters = max(10000, min(60000, len(phase_cells) * 4))
         path, iterations, _ = router.route_with_frontier(
             routing_obstacles, phase_cells, [(pad_gx, pad_gy, layer_idx)], ms_iters,
-            False,  # collinear_vias
+            env_knobs.COLLINEAR_VIAS,  # collinear_vias (#487: KICAD_COLLINEAR_VIAS=1)
             0,      # via_exclusion_radius
             None,   # start_direction
             None,   # end_direction
@@ -685,7 +693,7 @@ def route_via_to_pad(
 
     path, iterations, blocked_cells = router.route_with_frontier(
         routing_obstacles, sources, targets, max_iterations,
-        False,  # collinear_vias
+        env_knobs.COLLINEAR_VIAS,  # collinear_vias (#487: KICAD_COLLINEAR_VIAS=1)
         0,      # via_exclusion_radius
         None,   # start_direction
         None,   # end_direction
@@ -786,7 +794,7 @@ def route_multi_source_to_pad(
     ms_iters = max(max_iterations, min(60000, len(source_cells) * 4))
     path, iterations, blocked_cells = router.route_with_frontier(
         routing_obstacles, source_cells, [(pad_gx, pad_gy, layer_idx)], ms_iters,
-        False,  # collinear_vias
+        env_knobs.COLLINEAR_VIAS,  # collinear_vias (#487: KICAD_COLLINEAR_VIAS=1)
         0,      # via_exclusion_radius
         None,   # start_direction
         None,   # end_direction
@@ -1044,7 +1052,7 @@ def route_plane_connection(
 
     path, iterations, _ = router.route_with_frontier(
         obstacles, sources, targets, max_iterations,
-        False,  # collinear_vias
+        env_knobs.COLLINEAR_VIAS,  # collinear_vias (#487: KICAD_COLLINEAR_VIAS=1)
         0,      # via_exclusion_radius
         None,   # start_direction
         None,   # end_direction
@@ -1086,6 +1094,7 @@ def _generate_multinet_layer_zones(
     board_edge_clearance: float,
     debug_lines: bool,
     verbose: bool,
+    thermal_relief: bool = False,
     priority_offset: int = 0
 ) -> Tuple[List[str], List[str], List[Dict]]:
     """
@@ -1196,11 +1205,12 @@ def _generate_multinet_layer_zones(
                 polygon_points=zone_polygon,
                 clearance=zone_clearance,
                 min_thickness=min_thickness,
-                direct_connect=True,
+                direct_connect=not thermal_relief,
                 use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION
             )
             zone_sexprs.append(zone_sexpr)
             zone_data_list.append({
+                'thermal_relief': thermal_relief,
                 'net_id': net_id,
                 'net_name': net_name,
                 'layer': layer,
@@ -1482,11 +1492,12 @@ def _generate_multinet_layer_zones(
             polygon_points=zone_polygon,
             clearance=zone_clearance,
             min_thickness=min_thickness,
-            direct_connect=True,
+            direct_connect=not thermal_relief,
             use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION
         )
         zone_sexprs.append(zone_sexpr)
         zone_data_list.append({
+            'thermal_relief': thermal_relief,
             'net_id': net_id,
             'net_name': net_name,
             'layer': layer,
@@ -1536,12 +1547,13 @@ def _generate_multinet_layer_zones(
                 polygon_points=polygon,
                 clearance=zone_clearance,
                 min_thickness=min_thickness,
-                direct_connect=True,
+                direct_connect=not thermal_relief,
                 use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION,
                 priority=_prio_of.get((net_id, poly_idx), 0)
             )
             zone_sexprs.append(zone_sexpr)
             zone_data_list.append({
+                'thermal_relief': thermal_relief,
                 'net_id': net_id,
                 'net_name': net_name,
                 'layer': layer,
@@ -1569,6 +1581,8 @@ def _generate_multinet_layer_zones(
         result = analyze_multi_net_plane(largest_polygon, mst_edges, edge_routes, layer,
                                         copper_oz=copper_oz)
         resistance_results[net_name] = result
+        # #487: main() folds these into JSON_SUMMARY (stdout-only before).
+        note_resistance_result(net_name, result)
 
     print_multi_net_resistance(resistance_results)
 
@@ -2237,6 +2251,450 @@ def _resolve_zone_clearance_impl(zone_clearance, clearance, min_thickness,
     return round(needed, 4)
 
 
+# #487 narrowing (Andy): thermal-via arrays belong on true EP/tab pads of
+# HEAT-MAKING parts, not on every big pad -- a 2512 sense resistor or bulk
+# cap pad clears 2mm easily. Reference prefixes of active devices:
+_THERMAL_REF_PREFIXES = ('U', 'Q', 'D', 'T', 'VR', 'IC', 'PS', 'LED')
+# Footprint-name tokens that name an exposed pad / power tab outright
+# (KiCad library convention: QFN-32-1EP_5x5mm, TO-252-2, HTSSOP...).
+_THERMAL_FP_TOKENS = re.compile(
+    r'(?i)(-\d?EP[_\b-]|_EP_|ThermalPad|ThermalVias|D2?PAK|TO-2(20|52|63)|'
+    r'PowerPAK|HTSSOP|HSOP|PowerSO|SOT-223|HSOF|Powermite|VREG)')
+
+
+def is_thermal_pad(pad, pcb_data, min_mm: float = None) -> bool:
+    """True when a plane-net pad deserves a thermal-via ARRAY (#487).
+
+    Size alone over-triggers (big cap/resistor pads), so require ALL of:
+      * SMD and >= min_mm in both axes (the copper must hold a lattice);
+      * an ACTIVE component reference prefix (U/Q/D/T/VR/IC/PS/LED) --
+        passives and connectors are excluded by name;
+      * the EP/tab SIGNATURE: this is the footprint's largest pad AND at
+        least 3x the median pad area (QFN/DFN center EPs, D-Pak drain
+        tabs), OR the footprint name itself declares an exposed pad
+        (-1EP / TO-252 / HTSSOP / ...).
+    """
+    if min_mm is None:
+        min_mm = defaults.THERMAL_PAD_MIN_MM
+    if pad.drill != 0 or min(pad.size_x, pad.size_y) < min_mm:
+        return False
+    ref = pad.component_ref or ''
+    m = re.match(r'([A-Za-z]+)', ref)
+    if not m or m.group(1).upper() not in _THERMAL_REF_PREFIXES:
+        return False
+    fp = pcb_data.footprints.get(ref)
+    if fp is None:
+        return False
+    if _THERMAL_FP_TOKENS.search(getattr(fp, 'footprint_name', '') or ''):
+        return True
+    areas = sorted(p.size_x * p.size_y for p in fp.pads
+                   if p.pad_type != 'np_thru_hole' and p.size_x and p.size_y)
+    if len(areas) < 2:
+        return False
+    my_area = pad.size_x * pad.size_y
+    median = areas[len(areas) // 2]
+    # 2.5x, not 3.0: corpus scan (406 boards) showed SOT-223 tabs at 2.9x
+    # and multi-big-pad power packages just under 3x -- the heat-makers
+    # this exists for -- while passives stay excluded by prefix anyway.
+    return my_area >= max(areas) - 1e-9 and my_area >= 2.5 * median
+
+
+def compute_thermal_via_array(pad, obstacles, coord, config, via_size,
+                              via_drill, hole_to_hole_clearance, pcb_data,
+                              pitch: float = None) -> List[Tuple[float, float]]:
+    """Lattice of thermal-via sites over an exposed pad's REAL copper (#487).
+
+    A 5x5mm QFN exposed pad used to get ONE via out of the reuse/strap logic
+    ("share ONE via plus short pad-layer straps") -- electrically fine,
+    thermally backwards: the exposed pad's whole job is to pump heat into the
+    plane through a via field. Grid the pad at ``pitch`` (default: the
+    largest of 2 via diameters, drill + hole-to-hole, and 1.0mm -- classic
+    thermal-via spacing that also guarantees lattice-internal drill
+    clearance), keep only sites whose annulus sits fully on the (rotated)
+    pad copper, and cull each through the SAME predicates single-via
+    placement uses: obstacles.is_via_blocked + the board-edge clamp. The
+    caller re-checks blocked-ness as it commits sites (each placed via
+    blocks its hole-to-hole neighborhood). Returns world (x, y) sites,
+    possibly empty -- the caller then falls through to the normal path.
+    """
+    if pitch is None:
+        pitch = max(via_size * 2.0, via_drill + hole_to_hole_clearance, 1.0)
+    hw, hh = pad_rect_halfspan(pad)
+    inset = via_size / 2.0  # annulus fully on the pad copper
+    span_x, span_y = hw - inset, hh - inset
+    if span_x < 0 or span_y < 0:
+        return []
+    nx = max(1, int(span_x * 2 / pitch) + 1)
+    ny = max(1, int(span_y * 2 / pitch) + 1)
+    xs = ([pad.global_x] if nx == 1 else
+          [pad.global_x - span_x + i * (2 * span_x / (nx - 1)) for i in range(nx)])
+    ys = ([pad.global_y] if ny == 1 else
+          [pad.global_y - span_y + i * (2 * span_y / (ny - 1)) for i in range(ny)])
+    is_circle = getattr(pad, 'shape', '') == 'circle'
+    r_max = min(pad.size_x, pad.size_y) / 2.0 - inset
+    sites = []
+    for y in ys:
+        for x in xs:
+            if is_circle:
+                if ((x - pad.global_x) ** 2 + (y - pad.global_y) ** 2) > r_max ** 2:
+                    continue
+            elif getattr(pad, 'rect_rotation', 0.0) and not point_in_pad_rect(x, y, pad):
+                continue
+            gx, gy = coord.to_grid(x, y)
+            if obstacles.is_via_blocked(gx, gy):
+                continue
+            pos, _ = clamp_tap_via_to_edge((x, y), pad, pcb_data, config, via_size)
+            if abs(pos[0] - x) > pitch / 2 or abs(pos[1] - y) > pitch / 2:
+                continue  # clamp had to drag it off its lattice cell
+            sites.append(pos)
+    return sites
+
+
+def _stitch_pitch_from_freq(pcb_data: PCBData, max_freq_mhz: float,
+                            floor_mm: float = 1.0):
+    """lambda/20 stitching pitch for a maximum frequency of interest (#485).
+
+    Uses the LARGEST dielectric epsilon_r in the board's stackup
+    (conservative: the highest permittivity gives the shortest in-material
+    wavelength, hence the tightest pitch); FR-4's 4.5 when the board has no
+    stackup section. Floored at ``floor_mm`` -- below that the via-via
+    spacing floors reject most sites anyway and the lattice loop cost
+    explodes.
+
+    Returns (pitch_mm, epsilon_r, epsilon_from_stackup, lambda_mm).
+    """
+    import math
+    ers = [sl.epsilon_r for sl in (pcb_data.board_info.stackup or [])
+           if sl.layer_type in ('core', 'prepreg') and sl.epsilon_r]
+    er = max(ers) if ers else 4.5
+    lam_mm = 299792.458 / (max_freq_mhz * math.sqrt(er))  # c = 299792.458 mm*MHz
+    return max(lam_mm / 20.0, floor_mm), er, bool(ers), lam_mm
+
+
+def _fence_ring_points(pcb_data: PCBData, inset: float,
+                       pitch: float) -> List[Tuple[float, float]]:
+    """Candidate sites for a board-edge via fence (#485): the board outline(s)
+    offset ``inset`` toward the interior, sampled at ~``pitch`` arc-length
+    spacing. Uses the true Edge.Cuts polygon(s) when present -- a panelized
+    board fences EVERY outline (#304) -- else the bounding box. Interior
+    cutouts are not fenced. An inset that swallows a narrow board region
+    simply yields no ring there (shapely negative buffer)."""
+    from shapely.geometry import Polygon
+    bi = pcb_data.board_info
+    rings = [o for o in (getattr(bi, 'board_outlines', None) or [])
+             if len(o) >= 3]
+    if not rings:
+        if not bi.board_bounds:
+            return []
+        min_x, min_y, max_x, max_y = bi.board_bounds
+        rings = [[(min_x, min_y), (max_x, min_y),
+                  (max_x, max_y), (min_x, max_y)]]
+    pts: List[Tuple[float, float]] = []
+    for ring in rings:
+        try:
+            poly = Polygon(ring)
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            inner = poly.buffer(-inset, join_style=2)
+        except Exception:
+            continue
+        for g in getattr(inner, 'geoms', [inner]):
+            ext = getattr(g, 'exterior', None)
+            if g.is_empty or ext is None:
+                continue
+            n = max(4, int(round(ext.length / pitch)))
+            for i in range(n):
+                p = ext.interpolate(ext.length * i / n)
+                pts.append((p.x, p.y))
+    return pts
+
+
+def _stitch_plane_area_vias(
+    pcb_data: PCBData,
+    net_names: List[str],
+    plane_layers: List[str],
+    net_ids: List[int],
+    all_zone_data: List[Dict],
+    config: GridRouteConfig,
+    coord: GridCoord,
+    stitch_pitch: float,
+    via_size: float,
+    via_drill: float,
+    hole_to_hole_clearance: float,
+    same_net_pad_clearance: float,
+    stitch_lattice: bool = True,
+    stitch_edge_fence: bool = False,
+    stitch_fence_pitch: Optional[float] = None,
+    stitch_inset: Optional[float] = None,
+    board_edge_clearance: float = defaults.PLANE_EDGE_CLEARANCE,
+    progress_callback=None,
+    cancel_check=None,
+    verbose: bool = False,
+) -> List[Dict]:
+    """Area via stitching + board-edge via fence (#485): bond each
+    multi-layer plane net's pours across layers with a periodic via lattice
+    at ``stitch_pitch`` (``stitch_lattice``), and/or run a via row along the
+    board outline (``stitch_edge_fence``) at ``stitch_fence_pitch`` (default:
+    the lattice pitch), inset ``stitch_inset`` from the edge (default: the
+    board edge clearance plus the fill-margin ring, i.e. as close as a site
+    can sit and still pass the fill gate). The fence runs FIRST so the
+    lattice's coverage rule treats fence vias as existing bonds instead of
+    doubling them up near the rim.
+
+    Nets stitched: exactly the requested plane nets that own >= 2 of the
+    requested plane layers (deliberately no CLI selection). Every site --
+    fence or lattice -- is gated twice:
+
+    - Predicted fill (ZoneFillModel over this run's zone geometry, or a kept
+      existing zone): the via disk PLUS its clearance pocket PLUS a
+      min_thickness ring must lie inside the MAIN fill component on >= 2 of
+      the net's layers -- so a stitch never necks the pour below
+      min_thickness locally and never taps a fill island.
+    - The same via obstacle map pad taps use (foreign copper at cross-class
+      clearance, drills at hole-to-hole, board edge, per-layer .kicad_dru),
+      plus block_via_position between batch placements -- so the lattice
+      cannot reintroduce the #274/#125/#271 same-net via-spacing class.
+
+    A site already within pitch/2 of a same-net via or plated barrel is
+    coverage-satisfied and skipped (the via-reuse rule); a blocked site is
+    nudged outward ring-by-ring up to pitch/4 before being given up.
+
+    Placed vias are appended to pcb_data.vias HERE (later passes must see
+    them); the returned dicts are for all_new_vias only -- the caller must
+    not append them to pcb_data again. Runs on dry runs too; the caller's
+    dry_run split just skips the file write (#485 item 5).
+    """
+    if stitch_pitch <= 0:
+        return []
+    board_bounds = pcb_data.board_info.board_bounds
+    if not board_bounds:
+        return []
+    import math
+    from types import SimpleNamespace
+    from plane_fill_model import ZoneFillModel
+
+    # Which requested nets own >= 2 distinct requested layers?
+    owned_layers: Dict[int, List[str]] = {}
+    net_display: Dict[int, str] = {}
+    for net_name, layer, net_id in zip(net_names, plane_layers, net_ids):
+        layers = owned_layers.setdefault(net_id, [])
+        if layer not in layers:
+            layers.append(layer)
+        net_display[net_id] = net_name
+    stitch_net_ids = [nid for nid, layers in owned_layers.items()
+                      if len(layers) >= 2]
+    if not stitch_net_ids:
+        print("\nVia stitching: no requested net owns >= 2 plane layers -- "
+              "nothing to stitch")
+        return []
+
+    min_x, min_y, max_x, max_y = board_bounds
+    # Center the lattice on the board so coverage is symmetric.
+    nx = max(1, int((max_x - min_x) / stitch_pitch))
+    ny = max(1, int((max_y - min_y) / stitch_pitch))
+    x0 = (min_x + max_x) / 2 - (nx - 1) * stitch_pitch / 2
+    y0 = (min_y + max_y) / 2 - (ny - 1) * stitch_pitch / 2
+    lattice = [(x0 + i * stitch_pitch, y0 + j * stitch_pitch)
+               for j in range(ny) for i in range(nx)]
+
+    # Nudge-search geometry: rings at ~coarse steps out to max_nudge, each
+    # candidate snapped to the routing grid (an off-grid site can sit up to
+    # half a cell inside an obstacle the grid check calls clear).
+    nudge_step = max(config.grid_step, min(0.5, stitch_pitch / 40))
+
+    def _candidates(cx, cy, max_nudge):
+        yield (round(cx / config.grid_step) * config.grid_step,
+               round(cy / config.grid_step) * config.grid_step)
+        r = nudge_step
+        while r <= max_nudge:
+            n_ang = max(8, int(2 * math.pi * r / nudge_step))
+            for k in range(n_ang):
+                ang = 2 * math.pi * k / n_ang
+                yield (round((cx + r * math.cos(ang)) / config.grid_step)
+                       * config.grid_step,
+                       round((cy + r * math.sin(ang)) / config.grid_step)
+                       * config.grid_step)
+            r += nudge_step
+
+    new_via_dicts: List[Dict] = []
+    for net_id in stitch_net_ids:
+        if cancel_check and cancel_check():
+            print("\nVia stitching cancelled")
+            break
+        net_name = net_display[net_id]
+        layers = owned_layers[net_id]
+        if progress_callback:
+            progress_callback(0, 0, f"Stitching '{net_name}' planes...")
+
+        # Fill models per owned layer: this run's zone geometry first (single
+        # net AND Voronoi polys -- all_zone_data carries both), else a kept
+        # pre-existing zone in pcb_data. Each entry: (model, main component,
+        # required free radius around a site).
+        models_by_layer: Dict[str, List[Tuple]] = {}
+        for layer in layers:
+            zsrc = [SimpleNamespace(net_id=net_id, layer=layer,
+                                    clearance=zd.get('clearance'),
+                                    min_thickness=zd.get('min_thickness'),
+                                    polygon=zd.get('polygon_points'))
+                    for zd in all_zone_data
+                    if zd.get('net_id') == net_id and zd.get('layer') == layer
+                    and zd.get('polygon_points') and not zd.get('keepout')]
+            if not zsrc:
+                zsrc = [z for z in (getattr(pcb_data, 'zones', None) or [])
+                        if z.net_id == net_id and z.layer == layer
+                        and getattr(z, 'polygon', None)]
+            for zone in zsrc:
+                try:
+                    model = ZoneFillModel(pcb_data, zone)
+                except Exception:
+                    continue
+                if not model.ok:
+                    continue
+                main = model.largest_component()
+                if not main:
+                    continue
+                zc = zone.clearance if zone.clearance is not None \
+                    else defaults.PLANE_ZONE_CLEARANCE
+                mth = zone.min_thickness if zone.min_thickness is not None \
+                    else defaults.PLANE_MIN_THICKNESS
+                margin_r = via_size / 2 + zc + mth
+                models_by_layer.setdefault(layer, []).append(
+                    (model, main, margin_r))
+        if len(models_by_layer) < 2:
+            print(f"\nVia stitching: '{net_name}' has predictable fill on "
+                  f"{len(models_by_layer)} layer(s) (need 2) -- skipped")
+            continue
+
+        def _fill_layers_ok(x, y):
+            """Layers whose MAIN fill component contains the full margin disk
+            around (x, y). Ring-sampled at 8 points + center; a sample off the
+            main component (island, pocket, outside model coverage) fails
+            that model."""
+            n_ok = 0
+            for layer_models in models_by_layer.values():
+                for model, main, margin_r in layer_models:
+                    if model.query_component(x, y) != main:
+                        continue
+                    ok = True
+                    for k in range(8):
+                        ang = math.pi / 4 * k
+                        if model.query_component(
+                                x + margin_r * math.cos(ang),
+                                y + margin_r * math.sin(ang)) != main:
+                            ok = False
+                            break
+                    if ok:
+                        n_ok += 1
+                        break  # one passing model per layer is enough
+            return n_ok
+
+        # Existing same-net bond points: vias (full-stack barrels) and plated
+        # through-hole pads already tie this net's layers together.
+        bonds: List[Tuple[float, float]] = [
+            (v.x, v.y) for v in pcb_data.vias if v.net_id == net_id]
+        bonds.extend((p.global_x, p.global_y)
+                     for p in pcb_data.pads_by_net.get(net_id, [])
+                     if pad_is_plated_through(p))
+
+        def _nearest_bond(x, y):
+            return min((math.hypot(x - bx, y - by) for bx, by in bonds),
+                       default=float('inf'))
+
+        obstacles = build_via_obstacle_map(
+            pcb_data, config, net_id, verbose=False,
+            same_net_pad_clearance=same_net_pad_clearance)
+        # Vias stitched for earlier nets in this pass are already in
+        # pcb_data.vias (appended below), so the map above blocks them.
+
+        def _try_site(cx, cy, pitch_local, max_nudge):
+            """Gate + place one site. Returns (outcome, d0) where outcome is
+            'no_fill' | 'covered' | 'blocked' | 'placed' and d0 the pre-place
+            distance to the nearest same-net bond (None for no_fill)."""
+            if _fill_layers_ok(cx, cy) < 2:
+                return 'no_fill', None
+            d0 = _nearest_bond(cx, cy)
+            if d0 <= pitch_local / 2:
+                return 'covered', d0
+            for x, y in _candidates(cx, cy, max_nudge):
+                gx, gy = coord.to_grid(x, y)
+                if obstacles.is_via_blocked(gx, gy):
+                    continue
+                if _fill_layers_ok(x, y) < 2:
+                    continue
+                new_via_dicts.append({
+                    'x': x, 'y': y, 'size': via_size, 'drill': via_drill,
+                    'layers': ['F.Cu', 'B.Cu'], 'net_id': net_id,
+                })
+                pcb_data.vias.append(Via(x=x, y=y, size=via_size,
+                                         drill=via_drill,
+                                         layers=['F.Cu', 'B.Cu'],
+                                         net_id=net_id))
+                block_via_position(obstacles, x, y, coord,
+                                   hole_to_hole_clearance, via_drill,
+                                   via_size, config.clearance)
+                bonds.append((x, y))
+                return 'placed', d0
+            return 'blocked', d0
+
+        # Board-edge via fence first: fence vias then count as bonds for the
+        # lattice's coverage rule, so the rim isn't stitched twice.
+        if stitch_edge_fence:
+            fpitch = stitch_fence_pitch or stitch_pitch
+            max_margin = max(m for lms in models_by_layer.values()
+                             for (_mod, _comp, m) in lms)
+            # Auto inset: edge clearance + the fill-margin ring puts the
+            # ring samples exactly ON the pour boundary, where model cell
+            # quantization flips sites arbitrarily -- cushion past it.
+            inset = stitch_inset if stitch_inset else \
+                board_edge_clearance + max_margin + 0.2
+            ring = _fence_ring_points(pcb_data, inset, fpitch)
+            print(f"\nEdge via fence '{net_name}' at {fpitch:g}mm pitch, "
+                  f"{inset:.2f}mm inset ({len(ring)} outline sites)")
+            f_counts = {'placed': 0, 'covered': 0, 'no_fill': 0, 'blocked': 0}
+            for cx, cy in ring:
+                outcome, _d0 = _try_site(cx, cy, fpitch, fpitch / 4)
+                f_counts[outcome] += 1
+            print(f"  Fence vias placed: {f_counts['placed']}  "
+                  f"(covered by existing via/barrel: {f_counts['covered']}, "
+                  f"no 2-layer fill: {f_counts['no_fill']}, "
+                  f"no clear site: {f_counts['blocked']})")
+
+        if stitch_lattice:
+            print(f"\nVia stitching '{net_name}' across "
+                  f"{'/'.join(sorted(models_by_layer))} at {stitch_pitch:g}mm "
+                  f"pitch ({len(lattice)} lattice sites)")
+            placed = covered = no_fill = blocked = 0
+            max_dist_before = max_dist_after = 0.0
+            for cx, cy in lattice:
+                outcome, d0 = _try_site(cx, cy, stitch_pitch,
+                                        stitch_pitch / 4)
+                if outcome == 'no_fill':
+                    no_fill += 1
+                    continue
+                max_dist_before = max(max_dist_before, d0)
+                if outcome == 'covered':
+                    covered += 1
+                    max_dist_after = max(max_dist_after, d0)
+                elif outcome == 'blocked':
+                    blocked += 1
+                    max_dist_after = max(max_dist_after, d0)
+                else:
+                    placed += 1
+                    max_dist_after = max(max_dist_after,
+                                         _nearest_bond(cx, cy))
+
+            print(f"  Stitch vias placed: {placed}  "
+                  f"(covered by existing via/barrel: {covered}, "
+                  f"no 2-layer fill: {no_fill}, no clear site: {blocked})")
+            if max_dist_before > 0:
+                print(f"  Max lattice-site distance to nearest same-net bond: "
+                      f"{max_dist_before:.1f}mm -> {max_dist_after:.1f}mm")
+
+    if new_via_dicts:
+        print(f"\nVia stitching total: {len(new_via_dicts)} via(s) added")
+    return new_via_dicts
+
+
 def create_plane(
     input_file: str,
     output_file: str,
@@ -2282,6 +2740,14 @@ def create_plane(
     net_clearances: Optional[dict] = None,
     clamp_netclasses: bool = True,
     clearance_ceiling: Optional[float] = None,
+    thermal_relief: bool = False,
+    thermal_vias: bool = defaults.THERMAL_VIAS,
+    stitch_vias: bool = False,
+    stitch_pitch: float = defaults.STITCH_PITCH,
+    stitch_edge_fence: bool = False,
+    stitch_fence_pitch: Optional[float] = None,
+    stitch_inset: Optional[float] = None,
+    stitch_max_freq: Optional[float] = None,
 ) -> Union[Tuple[int, int, int],
            Tuple[int, int, int, list, list, list, int, list]]:
     """
@@ -2458,10 +2924,16 @@ def create_plane(
             print(f"Error: Zone conflict for net '{net_name}' on layer {plane_layer}")
             return _empty_plane_results(return_results)
         should_create_zones.append(should_create)
-        if zone_to_replace:
-            zones_to_replace.append((zone_to_replace.net_id, zone_to_replace.layer))
         if foreign_zones:
             shared_layer_priority[net_name] = shared_layer_zone_priority(foreign_zones)
+        if zone_to_replace:
+            zones_to_replace.append((zone_to_replace.net_id, zone_to_replace.layer))
+            # #487: a REPLACED user pour keeps (at least) its own fill priority.
+            # Writing only the shared-layer computed value silently reset e.g.
+            # a priority-2 pour to 0, flipping which overlapping zone pulls back.
+            _zp = int(getattr(zone_to_replace, 'priority', 0) or 0)
+            if _zp > shared_layer_priority.get(net_name, 0):
+                shared_layer_priority[net_name] = _zp
 
     # Step 3: Get board bounds for zone polygon
     board_bounds = pcb_data.board_info.board_bounds
@@ -2811,6 +3283,35 @@ def create_plane(
                 )
 
             print(f"  Pad {pad.component_ref}.{pad.pad_number}...", end=" ")
+
+            # #487: an exposed/thermal pad gets a via ARRAY, not the shared
+            # via the reuse/strap logic below would give it. Checked FIRST
+            # so a nearby via cannot satisfy a 5x5mm EP with one drill.
+            if thermal_vias and is_thermal_pad(pad, pcb_data):
+                _arr = compute_thermal_via_array(
+                    pad, obstacles, coord, config, via_size, via_drill,
+                    hole_to_hole_clearance, pcb_data)
+                _placed = 0
+                for (_ax, _ay) in _arr:
+                    _agx, _agy = coord.to_grid(_ax, _ay)
+                    if obstacles.is_via_blocked(_agx, _agy):
+                        continue  # a just-placed array via blocks this cell
+                    new_vias.append({'x': _ax, 'y': _ay, 'size': via_size,
+                                     'drill': via_drill,
+                                     'layers': ['F.Cu', 'B.Cu'], 'net_id': net_id})
+                    available_vias.append((_ax, _ay))
+                    via_index.add(_ax, _ay)
+                    block_via_position(obstacles, _ax, _ay, coord,
+                                       hole_to_hole_clearance, via_drill,
+                                       via_size, config.clearance)
+                    _placed += 1
+                if _placed:
+                    vias_placed += _placed
+                    print(f"thermal via array: {_placed} via(s) over "
+                          f"{pad.size_x:.1f}x{pad.size_y:.1f}mm pad")
+                    processed_pad_ids.add(current_pad_key)
+                    continue
+                # nothing fit: fall through to the normal single-via path
 
             # First, check if there's already a via very close by (within ~2 via diameters)
             # This handles cases like decoupling caps where both pads are on same net
@@ -3307,7 +3808,7 @@ def create_plane(
         # class as #208): after all rips/placements the maintained map must
         # equal a fresh rebuild from the CURRENT pcb_data plus the session vias
         # (mirroring its Step-7 construction + per-placement blocking).
-        if os.environ.get("KICAD_OBSTACLE_AUDIT") and obstacles is not None:
+        if env_knobs.OBSTACLE_AUDIT and obstacles is not None:
             _audit_plane_via_map(obstacles, pcb_data, config, net_id,
                                  same_net_pad_clearance,
                                  all_new_vias + new_vias, coord,
@@ -3330,7 +3831,7 @@ def create_plane(
                 polygon_points=zone_polygon,
                 clearance=zone_clearance,
                 min_thickness=min_thickness,
-                direct_connect=True,
+                direct_connect=not thermal_relief,
                 use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION,
                 priority=_prio
             )
@@ -3342,8 +3843,11 @@ def create_plane(
                 zone_polygon, plane_layer,
                 copper_oz=stackup_copper_oz(pcb_data, plane_layer))
             print_single_net_resistance(result, net_name)
+            # #487: main() folds these into JSON_SUMMARY (stdout-only before).
+            note_resistance_result(net_name, result)
 
             all_zone_data.append({
+                'thermal_relief': thermal_relief,
                 'net_id': net_id,
                 'net_name': net_name,
                 'layer': plane_layer,
@@ -3378,7 +3882,7 @@ def create_plane(
         # via-drilled-on-restored-track class; over-blocking is by-design
         # conservative for dropped pieces). Fresh-recompute each restored
         # net's footprint from CURRENT pcb_data and probe the map.
-        if os.environ.get('KICAD_PLANE_MAP_PARITY') and ripped_net_ids:
+        if env_knobs.PLANE_MAP_PARITY and ripped_net_ids:
             from obstacle_cache import precompute_via_placement_obstacles as _pv
             for _rid in ripped_net_ids:
                 if not any(v.net_id == _rid for v in pcb_data.vias) and \
@@ -3437,6 +3941,7 @@ def create_plane(
                     progress_callback(0, 0, f"Computing Voronoi zones for {layer}...")
 
                 zone_sexprs, debug_line_sexprs, zone_data = _generate_multinet_layer_zones(
+                    thermal_relief=thermal_relief,
                     layer=layer,
                     nets_on_layer=nets_on_layer,
                     pcb_data=pcb_data,
@@ -3465,6 +3970,40 @@ def create_plane(
                 all_zone_sexprs.extend(zone_sexprs)
                 all_debug_lines.extend(debug_line_sexprs)
                 all_zone_data.extend(zone_data)
+
+    # Area via stitching + edge fence (#485): AFTER every pour's geometry and
+    # this run's tap copper exist, BEFORE the finalize/write split so the CLI
+    # file write and the GUI results path emit identical stitch vias. The
+    # pass appends its vias to pcb_data.vias itself.
+    if (stitch_vias or stitch_edge_fence) and \
+            not (cancel_check and cancel_check()):
+        # Frequency-derived pitch: lambda/20 at the maximum frequency of
+        # interest, from the stackup's own dielectric. Overrides
+        # --stitch-pitch (the more specific intent wins); the fence pitch
+        # follows unless --stitch-fence-pitch is explicit.
+        if stitch_max_freq:
+            _p, _er, _from_stackup, _lam = _stitch_pitch_from_freq(
+                pcb_data, stitch_max_freq)
+            _src = "board stackup" if _from_stackup else "FR-4 default"
+            print(f"\nStitch pitch from max frequency {stitch_max_freq:g} "
+                  f"MHz: lambda = {_lam:.1f}mm (epsilon_r {_er:g}, {_src}) "
+                  f"-> lambda/20 pitch {_p:.2f}mm"
+                  + (f" (overrides pitch {stitch_pitch:g}mm)"
+                     if abs(_p - stitch_pitch) > 1e-9 else ""))
+            stitch_pitch = _p
+        stitch_via_dicts = _stitch_plane_area_vias(
+            pcb_data, net_names, plane_layers, net_ids, all_zone_data,
+            config, coord, stitch_pitch, via_size, via_drill,
+            hole_to_hole_clearance, same_net_pad_clearance,
+            stitch_lattice=stitch_vias,
+            stitch_edge_fence=stitch_edge_fence,
+            stitch_fence_pitch=stitch_fence_pitch,
+            stitch_inset=stitch_inset,
+            board_edge_clearance=board_edge_clearance,
+            progress_callback=progress_callback, cancel_check=cancel_check,
+            verbose=verbose)
+        all_new_vias.extend(stitch_via_dicts)
+        total_vias_placed += len(stitch_via_dicts)
 
     # Print overall totals only if multiple nets were processed
     if len(net_names) > 1:
@@ -3559,6 +4098,7 @@ def create_plane(
                         _cu, _pts, _kname,
                         use_net_name=pcb_data.kicad_version >= KICAD_10_MIN_VERSION))
                     all_zone_data.append({
+                        'thermal_relief': thermal_relief,
                         'keepout': True, 'name': _kname, 'layers': _cu,
                         'polygon_points': _pts,
                     })
@@ -3573,7 +4113,7 @@ def create_plane(
     if dry_run:
         print("\nDry run - no output file written")
     else:
-        if os.environ.get('KICAD_SETTLE_DEBUG'):
+        if env_knobs.SETTLE_DEBUG:
             from collections import Counter as _C
             _dups = {k: n for k, n in _C((v.get('net_id'), round(v['x'], 3), round(v['y'], 3))
                                           for v in all_new_vias).items() if n > 1}
@@ -3683,6 +4223,14 @@ def create_plane(
                         power_nets_widths=power_nets_widths,
                         disable_bga_zones=([] if no_bga_zone else None),
                         net_clearances=net_clearances,  # #434 cross-class
+                        # #527: forward progress/cancel -- a multi-net
+                        # reconnect used to run minutes behind one static
+                        # "Reconnecting..." message.
+                        progress_callback=(
+                            (lambda c, t, m: progress_callback(
+                                c, t, f"Reconnect: {m}"))
+                            if progress_callback else None),
+                        cancel_check=cancel_check,
                         return_results=True, pcb_data=pcb_data)
 
                     def _sd(_s):
@@ -3809,6 +4357,14 @@ Examples:
     # Zone options
     parser.add_argument("--zone-clearance", type=float, default=None, help="Zone (pour) clearance from other copper in mm. Default: follow --clearance, auto-stepping down to the fab floor if the pour cannot thread the densest BGA via lattice")
     parser.add_argument("--min-thickness", type=float, default=defaults.PLANE_MIN_THICKNESS, help="Minimum zone copper thickness in mm (default: 0.1)")
+    parser.add_argument("--thermal-vias", action=argparse.BooleanOptionalAction,
+                        default=defaults.THERMAL_VIAS,
+                        help="Via ARRAY over exposed/thermal pads (SMD plane-net pads wider than "
+                             f"{defaults.THERMAL_PAD_MIN_MM}mm both axes) instead of one shared "
+                             "via (#487). ON by default; --no-thermal-vias disables")
+    parser.add_argument("--thermal-relief", action="store_true",
+                        help="Connect pads to the pour with thermal-relief spokes instead of "
+                             "solid copper (#487: the writer always supported it; nothing could ask)")
 
     # Algorithm options
     parser.add_argument("--grid-step", type=float, default=defaults.GRID_STEP, help="Grid resolution in mm (default: 0.1)")
@@ -3879,6 +4435,35 @@ Examples:
     parser.add_argument("--debug-lines", action="store_true", help="Output MST routes on User.1, User.2, etc. per net")
     parser.add_argument("--add-teardrops", action="store_true",
         help="Add teardrop settings to all pads and vias in output file")
+
+    # Area via stitching (#485)
+    parser.add_argument("--stitch-vias", action="store_true",
+        help="Area via stitching: bond each plane net's pours across layers "
+             "with a periodic via lattice. Applies to the --nets that own "
+             ">= 2 of the --plane-layers (no separate net selection). Every "
+             "site is gated by the predicted zone fill (no pour necking, no "
+             "island taps) and the same obstacle/hole-to-hole/edge checks "
+             "pad-tap vias use.")
+    parser.add_argument("--stitch-pitch", type=float, default=defaults.STITCH_PITCH,
+        help=f"Lattice pitch for --stitch-vias in mm (default: {defaults.STITCH_PITCH})")
+    parser.add_argument("--stitch-max-freq", type=float, default=None,
+        help="Maximum frequency of interest in MHz: derives the stitching "
+             "pitch as lambda/20 using the largest dielectric epsilon_r in "
+             "the board's stackup (FR-4 4.5 if the board has none), "
+             "overriding --stitch-pitch. The fence pitch follows unless "
+             "--stitch-fence-pitch is given.")
+    parser.add_argument("--stitch-edge-fence", action="store_true",
+        help="Board-edge via fence: a row of stitching vias tracking the "
+             "board outline(s) (EMI guard ring). Same net rule and site "
+             "gates as --stitch-vias; works with or without it.")
+    parser.add_argument("--stitch-fence-pitch", type=float, default=None,
+        help="Via spacing along the edge fence in mm (default: the stitch "
+             "pitch)")
+    parser.add_argument("--stitch-inset", type=float, default=None,
+        help="Fence distance from the board edge to the via centers in mm "
+             "(default: auto -- the board edge clearance plus the fill-margin "
+             "ring, i.e. as close to the edge as a via can sit and keep the "
+             "pour intact)")
 
     # GND return vias
     parser.add_argument("--add-gnd-vias", action="store_true",
@@ -4028,6 +4613,14 @@ Examples:
         clearance=args.clearance,
         zone_clearance=args.zone_clearance,
         min_thickness=args.min_thickness,
+        thermal_relief=args.thermal_relief,
+        thermal_vias=args.thermal_vias,
+        stitch_vias=args.stitch_vias,
+        stitch_pitch=args.stitch_pitch,
+        stitch_edge_fence=args.stitch_edge_fence,
+        stitch_fence_pitch=args.stitch_fence_pitch,
+        stitch_inset=args.stitch_inset,
+        stitch_max_freq=args.stitch_max_freq,
         grid_step=args.grid_step,
         max_search_radius=args.max_search_radius,
         max_via_reuse_radius=args.max_via_reuse_radius,
@@ -4187,6 +4780,26 @@ Examples:
         "min_clearance_used": _cl.effective(args.clearance),
         "plane_nets": sorted(set(args.nets)),
     }
+    # #487: the plane resistance/ampacity numbers used to live only in stdout
+    # ("report-only ... print and discard"). Fold the per-net results the
+    # engine noted into the machine-readable summary so chains/graders/skills
+    # can gate on them.
+    try:
+        from plane_resistance import consume_resistance_results
+        _res = consume_resistance_results()
+        if _res:
+            _summary["plane_resistance"] = [
+                {"net": _n,
+                 "resistance_ohms": round(_r.get("resistance", 0.0), 6),
+                 "max_current_a": round(_r.get("max_current", 0.0), 2),
+                 "max_current_ipc2152_a": round(_r.get("max_current_ipc2152", 0.0), 2),
+                 "copper_oz": _r.get("copper_oz"),
+                 "temp_rise_c": _r.get("temp_rise_c"),
+                 "path_length_mm": round(_r.get("path_length", 0.0), 2),
+                 "avg_width_mm": round(_r.get("avg_width", 0.0), 3)}
+                for _n, _r in sorted(_res.items())]
+    except Exception:
+        pass
     print("JSON_SUMMARY: " + _json.dumps(_summary))
 
 

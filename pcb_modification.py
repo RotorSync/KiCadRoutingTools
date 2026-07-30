@@ -1105,7 +1105,8 @@ class PlaneCleanupDelta(NamedTuple):
 
 
 def compute_plane_copper_cleanup(pcb, plane_net_names, clearance: float = 0.1,
-                                 grid_step: float = 0.05) -> "PlaneCleanupDelta":
+                                 grid_step: float = 0.05,
+                                 progress_callback=None) -> "PlaneCleanupDelta":
     """Board-level core of the plane-copper cleanup (issues #84, #308, #319).
 
     Runs the ONE shared run_post_route_cleanup pipeline the signal fronts use --
@@ -1136,7 +1137,8 @@ def compute_plane_copper_cleanup(pcb, plane_net_names, clearance: float = 0.1,
     _outcome = run_post_route_cleanup(
         plane_results, pcb, scope, _cfg,
         label='Plane ', phantom=False, via_nudge=False, neck=False,
-        microshift_max_shift=grid_step)
+        microshift_max_shift=grid_step,
+        progress_callback=progress_callback)
     return PlaneCleanupDelta(
         connectors=[s for r in plane_results for s in (r.get('new_segments') or [])],
         segments_to_remove=list(_outcome.input_strip_segments),
@@ -1753,11 +1755,35 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None,
         for i, s in enumerate(net_segs):
             comp_segs[uf.find(2 * i)].append(s)
         via_reprs = graph.get('via_index_repr', {})
+        # #513 item 6 made graphics NON-conductive in the connectivity graph
+        # (correct for grading: KiCad never credits them), so a track that
+        # touches only a graphic is now its OWN pad-less component and the
+        # in-component graphic test below can no longer see the anchor. The
+        # copper still physically touches real (graphic) copper on the board,
+        # and deletion must stay conservative (#337) -- so anchor by GEOMETRY:
+        # an island whose copper overlaps a same-net graphic capsule is kept.
+        net_graphics = [g for g in net_segs if getattr(g, 'graphic', False)]
+
+        def _touches_graphic(segs):
+            from geometry_utils import segment_to_segment_distance
+            for s in segs:
+                for g in net_graphics:
+                    if s.layer != g.layer:
+                        continue
+                    d = segment_to_segment_distance(
+                        s.start_x, s.start_y, s.end_x, s.end_y,
+                        g.start_x, g.start_y, g.end_x, g.end_y)
+                    if d <= (s.width + g.width) / 2 + 1e-6:
+                        return True
+            return False
+
         for root, segs in comp_segs.items():
             if root in pad_roots:
                 continue
             if any(getattr(s, 'graphic', False) for s in segs):
                 continue  # immutable input art anchors the island
+            if net_graphics and _touches_graphic(segs):
+                continue  # copper abutting input art (#337): physically joined
             if keep_input_copper and (
                     any(id(s) not in seg_owner for s in segs)
                     or any(via_reprs.get(j) is not None
@@ -3824,6 +3850,7 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
     copper_layers = list(getattr(board_info, 'copper_layers', None) or
                          ['F.Cu', 'B.Cu'])
     edge_rings, edge_outer, edge_cutouts = board_edge_geometry(board_info)
+    board_bounds = getattr(board_info, 'board_bounds', None)
     MARGIN = 0.002
     WINDOW = 2.0     # local object window around a flagged via (mm)
     _edge_clr = max(clearance, board_edge_clearance)  # #438 honor board edge rule
@@ -3930,6 +3957,27 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
             mask[i] = False
         return bool(mask.any())
 
+    def edge_flagged(v):
+        """Via copper sub-clearance to the board edge (#526). A SIGNAL-route
+        via is committed at its true off-grid coordinate while the A* edge
+        keep-out is grid-quantized, so it can land a few um inside the rule
+        (h3: two /DDR3 SWE vias 0.010mm over the top edge). Tap vias have
+        clamp_tap_via_to_edge; this makes the nudge pass the signal-side
+        equivalent -- the edge was previously only a VETO when nudging for
+        other reasons, never a trigger."""
+        if edge_rings:
+            if not _point_on_board(v.x, v.y, edge_outer, edge_cutouts):
+                return True
+            return (_point_to_rings_distance(v.x, v.y, edge_rings)
+                    - (v.size / 2.0 + _edge_clr)) < -1e-4
+        if board_bounds:
+            # bbox fallback, same as check_drc on boards with no parsed
+            # outline (h3 is one -- its flags were bbox-based).
+            bx0, by0, bx1, by1 = board_bounds
+            return (min(v.x - bx0, bx1 - v.x, v.y - by0, by1 - v.y)
+                    - (v.size / 2.0 + _edge_clr)) < -1e-4
+        return False
+
     def npth_copper_flagged(v):
         """Via COPPER sub-clearance to an unplated (NPTH) hole edge (#441)."""
         if npth_x.size == 0:
@@ -4010,14 +4058,36 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
             d = math.hypot(x - hx, y - hy)
             consider(d - (r + hr + max(own, pc)), hx, hy)
         # board edge: include in the gap so a candidate never trades a copper
-        # graze for an edge one (no direction needed -- it's a veto, not a target)
+        # graze for an edge one. When the edge IS the worst offender (#526:
+        # edge-triggered vias, h3 SWE 0.010mm over the top edge), the nudge
+        # direction must point INTERIOR -- finite-difference gradient of the
+        # ring distance gives it without a nearest-point-on-rings helper.
         if edge_rings:
             if not _point_on_board(x, y, edge_outer, edge_cutouts):
                 best = (min(best[0], -1.0), best[1], best[2])
             else:
                 eg = _point_to_rings_distance(x, y, edge_rings) - (r + _edge_clr)
                 if eg < best[0]:
-                    best = (eg, best[1], best[2])
+                    e = 0.01
+                    gx = (_point_to_rings_distance(x + e, y, edge_rings)
+                          - _point_to_rings_distance(x - e, y, edge_rings)) / (2 * e)
+                    gy = (_point_to_rings_distance(x, y + e, edge_rings)
+                          - _point_to_rings_distance(x, y - e, edge_rings)) / (2 * e)
+                    n = math.hypot(gx, gy)
+                    if n > 1e-9:
+                        best = (eg, gx / n, gy / n)
+                    else:
+                        best = (eg, best[1], best[2])
+        elif board_bounds:
+            # bbox fallback (no parsed outline): four half-plane edges,
+            # inward unit direction per side.
+            bx0, by0, bx1, by1 = board_bounds
+            for eg2, ex, ey in ((x - bx0 - (r + _edge_clr), 1.0, 0.0),
+                                (bx1 - x - (r + _edge_clr), -1.0, 0.0),
+                                (y - by0 - (r + _edge_clr), 0.0, 1.0),
+                                (by1 - y - (r + _edge_clr), 0.0, -1.0)):
+                if eg2 < best[0]:
+                    best = (eg2, ex, ey)
         return best
 
     moved = 0
@@ -4032,7 +4102,8 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
               if id(v) in own_ids
               and (scope_net_ids is None or v.net_id in scope_net_ids)]
     for v in scoped:
-        if not (copper_flagged(v) or hole_flagged(v) or npth_copper_flagged(v)):
+        if not (copper_flagged(v) or hole_flagged(v) or npth_copper_flagged(v)
+                or edge_flagged(v)):
             continue
         near = gather_near(v)
         gap, ux, uy = worst_gap(v.x, v.y, v, near)

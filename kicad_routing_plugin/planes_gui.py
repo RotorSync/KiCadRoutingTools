@@ -315,6 +315,23 @@ class CreatePlanesOptionsPanel(wx.Panel):
         self.same_net_pad_clearance.Enable(False)  # sync with default-checked box
         zone_sizer.Add(self.via_in_pad_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
+        # #487: thermal-relief pad connections (the zone writer always
+        # supported them; every front hardcoded solid). Control named after
+        # the engine param so AI plans can set it.
+        self.thermal_relief = wx.CheckBox(self, label="Thermal relief pad connections")
+        self.thermal_relief.SetValue(False)
+        self.thermal_relief.SetToolTip(
+            "Connect pads to the pour with thermal-relief spokes instead of solid "
+            "copper (easier hand soldering/rework; solid = lowest impedance)")
+        zone_sizer.Add(self.thermal_relief, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
+        self.thermal_vias = wx.CheckBox(self, label="Thermal via arrays under exposed pads")
+        self.thermal_vias.SetValue(defaults.THERMAL_VIAS)
+        self.thermal_vias.SetToolTip(
+            "Give exposed/thermal pads (>= 2mm both axes) a lattice of vias into "
+            "the plane instead of a single shared via (#487)")
+        zone_sizer.Add(self.thermal_vias, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
         sizer.Add(zone_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
 
         # Rip-up options
@@ -329,6 +346,79 @@ class CreatePlanesOptionsPanel(wx.Panel):
         ripup_sizer.Add(self.rip_blocker_check, 0, wx.ALL, 5)
 
         sizer.Add(ripup_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
+
+        # Area via stitching (#485). Controls named after the engine params
+        # (stitch_vias / stitch_pitch) so AI plans can set them.
+        stitch_box = wx.StaticBox(self, label="Area Via Stitching")
+        stitch_sizer = wx.StaticBoxSizer(stitch_box, wx.VERTICAL)
+
+        self.stitch_vias = wx.CheckBox(self, label="Stitch plane layers with a via lattice")
+        self.stitch_vias.SetValue(False)
+        self.stitch_vias.SetToolTip(
+            "Bond each plane net's pours across layers with a periodic via "
+            "lattice (EMI/SI practice). Applies to the selected plane nets "
+            "that own 2+ plane layers; every site is checked against the "
+            "predicted zone fill and the same clearance/hole-to-hole/edge "
+            "rules as pad-tap vias.")
+        stitch_sizer.Add(self.stitch_vias, 0, wx.ALL, 5)
+
+        self.stitch_edge_fence = wx.CheckBox(
+            self, label="Board-edge via fence (EMI guard ring)")
+        self.stitch_edge_fence.SetValue(False)
+        self.stitch_edge_fence.SetToolTip(
+            "Add a row of stitching vias tracking the board outline(s). Same "
+            "net rule and site checks as the lattice; works with or without "
+            "it.")
+        stitch_sizer.Add(self.stitch_edge_fence, 0,
+                         wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
+        stitch_grid = wx.FlexGridSizer(cols=2, hgap=10, vgap=5)
+        stitch_grid.AddGrowableCol(1)
+        stitch_grid.Add(wx.StaticText(self, label="Lattice Pitch (mm):"), 0,
+                        wx.ALIGN_CENTER_VERTICAL)
+        r = defaults.PARAM_RANGES['stitch_pitch']
+        self.stitch_pitch = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
+                                              initial=defaults.STITCH_PITCH,
+                                              inc=r['inc'])
+        self.stitch_pitch.SetDigits(r['digits'])
+        self.stitch_pitch.SetToolTip("Spacing between stitching vias")
+        stitch_grid.Add(self.stitch_pitch, 0, wx.EXPAND)
+
+        stitch_grid.Add(wx.StaticText(self, label="Max Frequency (MHz, 0=off):"),
+                        0, wx.ALIGN_CENTER_VERTICAL)
+        r = defaults.PARAM_RANGES['stitch_max_freq']
+        self.stitch_max_freq = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
+                                                 initial=0.0, inc=r['inc'])
+        self.stitch_max_freq.SetDigits(r['digits'])
+        self.stitch_max_freq.SetToolTip(
+            "Maximum frequency of interest: derives the pitch as lambda/20 "
+            "from the stackup's dielectric (overrides Lattice Pitch). 0 = "
+            "use Lattice Pitch as-is.")
+        stitch_grid.Add(self.stitch_max_freq, 0, wx.EXPAND)
+
+        stitch_grid.Add(wx.StaticText(self, label="Fence Pitch (mm, 0=lattice):"),
+                        0, wx.ALIGN_CENTER_VERTICAL)
+        r = defaults.PARAM_RANGES['stitch_fence_pitch']
+        self.stitch_fence_pitch = wx.SpinCtrlDouble(self, min=r['min'],
+                                                    max=r['max'],
+                                                    initial=0.0, inc=r['inc'])
+        self.stitch_fence_pitch.SetDigits(r['digits'])
+        self.stitch_fence_pitch.SetToolTip(
+            "Via spacing along the edge fence. 0 = follow the lattice pitch.")
+        stitch_grid.Add(self.stitch_fence_pitch, 0, wx.EXPAND)
+
+        stitch_grid.Add(wx.StaticText(self, label="Fence Inset (mm, 0=auto):"),
+                        0, wx.ALIGN_CENTER_VERTICAL)
+        r = defaults.PARAM_RANGES['stitch_inset']
+        self.stitch_inset = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
+                                              initial=0.0, inc=r['inc'])
+        self.stitch_inset.SetDigits(r['digits'])
+        self.stitch_inset.SetToolTip(
+            "Distance from the board edge to the fence via centers. 0 = "
+            "auto (edge clearance + the pour's fill margin).")
+        stitch_grid.Add(self.stitch_inset, 0, wx.EXPAND)
+        stitch_sizer.Add(stitch_grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+        sizer.Add(stitch_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
 
         # GND Return Vias section
         gnd_box = wx.StaticBox(self, label="GND Return Vias")
@@ -394,6 +484,15 @@ class CreatePlanesOptionsPanel(wx.Panel):
             'gnd_via_distance': self.gnd_via_distance.GetValue(),
             'gnd_via_net': self.gnd_via_net.GetValue(),
             'same_net_pad_clearance': same_net_clr,
+            'thermal_relief': self.thermal_relief.GetValue(),
+            'thermal_vias': self.thermal_vias.GetValue(),
+            'stitch_vias': self.stitch_vias.GetValue(),
+            'stitch_pitch': self.stitch_pitch.GetValue(),
+            # 0 = auto/off in the controls -> None for the engine (CLI parity)
+            'stitch_edge_fence': self.stitch_edge_fence.GetValue(),
+            'stitch_fence_pitch': self.stitch_fence_pitch.GetValue() or None,
+            'stitch_inset': self.stitch_inset.GetValue() or None,
+            'stitch_max_freq': self.stitch_max_freq.GetValue() or None,
         }
 
 
@@ -1041,6 +1140,14 @@ class PlanesTab(wx.Panel):
                 clearance=config.get('clearance', defaults.CLEARANCE),
                 zone_clearance=config.get('zone_clearance'),
                 min_thickness=config.get('min_thickness', defaults.PLANE_MIN_THICKNESS),
+                thermal_relief=config.get('thermal_relief', False),
+                thermal_vias=config.get('thermal_vias', defaults.THERMAL_VIAS),
+                stitch_vias=config.get('stitch_vias', False),
+                stitch_pitch=config.get('stitch_pitch', defaults.STITCH_PITCH),
+                stitch_edge_fence=config.get('stitch_edge_fence', False),
+                stitch_fence_pitch=config.get('stitch_fence_pitch'),
+                stitch_inset=config.get('stitch_inset'),
+                stitch_max_freq=config.get('stitch_max_freq'),
                 grid_step=config.get('grid_step', defaults.GRID_STEP),
                 max_search_radius=config.get('max_search_radius', defaults.PLANE_MAX_SEARCH_RADIUS),
                 max_via_reuse_radius=config.get('max_via_reuse_radius', defaults.PLANE_MAX_VIA_REUSE_RADIUS),
@@ -1889,7 +1996,10 @@ class PlanesTab(wx.Panel):
                 # Set zone properties
                 zone.SetLocalClearance(mm_to_iu(zone_data.get('clearance', 0.2)))
                 zone.SetMinThickness(mm_to_iu(zone_data.get('min_thickness', 0.1)))
-                zone.SetPadConnection(pcbnew.ZONE_CONNECTION_FULL)  # Direct connect
+                zone.SetPadConnection(
+                    pcbnew.ZONE_CONNECTION_THERMAL
+                    if zone_data.get('thermal_relief')
+                    else pcbnew.ZONE_CONNECTION_FULL)
                 # Hatch the outline so the zone is visible immediately;
                 # the actual copper fill is computed below via ZONE_FILLER.
                 try:

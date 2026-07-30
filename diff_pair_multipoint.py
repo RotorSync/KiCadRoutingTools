@@ -17,6 +17,7 @@ resistor -> IC pins) are routed as a CHAIN of terminals:
 """
 from __future__ import annotations
 
+import env_knobs
 import math
 from itertools import permutations
 from typing import List, Optional, Tuple
@@ -925,7 +926,7 @@ def _route_terminal_set(state, pair: DiffPairNet, pair_name: str,
             # per-assembly re-ask only reaches hybrid candidates, and the
             # winning construction is often the pose leg.
             import os as _os
-            if _os.environ.get('KICAD_SEAM_REASK', '') not in ('0', 'off', 'false'):
+            if env_knobs.SEAM_REASK:
                 from diff_pair_routing import seam_reask_chain_leg
                 _pcb = state.pcb_data
                 _cfg = state.config
@@ -953,6 +954,21 @@ def _route_terminal_set(state, pair: DiffPairNet, pair_name: str,
             # write-list members (value-equality never matched the merged
             # dict, so ripped legs' copper shipped alongside the reroute).
             merged['leg_results'] = leg_results
+            # Group length matching (#520): a multipoint pair is matched on its
+            # LONGEST coupled leg (the longest MST edge) -- stamp that span's
+            # length so the pair participates in match groups (measure AND
+            # meander, via the leg splice in _apply_meanders_to_net_with_
+            # iteration) instead of falling back to board-copper seeding.
+            # Copper-only: leg dicts carry no combined stub bookkeeping, and
+            # the meander pass carries this same baseline as its offset.
+            from length_matching import pair_leg_metric
+            from net_queries import calculate_route_length
+            _pcb = state.pcb_data
+            merged['is_diff_pair'] = True
+            merged['is_multipoint'] = True
+            merged['route_length'] = max(
+                pair_leg_metric(lr, lambda s, v: calculate_route_length(s, v, _pcb))
+                for lr in leg_results)
             return leg_results, merged, se_terminals
     return None, None, []
 

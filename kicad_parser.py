@@ -231,6 +231,10 @@ class Via:
     net_id: int
     uuid: str = ""
     free: bool = False  # If True, KiCad won't auto-assign net based on overlapping tracks
+    # (locked yes): the user pinned this via. Rip machinery must NEVER rip a
+    # net's copper when any of it is locked (#521 follow-up); locked copper was
+    # already an obstacle (#150). Set by BOTH parse paths (text + pcbnew).
+    locked: bool = False
     # Protection spec: {token: raw inner s-expr}, e.g.
     # {'tenting': '(front yes) (back yes)'} for tenting/covering/plugging/
     # capping/filling. Held as raw text so it round-trips byte-faithfully
@@ -266,6 +270,10 @@ class Segment:
     # must never prune it and writers cannot strip it (there is no (segment)
     # block to match).
     graphic: bool = False
+    # (locked yes): the user pinned this track. Rip machinery must NEVER rip a
+    # net's copper when any of it is locked (#521 follow-up); locked copper was
+    # already an obstacle (#150). Set by BOTH parse paths (text + pcbnew).
+    locked: bool = False
 
 
 @dataclass
@@ -2446,9 +2454,12 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
     vias = []
 
     # Try KiCad 9 format first: (net <id>)
-    # Strict field ordering: at → size → drill → layers → (free?) → net → uuid
+    # Strict field ordering: at → size → drill → layers → (locked?) → (free?)
+    # → net → uuid. (locked yes) is tolerated on either side of (free ...) --
+    # without it a LOCKED via matched nothing at all (the segment-side #150
+    # bug, via edition): never an obstacle, never protected.
     # (via blind ...) / (via micro ...): the type token precedes (at ...)
-    via_pattern = r'\(via\s+(?:blind\s+|micro\s+)?\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\)\s+(?:\(free\s+(yes|no)\)\s+)?\(net\s+(\d+)\)\s+\(uuid\s+"([^"]+)"\)'
+    via_pattern = r'\(via\s+(?:blind\s+|micro\s+)?\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?(?:\(free\s+(yes|no)\)\s+)?(?:\(locked\s+yes\)\s+)?\(net\s+(\d+)\)\s+\(uuid\s+"([^"]+)"\)'
 
     for m in re.finditer(via_pattern, content, re.DOTALL):
         free_value = m.group(7)  # "yes", "no", or None
@@ -2460,7 +2471,8 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
             layers=[m.group(5), m.group(6)],
             net_id=int(m.group(8)),
             uuid=m.group(9),
-            free=(free_value == "yes")
+            free=(free_value == "yes"),
+            locked='(locked yes)' in m.group(0)
         )
         vias.append(via)
 
@@ -2483,7 +2495,8 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
                 layers=[m.group(5), m.group(6)],
                 net_id=name_to_id.get(net_name, 0),
                 uuid=m.group(8),
-                free=False  # Parse free from content if present
+                free=False,  # Parse free from content if present
+                locked='(locked yes)' in m.group(0)
             )
             vias.append(via)
         # Check for free flag in matched vias. The free_pattern below has two
@@ -2705,7 +2718,8 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
             start_x_str=m.group(1),
             start_y_str=m.group(2),
             end_x_str=m.group(3),
-            end_y_str=m.group(4)
+            end_y_str=m.group(4),
+            locked='(locked yes)' in m.group(0)
         )
         segments.append(segment)
 
@@ -2728,7 +2742,8 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                 start_x_str=m.group(1),
                 start_y_str=m.group(2),
                 end_x_str=m.group(3),
-                end_y_str=m.group(4)
+                end_y_str=m.group(4),
+                locked='(locked yes)' in m.group(0)
             )
             segments.append(segment)
 
@@ -2747,23 +2762,23 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                   r'\(width\s+([\d.-]+)\)\s+(?:\(locked\s+yes\)\s+)?'
                   r'\(layer\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?\(net\s+')
 
-    def _append_arc(sx, sy, mx, my, ex, ey, width, layer, net_id, uuid):
+    def _append_arc(sx, sy, mx, my, ex, ey, width, layer, net_id, uuid, locked=False):
         for (p0, p1) in _arc_to_segments((sx, sy), (mx, my), (ex, ey)):
             segments.append(Segment(
                 start_x=p0[0], start_y=p0[1], end_x=p1[0], end_y=p1[1],
                 width=width, layer=layer, net_id=net_id, uuid=uuid,
                 start_x_str=repr(p0[0]), start_y_str=repr(p0[1]),
-                end_x_str=repr(p1[0]), end_y_str=repr(p1[1])))
+                end_x_str=repr(p1[0]), end_y_str=repr(p1[1]), locked=locked))
 
     for m in re.finditer(arc_fields + r'(\d+)\)\s+\(uuid\s+"([^"]+)"\)', content, re.DOTALL):
         _append_arc(float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4)),
                     float(m.group(5)), float(m.group(6)), float(m.group(7)), m.group(8),
-                    int(m.group(9)), m.group(10))
+                    int(m.group(9)), m.group(10), '(locked yes)' in m.group(0))
     if name_to_id:
         for m in re.finditer(arc_fields + r'"([^"]*)"\)\s+\(uuid\s+"([^"]+)"\)', content, re.DOTALL):
             _append_arc(float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4)),
                         float(m.group(5)), float(m.group(6)), float(m.group(7)), m.group(8),
-                        name_to_id.get(m.group(9), 0), m.group(10))
+                        name_to_id.get(m.group(9), 0), m.group(10), '(locked yes)' in m.group(0))
 
     # Net-tied copper GRAPHICS (#337): KiCad renders gr_line / gr_arc drawn on
     # a copper layer as real copper (optionally carrying a (net ...)). They are
@@ -3788,6 +3803,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 width=to_mm(track.GetWidth()),
                 layer=get_layer_name(track.GetLayer()),
                 net_id=track.GetNetCode(),
+                locked=bool(track.IsLocked()),
             )
             segments.append(seg)
         elif track_class == "PCB_ARC":
@@ -3808,6 +3824,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                     width=to_mm(track.GetWidth()),
                     layer=get_layer_name(track.GetLayer()),
                     net_id=track.GetNetCode(),
+                    locked=bool(track.IsLocked()),
                 ))
         elif track_class == "PCB_VIA":
             # KiCad 9/10 padstack vias can refuse layerless GetWidth() with
@@ -3829,6 +3846,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 # builder must read it too, or GUI-side vias round-trip as
                 # "unspecified" and lose it exactly where the CLI keeps it.
                 tenting_attrs=_pcbnew_via_protection_attrs(track),
+                locked=bool(track.IsLocked()),
             )
             vias.append(v)
 
