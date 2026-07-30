@@ -2409,6 +2409,82 @@ def _fence_ring_points(pcb_data: PCBData, inset: float,
     return pts
 
 
+def _build_exact_stitch_validator(pcb_data, stitch_net_ids, net_display,
+                                  owned_layers, input_file, zone_sexprs,
+                                  tap_vias, tap_segments, exclude_net_ids,
+                                  verbose=False):
+    """KiCad-exact stitch-site truth: {net_id: {layer: [(bbox, poly), ...]}}
+    of the net's MAIN-cluster filled islands, or None when unavailable.
+
+    Why (#485 kbic65): the ZoneFillModel gate can be over-CONNECTED versus
+    KiCad's exact fill (dense 2-layer board, 0.254 min_thickness -> 336 exact
+    islands where the model saw one main pour). Every via placed on such a
+    site anchors an isolated sliver -- island removal keeps a fragment that
+    touches a net item -- so kicad-cli reported one unconnected GND item PER
+    STITCH VIA (38/38) and the next repair step's oracle strapped to them for
+    2045s, leaving min-web necks. Stitch vias are pure additions: a site the
+    exact fill does not place on the main cluster must be REJECTED, never
+    placed-then-strapped-to.
+
+    One pcbnew refill of a temp board carrying the input copper (minus nets
+    ripped this run), this run's zone s-exprs and tap copper -- everything
+    except the stitch vias themselves, so anchoring cannot mask a sliver.
+    Returns None (caller falls back to the model-only gate, with a printed
+    warning) when there is no source file or no KiCad python.
+    """
+    import shutil as _sh
+    import tempfile as _tf
+    src = input_file if input_file and os.path.isfile(input_file) else \
+        getattr(pcb_data, 'source_path', None)
+    if not src or not os.path.isfile(src):
+        return None
+    from kicad_exact_fill import exact_clusters, refill_islands
+    from plane_io import write_plane_output
+    tmpdir = _tf.mkdtemp(prefix='stitch_exact_')
+    try:
+        tmp_board = os.path.join(tmpdir, os.path.basename(src))
+        combined = '\n'.join(zone_sexprs) if zone_sexprs else None
+        if not write_plane_output(
+                src, tmp_board, combined, list(tap_vias or []),
+                list(tap_segments or []),
+                exclude_net_ids=list(exclude_net_ids or []),
+                net_id_to_name=getattr(pcb_data, 'net_id_to_name', None)):
+            return None
+        islands_map = refill_islands(tmp_board, project_from=src,
+                                     verbose=verbose)
+    except Exception as e:
+        if verbose:
+            print(f"  (exact stitch validation failed: {e})")
+        return None
+    finally:
+        _sh.rmtree(tmpdir, ignore_errors=True)
+    if islands_map is None:
+        return None
+    out = {}
+    for net_id in stitch_net_ids:
+        net_name = net_display[net_id]
+        net_islands = [(layer, poly)
+                       for (nname, layer), polys in islands_map.items()
+                       if nname == net_name for poly in polys]
+        per_layer: Dict[str, list] = {}
+        if net_islands:
+            clusters = exact_clusters(pcb_data, net_id, net_islands)
+            # Main cluster = the largest one holding pads (the real plane
+            # network); a pad-less "largest" would let a big orphan pour win.
+            main = next((c for c in clusters if c.get('has_pads')),
+                        clusters[0] if clusters else None)
+            for ii in (main['islands'] if main else ()):
+                layer, poly = net_islands[ii]
+                if layer not in owned_layers[net_id] or len(poly) < 3:
+                    continue
+                xs = [p[0] for p in poly]
+                ys = [p[1] for p in poly]
+                per_layer.setdefault(layer, []).append(
+                    ((min(xs), min(ys), max(xs), max(ys)), poly))
+        out[net_id] = per_layer
+    return out
+
+
 def _stitch_plane_area_vias(
     pcb_data: PCBData,
     net_names: List[str],
@@ -2430,6 +2506,11 @@ def _stitch_plane_area_vias(
     progress_callback=None,
     cancel_check=None,
     verbose: bool = False,
+    input_file: Optional[str] = None,
+    zone_sexprs: Optional[List[str]] = None,
+    tap_vias: Optional[List[Dict]] = None,
+    tap_segments: Optional[List[Dict]] = None,
+    exclude_net_ids: Optional[List[int]] = None,
 ) -> List[Dict]:
     """Area via stitching + board-edge via fence (#485): bond each
     multi-layer plane net's pours across layers with a periodic via lattice
@@ -2487,6 +2568,28 @@ def _stitch_plane_area_vias(
         print("\nVia stitching: no requested net owns >= 2 plane layers -- "
               "nothing to stitch")
         return []
+
+    # KiCad-exact site truth (#485): one refill, built lazily on the first
+    # net that actually reaches placement (the anchor gate below skips
+    # floating-pour nets without paying for a refill).
+    _exact_state: Dict = {}
+
+    def _get_exact_validator():
+        if 'val' not in _exact_state:
+            if progress_callback:
+                progress_callback(0, 0,
+                                  "Validating stitch sites (KiCad refill)...")
+            val = _build_exact_stitch_validator(
+                pcb_data, stitch_net_ids, net_display, owned_layers,
+                input_file, zone_sexprs, tap_vias, tap_segments,
+                exclude_net_ids, verbose=verbose)
+            if val is None:
+                print("Via stitching: KiCad exact-fill validation "
+                      "unavailable -- sites gated by the fill model only "
+                      "(a model/fill divergence can then anchor isolated "
+                      "islands, #485)")
+            _exact_state['val'] = val
+        return _exact_state['val']
 
     min_x, min_y, max_x, max_y = board_bounds
     # Center the lattice on the board so coverage is symmetric.
@@ -2565,6 +2668,81 @@ def _stitch_plane_area_vias(
                   f"{len(models_by_layer)} layer(s) (need 2) -- skipped")
             continue
 
+        # Floating-pour gate (#485 kbic65, model-only so it also protects
+        # KiCad-less environments): stitching bonds a net's pours ACROSS
+        # layers, which only means anything if that pour system touches the
+        # net's real network. kbic65's GND is 3 pads + 3 tracks inside a
+        # copperpour-keepout band -- its full-board pours are floating
+        # copper, and every stitch via placed on them became a KiCad
+        # ratsnest item disconnected from the pad network (38/38), which
+        # the next repair step's oracle then strapped to for 2045s. The
+        # fill model's geometry was RIGHT here; the old gate just asked
+        # "is there fill" when the load-bearing question is "is the fill
+        # anchored".
+        _anchored = False
+        for p in pcb_data.pads_by_net.get(net_id, []):
+            p_layers = layers if pad_is_plated_through(p) else \
+                [l for l in layers if l in (p.layers or [])]
+            for layer in p_layers:
+                for model, main, _mr in models_by_layer.get(layer, ()):
+                    if model.query_component(p.global_x, p.global_y) == main:
+                        _anchored = True
+                        break
+                if _anchored:
+                    break
+            if _anchored:
+                break
+        if not _anchored:
+            for v in pcb_data.vias:
+                if v.net_id != net_id:
+                    continue
+                for layer in layers:
+                    for model, main, _mr in models_by_layer.get(layer, ()):
+                        if model.query_component(v.x, v.y) == main:
+                            _anchored = True
+                            break
+                    if _anchored:
+                        break
+                if _anchored:
+                    break
+        if not _anchored:
+            print(f"\nVia stitching: '{net_name}' main pour holds no "
+                  f"same-net pad or via -- floating copper, nothing to "
+                  f"bond (skipped, #485)")
+            continue
+
+        # KiCad-exact gate (#485): a site must land inside a MAIN-cluster
+        # exact-fill island on >= 2 owned layers, else the via would anchor
+        # an isolated sliver the next repair step's oracle straps to.
+        exact_per_layer = None
+        exact_validator = _get_exact_validator()
+        if exact_validator is not None:
+            exact_per_layer = exact_validator.get(net_id) or {}
+            _n_exact = sum(1 for l in layers if exact_per_layer.get(l))
+            if _n_exact < 2:
+                print(f"\nVia stitching: KiCad exact fill has '{net_name}' "
+                      f"main-cluster copper on {_n_exact} of its "
+                      f"{len(layers)} owned layer(s) (need 2) -- skipped "
+                      f"(sites would anchor isolated islands, #485)")
+                continue
+
+        from kicad_exact_fill import point_in_poly as _pip
+
+        def _exact_layers_ok(x, y):
+            """Owned layers whose exact MAIN-cluster fill contains (x, y).
+            Pass-through (2) when the exact fill is unavailable."""
+            if exact_per_layer is None:
+                return 2
+            n_ok = 0
+            for layer in layers:
+                for (bx0, by0, bx1, by1), poly in \
+                        exact_per_layer.get(layer, ()):
+                    if bx0 <= x <= bx1 and by0 <= y <= by1 \
+                            and _pip(x, y, poly):
+                        n_ok += 1
+                        break
+            return n_ok
+
         def _fill_layers_ok(x, y):
             """Layers whose MAIN fill component contains the full margin disk
             around (x, y). Ring-sampled at 8 points + center; a sample off the
@@ -2608,10 +2786,13 @@ def _stitch_plane_area_vias(
 
         def _try_site(cx, cy, pitch_local, max_nudge):
             """Gate + place one site. Returns (outcome, d0) where outcome is
-            'no_fill' | 'covered' | 'blocked' | 'placed' and d0 the pre-place
-            distance to the nearest same-net bond (None for no_fill)."""
+            'no_fill' | 'off_exact' | 'covered' | 'blocked' | 'placed' and d0
+            the pre-place distance to the nearest same-net bond (None for
+            no_fill/off_exact)."""
             if _fill_layers_ok(cx, cy) < 2:
                 return 'no_fill', None
+            if _exact_layers_ok(cx, cy) < 2:
+                return 'off_exact', None
             d0 = _nearest_bond(cx, cy)
             if d0 <= pitch_local / 2:
                 return 'covered', d0
@@ -2620,6 +2801,8 @@ def _stitch_plane_area_vias(
                 if obstacles.is_via_blocked(gx, gy):
                     continue
                 if _fill_layers_ok(x, y) < 2:
+                    continue
+                if _exact_layers_ok(x, y) < 2:
                     continue
                 new_via_dicts.append({
                     'x': x, 'y': y, 'size': via_size, 'drill': via_drill,
@@ -2650,26 +2833,31 @@ def _stitch_plane_area_vias(
             ring = _fence_ring_points(pcb_data, inset, fpitch)
             print(f"\nEdge via fence '{net_name}' at {fpitch:g}mm pitch, "
                   f"{inset:.2f}mm inset ({len(ring)} outline sites)")
-            f_counts = {'placed': 0, 'covered': 0, 'no_fill': 0, 'blocked': 0}
+            f_counts = {'placed': 0, 'covered': 0, 'no_fill': 0,
+                        'off_exact': 0, 'blocked': 0}
             for cx, cy in ring:
                 outcome, _d0 = _try_site(cx, cy, fpitch, fpitch / 4)
                 f_counts[outcome] += 1
             print(f"  Fence vias placed: {f_counts['placed']}  "
                   f"(covered by existing via/barrel: {f_counts['covered']}, "
                   f"no 2-layer fill: {f_counts['no_fill']}, "
+                  f"off exact main fill: {f_counts['off_exact']}, "
                   f"no clear site: {f_counts['blocked']})")
 
         if stitch_lattice:
             print(f"\nVia stitching '{net_name}' across "
                   f"{'/'.join(sorted(models_by_layer))} at {stitch_pitch:g}mm "
                   f"pitch ({len(lattice)} lattice sites)")
-            placed = covered = no_fill = blocked = 0
+            placed = covered = no_fill = off_exact = blocked = 0
             max_dist_before = max_dist_after = 0.0
             for cx, cy in lattice:
                 outcome, d0 = _try_site(cx, cy, stitch_pitch,
                                         stitch_pitch / 4)
                 if outcome == 'no_fill':
                     no_fill += 1
+                    continue
+                if outcome == 'off_exact':
+                    off_exact += 1
                     continue
                 max_dist_before = max(max_dist_before, d0)
                 if outcome == 'covered':
@@ -2685,7 +2873,9 @@ def _stitch_plane_area_vias(
 
             print(f"  Stitch vias placed: {placed}  "
                   f"(covered by existing via/barrel: {covered}, "
-                  f"no 2-layer fill: {no_fill}, no clear site: {blocked})")
+                  f"no 2-layer fill: {no_fill}, "
+                  f"off exact main fill: {off_exact}, "
+                  f"no clear site: {blocked})")
             if max_dist_before > 0:
                 print(f"  Max lattice-site distance to nearest same-net bond: "
                       f"{max_dist_before:.1f}mm -> {max_dist_after:.1f}mm")
@@ -4001,7 +4191,15 @@ def create_plane(
             stitch_inset=stitch_inset,
             board_edge_clearance=board_edge_clearance,
             progress_callback=progress_callback, cancel_check=cancel_check,
-            verbose=verbose)
+            verbose=verbose,
+            # Exact-fill site validation (#485): the temp refill board =
+            # input copper minus this run's rips, plus this run's zones and
+            # tap copper -- everything but the stitch vias themselves.
+            input_file=input_file,
+            zone_sexprs=all_zone_sexprs,
+            tap_vias=all_new_vias,
+            tap_segments=all_new_segments,
+            exclude_net_ids=all_ripped_net_ids)
         all_new_vias.extend(stitch_via_dicts)
         total_vias_placed += len(stitch_via_dicts)
 
@@ -4442,8 +4640,10 @@ Examples:
              "with a periodic via lattice. Applies to the --nets that own "
              ">= 2 of the --plane-layers (no separate net selection). Every "
              "site is gated by the predicted zone fill (no pour necking, no "
-             "island taps) and the same obstacle/hole-to-hole/edge checks "
-             "pad-tap vias use.")
+             "island taps), validated against KiCad's own exact fill (one "
+             "pcbnew refill; a site off the net's main filled cluster is "
+             "rejected rather than anchoring an isolated island), and the "
+             "same obstacle/hole-to-hole/edge checks pad-tap vias use.")
     parser.add_argument("--stitch-pitch", type=float, default=defaults.STITCH_PITCH,
         help=f"Lattice pitch for --stitch-vias in mm (default: {defaults.STITCH_PITCH})")
     parser.add_argument("--stitch-max-freq", type=float, default=None,
