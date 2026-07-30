@@ -187,12 +187,19 @@ _PLANE_PARTIAL_RESTORE = os.environ.get('KICAD_PLANE_PARTIAL_RESTORE') == '1'
 from plane_write_reconcile import (consume_inner_strips,  # noqa: E402,F401
                                    drop_withdrawn_partial_restores)
 
+# #517 arm 2 (#343): reserve vacated ripped-net corridors against OTHER
+# claimants. 'soft' = cost stamps in tap/region routing maps + soft via-site
+# preference; 'hard' = pre-#342 via-map over-block baseline. None = off
+# (default; every hook below no-ops).
+from plane_corridor_ghosts import CorridorGhosts, softblock_mode
+
 
 def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_config,
                         max_search_radius, via_size, via_drill, max_rip_nets,
                         protected_net_ids, first_failure, ripped_net_ids, verbose,
                         distant_trace_radius=0.0, shared_via_maps=None,
-                        partial_restores=None, plane_oracle=None):
+                        partial_restores=None, plane_oracle=None,
+                        corridor_ghosts=None):
     """A plane-net pad too small to drop a via in needs a trace to the plane (or
     to an adjacent same-net pad); if signal nets block that trace, rip them (up
     to max_rip_nets), retry the tap. Identifies the blocker from the failed
@@ -243,12 +250,20 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
             break
         bname = pcb_data.nets[blocker].name if blocker in pcb_data.nets else f"net_{blocker}"
         print(f"{RED}blocked by {bname} - ripping{RESET}...", end=" ", flush=True)
-        if shared_via_maps is not None:
+        if shared_via_maps is not None and \
+                not (corridor_ghosts is not None and corridor_ghosts.mode == 'hard'):
             # Remove the blocker's stamps from the shared via maps BEFORE its
             # copper leaves pcb_data (the stamps are computed from it), then
-            # resync the copper counts after the rip (#263).
+            # resync the copper counts after the rip (#263). In #517 arm 2
+            # HARD mode the stamps deliberately STAY (pre-#342 over-block
+            # baseline; note_net_restored below is gated symmetrically so the
+            # refcounts never double-add).
             shared_via_maps.note_net_ripped(blocker)
         rsegs, rvias = _rip_net_from_pcb(pcb_data, blocker)
+        if corridor_ghosts is not None:
+            # #517 arm 2: reserve the vacated corridor against other claimants
+            # while this net is off the board.
+            corridor_ghosts.set_net(blocker, rsegs, rvias)
         ripped_local.append((blocker, rsegs, rvias))
         ripped_ids_local.add(blocker)
         from route_trace import plane_capture as _plane_capture
@@ -263,7 +278,11 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
             pad, pad_layer, net_id, pcb_data, tap_config,
             max_search_radius=max_search_radius, via_size=via_size, via_drill=via_drill,
             verbose=verbose, fine_for_all=True, distant_trace_radius=distant_trace_radius,
-            shared_via_maps=shared_via_maps, plane_oracle=plane_oracle)
+            shared_via_maps=shared_via_maps, plane_oracle=plane_oracle,
+            corridor_ghosts=corridor_ghosts,
+            # This tap's own rips freed this corridor FOR the tap: their
+            # ghosts must not repel it.
+            ghost_exclude_ids=frozenset(ripped_ids_local))
         if result.success:
             # Collision-checked restore on SUCCESS too (#329): give back every
             # ripped net whose copper does not conflict with the NEW tap
@@ -301,10 +320,13 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
                     # Nothing restorable: honest full rip for the reconnect pass.
                     if blocker not in ripped_net_ids:
                         ripped_net_ids.append(blocker)
-                    continue
+                    continue  # (#517 arm 2: ghost stays FULL, set at the rip)
                 pcb_data.segments.extend(keep_segs)
                 pcb_data.vias.extend(keep_vias)
-                if shared_via_maps is not None:
+                if shared_via_maps is not None and \
+                        not (corridor_ghosts is not None
+                             and corridor_ghosts.mode == 'hard'):
+                    # (hard mode never removed the stamps at the rip)
                     shared_via_maps.note_net_restored(blocker)
                 if dropped:
                     # Partial: the writer must strip the net's input copper and
@@ -315,11 +337,22 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
                         partial_restores.append((blocker, keep_segs, keep_vias, dropped))
                         bn = pcb_data.nets[blocker].name if blocker in pcb_data.nets else blocker
                         print(f"(partial restore {bn}: -{dropped} piece(s))", end=" ", flush=True)
+                        if corridor_ghosts is not None:
+                            # Restored copper is its own obstacle; the ghost
+                            # shrinks to the genuinely dropped legs (#517).
+                            corridor_ghosts.set_net(
+                                blocker,
+                                [s for s in rsegs if s not in keep_segs],
+                                [v for v in rvias if v not in keep_vias])
                     elif blocker not in ripped_net_ids:
                         # No partial channel (defensive): fall back to full rip.
                         pcb_data.segments = [x for x in pcb_data.segments if x not in keep_segs]
                         pcb_data.vias = [x for x in pcb_data.vias if x not in keep_vias]
                         ripped_net_ids.append(blocker)
+                        # (#517 arm 2: ghost stays FULL)
+                elif corridor_ghosts is not None:
+                    # Fully restored: nothing vacated, nothing to reserve.
+                    corridor_ghosts.drop_net(blocker)
             from route_trace import plane_capture as _plane_capture
             _plane_capture(pcb_data, 'plane-restore', net_id)  # restored non-conflicting pieces
             return result
@@ -354,11 +387,20 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
                 # Nothing restorable: honest full rip for the reconnect pass.
                 if blocker not in ripped_net_ids:
                     ripped_net_ids.append(blocker)
-                continue
+                continue  # (#517 arm 2: ghost stays FULL, set at the rip)
             pcb_data.segments.extend(keep_segs)
             pcb_data.vias.extend(keep_vias)
-            if shared_via_maps is not None:
+            if shared_via_maps is not None and \
+                    not (corridor_ghosts is not None
+                         and corridor_ghosts.mode == 'hard'):
+                # (hard mode never removed the stamps at the rip)
                 shared_via_maps.note_net_restored(blocker)
+            if corridor_ghosts is not None:
+                # Ghost shrinks to what stayed off the board (empty = drop).
+                corridor_ghosts.set_net(
+                    blocker,
+                    [s for s in rsegs if s not in keep_segs],
+                    [v for v in rvias if v not in keep_vias])
             n_restored += 1
             if dropped:
                 # Partial: the writer must strip the net's input copper and
@@ -374,6 +416,9 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
                     pcb_data.vias = [x for x in pcb_data.vias if x not in keep_vias]
                     ripped_net_ids.append(blocker)
                     n_restored -= 1
+                    if corridor_ghosts is not None:
+                        # Back to a full rip: reserve the whole footprint again.
+                        corridor_ghosts.set_net(blocker, rsegs, rvias)
         print(f"(restored {n_restored}/{len(ripped_local)} ripped net(s))",
               end=" ", flush=True)
         from route_trace import plane_capture as _plane_capture
@@ -752,6 +797,14 @@ def route_planes(
     all_new_segments: List[Dict] = []
     all_new_vias: List[Dict] = []
 
+    # #517 arm 2: per-run corridor-ghost registry (None unless the
+    # KICAD_PLANE_RIP_SOFTBLOCK env knob is set; every consumer no-ops on
+    # None, so the default path is untouched).
+    _sb_mode = softblock_mode()
+    corridor_ghosts = CorridorGhosts(_sb_mode) if _sb_mode else None
+    if corridor_ghosts is not None:
+        print(f"  (#517 corridor ghosts armed: {_sb_mode} mode)")
+
     # #517 instrumentation: which PASS placed each piece of this run's new
     # copper (pad-tap, region-join, partial-restore, reconnect, custody
     # restore), so a custody REFUSED-restore can name the occupier class
@@ -928,7 +981,8 @@ def route_planes(
                         fine_for_all=True,  # last-resort repair: escalate every failed pad
                         distant_trace_radius=distant_radius,
                         shared_via_maps=shared_maps,
-                        plane_oracle=plane_oracle
+                        plane_oracle=plane_oracle,
+                        corridor_ghosts=corridor_ghosts
                     )
                     if not result.success and rip_blocker_nets:
                         # Rip the signal net(s) blocking this pad's trace and retry
@@ -942,7 +996,8 @@ def route_planes(
                             partial_restores=(partial_restores
                                               if _PLANE_PARTIAL_RESTORE
                                               else None),
-                            plane_oracle=plane_oracle)
+                            plane_oracle=plane_oracle,
+                            corridor_ghosts=corridor_ghosts)
                         if rr is not None:
                             result = rr
                     if result.success:
@@ -1009,6 +1064,12 @@ def route_planes(
             hole_to_hole_clearance=hole_to_hole_clearance
         )
         print("done")
+        if corridor_ghosts is not None:
+            # #517 arm 2: region-join straps were the second-largest occupier
+            # of refused-restore corridors (140 items in the arm-1 histogram);
+            # steer them away from every corridor vacated so far.
+            corridor_ghosts.merge_into_routing_map(base_obstacles, config,
+                                                   layer_map)
 
         _round2_ctx[net_id] = {
             'net_name': net_name, 'primary_layer': primary_layer,
@@ -1397,6 +1458,17 @@ def route_planes(
                       f"of {len(_casualties)} casualty net(s)")
             if _still_open:
                 _report_unrouted_ripped_nets(pcb_data, _still_open)
+            if corridor_ghosts is not None:
+                # #517 arm 2: custody-defined lifetime -- a casualty that is
+                # connected again (reconnected, or custody-restored) has real
+                # copper as its own obstacle; its ghost would only repel the
+                # fill-aware sweep below from a corridor that is no longer
+                # vacated. Still-open nets keep their reservation through the
+                # sweep.
+                _open_set = set(_still_open)
+                for _cid in _casualties:
+                    if _cid not in _open_set:
+                        corridor_ghosts.drop_net(_cid)
 
     # A partial restore's kept-set is emitted into the write list ABOVE, before
     # the reconnect runs, and unconditionally. But the reconnect may RE-ROUTE
@@ -1873,7 +1945,8 @@ def route_planes(
                             via_drill=dtry, verbose=verbose, fine_for_all=True,
                             distant_trace_radius=0.0, disable_reuse=True,
                             shared_via_maps=shared_maps,
-                            plane_oracle=sweep_oracle)
+                            plane_oracle=sweep_oracle,
+                            corridor_ghosts=corridor_ghosts)
                         if result.success and result.via is not None:
                             if (vtry, dtry) in _escalated_pairs:
                                 warn_fab_escalation(
@@ -1960,7 +2033,8 @@ def route_planes(
                             via_size=via_size, via_drill=via_drill,
                             verbose=verbose, fine_for_all=True, pour_trace_only=True,
                             distant_trace_radius=max_search_radius, disable_reuse=True,
-                            plane_oracle=sweep_oracle)
+                            plane_oracle=sweep_oracle,
+                            corridor_ghosts=corridor_ghosts)
                         if not (track_res.success and track_res.segments):
                             continue
                         new_seg_objs = []
