@@ -2140,6 +2140,11 @@ def route_planes(
                     power_nets=power_nets, power_nets_widths=power_nets_widths,
                     disable_bga_zones=([] if no_bga_zone else None),
                     net_clearances=net_clearances,
+                    # #539: without this the gate's plane-net vias were placed
+                    # at batch_route's 0.2 default on a 0.25-h2h board (muzy_
+                    # zynq2's residual drill grazes -- same forwarding-gap
+                    # class 8920cb0 fixed for the two reconnect calls).
+                    hole_to_hole_clearance=hole_to_hole_clearance,
                     # #527: forward progress/cancel into the region-join
                     # sub-route (it can A* for minutes on a big pour).
                     progress_callback=(
