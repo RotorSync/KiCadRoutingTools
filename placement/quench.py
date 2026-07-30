@@ -408,19 +408,39 @@ class QuenchState:
 
     # ----- airwire helpers -------------------------------------------------
 
-    def _net_points(self, net_id, override_ref=None, override_pads=None):
+    def _net_points(self, net_id, override_ref=None, override_pads=None,
+                    overrides=None):
+        """A net's pad points, with any number of parts held at a HYPOTHETICAL
+        pose (#459).
+
+        `overrides` is {ref: pad_globals}; `override_ref`/`override_pads` are the
+        single-part spelling every existing caller uses. A rigid block move has
+        to override N parts at once, and the swap phase already needed two --
+        which it solved by hand-inlining a second copy of this loop, with a
+        comment warning that the two must not drift apart. This is that one
+        implementation.
+
+        The `for ref in self.net_refs[net_id]` iteration is load-bearing:
+        net_refs is a SORTED list and this order becomes the point order handed
+        to compute_mst_edges, whose tie-break is first-index-wins. Changing it
+        makes quench output vary across processes again (#457).
+        """
+        if overrides is None:
+            overrides = ({override_ref: override_pads}
+                         if override_ref is not None else {})
         pts = []
         for ref in self.net_refs[net_id]:
-            if ref == override_ref:
-                pts.extend((gx, gy) for gx, gy, n in override_pads if n == net_id)
-            else:
-                pts.extend((gx, gy) for gx, gy, n in self.parts[ref].pad_globals()
-                           if n == net_id)
+            pads = overrides.get(ref)
+            if pads is None:
+                pads = self.parts[ref].pad_globals()
+            pts.extend((gx, gy) for gx, gy, n in pads if n == net_id)
         return pts
 
-    def _build_net_airwires(self, net_id, override_ref=None, override_pads=None):
+    def _build_net_airwires(self, net_id, override_ref=None, override_pads=None,
+                            overrides=None):
         return _airwires_for_points(
-            self._net_points(net_id, override_ref, override_pads), net_id)
+            self._net_points(net_id, override_ref, override_pads, overrides),
+            net_id)
 
     def airwires_excluding(self, nets: Set[int]) -> np.ndarray:
         aws = []
@@ -830,6 +850,47 @@ class QuenchState:
         for net_id in part.nets:
             self.net_airwires[net_id] = self._build_net_airwires(net_id)
 
+    def apply_group_move(self, refs, dx, dy):
+        """Translate a whole block rigidly by (dx, dy) (#459).
+
+        Every member's pose is set FIRST, then each affected net is rebuilt once.
+        Calling apply_move per member would be correct but rebuilds a shared net
+        once per member that touches it, which on a 20-part block is most of the
+        cost of evaluating the move again.
+        """
+        nets = set()
+        for ref in refs:
+            part = self.parts[ref]
+            part.x += dx
+            part.y += dy
+            nets.update(part.nets)
+        self._inc_violation.clear()
+        for net_id in nets:
+            self.net_airwires[net_id] = self._build_net_airwires(net_id)
+
+    def group_move_valid(self, refs, dx, dy):
+        """Is a rigid translate of `refs` by (dx, dy) legal?
+
+        Intra-group pairs are EXCLUDED. Under a rigid translate the block's
+        internal geometry is invariant, so those pairs contribute exactly what
+        they did before the move -- but candidate_valid re-tests every pair, and
+        on a real board members routinely sit at sub-clearance courtyard gaps
+        already (watchy seeds 81 of 82 parts in violation), so without the
+        exclusion a block would veto its own every candidate. The swap phase uses
+        `exclude` in exactly this way.
+
+        Each member must also stay within its own seed cap, which is what keeps
+        build_neighbor_lists' pruning exact and the outline gate's cached reach
+        valid -- see the group phase in quench().
+        """
+        others = set(refs)
+        for ref in refs:
+            part = self.parts[ref]
+            if not self.candidate_valid(ref, part.x + dx, part.y + dy, part.rot,
+                                        exclude=others):
+                return False
+        return True
+
     def build_neighbor_lists(self, travel_budget):
         """Per-movable-part pruned neighbour lists (perf, mirrors the
         fanout_clearance pattern from #213 profiling). A movable part's live
@@ -904,6 +965,58 @@ class QuenchState:
             self._neighbors[ref] = lst
 
 
+def _group_offsets(state, refs, max_disp: float, step: float, grid_step: float):
+    """Rigid (dx, dy) offsets a whole block may take (#459).
+
+    The block translates as one body, so a single offset applies to every
+    member -- and the offset is admissible only if it keeps EVERY member within
+    `max_disp` of ITS OWN seed. That per-member seed cap is what makes the block
+    move safe to add without touching anything else:
+
+      * build_neighbor_lists' exactness argument is stated per part ("a movable
+        part's live position stays within travel_budget of its seed"), and stays
+        true, so the pruned neighbour lists remain exact rather than lossy;
+      * BoardOutlineGate.edges_near caches its reachable-edge list per ref on
+        first call, sized by that same budget -- a block allowed to travel
+        further would silently outrun the cache and skip the exact ring test;
+      * test_quench_swap_cap's no-stranding invariant ("no part further than
+        max_displacement + grid snap from where it started") keeps holding
+        unmodified.
+
+    Lifting that cap is what makes #459's 80mm relocation a separate piece of
+    work rather than a bigger number here.
+    """
+    n = int(max_disp / step)
+    if n <= 0:
+        return
+    seen = set()
+    for ix in range(-n, n + 1):
+        for iy in range(-n, n + 1):
+            if ix == 0 and iy == 0:
+                continue
+            dx, dy = ix * step, iy * step
+            if math.hypot(dx, dy) > max_disp + 1e-9:
+                continue
+            ok = True
+            for ref in refs:
+                p = state.parts[ref]
+                nx = snap_to_grid(p.x + dx, grid_step)
+                ny = snap_to_grid(p.y + dy, grid_step)
+                if math.hypot(nx - p.seed_x, ny - p.seed_y) > max_disp + 1e-9:
+                    ok = False
+                    break
+            if not ok:
+                continue
+            # Snap the OFFSET, so the block stays rigid: snapping each member
+            # independently would shear it by up to a grid step.
+            sdx = snap_to_grid(dx, grid_step)
+            sdy = snap_to_grid(dy, grid_step)
+            if (sdx, sdy) in seen or (sdx == 0.0 and sdy == 0.0):
+                continue
+            seen.add((sdx, sdy))
+            yield sdx, sdy
+
+
 def _candidate_positions(part: _Part, max_disp: float, step: float,
                          grid_step: float):
     """Grid of candidate centers within max_disp of the seed position."""
@@ -973,6 +1086,7 @@ def quench(pcb_data: PCBData, pcb_file: str,
            move_refs: Optional[Set[str]] = None,
            net_weights: Optional[Dict[int, float]] = None,
            metrics_out: Optional[Dict] = None,
+           groups: Optional[Dict[str, List[str]]] = None,
            verbose: bool = False) -> List[Dict]:
     """Greedy quench: iterate over parts, accept only cost-reducing moves.
 
@@ -997,6 +1111,12 @@ def quench(pcb_data: PCBData, pcb_file: str,
     count by contract; hpwl is pure pad geometry), so they are comparable
     across calls. `length` and `total` are scaled by net_weights, so they are
     only comparable between the before/after of the SAME call.
+
+    groups: optional {block name: [reference]} from placement.groups. Each block
+    gains a RIGID TRANSLATE move -- the whole body shifts by one offset, capped
+    so every member stays within max_displacement of its own seed (#459). Absent
+    or empty means no group phase runs and the result is byte-identical to the
+    ungrouped engine, which is why grouping is opt-in.
 
     Returns a list of placement dicts (reference/new_x/new_y/new_rotation)
     for every movable part, whether or not it moved.
@@ -1045,11 +1165,74 @@ def quench(pcb_data: PCBData, pcb_file: str,
     movable = [r for r, p in state.parts.items() if not p.locked]
     movable.sort(key=lambda r: state.parts[r].pin_count, reverse=True)
 
+    # --- placement blocks (#459) ---
+    # A block moves as one rigid body, which is the move the per-part nudge
+    # cannot express: an IC and its decoupling caps that need to travel together
+    # fight each other one part at a time, because moving either alone worsens
+    # the pair. Empty unless the caller asked for grouping, and when it is empty
+    # the group phase never runs and output is byte-identical to before.
+    blocks: Dict[str, List[str]] = {}
+    if groups:
+        movable_set = set(movable)
+        blocks = {name: [r for r in refs if r in movable_set]
+                  for name, refs in groups.items()}
+        blocks = {n: r for n, r in blocks.items() if len(r) >= 2}
+        if blocks and verbose:
+            from placement.groups import describe
+            print(describe(blocks))
+
     for pass_num in range(1, max_passes + 1):
         improved = 0.0
         moves = 0
+        group_moves = 0
         swaps_skipped = 0
         swaps_skipped_shape = 0
+
+        # --- rigid block translation (#459) ---
+        # Coarse before fine: a block that wants to be 2mm left is cheaper to fix
+        # here than by nudging twenty parts individually, and the per-part pass
+        # below then polishes inside the relocated block.
+        for name in sorted(blocks):
+            refs = blocks[name]
+            involved = set()
+            for r in refs:
+                involved.update(state.parts[r].nets)
+            other_aw = state.airwires_excluding(involved)
+            member_set = set(refs)
+
+            def eval_group(ddx, ddy):
+                ov = {r: state.parts[r].pad_globals(
+                    state.parts[r].x + ddx, state.parts[r].y + ddy,
+                    state.parts[r].rot) for r in refs}
+                subset = {n: state._build_net_airwires(n, overrides=ov)
+                          for n in sorted(involved)}
+                net_cost, _ = state.nets_cost(subset, other_aw)
+                # Intra-group geometry is invariant under a rigid translate, so
+                # excluding those pairs both avoids double-counting each internal
+                # halo pair and keeps the term comparable across candidates.
+                geo = sum(state.part_geometry_cost(
+                    r, state.parts[r].x + ddx, state.parts[r].y + ddy,
+                    state.parts[r].rot, exclude=member_set - {r}) for r in refs)
+                return net_cost + geo
+
+            base_cost = eval_group(0.0, 0.0)
+            best = (base_cost, 0.0, 0.0)
+            for ddx, ddy in _group_offsets(state, refs, max_displacement, step,
+                                           grid_step):
+                if not state.group_move_valid(refs, ddx, ddy):
+                    continue
+                c = eval_group(ddx, ddy)
+                if c < best[0] - EPS_IMPROVE:
+                    best = (c, ddx, ddy)
+            if best[0] < base_cost - EPS_IMPROVE:
+                improved += base_cost - best[0]
+                moves += 1
+                group_moves += 1
+                state.apply_group_move(refs, best[1], best[2])
+                if verbose:
+                    print(f"  block {name}: {len(refs)} parts moved "
+                          f"({best[1]:+.2f}, {best[2]:+.2f})mm "
+                          f"gain={base_cost - best[0]:.1f}")
 
         # --- single-part moves (nudge + rotate) ---
         for ref in movable:
@@ -1164,31 +1347,17 @@ def quench(pcb_data: PCBData, pcb_file: str,
                         other_aw = state.airwires_excluding(involved)
 
                         def eval_pair(ax, ay, arot, bx, by, brot):
-                            pads_a = pa.pad_globals(ax, ay, arot)
-                            pads_b = pb.pad_globals(bx, by, brot)
-                            subset = {}
-                            # Hand-inlined _net_points: that helper overrides ONE
-                            # ref's pads and a swap has to override two. It reads
-                            # the same state.net_refs, so it inherits the sorted
-                            # order fixed at construction (#457) -- if the two
-                            # ever diverge, the swap phase silently goes
-                            # nondeterministic again while the nudge phase looks
-                            # fine.
-                            for n in sorted(involved):
-                                pts = []
-                                for ref2 in state.net_refs[n]:
-                                    if ref2 == ra:
-                                        pts.extend((gx, gy) for gx, gy, nn in pads_a
-                                                   if nn == n)
-                                    elif ref2 == rb:
-                                        pts.extend((gx, gy) for gx, gy, nn in pads_b
-                                                   if nn == n)
-                                    else:
-                                        pts.extend(
-                                            (gx, gy) for gx, gy, nn in
-                                            state.parts[ref2].pad_globals()
-                                            if nn == n)
-                                subset[n] = _airwires_for_points(pts, n)
+                            # Two-part override through the shared helper. This
+                            # used to be a hand-inlined second copy of
+                            # _net_points, carrying a comment warning that the
+                            # two must not drift apart; _net_points now takes N
+                            # overrides (#459), so there is one implementation
+                            # and the sorted net_refs order (#457) is inherited
+                            # rather than re-typed.
+                            ov = {ra: pa.pad_globals(ax, ay, arot),
+                                  rb: pb.pad_globals(bx, by, brot)}
+                            subset = {n: state._build_net_airwires(n, overrides=ov)
+                                      for n in sorted(involved)}
                             net_cost, _ = state.nets_cost(subset, other_aw)
                             geo = (state.part_geometry_cost(ra, ax, ay, arot,
                                                             exclude={rb})
@@ -1218,6 +1387,7 @@ def quench(pcb_data: PCBData, pcb_file: str,
                                       f" (d[{ra}]={da:.1f}mm, d[{rb}]={db:.1f}mm)")
 
         stats = state.total_cost()
+        group_note = f" blocks={group_moves}" if group_moves else ""
         swap_note = (f" swap-capped={swaps_skipped}"
                      if verbose and swaps_skipped else "")
         # Shape/side mismatches were silent before: two instances of one
@@ -1227,7 +1397,7 @@ def quench(pcb_data: PCBData, pcb_file: str,
         print(f"Pass {pass_num}: {moves} moves, gain {improved:.1f} -> "
               f"length={stats['length']:.1f}mm crossings={stats['crossings']} "
               f"halo={stats['halo']:.1f} edge={stats['edge']:.1f} "
-              f"total={stats['total']:.1f}{swap_note}")
+              f"total={stats['total']:.1f}{group_note}{swap_note}")
         if moves == 0:
             break
 

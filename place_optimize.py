@@ -21,6 +21,7 @@ import os
 
 from kicad_parser import parse_kicad_pcb
 import routing_defaults as defaults
+from placement.groups import GroupError, derive_groups, describe, parse_sources
 from placement.quench import quench
 from placement.writer import write_placed_output
 
@@ -87,6 +88,12 @@ Examples:
                         help="Disable same-footprint swap moves")
     parser.add_argument("--max-passes", type=int, default=10,
                         help="Max quench passes (default: 10)")
+    parser.add_argument("--group-by", default="none",
+                        help="Move blocks of parts as one rigid body. Comma "
+                             "list of: kicad (KiCad (group ...) blocks), sheet "
+                             "(schematic sheet), netprefix, decap (caps tethered "
+                             "to their IC); 'auto' = kicad,sheet "
+                             "(default: none, i.e. per-part moves only)")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Print each accepted move")
 
@@ -106,6 +113,14 @@ Examples:
 
     print(f"Loading {args.input_file}...")
     pcb_data = parse_kicad_pcb(args.input_file)
+
+    try:
+        sources = parse_sources(args.group_by)
+    except GroupError as exc:
+        parser.error(str(exc))
+    blocks = derive_groups(pcb_data, sources) if sources else {}
+    if sources:
+        print(describe(blocks))
 
     ratsnest = {}
     placements = quench(
@@ -130,6 +145,7 @@ Examples:
         ignore_nets=args.ignore_nets,
         lock_refs=args.lock,
         metrics_out=ratsnest,
+        groups=blocks,
         verbose=args.verbose,
     )
 
@@ -142,6 +158,8 @@ Examples:
     before, after = ratsnest.get('before', {}), ratsnest.get('after', {})
     summary = {
         'parts_moved': len(placements),
+        'blocks': len(blocks),
+        'block_parts': sum(len(v) for v in blocks.values()),
         # UNWEIGHTED, comparable across runs.
         'crossings_before': before.get('crossings'),
         'crossings_after': after.get('crossings'),

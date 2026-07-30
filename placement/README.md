@@ -142,6 +142,8 @@ python3 tests/test_458_quench_rotations.py   # rotation lattice, --no-rotate
 python3 tests/test_fanout_clearance.py       # cap clearance repair (#130)
 python3 tests/test_456_courtyard_parser.py   # courtyard shapes + silk bleed (#456)
 python3 tests/test_456_side_and_outline.py   # board side, real outline, graders (#456)
+python3 tests/test_459_groups.py             # block sources + parsing (#459)
+python3 tests/test_459_group_moves.py        # rigid block translation (#459)
 ```
 
 Quench output is reproducible across processes — the same board and arguments
@@ -187,12 +189,48 @@ better. The baseline is free — quench is handed the current best board, so its
 `before` *is* that board's ratsnest. Every decision is logged with its numbers, so
 it is auditable whether the screen ever skipped a placement that would have won.
 
+## Placement blocks (`groups.py`, #459)
+
+The per-part nudge cannot express "these parts need to travel together": an IC
+and its decoupling caps fight each other one at a time, because moving either
+alone worsens the pair. `--group-by` gives a block a **rigid translate** move —
+the whole body shifts by one offset.
+
+Sources, in precedence order, first match wins per part (a part is in at most one
+block):
+
+| source | what it is | corpus evidence |
+|---|---|---|
+| `kicad` | KiCad `(group ...)` blocks | **0 of 27** in-repo boards have one. Exact when present; verified against a synthetic fixture. |
+| `sheet` | schematic sheet path | **12 of 22** boards with `(path ...)` have >1 sheet. `ulx3s`: 10 blocks sized 83/34/23/20/20/12. The workhorse. |
+| `netprefix` | net-name prefix (`AUDIO_*`) | The **weakest** source. Raw prefixes are dominated by KiCad's auto-generated `Net-(U1-Pad)` names — one bogus bucket of up to 92 refs spanning 75mm — so those and power nets are excluded and a 20mm coherence gate applied. What survives is small but real: ulx3s 9 blocks, tigard 0. |
+| `decap` | 2-pad caps tethered to their IC | Strong. A cap sits 0.0–2.6mm (median) from the nearest IC and **shares a net with it 93–100%** of the time; the net check rejects the rest (13 of ulx3s' 70). |
+
+`--group-by auto` means `kicad,sheet`. Default is `none`: grouping is opt-in, and
+with it off the group phase never runs and output is byte-identical to the
+ungrouped engine — which is what lets every existing bit-identity test stand.
+
+**What actually moves.** Small blocks move; large ones do not. On
+`splitflap_driver` with `--group-by decap`, 6 blocks of 2–3 parts translate and
+the objective improves (total 4781.6 → 4689.7, crossings 211 → 208, HPWL
+2468.0 → 2436.3 against the ungrouped run). Sheet blocks of 16–83 parts moved on
+none of the boards tried — at a few mm of displacement a rigid shift of that many
+parts rarely finds a legal, improving offset. That is the expected shape: #459's
+80mm block *relocation* is separate, unimplemented work.
+
+**Why the cap is per-member.** Every member must land within `--max-displacement`
+of **its own seed**. That single rule is what keeps three existing guarantees
+true: `build_neighbor_lists`' pruning stays exact rather than lossy, the outline
+gate's per-ref cached reach cannot be outrun, and the no-stranding invariant
+holds unchanged. Lifting it is precisely what makes the 80mm case hard.
+
 ## Module layout
 
 | File | Purpose |
 |------|---------|
 | `quench.py` | The optimizer: cost terms, move generation, greedy quench |
 | `fanout_clearance.py` | Post-fanout decoupling-cap clearance repair (#130) |
+| `groups.py` | Placement blocks: which parts move as one rigid body (#459) |
 | `legality.py` | Hard constraints shared by both engines: board side, real Edge.Cuts containment, and the OO/OoB graders (#456) |
 | `parser.py` | Courtyard boundary and locked-footprint extraction |
 | `writer.py` | Writes new positions/rotations (rotates pad angles with the footprint, as KiCad stores pad angle = footprint + pad rotation) |

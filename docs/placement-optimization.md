@@ -207,8 +207,14 @@ precedent), which is simpler and may capture most of the value:
     now modelled by the clearance/halo terms (#456): a part occupies its own
     side with its courtyard and the far side only with its drilled-pad box, so
     cross-side parts no longer collide or repel — but nothing flips a part.
-  - *rigid-group moves*: an IC plus its decoupling caps moves/rotates as one
-    super-component
+  - *rigid-group moves*: an IC plus its decoupling caps moves as one
+    super-component. **Translation is implemented** (`--group-by`, #459);
+    rigid *rotation* of a block is not. Blocks come from KiCad `(group ...)`,
+    the schematic sheet path, net-name prefixes, or decap-to-IC tethering —
+    see `placement/groups.py`. Off by default. The block is capped so every
+    member stays within `--max-displacement` of its own seed, which keeps the
+    neighbour-list pruning exact; the unbounded block relocation #459 also
+    describes (an 80mm move) is separate, unimplemented work.
 - **Constraints by construction, not penalty** (the discipline from analog-IC
   placement and Synopsys ICC relative-placement groups: encode constraints
   into the move generator so every perturbation is feasible, rather than
@@ -222,7 +228,12 @@ precedent), which is simpler and may capture most of the value:
     (`placement/legality.py`, #456). A part sitting off the board is not frozen:
     it may move strictly back toward the board. An overlapping one still may
     only move to a fully legal pose.
-  - decaps tethered to their IC (group membership or hard radius)
+  - decaps tethered to their IC. **Implemented as a grouping source**
+    (`--group-by decap`, #459): a 2-pad cap within 5mm of an IC's bounding box
+    AND sharing a net with it. Both halves matter — across the corpus a cap sits
+    0.0-2.6mm (median) from the nearest IC and shares a net with it 93-100% of
+    the time, and the net check is what rejects the rest (13 of ulx3s' 70). It
+    makes the block move together; it is not a constraint on the per-part nudge.
   - rotation disabled per-class where assembly conventions matter
     (`--no-rotate`, which also restricts same-footprint swaps to equal-angle
     pairs, since a swap exchanges full poses)
