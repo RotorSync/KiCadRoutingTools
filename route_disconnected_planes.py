@@ -921,6 +921,16 @@ def route_planes(
     # signal nets are, and they are left unrouted for a subsequent route.py pass.
     plane_net_ids = set(unique_nets.keys())
     ripped_net_ids: List[int] = []
+    # #517 arm 3 (#524 root cause): nets whose immediate reconnect SUCCEEDED
+    # leave ripped_net_ids (they are no longer casualties) -- but their
+    # ORIGINAL input copper was ripped and replaced by different copper, and
+    # ripped_net_ids doubles as the writer's input-copper exclusion list.
+    # Without this list the writer RESURRECTED the old copper at its old
+    # coordinates alongside the new (file-only ghosts over corridors other
+    # passes had since claimed: spartan6 885 DRC / 636 kicad-DRC, all
+    # file-vs-board). Members are excluded at write exactly like ripped nets;
+    # their live copper ships from the write list.
+    inplace_reconnected_ids: List[int] = []
     # (net_id, kept_segs, kept_vias, dropped_count) for nets partially
     # restored by the success-path settle: input copper stripped at write,
     # kept pieces emitted as new copper (board==file), gap left for reconnect.
@@ -1052,6 +1062,10 @@ def route_planes(
                 if _r517.get('connected'):
                     while _nid in ripped_net_ids:
                         ripped_net_ids.remove(_nid)
+                    if _nid not in inplace_reconnected_ids:
+                        # The writer must still strip this net's INPUT copper
+                        # (ripped and replaced); see inplace_reconnected_ids.
+                        inplace_reconnected_ids.append(_nid)
                     if corridor_ghosts is not None:
                         corridor_ghosts.drop_net(_nid)
                     print(f"    (#517 ordering: {pcb_data.nets[_nid].name} "
@@ -1432,6 +1446,10 @@ def route_planes(
                     _prov_via(_po.net_id, _po.x, _po.y, 'restore-first')
                 while _cid in ripped_net_ids:
                     ripped_net_ids.remove(_cid)
+                while _cid in inplace_reconnected_ids:
+                    # Original copper is back verbatim; the writer must keep
+                    # the input text, not strip it (#524 resurrection guard).
+                    inplace_reconnected_ids.remove(_cid)
                 _casualties.remove(_cid)
                 if corridor_ghosts is not None:
                     corridor_ghosts.drop_net(_cid)
@@ -1666,7 +1684,8 @@ def route_planes(
                       for _po in _ovias:
                           _prov_via(_po.net_id, _po.x, _po.y,
                                     'custody-restore')
-                      for _lst in (ripped_net_ids, partial_ids):
+                      for _lst in (ripped_net_ids, partial_ids,
+                                   inplace_reconnected_ids):
                           while _cid in _lst:
                               _lst.remove(_cid)
                       _still_open.remove(_cid)
@@ -1850,7 +1869,8 @@ def route_planes(
                 _write_output(input_file, _tmp.name, all_new_segments,
                               all_new_vias, None,
                               net_id_to_name=_nm10,
-                              exclude_net_ids=ripped_net_ids + partial_ids)
+                              exclude_net_ids=(ripped_net_ids + partial_ids
+                                               + inplace_reconnected_ids))
                 _links = None
                 # DETERMINISTIC gate source (#490): kicad-cli DRC's threaded
                 # connectivity gives different link reports run-to-run on
@@ -2518,11 +2538,13 @@ def route_planes(
         if progress_callback:
             progress_callback(1, 1, "Plane repair complete")
         return (total_routes, total_regions, all_new_vias, all_new_segments,
-                ripped_net_ids + partial_ids, _strip_segments)
+                ripped_net_ids + partial_ids + inplace_reconnected_ids,
+                _strip_segments)
 
     if dry_run:
         print("\nDry run - no output file written")
-    elif total_routes > 0 or total_pads_repaired > 0 or ripped_net_ids or partial_ids:
+    elif total_routes > 0 or total_pads_repaired > 0 or ripped_net_ids \
+            or partial_ids or inplace_reconnected_ids:
         print(f"\nWriting output to {output_file}...")
         # Strip the ripped signal nets' copper from the output - they are left
         # unrouted for a subsequent route.py pass to reconnect (#141 reverted).
@@ -2530,7 +2552,8 @@ def route_planes(
         # all_new_segments/all_new_vias (replacement).
         _write_output(input_file, output_file, all_new_segments, all_new_vias, all_debug_lines,
                       net_id_to_name=kv10_names,
-                      exclude_net_ids=ripped_net_ids + partial_ids,
+                      exclude_net_ids=(ripped_net_ids + partial_ids
+                                       + inplace_reconnected_ids),
                       removed_segments=file_strip_segments,
                       removed_vias=file_strip_vias,
                       add_teardrops=add_teardrops)
