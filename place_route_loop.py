@@ -39,6 +39,8 @@ import sys
 from kicad_parser import parse_kicad_pcb
 import routing_defaults as defaults
 from placement.groups import GroupError, derive_groups, describe, parse_sources
+from placement.cli_gates import (add_board_state_args,
+                                 add_lock_advisor_args)
 from placement.quench import quench
 from placement.writer import write_placed_output
 
@@ -400,8 +402,10 @@ def main():
         description="Router-in-the-loop placement repair.",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("input_file")
-    parser.add_argument("output_file")
-    parser.add_argument("--route-args", required=True,
+    # Optional so the report-only --suggest-locks mode does not demand an
+    # output board it never writes; required post-parse for a real run.
+    parser.add_argument("output_file", nargs="?")
+    parser.add_argument("--route-args", default=None,
                         help="Arguments passed to route.py (quoted string)")
     parser.add_argument("--rounds", type=int, default=5,
                         help="Max repair rounds (default: 5)")
@@ -457,7 +461,24 @@ def main():
     parser.add_argument("--work-dir", default=None,
                         help="Directory for intermediate files "
                              "(default: alongside output)")
+    add_board_state_args(parser)
+    add_lock_advisor_args(parser)
+
     args = parser.parse_args()
+
+    # --suggest-locks is report-only, so it must not demand a route spec it
+    # never uses. Every other run still requires one.
+    if not args.suggest_locks and not args.route_args:
+        parser.error("--route-args is required (except with --suggest-locks)")
+    if not args.suggest_locks and not args.output_file:
+        parser.error("output_file is required (except with --suggest-locks)")
+
+    if not args.suggest_locks:
+        try:
+            from redo_record import record_invocation
+            record_invocation()
+        except Exception:
+            pass
 
     if args.max_displacement < 0:
         parser.error("--max-displacement must be >= 0")
@@ -473,6 +494,32 @@ def main():
         if args.swap_max_displacement > args.max_displacement:
             parser.error("--swap-max-displacement must not exceed "
                          "--max-displacement")
+
+    # Report-only: advise, print, exit. Writes no board, routes nothing, and
+    # deliberately runs BEFORE the expensive round-0 route.
+    if args.suggest_locks:
+        from placement.lock_advisor import advise_locks, format_text, to_json
+        advice = advise_locks(parse_kicad_pcb(args.input_file), args.input_file,
+                              lock_patterns=args.lock,
+                              min_confidence=args.lock_confidence,
+                              edge_margin=args.lock_edge_margin,
+                              use_globs=args.suggest_locks_globs)
+        print(format_text(advice))
+        if args.suggest_locks_json:
+            with open(args.suggest_locks_json, 'w', encoding='utf-8') as f:
+                json.dump(to_json(advice), f, indent=1, sort_keys=True)
+            print(f"Wrote {args.suggest_locks_json}")
+        print("JSON_SUMMARY: " + json.dumps(advice.tally(), sort_keys=True))
+        return 0
+
+    # Board-state gates (#431), BEFORE round 0. Round 0 routes the whole board,
+    # so refusing here saves minutes-to-hours of A* that would fail everything
+    # and then quench a pile.
+    from placement.placement_state import gate_or_exit
+    gate_or_exit(parse_kicad_pcb(args.input_file), args.input_file,
+                 'place_route_loop.py',
+                 allow_unplaced=args.allow_unplaced,
+                 allow_routed=args.allow_routed)
 
     work = args.work_dir or os.path.dirname(os.path.abspath(args.output_file))
     os.makedirs(work, exist_ok=True)
