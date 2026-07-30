@@ -96,6 +96,21 @@ def _net_component_info(pcb_data, net_id):
         if cid in comp_pads:
             comp_points[cid].append((seg.start_x, seg.start_y))
             comp_points[cid].append((seg.end_x, seg.end_y))
+    # #545 F11: the components' VIAS are join points too (graph-authoritative
+    # membership, so via-in-pad-only islands and mid-track stitching vias
+    # count). Without them _closest_pair measured pad-to-pad / endpoint-to-
+    # endpoint only, overstating the true copper gap -- which inflates `half`
+    # in _attempt_edge and makes _choose_grid pick a COARSER rescue grid,
+    # the opposite of what a tight rescue wants. Vias only, per #545 scope
+    # (no zone join points).
+    for vidx, vpid in (graph.get('via_index_repr') or {}).items():
+        cid = uf.find(vpid)
+        if cid in comp_pads:
+            try:
+                _v = net_vias[vidx]
+            except (IndexError, TypeError):
+                continue
+            comp_points[cid].append((_v.x, _v.y))
     return len(comp_pads), comp_points, comp_pads
 
 

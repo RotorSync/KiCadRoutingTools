@@ -27,7 +27,7 @@ class _EndpointStub:
     __slots__ = ('x', 'y', 'global_x', 'global_y', 'layer', 'layers',
                  'drill', 'size_x', 'size_y', 'pad_number', 'net_id')
 
-    def __init__(self, x: float, y: float, layer: str):
+    def __init__(self, x: float, y: float, layer: str, net_id: int = 0):
         self.x = x
         self.y = y
         self.global_x = x
@@ -38,12 +38,74 @@ class _EndpointStub:
         self.size_x = 0
         self.size_y = 0
         self.pad_number = ''
-        self.net_id = 0
+        # #545 F3: carry the REAL net id. A hardcoded 0 made
+        # _pad_all_layer_reach short-circuit False for every stub terminal,
+        # so a stub free end sitting exactly on a same-net through via was
+        # never offered on all layers (Phase 1 pre-island-union, Phase 3
+        # targets) -- the via right under the terminal was invisible.
+        self.net_id = net_id
 
 
-def _make_endpoint_stub(x: float, y: float, layer: str) -> '_EndpointStub':
+def _make_endpoint_stub(x: float, y: float, layer: str,
+                        net_id: int = 0) -> '_EndpointStub':
     """Create a pad-like object for a stub free-end position."""
-    return _EndpointStub(x, y, layer)
+    return _EndpointStub(x, y, layer, net_id)
+
+
+def _pad_touches_copper_group(pad, group, net_vias, routing_layers) -> bool:
+    """Pad centre on/near any segment of the group (mid-segment too),
+    layer-gated and via-in-pad aware.
+
+    Hoisted from the multipoint path (#545 F8) so get_net_endpoints Case 2
+    can use the same test: its old check compared the pad centre to segment
+    ENDPOINTS on ANY layer within 0.05mm -- a B.Cu pad 0.05mm from an In1.Cu
+    endpoint with no via graded "connected", Case 2 skipped it, and Case 4
+    then declared the net already routed without ever verifying.
+
+    Conservative: claims connection only when group copper provably reaches
+    well inside the pad area (segment half-width plus a quarter of the pad's
+    smaller dimension). Under-claiming just adds a redundant endpoint the
+    router connects in a few iterations; over-claiming recreates the
+    phantom-success bug.
+    """
+    from net_queries import expand_pad_layers
+    px, py = pad.global_x, pad.global_y
+    pad_layers = expand_pad_layers(pad.layers, routing_layers)
+    reach_pad = min(pad.size_x, pad.size_y) / 4 if (pad.size_x and pad.size_y) else 0.05
+    # A via-in-pad fans an SMD pad out to every copper layer, so the
+    # group's copper may legitimately reach the pad on a layer the pad
+    # does not itself live on (e.g. an F.Cu pad escaped to B.Cu). Treat
+    # such a pad like a through-hole pad and skip the layer gate; else it
+    # is mis-classed as unconnected and the net is falsely promoted to a
+    # multi-point route that re-runs the already-routed leg. The test is
+    # deliberately a genuine via-IN-pad (via centre inside the pad
+    # rectangle), NOT mere annulus overlap: a same-net via merely grazing
+    # the pad edge is some neighbour's escape, and crediting it would
+    # collapse endpoints the router still needs, perturbing dense
+    # multi-drop nets.
+    half_x = (pad.size_x or 0) / 2
+    half_y = (pad.size_y or 0) / 2
+    reaches_all_layers = getattr(pad, 'drill', 0) > 0 or any(
+        abs(v.x - px) <= half_x and abs(v.y - py) <= half_y
+        for v in net_vias
+    )
+    for seg in group:
+        if seg.layer not in pad_layers and not reaches_all_layers:
+            continue
+        dx = seg.end_x - seg.start_x
+        dy = seg.end_y - seg.start_y
+        seg_len_sq = dx * dx + dy * dy
+        if seg_len_sq < 1e-8:
+            cx, cy = seg.start_x, seg.start_y
+        else:
+            t = ((px - seg.start_x) * dx + (py - seg.start_y) * dy) / seg_len_sq
+            t = max(0.0, min(1.0, t))
+            cx = seg.start_x + t * dx
+            cy = seg.start_y + t * dy
+        dist = math.sqrt((px - cx) ** 2 + (py - cy) ** 2)
+        if dist <= seg.width / 2 + reach_pad:
+            return True
+    return False
 
 
 def _get_pad_coords(p) -> Tuple[float, float]:
@@ -271,7 +333,7 @@ def get_copper_connected_terminal_groups(
     Returns {pad_info index -> component id}. Terminals that cannot be tied
     to any copper/pad point each get a unique (negative) component.
     """
-    components, _copper, _segs = get_terminal_component_info(
+    components, _copper, _segs, _vias = get_terminal_component_info(
         pcb_data, net_id, pad_info)
     return components
 
@@ -280,18 +342,27 @@ def get_terminal_component_info(
     pcb_data: PCBData,
     net_id: int,
     pad_info: List[Tuple],
-) -> Tuple[Dict[int, int], Dict[int, int], Dict[int, List[Segment]]]:
+) -> Tuple[Dict[int, int], Dict[int, int], Dict[int, List[Segment]],
+           Dict[int, List]]:
     """get_copper_connected_terminal_groups plus per-component copper (#348).
 
-    Returns (components, copper_count, segs_by_component):
+    Returns (components, copper_count, segs_by_component, vias_by_component):
       components        -- {pad_info index -> component id} (see the wrapper)
       copper_count      -- {component id -> number of existing net segments}
       segs_by_component -- {component id -> [existing net Segment, ...]}
+      vias_by_component -- {component id -> [existing net Via, ...]} (#545 F9)
     The phase-1-exhausted fallback uses copper_count to pick the copper-richest
     base island and segs_by_component to seed tap sources from exactly that
     island's copper. Stub terminals resolve through the same nearest-endpoint
     matching as the wrapper, so islands whose terminal is a free end (not a
     real pad) participate fully.
+
+    vias_by_component comes from the connectivity graph's via_index_repr --
+    the AUTHORITATIVE membership (tolerance-clustered, mid-segment T-taps
+    included), replacing the callers' hand-rolled rounded-endpoint-key /
+    proximity-box matches, which missed a via 5um across a rounding-bucket
+    boundary and every via tapped into a segment's middle (#545 F9).
+    Position-sorted for GUI/CLI order-independence.
     """
     # Local import: check_connected -> net_queries -> connectivity would cycle.
     from check_connected import check_net_connectivity
@@ -359,6 +430,17 @@ def get_terminal_component_info(
         copper_count[root] = copper_count.get(root, 0) + 1
         segs_by_component.setdefault(root, []).append(seg)
 
+    # #545 F9: per-component vias straight from the graph's membership.
+    vias_by_component: Dict[int, List] = {}
+    for _vidx, _vpid in (graph.get('via_index_repr') or {}).items():
+        try:
+            _via = net_vias[_vidx]
+        except (IndexError, TypeError):
+            continue
+        vias_by_component.setdefault(uf.find(_vpid), []).append(_via)
+    for _vlist in vias_by_component.values():
+        _vlist.sort(key=lambda v: (v.x, v.y))
+
     # CANONICAL component LABELS. uf.find() returns an arbitrary representative
     # decided by the union ORDER, which follows the order segments sit in the
     # board -- and the GUI and CLI hold identical copper in different order. The
@@ -399,7 +481,9 @@ def get_terminal_component_info(
     components = {i: remap[r] for i, r in components.items()}
     copper_count = {remap[r]: c for r, c in copper_count.items()}
     segs_by_component = {remap[r]: v for r, v in segs_by_component.items()}
-    return components, copper_count, segs_by_component
+    vias_by_component = {remap[r]: v for r, v in vias_by_component.items()
+                         if r in remap}
+    return components, copper_count, segs_by_component, vias_by_component
 
 
 def compute_component_mst_edges(
@@ -1006,6 +1090,30 @@ def _get_net_endpoints_ordered(pcb_data: PCBData, net_id: int, config: GridRoute
                     if layer_idx is not None:
                         gx, gy = coord.to_grid(x, y)
                         targets.append((gx, gy, layer_idx, x, y))
+
+                # #545 F5: a group with NO usable stub tip (both tips on pads,
+                # or a closed loop) left its side EMPTY, the guard below
+                # failed, and the pair fell through every later case to
+                # "Cannot determine endpoints" -- unroutable even though the
+                # group has perfectly good copper. Case 2 has always had this
+                # fallback ("Single-ended (or no free tip found): use all
+                # segment endpoints"); Case 1 was missing the else limb.
+                # Per-side, so a healthy tip on the other side keeps its
+                # tight diff-pair semantics.
+                for _side, _segs_fb in ((sources, source_segs),
+                                        (targets, target_segs)):
+                    if _side:
+                        continue
+                    for seg in _segs_fb:
+                        layer_idx = layer_map.get(seg.layer)
+                        if layer_idx is not None:
+                            gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+                            gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+                            _side.append((gx1, gy1, layer_idx,
+                                          seg.start_x, seg.start_y))
+                            if (gx1, gy1) != (gx2, gy2):
+                                _side.append((gx2, gy2, layer_idx,
+                                              seg.end_x, seg.end_y))
             else:
                 # For single-ended: use all segment endpoints
                 sources = []
@@ -1073,24 +1181,21 @@ def _get_net_endpoints_ordered(pcb_data: PCBData, net_id: int, config: GridRoute
     if len(net_segments) >= 1 and len(net_pads) >= 1:
         groups = find_connected_groups(net_segments, vias=net_vias)
         if len(groups) == 1:
-            # Check if any pad is NOT connected to the segment group
+            # Check if any pad is NOT connected to the segment group.
+            # #545 F8: the shared layer-gated, mid-segment-aware, via-in-pad-
+            # aware test (the multipoint path's _pad_on_group). The old check
+            # compared the pad centre to segment ENDPOINTS on ANY layer within
+            # 0.05mm: a B.Cu pad near an In1.Cu endpoint with no via graded
+            # "connected", Case 2 skipped it, and Case 4 below then declared
+            # the net "already routed" without ever verifying -- a silently
+            # dropped net (rescue usually recovered it, loudly). It also
+            # missed genuine MID-SEGMENT contact, manufacturing redundant
+            # route legs.
             seg_group = groups[0]
-            seg_points = set()
-            for seg in seg_group:
-                seg_points.add((round(seg.start_x, POSITION_DECIMALS), round(seg.start_y, POSITION_DECIMALS)))
-                seg_points.add((round(seg.end_x, POSITION_DECIMALS), round(seg.end_y, POSITION_DECIMALS)))
-
-            unconnected_pads = []
-            for pad in net_pads:
-                pad_pos = (round(pad.global_x, POSITION_DECIMALS), round(pad.global_y, POSITION_DECIMALS))
-                # Check if pad is near any segment point
-                connected = False
-                for sp in seg_points:
-                    if abs(pad_pos[0] - sp[0]) < 0.05 and abs(pad_pos[1] - sp[1]) < 0.05:
-                        connected = True
-                        break
-                if not connected:
-                    unconnected_pads.append(pad)
+            unconnected_pads = [
+                pad for pad in net_pads
+                if not _pad_touches_copper_group(pad, seg_group, net_vias,
+                                                 config.layers)]
 
             if unconnected_pads:
                 # Build source endpoints from the segment group, unconnected pad(s)
@@ -1168,6 +1273,27 @@ def _get_net_endpoints_ordered(pcb_data: PCBData, net_id: int, config: GridRoute
 
     # Case 3: No segments, just pads - route between pads
     if len(net_segments) == 0 and len(net_pads) >= 2:
+        # #545 F7: a via whose barrel OVERLAPS a pad (via-in-pad escape from
+        # a fanout step, or rip leftovers) is genuinely connected to it and
+        # spans the whole stack -- offer it as an all-layer terminal on that
+        # pad's side. Without this, an SMD pad whose only escape is its
+        # via-in-pad was confined to its own layer: the router dropped a
+        # SECOND via next to the invisible one, or failed outright on a
+        # congested pad layer. Overlap test (via radius), not a proximity
+        # box: with no segments on the net, only physical overlap connects.
+        # Position-sorted for GUI/CLI order-independence.
+        def _pad_via_terminals(pad, side):
+            svias = sorted((v for v in net_vias
+                            if math.hypot(v.x - pad.global_x, v.y - pad.global_y)
+                            <= (v.size or 0) / 2 + 1e-3),
+                           key=lambda v: (v.x, v.y))
+            for v in svias:
+                vgx, vgy = coord.to_grid(v.x, v.y)
+                for _layer in config.layers:
+                    layer_idx = layer_map.get(_layer)
+                    if layer_idx is not None:
+                        side.append((vgx, vgy, layer_idx, v.x, v.y))
+
         # Use first pad as source, rest as targets
         sources = []
         pad = net_pads[0]
@@ -1178,6 +1304,7 @@ def _get_net_endpoints_ordered(pcb_data: PCBData, net_id: int, config: GridRoute
             layer_idx = layer_map.get(layer)
             if layer_idx is not None:
                 sources.append((gx, gy, layer_idx, pad.global_x, pad.global_y))
+        _pad_via_terminals(pad, sources)
 
         targets = []
         for pad in net_pads[1:]:
@@ -1188,6 +1315,7 @@ def _get_net_endpoints_ordered(pcb_data: PCBData, net_id: int, config: GridRoute
                 layer_idx = layer_map.get(layer)
                 if layer_idx is not None:
                     targets.append((gx, gy, layer_idx, pad.global_x, pad.global_y))
+            _pad_via_terminals(pad, targets)
 
         if sources and targets:
             return sources, targets, None
@@ -1315,51 +1443,9 @@ def _get_multipoint_net_pads_unordered(
             return expand_pad_layers(pad.layers, config.layers)
 
         def _pad_on_group(pad, group) -> bool:
-            """Pad centre on/near any segment of the group (mid-segment too).
-
-            Conservative: claims connection only when group copper provably
-            reaches well inside the pad area (segment half-width plus a
-            quarter of the pad's smaller dimension). Under-claiming just adds
-            a redundant endpoint the router connects in a few iterations;
-            over-claiming recreates the phantom-success bug.
-            """
-            px, py = pad.global_x, pad.global_y
-            pad_layers = _pad_layers(pad)
-            reach_pad = min(pad.size_x, pad.size_y) / 4 if (pad.size_x and pad.size_y) else 0.05
-            # A via-in-pad fans an SMD pad out to every copper layer, so the
-            # group's copper may legitimately reach the pad on a layer the pad
-            # does not itself live on (e.g. an F.Cu pad escaped to B.Cu). Treat
-            # such a pad like a through-hole pad and skip the layer gate; else it
-            # is mis-classed as unconnected and the net is falsely promoted to a
-            # multi-point route that re-runs the already-routed leg. The test is
-            # deliberately a genuine via-IN-pad (via centre inside the pad
-            # rectangle), NOT mere annulus overlap: a same-net via merely grazing
-            # the pad edge is some neighbour's escape, and crediting it would
-            # collapse endpoints the router still needs, perturbing dense
-            # multi-drop nets.
-            half_x = (pad.size_x or 0) / 2
-            half_y = (pad.size_y or 0) / 2
-            reaches_all_layers = pad.drill > 0 or any(
-                abs(v.x - px) <= half_x and abs(v.y - py) <= half_y
-                for v in net_vias
-            )
-            for seg in group:
-                if seg.layer not in pad_layers and not reaches_all_layers:
-                    continue
-                dx = seg.end_x - seg.start_x
-                dy = seg.end_y - seg.start_y
-                seg_len_sq = dx * dx + dy * dy
-                if seg_len_sq < 1e-8:
-                    cx, cy = seg.start_x, seg.start_y
-                else:
-                    t = ((px - seg.start_x) * dx + (py - seg.start_y) * dy) / seg_len_sq
-                    t = max(0.0, min(1.0, t))
-                    cx = seg.start_x + t * dx
-                    cy = seg.start_y + t * dy
-                dist = math.sqrt((px - cx) ** 2 + (py - cy) ** 2)
-                if dist <= seg.width / 2 + reach_pad:
-                    return True
-            return False
+            # Hoisted to _pad_touches_copper_group (#545 F8) so Case 2 shares
+            # the same layer-gated, mid-segment-aware, via-in-pad-aware test.
+            return _pad_touches_copper_group(pad, group, net_vias, config.layers)
 
         def _append_pad(endpoint_info, pad):
             gx, gy = coord.to_grid(pad.global_x, pad.global_y)
@@ -1384,6 +1470,40 @@ def _get_multipoint_net_pads_unordered(
 
         endpoint_info = []
         for gi, group in enumerate(groups):
+            # #545 F4: prefer a VIA of the group as its representative
+            # terminal. The old choice, free_ends[0], is the SORTED-SMALLEST
+            # free end -- an arbitrary geometric corner pinned to one
+            # segment's layer -- which skewed MST edge realization and gave
+            # Phase 3 a single-layer target. A via spans the stack: with the
+            # stub carrying the real net id (F3), _pad_all_layer_reach sees
+            # the via under the terminal and offers it on EVERY layer.
+            # Membership mirrors find_connected_groups (a via joins a group
+            # at a segment endpoint); position-sorted for GUI/CLI
+            # order-independence (net_vias arrives in board order).
+            _gpts = set()
+            for _sg in group:
+                _gpts.add((_sg.start_x, _sg.start_y))
+                _gpts.add((_sg.end_x, _sg.end_y))
+            _gvias = sorted((v for v in net_vias
+                             if any(abs(v.x - px) < 0.05 and abs(v.y - py) < 0.05
+                                    for px, py in _gpts)),
+                            key=lambda v: (v.x, v.y))
+            if _gvias:
+                _gv = _gvias[0]
+                _vlayer = next(
+                    (_sg.layer for _sg in group
+                     if (abs(_sg.start_x - _gv.x) < 0.05
+                         and abs(_sg.start_y - _gv.y) < 0.05)
+                     or (abs(_sg.end_x - _gv.x) < 0.05
+                         and abs(_sg.end_y - _gv.y) < 0.05)),
+                    group[0].layer)
+                layer_idx = layer_map.get(_vlayer)
+                if layer_idx is not None:
+                    gx, gy = coord.to_grid(_gv.x, _gv.y)
+                    endpoint_info.append((gx, gy, layer_idx, _gv.x, _gv.y,
+                                          _make_endpoint_stub(_gv.x, _gv.y,
+                                                              _vlayer, net_id)))
+                    continue
             free_ends = find_stub_free_ends(group, net_pads)
             if free_ends:
                 x, y, layer = free_ends[0]
@@ -1395,7 +1515,7 @@ def _get_multipoint_net_pads_unordered(
                         layer_idx,
                         x,
                         y,
-                        _make_endpoint_stub(x, y, layer)
+                        _make_endpoint_stub(x, y, layer, net_id)
                     ))
                     continue
             # No usable free end: represent the island by one of its pads,
@@ -1408,7 +1528,8 @@ def _get_multipoint_net_pads_unordered(
                 if layer_idx is not None:
                     gx, gy = coord.to_grid(seg.start_x, seg.start_y)
                     endpoint_info.append((gx, gy, layer_idx, seg.start_x, seg.start_y,
-                                          _make_endpoint_stub(seg.start_x, seg.start_y, seg.layer)))
+                                          _make_endpoint_stub(seg.start_x, seg.start_y,
+                                                              seg.layer, net_id)))
 
         for pad in unconnected_pads:
             _append_pad(endpoint_info, pad)

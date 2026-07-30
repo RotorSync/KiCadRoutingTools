@@ -1267,6 +1267,13 @@ def get_all_unrouted_net_ids(pcb_data: PCBData) -> List[int]:
         if seg.net_id not in net_segments:
             net_segments[seg.net_id] = []
         net_segments[seg.net_id].append(seg)
+    # #545 F12: via-AWARE grouping (same fix as the 'Could not find pads for
+    # both stub groups' site below): without vias= a route that changes
+    # layers falls apart into per-layer fragments and a fully-routed net
+    # reads as 'unrouted' here (ordering/proximity-avoidance impact only).
+    net_vias_by_id: Dict[int, list] = {}
+    for _v in pcb_data.vias:
+        net_vias_by_id.setdefault(_v.net_id, []).append(_v)
 
     # Check each net with 2+ pads
     for net_id, pads in pcb_data.pads_by_net.items():
@@ -1281,7 +1288,8 @@ def get_all_unrouted_net_ids(pcb_data: PCBData) -> List[int]:
             unrouted_ids.add(net_id)
         else:
             # Check if segments form multiple disconnected groups
-            groups = find_connected_groups(segments)
+            groups = find_connected_groups(segments,
+                                           vias=net_vias_by_id.get(net_id, []))
             if len(groups) >= 2:
                 # Multiple disconnected stub groups = unrouted
                 unrouted_ids.add(net_id)
@@ -1711,8 +1719,27 @@ def _compute_mps_unit_layers(
         for net_id in unit_net_ids:
             net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
             if net_segments:
-                stub_groups = find_connected_groups(net_segments)
+                # #545 F12: via-aware grouping (a layer-changing stub is ONE
+                # group, not per-layer fragments), and rank the two main
+                # groups by COPPER like every other consumer -- [0]/[1] in
+                # board order differs between the GUI and CLI fronts.
+                _nv = [v for v in pcb_data.vias if v.net_id == net_id]
+                stub_groups = find_connected_groups(net_segments, vias=_nv)
                 if len(stub_groups) >= 2:
+                    def _sg_rank(g):
+                        total = 0.0
+                        anchor = None
+                        for _s in g:
+                            total += math.hypot(_s.end_x - _s.start_x,
+                                                _s.end_y - _s.start_y)
+                            a = (min((_s.start_x, _s.start_y),
+                                     (_s.end_x, _s.end_y)),
+                                 max((_s.start_x, _s.start_y),
+                                     (_s.end_x, _s.end_y)), _s.layer)
+                            if anchor is None or a < anchor:
+                                anchor = a
+                        return (-len(g), -total, anchor)
+                    stub_groups = sorted(stub_groups, key=_sg_rank)
                     for seg in stub_groups[0]:
                         src_layers.add(seg.layer)
                     for seg in stub_groups[1]:

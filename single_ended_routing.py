@@ -2950,17 +2950,21 @@ def route_multipoint_main(
     # best point of the island (e.g. directly at the via on B.Cu), and the
     # dead-end sweep then retires whatever stub the route no longer uses.
     from connectivity import get_terminal_component_info
-    pad_components, _isl_copper, _segs_by_comp = get_terminal_component_info(
-        pcb_data, net_id, pad_info)
+    pad_components, _isl_copper, _segs_by_comp, _vias_by_comp = \
+        get_terminal_component_info(pcb_data, net_id, pad_info)
     _island_cells = None
     if env_knobs.ISLAND_LAUNCH:
-        _net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
         _island_cells = {}
         for _cid, _segs in _segs_by_comp.items():
-            _ends = {(round(s.start_x, 2), round(s.start_y, 2)) for s in _segs} | \
-                    {(round(s.end_x, 2), round(s.end_y, 2)) for s in _segs}
-            _vs = [v for v in _net_vias
-                   if (round(v.x, 2), round(v.y, 2)) in _ends]
+            # #545 F9: the island's vias come from the connectivity graph's
+            # own membership (vias_by_component), not a rounded-endpoint-key
+            # equality match -- which missed a via 5um across a 0.01-rounding
+            # bucket boundary (the COINCIDENCE_TOL soft-joint class the
+            # checker grades connected) and every via T-tapped into a
+            # segment's MIDDLE (stitching vias, prior tap junctions). Those
+            # islands' cells existed only on one layer, so the route paid a
+            # fresh via to reach copper the island already spans.
+            _vs = _vias_by_comp.get(_cid, [])
             _pts = get_all_segment_tap_points(_segs, coord, layer_names,
                                               vias=_vs)
             # Keyed by cell, valued by the OWNER float point of that cell --
@@ -3285,7 +3289,7 @@ def route_multipoint_main(
             # island -- terminal count can't break the tie, copper can).
             # Stub terminals resolve inside the helper.
             from connectivity import get_terminal_component_info
-            _comps, _copper, _ = get_terminal_component_info(
+            _comps, _copper, _, _ = get_terminal_component_info(
                 pcb_data, net_id, pad_info)
             # Tie-break geometrically: equal-copper components fell back to
             # the first pad index, i.e. to pad walk order.
@@ -3590,41 +3594,40 @@ def _route_multipoint_taps_impl(
     for _v in all_vias:
         _register_inprogress_via(_v)
 
-    # Phase-1-exhausted fallback (#348): the synthetic main result carries NO
-    # new copper, so seed the tap sources from the net's EXISTING copper that
-    # belongs to the routed base component(s) -- the island the terminals in
-    # routed_indices sit on. Sources restricted to the BASE component only:
-    # launching from an unconnected island would join the target to that
-    # island and mark it routed while the base stays split (#189).
-    source_extra_segments: List[Segment] = []
-    source_extra_vias: List = []
-    if main_result.get('phase1_exhausted'):
-        from connectivity import get_terminal_component_info
-        _comps, _copper, _segs_by_comp = get_terminal_component_info(
-            pcb_data, net_id, pad_info)
-        _base_comps = {_comps.get(_i) for _i in routed_indices}
-        _base_ends = []
-        for _c in _base_comps:
-            for _s in _segs_by_comp.get(_c, []):
-                # SOURCE-ONLY list: never into all_segments, whose final value
-                # becomes the result's new_segments (re-emitting existing
-                # copper would duplicate it in the output).
-                source_extra_segments.append(_s)
-                _base_ends.append((_s.start_x, _s.start_y))
-                _base_ends.append((_s.end_x, _s.end_y))
-        _net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
-        # Existing vias touching the included base copper become tap points
-        # too (no in-progress ring: pcb_data vias already govern same-net via
-        # spacing in the obstacle build).
-        for _v in _net_vias:
-            _vr = (getattr(_v, 'size', 0.5) or 0.5) / 2 + 0.02
-            if any((abs(_v.x - _ex) <= _vr and abs(_v.y - _ey) <= _vr)
-                   for _ex, _ey in _base_ends):
-                source_extra_vias.append(_v)
-        if source_extra_segments or source_extra_vias:
-            print(f"  Seeding tap sources from the base island's existing "
-                  f"copper: {len(source_extra_segments)} segment(s), "
-                  f"{len(source_extra_vias)} via(s)")
+    # #545 F1/F2: Phase 3 gets the SAME island machinery Phase 1 has. Tap
+    # sources used to be only the copper Phase 1 just created plus the single
+    # src_pad cell -- every pre-existing fanout stub, prior-pass partial
+    # route and existing via of the routed islands was invisible, so taps
+    # re-walked copper that already exists (the WL_SDIO_D1 class; the
+    # island-launch fix at Phase 1 was never applied here). Tap TARGETS were
+    # one cell on one layer -- a tap landing on an existing island could only
+    # hit its representative point. Per-component cell->owner maps, computed
+    # once (the same get_all_segment_tap_points machinery Phase 1 uses; vias
+    # from the graph's authoritative membership, #545 F9). Sources take only
+    # ROUTED components' islands (#189: launching from an unconnected island
+    # would join the target to that island and mark it routed while the base
+    # stays split); targets take exactly the TARGET pad's own island. This
+    # subsumes the old phase-1-exhausted-only seeding (#348) -- the islands
+    # are seeded on that branch unconditionally, as before.
+    from connectivity import get_terminal_component_info
+    _p3_comps, _p3_copper, _p3_segs_by_comp, _p3_vias_by_comp = \
+        get_terminal_component_info(pcb_data, net_id, pad_info)
+    _p3_island_cells: Dict[int, Dict] = {}
+    for _cid, _segs in _p3_segs_by_comp.items():
+        _pts = get_all_segment_tap_points(_segs, coord, layer_names,
+                                          vias=_p3_vias_by_comp.get(_cid, []))
+        # Keyed by cell, valued by the OWNER float point (Phase 3's
+        # tap_point_map / end-weld contract: weld to the owner of the cell
+        # the router actually used, never to a distant anchor).
+        _p3_island_cells[_cid] = {(p[0], p[1], p[2]): (p[3], p[4])
+                                  for p in _pts}
+    _p3_use_islands = bool(_p3_island_cells) and (
+        env_knobs.ISLAND_LAUNCH or main_result.get('phase1_exhausted'))
+    if _p3_use_islands and main_result.get('phase1_exhausted'):
+        _n_cells = sum(len(_m) for _c, _m in _p3_island_cells.items())
+        print(f"  Seeding tap sources from the base island's existing "
+              f"copper ({_n_cells} cell(s) across "
+              f"{len(_p3_island_cells)} island(s))")
 
     # Get remaining MST edges (skip the first one which was routed in Phase 1)
     # MST edges are already sorted longest-first
@@ -3740,8 +3743,7 @@ def _route_multipoint_taps_impl(
         # The router will find the shortest path from ANY of these points
         # Vias are included on ALL layers since they connect all copper layers
         all_tap_points = get_all_segment_tap_points(
-            all_segments + source_extra_segments, coord, layer_names,
-            vias=all_vias + source_extra_vias)
+            all_segments, coord, layer_names, vias=all_vias)
 
         # Always include the designated source pad position as a potential source
         # This is critical for zone-connected pads that have no segments to them yet
@@ -3774,6 +3776,21 @@ def _route_multipoint_taps_impl(
                 sources.append(key)
                 tap_point_map[key] = (src_x, src_y, layer_names[src_pad[2]])
 
+        # #545 F1: every cell of every ROUTED component's existing island is
+        # a legal launch (its stubs, trunks, vias on all layers), exactly
+        # like Phase 1's island-wide launch. Restricted to routed components
+        # (#189). sorted() for GUI/CLI order-independence.
+        if _p3_use_islands:
+            for _cid in sorted(routed_components):
+                _isl = _p3_island_cells.get(_cid)
+                if not _isl:
+                    continue
+                for _cell, _owner in _isl.items():
+                    if _cell not in tap_point_map:
+                        sources.append(_cell)
+                        tap_point_map[_cell] = (_owner[0], _owner[1],
+                                                layer_names[_cell[2]])
+
         if not sources:
             print(f"      ERROR: No sources available for routing")
             continue
@@ -3787,6 +3804,23 @@ def _route_multipoint_taps_impl(
         else:
             # SMD pad or specific layer - use the layer from pad_info
             targets = [(tgt_gx, tgt_gy, tgt_pad[2])]
+
+        # #545 F2: the TARGET pad's whole island is a legal landing -- a tap
+        # reaching any cell of the island connects the component (the pad is
+        # on it by the graph's own membership). The old single-cell,
+        # single-layer target made the rip ladder rip neighbours a better
+        # landing set would never have needed. The end-weld below maps a
+        # landing cell back to ITS owner point, never the distant pad centre.
+        _tgt_isl = {}
+        if _p3_use_islands:
+            _tgt_isl = _p3_island_cells.get(
+                pad_components.get(tgt_idx, tgt_idx), {})
+            if _tgt_isl:
+                _tset = set(targets)
+                for _cell in _tgt_isl:
+                    if _cell not in _tset:
+                        targets.append(_cell)
+                        _tset.add(_cell)
 
         # Mark source/target cells
         for gx, gy, layer in sources + targets:
@@ -3929,10 +3963,20 @@ def _route_multipoint_taps_impl(
         # Convert path to segments/vias
         # Use the actual end layer from the path (router may reach through-hole pad on any layer)
         path_end_layer = layer_names[path[-1][2]]
+        # #545 F2 end-weld: a path that landed on a cell of the target's
+        # island welds to THAT cell's owner float point -- welding an island
+        # landing to the pad centre would draw a long any-angle slash to a
+        # route that ended elsewhere on the island (the SDC0_CMD class,
+        # tap_point_map contract mirrored on the target side).
+        if path[-1] in _tgt_isl:
+            _ex, _ey = _tgt_isl[path[-1]]
+            end_original = (_ex, _ey, path_end_layer)
+        else:
+            end_original = (tgt_x, tgt_y, path_end_layer)
         segments, vias = _path_to_segments_vias(
             path, coord, layer_names, net_id, config,
             (tap_x, tap_y, tap_layer),  # start_original (actual tap point used)
-            (tgt_x, tgt_y, path_end_layer),  # end_original (target pad on actual reached layer)
+            end_original,
             through_hole_positions,
             pcb_data
         )

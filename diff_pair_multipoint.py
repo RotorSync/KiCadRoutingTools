@@ -644,6 +644,23 @@ def _terminal_stub_endpoint(pcb_data: PCBData, terminal: Tuple[Pad, Pad],
                     pts.append((s.end_x, s.end_y))
                     changed = True
         if not comp:
+            # #545 F10: a via-in-pad-ONLY escape (via dropped on the ball, no
+            # track yet) has no segments to flood -- returning None fell back
+            # to the pad midpoint inside the BGA, blocked on every layer, and
+            # _relocate_blocked_terminals then added a SECOND via next to the
+            # one it failed to see. The via spans the stack: offer its
+            # position on every routing layer so the same-layer pairing below
+            # can match it against the other polarity's tips.
+            # Position-sorted for GUI/CLI order-independence.
+            svias = sorted((v for v in pcb_data.vias
+                            if v.net_id == pad.net_id
+                            and math.hypot(v.x - pad.global_x,
+                                           v.y - pad.global_y)
+                            <= (v.size or 0) / 2 + 1e-3),
+                           key=lambda v: (v.x, v.y))
+            if svias:
+                v = svias[0]
+                return [(v.x, v.y, li) for li in range(len(config.layers))]
             return None
         ends = find_stub_free_ends(comp, [pad])
         return [(fx, fy, config.layers.index(flayer))
