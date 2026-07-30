@@ -17,7 +17,6 @@ this repo's tooling. No matplotlib / ffmpeg needed.
 """
 
 import argparse
-import colorsys
 import os
 import sys
 
@@ -63,21 +62,13 @@ class _Recorder:
 # Rendering helpers
 # ---------------------------------------------------------------------------
 
-def _net_color(net_id):
-    """Stable, well-separated color per net id (gray for unconnected/0)."""
-    if not net_id or net_id <= 0:
-        return (130, 130, 130)
-    h = ((net_id * 0.61803398875) % 1.0)
-    r, g, b = colorsys.hsv_to_rgb(h, 0.65, 1.0)
-    return (int(r * 255), int(g * 255), int(b * 255))
-
-
-def _smoothstep(t):
-    return t * t * (3.0 - 2.0 * t)
-
-
-def _lerp_rect(a, b, t):
-    return tuple(a[i] + (b[i] - a[i]) * t for i in range(4))
+# Shared with render_placement / the movie camera (#431). Moved to
+# movie_camera.py rather than copied: these are pure functions and the versions
+# there are byte-for-byte these, verified over net ids -2..399 and t in [0,1],
+# so docs/fanout-cap-placement.gif is unchanged. movie_camera imports no PIL and
+# no pygame at module scope precisely so this import stays cheap here.
+from movie_camera import (lerp_rect as _lerp_rect, net_color as _net_color,
+                          smoothstep as _smoothstep)
 
 
 def _view_bounds(recorder, pad_mm):
