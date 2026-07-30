@@ -20,6 +20,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import env_knobs
 from kicad_parser import parse_kicad_pcb
 from kicad_writer import add_tracks_and_vias_to_pcb
 from qfn_fanout import generate_qfn_fanout
@@ -60,10 +62,12 @@ def main():
 
         # Default config only: the simple nearest-first stagger drops a leg.
         os.environ["QFN_UNDERPAD_NO_ALT_STAGGER"] = "1"
+        env_knobs.refresh()
         try:
             _v_single, d_single = _fanout(os.path.join(tmp, "single.kicad_pcb"))
         finally:
             del os.environ["QFN_UNDERPAD_NO_ALT_STAGGER"]
+            env_knobs.refresh()
         if not d_single:
             fails.append("expected the default-only config to drop a leg "
                          "(board no longer exercises the stagger search)")

@@ -7,6 +7,7 @@ regions and routes wide, short tracks between them to ensure electrical continui
 """
 from __future__ import annotations
 
+import env_knobs
 from typing import List, Optional, Tuple, Dict, Set
 from collections import deque
 import math
@@ -3070,7 +3071,7 @@ def route_plane_connection_wide(
 
     path, iterations, _ = router.route_with_frontier(
         obstacles, sources, targets, max_iterations,
-        False,  # collinear_vias
+        env_knobs.COLLINEAR_VIAS,  # collinear_vias (#487: KICAD_COLLINEAR_VIAS=1)
         0,      # via_exclusion_radius
         None,   # start_direction
         None,   # end_direction

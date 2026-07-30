@@ -18,6 +18,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import env_knobs
+
 from types import SimpleNamespace
 
 from kicad_parser import BoardInfo
@@ -84,8 +86,13 @@ def test_choose_grid_respects_cell_budget():
     cfg = _cfg()
     import routing_defaults as d
     assert _choose_grid(cfg, 6.0) == d.RESCUE_GRID_STEP
+    # #516 (529152c) deleted the 40mm gap cap: the CELL BUDGET is the real
+    # bound, so a huge window may come out COARSER than the run's own
+    # grid_step -- the grid doubles until the window fits the budget. (The
+    # old assertion `big <= cfg.grid_step` tested the deleted cap.)
     big = _choose_grid(cfg, 1000.0)
-    assert big <= cfg.grid_step and (2000.0 / big) ** 2 > 0  # coarsened, capped
+    assert (2 * 1000.0 / big) ** 2 <= d.RESCUE_MAX_WINDOW_CELLS
+    assert big >= min(cfg.grid_step, d.RESCUE_GRID_STEP)
 
 
 def test_rescue_necks_down_through_the_pinch():
@@ -143,12 +150,14 @@ def test_rescue_env_kill_switch():
     pcb = _board(wall_y=0.32)
     state = _state(pcb, _cfg())
     os.environ['KICAD_NET_RESCUE'] = '0'
+    env_knobs.refresh()
     try:
         assert rescue_failed_nets(state, [('VICTIM', VICTIM)]) is None
         assert not state.results and VICTIM not in state.routed_results
         assert all(s.net_id != VICTIM for s in pcb.segments)
     finally:
         os.environ.pop('KICAD_NET_RESCUE', None)
+        env_knobs.refresh()
 
 
 def test_rescue_skips_connected_and_reports_unchanged():

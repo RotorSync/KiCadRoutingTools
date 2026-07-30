@@ -17,6 +17,7 @@ resistor -> IC pins) are routed as a CHAIN of terminals:
 """
 from __future__ import annotations
 
+import env_knobs
 import math
 from itertools import permutations
 from typing import List, Optional, Tuple
@@ -925,7 +926,7 @@ def _route_terminal_set(state, pair: DiffPairNet, pair_name: str,
             # per-assembly re-ask only reaches hybrid candidates, and the
             # winning construction is often the pose leg.
             import os as _os
-            if _os.environ.get('KICAD_SEAM_REASK', '') not in ('0', 'off', 'false'):
+            if env_knobs.SEAM_REASK:
                 from diff_pair_routing import seam_reask_chain_leg
                 _pcb = state.pcb_data
                 _cfg = state.config

@@ -16,6 +16,7 @@ Usage:
 """
 from __future__ import annotations
 
+import env_knobs
 import sys
 import os
 import math
@@ -179,7 +180,7 @@ def _via_site_consensus_blocker(pad, pcb_data, blocker_config, net_id,
 # The reconnect withdrew ~6.8 pieces per net across 36 nets there and re-threaded
 # them anyway, so the fragments were mostly wasted work. ONE BOARD, ONE STEP --
 # set KICAD_PLANE_PARTIAL_RESTORE=1 to A/B the old policy on a corpus replay.
-_PLANE_PARTIAL_RESTORE = os.environ.get('KICAD_PLANE_PARTIAL_RESTORE') == '1'
+_PLANE_PARTIAL_RESTORE = env_knobs.PLANE_PARTIAL_RESTORE
 
 # Shared with route_planes (#508 finding 1: its GUI reconnect had neither
 # reconcile mechanism). Re-exported here so existing call sites and
@@ -1499,7 +1500,7 @@ def route_planes(
                 # ZONE_FILLER is measured-deterministic; exact_unconnected
                 # clusters its fill truth reproducibly.
                 # KICAD_LEGACY_GATE_ORACLE=1 restores kicad-cli for A/B.
-                if not os.environ.get('KICAD_LEGACY_GATE_ORACLE'):
+                if not env_knobs.LEGACY_GATE_ORACLE:
                     try:
                         from kicad_exact_fill import exact_unconnected
                         _gnames = [pcb_data.nets[g].name
@@ -1552,7 +1553,7 @@ def route_planes(
             # Oracle unavailable (no kicad-cli / DRC failed) => behave as
             # before. One DRC serves all gate nets (cached until a gate
             # repair adds copper). KICAD_NO_GATE_ORACLE=1 disables for A/B.
-            if not os.environ.get('KICAD_NO_GATE_ORACLE'):
+            if not env_knobs.NO_GATE_ORACLE:
                 if _gate_oracle_links[0] is None:
                     _gate_oracle_links[0] = _gate_oracle_query()
                 _gl = _gate_oracle_links[0]
@@ -1583,7 +1584,7 @@ def route_planes(
                 _sample = ', '.join(
                     f"{_l[3]}({_l[0]:.1f},{_l[1]:.1f})" for _l in _locs[:3])
                 print(f"    group {_cid}: {len(_locs)} pad(s): {_sample}")
-            if os.environ.get('KICAD_GATE_DEBUG'):
+            if env_knobs.GATE_DEBUG:
                 from plane_fill_model import get_fill_models as _gfm_dbg
                 _mods = _gfm_dbg(pcb_data, _nid)
                 for _cid, _locs in sorted(_bycomp.items(),
@@ -1726,7 +1727,7 @@ def route_planes(
             # Launch layers per pad (#494) -- see plane_tap_launch_layers.
             # KICAD_NO_SWEEP_PLATED=1 restores the old single-concrete-layer
             # resolution + plated skip, for one-env-var A/B on identical code.
-            _no_plated = bool(os.environ.get('KICAD_NO_SWEEP_PLATED'))
+            _no_plated = env_knobs.NO_SWEEP_PLATED
             pad_by_key = {}
             for p in net_pads:
                 if _no_plated:

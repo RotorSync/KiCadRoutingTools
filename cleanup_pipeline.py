@@ -29,6 +29,7 @@ emitted results) must be identical.
 from __future__ import annotations
 
 import os
+import env_knobs
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
@@ -144,7 +145,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     # within 0.05mm of each watched point. Pinpoints WHICH pass moved one
     # representation without the other (pair with KICAD_BOARD_LEDGER).
     _trace_pts = []
-    _t = os.environ.get('KICAD_LEDGER_TRACE')
+    _t = env_knobs.LEDGER_TRACE
     if _t:
         for tok in _t.split(';'):
             try:
@@ -363,7 +364,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     # PRUNE_CONN_VERIFY / KICAD_BOARD_LEDGER): it isolates close's contribution
     # when validating pipeline changes across a replay corpus -- the shipped
     # joints then surface as check_drc segment-endpoint-gap warnings instead.
-    if os.environ.get('KICAD_NO_SOFT_JOINT_BRIDGE'):
+    if env_knobs.NO_SOFT_JOINT_BRIDGE:
         print(f"{label}soft-joint bridging DISABLED (KICAD_NO_SOFT_JOINT_BRIDGE)")
         counts['soft_joints_bridged'] = 0
     else:
@@ -416,7 +417,7 @@ def verify_written_file_parity(output_file, pcb_data, scope_net_ids,
 
     No-op unless KICAD_BOARD_LEDGER is set. Returns True when clean.
     """
-    if not os.environ.get('KICAD_BOARD_LEDGER'):
+    if not env_knobs.BOARD_LEDGER:
         return True
     from collections import Counter
     from kicad_parser import parse_kicad_pcb
@@ -483,7 +484,7 @@ def verify_board_file_parity(pcb_data, scope_net_ids, orig_seg_by_net, results,
     Prints a per-net report and returns True when clean. No-op unless
     KICAD_BOARD_LEDGER is set.
     """
-    if not os.environ.get('KICAD_BOARD_LEDGER'):
+    if not env_knobs.BOARD_LEDGER:
         return True
     from collections import Counter
 

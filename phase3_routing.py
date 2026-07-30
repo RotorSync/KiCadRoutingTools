@@ -10,6 +10,7 @@ Phase 3 connects remaining pads to the main route.
 """
 from __future__ import annotations
 
+import env_knobs
 import os
 import time
 from dataclasses import dataclass
@@ -38,7 +39,7 @@ from terminal_colors import RED, RESET
 
 # Opt-in canary for the #186 segment-crossing scan (see try_phase3_ripup);
 # read once at import -- the abandon path is inside the routing hot loop.
-_TAP_CROSS_SCAN = bool(os.environ.get('KICAD_TAP_CROSS_SCAN'))
+_TAP_CROSS_SCAN = env_knobs.TAP_CROSS_SCAN
 
 
 @dataclass
@@ -1757,7 +1758,7 @@ def _reroute_phase3_ripped_nets(
 
 def _seam_ratio_floor():
     try:
-        return float(os.environ.get('KICAD_SEAM_SE_RATIO', '1.3'))
+        return env_knobs.SEAM_SE_RATIO
     except ValueError:
         return 1.3
 
@@ -1778,7 +1779,7 @@ def seam_reask_one_net(net_id, pcb_data, config, state, base_obstacles,
     (default 1.3) times the straight-line MST bound over their pads.
     Returns True when the tree was replaced."""
     import math
-    if os.environ.get('KICAD_SEAM_REASK', '') in ('0', 'off', 'false'):
+    if not env_knobs.SEAM_REASK:
         return False
     r_old = routed_results.get(net_id)
     if (not r_old or r_old.get('failed') or r_old.get('failed_pads_info')
@@ -1894,15 +1895,15 @@ def se_seam_reask(state, pcb_data, config, base_obstacles, gnd_net_id,
     lower bound over their pads, worst first, capped at KICAD_SEAM_SE_MAX
     (default 16)."""
     import math
-    if os.environ.get('KICAD_SEAM_REASK', '') in ('0', 'off', 'false'):
+    if not env_knobs.SEAM_REASK:
         return 0
     from dataclasses import replace as _dc_replace
     try:
-        ratio_floor = float(os.environ.get('KICAD_SEAM_SE_RATIO', '1.3'))
+        ratio_floor = env_knobs.SEAM_SE_RATIO
     except ValueError:
         ratio_floor = 1.3
     try:
-        cap = int(os.environ.get('KICAD_SEAM_SE_MAX', '16'))
+        cap = env_knobs.SEAM_SE_MAX
     except ValueError:
         cap = 16
 

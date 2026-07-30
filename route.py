@@ -13,6 +13,7 @@ Requires the Rust router module. Build it with:
 """
 from __future__ import annotations
 
+import env_knobs
 import sys
 import os
 import copy
@@ -214,8 +215,7 @@ def _dump_engine_config(engine, cfg):
     dump. Only active in APPEND/CONTINUE mode (KICAD_DUMP_BATCH_KWARGS +
     KICAD_DUMP_BATCH_KWARGS_CONTINUE=1): writes one JSONL line per engine call
     and never alters routing, so a whole GUI plan run is captured in one pass."""
-    if not (os.environ.get('KICAD_DUMP_BATCH_KWARGS')
-            and os.environ.get('KICAD_DUMP_BATCH_KWARGS_CONTINUE') == '1'):
+    if not (env_knobs.DUMP_BATCH_KWARGS and env_knobs.DUMP_BATCH_KWARGS_CONTINUE):
         return
     import json as _json
     d = {'_engine': engine}
@@ -235,7 +235,7 @@ def _dump_engine_config(engine, cfg):
         except (TypeError, ValueError):
             d[k] = repr(v)
     try:
-        with open(os.environ['KICAD_DUMP_BATCH_KWARGS'], 'a') as _f:
+        with open(env_knobs.DUMP_BATCH_KWARGS, 'a') as _f:
             _f.write(_json.dumps(d, sort_keys=True) + '\n')
     except Exception:
         pass
@@ -407,7 +407,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _reconcile_kwargs = dict(locals())
     for _k in ('input_file', 'output_file', 'net_names', 'pcb_data'):
         _reconcile_kwargs.pop(_k, None)
-    if os.environ.get('KICAD_DUMP_BATCH_KWARGS'):
+    if env_knobs.DUMP_BATCH_KWARGS:
         # Parameter-parity probe: dump THIS call's full parameter set so the
         # CLI front (argparse->main) and the GUI front (plan setters->tab
         # config->call site) can be diffed key by key on identical inputs.
@@ -427,12 +427,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             except (TypeError, ValueError):
                 _dump[_k] = repr(_v)
         _dump['net_names'] = net_names
-        if os.environ.get('KICAD_DUMP_BATCH_KWARGS_CONTINUE') == '1':
-            with open(os.environ['KICAD_DUMP_BATCH_KWARGS'], 'a') as _f:
+        if env_knobs.DUMP_BATCH_KWARGS_CONTINUE:
+            with open(env_knobs.DUMP_BATCH_KWARGS, 'a') as _f:
                 _f.write(_json.dumps(_dump, sort_keys=True) + '\n')
             # fall through -- route normally
         else:
-            with open(os.environ['KICAD_DUMP_BATCH_KWARGS'], 'w') as _f:
+            with open(env_knobs.DUMP_BATCH_KWARGS, 'w') as _f:
                 _json.dump(_dump, _f, indent=1, sort_keys=True)
             if return_results:
                 return 0, 0, 0.0, _empty_results_data()
@@ -757,8 +757,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     try:
         config.bus_rip_resistance = float(
-            os.environ.get('KICAD_BUS_RIP_RESISTANCE',
-                           config.bus_rip_resistance))
+            env_knobs.BUS_RIP_RESISTANCE or config.bus_rip_resistance)
     except ValueError:
         pass
     if config.bus_rip_resistance != 1.0:
@@ -962,8 +961,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # space (the human's sequence: nearby connections first). Inert on
     # boards with no bare balls -- stubs/vias at every ball leave the order
     # untouched. Board-state-driven and engine-level (GUI parity).
-    if (net_ids and os.environ.get('KICAD_DIRECT_FIRST', '1')
-            not in ('0', 'off', 'false')):
+    if net_ids and env_knobs.DIRECT_FIRST:
         _bga_refs = set()
         from kicad_parser import find_components_by_type
         _sel_set = {nid for _nm, nid in net_ids}
@@ -1183,7 +1181,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # #422: base holds only permanent copper/geometry (target + rippable
             # nets live in the per-net caches on a CLONE); stamp it straight into
             # the static keep-out bitmap so the working clone carries it as bits.
-            static_base=not os.environ.get("KICAD_NO_STATIC_BASE"))
+            static_base=not env_knobs.NO_STATIC_BASE)
 
     base_elapsed = time.time() - base_start
     print(f"Base obstacle map built in {base_elapsed:.2f}s")
@@ -1703,8 +1701,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # snapshot (dead-end sweep, grazes, etc.) before writing -- shows what
     # cleanup would retire (e.g. a stale escape stub the island-launch
     # route no longer uses). The freeze then fires inside the pipeline.
-    _ckpt_cleanup = _ckpt_stop and os.environ.get(
-        'KICAD_STOP_CLEANUP', '') in ('1', 'true', 'on')
+    _ckpt_cleanup = _ckpt_stop and env_knobs.STOP_CLEANUP
     if _ckpt_stop and not _ckpt_cleanup:
         _freeze_committed()
     # #473: nets still carrying unfinished pads keep ALL their copper
@@ -2375,7 +2372,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # base. Any residual means a per-net contribution the cache no longer accounts
     # for -- a leak (add not mirrored by remove) or an over-decrement. Env-gated so
     # normal runs pay nothing; fully defensive (never breaks a real route).
-    if os.environ.get("KICAD_OBSTACLE_AUDIT"):
+    if env_knobs.OBSTACLE_AUDIT:
         from obstacle_cache import run_obstacle_audit
         run_obstacle_audit(base_obstacles, state.working_obstacles,
                            state.net_obstacles_cache)

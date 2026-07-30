@@ -16,6 +16,7 @@ Requires the Rust router module. Build it with:
 """
 from __future__ import annotations
 
+import env_knobs
 import sys
 import os
 from dataclasses import replace
@@ -239,7 +240,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # Default: overwrite the file and RETURN without routing (single-call A/B).
     # CONTINUE mode (KICAD_DUMP_BATCH_KWARGS_CONTINUE=1): APPEND one JSONL line
     # per call and keep routing, so a whole multi-step GUI plan is captured.
-    if os.environ.get('KICAD_DUMP_BATCH_KWARGS'):
+    if env_knobs.DUMP_BATCH_KWARGS:
         import json as _json
         _snap = dict(locals())
         for _k in ('input_file', 'output_file', 'net_names', 'pcb_data',
@@ -257,12 +258,12 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 _dump[_k] = repr(_v)
         _dump['net_names'] = net_names
         _dump['_engine'] = 'batch_route_diff_pairs'
-        if os.environ.get('KICAD_DUMP_BATCH_KWARGS_CONTINUE') == '1':
-            with open(os.environ['KICAD_DUMP_BATCH_KWARGS'], 'a') as _f:
+        if env_knobs.DUMP_BATCH_KWARGS_CONTINUE:
+            with open(env_knobs.DUMP_BATCH_KWARGS, 'a') as _f:
                 _f.write(_json.dumps(_dump, sort_keys=True) + '\n')
             # fall through -- route normally
         else:
-            with open(os.environ['KICAD_DUMP_BATCH_KWARGS'], 'w') as _f:
+            with open(env_knobs.DUMP_BATCH_KWARGS, 'w') as _f:
                 _json.dump(_dump, _f, indent=1, sort_keys=True)
             if return_results:
                 return 0, 0, 0.0, {'results': [], 'segments_to_remove': [],
@@ -1516,7 +1517,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
 
     # Obstacle-map ref-count integrity audit (#309), same invariant as route.py:
     # the diff loop maintains its own persistent working map + per-net caches.
-    if os.environ.get("KICAD_OBSTACLE_AUDIT"):
+    if env_knobs.OBSTACLE_AUDIT:
         from obstacle_cache import run_obstacle_audit
         run_obstacle_audit(base_obstacles, state.working_obstacles,
                            state.net_obstacles_cache, label="route_diff")

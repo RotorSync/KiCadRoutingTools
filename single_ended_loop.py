@@ -6,6 +6,7 @@ extracted from route.py for better maintainability.
 """
 from __future__ import annotations
 
+import env_knobs
 import os
 import time
 from typing import List, Tuple, Optional, Any, Dict, Set
@@ -593,8 +594,8 @@ def route_single_ended_nets(
     #     moment).
     #   KICAD_STOP_FILE=path  -> stop before the next net once the file
     #     exists (manual abort: `touch path`).
-    _stop_after = os.environ.get('KICAD_STOP_AFTER', '')
-    _stop_file = os.environ.get('KICAD_STOP_FILE', '')
+    _stop_after = env_knobs.STOP_AFTER
+    _stop_file = env_knobs.STOP_FILE
     _stop_after_idx = None
     if _stop_after == 'bus' and bus_net_to_group:
         _members = set(bus_net_to_group)
@@ -643,7 +644,7 @@ def route_single_ended_nets(
             print(f"[MEMORY] Route {route_index}/{total_routes}: {current_mem:.1f} MB total, "
                   f"track_proximity_cache: {prox_cache_mb:.1f} MB ({len(track_proximity_cache)} nets)")
         # #422 probe: env-gated live-set audit (Rust map get_stats + Python caches)
-        if os.environ.get('KICAD_MEM_PROBE') and (route_index % 10 == 1 or route_index == total_routes):
+        if env_knobs.MEM_PROBE and (route_index % 10 == 1 or route_index == total_routes):
             try:
                 import gc as _gc
                 from memory_debug import (estimate_net_obstacles_cache_mb as _enc,

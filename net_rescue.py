@@ -34,6 +34,7 @@ Design constraints (#331/#371 review):
     clearance ledger, so check_drc grades at the true floor (#226).
 """
 
+import env_knobs
 import math
 import os
 import time
@@ -282,7 +283,7 @@ def _attempt_edge(pcb_data, net_id, gap, config, net_clearances):
             _g0 = wcoord.to_grid(_wx0, _wy0)
             _g1 = wcoord.to_grid(_wx1, _wy1)
             bounds = (_g0[0], _g0[1], _g1[0], _g1[1])
-        if os.environ.get('KICAD_RESCUE_DEBUG_VIA'):
+        if env_knobs.RESCUE_DEBUG_VIA:
             # Debug probe: report the window box and whether a named via cell
             # is blocked in THIS rung's map (KICAD_RESCUE_DEBUG_VIA="x,y").
             try:
@@ -366,7 +367,7 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None):
     'unchanged', 'pads_reconnected', 'time'}) or None when there was nothing
     to rescue (or KICAD_NET_RESCUE=0).
     """
-    if os.environ.get('KICAD_NET_RESCUE', '1') == '0':
+    if not env_knobs.NET_RESCUE:
         return None
     from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
     from plane_pad_tap import note_clearance_used

@@ -9,6 +9,7 @@ Usage:
 """
 from __future__ import annotations
 
+import env_knobs
 import sys
 import os
 import argparse
@@ -450,7 +451,7 @@ def find_via_position(
         ms_iters = max(10000, min(60000, len(phase_cells) * 4))
         path, iterations, _ = router.route_with_frontier(
             routing_obstacles, phase_cells, [(pad_gx, pad_gy, layer_idx)], ms_iters,
-            False,  # collinear_vias
+            env_knobs.COLLINEAR_VIAS,  # collinear_vias (#487: KICAD_COLLINEAR_VIAS=1)
             0,      # via_exclusion_radius
             None,   # start_direction
             None,   # end_direction
@@ -686,7 +687,7 @@ def route_via_to_pad(
 
     path, iterations, blocked_cells = router.route_with_frontier(
         routing_obstacles, sources, targets, max_iterations,
-        False,  # collinear_vias
+        env_knobs.COLLINEAR_VIAS,  # collinear_vias (#487: KICAD_COLLINEAR_VIAS=1)
         0,      # via_exclusion_radius
         None,   # start_direction
         None,   # end_direction
@@ -787,7 +788,7 @@ def route_multi_source_to_pad(
     ms_iters = max(max_iterations, min(60000, len(source_cells) * 4))
     path, iterations, blocked_cells = router.route_with_frontier(
         routing_obstacles, source_cells, [(pad_gx, pad_gy, layer_idx)], ms_iters,
-        False,  # collinear_vias
+        env_knobs.COLLINEAR_VIAS,  # collinear_vias (#487: KICAD_COLLINEAR_VIAS=1)
         0,      # via_exclusion_radius
         None,   # start_direction
         None,   # end_direction
@@ -1045,7 +1046,7 @@ def route_plane_connection(
 
     path, iterations, _ = router.route_with_frontier(
         obstacles, sources, targets, max_iterations,
-        False,  # collinear_vias
+        env_knobs.COLLINEAR_VIAS,  # collinear_vias (#487: KICAD_COLLINEAR_VIAS=1)
         0,      # via_exclusion_radius
         None,   # start_direction
         None,   # end_direction
@@ -3310,7 +3311,7 @@ def create_plane(
         # class as #208): after all rips/placements the maintained map must
         # equal a fresh rebuild from the CURRENT pcb_data plus the session vias
         # (mirroring its Step-7 construction + per-placement blocking).
-        if os.environ.get("KICAD_OBSTACLE_AUDIT") and obstacles is not None:
+        if env_knobs.OBSTACLE_AUDIT and obstacles is not None:
             _audit_plane_via_map(obstacles, pcb_data, config, net_id,
                                  same_net_pad_clearance,
                                  all_new_vias + new_vias, coord,
@@ -3383,7 +3384,7 @@ def create_plane(
         # via-drilled-on-restored-track class; over-blocking is by-design
         # conservative for dropped pieces). Fresh-recompute each restored
         # net's footprint from CURRENT pcb_data and probe the map.
-        if os.environ.get('KICAD_PLANE_MAP_PARITY') and ripped_net_ids:
+        if env_knobs.PLANE_MAP_PARITY and ripped_net_ids:
             from obstacle_cache import precompute_via_placement_obstacles as _pv
             for _rid in ripped_net_ids:
                 if not any(v.net_id == _rid for v in pcb_data.vias) and \
@@ -3578,7 +3579,7 @@ def create_plane(
     if dry_run:
         print("\nDry run - no output file written")
     else:
-        if os.environ.get('KICAD_SETTLE_DEBUG'):
+        if env_knobs.SETTLE_DEBUG:
             from collections import Counter as _C
             _dups = {k: n for k, n in _C((v.get('net_id'), round(v['x'], 3), round(v['y'], 3))
                                           for v in all_new_vias).items() if n > 1}

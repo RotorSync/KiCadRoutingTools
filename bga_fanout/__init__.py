@@ -21,6 +21,7 @@ from collections import defaultdict
 
 import sys
 import os
+import env_knobs
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import routing_defaults as defaults
@@ -1969,7 +1970,7 @@ def generate_bga_fanout(footprint: Footprint,
     # balls routable.
     global _direct_route_nets
     if (_pad_filter is None and not _single_pass
-            and os.environ.get('KICAD_FANOUT_DIRECT', '') in ('1', 'true', 'on')):
+            and env_knobs.FANOUT_DIRECT):
         from bga_fanout.escape import direct_route_candidates
         _dp_probe = (find_differential_pairs(footprint, diff_pair_patterns)
                      if diff_pair_patterns else None)
@@ -2457,7 +2458,7 @@ def generate_bga_fanout(footprint: Footprint,
         # pair (coupling untouched), biasing which direction the assigner
         # tries first. Same env gate as the single-ended preference.
         _pair_toward = {}
-        if os.environ.get('KICAD_FANOUT_TOWARD_TARGETS', '') in ('1', 'true', 'on'):
+        if env_knobs.FANOUT_TOWARD_TARGETS:
             from bga_fanout.escape import preferred_pair_dirs
             _pair_toward = preferred_pair_dirs(pcb_data, footprint, diff_pairs)
             if _pair_toward:
@@ -2633,7 +2634,7 @@ def generate_bga_fanout(footprint: Footprint,
         # off-footprint pad; the smart layer assignment then spreads the
         # extra same-direction competition across layers.
         _toward_targets = {}
-        if os.environ.get('KICAD_FANOUT_TOWARD_TARGETS', '') in ('1', 'true', 'on'):
+        if env_knobs.FANOUT_TOWARD_TARGETS:
             from bga_fanout.escape import preferred_escape_dirs
             _toward_targets = preferred_escape_dirs(pcb_data, footprint)
             if _toward_targets:
@@ -3166,7 +3167,7 @@ def main():
     # 2.4s, 39/39, DRC-clean. Fail in a second with that command instead.
     _grid_for_guard = analyze_bga_grid(footprint)
     _stagger_why = staggered_lattice_diagnosis(footprint, _grid_for_guard)
-    if _stagger_why and not os.environ.get('KICAD_ALLOW_STAGGERED_BGA'):
+    if _stagger_why and not env_knobs.ALLOW_STAGGERED_BGA:
         print(f"\nERROR: {footprint.reference} ({footprint.footprint_name}) is "
               f"not a grid array: {_stagger_why}.")
         print("  bga_fanout models a ball grid; on a staggered package its "
