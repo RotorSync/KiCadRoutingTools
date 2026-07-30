@@ -107,6 +107,20 @@ def test_coupling_grows_retroactively():
     assert rdp._corridor_coupled_ids([2], [0, 1, 2], pcb) == {2}
 
 
+def test_phase_history_couples_after_success():
+    # daisho: /ddr2/A1, VREF, DQ11 ripped ONE PAD AT A TIME with a successful
+    # immediate reconnect between each.  The pending population alone is a
+    # single net at every decision; the phase HISTORY (which keeps nets whose
+    # reconnect succeeded) is what makes the second sibling defer.  The
+    # caller passes pending | phase_history as the population.
+    pcb = _Pcb(['/ddr2/A1', '/ddr2/VREF', '/ddr2/DQ11'])
+    # First rip: alone in both histories -> immediate.
+    assert rdp._corridor_coupled_ids([0], {0}, pcb) == set()
+    # Second rip: A1 already reconnected (not pending) but in phase history.
+    assert rdp._corridor_coupled_ids([1], {0, 1}, pcb) == {1}
+    assert rdp._corridor_coupled_ids([2], {0, 1, 2}, pcb) == {2}
+
+
 def test_cross_phase_pending_casualties_couple():
     # The population is ALL pending ripped casualties, not the current
     # phase's rips: allwinner's VCC-DRAM phase ripped SDQ1 alone, but its
@@ -138,6 +152,7 @@ if __name__ == '__main__':
     test_apple2e_small_stem_groups_stay_immediate()
     test_flat_bus_names_couple_at_three()
     test_coupling_grows_retroactively()
+    test_phase_history_couples_after_success()
     test_cross_phase_pending_casualties_couple()
     test_env_kill_switch()
     print('All #540 coupling-gate tests passed')

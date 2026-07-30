@@ -228,9 +228,11 @@ except ValueError:
 # NEXT pad (44 complete vs 53 under order-only). zynq2's 12-pad phase of
 # INDEPENDENT signals (+1V8, PL_CLK, /TX_EN, ...) is a genuine immediate win
 # (+4), so the fix is per-net, not a phase flip: a ripped net whose name is
-# bus-coupled to any PENDING casualty (this phase's rips or an earlier phase's
-# deferred batch) defers to the end-of-run batch (where siblings negotiate the
-# corridor together); uncoupled nets keep reconnecting immediately. Coupling = shared NON-ROOT sheet prefix (>=2 nets -- '/A5' and
+# bus-coupled to any PENDING casualty (an earlier phase's deferred batch) or
+# to any net this phase already ripped (even ones whose immediate reconnect
+# succeeded -- daisho's one-sibling-per-pad rip sequence) defers to the
+# end-of-run batch (where siblings negotiate the corridor together);
+# uncoupled nets keep reconnecting immediately. Coupling = shared NON-ROOT sheet prefix (>=2 nets -- '/A5' and
 # '/TX1' live in the root sheet and do not couple) or shared digit-stripped
 # name stem (>=3 nets, stem >=2 chars, power-rail names excluded so +1V8/+1V0
 # never couple). KICAD_PLANE_IMMEDIATE_COUPLING=0 restores the pure count gate.
@@ -260,13 +262,19 @@ def _bus_group_keys(name: str) -> List[Tuple[str, str]]:
 
 
 def _corridor_coupled_ids(candidate_ids, pending_rip_ids, pcb_data) -> Set[int]:
-    """#540: the subset of candidate_ids that are bus-coupled to a PENDING
-    ripped casualty (pending_rip_ids includes the candidates themselves).
-    The population is every net currently off the board awaiting reconnect --
-    including earlier phases' deferred batches: allwinner's lone VCC-DRAM-phase
-    rip of SDQ1 had no phase sibling, but dozens of /DDR3 siblings from the
-    GND phase sat ripped, and its immediate reconnect claimed their corridors
-    with maximum freedom."""
+    """#540: the subset of candidate_ids that are bus-coupled to another net
+    in pending_rip_ids (which includes the candidates themselves). The
+    population must be the UNION of two histories:
+    - every net currently off the board awaiting reconnect, including earlier
+      phases' deferred batches (allwinner's lone VCC-DRAM-phase rip of SDQ1
+      had no phase sibling, but dozens of /DDR3 siblings from the GND phase
+      sat ripped, and its immediate reconnect claimed their corridors with
+      maximum freedom), and
+    - every net ripped earlier in THIS phase even if its immediate reconnect
+      SUCCEEDED (daisho ripped /ddr2/A1, VREF, DQ11 one pad at a time with a
+      successful reconnect between each -- pending-only sees a population of
+      one at every decision and never fires, yet each reconnect locks the
+      corridor against the sibling the next pad rips)."""
     if not _PLANE_IMMEDIATE_COUPLING:
         return set()
 
@@ -1255,6 +1263,8 @@ def route_planes(
                               for (p, l) in unconnected]
                 _deferred_rip: List = []
                 _phase2_immediate = False
+                _phase_rip_ids: List[int] = []  # #540: phase rip history,
+                #   kept even after a successful immediate reconnect
                 _pr_idx = -1
                 while _pad_queue or _deferred_rip:
                     if not _pad_queue:
@@ -1373,14 +1383,16 @@ def route_planes(
                         # with unrestorable pieces) reconnect NOW, while their
                         # corridors are still exactly as the rip left them.
                         # #540: EXCEPT nets bus-coupled to a PENDING casualty
-                        # (this phase's rips or an earlier phase's deferred
-                        # batch) -- an early sibling's reconnect locks the
-                        # shared corridor against the rest, so coupled nets
-                        # wait and negotiate it together in the end-of-run
-                        # batch.
+                        # (any phase's deferred batch) or to ANY net this
+                        # phase already ripped -- an early sibling's
+                        # reconnect locks the shared corridor against the
+                        # rest, so coupled nets wait and negotiate it
+                        # together in the end-of-run batch.
                         _newly = list(ripped_net_ids[_rips_before:])
+                        _phase_rip_ids.extend(_newly)
                         _coupled = _corridor_coupled_ids(
-                            _newly, ripped_net_ids, pcb_data)
+                            _newly, set(ripped_net_ids) | set(_phase_rip_ids),
+                            pcb_data)
                         if _coupled:
                             _cnames = sorted(
                                 pcb_data.nets[_n].name for _n in _coupled
