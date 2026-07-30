@@ -345,11 +345,31 @@ class QuenchState:
                                     if n not in ignore]
         warn_missing_courtyards(no_courtyard, 'quench')
 
-        # net -> refs touching it
-        self.net_refs: Dict[int, Set[str]] = {}
+        # net -> refs touching it, as a SORTED LIST, not a set (#457).
+        #
+        # This order reaches compute_mst_edges as the point order, and Prim's
+        # tie-break there is first-index-wins (seed node 0, argmin, and a strict
+        # `<` on the frontier update). Equidistant pads are the norm on a real
+        # board -- uniform-pitch GND arrays, identical decaps on a grid,
+        # symmetric connectors -- so a different order builds a different tree
+        # of the same total length, which changes the crossing count, which
+        # changes which moves get accepted. Set-of-STRING iteration order is
+        # randomized per process (PYTHONHASHSEED), so identical inputs gave
+        # different boards: interf_u_unrouted scored 447 / 457 / 450 crossings
+        # under three seeds before a single move was made.
+        #
+        # Sorting (rather than merely fixing an insertion order) makes the
+        # labelling a property of the NET, not of whichever front enumerated the
+        # footprints -- the same argument connectivity.py's
+        # get_multipoint_net_pads makes for sorting by position. Geometry is
+        # untouched, so this cannot pick a worse tree; it only settles which of
+        # several equivalent trees everyone agrees on.
+        by_net: Dict[int, List[str]] = {}
         for ref, part in self.parts.items():
             for n in part.nets:
-                self.net_refs.setdefault(n, set()).add(ref)
+                by_net.setdefault(n, []).append(ref)
+        self.net_refs: Dict[int, List[str]] = {
+            n: sorted(refs) for n, refs in by_net.items()}
 
         # Per-net airwires cache
         self.net_airwires: Dict[int, List] = {}
@@ -724,7 +744,33 @@ class QuenchState:
         total = (self.length_weight * length
                  + self.crossing_penalty * w_crossings + halo + edge)
         return {'total': total, 'length': length, 'crossings': crossings,
-                'halo': halo, 'edge': edge}
+                'halo': halo, 'edge': edge, 'hpwl': self.hpwl()}
+
+    def hpwl(self):
+        """Half-perimeter wirelength: sum over nets of the pad bbox's width plus
+        height (mm). The classic placement-quality proxy, and one of the columns
+        a placement scorecard wants (#411).
+
+        Its value here is that it is airwire-ORDER-INVARIANT by construction: it
+        reads only the extremes of each net's pad positions, so unlike the MST
+        length and the crossing count it cannot move when a tie-break resolves
+        differently. That makes it the witness for #457 -- two runs whose HPWL
+        agrees but whose crossing count does not differ in tie-breaks, not in
+        placement quality. (After the sorted-net_refs fix all three agree; HPWL
+        is what tells you WHICH kind of difference you are looking at if one
+        ever reappears.)
+        """
+        total = 0.0
+        for net_id, refs in self.net_refs.items():
+            xs, ys = [], []
+            for ref in refs:
+                for gx, gy, n in self.parts[ref].pad_globals():
+                    if n == net_id:
+                        xs.append(gx)
+                        ys.append(gy)
+            if len(xs) > 1:
+                total += (max(xs) - min(xs)) + (max(ys) - min(ys))
+        return total
 
     def graded_parts(self):
         """The placement as `legality.GradedPart` records, for the graders.
@@ -738,8 +784,10 @@ class QuenchState:
                 for ref, p in self.parts.items()]
 
     def legality_metrics(self):
-        """{'overlap_area', 'oob_count', 'oob_amount', 'oob_area'} for the
-        current placement. Zero across the board means fully legal."""
+        """{'overlap_area', 'oob_count', 'oob_amount', 'oob_area', 'hpwl'} for
+        the current placement. Zero across the legality keys means fully legal;
+        `hpwl` is a quality number, not a legality one, and is included because a
+        scorecard wants both from one call (#411)."""
         parts = self.graded_parts()
         oob_count = 0
         oob_amount = 0.0
@@ -752,7 +800,7 @@ class QuenchState:
                 oob_area += self.edge_gate.out_of_board_area(p.rect)
         return {'overlap_area': legality.placement_overlap_area(parts),
                 'oob_count': oob_count, 'oob_amount': oob_amount,
-                'oob_area': oob_area}
+                'oob_area': oob_area, 'hpwl': self.hpwl()}
 
     # ----- move application -------------------------------------------------
 
@@ -954,7 +1002,8 @@ def quench(pcb_data: PCBData, pcb_file: str,
     before = state.total_cost()
     print(f"Initial: length={before['length']:.1f}mm "
           f"crossings={before['crossings']} halo={before['halo']:.1f} "
-          f"edge={before['edge']:.1f} total={before['total']:.1f}")
+          f"edge={before['edge']:.1f} hpwl={before['hpwl']:.1f}mm "
+          f"total={before['total']:.1f}")
 
     movable = [r for r, p in state.parts.items() if not p.locked]
     movable.sort(key=lambda r: state.parts[r].pin_count, reverse=True)
@@ -1081,7 +1130,14 @@ def quench(pcb_data: PCBData, pcb_file: str,
                             pads_a = pa.pad_globals(ax, ay, arot)
                             pads_b = pb.pad_globals(bx, by, brot)
                             subset = {}
-                            for n in involved:
+                            # Hand-inlined _net_points: that helper overrides ONE
+                            # ref's pads and a swap has to override two. It reads
+                            # the same state.net_refs, so it inherits the sorted
+                            # order fixed at construction (#457) -- if the two
+                            # ever diverge, the swap phase silently goes
+                            # nondeterministic again while the nudge phase looks
+                            # fine.
+                            for n in sorted(involved):
                                 pts = []
                                 for ref2 in state.net_refs[n]:
                                     if ref2 == ra:
@@ -1141,6 +1197,7 @@ def quench(pcb_data: PCBData, pcb_file: str,
     after = state.total_cost()
     print(f"Quench complete: length {before['length']:.1f} -> {after['length']:.1f}mm, "
           f"crossings {before['crossings']} -> {after['crossings']}, "
+          f"hpwl {before['hpwl']:.1f} -> {after['hpwl']:.1f}mm, "
           f"total {before['total']:.1f} -> {after['total']:.1f}")
 
     return [{'reference': ref,

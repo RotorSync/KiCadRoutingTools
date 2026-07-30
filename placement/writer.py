@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from typing import List, Dict
 
+from kicad_parser import find_matching_paren
 from kicad_writer import move_copper_text_to_silkscreen
 
 
@@ -64,18 +65,12 @@ def write_placed_output(input_file: str, output_file: str,
 
     # Process in reverse order so string indices remain valid after replacements
     for start in reversed(footprint_starts):
-        # Find the matching end parenthesis
-        depth = 0
-        end = start
-        for i in range(start, len(content)):
-            if content[i] == '(':
-                depth += 1
-            elif content[i] == ')':
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
-
+        # String-aware, so a lone paren inside a property value (an MPN like
+        # "TCR2EF115,LM(CT") cannot run the scan past this block and swallow the
+        # next footprint -- issue #113, the same hazard placement/parser.py's
+        # readers carry. A naive depth counter here would place the WRONG
+        # footprint, or silently place none.
+        end = find_matching_paren(content, start)
         fp_text = content[start:end]
 
         # Extract reference from (property "Reference" "XX" ...)

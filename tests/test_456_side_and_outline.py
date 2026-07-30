@@ -428,8 +428,13 @@ def test_state_legality_metrics_are_zero_on_a_legal_placement():
             + _part('C1', 150.0, 100.0, 'B.Cu', 2, 'NB', cy=1.0))
     st, path = _state(body)
     m = st.legality_metrics()
-    assert m == {'overlap_area': 0.0, 'oob_count': 0, 'oob_amount': 0.0,
-                 'oob_area': 0.0}, f"cross-side pair graded as illegal: {m}"
+    # Legality keys only -- `hpwl` rides along in the same dict but is a quality
+    # number, not a legality one, so it is not expected to be zero.
+    legality_keys = {k: m[k] for k in
+                     ('overlap_area', 'oob_count', 'oob_amount', 'oob_area')}
+    assert legality_keys == {'overlap_area': 0.0, 'oob_count': 0,
+                             'oob_amount': 0.0, 'oob_area': 0.0}, \
+        f"cross-side pair graded as illegal: {m}"
     os.unlink(path)
 
 

@@ -144,11 +144,19 @@ python3 tests/test_456_courtyard_parser.py   # courtyard shapes + silk bleed (#4
 python3 tests/test_456_side_and_outline.py   # board side, real outline, graders (#456)
 ```
 
-One caveat when comparing quench *outputs*: results currently differ across
-processes unless `PYTHONHASHSEED` is pinned (set-order airwire iteration
-feeds MST tie-breaks, #457). Same-process runs are deterministic — the
-parity tests rely on that — so A/B two placements inside one process, or
-export `PYTHONHASHSEED=0` for both runs.
+Quench output is reproducible across processes — the same board and arguments
+give the same placement, with no `PYTHONHASHSEED` pinning (#457). It used to
+depend on the hash seed: `net_refs` was a set of reference strings, its iteration
+order became the MST's point order, and Prim's tie-break is first-index-wins, so
+equidistant pads (uniform-pitch GND arrays, decaps on a grid, symmetric
+connectors) built a different tree per process. `interf_u_unrouted` scored 447 /
+457 / 450 crossings under three seeds before a single move was made. `net_refs`
+now holds sorted lists, and `tests/test_457_determinism.py` pins it.
+
+When comparing two placements, `hpwl` is the metric to reach for first: it reads
+only each net's pad-position extremes, so unlike the MST length and the crossing
+count it is invariant to airwire order. If HPWL agrees and crossings do not, the
+two runs differ in tie-breaks rather than in placement quality.
 
 ## Module layout
 
@@ -191,8 +199,8 @@ any grader cannot disagree:
   Measured on `watchy`, where 81 of 82 parts start in violation — its hand
   placement is tighter than the 0.25 mm courtyard clearance quench asks for — a
   permissive rule took total courtyard overlap from 9.1 mm² to 37.9 mm²
-  (strict-decrease: 16.8) where the board-only rule gets 0.81 while also walking
-  7 parts back onto the board.
+  (strict-decrease: 16.8) where the board-only rule gets 0.23 while also walking
+  10 of the 13 off-board parts back on.
 - **Graders.** `placement_overlap_area` (OO, mm²) and `placement_out_of_board`
   (OoB) report the same geometry the optimizer gates on;
   `QuenchState.legality_metrics()` returns both for a live placement. All zero
@@ -204,8 +212,8 @@ the cost function. On `glasgow_revC` (172 front / 92 back parts) a bounded 40-pa
 pass makes **3.4× more airwire cost evaluations** than before (9.3k → 31.4k
 `_count_crossings_np` calls) and takes correspondingly longer. Nothing per-call
 got slower — the optimizer is searching the space it was previously, wrongly,
-skipping. Single-sided and small boards are unaffected (`watchy`: 109 s, same as
-before; `interf_u_unrouted`: same 21 parts moved, same final length/crossings).
+skipping. Small boards are unaffected or faster (`watchy`: 69 s against 109 s
+before).
 
 Courtyard extraction (`parser.py`) reads `fp_line`/`fp_rect`/`fp_arc`/
 `fp_circle`/`fp_poly` per side. A footprint with no courtyard on any layer falls

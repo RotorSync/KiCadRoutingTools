@@ -21,6 +21,17 @@ import routing_defaults as defaults
 from kicad_parser import POSITION_DECIMALS
 from kicad_parser import mm_to_iu
 
+# What a failed startup check can look like coming out of `import route`.
+# SystemExit is the historical form; StartupCheckError is what the checks raise
+# now that they no longer kill an importing process (#457 item 3). Tolerant of an
+# old startup_checks with no such class, so a stale checkout still imports.
+try:
+    from startup_checks import StartupCheckError as _StartupCheckError
+    _STARTUP_FAILURES = (SystemExit, _StartupCheckError)
+except ImportError:  # pragma: no cover - stale checkout
+    _STARTUP_FAILURES = (SystemExit,)
+
+
 def _via_width(via):
     """KiCad 9/10 padstack vias can refuse layerless GetWidth() ('result
     with an error set', seen on vias ADDED in-session then re-synced);
@@ -2965,7 +2976,12 @@ class RoutingDialog(wx.Dialog):
                     captured_output = captured.getvalue()
                 if captured_output:
                     self._append_log(captured_output)
-            except SystemExit as e:
+            except _STARTUP_FAILURES as e:
+                # StartupCheckError as well as SystemExit (#457 item 3): the
+                # checks now raise instead of exiting when route.py is IMPORTED,
+                # which is exactly what this call site does. Catching only
+                # SystemExit here would turn the friendly dependency dialog below
+                # into a raw traceback in the plugin.
                 captured_output = captured.getvalue() if 'captured' in dir() else ''
                 # Check which dependencies are missing
                 missing = []
