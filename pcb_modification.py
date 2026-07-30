@@ -1105,7 +1105,8 @@ class PlaneCleanupDelta(NamedTuple):
 
 
 def compute_plane_copper_cleanup(pcb, plane_net_names, clearance: float = 0.1,
-                                 grid_step: float = 0.05) -> "PlaneCleanupDelta":
+                                 grid_step: float = 0.05,
+                                 progress_callback=None) -> "PlaneCleanupDelta":
     """Board-level core of the plane-copper cleanup (issues #84, #308, #319).
 
     Runs the ONE shared run_post_route_cleanup pipeline the signal fronts use --
@@ -1136,7 +1137,8 @@ def compute_plane_copper_cleanup(pcb, plane_net_names, clearance: float = 0.1,
     _outcome = run_post_route_cleanup(
         plane_results, pcb, scope, _cfg,
         label='Plane ', phantom=False, via_nudge=False, neck=False,
-        microshift_max_shift=grid_step)
+        microshift_max_shift=grid_step,
+        progress_callback=progress_callback)
     return PlaneCleanupDelta(
         connectors=[s for r in plane_results for s in (r.get('new_segments') or [])],
         segments_to_remove=list(_outcome.input_strip_segments),

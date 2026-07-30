@@ -1457,7 +1457,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             print(f"Issue #134 recovery: re-routing {len(recover)} net(s) left ripped "
                   f"to avoid a short: {', '.join(recover)}")
             run_reroute_loop(state, route_index_start=route_index,
-                             cancel_check=cancel_check)
+                             cancel_check=cancel_check,
+                             progress_callback=progress_callback)
         # Last resort (parity with the plane tools' piece-level settle,
         # 72ca5f9): a refused net whose clean reroute ALSO failed ships at
         # zero copper -- restore the saved route's non-colliding pieces
@@ -1517,7 +1518,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # restored copper colliding with newly routed copper); honest 'unrecovered'
     # when nothing safe can be re-instated. Engine-side, so the GUI inherits.
     from diff_pair_custody import run_casualty_reconcile
-    casualty_summary = None if _ckpt_stop else run_casualty_reconcile(state)
+    casualty_summary = None if _ckpt_stop else run_casualty_reconcile(
+        state, progress_callback=progress_callback, cancel_check=cancel_check)
 
     # Issues #331/#371: last-chance scoped fine-parameter rescue for nets the
     # whole pipeline (main loop, rip-up ladder, reroute loop, Phase 3, #134
@@ -1530,7 +1532,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         progress_callback(0, 0, "Rescuing failed nets...")
     from net_rescue import rescue_failed_nets
     rescue_summary = None if _ckpt_stop else rescue_failed_nets(
-        state, single_ended_nets, net_clearances=net_clearances)
+        state, single_ended_nets, net_clearances=net_clearances,
+        progress_callback=progress_callback, cancel_check=cancel_check)
 
     # Final progress update
     if progress_callback:
@@ -1731,7 +1734,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         original_segment_ids=original_segment_ids,
         original_via_ids=({id(v) for lst in _orig_via_by_net.values() for v in lst}
                           | {id(v) for v in all_swap_vias}),
-        keep_input_copper=keep_input_copper)
+        keep_input_copper=keep_input_copper,
+        progress_callback=progress_callback)
     dead_end_input_segments = _cleanup.input_strip_segments if _cleanup is not None else []
 
     # Issue #220: the output writer copies the INPUT FILE verbatim, then adds the

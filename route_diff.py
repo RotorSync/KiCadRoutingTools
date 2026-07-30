@@ -1117,7 +1117,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     from diff_pair_custody import (run_casualty_reconcile, audit_pair_members,
                                    build_pair_reports,
                                    run_single_ended_member_fallback)
-    casualty_summary = run_casualty_reconcile(state)
+    casualty_summary = run_casualty_reconcile(
+        state, progress_callback=progress_callback, cancel_check=cancel_check)
     _recovered = (len(casualty_summary['restored'])
                   + len(casualty_summary['rerouted']))
     if _recovered:
@@ -1246,7 +1247,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     _dp_cleanup = run_post_route_cleanup(
         results, pcb_data, dp_scope, config,
         label='Diff-pair ', snap=False, phantom=False, neck=False,
-        keep_input_copper=keep_input_copper)
+        keep_input_copper=keep_input_copper,
+        progress_callback=progress_callback)
     cleanup_input_strip = _dp_cleanup.input_strip_segments
     # #508 finding 11: the pipeline's removed input VIAS were dropped on the
     # floor here -- the orphan-island sweep deletes them from pcb_data, but

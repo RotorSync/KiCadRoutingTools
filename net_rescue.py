@@ -360,12 +360,19 @@ def _unconnected_pads_info(comp_pads):
     return out
 
 
-def rescue_failed_nets(state, single_ended_nets, net_clearances=None):
+def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
+                       progress_callback=None, cancel_check=None):
     """Scoped fine-parameter rescue for every still-failed/partial net.
 
     Returns a summary dict ({'attempted', 'recovered', 'improved',
     'unchanged', 'pads_reconnected', 'time'}) or None when there was nothing
     to rescue (or KICAD_NET_RESCUE=0).
+
+    progress_callback(i, n, "Rescue: <net>") fires per candidate net (#527 --
+    this phase can dominate a step's wall clock and used to sit behind one
+    static GUI message); cancel_check is honored at net and edge-attempt
+    boundaries -- rescue copper is purely additive, so aborting mid-pass
+    ships whatever was recovered so far.
     """
     if not env_knobs.NET_RESCUE:
         return None
@@ -396,7 +403,13 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None):
                'unchanged': [], 'pads_reconnected': 0, 'time': 0.0}
     pass_start = time.time()
 
-    for net_name, net_id, kind in candidates:
+    for _cand_idx, (net_name, net_id, kind) in enumerate(candidates):
+        if cancel_check and cancel_check():
+            print("  Rescue cancelled")
+            break
+        if progress_callback:
+            progress_callback(_cand_idx + 1, len(candidates),
+                              f"Rescue: {net_name}")
         net_start = time.time()
         num0, comp_points, comp_pads = _net_component_info(pcb_data, net_id)
         if num0 <= 1:
@@ -411,6 +424,8 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None):
         attempts = 0
         num = num0
         while attempts < defaults.RESCUE_MAX_EDGES_PER_NET and num > 1:
+            if cancel_check and cancel_check():
+                break  # additive copper: keep what landed, stop attempting
             main = _main_component(comp_pads)
             gaps = []
             for cid, pts in comp_points.items():

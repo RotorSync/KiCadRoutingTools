@@ -4223,6 +4223,14 @@ def create_plane(
                         power_nets_widths=power_nets_widths,
                         disable_bga_zones=([] if no_bga_zone else None),
                         net_clearances=net_clearances,  # #434 cross-class
+                        # #527: forward progress/cancel -- a multi-net
+                        # reconnect used to run minutes behind one static
+                        # "Reconnecting..." message.
+                        progress_callback=(
+                            (lambda c, t, m: progress_callback(
+                                c, t, f"Reconnect: {m}"))
+                            if progress_callback else None),
+                        cancel_check=cancel_check,
                         return_results=True, pcb_data=pcb_data)
 
                     def _sd(_s):

@@ -80,6 +80,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                            original_segment_ids=None,
                            original_via_ids=None,
                            keep_input_copper: bool = False,
+                           progress_callback=None,
                            ) -> CleanupOutcome:
     """Run the post-route cleanup passes in their one canonical order.
 
@@ -124,6 +125,13 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         quantization); the plane repair path passes a full grid_step (#308 --
         its tracks are on-grid against off-grid holes).
 
+    ``progress_callback(0, 0, "<label>Cleanup: <pass>...")`` fires before
+    each pass (#527: the whole pipeline used to run behind whatever message
+    the previous phase left on screen -- minutes of apparent hang on dense
+    boards). No cancel hook by design: the passes maintain board/write-list
+    invariants pairwise, and aborting between them ships a half-reconciled
+    ledger.
+
     Returns a CleanupOutcome; input-file removals from every pass are merged
     into ``input_strip_segments`` in pass order.
 
@@ -167,8 +175,13 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
             print(f"[LEDGER_TRACE]{label} after {stage}: ({tx},{ty}) "
                   f"board={nb} writelist={nr} strip={ns}")
 
+    def _prog(stage):
+        if progress_callback:
+            progress_callback(0, 0, f"{label}Cleanup: {stage}...")
+
     _trace('start')
     if snap:
+        _prog("stub-gap snap")
         _snapped = snap_stub_gaps(results, pcb_data, scope_net_ids, config)
         counts['stub_gaps_snapped'] = _snapped
         _trace('snap')
@@ -176,6 +189,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
             print(f"{label}Closed {_snapped} stub gap(s) to same-net copper")
 
     if phantom:
+        _prog("phantom reconcile")
         # Two-way reconciliation: write-list phantoms dropped from results, and
         # -- when the caller identifies its input copper -- orphan routed
         # copper (rip/reroute slivers no result references) dropped from
@@ -207,6 +221,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     _bec = getattr(config, 'board_edge_clearance', 0.0) or 0.0
 
     if graze:
+        _prog("graze prune")
         _gz_segs, _gz_nets, _gz_strip = prune_grazing_segments(
             results, pcb_data, scope_net_ids, clearance=config.clearance,
             check_foreign_segments=True, keep_input_copper=keep_input_copper,
@@ -232,6 +247,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                   f"detour seg(s) across {_wd_nets} net(s)")
 
     if octolinear:
+        _prog("octolinear graze re-bend")
         _nz_segs, _nz_nets, _nz_strip, _ = nudge_grazing_octolinear(
             results, pcb_data, scope_net_ids, clearance=config.clearance,
             keep_input_copper=keep_input_copper,
@@ -243,6 +259,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
             print(f"{label}Graze nudge: re-bent grazing octolinear jog(s) "
                   f"on {_nz_nets} net(s)")
 
+    _prog("graze micro-shift")
     _ms_segs, _ms_nets, _ms_strip, _ = nudge_grazing_microshift(
         results, pcb_data, scope_net_ids, clearance=config.clearance,
         max_shift=(microshift_max_shift if microshift_max_shift is not None
@@ -260,6 +277,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
               f"shortfall on {_ms_nets} net(s)")
 
     if via_nudge:
+        _prog("via nudge")
         _vn_moved, _vn_nets, _ = nudge_grazing_vias(
             results, pcb_data, scope_net_ids, clearance=config.clearance,
             hole_to_hole=config.hole_to_hole_clearance,
@@ -291,6 +309,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         else:
             _sub_scope = set(scope_net_ids) - set(protect_net_ids)
     if cycles:
+        _prog("cycle prune")
         _cy_segs, _cy_nets, _cy_strip = prune_redundant_cycles(
             results, pcb_data, _sub_scope, clearance=config.clearance,
             keep_input_copper=keep_input_copper)
@@ -304,6 +323,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     # Strict-redundant collapse (#217 classes 1-2): superseded parallel
     # chains and pad/via-buried tails that are redundant under the strict
     # width-clamped graph. Before the sweep so freed this-run vias drop.
+    _prog("strict-redundant collapse")
     _sc_n, _sc_strip = collapse_strict_redundant(results, pcb_data, _sub_scope,
                                                  keep_input_copper=keep_input_copper)
     counts['strict_collapsed'] = _sc_n
@@ -317,6 +337,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     # their net -- rip/reroute leftovers connected to nothing. Runs before
     # the dead-end sweep so the sweep's unsupported-via pass drops the
     # islands' freed this-run vias.
+    _prog("orphan islands")
     _oi_n, _oi_segs, _oi_strip, _oi_via_strip = remove_orphan_islands(
         results, pcb_data, _sub_scope, keep_input_copper=keep_input_copper)
     out.input_strip_vias.extend(_oi_via_strip)
@@ -327,6 +348,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         print(f"{label}Orphan islands: removed {_oi_n} pad-less copper "
               f"island(s) ({_oi_segs} segment(s))")
 
+    _prog("dead-end sweep")
     _de_segs, _de_vias, _de_strip = sweep_dead_ends(results, pcb_data, scope_net_ids,
                                                     protect_net_ids=protect_net_ids,
                                                     keep_input_copper=keep_input_copper)
@@ -342,6 +364,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     # a dead-end segment T-anchored mid-BODY (a via ON the trace, or a tee) is
     # load-bearing through the anchor, so the whole-segment prune keeps it and
     # the copper past the anchor ships as an antenna. Split-trim to the anchor.
+    _prog("dangle trim")
     _dt_n, _dt_strip = trim_dangles_past_body_anchor(results, pcb_data, _sub_scope,
                                                      keep_input_copper=keep_input_copper)
     counts['dangles_trimmed'] = _dt_n
@@ -352,6 +375,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
               f"mid-body anchor")
 
     if neck:
+        _prog("width neck")
         _necked = neck_wide_segments_grazing_pads(results, pcb_data, config)
         counts['width_necked'] = _necked
         _trace('neck')
@@ -368,6 +392,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         print(f"{label}soft-joint bridging DISABLED (KICAD_NO_SOFT_JOINT_BRIDGE)")
         counts['soft_joints_bridged'] = 0
     else:
+        _prog("soft-joint bridging")
         _bridged = close_soft_joints(results, pcb_data, scope_net_ids, config)
         counts['soft_joints_bridged'] = _bridged
         if _bridged:

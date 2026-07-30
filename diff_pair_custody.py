@@ -346,7 +346,8 @@ def record_casualty(state, net_id: int, saved_result: dict,
                                        was_in_results)
 
 
-def run_casualty_reconcile(state) -> Dict:
+def run_casualty_reconcile(state, progress_callback=None,
+                           cancel_check=None) -> Dict:
     """Casualties-only end-of-run reconciliation (final_reconcile=
     'casualties-only', depth 1 - no recursive rip authority).
 
@@ -361,6 +362,13 @@ def run_casualty_reconcile(state) -> Dict:
          already committed as obstacles - one plain attempt, no rip-up;
       D. last resort: piece-level partial restore of the non-colliding copper
          (parity with route.py's #134 last resort) - a partial net beats zero.
+
+    progress_callback(i, n, label) fires per casualty in the restore and
+    reroute loops (#527: this phase used to run with the PREVIOUS phase's
+    message still on screen). cancel_check is honored only around the
+    depth-1 REROUTE attempts (the expensive part): a cancelled casualty
+    skips C and drops straight to the partial restore, so custody is never
+    abandoned -- cancelling must not ship a ripped net at zero copper.
 
     Returns a JSON-ready summary dict.
     """
@@ -400,13 +408,18 @@ def run_casualty_reconcile(state) -> Dict:
     print(f"Final reconciliation (casualties-only, depth 1): {len(broken)} "
           f"net(s)/pair(s) ripped during routing never re-routed")
     print("=" * 60)
+    if progress_callback:
+        progress_callback(0, 0, f"Reconciling {len(broken)} ripped net(s)...")
 
     from rip_up_reroute import restore_net
 
     # B: restore-FIRST (collision-aware; refused restores stay ripped and are
     # stashed for the piece-level last resort).
     still_broken = []
-    for net_id, saved, ripped_ids, was_in in broken:
+    for _b_idx, (net_id, saved, ripped_ids, was_in) in enumerate(broken):
+        if progress_callback:
+            progress_callback(_b_idx + 1, len(broken),
+                              f"Reconcile restore: {_label(net_id)}")
         restore_net(net_id, saved, ripped_ids, was_in, pcb_data,
                     state.routed_net_ids, state.routed_net_paths,
                     state.routed_results, state.diff_pair_by_net_id,
@@ -429,11 +442,19 @@ def run_casualty_reconcile(state) -> Dict:
 
     # C: depth-1 reroute of the still-broken, with all restored copper as
     # obstacles. No rip-up (no recursive rip authority).
-    for net_id, saved, ripped_ids, was_in in still_broken:
+    for _c_idx, (net_id, saved, ripped_ids, was_in) in enumerate(still_broken):
         name = _label(net_id)
+        if progress_callback:
+            progress_callback(_c_idx + 1, len(still_broken),
+                              f"Reconcile reroute: {name}")
         rerouted = False
         pair_info = state.diff_pair_by_net_id.get(net_id)
-        if pair_info is not None:
+        if cancel_check and cancel_check():
+            # Cancelled: skip the expensive reroute attempt but NEVER abandon
+            # custody -- fall through to the partial restore below so the net
+            # doesn't ship at zero copper.
+            pass
+        elif pair_info is not None:
             pair_name, pair = pair_info
             from routing_context import (build_diff_pair_obstacles,
                                          record_diff_pair_success)

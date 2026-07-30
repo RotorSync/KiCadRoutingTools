@@ -1185,6 +1185,13 @@ def route_planes(
                     # project (batch_route's own auto-read would find no
                     # netclasses next to a not-yet-written output).
                     net_clearances=net_clearances,
+                    # #527: forward progress/cancel -- a multi-net reconnect
+                    # used to run minutes behind one static message.
+                    progress_callback=(
+                        (lambda c, t, m: progress_callback(
+                            c, t, f"Reconnect: {m}"))
+                        if progress_callback else None),
+                    cancel_check=cancel_check,
                     return_results=True, pcb_data=pcb_data)
 
                 def _sd(_s):
@@ -1634,6 +1641,13 @@ def route_planes(
                     power_nets=power_nets, power_nets_widths=power_nets_widths,
                     disable_bga_zones=([] if no_bga_zone else None),
                     net_clearances=net_clearances,
+                    # #527: forward progress/cancel into the region-join
+                    # sub-route (it can A* for minutes on a big pour).
+                    progress_callback=(
+                        (lambda c, t, m: progress_callback(
+                            c, t, f"Region join: {m}"))
+                        if progress_callback else None),
+                    cancel_check=cancel_check,
                     return_results=True, pcb_data=pcb_data)
                 for _r in _rdata3.get('results', []):
                     all_new_segments.extend(
@@ -1769,11 +1783,21 @@ def route_planes(
             # are accepted. A repair is kept only if it STRICTLY reduces
             # this pad's count -- see pad_repair_made_progress.
             _cur_dp = res.get('disconnected_pads') or []
-            for (fx, fy, _flayer, fref) in res.get('disconnected_pads', []):
+            _sweep_pads = res.get('disconnected_pads', [])
+            for _sw_idx, (fx, fy, _flayer, fref) in enumerate(_sweep_pads):
+                if cancel_check and cancel_check():
+                    print("    (cancelled)")
+                    break
                 pp = pad_by_key.get((round(fx, 3), round(fy, 3), fref))
                 if pp is None:
                     continue
                 pad, pad_cands = pp
+                # #527: the via ladder below (sizes x layers x full-radius
+                # searches) can take many seconds per pad -- report each one.
+                if progress_callback:
+                    progress_callback(_sw_idx + 1, len(_sweep_pads),
+                                      f"{net_name}: forcing via "
+                                      f"{pad.component_ref}.{pad.pad_number}")
                 # #494: the old guard also skipped PLATED barrels, on the
                 # premise "plated barrels are already plane-tied by the
                 # fill". That cannot hold here -- this loop iterates
