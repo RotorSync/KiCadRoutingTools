@@ -306,6 +306,48 @@ the 27 tracked boards trips any of it, `watchy` included -- and `watchy` is the
 worst case, with 81 of 82 parts in courtyard violation. Density is not
 unplacedness, which is why this does not live in `legality.py`.
 
+## Floorplan intent (`floorplan.py`, #549)
+
+Everything above judges a placement by `crossings` and `hpwl`, and both are
+indifferent between a sensible layout and a scattered one with the same
+wirelength. Nothing declares where parts *belong*, so nothing can check whether
+they went there.
+
+`check_floorplan.py` closes that: declare the floorplan, grade the board against
+it, exit non-zero with the number that broke.
+
+```bash
+python3 check_floorplan.py board.kicad_pcb --emit-intent floorplan.json   # start here
+python3 check_floorplan.py board.kicad_pcb --intent floorplan.json        # 0 clean, 4 violations
+```
+
+Full reference: [docs/floorplan-intent.md](../docs/floorplan-intent.md). The
+parts worth knowing from here:
+
+- **The board outline is not editable by this toolchain.** `envelope` is READ
+  from the board; a part outside it is a finding about the **part**. Board size,
+  cutouts and slots are mechanical decisions the user owns.
+- **Every rule reuses the geometry the optimizer gates on** — `QuenchState`'s
+  `legality_metrics` and `edge_gate`, `GradedPart` rects and sides, and
+  `groups.decap_tethers` for the cap→IC rule. A grader with its own idea of
+  "legal" grades the reimplementation, so tests assert the two agree exactly.
+- **A block that resolves to nothing is an error**, not an empty block. A typo'd
+  `refs` grades clean while nothing was checked.
+- **`rules_run` / `rules_skipped` are reported**, because "0 violations" and
+  "0 rules ran" must not look the same to a machine.
+- **A board with no trustworthy outline is refused (exit 3), not graded.** The
+  fallback is invisible: no rings ⇒ `BoardOutlineGate.active` False ⇒ every
+  containment test silently degrades to the bounding box.
+- **`oob_area` cannot be budgeted.** It is measured against the bbox inset, so a
+  part sitting entirely inside a cutout scores `0.0`. Refused at load time with
+  that reason; use `oob_count` / `oob_amount`.
+
+One thing `--emit-intent` will not do: claim a `zone` for a sheet block. A
+schematic sheet is a *functional* grouping, so its members scatter and all ten of
+ulx3s's sheet bounding boxes mutually overlap (up to 4508 mm²). Zones are emitted
+only where disjoint — the same spatial incoherence that makes sheet blocks
+useless for movement, above.
+
 ## Lock advisor (#431)
 
 `--suggest-locks` on either CLI reports which parts look position-critical, with
