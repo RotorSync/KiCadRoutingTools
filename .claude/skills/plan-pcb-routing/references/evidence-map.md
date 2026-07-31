@@ -129,6 +129,17 @@ The feedback edge back into placement.
 | `pad_pairs_connected` / `pad_pairs_total` | The honest completion number for comparing two placements |
 | `total_iterations` | Effort. A placement that halves iterations at equal completion is a real win |
 | `total_vias` | The cost side of the same trade |
+| `power_trace_ampacity[].bottleneck_width_mm` | **Did the width you asked for actually happen?** `--power-nets-widths` degrades quietly: a wide tap that will not fit is re-routed at the layer default (#72's neckdown retry), and on a dense board that fallback can take the *whole* run, not just the pad. On test-board, `--power-nets-widths 0.8` on the USB nets produced **1.30 mm of 0.8 mm copper out of 41 mm** — three of the four nets got none at all. Compare this key against what you asked for, every time; the routed board is DRC-clean either way |
+| `min_clearance_used` | The floor the run actually reached, which is **not** what you asked for. Below your netclass means the gap-rescue stepped down toward the fab floor. test-board: nominal 0.16, `min_clearance_used` 0.127, and **25% of all copper (180 of 710 mm) ended up at 0.127** — under the board's own 0.15 minimum. The `.kicad_pro` writeback then clamps the DRC floor to the routed value, so **KiCad grades it clean**. This key is the only place the step-down is visible |
+| `rescue.unchanged` | Nets the rescue pass could not improve. Distinguishes "nearly made it" from "never had a path" |
+
+**No KRT check grades a routed LENGTH.** Not `check_drc`, not `check_connected`,
+not `check_floorplan`. If the board's spec carries max-run, per-leg, via-count or
+skew limits — `QSPI <= 15 mm, 0 vias`, `XTAL <= 10 mm/leg, legs matched to
+1 mm` — you must measure them yourself from `pcb.segments`, and say plainly that
+you did. On test-board the routed board was DRC-clean and 90% connected while
+breaking **19** such limits, including a QSPI net at 32.6 mm against a 15 mm
+HARD budget. Green on every KRT gate is not green on the spec.
 
 ---
 
