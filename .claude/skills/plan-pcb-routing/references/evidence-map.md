@@ -183,3 +183,55 @@ visible. Diff the `.kicad_pro` between steps whenever the spec has a width floor
 |---|---|
 | `route.py --list-groups`: `parts=`, `touching=`, `internal=` | The routing-scope decision. `internal ≈ 0` ⇒ only `touching` is meaningful (always true of `decap`) |
 | `render_placement.py --list-groups`: `parts=`, `front=`, `back=` | A block with parts on both faces cannot be reviewed in one panel |
+
+---
+
+## H. The board score — `scripts/board_score.py BOARD --json wk/score.json`
+
+The only number that decides better-from-worse in the Step 9 loop, and the only
+one produced by something **other than the tool being graded**. Everything else
+on this page describes what a step *claims*; this describes what the board *is*.
+
+| key | decision |
+|---|---|
+| `blocking` | **must reach 0 before the board is deliverable.** `unrouted + broken + drc + undersized + floorplan + impedance + length` |
+| `blocking_by.<component>` | names the lever. The largest entry is where the next iteration goes |
+| `quality` = `{vias, copper_mm, segments}` | tie-break **only** at `blocking == 0`. Comparing it earlier lets a router trade a disconnected net for a lower via count |
+| `ungraded` | components nothing examined (no `--intent`, no `--impedance-nets`, no `--length-groups`). **Report as unexamined, never as clean** |
+| `unknown` | a component that was asked for and could not run. `blocking` is `null`, not 0 — the loop must not stop here |
+| `components.drc.graded_at` | the clearance actually graded at. Confirm it is the routed floor; stricter invents violations, looser hides them |
+| `components.drc.by_type` | `segment-segment`, `pad-segment`, … — clearance conflicts |
+| `components.undersized.by_type` | `track-width`, `via-size`, `via-drill-size` — **sub-spec copper** |
+| `components.floorplan.rules_run` / `.rules_skipped` | `0 violations` with `0 rules run` is a vacuous pass. Quote both |
+| `connectivity_nets` | *which* nets failed. Same nets every iteration ⇒ parameters; different nets ⇒ congestion |
+| exit code | `0` blocking is zero · `4` graded with blockers · `3` board state · `2` args · `1` crash |
+
+**The size floors default to the FAB minimum, not the spec.** `check_drc` derives
+them from the copper-layer count, so a via that clears the fab and violates the
+board's own tighter spec **grades clean**. That is not hypothetical: 141 of 141
+vias at 0.25 mm ⌀ passed against a 0.6 mm spec requirement. If the spec states
+sizes, pass them:
+
+```bash
+python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/board_score.py board.kicad_pcb \
+    --intent wk/floorplan.json \
+    --min-track-width 0.15 --min-via-diameter 0.6 --min-via-drill 0.3
+```
+
+**Omit `--clearance`.** `check_drc` then reads the sibling `.kicad_pro`, which is
+the floor the board was actually routed to (see F's writeback ratchet). Pass one
+only when you know better than the board.
+
+### `convergence.json` — the Step 9 ledger
+
+| key | decision |
+|---|---|
+| `iterations[].parent_board` | the last **accepted** board. This is `render_placement --before`; using N−1 renders a delta that never existed |
+| `iterations[].lever` | must be reproducible. "tuned parameters" is not a lever |
+| `iterations[].accepted` / `.reverted_to` | a rejected iteration is data — keeping it is what makes "3 unchanged iterations" detectable |
+| `iterations[].score.blocking` | flat across three iterations and three levers ⇒ stop condition 3 |
+| `iterations[].verdicts[]` | a `VERDICT=FAIL` here means `blocking` was not really 0 |
+| `stopped_by` | `1`…`4`. The final report quotes it by number |
+| accepted boards, in order | the frame list for `make_movie.py`. Reverted boards animate a change that was undone |
+
+Full procedure: [`convergence.md`](convergence.md).

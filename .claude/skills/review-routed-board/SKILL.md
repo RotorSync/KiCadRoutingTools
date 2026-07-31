@@ -194,10 +194,33 @@ For each differential pair (from `list_nets.py --diff-pairs`):
 
 ## Step 5: The Sign-Off Report
 
-Present a compact report — one pass/fail line per category, details only for failures, ending with next actions:
+**Lead with the score, so this review and `/plan-pcb-routing` agree on what
+"done" means.** One command produces it, and it is the same number Step 9 of the
+routing skill loops on:
+
+```bash
+python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/board_score.py \
+    board.kicad_pcb --intent wk/floorplan.json \
+    --min-track-width <spec> --min-via-diameter <spec> --min-via-drill <spec>
+```
+
+`blocking == 0` is the only state in which this report may say the board is
+ready. Anything else is **not done** — hand it back to `/plan-pcb-routing`
+Step 9 rather than signing off with caveats. Two traps this closes:
+
+- **`ungraded` is not `passed`.** Components with no intent, no impedance nets
+  and no length groups were *unexamined*; list them as such.
+- **The size floors default to the FAB minimum, not the spec.** Pass the spec's
+  numbers, or copper that meets the fab and violates the board's own tighter
+  requirement signs off clean.
+
+Then present a compact report — one pass/fail line per category, details only for failures, ending with next actions:
 
 ```
 ## Board Review: board.kicad_pcb
+
+BLOCKING=0  (unrouted=0 broken=0 drc=0 undersized=0 floorplan=0)
+UNGRADED: impedance, length          <- unexamined, NOT passed
 
 | Check | Result |
 |-------|--------|

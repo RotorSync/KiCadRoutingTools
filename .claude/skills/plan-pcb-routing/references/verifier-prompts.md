@@ -31,9 +31,15 @@ wk/turn<N>/
   intent.json  intent_result.json  # E -- check_floorplan
   route.log  drc.txt  conn.txt   # F -- routing + the authoritative checkers
   list_groups.txt                # G
+  score.json  convergence.json   # H -- board_score.py + the Step 9 ledger
 ```
 
-## The six lenses
+## The nine lenses
+
+Lenses 1–6 grade the **placement**. Lenses 7–9 grade the **routed board** — the
+thing actually being handed over. Run 7–9 on every board you are about to call
+done; skipping them is how a board went out at 39/44 nets with 762 DRC errors and
+a clean-looking report.
 
 **1. `intent`** — given `intent.json`, `intent_result.json`, the front panel.
 > Does this board honour the declared floorplan? Report every `violations[]`
@@ -77,6 +83,34 @@ plane nets, and any placement `--ignore-nets`.
 > plane-net set? A placement step claims no nets and must not appear in the
 > partition.
 
+**7. `connectivity`** — given `conn.txt`, `score.json`, the route `--nets` lists.
+> Is every net actually joined? Read `score.json#/components/unrouted/count` and
+> `/components/broken/count` and reconcile them against `conn.txt`. A net that is
+> unrouted because it was *excluded* from every route step and never poured is a
+> **FAIL**, not an accepted shortfall — name it and say which step should have
+> claimed it. The router's own `failures` tally is not evidence here: it comes
+> from the thing being graded. You may not conclude anything about clearance.
+
+**8. `drc`** — given `drc.txt`, `score.json`, the routed clearance.
+> Is this board manufacturable? Read `score.json#/components/drc/count` and
+> `/components/undersized/count`, and check `/components/drc/graded_at` is the
+> floor the board was actually routed to — grading stricter than the route
+> manufactures phantom violations, grading looser hides real ones. **`undersized`
+> is the one that hides:** `check_drc` defaults its size floors to the FAB
+> minimum, so a via meeting the fab and violating the board's own tighter spec
+> grades clean unless the spec numbers were passed. If the spec states sizes and
+> `board_score.py` was called without them, FAIL on that alone.
+
+**9. `spec`** — given `score.json`, the requirements document, `intent.json`.
+> Does the board meet what was *asked for*, not just what is manufacturable?
+> Walk every requirement with a number in it — track widths, pair widths and
+> gaps, length rules, impedance, clearances, connector positions — and find the
+> measurement that confirms or refutes it. Report the ones with **no measurement
+> at all** as findings: `score.json#/ungraded` lists components nothing examined,
+> and *ungraded is not passed*. If a requirement is **geometrically
+> unsatisfiable** as written, say so with the measurement that proves it rather
+> than reporting it as a routing failure.
+
 ## Adversarial completeness
 
 On anything high-stakes, add one more whose only job is to disprove the result:
@@ -94,3 +128,38 @@ On anything high-stakes, add one more whose only job is to disprove the result:
   writing** — a disposition lives in the report, not in your head.
 - A machine check failing outranks any verifier's judgement.
 - If two sources disagree, believe the JSON.
+
+## A FAIL re-enters the loop — it is not a footnote on a finished board
+
+This is the half that makes the fan-out a **gate** rather than a report. When a
+lens fails, `blocking` was not really zero:
+
+```
+VERDICT=FAIL:lens=drc;finding=8 vias below the 0.6 mm spec on B.Cu;
+  evidence=wk/score.json#/components/undersized/by_type/via-size;route=Step 2
+```
+
+1. **Append the verdict to the ledger's `verdicts[]`** for the current iteration.
+2. **Spend another iteration at the step named in `route=`**, if budget remains.
+3. If the budget is exhausted, stop on **condition 2** and report the finding as
+   an outstanding blocker with its measurement — never as a passing board with a
+   note attached.
+
+Two failure modes to refuse by name:
+
+- **Do not re-word a FAIL into a caveat.** "Routing is complete, with some DRC
+  warnings" describes a board that did not pass. Either fix it, or report it as
+  not done.
+- **Do not accept a lens that passed vacuously.** A lens whose inputs were empty
+  has not verified anything; that is why lens 1 must FAIL on `rules_run == 0` and
+  lens 9 must report `ungraded` as a finding.
+
+**Stop condition 4 is the exception, and it is the only one.** A requirement that
+is geometrically unsatisfiable does not get more iterations — it gets a
+measurement and a written finding about the requirement.
+
+**When the `Agent` tool is unavailable** — the GUI headless path allows only
+`Read,Glob,Grep,Bash,WebSearch` — run the same lenses yourself, in the same
+order, on the same inputs, tag each `mode=inline`, and **say in the report that
+verification was single-agent**. A run must never look like a fan-out happened
+when it did not.
