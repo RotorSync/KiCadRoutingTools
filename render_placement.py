@@ -336,17 +336,28 @@ def draw_airwires(d, r, airwires, *, color=C_AIR, width_mm=0.05):
         d.line([*r.tf.pt(x1, y1), *r.tf.pt(x2, y2)], fill=color, width=w)
 
 
-def draw_ref_labels(d, r, model, refs, *, min_px=8):
-    font = load_font(max(min_px, int(r.H * r.ss / 90)))
+def draw_ref_labels(d, r, model, refs, *, min_px=14, lo=11, hi=34):
+    """Reference designators, sized to the PART rather than to the image.
+
+    Scaling the font by image height alone gives an 8px label on a 400px render
+    whatever the zoom -- drawn, technically present, and unreadable. A label is
+    only useful if you can read it, so it is sized from the part's own footprint
+    on screen and skipped entirely when the part is too small to carry one.
+    """
     for ref in refs:
         rect = model.rect(ref)
         if rect is None:
             continue
         box = _rect_pts(r, rect)
-        if (box[2] - box[0]) < min_px and (box[3] - box[1]) < min_px:
-            continue                      # unreadable at this zoom; skip
+        w, h = box[2] - box[0], box[3] - box[1]
+        if max(w, h) < min_px:
+            continue                      # too small to letter; the arrow says it
+        # fit to the shorter side, but let a long ref use the longer one
+        size = int(max(lo, min(hi, min(max(w, h) * 0.45,
+                                       (w * 1.6) / max(1, len(ref))))))
         d.text(((box[0] + box[2]) / 2, (box[1] + box[3]) / 2), ref,
-               fill=C_LABEL, font=font, anchor='mm')
+               fill=C_LABEL, font=load_font(size), anchor='mm',
+               stroke_width=max(1, size // 9), stroke_fill=(12, 14, 16))
 
 
 def _dim(c, k=0.32):

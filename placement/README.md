@@ -400,11 +400,29 @@ at the origin would otherwise render as a dot in the corner of an empty board.
 
 ![unplaced](../docs/placement-unplaced.png)
 
-Toggles for everything: `--no-borders`, `--no-labels`, `--no-ratsnest`,
-`--no-arrows`, `--no-ghosts`, `--no-pads`. `--ratsnest-all` is the deliberate
-hairball switch — on by default only the moved and attributed nets are drawn,
-because a full ratsnest on a dense board reproduces exactly the unreadable mess
-KiCad already shows. `--focus` adds one cropped panel per failed-net cluster.
+**Reference designators.** On by default, and sized to the PART rather than to
+the image — scaling by image height alone gives an 8px label at any zoom:
+drawn, technically present, and unreadable. A part too small to letter is
+skipped, and its arrow carries the meaning instead.
+
+![labels](../docs/placement-labels.png)
+
+**Every toggle, on one board.** The same 13-part delta, one flag at a time:
+
+![toggles](../docs/placement-toggles.png)
+
+`--no-delta-first` looks unchanged there for a real reason: 12 of the 13 parts
+moved, so there is no context left to dim. It matters on a board where the delta
+is a genuine subset — which is also where `--ratsnest-all` earns its keep:
+
+![ratsnest](../docs/placement-ratsnest.png)
+
+By default only the moved and attributed nets are drawn. `--ratsnest-all` is the
+deliberate hairball switch: on a dense board it reproduces exactly the
+unreadable mess KiCad already shows, which is limitation #1 in the issue and the
+reason delta-first is a default rather than polish.
+
+`--focus` adds one cropped panel per failed-net cluster.
 
 ### The movie
 
