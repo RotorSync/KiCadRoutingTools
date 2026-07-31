@@ -617,6 +617,49 @@ def _edge_band_grid(gmin_x: int, gmin_y: int, gmax_x: int, gmax_y: int, grid_mar
     return gx_grid.ravel(), gy_grid.ravel()
 
 
+# #546 memory: entry caps for the two mask caches below. Both memoize pure
+# functions of static geometry, so eviction is always safe -- an evicted key
+# recomputes in milliseconds with the scanline/banded kernels. Before the
+# caps, a full-board _edge_mask_cache entry stored ~108 MB (two 48 MB int32
+# meshgrid flats that are pure functions of the window bounds, plus the 12 MB
+# bool mask), and the clip-window-keyed cutout cache grew one entry set per
+# distinct tap window for the whole run (crkbd: 172+ entries and climbing).
+_EDGE_MASK_CACHE_MAX = 8       # masks (window grids shared separately)
+_EDGE_GRID_CACHE_MAX = 2       # (gx_flat, gy_flat) meshgrids per window
+_CUTOUT_CACHE_MAX = 512        # small per-cutout window entries
+
+
+def _lru_get(cache, key):
+    """dict-as-LRU: move the hit to the ordered dict's end (most recent)."""
+    hit = cache.get(key)
+    if hit is not None and next(reversed(cache)) != key:
+        del cache[key]
+        cache[key] = hit
+    return hit
+
+
+def _lru_put(cache, key, value, cap):
+    cache[key] = value
+    while len(cache) > cap:
+        del cache[next(iter(cache))]
+
+
+def _edge_band_grid_cached(pcb_data, gmin_x, gmin_y, gmax_x, gmax_y,
+                           grid_margin):
+    """The flattened window meshgrid, shared across every edge-mask entry
+    with the same window (it does not depend on outline or clearance)."""
+    cache = getattr(pcb_data, '_edge_grid_cache', None)
+    if cache is None:
+        cache = {}
+        pcb_data._edge_grid_cache = cache
+    key = (gmin_x, gmin_y, gmax_x, gmax_y, grid_margin)
+    hit = _lru_get(cache, key)
+    if hit is None:
+        hit = _edge_band_grid(gmin_x, gmin_y, gmax_x, gmax_y, grid_margin)
+        _lru_put(cache, key, hit, _EDGE_GRID_CACHE_MAX)
+    return hit
+
+
 def _board_edge_cell_mask_cached(pcb_data, coord: GridCoord, board_outline,
                                  gmin_x: int, gmin_y: int, gmax_x: int,
                                  gmax_y: int, grid_margin: int,
@@ -626,7 +669,12 @@ def _board_edge_cell_mask_cached(pcb_data, coord: GridCoord, board_outline,
     yet every via/routing obstacle-map build re-rasterized it from scratch --
     171 identical ray-cast + edge-distance passes on scalenode_cm4's polygon
     outline (~1/3 of the whole route_planes step). Consumers only READ the
-    returned arrays (boolean indexing / column_stack), so sharing is safe."""
+    returned arrays (boolean indexing / column_stack), so sharing is safe.
+
+    #546 memory: the cache stores the MASK only (LRU-capped); the coordinate
+    flats are a pure function of the window and come from the shared
+    window-grid cache, so N clearance variants of one window no longer store
+    N copies of the same 96 MB meshgrid."""
     cache = getattr(pcb_data, '_edge_mask_cache', None)
     if cache is None:
         cache = {}
@@ -643,12 +691,15 @@ def _board_edge_cell_mask_cached(pcb_data, coord: GridCoord, board_outline,
                        for o in board_outline)
     key = (_ol_fp, round(coord.grid_step, 9), gmin_x, gmin_y, gmax_x, gmax_y,
            grid_margin, round(edge_clearance, 9))
-    hit = cache.get(key)
-    if hit is None:
-        hit = _board_edge_cell_mask(coord, board_outline, gmin_x, gmin_y,
-                                    gmax_x, gmax_y, grid_margin, edge_clearance)
-        cache[key] = hit
-    return hit
+    gx_flat, gy_flat = _edge_band_grid_cached(
+        pcb_data, gmin_x, gmin_y, gmax_x, gmax_y, grid_margin)
+    mask = _lru_get(cache, key)
+    if mask is None:
+        _gx, _gy, mask = _board_edge_cell_mask(
+            coord, board_outline, gmin_x, gmin_y, gmax_x, gmax_y,
+            grid_margin, edge_clearance)
+        _lru_put(cache, key, mask, _EDGE_MASK_CACHE_MAX)
+    return gx_flat, gy_flat, mask
 
 
 def _cutout_fingerprint(cutout):
@@ -687,7 +738,7 @@ def _rasterize_cutout_cached(pcb_data, cutout_idx: int, cutout, coord: GridCoord
     key = (_cutout_fingerprint(cutout), round(coord.grid_step, 9),
            round(clearance, 9), band_only,
            tuple(round(b, 6) for b in clip_bounds) if clip_bounds else None)
-    hit = cache.get(key)
+    hit = _lru_get(cache, key)
     if hit is None:
         cgx, cgy, c_inside, c_edge = _rasterize_polygon(
             cutout, coord, clearance, clip_bounds=clip_bounds)
@@ -696,7 +747,10 @@ def _rasterize_cutout_cached(pcb_data, cutout_idx: int, cutout, coord: GridCoord
         else:
             band = c_edge < clearance
             hit = (cgx, cgy, band if band_only else (c_inside | band))
-        cache[key] = hit
+        # #546 memory: clip-window keys never recur once the repair moves to
+        # a new tap window, so without the cap this grew one entry set per
+        # window for the life of the run.
+        _lru_put(cache, key, hit, _CUTOUT_CACHE_MAX)
     return hit
 
 
