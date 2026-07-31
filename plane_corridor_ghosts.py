@@ -41,13 +41,22 @@ from routing_config import GridCoord, GridRouteConfig
 
 
 def softblock_mode() -> Optional[str]:
-    """'soft', 'hard', or None (disabled). Read once per call so tests can
-    flip the env var."""
+    """'soft', 'hard', 'reconnect', or None (disabled). Read once per call so
+    tests can flip the env var.
+
+    #540 item 2: 'reconnect' arms the registry for the RECONNECT batch_route
+    pass-through only -- no tap/region cost stamps, no via-site preference
+    (both gate on mode == 'soft'). 'soft' now enables the pass-through TOO,
+    closing the #517 coverage hole where the biggest corridor thief (the
+    reconnect pass, 249 rising claims in the attribution histogram) was the
+    one pass the soft arm did not price."""
     v = os.environ.get('KICAD_PLANE_RIP_SOFTBLOCK', '').lower()
     if v in ('1', 'soft'):
         return 'soft'
     if v == 'hard':
         return 'hard'
+    if v == 'reconnect':
+        return 'reconnect'
     return None
 
 
@@ -80,6 +89,21 @@ class CorridorGhosts:
 
     def net_ids(self) -> List[int]:
         return sorted(self._nets)
+
+    @property
+    def reconnect_passthrough(self) -> bool:
+        """#540 item 2: should reconnect batch_route calls receive ghosts?"""
+        return self.mode in ('soft', 'reconnect')
+
+    def external_ghosts(self, exclude_net_ids=()) -> Dict[int, dict]:
+        """Armed ghosts as batch_route's `external_ripped_ghosts` payload
+        (#540 item 2): {net_id: {'new_segments': [...], 'new_vias': [...]}}.
+        exclude_net_ids must hold the nets the batch is about to route --
+        their corridors are their own to reclaim."""
+        excl = set(exclude_net_ids or ())
+        return {nid: {'new_segments': segs, 'new_vias': vias}
+                for nid, (segs, vias) in self._nets.items()
+                if nid not in excl and (segs or vias)}
 
     # ---- consumers ------------------------------------------------------
     def merge_into_routing_map(self, obstacles, config: GridRouteConfig,

@@ -313,6 +313,39 @@ from plane_write_reconcile import (consume_inner_strips,  # noqa: E402,F401
 # (default; every hook below no-ops).
 from plane_corridor_ghosts import CorridorGhosts, softblock_mode
 
+# #540 item 2: reconnect-side ghost pricing. The #517 soft arm never reached
+# the reconnect batch_route calls -- the pass whose corridor claims ROSE in
+# the attribution histogram (249 vs 184) -- and its 0.1mm default cell cost
+# was likely too weak at repair-pass timescale. When the registry's mode
+# enables the pass-through ('soft' or the reconnect-only arm
+# KICAD_PLANE_RIP_SOFTBLOCK=reconnect), every reconnect/gate batch_route
+# receives the pending casualties' ghosts at this stronger cost.
+try:
+    _RECONNECT_GHOST_COST = float(os.environ.get(
+        'KICAD_PLANE_RECONNECT_GHOST_COST', '0.5') or 0.5)
+except ValueError:
+    _RECONNECT_GHOST_COST = 0.5
+try:
+    _RECONNECT_GHOST_RADIUS = float(os.environ.get(
+        'KICAD_PLANE_RECONNECT_GHOST_RADIUS', '1.0') or 1.0)
+except ValueError:
+    _RECONNECT_GHOST_RADIUS = 1.0
+
+
+def _ghost_kwargs(corridor_ghosts, batch_net_ids):
+    """Extra batch_route kwargs pricing pending casualties' corridors
+    (#540 item 2), or {} when the arm is off / nothing is pending. The
+    avoidance-cost overrides ride along only when ghosts do, so the arm-off
+    default batch behavior is untouched."""
+    if corridor_ghosts is None or not corridor_ghosts.reconnect_passthrough:
+        return {}
+    ghosts = corridor_ghosts.external_ghosts(exclude_net_ids=batch_net_ids)
+    if not ghosts:
+        return {}
+    return {'external_ripped_ghosts': ghosts,
+            'ripped_route_avoidance_cost': _RECONNECT_GHOST_COST,
+            'ripped_route_avoidance_radius': _RECONNECT_GHOST_RADIUS}
+
 
 def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_config,
                         max_search_radius, via_size, via_drill, max_rip_nets,
@@ -1135,7 +1168,10 @@ def route_planes(
                 disable_bga_zones=([] if no_bga_zone else None),
                 net_clearances=net_clearances,
                 hole_to_hole_clearance=hole_to_hole_clearance,
-                return_results=True, pcb_data=pcb_data)
+                return_results=True, pcb_data=pcb_data,
+                # #540 item 2: price the OTHER pending casualties' corridors
+                # (this batch's own nets excluded -- theirs to reclaim).
+                **_ghost_kwargs(corridor_ghosts, _rip_ids))
             for _r in _rdata.get('results', []):
                 for _s in (_r.get('new_segments') or []):
                     all_new_segments.append(
@@ -1676,7 +1712,11 @@ def route_planes(
                             c, t, f"Reconnect: {m}"))
                         if progress_callback else None),
                     cancel_check=cancel_check,
-                    return_results=True, pcb_data=pcb_data)
+                    return_results=True, pcb_data=pcb_data,
+                    # #540 item 2: the end-of-run batch routes the casualties
+                    # themselves, so only ghosts NOT in this batch remain --
+                    # normally none, but a cancel/partial path can leave some.
+                    **_ghost_kwargs(corridor_ghosts, _casualties))
 
                 def _sd(_s):
                     return {'start': (_s.start_x, _s.start_y),
@@ -2246,7 +2286,10 @@ def route_planes(
                             c, t, f"Region join: {m}"))
                         if progress_callback else None),
                     cancel_check=cancel_check,
-                    return_results=True, pcb_data=pcb_data)
+                    return_results=True, pcb_data=pcb_data,
+                    # #540 item 2: gate straps must not squat the pending
+                    # casualties' corridors either.
+                    **_ghost_kwargs(corridor_ghosts, {_nid}))
                 for _r in _rdata3.get('results', []):
                     all_new_segments.extend(
                         {'start': (_s.start_x, _s.start_y),

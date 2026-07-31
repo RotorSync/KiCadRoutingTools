@@ -368,7 +368,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # exact names, so the engine can't tell a typed name from a
                 # glob hit without this. None (the GUI, tests) = net_names ARE
                 # the operator's literal selection (per-net checkboxes).
-                net_name_patterns: Optional[List[str]] = None) -> Tuple[int, int, float]:
+                net_name_patterns: Optional[List[str]] = None,
+                # #540 item 2: corridor ghosts of nets ripped by an OUTER pass
+                # (the plane repair) and still awaiting reconnect --
+                # {net_id: {'new_segments': [...], 'new_vias': [...]}}. Seeded
+                # into the ripped-route avoidance dicts so every search in
+                # this batch prices the vacated corridors exactly like an
+                # internal rip's; keys must not be nets routed by this batch.
+                external_ripped_ghosts: Optional[Dict[int, dict]] = None) -> Tuple[int, int, float]:
     """
     Route single-ended nets using the Rust router.
 
@@ -1401,6 +1408,25 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     routed_results = state.routed_results
     track_proximity_cache = state.track_proximity_cache
     layer_map = state.layer_map
+
+    # #540 item 2: price the outer pass's vacated corridors in every search
+    # of this batch. The entries ride the existing ripped-route avoidance
+    # dicts (merge_ripped_route_costs), so per-net maps, rip-up retries and
+    # reroute rounds all see them; the owners never route here, so the
+    # routed_net_ids skip never drops them and no net repels itself.
+    if external_ripped_ghosts and config.ripped_route_avoidance_cost > 0:
+        from obstacle_costs import compute_ripped_route_costs as _crrc540
+        _gcells = 0
+        for _gnid, _gres in sorted(external_ripped_ghosts.items()):
+            _glc, _gvp = _crrc540(_gres, config, layer_map)
+            if len(_glc):
+                state.ripped_route_layer_costs[_gnid] = _glc
+                _gcells += len(_glc)
+            if _gvp:
+                state.ripped_route_via_positions[_gnid] = _gvp
+        print(f"  (#540 ghosts: pricing {len(external_ripped_ghosts)} pending "
+              f"casualty corridor(s), {_gcells} cost cells at "
+              f"{config.ripped_route_avoidance_cost}mm)")
 
     # BGA proximity costs live in the track-proximity cache under a reserved
     # key (soft-knobs review B1): stamped into the base map they were wiped
