@@ -147,6 +147,49 @@ says why for the rest.
 it connects to, and what crosses each declared bus corridor. Advisory — they say
 the floorplan will fight the router, not that it breaks your intent.
 
+### Scope `decaps` to the caps the requirement names, then LOCK them
+
+A spec clause like *"100nF within 3mm of every VDD pin"* names **one BOM line**,
+not every capacitor. Read the MPNs off the board and exempt the rest —
+bulk electrolytics, crystal loads, a regulator network — in `decaps.exempt`,
+citing the line item. That is scoping the rule to what it says, not relaxing it.
+
+Then **lock the caps it does govern**. The quench has **no decap-proximity
+term**, so any decap it may move can drift past the limit for a fraction of a
+millimetre of wirelength, and it is a different cap every run — on test-board,
+`C11` on one run, then `C13` and `C8` on the next. Locking them one at a time is
+whack-a-mole. Their proximity *is* the requirement; their exact position is not
+the optimizer's to trade. Expect to pay for it: locking ten decaps there took
+crossings from 52 to 60. That is the correct trade, not a regression.
+
+### Board features that live ON the outline
+
+Castellated edge rows, card edges and a USB shell are *meant* to cross the
+boundary. Declare them in `must_lock` **and** `edge_connectors` — the second is
+what stops `oob_count` reporting them as defects forever.
+
+Three things follow that nothing will tell you:
+
+- **`check_drc` has no castellation exemption.** A track landing on a half-hole
+  is flagged `SEGMENT-BOARD-EDGE` and the tool exits non-zero. Do not call that
+  board clean — say what the tool reports, then why it is benign, and check the
+  flagged coordinates really are on exempt pads before claiming they are.
+- **Set `pad_prop_castellated` on the pads.** KiCad has the property; without it
+  the fab has nothing machine-readable saying these half-holes are deliberate,
+  and KiCad's own DRC reports pad-outside-outline on every one.
+- **A collinear row is not an IC.** `decap_tethers` filters those out now, but
+  the reason is worth carrying: a 1×N row spanning a board edge and carrying a
+  rail sits nearer to half the decaps than their real IC, and it used to capture
+  them — which made a distant decap grade **clean** against the wrong part.
+
+### Before routing a dense escape: is the channel even wide enough?
+
+If a board fans a bus out to an edge, measure the corridor before blaming the
+router: `escapes x trace pitch / channel width`. It is the difference between
+*"the router failed"* and *"this was never routable"*, and a router you cannot
+tell those apart on measures nothing. test-board's spec sets its own gate at
+≤75%; the as-built channel measured 5.60mm against 2.40mm of escape, 42.9%.
+
 ### THE BOARD OUTLINE IS NOT YOURS TO CHANGE
 
 Size, shape, cutouts, slots and mounting-hole geometry are mechanical decisions

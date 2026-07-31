@@ -168,6 +168,41 @@ def _from_netprefix(pcb_data, movable) -> Dict[str, List[str]]:
     return out
 
 
+def _net_name(pcb_data, net_id: int) -> str:
+    """A net's name, or '' -- pcb_data.nets is keyed by id and may not have it."""
+    n = pcb_data.nets.get(net_id)
+    return getattr(n, 'name', '') or ''
+
+
+def _pads_are_collinear(fp, eps: float = 1e-6) -> bool:
+    """True when every pad of `fp` sits on one line -- a 1xN header, a pin
+    strip, a castellated edge row.
+
+    `build_chip_list` qualifies a footprint as a "chip" on PAD COUNT ALONE, so a
+    1x10 castellated breakout row (10 pads) is an IC as far as it is concerned.
+    That row spans a whole board edge and carries a rail, so it is nearer to
+    half the decoupling caps than their real IC is and it passes the shared-net
+    test -- it captures them. On test-board it captured three, and the grader
+    then reported "C12 is 3.30mm from CN2, the IC it decouples".
+
+    The false positive is only noise. The FALSE NEGATIVE is the reason this
+    filter exists: a cap 2mm from the edge row and 8mm from the part it actually
+    decouples grades CLEAN, because the tether measured to the row. That is a
+    HARD spec limit (100nF within 3mm of every VDD pin) silently passing.
+
+    Collinearity is the discriminator that needs no new parser field: at >= 4
+    pads a real IC always has two-dimensional pad extent (SOIC, SOT-223, QFN,
+    a 4-pad crystal), and a single row never does. `attr exclude_from_bom` would
+    be the more direct signal, but the parser does not carry footprint attrs and
+    adding one means touching both parse paths.
+    """
+    if fp is None or not fp.pads:
+        return False
+    xs = {round(p.global_x, 4) for p in fp.pads}
+    ys = {round(p.global_y, 4) for p in fp.pads}
+    return len(xs) <= 1 or len(ys) <= 1
+
+
 def decap_tethers(pcb_data, movable=None,
                   radius: float = DECAP_RADIUS_MM
                   ) -> Dict[str, List[Tuple[str, float]]]:
@@ -191,7 +226,9 @@ def decap_tethers(pcb_data, movable=None,
     PYTHONHASHSEED (#457).
     """
     from chip_boundary import build_chip_list
-    chips = build_chip_list(pcb_data, min_pads=DECAP_MIN_IC_PADS)
+    from net_queries import is_ground_net_name
+    chips = [c for c in build_chip_list(pcb_data, min_pads=DECAP_MIN_IC_PADS)
+             if not _pads_are_collinear(pcb_data.footprints.get(c.reference))]
     if not chips:
         return {}
     if movable is None:
@@ -210,10 +247,24 @@ def decap_tethers(pcb_data, movable=None,
         nets = {p.net_id for p in fp.pads if p.net_id > 0}
         if len(nets) != 2:            # a decoupling cap bridges exactly two nets
             continue
+        # Match on the POWER net, not on ground. A decoupling cap bridges a rail
+        # and GND, and GND is shared with nearly every part on the board -- so
+        # matching on "shares a net" lets the nearest 4-pad part win on ground
+        # alone. On test-board that tethered C12 (VCC3V3) to the CRYSTAL and the
+        # flash's own C2 to the USB connector, and the reported distance was then
+        # to the wrong part in both directions.
+        power = {n for n in nets
+                 if not is_ground_net_name(_net_name(pcb_data, n))} or nets
         cx, cy = _centroid(fp)
         best, best_d = None, None
         for c in chips:
             if c.reference == ref:
+                continue
+            # Nearest chip THAT CARRIES THE RAIL, not nearest-then-reject.
+            # Rejecting after the fact dropped the cap entirely whenever some
+            # unrelated part happened to be closer, so a genuinely distant decap
+            # went ungraded instead of flagged.
+            if not (power & ic_nets.get(c.reference, set())):
                 continue
             x0, y0, x1, y1 = c.bounds
             d = math.hypot(max(x0 - cx, cx - x1, 0.0), max(y0 - cy, cy - y1, 0.0))
