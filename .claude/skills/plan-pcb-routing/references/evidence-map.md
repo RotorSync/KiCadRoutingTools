@@ -51,14 +51,20 @@ The `JSON_SUMMARY` goes to **stdout only**; `tee` is what makes it citable.
 
 ---
 
-## C. `render_placement.py ... --json -o wk/view/`
+## C. `render_placement.py ... --json --ignore-nets <same set as B> -o wk/view/`
 
 Always pass `-o`. Without it the tool writes `<board>_placement.png` **next to
 the board**.
 
+**Pass the same `--ignore-nets` you gave `place_optimize`, or the re-measurement
+below compares two different net sets and always "fails".** B's numbers exclude
+the plane nets; this tool's do not unless told to. On the test-board run, GND
+alone moved the same board from 53 crossings to 116 — which reads exactly like a
+corrupted write and is not one.
+
 | key | decision |
 |---|---|
-| `metrics.crossings`, `metrics.hpwl` | **The re-measurement channel.** Run this on the *written output board*; it must reproduce B's `*_after`. A mismatch means something was lost between the objective and the file — this is the self-assertion ban with teeth |
+| `metrics.crossings`, `metrics.hpwl` | **The re-measurement channel.** Run this on the *written output board*; with the same `--ignore-nets` it must reproduce B's `*_after` **exactly** (53 / 587.3150 on both sides, not "about the same"). A mismatch means something was lost between the objective and the file — this is the self-assertion ban with teeth |
 | `metrics.overlap_area`, `metrics.oob_*` | Independent read of B's legality numbers off the file |
 | `metrics.halo`, `metrics.edge` | Cost decomposition. `total` improved while `length` and `crossings` did not ⇒ the win was halo/edge only ⇒ not a routability win |
 | `no_outline: true` | The oob metrics are **unavailable**, not zero. Say "unavailable" — never "0 parts off board" |

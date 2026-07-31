@@ -316,6 +316,65 @@ def test_ratsnest_nets_cli_reports_an_empty_match():
         shutil.rmtree(d, ignore_errors=True)
 
 
+
+def test_single_panel_accepts_a_directory_target():
+    """`-o` is documented as "PNG path (one panel) or directory", but directory
+    handling used to be gated on len(panels) > 1, so every ONE-panel run with a
+    directory died in PIL with "unknown file extension". That is the plain render
+    and --focus, i.e. two of the four situations the skill says to render in."""
+    d = tempfile.mkdtemp()
+    try:
+        for extra in ([], ['--focus']):
+            sub = os.path.join(d, 'out' + str(len(extra)))
+            os.makedirs(sub)
+            r = _run(PLACED, '-o', sub + os.sep, '--size', '320',
+                     '--supersample', '1', *extra)
+            assert r.returncode == 0, (extra, r.stderr[-600:])
+            pngs = [f for f in os.listdir(sub) if f.endswith('.png')]
+            assert pngs, f"{extra}: nothing written into the directory"
+        # and a plain file target is still a file, not a directory
+        f = os.path.join(d, 'one.png')
+        r = _run(PLACED, '-o', f, '--size', '320', '--supersample', '1')
+        assert r.returncode == 0, r.stderr[-600:]
+        assert os.path.isfile(f)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_ignore_nets_reproduces_place_optimize_exactly():
+    """The skill calls this the re-measurement channel: render the WRITTEN board
+    and the metrics must reproduce place_optimize's JSON_SUMMARY. They cannot
+    unless both exclude the same nets -- place_optimize is always given
+    --ignore-nets for the plane rails, and this tool had no such flag, so the
+    check compared two different net sets and always "failed"."""
+    import json
+    d = tempfile.mkdtemp()
+    try:
+        placed = os.path.join(d, 'p.kicad_pcb')
+        opt = subprocess.run(
+            [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'place_optimize.py'),
+             SEED, placed, '--max-displacement', '1', '--ignore-nets', 'GND'],
+            capture_output=True, text=True, cwd=ROOT, timeout=1800)
+        assert opt.returncode == 0, opt.stderr[-600:]
+        q = json.loads(opt.stdout.split('JSON_SUMMARY:', 1)[1])
+
+        def rendered(*extra):
+            r = _run(placed, '--json', '-o', os.path.join(d, 'r.png'),
+                     '--size', '320', '--supersample', '1', *extra)
+            assert r.returncode == 0, r.stderr[-600:]
+            line = [l for l in r.stdout.splitlines()
+                    if l.startswith('JSON_SUMMARY:')][0]
+            return json.loads(line.split('JSON_SUMMARY:', 1)[1])['metrics']
+
+        same = rendered('--ignore-nets', 'GND')
+        assert same['crossings'] == q['crossings_after'], (same, q)
+        assert abs(same['hpwl'] - q['hpwl_after']) < 1e-9, (same, q)
+        # and without the flag it legitimately differs, or the test proves nothing
+        assert rendered()['crossings'] != q['crossings_after']
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 TESTS = [
     test_moved_parts_finds_the_tracked_delta,
     test_rects_come_from_the_optimizers_own_model,
@@ -335,6 +394,8 @@ TESTS = [
     test_ratsnest_nets_draws_only_the_named_nets,
     test_ratsnest_nets_uses_the_shared_net_filter,
     test_ratsnest_nets_cli_reports_an_empty_match,
+    test_single_panel_accepts_a_directory_target,
+    test_ignore_nets_reproduces_place_optimize_exactly,
 ]
 
 
