@@ -195,6 +195,80 @@ better. The baseline is free — quench is handed the current best board, so its
 `before` *is* that board's ratsnest. Every decision is logged with its numbers, so
 it is auditable whether the screen ever skipped a placement that would have won.
 
+## Alignment and orientation (`--align-weight`, `--orient-weight`, #548)
+
+Two cost terms for the things a human does constantly and the quench does not:
+put parts that belong together on a shared axis, and turn a part toward the net
+it exists to serve. **Both default to 0 (off).**
+
+```bash
+python3 place_optimize.py board.kicad_pcb out.kicad_pcb --max-displacement 3 \
+    --align-weight 5 --orient-weight 1
+```
+
+### The premise in #548 is wrong in a way worth recording
+
+The issue proposes to *"score airwires from the actual pad the net lands on"*.
+The cost path **already does that** — `_net_points` emits one MST node per
+connected pad from `pad_globals()`, full rotation applied, and there is no
+centroid anywhere in the objective.
+
+The gap is **numeric**, not geometric. Measured on the test fixture: the four
+rotations of a part whose one connected pad faces away from its anchor differ by
+**0.500 mm across a 19.8 mm net**. The directional signal is present and drowned.
+So what was missing is a term that is directional at *part* scale with its own
+weight, which is what `--orient-weight` is.
+
+### Alignment
+
+A pairwise penalty between **peers** — same `footprint_name`, the pairing the
+swap phase already indexes — on the nearer shared axis:
+`w * min(d, radius)²`.
+
+- **Continuous** at the radius. The obvious charge-inside/zero-outside shape has
+  a cliff there that pays a part to *flee* the row rather than join it.
+- **Saturating** beyond it, so a distant peer contributes a constant that
+  cancels between one part's candidate poses instead of dragging it across the
+  board.
+- **Zero** on a shared axis, so a tidy row is free.
+
+Four caps seeded at y ∈ {99.8, 100.0, 100.2, 100.3} come out at four distinct y
+today, and on one shared y with the term on.
+
+The peer index is built in `__init__` and deliberately does **not** ride on the
+pruned neighbour lists: that prune is a 2-D *box* overlap test, so a pair must be
+near in both axes — but alignment is inherently long-range *along* the shared
+axis (two caps 50 mm apart in x and 0.1 mm apart in y **are** aligned). It is a
+*lossy* prune, unlike `_neighbors`' exact one: peers are fixed from seed
+positions, so a pair that drifts within `--align-span` later is not picked up.
+
+### Orientation
+
+Sums `|r| − r·û` per connected pad, where `û` points from the pose origin toward
+the centroid of that net's pads owned by *other* parts. Zero facing the anchor,
+`2|r|` facing away — **bounded at part scale on purpose**: it breaks a rotation
+tie, it does not outrank a real length win.
+
+Two things it is not, worth knowing: it is not purely rotational (moving the part
+changes `û` too, so a large weight also pulls the part toward its nets), and
+through `part_geometry_cost` it reaches the group phase, so a rigid block
+translate is steered by it as well.
+
+### Why off by default
+
+The router, not a tidiness score, is the judge of a placement, and neither term
+has been measured against routing outcomes. On-by-default would silently change
+every user's board to buy legibility.
+
+It would also corrupt the isolated fixtures in `test_458_*`, which zero every
+geometry knob they know about so the objective is clean enough to assert
+`total == 30.0`. A term with a nonzero default is invisible to those and breaks
+the isolation — that is degrading a correctness test, not re-baselining a golden.
+
+At `0.0` both hooks return before touching any geometry and the peer index is
+empty, so a default run is **bit-identical**, verified on `interf_u_unrouted` and
+`splitflap_driver` rather than argued.
+
 ## Placement blocks (`groups.py`, #459)
 
 The per-part nudge cannot express "these parts need to travel together": an IC
