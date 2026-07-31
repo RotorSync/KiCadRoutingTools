@@ -168,26 +168,42 @@ def _from_netprefix(pcb_data, movable) -> Dict[str, List[str]]:
     return out
 
 
-def _from_decap(pcb_data, movable) -> Dict[str, List[str]]:
-    """Two-pad caps tethered to the IC they decouple.
+def decap_tethers(pcb_data, movable=None,
+                  radius: float = DECAP_RADIUS_MM
+                  ) -> Dict[str, List[Tuple[str, float]]]:
+    """{IC ref: [(cap ref, bbox distance mm)]} -- the decoupling tethers.
 
     Nearest IC by bounding-box distance, but ONLY when the cap shares a net with
     it. Proximity alone is not enough -- on ulx3s 13 of 70 caps sit near an IC
     they have no electrical relationship with, and dragging those along would be
     a wrong group.
+
+    Public, and returning the DISTANCE, because two consumers need the same
+    tether and must not each decide what "near its IC" means: `_from_decap`
+    wants the membership, and the floorplan grader's `decap_distance` rule
+    (#549) wants the number. Grading the quench's own decap rule against a
+    second implementation of it would measure the reimplementation, not the
+    board.
+
+    `movable` restricts which caps are considered (None = every footprint), as
+    in `derive_groups`. Iteration is over a SORTED ref list: `movable` reaches
+    us as a set, and cap order within an IC's list would otherwise vary with
+    PYTHONHASHSEED (#457).
     """
     from chip_boundary import build_chip_list
     chips = build_chip_list(pcb_data, min_pads=DECAP_MIN_IC_PADS)
     if not chips:
         return {}
+    if movable is None:
+        movable = set(pcb_data.footprints)
     ic_nets = {}
     for c in chips:
         fp = pcb_data.footprints.get(c.reference)
         if fp is not None:
             ic_nets[c.reference] = {p.net_id for p in fp.pads if p.net_id > 0}
 
-    out: Dict[str, List[str]] = {}
-    for ref in movable:
+    out: Dict[str, List[Tuple[str, float]]] = {}
+    for ref in sorted(movable):
         fp = pcb_data.footprints.get(ref)
         if fp is None or not ref[:1].upper() == 'C':
             continue
@@ -203,16 +219,27 @@ def _from_decap(pcb_data, movable) -> Dict[str, List[str]]:
             d = math.hypot(max(x0 - cx, cx - x1, 0.0), max(y0 - cy, cy - y1, 0.0))
             if best_d is None or d < best_d:
                 best, best_d = c.reference, d
-        if best is None or best_d > DECAP_RADIUS_MM:
+        if best is None or best_d > radius:
             continue
         if not (nets & ic_nets.get(best, set())):
             continue              # near, but not electrically its cap
-        out.setdefault(f"decap:{best}", []).append(ref)
-    # The IC itself anchors the tether, so it belongs to the block.
-    for key, refs in out.items():
-        ic = key.split(':', 1)[1]
+        out.setdefault(best, []).append((ref, best_d))
+    return out
+
+
+def _from_decap(pcb_data, movable) -> Dict[str, List[str]]:
+    """Two-pad caps tethered to the IC they decouple -- membership only.
+
+    The tether itself (and its distance) is `decap_tethers`; this is the
+    grouping view of it.
+    """
+    out: Dict[str, List[str]] = {}
+    for ic, caps in decap_tethers(pcb_data, movable).items():
+        refs = [cap for cap, _d in caps]
+        # The IC itself anchors the tether, so it belongs to the block.
         if ic in movable:
             refs.append(ic)
+        out[f"decap:{ic}"] = refs
     return out
 
 
