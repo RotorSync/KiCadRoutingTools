@@ -133,13 +133,47 @@ The feedback edge back into placement.
 | `min_clearance_used` | The floor the run actually reached, which is **not** what you asked for. Below your netclass means the gap-rescue stepped down toward the fab floor. test-board: nominal 0.16, `min_clearance_used` 0.127, and **25% of all copper (180 of 710 mm) ended up at 0.127** — under the board's own 0.15 minimum. The `.kicad_pro` writeback then clamps the DRC floor to the routed value, so **KiCad grades it clean**. This key is the only place the step-down is visible |
 | `rescue.unchanged` | Nets the rescue pass could not improve. Distinguishes "nearly made it" from "never had a path" |
 
-**No KRT check grades a routed LENGTH.** Not `check_drc`, not `check_connected`,
-not `check_floorplan`. If the board's spec carries max-run, per-leg, via-count or
-skew limits — `QSPI <= 15 mm, 0 vias`, `XTAL <= 10 mm/leg, legs matched to
-1 mm` — you must measure them yourself from `pcb.segments`, and say plainly that
-you did. On test-board the routed board was DRC-clean and 90% connected while
-breaking **19** such limits, including a QSPI net at 32.6 mm against a 15 mm
-HARD budget. Green on every KRT gate is not green on the spec.
+### Routed length: half of it is already built, and the half that is not will bite you
+
+**Matching IS supported — use it.** `route.py` / `route_diff.py` take
+`--length-match-group NETS --length-match-tolerance MM`, `length_matching.py`
+measures each net with `net_queries.calculate_route_length` and prints
+`WARNING: <net> is X mm SHORT of the group target`, and
+`/review-routed-board` Step 2 grades the spread. A spec clause like *"XTAL legs
+symmetric to within 1 mm"* or *"QSPI intra-group skew <= 5 mm"* is a
+`--length-match-group`, not something to hand-roll.
+
+**An ABSOLUTE cap is not expressible anywhere.** No `check_*.py` says "this net
+must be under N mm" or "this net must have 0 vias". (`check_orthonormal
+--max-len` is per-segment non-orthonormality; `check_impedance
+--min-void-length` is a void run.) So `QSPI <= 15 mm pad-to-pad, 0 vias` and
+`XTAL <= 10 mm/leg` have to be measured from `pcb.segments` by hand — do it, and
+say plainly that you did.
+
+On test-board the routed board graded **`check_floorplan` PASS** and 86%
+connected while breaking **19** such limits, including a QSPI net at 32.6 mm
+against a 15 mm HARD budget and crystal legs 6.03 mm apart against 1 mm. Green
+on the KRT gates is not green on the spec.
+
+### The DRC writeback RATCHETS — check it between chain steps
+
+`route.py` clamps the sibling `.kicad_pro` down to what the run actually
+achieved, and **that includes `track_width`, which the next step reads back as
+its nominal**. Measured across one test-board chain:
+
+| project | `Default.clearance` | `Default.track_width` |
+|---|---|---|
+| `placed.kicad_pro` (authored) | 0.16 | 0.16 |
+| after the signal route | **0.127** | **0.127** |
+| after the plane pour | 0.127 | 0.127 |
+| after the repair route | 0.127 | 0.127 |
+
+One rescue at 0.127 became the default width for every later step, and 25% of
+the final copper (180 of 710 mm) sits at 0.127 — under the board's own 0.15 HARD
+minimum. Because the project now *says* 0.127, `check_drc` and KiCad both grade
+it clean; grading the same board at the pre-clamp 0.16 gives **34** violations.
+`min_clearance_used` and `Default.track_width` are the two places this is
+visible. Diff the `.kicad_pro` between steps whenever the spec has a width floor.
 
 ---
 
