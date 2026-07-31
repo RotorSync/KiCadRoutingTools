@@ -349,15 +349,79 @@ python3 render_placement.py board.kicad_pcb --list-groups --group-by sheet
 python3 render_placement.py board.kicad_pcb --zoom-group sheet:58d913ec --per-side -o out/
 ```
 
-Ghost rects at seed poses, displacement arrows, courtyards with locked parts
-dimmed, airwires with failed nets and blockers highlighted, per-part labels, and
-a metrics caption. `--zoom-group` takes the same block names as `route.py
---group`. Toggles: `--no-borders` / `--no-labels` / `--no-ratsnest` /
-`--no-arrows`; `--ratsnest-all` is the deliberate hairball switch.
-
 **The render is triage, not a verdict.** The verdict is the caption's numbers.
 Do not judge a placement by how much moved -- "lots moved, looks broken" and
 "barely moved, looks safe" are both wrong.
+
+### What it renders
+
+Every panel below is `render_placement.py` output, and every one carries a
+metrics caption — the render is triage, the caption is the verdict.
+
+**The placement diff, drawn.** `--before` turns on the dashed seed rects and the
+displacement arrows, so "what moved and how far" is the picture rather than a
+diff of two files. 22 parts here; `C4` travelled 95.65 mm.
+
+```bash
+python3 render_placement.py placed.kicad_pcb --before seed.kicad_pcb -o delta.png
+```
+
+![placement delta](../docs/placement-delta.png)
+
+**Per-side panels.** Placement lives on two sides, so `--per-side` emits one
+panel per side instead of one flattened projection. Parts on the side you asked
+for are bright; the far side's SMD pads are dimmed (still context — a back-side
+part is why a front trace has to detour); **through-hole pads stay full
+brightness on both**, because they are physically on both and a hole cannot move
+on one side only.
+
+```bash
+python3 render_placement.py board.kicad_pcb --before seed.kicad_pcb --per-side -o out/
+```
+
+| front | back |
+|---|---|
+| ![front](../docs/placement-side-F.png) | ![back](../docs/placement-side-B.png) |
+
+**Zoom to one placement block.** `--zoom-group` takes the same block names as
+`route.py --group` — `--list-groups` prints them with their part and net counts.
+
+```bash
+python3 render_placement.py board.kicad_pcb --list-groups --group-by sheet
+python3 render_placement.py board.kicad_pcb --zoom-group 58d913ec --group-by sheet -o blk.png
+```
+
+![group zoom](../docs/placement-group-zoom.png)
+
+**An unplaced board.** The placement CLIs refuse this one (exit 3); the renderer
+warns and draws it anyway, framed to the PARTS rather than the outline — a pile
+at the origin would otherwise render as a dot in the corner of an empty board.
+13 footprints at 1 distinct position, and `overlap 792 mm²` gives it away.
+
+![unplaced](../docs/placement-unplaced.png)
+
+Toggles for everything: `--no-borders`, `--no-labels`, `--no-ratsnest`,
+`--no-arrows`, `--no-ghosts`, `--no-pads`. `--ratsnest-all` is the deliberate
+hairball switch — on by default only the moved and attributed nets are drawn,
+because a full ratsnest on a dense board reproduces exactly the unreadable mess
+KiCad already shows. `--focus` adds one cropped panel per failed-net cluster.
+
+### The movie
+
+`make_movie.py WORKDIR --camera auto` animates a `place_route_loop` work dir:
+an establishing overview, a zoom to the parts each round moved, and — when the
+work moves to the other face — the board **turns over**, 180° about the vertical
+axis, with every frame after that mirrored, because you are now looking at the
+back.
+
+13 components, 4 on the back, routed. `--tween 0` cuts to each new placement
+instead of gliding.
+
+![placement movie](../docs/placement-movie.gif)
+
+One rule makes the sequencing legible: **a frame either moves the camera or
+changes the board, never both.** Every transition happens over a frozen board and
+is followed by a settle beat, so the moves only play once the camera has arrived.
 
 ## Module layout
 
