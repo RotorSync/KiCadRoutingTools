@@ -304,7 +304,16 @@ class QuenchState:
                  ignore_net_ids: Optional[Set[int]] = None,
                  extra_locked_refs: Optional[Set[str]] = None,
                  move_refs: Optional[Set[str]] = None,
-                 net_weights: Optional[Dict[int, float]] = None):
+                 net_weights: Optional[Dict[int, float]] = None,
+                 # --- #548, APPENDED after net_weights on purpose. Three test
+                 # files bind this constructor with TWELVE positional arguments
+                 # (test_458_quench_net_weights.py:131,
+                 # test_458_quench_rotations.py:252 and :284); inserting
+                 # anywhere earlier rebinds them silently.
+                 align_weight: float = 0.0,
+                 align_radius: float = 0.5,
+                 align_span: float = 20.0,
+                 orient_weight: float = 0.0):
         bounds = pcb_data.board_info.board_bounds
         if bounds is None:
             raise ValueError("No board boundary (Edge.Cuts) found")
@@ -405,6 +414,181 @@ class QuenchState:
         # ref -> violation of its CURRENT pose; whole-dict invalidated on any
         # move, since a move changes its neighbours' violations too.
         self._inc_violation: Dict[str, float] = {}
+
+        # --- #548: alignment and orientation, both OFF unless asked for ------
+        self.align_weight = float(align_weight)
+        self.align_radius = float(align_radius)
+        self.align_span = float(align_span)
+        self.orient_weight = float(orient_weight)
+        self._peers = self._build_peers(self.align_span) if (
+            self.align_weight > 0.0) else {}
+        # (ref, net_id) -> centroid of that net's pads owned by OTHER parts, or
+        # None when this part is the net's only owner. Cleared beside
+        # _inc_violation on every move.
+        self._anchors: Dict[Tuple[str, int], Optional[Tuple[float, float]]] = {}
+
+    def _build_peers(self, span: float) -> Dict[str, List[str]]:
+        """{ref: sorted peer refs} -- same footprint_name, SEED centres within
+        `span`.
+
+        Built HERE and not in `build_neighbor_lists`, deliberately.
+        `tests/test_quench_neighbor_lists.py:60` asserts a state that never
+        called `build_neighbor_lists` has `_neighbors is None`, and :79-82
+        asserts that state's `part_geometry_cost` equals the built one's
+        EXACTLY. A peer index that only existed on the built path would break
+        that equality as a correctness failure, not a baseline drift.
+
+        It also cannot ride on `_neighbors` at all: that prune is a 2-D BOX
+        overlap test, so a pair must be near in BOTH axes. Alignment is
+        inherently long-range ALONG the shared axis -- two caps 50mm apart in x
+        and 0.1mm apart in y ARE aligned -- and no widening of the box margin
+        covers that without inflating every neighbour list board-wide.
+
+        Seed-relative on purpose: "align to the peers you started next to" is
+        what `your placement, nudged` means. A pair whose seeds are just over
+        `span` apart and that later drift within it is NOT picked up. That makes
+        this a LOSSY prune, unlike `_neighbors`' exact one, and it is said out
+        loud here rather than left to be discovered.
+        """
+        by_fp: Dict[str, List[str]] = {}
+        for ref in sorted(self.parts):
+            by_fp.setdefault(self.parts[ref].footprint_name, []).append(ref)
+        out: Dict[str, List[str]] = {}
+        for group in by_fp.values():
+            if len(group) < 2:
+                continue
+            seeds = {r: (self.parts[r].seed_x, self.parts[r].seed_y)
+                     for r in group}
+            for ref in group:
+                sx, sy = seeds[ref]
+                near = [o for o in group
+                        if o != ref
+                        and math.hypot(seeds[o][0] - sx, seeds[o][1] - sy) <= span]
+                if near:
+                    out[ref] = near
+        return out
+
+    # ----- #548 cost terms --------------------------------------------------
+
+    def _align_pair_penalty(self, part_a, rect_a, part_b, rect_b) -> float:
+        """Off-axis misalignment between two PEER parts.
+
+            d   = min(|cx_a - cx_b|, |cy_a - cy_b|)     # the nearer shared axis
+            pen = align_weight * min(d, align_radius) ** 2
+
+        Three properties chosen deliberately:
+
+        CONTINUOUS at `align_radius`. The obvious "charge inside the radius,
+        zero outside" shape has a cliff there, which pays a part to FLEE the row
+        rather than join it -- the exact opposite of the intent.
+
+        SATURATING beyond it, so every distant peer contributes the same
+        constant and it cancels between one part's candidate poses instead of
+        dragging it across the board toward a peer it will never reach.
+
+        ZERO exactly on a shared axis, so a tidy row costs nothing.
+
+        Peers means identical `footprint_name`: centre-to-centre is the right
+        anchor for two instances of one library footprint and the wrong one for
+        an 0402 against a BGA. It is also the pairing the swap phase already
+        indexes, so the notion is not new to this module.
+        """
+        d = min(abs((rect_a[0] + rect_a[2]) - (rect_b[0] + rect_b[2])),
+                abs((rect_a[1] + rect_a[3]) - (rect_b[1] + rect_b[3]))) * 0.5
+        if d >= self.align_radius:
+            d = self.align_radius
+        return self.align_weight * d * d
+
+    def _align_cost(self, ref, rect, exclude: Optional[Set[str]] = None
+                    ) -> float:
+        if self.align_weight <= 0.0:
+            return 0.0
+        peers = self._peers.get(ref)
+        if not peers:
+            return 0.0
+        part = self.parts[ref]
+        pen = 0.0
+        for other_ref in peers:
+            if exclude and other_ref in exclude:
+                continue
+            other = self.parts.get(other_ref)
+            if other is None:
+                continue
+            pen += self._align_pair_penalty(part, rect, other, other.rect())
+        return pen
+
+    def _net_anchor(self, ref, net_id):
+        """Centroid of `net_id`'s pads owned by parts OTHER than `ref`."""
+        key = (ref, net_id)
+        if key in self._anchors:
+            return self._anchors[key]
+        xs = ys = 0.0
+        n = 0
+        # net_refs values are SORTED, so the float summation order is a property
+        # of the net rather than of dict iteration (#457).
+        for other in self.net_refs.get(net_id, ()):
+            if other == ref:
+                continue
+            part = self.parts.get(other)
+            if part is None:
+                continue
+            for gx, gy, pn in part.pad_globals():
+                if pn == net_id:
+                    xs += gx
+                    ys += gy
+                    n += 1
+        val = (xs / n, ys / n) if n else None
+        self._anchors[key] = val
+        return val
+
+    def _orient_cost(self, ref, x=None, y=None, rot=None) -> float:
+        """Reward a pose whose pads FACE the nets they serve (#548 item 2).
+
+        With `o` the pose origin, `r = pad_global - o` and `u` the unit vector
+        from `o` toward that net's anchor:
+
+            cost = orient_weight * sum_p ( |r| - r . u )
+
+        Zero when a pad points exactly at its anchor, `2|r|` when exactly away,
+        so the whole term is bounded by `2 * orient_weight * sum|r|` -- mm-scale
+        per part. Bounded on purpose: this should break a rotation TIE, never
+        outrank a real length win.
+
+        Why this rather than "score airwires from the actual pad", as #548
+        proposes: the cost path ALREADY does that. `_net_points` emits one MST
+        node per connected pad from `pad_globals()`, full rotation applied;
+        there is no centroid anywhere in the objective. The gap is NUMERIC -- a
+        ~1mm pad offset perturbs a ~20mm net's MST length by a fraction of a mm,
+        less once the tree re-roots -- so the directional signal is present and
+        drowned. This extracts the same signal at part scale and gives it its
+        own weight.
+
+        Two things it is NOT, worth stating: it is not purely rotational, since
+        moving the part also changes `u`, so a large weight pulls a part toward
+        its nets and overlaps the length term; and through `part_geometry_cost`
+        it also reaches the group phase, so a rigid block translate is steered
+        by it too. Both intended, neither obvious.
+        """
+        if self.orient_weight <= 0.0:
+            return 0.0
+        part = self.parts[ref]
+        ox = part.x if x is None else x
+        oy = part.y if y is None else y
+        pen = 0.0
+        for gx, gy, net_id in part.pad_globals(x, y, rot):
+            anchor = self._net_anchor(ref, net_id)
+            if anchor is None:
+                continue
+            rx, ry = gx - ox, gy - oy
+            rn = math.hypot(rx, ry)
+            if rn < 1e-9:
+                continue
+            ax, ay = anchor[0] - ox, anchor[1] - oy
+            an = math.hypot(ax, ay)
+            if an < 1e-9:
+                continue
+            pen += rn - (rx * ax + ry * ay) / an
+        return self.orient_weight * pen
 
     # ----- airwire helpers -------------------------------------------------
 
@@ -538,6 +722,13 @@ class QuenchState:
                 continue
             pen += self._halo_pair_penalty(part, rect, other, other.rect(),
                                            rects_a=rects)
+        # #548. Hooked HERE because this is the one function all three
+        # evaluators call -- the nudge pass, the group pass and the swap pass --
+        # and it already carries the `exclude` semantics the latter two need.
+        # Both return 0.0 before touching any geometry when their weight is 0,
+        # so a default run is bit-identical and pays nothing.
+        pen += self._align_cost(ref, rect, exclude)
+        pen += self._orient_cost(ref, x, y, rot)
         return pen
 
     def violation(self, ref, x=None, y=None, rot=None,
@@ -772,18 +963,31 @@ class QuenchState:
         crossings, w_crossings = _count_crossings_within(all_aw, self._net_w)
         halo = 0.0
         edge = 0.0
+        align = 0.0
+        orient = 0.0
         refs = list(self.parts)
+        peers = self._peers
         for i, ra in enumerate(refs):
             pa = self.parts[ra]
             rect_a = pa.rect()
             edge += self._edge_penalty(rect_a, ra)
+            orient += self._orient_cost(ra)
+            near = peers.get(ra) if peers else None
             for rb in refs[i + 1:]:
                 pb = self.parts[rb]
                 halo += self._halo_pair_penalty(pa, rect_a, pb, pb.rect())
+                # #548. Counted over UNORDERED pairs here, matching halo, so the
+                # report shows each physical pair once. part_geometry_cost sums
+                # one part's pairs from that part's side, which is the factor of
+                # 2 the evaluators need and which cancels between candidates.
+                if near and rb in near:
+                    align += self._align_pair_penalty(pa, rect_a, pb, pb.rect())
         total = (self.length_weight * length
-                 + self.crossing_penalty * w_crossings + halo + edge)
+                 + self.crossing_penalty * w_crossings + halo + edge
+                 + align + orient)
         return {'total': total, 'length': length, 'crossings': crossings,
-                'halo': halo, 'edge': edge, 'hpwl': self.hpwl()}
+                'halo': halo, 'edge': edge, 'hpwl': self.hpwl(),
+                'align': align, 'orient': orient}
 
     def hpwl(self):
         """Half-perimeter wirelength: sum over nets of the pad bbox's width plus
@@ -847,6 +1051,9 @@ class QuenchState:
         part = self.parts[ref]
         part.x, part.y, part.rot = x, y, rot
         self._inc_violation.clear()
+        # #548: a move changes which pads other parts see, so every
+        # net anchor computed against this part is now stale.
+        self._anchors.clear()
         for net_id in part.nets:
             self.net_airwires[net_id] = self._build_net_airwires(net_id)
 
@@ -865,6 +1072,9 @@ class QuenchState:
             part.y += dy
             nets.update(part.nets)
         self._inc_violation.clear()
+        # #548: a move changes which pads other parts see, so every
+        # net anchor computed against this part is now stale.
+        self._anchors.clear()
         for net_id in nets:
             self.net_airwires[net_id] = self._build_net_airwires(net_id)
 
@@ -1087,8 +1297,17 @@ def quench(pcb_data: PCBData, pcb_file: str,
            net_weights: Optional[Dict[int, float]] = None,
            metrics_out: Optional[Dict] = None,
            groups: Optional[Dict[str, List[str]]] = None,
+           align_weight: float = 0.0,
+           align_radius: float = 0.5,
+           align_span: float = 20.0,
+           orient_weight: float = 0.0,
            verbose: bool = False) -> List[Dict]:
     """Greedy quench: iterate over parts, accept only cost-reducing moves.
+
+    align_weight / align_radius / align_span, orient_weight: the #548 tidiness
+    terms, BOTH OFF by default. See QuenchState for what they measure and why
+    they default to zero -- at 0.0 they return before touching any geometry and
+    the output is bit-identical to a build without them.
 
     net_weights: optional {net_id: weight} priority multipliers. A weighted
     net's airwire length is scaled by its weight and every crossing it takes
@@ -1153,7 +1372,9 @@ def quench(pcb_data: PCBData, pcb_file: str,
                         ignore_net_ids=ignore_net_ids,
                         extra_locked_refs=extra_locked,
                         move_refs=move_refs,
-                        net_weights=net_weights)
+                        net_weights=net_weights,
+                        align_weight=align_weight, align_radius=align_radius,
+                        align_span=align_span, orient_weight=orient_weight)
     state.build_neighbor_lists(max_displacement + grid_step)
 
     before = state.total_cost()
@@ -1368,6 +1589,21 @@ def quench(pcb_data: PCBData, pcb_file: str,
                                        pb, pb.rect(bx, by, brot),
                                        rects_a=pa.rects(ax, ay, arot),
                                        rects_b=pb.rects(bx, by, brot)))
+                            # #548: the a-b ALIGN pair, added back for the same
+                            # reason the halo pair above is -- both
+                            # part_geometry_cost calls exclude the other part.
+                            #
+                            # It is tempting to skip this on the grounds that a
+                            # swap exchanges two poses so the pair term cancels.
+                            # It does not always: rect() centres depend on
+                            # rotation when a courtyard is off-centre from the
+                            # footprint origin, and a swap exchanges rotations
+                            # too.
+                            if (state.align_weight > 0.0
+                                    and rb in state._peers.get(ra, ())):
+                                geo += state._align_pair_penalty(
+                                    pa, pa.rect(ax, ay, arot),
+                                    pb, pb.rect(bx, by, brot))
                             return net_cost + geo
 
                         cur = eval_pair(pa.x, pa.y, pa.rot, pb.x, pb.y, pb.rot)
