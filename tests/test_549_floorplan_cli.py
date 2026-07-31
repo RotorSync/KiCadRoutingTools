@@ -218,8 +218,60 @@ def test_emit_writes_no_board_and_touches_nothing():
     print("  PASS: input board mtime/size unchanged, no stray siblings")
 
 
+def test_a_placement_run_leaves_the_board_outline_untouched():
+    """The invariant the whole outline rule rests on, asserted rather than
+    assumed.
+
+    It is true today by construction -- no writer in the routing chain emits an
+    Edge.Cuts primitive, and `strip_zero_length_edge_cuts` removes only
+    degenerate segments that bound nothing. But "true by construction" is
+    exactly the kind of property that stops being true silently, so it gets a
+    test rather than a comment.
+
+    watchy is the right board for it: 2 real interior cutouts, and 81 of its 82
+    parts seeded in courtyard violation, so the optimizer has every reason to
+    move things around.
+    """
+    import shutil
+    src = os.path.join(ROOT, 'kicad_files', 'watchy.kicad_pcb')
+    if not os.path.exists(src):
+        print("  SKIP: watchy absent")
+        return
+    work = os.path.join(_TMP, 'watchy.kicad_pcb')
+    shutil.copy2(src, work)
+    for ext in ('.kicad_pro', '.kicad_dru'):
+        sib = src[:-len('.kicad_pcb')] + ext
+        if os.path.exists(sib):
+            shutil.copy2(sib, work[:-len('.kicad_pcb')] + ext)
+    out = os.path.join(_TMP, 'watchy_placed.kicad_pcb')
+
+    r = subprocess.run(
+        [sys.executable, '-X', 'utf8',
+         os.path.join(ROOT, 'place_optimize.py'), work, out,
+         '--max-displacement', '2', '--align-weight', '5',
+         '--orient-weight', '1'],
+        capture_output=True, text=True, cwd=ROOT)
+    assert r.returncode == 0, r.stderr[-800:]
+
+    sys.path.insert(0, ROOT)
+    from kicad_parser import parse_kicad_pcb
+    a = parse_kicad_pcb(work).board_info
+    b = parse_kicad_pcb(out).board_info
+    assert a.board_bounds == b.board_bounds, \
+        f"the board was RESIZED: {a.board_bounds} -> {b.board_bounds}"
+    assert len(a.board_cutouts) == len(b.board_cutouts), \
+        f"a cutout was lost: {len(a.board_cutouts)} -> {len(b.board_cutouts)}"
+    assert a.board_cutouts == b.board_cutouts, "a cutout moved"
+    assert a.board_outlines == b.board_outlines, "the outline moved"
+    assert len(a.board_cutouts) >= 2, "the fixture stopped having cutouts"
+    print(f"  PASS: bounds, {len(a.board_cutouts)} cutouts and "
+          f"{len(a.board_outlines)} outline ring(s) all identical through a "
+          f"placement run with both #548 terms on")
+
+
 TESTS = [
     test_emit_then_grade_is_clean_and_exits_zero,
+    test_a_placement_run_leaves_the_board_outline_untouched,
     test_violations_exit_4_and_exit_zero_overrides,
     test_argparse_failures_all_exit_2,
     test_a_board_with_no_usable_outline_exits_3_not_0,
