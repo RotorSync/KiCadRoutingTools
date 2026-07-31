@@ -627,6 +627,7 @@ def _edge_band_grid(gmin_x: int, gmin_y: int, gmax_x: int, gmax_y: int, grid_mar
 _EDGE_MASK_CACHE_MAX = 8       # masks (window grids shared separately)
 _EDGE_GRID_CACHE_MAX = 2       # (gx_flat, gy_flat) meshgrids per window
 _CUTOUT_CACHE_MAX = 512        # small per-cutout window entries
+_CUTOUT_CACHE_MAX_BYTES = 128 * 1024 * 1024
 
 
 def _lru_get(cache, key):
@@ -718,8 +719,10 @@ def _rasterize_cutout_cached(pcb_data, cutout_idx: int, cutout, coord: GridCoord
                              clip_bounds=None):
     """Memoized cutout rasterization (same rationale as the edge-mask cache):
     board cutouts are static, but each obstacle build re-rasterized every one
-    per layer. Returns (cgx, cgy, cmask) with the clearance band applied.
-    Keyed by geometry fingerprint, not list index (see _cutout_fingerprint).
+    per layer. Returns the (K, 2) int32 array of blocked cells (interior +
+    clearance band, or band only) -- or None for a degenerate/clipped-away
+    polygon. Keyed by geometry fingerprint, not list index (see
+    _cutout_fingerprint).
 
     ``band_only`` (#505) drops the interior term, leaving just the clearance
     band around the boundary -- for a milled INNER contour, which is a mill line
@@ -743,15 +746,27 @@ def _rasterize_cutout_cached(pcb_data, cutout_idx: int, cutout, coord: GridCoord
         cgx, cgy, c_inside, c_edge = _rasterize_polygon(
             cutout, coord, clearance, clip_bounds=clip_bounds)
         if cgx is None:
-            hit = (None, None, None)
+            hit = (None,)
         else:
-            band = c_edge < clearance
-            hit = (cgx, cgy, band if band_only else (c_inside | band))
-        # #546 memory: clip-window keys never recur once the repair moves to
-        # a new tap window, so without the cap this grew one entry set per
-        # window for the life of the run.
+            cmask = (c_edge < clearance) if band_only \
+                else (c_inside | (c_edge < clearance))
+            # #546 memory: store the MASKED CELLS only -- every consumer
+            # reduces the (cgx, cgy, cmask) triple to exactly this array,
+            # and the triple for a board-clipped inner contour was ~7 MB
+            # against ~1-2 MB of actual band cells (the recheck phase's
+            # full-radius windows ballooned the old cache to gigabytes).
+            hit = (np.column_stack([cgx[cmask], cgy[cmask]]),)
         _lru_put(cache, key, hit, _CUTOUT_CACHE_MAX)
-    return hit
+        # Byte budget on top of the entry cap: entries are usually small,
+        # but a pathological board could still stack big ones.
+        _bytes = sum(h[0].nbytes for h in cache.values()
+                     if h[0] is not None)
+        while _bytes > _CUTOUT_CACHE_MAX_BYTES and len(cache) > 1:
+            _old = next(iter(cache))
+            _oh = cache.pop(_old)
+            if _oh[0] is not None:
+                _bytes -= _oh[0].nbytes
+    return hit[0]
 
 
 def _board_edge_cell_mask(coord: GridCoord, board_outline, gmin_x: int, gmin_y: int,
@@ -855,25 +870,21 @@ def _add_board_edge_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     for _ci, cutout in enumerate(pcb_data.board_info.board_cutouts):
         if len(cutout) < 3:
             continue
-        cgx, cgy, cmask = _rasterize_cutout_cached(
+        _cells = _rasterize_cutout_cached(
             pcb_data, _ci, cutout, coord, via_edge_clearance)
-        if cgx is None:
-            continue
-        if cmask.any():
-            obstacles.add_blocked_vias_batch(np.column_stack([cgx[cmask], cgy[cmask]]))
+        if _cells is not None and len(_cells):
+            obstacles.add_blocked_vias_batch(_cells)
 
     # Milled inner contours (#505): band only -- a mill line, not an opening.
     for _ei, _ec in enumerate(getattr(pcb_data.board_info,
                                       'board_edge_contours', None) or []):
         if len(_ec) < 3:
             continue
-        cgx, cgy, cmask = _rasterize_cutout_cached(
+        _cells = _rasterize_cutout_cached(
             pcb_data, _ei, _ec, coord, via_edge_clearance, band_only=True,
             clip_bounds=pcb_data.board_info.board_bounds)
-        if cgx is None:
-            continue
-        if cmask.any():
-            obstacles.add_blocked_vias_batch(np.column_stack([cgx[cmask], cgy[cmask]]))
+        if _cells is not None and len(_cells):
+            obstacles.add_blocked_vias_batch(_cells)
 
 
 def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
@@ -934,23 +945,23 @@ def _add_board_edge_track_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
     for _ci, cutout in enumerate(pcb_data.board_info.board_cutouts):
         if len(cutout) < 3:
             continue
-        cgx, cgy, cmask = _rasterize_cutout_cached(
+        _cells = _rasterize_cutout_cached(
             pcb_data, _ci, cutout, coord, track_edge_clearance)
-        if cgx is None:
-            continue
-        _block_cells_on_layers(obstacles, cgx, cgy, cmask, [layer_idx])
+        if _cells is not None and len(_cells):
+            _lcol = np.full((_cells.shape[0], 1), layer_idx, dtype=np.int32)
+            obstacles.add_blocked_cells_batch(np.hstack([_cells, _lcol]))
 
     # Milled inner contours (#505): band only -- a mill line, not an opening.
     for _ei, _ec in enumerate(getattr(pcb_data.board_info,
                                       'board_edge_contours', None) or []):
         if len(_ec) < 3:
             continue
-        cgx, cgy, cmask = _rasterize_cutout_cached(
+        _cells = _rasterize_cutout_cached(
             pcb_data, _ei, _ec, coord, track_edge_clearance, band_only=True,
             clip_bounds=pcb_data.board_info.board_bounds)
-        if cgx is None:
-            continue
-        _block_cells_on_layers(obstacles, cgx, cgy, cmask, [layer_idx])
+        if _cells is not None and len(_cells):
+            _lcol = np.full((_cells.shape[0], 1), layer_idx, dtype=np.int32)
+            obstacles.add_blocked_cells_batch(np.hstack([_cells, _lcol]))
 
 
 def _add_drill_hole_via_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
