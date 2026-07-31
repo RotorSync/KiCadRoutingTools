@@ -33,6 +33,7 @@ SOURCES = [
     # quiet way this gate stops gating.
     '.claude/skills/plan-pcb-routing/references/evidence-map.md',
     '.claude/skills/plan-pcb-routing/references/verifier-prompts.md',
+    '.claude/skills/plan-pcb-routing/references/convergence.md',
     'docs/floorplan-intent.md',
     'docs/placement-optimization.md',
     'docs/claude-skills.md',
@@ -41,7 +42,10 @@ SOURCES = [
 ]
 
 TOOLS = ('place_optimize.py', 'place_route_loop.py', 'render_placement.py',
-         'check_floorplan.py', 'make_movie.py')
+         'check_floorplan.py', 'make_movie.py',
+         # Skill-local helper, cited by its full path in the docs -- so the
+         # entry is the path, which is also what _continued_blocks matches on.
+         '.claude/skills/plan-pcb-routing/scripts/board_score.py')
 
 # Flags that belong to a DIFFERENT tool on the same command line (a pipe, a
 # --route-args payload). --route-args carries route.py's flags verbatim.
@@ -51,7 +55,11 @@ _ROUTE_ARGS_RE = re.compile(r"--route-args\s+(['\"])(.*?)\1", re.S)
 def _parser_for(tool):
     """Build the tool's real argparse parser and return its option strings."""
     path = os.path.join(ROOT, tool)
-    spec = importlib.util.spec_from_file_location(tool[:-3] + '_probe', path)
+    # basename, not the whole entry: a TOOLS entry may be a PATH (skill-local
+    # helpers live under .claude/skills/...), and a module name carrying path
+    # separators is legal but confusing in tracebacks.
+    spec = importlib.util.spec_from_file_location(
+        os.path.basename(tool)[:-3] + '_probe', path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
@@ -248,8 +256,58 @@ def test_verdict_lines_do_not_collide_with_the_gui_result_contract():
     print("  PASS: verdicts use VERDICT=; RESULT= left to the host")
 
 
+def test_the_score_is_the_gate_and_the_router_is_not_the_judge():
+    """The board that prompted this shipped at 39/44 nets and 762 DRC errors
+    with every tool reporting success, because the only thing being consulted
+    was the router's own tally. Two claims have to stay in the skill or that
+    recurs: the score exists and is the gate, and place_route_loop's ACCEPTED
+    is not a verdict."""
+    skill = open(os.path.join(ROOT, SOURCES[0]), encoding='utf-8').read()
+    low = skill.lower()
+
+    assert 'board_score.py' in skill, \
+        "the skill must name the score helper -- it is the only number not " \
+        "produced by the thing being graded"
+    # The router's self-report must be explicitly demoted. Without this the
+    # skill reads ACCEPTED as 'this round is good', which is how a disconnected
+    # board survives an 'improving' loop.
+    assert 'not a quality verdict' in low, \
+        "the skill must state that place_route_loop's ACCEPTED is not a verdict"
+    assert 'better()' in skill and 'place_route_loop.py:358' in skill, \
+        "cite where the router-self-report comparison actually lives"
+    # The loop has to be bounded, or 'keep going until fixed' is unbounded.
+    assert '20 iterations per group' in skill, \
+        "the convergence budget must be stated in the skill"
+    # Vacuity: ungraded must never read as clean.
+    assert 'ungraded' in low, "the skill must distinguish ungraded from passed"
+
+    conv = os.path.join(ROOT, '.claude/skills/plan-pcb-routing/references/convergence.md')
+    assert os.path.isfile(conv), "references/convergence.md is missing"
+    ctext = open(conv, encoding='utf-8').read()
+    for key in ('convergence.json', 'parent_board', 'stopped_by', 'blocking'):
+        assert key in ctext, f"convergence.md does not document `{key}`"
+    print("  PASS: score is the gate, router self-report demoted, loop bounded")
+
+
+def test_routed_board_lenses_exist_and_reenter_the_loop():
+    """A verifier fan-out that only reports is not a gate. The three
+    routed-board lenses must exist, and a FAIL must be documented as
+    re-entering the loop rather than becoming a caveat on a shipped board."""
+    rel = '.claude/skills/plan-pcb-routing/references/verifier-prompts.md'
+    text = open(os.path.join(ROOT, rel), encoding='utf-8').read()
+    for lens in ('connectivity', 'drc', 'spec'):
+        assert f'`{lens}`' in text, f"routed-board lens `{lens}` is missing"
+    assert 're-enters the loop' in text.lower(), \
+        "a FAIL must be documented as re-entering the loop, not as a footnote"
+    assert 'do not re-word a fail into a caveat' in text.lower(), \
+        "the caveat-laundering failure mode must be refused by name"
+    print("  PASS: 3 routed lenses present, FAIL re-enters the loop")
+
+
 TESTS = [
     test_every_documented_flag_exists,
+    test_the_score_is_the_gate_and_the_router_is_not_the_judge,
+    test_routed_board_lenses_exist_and_reenter_the_loop,
     test_the_placement_tools_are_actually_mentioned,
     test_exit_code_contract_is_documented,
     test_routing_only_stays_the_default_path,
