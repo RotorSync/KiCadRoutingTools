@@ -254,11 +254,39 @@ changes `û` too, so a large weight also pulls the part toward its nets), and
 through `part_geometry_cost` it reaches the group phase, so a rigid block
 translate is steered by it as well.
 
+### Measured, so the recommendation is not a guess
+
+Sweep at `--max-displacement 3`, 3 passes. *tidy* is the mean share of distinct
+axis positions within each same-footprint group — **lower is tidier**.
+
+| board | align | orient | crossings | hpwl | tidy | overlap / oob |
+|---|---|---|---|---|---|---|
+| splitflap_driver | 0 | 0 | 194 | 2407.1 | 0.652 | 0.0 / 6 |
+| | 5 | 0 | **187** | 2386.2 | 0.581 | 0.0 / 6 |
+| | 15 | 0 | 187 | 2404.7 | **0.560** | 0.0 / 6 |
+| | 0 | 3 | 185 | 2415.5 | 0.712 | 0.0 / 6 |
+| | **5** | **1** | **185** | 2391.2 | 0.605 | 0.0 / 6 |
+| interf_u_unrouted | 0 | 0 | 404 | 4175.0 | 1.000 | 0.0 / 2 |
+| | 5 | 0 | 404 | 4174.5 | 1.000 | 0.0 / 2 |
+| | **5** | **1** | **402** | **4162.3** | **0.889** | 0.0 / 2 |
+
+**`--align-weight 5 --orient-weight 1`** is the recommended pair: best or
+joint-best crossings on both boards, tidier, and **no legality regression
+anywhere** — overlap stayed 0.0 and `oob_count` never moved.
+
+Two honest caveats. **n = 2 boards, and no re-route** — crossings and HPWL are
+proxies, and the router is the only judge that counts, so do not read the
+crossing improvements as a routability claim. And **over-weighting trades
+wirelength for tidiness**: `--align-weight 15` is the tidiest row in the table
+and its HPWL is *worse* than at 5. `interf_u_unrouted` shows the other limit —
+alignment does nothing at all on a board with few repeated footprints, because
+there are no peers to align.
+
 ### Why off by default
 
 The router, not a tidiness score, is the judge of a placement, and neither term
-has been measured against routing outcomes. On-by-default would silently change
-every user's board to buy legibility.
+has been measured against routing *outcomes* — only against proxies, above.
+On-by-default would silently change every user's board to buy legibility.
 
 It would also corrupt the isolated fixtures in `test_458_*`, which zero every
 geometry knob they know about so the objective is clean enough to assert
