@@ -1017,7 +1017,10 @@ def build_routing_obstacle_map(
                                       route_layer, config.obstacle_clearance(net_id)),
                                   getattr(pad, 'local_clearance', 0.0) or 0.0)
                     # Half-grid discretization cushion, matching this file's own
-                    # via/segment stamps and build_base_obstacles (#173): cells
+                    # VIA stamps and build_base_obstacles (#173) -- the segment
+                    # capsule below deliberately carries NO cushion, same as the
+                    # main builder's (see PR #532: adding one there costs grid/2
+                    # of tap routability for a um-scale chord-dip class): cells
                     # are blocked by CENTER distance, so without the cushion a
                     # tap trace through a barely-free cell can sit up to
                     # ~grid/2 inside the pad's clearance ring (orangecrab

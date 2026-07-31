@@ -133,7 +133,7 @@ whose resolved copper overlaps a different-net neighbour (a modelling error).
 | `width` | float | Track width |
 | `layer` | str | Layer name |
 | `net_id` | int | Net ID |
-| `uuid` | str | UUID from the file (`''` for newly created segments) |
+| `uuid` | str | UUID from the file (`''` for newly created segments and for uuid-less file items — KiCad treats the token as optional, PR #534) |
 | `start_x_str`, … | str | Original coordinate strings, kept for exact file matching |
 
 ### `Via`

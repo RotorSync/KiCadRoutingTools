@@ -236,8 +236,11 @@ via pad in a fine-pitch escape. Two details are load-bearing:
 - The block is inserted **after** the via's `(uuid ...)`, as its last child.
   KiCad does not care about child order (verified by round-trip through pcbnew:
   0 vias reported `GetTeardropsEnabled()` before, all 63 after), while this
-  repo's own via regexes require `layers → (free)? → net → uuid` to be
-  contiguous — inserting earlier would make the boards we write unparseable by us.
+  repo's own via regexes require `layers → (free)? → net → (uuid)?` to be
+  contiguous (uuid itself is optional since PR #534, but an earlier insertion
+  would still split the required run) — inserting earlier would make the
+  boards we write unparseable by us. A uuid-less via has no anchor and is
+  skipped by this pass (benign: the tool's own output always writes uuids).
 - Both writers run this pass **last**, after the run's new copper is inserted,
   so vias *this run placed* get teardrops too. Running it on the input text
   covered only pre-existing vias (63 of 81 on megadesk).
