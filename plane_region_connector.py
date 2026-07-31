@@ -1500,14 +1500,24 @@ def _calculate_clearance(
     layer_idx: int,
     max_check: int = 10
 ) -> int:
-    """Calculate clearance from a grid cell to nearest obstacle."""
+    """Calculate clearance from a grid cell to nearest obstacle.
+
+    #546: walk each Chebyshev ring's PERIMETER directly. The old loop scanned
+    the full (2r+1)^2 square and filtered with `abs(dx) == r or abs(dy) == r`
+    -- ~1500 wasted iterations per call at max_check=10, 795M abs() calls in
+    a 6-minute crkbd profile (65s, the hottest Python frame after the edge
+    kernels). The result only depends on WHICH ring first contains a blocked
+    cell, so perimeter order does not matter."""
+    is_blocked = obstacles.is_blocked
     for r in range(1, max_check + 1):
-        # Check cells at distance r (manhattan approximation for speed)
         for dx in range(-r, r + 1):
-            for dy in range(-r, r + 1):
-                if abs(dx) == r or abs(dy) == r:  # Only check perimeter
-                    if obstacles.is_blocked(gx + dx, gy + dy, layer_idx):
-                        return r - 1
+            if is_blocked(gx + dx, gy - r, layer_idx) or \
+                    is_blocked(gx + dx, gy + r, layer_idx):
+                return r - 1
+        for dy in range(-r + 1, r):
+            if is_blocked(gx - r, gy + dy, layer_idx) or \
+                    is_blocked(gx + r, gy + dy, layer_idx):
+                return r - 1
     return max_check
 
 

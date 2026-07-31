@@ -1205,21 +1205,25 @@ def block_via_cells_near_drills(obstacles: GridObstacleMap,
     if hole_to_hole_clearance <= 0:
         return
     coord = GridCoord(grid_step)
-    cells = []
+    chunks = []
     for hx, hy, drill_dia in drill_holes:
         # Required center-to-center distance = drill/2 + via_drill/2 + clearance.
         required_dist = drill_dia / 2.0 + via_drill / 2.0 + hole_to_hole_clearance
         req_sq = required_dist * required_dist
         gx, gy = coord.to_grid(hx, hy)
         expand = coord.to_grid_dist_safe(required_dist) + 1  # ceil + 1-cell bbox margin
-        for ex in range(-expand, expand + 1):
-            cx = (gx + ex) * grid_step
-            for ey in range(-expand, expand + 1):
-                cy = (gy + ey) * grid_step
-                if (cx - hx) * (cx - hx) + (cy - hy) * (cy - hy) < req_sq:
-                    cells.append((gx + ex, gy + ey))
-    if cells:
-        obstacles.add_blocked_vias_batch(np.array(cells, dtype=np.int32))
+        # #546: vectorized disc (was a Python double loop per drill). Same
+        # cell-center-in-mm test, same per-drill cell multiset.
+        exs = np.arange(gx - expand, gx + expand + 1, dtype=np.int64)
+        eys = np.arange(gy - expand, gy + expand + 1, dtype=np.int64)
+        dx = exs.astype(np.float64) * grid_step - hx
+        dy = eys.astype(np.float64) * grid_step - hy
+        mask = (dx * dx)[:, np.newaxis] + (dy * dy)[np.newaxis, :] < req_sq
+        ii, jj = np.nonzero(mask)
+        if ii.size:
+            chunks.append(np.column_stack([exs[ii], eys[jj]]).astype(np.int32))
+    if chunks:
+        obstacles.add_blocked_vias_batch(np.vstack(chunks))
 
 
 def _pad_has_copper(pad) -> bool:
@@ -1253,22 +1257,26 @@ def block_track_cells_near_drills(obstacles: GridObstacleMap, drill_holes,
     if clearance < 0 or not layer_idxs:
         return
     coord = GridCoord(grid_step)
-    cells = []
+    chunks = []
     for hx, hy, drill_dia in drill_holes:
         # A track centerline must stay this far from the real drill centre.
         required_dist = drill_dia / 2.0 + track_width / 2.0 + clearance
         req_sq = required_dist * required_dist
         gx, gy = coord.to_grid(hx, hy)
         expand = coord.to_grid_dist_safe(required_dist) + 1  # ceil + 1-cell bbox margin
-        for ex in range(-expand, expand + 1):
-            cx = (gx + ex) * grid_step
-            for ey in range(-expand, expand + 1):
-                cy = (gy + ey) * grid_step
-                if (cx - hx) * (cx - hx) + (cy - hy) * (cy - hy) < req_sq:
-                    cells.append((gx + ex, gy + ey))
-    if not cells:
+        # #546: vectorized disc (was a Python double loop per drill). Same
+        # cell-center-in-mm test, same per-drill cell multiset.
+        exs = np.arange(gx - expand, gx + expand + 1, dtype=np.int64)
+        eys = np.arange(gy - expand, gy + expand + 1, dtype=np.int64)
+        dx = exs.astype(np.float64) * grid_step - hx
+        dy = eys.astype(np.float64) * grid_step - hy
+        mask = (dx * dx)[:, np.newaxis] + (dy * dy)[np.newaxis, :] < req_sq
+        ii, jj = np.nonzero(mask)
+        if ii.size:
+            chunks.append(np.column_stack([exs[ii], eys[jj]]).astype(np.int32))
+    if not chunks:
         return
-    arr = np.array(cells, dtype=np.int32)
+    arr = np.vstack(chunks)
     for li in layer_idxs:
         layer_col = np.full((arr.shape[0], 1), li, dtype=np.int32)
         obstacles.add_blocked_cells_batch(np.hstack([arr, layer_col]))
