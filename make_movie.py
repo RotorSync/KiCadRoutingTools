@@ -54,12 +54,46 @@ def resolve_inputs(inputs):
     """
     import animate_route as a
     if len(inputs) == 1 and os.path.isdir(inputs[0]):
+        chain = placement_chain(inputs[0])
+        if chain:
+            return chain
         return a.discover_steps(inputs[0])
     boards = [os.path.abspath(b) for b in inputs]
     missing = [b for b in boards if not os.path.exists(b)]
     if missing:
         raise FileNotFoundError(missing[0])
     return a.steps_for_boards(boards), (boards[-1] if boards else None)
+
+
+def placement_chain(work_dir):
+    """(steps, final) for a place_route_loop work dir, or None.
+
+    Keyed on the loop_round{N}.json SIDECARS, never a loop_round*.kicad_pcb
+    glob: --work-dir defaults to the output board's directory, which may hold
+    unrelated boards, and mtime order would animate a REJECTED round as though
+    it had been kept. The sidecar's `parent` is what makes the set a chain --
+    round N follows the last ACCEPTED board, not N-1.
+    """
+    try:
+        from movie_camera import load_round_sidecars
+    except Exception:
+        return None
+    rounds = load_round_sidecars(work_dir)
+    if not rounds:
+        return None
+    steps = []
+    for rd in rounds:
+        if not rd.get('accepted') or not rd.get('board'):
+            continue          # rejected/screened rounds are on disk, not the story
+        b = os.path.join(work_dir, rd['board'])
+        if os.path.exists(b):
+            steps.append((f"round {rd['round']}", b, None))
+        r = rd.get('routed') and os.path.join(work_dir, rd['routed'])
+        if r and os.path.exists(r):
+            steps.append((f"round {rd['round']} routed", r, None))
+    if not steps:
+        return None
+    return steps, steps[-1][1]
 
 
 def default_output(inputs):
@@ -73,7 +107,8 @@ def default_output(inputs):
 def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
                supersample=DEFAULT_SUPERSAMPLE, layer_alpha=DEFAULT_LAYER_ALPHA,
                rip_hold=DEFAULT_RIP_HOLD, chunks=DEFAULT_CHUNKS,
-               end_hold=DEFAULT_END_HOLD, png_dir=None, quiet=False):
+               end_hold=DEFAULT_END_HOLD, png_dir=None, quiet=False,
+               camera=None, camera_budget=60.0, tween=8):
     """Render the movie. ``inputs`` is a run dir (one entry) or a board sequence.
 
     Returns the path actually written -- which is a sibling ``.gif`` when an
@@ -90,8 +125,35 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
         if not quiet:
             print(f"make_movie: no boards found in {inputs[0]}", file=sys.stderr)
         return None
+    # #431: the camera is OPT-IN. camera=None falls back to the env knob, so
+    # one variable turns it on for the GUI recorder, run_plan.py --movie and the
+    # stress renderer at once -- and OFF is the default everywhere, because
+    # every GUI movie is a routing movie and changing those is pure regression
+    # risk for no user-visible win.
+    stage = None
+    if camera is None:
+        try:
+            import env_knobs
+            camera = getattr(env_knobs, 'MOVIE_CAMERA', 'off')
+        except Exception:
+            camera = 'off'
+    if str(camera).lower() not in ('off', '', 'none', '0'):
+        rounds = []
+        if len(inputs) == 1 and os.path.isdir(inputs[0]):
+            try:
+                from movie_camera import load_round_sidecars
+                rounds = load_round_sidecars(inputs[0])
+            except Exception:
+                rounds = []
+        if rounds:
+            from movie_camera import Stage
+            stage = Stage(rounds, inputs[0], fps=fps,
+                          budget=camera_budget, tween=tween, quiet=quiet)
+        elif not quiet:
+            print("make_movie: --camera asked for but no loop_round*.json "
+                  "sidecars found; rendering without one", file=sys.stderr)
     frames = a.build_boards(steps, final, size, supersample, layer_alpha,
-                            rip_hold, chunks)
+                            rip_hold, chunks, stage=stage)
     if not frames:
         if not quiet:
             print("make_movie: no frames (nothing routed?)", file=sys.stderr)
@@ -144,6 +206,18 @@ def main():
     ap.add_argument('--png', action='store_true',
                     help='also write a full-resolution still of the final board')
     ap.add_argument('--quiet', action='store_true')
+    ap.add_argument('--camera', default=None,
+                    choices=('off', 'auto'),
+                    help="placement camera: overview -> zoom to the "
+                         "round's parts -> pan when work moves -> then "
+                         "play the moves (#431). Needs loop_round*.json "
+                         "sidecars in the work dir. Default: off, or "
+                         "$KICAD_MOVIE_CAMERA")
+    ap.add_argument('--camera-budget', type=float, default=60.0,
+                    metavar='SECONDS',
+                    help='cap the camera runtime (0 = unlimited)')
+    ap.add_argument('--tween', type=int, default=8,
+                    help='frames per placement glide; 0 = no glide, cut straight to the new placement (default: 8)')
     args = ap.parse_args()
 
     try:
@@ -151,7 +225,10 @@ def main():
                          supersample=args.supersample, layer_alpha=args.layer_alpha,
                          rip_hold=args.rip_hold, chunks=args.chunks,
                          end_hold=args.end_hold, png_dir=args.png_dir,
-                         quiet=args.quiet)
+                         quiet=args.quiet,
+                       camera=args.camera,
+                       camera_budget=args.camera_budget,
+                       tween=args.tween)
     except FileNotFoundError as e:
         print(f"make_movie: no such board: {e}", file=sys.stderr)
         return 1

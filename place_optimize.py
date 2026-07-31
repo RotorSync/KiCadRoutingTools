@@ -22,6 +22,8 @@ import os
 from kicad_parser import parse_kicad_pcb
 import routing_defaults as defaults
 from placement.groups import GroupError, derive_groups, describe, parse_sources
+from placement.cli_gates import (add_board_state_args,
+                                 add_lock_advisor_args)
 from placement.quench import quench
 from placement.writer import write_placed_output
 
@@ -96,6 +98,8 @@ Examples:
                              "(default: none, i.e. per-part moves only)")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Print each accepted move")
+    add_board_state_args(parser)
+    add_lock_advisor_args(parser)
 
     args = parser.parse_args()
 
@@ -106,13 +110,48 @@ Examples:
             parser.error("--swap-max-displacement must not exceed "
                          "--max-displacement")
 
+    # Recorded AFTER parsing and only for a real run: this tool MUTATES the
+    # board, so a stress manifest that omits it leaves the next step's input
+    # produced by nothing and the pruner drops legitimate upstream steps.
+    # Report-only modes are skipped so a manifest never carries a command that
+    # touched no file (route.py records --list-groups for exactly that reason,
+    # and manifest_to_plan then has to refuse it loudly).
+    if not args.suggest_locks:
+        try:
+            from redo_record import record_invocation
+            record_invocation()
+        except Exception:
+            pass
+
     if args.output_file is None:
         base, ext = os.path.splitext(args.input_file)
         args.output_file = base + '_optimized' + ext
-        print(f"Output file: {args.output_file}")
 
     print(f"Loading {args.input_file}...")
     pcb_data = parse_kicad_pcb(args.input_file)
+
+    if args.suggest_locks:
+        from placement.lock_advisor import advise_locks, format_text, to_json
+        advice = advise_locks(pcb_data, args.input_file,
+                              lock_patterns=args.lock,
+                              min_confidence=args.lock_confidence,
+                              edge_margin=args.lock_edge_margin,
+                              use_globs=args.suggest_locks_globs)
+        print(format_text(advice))
+        if args.suggest_locks_json:
+            with open(args.suggest_locks_json, 'w', encoding='utf-8') as f:
+                json.dump(to_json(advice), f, indent=1, sort_keys=True)
+            print(f"Wrote {args.suggest_locks_json}")
+        print("JSON_SUMMARY: " + json.dumps(advice.tally(), sort_keys=True))
+        return 0
+
+    # Board-state gates (#431): refuse rather than produce a result-shaped
+    # non-result. See placement/placement_state.py for why each fires.
+    from placement.placement_state import gate_or_exit
+    gate_or_exit(pcb_data, args.input_file, 'place_optimize.py',
+                 allow_unplaced=args.allow_unplaced,
+                 allow_routed=args.allow_routed)
+    print(f"Output file: {args.output_file}")
 
     try:
         sources = parse_sources(args.group_by)

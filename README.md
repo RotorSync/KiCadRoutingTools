@@ -370,6 +370,23 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets 
 # Route all nets except GND and VCC (exclusion patterns with ! prefix)
 python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*" "!GND" "!VCC"
 
+# Route one placement BLOCK -- a schematic sheet, a KiCad group, an IC and its decaps
+# (see "Placement blocks" below for what --group-by can infer, and --list-groups)
+python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
+  --group-by sheet --list-groups                      # what blocks exist?
+python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
+  --group sheet:558c3023 --group-by sheet --group-scope internal
+
+# PREVIEW any routing run: route it, report what it WOULD add, write no board
+python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
+  --group sheet:558c3023 --group-by sheet --preview --preview-png preview.png
+
+# UNDO: strip the scoped nets' copper back to unrouted (needs an explicit scope;
+# defaults to --group-scope internal, since a block's "touching" nets include
+# GND/VCC and undoing those would strip their copper across the whole board)
+python route.py kicad_files/input.kicad_pcb kicad_files/undone.kicad_pcb \
+  --group sheet:558c3023 --group-by sheet --undo
+
 # Route differential pairs (use route_diff.py)
 python route_diff.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*lvds*" --no-bga-zones
 
@@ -431,6 +448,26 @@ python route_disconnected_planes.py kicad_files/input.kicad_pcb --nets GND --pla
 python route_disconnected_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
     --track-width 0.5 --clearance 0.2
 ```
+
+### 3c. Review a Placement (issue #431)
+
+Placement deltas are invisible in a board file; render them instead.
+
+```bash
+# what moved, and did it help? (ghosts at the seed poses, arrows, metrics caption)
+python3 render_placement.py placed.kicad_pcb --before seed.kicad_pcb -o delta.png
+
+# zoom to one placement block; same block names as route.py --group
+python3 render_placement.py board.kicad_pcb --list-groups --group-by sheet
+python3 render_placement.py board.kicad_pcb --zoom-group sheet:58d913ec --per-side -o out/
+
+# which parts should NOT be moved -- advice only, locks nothing, writes no board
+python3 place_optimize.py board.kicad_pcb --suggest-locks
+```
+
+Toggles for `--borders` / `--labels` / `--ratsnest` / `--arrows` / `--ghosts`;
+`--per-side` gives F and B panels rather than one flattened projection.
+The render is triage -- the verdict is the caption's `crossings` / `hpwl`.
 
 ### 4. Verify Results
 

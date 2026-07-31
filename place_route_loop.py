@@ -39,6 +39,8 @@ import sys
 from kicad_parser import parse_kicad_pcb
 import routing_defaults as defaults
 from placement.groups import GroupError, derive_groups, describe, parse_sources
+from placement.cli_gates import (add_board_state_args,
+                                 add_lock_advisor_args)
 from placement.quench import quench
 from placement.writer import write_placed_output
 
@@ -216,6 +218,17 @@ def run_route(pcb_file: str, routed_file: str, route_args: str, log_file: str):
         raise RuntimeError(f"route.py produced no JSON_SUMMARY (see {log_file})"
                            f"\n" + _log_tail(log))
 
+    return metrics_from_summary(summary, log)
+
+
+def metrics_from_summary(summary: dict, log: str = '') -> dict:
+    """Round metrics from an already-merged JSON_SUMMARY.
+
+    Split out of run_route (#431) so a renderer can caption a recorded round
+    from its `loop_roundN_route.log` using THIS arithmetic rather than a second
+    implementation that drifts. Pure: no subprocess, no file IO. `log` is only
+    the pre-#409 blocker fallback.
+    """
     failed_nets = list(summary.get('failed_single', []))
     # failed_multipoint entries are dicts {net_name, failed_pads}; keep just the
     # name so failed_nets is uniformly net-name strings (downstream uses them as
@@ -254,6 +267,66 @@ def run_route(pcb_file: str, routed_file: str, route_args: str, log_file: str):
         'pad_pairs_connected': summary.get('pad_pairs_connected', 0),
         'pad_pairs_total': summary.get('pad_pairs_total', 0),
     }
+
+
+def write_round_sidecar(work: str, rnd: int, *, board: str, routed: str,
+                        parent: str, accepted: bool, screened: bool = False,
+                        targets=None, groups=None, moved=None, metrics=None
+                        ) -> str:
+    """Record one round as `loop_round{N}.json` next to its board (#431).
+
+    The boards alone are NOT a chain: a REJECTED loop_round2.kicad_pcb sits
+    between rounds 1 and 3 in both name and mtime order, and anything that
+    walks the directory would animate it as though it had been kept. `parent`
+    is the field that fixes that -- it names the board this round was actually
+    derived from, which is the last ACCEPTED one, not N-1.
+
+    An artifact rather than a callback, deliberately: it is how the rest of this
+    repo communicates between tools (make_movie reads directories), it needs no
+    hook in this monolithic main(), and both the renderer and the movie camera
+    can consume it without either importing the other.
+    """
+    path = os.path.join(work, f'loop_round{rnd}.json')
+    doc = {
+        'schema': 1,
+        'round': rnd,
+        'board': os.path.basename(board) if board else None,
+        'routed': os.path.basename(routed) if routed else None,
+        'parent': os.path.basename(parent) if parent else None,
+        'accepted': bool(accepted),
+        'screened': bool(screened),
+        'targets': sorted(targets or []),
+        'groups': {k: sorted(v) for k, v in sorted((groups or {}).items())},
+        'moved': moved or [],
+        'metrics': metrics or {},
+    }
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(doc, f, indent=1, sort_keys=True)
+    except OSError as e:      # best-effort: never lose a round over a sidecar
+        print(f"  (round sidecar not written: {e})")
+        return ''
+    return path
+
+
+def moves_from_placements(parent_pcb, placements) -> list:
+    """`[{reference, from:[x,y,rot], to:[x,y,rot]}]` for the movie's tween.
+
+    quench() returns only the destination pose, so the source is read off the
+    board the round started from. Also the degraded path when a work dir has no
+    sidecars: `moves_between(a, b)` is this with both poses read from files.
+    """
+    out = []
+    for p in placements or []:
+        fp = parent_pcb.footprints.get(p['reference']) if parent_pcb else None
+        if fp is None:
+            continue
+        out.append({'reference': p['reference'],
+                    'from': [round(fp.x, 4), round(fp.y, 4),
+                             round(fp.rotation or 0.0, 3)],
+                    'to': [round(p['new_x'], 4), round(p['new_y'], 4),
+                           round(p.get('new_rotation') or 0.0, 3)]})
+    return sorted(out, key=lambda m: m['reference'])
 
 
 def nets_to_refs(pcb_data, net_names, max_pins, locked_patterns):
@@ -329,8 +402,10 @@ def main():
         description="Router-in-the-loop placement repair.",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("input_file")
-    parser.add_argument("output_file")
-    parser.add_argument("--route-args", required=True,
+    # Optional so the report-only --suggest-locks mode does not demand an
+    # output board it never writes; required post-parse for a real run.
+    parser.add_argument("output_file", nargs="?")
+    parser.add_argument("--route-args", default=None,
                         help="Arguments passed to route.py (quoted string)")
     parser.add_argument("--rounds", type=int, default=5,
                         help="Max repair rounds (default: 5)")
@@ -386,7 +461,34 @@ def main():
     parser.add_argument("--work-dir", default=None,
                         help="Directory for intermediate files "
                              "(default: alongside output)")
+    parser.add_argument("--movie", nargs='?', const='', default=None,
+                        metavar="OUT",
+                        help="render a movie of the whole repair when the loop "
+                             "finishes, with the placement camera on (#431): "
+                             "overview -> zoom to each round's moved parts -> "
+                             "pan when the work moves -> then play the moves. "
+                             "Default path: <work-dir>/placement.mp4")
+    parser.add_argument("--movie-tween", type=int, default=8, metavar="N",
+                        help="frames per placement glide in --movie; 0 = no "
+                             "glide, cut straight to the new placement")
+    add_board_state_args(parser)
+    add_lock_advisor_args(parser)
+
     args = parser.parse_args()
+
+    # --suggest-locks is report-only, so it must not demand a route spec it
+    # never uses. Every other run still requires one.
+    if not args.suggest_locks and not args.route_args:
+        parser.error("--route-args is required (except with --suggest-locks)")
+    if not args.suggest_locks and not args.output_file:
+        parser.error("output_file is required (except with --suggest-locks)")
+
+    if not args.suggest_locks:
+        try:
+            from redo_record import record_invocation
+            record_invocation()
+        except Exception:
+            pass
 
     if args.max_displacement < 0:
         parser.error("--max-displacement must be >= 0")
@@ -403,6 +505,32 @@ def main():
             parser.error("--swap-max-displacement must not exceed "
                          "--max-displacement")
 
+    # Report-only: advise, print, exit. Writes no board, routes nothing, and
+    # deliberately runs BEFORE the expensive round-0 route.
+    if args.suggest_locks:
+        from placement.lock_advisor import advise_locks, format_text, to_json
+        advice = advise_locks(parse_kicad_pcb(args.input_file), args.input_file,
+                              lock_patterns=args.lock,
+                              min_confidence=args.lock_confidence,
+                              edge_margin=args.lock_edge_margin,
+                              use_globs=args.suggest_locks_globs)
+        print(format_text(advice))
+        if args.suggest_locks_json:
+            with open(args.suggest_locks_json, 'w', encoding='utf-8') as f:
+                json.dump(to_json(advice), f, indent=1, sort_keys=True)
+            print(f"Wrote {args.suggest_locks_json}")
+        print("JSON_SUMMARY: " + json.dumps(advice.tally(), sort_keys=True))
+        return 0
+
+    # Board-state gates (#431), BEFORE round 0. Round 0 routes the whole board,
+    # so refusing here saves minutes-to-hours of A* that would fail everything
+    # and then quench a pile.
+    from placement.placement_state import gate_or_exit
+    gate_or_exit(parse_kicad_pcb(args.input_file), args.input_file,
+                 'place_route_loop.py',
+                 allow_unplaced=args.allow_unplaced,
+                 allow_routed=args.allow_routed)
+
     work = args.work_dir or os.path.dirname(os.path.abspath(args.output_file))
     os.makedirs(work, exist_ok=True)
 
@@ -415,6 +543,10 @@ def main():
                      args.route_args, os.path.join(work, 'loop_round0_route.log'))
     print(f"  failures={best['failures']} iterations={best['iterations']:,}"
           f" vias={best['vias']}")
+    # Round 0 is the baseline: its own parent, nothing moved, always "accepted".
+    write_round_sidecar(work, 0, board=cur_file,
+                        routed=os.path.join(work, 'loop_round0_routed.kicad_pcb'),
+                        parent=None, accepted=True, metrics=best)
 
     max_disp = args.max_displacement
     # The swap cap is pinned to the BASE displacement and never widened (#458).
@@ -505,6 +637,13 @@ def main():
             print(f"  SCREENED - skipping the routing run, widening the nudge cap"
                   f" (swap cap stays {swap_cap:.1f}mm).")
             screened += 1
+            # No board is written for a screened round, so without this record a
+            # consumer sees a gap in the numbering and cannot tell "screened"
+            # from "crashed".
+            write_round_sidecar(work, rnd, board=None, routed=None,
+                                parent=cur_file, accepted=False, screened=True,
+                                targets=targets, groups=blocks,
+                                moved=moves_from_placements(pcb_data, placements))
             max_disp *= 1.5
             continue
 
@@ -523,7 +662,17 @@ def main():
         print(f"  -> failures={metrics['failures']}"
               f" iterations={metrics['iterations']:,} vias={metrics['vias']}")
 
-        if better(metrics, best):
+        # Record BEFORE the accept/revert bookkeeping mutates cur_file, so
+        # `parent` names the board this candidate was actually derived from.
+        _accepted = better(metrics, best)
+        write_round_sidecar(work, rnd, board=cand_file,
+                            routed=os.path.join(
+                                work, f'loop_round{rnd}_routed.kicad_pcb'),
+                            parent=cur_file, accepted=_accepted,
+                            targets=targets, groups=blocks,
+                            moved=moves_from_placements(pcb_data, placements),
+                            metrics=metrics)
+        if _accepted:
             print(f"  ACCEPTED (was failures={best['failures']},"
                   f" iterations={best['iterations']:,})")
             best = metrics
@@ -541,6 +690,18 @@ def main():
     print(f"Final: failures={best['failures']} iterations={best['iterations']:,}"
           f" vias={best['vias']}")
     print(f"Wrote {args.output_file}")
+
+    if args.movie is not None:
+        # The work dir already holds every round board plus the loop_round{N}.json
+        # sidecars, so this needs no extra plumbing -- make_movie reads a
+        # directory, and the sidecars are what make the set a chain.
+        try:
+            from make_movie import make_movie
+            out = args.movie or os.path.join(work, 'placement.mp4')
+            got = make_movie([work], out=out, camera='auto', quiet=False)
+            print(f"Movie: {got}" if got else "Movie: nothing to animate")
+        except Exception as e:
+            print(f"  (movie skipped: {e})")
 
 
 if __name__ == "__main__":

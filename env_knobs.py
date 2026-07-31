@@ -81,6 +81,11 @@ def refresh() -> None:
     g['STOP_CLEANUP'] = _opt_in('KICAD_STOP_CLEANUP')
     g['PLANE_PARTIAL_RESTORE'] = _s('KICAD_PLANE_PARTIAL_RESTORE') == '1'
     g['DUMP_BATCH_KWARGS_CONTINUE'] = _s('KICAD_DUMP_BATCH_KWARGS_CONTINUE') == '1'
+    # #431: the placement-movie camera. 'off' (default) keeps every existing
+    # movie bit-for-bit; one variable turns it on for the GUI recorder,
+    # run_plan.py --movie and the stress renderer at once, which is the
+    # CLI/GUI parity story for a feature with no GUI control of its own.
+    g['MOVIE_CAMERA'] = _s('KICAD_MOVIE_CAMERA', 'off')
 
     # --- truthy diagnostics / overrides -------------------------------------
     g['UNBLOCK_DEBUG'] = _truthy('KICAD_UNBLOCK_DEBUG')

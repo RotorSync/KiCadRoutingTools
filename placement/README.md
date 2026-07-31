@@ -125,8 +125,14 @@ python animate_fanout_clearance.py fanned.kicad_pcb capmove.gif --clearance 0.1
 
 This is a read-only visualization tool: the `on_move` hook defaults to `None`,
 so `place_fanout_clearance.py`, the GUI, and the engine itself behave exactly
-as before when it is unused. Requires `pygame` (render) and `Pillow` (GIF
-encode) — both already used elsewhere in this repo; no matplotlib/ffmpeg.
+as before when it is unused. Requires only **Pillow** -- as of #431 it renders
+through `route_render.BoardRenderer` and encodes through
+`animate_route.save_movie`, so it no longer carries its own world->pixel
+transform, GIF writer or font handling, and `pygame` is no longer needed. Two
+things came free with the port: the **real board** beneath the BGA field
+(outline, cutouts, zones), which the pygame version never drew, and `.mp4`
+output (extension picks the format, falling back to a sibling `.gif` when
+imageio-ffmpeg is absent).
 
 ## Testing
 
@@ -224,13 +230,246 @@ true: `build_neighbor_lists`' pruning stays exact rather than lossy, the outline
 gate's per-ref cached reach cannot be outrun, and the no-stranding invariant
 holds unchanged. Lifting it is precisely what makes the 80mm case hard.
 
+### Blocks are also a ROUTING scope
+
+The same blocks drive `route.py`: `--group BLOCK` scopes a routing run to a
+block's nets, `--preview` reports what a run would add without writing a board,
+and `--undo` strips a block's copper back to unrouted. `--list-groups` prints
+what is inferred, with both net counts, before you trust any of it.
+
+Which nets a block "owns" has two honest answers, so `--group-scope` picks:
+
+| scope | means | when it is the right one |
+|---|---|---|
+| `internal` | every pad of the net is inside the block | a schematic sheet — measured **60–70% internal** (glasgow's two 68-part sheets: 52 internal vs 23 boundary), so "route this sheet" is a real self-contained job |
+| `touching` | any pad inside the block, interface nets included | matches what `--component` already means, and it is the **only** useful reading for a `decap` block: those are **0% internal** by construction, since a decoupling cap bridges VCC to GND and both span the board |
+
+**The default depends on the operation**, because the same set of nets is right
+for one and dangerous for the other. Routing defaults to `touching` — routing a
+block's interface is the point. `--undo` defaults to `internal`, because a
+block's touching set contains GND/VCC, and undoing *those* strips their copper
+across the **whole board**: on the rp2350 fixture, `touching` removes 170
+segments, 54 of them nowhere near the block, versus 75 for `internal`. Asking
+for `--group-scope touching --undo` explicitly still works, and warns.
+
+`--undo` refuses KiCad-**locked** copper — `locked` gets no override anywhere
+else in the toolchain (#521) and an undo is not the place to invent one, in the
+segment path or the arc path. Nets protected for a *reason* (length-matched,
+diff-pair) are removed, because naming a net exactly is the deliberate targeting
+those reasons exist to allow. It carries the sibling `.kicad_pro` across (#441):
+an undo only removes copper, so the input's DRC floor is still the correct one
+and must travel.
+
+It removes `(segment ...)` **and** `(arc ...)` tracks. Arcs need their own pass:
+the parser *linearizes* them into `pcb_data.segments`, so an undo counts them,
+but the text writer only matches `(segment ...)` blocks — without the arc pass an
+arc-routed (i.e. hand-routed) net kept its copper while the run reported success.
+
+What `--undo` does **not** do, and says so at runtime:
+
+- **Zone pours.** A filled plane is copper, so a net with a surviving pour is not
+  back to "no copper". Deleting a pour is a plane decision, not an undo, so it
+  reports and leaves it — re-routing such a net gives a track web beside the
+  pour, not the original plane.
+- **Pad/target swaps.** No inverse exists, and they can touch nets outside the
+  scope. It returns the named nets to "no copper", not the board to a prior state.
+- **Copper graphics.** Net-tagged artwork has no `(segment)` block to delete; it
+  is counted and named rather than silently left behind.
+
+It also **refuses to run unscoped** — for a routing run "no scope" sensibly means
+the whole board, but for an undo that silently means erasing every track on it.
+
+## Board-state gates (#431)
+
+Both CLIs refuse, with **exit code 3**, two board states they cannot do anything
+useful with. `0` ok, `1` crash, `2` argparse, `3` "the board is not in a state
+this tool can work on" -- a distinct code so a caller branches on the number
+rather than scraping text.
+
+| state | why refusing beats trying | override |
+|---|---|---|
+| **unplaced** (parts stacked at one coordinate) | the quench REFINES a placement. On a pile every candidate pose is illegal, so the run prints "0 parts moved" plus a legality block that looks like a result, and a large `--max-displacement` yields a tiny scatter around the origin that looks like progress | `--allow-unplaced` |
+| **already routed** | the quench models no copper at all: legality is courtyard + outline, cost is pad-to-pad airwires, and `writer.write_placed_output` rewrites footprint positions only. Every track would be left behind, detached from its pad | `--allow-routed` |
+
+`place_route_loop` gates BEFORE round 0, which routes the whole board -- refusing
+there saves minutes-to-hours of A* that would fail everything and then quench a
+pile. `render_placement.py` WARNS and renders instead: being able to SEE an
+unplaced board is the point of having a renderer for one.
+
+Detection is board-relative. Coincident positions is the only signal strong
+enough to fire alone -- two parts at the *same* coordinate is physically
+impossible in a real placement, however dense. Low spread never fires alone. The
+outside-the-outline share fires at 0.9, not 0.5, because castellated boards
+legitimately overhang; and with no usable outline it is **unavailable**, never
+true, so a misparsed outline cannot condemn a placed board. Measured: none of
+the 27 tracked boards trips any of it, `watchy` included -- and `watchy` is the
+worst case, with 81 of 82 parts in courtyard violation. Density is not
+unplacedness, which is why this does not live in `legality.py`.
+
+## Lock advisor (#431)
+
+`--suggest-locks` on either CLI reports which parts look position-critical, with
+a reason each, and prints a paste-ready `--lock` list. It **never locks
+anything**: a wrong auto-lock silently freezes a part that needed to move, and
+the run just quietly does less.
+
+Its strongest rule is a code fact rather than folklore. `quench.py:207` keeps
+only `net_id > 0` pads, so a net-less NPTH mounting hole has `pin_count == 0`
+and no airwires -- while the only skip in the part loop is `if not fp.pads`, and
+a mounting hole HAS a pad. It is movable with **nothing opposing it but the halo
+term**. `tigard` ships four unlocked M3 holes in exactly that state.
+
+Geometric rules (NPTH, outline overhang, edge proximity) measure the board.
+Lexical ones (footprint name, reference prefix, pin function) guess from names
+and are asymmetric: near-exact on stock KiCad libraries, silent on a house
+library like `interf_u:PGA120`. False negatives are common, false positives
+rare, and the output says so -- treat a quiet result as "nothing detected", not
+"nothing to lock". A ref matched by rules from two different evidence channels
+promotes to high.
+
+High-pin parts are an **advisory**, not a suggestion: `place_route_loop` guards
+them with `--max-target-pins` but `place_optimize` does not, and "large" is not
+"position-critical". Exact refs by default, never invented globs -- a `J*` you
+did not inspect freezes parts you never looked at, which is the auto-lock
+failure merely deferred.
+
+```bash
+python3 place_optimize.py board.kicad_pcb --suggest-locks     --suggest-locks-json /tmp/locks.json     # writes NO board
+# review the reasons, then:
+python3 place_optimize.py board.kicad_pcb out.kicad_pcb --lock H1 J1 J2 ...
+# confirm you covered them -- unlocked_high must be 0:
+python3 place_optimize.py board.kicad_pcb --suggest-locks --lock H1 J1 J2 ...
+```
+
+## Reviewing a placement: render it (#431)
+
+```bash
+python3 render_placement.py placed.kicad_pcb --before seed.kicad_pcb -o delta.png
+python3 render_placement.py board.kicad_pcb --list-groups --group-by sheet
+python3 render_placement.py board.kicad_pcb --zoom-group sheet:58d913ec --per-side -o out/
+```
+
+**The render is triage, not a verdict.** The verdict is the caption's numbers.
+Do not judge a placement by how much moved -- "lots moved, looks broken" and
+"barely moved, looks safe" are both wrong.
+
+### What it renders
+
+Every panel below is `render_placement.py` output, and every one carries a
+metrics caption — the render is triage, the caption is the verdict.
+
+**The placement diff, drawn.** `--before` turns on the dashed seed rects and the
+displacement arrows, so "what moved and how far" is the picture rather than a
+diff of two files. 22 parts here; `C4` travelled 95.65 mm.
+
+```bash
+python3 render_placement.py placed.kicad_pcb --before seed.kicad_pcb -o delta.png
+```
+
+![placement delta](../docs/placement-delta.png)
+
+**Per-side panels.** Placement lives on two sides, so `--per-side` emits one
+panel per side instead of one flattened projection. Parts on the side you asked
+for are bright; the far side's SMD pads are dimmed (still context — a back-side
+part is why a front trace has to detour); **through-hole pads stay full
+brightness on both**, because they are physically on both and a hole cannot move
+on one side only.
+
+```bash
+python3 render_placement.py board.kicad_pcb --before seed.kicad_pcb --per-side -o out/
+```
+
+| front | back |
+|---|---|
+| ![front](../docs/placement-side-F.png) | ![back](../docs/placement-side-B.png) |
+
+**Zoom to one placement block.** `--zoom-group` takes the same block names as
+`route.py --group` — `--list-groups` prints them with their part and net counts.
+
+```bash
+python3 render_placement.py board.kicad_pcb --list-groups --group-by sheet
+python3 render_placement.py board.kicad_pcb --zoom-group 58d913ec --group-by sheet -o blk.png
+```
+
+![group zoom](../docs/placement-group-zoom.png)
+
+**An unplaced board.** The placement CLIs refuse this one (exit 3); the renderer
+warns and draws it anyway, framed to the PARTS rather than the outline — a pile
+at the origin would otherwise render as a dot in the corner of an empty board.
+13 footprints at 1 distinct position, and `overlap 792 mm²` gives it away.
+
+![unplaced](../docs/placement-unplaced.png)
+
+**Reference designators.** On by default, and sized to the PART rather than to
+the image — scaling by image height alone gives an 8px label at any zoom:
+drawn, technically present, and unreadable. A part too small to letter is
+skipped, and its arrow carries the meaning instead.
+
+![labels](../docs/placement-labels.png)
+
+**Every toggle, on one board.** The same 13-part delta, one flag at a time:
+
+![toggles](../docs/placement-toggles.png)
+
+`--no-delta-first` looks unchanged there for a real reason: 12 of the 13 parts
+moved, so there is no context left to dim. It matters on a board where the delta
+is a genuine subset — which is also where `--ratsnest-all` earns its keep:
+
+![ratsnest](../docs/placement-ratsnest.png)
+
+By default only the moved and attributed nets are drawn. `--ratsnest-all` is the
+deliberate hairball switch: on a dense board it reproduces exactly the
+unreadable mess KiCad already shows, which is limitation #1 in the issue and the
+reason delta-first is a default rather than polish.
+
+**Just the nets you are chasing.** `--ratsnest-nets` takes the same globs as
+`route.py --nets`, exclusions included, and draws only those airwires — in their
+own colour, with the parts they run between labelled and un-dimmed. Between "the
+nets that moved" and "every net on the board" this is the case that actually
+comes up.
+
+```bash
+python3 render_placement.py board.kicad_pcb --before seed.kicad_pcb     --ratsnest-nets '/CLK*' '/DATA*' '!*_N' -o clk.png
+```
+
+![named nets](../docs/placement-ratsnest-nets.png)
+
+The matching goes through `net_queries.matches_net_filter` — the same helper
+`route.py --nets` and the plan executor use — so a pattern means here exactly
+what it means there. A pattern that matches nothing says so on stderr rather
+than rendering an empty ratsnest, which would read as "this net has no airwires".
+
+`--focus` adds one cropped panel per failed-net cluster.
+
+### The movie
+
+`make_movie.py WORKDIR --camera auto` animates a `place_route_loop` work dir:
+an establishing overview, a zoom to the parts each round moved, and — when the
+work moves to the other face — the board **turns over**, 180° about the vertical
+axis, with every frame after that mirrored, because you are now looking at the
+back.
+
+13 components, 4 on the back, routed. `--tween 0` cuts to each new placement
+instead of gliding.
+
+![placement movie](../docs/placement-movie.gif)
+
+One rule makes the sequencing legible: **a frame either moves the camera or
+changes the board, never both.** Every transition happens over a frozen board and
+is followed by a settle beat, so the moves only play once the camera has arrived.
+
 ## Module layout
 
 | File | Purpose |
 |------|---------|
 | `quench.py` | The optimizer: cost terms, move generation, greedy quench |
+| `../group_routing.py` | Block → net scoping, and the undo, for `route.py` (#459) |
 | `fanout_clearance.py` | Post-fanout decoupling-cap clearance repair (#130) |
 | `groups.py` | Placement blocks: which parts move as one rigid body (#459) |
+| `lock_advisor.py` | Which parts should not be moved, and why (#431). Advice only |
+| `placement_state.py` | Board-state gates: unplaced, and already-routed (#431) |
+| `cli_gates.py` | argparse shared by both placement CLIs so they cannot drift |
+| `../render_placement.py` | Headless PNG stills of placement status (#431) |
 | `legality.py` | Hard constraints shared by both engines: board side, real Edge.Cuts containment, and the OO/OoB graders (#456) |
 | `parser.py` | Courtyard boundary and locked-footprint extraction |
 | `writer.py` | Writes new positions/rotations (rotates pad angles with the footprint, as KiCad stores pad angle = footprint + pad rotation) |

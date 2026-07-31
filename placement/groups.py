@@ -252,10 +252,14 @@ def derive_groups(pcb_data, sources, movable=None) -> Dict[str, List[str]]:
     return out
 
 
-def _short(name: str) -> str:
+def short_name(name: str) -> str:
     """Readable form of a group key. Sheet keys are uuid paths -- KiCad's
     Sheetname property is absent from every corpus board, so the uuid is all
-    there is; show its tail rather than 36 meaningless characters."""
+    there is; show its TAIL rather than 36 meaningless characters.
+
+    Public because it is what the user SEES: `--list-groups` prints this form,
+    so `route.py --group` has to accept it back, and both need the same rule.
+    """
     src, _, rest = name.partition(':')
     if src != 'sheet':
         return name
@@ -270,7 +274,7 @@ def describe(groups: Dict[str, List[str]], limit: int = 8) -> str:
              f"{sum(len(v) for v in groups.values())} part(s)"]
     for name, refs in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))[:limit]:
         shown = ', '.join(refs[:6]) + (', ...' if len(refs) > 6 else '')
-        lines.append(f"    {_short(name)}  ({len(refs)}): {shown}")
+        lines.append(f"    {short_name(name)}  ({len(refs)}): {shown}")
     if len(groups) > limit:
         lines.append(f"    ... and {len(groups) - limit} more")
     return '\n'.join(lines)

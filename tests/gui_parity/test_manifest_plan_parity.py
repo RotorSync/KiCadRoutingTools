@@ -313,6 +313,87 @@ def check_param_resolution():
     return bad
 
 
+def check_group_flags():
+    """#459: --group must SURVIVE, and --undo/--preview must be REFUSED.
+
+    Self-contained (no corpus needed) because the failure is silent and severe:
+    all three flags used to fall through to the generic `params` bucket, where
+    ai_plan drops any param with no matching dialog control -- and `nets` then
+    defaults to ['*']. So a recorded `--undo BLOCK` converted to a plan step that
+    ROUTES the whole board: the exact inverse of the recorded command, on 100x
+    the scope, with nothing printed.
+    """
+    bad = []
+
+    argv = ['python3', 'route.py', 'in.kicad_pcb', 'out.kicad_pcb',
+            '--group', 'sheet:abcd1234', '--group-scope', 'internal',
+            '--group-by', 'sheet', '--clearance', '0.09']
+    step = m2p.parse_command(argv)
+    if not step:
+        bad.append(('--group', 'produced no step at all'))
+    else:
+        for flag, key, want in (('--group', 'group', 'sheet:abcd1234'),
+                                ('--group-scope', 'group_scope', 'internal'),
+                                ('--group-by', 'group_by', 'sheet')):
+            got = step.get(key)
+            if got != want:
+                bad.append((flag, f"step[{key!r}] want {want!r} got {got!r} "
+                                  f"(in params instead? "
+                                  f"{step.get('params', {}).get(key)!r})"))
+        if step.get('params', {}).get('group'):
+            bad.append(('--group', "landed in params, where ai_plan drops it"))
+
+    for flag in ('--undo', '--preview', '--list-groups'):
+        step = m2p.parse_command(['python3', 'route.py', 'in.kicad_pcb',
+                                  'out.kicad_pcb', flag, '--group', 'decap:U3'])
+        if step is None or '_refused' not in (step or {}):
+            bad.append((flag, f"NOT refused -- converted to {step!r}. A replayed "
+                              f"{flag} step would route these nets instead."))
+    return bad
+
+
+def check_refused_tools():
+    """#431: placement tools must be REFUSED loudly, and must not break the chain.
+
+    They mutate the board, so the recorded command has to stay in the manifest
+    to keep `compute_prune_keep` linking board -> board_placed. Dropping it
+    silently (the unknown-tool path, which only bumps a `skipped` counter)
+    leaves the next route step's input produced by nothing and the pruner then
+    discards legitimate upstream steps.
+    """
+    bad = []
+    for tool in ('place_optimize.py', 'place_route_loop.py', 'render_placement.py'):
+        step = m2p.parse_command(['python3', tool, 'a.kicad_pcb', 'b.kicad_pcb'])
+        if not step or '_refused' not in step:
+            bad.append((tool, f"NOT refused -- converted to {step!r}"))
+
+    # Chain integrity: a placement step between a fanout and a route must not
+    # take either of them with it.
+    import tempfile
+    d = tempfile.mkdtemp()
+    man = os.path.join(d, 'redo_commands.sh')
+    with open(man, 'w', encoding='utf-8', newline='\n') as f:
+        f.write("#!/bin/sh\n"
+                "python3 bga_fanout.py b.kicad_pcb -o s1.kicad_pcb "
+                "--component U1 --clearance 0.1\n"
+                "python3 place_optimize.py s1.kicad_pcb s2.kicad_pcb "
+                "--max-displacement 3\n"
+                "python3 route.py s2.kicad_pcb s3.kicad_pcb --nets '*' "
+                "--clearance 0.1\n")
+    try:
+        steps, _skipped = m2p.plan_steps_from_manifest(man)
+        actions = [s.get('action') for s in steps]
+        if actions != ['fanout', 'route']:
+            bad.append(('<chain>', f"expected ['fanout','route'], got {actions} "
+                                   f"-- a refused placement step broke the chain"))
+    except Exception as e:
+        bad.append(('<chain>', f"{type(e).__name__}: {e}"))
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+    return bad
+
+
 def main():
     # Corpus manifests give broad coverage; the checked-in fixture makes the gate
     # self-contained (runs on a fresh checkout with no corpus). Explicit args win.
@@ -356,7 +437,20 @@ def main():
     for p, why in res_bad:
         print(f"    {p}: {why}")
 
-    return 1 if (total_bad or res_bad) else 0
+    # #459 placement-block flags (self-contained, no corpus needed).
+    grp_bad = check_group_flags()
+    print(f"\nPlacement-block flags: {'OK' if not grp_bad else 'FAILED'} "
+          f"(--group survives, --undo/--preview refused).")
+    for f, why in grp_bad:
+        print(f"    {f}: {why}")
+
+    ref_bad = check_refused_tools()
+    print(f"Placement tools: {'OK' if not ref_bad else 'FAILED'} "
+          f"(refused loudly, chain intact).")
+    for f, why in ref_bad:
+        print(f"    {f}: {why}")
+
+    return 1 if (total_bad or res_bad or grp_bad or ref_bad) else 0
 
 
 if __name__ == "__main__":
