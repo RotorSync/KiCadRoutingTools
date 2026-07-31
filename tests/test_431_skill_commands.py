@@ -41,7 +41,7 @@ SOURCES = [
 ]
 
 TOOLS = ('place_optimize.py', 'place_route_loop.py', 'render_placement.py',
-         'check_floorplan.py')
+         'check_floorplan.py', 'make_movie.py')
 
 # Flags that belong to a DIFFERENT tool on the same command line (a pipe, a
 # --route-args payload). --route-args carries route.py's flags verbatim.

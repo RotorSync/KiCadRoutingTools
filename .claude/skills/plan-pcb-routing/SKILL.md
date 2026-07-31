@@ -212,6 +212,31 @@ numbers. **Do not adjudicate clearance from pixels.**
 dumps. Those are for the human. Budget **≤3 images read per turn** — pick by the
 question you have, not by what is available.
 
+### Always produce the movie — it is the only artifact that shows *how*
+
+`place_route_loop` renders it **by default** (`--no-movie` opts out). Every other
+artifact is a snapshot: the movie is the only one that shows which round moved
+what, and what the router did with the room it was given. Do not make the user
+ask for it.
+
+When the chain was **not** a `place_route_loop` run — a hand chain of
+`place_optimize` → `route` → `route_planes` → repair, which has no
+`loop_round*.json` sidecars and so no camera — build it from the step boards you
+already wrote, in order. They are cumulative, which is exactly what the animator
+wants:
+
+```bash
+python3 -X utf8 make_movie.py placed.kicad_pcb r3.kicad_pcb r4.kicad_pcb r5.kicad_pcb \
+    -o wk/routing.gif --size 1600 --fps 12 --chunks 30 --end-hold 12
+```
+
+`.mp4` needs `imageio` + `imageio-ffmpeg` and falls back to a sibling `.gif`
+without them — ask for `.gif` directly if you know they are missing, rather than
+letting the fallback surprise you. `--camera auto` needs the loop's sidecars and
+warns (does not fail) when there are none. Hand it to the user with
+`SendUserFile`; do not `Read` it — it is a show-without-reading artifact, and its
+frames would blow the ≤3 budget for nothing.
+
 A render can never establish: that routing will now succeed (only a re-route
 shows that); that the placement improved (`crossings`/`hpwl` decide); that a
 part is or is not in violation (`overlap_area`/`oob_count` decide); or anything

@@ -461,13 +461,23 @@ def main():
     parser.add_argument("--work-dir", default=None,
                         help="Directory for intermediate files "
                              "(default: alongside output)")
-    parser.add_argument("--movie", nargs='?', const='', default=None,
+    # ON BY DEFAULT. The loop already writes every round's board and sidecar,
+    # so the movie is the only artifact that shows WHY a round was taken -- and
+    # a flag nobody remembers to pass is a flag nobody sees. It renders from
+    # what is already on disk after the loop has finished, so it cannot change
+    # the routing result, and a failure to render is caught and reported rather
+    # than failing the run.
+    parser.add_argument("--movie", nargs='?', const='', default='',
                         metavar="OUT",
                         help="render a movie of the whole repair when the loop "
                              "finishes, with the placement camera on (#431): "
                              "overview -> zoom to each round's moved parts -> "
                              "pan when the work moves -> then play the moves. "
+                             "ON BY DEFAULT; pass --no-movie to skip it. "
                              "Default path: <work-dir>/placement.mp4")
+    parser.add_argument("--no-movie", dest='movie', action='store_const',
+                        const=None,
+                        help="skip the end-of-run movie (see --movie)")
     parser.add_argument("--movie-tween", type=int, default=8, metavar="N",
                         help="frames per placement glide in --movie; 0 = no "
                              "glide, cut straight to the new placement")
