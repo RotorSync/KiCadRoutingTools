@@ -1,6 +1,6 @@
 ---
 name: plan-pcb-routing
-description: Analyzes a KiCad PCB file and creates a comprehensive placement-and-routing plan. Detects unplaced boards and advises which parts to lock before any placement repair, examines components for fanout needs (BGA/QFN/QFP/PGA), identifies differential pairs, categorizes power/ground nets, and presents a step-by-step workflow with explanations.
+description: Analyzes a KiCad PCB file and creates a comprehensive placement-and-routing plan. Routing-only is the default and fully supported path. Detects unplaced boards and advises which parts to lock before any placement repair, can declare a floorplan intent and grade the board against it, examines components for fanout needs (BGA/QFN/QFP/PGA), identifies differential pairs, categorizes power/ground nets, and presents a step-by-step workflow with explanations. Pairs every render with the JSON key that confirms or contradicts it, reads the renders itself rather than only showing them, and classifies routing failures as floorplan-, placement- or parameter-shaped so the two halves form one loop. Never changes the board outline.
 ---
 
 # Plan PCB Routing
@@ -118,11 +118,66 @@ carries the real metrics.
 `iterations`. Do **not** judge a placement by how much moved: "lots moved, looks
 broken" and "barely moved, looks safe" are both wrong.
 
+### Step 0e: declare the floorplan, so it can be checked
+
+A placement judged only by `crossings` and `hpwl` is judged by two numbers that
+are **indifferent between a sensible layout and a scattered one with the same
+wirelength**. Declaring where parts belong is what makes the rest checkable.
+
+```bash
+# read a starter intent OFF the board, then edit it down
+python3 -X utf8 check_floorplan.py board.kicad_pcb --emit-intent /tmp/intent.json
+python3 -X utf8 check_floorplan.py board.kicad_pcb --intent /tmp/intent.json --health
+```
+
+Exit **0** clean, **4** violations, **3** the board is not in a state it can
+grade. Each violation carries the measured number beside the limit it broke, so
+`--json` output is quotable evidence rather than an opinion.
+
+Worth declaring, in rough order of value: `must_lock` for the parts the lock
+advisor flagged; `edge_connectors` for anything that is *meant* to overhang
+(this is what stops `oob_count` reporting a card edge as a defect forever);
+`keepouts` for mounting holes and antenna clearances; `decaps.max_distance_mm`;
+and `blocks` with a `zone` **only where the parts really are one contiguous
+area**. Schematic sheets usually are not — on ulx3s all ten sheet bounding
+boxes overlap each other, so `--emit-intent` claims a zone for only 4 of 10 and
+says why for the rest.
+
+`--health` adds the routability signals: how far each block sits from the parts
+it connects to, and what crosses each declared bus corridor. Advisory — they say
+the floorplan will fight the router, not that it breaks your intent.
+
+### THE BOARD OUTLINE IS NOT YOURS TO CHANGE
+
+Size, shape, cutouts, slots and mounting-hole geometry are mechanical decisions
+the user owns: enclosure fit, panel rails, connector apertures.
+
+- **Never resize a board**, and never "just widen it a little". If a board is
+  genuinely too small for its parts, **say so in words with the measured number
+  and stop.** That is a design decision, not a routing one.
+- **Never run** `tests/stress/fix_outline_gaps.py`, `strip_routing.py` or
+  `prep_set2.py`. They are corpus-normalization tools and they *do* rewrite
+  `Edge.Cuts` — the only things in this repo that do.
+- The intent's `envelope` is **read from the board**, never authored. A part
+  outside it is a finding about the **part**.
+- A part sitting inside a **cutout** is caught by `oob_count` and `oob_amount`,
+  never by `oob_area` — that one is measured against the bounding-box inset and
+  scores a part in a slot as `0.0`. `check_floorplan` refuses it as a budget
+  key, with that reason.
+
+This mirrors the rules you already follow for user-owned geometry: guide
+corridors and keepout polygons are described in words and drawn by the user, and
+the stackup is never edited directly.
+
 ### Which artifact to produce, and what to check it against
 
 **Never read a picture on its own.** Every render is paired with a number that
 either confirms or contradicts it, and the number wins. A render that looks
 tidier while `crossings` went up is a worse placement that photographs well.
+
+Full key-by-key map in
+[`references/evidence-map.md`](references/evidence-map.md) — read it before
+quoting any number. The headline pairings:
 
 | after this step | produce | and CHECK it against |
 |---|---|---|
@@ -134,16 +189,85 @@ tidier while `crossings` went up is a worse placement that photographs well.
 | routing failed after placement | `--summary-json <route log>` on the render | the `failed_nets` and `blockers` in that same summary — the render colours exactly those, so the picture and the diagnosis are the same data |
 | board looks wrong / empty | `render_placement.py board -o state.png` | exit code. **3 means the board is unplaced or already routed** — read the message rather than reaching for an override |
 
+### LOOK at the render — you, not just the user
+
+Renders are for **intent**; numbers are for **legality**. A render answers *"is
+this the structure I meant?"* — bus corridors, block cohesion, connector
+orientation, which pocket the failures sit in. It never answers *"is this
+legal?"*: clearance, overlap, off-board, connectivity and DRC all come from
+numbers. **Do not adjudicate clearance from pixels.**
+
+**`Read` the PNG yourself, and say what you saw, in exactly these four cases:**
+
+1. **Before writing an intent** — `--per-side` on any board with back-side
+   parts. You cannot declare zones for a board you have not looked at.
+2. **After any accepted placement change** — the delta against the board it
+   actually came from. One question only: *did the macro structure survive?*
+3. **When routing failed and you need to know why** —
+   `--summary-json <route log> --focus`. One question: *do the failures share
+   one pocket* (→ placement) *or are they scattered* (→ parameters)?
+4. **When a block decision is live** — `--zoom-group`.
+
+**Show without reading:** the movie, `--ratsnest-all` hairballs, full panel
+dumps. Those are for the human. Budget **≤3 images read per turn** — pick by the
+question you have, not by what is available.
+
+A render can never establish: that routing will now succeed (only a re-route
+shows that); that the placement improved (`crossings`/`hpwl` decide); that a
+part is or is not in violation (`overlap_area`/`oob_count` decide); or anything
+at a coordinate outside that panel's `view` rect.
+
+Two things the picture cannot show you at all: `board_edge_contours` (milled
+inner contours the router keeps clearance from) are **not drawn**, and a board
+whose outline failed to chain renders as a clean **rectangle**. Both are visible
+only in `check_floorplan`'s `outline` block.
+
 ### Verify, do not assume
 
 - **Re-read the `JSON_SUMMARY` line you just produced.** Do not carry a number
   forward from an earlier step or from memory of what you expected.
+- **A tool's own report does not satisfy its own gate.** `place_optimize` says
+  the placement improved; confirm it on a *different channel* by running
+  `render_placement.py <the written output> --json` and checking `metrics.
+  crossings` and `metrics.hpwl` reproduce it. That is what catches a writer that
+  dropped something between the objective and the file.
 - **A render proves nothing about connectivity or DRC.** Those come from
   `check_connected.py` and `check_drc.py`, graded at the clearance the board was
   actually routed to.
 - **After ANY placement change, every downstream routed board is stale.** Re-run
   the chain from the placed board. Do not reuse a routed artifact from before it.
 - **If two sources disagree, believe the JSON.** The picture is a summary of it.
+- **`0 violations` and `0 rules ran` are different.** `check_floorplan` reports
+  `rules_run` and `rules_skipped` precisely so you can tell them apart; quote
+  both.
+
+### Verify with independent subagents, when you can
+
+For anything beyond a single obvious call, **fan out verifiers in ONE response**
+and hand each only its slice of the round's evidence — never the raw
+`.kicad_pcb`. The prompts are in
+[`references/verifier-prompts.md`](references/verifier-prompts.md). Six lenses:
+`intent`, `legality`, `delta`, `blocks`, `routing-feedback`, `coverage`.
+
+Each returns exactly one machine-readable line:
+
+```
+VERDICT=PASS:lens=<lens>
+VERDICT=FAIL:lens=<lens>;finding=<one line>;evidence=<path#json-pointer|path@x,y>;route=<step>
+```
+
+**A verifier that cannot fill `evidence=` has not verified anything.** The gate
+is met when every lens passes or every finding is dispositioned in writing.
+
+`VERDICT=`, **not** `RESULT=`. The GUI takes the **last** `RESULT=` line in a
+reply and parses it as the plan JSON, so a verdict spelled that way would be
+read as a malformed plan.
+
+**If the Agent tool is unavailable** — the GUI's headless runs allow only
+`Read,Glob,Grep,Bash,WebSearch` — run the identical lenses yourself, in the same
+order, on the same inputs, tag each `mode=inline`, and **say in the report that
+verification was single-agent**. A run must never look like a fan-out happened
+when it did not.
 
 ### Good and bad, concretely
 
@@ -206,12 +330,52 @@ plan and hand the plan the placed board. `make_plan.py` / `manifest_to_plan.py`
 **refuse** a recorded `place_optimize.py` / `place_route_loop.py` command loudly
 rather than convert it.
 
-### Scoping a run to one block (`--group`) — opt-in, off by default
+### Do we need blocks at all, and which ones? — a procedure
 
-Both group features are **opt-in and the default chain is unchanged**.
-`--group-by` defaults to `none` on the placement CLIs and `route.py --group` is
-unset. **Do not add `--group*` to a plan or a command unless the user asked for
-it.**
+**G0. The default is no blocks.** `--group-by` defaults to `none` on the
+placement CLIs and `route.py --group` is unset. **Do not add `--group*` to a
+plan or a command unless the user asked for it** — a routing run that silently
+acquires a scope routes a fraction of the board and reports success on that
+fraction.
+
+**G1. Name the job first.** Three different jobs want three different sources:
+
+| the job | the tool | the source that works |
+|---|---|---|
+| move parts together | `place_optimize` / `place_route_loop --group-by` | `decap`, and realistically only `decap` |
+| scope a route or an undo | `route.py --group` + `--group-scope` | `sheet` (or `kicad` if it exists) |
+| frame a picture, or a zone in an intent | `render_placement --zoom-group`, `check_floorplan` | `sheet` |
+
+**G2. List before deciding.** Both are report-only, exit 0, write nothing:
+
+```bash
+python3 -X utf8 route.py board.kicad_pcb --list-groups --group-by auto
+python3 -X utf8 render_placement.py board.kicad_pcb --list-groups --group-by sheet
+```
+
+**G3. Choose on the measured evidence, in this order.**
+
+1. `kicad` — the designer's own `(group ...)`. Exact when present, but on **0 of
+   27** in-repo boards. If it fires, trust it and stop looking.
+2. `sheet` — **12 of 22** boards with sheet paths have more than one. The
+   workhorse **for scoping and framing**. **Not for movement**: sheet blocks of
+   16–83 parts moved on no board tried. Also not for zones — a sheet is a
+   *functional* grouping, so its members scatter and its bounding box overlaps
+   its neighbours' (all 10 of ulx3s's do).
+3. `decap` — the only source that measurably *moves* anything. **0% internal by
+   construction** (a cap bridges VCC and GND, both board-spanning), so it is
+   meaningless as a routing scope.
+4. `netprefix` — weakest. Enable expecting little.
+
+**G4. Pick the scope deliberately.** `--group-scope` defaults **depend on the
+operation**: `touching` when routing (routing a block's interface is the point),
+`internal` with `--undo`, because a block's touching set contains GND/VCC and
+undoing those strips copper board-wide (rp2350: 170 segments vs 75).
+
+**G5. Confirm it did something.** Read `blocks` and `block_parts` from the
+`JSON_SUMMARY` and the `describe()` banner. **`blocks: 0` means drop the flag**,
+not "it helped". And if a round's `groups` pulled a large block in, the run moved
+far more than you targeted.
 
 - Always list first: `python3 route.py board.kicad_pcb --list-groups --group-by auto`
   (prints parts and touching/internal net counts, exits 0, routes nothing).
@@ -1754,6 +1918,38 @@ Rules of the loop:
 - **Honest gates:** grade every accepted retry with `check_connected` AND
   `check_drc` at the routed clearance (plus the kicad oracle for final
   boards) — never accept a retry that trades new DRC for completion.
+
+### Step 9: is this failure floorplan-shaped, placement-shaped, or parameter-shaped?
+
+**Placement and routing are one loop, not two stages.** The routing evidence is
+what tells you which of them to fix — this is the decision the whole chain
+exists to support, and getting it wrong costs either a wasted re-place or days
+of grinding a router against a floorplan error.
+
+**Default answer: fix the parameters.** Placement is the escape hatch, not the
+first resort. Classify on the exact keys, not on impressions:
+
+| evidence | verdict | where to go |
+|---|---|---|
+| failures cluster into ≤2 pockets (`--focus` panels), their refs share one block, `blockers` non-empty | **floorplan** | back to **Step 0e** — re-zone. A 3 mm nudge cannot move a block 80 mm |
+| failures scattered, `blockers` non-empty, every failing ref is a ≤40-pin passive | **placement detail** | back to **Step 0c**, `place_route_loop` with the caps above |
+| `blockers` empty; the log says boxed in by static obstacles | **parameters** | stay here — grid, ripup budget, width. Placement is not the lever |
+| 2-layer board, heavy F.Cu skew, via count far above a hand layout | **parameters** | layer-cost rebalance, below |
+| `oob_count` or `overlap_area` rose after the last placement | **the placement is illegal** | discard it; do not route it |
+| `check_floorplan` exits 4 with `zone_containment` | **intent violated** | fix the placement to match, or say why the intent changed. Do not quietly rewrite the intent to match the board |
+| a whole net has no copper while `pad_pairs_connected` looks healthy | **coverage bug** | the Step 5b ledger — not a placement problem at all |
+
+**Stop conditions for the loop.** Say which one fired:
+
+1. `failures == 0` — the loop stops itself.
+2. Two consecutive rounds `accepted: false` (or `screened: true`) with
+   `failures` unchanged → **floorplan-limited**. Report that; do not raise
+   `--rounds`.
+3. `ratsnest_crossings` and `ratsnest_hpwl` both flat while `failures` is
+   unchanged → the proxy is exhausted. More rounds will not help.
+4. The same nets fail every round and the diagnosis is parameters → fix those.
+5. The widened nudge cap would exceed ~7 mm (the loop widens ×1.5 per rejection:
+   3 → 4.5 → 6.75) → stop and hand the user a short, specific move list.
 
 ### Diagnose and Retry
 
