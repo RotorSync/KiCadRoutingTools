@@ -422,6 +422,23 @@ deliberate hairball switch: on a dense board it reproduces exactly the
 unreadable mess KiCad already shows, which is limitation #1 in the issue and the
 reason delta-first is a default rather than polish.
 
+**Just the nets you are chasing.** `--ratsnest-nets` takes the same globs as
+`route.py --nets`, exclusions included, and draws only those airwires — in their
+own colour, with the parts they run between labelled and un-dimmed. Between "the
+nets that moved" and "every net on the board" this is the case that actually
+comes up.
+
+```bash
+python3 render_placement.py board.kicad_pcb --before seed.kicad_pcb     --ratsnest-nets '/CLK*' '/DATA*' '!*_N' -o clk.png
+```
+
+![named nets](../docs/placement-ratsnest-nets.png)
+
+The matching goes through `net_queries.matches_net_filter` — the same helper
+`route.py --nets` and the plan executor use — so a pattern means here exactly
+what it means there. A pattern that matches nothing says so on stderr rather
+than rendering an empty ratsnest, which would read as "this net has no airwires".
+
 `--focus` adds one cropped panel per failed-net cluster.
 
 ### The movie

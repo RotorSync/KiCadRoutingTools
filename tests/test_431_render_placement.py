@@ -268,6 +268,54 @@ def test_an_unplaced_board_still_renders_and_says_so():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_ratsnest_nets_draws_only_the_named_nets():
+    """Between "the nets that moved" and "every net on the board" is the case
+    that actually comes up: the handful you are chasing. Naming them also makes
+    their parts prominent -- a set of wires with nothing identified is not much
+    of an answer."""
+    m = _model()
+    all_ids = {n.net_id for n in m.pcb.nets.values()
+               if n.net_id > 0 and len(n.pads) > 1}
+    pick = m.net_ids_matching(['/BIT*'])
+    assert pick, "fixture: expected some matching nets"
+    assert pick < all_ids, "the pattern must select a strict subset"
+
+    o = dict(borders=False, labels=False, ratsnest=True, pads=False,
+             ghosts=False, arrows=False, delta_first=True, ratsnest_all=False)
+    plain = RP.render_panel(RP.PanelSpec(m, opts=o), size=420, supersample=1)
+    named = RP.render_panel(RP.PanelSpec(m, pick_nets=pick, opts=o),
+                            size=420, supersample=1)
+    assert ImageChops.difference(plain, named).getbbox() is not None
+    # the picked colour must actually appear, and only when asked for
+    assert RP.C_AIR_PICK in {c for _n, c in named.convert('RGB').getcolors(1 << 20)}
+    assert RP.C_AIR_PICK not in {c for _n, c in plain.convert('RGB').getcolors(1 << 20)}
+
+
+def test_ratsnest_nets_uses_the_shared_net_filter():
+    """Same glob semantics as route.py --nets, exclusions included. A second
+    matcher in a viewer would be a second set of surprises."""
+    m = _model()
+    from net_queries import matches_net_filter
+    pats = ['*', '!/BIT*']
+    got = m.net_ids_matching(pats)
+    want = {n.net_id for n in m.pcb.nets.values()
+            if n.net_id > 0 and n.name and matches_net_filter(n.name, pats)}
+    assert got == want and got, "exclusion patterns must behave as elsewhere"
+    assert not (got & m.net_ids_matching(['/BIT*']))
+
+
+def test_ratsnest_nets_cli_reports_an_empty_match():
+    """Silently rendering nothing would read as "this net has no airwires"."""
+    d = tempfile.mkdtemp()
+    try:
+        r = _run(PLACED, '-o', os.path.join(d, 'x.png'), '--size', '260',
+                 '--supersample', '1', '--ratsnest-nets', 'NOSUCHNET*')
+        assert r.returncode == 0, r.stderr[-300:]
+        assert 'no nets match' in (r.stdout + r.stderr)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 TESTS = [
     test_moved_parts_finds_the_tracked_delta,
     test_rects_come_from_the_optimizers_own_model,
@@ -284,6 +332,9 @@ TESTS = [
     test_the_caption_carries_the_verdict_not_just_a_title,
     test_cli_writes_a_png_and_a_machine_readable_summary,
     test_an_unplaced_board_still_renders_and_says_so,
+    test_ratsnest_nets_draws_only_the_named_nets,
+    test_ratsnest_nets_uses_the_shared_net_filter,
+    test_ratsnest_nets_cli_reports_an_empty_match,
 ]
 
 

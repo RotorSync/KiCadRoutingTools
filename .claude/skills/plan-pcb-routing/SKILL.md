@@ -118,6 +118,86 @@ carries the real metrics.
 `iterations`. Do **not** judge a placement by how much moved: "lots moved, looks
 broken" and "barely moved, looks safe" are both wrong.
 
+### Which artifact to produce, and what to check it against
+
+**Never read a picture on its own.** Every render is paired with a number that
+either confirms or contradicts it, and the number wins. A render that looks
+tidier while `crossings` went up is a worse placement that photographs well.
+
+| after this step | produce | and CHECK it against |
+|---|---|---|
+| 0b lock advice | *(none)* | `JSON_SUMMARY` `unlocked_high` — re-run with your `--lock` list until it is **0**, or say which findings you are deliberately leaving free and why |
+| 0c `place_optimize` | `render_placement.py placed --before seed -o delta.png` | `JSON_SUMMARY` `crossings_after` vs `crossings_before`, `hpwl_after` vs `hpwl_before`. **Both must improve or you discard the result.** The arrows show what moved; only these say whether it helped |
+| 0c on a two-sided board | add `--per-side` | `overlap_area` — a per-side panel is the only place a back-side collision is visible, and `overlap_area > 0` tells you one exists before you go looking |
+| chasing one bus / clock | add `--ratsnest-nets '/CLK*'` | the same crossings/hpwl pair. Use this when the default delta view is too busy to read |
+| a `place_route_loop` round | `make_movie.py WORKDIR --camera auto` | per-round `failures` and `iterations` from the loop's own output. A round that moved a lot and changed neither is noise |
+| routing failed after placement | `--summary-json <route log>` on the render | the `failed_nets` and `blockers` in that same summary — the render colours exactly those, so the picture and the diagnosis are the same data |
+| board looks wrong / empty | `render_placement.py board -o state.png` | exit code. **3 means the board is unplaced or already routed** — read the message rather than reaching for an override |
+
+### Verify, do not assume
+
+- **Re-read the `JSON_SUMMARY` line you just produced.** Do not carry a number
+  forward from an earlier step or from memory of what you expected.
+- **A render proves nothing about connectivity or DRC.** Those come from
+  `check_connected.py` and `check_drc.py`, graded at the clearance the board was
+  actually routed to.
+- **After ANY placement change, every downstream routed board is stale.** Re-run
+  the chain from the placed board. Do not reuse a routed artifact from before it.
+- **If two sources disagree, believe the JSON.** The picture is a summary of it.
+
+### Good and bad, concretely
+
+**Do**
+
+- Default to **not** running placement. The measured verdict is that the quench
+  is a repair tool for rough/generated placements, not a polish pass — on a good
+  hand placement it was neutral at best and its default weights caused 2 new
+  routing failures.
+- Run the lock advisor **before** the first placement run, and read the reasons
+  rather than pasting the list blind.
+- Keep `--max-displacement` at ~3 mm. It is the dominant safety knob; 10 mm with
+  strong halos destroyed a data-bus corridor (15 new failures).
+- Pass `--ignore-nets` equal to the plane-net set, so the optimizer does not
+  chase a plane-routed rail's airwire across the board.
+- Show the render **and** quote the caption metrics when reporting to the user.
+
+**Do not**
+
+- Judge a placement by how much moved. "Lots moved, looks broken" and "barely
+  moved, looks safe" are both wrong — this is the single most common misreading.
+- Run placement mid-chain, between routing steps.
+- Pass `--allow-unplaced` or `--allow-routed` to make an error go away. They exist
+  for a human who has read the message and decided; not to unblock a script.
+- Add `--group*` to a command unless the user asked to scope to a block. A
+  routing run that silently acquires a scope routes a fraction of the board and
+  reports success on that fraction.
+- Auto-lock anything the advisor merely suggested at `low` confidence.
+- Present a render as evidence that routing will now succeed. Only a re-route
+  shows that.
+
+### The loop, and when to stop
+
+`place_route_loop` is the router-in-the-loop form: it routes, reads the failure
+diagnostics, moves only the parts implicated, re-routes, and keeps the result
+**only if `(failures, iterations)` improved**. Rejected rounds revert and widen
+the search.
+
+Stop when any of these is true, and say which:
+
+1. `failures == 0` — done; the loop stops itself.
+2. Several consecutive rounds are REJECTED and `failures` has not moved. The
+   floorplan, not the placement detail, is the limit. Report that rather than
+   raising `--rounds`.
+3. `crossings` and `hpwl` have flattened while `failures` has not improved. More
+   rounds will not help.
+4. The remaining failures are the same nets every round and
+   `/diagnose-routing-failures` blames parameters, not congestion. Fix the
+   routing parameters instead.
+
+Each round costs a full re-route (minutes). `--ratsnest-screen 20` skips the
+route for candidates whose ratsnest clearly regressed, which buys some of that
+back.
+
 ### Placement is CLI-only
 
 There is no placement tab and no `place` plan action, so a placement step

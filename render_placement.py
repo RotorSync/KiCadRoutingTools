@@ -52,6 +52,7 @@ C_ARROW = (236, 214, 110)       # displacement
 C_AIR = (86, 96, 112)           # ordinary airwire
 C_AIR_FAIL = (232, 72, 72)      # failed net
 C_AIR_BLOCK = (236, 158, 60)    # blocker net
+C_AIR_PICK = (96, 214, 170)     # net named by --ratsnest-nets
 C_LABEL = (226, 228, 238)
 C_PAD_THT = (196, 150, 74)      # through-hole
 C_PAD_F = (198, 172, 96)        # front SMD
@@ -158,6 +159,21 @@ class PlacementModel:
         want = set(names or ())
         return {nid for nid, n in self.pcb.nets.items()
                 if nid > 0 and n.name in want}
+
+    def net_ids_matching(self, patterns) -> set:
+        """Net ids matching glob patterns, via the SHARED filter.
+
+        `net_queries.matches_net_filter` is what `route.py --nets` and the plan
+        executor use, so `'*USB*' '!*_N'` means here exactly what it means
+        there -- including that a leading `!` is an exclusion, with the
+        active-low caveat that helper already documents. A second matcher in a
+        viewer would be a second set of surprises.
+        """
+        if not patterns:
+            return set()
+        from net_queries import matches_net_filter
+        return {nid for nid, n in self.pcb.nets.items()
+                if nid > 0 and n.name and matches_net_filter(n.name, list(patterns))}
 
     def refs_of_nets(self, net_ids) -> set:
         refs = set()
@@ -392,7 +408,8 @@ class PanelSpec:
     """One image: a view, a side filter, what is prominent, and a caption."""
 
     def __init__(self, model, *, view=None, side=None, prominent=(), moves=(),
-                 hot_nets=(), blocker_nets=(), label='', opts=None):
+                 hot_nets=(), blocker_nets=(), pick_nets=(), label='',
+                 opts=None):
         self.model = model
         self.view = view
         self.side = side
@@ -400,6 +417,7 @@ class PanelSpec:
         self.moves = list(moves)
         self.hot_nets = set(hot_nets)
         self.blocker_nets = set(blocker_nets)
+        self.pick_nets = set(pick_nets)     # ids, from --ratsnest-nets
         self.label = label
         self.o = opts or {}
 
@@ -415,7 +433,12 @@ def overlay_for(spec: PanelSpec):
 
     hot = m.net_ids_for(spec.hot_nets)
     blocked = m.net_ids_for(spec.blocker_nets) - hot
-    if o.get('ratsnest_all') or not spec.prominent:
+    if spec.pick_nets:
+        # Named nets win over both defaults: between "the nets that moved" and
+        # "every net on the board" is the case that actually comes up -- the
+        # handful you are chasing. Draw only those, in their own colour.
+        quiet_ids = set(spec.pick_nets)
+    elif o.get('ratsnest_all') or not spec.prominent:
         # Every net. Either the hairball switch, or there is no delta to be
         # "first" about -- delta-first with nothing prominent would draw NO
         # airwires at all, which is not a summary, it is a blank.
@@ -439,8 +462,12 @@ def overlay_for(spec: PanelSpec):
         if o.get('ratsnest', True):
             ids = quiet_ids if quiet_ids is not None else None
             quiet = [a for a in m.airwires(ids)
-                     if a[4] not in hot and a[4] not in blocked]
+                     if a[4] not in hot and a[4] not in blocked
+                     and a[4] not in spec.pick_nets]
             draw_airwires(d, r, quiet, color=C_AIR)
+            if spec.pick_nets:
+                draw_airwires(d, r, m.airwires(spec.pick_nets),
+                              color=C_AIR_PICK, width_mm=0.08)
             draw_airwires(d, r, m.airwires(blocked), color=C_AIR_BLOCK,
                           width_mm=0.07)
             draw_airwires(d, r, m.airwires(hot), color=C_AIR_FAIL, width_mm=0.09)
@@ -540,6 +567,13 @@ Examples:
     _bool_pair(p, 'arrows', True, 'draw displacement arrows when --before is given')
     _bool_pair(p, 'delta-first', True,
                'moved parts prominent, everything else faint (default: on)')
+    p.add_argument('--ratsnest-nets', nargs='+', metavar='PATTERN',
+                   help='draw airwires for JUST these nets, in their own '
+                        'colour, and label the parts that own them. Same glob '
+                        'syntax as route.py --nets, exclusions included '
+                        "(e.g. '*USB*' '/CLK*' '!*_N'). Between the nets that "
+                        'moved and every net on the board, this is the case '
+                        'that actually comes up: the handful you are chasing')
     p.add_argument('--ratsnest-all', action='store_true',
                    help='draw EVERY net, not just the moved/attributed ones. The '
                         'hairball switch: on a dense board this reproduces exactly '
@@ -611,6 +645,15 @@ def main(argv=None):
     prominent = {m['reference'] for m in moves} | \
         model.refs_of_nets(model.net_ids_for(failed))
 
+    pick = model.net_ids_matching(args.ratsnest_nets)
+    if args.ratsnest_nets and not pick:
+        print(f"  no nets match {' '.join(args.ratsnest_nets)}", file=sys.stderr)
+    if pick:
+        # The parts owning a named net become prominent, so "show me /CLK" also
+        # labels and un-dims the parts it runs between -- a bare set of wires
+        # with nothing identified is not much of an answer.
+        prominent |= model.refs_of_nets(pick)
+
     opts = {'borders': args.borders, 'labels': args.labels,
             'ratsnest': args.ratsnest, 'pads': args.pads,
             'ghosts': args.ghosts, 'arrows': args.arrows,
@@ -651,7 +694,8 @@ def main(argv=None):
     for side in sides:
         panels.append(PanelSpec(model, view=view, side=side, prominent=prominent,
                                 moves=moves, hot_nets=failed,
-                                blocker_nets=blockers, label=tag, opts=opts))
+                                blocker_nets=blockers, pick_nets=pick,
+                                label=tag, opts=opts))
     if args.focus and failed:
         pts = model.net_points(model.net_ids_for(failed))
         for i, cl in enumerate(cluster_points(pts, args.focus_gap)[:args.max_focus]):
@@ -659,6 +703,7 @@ def main(argv=None):
             panels.append(PanelSpec(model, view=fview, side=None,
                                     prominent=prominent, moves=moves,
                                     hot_nets=failed, blocker_nets=blockers,
+                                    pick_nets=pick,
                                     label=f"{tag} focus {i + 1}", opts=opts))
 
     extra = None
