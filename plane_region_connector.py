@@ -2577,11 +2577,65 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
     if edge_clr is None:
         edge_clr = getattr(config, 'board_edge_clearance', 0.0) or 0.0
 
+    # #546: conservative numpy bbox PREFILTERS over the board's vias/segments/
+    # pads, so each leg's exact scalar checks below run over a handful of
+    # nearby items instead of every item on the board (the old loops made
+    # this the second-hottest Python frame of the crkbd repair profile).
+    # The filters use an upper bound of every per-item `req` (max net-class
+    # clearance + max item half-size), so they pass a SUPERSET of what the
+    # exact per-item bbox tests accept -- the scalar bodies are unchanged and
+    # every survivor still runs the original bbox + distance math, keeping
+    # the predicate's decisions bit-identical.
+    _vias_l = [v for v in pcb_data.vias if v.net_id != net_id]
+    _segs_l = [s for s in pcb_data.segments if s.net_id != net_id]
+    _pads_l = [p for pnid, pads in pcb_data.pads_by_net.items()
+               if pnid != net_id for p in pads]
+    _vx = np.array([v.x for v in _vias_l])
+    _vy = np.array([v.y for v in _vias_l])
+    _vhalf = np.array([v.size / 2.0 for v in _vias_l])
+    _sxlo = np.array([min(s.start_x, s.end_x) for s in _segs_l])
+    _sxhi = np.array([max(s.start_x, s.end_x) for s in _segs_l])
+    _sylo = np.array([min(s.start_y, s.end_y) for s in _segs_l])
+    _syhi = np.array([max(s.start_y, s.end_y) for s in _segs_l])
+    _shalf = np.array([s.width / 2.0 for s in _segs_l])
+    _slay = np.array([hash(s.layer) for s in _segs_l], dtype=np.int64)
+    _px = np.array([p.global_x for p in _pads_l])
+    _py = np.array([p.global_y for p in _pads_l])
+    # Pad reach bound: copper extent, plus the FULL drill dimension -- an NPTH
+    # slot's circles can extend past the copper (and their req adds hdia/2),
+    # so the drill term keeps the gate a strict superset of every check the
+    # body can fire. Overshoot only adds candidates.
+    _pext = np.array([max(p.size_x, p.size_y) / 2.0 for p in _pads_l])
+    _pdrill = np.array([p.drill if (p.drill and p.drill > 0) else 0.0
+                        for p in _pads_l])
+    _plocal = np.array([getattr(p, 'local_clearance', 0.0) or 0.0
+                        for p in _pads_l])
+
+    def _max_layer_clearance(layer):
+        """Upper bound of layer_clearance(layer, obstacle_clearance(net))
+        over every foreign net present (exact per-item values are <= this)."""
+        nids = {v.net_id for v in _vias_l} | {s.net_id for s in _segs_l} \
+            | {p.net_id for p in _pads_l if hasattr(p, 'net_id')} \
+            | {pnid for pnid in pcb_data.pads_by_net if pnid != net_id}
+        best = 0.0
+        for nid in nids:
+            best = max(best, config.layer_clearance(
+                layer, config.obstacle_clearance(nid)))
+        return best
+
+    _clr_max_by_layer = {}
+
     for (x1, y1, x2, y2, layer) in legs:
         bb = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
-        for v in pcb_data.vias:
-            if v.net_id == net_id:
-                continue
+        clr_max = _clr_max_by_layer.get(layer)
+        if clr_max is None:
+            clr_max = _max_layer_clearance(layer)
+            _clr_max_by_layer[layer] = clr_max
+        vreq = half + _vhalf + clr_max
+        for vi in np.nonzero((bb[0] - vreq <= _vx) & (_vx <= bb[2] + vreq)
+                             & (bb[1] - vreq <= _vy)
+                             & (_vy <= bb[3] + vreq))[0]:
+            v = _vias_l[vi]
             req = half + v.size / 2.0 + config.layer_clearance(  # #498
                 layer, config.obstacle_clearance(v.net_id))
             if not (bb[0] - req <= v.x <= bb[2] + req
@@ -2589,8 +2643,15 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
                 continue
             if _seg_pt(x1, y1, x2, y2, v.x, v.y) < req - EPS:
                 return False
-        for s in pcb_data.segments:
-            if s.net_id == net_id or s.layer != layer:
+        sreq = half + _shalf + clr_max
+        _lh = hash(layer)
+        for si in np.nonzero((_slay == _lh)
+                             & (bb[0] - sreq <= _sxhi)
+                             & (_sxlo <= bb[2] + sreq)
+                             & (bb[1] - sreq <= _syhi)
+                             & (_sylo <= bb[3] + sreq))[0]:
+            s = _segs_l[si]
+            if s.layer != layer:
                 continue
             req = half + s.width / 2.0 + config.layer_clearance(  # #498
                 layer, config.obstacle_clearance(s.net_id))
@@ -2602,10 +2663,20 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
             if _seg_seg(x1, y1, x2, y2, s.start_x, s.start_y,
                         s.end_x, s.end_y) < req - EPS:
                 return False
-        for pnid, pads in pcb_data.pads_by_net.items():
-            if pnid == net_id:
-                continue
-            for p in pads:
+        # Pads: the copper check bbox-gates below exactly as before; the NPTH
+        # drill check had NO gate (every through pad paid per-drill distance
+        # math per leg), so both share this superset gate. NPTH's req is
+        # half + hdia/2 + npth_clr with the drill inside the pad body, so
+        # pext + max(local, clr_max, config.clearance, NPTH floor) bounds it.
+        _npth_bound = max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE)
+        preq = half + _pext + _pdrill + np.maximum(_plocal,
+                                                   max(clr_max, _npth_bound))
+        for pi in np.nonzero((bb[0] - preq <= _px) & (_px <= bb[2] + preq)
+                             & (bb[1] - preq <= _py)
+                             & (_py <= bb[3] + preq))[0]:
+            p = _pads_l[pi]
+            pnid = p.net_id
+            if True:
                 on_layer = ('*.Cu' in p.layers or layer in p.layers)
                 is_th = bool(p.drill and p.drill > 0)
                 if p.pad_type != 'np_thru_hole' and (on_layer or is_th):
