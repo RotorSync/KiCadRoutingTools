@@ -174,6 +174,49 @@ The case that motivated it is [#550](https://github.com/drandyhaas/KiCadRoutingT
 `extract_board_bounds` reads neither board-level `gr_circle` nor `gr_curve`, so a
 round board reports `board_bounds: None` while its 64-point ring parses fine.
 
+## `--health`: what tells you the floorplan is wrong
+
+Separate from the rules, and advisory. An intent violation says *"this is not the
+floorplan you declared"*; a health signal says *"this floorplan will fight the
+router whatever you declared"*. That is
+[discussion #407](https://github.com/drandyhaas/KiCadRoutingTools/discussions/407)'s
+question — *knowing when to stop routing and go move something* — whose two scars
+were a magnetics block 80 mm from both its own endpoints, and ~22 nets no knob
+could fix because the answer was re-floorplanning a quadrant.
+
+```jsonc
+"health": {
+  "block_displacement_mm": 15.0,
+  "bus_corridors": [ { "name": "sdram", "nets": ["SDRAM_*"], "width_mm": 8.0 } ],
+  "classes":      { "SDRAM": ["SDRAM_*"], "USB": ["USB_*"] }
+}
+```
+
+| signal | computable | what it means |
+|---|---|---|
+| **block displacement** | from geometry alone | the block's own pad centroid vs the centroid of everything it connects to. This is #459's "connectivity-centroid displacement" |
+| **bus crossings** | pre-route, but the corridor is a **model** | a straight rectangle between the bus's two pad clusters; its long sides are fed to the quench's own crossing kernel. A screening signal, not a verdict — real routes bend |
+| **convergence** | only with declared `classes` | which critical classes crowd one corridor. Placement has no net-class notion and "critical" is design intent, not a fact in the file, so **it is skipped rather than guessed** |
+| **blocked-cell share** | **not pre-route at all** | needs #409's blocker JSON, which only exists after a routing attempt. Reported as skipped, with that reason |
+
+### Power and ground are excluded, and that is what makes these signals work
+
+GND owns **96** of ulx3s's parts and `+3V3` owns **45**, out of 329 nets whose
+*median* is 2. Left in:
+
+- 8 of 10 blocks report a foreign-pad count within 10% of the same median — they
+  are all seeing the board's power nets, so the "net centroid" is really the
+  board centroid and displacement degenerates into *distance from the middle of
+  the board*. Filtered, the median drops from 332 to 40 and the ranking changes.
+- The same rails cross **every** corridor, because a 96-part MST sprays airwires
+  board-wide. On ulx3s's SDRAM corridor the unfiltered top three offenders were
+  `GND`, `+5V`, `+3V3` — a fiction, since those route on a plane rather than as
+  traces through the channel. Filtered: 24 crossings → 18, and the offenders
+  become real signal nets.
+
+Pass `health.ignore_net_ids` to name the plane nets explicitly (as `--ignore-nets`
+does elsewhere); `health.max_fanout` is the backstop, default 20.
+
 ## What `--emit-intent` does and does not claim
 
 It writes an intent that **grades clean by construction** — a baseline to

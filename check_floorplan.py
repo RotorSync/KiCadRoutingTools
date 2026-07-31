@@ -82,6 +82,12 @@ def build_parser():
     p.add_argument('--board-edge-clearance', type=float, metavar='MM',
                    help='board-edge clearance for the outline gate '
                         '(default: 0.55)')
+    p.add_argument('--health', action='store_true',
+                   help="also report the routability signals from the intent's "
+                        "`health` block: how far each block sits from the parts "
+                        "it connects to, and what crosses each declared bus "
+                        "corridor. Advisory -- these say the floorplan will "
+                        "fight the router, not that it breaks the intent")
     p.add_argument('--exit-zero', action='store_true',
                    help='report violations but exit 0 anyway')
     p.add_argument('-q', '--quiet', action='store_true',
@@ -139,7 +145,8 @@ def main(argv=None):
     try:
         result = grade(intent, pcb, args.board, group_sources=sources or (),
                        clearance=args.clearance,
-                       board_edge_clearance=args.board_edge_clearance)
+                       board_edge_clearance=args.board_edge_clearance,
+                       with_health=args.health)
     except UntrustworthyOutline as exc:
         print(f"ERROR: {args.board}: {exc}", file=sys.stderr)
         print("  Refused rather than graded: with no usable outline every "

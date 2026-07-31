@@ -921,6 +921,7 @@ class GradeResult:
     legality: Dict[str, object]
     outline: Dict[str, object]
     state: Dict[str, object]
+    health: Dict[str, object]
     rules_run: Tuple[str, ...]
     rules_skipped: Dict[str, str]
     n_footprints: int
@@ -954,7 +955,8 @@ class UntrustworthyOutline(ValueError):
 
 def grade(intent: Intent, pcb_data, pcb_file: str, *,
           group_sources: Sequence[str] = (), clearance: Optional[float] = None,
-          board_edge_clearance: Optional[float] = None) -> GradeResult:
+          board_edge_clearance: Optional[float] = None,
+          with_health: bool = False) -> GradeResult:
     """Measure a board against its declared floorplan intent."""
     from .quench import QuenchState
     from . import placement_state
@@ -994,6 +996,11 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
         violations.extend(fn(ctx))
     violations.sort(key=lambda v: v.sort_key())
 
+    health_out: Dict[str, object] = {}
+    if with_health:
+        from . import routability
+        health_out = routability.health(state, pcb_data, blocks, intent.health)
+
     st = placement_state.assess_placement(pcb_data, pcb_file)
     return GradeResult(
         intent=intent, board=pcb_file, violations=violations, blocks=blocks,
@@ -1012,6 +1019,7 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
                                     else round(st.outside_fraction, 4)),
                'stacked_refs': list(st.stacked_refs),
                'segments': st.segments, 'vias': st.vias},
+        health=health_out,
         rules_run=tuple(ran), rules_skipped=skipped,
         n_footprints=len(pcb_data.footprints))
 
@@ -1192,6 +1200,28 @@ def format_text(r: GradeResult) -> str:
         lines.append(f"  {len(r.rules_skipped)} rule(s) did not run:")
         for name in sorted(r.rules_skipped):
             lines.append(f"    - {name}: {r.rules_skipped[name]}")
+    if r.health:
+        lines.append("  routability (advisory -- this says the floorplan will "
+                     "fight the router, not that it breaks the intent):")
+        disp = r.health.get('block_displacement') or []
+        if disp:
+            lines.append(f"    block displacement, worst first "
+                         f"(max {r.health.get('block_displacement_max_mm')}mm):")
+            for d in disp[:5]:
+                lines.append(f"      {d['block']}  {d['distance_mm']:.2f}mm  "
+                             f"({d['members']} parts, {d['foreign_pads']} "
+                             f"foreign pads on {d['nets']} nets)")
+        for row in (r.health.get('bus_corridors') or []):
+            lines.append(f"    corridor {row['name']}: "
+                         f"{row['foreign_crossings']} foreign crossing(s)"
+                         + (f", worst {', '.join(row['worst_nets'][:3])}"
+                            if row['worst_nets'] else ''))
+        for row in (r.health.get('convergence') or []):
+            lines.append(f"    convergence in {row['corridor']}: "
+                         f"{', '.join(row['classes'])}")
+        for name in sorted(r.health.get('skipped') or {}):
+            lines.append(f"    - {name} not measured: "
+                         f"{r.health['skipped'][name]}")
     return '\n'.join(lines)
 
 
@@ -1206,6 +1236,7 @@ def to_json(r: GradeResult) -> Dict:
         'legality': r.legality,
         'outline': r.outline,
         'state': r.state,
+        'health': r.health,
         'rules_run': list(r.rules_run),
         'rules_skipped': r.rules_skipped,
         'n_footprints': r.n_footprints,
@@ -1238,4 +1269,15 @@ def summary(r: GradeResult) -> Dict:
     for k in ('unplaced', 'partially_unplaced', 'has_copper',
               'duplicate_fraction', 'spread_ratio', 'outside_fraction'):
         out[f"state_{k}"] = r.state[k]
+    if r.health:
+        # Advisory, and namespaced so a caller cannot mistake one of these for
+        # a violation count.
+        for key, out_key in (('block_displacement_max_mm',
+                              'health_block_displacement_max_mm'),
+                             ('blocks_displaced', 'health_blocks_displaced'),
+                             ('bus_foreign_crossings',
+                              'health_bus_foreign_crossings')):
+            if key in r.health:
+                out[out_key] = r.health[key]
+        out['health_signals_skipped'] = len(r.health.get('skipped') or {})
     return out
