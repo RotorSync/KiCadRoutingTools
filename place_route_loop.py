@@ -72,15 +72,67 @@ def _run_route_cmd(cmd, log_file):
         return subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT).returncode
 
 
-def run_route(pcb_file: str, routed_file: str, route_args: str, log_file: str):
-    """Run route.py, return (metrics dict, log text)."""
+def accept_score(cmd: str, placed: str, routed: str, json_file: str):
+    """(score, note) from an external, spec-aware accept test. None = reject.
+
+    better() compares failures then iterations, and that is all it CAN compare:
+    it has no way to see a max-length rule, a via ban, a required track width or
+    a decap-proximity limit. On a board with a real specification those are
+    exactly the constraints that decide whether a placement got better, and a
+    loop blind to them will accept a round that broke one.
+
+    Reworking better() is out of scope by its own comment, so this does not
+    touch it -- it BYPASSES it when the operator supplies a judge:
+
+        CMD <placed.kicad_pcb> <routed.kicad_pcb> <route.json>
+
+    The judge prints one line `SCORE=<float>`, LOWER IS BETTER. A non-zero exit,
+    a missing SCORE line, or an unparseable number all mean REJECT: a judge that
+    cannot answer is not evidence that the round was good.
+
+    Post-route mirror of _ratsnest_screen's pre-route veto -- same shape, same
+    contract of reporting the numbers behind every decision.
+    """
+    argv = shlex.split(cmd) + [placed, routed, json_file or '']
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True,
+                           encoding='utf-8', errors='replace')
+    except OSError as e:
+        return None, f"accept-cmd could not run: {e}"
+    if r.returncode != 0:
+        detail = (r.stdout or r.stderr or '').strip().splitlines()
+        return None, (f"accept-cmd exit {r.returncode}"
+                      + (f": {detail[-1][:160]}" if detail else ''))
+    m = re.search(r'^SCORE=([-+0-9.eE]+)', r.stdout or '', re.M)
+    if not m:
+        return None, 'accept-cmd printed no SCORE= line'
+    try:
+        val = float(m.group(1))
+    except ValueError:
+        return None, f"accept-cmd SCORE= unparseable: {m.group(1)!r}"
+    return val, f"score {val:g}"
+
+
+def run_route(pcb_file: str, routed_file: str, route_args: str, log_file: str,
+              json_file: str = None):
+    """Run route.py and return its metrics dict.
+
+    `json_file` asks route.py to also write its MERGED summary there
+    (route.py --json-out). The loop does not read it back -- it already has the
+    metrics -- but --accept-cmd is handed the path, so an external judge sees
+    the same tally the loop is using instead of re-scraping the log. Skipped
+    when the operator already put --json-out in --route-args: that
+    destination is theirs to choose.
+    """
     # Absolute path to the sibling route.py, so the loop runs from any cwd.
     # No cwd= override: route.py resolves its own assets from __file__, and
     # relative paths inside --route-args (--net-clearances foo.json) must keep
     # resolving against the OPERATOR's cwd, which a cwd= would silently break.
     # -X utf8 mirrors how the test suite invokes route.py.
-    cmd = [sys.executable, '-X', 'utf8', _ROUTE_PY, pcb_file, routed_file] + \
-        shlex.split(route_args)
+    _extra = shlex.split(route_args)
+    if json_file and '--json-out' not in _extra:
+        _extra += ['--json-out', json_file]
+    cmd = [sys.executable, '-X', 'utf8', _ROUTE_PY, pcb_file, routed_file] + _extra
     rc = _run_route_cmd(cmd, log_file)
     # errors='replace': route.py forces its own stream to UTF-8, but a cp1252
     # default locale on the READING side would raise on the first non-ASCII
@@ -314,6 +366,15 @@ def main():
                              "in its whole block, so a block is no longer "
                              "half-frozen because its IC exceeds "
                              "--max-target-pins")
+    parser.add_argument("--accept-cmd", default=None, metavar="CMD",
+                        help="External accept test, run after each round's route as "
+                             "CMD <placed> <routed> <route.json>; print one line "
+                             "SCORE=<float>, LOWER IS BETTER. Replaces the built-in "
+                             "failures-then-iterations comparison, which cannot see a "
+                             "max-length rule, a via ban, a required width or a "
+                             "decap-proximity limit -- on a spec'd board those are what "
+                             "decide whether a placement got better. A non-zero exit or "
+                             "a missing SCORE line REJECTS the round.")
     parser.add_argument("--ratsnest-screen", type=float, default=0.0,
                         help="Skip the routing run when a candidate placement's "
                              "airwire crossings or HPWL regress by more than "
@@ -433,7 +494,20 @@ def main():
     screened = 0
     print("Round 0: routing initial placement...")
     best = run_route(cur_file, os.path.join(work, 'loop_round0_routed.kicad_pcb'),
-                     args.route_args, os.path.join(work, 'loop_round0_route.log'))
+                     args.route_args, os.path.join(work, 'loop_round0_route.log'),
+                     json_file=os.path.join(work, 'loop_round0_route.json'))
+    # Round 0 is the unconditional baseline, so the judge is not a gate here --
+    # it is scored only so later rounds have an incumbent to beat.
+    best_score = None
+    if args.accept_cmd:
+        best_score, _note = accept_score(
+            args.accept_cmd, cur_file,
+            os.path.join(work, 'loop_round0_routed.kicad_pcb'),
+            os.path.join(work, 'loop_round0_route.json'))
+        print(f"  baseline accept-cmd: {_note}")
+        if best_score is None:
+            print('  WARNING: the judge could not score the BASELINE. Every round '
+                  'it can score will now be accepted on its first success.')
     print(f"  failures={best['failures']} iterations={best['iterations']:,}"
           f" vias={best['vias']}")
     # Round 0 is the baseline: its own parent, nothing moved, always "accepted".
@@ -549,7 +623,8 @@ def main():
 
         metrics = run_route(
             cand_file, os.path.join(work, f'loop_round{rnd}_routed.kicad_pcb'),
-            args.route_args, os.path.join(work, f'loop_round{rnd}_route.log'))
+            args.route_args, os.path.join(work, f'loop_round{rnd}_route.log'),
+            json_file=os.path.join(work, f'loop_round{rnd}_route.json'))
         # Report-only, exactly like the pad_pairs_* keys above: every round now
         # records placement quality next to the routing result. better() is
         # deliberately untouched -- reworking the comparator is #458's scope.
@@ -561,7 +636,20 @@ def main():
 
         # Record BEFORE the accept/revert bookkeeping mutates cur_file, so
         # `parent` names the board this candidate was actually derived from.
-        _accepted = better(metrics, best)
+        if args.accept_cmd:
+            _score, _note = accept_score(
+                args.accept_cmd, cand_file,
+                os.path.join(work, f'loop_round{rnd}_routed.kicad_pcb'),
+                os.path.join(work, f'loop_round{rnd}_route.json'))
+            metrics['accept_score'] = _score
+            # Strictly better, and a judge that could not answer never wins.
+            _accepted = _score is not None and (best_score is None
+                                                or _score < best_score)
+            print(f"  accept-cmd: {_note}"
+                  + (f" vs incumbent {best_score:g}" if best_score is not None
+                     else " (no incumbent score)"))
+        else:
+            _accepted = better(metrics, best)
         write_round_sidecar(work, rnd, board=cand_file,
                             routed=os.path.join(
                                 work, f'loop_round{rnd}_routed.kicad_pcb'),
@@ -573,6 +661,8 @@ def main():
             print(f"  ACCEPTED (was failures={best['failures']},"
                   f" iterations={best['iterations']:,})")
             best = metrics
+            if args.accept_cmd:
+                best_score = metrics.get('accept_score')
             cur_file = cand_file
             max_disp = args.max_displacement
         else:
