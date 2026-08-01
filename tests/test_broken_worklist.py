@@ -98,6 +98,68 @@ def test_unrouted_names_are_separate_from_broken_names():
     print('  PASS: unrouted and broken names are separable')
 
 
+ZONED_BOARD = '''(kicad_pcb
+	(zone
+		(net "GND")
+		(layer "B.Cu")
+		(hatch edge 0.5)
+	)
+	(footprint "x"
+		(pad "1" smd rect
+			(zone_connect 2)
+		)
+	)
+)
+'''
+
+
+def test_a_poured_net_is_routed_to_the_plane_repair(tmpdir=None):
+    """WHICH STEP fixes a break is decided by one fact: is the net poured?
+
+    route.py cannot tap a pour, so a stranded plane pad handed to it is work that
+    cannot succeed -- measured, `broken` sat at 14 across two iterations of
+    route.py calls and fell to 11 in ONE route_disconnected_planes call. The
+    classification must therefore be read off the board's zones, not guessed.
+    """
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        b = os.path.join(d, 'b.kicad_pcb')
+        with open(b, 'w', encoding='utf-8') as f:
+            f.write(ZONED_BOARD)
+        real = bs.run_tool
+        bs.run_tool = lambda root, tool, board, *a, **k: (1, SAMPLE)
+        try:
+            conn = bs.score_connectivity('.', b)
+        finally:
+            bs.run_tool = real
+
+    assert conn['poured_nets'] == ['GND'], \
+        f"a zone naming its net as (net \"GND\") must be seen, got {conn['poured_nets']}"
+    assert conn['broken_detail']['GND']['handler'] == 'route_disconnected_planes'
+    assert conn['broken_detail']['FLASH_CS']['handler'] == 'route'
+    print('  PASS: poured nets go to the plane repair, the rest to route.py')
+
+
+def test_zone_connect_pad_property_is_not_mistaken_for_a_zone():
+    """`(zone_connect 2)` appears hundreds of times inside footprints. Matching
+    it would classify half the board as poured."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        b = os.path.join(d, 'b.kicad_pcb')
+        with open(b, 'w', encoding='utf-8') as f:
+            f.write('(kicad_pcb (footprint "x" (pad "1" (zone_connect 2) '
+                    '(net 4 "GND"))))\n')
+        real = bs.run_tool
+        bs.run_tool = lambda root, tool, board, *a, **k: (1, SAMPLE)
+        try:
+            conn = bs.score_connectivity('.', b)
+        finally:
+            bs.run_tool = real
+    assert conn['poured_nets'] == [], \
+        f'zone_connect is not a zone, got {conn["poured_nets"]}'
+    print('  PASS: (zone_connect N) is not read as a pour')
+
+
 def test_a_fully_connected_board_reports_empty_lists_not_missing_keys():
     conn = _parse('ALL NETS FULLY CONNECTED\n')
     assert conn['broken'] == 0 and conn['unrouted'] == 0

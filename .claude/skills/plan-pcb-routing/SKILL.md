@@ -2818,18 +2818,28 @@ nothing behind it.
 `board_score.py` emits the list under `components.broken.nets`:
 
 ```jsonc
-"GND":      {"components": 5, "joins_needed": 4,
+"GND":      {"components": 5, "joins_needed": 4, "handler": "route_disconnected_planes",
              "stranded_pads": [{"x":137.72,"y":66.05,"layer":"F.Cu","ref":"SW1"}, ...]},
-"VCC1V1":   {"components": 4, "joins_needed": 3, "stranded_pads": [{"ref":"U1"}, ...]},
-"FLASH_CS": {"components": 2, "joins_needed": 1, "stranded_pads": [{"ref":"R1"}]}
+"VCC1V1":   {"components": 4, "joins_needed": 3, "handler": "route",
+             "stranded_pads": [{"ref":"U1"}, ...]},
+"FLASH_CS": {"components": 2, "joins_needed": 1, "handler": "route",
+             "stranded_pads": [{"ref":"R1"}]}
 ```
 
 `joins_needed` sums exactly to `blocking_by.broken`, so the list is complete and
 you can see what each entry is worth. **Sort by it** — above, GND alone is 4 of
 the 14, and seven single-join nets are worth 1 each.
 
-**Then route each break to the tool for its class — they are not interchangeable,
-and using `route.py` on all of them is why the count does not move:**
+**`handler` names the step, and it is a FACT off the board, not a guess:** it is
+`route_disconnected_planes` when the net has a zone (see `broken.poured_nets`,
+read from the board's own `(zone (net "…"))` blocks) and `route` otherwise.
+`route.py` cannot tap a pour, so a stranded plane pad handed to it is work that
+cannot succeed. Measured: `broken` sat at **14 across two iterations** of
+`route.py` calls and fell to **11 in one** `route_disconnected_planes` call once
+the plane net was separated out.
+
+**One tool per class — they are not interchangeable, and using `route.py` on all
+of them is why the count does not move:**
 
 | the break | the tool |
 |---|---|

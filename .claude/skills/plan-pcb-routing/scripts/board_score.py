@@ -170,11 +170,44 @@ def score_connectivity(root: str, board: str) -> dict:
                 {'x': float(mp.group(1)), 'y': float(mp.group(2)),
                  'layer': mp.group(3), 'ref': mp.group(4)})
 
+    # NAME THE TOOL, not just the defect. Which step fixes a break is decided by
+    # ONE fact the board already carries: is the net POURED? A stranded pad on a
+    # plane net cannot be reached by route.py at all -- it needs a tap via, which
+    # is route_disconnected_planes' job -- and a run that reaches for route.py on
+    # everything watches the count sit still. Measured: `broken` held at 14 across
+    # two iterations of route.py calls, then fell to 11 in ONE
+    # route_disconnected_planes call once the plane nets were separated out.
+    #
+    # Poured-ness is read off the board's own zones, so this is a fact and not a
+    # guess. Everything else is `route`; the DNF case stays a human call, which is
+    # what the stranded pad's `ref` is in the list for.
+    poured = set()
+    try:
+        with open(board, encoding='utf-8', errors='replace') as f:
+            txt = f.read()
+        # A zone names its net as EITHER `(net_name "GND")` or `(net "GND")`
+        # depending on the writer -- KiCad 10 emits the second, and matching only
+        # the first classified a poured GND as `route` and sent the caller to a
+        # tool that cannot tap a pour. `(net 4)` is the numeric form and is
+        # deliberately not matched here: it identifies nothing without the net
+        # table, and a wrong name is worse than a missing one.
+        # `(?!_)` keeps `(zone_connect 2)` -- a per-pad property that appears
+        # hundreds of times inside footprints -- out of the scan.
+        for zb in re.finditer(r'\(zone(?!_)', txt):
+            seg = txt[zb.start():zb.start() + 400]
+            if (zn := re.search(r'\(net(?:_name)? "([^"]+)"\)', seg)):
+                poured.add(zn.group(1))
+    except OSError:
+        pass
+    for name, v in detail.items():
+        v['handler'] = ('route_disconnected_planes' if name in poured
+                        else 'route')
+
     return {'ran': True, 'count': int(m.group(1)), 'unrouted': unrouted,
             'broken': broken, 'broken_nets': broken_nets,
             'components_per_broken_net': comps, 'nets': sorted(set(nets)),
             'unrouted_net_names': sorted(set(unrouted_names)),
-            'broken_detail': detail}
+            'poured_nets': sorted(poured), 'broken_detail': detail}
 
 
 def score_drc(root: str, board: str, clearance=None, sizes=None) -> tuple:
@@ -486,6 +519,7 @@ def main():
     parts = {'unrouted': {'ran': conn['ran'], 'count': conn.get('unrouted'),
                           'nets': conn.get('unrouted_net_names', [])},
              'broken': {'ran': conn['ran'], 'count': conn.get('broken'),
+                        'poured_nets': conn.get('poured_nets', []),
                         'nets': conn.get('broken_detail', {})},
              'drc': drc, 'undersized': undersized, 'floorplan': floorplan,
              'impedance': imped, 'length': length, 'net_widths': net_widths}
