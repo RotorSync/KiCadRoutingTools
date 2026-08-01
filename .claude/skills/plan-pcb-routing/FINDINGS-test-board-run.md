@@ -87,15 +87,33 @@ no project and resolves its floor from the stock netclass — the precise failur
 not guard.
 
 **B4. Nothing warns that `--track-width` is advisory.**
-`route.py` silently substitutes the fab floor when the requested width does not
-fit. Measured: `--track-width 0.8` on the R7→J1 half that never touches the QFN →
-**0.127 mm**, `failed_single` empty, no warning. And `--power-nets-widths` is
-ignored entirely for 2-pad nets (it only reaches multipoint power trees) — so
-`--power-nets USB_DP … --power-nets-widths 0.8` produced 0.16 mm.
 
-Between them these root-cause the previous run's *"USB_DP had no 0.8 mm segment"*
-as a **tool defect, not operator error**. A skill that tells you to pass a width
-must tell you to verify the width landed.
+> **CORRECTED after reading the code.** I originally wrote that route.py
+> *silently* ignores `--track-width` and that `--power-nets-widths` is ignored
+> for 2-pad nets. **Both claims were wrong.** `--power-nets-widths` is honoured
+> (`get_net_track_width` priority 1; the run's own log prints `Power net width
+> assignments (4 nets)`), and the neck-down does warn
+> (`single_ended_routing.py:2285`). I had inferred the mechanism from output
+> shape instead of reading it. The real cause is narrower and worse:
+
+Two paths replace the requested width **for the whole net** and still report it
+routed:
+
+- the **wide-route neck-down**, which warns but leaves `failed_single` empty; and
+- **`net_rescue.py`'s per-net rescue** (#331/#371), the dominant one, which
+  re-routes a failed net at the **fab floor** — `rescue_track = min(nominal_w,
+  fab_track)` — and reports it `recovered`. Its only symptom is one green
+  `rescued a gap: … track 0.127` line per net.
+
+Reduced repro: `--track-width 0.8` on the R7→J1 half that never touches the QFN
+→ **0.127 mm**, `failed_single` empty. This root-causes the previous run's
+*"USB_DP had no 0.8 mm segment"* as a **tool defect, not operator error** — and
+it is why 155 of 785 segments landed at 0.127 mm with `--track-width 0.16`
+passed.
+
+**Fixed** by `--track-width-floor`, which bounds both paths so the net fails
+honestly instead. A skill that tells you to pass a width must also tell you to
+verify the width landed.
 
 **B5. The DRC writeback's blast radius is understated.**
 The skill mentions the `.kicad_pro` floor carryover. What actually happens: all
@@ -214,3 +232,26 @@ that is why I could act on them immediately.
 5. Make `broken` count pads. **(C3)**
 6. Add "verify the width landed" after any width-bearing route step. **(B4)**
 7. Replace "groups exist → 20 per group" with a decomposability test. **(A2)**
+
+---
+
+## H. Disposition — all of the above are now fixed
+
+Every item was implemented and verified against the board that produced it, on
+branch `fix/test-board-run-findings`. Two diagnoses changed once the code was
+read rather than inferred, and the record above is corrected in place.
+
+| finding | fix | verified by |
+|---|---|---|
+| off-board GND via (A1 in the plan) | `route_planes` now threads the copper-to-edge clearance into the GND-via config; `add_gnd_vias` gained an outline backstop; `planes_gui` mirrored | 1 off-board via → **0** on the same board |
+| all six net classes flattened | non-Default clamp restricted to `clearance` + diff-pair readback; `track_width`/`via_*` are draw defaults and are no longer touched | every declared width survives: 0.8 / 0.4 / 0.16 |
+| `via_drill` 0.3 → 0.25 | net-class `via_drill` now sourced from `min_via_drill` (vias only), not `min_through_hole_diameter` (which spans **pads**) | holds at **0.3**; a 0.25 pad drill no longer rewrites it |
+| sub-spec copper (B4) | new **`--track-width-floor`**, bounding the neck-down *and* `net_rescue`'s fab-floor retry | `--track-width 0.8` → 0.127 before, **0.15** after, nets still routed |
+| `broken` counts nets (C3) | counts **separations**, `sum(components − 1)` | the two boards now rank 17 vs **15** — the correct order |
+| skip scored as failure (C1) | unmeasurable group → `unmeasured`; all-unmeasurable → `UNGRADED` | the phantom `length=1` on a 0-copper board is gone |
+| per-net widths invisible (C2) | new **`--net-min-widths`** | `undersized` 0 vs `net_widths` **9**, naming every breach |
+| skill gaps (A1, A2, B1–B6, C7, C8) | SKILL.md sections rewritten | `test_431_skill_commands` passes |
+
+`route_diff`'s sub-spec vias (A5) needed **no code**: it is `--fab-tier standard`
+auto-escalating, and `--fab-overrides` already forbids it (escalation warnings 6
+→ 0; 83/83 and 136/136 vias at 0.6/0.3 with it set).

@@ -22,7 +22,7 @@ python3 -X utf8 place_optimize.py board.kicad_pcb --suggest-locks
 
 | board state | run placement? | tool |
 |---|---|---|
-| **unplaced** (the tools exit 3) | **NO** — out of scope; report and stop | — |
+| **unplaced** (test it — see below) | **NO** — out of scope; report and stop | — |
 | careful hand placement, routing not yet attempted | **NO** | — |
 | routing already completed clean | **NO** | — |
 | board already carries copper (the tools exit 3) | **NO** — placement moves footprints, not tracks | — |
@@ -40,9 +40,31 @@ re-run the whole chain from the placed board.
 
 ### If the board is UNPLACED
 
-The tools exit **3** and say so. This toolchain **refines** an existing
-placement; it does not place a board from scratch. Report that plainly, tell the
-user to place the parts in KiCad, and offer to show them the current state:
+**Do not rely on an exit code to tell you.** `--suggest-locks` exited **0** and
+happily gave advice on a board with 42 footprints at their generator's default
+positions and no outline at all. Test positively instead — any of these means
+unplaced, regardless of what the tools return:
+
+```python
+from kicad_parser import parse_kicad_pcb
+pcb = parse_kicad_pcb('board.kicad_pcb')
+pcb.board_info.board_bounds is None        # no Edge.Cuts outline to place INTO
+len({(round(f.x, 3), round(f.y, 3)) for f in pcb.footprints.values()}) < len(pcb.footprints) / 2
+```
+
+`check_floorplan.py --emit-intent` is the other honest probe: it exits **3** with
+*"the board has no Edge.Cuts outline"*, and its `JSON_SUMMARY` carries
+`state_unplaced` / `state_partially_unplaced` / `state_spread_ratio` for the
+cases where an outline does exist.
+
+This toolchain **refines** an existing placement; it does not place a board from
+scratch. Report that plainly, tell the user to place the parts in KiCad, and
+offer to show them the current state:
+
+**If the repo has its own seeder** (a script that writes a starting floorplan and
+the outline from the spec), that is the placement step — run it, then treat its
+output as the "rough / generated placement" row of the table above. The skill
+does not place a board, but it should not stop in front of a repo that does.
 
 ```bash
 python3 -X utf8 render_placement.py board.kicad_pcb -o /tmp/state.png
@@ -312,7 +334,8 @@ question you actually have, is the same as not producing it. Each row is a
 | chasing one bus, pair or clock | `render_placement --ratsnest-nets '*USB*'` | route.py `--nets` glob syntax, exclusions included. Use it when the default delta view is too busy to read |
 | every placement render | add `--ignore-nets <same as place_optimize>` | **must match** or `crossings`/`hpwl` will not reproduce the optimizer's `JSON_SUMMARY`, and you will chase a phantom disagreement |
 | every placement render | add `--clearance <the board's real floor>` | halo and overlap are otherwise graded at the wrong gap |
-| every render, always | add `--json` | the re-measurement channel. A tool's own report never satisfies its own gate |
+| every render, always | add `--json` | the re-measurement channel. A tool's own report never satisfies its own gate. **It is a bare FLAG on `render_placement`**, not a path: it prints a `JSON_SUMMARY:`-prefixed line into stdout among the progress text, so grep that prefix and strip it. Only `board_score.py --json <path>` takes a file |
+| with `--focus` | `-o` names a **DIRECTORY** | `render_placement --focus -o wk/x.png` writes `wk/x.png/<board>.png` and `wk/x.png/<board>_focus1.png`. Give it a directory name, and read the panel paths back out of the `panels` array |
 | once, before choosing a budget | `route.py --list-groups --group-by auto` | groups exist → 20 iterations per group; none → 20 per board |
 | after each accepted placement | `check_floorplan --intent I --health` | will this floorplan *fight* the router? Block displacement and bus-corridor crossings |
 | every Step 9 iteration | `check_floorplan --intent I --json` | the per-rule measurements the ledger records |
@@ -399,6 +422,38 @@ only in `check_floorplan`'s `outline` block.
 
 - **Re-read the `JSON_SUMMARY` line you just produced.** Do not carry a number
   forward from an earlier step or from memory of what you expected.
+- **VERIFY THE WIDTH LANDED.** `--track-width` and `--power-nets-widths` are
+  *requests*. A wide route that will not fit is necked down, and the per-net
+  rescue re-routes a failed net at the **fab floor** — both leave `failed_single`
+  empty and print one easily-missed line in a long log. Measure the copper
+  instead, after every width-bearing step:
+
+  ```python
+  from collections import Counter
+  from kicad_parser import parse_kicad_pcb
+  pcb = parse_kicad_pcb('out.kicad_pcb')
+  print(Counter(round(s.width, 4) for s in pcb.segments))    # widths ACTUALLY emitted
+  ```
+
+  Pass `--track-width-floor <mm>` to make the net fail instead of going under,
+  and score with `board_score.py --net-min-widths` so a per-net requirement is
+  graded rather than hoped for.
+- **Carry the `.kicad_dru` with the `.kicad_pro`.** Rule lookup is
+  `splitext(board)[0] + ".kicad_dru"`, strictly per board stem, so every
+  intermediate board needs its own. `copy_board.py` takes every sibling; a hand
+  `cp` of two files does not.
+- **`place_optimize.py` writes NO project sibling at all** — only the
+  `.kicad_pcb`. The next step then reads no project and resolves its floor from
+  the stock netclass, which is the exact failure the `copy_board.py` warning
+  exists to prevent, arriving through a door nothing guards. Copy the
+  `.kicad_pro` (and `.kicad_dru`) onto the placed board yourself.
+- **A netclass-scoped `.kicad_dru` rule is enforced by nothing in this chain.**
+  `read_board_layer_clearances` extracts only *layer*-scoped rules and skips the
+  rest with a note saying KiCad will still enforce it — true in KiCad, false for
+  `check_drc.py` and for the router. Without `kicad-cli` installed, such a rule
+  is graded by **nobody**, and the score cannot even list it as `ungraded`
+  because it never knew about it. Say so explicitly rather than letting the rule
+  read as covered.
 - **A tool's own report does not satisfy its own gate.** `place_optimize` says
   the placement improved; confirm it on a *different channel* by running
   `render_placement.py <the written output> --json` and checking `metrics.
@@ -945,7 +1000,47 @@ for fine-pitch boards (#111/#115):**
   them with the JLCPCB fab minimum (backstop when a Constraint is 0/unset — e.g.
   `min_clearance` is frequently 0) into a single **manufacturing floor**.
 
-Use the printed flags as-is:
+### FIRST: does this board have a requirements document?
+
+**If it does, the SPEC outranks everything below.** `--design-rules` reports what
+the *fab* can make and what the *board file* currently declares. Neither is
+permission. On a board with real requirements its suggestions actively
+contradicted three HARD rules at once:
+
+| `--design-rules` printed | the spec said |
+|---|---|
+| `--via-drill 0.25` | 0.3 mm, HARD |
+| *"drop `--track-width` to the fab floor 0.1 … BELOW the board's own rule"* | 0.15 mm HARD, and *"shall not be routed to"* 0.10 |
+| `check_drc.py --clearance 0.1` | classes at 0.16 / 0.45 — grading at 0.1 hides real violations |
+
+So: read the requirements first, write the numbers down with their requirement
+IDs, and treat the printed flags as a *starting point to be overridden*. The
+"route at the fab floor" advice further down is correct **absent a requirements
+document** and wrong with one — it is exactly how a previous run shipped 267
+segments at 0.127 mm against a 0.15 mm HARD floor.
+
+Two flags exist for holding a spec floor, and neither is discoverable from the
+suggestions:
+
+- **`--track-width-floor <mm>`** — the router may not go under it. `--track-width`
+  is a *request*: a wide route that will not fit is necked down, and the per-net
+  rescue re-routes a failed net at the **fab** floor, both reporting the net
+  routed. With the floor set the net fails honestly instead. (Not to be confused
+  with `route_disconnected_planes --min-track-width`, its region-join width band,
+  nor `check_drc --min-track-width`, which grades.)
+- **`--fab-overrides <file>`** — `key = value` lines over the `--fab-tier` floor
+  (`clearance`, `track_width`, `via_diameter`, `via_drill`, `annular`,
+  `board_edge`, `hole_to_hole`, `pad_hole_to_hole`). Supplying it also **forbids
+  the silent `standard`→`advanced` escalation**, which is what puts 0.25/0.15
+  vias on a board that asked for 0.6/0.3. On test-board one file took the score's
+  `undersized` from **169 to 0**.
+
+  **Its `clearance` key REPLACES the per-class clearance map, it does not floor
+  it.** Set it to the board's *Default class*, not the spec minimum: pinning it
+  to the tighter figure is what silently dropped an `XTAL_12M` class from 0.45 mm
+  to 0.15 mm, and restoring 0.45 afterwards produced 126 violations.
+
+Use the printed flags as-is **only when the board has no spec of its own**:
 
 - **Routing** (`route.py`, `qfn_fanout.py`, `bga_fanout.py`, `route_planes.py`):
   `--clearance` from the **Default class**, but **`--via-size`/`--via-drill`
@@ -1336,6 +1431,18 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    their channel before the bulk signals fill the area. Route an RF feed on an
    outer layer (`--layers F.Cu`); requires a real stackup (see Step 2 stackup
    check). These nets are then EXCLUDED from step 3.
+2c. **ANY net with a per-net geometric requirement** — not just impedance ones.
+   The step-2b shape (own pass, before the bulk route, then excluded from it) is
+   the general answer whenever the spec constrains ONE net's geometry: a required
+   width, a layer restriction, a **via ban**, a maximum length. Routed in the bulk
+   pass those nets get whatever the router finds convenient, and no later step can
+   put it back without ripping everything around them.
+   Worked example — a crystal spec'd at *0.15 mm, max 0 vias per leg*: routed in
+   the bulk pass it came out at 0.16 mm with **6 vias**; given its own single-layer
+   pass first (`--nets XIN XOUT XTAL_XOUT --layers F.Cu --track-width 0.15`) it met
+   both clauses, because a one-layer route cannot place a via at all. Constrain by
+   **construction** where you can — a `--layers` with one entry is a via ban the
+   router cannot violate — rather than by hoping the bulk pass agrees.
 3. **Signal Routing** - All remaining nets, **excluding the plane nets AND any
    single-ended impedance nets from step 2b** (`--nets "*" "!GND" "!VCC" "!RF"`).
    Routing the plane nets as tracks would defeat the planes step; re-routing the
@@ -2174,11 +2281,29 @@ pre-filter and **re-score with `board_score.py` before believing it.**
 python3 -X utf8 route.py board.kicad_pcb --list-groups --group-by auto
 ```
 
-Groups exist → **20 iterations per group**. No groups → **20 per board**. Most
-boards take the per-board budget and that is correct: `kicad` groups exist on
-**0 of 27** in-repo boards. **Do not invent groups to iterate over** — a `sheet`
-block of 16–83 parts moved on no board tried, so iterating per sheet-block burns
-the budget on a lever that does not move.
+**The per-group budget needs groups that are separately convergeable — not just
+groups that exist.** Test each candidate against all three:
+
+1. its parts occupy a **distinct region** (not interleaved with other blocks),
+2. its nets are mostly **internal** (`--list-groups` prints touching/internal),
+3. routing it can **succeed or fail on its own**, without the others' copper.
+
+Fail any of them and it is a *label*, not a convergence unit: take the per-board
+budget and say so. A board of functional modules sharing one congested centre is
+the common case — iterating per module there routes a fraction and reports
+success on that fraction, which is the same defect the `route.py --group` rule
+warns about.
+
+**`kicad` groups exist on 0 of 27 boards *in this repo's corpus*** — that figure
+is about KRT's own test boards, not about boards in general. A generated board
+(e.g. Zener `.zen`) carries one `kicad:` group **per module**, so the naive
+reading of "groups exist → per-group" authorised **8 × 20 = 160 iterations** on a
+42-part board whose modules all fight over the same 21 mm of width. Take the
+per-board budget there.
+
+**Do not invent groups to iterate over** — a `sheet` block of 16–83 parts moved
+on no board tried, so iterating per sheet-block burns the budget on a lever that
+does not move.
 
 #### 9.3 — Cheapest lever first, and revert what did not help
 
