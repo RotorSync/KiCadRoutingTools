@@ -28,13 +28,26 @@ Static v1: the field reflects the pours as they exist at batch start (in a
 planes-first chain, the just-poured planes). Necks created later by in-run
 copper are invisible; a dynamic refresh is the #466 extension.
 
-Experimental knobs via environment (no CLI flags until the lever proves
-itself; promotion requires the full parity wiring per CLAUDE.md):
+DEFAULT ON at 2.0 mm-equivalent (2026-08-01, Andy): with plane drops (#424
+D2) and a planes-first chain this measured the winning composition on
+ottercast (4 vs 5 conn issues, GND+power fully connected, +3V3 pour a
+single intact island, GND weld segments 3075 -> 1063, 63/70 balls served
+by the pour alone). Inert on boards with no zones (signals-then-planes
+chains feel it only after the pour exists). Corpus A/B pending -- revert
+per-run with KICAD_PLANE_FRAGILITY_COST=0.
+
+Knobs via environment (no CLI flags; both fronts inherit the default
+through batch_route, so CLI/GUI parity needs no wiring):
   KICAD_PLANE_FRAGILITY_COST   mm-equivalent per-cell cost at a zone
-                               boundary cell (0 = disabled, the default)
+                               boundary cell (default 2.0; 0 = off)
   KICAD_PLANE_FRAGILITY_WIDTH  half-width in mm at which the ramp reaches
                                zero (default 2.0: cells deeper than this
                                into the pour cost nothing)
+
+GUI caveat: a live pcbnew board has no source file, so the field falls
+back to the drawn OUTLINE there (near-inert for full-board pours) -- a
+known CLI/GUI fidelity gap of the same class as the other
+source_path-gated exact-fill features.
 """
 from __future__ import annotations
 
@@ -52,9 +65,9 @@ PLANE_FRAGILITY_CACHE_KEY = -3
 
 def fragility_cost_mm() -> float:
     try:
-        return float(os.environ.get('KICAD_PLANE_FRAGILITY_COST', '0') or 0)
+        return float(os.environ.get('KICAD_PLANE_FRAGILITY_COST', '2.0') or 0)
     except ValueError:
-        return 0.0
+        return 2.0
 
 
 def _rasterize_polygon(poly, coord, gx0, gy0, W, H) -> np.ndarray:
