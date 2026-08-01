@@ -418,15 +418,16 @@ class PCBData:
     # per-layer clearance rules. parse_kicad_pcb sets it from its argument;
     # build_pcb_data_from_board from board.GetFileName().
     source_path: str = ""
-    # #424: board file that exact-fill consumers (plane_fragility, anything
-    # calling kicad_exact_fill) should refill. "" = use source_path. The GUI
-    # sets it to a fresh pcbnew.SaveBoard SNAPSHOT of the LIVE board each time
-    # build_pcb_data_from_board runs -- the on-disk source file can be stale
-    # mid-plan (earlier steps' copper applied to the live board only), and the
-    # fill truth must match the copper the engine is routing against. Sibling
-    # .kicad_pro is copied next to the snapshot so the refill sees the same
-    # netclass clearances a from-file refill would.
-    fill_snapshot_path: str = ""
+    # #424: callable returning {(net_name, layer): [island_polygon, ...]}
+    # (the refill_islands result shape) for exact-fill consumers
+    # (plane_fragility, anything wanting KiCad fill truth). None = refill
+    # source_path. build_pcb_data_from_board sets it to an IN-PROCESS
+    # ZONE_FILLER refill of the LIVE board (kicad_exact_fill.
+    # live_fill_islands) -- the on-disk file can be stale mid-plan (earlier
+    # steps' copper applied to the live board only), and the fill truth must
+    # match the copper the engine is routing against. Not a file path on
+    # purpose: the GUI never needs to save to be priced correctly.
+    exact_fill_provider: object = None
     # #459: KiCad (group "name" (uuid ...) (members <uuid> ...)) blocks, as
     # {group name: [footprint reference, ...]}. The designer's own statement that
     # these parts belong together, so placement grouping ranks it above any
@@ -4094,28 +4095,14 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
     # Drop Edge.Cuts contours mis-classified as cutouts (they enclose pads).
     drop_pad_containing_cutouts(board_info, pads_by_net)
 
-    # #424: snapshot the LIVE board for exact-fill consumers. The file at
-    # source_path can be stale mid-plan (steps apply copper to the live board
-    # first); the fragility field must price the fill of the copper the
-    # engine actually sees. One snapshot dir per process, overwritten on
-    # every build, so repeated calls don't accumulate temp files.
-    fill_snapshot = ""
-    try:
-        import pcbnew as _pcbnew
-        import tempfile as _tempfile
-        import shutil as _shutil
-        _snap_dir = os.path.join(_tempfile.gettempdir(),
-                                 f"kicad_live_snapshot_{os.getpid()}")
-        os.makedirs(_snap_dir, exist_ok=True)
-        _base = os.path.basename(board.GetFileName()) or "live.kicad_pcb"
-        _snap = os.path.join(_snap_dir, _base)
-        _pcbnew.SaveBoard(_snap, board)
-        _src_pro = os.path.splitext(board.GetFileName() or "")[0] + ".kicad_pro"
-        if _src_pro and os.path.isfile(_src_pro):
-            _shutil.copy(_src_pro, os.path.splitext(_snap)[0] + ".kicad_pro")
-        fill_snapshot = _snap
-    except Exception:
-        fill_snapshot = ""
+    # #424: exact-fill consumers must price the LIVE board's fill, not the
+    # possibly-stale file at source_path (mid-plan, steps apply copper to the
+    # live board first). No save needed: an in-process ZONE_FILLER refill
+    # reads the truth straight off the board object at the moment a consumer
+    # asks for it.
+    def _live_fill(_board=board):
+        from kicad_exact_fill import live_fill_islands
+        return live_fill_islands(_board)
 
     return PCBData(
         board_info=board_info,
@@ -4130,9 +4117,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         keepout_zones=keepout_zones,
         # #498 parity with parse_kicad_pcb: sibling-file discovery (.kicad_dru)
         source_path=os.path.abspath(board.GetFileName()) if board.GetFileName() else "",
-        # #424: exact-fill consumers refill THIS (the live board), never the
-        # possibly-stale on-disk source file
-        fill_snapshot_path=fill_snapshot
+        # #424: exact-fill consumers read the LIVE board, never a stale file
+        exact_fill_provider=_live_fill
     )
 
 

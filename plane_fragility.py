@@ -110,14 +110,26 @@ def compute_plane_fragility_cells(pcb_data: PCBData,
     depth = max(1, int(round(width_mm / config.grid_step)))
     rows = []
 
-    # Exact fill polygons (KiCad truth) when a board file is reachable;
-    # outline fallback otherwise. Each entry: (layer, polygon). The GUI's
-    # live-board snapshot outranks the on-disk source file (#424: mid-plan
-    # the disk copy is stale; the snapshot is the copper being routed).
+    # Exact fill polygons (KiCad truth): the GUI's live-board provider first
+    # (#424: an in-process ZONE_FILLER refill of the board object itself --
+    # no save, no staleness), then a refill of the source file (CLI), then
+    # the drawn zone outlines as the last resort. Each entry: (layer, poly).
     polys = []
-    src = (getattr(pcb_data, 'fill_snapshot_path', '')
-           or getattr(pcb_data, 'source_path', None))
-    if src and os.path.isfile(src):
+    provider = getattr(pcb_data, 'exact_fill_provider', None)
+    if provider is not None:
+        try:
+            fills = provider()
+            polys = [(layer, poly) for (_net, layer), pp in fills.items()
+                     for poly in pp]
+            if polys:
+                print(f"Plane fragility: exact-fill geometry "
+                      f"({len(polys)} filled island(s) from the LIVE board)")
+        except Exception as e:
+            print(f"Plane fragility: live-board fill unavailable ({e}); "
+                  f"trying the source file")
+            polys = []
+    src = getattr(pcb_data, 'source_path', None)
+    if not polys and src and os.path.isfile(src):
         try:
             from kicad_exact_fill import refill_islands
             fills = refill_islands(src)
