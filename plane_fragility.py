@@ -4,10 +4,18 @@ A signal track only BISECTS a plane where the plane is NARROW: a crossing
 through a wide pour region costs nothing (copper flows around it at fill
 time), while a crossing at a neck severs the pour into islands the repair
 step then has to stitch. Bisection is topological, but local narrowness is
-a computable proxy: this module rasterizes each filled zone's outline at
-the routing grid, measures every fill cell's distance to the zone boundary
-(iterative erosion, no scipy), and stamps a soft per-cell cost on the
-zone's layer that is negligible mid-pour and steep at necks.
+a computable proxy: this module rasterizes the pour's copper at the routing
+grid, measures every fill cell's distance to the copper boundary (iterative
+erosion, no scipy), and stamps a soft per-cell cost on the zone's layer
+that is negligible mid-pour and steep at necks.
+
+The copper rasterized is the EXACT KiCad fill when available (a ZONE_FILLER
+refill of the batch's input board via kicad_exact_fill -- so voids cut by
+fanout barrels and earlier copper make the surviving straits expensive,
+which is the "penalize what would break the plane" semantics), falling back
+to the drawn zone outline when no board file / KiCad python exists (live GUI
+boards). For a full-board outline the fallback prices only a board-edge
+band -- near-useless; the exact fill is the real lever.
 
 Delivery reuses the congestion-field transport (#424 Phase D): the field is
 computed once at batch start into (N, 4) [layer, gx, gy, cost] rows under a
@@ -89,18 +97,38 @@ def compute_plane_fragility_cells(pcb_data: PCBData,
     depth = max(1, int(round(width_mm / config.grid_step)))
     rows = []
 
-    for zone in pcb_data.zones:
-        li = layer_index.get(zone.layer)
-        if li is None or len(zone.polygon) < 3:
+    # Exact fill polygons (KiCad truth) when the board file is reachable;
+    # outline fallback otherwise. Each entry: (layer, polygon).
+    polys = []
+    src = getattr(pcb_data, 'source_path', None)
+    if src and os.path.isfile(src):
+        try:
+            from kicad_exact_fill import refill_islands
+            fills = refill_islands(src)
+            polys = [(layer, poly) for (_net, layer), pp in fills.items()
+                     for poly in pp]
+            if polys:
+                print(f"Plane fragility: exact-fill geometry "
+                      f"({len(polys)} filled island(s) from KiCad refill)")
+        except Exception as e:
+            print(f"Plane fragility: exact refill unavailable ({e}); "
+                  f"using zone outlines")
+            polys = []
+    if not polys:
+        polys = [(z.layer, z.polygon) for z in pcb_data.zones]
+
+    for zlayer, zpoly in polys:
+        li = layer_index.get(zlayer)
+        if li is None or len(zpoly) < 3:
             continue
-        xs = [p[0] for p in zone.polygon]
-        ys = [p[1] for p in zone.polygon]
+        xs = [p[0] for p in zpoly]
+        ys = [p[1] for p in zpoly]
         gx0, gy0 = coord.to_grid(min(xs), min(ys))
         gx1, gy1 = coord.to_grid(max(xs), max(ys))
         W, H = int(gx1 - gx0 + 1), int(gy1 - gy0 + 1)
         if W <= 2 or H <= 2 or W * H > 40_000_000:
             continue  # degenerate or absurdly large raster
-        mask = _rasterize_polygon(zone.polygon, coord, gx0, gy0, W, H)
+        mask = _rasterize_polygon(zpoly, coord, gx0, gy0, W, H)
         if not mask.any():
             continue
         # distance-to-boundary in grid steps by iterative 4-neighbour erosion,
