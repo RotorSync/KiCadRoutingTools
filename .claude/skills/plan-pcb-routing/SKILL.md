@@ -1625,6 +1625,38 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    both clauses, because a one-layer route cannot place a via at all. Constrain by
    **construction** where you can — a `--layers` with one entry is a via ban the
    router cannot violate — rather than by hoping the bulk pass agrees.
+
+   **A Step 2c pass is not durable. Two later steps silently undo it, and both
+   report success.** Excluding the net from the bulk signal route is necessary
+   and NOT sufficient — measured on one board, a crystal and a QSPI bus that
+   left their own passes on F.Cu with **0 vias** ended the chain on both layers
+   with **8 vias**, failing four HARD clauses, while every step printed a clean
+   summary. The two doors:
+
+   1. **`route_disconnected_planes --rip-blocker-nets` reconnects what it rips,
+      IN-STEP, at ITS OWN parameters.** It does not know your `--layers`. Pass
+      **`--net-layers <json>`** — `{"QSPI_SD0": ["F.Cu"], ...}` — and the ripped
+      net comes back on its own layer, where it cannot take a via at all. Add
+      `--track-width-floor` for a width clause. Without it a rip is a silent
+      constraint reset.
+   2. **The Step 5c reconnect's `--nets "*"` re-routes them again.** The template
+      below excludes only the *plane* nets; on a board with per-net geometry that
+      flattens every Step 2c pass in one command. **Mirror the geometry passes in
+      the reconnect, in the same order, and sweep the remainder last:**
+
+      ```bash
+      route.py r7.kicad_pcb r8a.kicad_pcb --nets XIN XOUT XTAL_XOUT --layers F.Cu --track-width 0.15
+      route.py r8a.kicad_pcb r8b.kicad_pcb --nets "QSPI_*" FLASH_CS --layers F.Cu --track-width 0.16
+      route.py r8b.kicad_pcb r8.kicad_pcb  --nets "*" "!GND" "!XIN" "!XOUT" "!XTAL_XOUT" "!QSPI_*" "!FLASH_CS"
+      ```
+
+   **The general rule: a per-net constraint must be re-stated at EVERY step that
+   can touch the net, not established once.** `--layers`, `--power-nets-widths`,
+   `--net-clearances` and `--net-layers` are the four channels; a step that
+   re-routes a net without them resets it to that step's defaults. This is the
+   same failure as 9.3c rule 2 (a ripped net returns at the *calling* command's
+   parameters), and it applies to the plane repair and the reconnect just as much
+   as to an explicit `--rip-existing-nets`.
 3. **Signal Routing** - All remaining nets, **excluding the plane nets AND any
    single-ended impedance nets from step 2b** (`--nets "*" "!GND" "!VCC" "!RF"`).
    Routing the plane nets as tracks would defeat the planes step; re-routing the
@@ -1797,7 +1829,7 @@ over Step 2's clearance/via/track-width/grid and `--no-bga-zone`.
 
 python3 -X utf8 route_disconnected_planes.py board_step4.kicad_pcb board_step5_repair.kicad_pcb \
     --clearance <floor> --via-size <V> --via-drill <D> --track-width <signal_track> --grid-step <G> \
-    --rip-blocker-nets \
+    --rip-blocker-nets --net-layers <json> --track-width-floor <spec floor> \
     --power-nets <PWR...> --power-nets-widths <W...> [--no-bga-zone] \
     2>&1 | tee /tmp/step5_plane_repair.txt
 
@@ -1845,7 +1877,7 @@ bare `cp`** — see the warning below.)
 > board has no sibling `.kicad_pro` (#441).
 
 python3 -X utf8 route.py board_step5_repair.kicad_pcb board_step5.kicad_pcb \
-    --nets "*" "!GND" "!<other_plane_nets...>" \
+    --nets "*" "!GND" "!<other_plane_nets...>" "!<every Step 2c net>" \
     --clearance <floor> --via-size <V> --via-drill <D> --track-width <signal_track> --grid-step <G> \
     --max-ripup 10 [--no-bga-zone] \
     --power-nets <PWR...> --power-nets-widths <W...> \
