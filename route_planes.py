@@ -4865,6 +4865,7 @@ Examples:
         from obstacle_map import build_base_obstacle_map
         from add_gnd_vias import add_gnd_vias_to_existing_board
         from kicad_writer import add_tracks_and_vias_to_pcb
+        from fix_kicad_drc_settings import effective_board_edge_clearance
 
         print(f"\nAdding GND return vias near signal vias...")
 
@@ -4885,7 +4886,21 @@ Examples:
             layers=list(pcb_data.board_info.copper_layers),
             # Thread the fab hole-to-hole minimum through so GND-via placement
             # enforces the real drill spacing (issue #125), not the 0.2mm default.
-            hole_to_hole_clearance=args.hole_to_hole_clearance
+            hole_to_hole_clearance=args.hole_to_hole_clearance,
+            # Copper-to-EDGE, so build_base_obstacle_map populates the static
+            # off-board keep-out (#422) and a return via cannot land outside the
+            # outline. Without it this config carried the 0.0 default, the map had
+            # no edge keep-out at all, and add_gnd_vias -- which checks track and
+            # via-to-via clearance but never the outline -- placed a GND via
+            # 1.40mm BEYOND the board edge (test-board: (124.20, 82.40) against a
+            # y=81.0 edge), i.e. copper that is milled away at depanelization.
+            #
+            # NOT args.board_edge_clearance: that one is the plane-zone INSET
+            # (see the note at the DRC writeback below), not the enforced
+            # copper-to-edge rule. cli=0 reads the board's own
+            # min_copper_edge_clearance, floored at the fab minimum -- the same
+            # idiom the zone-inset resolution above uses.
+            board_edge_clearance=effective_board_edge_clearance(args.input_file, 0.0),
         )
         from kicad_dru import install_layer_clearances
         install_layer_clearances(gnd_config, None, None, pcb_data)  # #498
