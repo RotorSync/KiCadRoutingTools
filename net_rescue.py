@@ -170,6 +170,20 @@ def _rescue_rungs(config, fine_grid, pcb_data, net_id):
     fab_clear, fab_track = fab_floor_clearance_track(pcb_data)
     nominal_w = config.get_net_track_width(net_id, config.layers[0])
     rescue_track = min(nominal_w, fab_track)  # never widen a sub-floor choice
+    # ...but never go under the board's OWN declared minimum either. The rescue
+    # is the single largest producer of sub-spec copper in the chain: it re-routes
+    # a failed net at the FAB floor and reports it `recovered`, with
+    # `failed_single` empty, so a run reads as fully routed while carrying track
+    # narrower than the board's spec allows. Measured on a board whose spec sets a
+    # HARD 0.15mm minimum and explicitly forbids the 0.10 fab minimum: 155 of 785
+    # segments came out at 0.127 with --track-width 0.16 passed, and the only
+    # symptom was one green "rescued a gap" line per net.
+    #
+    # `min(nominal_w, ...)` on the floor too, so this still "never widens a
+    # sub-floor choice": a net whose nominal is already below the floor keeps its
+    # own width rather than being pushed up by it.
+    if config.track_width_floor:
+        rescue_track = max(rescue_track, min(nominal_w, config.track_width_floor))
     power_widths = dict(config.power_net_widths)
     power_widths.pop(net_id, None)  # this net necks down; other nets are obstacles
     floor_clearance = config.clearance

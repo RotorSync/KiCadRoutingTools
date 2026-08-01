@@ -1232,6 +1232,17 @@ class PlanesTab(wx.Panel):
                     gnd_via_distance = config.get('gnd_via_distance', defaults.GND_VIA_DISTANCE)
                     gnd_via_net = config.get('gnd_via_net', defaults.GND_VIA_NET)
 
+                    def _gnd_via_edge_clearance():
+                        """The board's copper-to-edge rule, mm. 0.0 when it cannot
+                        be read -- add_gnd_vias' own bounding-box backstop then
+                        still keeps the via inside the outline."""
+                        try:
+                            import pcbnew as _pcbnew
+                            return (_pcbnew.GetBoard().GetDesignSettings()
+                                    .m_CopperEdgeClearance or 0) / 1e6
+                        except Exception:
+                            return 0.0
+
                     # Create config for GND via placement
                     gnd_config = GridRouteConfig(
                         via_size=config.get('via_size', defaults.VIA_SIZE),
@@ -1243,7 +1254,17 @@ class PlanesTab(wx.Panel):
                         # Thread the fab hole-to-hole minimum so GND-via placement
                         # enforces real drill spacing (issue #125), not the default.
                         hole_to_hole_clearance=config.get(
-                            'hole_to_hole_clearance', defaults.HOLE_TO_HOLE_CLEARANCE)
+                            'hole_to_hole_clearance', defaults.HOLE_TO_HOLE_CLEARANCE),
+                        # CLI parity with route_planes main: copper-to-EDGE, so
+                        # build_base_obstacle_map populates the static off-board
+                        # keep-out (#422) and a return via cannot land outside the
+                        # outline. Left unset this carried the 0.0 default and a
+                        # GND via was placed 1.40mm beyond the board edge.
+                        # Read from the live board's design settings (nm -> mm),
+                        # NOT cfg 'board_edge_clearance': that is the plane-zone
+                        # inset, a pour aesthetic, not an enforced routing floor
+                        # (same reasoning as _run_kicad_oracle_after_apply).
+                        board_edge_clearance=_gnd_via_edge_clearance(),
                     )
                     coord = GridCoord(gnd_config.grid_step)
 

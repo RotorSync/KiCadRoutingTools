@@ -144,6 +144,24 @@ def add_gnd_vias_to_existing_board(
                           config.via_size / 2 - config.track_width / 2)
     via_check_radius_grid = max(1, coord.to_grid_dist_safe(_ring_shortfall))
 
+    # Board outline, as a LAST-RESORT backstop. The obstacle map's static
+    # off-board keep-out (#422) is the real mechanism and does this properly
+    # (cutouts, milled contours, non-rectangular outlines); this only catches a
+    # caller that built its map with board_edge_clearance unset, which is how a
+    # GND return via once landed 1.40mm outside the board edge and would have
+    # been milled away at depanelization. Bounding-box only, so it is
+    # deliberately permissive -- it never rejects a via the keep-out accepts.
+    _bounds = getattr(pcb_data.board_info, 'board_bounds', None)
+    _edge_keepout = config.board_edge_clearance or 0.0
+
+    def _outside_board(x_mm: float, y_mm: float) -> bool:
+        if not _bounds:
+            return False
+        min_x, min_y, max_x, max_y = _bounds
+        margin = _edge_keepout + config.via_size / 2
+        return not (min_x + margin <= x_mm <= max_x - margin
+                    and min_y + margin <= y_mm <= max_y - margin)
+
     def is_via_position_clear(x_mm: float, y_mm: float, sig_via_x: float, sig_via_y: float) -> tuple:
         """Check if a via can be placed at the given position.
 
@@ -155,6 +173,9 @@ def add_gnd_vias_to_existing_board(
         via_size+clearance), we just need to check track clearance and manually
         check other vias.
         """
+        if _outside_board(x_mm, y_mm):
+            return (False, "outside_board_outline")
+
         gx, gy = coord.to_grid(x_mm, y_mm)
 
         # Check all layers for track clearance

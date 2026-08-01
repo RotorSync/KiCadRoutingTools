@@ -51,3 +51,37 @@ def add_lock_advisor_args(parser) -> None:
                         help="Distance from the board edge under which a part "
                              "is flagged as possibly position-critical "
                              "(default: 1.0mm)")
+
+
+def add_tidiness_args(parser) -> None:
+    """The #548 alignment and orientation cost terms. BOTH OFF by default.
+
+    Off because they are heuristic and aesthetic, and the router -- not a
+    tidiness score -- is the judge of a placement. Turning them on by default
+    would silently change every user's board to buy legibility, and would also
+    corrupt the isolated fixtures in `test_458_*`, which zero every geometry
+    knob they know about so the objective is clean enough to assert an exact
+    total. At 0.0 both return before touching any geometry, so a default run is
+    bit-identical rather than merely close.
+    """
+    parser.add_argument("--align-weight", type=float, default=0.0,
+                        help="Reward same-footprint parts that share an axis, "
+                             "so a row of decoupling caps comes out ON a line "
+                             "rather than within a few tenths of one. 0 = off "
+                             "(default). Try 5")
+    parser.add_argument("--align-radius", type=float, default=0.5,
+                        metavar="MM",
+                        help="Off-axis distance past which two peers are "
+                             "simply not a row, so the penalty stops growing "
+                             "(default: 0.5mm). The penalty is continuous "
+                             "here: a cliff would pay a part to flee the row")
+    parser.add_argument("--align-span", type=float, default=20.0,
+                        metavar="MM",
+                        help="How far apart two same-footprint parts can SEED "
+                             "and still be considered peers (default: 20.0mm)")
+    parser.add_argument("--orient-weight", type=float, default=0.0,
+                        help="Reward a rotation that puts a part's pads on the "
+                             "side its nets leave from. 0 = off (default). The "
+                             "airwire cost already uses exact pad positions, "
+                             "but a ~1mm pad offset is noise against a ~20mm "
+                             "net, so the signal needs its own weight. Try 1")

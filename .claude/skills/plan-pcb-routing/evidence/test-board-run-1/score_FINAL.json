@@ -1,0 +1,80 @@
+{
+  "blocking": 11,
+  "blocking_by": {
+    "broken": 1,
+    "drc": 5,
+    "floorplan": 0,
+    "impedance": 4,
+    "length": 1,
+    "undersized": 0,
+    "unrouted": 0
+  },
+  "board": "C:\\Users\\rob\\Documents\\prive\\git\\test-board\\layout\\layout.kicad_pcb",
+  "components": {
+    "broken": {
+      "count": 1,
+      "ran": true
+    },
+    "drc": {
+      "by_type": {
+        "segment-board-edge": 4,
+        "via-board-edge": 1
+      },
+      "count": 5,
+      "graded_at": 0.15,
+      "ran": true
+    },
+    "floorplan": {
+      "count": 0,
+      "ran": true,
+      "rules_run": 7,
+      "rules_skipped": [
+        "keepout",
+        "zone_exclusive"
+      ],
+      "violations": []
+    },
+    "impedance": {
+      "count": 4,
+      "crossings": 14,
+      "nets_analyzed": 4,
+      "ran": true,
+      "segments_over_void": 12
+    },
+    "length": {
+      "count": 1,
+      "groups": {
+        "xtal_legs": {
+          "missing_nets": [],
+          "pass": false,
+          "spread_mm": 6.8571,
+          "tolerance_mm": 1.0,
+          "worst": "XIN"
+        }
+      },
+      "ran": true
+    },
+    "undersized": {
+      "by_type": {},
+      "count": 0,
+      "ran": true
+    },
+    "unrouted": {
+      "count": 0,
+      "ran": true
+    }
+  },
+  "connectivity_nets": [
+    "GND"
+  ],
+  "kind": "board-score",
+  "label": "FINAL delivered board",
+  "quality": {
+    "copper_mm": 769.95,
+    "segments": 1011,
+    "vias": 136
+  },
+  "schema": 1,
+  "ungraded": [],
+  "unknown": []
+}

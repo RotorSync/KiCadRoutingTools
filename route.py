@@ -287,6 +287,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 power_tap_neckdown: bool = True,
                 neckdown_length: float = 2.5,
                 neckdown_taper_length: float = 0.5,
+                track_width_floor: float = 0.0,
                 clearance: float = defaults.CLEARANCE,
                 via_size: float = defaults.VIA_SIZE,
                 via_drill: float = defaults.VIA_DRILL,
@@ -762,6 +763,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     config_kwargs['power_tap_neckdown'] = power_tap_neckdown
     config_kwargs['neckdown_length'] = neckdown_length
     config_kwargs['neckdown_taper_length'] = neckdown_taper_length
+    config_kwargs['track_width_floor'] = track_width_floor
     if direction_order is not None:
         config_kwargs['direction_order'] = direction_order
     if layer_widths:
@@ -2938,6 +2940,15 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--no-power-tap-neckdown", action="store_true",
                         help="Disable neck-down retry of failed power-net tap edges (issue #72): by default a "
                              "wide tap that cannot fit is re-routed at the layer's default width near the pad")
+    parser.add_argument("--track-width-floor", type=float, default=0.0,
+                        help="HARD floor (mm) the neck-down may not cross. --track-width is a "
+                             "REQUEST: when a wide route will not fit, the router silently retries "
+                             "the WHOLE net at the layer/default width and still reports it routed, "
+                             "so a board whose spec sets a minimum above the fab floor can ship "
+                             "copper under it. With this set the net FAILS instead of going under. "
+                             "Distinct from check_drc.py's identically-named GRADING flag: this one "
+                             "constrains what gets routed, that one what gets graded (default: 0 = "
+                             "no floor beyond the --fab-tier minimum)")
     parser.add_argument("--neckdown-length", type=float, default=defaults.NECKDOWN_LENGTH,
                         help="Length in mm of narrow track from the target pad on neck-down tap routes; the track "
                              "returns to the power width beyond this where clearance allows (default: 2.5)")
@@ -3525,6 +3536,7 @@ For differential pair routing, use route_diff.py:
                 power_tap_neckdown=not args.no_power_tap_neckdown,
                 neckdown_length=args.neckdown_length,
                 neckdown_taper_length=args.neckdown_taper_length,
+                track_width_floor=args.track_width_floor,
                 clearance=args.clearance,
                 net_clearances=_net_clearances_map,
                 keep_input_copper=args.keep_input_copper,

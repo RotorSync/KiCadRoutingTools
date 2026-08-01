@@ -1,6 +1,6 @@
 ---
 name: plan-pcb-routing
-description: Analyzes a KiCad PCB file and creates a comprehensive placement-and-routing plan. Detects unplaced boards and advises which parts to lock before any placement repair, examines components for fanout needs (BGA/QFN/QFP/PGA), identifies differential pairs, categorizes power/ground nets, and presents a step-by-step workflow with explanations.
+description: Analyzes a KiCad PCB file and creates a comprehensive placement-and-routing plan. Routing-only is the default and fully supported path. Detects unplaced boards and advises which parts to lock before any placement repair, can declare a floorplan intent and grade the board against it, examines components for fanout needs (BGA/QFN/QFP/PGA), identifies differential pairs, categorizes power/ground nets, and presents a step-by-step workflow with explanations. Pairs every render with the JSON key that confirms or contradicts it, reads the renders itself rather than only showing them, and classifies routing failures as floorplan-, placement- or parameter-shaped so the two halves form one loop. Never changes the board outline.
 ---
 
 # Plan PCB Routing
@@ -22,7 +22,7 @@ python3 -X utf8 place_optimize.py board.kicad_pcb --suggest-locks
 
 | board state | run placement? | tool |
 |---|---|---|
-| **unplaced** (the tools exit 3) | **NO** — out of scope; report and stop | — |
+| **unplaced** (test it — see below) | **NO** — out of scope; report and stop | — |
 | careful hand placement, routing not yet attempted | **NO** | — |
 | routing already completed clean | **NO** | — |
 | board already carries copper (the tools exit 3) | **NO** — placement moves footprints, not tracks | — |
@@ -40,9 +40,31 @@ re-run the whole chain from the placed board.
 
 ### If the board is UNPLACED
 
-The tools exit **3** and say so. This toolchain **refines** an existing
-placement; it does not place a board from scratch. Report that plainly, tell the
-user to place the parts in KiCad, and offer to show them the current state:
+**Do not rely on an exit code to tell you.** `--suggest-locks` exited **0** and
+happily gave advice on a board with 42 footprints at their generator's default
+positions and no outline at all. Test positively instead — any of these means
+unplaced, regardless of what the tools return:
+
+```python
+from kicad_parser import parse_kicad_pcb
+pcb = parse_kicad_pcb('board.kicad_pcb')
+pcb.board_info.board_bounds is None        # no Edge.Cuts outline to place INTO
+len({(round(f.x, 3), round(f.y, 3)) for f in pcb.footprints.values()}) < len(pcb.footprints) / 2
+```
+
+`check_floorplan.py --emit-intent` is the other honest probe: it exits **3** with
+*"the board has no Edge.Cuts outline"*, and its `JSON_SUMMARY` carries
+`state_unplaced` / `state_partially_unplaced` / `state_spread_ratio` for the
+cases where an outline does exist.
+
+This toolchain **refines** an existing placement; it does not place a board from
+scratch. Report that plainly, tell the user to place the parts in KiCad, and
+offer to show them the current state:
+
+**If the repo has its own seeder** (a script that writes a starting floorplan and
+the outline from the spec), that is the placement step — run it, then treat its
+output as the "rough / generated placement" row of the table above. The skill
+does not place a board, but it should not stop in front of a repo that does.
 
 ```bash
 python3 -X utf8 render_placement.py board.kicad_pcb -o /tmp/state.png
@@ -52,11 +74,75 @@ Do not pass `--allow-unplaced` to "make it work". On a pile of parts every
 candidate pose is illegal, so the run prints "0 parts moved" plus a legality
 block that *looks like a result*.
 
+### Step 0a: what the SPEC fixes in place — read this before the lock advisor
+
+**Every board mates with something.** A Pico-footprint carrier drops into a
+2.54 mm header; a USB receptacle has to line up with an enclosure aperture; a
+mounting hole has to hit a standoff. Those positions are **mechanical facts, not
+optimizer variables** — and a 3 mm nudge that improves `crossings` by 20% can
+make the board physically not fit, which no routing metric will ever tell you.
+
+**The lock advisor does not know this.** `--suggest-locks` (Step 0b) infers from
+footprint names and reference prefixes; it cannot read a requirements document,
+and its lexical rules "miss house libraries entirely". It is the **second** pass.
+The spec is the first.
+
+**1. List what the spec fixes, and cite the requirement next to each ref.**
+Read the board's requirements/spec before touching placement. Anything with a
+coordinate, a pitch, a mating standard or an enclosure feature is fixed:
+
+| what | typical source | example |
+|---|---|---|
+| edge/board-to-board connectors | the mating standard | Pico castellated rows: 2.54 mm pitch, 17.78 mm apart |
+| USB / barrel / RF connectors | enclosure aperture | `HW-TB-PCB13` fixes the USB-C at the north edge |
+| mounting holes | standoff pattern | keep-out + exact XY |
+| castellated edges | the carrier's pad field | pad centred **on** the outline |
+| test points, antennas, sensors | mechanical or RF | an antenna keepout is not negotiable |
+
+**2. Lock every one of them, and pass the locks to EVERY placement invocation.**
+Not just the first — `place_optimize`, `place_route_loop` and every retry:
+
+```bash
+python3 -X utf8 place_optimize.py board.kicad_pcb placed.kicad_pcb \
+    --lock 'J*' 'H*' 'U1' --max-displacement 2
+```
+
+**3. Record them in the intent, so they are GRADED and not merely hoped for.**
+A lock you forgot to re-pass is silent. A `must_lock` the grader checks is not:
+
+```jsonc
+{
+  "must_lock": ["J1", "J2", "H1", "H2", "H3", "H4"],   // HW-TB-PCB02, -PCB13
+  "blocks": [
+    { "name": "pico-header-north",                      // HW-TB-PCB01
+      "refs": ["J1"],
+      "zone": {"x": 100.2, "y": 60.1, "w": 0.4, "h": 0.4} }
+  ]
+}
+```
+
+`edge_connectors` constrains **which edge** and `overhang_mm` — it cannot pin an
+XY. Anything with an *exact* position needs a `blocks` zone a few hundred microns
+wide around the spec coordinate. Then `check_floorplan --intent` **fails** the
+moment an iteration walks one, which is the mechanism a spec-conformant board
+needs and prose does not provide.
+
+**4. Scope `decaps` to the caps the requirement names, and lock those too.**
+The quench has no decap-proximity term, so it walks a *different* cap past the
+limit every run — lock one and the next moves. Locking them one at a time is
+whack-a-mole; lock the named set at once. On test-board that cost `crossings`
+52 → 60, and **that is the correct trade, not a regression**: a spec-conformant
+placement that routes slightly worse beats a spec-violating one that routes well.
+
+**Do not** lock a part the spec does not fix, "to be safe". A wrong lock freezes
+a part that needed to move and the failure is invisible — which is the same
+reason nothing is auto-locked.
+
 ### Step 0b: what to lock — advice only
 
-Run this **first**, and read the reasons. Nothing is locked automatically,
-deliberately: a wrong auto-lock silently freezes a part that needed to move, and
-that failure is invisible.
+Run this **second**, after Step 0a, and read the reasons. Nothing is locked
+automatically, deliberately: a wrong auto-lock silently freezes a part that
+needed to move, and that failure is invisible.
 
 ```bash
 python3 -X utf8 place_optimize.py board.kicad_pcb --suggest-locks \
@@ -86,9 +172,29 @@ strong halos destroyed a data-bus corridor (15 new failures). `--ignore-nets`
 must equal the Step 5 plane-net set — a plane-routed rail's airwire is a fiction
 the optimizer would otherwise chase across the board.
 
-**Acceptance rule — apply it, do not skip it.** Read the `JSON_SUMMARY:` line
-from 0c. If `crossings_after > crossings_before` or `hpwl_after > hpwl_before`,
-**discard the result and route from the original board.**
+**Acceptance rule — apply it, do not skip it.** It is a CONJUNCTION, and all
+three parts are required:
+
+1. Read the `JSON_SUMMARY:` line from 0c. If `crossings_after > crossings_before`
+   or `hpwl_after > hpwl_before`, **discard the result.**
+2. `check_floorplan --intent` must still **pass**. It did not, once: the quench
+   walked a crystal 1.40 mm out of its declared zone while both metrics improved.
+3. Any repo-local requirement gate must still pass.
+
+**Two numbers produced by the optimizer cannot adjudicate a requirement the
+optimizer has no term for.** Measured, one accepted-by-rule-1 placement:
+`crossings` 85→60 and `hpwl` 602→596, both "better" — while a decap requirement
+went from 2.04 mm to **9.57 mm** because the quench **rotated** the part it served
+by 180°. The footprint origin never moved, so a position diff showed nothing and
+the delta render drew no arrow.
+
+**Rotation is the trap.** Lock anything whose **pin positions** a requirement
+depends on, not merely anything the spec gives a coordinate to. On one board that
+added six parts the spec pins nowhere: the flash (a decap-per-pin rule), the
+crystal and its load caps (leg length and symmetry), and two series resistors (a
+pair's coupled geometry). Expect to pay: `crossings` 85→74 instead of 85→60. That
+is the same trade the decap case records — a spec-conformant placement that routes
+slightly worse beats a spec-violating one that routes well.
 
 When routing has already failed on congestion, use the loop instead — it consumes
 exactly the failed and blocker nets the router reported:
@@ -118,11 +224,109 @@ carries the real metrics.
 `iterations`. Do **not** judge a placement by how much moved: "lots moved, looks
 broken" and "barely moved, looks safe" are both wrong.
 
+### Step 0e: declare the floorplan, so it can be checked
+
+A placement judged only by `crossings` and `hpwl` is judged by two numbers that
+are **indifferent between a sensible layout and a scattered one with the same
+wirelength**. Declaring where parts belong is what makes the rest checkable.
+
+```bash
+# read a starter intent OFF the board, then edit it down
+python3 -X utf8 check_floorplan.py board.kicad_pcb --emit-intent /tmp/intent.json
+python3 -X utf8 check_floorplan.py board.kicad_pcb --intent /tmp/intent.json --health
+```
+
+Exit **0** clean, **4** violations, **3** the board is not in a state it can
+grade. Each violation carries the measured number beside the limit it broke, so
+`--json` output is quotable evidence rather than an opinion.
+
+Worth declaring, in rough order of value: `must_lock` for the parts the lock
+advisor flagged; `edge_connectors` for anything that is *meant* to overhang
+(this is what stops `oob_count` reporting a card edge as a defect forever);
+`keepouts` for mounting holes and antenna clearances; `decaps.max_distance_mm`;
+and `blocks` with a `zone` **only where the parts really are one contiguous
+area**. Schematic sheets usually are not — on ulx3s all ten sheet bounding
+boxes overlap each other, so `--emit-intent` claims a zone for only 4 of 10 and
+says why for the rest.
+
+`--health` adds the routability signals: how far each block sits from the parts
+it connects to, and what crosses each declared bus corridor. Advisory — they say
+the floorplan will fight the router, not that it breaks your intent.
+
+### Scope `decaps` to the caps the requirement names, then LOCK them
+
+A spec clause like *"100nF within 3mm of every VDD pin"* names **one BOM line**,
+not every capacitor. Read the MPNs off the board and exempt the rest —
+bulk electrolytics, crystal loads, a regulator network — in `decaps.exempt`,
+citing the line item. That is scoping the rule to what it says, not relaxing it.
+
+Then **lock the caps it does govern**. The quench has **no decap-proximity
+term**, so any decap it may move can drift past the limit for a fraction of a
+millimetre of wirelength, and it is a different cap every run — on test-board,
+`C11` on one run, then `C13` and `C8` on the next. Locking them one at a time is
+whack-a-mole. Their proximity *is* the requirement; their exact position is not
+the optimizer's to trade. Expect to pay for it: locking ten decaps there took
+crossings from 52 to 60. That is the correct trade, not a regression.
+
+### Board features that live ON the outline
+
+Castellated edge rows, card edges and a USB shell are *meant* to cross the
+boundary. Declare them in `must_lock` **and** `edge_connectors` — the second is
+what stops `oob_count` reporting them as defects forever.
+
+Three things follow that nothing will tell you:
+
+- **`check_drc` has no castellation exemption.** A track landing on a half-hole
+  is flagged `SEGMENT-BOARD-EDGE` and the tool exits non-zero. Do not call that
+  board clean — say what the tool reports, then why it is benign, and check the
+  flagged coordinates really are on exempt pads before claiming they are.
+- **Set `pad_prop_castellated` on the pads.** KiCad has the property; without it
+  the fab has nothing machine-readable saying these half-holes are deliberate,
+  and KiCad's own DRC reports pad-outside-outline on every one.
+- **A collinear row is not an IC.** `decap_tethers` filters those out now, but
+  the reason is worth carrying: a 1×N row spanning a board edge and carrying a
+  rail sits nearer to half the decaps than their real IC, and it used to capture
+  them — which made a distant decap grade **clean** against the wrong part.
+
+### Before routing a dense escape: is the channel even wide enough?
+
+If a board fans a bus out to an edge, measure the corridor before blaming the
+router: `escapes x trace pitch / channel width`. It is the difference between
+*"the router failed"* and *"this was never routable"*, and a router you cannot
+tell those apart on measures nothing. test-board's spec sets its own gate at
+≤75%; the as-built channel measured 5.60mm against 2.40mm of escape, 42.9%.
+
+### THE BOARD OUTLINE IS NOT YOURS TO CHANGE
+
+Size, shape, cutouts, slots and mounting-hole geometry are mechanical decisions
+the user owns: enclosure fit, panel rails, connector apertures.
+
+- **Never resize a board**, and never "just widen it a little". If a board is
+  genuinely too small for its parts, **say so in words with the measured number
+  and stop.** That is a design decision, not a routing one.
+- **Never run** `tests/stress/fix_outline_gaps.py`, `strip_routing.py` or
+  `prep_set2.py`. They are corpus-normalization tools and they *do* rewrite
+  `Edge.Cuts` — the only things in this repo that do.
+- The intent's `envelope` is **read from the board**, never authored. A part
+  outside it is a finding about the **part**.
+- A part sitting inside a **cutout** is caught by `oob_count` and `oob_amount`,
+  never by `oob_area` — that one is measured against the bounding-box inset and
+  scores a part in a slot as `0.0`. `check_floorplan` refuses it as a budget
+  key, with that reason.
+
+This mirrors the rules you already follow for user-owned geometry: guide
+corridors and keepout polygons are described in words and drawn by the user, and
+the stackup is never edited directly.
+
 ### Which artifact to produce, and what to check it against
 
 **Never read a picture on its own.** Every render is paired with a number that
 either confirms or contradicts it, and the number wins. A render that looks
 tidier while `crossings` went up is a worse placement that photographs well.
+
+Full key-by-key map in
+[`references/evidence-map.md`](references/evidence-map.md) — read it before
+quoting any number. The headline pairings:
 
 | after this step | produce | and CHECK it against |
 |---|---|---|
@@ -133,17 +337,204 @@ tidier while `crossings` went up is a worse placement that photographs well.
 | a `place_route_loop` round | `make_movie.py WORKDIR --camera auto` | per-round `failures` and `iterations` from the loop's own output. A round that moved a lot and changed neither is noise |
 | routing failed after placement | `--summary-json <route log>` on the render | the `failed_nets` and `blockers` in that same summary — the render colours exactly those, so the picture and the diagnosis are the same data |
 | board looks wrong / empty | `render_placement.py board -o state.png` | exit code. **3 means the board is unplaced or already routed** — read the message rather than reaching for an override |
+| **any board you are about to call done** | `scripts/board_score.py board --intent I --json wk/score.json` | `blocking` — it must be **0**. `ungraded` lists what nothing examined; that is *unexamined*, not clean. This is the one number not produced by the thing being graded |
+
+### Which flag, at which step — the trigger table
+
+Producing a render at the wrong moment, or without the flag that answers the
+question you actually have, is the same as not producing it. Each row is a
+**trigger**: when the left column happens, run that command *then*.
+
+| when this happens | run | because it answers |
+|---|---|---|
+| before authoring an intent, board has back-side parts | `render_placement --per-side` | you cannot declare zones for a side you have not seen. Pairs with `overlap_area` |
+| any accepted placement change | `render_placement after --before <ledger parent_board>` | did the macro structure survive? **`--before` is the last ACCEPTED board**, not iteration N−1 — N−1 renders a delta that never existed |
+| any route step failed | `render_placement board --summary-json <route log> --focus` | do the failures share one pocket (→ placement) or scatter (→ parameters)? **`--focus` emits nothing without `--summary-json`** |
+| a `--group-by` decision is live | `render_placement --zoom-group <name> --group-by sheet` | which parts does this block actually pull in? |
+| chasing one bus, pair or clock | `render_placement --ratsnest-nets '*USB*'` | route.py `--nets` glob syntax, exclusions included. Use it when the default delta view is too busy to read |
+| every placement render | add `--ignore-nets <same as place_optimize>` | **must match** or `crossings`/`hpwl` will not reproduce the optimizer's `JSON_SUMMARY`, and you will chase a phantom disagreement |
+| every placement render | add `--clearance <the board's real floor>` | halo and overlap are otherwise graded at the wrong gap |
+| every render, always | add `--json` | the re-measurement channel. A tool's own report never satisfies its own gate. **It is a bare FLAG on `render_placement`**, not a path: it prints a `JSON_SUMMARY:`-prefixed line into stdout among the progress text, so grep that prefix and strip it. Only `board_score.py --json <path>` takes a file |
+| with `--focus` | `-o` names a **DIRECTORY** | `render_placement --focus -o wk/x.png` writes `wk/x.png/<board>.png` and `wk/x.png/<board>_focus1.png`. Give it a directory name, and read the panel paths back out of the `panels` array |
+| once, before choosing a budget | `route.py --list-groups --group-by auto` | whether the board decomposes at all. The budget is **100 per board** either way (9.2) |
+| after each accepted placement | `check_floorplan --intent I --health` | will this floorplan *fight* the router? Block displacement and bus-corridor crossings |
+| every Step 9 iteration | `check_floorplan --intent I --json` | the per-rule measurements the ledger records |
+| every Step 9 iteration | `board_score.py --json` | the only number that decides better/worse |
+
+**Not evidence:** `--size` and `--supersample` change how the picture looks, not
+what is true — measure instead. `--ratsnest-all` is the deliberate hairball, for
+showing a human, never for reading.
+
+### LOOK at the render — you, not just the user
+
+Renders are for **intent**; numbers are for **legality**. A render answers *"is
+this the structure I meant?"* — bus corridors, block cohesion, connector
+orientation, which pocket the failures sit in. It never answers *"is this
+legal?"*: clearance, overlap, off-board, connectivity and DRC all come from
+numbers. **Do not adjudicate clearance from pixels.**
+
+**`Read` the PNG yourself, and say what you saw, in exactly these four cases:**
+
+1. **Before writing an intent** — `--per-side` on any board with back-side
+   parts. You cannot declare zones for a board you have not looked at.
+2. **After any accepted placement change** — the delta against the board it
+   actually came from. One question only: *did the macro structure survive?*
+3. **When routing failed and you need to know why** —
+   `--summary-json <route log> --focus`. One question: *do the failures share
+   one pocket* (→ placement) *or are they scattered* (→ parameters)?
+4. **When a block decision is live** — `--zoom-group`.
+
+**Show without reading:** the movie, `--ratsnest-all` hairballs, full panel
+dumps. Those are for the human. Budget **≤3 images read per turn** — pick by the
+question you have, not by what is available.
+
+### Always produce the movie — it is the only artifact that shows *how*
+
+`place_route_loop` renders it **by default** (`--no-movie` opts out). Every other
+artifact is a snapshot: the movie is the only one that shows which round moved
+what, and what the router did with the room it was given. Do not make the user
+ask for it.
+
+When the chain was **not** a `place_route_loop` run — a hand chain of
+`place_optimize` → `route` → `route_planes` → repair, which has no
+`loop_round*.json` sidecars and so no camera — build it from the step boards you
+already wrote, in order. They are cumulative, which is exactly what the animator
+wants:
+
+```bash
+python3 -X utf8 make_movie.py placed.kicad_pcb r3.kicad_pcb r4.kicad_pcb r5.kicad_pcb \
+    -o wk/routing.gif --size 1600 --fps 12 --chunks 30 --end-hold 12
+```
+
+`.mp4` needs `imageio` + `imageio-ffmpeg` and falls back to a sibling `.gif`
+without them — ask for `.gif` directly if you know they are missing, rather than
+letting the fallback surprise you. `--camera auto` needs the loop's sidecars and
+warns (does not fail) when there are none. Hand it to the user with
+`SendUserFile`; do not `Read` it — it is a show-without-reading artifact, and its
+frames would blow the ≤3 budget for nothing.
+
+**A Step 9 convergence produces one film, not N disconnected ones.** Each
+iteration may render its own movie; the artifact the user wants is the whole
+convergence, and the ledger already holds its frame list — **the accepted boards,
+in order**:
+
+```bash
+python3 -X utf8 make_movie.py \
+    wk/iter00.kicad_pcb wk/iter01.kicad_pcb wk/iter04.kicad_pcb wk/iter07.kicad_pcb \
+    -o wk/convergence.gif --size 1600 --fps 12 --chunks 30 --end-hold 12
+```
+
+Feed it the **accepted** boards only. A reverted iteration in the frame list
+animates a change that was undone, which reads as the router thrashing when it
+was doing the opposite.
+
+A render can never establish: that routing will now succeed (only a re-route
+shows that); that the placement improved (`crossings`/`hpwl` decide); that a
+part is or is not in violation (`overlap_area`/`oob_count` decide); or anything
+at a coordinate outside that panel's `view` rect.
+
+Two things the picture cannot show you at all: `board_edge_contours` (milled
+inner contours the router keeps clearance from) are **not drawn**, and a board
+whose outline failed to chain renders as a clean **rectangle**. Both are visible
+only in `check_floorplan`'s `outline` block.
 
 ### Verify, do not assume
 
 - **Re-read the `JSON_SUMMARY` line you just produced.** Do not carry a number
   forward from an earlier step or from memory of what you expected.
+- **VERIFY THE WIDTH LANDED.** `--track-width` and `--power-nets-widths` are
+  *requests*. A wide route that will not fit is necked down, and the per-net
+  rescue re-routes a failed net at the **fab floor** — both leave `failed_single`
+  empty and print one easily-missed line in a long log. Measure the copper
+  instead, after every width-bearing step:
+
+  ```python
+  from collections import Counter
+  from kicad_parser import parse_kicad_pcb
+  pcb = parse_kicad_pcb('out.kicad_pcb')
+  print(Counter(round(s.width, 4) for s in pcb.segments))    # widths ACTUALLY emitted
+  ```
+
+  Pass `--track-width-floor <mm>` to make the net fail instead of going under,
+  and score with `board_score.py --net-min-widths` so a per-net requirement is
+  graded rather than hoped for.
+- **Carry the `.kicad_dru` with the `.kicad_pro`.** Rule lookup is
+  `splitext(board)[0] + ".kicad_dru"`, strictly per board stem, so every
+  intermediate board needs its own. `copy_board.py` takes every sibling; a hand
+  `cp` of two files does not.
+- **`place_optimize.py` writes NO project sibling at all** — only the
+  `.kicad_pcb`. The next step then reads no project and resolves its floor from
+  the stock netclass, which is the exact failure the `copy_board.py` warning
+  exists to prevent, arriving through a door nothing guards. Copy the
+  `.kicad_pro` (and `.kicad_dru`) onto the placed board yourself.
+- **A netclass-scoped `.kicad_dru` rule is enforced by nothing in this chain.**
+  `read_board_layer_clearances` extracts only *layer*-scoped rules and skips the
+  rest with a note saying KiCad will still enforce it — true in KiCad, false for
+  `check_drc.py` and for the router. Without `kicad-cli` installed, such a rule
+  is graded by **nobody**, and the score cannot even list it as `ungraded`
+  because it never knew about it. Say so explicitly rather than letting the rule
+  read as covered.
+- **A tool's own report does not satisfy its own gate.** `place_optimize` says
+  the placement improved; confirm it on a *different channel* by running
+  `render_placement.py <the written output> --json` and checking `metrics.
+  crossings` and `metrics.hpwl` reproduce it. That is what catches a writer that
+  dropped something between the objective and the file.
 - **A render proves nothing about connectivity or DRC.** Those come from
   `check_connected.py` and `check_drc.py`, graded at the clearance the board was
   actually routed to.
 - **After ANY placement change, every downstream routed board is stale.** Re-run
   the chain from the placed board. Do not reuse a routed artifact from before it.
 - **If two sources disagree, believe the JSON.** The picture is a summary of it.
+- **`0 violations` and `0 rules ran` are different.** `check_floorplan` reports
+  `rules_run` and `rules_skipped` precisely so you can tell them apart; quote
+  both.
+
+### Verify with independent subagents, when you can
+
+For anything beyond a single obvious call, **fan out verifiers in ONE response**
+and hand each only its slice of the round's evidence — never the raw
+`.kicad_pcb`. The prompts are in
+[`references/verifier-prompts.md`](references/verifier-prompts.md). Nine lenses —
+six grade the **placement** (`intent`, `legality`, `delta`, `blocks`,
+`routing-feedback`, `coverage`) and three grade the **routed board**
+(`connectivity`, `drc`, `spec`).
+
+**Run the `spec` lens ONCE AT THE START, before the chain is built.** It is the
+only step in this procedure that walks the requirements document and asks *"what
+will measure this?"* of every clause — and a clause nothing models is **invisible**,
+not `ungraded`. `score.json#/ungraded` lists components that know they did not run;
+a requirement no component represents never appears there at all. Two HARD clauses
+were shipped unmeasured that way: a plane-continuity rule that no checker
+implements, and three fiducials that were never in the netlist, so no routing step
+could have noticed they were absent. Running `spec` early tells you which clauses
+you must measure by hand, in time to build that into the chain instead of
+discovering it after delivery.
+
+**Then run `connectivity`, `drc` and `spec` again on every board you are about to
+call done.** They are the gate, not the write-up: a `VERDICT=FAIL` means `blocking`
+was not really zero, so it **re-enters the Step 9 loop** at the step named in
+`route=` while budget remains (100 per board). Do not re-word a FAIL into a caveat — "complete,
+with some DRC warnings" describes a board that did not pass.
+
+Each returns exactly one machine-readable line:
+
+```
+VERDICT=PASS:lens=<lens>
+VERDICT=FAIL:lens=<lens>;finding=<one line>;evidence=<path#json-pointer|path@x,y>;route=<step>
+```
+
+**A verifier that cannot fill `evidence=` has not verified anything.** The gate
+is met when every lens passes or every finding is dispositioned in writing.
+
+`VERDICT=`, **not** `RESULT=`. The GUI takes the **last** `RESULT=` line in a
+reply and parses it as the plan JSON, so a verdict spelled that way would be
+read as a malformed plan.
+
+**If the Agent tool is unavailable** — the GUI's headless runs allow only
+`Read,Glob,Grep,Bash,WebSearch` — run the identical lenses yourself, in the same
+order, on the same inputs, tag each `mode=inline`, and **say in the report that
+verification was single-agent**. A run must never look like a fan-out happened
+when it did not.
 
 ### Good and bad, concretely
 
@@ -175,28 +566,34 @@ tidier while `crossings` went up is a worse placement that photographs well.
 - Present a render as evidence that routing will now succeed. Only a re-route
   shows that.
 
-### The loop, and when to stop
+### The inner loop — and why its verdict is not the verdict
 
 `place_route_loop` is the router-in-the-loop form: it routes, reads the failure
 diagnostics, moves only the parts implicated, re-routes, and keeps the result
 **only if `(failures, iterations)` improved**. Rejected rounds revert and widen
-the search.
+the search. Each round costs a full re-route (minutes); `--ratsnest-screen 20`
+skips the route for candidates whose ratsnest clearly regressed, buying some back.
 
-Stop when any of these is true, and say which:
+**Its `ACCEPTED` / `REJECTED` is the ROUTER'S OWN OPINION, not a quality
+verdict.** `better()` (`place_route_loop.py:358-362`) compares `failures` and
+`iterations`, and `metrics_from_summary` (`:224`) reads both out of route.py's
+`JSON_SUMMARY`. **No checker runs.** CLAUDE.md states the hazard directly —
+*"Routers can report false success… re-verify with the authoritative,
+zone/fill-aware check"* — so a round can be ACCEPTED with pads disconnected and
+DRC dirty. Two consequences:
 
-1. `failures == 0` — done; the loop stops itself.
-2. Several consecutive rounds are REJECTED and `failures` has not moved. The
-   floorplan, not the placement detail, is the limit. Report that rather than
-   raising `--rounds`.
-3. `crossings` and `hpwl` have flattened while `failures` has not improved. More
-   rounds will not help.
-4. The remaining failures are the same nets every round and
-   `/diagnose-routing-failures` blames parameters, not congestion. Fix the
-   routing parameters instead.
+- **It is a cheap pre-filter, not a gate.** Re-score every board it hands you
+  with `scripts/board_score.py` before believing it improved anything.
+- **It is also only ONE `route.py` call** (`_ROUTE_PY`, `:52`), not the chain.
+  Planes, plane-repair, reconnect and diff pairs never participate in its
+  feedback, so a board that needs a plane repair to connect cannot converge
+  inside it. That is what the **Step 9** outer loop is for.
 
-Each round costs a full re-route (minutes). `--ratsnest-screen 20` skips the
-route for candidates whose ratsnest clearly regressed, which buys some of that
-back.
+`--rounds` (default **5**) bounds this inner loop. The 20-per-group / 20-per-board
+budget in Step 9 (100 per board) bounds the outer one. They are different budgets; do not confuse
+raising `--rounds` with taking another outer iteration.
+
+**Full convergence procedure: [`references/convergence.md`](references/convergence.md).**
 
 ### Placement is CLI-only
 
@@ -206,12 +603,52 @@ plan and hand the plan the placed board. `make_plan.py` / `manifest_to_plan.py`
 **refuse** a recorded `place_optimize.py` / `place_route_loop.py` command loudly
 rather than convert it.
 
-### Scoping a run to one block (`--group`) — opt-in, off by default
+### Do we need blocks at all, and which ones? — a procedure
 
-Both group features are **opt-in and the default chain is unchanged**.
-`--group-by` defaults to `none` on the placement CLIs and `route.py --group` is
-unset. **Do not add `--group*` to a plan or a command unless the user asked for
-it.**
+**G0. The default is no blocks.** `--group-by` defaults to `none` on the
+placement CLIs and `route.py --group` is unset. **Do not add `--group*` to a
+plan or a command unless the user asked for it** — a routing run that silently
+acquires a scope routes a fraction of the board and reports success on that
+fraction.
+
+**G1. Name the job first.** Three different jobs want three different sources:
+
+| the job | the tool | the source that works |
+|---|---|---|
+| move parts together | `place_optimize` / `place_route_loop --group-by` | `decap`, and realistically only `decap` |
+| scope a route or an undo | `route.py --group` + `--group-scope` | `sheet` (or `kicad` if it exists) |
+| frame a picture, or a zone in an intent | `render_placement --zoom-group`, `check_floorplan` | `sheet` |
+
+**G2. List before deciding.** Both are report-only, exit 0, write nothing:
+
+```bash
+python3 -X utf8 route.py board.kicad_pcb --list-groups --group-by auto
+python3 -X utf8 render_placement.py board.kicad_pcb --list-groups --group-by sheet
+```
+
+**G3. Choose on the measured evidence, in this order.**
+
+1. `kicad` — the designer's own `(group ...)`. Exact when present, but on **0 of
+   27** in-repo boards. If it fires, trust it and stop looking.
+2. `sheet` — **12 of 22** boards with sheet paths have more than one. The
+   workhorse **for scoping and framing**. **Not for movement**: sheet blocks of
+   16–83 parts moved on no board tried. Also not for zones — a sheet is a
+   *functional* grouping, so its members scatter and its bounding box overlaps
+   its neighbours' (all 10 of ulx3s's do).
+3. `decap` — the only source that measurably *moves* anything. **0% internal by
+   construction** (a cap bridges VCC and GND, both board-spanning), so it is
+   meaningless as a routing scope.
+4. `netprefix` — weakest. Enable expecting little.
+
+**G4. Pick the scope deliberately.** `--group-scope` defaults **depend on the
+operation**: `touching` when routing (routing a block's interface is the point),
+`internal` with `--undo`, because a block's touching set contains GND/VCC and
+undoing those strips copper board-wide (rp2350: 170 segments vs 75).
+
+**G5. Confirm it did something.** Read `blocks` and `block_parts` from the
+`JSON_SUMMARY` and the `describe()` banner. **`blocks: 0` means drop the flag**,
+not "it helped". And if a round's `groups` pulled a large block in, the run moved
+far more than you targeted.
 
 - Always list first: `python3 route.py board.kicad_pcb --list-groups --group-by auto`
   (prints parts and touching/internal net counts, exits 0, routes nothing).
@@ -347,6 +784,15 @@ for ref, fp in pcb.footprints.items():
         ys = sorted(set(round(p.local_y, 2) for p in fp.pads))
         grid_cols, grid_rows = len(xs), len(ys)
 ```
+
+**Do not skip this step on a fine-pitch QFN.** It is easy to read "QFN" as
+"perimeter part, ordinary routing handles it" and move on. A 0.4 mm-pitch QFN-60
+does **not**: its mid-row pins are boxed in by neighbours on both sides, and the
+two nets that stayed unrouted longest on one board were exactly that — mid-row
+south-face pins whose escape channel their own already-routed neighbours filled.
+The rule below says a perimeter at ≤0.65 mm with many pads wants fanout; a QFN-60
+at 0.4 mm is squarely inside it. Fanout runs on the EMPTY board (Step 1), so
+skipping it is expensive to undo — you cannot bolt it on after the bulk route.
 
 ### Does this part actually BENEFIT from fanout? (check before planning it)
 
@@ -594,7 +1040,47 @@ for fine-pitch boards (#111/#115):**
   them with the JLCPCB fab minimum (backstop when a Constraint is 0/unset — e.g.
   `min_clearance` is frequently 0) into a single **manufacturing floor**.
 
-Use the printed flags as-is:
+### FIRST: does this board have a requirements document?
+
+**If it does, the SPEC outranks everything below.** `--design-rules` reports what
+the *fab* can make and what the *board file* currently declares. Neither is
+permission. On a board with real requirements its suggestions actively
+contradicted three HARD rules at once:
+
+| `--design-rules` printed | the spec said |
+|---|---|
+| `--via-drill 0.25` | 0.3 mm, HARD |
+| *"drop `--track-width` to the fab floor 0.1 … BELOW the board's own rule"* | 0.15 mm HARD, and *"shall not be routed to"* 0.10 |
+| `check_drc.py --clearance 0.1` | classes at 0.16 / 0.45 — grading at 0.1 hides real violations |
+
+So: read the requirements first, write the numbers down with their requirement
+IDs, and treat the printed flags as a *starting point to be overridden*. The
+"route at the fab floor" advice further down is correct **absent a requirements
+document** and wrong with one — it is exactly how a previous run shipped 267
+segments at 0.127 mm against a 0.15 mm HARD floor.
+
+Two flags exist for holding a spec floor, and neither is discoverable from the
+suggestions:
+
+- **`--track-width-floor <mm>`** — the router may not go under it. `--track-width`
+  is a *request*: a wide route that will not fit is necked down, and the per-net
+  rescue re-routes a failed net at the **fab** floor, both reporting the net
+  routed. With the floor set the net fails honestly instead. (Not to be confused
+  with `route_disconnected_planes --min-track-width`, its region-join width band,
+  nor `check_drc --min-track-width`, which grades.)
+- **`--fab-overrides <file>`** — `key = value` lines over the `--fab-tier` floor
+  (`clearance`, `track_width`, `via_diameter`, `via_drill`, `annular`,
+  `board_edge`, `hole_to_hole`, `pad_hole_to_hole`). Supplying it also **forbids
+  the silent `standard`→`advanced` escalation**, which is what puts 0.25/0.15
+  vias on a board that asked for 0.6/0.3. On test-board one file took the score's
+  `undersized` from **169 to 0**.
+
+  **Its `clearance` key REPLACES the per-class clearance map, it does not floor
+  it.** Set it to the board's *Default class*, not the spec minimum: pinning it
+  to the tighter figure is what silently dropped an `XTAL_12M` class from 0.45 mm
+  to 0.15 mm, and restoring 0.45 afterwards produced 126 violations.
+
+Use the printed flags as-is **only when the board has no spec of its own**:
 
 - **Routing** (`route.py`, `qfn_fanout.py`, `bga_fanout.py`, `route_planes.py`):
   `--clearance` from the **Default class**, but **`--via-size`/`--via-drill`
@@ -985,6 +1471,18 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    their channel before the bulk signals fill the area. Route an RF feed on an
    outer layer (`--layers F.Cu`); requires a real stackup (see Step 2 stackup
    check). These nets are then EXCLUDED from step 3.
+2c. **ANY net with a per-net geometric requirement** — not just impedance ones.
+   The step-2b shape (own pass, before the bulk route, then excluded from it) is
+   the general answer whenever the spec constrains ONE net's geometry: a required
+   width, a layer restriction, a **via ban**, a maximum length. Routed in the bulk
+   pass those nets get whatever the router finds convenient, and no later step can
+   put it back without ripping everything around them.
+   Worked example — a crystal spec'd at *0.15 mm, max 0 vias per leg*: routed in
+   the bulk pass it came out at 0.16 mm with **6 vias**; given its own single-layer
+   pass first (`--nets XIN XOUT XTAL_XOUT --layers F.Cu --track-width 0.15`) it met
+   both clauses, because a one-layer route cannot place a via at all. Constrain by
+   **construction** where you can — a `--layers` with one entry is a via ban the
+   router cannot violate — rather than by hoping the bulk pass agrees.
 3. **Signal Routing** - All remaining nets, **excluding the plane nets AND any
    single-ended impedance nets from step 2b** (`--nets "*" "!GND" "!VCC" "!RF"`).
    Routing the plane nets as tracks would defeat the planes step; re-routing the
@@ -1212,6 +1710,23 @@ python3 -X utf8 route.py board_step5_repair.kicad_pcb board_step5.kicad_pcb \
     2>&1 | tee /tmp/step5c_reconnect.txt
 
 ### Step 6: Verify Results
+
+**Score it first — one command, and it is the gate.** Everything below is the
+detail behind this number; run it before anything else so you know whether you
+are reviewing a finished board or an unfinished one:
+
+```bash
+python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/board_score.py \
+    board_step5.kicad_pcb --intent wk/floorplan.json \
+    --min-track-width <spec> --min-via-diameter <spec> --min-via-drill <spec> \
+    --json wk/score.json
+```
+
+`blocking == 0` (exit 0) → proceed to the review and the verifier lenses.
+`blocking > 0` (exit 4) → the board is **not done**; go to **Step 9** and spend
+an iteration. Do not write a summary that describes an unfinished board as
+finished with caveats.
+
 Invoke `/review-routed-board board_step5.kicad_pcb` for the full review (DRC,
 connectivity, orphan stubs, length-match tolerances, GND return via coverage,
 diff pair checks). If that skill is unavailable, run the raw checks — `check_drc.py`
@@ -1755,6 +2270,356 @@ Rules of the loop:
   `check_drc` at the routed clearance (plus the kicad oracle for final
   boards) — never accept a retry that trades new DRC for completion.
 
+### Step 9: converge — score the board, pick a lever, repeat
+
+**Full procedure, worked example and ledger schema:
+[`references/convergence.md`](references/convergence.md).** The summary below is
+the part you must not get wrong.
+
+**A chain that ran is not a board that is done.** The failure this step exists to
+prevent is concrete: a board went out at **39 of 44 nets connected, 762 DRC
+errors, and 141 of 141 vias below its own spec**, and every tool in the chain
+reported success. Nothing looped back, because nothing had measured the board.
+
+#### 9.1 — Score it. The router's opinion is not evidence.
+
+```bash
+python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/board_score.py \
+    board.kicad_pcb --intent floorplan.json \
+    --min-track-width 0.15 --min-via-diameter 0.6 --min-via-drill 0.3 \
+    --json wk/score_iter3.json
+```
+
+**Produce:** the command above, every iteration, on the board you just wrote.
+**Read:** `blocking`, `blocking_by`, `ungraded`, `unknown`, `quality`.
+**Decide:** `blocking == 0` → go to 9.4. Otherwise pick the lever by **9.1a**,
+NOT by the largest `blocking_by` entry.
+
+##### 9.1a — CONNECTIVITY FIRST. The largest number is not the lever.
+
+The obvious rule — *"the biggest `blocking_by` entry names the lever"* — is wrong,
+and it wrecked a run. On a board with 5 nets carrying **no copper at all**, the
+biggest entry was `drc: 18`, of which **16 were grading artifacts**. The loop spent
+eleven iterations on clearances while five nets sat dead, and the board could not
+have booted.
+
+**Work the components in this fixed order, regardless of size:**
+
+| order | component | why it outranks the rest |
+|---|---|---|
+| 1 | `unrouted` | a net with no copper is a dead wire. Nothing else matters while one exists |
+| 2 | `broken` | a net in N pieces is N−1 dead wires |
+| 3 | `net_widths`, `undersized` | real copper, wrong size — fixable by re-routing what is already there |
+| 4 | `floorplan` | placement or intent |
+| 5 | `drc` | **last, and only after auditing it — see below** |
+
+`unrouted` and `broken` are the **ratsnest**: they count connections the board is
+supposed to have and does not. They are never artifacts, never a grading choice,
+and they map one-to-one onto whether the thing works. Drive the loop on them.
+
+##### 9.1b — Audit `drc` before you believe it
+
+`check_drc` grades the whole board at **one clearance**. A board with more than one
+net class therefore reports violations that are purely a grading choice. The
+signature is unmistakable — **many violations, all the same net pair, all the same
+overlap**:
+
+```
+SEGMENT-SEGMENT  USB_DM <-> USB_DP   Overlap: 0.010mm     x15
+PAD-SEGMENT      USB_DP  <-> USB_DM   Overlap: 0.010mm     x1
+```
+
+0.010 mm is exactly `0.16 − 0.15`: the Default class grading a pair whose own class
+permits 0.15. Re-grade at the tighter class and they vanish:
+
+```bash
+check_drc.py board.kicad_pcb            # 18 violations
+check_drc.py board.kicad_pcb -c 0.15    #  2 violations
+```
+
+**Before letting `drc` drive anything:** group the violations by (type, net pair,
+overlap). Any group that is large, uniform, and sits within a µm of a
+class-clearance difference is an artifact of the grading scalar, not a defect.
+Quote both numbers in the report and say which classes each applies to. Never pick
+the flattering one silently.
+
+##### 9.1c — The authoritative ratsnest needs the zones FILLED
+
+`route_planes` writes a zone **outline** with no `filled_polygon`. Until something
+fills it, every KiCad-side check reads the pour as empty. Measured on one board,
+same file, fill the only difference:
+
+```
+unfilled -> kicad-cli pcb drc:  48 unconnected items
+filled   -> kicad-cli pcb drc:  15 unconnected items   == what check_connected says
+```
+
+So: **fill before you grade, and then the two agree.** If `check_connected` and
+`kicad-cli` disagree by a lot on a board with a pour, the fill is the first
+suspect — not the checker.
+
+```python
+# KiCad's own python; nothing else can do this
+import pcbnew
+b = pcbnew.LoadBoard(path); pcbnew.ZONE_FILLER(b).Fill(b.Zones()); b.Save(path)
+```
+
+**And re-assert the net classes afterwards.** `pcbnew.LoadBoard(...).Save()`
+rewrites the sibling `.kicad_pro` and **deletes every non-Default net class**,
+leaving the `netclass_patterns` orphaned. A board has shipped that way. Restore the
+project after the fill, and assert the classes exist rather than trusting a
+success message.
+
+Three rules about that number:
+
+- **`blocking` must reach 0 before a board is deliverable.** It is
+  `unrouted + broken + drc + undersized + floorplan + impedance + length`.
+  `quality` (vias, copper length) is a **tie-break only**, compared once
+  `blocking` is 0 — otherwise a router buys off a disconnected net with a lower
+  via count.
+- **Pass the spec's size floors when the spec is tighter than the fab.**
+  `check_drc` defaults to the fab minimum for the layer count. That is why 141
+  vias at 0.25 mm graded clean against a 0.6 mm spec. If the spec gives numbers,
+  pass them.
+- **`ungraded` is not `passed`.** A component with no `--intent`, no
+  `--impedance-nets`, no `--length-groups` is *unexamined*. Say so in the report;
+  never let it read as clean.
+
+**`place_route_loop`'s own `ACCEPTED` / `REJECTED` is NOT a quality verdict.**
+`better()` (`place_route_loop.py:358`) compares `failures` and `iterations`, both
+from route.py's own `JSON_SUMMARY`; it never runs a checker. Treat it as a cheap
+pre-filter and **re-score with `board_score.py` before believing it.**
+
+#### 9.2 — Budget: 100 iterations per board, and they are cheap if you spend them right
+
+**The budget is 100 per board.** Not 20 — 20 was set when every iteration meant a
+full chain re-run, and that assumption is wrong (9.3a). A scoped retry takes
+seconds, so a hundred of them is an afternoon, not a week.
+
+**Count two kinds separately, and say which you are spending:**
+
+| kind | what it does | example |
+|---|---|---|
+| **completion** | changes the copper: routes a net, heals a separation, fixes a width | `route.py --nets QSPI_SD1 ... --rip-existing-nets ...` |
+| **systemic** | changes how the chain routes, measures or grades — no net gets connected by it | pinning the fab floor, restoring net classes, filling zones, fixing a checker |
+
+Systemic iterations are necessary and they are not progress. A run once spent
+**nine of eleven** on them, moved `blocking` every time, and finished with five
+nets carrying no copper. **If three consecutive iterations are systemic, stop and
+ask what is actually unconnected** — you are tuning the instrument, not the board.
+
+Record `"kind": "completion" | "systemic"` in every ledger entry. The final report
+states both counts.
+
+```bash
+python3 -X utf8 route.py board.kicad_pcb --list-groups --group-by auto
+```
+
+**The per-group budget needs groups that are separately convergeable — not just
+groups that exist.** Test each candidate against all three:
+
+1. its parts occupy a **distinct region** (not interleaved with other blocks),
+2. its nets are mostly **internal** (`--list-groups` prints touching/internal),
+3. routing it can **succeed or fail on its own**, without the others' copper.
+
+Fail any of them and it is a *label*, not a convergence unit: take the per-board
+budget and say so. A board of functional modules sharing one congested centre is
+the common case — iterating per module there routes a fraction and reports
+success on that fraction, which is the same defect the `route.py --group` rule
+warns about.
+
+**`kicad` groups exist on 0 of 27 boards *in this repo's corpus*** — that figure
+is about KRT's own test boards, not about boards in general. A generated board
+(e.g. Zener `.zen`) carries one `kicad:` group **per module**, so the naive
+reading of "groups exist → per-group" authorised **8 × 20 = 160 iterations** on a
+42-part board whose modules all fight over the same 21 mm of width. Take the
+per-board budget there.
+
+**Do not invent groups to iterate over** — a `sheet` block of 16–83 parts moved
+on no board tried, so iterating per sheet-block burns the budget on a lever that
+does not move.
+
+#### 9.3 — Cheapest lever first, and revert what did not help
+
+##### 9.3a — RE-ENTER AT THE FAILING STEP. Do not re-run the chain.
+
+The single most expensive mistake available here. A full chain run is 3–5 minutes;
+re-routing three nets from the board that failed them is **seconds**. The ledger
+already records `parent_board` per iteration precisely so you can go back to it.
+
+```bash
+# NOT: bash chain.sh          (re-seeds, re-places, re-routes everything)
+# THIS:
+route.py wk/r4.kicad_pcb wk/i15.kicad_pcb --nets QSPI_SD1 ...
+```
+
+Re-run the chain only when a **placement** changed (which invalidates every routed
+board downstream) or when you are producing the final artifact. Everything else is
+a scoped retry on the board that already failed.
+
+##### 9.3b — READ THE ROUTER'S HINT. It names the flag and the nets.
+
+When `route.py` fails a net it prints the fix, and it is usually right:
+
+```
+ROUTE FAILED - no rippable blockers found
+  Hint: the blocking copper belongs to pre-existing net(s) 'QSPI_SD2' 'QSPI_SS'
+  'VCC3V3' (committed by an earlier run/step), which this run is not allowed to
+  rip. Retry with --rip-existing-nets 'QSPI_SD2' 'QSPI_SS' 'VCC3V3' ...
+```
+```
+  Hint: the start/target pads are boxed in by static obstacles ... try
+  --grid-step 0.025 --clearance 0.15 --track-width 0.15
+```
+
+On one board these two hints, applied, took `unrouted` from 5 to 0. The router
+diagnoses better than the score does — the score said `drc`, the router said
+"rip these four nets", and the router was right.
+
+##### 9.3c — Ripping blocking nets IS a sanctioned lever
+
+`--rip-existing-nets` rips named nets, re-routes them in the same run, and reports
+honestly if one cannot be. It is often the **only** way past copper an earlier step
+committed. Use it — with four rules, each of which cost a wasted iteration to
+learn:
+
+1. **Scope the rip.** Start with the set the hint names, then bisect if you want a
+   minimal one. Do not reach for `'*'`.
+2. **A ripped net returns at the CALLING command's parameters, not the ones it was
+   originally routed with.** Ripping a 0.8 mm USB net from a plain signal call
+   brings it back at 0.16 mm and silently destroys the spec geometry. **Whenever
+   the rip set contains a width-bearing net, pass its `--power-nets` /
+   `--power-nets-widths` (or `--impedance`) in the same call.**
+3. **One net per call.** Routing two nets together let the second rip the first —
+   reported as `1/2 routed` twice running, a different net each time. Sequential
+   single-net calls connected both.
+4. **A glob does not override a lock.** `--rip-existing-nets 'QSPI_*'` silently
+   skips a locked or protected net (#521) while the router keeps asking for that
+   exact rip. Name it EXACTLY, and if it is KiCad-locked, nothing overrides that —
+   unlock it or route around it.
+
+For plane-net pads that cannot reach their pour, the equivalent is
+`route_disconnected_planes --rip-blocker-nets` (it leaves the ripped nets unrouted
+for the Step 5c pass — never re-route them in-step, #141). Budget for it: on a
+dense board it can run **20× longer** than the plain repair, so start it early
+rather than discovering the cost at the end.
+
+##### 9.3d — Classify the blocker, then pick
+
+Never spend a full-chain iteration on something a parameter fixes. Classify the
+top blocker on the exact keys, not on impressions:
+
+| evidence | verdict | where to go |
+|---|---|---|
+| failures cluster into ≤2 pockets (`--focus` panels), their refs share one block, `blockers` non-empty | **floorplan** | back to **Step 0e** — re-zone. A 3 mm nudge cannot move a block 80 mm |
+| failures scattered, `blockers` non-empty, every failing ref is a ≤40-pin passive | **placement detail** | back to **Step 0c**, `place_route_loop` with the caps above |
+| `blockers` empty; the log says boxed in by static obstacles | **parameters** | stay here — grid, ripup budget, width. Placement is not the lever |
+| 2-layer board, heavy F.Cu skew, via count far above a hand layout | **parameters** | layer-cost rebalance, below |
+| `oob_count` or `overlap_area` rose after the last placement | **the placement is illegal** | discard it; do not route it |
+| `check_floorplan` exits 4 with `zone_containment` | **intent violated** | fix the placement to match, or say why the intent changed. Do not quietly rewrite the intent to match the board |
+| a whole net has no copper while `pad_pairs_connected` looks healthy | **coverage bug** | the Step 5b ledger — not a placement problem at all |
+| `undersized` non-zero | **parameters** | re-route at the spec's width/via. Placement is not the lever |
+| `unrouted` names a plane net | **the pour step** | it was excluded and never poured — Step 3/5, not placement |
+| the log names **pre-existing nets** it is "not allowed to rip" | **rip lever** | 9.3c — `--rip-existing-nets` with the set it named |
+| a net fails on ONE layer at every grid and rip set, and routes instantly with a second layer | **the single-layer constraint is the blocker** | not a router failure. Report it against the requirement that imposed the layer restriction, with both measurements |
+| `drc` is large, uniform, one net pair, one overlap value | **grading artifact** | 9.1b — re-grade at the right class. Not a lever at all |
+| `broken` is mostly plane-net pads | **the pour could not reach them** | `route_disconnected_planes --rip-blocker-nets`, then the Step 5c reconnect |
+| `check_connected` and `kicad-cli` disagree badly | **the zones are unfilled** | 9.1c — fill, then re-read. Do not "average" them |
+
+**Accept an iteration only if `blocking` strictly decreased**, or `blocking` is
+unchanged and `quality` improved. Otherwise **revert to the parent board** and
+take the next lever. An iteration that made it worse is not a starting point.
+
+**One exception, and state it when you use it:** an iteration that reduces
+`unrouted` or `broken` while raising a lower-ranked component may be accepted even
+if `blocking` is level, because 9.1a ranks connectivity above the rest. Say so in
+the ledger with both numbers. A dead net is worse than a wide trace, and the scalar
+does not know that.
+
+**Watch for whack-a-mole.** Ripping to route net A can leave net B unrouted, and
+the tally still reads "1 failed" — a *different* net. Compare the failing net
+**names** between iterations, never just the counts. If they alternate, route them
+one per call with the other explicitly out of the rip set (9.3c rule 3).
+
+**After ANY placement change every downstream routed board is stale** — re-run
+the chain from the placed board. Never keep a routed artifact from before it.
+
+#### 9.4 — Write the ledger, every iteration, before the next one starts
+
+`convergence.json` in the work dir. It is what makes the run resumable, lets the
+final report name which stop condition fired, and gives the movie its frames:
+
+```jsonc
+{"iteration": 3, "group": null, "parent_board": "wk/iter02.kicad_pcb",
+ "kind": "completion",                       // or "systemic" -- see 9.2
+ "lever": "rip lever: --rip-existing-nets QSPI_SD2 QSPI_SS + --grid-step 0.025",
+ "commands": ["python3 -X utf8 route.py ..."],
+ "score": {"blocking": 12, "blocking_by": {"unrouted": 1, "drc": 11}},
+ "unrouted_nets": ["QSPI_SD1"],              // NAMES, not just the count
+ "verdicts": ["VERDICT=FAIL:lens=drc;..."],
+ "accepted": true, "reverted_to": null}
+```
+
+**`parent_board` is the board this iteration actually came from** — the last
+*accepted* one, not iteration N−1. It is what `render_placement --before` takes;
+using N−1 renders a delta that never existed. **Never reuse an output path across
+iterations**: a ledger that says `wk/placed.kicad_pcb` when three iterations wrote
+that name is unauditable, and one that named a *rejected* board as the parent of
+everything downstream got shipped.
+
+**Record `unrouted_nets` by NAME.** Counts hide whack-a-mole — "1 failed" twice
+running can be two different nets, each ripped by the fix for the other (9.3d).
+
+**Log the systemic/completion split in the final report**: *"41 iterations: 9
+systemic, 32 completion"* is a fact about how the budget was spent, and a run that
+cannot state it was not keeping a ledger.
+
+#### 9.5 — Stop conditions. Only these four. Say which one fired, every time.
+
+1. **`blocking == 0` and every verifier lens passes** → done. Both halves are
+   required: see "Verify with independent subagents".
+2. **Budget exhausted** — you have actually written **100** ledger entries for this
+   board. Report the best-scoring board **and the remaining blockers itemised with
+   measurements**. Do not present it as finished.
+3. **Five consecutive iterations with `unrouted` and `broken` both unchanged,
+   after trying the rip lever, a finer grid, and a layer change on the failing
+   nets** → floorplan-limited or spec-limited. Say which, with the number. (Five,
+   and on the connectivity components — three iterations of `drc` not moving means
+   nothing when the real blocker is a dead net.)
+4. **A blocker is geometrically unsatisfiable** → stop and report it as a
+   **finding about the requirement**, with the measurements that prove it. Worked
+   example: a 2.4 mm clearance requirement written as a netclass also applies
+   pad-to-pad, and on that connector the measured pad gaps were 0.500 mm (VBUS)
+   and 1.300 mm (GND) — 23/44 nets with it, 38/44 without. That is unsatisfiable
+   *as written*, and it took one measurement to prove. **Do not silently relax
+   it, and do not grind iterations against it.**
+
+##### These are NOT stop conditions
+
+Stopping for any of these is a process failure, not an outcome. If one of them is
+pulling at you, write the next ledger entry instead:
+
+- **"This is taking a long time."** Wall-clock is not a stop condition. A run once
+  stopped at 11 of 20, labelled it "budget exhausted", and recorded in its own
+  ledger that the levers were *not* exhausted. Eleven is not twenty.
+- **"The score stopped moving."** Check *which* component. `blocking` level while
+  `unrouted` falls is progress (9.3d's exception).
+- **"The remaining work is hard."** Hard is what the budget is for. A net that
+  needs a scoped rip, a finer grid and a layer change is three cheap iterations,
+  not a wall.
+- **"I have written up the findings."** The report is not the deliverable while
+  nets are unrouted. Finish the board, then write.
+- **"The last lever failed."** Revert and take the next one. The ladder has more
+  rungs than you have tried: rip set → grid → layer → via cost → width → order →
+  placement.
+
+**Before invoking condition 2 or 3, answer in writing:** how many nets are
+unrouted, what is the router's own hint for each, and which of the 9.3c rip rules
+has not been tried on them? If any of those is unanswered, the loop is not done.
+
+Ending on 2, 3 or 4 is a legitimate outcome. Ending on any of them **while
+calling the board finished is not**, and ending on none of them is not an ending.
+
 ### Diagnose and Retry
 
 After running routing commands:
@@ -1908,11 +2773,14 @@ hunt for.
    - If yes, ask for the KiCad project directory path
    - Re-run the routing command with `--schematic-dir` added
 4. Run verification: invoke `/review-routed-board` (falls back to the raw DRC and connectivity checks)
-4b. **Apply the coverage gate (Step 6):** if `check_connected.py` lists any
-   fully-unrouted multi-pad net, the board is NOT done — handle each (route or
-   pour it) and re-verify before summarizing. Do not present an unrouted net as
-   an accepted shortfall.
-5. Summarize the final state of the board
+4b. **Apply the score gate (Step 6):** run `scripts/board_score.py`. If
+   `blocking > 0` the board is NOT done — go to **Step 9**, spend an iteration,
+   and re-score. A fully-unrouted multi-pad net, a DRC violation, or copper below
+   the spec's sizes is a **defect to fix**, never an accepted shortfall.
+4c. **Run the three routed-board verifier lenses** (`connectivity`, `drc`,
+   `spec`). A `VERDICT=FAIL` re-enters the loop at its `route=` step.
+5. Summarize the final state of the board — quoting `blocking`, the stop
+   condition by number, and everything in `ungraded` as **unexamined**
 6. **Offer to clean up intermediate files**:
    - List the intermediate `.kicad_pcb` files created (e.g., `board_step1.kicad_pcb`, `board_step2.kicad_pcb`, etc.)
    - Ask if the user wants to delete them, keeping only the final output

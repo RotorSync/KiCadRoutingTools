@@ -939,6 +939,7 @@ class RoutingDialog(wx.Dialog):
             ('stub_proximity_radius', 'Stub Proximity (mm):', defaults.STUB_PROXIMITY_RADIUS, "Radius around stubs to apply extra cost"),
             ('stub_proximity_cost', 'Stub Prox. Cost:', defaults.STUB_PROXIMITY_COST, "Cost for routing near stubs of other nets"),
             ('neckdown_length', 'Neck-down (mm):', defaults.NECKDOWN_LENGTH, "Length of narrow track from the pad when a wide power route is necked down (issue #72)"),
+            ('track_width_floor', 'Track Floor (mm):', 0.0, "HARD floor the router may not go under. Track Width is a REQUEST: a wide route that will not fit is retried at the layer width, and the per-net rescue re-routes a failed net at the FAB floor -- both report the net routed, so a board whose spec sets a minimum above the fab floor can ship copper under it. Set this and the net FAILS instead. 0 = no floor beyond the fab tier's."),
             ('neckdown_taper_length', 'Neck Taper (mm):', defaults.NECKDOWN_TAPER_LENGTH, "Length of the stepped narrow-to-wide width taper on necked routes (0 = abrupt)"),
             ('coplanar_gap', 'Coplanar Gap (mm):', defaults.COPLANAR_GAP, "#486: declare that impedance-controlled traces run through a same-layer ground pour this far away (edge to edge). >0 uses the coplanar-waveguide-over-ground model instead of microstrip -- a NARROWER trace for the same ohms. Pour the plane layers with a MATCHING zone clearance, then verify with check_impedance.py. 0 = plain microstrip."),
             ('via_proximity_cost', 'Via Prox. Multiplier:', defaults.VIA_PROXIMITY_COST, "Cost multiplier for placing vias near other vias"),
@@ -2433,6 +2434,7 @@ class RoutingDialog(wx.Dialog):
         self.stub_proximity_radius.SetValue(defaults.STUB_PROXIMITY_RADIUS)
         self.stub_proximity_cost.SetValue(defaults.STUB_PROXIMITY_COST)
         self.neckdown_length.SetValue(defaults.NECKDOWN_LENGTH)
+        self.track_width_floor.SetValue(0.0)
         self.neckdown_taper_length.SetValue(defaults.NECKDOWN_TAPER_LENGTH)
         self.power_tap_neckdown_check.SetValue(True)
         self.via_proximity_cost.SetValue(defaults.VIA_PROXIMITY_COST)
@@ -2727,6 +2729,7 @@ class RoutingDialog(wx.Dialog):
             'stub_proximity_cost': self.stub_proximity_cost.GetValue(),
             'power_tap_neckdown': self.power_tap_neckdown_check.GetValue(),
             'neckdown_length': self.neckdown_length.GetValue(),
+            'track_width_floor': self.track_width_floor.GetValue(),
             'neckdown_taper_length': self.neckdown_taper_length.GetValue(),
             'via_proximity_cost': self.via_proximity_cost.GetValue(),
             'track_proximity_distance': self.track_proximity_distance.GetValue(),
@@ -3172,6 +3175,7 @@ class RoutingDialog(wx.Dialog):
                     stub_proximity_cost=config['stub_proximity_cost'],
                     power_tap_neckdown=config.get('power_tap_neckdown', True),
                     neckdown_length=config.get('neckdown_length', defaults.NECKDOWN_LENGTH),
+                    track_width_floor=config.get('track_width_floor', 0.0),
                     neckdown_taper_length=config.get('neckdown_taper_length', defaults.NECKDOWN_TAPER_LENGTH),
                     via_proximity_cost=config['via_proximity_cost'],
                     track_proximity_distance=config['track_proximity_distance'],

@@ -94,6 +94,9 @@ FLAG_PARAMS = {
     '--extension': 'extension',
     '--max-track-width': 'max_track_width',
     '--min-track-width': 'min_track_width',
+    # route.py's ROUTING floor (distinct from route_disconnected_planes'
+    # --min-track-width above, which is the region-join width band).
+    '--track-width-floor': 'track_width_floor',
     '--analysis-grid-step': 'analysis_grid_step',
 }
 LIST_FLAGS = {

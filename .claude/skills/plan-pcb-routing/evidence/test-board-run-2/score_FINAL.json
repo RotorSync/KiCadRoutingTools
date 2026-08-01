@@ -1,0 +1,127 @@
+{
+  "blocking": 39,
+  "blocking_by": {
+    "broken": 10,
+    "drc": 18,
+    "floorplan": 0,
+    "impedance": null,
+    "length": null,
+    "net_widths": 6,
+    "undersized": 0,
+    "unrouted": 5
+  },
+  "board": "C:\\Users\\rob\\Documents\\prive\\git\\test-board\\layout\\layout.kicad_pcb",
+  "components": {
+    "broken": {
+      "count": 10,
+      "ran": true
+    },
+    "drc": {
+      "by_type": {
+        "pad-segment": 1,
+        "segment-board-edge": 2,
+        "segment-segment": 15
+      },
+      "count": 18,
+      "graded_at": 0.16,
+      "ran": true
+    },
+    "floorplan": {
+      "count": 0,
+      "ran": true,
+      "rules_run": 7,
+      "rules_skipped": [
+        "keepout",
+        "zone_exclusive"
+      ],
+      "violations": []
+    },
+    "impedance": {
+      "count": null,
+      "ran": false,
+      "reason": "no --impedance-nets given; impedance is ungraded"
+    },
+    "length": {
+      "count": null,
+      "ran": false,
+      "reason": "no --length-groups given; length matching is ungraded"
+    },
+    "net_widths": {
+      "count": 6,
+      "nets": {
+        "USB_DM": {
+          "narrowest_mm": 0.15,
+          "required_mm": 0.8,
+          "segments_total": 13,
+          "segments_under": 6
+        },
+        "USB_DM_R": {
+          "narrowest_mm": 0.25,
+          "required_mm": 0.8,
+          "segments_total": 2,
+          "segments_under": 2
+        },
+        "USB_DP": {
+          "narrowest_mm": 0.15,
+          "required_mm": 0.8,
+          "segments_total": 17,
+          "segments_under": 17
+        },
+        "USB_DP_R": {
+          "narrowest_mm": 0.2498,
+          "required_mm": 0.8,
+          "segments_total": 2,
+          "segments_under": 2
+        },
+        "VBUS": {
+          "narrowest_mm": 0.2,
+          "required_mm": 0.4,
+          "segments_total": 30,
+          "segments_under": 11
+        },
+        "VCC3V3": {
+          "narrowest_mm": 0.15,
+          "required_mm": 0.4,
+          "segments_total": 132,
+          "segments_under": 48
+        }
+      },
+      "patterns_matching_no_routed_net": [
+        "_comment"
+      ],
+      "ran": true
+    },
+    "undersized": {
+      "by_type": {},
+      "count": 0,
+      "ran": true
+    },
+    "unrouted": {
+      "count": 5,
+      "ran": true
+    }
+  },
+  "connectivity_nets": [
+    "GND",
+    "GPIO1",
+    "GPIO6",
+    "QSPI_SCLK",
+    "QSPI_SD0",
+    "QSPI_SD1",
+    "VCC1V1",
+    "VCC3V3"
+  ],
+  "kind": "board-score",
+  "label": "FINAL run2 usb_first, graded at the board's own classes (no --clearance)",
+  "quality": {
+    "copper_mm": 767.2,
+    "segments": 902,
+    "vias": 107
+  },
+  "schema": 1,
+  "ungraded": [
+    "impedance",
+    "length"
+  ],
+  "unknown": []
+}

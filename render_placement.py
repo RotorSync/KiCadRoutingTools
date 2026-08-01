@@ -580,6 +580,16 @@ Examples:
                         'the unreadable ratsnest KiCad already shows')
     p.add_argument('--metrics', choices=('exact', 'none'), default='exact')
     p.add_argument('--clearance', type=float, default=None)
+    # Same spelling and semantics as place_optimize's. Without it this tool
+    # cannot reproduce a run's crossings/hpwl whenever the optimizer was given
+    # --ignore-nets -- which is the normal case, since the plane nets have to be
+    # excluded from airwire scoring. The gap turned the "re-measure the written
+    # board" check into a false-alarm generator: GND alone took placedA from
+    # 53 crossings to 116, which reads as a corrupted write and is not one.
+    p.add_argument('--ignore-nets', nargs='+', default=None, metavar='NET',
+                   help='net-name globs to exclude from airwire scoring; pass '
+                        'the same set given to place_optimize --ignore-nets, '
+                        'or crossings/hpwl will not match its JSON_SUMMARY')
     p.add_argument('--size', type=int, default=1600)
     p.add_argument('--supersample', type=int, default=2)
     p.add_argument('--json', action='store_true',
@@ -637,8 +647,18 @@ def main(argv=None):
     from placement.placement_state import gate_or_exit
     state = gate_or_exit(pcb, args.board, 'render_placement.py', warn_only=True)
 
+    ignore_ids = None
+    if args.ignore_nets:
+        import fnmatch
+        ignore_ids = {nid for nid, net in pcb.nets.items()
+                      if any(fnmatch.fnmatch(net.name, pat)
+                             for pat in args.ignore_nets)}
+        if not args.quiet:
+            print(f"Ignoring {len(ignore_ids)} nets for airwire scoring")
+
     model = PlacementModel(pcb, args.board, exact=True,
-                           quench_kwargs={'clearance': args.clearance})
+                           quench_kwargs={'clearance': args.clearance,
+                                          'ignore_net_ids': ignore_ids})
 
     moves = moved_parts(parse_kicad_pcb(args.before), pcb) if args.before else []
     failed, blockers, route_metrics = _load_summary(args.summary_json)
@@ -713,14 +733,23 @@ def main(argv=None):
                  'vias': route_metrics.get('vias')}
 
     out = args.output or (os.path.splitext(args.board)[0] + '_placement.png')
-    many = len(panels) > 1
-    if many:
+    # `-o` is documented as "PNG path (one panel) or directory", but directory
+    # handling used to be gated on len(panels) > 1 -- so a single-panel run with
+    # `-o out/` fell through to img.save('out/') and died with PIL's "unknown
+    # file extension". That hit the plain one-panel render and --focus (which
+    # usually finds one cluster), i.e. two of the four situations the skill tells
+    # a caller to render in. A directory target is a directory at any count.
+    as_dir = (len(panels) > 1
+              or (bool(args.output)
+                  and (args.output.endswith(('/', os.sep))
+                       or os.path.isdir(args.output))))
+    if as_dir:
         os.makedirs(out, exist_ok=True)
     written = []
     for i, spec in enumerate(panels):
         img = render_panel(spec, size=args.size, supersample=args.supersample,
                            extra=extra)
-        if many:
+        if as_dir:
             bits = [tag]
             if spec.side:
                 bits.append(spec.side)

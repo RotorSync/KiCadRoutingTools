@@ -53,6 +53,7 @@ Fast, grid-based A\* routing with a native Rust core (~10× faster than pure Pyt
 
 **Placement, fanout & optimization**
 - [Placement optimization](docs/placement-optimization.md) for routability, before routing
+- [Floorplan intent, graded](docs/floorplan-intent.md) — declare where parts belong and check the board against it, so "the render looks fine" stops being a verdict
 - BGA / QFN fanout with decoupling-cap placement cleanup, Hungarian target-swap, and schematic sync
 
 **Cleanup & verification** — see [Utilities](docs/utilities.md)
@@ -587,6 +588,7 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 | [Guide Corridor](docs/configuration.md#guide-corridor-options-preferred-route) | User-layer guide paths, waypoints, best-effort following |
 | [Power/Ground Planes](docs/route-plane.md) | Copper zones with automatic via placement |
 | [Utilities](docs/utilities.md) | DRC checker, connectivity checker, fanout generators, layer switcher, DRC-settings fixer |
+| [Floorplan Intent](docs/floorplan-intent.md) | Declare the floorplan, grade the board against it (`check_floorplan.py`) |
 | [BGA Fanout](bga_fanout/README.md) | BGA escape routing generator |
 | [QFN Fanout](qfn_fanout/README.md) | QFN/QFP escape routing generator |
 | [Rust Router](rust_router/README.md) | Building and using the Rust A* module |
@@ -839,6 +841,7 @@ Every tool prints its full option list with `--help`, and **[docs/configuration.
 | `bga_fanout.py` / `qfn_fanout.py` | BGA / QFN escape fanout | [BGA](bga_fanout/README.md) · [QFN](qfn_fanout/README.md) · [Utilities](docs/utilities.md) |
 | `place_fanout_clearance.py` | Move decoupling caps off fanout vias | [Utilities](docs/utilities.md) |
 | `place_optimize.py` | Placement for routability | [Placement Optimization](docs/placement-optimization.md) |
+| `check_floorplan.py` | Grade a board against a declared floorplan intent | [Floorplan Intent](docs/floorplan-intent.md) |
 | `check_*.py` | DRC / connectivity / hygiene / pad checks | [Utilities](docs/utilities.md) |
 | `make_movie.py` | Movie of a routing run (`.mp4`/`.gif`) | [Rendering & animation](docs/route-animation.md) |
 | `make_plan.py` / `run_plan.py` | Build a GUI routing plan from a recorded chain / run one headless | [Plans from the CLI](docs/claude-skills.md#plans-from-the-command-line) |

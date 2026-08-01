@@ -195,6 +195,136 @@ better. The baseline is free — quench is handed the current best board, so its
 `before` *is* that board's ratsnest. Every decision is logged with its numbers, so
 it is auditable whether the screen ever skipped a placement that would have won.
 
+## Alignment and orientation (`--align-weight`, `--orient-weight`, #548)
+
+Two cost terms for the things a human does constantly and the quench does not:
+put parts that belong together on a shared axis, and turn a part toward the net
+it exists to serve. **Both default to 0 (off).**
+
+```bash
+python3 place_optimize.py board.kicad_pcb out.kicad_pcb --max-displacement 3 \
+    --align-weight 5 --orient-weight 1
+```
+
+### The premise in #548 is wrong in a way worth recording
+
+The issue proposes to *"score airwires from the actual pad the net lands on"*.
+The cost path **already does that** — `_net_points` emits one MST node per
+connected pad from `pad_globals()`, full rotation applied, and there is no
+centroid anywhere in the objective.
+
+The gap is **numeric**, not geometric. Measured on the test fixture: the four
+rotations of a part whose one connected pad faces away from its anchor differ by
+**0.500 mm across a 19.8 mm net**. The directional signal is present and drowned.
+So what was missing is a term that is directional at *part* scale with its own
+weight, which is what `--orient-weight` is.
+
+### Alignment
+
+A pairwise penalty between **peers** — same `footprint_name`, the pairing the
+swap phase already indexes — on the nearer shared axis:
+`w * min(d, radius)²`.
+
+- **Continuous** at the radius. The obvious charge-inside/zero-outside shape has
+  a cliff there that pays a part to *flee* the row rather than join it.
+- **Saturating** beyond it, so a distant peer contributes a constant that
+  cancels between one part's candidate poses instead of dragging it across the
+  board.
+- **Zero** on a shared axis, so a tidy row is free.
+
+Four caps seeded at y ∈ {99.8, 100.0, 100.2, 100.3} come out at four distinct y
+today, and on one shared y with the term on.
+
+The peer index is built in `__init__` and deliberately does **not** ride on the
+pruned neighbour lists: that prune is a 2-D *box* overlap test, so a pair must be
+near in both axes — but alignment is inherently long-range *along* the shared
+axis (two caps 50 mm apart in x and 0.1 mm apart in y **are** aligned). It is a
+*lossy* prune, unlike `_neighbors`' exact one: peers are fixed from seed
+positions, so a pair that drifts within `--align-span` later is not picked up.
+
+### Orientation
+
+Sums `|r| − r·û` per connected pad, where `û` points from the pose origin toward
+the centroid of that net's pads owned by *other* parts. Zero facing the anchor,
+`2|r|` facing away — **bounded at part scale on purpose**: it breaks a rotation
+tie, it does not outrank a real length win.
+
+Two things it is not, worth knowing: it is not purely rotational (moving the part
+changes `û` too, so a large weight also pulls the part toward its nets), and
+through `part_geometry_cost` it reaches the group phase, so a rigid block
+translate is steered by it as well.
+
+### Measured, so the recommendation is not a guess
+
+Sweep at `--max-displacement 3`, 3 passes. *tidy* is the mean share of distinct
+axis positions within each same-footprint group — **lower is tidier**.
+
+| board | align | orient | crossings | hpwl | tidy | overlap / oob |
+|---|---|---|---|---|---|---|
+| splitflap_driver | 0 | 0 | 194 | 2407.1 | 0.652 | 0.0 / 6 |
+| | 5 | 0 | **187** | 2386.2 | 0.581 | 0.0 / 6 |
+| | 15 | 0 | 187 | 2404.7 | **0.560** | 0.0 / 6 |
+| | 0 | 3 | 185 | 2415.5 | 0.712 | 0.0 / 6 |
+| | **5** | **1** | **185** | 2391.2 | 0.605 | 0.0 / 6 |
+| interf_u_unrouted | 0 | 0 | 404 | 4175.0 | 1.000 | 0.0 / 2 |
+| | 5 | 0 | 404 | 4174.5 | 1.000 | 0.0 / 2 |
+| | **5** | **1** | **402** | **4162.3** | **0.889** | 0.0 / 2 |
+
+**`--align-weight 5 --orient-weight 1`** is the recommended pair: best or
+joint-best crossings on both boards, tidier, and **no legality regression
+anywhere** — overlap stayed 0.0 and `oob_count` never moved.
+
+Two honest caveats. **n = 2 boards, and no re-route** — crossings and HPWL are
+proxies, and the router is the only judge that counts, so do not read the
+crossing improvements as a routability claim. And **over-weighting trades
+wirelength for tidiness**: `--align-weight 15` is the tidiest row in the table
+and its HPWL is *worse* than at 5. `interf_u_unrouted` shows the other limit —
+alignment does nothing at all on a board with few repeated footprints, because
+there are no peers to align.
+
+### Third board, and `5` did nothing on it
+
+`edgehero/test-board` (RP2350A breakout, 51 × 21 mm, 42 footprints) has **16
+identical `C_0402_1005Metric` decoupling caps in two straight rows of four**, so
+peers are not the limit here. Seed rows are exactly aligned (y spread `0.0000`).
+After `--max-displacement 2`:
+
+| `--crossing-penalty` | `--align-weight` | N row y spread | S row y spread | crossings | HPWL |
+|---|---|---|---|---|---|
+| 10 | 0 | 0.8292 | 0.8292 | 52 | 584.835 |
+| 10 | **5** | **0.8660** | **0.8660** | 53 | 584.835 |
+| 10 | 50 | 0.0000 | 0.0000 | 62 | 592.245 |
+| 30 | 0 | 0.8292 | 0.8292 | 52 | 584.835 |
+| 30 | **5** | **0.8292** | **0.8660** | 52 | 584.905 |
+| 30 | 50 | 0.0000 | 0.0000 | 55 | 588.005 |
+
+At the recommended `5` the rows are destroyed exactly as if the term were off —
+at **either** crossing penalty, so this is not a `--crossing-penalty 30` scaling
+effect. The mechanism is sound: at `50` both rows come back to `0.0000` spread.
+It is the *weight* that does not transfer between boards.
+
+The reason is in the shape. The penalty saturates at `w · radius²`, so at the
+recommended pair that is `5 × 0.5² = 1.25` per peer pair — against a halo term
+of ~289 and 30 per crossing on this board. **Sweep `--align-weight` on the board
+in front of you and check a row's y spread; do not carry `5` over.** And note
+what `50` costs here: +3 crossings and +3.2 mm HPWL at `--crossing-penalty 30`,
+which the Step 0c acceptance rule scores as a regression.
+
+### Why off by default
+
+The router, not a tidiness score, is the judge of a placement, and neither term
+has been measured against routing *outcomes* — only against proxies, above.
+On-by-default would silently change every user's board to buy legibility.
+
+It would also corrupt the isolated fixtures in `test_458_*`, which zero every
+geometry knob they know about so the objective is clean enough to assert
+`total == 30.0`. A term with a nonzero default is invisible to those and breaks
+the isolation — that is degrading a correctness test, not re-baselining a golden.
+
+At `0.0` both hooks return before touching any geometry and the peer index is
+empty, so a default run is **bit-identical**, verified on `interf_u_unrouted` and
+`splitflap_driver` rather than argued.
+
 ## Placement blocks (`groups.py`, #459)
 
 The per-part nudge cannot express "these parts need to travel together": an IC
@@ -305,6 +435,48 @@ true, so a misparsed outline cannot condemn a placed board. Measured: none of
 the 27 tracked boards trips any of it, `watchy` included -- and `watchy` is the
 worst case, with 81 of 82 parts in courtyard violation. Density is not
 unplacedness, which is why this does not live in `legality.py`.
+
+## Floorplan intent (`floorplan.py`, #549)
+
+Everything above judges a placement by `crossings` and `hpwl`, and both are
+indifferent between a sensible layout and a scattered one with the same
+wirelength. Nothing declares where parts *belong*, so nothing can check whether
+they went there.
+
+`check_floorplan.py` closes that: declare the floorplan, grade the board against
+it, exit non-zero with the number that broke.
+
+```bash
+python3 check_floorplan.py board.kicad_pcb --emit-intent floorplan.json   # start here
+python3 check_floorplan.py board.kicad_pcb --intent floorplan.json        # 0 clean, 4 violations
+```
+
+Full reference: [docs/floorplan-intent.md](../docs/floorplan-intent.md). The
+parts worth knowing from here:
+
+- **The board outline is not editable by this toolchain.** `envelope` is READ
+  from the board; a part outside it is a finding about the **part**. Board size,
+  cutouts and slots are mechanical decisions the user owns.
+- **Every rule reuses the geometry the optimizer gates on** — `QuenchState`'s
+  `legality_metrics` and `edge_gate`, `GradedPart` rects and sides, and
+  `groups.decap_tethers` for the cap→IC rule. A grader with its own idea of
+  "legal" grades the reimplementation, so tests assert the two agree exactly.
+- **A block that resolves to nothing is an error**, not an empty block. A typo'd
+  `refs` grades clean while nothing was checked.
+- **`rules_run` / `rules_skipped` are reported**, because "0 violations" and
+  "0 rules ran" must not look the same to a machine.
+- **A board with no trustworthy outline is refused (exit 3), not graded.** The
+  fallback is invisible: no rings ⇒ `BoardOutlineGate.active` False ⇒ every
+  containment test silently degrades to the bounding box.
+- **`oob_area` cannot be budgeted.** It is measured against the bbox inset, so a
+  part sitting entirely inside a cutout scores `0.0`. Refused at load time with
+  that reason; use `oob_count` / `oob_amount`.
+
+One thing `--emit-intent` will not do: claim a `zone` for a sheet block. A
+schematic sheet is a *functional* grouping, so its members scatter and all ten of
+ulx3s's sheet bounding boxes mutually overlap (up to 4508 mm²). Zones are emitted
+only where disjoint — the same spatial incoherence that makes sheet blocks
+useless for movement, above.
 
 ## Lock advisor (#431)
 

@@ -23,7 +23,7 @@ from kicad_parser import parse_kicad_pcb
 import routing_defaults as defaults
 from placement.groups import GroupError, derive_groups, describe, parse_sources
 from placement.cli_gates import (add_board_state_args,
-                                 add_lock_advisor_args)
+                                 add_lock_advisor_args, add_tidiness_args)
 from placement.quench import quench
 from placement.writer import write_placed_output
 
@@ -100,6 +100,7 @@ Examples:
                         help="Print each accepted move")
     add_board_state_args(parser)
     add_lock_advisor_args(parser)
+    add_tidiness_args(parser)
 
     args = parser.parse_args()
 
@@ -183,6 +184,10 @@ Examples:
         max_passes=args.max_passes,
         ignore_nets=args.ignore_nets,
         lock_refs=args.lock,
+        align_weight=args.align_weight,
+        align_radius=args.align_radius,
+        align_span=args.align_span,
+        orient_weight=args.orient_weight,
         metrics_out=ratsnest,
         groups=blocks,
         verbose=args.verbose,
