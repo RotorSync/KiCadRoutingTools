@@ -862,6 +862,17 @@ class BGAOptionsPanel(wx.ScrolledWindow):
         esc_method_row.Add(self.escape_method_choice, 1)
         options_sizer.Add(esc_method_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
+        self.plane_drop = wx.CheckBox(self, label="Drop plane-net balls to vias")
+        self.plane_drop.SetValue(True)
+        self.plane_drop.SetToolTip(
+            "After the signal escape, give every plane-net ball (a net excluded "
+            "from the fanout with >= 6 balls, or one that already owns a zone) "
+            "a via now: a dog-bone via in a free inter-ball gap, else "
+            "via-in-pad. The plane poured later picks the via up at fill, "
+            "instead of the plane step pushing a tap through the finished ball "
+            "field (#360/#424). On by default; matches the CLI --plane-drop.")
+        options_sizer.Add(self.plane_drop, 0, wx.LEFT | wx.BOTTOM, 5)
+
         self.optimize_caps = wx.CheckBox(self, label="Optimize decoupling cap placement")
         self.optimize_caps.SetValue(False)
         self.optimize_caps.SetToolTip(
@@ -972,6 +983,8 @@ class BGAOptionsPanel(wx.ScrolledWindow):
             # Dropdown: auto (default, channel + under-pad retry, #288) /
             # channel / underpad - same choices and default as the CLI.
             'escape_method': self.get_escape_method(),
+            # #424 plane-ball drops; checkbox bool -> engine 'auto'/'off'.
+            'plane_drop': self.plane_drop.GetValue(),
             'optimize_caps': self.optimize_caps.GetValue(),
             # Decoupling-cap placement (advanced) knobs (#130)
             'cap_capture_radius': self.cap_capture_radius.GetValue(),
@@ -1343,6 +1356,9 @@ class FanoutTab(wx.Panel):
                 check_for_previous=config['check_for_previous'],
                 no_inner_top_layer=config['no_inner_top_layer'],
                 escape_method=config.get('escape_method', 'auto'),
+                # #424 plane-ball drops -- checkbox bool -> engine token, same
+                # default (on/'auto') as the CLI's --plane-drop.
+                plane_drop=('auto' if config.get('plane_drop', True) else 'off'),
                 grid_step=shared.get('grid_step', defaults.GRID_STEP),
                 # Shared Basic-tab per-layer costs (issue #288), same values the
                 # route/diff tabs use; None when the control is empty/invalid.

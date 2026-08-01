@@ -87,6 +87,10 @@ def refresh() -> None:
     g['MULTIPOINT_DENSE_FIRST'] = _opt_in('KICAD_MULTIPOINT_DENSE_FIRST')
     g['FANOUT_DIRECT'] = _opt_in('KICAD_FANOUT_DIRECT')
     g['FANOUT_TOWARD_TARGETS'] = _opt_in('KICAD_FANOUT_TOWARD_TARGETS')
+    # '' = follow the --plane-drop param (default auto); '0'/'off' forces the
+    # plane-ball drop pass OFF, '1'/'auto' forces it ON -- the manifest-replay
+    # A/B switch for #424 D2 (recorded chains carry no flag either way).
+    g['FANOUT_PLANE_DROP'] = _s('KICAD_FANOUT_PLANE_DROP', '')
     g['STOP_CLEANUP'] = _opt_in('KICAD_STOP_CLEANUP')
     g['TAP_RELOCATION'] = _opt_in('KICAD_TAP_RELOCATION')  # phase-3 tap pocket moves
     g['PLANE_PARTIAL_RESTORE'] = _s('KICAD_PLANE_PARTIAL_RESTORE') == '1'

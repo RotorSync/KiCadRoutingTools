@@ -2334,6 +2334,20 @@ class RoutingDialog(wx.Dialog):
             pass
         try:
             _ft = self.fanout_tab
+            # The option controls live on the bga_options / qfn_options
+            # PANELS, not the tab -- a tab-only getattr silently skipped
+            # every one of these resets (found wiring #424's plane_drop).
+            _holders = [h for h in (_ft, getattr(_ft, 'bga_options', None),
+                                    getattr(_ft, 'qfn_options', None))
+                        if h is not None]
+
+            def _fctl(name):
+                for _h in _holders:
+                    _c = getattr(_h, name, None)
+                    if _c is not None:
+                        return _c
+                return None
+
             for _name, _val in (
                     ('exit_margin', defaults.BGA_EXIT_MARGIN),
                     ('extension', defaults.QFN_EXTENSION),
@@ -2346,15 +2360,16 @@ class RoutingDialog(wx.Dialog):
                     ('cap_allow_rotation', True),
                     ('cap_max_passes', 30),
                     ('underpad_escape', False),
-                    ('allow_via_in_pad', False)):
-                _ctl = getattr(_ft, _name, None)
+                    ('allow_via_in_pad', False),
+                    ('plane_drop', True)):   # #424 drops: default ON
+                _ctl = _fctl(_name)
                 if _ctl is not None:
                     try:
                         _ctl.SetValue(_val)
                     except Exception:
                         pass
             for _name in ('escape_method_choice',):
-                _ctl = getattr(_ft, _name, None)
+                _ctl = _fctl(_name)
                 if _ctl is not None:
                     try:
                         _ctl.SetSelection(0)

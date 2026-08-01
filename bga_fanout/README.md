@@ -78,6 +78,7 @@ The `--nets` option supports fnmatch-style wildcards (`*`, `?`) and exclusion pa
 | `--check-for-previous` | Skip existing fanouts | False |
 | `--no-inner-top-layer` | Prevent inner pads from using F.Cu | False |
 | `--escape-method` | `channel` (default), `underpad` (dense arrays) or `dogbone` (gap vias) | channel |
+| `--plane-drop` | `auto` = drop a via for every excluded plane-net ball after the signal escape (#424); `off` disables. `KICAD_FANOUT_PLANE_DROP=0/1` overrides either | auto |
 
 ### Sizing the escape via to the pitch (issue #158)
 
@@ -97,6 +98,21 @@ clean** (pair with `--via-drill 0.25` to keep a 0.1 mm annular ring). When hande
 infeasible params, `bga_fanout` prints a `WARNING: escape via ... busts the
 half-pitch budget` with the recommended maximum. The `plan-pcb-routing` skill
 computes this automatically.
+
+## Plane-ball drops (#424)
+
+With any escape method, after the signal escape completes every SMD ball on a
+**plane net** — a net excluded from `--nets` with ≥ 6 balls on the part, or an
+excluded net that already owns a copper zone — is dropped to a via immediately:
+a dog-bone via in a free inter-ball gap (the #128 site allocator, exact-checked),
+falling back to a pad-clamped via-in-pad tap. The ball is not routed anywhere;
+the plane poured later picks the via up at fill. This claims the tap while the
+under-package space is still open, instead of leaving the plane step to push a
+via through the finished ball field (the #360 failure class). Existing same-net
+connections are respected, so re-runs are idempotent; per-net counts are
+reported in `JSON_SUMMARY.plane_drop`. Disable with `--plane-drop off`;
+`KICAD_FANOUT_PLANE_DROP=0/1` overrides the flag either way (the
+recorded-manifest A/B switch).
 
 ## Escape methods
 
@@ -132,8 +148,9 @@ computes this automatically.
 
   Notes / when to use it:
   - Use it when `channel` reports dropped balls (`failed > 0`) on a dense array.
-  - **Power/plane nets are skipped** - they tap their plane through a via, not a
-    lateral escape. (Plane the power nets first, or exclude them with `--nets`.)
+  - **Power/plane nets are skipped as escapes** - but every skipped plane ball
+    still gets a **plane-drop via** (below), so excluding them with `--nets` is
+    all the setup a later plane pour needs.
   - **Differential pairs are escaped coupled** when `--diff-pairs` is given
     (issue #182): each pair's P and N exit on the **same layer**, converged to
     the diff spacing and extended past the boundary, so `route_diff` picks them

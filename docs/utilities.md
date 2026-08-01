@@ -536,6 +536,17 @@ Options:
                       soon-to-be-plane inner layer), otherwise a weight in
                       [1.0, 1000] - cheaper layers are filled first and costly
                       layers keep only overflow escapes
+  --plane-drop        auto (default) or off. After the signal escape (any
+                      method), every SMD ball on a plane net - a net excluded
+                      from --nets with >= 6 balls on the part, or an excluded
+                      net that already owns a copper zone - gets a via
+                      immediately: a dog-bone via in a free inter-ball gap,
+                      else an exact-checked via-in-pad tap. The plane poured
+                      later picks these vias up at fill, so the plane step
+                      never has to push a tap through the finished ball field
+                      (#360/#424). Per-net counts land in
+                      JSON_SUMMARY.plane_drop; KICAD_FANOUT_PLANE_DROP=0/1
+                      overrides the flag (the recorded-manifest A/B switch)
   --fab-tier {standard,advanced}  JLC fab capability floor (default: standard)
   --fab-overrides FILE  Fab-floor override file overlaying the selected --fab-tier
                       (see [Fab Tier Options](configuration.md#fab-tier-options))

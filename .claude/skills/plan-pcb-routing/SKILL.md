@@ -288,7 +288,8 @@ options panel, keyed by its snake_case field name (`max_iterations`,
 Unknown names are ignored with a note in the plan log. Use this to carry the
 same values the equivalent CLI chain would pass (e.g. `--max-iterations
 1000000 --max-ripup 10 --grid-step 0.05`), so a GUI plan run matches a stress
-run step for step.
+run step for step. (Under `KICAD_DYNAMIC_ITERATIONS=1`, leave
+`max_iterations` at its default instead — the engine self-budgets, #529.)
 
 **Why this heuristic matters for the GUI:** the plugin runs `/plan-pcb-routing` in
 *plan-only* mode — it never executes the fanout and never runs the DRC↔smaller-via
@@ -320,9 +321,29 @@ a few channels over-subscribe and the deepest balls can't escape; `underpad`
 routes each ball *under* the pad field on inner layers via a via-in-pad and
 escapes arrays `channel` can't (e.g. a 22×22 BGA that drops ~20 balls → 0).
 Caveats: it routes diff pairs as **single-ended**, and it **skips power/plane
-nets** (they tap their plane), so create the planes first (or exclude power with
-`--nets`). Rule of thumb: try `channel` first (keeps diff pairs); fall back to
-`underpad` when `channel` can't escape a dense array.
+nets** as escapes — but every skipped plane ball still gets a **plane-drop via**
+(below), so nothing is left stranded. Rule of thumb: try `channel` first (keeps
+diff pairs); fall back to `underpad` when `channel` can't escape a dense array.
+
+**Plane-net balls are dropped to vias automatically (#424).** With any escape
+method, after the signal escape each SMD ball on a plane net — a net excluded
+from the fanout with ≥ 6 balls on the part, or an excluded net that already
+owns a copper zone — gets a via immediately: a dog-bone via in a free
+inter-ball gap, else a via-in-pad tap. The plane poured later (Step 3) picks
+these vias up at fill, which kills the tap-behind-the-ball-wall failure class
+(#360: the plane step trying to push a tap via through the finished ball
+field). Consequences for the plan:
+- Keep excluding plane nets from `--nets` — the exclusion is exactly what
+  marks them for drops.
+- The plane steps then rarely need `--rip-blocker-nets` or per-pad repair
+  under a dropped BGA; prefer the no-rip form there first.
+- **Expect the plane nets to show as disconnected in `check_connected` on
+  intermediate boards** — the drop vias have no plane to land on until the
+  planes step pours. That is correct, not a bug; grade connectivity on the
+  post-planes board.
+- `--plane-drop off` disables the pass; `KICAD_FANOUT_PLANE_DROP=0/1`
+  overrides either way (the recorded-manifest A/B switch). The per-net drop
+  counts are in `JSON_SUMMARY.plane_drop`.
 
 **After every BGA/PGA fanout, run the decoupling-cap placement optimizer
 (#130).** A fanout drops vias near the ball field; where a foreign-net via
@@ -723,9 +744,12 @@ Based on the analysis, generate a step-by-step plan. The general order is:
 ### Routing Order Rationale
 
 1. **Fanout** (if needed) - Escape routing first, while the board is empty. Exclude
-   nets that planes will handle (`"*" "!GND" "!VCC"`). **After each BGA/PGA
-   fanout, run `place_fanout_clearance.py`** (Step 1b) to clear decoupling-cap /
-   fanout-via collisions (#130) before signal routing.
+   nets that planes will handle (`"*" "!GND" "!VCC"`) — the exclusion also marks
+   them for automatic **plane-drop vias** (#424): each excluded plane ball gets a
+   dog-bone/in-pad via at fanout time that the Step 4 pour picks up at fill, so
+   the plane step never has to tap through the finished ball field (#360).
+   **After each BGA/PGA fanout, run `place_fanout_clearance.py`** (Step 1b) to
+   clear decoupling-cap / fanout-via collisions (#130) before signal routing.
 2. **Differential Pairs** - The most constrained routes claim their channels before
    anything else can block them (if present). Add `--impedance <ohms>` for the
    controlled ones (USB/Ethernet/LVDS/balanced-RF; from `/find-high-speed-nets`).
@@ -858,6 +882,17 @@ to find alternative paths through the dense pin area (even when fanout was
 done, some paths may require this). Use `--max-ripup 10
 --max-iterations 1000000` for difficult 2-layer boards.
 
+> **Dynamic iterations (#529): do NOT tune `--max-iterations` when
+> `KICAD_DYNAMIC_ITERATIONS=1` is in the environment.** The router then
+> self-budgets: full searches run at min(base, 200k) and automatically earn
+> +1×base extensions while the search's heuristic keeps approaching the
+> target, up to a 1e7 ceiling — so a genuinely hard net gets far MORE than
+> a static 1000000 while hopeless searches stop early. Passing
+> `--max-iterations 1000000` in that mode is inert (the base is clamped to
+> 200k) and cluttering plans with it is wrong; just omit the flag. The
+> `--max-iterations 1000000` advice in this skill applies only to the
+> knob-off (default) regime.
+
 python3 -X utf8 route.py board_step1.kicad_pcb board_step2.kicad_pcb \
     --nets "*" "!GND" "!VCC" \
     --no-bga-zone \
@@ -873,10 +908,15 @@ Creates power planes in a single call, after signal routing so the stitching
 vias find spots around the finished tracks. Each net is paired with its
 corresponding layer (GND→B.Cu, VCC→F.Cu). Through-hole PGA/BGA pads
 automatically connect to planes on their layer; SMD pads get vias routed to
-the plane. `--add-gnd-vias` also places return-current vias near the signal
-vias that now exist. If signal tracks boxed in a power pad, add
-`--rip-blocker-nets` to rip the blockers out of the way (they are left unrouted
-and reconnected by the Step 5c route.py pass).
+the plane — and BGA plane balls already carry their fanout-time plane-drop
+vias (#424), which the pour picks up directly, so under a dropped BGA this
+step should need no tapping at all. `--add-gnd-vias` also places
+return-current vias near the signal vias that now exist. If signal tracks
+boxed in a power pad, add `--rip-blocker-nets` to rip the blockers out of the
+way (they are left unrouted and reconnected by the Step 5c route.py pass) —
+but on boards whose BGAs were plane-dropped, try the no-rip form first: the
+measured failure mode of ripping here is routed signals lost for tap pads the
+drops already served.
 
 > **Note to user:** GND return vias improve signal integrity for high-speed
 > signals. Based on the speed analysis, this board has [speed_tier] signals,
@@ -1398,7 +1438,7 @@ python3 route.py board.kicad_pcb --nets "*" \
 14. **BGA/PGA power pins and planes** - When using power planes, BGA/PGA power pins (GND, VCC) connect most efficiently via direct vias to the plane rather than fanout routing. Create planes first, then fanout only signal nets. Through-hole PGA pads automatically connect to planes on that layer; SMD BGA pads need vias placed by `route_planes.py`. This approach:
     - Reduces routing congestion (power pins don't consume escape channels)
     - Provides lower impedance power connections
-15. **Aggressive parameters for 2-layer BGA/PGA boards** - Use `--max-ripup 10 --max-iterations 1000000` from the start for boards with dense components. These parameters help resolve routing conflicts that would otherwise fail.
+15. **Aggressive parameters for 2-layer BGA/PGA boards** - Use `--max-ripup 10 --max-iterations 1000000` from the start for boards with dense components. These parameters help resolve routing conflicts that would otherwise fail. (Exception: with `KICAD_DYNAMIC_ITERATIONS=1` exported, omit `--max-iterations` entirely — the router self-budgets per #529 and the flag is clamped/inert; see the note in the routing-step section.)
 16. **Guide corridors and keepouts are user-drawn** - Never draw `User.1` guide polylines or `User.2` keepout polygons yourself; suggest in words where they should go and let the user draw them, then add `--guide-corridor` / `--keepout` to the plan.
 17. **Companion skills** - Defer to `/identify-diff-pairs` (datasheet-based pair detection), `/recommend-stackup` (before impedance/time-matching work), `/diagnose-routing-failures` (after failures), and `/review-routed-board` (final verification) rather than duplicating their logic inline.
 
@@ -1540,7 +1580,7 @@ python3 -X utf8 route.py board_prev.kicad_pcb board_routed.kicad_pcb \
    Key parameters for difficult boards (especially 2-layer with BGA/PGA):
    - `--no-bga-zone` - **Critical**: Allows router to enter BGA area for alternative paths
    - `--max-ripup 10` (default 3) - More rip-up attempts to resolve conflicts
-   - `--max-iterations 1000000` (default 200000) - 5x more search iterations
+   - `--max-iterations 1000000` (default 200000) - 5x more search iterations (knob-off regime only; inert under `KICAD_DYNAMIC_ITERATIONS=1`, which self-budgets to a 1e7 ceiling)
    - `--stub-proximity-radius 10 --stub-proximity-cost 3.0` - Spread out fanout stubs (optional, for aesthetics)
 
 #### Dense 2-layer boards: rebalance layer costs (issue #178)
