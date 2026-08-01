@@ -2318,8 +2318,22 @@ reported success. Nothing looped back, because nothing had measured the board.
 python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/board_score.py \
     board.kicad_pcb --intent floorplan.json \
     --min-track-width 0.15 --min-via-diameter 0.6 --min-via-drill 0.3 \
+    --net-min-widths wk/net_min_widths.json \
     --json wk/score_iter3.json
 ```
+
+**`--net-min-widths` is not optional on a board with per-net width clauses.**
+`undersized` sees only board-wide floors, so a requirement naming ONE net — a
+0.8 mm pair, a 0.4 mm rail — is invisible to `blocking` without it, and the loop
+will happily converge to 0 with that clause broken.
+
+**And `blocking == 0` is not the whole gate when the repo ships its own spec
+checker.** Some clauses are not expressible to `board_score` at all: an absolute
+maximum length, a symmetry match between two *series chains* through a resistor,
+a via ban per leg. If the repo has a `check_spec.py` (or equivalent), run it
+**beside** `board_score.py` every iteration, treat a HARD failure as blocking even
+when `blocking` reads 0, and wire it into `place_route_loop --accept-cmd` so the
+inner loop stops accepting rounds that break it.
 
 **Produce:** the command above, every iteration, on the board you just wrote.
 **Read:** `blocking`, `blocking_by`, `ungraded`, `unknown`, `quality`.
@@ -2338,8 +2352,8 @@ have booted.
 
 | order | component | why it outranks the rest |
 |---|---|---|
-| 1 | `unrouted` | a net with no copper is a dead wire. Nothing else matters while one exists |
-| 2 | `broken` | a net in N pieces is N−1 dead wires |
+| 1 | `unrouted` | a net with no copper is a dead wire. Nothing else matters while one exists. **Run `converge.py where BOARD --nets <names>` before touching a parameter** — it names the gap endpoints and the foreign copper walling them in, per layer, nearest-first (9.1b-ii). Guessing from the score is how eleven iterations went to clearances while five nets sat dead |
+| 2 | `broken` | a net in N pieces is N−1 dead wires. Same tool, same reason |
 | 3 | `net_widths`, `undersized` | real copper, wrong size — fixable by re-routing what is already there |
 | 4 | `floorplan` | placement or intent |
 | 5 | `drc` | **last, and only after auditing it — see below** |
@@ -2539,6 +2553,20 @@ On one board these two hints, applied, took `unrouted` from 5 to 0. The router
 diagnoses better than the score does — the score said `drc`, the router said
 "rip these four nets", and the router was right.
 
+##### 9.3b-ii — Carry `--fab-overrides` on EVERY retry when the spec floor is tighter
+
+A scoped retry is a fresh `route.py` call, and it resolves its floor from the fab
+tier unless told otherwise. Two things then happen quietly: the **per-net rescue
+re-routes a failed net AT the tier floor**, and the `standard`→`advanced` tier
+escalation is allowed, which is what puts sub-spec vias on a board that asked for
+big ones. Both report the net routed.
+
+So every route call in the loop — not only the first one — carries
+`--fab-overrides <the spec file>` when the spec is tighter than the tier, plus
+`--track-width-floor` for a width clause. Measured, one such file took a board's
+`undersized` from **169 to 0**. Check `min_clearance_used` in the `JSON_SUMMARY`
+afterwards: it is the only place a floor that was silently loosened shows up.
+
 ##### 9.3c — Ripping blocking nets IS a sanctioned lever
 
 `--rip-existing-nets` rips named nets, re-routes them in the same run, and reports
@@ -2609,8 +2637,32 @@ the chain from the placed board. Never keep a routed artifact from before it.
 
 #### 9.4 — Write the ledger, every iteration, before the next one starts
 
-`convergence.json` in the work dir. It is what makes the run resumable, lets the
-final report name which stop condition fired, and gives the movie its frames:
+`wk/ledger.jsonl` in the work dir. It is what makes the run resumable, lets the
+final report name which stop condition fired, and gives the film its frames.
+
+**Write it with `converge.py record`, and read `converge.py status` back every
+iteration.** The verbs that make a ledger worth keeping — `step-back` (byte-exact,
+because the board is stored by content hash), `replay` (re-runs the recorded argv),
+`status` (the systemic/completion split) and `make_film.py --from-ledger` — all
+read append-only **JSONL** through `board_store.Ledger`. A hand-written single JSON
+document is readable by a person and by nothing else, so every one of them is
+unreachable from it.
+
+```bash
+python3 -X utf8 converge.py record --ledger wk/ledger.jsonl \
+    --board wk/iter03.kicad_pcb --kind completion \
+    --lever 'rip lever: --rip-existing-nets QSPI_SD2 + --grid-step 0.025' \
+    --score "$(cat wk/score_iter03.json)" \
+    --argv -- python3 -X utf8 route.py wk/iter02.kicad_pcb wk/iter03.kicad_pcb --nets QSPI_SD1 ...
+
+python3 -X utf8 converge.py status --ledger wk/ledger.jsonl      # EVERY iteration
+```
+
+`status` is the alarm for 9.2's failure mode: it splits the budget into completion
+vs systemic and warns when at least half went to the instrument. Nothing else in
+the loop says that out loud, and the run that needed to hear it did not.
+
+A record holds this; `record` writes it for you:
 
 ```jsonc
 {"iteration": 3, "group": null, "parent_board": "wk/iter02.kicad_pcb",

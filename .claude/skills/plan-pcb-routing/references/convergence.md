@@ -99,14 +99,35 @@ Accept **only** if `blocking` strictly decreased, or `blocking` is unchanged and
 `blocking == 0`**. Comparing it earlier lets a router trade a disconnected net
 for a lower via count.
 
-## 2. The ledger — `convergence.json`
+## 2. The ledger — `wk/ledger.jsonl`
 
 One record per iteration, appended **before** the next iteration starts.
+
+**Write it with `converge.py record`, not by hand.** The tools that read a ledger
+— `converge.py step-back` / `replay` / `status`, and `make_film.py --from-ledger`
+— read append-only **JSONL** through `board_store.Ledger`. A hand-written single
+JSON document is readable by a person and by nothing else, so the byte-exact step
+back and the replay are both unreachable from it. It also loses the content
+addressing: `record` stores the board by SHA, which is what makes stepping back
+exact after three iterations have overwritten the same path.
+
+```bash
+python3 -X utf8 converge.py record --ledger wk/ledger.jsonl     --board wk/iter03.kicad_pcb --kind completion     --lever 'rip lever: --rip-existing-nets QSPI_SD2 + --grid-step 0.025'     --score "$(cat wk/score_iter03.json)"     --argv -- python3 -X utf8 route.py wk/iter02.kicad_pcb wk/iter03.kicad_pcb --nets QSPI_SD1 ...
+```
+
+**Then run `converge.py status --ledger wk/ledger.jsonl` every iteration and read
+what it prints.** It is the alarm for the failure this whole section exists to
+prevent: it splits the budget into completion vs systemic and warns when at least
+half went to the instrument. A run once spent nine of eleven iterations on how the
+chain measures itself and finished with five nets carrying no copper — `status`
+says that out loud, and nothing else in the loop does.
+
+The shape below is what a record holds; `record` writes it for you.
 
 ```jsonc
 {
   "schema": 1,
-  "budget": {"per": "board", "limit": 20, "group": null},
+  "budget": {"per": "board", "limit": 100, "group": null},
   "iterations": [
     {"iteration": 0, "parent_board": null, "lever": "baseline",
      "commands": ["python3 -X utf8 route.py seed.kicad_pcb wk/iter00.kicad_pcb ..."],
