@@ -276,8 +276,24 @@ def test_the_score_is_the_gate_and_the_router_is_not_the_judge():
     assert 'better()' in skill and 'place_route_loop.py:358' in skill, \
         "cite where the router-self-report comparison actually lives"
     # The loop has to be bounded, or 'keep going until fixed' is unbounded.
-    assert '20 iterations per group' in skill, \
+    assert '100 iterations per board' in low or '100 per board' in low, \
         "the convergence budget must be stated in the skill"
+    # ...but bounded is not the only failure mode. A run stopped at 11 of 20 and
+    # called it "budget exhausted" while its own ledger said the levers were not
+    # exhausted, so the skill must also say what is NOT a stop condition.
+    assert 'not a stop condition' in low or 'not stop conditions' in low, \
+        "the skill must name the non-reasons for stopping (wall-clock, fatigue, " \
+        "'the score stopped moving') -- bounding the loop from above is useless " \
+        "if it can be abandoned from below"
+    # The lever must be chosen by connectivity, not by whichever number is
+    # biggest: `drc` can be ~90% grading artifact on a multi-class board, and a
+    # run that let it pick spent eleven iterations on clearances while five nets
+    # carried no copper.
+    assert 'connectivity first' in low, \
+        "the skill must rank unrouted/broken above drc when choosing the lever"
+    # Re-entering at the failing step is what makes a 100-iteration budget cheap.
+    assert 'rip-existing-nets' in skill, \
+        "ripping blocking nets must be documented as a sanctioned lever"
     # Vacuity: ungraded must never read as clean.
     assert 'ungraded' in low, "the skill must distinguish ungraded from passed"
 

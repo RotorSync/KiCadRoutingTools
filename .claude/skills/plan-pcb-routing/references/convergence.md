@@ -40,8 +40,17 @@ loop asks.
    or annular ring, they go on every `board_score.py` call. `check_drc`'s default
    is the *fab* floor for the layer count, which is looser than most specs — that
    gap is exactly how 141 spec-violating vias graded clean.
-4. **The budget is fixed:** `route.py --list-groups --group-by auto`. Groups →
-   20 iterations per group. No groups → 20 per board. Do not invent groups.
+4. **The budget is 100 per board.** Not 20 — that figure assumed every iteration
+   meant a full chain re-run, and it does not (SKILL 9.3a: re-enter at the failing
+   step, which takes seconds). Count **completion** iterations (the copper
+   changed) separately from **systemic** ones (the chain's floors, classes, zone
+   fill or a checker changed). Three consecutive systemic iterations means you are
+   tuning the instrument, not the board — go and look at what is unrouted.
+5. **The lever is chosen by CONNECTIVITY, not by the largest number.** Work
+   `unrouted` → `broken` → widths → floorplan → `drc`, in that order, whatever
+   their sizes. A run that let the biggest `blocking_by` entry pick spent eleven
+   iterations on clearances — 16 of the 18 of which were grading artifacts — while
+   five nets carried no copper at all.
 
 ## 1. The iteration
 
@@ -133,8 +142,8 @@ Fields that carry weight:
 | # | condition | what to report |
 |---|---|---|
 | 1 | `blocking == 0` **and** every lens passes | done — quote the score and the lens list |
-| 2 | budget exhausted | the best-scoring board **and** every remaining blocker, itemised with measurements |
-| 3 | 3 consecutive iterations, `blocking` unchanged across all three levers | floorplan-limited or spec-limited — say which, with the number |
+| 2 | budget exhausted — **100 ledger entries actually written** | the best-scoring board **and** every remaining blocker, itemised with measurements |
+| 3 | **5** consecutive iterations with `unrouted` AND `broken` both unchanged, after trying the rip lever, a finer grid and a layer change on the failing nets | floorplan-limited or spec-limited — say which, with the number |
 | 4 | a blocker is geometrically unsatisfiable | a finding **about the requirement**, with the measurement that proves it |
 
 Stop condition 4, worked: a requirement asked for 2.4 mm edge-to-edge clearance
@@ -144,10 +153,18 @@ and **1.300 mm** (GND) — nearer than 2.4 mm before any track exists. With it:
 23/44 nets. Without: 38/44. It is unsatisfiable as written, it took one
 measurement to prove, and the honest output is *"this requirement needs a
 keepout or a `.kicad_dru` track-scoped rule, not a netclass"* — not a quietly
-relaxed class, and not 20 iterations of grinding.
+relaxed class, and not a budget spent grinding.
 
 **Ending on 2, 3 or 4 is legitimate. Ending on them while calling the board
-finished is not.**
+finished is not. Ending on none of them is not an ending at all.**
+
+### What is NOT a stop condition
+
+Wall-clock, fatigue, "the score stopped moving", "the remaining work is hard", or
+"the findings are written up". A run once stopped at **11 of 20**, called it
+"budget exhausted", and said in its own ledger that the levers were not exhausted.
+Before invoking 2 or 3, answer in writing: how many nets are unrouted, what is the
+router's own hint for each, and which rip rule has not been tried on them.
 
 ## 4. The movie
 
