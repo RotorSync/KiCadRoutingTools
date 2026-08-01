@@ -300,8 +300,18 @@ def test_the_score_is_the_gate_and_the_router_is_not_the_judge():
     conv = os.path.join(ROOT, '.claude/skills/plan-pcb-routing/references/convergence.md')
     assert os.path.isfile(conv), "references/convergence.md is missing"
     ctext = open(conv, encoding='utf-8').read()
-    for key in ('convergence.json', 'parent_board', 'stopped_by', 'blocking'):
+    for key in ('ledger.jsonl', 'parent_board', 'stopped_by', 'blocking'):
         assert key in ctext, f"convergence.md does not document `{key}`"
+    # The ledger has to be the one the TOOLS read. `board_store.Ledger` is
+    # append-only JSONL and `converge.py record` is its only writer, so a
+    # hand-written single JSON document leaves step-back, replay, status and
+    # make_film --from-ledger all unreachable -- which is what the skill used
+    # to prescribe.
+    for verb in ('record', 'status'):
+        assert f'converge.py {verb}' in ctext or f'converge.py {verb}' in skill, \
+            f"neither the skill nor convergence.md names `converge.py {verb}`"
+    assert '"limit": 100' in ctext, \
+        "the ledger template must carry the same budget the prose states (100)"
     print("  PASS: score is the gate, router self-report demoted, loop bounded")
 
 
