@@ -182,7 +182,7 @@ def _pads_are_collinear(fp, eps: float = 1e-6) -> bool:
     1x10 castellated breakout row (10 pads) is an IC as far as it is concerned.
     That row spans a whole board edge and carries a rail, so it is nearer to
     half the decoupling caps than their real IC is and it passes the shared-net
-    test -- it captures them. On test-board it captured three, and the grader
+    test -- it captures them. Measured on one board it captured three, and the grader
     then reported "C12 is 3.30mm from CN2, the IC it decouples".
 
     The false positive is only noise. The FALSE NEGATIVE is the reason this
@@ -250,7 +250,7 @@ def decap_tethers(pcb_data, movable=None,
         # Match on the POWER net, not on ground. A decoupling cap bridges a rail
         # and GND, and GND is shared with nearly every part on the board -- so
         # matching on "shares a net" lets the nearest 4-pad part win on ground
-        # alone. On test-board that tethered C12 (VCC3V3) to the CRYSTAL and the
+        # alone. Measured, that tethered a rail decap to the CRYSTAL and the
         # flash's own C2 to the USB connector, and the reported distance was then
         # to the wrong part in both directions.
         power = {n for n in nets

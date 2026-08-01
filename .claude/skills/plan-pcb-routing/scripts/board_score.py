@@ -156,10 +156,10 @@ def score_drc(root: str, board: str, clearance=None, sizes=None) -> tuple:
     `sizes` is the opposite case, and it is the one that shipped a broken board.
     check_drc defaults its size floors to the FAB minimum derived from the layer
     count -- correct when the fab is the only constraint, and blind when the
-    board's own spec is TIGHTER. test-board's HW-TB-PCB08 asks for 0.6 mm vias
-    with a 0.15 mm annular ring; every one of its 141 vias violated that, and
-    nothing caught it, because 0.25 mm clears the 2-layer fab floor. Pass the
-    spec's numbers whenever the spec has any.
+    board's own spec is TIGHTER. Measured on a 2-layer board whose spec asked
+    for 0.6 mm vias with a 0.15 mm annular ring: every one of its 141 vias
+    violated that and nothing caught it, because 0.25 mm clears the 2-layer fab
+    floor. Pass the spec's numbers whenever the spec has any.
     """
     args = [board]
     if clearance is not None:
@@ -317,10 +317,10 @@ def score_net_widths(board: str, spec_file: str) -> dict:
     `undersized` comes from check_drc's size floors, which are BOARD-WIDE
     minima: they answer "is any copper thinner than X?". A spec that demands a
     PARTICULAR net be at least a given width is a different question, and the
-    difference is not academic -- it is the one that shipped. On test-board
-    `undersized` read 0 while 47 segments breached HW-TB-PCB25's >=0.4mm rails,
-    and the previous run's "USB_DP has no 0.8mm segment" would still not be
-    caught, because 0.16mm clears every board-wide floor.
+    difference is not academic -- it is the one that shipped. Measured:
+    `undersized` read 0 while 47 segments breached a >=0.4 mm rail requirement,
+    and a pair spec'd at 0.8 mm that came out at 0.16 mm would not be caught
+    either, because 0.16 mm clears every board-wide floor.
 
     `spec_file` is a JSON file of ``{"<net glob>": <min mm>}``, e.g.::
 
@@ -398,7 +398,7 @@ def build_parser():
         'spec size floors',
         "check_drc defaults these to the FAB minimum for the layer count. Pass "
         "the board's own spec whenever it is TIGHTER than the fab -- that gap is "
-        "how 141 spec-violating vias graded clean on test-board.")
+        "how 141 spec-violating vias once graded clean.")
     g.add_argument('--min-track-width', type=float, metavar='MM')
     g.add_argument('--min-via-diameter', type=float, metavar='MM')
     g.add_argument('--min-via-drill', type=float, metavar='MM')

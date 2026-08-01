@@ -282,33 +282,23 @@ and its HPWL is *worse* than at 5. `interf_u_unrouted` shows the other limit —
 alignment does nothing at all on a board with few repeated footprints, because
 there are no peers to align.
 
-### Third board, and `5` did nothing on it
+### `5` is not a transferable number
 
-`edgehero/test-board` (RP2350A breakout, 51 × 21 mm, 42 footprints) has **16
-identical `C_0402_1005Metric` decoupling caps in two straight rows of four**, so
-peers are not the limit here. Seed rows are exactly aligned (y spread `0.0000`).
-After `--max-displacement 2`:
+The two sweeps above make `--align-weight 5` look like a default. It is not. On a
+third board — 42 footprints, 16 identical 0402 decouplers in two exactly-aligned
+rows, so peers were not the limit — `5` destroyed both rows just as thoroughly as
+switching the term off, at **either** crossing penalty. The mechanism was fine:
+at `50` both rows returned to a `0.0000` y spread. It was the *weight* that did
+not transfer.
 
-| `--crossing-penalty` | `--align-weight` | N row y spread | S row y spread | crossings | HPWL |
-|---|---|---|---|---|---|
-| 10 | 0 | 0.8292 | 0.8292 | 52 | 584.835 |
-| 10 | **5** | **0.8660** | **0.8660** | 53 | 584.835 |
-| 10 | 50 | 0.0000 | 0.0000 | 62 | 592.245 |
-| 30 | 0 | 0.8292 | 0.8292 | 52 | 584.835 |
-| 30 | **5** | **0.8292** | **0.8660** | 52 | 584.905 |
-| 30 | 50 | 0.0000 | 0.0000 | 55 | 588.005 |
+The reason is in the shape of the term. The penalty saturates at `w · radius²`, so
+the recommended pair is worth `5 × 0.5² = 1.25` per peer pair — against a halo term
+of order 100s and tens per crossing. It is simply outvoted.
 
-At the recommended `5` the rows are destroyed exactly as if the term were off —
-at **either** crossing penalty, so this is not a `--crossing-penalty 30` scaling
-effect. The mechanism is sound: at `50` both rows come back to `0.0000` spread.
-It is the *weight* that does not transfer between boards.
-
-The reason is in the shape. The penalty saturates at `w · radius²`, so at the
-recommended pair that is `5 × 0.5² = 1.25` per peer pair — against a halo term
-of ~289 and 30 per crossing on this board. **Sweep `--align-weight` on the board
-in front of you and check a row's y spread; do not carry `5` over.** And note
-what `50` costs here: +3 crossings and +3.2 mm HPWL at `--crossing-penalty 30`,
-which the Step 0c acceptance rule scores as a regression.
+**Sweep `--align-weight` on the board in front of you and check a row's y spread;
+do not carry `5` over.** And note what a weight large enough to win can cost: on
+that board `50` bought aligned rows at +3 crossings and +3.2 mm HPWL, which the
+Step 0c acceptance rule scores as a regression.
 
 ### Why off by default
 

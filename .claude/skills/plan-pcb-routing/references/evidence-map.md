@@ -58,7 +58,7 @@ the board**.
 
 **Pass the same `--ignore-nets` you gave `place_optimize`, or the re-measurement
 below compares two different net sets and always "fails".** B's numbers exclude
-the plane nets; this tool's do not unless told to. On the test-board run, GND
+the plane nets; this tool's do not unless told to. On one run, GND
 alone moved the same board from 53 crossings to 116 — which reads exactly like a
 corrupted write and is not one.
 
@@ -129,8 +129,8 @@ The feedback edge back into placement.
 | `pad_pairs_connected` / `pad_pairs_total` | The honest completion number for comparing two placements |
 | `total_iterations` | Effort. A placement that halves iterations at equal completion is a real win |
 | `total_vias` | The cost side of the same trade |
-| `power_trace_ampacity[].bottleneck_width_mm` | **Did the width you asked for actually happen?** `--power-nets-widths` degrades quietly: a wide tap that will not fit is re-routed at the layer default (#72's neckdown retry), and on a dense board that fallback can take the *whole* run, not just the pad. On test-board, `--power-nets-widths 0.8` on the USB nets produced **1.30 mm of 0.8 mm copper out of 41 mm** — three of the four nets got none at all. Compare this key against what you asked for, every time; the routed board is DRC-clean either way |
-| `min_clearance_used` | The floor the run actually reached, which is **not** what you asked for. Below your netclass means the gap-rescue stepped down toward the fab floor. test-board: nominal 0.16, `min_clearance_used` 0.127, and **25% of all copper (180 of 710 mm) ended up at 0.127** — under the board's own 0.15 minimum. The `.kicad_pro` writeback then clamps the DRC floor to the routed value, so **KiCad grades it clean**. This key is the only place the step-down is visible |
+| `power_trace_ampacity[].bottleneck_width_mm` | **Did the width you asked for actually happen?** `--power-nets-widths` degrades quietly: a wide tap that will not fit is re-routed at the layer default (#72's neckdown retry), and on a dense board that fallback can take the *whole* run, not just the pad. Measured, `--power-nets-widths 0.8` on a pair produced **1.30 mm of 0.8 mm copper out of 41 mm** — three of the four nets got none at all. Compare this key against what you asked for, every time; the routed board is DRC-clean either way |
+| `min_clearance_used` | The floor the run actually reached, which is **not** what you asked for. Below your netclass means the gap-rescue stepped down toward the fab floor. Measured: nominal 0.16, `min_clearance_used` 0.127, and **25% of all copper (180 of 710 mm) ended up at 0.127** — under the board's own 0.15 minimum. The `.kicad_pro` writeback then clamps the DRC floor to the routed value, so **KiCad grades it clean**. This key is the only place the step-down is visible |
 | `rescue.unchanged` | Nets the rescue pass could not improve. Distinguishes "nearly made it" from "never had a path" |
 
 ### Routed length: half of it is already built, and the half that is not will bite you
@@ -150,7 +150,7 @@ must be under N mm" or "this net must have 0 vias". (`check_orthonormal
 `XTAL <= 10 mm/leg` have to be measured from `pcb.segments` by hand — do it, and
 say plainly that you did.
 
-On test-board the routed board graded **`check_floorplan` PASS** and 86%
+One routed board graded **`check_floorplan` PASS** and 86%
 connected while breaking **19** such limits, including a QSPI net at 32.6 mm
 against a 15 mm HARD budget and crystal legs 6.03 mm apart against 1 mm. Green
 on the KRT gates is not green on the spec.
@@ -159,7 +159,7 @@ on the KRT gates is not green on the spec.
 
 `route.py` clamps the sibling `.kicad_pro` down to what the run actually
 achieved, and **that includes `track_width`, which the next step reads back as
-its nominal**. Measured across one test-board chain:
+its nominal**. Measured across one chain:
 
 | project | `Default.clearance` | `Default.track_width` |
 |---|---|---|

@@ -256,7 +256,7 @@ def test_a_collinear_edge_row_is_not_an_ic_a_cap_can_decouple():
 
 def test_a_decap_tethers_on_its_rail_not_on_ground():
     """GND is shared with nearly every part, so matching on "shares a net" lets
-    the nearest 4-pad neighbour win on ground alone -- on test-board that put a
+    the nearest 4-pad neighbour win on ground alone -- measured, that put a
     VCC3V3 decap on the CRYSTAL and the flash's own cap on the USB connector.
 
     Also pins the second half: the search is nearest-chip-CARRYING-THE-RAIL, not

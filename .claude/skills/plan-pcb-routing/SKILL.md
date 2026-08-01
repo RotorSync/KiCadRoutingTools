@@ -94,7 +94,7 @@ coordinate, a pitch, a mating standard or an enclosure feature is fixed:
 | what | typical source | example |
 |---|---|---|
 | edge/board-to-board connectors | the mating standard | Pico castellated rows: 2.54 mm pitch, 17.78 mm apart |
-| USB / barrel / RF connectors | enclosure aperture | `HW-TB-PCB13` fixes the USB-C at the north edge |
+| USB / barrel / RF connectors | enclosure aperture | a spec clause fixing the receptacle to a named edge |
 | mounting holes | standoff pattern | keep-out + exact XY |
 | castellated edges | the carrier's pad field | pad centred **on** the outline |
 | test points, antennas, sensors | mechanical or RF | an antenna keepout is not negotiable |
@@ -112,9 +112,9 @@ A lock you forgot to re-pass is silent. A `must_lock` the grader checks is not:
 
 ```jsonc
 {
-  "must_lock": ["J1", "J2", "H1", "H2", "H3", "H4"],   // HW-TB-PCB02, -PCB13
+  "must_lock": ["J1", "J2", "H1", "H2", "H3", "H4"],   // cite the requirement id here
   "blocks": [
-    { "name": "pico-header-north",                      // HW-TB-PCB01
+    { "name": "pico-header-north",                      // and here
       "refs": ["J1"],
       "zone": {"x": 100.2, "y": 60.1, "w": 0.4, "h": 0.4} }
   ]
@@ -130,7 +130,7 @@ needs and prose does not provide.
 **4. Scope `decaps` to the caps the requirement names, and lock those too.**
 The quench has no decap-proximity term, so it walks a *different* cap past the
 limit every run — lock one and the next moves. Locking them one at a time is
-whack-a-mole; lock the named set at once. On test-board that cost `crossings`
+whack-a-mole; lock the named set at once. Measured, that cost `crossings`
 52 → 60, and **that is the correct trade, not a regression**: a spec-conformant
 placement that routes slightly worse beats a spec-violating one that routes well.
 
@@ -262,8 +262,8 @@ citing the line item. That is scoping the rule to what it says, not relaxing it.
 
 Then **lock the caps it does govern**. The quench has **no decap-proximity
 term**, so any decap it may move can drift past the limit for a fraction of a
-millimetre of wirelength, and it is a different cap every run — on test-board,
-`C11` on one run, then `C13` and `C8` on the next. Locking them one at a time is
+millimetre of wirelength, and it is a different cap every run — measured, one
+cap on the first run and two different ones on the next. Locking them one at a time is
 whack-a-mole. Their proximity *is* the requirement; their exact position is not
 the optimizer's to trade. Expect to pay for it: locking ten decaps there took
 crossings from 52 to 60. That is the correct trade, not a regression.
@@ -293,8 +293,8 @@ Three things follow that nothing will tell you:
 If a board fans a bus out to an edge, measure the corridor before blaming the
 router: `escapes x trace pitch / channel width`. It is the difference between
 *"the router failed"* and *"this was never routable"*, and a router you cannot
-tell those apart on measures nothing. test-board's spec sets its own gate at
-≤75%; the as-built channel measured 5.60mm against 2.40mm of escape, 42.9%.
+tell those apart on measures nothing. A spec may set its own gate — one asks for
+≤75%, and the as-built channel measured 5.60mm against 2.40mm of escape, 42.9%.
 
 ### THE BOARD OUTLINE IS NOT YOURS TO CHANGE
 
@@ -1072,7 +1072,7 @@ suggestions:
   (`clearance`, `track_width`, `via_diameter`, `via_drill`, `annular`,
   `board_edge`, `hole_to_hole`, `pad_hole_to_hole`). Supplying it also **forbids
   the silent `standard`→`advanced` escalation**, which is what puts 0.25/0.15
-  vias on a board that asked for 0.6/0.3. On test-board one file took the score's
+  vias on a board that asked for 0.6/0.3. Measured, one such file took the score's
   `undersized` from **169 to 0**.
 
   **Its `clearance` key REPLACES the per-class clearance map, it does not floor

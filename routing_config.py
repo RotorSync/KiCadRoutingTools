@@ -161,7 +161,7 @@ class GridRouteConfig:
     # `track_width` is a REQUEST: when a wide route will not fit, the neck-down
     # retries the whole net at the layer/default width and the run reports success
     # -- so a board whose spec sets a minimum ABOVE the fab floor silently shipped
-    # copper under it (test-board: 155 of 785 segments at 0.127mm against a 0.15mm
+    # copper under it (measured: 155 of 785 segments at 0.127mm against a 0.15mm
     # HARD requirement, with --track-width 0.16 passed). With this set the ladder
     # stops here and the net FAILS honestly instead of going under.
     track_width_floor: float = 0.0
