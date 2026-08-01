@@ -101,7 +101,11 @@ def _run_loop(extra_args, rounds=4, quench_result=None,
             kw['metrics_out'].update(quench_metrics)
         return placements
 
-    def fake_run_route(pcb_file, routed_file, route_args, log_file):
+    # **kw, not a fixed signature: this fake stands in for run_route, and
+    # pinning its parameter list here makes an unrelated addition to the real
+    # one (json_file, for --accept-cmd's judge) fail as a steering regression.
+    # What this test is about is WHICH BOARD each round routes, nothing else.
+    def fake_run_route(pcb_file, routed_file, route_args, log_file, **kw):
         if route_calls is not None:
             route_calls.append(pcb_file)
         # Every candidate scores exactly like round 0, so better() is False
