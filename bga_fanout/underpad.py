@@ -910,12 +910,12 @@ def generate_underpad_escape(footprint: Footprint,
     # top-layer escape attempt before falling to via-in-pad. Default is
     # UNLIMITED (#424): Phase A runs outside-in, so trying every ball is
     # safe and fewer under-package barrels measured as better completion.
-    import os as _os
-    try:
-        outer_rings = float(_os.environ.get('KICAD_UNDERPAD_OUTER_RINGS',
-                                            str(outer_rings)))
-    except ValueError:
-        pass
+    import env_knobs
+    if env_knobs.UNDERPAD_OUTER_RINGS:
+        try:
+            outer_rings = float(env_knobs.UNDERPAD_OUTER_RINGS)
+        except ValueError:
+            pass
     if dogbone and math.isinf(outer_rings):
         # Dog-bone (#128) WANTS its vias in the gaps -- an unlimited surface
         # phase claims the diagonal gap sites and forces via-in-pad fallbacks

@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import math
 import os
+
+import env_knobs
 from typing import Optional
 
 import numpy as np
@@ -132,7 +134,7 @@ class ZoneFillModel:
         # fidelity terms below make the model predict LESS fill, and every
         # consumer keys off that prediction, so being able to flip each one
         # without a rebuild is how the corpus A/B attributes a delta.
-        if os.environ.get('KICAD_NO_FILL_NETCLASS'):
+        if env_knobs.NO_FILL_NETCLASS:
             _nc = {}
         zc = zone.clearance if zone.clearance is not None \
             else defaults.PLANE_ZONE_CLEARANCE
