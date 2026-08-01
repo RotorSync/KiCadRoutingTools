@@ -605,6 +605,34 @@ TESTS = [
 ]
 
 
+
+def test_target_nets_gives_the_loop_something_to_move_on_a_clean_board():
+    """The loop's move candidates come from `failed_single` + `failed_multipoint`.
+    So a board where EVERY NET ROUTES but a spec clause is violated -- a maximum
+    length, a via ban, a required width -- hands it an empty target list and it
+    does nothing at all. That is not a bad move, it is no move, and it is why a
+    run whose only blocker was a length clause never re-placed anything.
+
+    `--target-nets` supplies the targets; `--accept-cmd` supplies the gradient.
+    Neither alone lets the loop chase a requirement the router is happy with."""
+    import place_route_loop as L
+    clean = {'failed_single': [], 'failed_multipoint': [],
+             'multipoint_pads_total': 10, 'multipoint_pads_connected': 10}
+    assert L.metrics_from_summary(dict(clean))['failed_nets'] == [],         "a clean board must have no targets without the flag"
+    m = L.metrics_from_summary(dict(clean), extra_targets=['QSPI_SD0', 'QSPI_SD3'])
+    assert m['failed_nets'] == ['QSPI_SD0', 'QSPI_SD3']
+    # The failure COUNT must not move: better() compares failures then
+    # iterations, and inflating it would make every round look like a
+    # regression against round 0.
+    assert m['failures'] == 0, "targets must not be counted as failures"
+    # And a named net that DID fail must not be duplicated.
+    m2 = L.metrics_from_summary(
+        {'failed_single': ['QSPI_SD0'], 'failed_multipoint': [],
+         'multipoint_pads_total': 0, 'multipoint_pads_connected': 0},
+        extra_targets=['QSPI_SD0', 'QSPI_SD3'])
+    assert m2['failed_nets'] == ['QSPI_SD0', 'QSPI_SD3'], m2['failed_nets']
+    print("  PASS: --target-nets seeds the move set, leaves the failure count alone")
+
 if __name__ == '__main__':
     for fn in TESTS:
         fn()

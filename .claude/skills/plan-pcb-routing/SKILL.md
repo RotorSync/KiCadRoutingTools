@@ -24,7 +24,7 @@ python3 -X utf8 place_optimize.py board.kicad_pcb --suggest-locks
 |---|---|---|
 | **unplaced** (test it — see below) | **NO** — out of scope; report and stop | — |
 | careful hand placement, routing not yet attempted | **NO** | — |
-| routing already completed clean | **NO** | — |
+| routing already completed clean | **NO** — *unless* a spec clause placement could fix is still violated; see the last row of 9.3d | — |
 | board already carries copper (the tools exit 3) | **NO** — placement moves footprints, not tracks | — |
 | rough / imported / auto-generated placement | yes | `place_optimize.py --max-displacement 3` |
 | routing FAILED and `/diagnose-routing-failures` blames **congestion / blockers** | yes | `place_route_loop.py` |
@@ -627,7 +627,30 @@ DRC dirty. Two consequences:
 
 - **It is a cheap pre-filter, not a gate.** Re-score every board it hands you
   with `scripts/board_score.py` before believing it improved anything.
-- **It is also only ONE `route.py` call** (`_ROUTE_PY`, `:52`), not the chain.
+- **Its move candidates come ONLY from failed nets, so on a board where nothing
+fails it does nothing at all.** `metrics_from_summary` builds the target set from
+`failed_single` + `failed_multipoint` and from the `blockers` diagnostics — all of
+which are empty when every net routed. A board whose only blocker is a spec
+clause therefore hands the loop an empty target list: it is not that it moves the
+wrong parts, it never moves any, and the run looks like placement was "tried".
+Two flags together fix it, and neither is sufficient alone:
+
+```bash
+# --target-nets = WHAT to move around (the clause's nets, routed or not)
+# --accept-cmd  = HOW to tell better from worse (the comparator cannot see a
+#                 length or a width; your judge can)
+place_route_loop.py in.kicad_pcb out.kicad_pcb \
+    --target-nets QSPI_SD0 QSPI_SD3 \
+    --accept-cmd 'python3 judge.py' \
+    --route-args '...' --max-displacement 3
+```
+
+`--target-nets` names nets to treat as targets even though the router routed
+them; `--accept-cmd` replaces the failures-then-iterations comparator, which
+cannot see a length or a width. One supplies the targets, the other the
+gradient.
+
+**It is also only ONE `route.py` call** (`_ROUTE_PY`, `:52`), not the chain.
   Planes, plane-repair, reconnect and diff pairs never participate in its
   feedback, so a board that needs a plane repair to connect cannot converge
   inside it. That is what the **Step 9** outer loop is for.
@@ -2835,6 +2858,7 @@ top blocker on the exact keys, not on impressions:
 | `check_floorplan` exits 4 with `zone_containment` | **intent violated** | fix the placement to match, or say why the intent changed. Do not quietly rewrite the intent to match the board |
 | a whole net has no copper while `pad_pairs_connected` looks healthy | **coverage bug** | the Step 5b ledger — not a placement problem at all |
 | `undersized` non-zero | **parameters** | re-route at the spec's width/via. Placement is not the lever |
+| every net routes, `unrouted`/`broken` are 0, and a **geometric clause still fails** — a maximum length, a via ban, a required width | **placement** | the router had no shorter path to find. The signature is a **routed length far above the straight-line pad distance** (measured on one board: 47 mm and 66 mm runs against 7–13 mm direct, unchanged by an admissible `--heuristic-weight 1.0`, which proves no shorter path exists at that placement). Go to `place_route_loop` — see the warning below, because it needs BOTH `--target-nets` and `--accept-cmd` to see this at all |
 | `unrouted` names a plane net | **the pour step** | it was excluded and never poured — Step 3/5, not placement |
 | the log names **pre-existing nets** it is "not allowed to rip" | **rip lever** | 9.3c — `--rip-existing-nets` with the set it named |
 | a net fails on ONE layer at every grid and rip set, and routes instantly with a second layer | **the single-layer constraint is the blocker** | not a router failure. Report it against the requirement that imposed the layer restriction, with both measurements |

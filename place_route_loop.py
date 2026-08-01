@@ -114,7 +114,7 @@ def accept_score(cmd: str, placed: str, routed: str, json_file: str):
 
 
 def run_route(pcb_file: str, routed_file: str, route_args: str, log_file: str,
-              json_file: str = None):
+              json_file: str = None, extra_targets=None):
     """Run route.py and return its metrics dict.
 
     `json_file` asks route.py to also write its MERGED summary there
@@ -152,10 +152,11 @@ def run_route(pcb_file: str, routed_file: str, route_args: str, log_file: str,
         raise RuntimeError(f"route.py produced no JSON_SUMMARY (see {log_file})"
                            f"\n" + _log_tail(log))
 
-    return metrics_from_summary(summary, log)
+    return metrics_from_summary(summary, log, extra_targets)
 
 
-def metrics_from_summary(summary: dict, log: str = '') -> dict:
+def metrics_from_summary(summary: dict, log: str = '',
+                         extra_targets=None) -> dict:
     """Round metrics from an already-merged JSON_SUMMARY.
 
     Split out of run_route (#431) so a renderer can caption a recorded round
@@ -164,6 +165,16 @@ def metrics_from_summary(summary: dict, log: str = '') -> dict:
     the pre-#409 blocker fallback.
     """
     failed_nets = list(summary.get('failed_single', []))
+    # Nets the CALLER named as the thing to work on, whether or not the router
+    # failed them (#549). Without this the loop's entire target set comes from
+    # `failed_single` + `failed_multipoint`, so a board where EVERY NET ROUTES
+    # but a spec clause is violated -- a maximum length, a via ban, a required
+    # width -- yields an empty target list and the loop has nothing to move. It
+    # is not that it moves the wrong parts; it does not run. Pair with
+    # `--accept-cmd`, which is the other half: one supplies the targets, the
+    # other supplies the gradient, and neither alone lets the loop chase a
+    # requirement the router is happy with.
+    failed_nets += [n for n in (extra_targets or []) if n not in failed_nets]
     # failed_multipoint entries are dicts {net_name, failed_pads}; keep just the
     # name so failed_nets is uniformly net-name strings (downstream uses them as
     # dict keys -> a dict here raises "unhashable type: 'dict'").
@@ -341,6 +352,15 @@ def main():
     parser.add_argument("output_file", nargs="?")
     parser.add_argument("--route-args", default=None,
                         help="Arguments passed to route.py (quoted string)")
+    parser.add_argument("--target-nets", nargs="*", default=None, metavar="NET",
+                        help="Net names to treat as targets EVEN IF the router "
+                             "routed them. The loop's move candidates otherwise "
+                             "come only from failed nets, so a board where "
+                             "everything routes but a SPEC clause is violated "
+                             "(a maximum length, a via ban, a required width) "
+                             "gives it an empty target list and it does nothing. "
+                             "Pair with --accept-cmd: this supplies the targets, "
+                             "that supplies the gradient.")
     parser.add_argument("--rounds", type=int, default=5,
                         help="Max repair rounds (default: 5)")
     parser.add_argument("--max-displacement", type=float, default=3.0,
@@ -495,7 +515,8 @@ def main():
     print("Round 0: routing initial placement...")
     best = run_route(cur_file, os.path.join(work, 'loop_round0_routed.kicad_pcb'),
                      args.route_args, os.path.join(work, 'loop_round0_route.log'),
-                     json_file=os.path.join(work, 'loop_round0_route.json'))
+                     json_file=os.path.join(work, 'loop_round0_route.json'),
+                     extra_targets=args.target_nets)
     # Round 0 is the unconditional baseline, so the judge is not a gate here --
     # it is scored only so later rounds have an incumbent to beat.
     best_score = None
@@ -624,7 +645,8 @@ def main():
         metrics = run_route(
             cand_file, os.path.join(work, f'loop_round{rnd}_routed.kicad_pcb'),
             args.route_args, os.path.join(work, f'loop_round{rnd}_route.log'),
-            json_file=os.path.join(work, f'loop_round{rnd}_route.json'))
+            json_file=os.path.join(work, f'loop_round{rnd}_route.json'),
+            extra_targets=args.target_nets)
         # Report-only, exactly like the pad_pairs_* keys above: every round now
         # records placement quality next to the routing result. better() is
         # deliberately untouched -- reworking the comparator is #458's scope.
