@@ -157,6 +157,14 @@ class GridRouteConfig:
                                            # Hole-to-Hole Spacing" (keep in sync with
                                            # routing_defaults.HOLE_TO_HOLE_CLEARANCE)
     board_edge_clearance: float = 0.0  # mm - clearance from board edge (0 = use track clearance)
+    # HARD floor the neck-down may not cross (0 = no floor beyond the fab tier's).
+    # `track_width` is a REQUEST: when a wide route will not fit, the neck-down
+    # retries the whole net at the layer/default width and the run reports success
+    # -- so a board whose spec sets a minimum ABOVE the fab floor silently shipped
+    # copper under it (test-board: 155 of 785 segments at 0.127mm against a 0.15mm
+    # HARD requirement, with --track-width 0.16 passed). With this set the ladder
+    # stops here and the net FAILS honestly instead of going under.
+    track_width_floor: float = 0.0
     max_turn_angle: float = 180.0  # Max cumulative turn angle (degrees) before reset, to prevent U-turns
     # Power-tap neck-down (issue #72): when a wide power-net tap edge fails,
     # retry it at the layer's default track width. The narrow neck extends

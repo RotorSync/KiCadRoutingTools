@@ -2262,6 +2262,17 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
     if result[0] is not None or not (power_wide or imp_wide) or not config.power_tap_neckdown:
         return result + (False, None)
     neck_floor = layer_w if power_wide else config.track_width
+    # A board-spec floor outranks the layer/nominal width the neck-down would
+    # otherwise fall back to. Without it the ladder walks all the way to the fab
+    # minimum and the run still reports the net routed, which is how copper lands
+    # under a HARD spec width. Raising the floor can make the retry fail -- that
+    # is the point: an honest failure beats a silent sub-spec track.
+    if config.track_width_floor and config.track_width_floor > neck_floor:
+        neck_floor = config.track_width_floor
+        if neck_floor >= net_w - 1e-9:
+            # The floor leaves no room to neck at all: nothing between the
+            # requested width and the floor is legal, so do not pretend to retry.
+            return result + (False, None)
 
     if _edge_span_mm(sources, targets, config.grid_step) <= SHORT_POWER_EDGE_MM:
         # Short edge: step the width down, widest-that-fits wins; segments use it.
@@ -2283,8 +2294,12 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
     # on impedance runs, 0 on plain runs); an impedance net necks to the
     # NOMINAL width (its margins vs the stamps' reserve, usually all-zero).
     print(f"{print_prefix}{YELLOW}Wide route blocked - retrying at default track width (neck-down){RESET}")
-    retry_margins = (config.base_track_margins() if power_wide
-                     else config.track_margins_for_width(config.track_width))
+    # Same floor as the short-edge ladder above: neck to neck_floor, which is the
+    # layer/nominal width unless a board-spec min_track_width raised it.
+    retry_margins = (config.track_margins_for_width(neck_floor)
+                     if config.track_width_floor and config.track_width_floor > 0
+                     else (config.base_track_margins() if power_wide
+                           else config.track_margins_for_width(config.track_width)))
     retry = _route_connection_at_margin(
         router, obstacles, config, sources, targets, retry_margins,
         pcb_data, net_id, print_prefix, direction_labels, single_direction, waypoints)
