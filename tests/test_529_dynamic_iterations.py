@@ -152,8 +152,9 @@ def main():
             failures.append('best_h %.0f outside [0, initial_h %.0f]'
                             % (stats['best_h'], stats['initial_h']))
 
-    # --- 6. python gate: probe budgets never extend; knob-on clamps >200k ----
-    os.environ['KICAD_DYNAMIC_ITERATIONS'] = '1'
+    # --- 6. python gate: DEFAULT-ON (no env), probe budgets never extend -----
+    for var in ('KICAD_DYNAMIC_ITERATIONS', 'KICAD_DYNAMIC_ITERATIONS_CLAMP'):
+        os.environ.pop(var, None)
     import env_knobs
     env_knobs.refresh()
     import single_ended_routing as ser
@@ -161,26 +162,38 @@ def main():
     class _Cfg:
         max_iterations = 0
 
-    # (input base, expected effective base, expected extension?)
+    # default config: ON, NO clamp — (base, expected effective, extension?)
     for b, want_base, want_ext in ((5000, 5000, False), (10000, 10000, False),
                                    (100000, 100000, True),
-                                   (500000, 200000, True),
-                                   (1000000, 200000, True)):
+                                   (1000000, 1000000, True)):
         _Cfg.max_iterations = b
         eff, kw = ser._dynamic_iterations(_Cfg())
         if eff != want_base or bool(kw) != want_ext:
-            failures.append('knob-on base %d -> (%d, %s), expected (%d, ext=%s)'
+            failures.append('default base %d -> (%d, %s), expected (%d, ext=%s)'
                             % (b, eff, kw, want_base, want_ext))
         elif kw and kw.get('max_iterations_ceiling') != 10_000_000:
             failures.append('base %d ceiling %s, expected flat 1e7' % (b, kw))
 
-    # knob off: base passes through untouched, no clamp, no ceiling
+    # speed dial: CLAMP=200000 caps the base
+    os.environ['KICAD_DYNAMIC_ITERATIONS_CLAMP'] = '200000'
+    env_knobs.refresh()
+    for b, want_base in ((500000, 200000), (1000000, 200000), (100000, 100000)):
+        _Cfg.max_iterations = b
+        eff, kw = ser._dynamic_iterations(_Cfg())
+        if eff != want_base or not kw:
+            failures.append('clamped base %d -> (%d, %s), expected %d'
+                            % (b, eff, kw, want_base))
+    os.environ.pop('KICAD_DYNAMIC_ITERATIONS_CLAMP', None)
+
+    # kill-switch: =0 restores static caps exactly (base untouched, no kwargs)
     os.environ['KICAD_DYNAMIC_ITERATIONS'] = '0'
     env_knobs.refresh()
     _Cfg.max_iterations = 1_000_000
     eff, kw = ser._dynamic_iterations(_Cfg())
     if eff != 1_000_000 or kw:
-        failures.append('knob-off 1e6 must pass through, got (%d, %s)' % (eff, kw))
+        failures.append('kill-switch 1e6 must pass through, got (%d, %s)' % (eff, kw))
+    os.environ.pop('KICAD_DYNAMIC_ITERATIONS', None)
+    env_knobs.refresh()
 
     if failures:
         for f in failures:

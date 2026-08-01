@@ -72,15 +72,16 @@ def refresh() -> None:
     g['IMPEDANCE_NECKDOWN'] = (_s('KICAD_IMPEDANCE_NECKDOWN', '1').strip().lower()
                                not in ('0', 'false', 'no', 'off'))
     g['NET_RESCUE'] = _s('KICAD_NET_RESCUE', '1') != '0'
+    # #529 dynamic iterations, DEFAULT ON (=0 reverts to static caps): full
+    # searches run at min(base, CLAMP) and earn +1x base tranches while the
+    # heuristic keeps approaching, up to a flat 1e7 ceiling. CLAMP defaults
+    # to 1e7 = no clamping (corpus: -29 incomplete nets over 150 boards);
+    # set CLAMP=200000 as the deliberate speed-over-completion dial.
+    g['DYNAMIC_ITERATIONS'] = _s('KICAD_DYNAMIC_ITERATIONS', '1') != '0'
+    g['DYNAMIC_ITERATIONS_CLAMP'] = _i('KICAD_DYNAMIC_ITERATIONS_CLAMP', 10_000_000)
 
     # --- opt-in experiments (env turns ON) ----------------------------------
     g['COLLINEAR_VIAS'] = _opt_in('KICAD_COLLINEAR_VIAS')  # #487: on-axis vias
-    # #529: full searches run at min(base, clamp) and earn +1x tranches while
-    # the heuristic keeps improving, up to a 1e7 ceiling (main routing only;
-    # knob OFF = static caps exactly as passed). CLAMP dials the base cap for
-    # A/B (set >= 1e7 to disable clamping entirely).
-    g['DYNAMIC_ITERATIONS'] = _opt_in('KICAD_DYNAMIC_ITERATIONS')
-    g['DYNAMIC_ITERATIONS_CLAMP'] = _i('KICAD_DYNAMIC_ITERATIONS_CLAMP', 200_000)
     # per-tranche quantum = max(CELLS grid cells, PCT% of tranche-start best_h)
     g['DYNAMIC_ITERATIONS_QUANTUM_CELLS'] = _f('KICAD_DYNAMIC_ITERATIONS_QUANTUM_CELLS', 2.0)
     g['DYNAMIC_ITERATIONS_QUANTUM_PCT'] = _f('KICAD_DYNAMIC_ITERATIONS_QUANTUM_PCT', 2.0)

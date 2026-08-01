@@ -286,10 +286,9 @@ options panel, keyed by its snake_case field name (`max_iterations`,
 `max_ripup`, `grid_step`, `board_edge_clearance`, `hole_to_hole_clearance`,
 `via_cost`, `heuristic_weight`, `turn_cost`, `ordering_strategy`, ...).
 Unknown names are ignored with a note in the plan log. Use this to carry the
-same values the equivalent CLI chain would pass (e.g. `--max-iterations
-1000000 --max-ripup 10 --grid-step 0.05`), so a GUI plan run matches a stress
-run step for step. (Under `KICAD_DYNAMIC_ITERATIONS=1`, leave
-`max_iterations` at its default instead — the engine self-budgets, #529.)
+same values the equivalent CLI chain would pass (e.g. `--max-ripup 10
+--grid-step 0.05`), so a GUI plan run matches a stress run step for step.
+(Leave `max_iterations` at its default — the engine self-budgets, #529.)
 
 **Why this heuristic matters for the GUI:** the plugin runs `/plan-pcb-routing` in
 *plan-only* mode — it never executes the fanout and never runs the DRC↔smaller-via
@@ -915,25 +914,23 @@ expensive, which is what keeps them intact through this step.
 
 For boards with BGA/PGA components, use `--no-bga-zone` to allow the router
 to find alternative paths through the dense pin area (even when fanout was
-done, some paths may require this). Use `--max-ripup 10
---max-iterations 1000000` for difficult 2-layer boards.
+done, some paths may require this). Use `--max-ripup 10` for difficult
+2-layer boards.
 
-> **Dynamic iterations (#529): do NOT tune `--max-iterations` when
-> `KICAD_DYNAMIC_ITERATIONS=1` is in the environment.** The router then
-> self-budgets: full searches run at min(base, 200k) and automatically earn
-> +1×base extensions while the search's heuristic keeps approaching the
-> target, up to a 1e7 ceiling — so a genuinely hard net gets far MORE than
-> a static 1000000 while hopeless searches stop early. Passing
-> `--max-iterations 1000000` in that mode is inert (the base is clamped to
-> 200k) and cluttering plans with it is wrong; just omit the flag. The
-> `--max-iterations 1000000` advice in this skill applies only to the
-> knob-off (default) regime.
+> **Do NOT pass `--max-iterations` (#529 dynamic iterations, default on).**
+> The router self-budgets: full searches automatically earn +1×base
+> extensions while the search's heuristic keeps approaching the target, up
+> to a 1e7-iteration ceiling — a genuinely hard net gets far MORE than the
+> old `--max-iterations 1000000` advice ever gave it, while hopeless
+> searches stop early. A net that still fails after an
+> `"dynamic iterations (#529): search extended to N"` log line is a
+> capacity problem (rip-up, clearance, layers), not a budget problem.
+> (`KICAD_DYNAMIC_ITERATIONS=0` restores the legacy static caps for A/B.)
 
 python3 -X utf8 route.py board_step1c.kicad_pcb board_step2.kicad_pcb \
     --nets "*" "!GND" "!VCC" \
     --no-bga-zone \
     --max-ripup 10 \
-    --max-iterations 1000000 \
     2>&1 | tee /tmp/step2_routing.txt
 
 (When Step 2b ran, add its impedance nets to the exclusions, e.g.
@@ -1431,7 +1428,7 @@ For difficult boards, consider tuning these parameters:
 | Parameter | Default | Effect |
 |-----------|---------|--------|
 | `--max-ripup 3` | 3 | Max blocking nets to rip up and retry |
-| `--max-iterations 200000` | 200000 | A* iteration limit per route |
+| `--max-iterations 200000` | 200000 | A* base budget per route (self-extends to 1e7 while progressing — #529; don't tune) |
 | `--heuristic-weight 1.9` | 1.9 | >1 = faster but may miss tight routes, 1.0 = optimal |
 | `--via-cost 50` | 50 | Higher = fewer vias, longer paths; lower (10-25) for BGA escape |
 | `--grid-step 0.1` | 0.1 | Smaller = finer routing but slower; 0.05 for fine-pitch |
@@ -1475,7 +1472,7 @@ python3 route.py board.kicad_pcb --nets "*" \
 14. **BGA/PGA power pins and planes** - When using power planes, BGA/PGA power pins (GND, VCC) connect most efficiently via direct vias to the plane rather than fanout routing. Create planes first, then fanout only signal nets. Through-hole PGA pads automatically connect to planes on that layer; SMD BGA pads need vias placed by `route_planes.py`. This approach:
     - Reduces routing congestion (power pins don't consume escape channels)
     - Provides lower impedance power connections
-15. **Aggressive parameters for 2-layer BGA/PGA boards** - Use `--max-ripup 10 --max-iterations 1000000` from the start for boards with dense components. These parameters help resolve routing conflicts that would otherwise fail. (Exception: with `KICAD_DYNAMIC_ITERATIONS=1` exported, omit `--max-iterations` entirely — the router self-budgets per #529 and the flag is clamped/inert; see the note in the routing-step section.)
+15. **Aggressive parameters for 2-layer BGA/PGA boards** - Use `--max-ripup 10` from the start for boards with dense components. Do NOT add `--max-iterations` — the router self-budgets (#529 dynamic iterations, default on, up to a 1e7 ceiling while a search progresses); see the note in the routing-step section.
 16. **Guide corridors and keepouts are user-drawn** - Never draw `User.1` guide polylines or `User.2` keepout polygons yourself; suggest in words where they should go and let the user draw them, then add `--guide-corridor` / `--keepout` to the plan.
 17. **Companion skills** - Defer to `/identify-diff-pairs` (datasheet-based pair detection), `/recommend-stackup` (before impedance/time-matching work), `/diagnose-routing-failures` (after failures), and `/review-routed-board` (final verification) rather than duplicating their logic inline.
 
@@ -1599,7 +1596,7 @@ After running routing commands:
 | Failure Pattern | Likely Cause | Solution |
 |-----------------|--------------|----------|
 | "no rippable blockers found" | Route blocked by non-rippable obstacle | Use `--no-bga-zone`; if pads are "boxed in by static obstacles", shrink geometry / finer grid (see "Congestion escalation" below) |
-| "Re-route FAILED: no path found" | Ripped net couldn't find new path | Increase `--max-iterations` |
+| "Re-route FAILED: no path found" | Ripped net couldn't find new path | Capacity problem (`--max-iterations` self-extends, #529): `--max-ripup`, clearance, or layers |
 | Many multipoint pads failed on same component | Congested area | Use `--max-ripup 10` or higher; shrink geometry toward the fab floor (see below) |
 | Many failures cluster in one channel/region | Tracks too fat for the channel | **Congestion escalation**: re-route the failed nets at smaller track/via/clearance down to the fab floor (see below) |
 | 2-layer board: low completion, via count far above a hand layout, or copper badly skewed to F.Cu while B.Cu sits empty | Default B.Cu cost (3.0×) over-penalizes the back layer | Retry with balanced `--layer-costs 1.0 1.5` (down toward `1.0 1.0`) — see "Dense 2-layer boards: rebalance layer costs" below |
@@ -1610,14 +1607,13 @@ python3 -X utf8 route.py board_prev.kicad_pcb board_routed.kicad_pcb \
     --nets "*" \
     --no-bga-zone \
     --max-ripup 10 \
-    --max-iterations 1000000 \
     2>&1 | tee /tmp/route_retry.txt
 ```
 
    Key parameters for difficult boards (especially 2-layer with BGA/PGA):
    - `--no-bga-zone` - **Critical**: Allows router to enter BGA area for alternative paths
    - `--max-ripup 10` (default 3) - More rip-up attempts to resolve conflicts
-   - `--max-iterations 1000000` (default 200000) - 5x more search iterations (knob-off regime only; inert under `KICAD_DYNAMIC_ITERATIONS=1`, which self-budgets to a 1e7 ceiling)
+   - Do NOT pass `--max-iterations` — self-budgeting (#529) extends hard searches to a 1e7 ceiling automatically; a post-extension failure is a capacity problem, not a budget one
    - `--stub-proximity-radius 10 --stub-proximity-cost 3.0` - Spread out fanout stubs (optional, for aesthetics)
 
 #### Dense 2-layer boards: rebalance layer costs (issue #178)
@@ -1644,7 +1640,7 @@ python3 -X utf8 route.py board_fanout.kicad_pcb board_signal.kicad_pcb \
     --nets "*" "!GND" "!VCC" \
     --track-width 0.127 --clearance 0.1 \
     --layer-costs 1.0 1.5 \
-    --no-bga-zone --max-ripup 10 --max-iterations 1000000 \
+    --no-bga-zone --max-ripup 10 \
     2>&1 | tee /tmp/route_balanced.txt
 ```
 Start around **`1.0 1.5`** (down from the `1.0 3.0` default); if F.Cu is still
@@ -1717,7 +1713,7 @@ hunt for.
        --nets "*" "!GND" "!VCC" \
        --track-width <fab floor, e.g. 0.127 or 0.0889> --clearance <floor, e.g. 0.1> \
        --via-size <floor via, e.g. 0.30> --via-drill <floor drill, e.g. 0.15> \
-       --no-bga-zone --max-ripup 10 --max-iterations 1000000 \
+       --no-bga-zone --max-ripup 10 \
        2>&1 | tee /tmp/route_signal.txt
    ```
    A finer `--grid-step` (0.05, or 0.025 for sub-0.4 mm pitch) is the complementary
