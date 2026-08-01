@@ -30,7 +30,8 @@ Lexicographic, never a weighted sum -- a weighted sum lets a router buy off a
 disconnected net with a lower via count::
 
     score = (blocking, quality)
-    blocking = unrouted + broken + drc + undersized + floorplan + impedance + length
+    blocking = (unrouted + broken + drc + undersized + floorplan
+               + impedance + length + net_widths)
     quality  = (vias, copper_mm, segments)      # only compared once blocking == 0
 
 `blocking` must reach 0 before a board is deliverable. `quality` orders the
@@ -70,6 +71,7 @@ _DRC_TYPE = re.compile(r'^([A-Z0-9-]+) violations \((\d+)\):', re.M)
 _CONN_TOTAL = re.compile(r'^FOUND (\d+) ISSUES', re.M)
 _CONN_UNROUTED = re.compile(r'^\s+Unrouted nets \((\d+)\):', re.M)
 _CONN_BROKEN = re.compile(r'^\s+Connectivity issues \((\d+)\):', re.M)
+_CONN_COMPONENTS = re.compile(r'^\s+Disconnected components: (\d+)', re.M)
 
 
 def krt_dir() -> str:
@@ -122,14 +124,24 @@ def score_connectivity(root: str, board: str) -> dict:
     if not m:
         return skipped(f'check_connected.py produced no summary (rc={rc})')
     unrouted = int(u.group(1)) if (u := _CONN_UNROUTED.search(out)) else 0
-    broken = int(b.group(1)) if (b := _CONN_BROKEN.search(out)) else 0
+    broken_nets = int(b.group(1)) if (b := _CONN_BROKEN.search(out)) else 0
+    # `broken` counts SEPARATIONS, not nets. Counting nets makes a net split into
+    # 10 pieces score the same as one split into 2, so the score ranked a board
+    # that had just taken GND from 10 components to 6 (23 stranded pads to 5) as
+    # WORSE, and the run had to be delivered against its own gate. Each net needs
+    # (components - 1) more joins to be whole, so that is the honest unit: it is
+    # 0 exactly when the net is connected, and it falls monotonically as repairs
+    # land. `broken_nets` is kept for the report.
+    comps = [int(c) for c in _CONN_COMPONENTS.findall(out)]
+    broken = sum(max(0, c - 1) for c in comps) if comps else broken_nets
     # Net names, so the ledger can say WHICH nets failed and a later round can
     # tell "the same nets every time" (parameters) from "different nets"
     # (congestion) -- the Step 9 classification needs this distinction.
     nets = re.findall(r'^\s{4}(\S+) \(\d+ pads\)', out, re.M)
     nets += re.findall(r'^\s{2}(\S+) \(net \d+\):', out, re.M)
     return {'ran': True, 'count': int(m.group(1)), 'unrouted': unrouted,
-            'broken': broken, 'nets': sorted(set(nets))}
+            'broken': broken, 'broken_nets': broken_nets,
+            'components_per_broken_net': comps, 'nets': sorted(set(nets))}
 
 
 def score_drc(root: str, board: str, clearance=None, sizes=None) -> tuple:
@@ -249,7 +261,7 @@ def score_length(board: str, groups_file: str) -> dict:
         groups = json.load(f)
     pcb = parse_kicad_pcb(board)
     by_name = {n.name: nid for nid, n in pcb.nets.items()}
-    failures, detail = 0, {}
+    failures, unmeasured, detail = 0, 0, {}
     for gname, spec in groups.items():
         names = [n for n in spec.get('nets', [])]
         tol = float(spec.get('tolerance_mm', 0.1))
@@ -271,9 +283,14 @@ def score_length(board: str, groups_file: str) -> dict:
                 if L is not None:
                     lengths[n] = L
             if len(lengths) < 2:
+                # NOT a failure. "Not routed yet" is what `unrouted`/`broken`
+                # already measure, and counting it here too made every 0-copper
+                # board score length=1 per group -- a permanent phantom blocker
+                # that no routing could ever clear. Distinct from the
+                # missing-nets case above, which IS a finding about the spec.
                 detail[gname] = {'skipped': 'no track path between the pad pair '
                                             '(plane-only or broken)'}
-                failures += 1
+                unmeasured += 1
                 continue
         else:
             got = net_copper_lengths(pcb, ids)
@@ -284,8 +301,69 @@ def score_length(board: str, groups_file: str) -> dict:
         detail[gname] = {'spread_mm': round(spread, 4), 'tolerance_mm': tol,
                          'pass': ok, 'missing_nets': missing,
                          'worst': max(lengths, key=lengths.get)}
-    return {'ran': True, 'count': failures, 'groups': detail}
+    if unmeasured and unmeasured == len(detail):
+        # Nothing could be measured at all -- report UNGRADED rather than a
+        # clean 0, so the gate cannot be passed by a board nothing examined.
+        return dict(skipped('no group had a measurable track path yet'),
+                    groups=detail)
+    return {'ran': True, 'count': failures, 'groups': detail,
+            'unmeasured_groups': unmeasured}
 
+
+
+def score_net_widths(board: str, spec_file: str) -> dict:
+    """Per-net REQUIRED widths -- the gap `undersized` structurally cannot see.
+
+    `undersized` comes from check_drc's size floors, which are BOARD-WIDE
+    minima: they answer "is any copper thinner than X?". A spec that demands a
+    PARTICULAR net be at least a given width is a different question, and the
+    difference is not academic -- it is the one that shipped. On test-board
+    `undersized` read 0 while 47 segments breached HW-TB-PCB25's >=0.4mm rails,
+    and the previous run's "USB_DP has no 0.8mm segment" would still not be
+    caught, because 0.16mm clears every board-wide floor.
+
+    `spec_file` is a JSON file of ``{"<net glob>": <min mm>}``, e.g.::
+
+        {"USB_D*": 0.8, "VCC3V3": 0.4, "VBUS": 0.4, "XIN": 0.15}
+
+    First matching glob wins, so list the specific patterns before the broad
+    ones. Nets with no copper are not counted here -- that is `unrouted`'s job.
+    """
+    if not spec_file:
+        return skipped('no --net-min-widths given; per-net widths are ungraded')
+    if not os.path.isfile(spec_file):
+        return skipped(f'net-min-widths file not found: {spec_file}')
+    import fnmatch
+    from collections import defaultdict
+    from kicad_parser import parse_kicad_pcb
+
+    with open(spec_file, encoding='utf-8') as fh:
+        want = json.load(fh)
+    pcb = parse_kicad_pcb(board)
+    by_id = {n.net_id: n.name for n in pcb.nets.values()}
+    seen = defaultdict(list)
+    for seg in pcb.segments:
+        name = by_id.get(seg.net_id)
+        if name:
+            seen[name].append(seg.width)
+
+    failures, detail = 0, {}
+    for name, widths in sorted(seen.items()):
+        req = next((mm for pat, mm in want.items() if fnmatch.fnmatch(name, pat)),
+                   None)
+        if req is None:
+            continue
+        under = [w for w in widths if w < float(req) - 1e-9]
+        if under:
+            failures += 1
+            detail[name] = {'required_mm': float(req),
+                            'narrowest_mm': round(min(widths), 4),
+                            'segments_under': len(under),
+                            'segments_total': len(widths)}
+    unmatched = [p for p in want
+                 if not any(fnmatch.fnmatch(n, p) for n in seen)]
+    return {'ran': True, 'count': failures, 'nets': detail,
+            'patterns_matching_no_routed_net': unmatched}
 
 def quality(board: str) -> dict:
     """Tie-breakers, compared ONLY once blocking == 0. Never a blocker itself:
@@ -329,6 +407,12 @@ def build_parser():
     p.add_argument('--impedance-nets', nargs='+', metavar='GLOB',
                    help='route.py --nets glob syntax; enables the impedance '
                         'component')
+    p.add_argument('--net-min-widths', metavar='JSON',
+                   help='JSON FILE of {"<net glob>": <min mm>} -- per-net width '
+                        'requirements. `undersized` only sees BOARD-WIDE floors, '
+                        'so a spec demanding a particular net be wider (a 0.8mm '
+                        'USB pair, 0.4mm rails) is invisible to it. First '
+                        'matching glob wins')
     p.add_argument('--length-groups', metavar='JSON',
                    help='{"group": {"nets": [...], "tolerance_mm": 0.1, '
                         '"mode": "pin_pair"}} -- enables the length component')
@@ -361,11 +445,12 @@ def main():
         floorplan = score_floorplan(root, args.board, args.intent, tmp)
         imped = score_impedance(root, args.board, args.impedance_nets, tmp)
         length = score_length(args.board, args.length_groups)
+        net_widths = score_net_widths(args.board, args.net_min_widths)
 
     parts = {'unrouted': {'ran': conn['ran'], 'count': conn.get('unrouted')},
              'broken': {'ran': conn['ran'], 'count': conn.get('broken')},
              'drc': drc, 'undersized': undersized, 'floorplan': floorplan,
-             'impedance': imped, 'length': length}
+             'impedance': imped, 'length': length, 'net_widths': net_widths}
 
     # A component that was ASKED for and could not run leaves blocking unknown.
     # Reporting 0 there would let the loop stop on a board nothing graded.
