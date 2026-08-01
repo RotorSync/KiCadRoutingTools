@@ -130,6 +130,15 @@ def main():
         failures.append('flood earned tranches without approach: %d iterations '
                         '(base %d)' % (iters4, base4))
 
+    # --- 4b. plateau grace: flood earns exactly +grace tranches --------------
+    for grace, want in ((2, 3 * base4), (5, 6 * base4)):
+        _p, it_g, _b = router.route_with_frontier(
+            obs4, src4, tgt4, base4, max_iterations_ceiling=50 * base4,
+            grace_tranches=grace)
+        if it_g != want:
+            failures.append('grace=%d flood ran %d iters, expected %d'
+                            % (grace, it_g, want))
+
     # --- 5. stats: best_h + iteration_tranches -------------------------------
     _p5, _i5, stats = router.route_multi(
         obs, src, tgt, base, max_iterations_ceiling=ceiling)

@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.19.2**
+**Current Version: 0.19.3**
 
 ## Features
 
@@ -305,6 +305,19 @@ src/
 - **Costs**: ORTHO_COST=1000, DIAG_COST=1414 (sqrt(2) * 1000), DEFAULT_TURN_COST=1000
 
 ## Version History
+
+- **0.19.3**: **#529 plateau grace** — `route_multi` / `route_with_frontier`
+  accept `grace_tranches=0`: up to N consecutive quantum-failing tranches
+  are tolerated before extension is denied, with the progress reference
+  frozen at the last real-improvement mark (so the eventual grant is judged
+  cumulatively over the plateau). Intended to emulate a wider progress
+  window without a bigger base. **MEASURED DEAD — leave at the default 0**:
+  because the streak resets on every success, searches alternating progress
+  and plateau chain grace windows indefinitely (more permissive than a true
+  wide window, not equivalent). A/B at K=4 on 200k bases: zynq7020 30 open
+  + 2 DRC (worse than the feature OFF), duodyne 3.6x the CPU. Kept as an
+  inert dial so the idea is not re-tried blind. Default 0 reproduces
+  0.19.2 exactly.
 
 - **0.19.2**: **#529 dynamic iterations (tranche-earned budget extension)** —
   `route_multi` / `route_with_frontier` accept an optional

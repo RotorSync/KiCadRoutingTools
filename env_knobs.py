@@ -84,6 +84,10 @@ def refresh() -> None:
     # per-tranche quantum = max(CELLS grid cells, PCT% of tranche-start best_h)
     g['DYNAMIC_ITERATIONS_QUANTUM_CELLS'] = _f('KICAD_DYNAMIC_ITERATIONS_QUANTUM_CELLS', 2.0)
     g['DYNAMIC_ITERATIONS_QUANTUM_PCT'] = _f('KICAD_DYNAMIC_ITERATIONS_QUANTUM_PCT', 2.0)
+    # plateau grace: consecutive quantum-failing tranches tolerated before
+    # denial (progress judged cumulatively over the plateau; emulates a wider
+    # window without a bigger base)
+    g['DYNAMIC_ITERATIONS_GRACE'] = _i('KICAD_DYNAMIC_ITERATIONS_GRACE', 0)
     g['MULTIPOINT_DENSE_FIRST'] = _opt_in('KICAD_MULTIPOINT_DENSE_FIRST')
     g['FANOUT_DIRECT'] = _opt_in('KICAD_FANOUT_DIRECT')
     g['FANOUT_TOWARD_TARGETS'] = _opt_in('KICAD_FANOUT_TOWARD_TARGETS')
