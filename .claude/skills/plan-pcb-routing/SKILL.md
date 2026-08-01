@@ -2343,6 +2343,21 @@ class-clearance difference is an artifact of the grading scalar, not a defect.
 Quote both numbers in the report and say which classes each applies to. Never pick
 the flattering one silently.
 
+##### 9.1b-ii — Tools that already answer this, which nothing in a chain calls
+
+A whole convergence went by hand-rolling worse versions of four of these. Before
+writing a script to answer a question, check whether one of them already does.
+
+| you want | run | why it beats the obvious thing |
+|---|---|---|
+| where is the gap, and what is walling it in | `net_forensics.py --nets N --radius 1.0` | per net: the connected ISLANDS, the exact unclosed gap endpoints, and an inventory of the foreign copper around each gap — **named, per layer, nearest-first**. Better than a ratsnest, which tells you two pads are unjoined and nothing about why |
+| the honest unconnected count | `kicad_unconnected.py board --items` | KiCad's own DRC, and it **refills the zones itself** — which is 9.1c's whole problem, already solved |
+| what kind of failure is this | `converge.py where` / the router's own hint | the hint names the flag and the nets (9.3b); it diagnoses better than the score does |
+| where should this part go, facing which way | `converge.py poses BOARD --ref R` | ranks legal (x, y, rotation) poses by placement cost in **milliseconds**, with a per-component breakdown, and `--route` pays for tier 3 on only the top few |
+| is this even the engine I pinned | `route.py --capabilities` / `krt_capabilities.py --require` | a chain can otherwise run green against a clone missing the module it depends on |
+| step back to iteration N | `converge.py step-back --iteration N` | byte-exact, because the board is addressed by content instead of by a path three iterations overwrote |
+| re-run what iteration N did | `converge.py replay --iteration N` | replays the recorded argv. If it refuses, the ledger recorded prose instead of a command — fix the ledger, not the memory |
+
 ##### 9.1c — The authoritative ratsnest needs the zones FILLED
 
 `route_planes` writes a zone **outline** with no `filled_polygon`. Until something
@@ -2358,11 +2373,18 @@ So: **fill before you grade, and then the two agree.** If `check_connected` and
 `kicad-cli` disagree by a lot on a board with a pour, the fill is the first
 suspect — not the checker.
 
-```python
-# KiCad's own python; nothing else can do this
-import pcbnew
-b = pcbnew.LoadBoard(path); pcbnew.ZONE_FILLER(b).Fill(b.Zones()); b.Save(path)
+**Use `kicad_unconnected.py`, which refills for you** — it exists precisely for
+this, and a hand-rolled fill has a trap the tool does not:
+
+```bash
+python3 -X utf8 kicad_unconnected.py board.kicad_pcb --items
 ```
+
+If you must fill in place (to hand a filled board to something else), note that
+`pcbnew.LoadBoard(...).Save()` **rewrites the sibling `.kicad_pro` and deletes
+every non-Default net class**, leaving the netclass patterns orphaned. A board has
+shipped that way. Restore the project afterwards and assert the classes are back
+rather than trusting a success message.
 
 **And re-assert the net classes afterwards.** `pcbnew.LoadBoard(...).Save()`
 rewrites the sibling `.kicad_pro` and **deletes every non-Default net class**,
@@ -2389,6 +2411,16 @@ Three rules about that number:
 `better()` (`place_route_loop.py:358`) compares `failures` and `iterations`, both
 from route.py's own `JSON_SUMMARY`; it never runs a checker. Treat it as a cheap
 pre-filter and **re-score with `board_score.py` before believing it.**
+
+**It is also spec-blind, and `--accept-cmd` is the fix.** `better()` compares
+failures then iterations; nothing in a route summary tells it a net exceeded a
+maximum length, took a via where none is allowed, came out under a required
+width, or drifted a decap past a proximity limit. On a board with a real spec
+those are what decide whether a placement improved, so the loop will accept a
+round that broke one and print ACCEPTED. Pass
+`--accept-cmd 'CMD'` and the loop asks your judge instead:
+`CMD <placed> <routed> <route.json>` printing one line `SCORE=<float>`, lower
+better; a non-zero exit or a missing SCORE rejects the round.
 
 #### 9.2 — Budget: 100 iterations per board, and they are cheap if you spend them right
 
