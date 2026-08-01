@@ -441,7 +441,7 @@ def main():
     parser.add_argument("--no-movie", dest='movie', action='store_const',
                         const=None,
                         help="skip the end-of-run movie (see --movie)")
-    parser.add_argument("--movie-tween", type=int, default=8, metavar="N",
+    parser.add_argument("--movie-tween", type=int, default=10, metavar="N",
                         help="frames per placement glide in --movie; 0 = no "
                              "glide, cut straight to the new placement")
     add_board_state_args(parser)

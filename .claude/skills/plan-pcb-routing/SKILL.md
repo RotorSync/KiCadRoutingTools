@@ -425,6 +425,12 @@ letting the fallback surprise you. Hand it to the user with `SendUserFile`; do
 not `Read` it — it is a show-without-reading artifact, and its frames would blow
 the ≤3 budget for nothing.
 
+A part move is animated over **at least 10 frames** (`--tween`, default 10,
+floored at `movie_camera.MIN_MOVE_FRAMES`) — below that it reads as a jump cut
+and you cannot see *which* part went *where*, which is the only reason the beat
+is in the film. `--camera-budget` may squeeze a pan to nothing but never a move.
+`--tween 0` is still an explicit "cut straight there, no glide".
+
 **Pass `--camera auto` on a chain that placed anything.** A placement step
 changes no copper, and the movie animates copper deltas, so without it the step
 that decides everything downstream renders as a **single frame** — measured:

@@ -224,6 +224,36 @@ def test_loop_sidecars_still_get_the_loop_behaviour():
     print("  PASS: a real sidecar is not marked synth and keeps its semantics")
 
 
+
+def test_a_part_move_never_gets_fewer_than_ten_frames():
+    """A placement beat is the one thing in a routing film that is not copper
+    appearing. At a handful of frames it reads as a jump cut rather than as a
+    part travelling, and you cannot see WHICH part went WHERE -- which is the
+    only reason the beat is in the film at all.
+
+    Two paths could starve it and both are floored: the tween clamp, and the
+    runtime budget, which may cut a pan to nothing but may not cut a move."""
+    from movie_camera import (Stage, Action, plan_shots, apply_budget,
+                              MIN_MOVE_FRAMES)
+    assert MIN_MOVE_FRAMES >= 10
+
+    for t in (1, 2, 5, 8, 10):
+        assert Stage([], tween=t).tween_frames >= MIN_MOVE_FRAMES, t
+    # a bigger request is honoured, and 0 stays an explicit "cut, no glide"
+    assert Stage([], tween=24).tween_frames == 24
+    assert Stage([], tween=0).tween_frames == 0
+
+    # Budget starvation: a 1-second budget at 6fps against 52 content frames.
+    acts = [Action('place', 'round 1', (0, 0, 10, 10), 'F', frames=12),
+            Action('route', 'step', None, 'F', frames=40)]
+    tight = apply_budget(plan_shots(acts, (0, 0, 50, 20)), 1.0, 6.0)
+    place = [s for s in tight if s.kind == 'action' and s.action.kind == 'place']
+    route = [s for s in tight if s.kind == 'action' and s.action.kind == 'route']
+    assert place and place[0].frames >= MIN_MOVE_FRAMES,         f"the budget starved a part move to {place[0].frames} frames"
+    assert route, "a routing beat should still be present"
+    print(f"  PASS: moves floored at {MIN_MOVE_FRAMES} through the tween AND "
+          f"the budget")
+
 if __name__ == '__main__':
     if not os.path.isfile(BOARD):
         print("SKIP: fixture missing")

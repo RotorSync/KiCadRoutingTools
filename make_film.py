@@ -284,7 +284,7 @@ def _badge(frame, text, rgb=(200, 60, 60)):
 
 def build_film(shots, size=DEFAULT_SIZE, fps=DEFAULT_FPS, supersample=1,
                layer_alpha=150, rip_hold=2, chunks=6, camera='auto',
-               camera_budget=0.0, tween=8, quiet=False):
+               camera_budget=0.0, tween=10, quiet=False):
     """Frames for the whole shot list. One render pass, one scale."""
     import animate_route as a
     boards = [s for s in shots if s['kind'] == 'board']
@@ -418,7 +418,7 @@ def main(argv=None):
                          "arriving is most of what a film is for)")
     ap.add_argument('--camera-budget', type=float, default=0.0,
                     help="cap the camera runtime in seconds (0 = unlimited)")
-    ap.add_argument('--tween', type=int, default=8,
+    ap.add_argument('--tween', type=int, default=10,
                     help="frames per part move (0 snaps)")
     ap.add_argument('--png-dir', help="also dump every frame as a PNG")
     ap.add_argument('--shots-json', help="write the resolved shot list here")

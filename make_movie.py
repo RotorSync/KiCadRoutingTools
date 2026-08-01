@@ -108,7 +108,7 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
                supersample=DEFAULT_SUPERSAMPLE, layer_alpha=DEFAULT_LAYER_ALPHA,
                rip_hold=DEFAULT_RIP_HOLD, chunks=DEFAULT_CHUNKS,
                end_hold=DEFAULT_END_HOLD, png_dir=None, quiet=False,
-               camera=None, camera_budget=60.0, tween=8):
+               camera=None, camera_budget=60.0, tween=10):
     """Render the movie. ``inputs`` is a run dir (one entry) or a board sequence.
 
     Returns the path actually written -- which is a sibling ``.gif`` when an
@@ -236,7 +236,7 @@ def main():
     ap.add_argument('--camera-budget', type=float, default=60.0,
                     metavar='SECONDS',
                     help='cap the camera runtime (0 = unlimited)')
-    ap.add_argument('--tween', type=int, default=8,
+    ap.add_argument('--tween', type=int, default=10,
                     help='frames per placement glide; 0 = no glide, cut straight to the new placement (default: 8)')
     args = ap.parse_args()
 

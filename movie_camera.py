@@ -37,6 +37,15 @@ from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 Rect = Tuple[float, float, float, float]
 
+# Floor on the frames a PART MOVE gets. A placement beat is the one thing in a
+# routing film that is not copper appearing, and at a handful of frames it reads
+# as a jump cut rather than as a part travelling -- you cannot see WHICH part
+# went WHERE, which is the only reason the beat is in the film. Applies to the
+# glide and to the runtime budget alike: the budget may cut a pan to nothing,
+# and it may not cut a move below this. `tween=0` stays an explicit "no glide,
+# cut straight there" and is left alone.
+MIN_MOVE_FRAMES = 10
+
 # --- easing (shared; animate_fanout_clearance imports these) -----------------
 
 
@@ -313,10 +322,15 @@ def apply_budget(shots: Sequence[Shot], seconds: float, fps: float
            if s.kind != 'action' else s for s in out]
     if sum(s.frames for s in out) > budget:
         over = sum(s.frames for s in out) - budget
-        # Only now touch the content, proportionally, never below 2.
+        # Only now touch the content, proportionally. A ROUTING beat may go to
+        # 2; a PART MOVE may not go below MIN_MOVE_FRAMES -- squeezing the
+        # travel out of a placement round to save a pan is the trade this
+        # function exists to refuse.
         acts = [i for i, s in enumerate(out) if s.kind == 'action']
         for i in acts:
-            share = max(2, out[i].frames - max(1, over // max(1, len(acts))))
+            floor = (MIN_MOVE_FRAMES if (out[i].action and
+                                         out[i].action.kind == 'place') else 2)
+            share = max(floor, out[i].frames - max(1, over // max(1, len(acts))))
             out[i] = out[i]._replace(frames=share)
     return out
 
@@ -367,7 +381,8 @@ class Stage:
         # what carries the story; the glide is decoration, and on a long run it
         # is most of the runtime. Anything else is clamped to >=2, since a
         # 1-frame "glide" is just a cut with extra steps.
-        self.tween_frames = 0 if int(tween) <= 0 else max(2, int(tween))
+        self.tween_frames = (0 if int(tween) <= 0
+                             else max(MIN_MOVE_FRAMES, int(tween)))
         self.quiet = quiet
         self.movie = None
         self.r = None
