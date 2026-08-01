@@ -2796,7 +2796,7 @@ have booted.
 | order | component | why it outranks the rest |
 |---|---|---|
 | 1 | `unrouted` | a net with no copper is a dead wire. Nothing else matters while one exists. **Run `converge.py where BOARD --nets <names>` before touching a parameter** — it names the gap endpoints and the foreign copper walling them in, per layer, nearest-first (9.1b-ii). Guessing from the score is how eleven iterations went to clearances while five nets sat dead |
-| 2 | `broken` | a net in N pieces is N−1 dead wires. Same tool, same reason |
+| 2 | `broken` | a net in N pieces is N−1 dead wires. **Read `components.broken.nets`, not the count** — see below; the count alone is not a work list and a loop driven on it does not move |
 | 3 | `net_widths`, `undersized` | real copper, wrong size — fixable by re-routing what is already there |
 | 4 | `floorplan` | placement or intent |
 | 5 | `drc` | **last, and only after auditing it — see below** |
@@ -2804,6 +2804,43 @@ have booted.
 `unrouted` and `broken` are the **ratsnest**: they count connections the board is
 supposed to have and does not. They are never artifacts, never a grading choice,
 and they map one-to-one onto whether the thing works. Drive the loop on them.
+
+##### 9.1a-ii — `broken` needs a WORK LIST, and one tool per class
+
+`unrouted` is actionable from its names alone: the net has no copper, so route
+it. **`broken` is not.** Before you can act you need three more things — which
+net, how many pieces (a 5-way split and a 2-way split are different jobs), and
+*where* the stranded pads are. Measured failure mode: a run drove `unrouted` to
+0 using `net_widths`' per-net detail as its model, then left `broken` at **14
+across two iterations**, because `blocking_by.broken: 14` is a number with
+nothing behind it.
+
+`board_score.py` emits the list under `components.broken.nets`:
+
+```jsonc
+"GND":      {"components": 5, "joins_needed": 4,
+             "stranded_pads": [{"x":137.72,"y":66.05,"layer":"F.Cu","ref":"SW1"}, ...]},
+"VCC1V1":   {"components": 4, "joins_needed": 3, "stranded_pads": [{"ref":"U1"}, ...]},
+"FLASH_CS": {"components": 2, "joins_needed": 1, "stranded_pads": [{"ref":"R1"}]}
+```
+
+`joins_needed` sums exactly to `blocking_by.broken`, so the list is complete and
+you can see what each entry is worth. **Sort by it** — above, GND alone is 4 of
+the 14, and seven single-join nets are worth 1 each.
+
+**Then route each break to the tool for its class — they are not interchangeable,
+and using `route.py` on all of them is why the count does not move:**
+
+| the break | the tool |
+|---|---|
+| a **plane net** (GND, any poured rail): stranded pads that cannot reach the pour | `route_disconnected_planes --rip-blocker-nets`. `route.py` will not tap a pour |
+| a **multipoint** signal/power net: some MST edges landed, one did not | `route.py --nets <that net>` — and read **`failed_multipoint`**, which is where its failure is reported |
+| a break whose stranded pad sits on a **DNF / do-not-fit** part | **not a defect.** Chasing it never converges. Say so once, with the ref, and exclude it from the target set |
+| a break at a fine-pitch pad with no room for a tap via | smaller `--via-size`/`--via-drill`, then finer `--grid-step` — the Step 5 ladder |
+
+The `ref` on each stranded pad is what tells these apart, which is why it is in
+the list. A break on `[R1]` where R1 is unpopulated and a break on `[U1]` are the
+same number and completely different work.
 
 ##### 9.1b — Audit `drc` before you believe it
 

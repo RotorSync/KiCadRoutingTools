@@ -137,11 +137,44 @@ def score_connectivity(root: str, board: str) -> dict:
     # Net names, so the ledger can say WHICH nets failed and a later round can
     # tell "the same nets every time" (parameters) from "different nets"
     # (congestion) -- the Step 9 classification needs this distinction.
-    nets = re.findall(r'^\s{4}(\S+) \(\d+ pads\)', out, re.M)
-    nets += re.findall(r'^\s{2}(\S+) \(net \d+\):', out, re.M)
+    unrouted_names = re.findall(r'^\s{4}(\S+) \(\d+ pads\)', out, re.M)
+    broken_names = re.findall(r'^\s{2}(\S+) \(net \d+\):', out, re.M)
+    nets = unrouted_names + broken_names
+
+    # PER-NET DETAIL FOR `broken`, because a COUNT IS NOT A WORK LIST. `unrouted`
+    # is actionable from its names alone -- the net has no copper, route it. A
+    # `broken` net needs three more things before anyone can act: WHICH net, how
+    # many pieces (a 5-way split and a 2-way split are different jobs), and WHERE
+    # the stranded pads are. All three are already in check_connected's output and
+    # were being parsed and dropped, so `blocking_by.broken: 14` was a number with
+    # nothing behind it. Measured consequence: a run drove `unrouted` to 0 using
+    # the per-net width detail as its model, and left `broken` untouched at 14
+    # across two iterations because it had nothing equivalent to work from.
+    #
+    # The pad REF matters as much as the count. A break whose stranded pad sits on
+    # a do-not-fit part is not a functional defect and must not be chased forever;
+    # a break on a plane net wants route_disconnected_planes, not route.py. The
+    # ref is what lets the caller tell those apart.
+    detail, cur = {}, None
+    for line in out.splitlines():
+        if (mm := re.match(r'^\s{2}(\S+) \(net \d+\):\s*$', line)):
+            cur = mm.group(1)
+            detail[cur] = {'components': None, 'joins_needed': None,
+                           'stranded_pads': []}
+        elif cur and (mc := re.match(r'^\s+Disconnected components:\s*(\d+)', line)):
+            detail[cur]['components'] = int(mc.group(1))
+            detail[cur]['joins_needed'] = max(0, int(mc.group(1)) - 1)
+        elif cur and (mp := re.match(
+                r'^\s+\(([-\d.]+),\s*([-\d.]+)\) on (\S+)(?:\s+\[(\S+)\])?', line)):
+            detail[cur]['stranded_pads'].append(
+                {'x': float(mp.group(1)), 'y': float(mp.group(2)),
+                 'layer': mp.group(3), 'ref': mp.group(4)})
+
     return {'ran': True, 'count': int(m.group(1)), 'unrouted': unrouted,
             'broken': broken, 'broken_nets': broken_nets,
-            'components_per_broken_net': comps, 'nets': sorted(set(nets))}
+            'components_per_broken_net': comps, 'nets': sorted(set(nets)),
+            'unrouted_net_names': sorted(set(unrouted_names)),
+            'broken_detail': detail}
 
 
 def score_drc(root: str, board: str, clearance=None, sizes=None) -> tuple:
@@ -447,8 +480,13 @@ def main():
         length = score_length(args.board, args.length_groups)
         net_widths = score_net_widths(args.board, args.net_min_widths)
 
-    parts = {'unrouted': {'ran': conn['ran'], 'count': conn.get('unrouted')},
-             'broken': {'ran': conn['ran'], 'count': conn.get('broken')},
+    # Both connectivity components carry their work list, not just their count --
+    # see score_connectivity. `unrouted` needs names; `broken` needs names, piece
+    # counts and the stranded pads, or 9.1a's lever 2 has nothing to act on.
+    parts = {'unrouted': {'ran': conn['ran'], 'count': conn.get('unrouted'),
+                          'nets': conn.get('unrouted_net_names', [])},
+             'broken': {'ran': conn['ran'], 'count': conn.get('broken'),
+                        'nets': conn.get('broken_detail', {})},
              'drc': drc, 'undersized': undersized, 'floorplan': floorplan,
              'impedance': imped, 'length': length, 'net_widths': net_widths}
 
