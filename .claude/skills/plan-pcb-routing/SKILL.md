@@ -1289,7 +1289,9 @@ fab floor as the geometry demands) into the output `.kicad_pro` DRC floor and in
 `JSON_SUMMARY` (`min_clearance_used`). `check_drc.py` **auto-grades at that
 `.kicad_pro` clearance when `-c` is omitted**, so a bare `check_drc.py board.kicad_pcb`
 already grades at the true routed floor. Passing `--clearance <floor>` still works
-as an explicit override; see Step 6.
+to TIGHTEN the grade — it is a FLOOR, `max(-c, classA, classB)`, not an
+override, so a value at or below the board's netclasses changes nothing. See
+Step 6 and "`check_drc.py -c` is NOT `route.py --clearance`" above.
 
 Only fall back to tool defaults when neither net classes nor Constraints are found
 (`--design-rules` then prints the JLCPCB fab floor for the board's layer count).
@@ -1391,6 +1393,25 @@ widths into a single flag:
 ```bash
 --power-nets VCC3V3 VBUS USB_DP USB_DM --power-nets-widths 0.4 0.4 0.8 0.8
 ```
+
+**And `--power-nets-widths` is itself only a REQUEST.** Getting the flag right is
+necessary and still not sufficient: a wide route that will not fit is necked down
+by the same ladder as `--track-width`, and the log says so in one line among
+thousands — `Wide power route blocked - routed short edge at 0.2000mm (down from
+0.8000)`. Measured: the flag landed correctly (`0.8mm: USB_DP_R, USB_DP, USB_DM,
+USB_DM_R` in the log) and the board still carried that pair at 0.2 and 0.15.
+
+Two things the rest of this skill does not tell you, and both matter here:
+
+- **`--no-power-tap-neckdown` is the actual off-switch.** It forbids the taper
+  rather than asking for a width. Reach for it when a width is a HARD
+  requirement and you would rather the net FAIL than come back thin — which is
+  the whole point of a floor.
+- **`--track-width-floor` is a single GLOBAL scalar** (`routing_config.py:167`),
+  not per-net. It cannot hold a pair at 0.8 while signals run at 0.15: set it to
+  0.15 for the signals and the pair may legally neck to 0.2. There is no per-net
+  floor flag. So the only honest gate on a per-net width is to **measure the
+  emitted copper** and carry the requirement in `board_score --net-min-widths`.
 
 ### Check for DDR/High-Speed Memory Signals
 
@@ -1626,18 +1647,35 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    **construction** where you can — a `--layers` with one entry is a via ban the
    router cannot violate — rather than by hoping the bulk pass agrees.
 
-   **But check the clause actually says that before spending a layer on it.** A
-   one-entry `--layers` is also a *routing-space halving*, and on a 2-layer board
-   that is most of the board. Measured: a bus whose clause read
-   *"Max direct-run length, single layer | ≤15 mm"* was pinned to F.Cu on the
-   strength of the words "single layer" in a column header. The clause bans
-   nothing — it bounds a **length**; the neighbouring clause is the one that says
-   "max 0 vias per leg", and it governs a different net. The cost of the invented
-   constraint was **29 broken pieces**, and the length clause it was meant to
-   protect got *worse* (47 mm and 66 mm runs), because confining the bus to one
-   layer forced exactly the detours the clause bounds. Quote the clause verbatim
-   next to the flag, and if it bounds a length rather than banning a via, give the
-   router both layers and hold the clause by **measurement** instead.
+   **READ EVERY DOCUMENT THAT DERIVES FROM THE CLAUSE, not just the spec row.**
+   A requirements table is rarely the whole requirement. This cost a real
+   mistake, in the direction that matters: a bus whose spec row read *"Max
+   direct-run length, single layer | ≤15 mm"* was pinned to one layer; the pin
+   made the board hard to route (**29 broken pieces**), so the row was re-read as
+   "it only bounds a length" and the pin removed. That reading was **wrong**. The
+   repo's design brief said, deriving from the same clause:
+
+   ```
+   | Layer preference | L1 (top) only, one layer, direct run — HARD | HW-TB-PCB19 |
+   | Via transitions  | Max 0 vias — the ≤15 mm run length assumes a direct
+                        single-layer path with no layer changes  | derived from HW-TB-PCB19 |
+   ```
+
+   and the repo's own checker gated on vias for that clause. Unpinning healed
+   connectivity and made the clause fail **worse** (6 violated lines instead of
+   5) — a board that scores better and conforms less.
+
+   The rule: before you decide a clause does *not* impose a constraint, check the
+   **design brief, the checker, the netclass and the `.kicad_dru`** as well as the
+   spec table. A constraint that is expensive to hold is not evidence that it
+   isn't there — and "the score improved when I dropped it" is exactly the
+   reasoning that ships a non-conformant board. If a HARD constraint really is
+   unsatisfiable, that is stop condition 4: report it with the measurement, do
+   not quietly relax it.
+
+   (The genuine caution stands: a one-entry `--layers` halves the routing space,
+   which on a 2-layer board is most of the board. Expect to pay for it, and say
+   what it cost — but pay it when the requirement says so.)
 
    **A Step 2c pass is not durable. Two later steps silently undo it, and both
    report success.** Excluding the net from the bulk signal route is necessary
@@ -1663,13 +1701,29 @@ Based on the analysis, generate a step-by-step plan. The general order is:
       route.py r8b.kicad_pcb r8.kicad_pcb  --nets "*" "!GND" "!XIN" "!XOUT" "!XTAL_XOUT" "!QSPI_*" "!FLASH_CS"
       ```
 
-   **The general rule: a per-net constraint must be re-stated at EVERY step that
-   can touch the net, not established once.** `--layers`, `--power-nets-widths`,
-   `--net-clearances` and `--net-layers` are the four channels; a step that
-   re-routes a net without them resets it to that step's defaults. This is the
-   same failure as 9.3c rule 2 (a ripped net returns at the *calling* command's
-   parameters), and it applies to the plane repair and the reconnect just as much
-   as to an explicit `--rip-existing-nets`.
+   **The rule, and its exact scope: a constraint with no persistence channel in
+   the `.kicad_pro` must be re-stated at EVERY step that can touch the net.**
+   That is **layer and width pins specifically** — `--layers`,
+   `--power-nets-widths`, `--net-layers`, `--track-width-floor`. A step that
+   re-routes without them resets the net to that step's defaults. Same failure as
+   9.3c rule 2 (a ripped net returns at the *calling* command's parameters),
+   reaching the plane repair and the reconnect as much as an explicit
+   `--rip-existing-nets`.
+
+   Do **not** over-generalise it — several constraints ARE durable and re-stating
+   them is wasted effort:
+
+   - **protected nets** (#521): matched groups and routed diff pairs are recorded
+     in the sibling `.kicad_pro` and no rip glob or `--rip-blocker-nets` touches them;
+   - **KiCad-`locked` copper**: never rippable, with no override at all;
+   - **`net_impedance` declarations**: persisted, and recomputed identically by a
+     later step from the stackup;
+   - **`.kicad_dru` per-layer clearance**: auto-read by every routing step;
+   - **an explicit exclusion**: a bulk pass with `"!QSPI_*"` leaves that copper
+     byte-identical — the exclusion works, it just isn't sufficient on its own.
+
+   The asymmetry is the point: those four have a home in the project file, and
+   layers and widths do not.
 3. **Signal Routing** - All remaining nets, **excluding the plane nets AND any
    single-ended impedance nets from step 2b** (`--nets "*" "!GND" "!VCC" "!RF"`).
    Routing the plane nets as tracks would defeat the planes step; re-routing the
@@ -2475,13 +2529,28 @@ python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/board_score.py \
     board.kicad_pcb --intent floorplan.json \
     --min-track-width 0.15 --min-via-diameter 0.6 --min-via-drill 0.3 \
     --net-min-widths wk/net_min_widths.json \
+    --impedance-nets '<every net with a reference-plane clause>' \
+    --length-groups '<every length-matched group>' \
     --json wk/score_iter3.json
 ```
 
-**`--net-min-widths` is not optional on a board with per-net width clauses.**
-`undersized` sees only board-wide floors, so a requirement naming ONE net — a
-0.8 mm pair, a 0.4 mm rail — is invisible to `blocking` without it, and the loop
-will happily converge to 0 with that clause broken.
+**Every one of those flags is what makes its clause reach `blocking`. A component
+with no flag reports `ungraded`, which is not a pass.** The pattern is identical
+each time, and it is how a HARD clause ships unmeasured:
+
+| flag | without it | measured worth on one board |
+|---|---|---|
+| `--net-min-widths` | `undersized` sees only BOARD-WIDE floors, so a clause naming ONE net — a 0.8 mm pair, a 0.4 mm rail — is invisible | `net_widths` 5, while `undersized` read 0 |
+| `--impedance-nets` | the component returns *"no --impedance-nets given"* and a plane-continuity clause is never checked at all | `impedance` 10 — 68 reference crossings, 63 segments over void |
+| `--length-groups` | length matching is ungraded | — |
+
+Same board, same copper: **`blocking` 12 without those flags, 27 with them.** A
+run that reports 12 has not found a better board; it has looked at less of it.
+
+Also **read `net_widths.patterns_matching_no_routed_net`.** A width clause on a
+net with NO copper never appears in `net_widths` — the component only walks nets
+that HAVE segments — so an unrouted net's width requirement lands in that list
+and nowhere else.
 
 **And `blocking == 0` is not the whole gate when the repo ships its own spec
 checker.** Some clauses are not expressible to `board_score` at all: an absolute
@@ -2847,8 +2916,12 @@ cannot state it was not keeping a ledger.
 
 #### 9.5 — Stop conditions. Only these four. Say which one fired, every time.
 
-1. **`blocking == 0` and every verifier lens passes** → done. Both halves are
-   required: see "Verify with independent subagents".
+1. **`blocking == 0`, the repo's own spec checker passes, and every verifier lens
+   passes** → done. All three are required. `board_score` exits **0** at
+   `blocking == 0` even on a board with ten HARD clauses violated, because the
+   clauses a repo checker measures are not `board_score` components — so
+   exit-code-driven automation stops there unless you gate on the checker too.
+   See "Verify with independent subagents".
 2. **Budget exhausted** — you have actually written **100** ledger entries for this
    board. Report the best-scoring board **and the remaining blockers itemised with
    measurements**. Do not present it as finished.

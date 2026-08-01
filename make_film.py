@@ -116,8 +116,17 @@ def shots_from_ledger(ledger_path, store_root=None, work=None,
     """
     from board_store import BoardStore, Ledger
     entries = Ledger(ledger_path).entries()
+    # `boards`, not `store`: `converge.py record` is the only writer of a ledger
+    # and it puts the content-addressed boards in `<ledger dir>/boards`
+    # (converge.py:218). Defaulting to a different name here made
+    # `--from-ledger` return ZERO shots against a real ledger, silently -- the
+    # per-sha `store.has()` check just skips every entry.
     root = store_root or os.path.join(os.path.dirname(
-        os.path.abspath(ledger_path)), 'store')
+        os.path.abspath(ledger_path)), 'boards')
+    if not os.path.isdir(root):                 # tolerate the older name
+        alt = os.path.join(os.path.dirname(os.path.abspath(ledger_path)), 'store')
+        if os.path.isdir(alt):
+            root = alt
     store = BoardStore(root)
     work = work or os.path.join(os.path.dirname(os.path.abspath(ledger_path)),
                                 '_film')
