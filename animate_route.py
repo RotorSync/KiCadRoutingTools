@@ -279,13 +279,21 @@ def build_run(run_dir, size, ss, alpha, rip_hold, chunks):
     return build_boards(steps, final, size, ss, alpha, rip_hold, chunks)
 
 
-def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None):
+def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
+                 marks=None):
     """Frames for a chain given as [(label, board, trace|None), ...] plus the
     final board. ``build_run`` is this with the chain discovered from a run dir.
 
     ``stage`` (movie_camera.Stage, #431) adds a camera and animates FOOTPRINT
     motion for placement rounds. With ``stage=None`` -- every existing caller --
     the three hooks below are falsy branches and the routing movie is unchanged.
+
+    ``marks``, when a list is passed, collects ``(label, board, first, last)``
+    frame indices per step -- what a composer needs to caption, badge or splice
+    a beat without re-deriving where it landed. Rendering one pass and reading
+    the boundaries back is the only way to keep ONE scale across the whole
+    film; a per-segment call restarts from an empty board and re-reveals all
+    the copper, which reads as the board redrawing itself between beats.
     """
     from kicad_parser import parse_kicad_pcb
     if not final:
@@ -299,13 +307,34 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None):
     if stage is not None:
         stage.attach(m, r, layers)
     m.snapshot("input")
-    for label, board, trace_path in steps:
+    for _step in steps:
+        # 4th element (optional, back-compatible): 'revert' undoes a beat with
+        # the SILENT trueup instead of reveal_delta -- which would flash the
+        # copper red and label it "(rip)". Nothing was ripped; an attempt was
+        # not kept, and the two read completely differently in a film.
+        label, board, trace_path = _step[0], _step[1], _step[2]
+        mode = _step[3] if len(_step) > 3 else None
+        _first = len(m.frames)
         pcb = parse_kicad_pcb(board)
         seg_rows, via_rows = _board_rows(pcb, layers)
+        if mode == 'revert':
+            if stage is not None:
+                r.pcb = pcb
+            m.reconcile_to(seg_rows, via_rows, label)
+            if len(m.frames) == _first:
+                # An attempt that only MOVED parts changes no copper, so the
+                # silent trueup stays silent and the undo is invisible. The
+                # parts still went back; show that they did.
+                m.snapshot(label)
+            if marks is not None:
+                marks.append((label, board, _first, len(m.frames)))
+            continue
         if stage is not None:
             # The renderer draws footprints from THIS board from here on.
             r.pcb = pcb
             if stage.enter_step(label, board, pcb, seg_rows, via_rows):
+                if marks is not None:
+                    marks.append((label, board, _first, len(m.frames)))
                 continue        # a placement round; the stage emitted its frames
         # Reveal any plane whose pour exists on this step board but had no fine
         # plane-tap event (untraced plane step) so its fill still appears here.
@@ -318,6 +347,8 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None):
                 for _nid in step_zone_nets:
                     m.reveal_zone(_nid)
                 m.reconcile_to(seg_rows, via_rows, label)   # trueup to step board
+                if marks is not None:
+                    marks.append((label, board, _first, len(m.frames)))
                 continue
             except Exception as e:
                 print(f"animate_route: trace {trace_path} failed ({e}); "
@@ -325,6 +356,8 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None):
         for _nid in step_zone_nets:      # untraced plane step: reveal its pours
             m.reveal_zone(_nid)
         m.reveal_delta(seg_rows, via_rows, label, chunks=chunks)
+        if marks is not None:
+            marks.append((label, board, _first, len(m.frames)))
     # final trueup (in case the graded final differs from the last step board)
     fpcb = parse_kicad_pcb(final)
     if stage is not None:

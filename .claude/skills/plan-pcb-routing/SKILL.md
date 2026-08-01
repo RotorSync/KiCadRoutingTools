@@ -335,6 +335,7 @@ quoting any number. The headline pairings:
 | 0c on a two-sided board | add `--per-side` | `overlap_area` — a per-side panel is the only place a back-side collision is visible, and `overlap_area > 0` tells you one exists before you go looking |
 | chasing one bus / clock | add `--ratsnest-nets '/CLK*'` | the same crossings/hpwl pair. Use this when the default delta view is too busy to read |
 | a `place_route_loop` round | `make_movie.py WORKDIR --camera auto` | per-round `failures` and `iterations` from the loop's own output. A round that moved a lot and changed neither is noise |
+| a run that TRIED more than it kept | `make_film.py --from-loop-dir WORKDIR` | the same per-round numbers, for the **rejected** rounds too — the badged beats are the ones whose `failures` did not improve, and seeing where the search went is the point |
 | routing failed after placement | `--summary-json <route log>` on the render | the `failed_nets` and `blockers` in that same summary — the render colours exactly those, so the picture and the diagnosis are the same data |
 | board looks wrong / empty | `render_placement.py board -o state.png` | exit code. **3 means the board is unplaced or already routed** — read the message rather than reaching for an override |
 | **any board you are about to call done** | `scripts/board_score.py board --intent I --json wk/score.json` | `blocking` — it must be **0**. `ungraded` lists what nothing examined; that is *unexamined*, not clean. This is the one number not produced by the thing being graded |
@@ -408,10 +409,16 @@ python3 -X utf8 make_movie.py placed.kicad_pcb r3.kicad_pcb r4.kicad_pcb r5.kica
 
 `.mp4` needs `imageio` + `imageio-ffmpeg` and falls back to a sibling `.gif`
 without them — ask for `.gif` directly if you know they are missing, rather than
-letting the fallback surprise you. `--camera auto` needs the loop's sidecars and
-warns (does not fail) when there are none. Hand it to the user with
-`SendUserFile`; do not `Read` it — it is a show-without-reading artifact, and its
-frames would blow the ≤3 budget for nothing.
+letting the fallback surprise you. Hand it to the user with `SendUserFile`; do
+not `Read` it — it is a show-without-reading artifact, and its frames would blow
+the ≤3 budget for nothing.
+
+**Pass `--camera auto` on a chain that placed anything.** A placement step
+changes no copper, and the movie animates copper deltas, so without it the step
+that decides everything downstream renders as a **single frame** — measured:
+seed → placed, 14 parts moved, one frame. The camera used to need the loop's
+sidecars; it now recovers the moves from the boards themselves when there are
+none, so a hand chain gets the same animation the loop does.
 
 **A Step 9 convergence produces one film, not N disconnected ones.** Each
 iteration may render its own movie; the artifact the user wants is the whole
@@ -424,9 +431,33 @@ python3 -X utf8 make_movie.py \
     -o wk/convergence.gif --size 1600 --fps 12 --chunks 30 --end-hold 12
 ```
 
-Feed it the **accepted** boards only. A reverted iteration in the frame list
-animates a change that was undone, which reads as the router thrashing when it
-was doing the opposite.
+Feed it the **accepted** boards only. A reverted iteration spliced into *this*
+sequence animates a change that was undone, which reads as the router thrashing
+when it was doing the opposite.
+
+**The attempts are a second film, not a looser cut of this one** — and they are
+usually the more interesting artifact, because the accepted spine is a small
+fraction of what a run actually tried (one run: 10 boards of the 45 on disk).
+`make_film.py` composes the whole search in one pass: the placements animate,
+every attempt is shown and then explicitly reverted with a red **TRIED** badge
+so it reads as a search rather than as churn, and the diagnostic renders that
+were the *input* to each decision are spliced in as cards where they were made.
+
+```bash
+# a place_route_loop run: every round it wrote, kept AND dropped
+python3 -X utf8 make_film.py --from-loop-dir wk/ -o wk/film.gif --size 1200
+
+# a converge.py run: beats captioned with the lever_argv that produced them
+python3 -X utf8 make_film.py --from-ledger wk/ledger.jsonl -o wk/film.gif
+
+# a hand chain: name the dead ends, point it at the renders
+python3 -X utf8 make_film.py wk/seed.kicad_pcb wk/placed.kicad_pcb \
+    'wk/r*.kicad_pcb' --reject 'r4[bcd]*' --cards-from wk/ \
+    -o wk/film.gif --size 1200 --fps 8
+```
+
+`--accepted-only` gives back the convergence cut. Produce both when a run had
+attempts worth seeing; produce the convergence one always.
 
 A render can never establish: that routing will now succeed (only a re-route
 shows that); that the placement improved (`crossings`/`hpwl` decide); that a
