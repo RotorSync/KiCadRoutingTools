@@ -489,6 +489,29 @@ only in `check_floorplan`'s `outline` block.
 
 ### Verify, do not assume
 
+- **`failed_single` is HALF the answer — read `failed_multipoint` too, and read
+  EVERY `JSON_SUMMARY` in the log, not the last one.** A net can fail as
+  multipoint while the single-ended bucket is empty, and route.py's in-run
+  reconciliation prints a SECOND summary whose buckets differ from the first.
+  Measured: a call printed `routed_single: ["QSPI_SD1"], failed_single: []` and
+  wrote a board with **0 segments** on that net — which reads exactly like the
+  "routers report false success" hazard and was **not** one. The reconciliation
+  had re-routed `QSPI_SD2` and reported breaking `QSPI_SD1` in
+  `failed_multipoint`, the field the chain was not grepping. A grep of one bucket
+  turns an honestly-reported failure into a silent one, and then into a wrong bug
+  report against the engine. Grep both, from every summary line:
+
+  ```bash
+  grep -oE '"routed_single": \[[^]]*\]|"failed_single": \[[^]]*\]|"failed_multipoint": \[[^]]*' run.log
+  ```
+- **Before concluding a clause is geometrically unsatisfiable, check your own
+  flags.** One net was reported "walled in by its neighbours" when the actual
+  blocker was a `--track-width 0.4` the analyst had passed: a 0.4 mm trace cannot
+  leave a 0.200 mm QFN pad, and that net carried **no HARD width clause at all**
+  — the 0.4 came from the netclass nominal, not the spec. It routed at 0.16 with
+  no other change. Confirm the requirement is real (`--net-min-widths` is the
+  list of what the SPEC demands) and that you are not asking for something the
+  spec never did, before writing it up as stop condition 4.
 - **Re-read the `JSON_SUMMARY` line you just produced.** Do not carry a number
   forward from an earlier step or from memory of what you expected.
 - **VERIFY THE WIDTH LANDED.** `--track-width` and `--power-nets-widths` are
@@ -3194,6 +3217,24 @@ pulling at you, write the next ledger entry instead:
 - **"The last lever failed."** Revert and take the next one. The ladder has more
   rungs than you have tried: rip set → grid → layer → via cost → width → order →
   placement.
+
+**A worked case of stopping wrongly, because it is the most expensive mistake in
+this document.** One run reported four unrouted nets, wrote up "stop condition 3"
+and named the next lever *in the same write-up without trying it*. Budget spent:
+**4 of 100**. Resuming cost four scoped single-net calls of a few seconds each
+and took `unrouted` **4 → 0**. Every blocker it had reported dissolved:
+
+| reported as | actually was |
+|---|---|
+| "boxed in by its QFN neighbours" | needed the rip set the **router** named, which was wider than the one `net_forensics`' 1 mm radius showed |
+| "walled by VREG_AVDD/VCC3V3" | the analyst's own `--track-width 0.4`, on a net with no width clause |
+| "needs a fanout; that is what run 5 should try" | routed on one layer at `--grid-step 0.025`, no fanout |
+
+Two rules fall out. **The working grid at a 0.4 mm-pitch part is 0.025, not
+0.05** — "0.05, or 0.025 for sub-0.4 mm pitch" reads as excluding a part that is
+*at* 0.4 mm, and it should not. And **the router's hint beats the forensics
+wall**: forensics reports what is inside a radius, the router reports what its
+whole obstacle map says is decisive. When they disagree, take the router's set.
 
 **Before invoking condition 2 or 3, answer in writing:** how many nets are
 unrouted, what is the router's own hint for each, and which of the 9.3c rip rules
