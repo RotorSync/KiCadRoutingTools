@@ -1387,6 +1387,34 @@ every other unrouted net, since they remain unrouted after the diff-pair step. S
 that step is what finishes the peeled pads. If you scope the signal step to specific
 nets instead of `"*"`, add any `single_ended_followup_nets` to it explicitly.
 
+**EXCEPT when the pair carries a LAYER or VIA clause — then the signal step is the
+wrong finisher and you give the peel its own pass.** The bulk step routes **both
+layers** at the **signal width**; a pair spec'd L1-only, 0 vias, 0.8 mm comes back
+from it with a via, at 0.16 mm, and every summary says routed. Measured on one
+board: `route_diff` returned `partial` with the two post-resistor halves carrying
+**zero** copper, and following this rule would have finished them illegally. Give
+the peel a Step-2c-shaped pass instead — same nets, `--layers F.Cu`, the pair's own
+width — and note the one thing that makes it work: **in a call scoped to only those
+nets, the global `--track-width-floor` scalar acts as a per-net floor.** That is
+the only place it can hold 0.8 mm without pinning every signal on the board to it.
+
+Two traps in that pass, both measured on the same board:
+
+- **The router's own hint names the blocker, and it is the pair's other half.**
+  `ROUTE FAILED - no rippable blockers found … the blocking copper belongs to
+  pre-existing net(s) 'USB_DP' … Retry with --rip-existing-nets` — the coupled
+  route committed copper the peel pass then cannot get past. Rip by exact name;
+  the call already pins layer and width, so the rip is safe (9.3c rule 2).
+- **A floor that makes the net FAIL is doing its job — read the failure before
+  removing it.** With the floor at 0.8 the pass routed **0 of 4**; with the taper
+  allowed, **4 of 4**. That is not a reason to drop the floor quietly. Measure
+  *why*: on that board a 0.8 mm trace centred on a 0.200 mm QFN pad at 0.4 mm
+  pitch overhangs **0.300 mm per side into a 0.200 mm gap** — it lands on the
+  neighbouring pads. Unsatisfiable by construction, max width at that pad 0.30 mm.
+  Allow the taper because 9.1a ranks connectivity above width, and report the
+  shortfall as **stop condition 4, a finding about the requirement**, with the
+  arithmetic. Never as "routed, with some width caveats".
+
 **CARRY THE PAIR'S WIDTH INTO EVERY STEP THAT MAY TOUCH IT.** This handoff is a
 silent width leak, and on a board with a HARD pair geometry it destroys the
 requirement. The peeled pads are finished by a step whose `--track-width` is the
@@ -1675,6 +1703,44 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    both clauses, because a one-layer route cannot place a via at all. Constrain by
    **construction** where you can — a `--layers` with one entry is a via ban the
    router cannot violate — rather than by hoping the bulk pass agrees.
+
+   **A MAXIMUM LENGTH CANNOT BE CONSTRUCTED, AND THE DEFAULT SEARCH ACTIVELY
+   FIGHTS IT. Set `--heuristic-weight 1.0` on that pass.** Every other clause in
+   this list has a flag that makes violating it impossible; a length clause has
+   none, so it is held by two things instead: routing the net FIRST (which 2c
+   already mandates), and asking the router for a *short* path rather than a
+   *fast* one. `route.py`/`route_diff.py` default to **1.9**, which is
+   **inadmissible** — a weight `w > 1` licenses a returned path up to ~`w`× the
+   optimal cost. On a net whose HARD requirement IS its length, that default is
+   not a speed knob, it is the requirement set wrong. Measured on a bus spec'd at
+   ≤15 mm, same input board, same everything, `--grid-step` held at 0.05:
+
+   | | `--heuristic-weight 1.9` | `--heuristic-weight 1.0` |
+   |---|---|---|
+   | routed length | **44.50 mm** | **7.73 mm** |
+   | straight-line pad distance | 7.71 mm | 7.71 mm |
+
+   Two things go with it, and skipping either turns the fix into a new failure:
+
+   - **Raise `--max-iterations`, and pick a grid fine enough.** An admissible
+     search expands vastly more nodes. In the same experiment at the default
+     `--grid-step 0.1`, weight 1.0 **exhausted and returned NO PATH** where 1.9
+     had returned the 54 mm one — converting a length violation into an
+     `unrouted`, which 9.1a ranks strictly worse. Pair 1.0 with a finer grid and
+     a raised iteration cap, then check the net actually routed.
+   - **Measure routed length against the straight-line pad distance and quote the
+     ratio.** That number, not the router's success line, is what says whether the
+     clause is met.
+
+   Leave the bulk signal pass at the fast default — its nets carry no length
+   clause and 1.0 there costs a great deal for nothing.
+
+   **The general rule: before pulling a knob for a clause, ask what that knob's
+   default optimises.** A price is not a ban (`--via-cost 50` *buys* a via
+   whenever the detour exceeds ~5 mm; only a one-entry `--layers` forbids one), a
+   crossing count is not a length (`--ordering mps` minimises crossings), and
+   speed is not shortness. Where the clause can be met by construction, construct
+   it; where it cannot, set the objective and measure the result.
 
    **READ EVERY DOCUMENT THAT DERIVES FROM THE CLAUSE, not just the spec row.**
    A requirements table is rarely the whole requirement. This cost a real
@@ -2385,7 +2451,7 @@ For difficult boards, consider tuning these parameters:
 |-----------|---------|--------|
 | `--max-ripup 3` | 3 | Max blocking nets to rip up and retry |
 | `--max-iterations 200000` | 200000 | A* iteration limit per route |
-| `--heuristic-weight 1.9` | 1.9 | >1 = faster but may miss tight routes, 1.0 = optimal |
+| `--heuristic-weight 1.9` | 1.9 | **INADMISSIBLE** — returns a path up to ~1.9× the optimal *length*, not merely "may miss tight routes". Set **1.0** on any net whose requirement IS its length (Step 2c), and raise `--max-iterations` with it: an admissible search expands far more nodes and can exhaust where 1.9 succeeded |
 | `--via-cost 50` | 50 | Higher = fewer vias, longer paths; lower (10-25) for BGA escape |
 | `--grid-step 0.1` | 0.1 | Smaller = finer routing but slower; 0.05 for fine-pitch |
 
@@ -2653,7 +2719,7 @@ writing a script to answer a question, check whether one of them already does.
 | the honest unconnected count | `kicad_unconnected.py board --items` | KiCad's own DRC, and it **refills the zones itself** — which is 9.1c's whole problem, already solved |
 | what kind of failure is this | `converge.py where` / the router's own hint | the hint names the flag and the nets (9.3b); it diagnoses better than the score does |
 | where should this part go, facing which way | `converge.py poses BOARD --ref R` | ranks legal (x, y, rotation) poses by placement cost in **milliseconds**, with a per-component breakdown, and `--route` pays for tier 3 on only the top few |
-| is this even the engine I pinned | `route.py --capabilities` / `krt_capabilities.py --require` | a chain can otherwise run green against a clone missing the module it depends on |
+| is this even the engine I pinned | `route.py --capabilities` / `krt_capabilities.py --require` | a chain can otherwise run green against a clone missing the module it depends on. **Spelling is `module:--flag`, WITH the dashes.** And ground-truth a PLANE-step flag with `--help`: `--require` scans imports one level to catch shared registrars, and both plane scripts import `route.py` — so they used to inherit its whole vocabulary and answer OK for flags argparse rejects with exit 2 (fixed, but the lesson stands: a capability gate is evidence, not proof) |
 | step back to iteration N | `converge.py step-back --iteration N` | byte-exact, because the board is addressed by content instead of by a path three iterations overwrote |
 | re-run what iteration N did | `converge.py replay --iteration N` | replays the recorded argv. If it refuses, the ledger recorded prose instead of a command — fix the ledger, not the memory |
 
@@ -2864,7 +2930,8 @@ top blocker on the exact keys, not on impressions:
 | `check_floorplan` exits 4 with `zone_containment` | **intent violated** | fix the placement to match, or say why the intent changed. Do not quietly rewrite the intent to match the board |
 | a whole net has no copper while `pad_pairs_connected` looks healthy | **coverage bug** | the Step 5b ledger — not a placement problem at all |
 | `undersized` non-zero | **parameters** | re-route at the spec's width/via. Placement is not the lever |
-| every net routes, `unrouted`/`broken` are 0, and a **geometric clause still fails** — a maximum length, a via ban, a required width | **placement** | the router had no shorter path to find. The signature is a **routed length far above the straight-line pad distance** (measured on one board: 47 mm and 66 mm runs against 7–13 mm direct, unchanged by an admissible `--heuristic-weight 1.0`, which proves no shorter path exists at that placement). Go to `place_route_loop` — see the warning below, because it needs BOTH `--target-nets` and `--accept-cmd` to see this at all |
+| a **maximum-length clause fails** and the net's own geometry pass ran at the default `--heuristic-weight` | **parameters — rung 1, seconds** | 1.9 is inadmissible; it returns a path up to ~1.9× optimal. Re-run **that pass**, on **its own input board**, at `--heuristic-weight 1.0` with a finer `--grid-step` and a raised `--max-iterations`, then re-measure routed:straight-line. Measured: 44.50 mm → 7.73 mm against a 7.71 mm direct. **Do not go to placement before this.** See Step 2c |
+| `--heuristic-weight 1.0` **on the net's own FIRST pass**, on a board carrying only what must precede it, did not change the length | **placement** | now the router genuinely had no shorter path. Signature: routed length far above the straight-line pad distance *and stable under an admissible search*. Go to `place_route_loop` — see the warning below, it needs BOTH `--target-nets` and `--accept-cmd` to see this at all. **A null measured on a SATURATED board proves nothing** — one run tested 1.0 at iteration 4, after fanout, USB and every signal were committed, got a byte-identical board, and recorded "no shorter path exists at this placement". Re-tested on the first pass that lays the net's copper, the same flag was worth 5.8× |
 | `unrouted` names a plane net | **the pour step** | it was excluded and never poured — Step 3/5, not placement |
 | the log names **pre-existing nets** it is "not allowed to rip" | **rip lever** | 9.3c — `--rip-existing-nets` with the set it named |
 | a net fails on ONE layer at every grid and rip set, and routes instantly with a second layer | **the single-layer constraint is the blocker** | not a router failure. Report it against the requirement that imposed the layer restriction, with both measurements |
