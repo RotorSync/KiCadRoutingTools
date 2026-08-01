@@ -499,7 +499,62 @@ already carry `pad_prop_castellated` from the footprint library.)
 
 ---
 
-## D. The run-1 fixes, re-verified
+## D. What the verifier lenses caught that I did not
+
+All ten lenses ran as independent subagents. Six passed. The four that did not
+earned their place, and two of them **corrected me**.
+
+| lens | verdict | what it did |
+|---|---|---|
+| `intent` | PASS | confirmed the 2 skipped rules are skipped because the intent declares nothing for them, not because the checker dodged them |
+| `legality` | PASS | overlap/oob bit-identical to the seed across a 14-part move |
+| `delta` | PASS | independently re-argued the six extra locks as a legitimate trade rather than accepting the analogy to the decap case |
+| `blocks` | PASS | verified no routing command silently acquired a `--group`, one invocation at a time, and checked the per-board budget against the internal/touching ratios (CoreReg and Power have **zero** internal nets) |
+| `coverage` | PASS | partition exhaustive, symmetric difference empty |
+| `connectivity` | **FAIL — withdrawn** | reasoned correctly from bad evidence: the unfilled pour (§B12). Its conclusion that `check_connected` over-credits GND is wrong; filled, the two tools agree exactly at 15 |
+| `routing-feedback` | **FAIL — upheld** | caught **three** ledger defects: `parent_board` on iterations 3–4 naming a path that had also held a *rejected* board, `score_FINAL` labelled with the arm the ledger had rejected, and iteration 8 left `score: null, accepted: null`. Same lens caught a ledger error in run 1. It keeps earning its place |
+| `drc` | **FAIL — upheld** | caught `graded_at: null` (§B13) and refused to accept a claimed grading floor the artifact did not carry |
+| `spec` | **FAIL — upheld, and the most valuable single result of the run** | see below |
+| `adversarial` | — | ran last |
+
+### The `spec` lens found two HARD clauses that NOTHING in the run measured
+
+**HW-TB-PCB24 — "GND pour unbroken beneath the USB pair and the entire QSPI bus".**
+Not measured by `board_score`, not by `check_drc`, not by `check_connected`, and
+not by my own purpose-written `check_spec.py`, which names the clause in its
+docstring and never implements it. Independently confirmed after the lens raised it:
+non-GND B.Cu copper crosses beneath both protected regions. It is a **HARD** clause
+and it was silently absent from every gate.
+
+**HW-TB-PCB26 — 3 fiducials, 1.0 mm copper / 2.0 mm mask opening.** The board has
+**zero**. Confirmed: 42 footprints, none a fiducial, none matching `FID*`. Nothing
+in the chain looks for a part that is *supposed to exist*, because every gate reasons
+about the copper that is there rather than the parts the spec requires.
+
+Both are the same shape and it is the shape the skill's own discipline is meant to
+prevent: *ungraded is not passed*. `score.json#/ungraded` lists `impedance` and
+`length` because those components know they did not run. A requirement no component
+models at all does not appear in `ungraded` either — it is invisible rather than
+unexamined, which is strictly worse. The `spec` lens is the only thing in the
+procedure that walks the requirements document itself, and it is the only reason
+these two surfaced.
+
+### The `spec` lens also corrected §C2's strongest claim
+
+I wrote that HW-TB-PCB14's 2.4 mm is unachievable, full stop. The lens split the
+142 violations by where they sit:
+
+- **121 are inside a pad fan-out** — adjacent 0.4 mm-pitch pins at U1's west face,
+  and CC1/CC2 at the USB4105 receptacle. Those are the genuinely unsatisfiable class,
+  for the same land-pattern reason as §C1.
+- **21 are in open channel, worst 0.97 mm against 2.4 mm demanded.** Those are real
+  routing failures and must not be absorbed into the requirement finding.
+
+That distinction is right and mine was too coarse. The corrected claim: PCB14 is
+unsatisfiable *in the fan-out annulus* and merely unmet *in open channel*, and only
+the first is a finding about the requirement.
+
+## E. The run-1 fixes, re-verified
 
 | fix | verdict |
 |---|---|
