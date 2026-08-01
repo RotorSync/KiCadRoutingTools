@@ -110,10 +110,13 @@ def compute_plane_fragility_cells(pcb_data: PCBData,
     depth = max(1, int(round(width_mm / config.grid_step)))
     rows = []
 
-    # Exact fill polygons (KiCad truth) when the board file is reachable;
-    # outline fallback otherwise. Each entry: (layer, polygon).
+    # Exact fill polygons (KiCad truth) when a board file is reachable;
+    # outline fallback otherwise. Each entry: (layer, polygon). The GUI's
+    # live-board snapshot outranks the on-disk source file (#424: mid-plan
+    # the disk copy is stale; the snapshot is the copper being routed).
     polys = []
-    src = getattr(pcb_data, 'source_path', None)
+    src = (getattr(pcb_data, 'fill_snapshot_path', '')
+           or getattr(pcb_data, 'source_path', None))
     if src and os.path.isfile(src):
         try:
             from kicad_exact_fill import refill_islands
