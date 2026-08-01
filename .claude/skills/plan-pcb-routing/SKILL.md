@@ -1626,6 +1626,19 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    **construction** where you can — a `--layers` with one entry is a via ban the
    router cannot violate — rather than by hoping the bulk pass agrees.
 
+   **But check the clause actually says that before spending a layer on it.** A
+   one-entry `--layers` is also a *routing-space halving*, and on a 2-layer board
+   that is most of the board. Measured: a bus whose clause read
+   *"Max direct-run length, single layer | ≤15 mm"* was pinned to F.Cu on the
+   strength of the words "single layer" in a column header. The clause bans
+   nothing — it bounds a **length**; the neighbouring clause is the one that says
+   "max 0 vias per leg", and it governs a different net. The cost of the invented
+   constraint was **29 broken pieces**, and the length clause it was meant to
+   protect got *worse* (47 mm and 66 mm runs), because confining the bus to one
+   layer forced exactly the detours the clause bounds. Quote the clause verbatim
+   next to the flag, and if it bounds a length rather than banning a via, give the
+   router both layers and hold the clause by **measurement** instead.
+
    **A Step 2c pass is not durable. Two later steps silently undo it, and both
    report success.** Excluding the net from the bulk signal route is necessary
    and NOT sufficient — measured on one board, a crystal and a QSPI bus that
