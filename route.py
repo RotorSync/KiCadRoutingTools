@@ -2994,6 +2994,13 @@ For differential pair routing, use route_diff.py:
                              "Distinct from check_drc.py's identically-named GRADING flag: this one "
                              "constrains what gets routed, that one what gets graded (default: 0 = "
                              "no floor beyond the --fab-tier minimum)")
+    parser.add_argument("--capabilities", action="store_true",
+                        help="Print this clone's module and flag inventory as JSON and "
+                             "exit. A consumer that pins a KRT clone can only check that "
+                             "route.py exists as a file, which passes for a clone on the "
+                             "wrong branch or missing the module its chain needs -- the "
+                             "run then prints green while describing an engine the repo "
+                             "does not pin. See krt_capabilities.py --require.")
     parser.add_argument("--json-out", metavar="FILE", default=None,
                         help="Also write the run's JSON_SUMMARY to FILE. This is the MERGED "
                              "tally: when the end-of-run reconciliation fires, route.py emits a "
@@ -3193,6 +3200,16 @@ For differential pair routing, use route_diff.py:
     from fab_tiers import (add_fab_tier_args, fab_tier_from_args, set_default_fab_tier,
                            enforce_fab_floors, count_copper_layers_in_file)
     add_fab_tier_args(parser)
+    if '--capabilities' in sys.argv[1:]:
+        # Answered BEFORE parse_args, and before any board is touched:
+        # `input_file` is a required positional, and "is this the engine I
+        # pinned?" has to be answerable without naming a board -- a consumer
+        # asks it precisely because it does not yet trust anything else this
+        # clone would tell it. sys.exit rather than return: this block lives
+        # directly under `if __name__ == "__main__":`, not inside a main().
+        from krt_capabilities import capabilities as _caps
+        print(json.dumps(_caps(), indent=1, sort_keys=True))
+        sys.exit(0)
     args = parser.parse_args()
     # #439: the PRESENCE of --clearance is the clamp switch. Given -> it is the
     # ceiling: non-Default classes are capped at min(class, --clearance) and the
