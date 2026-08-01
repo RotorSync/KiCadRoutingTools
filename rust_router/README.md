@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.19.0**
+**Current Version: 0.19.2**
 
 ## Features
 
@@ -306,6 +306,19 @@ src/
 
 ## Version History
 
+- **0.19.2**: **#529 dynamic iterations (tranche-earned budget extension)** —
+  `route_multi` / `route_with_frontier` accept an optional
+  `max_iterations_ceiling` (default 0 = off, existing callers unchanged).
+  When above `max_iterations`, hitting the cap grants another
+  +1×`max_iterations` tranche iff the tranche just completed improved the
+  search's closest approach — `best_h`, the minimum cost-to-go `f − g` over
+  expanded nodes, tracked free at pop time — by a quantum:
+  `max(quantum_cells grid cells, quantum_pct% of best_h at the tranche
+  start)` — tunable via the optional `quantum_cells=2.0` / `quantum_pct=2.0`
+  kwargs. The first grant references a `best_h` snapshot taken at half the
+  base budget (improvement "vs iteration 0" is trivially satisfied).
+  Deterministic (pure search-internal state). New stats: `best_h`,
+  `iteration_tranches`.
 - **0.19.0**: **#156 fractional per-layer track_margin** — `route_multi` /
   `route_with_frontier` accept `track_margin` as a FLOAT (scalar) or a
   per-layer `list[float]`, in fractional grid cells, instead of an integer

@@ -962,6 +962,48 @@ def _path_has_close_vias(path: Optional[List], config: 'GridRouteConfig') -> boo
     return False
 
 
+# #529 absolute ceiling for dynamic iteration extension: bounds the open-set
+# heap (~24-32 B/push) and wall clock even when every tranche keeps earning.
+DYNAMIC_ITERATIONS_CEILING = 10_000_000
+
+
+def _dynamic_iterations(config: 'GridRouteConfig') -> Tuple[int, dict]:
+    """#529 (opt-in via KICAD_DYNAMIC_ITERATIONS): (effective_base, kwargs)
+    for a FULL search. With the knob on, the base is CLAMPED to 200k — a
+    chain's --max-iterations 1000000 was only ever papering over the static
+    cap, and the giant-heap 1M searches are where the time goes — and the
+    search may then earn +1x base tranches while its closest approach
+    (best_h, tracked in the Rust core) keeps improving, up to a flat 1e7
+    ceiling.
+    Scope: probe-scale budgets never extend — fast-fail retry configs clone
+    the config with max_iterations = (2x) max_probe_iterations (5k default)
+    precisely to give up early, so any base at or below 10k keeps its static
+    cap. Oracle, plane, and pose (diff-pair centerline) searches don't go
+    through this helper at all.
+    The kwarg is only passed when the knob is on, so default runs are
+    byte-identical and predate-0.19.2 grid_router binaries keep working."""
+    if not env_knobs.DYNAMIC_ITERATIONS or config.max_iterations <= 10_000:
+        return config.max_iterations, {}
+    base = min(config.max_iterations, env_knobs.DYNAMIC_ITERATIONS_CLAMP)
+    kwargs = {'max_iterations_ceiling': DYNAMIC_ITERATIONS_CEILING}
+    # Quantum dials (#529 A/B): only pass when non-default (they postdate
+    # the ceiling kwarg within 0.19.2's development).
+    cells = env_knobs.DYNAMIC_ITERATIONS_QUANTUM_CELLS
+    pct = env_knobs.DYNAMIC_ITERATIONS_QUANTUM_PCT
+    if cells != 2.0 or pct != 2.0:
+        kwargs['quantum_cells'] = cells
+        kwargs['quantum_pct'] = pct
+    return base, kwargs
+
+
+def _note_dynamic_extension(iters: int, base: int,
+                            print_prefix: str = "") -> None:
+    """One line of attribution when a full search ran past the static cap."""
+    if iters > base:
+        print(f"{print_prefix}dynamic iterations (#529): search extended to "
+              f"{iters} (base {base})")
+
+
 def _probe_route_with_frontier(
     router: 'GridRouter',
     obstacles: 'GridObstacleMap',
@@ -1090,9 +1132,11 @@ def _probe_route_with_frontier_once(
 
         # Forward probe reached max - do full search
         print(f"{print_prefix}Probe: {first_label}={first_probe_iters} iters [single-direction bus mode], trying full iterations...")
+        _dyn_base, _dyn_kw = _dynamic_iterations(config)
         path, full_iters, full_blocked = router.route_with_frontier(
-            obstacles, forward_sources, forward_targets, config.max_iterations, track_margin=track_margin, via_exclusion_radius=_ver,
-        collinear_vias=env_knobs.COLLINEAR_VIAS)
+            obstacles, forward_sources, forward_targets, _dyn_base, track_margin=track_margin, via_exclusion_radius=_ver,
+        collinear_vias=env_knobs.COLLINEAR_VIAS, **_dyn_kw)
+        _note_dynamic_extension(full_iters, _dyn_base, print_prefix)
         first_total_iters += full_iters
         total_iterations += full_iters
 
@@ -1150,9 +1194,11 @@ def _probe_route_with_frontier_once(
     # Both probes reached max iterations - do full search on forward direction
     print(f"{print_prefix}Probe: {first_label}={first_probe_iters}, {second_label}={second_probe_iters} iters, trying {first_label} with full iterations...")
 
+    _dyn_base, _dyn_kw = _dynamic_iterations(config)
     path, full_iters, full_blocked = router.route_with_frontier(
-        obstacles, forward_sources, forward_targets, config.max_iterations, track_margin=track_margin, via_exclusion_radius=_ver,
-        collinear_vias=env_knobs.COLLINEAR_VIAS)
+        obstacles, forward_sources, forward_targets, _dyn_base, track_margin=track_margin, via_exclusion_radius=_ver,
+        collinear_vias=env_knobs.COLLINEAR_VIAS, **_dyn_kw)
+    _note_dynamic_extension(full_iters, _dyn_base, print_prefix)
     first_total_iters += full_iters
     total_iterations += full_iters
 
@@ -1166,8 +1212,9 @@ def _probe_route_with_frontier_once(
     forward_blocked = full_blocked
 
     path, backward_full_iters, backward_full_blocked = router.route_with_frontier(
-        obstacles, forward_targets, forward_sources, config.max_iterations, track_margin=track_margin, via_exclusion_radius=_ver,
-        collinear_vias=env_knobs.COLLINEAR_VIAS)
+        obstacles, forward_targets, forward_sources, _dyn_base, track_margin=track_margin, via_exclusion_radius=_ver,
+        collinear_vias=env_knobs.COLLINEAR_VIAS, **_dyn_kw)
+    _note_dynamic_extension(backward_full_iters, _dyn_base, print_prefix)
     second_total_iters += backward_full_iters
     total_iterations += backward_full_iters
 
@@ -1509,9 +1556,10 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             stats_sources, stats_targets = forward_targets, forward_sources
         else:
             stats_sources, stats_targets = forward_sources, forward_targets
+        _stats_base, _stats_kw = _dynamic_iterations(config)
         _, _, stats = router.route_multi(
-            obstacles, stats_sources, stats_targets, config.max_iterations, track_margin=track_margin,
-            collinear_vias=env_knobs.COLLINEAR_VIAS)
+            obstacles, stats_sources, stats_targets, _stats_base, track_margin=track_margin,
+            collinear_vias=env_knobs.COLLINEAR_VIAS, **_stats_kw)
         print_route_stats(stats)
 
     if reversed_path:
