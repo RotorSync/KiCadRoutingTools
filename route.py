@@ -444,6 +444,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if json_out:
         _SUMMARY_SINK.clear()
         _RECONCILE_RAISED[0] = False
+    if not _SUMMARY_SINK:
+        # First (outermost) entry of this process's run: start the
+        # protected-net refusal record clean. The reconciliation sub-run
+        # re-enters here with the sink non-empty and must NOT reset it --
+        # its own refusals are part of the same run's report.
+        try:
+            from protected_nets import clear_skipped
+            clear_skipped()
+        except Exception:
+            pass
     if env_knobs.DUMP_BATCH_KWARGS:
         # Parameter-parity probe: dump THIS call's full parameter set so the
         # CLI front (argparse->main) and the GUI front (plan setters->tab
@@ -2339,6 +2349,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # T5 coverage gate: disturbed out-of-scope nets shipping broken
         # (additive; also present as failed_multipoint entries above).
         summary['coverage_gate_nets'] = coverage_gate_nets
+    try:
+        from protected_nets import PROTECTED_SKIPPED
+        if PROTECTED_SKIPPED:
+            # {context: {net: reason}}. reason 'locked' has NO override --
+            # a caller retrying with the net named exactly will be refused
+            # again, so it must stop rather than loop.
+            summary['protected_skipped'] = {
+                _c: dict(_m) for _c, _m in PROTECTED_SKIPPED.items()}
+    except Exception:
+        pass
     # #409: report-only frontier-blocking attribution per net still failed at
     # END of run (additive; key omitted when no failed net has a recorded
     # analysis). Last-wins per net -- 'stage' names the loop that recorded it;

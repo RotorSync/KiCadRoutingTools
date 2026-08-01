@@ -202,6 +202,21 @@ def exact_names(patterns: Optional[Iterable[str]]) -> Set[str]:
     return {p for p in patterns if p and not (_GLOB_CHARS & set(p))}
 
 
+# What the last run's rip filters refused, and why: {context: {net: reason}}.
+# The print below is for a human reading a log; a PROGRAM driving the router
+# cannot see it, and the router's own failure hint tells that program to retry
+# with --rip-existing-nets naming exactly the net that was just refused. A
+# caller following that advice loops forever. route.py drains this into
+# JSON_SUMMARY['protected_skipped'] so the refusal is machine-readable, and so a
+# caller can tell "name it exactly to override" from "locked, no override ever".
+PROTECTED_SKIPPED: Dict[str, Dict[str, str]] = {}
+
+
+def clear_skipped() -> None:
+    """Reset the record. route.py calls this once per run."""
+    PROTECTED_SKIPPED.clear()
+
+
 def filter_rippable_names(names: List[str], protected: Dict[str, str],
                           override_patterns: Optional[Iterable[str]] = None,
                           context: str = "rip-up") -> List[str]:
@@ -218,6 +233,8 @@ def filter_rippable_names(names: List[str], protected: Dict[str, str],
         else:
             kept.append(n)
     if blocked:
+        PROTECTED_SKIPPED.setdefault(context, {}).update(
+            {n: protected[n] for n in blocked})
         by_reason: Dict[str, List[str]] = {}
         for n in blocked:
             by_reason.setdefault(protected[n], []).append(n)
