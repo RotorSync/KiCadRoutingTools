@@ -92,6 +92,28 @@ def test_route_py_answers_without_a_board():
     print("  PASS: route.py --capabilities needs no input_file")
 
 
+
+def test_a_flag_from_a_SHARED_registrar_is_not_reported_missing():
+    """The dangerous direction is a false NEGATIVE: a consumer that trusts
+    --require refuses to run against an engine that was fine all along.
+
+    Two shapes produced one. `--fab-overrides` is registered by
+    `fab_tiers.add_fab_args`, so a text scan of route.py's own source never saw
+    it. And `qfn_fanout.py` is a thin shim over `qfn_fanout/__init__.py`, where
+    its flags actually live -- and it was not in FLAG_SCRIPTS at all, so "never
+    scanned" came back worded as "flag not supported"."""
+    import krt_capabilities as k
+    caps = k.capabilities()
+    assert k.missing(caps, ['route.py:--fab-overrides']) == [],         "a flag from a shared argparse registrar must be found"
+    assert k.missing(caps, ['qfn_fanout.py:--width']) == [],         "a package shim's flags live in <pkg>/__init__.py"
+    # and a script outside the repo root, named by path
+    assert k.missing(caps, [
+        '.claude/skills/plan-pcb-routing/scripts/board_score.py:--net-min-widths'
+    ]) == [], "a required script may be named by path"
+    # a genuinely absent flag must still be reported
+    assert k.missing(caps, ['route.py:--not-a-real-flag']),         "a real gap must still be reported"
+    print("  PASS: shared registrars, package shims and paths all resolve")
+
 if __name__ == '__main__':
     for k, v in sorted(globals().items()):
         if k.startswith('test_'):
