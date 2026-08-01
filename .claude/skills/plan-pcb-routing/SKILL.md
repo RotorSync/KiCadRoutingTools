@@ -1267,7 +1267,14 @@ Use the printed flags as-is **only when the board has no spec of its own**:
 
   **Grade the leftovers with `--clearance-margin`, not by re-picking `-c`.** A
   ~1-grid overlap on copper that is otherwise at the floor is the quantisation
-  artifact CLAUDE.md describes; `check_drc.py --clearance-margin 0.1` filters
+  artifact CLAUDE.md describes. **`--clearance-margin` is a FRACTION of the
+  graded clearance, not millimetres** (`check_drc.py` default **0.05**, i.e. one
+  twentieth is already hidden before you pass anything). It therefore SCALES with
+  what you are grading: `0.1` hides 16 µm against a 0.16 mm class and 45 µm
+  against a 0.45 mm one — so the same flag is a quantisation filter on one net
+  and a real-defect filter on another. **Always quote the unfiltered count beside
+  the filtered one**, and never use it above ~0.2 mm of graded clearance.
+  `check_drc.py --clearance-margin 0.1` filters
   exactly it. Say the raw count and the filtered count, and which you are
   standing behind.
 
@@ -1742,6 +1749,37 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    speed is not shortness. Where the clause can be met by construction, construct
    it; where it cannot, set the objective and measure the result.
 
+   **ORDER THE 2c PASSES BY WHICH ESCAPE CHANNEL THEY CONTEND FOR, NOT BY WHICH
+   CLAUSE IS TIGHTEST.** The obvious ordering — most-constrained first — is the
+   right instinct for *claiming board area* and the wrong one when two passes
+   leave the **same fine-pitch part** on the **same layer**. There, the first
+   pass's copper is a wall for the second, and the wall's width is what matters,
+   not the clause's tightness. Measured on a QFN-60 at 0.4 mm pitch: a 0.8 mm USB
+   pair routed before the QSPI bus landed on pins 51/52, immediately adjacent to
+   the bus's pins 55–60, and two bus nets could then find **no path on any
+   parameter** — admissible heuristic, grid down to 0.025, rip sets from single
+   named nets up to the whole bus, 10⁶ iterations, and even with a second layer
+   allowed. The router's own history named the blocker plainly: `Blocked by:
+   QSPI_SD2, QSPI_SCLK` — its own neighbours, three mid-row pins deep.
+
+   So before fixing the order, list for each 2c group: which component it escapes
+   from, on which layer, at what pitch, and how wide its copper is. Groups that
+   share a part *and* a layer are in contention; among those, **route the widest
+   copper LAST**, because a wide trace boxes in far more of a fine-pitch field
+   than it needs and a thin one can thread past copper already down. Groups that
+   escape from different parts do not interact and their order is free.
+
+   **When contending groups on one part want different widths, the answer is a
+   fanout SCOPED to one group.** A whole-part fanout commits every stub at a
+   single width, which cannot serve a 0.8 mm pair and a 0.15 mm crystal and a
+   0.16 mm bus at once — a real reason to skip it. But `--nets` scopes a fanout
+   the same way it scopes a route, so `qfn_fanout.py --component U1 --nets
+   'QSPI_*' --width 0.16` stages exactly the escapes that are contended, at
+   exactly their clause's width, and leaves the pair and the crystal alone.
+   Skipping the fanout wholesale because *one* group's width is incompatible is
+   the mistake — it was correct for the pair and the crystal and wrong for the
+   bus, and the bus is what failed.
+
    **READ EVERY DOCUMENT THAT DERIVES FROM THE CLAUSE, not just the spec row.**
    A requirements table is rarely the whole requirement. This cost a real
    mistake, in the direction that matters: a bus whose spec row read *"Max
@@ -1813,7 +1851,17 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    - **KiCad-`locked` copper**: never rippable, with no override at all;
    - **`net_impedance` declarations**: persisted, and recomputed identically by a
      later step from the stackup;
-   - **`.kicad_dru` per-layer clearance**: auto-read by every routing step;
+   - **`.kicad_dru` per-LAYER clearance**: auto-read by every routing step. Note
+     the qualifier — **only layer-scoped rules**. A rule scoped to a netclass, an
+     area, or anything else is *skipped with a printed note* ("KiCad will still
+     enforce it"), which is true in KiCad and false for `check_drc.py` and for
+     the router. Without `kicad-cli`, such a rule is graded by **nobody**, and it
+     cannot even appear in `ungraded` because no component ever knew about it.
+     Measured on one board: both of its `.kicad_dru` rules were netclass-scoped
+     3W separation clauses, enforced by nothing in the chain — the only thing
+     holding them was `route.py --net-clearances`, which **neither plane script
+     accepts**. If your spec's separation rules live in the dru, say in the
+     report exactly which steps enforced them and which did not;
    - **an explicit exclusion**: a bulk pass with `"!QSPI_*"` leaves that copper
      byte-identical — the exclusion works, it just isn't sufficient on its own.
 
@@ -1981,13 +2029,48 @@ reconnects any isolated copper islands AND repairs pad-level plane connections.
 With `--rip-blocker-nets`, a plane-net pad that can't reach its plane (e.g. a tiny
 connector GND pin blocked by a signal trace) is connected by tracing to an
 adjacent same-net pad, **ripping the blocking net out of the way**. The ripped
-blockers are **left UNROUTED here** — they are reconnected by the route.py pass in
-Step 5c, NOT inside this step. (Re-routing them in-step is unsafe: a ripped net
-that fails to re-route had its original copper restored on top of whatever had
-meanwhile been routed through its freed corridor, shorting them — the restore
-bypasses the obstacle map. Issue #141 reverted; `--reroute-ripped-nets` and the
-plugin's "Auto-reroute ripped nets" checkbox are now deprecated no-ops.) Carry
-over Step 2's clearance/via/track-width/grid and `--no-bga-zone`.
+blockers are reconnected by a **mandated end-of-run pass INSIDE this step**
+(#347/#517), reported as `ripped_reconnect` in its `JSON_SUMMARY`, and then again
+by the Step 5c route.py pass for anything still open.
+
+**That in-step reconnect runs at THIS step's parameters, and it is the single
+biggest silent constraint reset in the chain.** It does not know the `--layers`,
+the width or the heuristic the net's own Step 2c pass used. What was once the
+old advice — *"the ripped blockers are left unrouted here, Step 5c reconnects
+them"* — is **wrong**, and following it means omitting the flags below on the
+belief that a later step will apply them. By then the copper is already down.
+
+So this call carries the per-net pins itself:
+
+- **`--net-layers <json>`** so a ripped single-layer net comes back on its own
+  layer, where it cannot take a via at all;
+- **`--track-width-floor`** and **`--power-nets`/`--power-nets-widths` covering
+  every width-bearing net that could be ripped** — including a routed diff pair.
+  Measured on one board: `ripped_reconnect.nets = ["VCC3V3"]`, harmless because
+  VCC3V3 was in the `--power-nets` list; had it named a QSPI net instead, that
+  clause would have reset with every step still printing a clean summary.
+- **There is no `--heuristic-weight` on this script at all**, nor on
+  `route_planes.py` or either fanout. So a max-length net ripped here comes back
+  on an inadmissible path and nothing can ask otherwise. Keep such nets OUT of
+  the rip set by name, and treat any `ripped_reconnect.nets` entry that
+  intersects a length-clause net as an automatic re-run of that net's Step 2c
+  mirror — not as a step that succeeded.
+
+**And `protected_nets` is what normally keeps a routed diff pair out of the rip
+set — check it is still there.** `route_diff` records the pair under
+`kicad_routing_tools.protected_nets` in the output `.kicad_pro`, and this step
+reads it (`N PROTECTED net(s) excluded from blocker rip-up`). Any helper that
+*replaces* that project file rather than merging into it — a "restore the
+canonical netclasses" script, for instance — silently deletes the record and
+re-exposes the pair. The tell is that log line: if it is absent or its count
+dropped, the protection is gone and only your `--power-nets` width carries it.
+
+(The old `--reroute-ripped-nets` flag and the plugin's "Auto-reroute ripped nets"
+checkbox are deprecated no-ops — issue #141's unsafe restore-on-failure path,
+which put original copper back on top of whatever had meanwhile been routed
+through the freed corridor. The mandated pass above is a different, safe
+mechanism; do not confuse the two.) Carry over Step 2's
+clearance/via/track-width/grid and `--no-bga-zone`.
 
 python3 -X utf8 route_disconnected_planes.py board_step4.kicad_pcb board_step5_repair.kicad_pcb \
     --clearance <floor> --via-size <V> --via-drill <D> --track-width <signal_track> --grid-step <G> \
@@ -2062,6 +2145,23 @@ python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/board_score.py \
 `blocking > 0` (exit 4) → the board is **not done**; go to **Step 9** and spend
 an iteration. Do not write a summary that describes an unfinished board as
 finished with caveats.
+
+**DO NOT PIPE A GATE.** This step and Step 9 decide on **exit codes**, and every
+`2>&1 | tee /tmp/…` in this document is for a *log*, not a *gate* — a piped
+command reports the **pipe's** status, which is `tee`'s or `tail`'s and is almost
+always 0. Measured twice in one run: `krt_capabilities --require` was read as
+exit 0 when it was 3, and a chain ran all four of its gates as `| tail -N ||
+true` and exited 0 while its spec checker was returning 4 the whole time. A gate
+that cannot fail is not a gate. Run it unpiped and capture `$?` on the next line,
+or read `${PIPESTATUS[0]}`, or `set -o pipefail`:
+
+```bash
+python3 -X utf8 scripts/board_score.py board.kicad_pcb --json wk/score.json
+echo "EXIT board_score = $?"          # <- the number the gate turns on
+```
+
+**Quote the exit code beside the finding.** "Gates passed" with no exit code in
+the transcript is an assertion, not evidence.
 
 Invoke `/review-routed-board board_step5.kicad_pcb` for the full review (DRC,
 connectivity, orphan stubs, length-match tolerances, GND return via coverage,
@@ -2949,6 +3049,33 @@ if `blocking` is level, because 9.1a ranks connectivity above the rest. Say so i
 the ledger with both numbers. A dead net is worse than a wide trace, and the scalar
 does not know that.
 
+**A SECOND EXCEPTION, and it is the one you will get backwards: `blocking` can
+RISE because the iteration made more of the board MEASURABLE.** 9.1's rule that
+"a run reporting 12 has not found a better board, it has looked at less of it"
+does not stop applying once you are inside the loop — it governs comparing two
+*iterations* exactly as it governs comparing two flag sets. A net with **no
+copper** is invisible to `net_widths` (its clause lands in
+`patterns_matching_no_routed_net`), invisible to `check_impedance` (it has no
+segments to walk, so it is not in `nets_analyzed`), and invisible to any
+per-segment geometry check. Route it and every one of those violations *appears*,
+having been there all along.
+
+Measured across one pair of iterations:
+
+| | i1 | i2 |
+|---|---|---|
+| `blocking` | **34** | 41 |
+| width clauses with no copper to measure | 2 nets | **0** |
+| `impedance.nets_analyzed` | 7 | **9** |
+| HARD clauses failing (repo `check_spec`) | 8 | **7** |
+
+i2 shipped. **Before comparing two `blocking` values, compare what each one
+looked at** — `patterns_matching_no_routed_net`, `nets_analyzed`, and `ungraded`.
+If they differ, the scores are not commensurable and the scalar is the wrong
+arbiter; fall back to the components that ran in both, and to the repo's own spec
+checker if it has one. Assert `nets_analyzed` equals the number of nets you named
+in `--impedance-nets` every iteration, exactly as you assert `ran == true`.
+
 **Watch for whack-a-mole.** Ripping to route net A can leave net B unrouted, and
 the tally still reads "1 failed" — a *different* net. Compare the failing net
 **names** between iterations, never just the counts. If they alternate, route them
@@ -2984,28 +3111,42 @@ python3 -X utf8 converge.py status --ledger wk/ledger.jsonl      # EVERY iterati
 vs systemic and warns when at least half went to the instrument. Nothing else in
 the loop says that out loud, and the run that needed to hear it did not.
 
-A record holds this; `record` writes it for you:
+**What `record` actually writes is this, and only this:**
 
 ```jsonc
-{"iteration": 3, "group": null, "parent_board": "wk/iter02.kicad_pcb",
- "kind": "completion",                       // or "systemic" -- see 9.2
+{"iteration": 3, "kind": "completion",       // or "systemic" -- see 9.2
+ "parent_sha": "...", "result_sha": "...",   // content hashes, not paths
  "lever": "rip lever: --rip-existing-nets QSPI_SD2 QSPI_SS + --grid-step 0.025",
- "commands": ["python3 -X utf8 route.py ..."],
+ "lever_argv": ["python3", "-X", "utf8", "route.py", "..."],
  "score": {"blocking": 12, "blocking_by": {"unrouted": 1, "drc": 11}},
- "unrouted_nets": ["QSPI_SD1"],              // NAMES, not just the count
- "verdicts": ["VERDICT=FAIL:lens=drc;..."],
- "accepted": true, "reverted_to": null}
+ "accepted": true}
 ```
 
-**`parent_board` is the board this iteration actually came from** — the last
-*accepted* one, not iteration N−1. It is what `render_placement --before` takes;
-using N−1 renders a delta that never existed. **Never reuse an output path across
-iterations**: a ledger that says `wk/placed.kicad_pcb` when three iterations wrote
-that name is unauditable, and one that named a *rejected* board as the parent of
-everything downstream got shipped.
+**There is no `--unrouted-nets`, no `--parent`, no `--verdicts` flag** — those
+fields do not exist, and a reader who assumes they are captured will keep no
+record of the one thing 9.3d says decides an iteration. Until they do exist,
+**put the failing net NAMES in `--lever`**, which is free text and is what
+`status` and the film both display:
 
-**Record `unrouted_nets` by NAME.** Counts hide whack-a-mole — "1 failed" twice
-running can be two different nets, each ripped by the fix for the other (9.3d).
+```bash
+--lever 'rip lever: --rip-existing-nets QSPI_SD2 + --grid-step 0.025.
+         unrouted BY NAME: QSPI_SD0, QSPI_SD1. Fixed USB_DP_R/USB_DM_R;
+         newly broke QSPI_SS, GPIO2 -- whack-a-mole, net a traded for net b.'
+```
+
+**Record the failing nets by NAME, not by count.** Counts hide whack-a-mole
+completely: measured on one run, `unrouted` read **4 → 4** across an iteration
+that had in fact fixed four nets and broken five different ones. The scalar said
+"no progress"; the names said the iteration was churning.
+
+**`parent_sha` is the board this iteration actually came from** — `record`
+derives it from the last accepted entry, not from iteration N−1. When you need a
+path for `render_placement --before`, resolve it out of the store by that sha
+rather than guessing; using N−1 renders a delta that never existed. **Never
+reuse an output path across iterations**: a ledger that says
+`wk/placed.kicad_pcb` when three iterations wrote that name is unauditable, and
+one that named a *rejected* board as the parent of everything downstream got
+shipped.
 
 **Log the systemic/completion split in the final report**: *"41 iterations: 9
 systemic, 32 completion"* is a fact about how the budget was spent, and a run that
