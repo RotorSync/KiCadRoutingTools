@@ -10,7 +10,7 @@
     "undersized": 0,
     "unrouted": 5
   },
-  "board": "C:\\Users\\rob\\Documents\\prive\\git\\test-board\\wk\\final.kicad_pcb",
+  "board": "C:\\Users\\rob\\Documents\\prive\\git\\test-board\\layout\\layout.kicad_pcb",
   "components": {
     "broken": {
       "count": 10,
@@ -112,7 +112,7 @@
     "VCC3V3"
   ],
   "kind": "board-score",
-  "label": "FINAL run2 usb_first, zones filled",
+  "label": "FINAL run2 usb_first, graded at the board's own classes (no --clearance)",
   "quality": {
     "copper_mm": 767.2,
     "segments": 902,

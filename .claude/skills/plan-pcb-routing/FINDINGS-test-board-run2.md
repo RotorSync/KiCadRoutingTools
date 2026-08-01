@@ -73,27 +73,54 @@ Cost of those six locks, and it is worth stating plainly because it looks like a
 regression: `crossings` 85 → 74 instead of 85 → 60. That is the same trade the
 skill already records for decaps ("crossings 52 to 60 … the correct trade").
 
-### A3. Step 2c's exclusion does not protect the copper it routed
+### A3. ~~Step 2c's exclusion does not protect the copper it routed~~ — WITHDRAWN, the claim was false
 
-Step 2c is one of run 1's own fixes and the shape is right — route the
-geometrically-constrained net in its own pass, then exclude it from the bulk route.
-But **exclusion stops re-routing, not ripping**:
+**This finding was wrong and is retracted in full.** It is left in place, struck
+through, because how it was wrong is more useful than the claim was.
 
-```
-step 1  route.py --nets XIN XOUT XTAL_XOUT --layers F.Cu   ->  3/3 routed, 0 vias
-...
-step 4  route.py --nets '*' '!XIN' '!XOUT' '!XTAL_XOUT' --max-ripup 20
-final   check_spec.py                                      ->  XOUT leg: NO ROUTED PATH
-```
+I reported that the bulk pass rips Step 2c copper, on the evidence that
+`XIN`/`XOUT`/`XTAL_XOUT` routed 3/3 in their own pass and that `check_spec.py` then
+reported `XOUT leg: NO ROUTED PATH` in the finished board. I concluded the leg had
+been "left in two pieces", and wrote `lock_nets.py` to prevent it.
 
-The bulk pass ripped the XOUT leg as a blocker and left it in two pieces. #521's
-protected-nets record does not cover this case — CLAUDE.md scopes it to "matched
-groups and routed diff pairs", and a Step 2c net is neither.
+Both halves were wrong:
 
-**Fix:** Step 2c must say to **KiCad-lock the copper after the pass**. CLAUDE.md
-already documents `segment.locked` / `via.locked` as making a net never-rippable
-with no override; it is the only mechanism strong enough, and it is the only one
-that survives A4's project restore, because it lives in the `.kicad_pcb`.
+1. **The measurement was my own instrument's bug.** `check_spec.py` built its graph
+   from segment *endpoints* only, so a segment ending mid-span of another — an
+   ordinary T-junction, which KiCad joins and the router emits routinely — read as a
+   break. `XIN`, `XOUT`, `XTAL_XOUT` and `USB_DP` each have at least one. Fixed
+   (split every segment at any other endpoint lying on it; bridge every pad of the
+   net as a zero-cost hub), the leg is **continuous**.
+2. **The claim itself does not reproduce.** Directly tested: strip all 52 copper
+   locks from the post-XTAL board, run the bulk pass with `--max-ripup 20` and the
+   XTAL nets excluded, count again.
+
+   ```
+   XTAL segments BEFORE bulk pass: 32
+   XTAL segments AFTER  bulk pass: 32
+   ```
+
+   Exclusion **is** sufficient. The skill was right and I was not.
+
+`lock_nets.py` therefore solves a problem that does not exist. It is harmless and
+stays in the chain (locked copper is still a reasonable belt-and-braces on a
+multi-pass chain), but it is not load-bearing and its docstring's justification is
+withdrawn.
+
+**What the corrected instrument actually shows** — and this is a real finding the
+broken one was concealing:
+
+| clause | broken checker said | corrected |
+|---|---|---|
+| HW-TB-PCB22 XOUT leg ≤10 mm | `NO ROUTED PATH` | **18.09 mm — 81% over a HARD limit** |
+| HW-TB-PCB23 leg symmetry ≤1 mm | `unmeasurable, a leg is unrouted` | **12.64 mm — 12.6× over a HARD limit** |
+
+A "no routed path" reads as an instrument gap. An 18.09 mm leg reads as a defect.
+Replacing the second with the first is the worst failure mode an instrument has, and
+mine had it. **The lesson that generalises:** a hand-written checker used to grade
+what the toolchain cannot has no tests and no second opinion, and this run shipped
+findings resting on one for several hours. The adversarial verifier lens caught it;
+nothing else did, and nothing else could have.
 
 ### A4. Nothing says to restore the net classes after a `--clearance` pass
 
@@ -136,6 +163,40 @@ needs on a fine-pitch part.
 ---
 
 ## B. Tooling findings
+
+### B0. `route_diff.py` routed **nothing**, on every run, and the chain swallowed it
+
+Under-disclosed in the first draft of this document, caught by the adversarial lens.
+Every run of the chain records:
+
+```
+== 3. USB pair, connector side: coupled, 0.8mm / 0.15mm gap (HW-TB-PCB13) ==
+  Diff pairs:    0/1 routed
+```
+
+`route_diff` failed on the pair it *could* name (`USB_DP`/`USB_DM`), not merely on
+the one it could not (§B1). **All** USB copper on the delivered board comes from the
+single-ended `route.py` rescue in step 3a. Two consequences that were being reported
+the wrong way round:
+
+- The 72.3% / 77.6% at 0.8 mm is `--power-nets-widths` on a single-ended route, not
+  a coupled pair holding its width.
+- The **0.15 mm gap was never router-enforced at all.** The 0.1502 mm KiCad measures
+  between `USB_DP` and `USB_DM` is an uncontrolled by-product of two independent
+  single-ended routes that happen to run alongside each other. Everything this
+  document says about `--clearance 0.15` being required so `route_diff` does not
+  floor the gap to 0.16 is *correct about the flag* and *irrelevant to this board*,
+  because that code path never ran to completion.
+
+And the chain hid it: `| grep -E 'Diff pairs|Total vias' || true` turns a failed
+pass into a silent one. `|| true` was there to stop a `grep` miss killing a
+`set -e` script, and it swallowed the gate as well. Two other reported failures went
+past unread the same way — `KiCad-oracle recheck: 3 link(s) still unconnected` and
+`GND: 49/55 pads connected to plane`.
+
+**Fix, on both sides:** `route_diff` should exit non-zero when it routes 0 pairs
+(today the JSON says so and the exit code does not), and a chain must never wrap a
+routing step's output filter in `|| true` without also asserting on the tally.
 
 ### B1. `route_diff.py` cannot be told that two nets are a pair — and `/identify-diff-pairs` exists precisely to find the pairs it cannot name
 
@@ -399,7 +460,48 @@ spec'd board has **no honest single DRC number** available from `board_score`:
 class and hides real ones, and whichever you choose the artifact does not say
 which you chose.
 
-### B14. `--design-rules` still contradicts a spec'd board on four counts
+### B15. `pcbnew.LoadBoard(...).Save()` silently flattens the sibling `.kicad_pro` to one net class
+
+Filling the zones (§B12) is done with KiCad's own python, because nothing else can.
+That call **rewrites the sibling project** and deletes every non-Default net class
+while leaving all 15 `netclass_patterns` pointing at classes that no longer exist:
+
+```
+before fill_zones.py:  classes = [Default, GND_REF, PWR, QSPI_BUS, USB_FS_DIFF, XTAL_12M]
+after:                 classes = [Default]          patterns = 15  (all now orphaned)
+```
+
+**This shipped.** The first commit of the delivered board carried the flattened
+project, so KiCad resolved every net to Default 0.16 — which is precisely how the
+USB pair's spec-mandated 0.15 mm gap became 12 real DRC errors. Caught by the
+adversarial lens, not by any gate.
+
+It is the same hazard CLAUDE.md documents for a bare `cp` of a board without its
+`.kicad_pro` (#441), arriving through a door nothing guards: the recommended
+`copy_board.py` faithfully copies a project that a *previous* step had already
+destroyed.
+
+**Fix applied:** the project restore now runs **after** the fill, and
+`restore_project.py` gained a hard assertion — it previously printed the same
+success line whether it had corrected both classes or found neither, because its
+`done` list was simply empty. A restore that cannot distinguish "already correct"
+from "the classes are gone" is not a restore.
+
+### B16. `board_score.py` has no component for a requirement nothing models
+
+Distinct from §B6, and sharper. `ungraded` lists components that *know* they did not
+run (`impedance`, `length`). A requirement that no component models at all —
+HW-TB-PCB24's plane continuity, HW-TB-PCB26's three fiducials — does not appear in
+`ungraded` either. It is invisible rather than unexamined, which defeats the
+"ungraded is not passed" discipline exactly where that discipline is most needed.
+
+There is no general fix inside `board_score`; the answer is procedural, and the
+`spec` verifier lens is it — the only step in the whole procedure that walks the
+requirements document and asks "what measured this?" of every clause. That argues
+for promoting it from a final gate to something run **early**, so the chain is built
+knowing which clauses nothing will grade.
+
+### B17. `--design-rules` still contradicts a spec'd board on four counts
 
 Confirming run 1's C2 finding is live, and that the skill's new *"FIRST: does this
 board have a requirements document?"* section is load-bearing — it is the only
@@ -515,7 +617,41 @@ earned their place, and two of them **corrected me**.
 | `routing-feedback` | **FAIL — upheld** | caught **three** ledger defects: `parent_board` on iterations 3–4 naming a path that had also held a *rejected* board, `score_FINAL` labelled with the arm the ledger had rejected, and iteration 8 left `score: null, accepted: null`. Same lens caught a ledger error in run 1. It keeps earning its place |
 | `drc` | **FAIL — upheld** | caught `graded_at: null` (§B13) and refused to accept a claimed grading floor the artifact did not carry |
 | `spec` | **FAIL — upheld, and the most valuable single result of the run** | see below |
-| `adversarial` | — | ran last |
+| `adversarial` | **FAIL — upheld, and it overturned a headline finding of mine** | see below |
+
+### The adversarial lens disproved §A3 and found a defect I had shipped
+
+It was pointed at the hand-written helpers specifically — *"these are hand-written
+for this run and have no tests … if `check_spec.py`'s shortest-path measurement is
+wrong, several headline findings are wrong."* It was.
+
+- **`check_spec.py` built its graph from segment endpoints only**, so every
+  T-junction read as a break. That is what produced `XOUT leg: NO ROUTED PATH`, and
+  §A3's entire diagnosis rested on it. Fixed and re-measured: the leg is continuous
+  at **18.09 mm** against a 10 mm HARD limit, and the legs are **12.64 mm** apart
+  against a 1 mm HARD limit. §A3 is withdrawn; both violations are real and were
+  being concealed as an instrument gap.
+- **The delivered `.kicad_pro` had five of its six net classes deleted** (§B15), by
+  the `pcbnew` save inside the zone fill. It shipped that way in the first commit.
+- **`route_diff` routed 0/1 pairs on every run** and the chain's `|| true` swallowed
+  it (§B0) — so this document's original account of the USB pair was wrong about
+  where its copper came from.
+
+It also flagged that `blocking = 23` is a re-grade at a clearance **looser** than the
+board's own Default class, and that `graded_at: null` means the artifact never
+recorded which floor was used. That is right, and it is the honest reading: 23 is
+defensible only for the USB pair's own class; the board-wide number is 39, and
+neither is correct for a multi-class board because `check_drc` cannot grade per
+class (§B7). Both are quoted here rather than picking one.
+
+Three of its criticisms I checked and do not accept:
+
+- *"§C1's pad-to-pad argument"* — it agreed this one is a genuine geometric bound.
+- *"the 166 KiCad errors were never read"* — they were; §B12 and the evidence
+  README are built on them. They are not folded into `blocking` because
+  `board_score` cannot see netclass-scoped rules at all, which is §B7's point.
+- *"`chain.sh` as delivered does not reproduce the bundle"* — correct as filed, and
+  now fixed: the default is `ORDER=usb_first` and the post-chain fill is a chain step.
 
 ### The `spec` lens found two HARD clauses that NOTHING in the run measured
 
