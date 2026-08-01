@@ -49,6 +49,22 @@ _FLAG_RE = re.compile(r'add_argument\(\s*["\'](--[A-Za-z0-9][A-Za-z0-9-]*)["\']'
 _IMPORT_RE = re.compile(r'^\s*(?:from|import)\s+([a-z_][a-z0-9_]*)', re.M)
 
 
+_PARSER_RE = re.compile(r'\bArgumentParser\s*\(')
+
+
+def _builds_own_parser(path):
+    """True if this module is a CLI in its own right, not a flag registrar.
+
+    Its flags belong to ITS parser, so unioning them into an importer's flag set
+    is a false positive -- see script_flags.
+    """
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            return bool(_PARSER_RE.search(f.read()))
+    except OSError:
+        return True          # unreadable: assume the risky direction
+
+
 def script_flags(path, _depth=1):
     """Long flags a script's argparse defines, including SHARED registrars.
 
@@ -67,6 +83,21 @@ def script_flags(path, _depth=1):
 
     One level, and only modules resolving to a .py beside the script: enough for
     a registrar helper, and it cannot wander into the whole dependency graph.
+
+    FOLLOW REGISTRARS, NEVER OTHER CLIs. That distinction is the whole
+    correctness of this function, and getting it wrong inverts the tool's
+    failure mode into the dangerous direction. `route_planes.py` imports
+    `route.py` (and `check_drc.py`, and `list_nets.py`), so an indiscriminate
+    hop hands route_planes route.py's entire 97-flag vocabulary -- and
+    `--require route_planes.py:--net-clearances` then answers OK for a flag
+    argparse rejects with exit 2. A consumer's chain dies mid-run on a
+    capability check that passed.
+
+    The discriminator is structural, not a name list: a REGISTRAR adds arguments
+    to a parser somebody else owns (`fab_tiers.py`: 2 add_argument, 0
+    ArgumentParser); a CLI builds its own (`route.py`: 97 add_argument, 1
+    ArgumentParser). Only a module that never constructs an ArgumentParser can
+    be contributing its flags to this script's parser.
     """
     try:
         with open(path, encoding='utf-8', errors='replace') as f:
@@ -82,9 +113,15 @@ def script_flags(path, _depth=1):
             # `qfn_fanout/__init__.py`, which is where its 40-odd flags live.
             # Checking only `<mod>.py` resolves back to the shim itself and
             # finds nothing.
+            # `qfn_fanout.py` is a shim over `qfn_fanout/__init__.py`, which is
+            # where its own parser and 40-odd flags live. That hop is the script
+            # reaching its OWN implementation, not borrowing a second CLI's, so
+            # it is allowed through the parser test.
+            own_package = (mod == os.path.splitext(os.path.basename(path))[0])
             for sib in (os.path.join(root, mod + '.py'),
                         os.path.join(root, mod, '__init__.py')):
-                if os.path.isfile(sib) and os.path.abspath(sib) != me:
+                if (os.path.isfile(sib) and os.path.abspath(sib) != me
+                        and (own_package or not _builds_own_parser(sib))):
                     flags.update(script_flags(sib, _depth - 1))
     return sorted(flags)
 

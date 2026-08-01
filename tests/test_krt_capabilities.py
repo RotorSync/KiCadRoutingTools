@@ -114,6 +114,45 @@ def test_a_flag_from_a_SHARED_registrar_is_not_reported_missing():
     assert k.missing(caps, ['route.py:--not-a-real-flag']),         "a real gap must still be reported"
     print("  PASS: shared registrars, package shims and paths all resolve")
 
+def test_a_script_does_NOT_inherit_another_CLIs_flags():
+    """The fix for false negatives manufactured false POSITIVES, which are worse.
+
+    `script_flags` follows local imports one level to pick up shared registrars.
+    Indiscriminately, that also follows `route_planes.py -> route.py` (and
+    `-> check_drc.py`, `-> list_nets.py`), handing the plane scripts route.py's
+    entire 97-flag vocabulary. Measured on a live run: `--require
+    route_planes.py:--net-clearances` answered OK, the chain was written to use
+    it, and argparse killed the step with exit 2 mid-run. A capability gate that
+    passes for a flag the CLI rejects is the exact failure the module exists to
+    prevent, inverted.
+
+    The discriminator is structural: a REGISTRAR adds arguments to a parser
+    somebody else owns; a CLI constructs its own ArgumentParser."""
+    import krt_capabilities as k
+    caps = k.capabilities()
+
+    # These four are argparse errors on the real CLI -- verified by --help.
+    for token in ('route_planes.py:--net-clearances',
+                  'route_planes.py:--track-width-floor',
+                  'route_disconnected_planes.py:--net-clearances',
+                  'route_diff.py:--track-width-floor'):
+        assert k.missing(caps, [token]), \
+            f'{token} does not exist on that CLI and must be reported missing'
+
+    # ...while every genuinely-shared flag still resolves. --fab-overrides comes
+    # from the fab_tiers registrar (0 ArgumentParser, 2 add_argument), which is
+    # exactly the hop that must survive.
+    for token in ('route_planes.py:--fab-overrides',
+                  'route_disconnected_planes.py:--net-layers',
+                  'route_disconnected_planes.py:--track-width-floor',
+                  'route.py:--net-clearances',
+                  'route_diff.py:--net-clearances',
+                  'qfn_fanout.py:--escape-method'):
+        assert k.missing(caps, [token]) == [], \
+            f'{token} DOES exist on that CLI and must not be reported missing'
+    print("  PASS: registrars are followed, other CLIs are not")
+
+
 if __name__ == '__main__':
     for k, v in sorted(globals().items()):
         if k.startswith('test_'):
