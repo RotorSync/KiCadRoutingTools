@@ -1379,6 +1379,19 @@ the only way a `"*"` pass can honour a geometry an earlier step established. The
 verify with the width counter below — `board_score --net-min-widths` will show it
 as `net_widths` if you miss it, but only if you passed the file.
 
+**ONE `--power-nets` per command, never two.** It is `nargs="*"` with no `append`
+action (`route.py:2981`), so a second occurrence **replaces** the first rather
+than adding to it — and the widths are positional against the net list, so the
+whole first group loses its width silently. Building the flag from two shell
+variables (`$PWR $USBW`) is the natural way to write this and it is wrong:
+measured, the rails' 0.4 mm vanished and **248 of 248** power segments came back
+at the signal width, with nothing reporting a problem. Merge the nets and the
+widths into a single flag:
+
+```bash
+--power-nets VCC3V3 VBUS USB_DP USB_DM --power-nets-widths 0.4 0.4 0.8 0.8
+```
+
 ### Check for DDR/High-Speed Memory Signals
 
 Look for DDR signal patterns in the net list that may need length matching:
