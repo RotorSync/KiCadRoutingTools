@@ -66,6 +66,18 @@ the outline from the spec), that is the placement step — run it, then treat it
 output as the "rough / generated placement" row of the table above. The skill
 does not place a board, but it should not stop in front of a repo that does.
 
+**Then copy the `.kicad_pro` and `.kicad_dru` onto its output yourself.** A
+seeder writes a `.kicad_pcb` and, like `place_optimize.py`, usually nothing else
+— and it is the FIRST thing that touches the board, so a missing sibling there
+propagates through the entire chain: every later step reads no project, resolves
+its floor from the stock netclass instead of the spec, and stamps that looser
+floor over tighter copper. `copy_board.py` copies a board *with* its siblings,
+but a seeder is not a copy, so this one is on you:
+
+```bash
+cp board.kicad_pro seed.kicad_pro && cp board.kicad_dru seed.kicad_dru
+```
+
 ```bash
 python3 -X utf8 render_placement.py board.kicad_pcb -o /tmp/state.png
 ```
@@ -1146,6 +1158,25 @@ Use the printed flags as-is **only when the board has no spec of its own**:
   USB_D's two 0.5 mm vias collide by 0.1 mm at the connector pitch — a smaller via
   clears it). Step **toward, never below**, the fab floors, and keep `--impedance`
   so the ohms target is held as the geometry shrinks.
+
+  **`--track-width-floor` does NOT exist on `route_diff.py`.** It is a `route.py`
+  flag. So a pair whose width is a HARD requirement — a spec'd 0.8 mm USB
+  geometry, say — has **no floor protection at all** in the diff-pair step: if
+  the engine necks it down to fit, it does so silently and the summary still
+  reports the pair routed. Measure the emitted copper after the call, and carry
+  the requirement in `board_score.py --net-min-widths` so it reaches `blocking`:
+
+  ```python
+  from collections import Counter
+  from kicad_parser import parse_kicad_pcb
+  pcb = parse_kicad_pcb('out.kicad_pcb')
+  print(Counter(round(s.width, 4) for s in pcb.segments
+                if pcb.nets[s.net_id].name.startswith('USB_')))
+  ```
+
+  (The same asymmetry note applies as for `--coplanar-gap`/`--coplanar-nets`
+  below: the diff engine takes some of route.py's flags and not others, and the
+  ones it drops fail quietly.)
 - **Escape clearance — trigger on dropped balls, not pitch (issue #122):** the
   inter-ball channel is too narrow to fit a track at the net-class clearance on
   more BGAs than just "fine-pitch" ones. Even an **0.8 mm-pitch** BGA drops balls
@@ -1184,6 +1215,50 @@ Use the printed flags as-is **only when the board has no spec of its own**:
   (For *via-over-pad* grazes where a decoupling cap/resistor sits on a via,
   `place_fanout_clearance.py` (Step 1b) is the better fix — it moves the part;
   smaller vias/thinner tracks help the via-over-track and stub-over-stub classes.)
+
+  **When a SPEC pins the width floor at or above the width you are already
+  using, this rung does not exist.** The ladder says "toward, never below, the
+  floor" and means the *fab* floor; a requirements document can put its own
+  floor higher, and then there is no next step down. Measured on one board:
+  `--width 0.15` was already the spec's HARD minimum, and the spec said in terms
+  that the board "shall not be routed to" the fab's 0.10. **Do not thin below a
+  spec floor to clear a graze.** Reach for the fixed-width levers instead, in
+  this order:
+
+  1. **`--grid-step`, matched to the routing grid** — the cheapest and most
+     likely, because the shortfall usually IS one grid cell. `qfn_fanout` and
+     `bga_fanout` default to `0.1`; if the route step runs at `0.05`, the fanout
+     quantised to a coarser grid than everything downstream. Measured: 7 grazes
+     all at exactly `0.011 mm` overlap — one 0.1-grid rounding.
+  2. **A larger `--clearance` on the fanout**, buying the gap by asking for more
+     room rather than by removing copper.
+  3. **`--escape-method underpad`** (± `--allow-via-in-pad`) — it removes the 45°
+     wrist where two stubs converge, which is where this class of graze sits.
+  4. **Fan out fewer nets** — see the no-connect trap below.
+
+  **Grade the leftovers with `--clearance-margin`, not by re-picking `-c`.** A
+  ~1-grid overlap on copper that is otherwise at the floor is the quantisation
+  artifact CLAUDE.md describes; `check_drc.py --clearance-margin 0.1` filters
+  exactly it. Say the raw count and the filtered count, and which you are
+  standing behind.
+
+  **`check_drc.py -c` is NOT `route.py --clearance`.** On route.py the flag is a
+  **ceiling over every class**. On `check_drc` it is only the **global fallback**,
+  and a netclass override still wins — the tool prints
+  `Required clearance: 0.1600mm (local/netclass override; global 0.1500mm)` and
+  grades at 0.16 no matter what `-c` says. Measured on one board: 7 violations at
+  `-c 0.16`, the same 7 at `-c 0.15`, the same 7 at `-c 0.149`. If you expected
+  a looser `-c` to clear class-driven violations, it will not; change the class,
+  or use `--clearance-margin`.
+
+  **Do not fan out no-connect nets.** `--nets "*" "!GND" "!VCC"` matches every
+  single-pad `*NC_*` net on the part. They get escape stubs, no later stage
+  routes them, and the result is orphan copper that grazes its neighbours —
+  invisible to every tally, because `escaped 43/43, failed 0` is *true*. Measured:
+  2 of one board's 7 grazes were between two no-connect nets that should never
+  have been fanned. Add `"!*NC_*"` (or the part's own no-connect prefix) to the
+  fanout selection, and run `check_orphan_stubs.py` after the fanout — nothing
+  else looks for copper nothing owns.
 - **Fine-pitch escape VIA (4+ layer):** the 0.45 mm standard via can't dog-bone /
   via-in-pad sub-~0.5 mm-pitch BGA/QFN balls. For *those parts only*, pass the
   smaller **fine-pitch escape via** that `--design-rules` prints (`fine-pitch
@@ -1280,6 +1355,29 @@ every other unrouted net, since they remain unrouted after the diff-pair step. S
 **do not exclude the diff-pair nets from the signal-routing step's net selection** —
 that step is what finishes the peeled pads. If you scope the signal step to specific
 nets instead of `"*"`, add any `single_ended_followup_nets` to it explicitly.
+
+**CARRY THE PAIR'S WIDTH INTO EVERY STEP THAT MAY TOUCH IT.** This handoff is a
+silent width leak, and on a board with a HARD pair geometry it destroys the
+requirement. The peeled pads are finished by a step whose `--track-width` is the
+*signal* width, so they come back thin — and every later `"*"` pass (the Step 5c
+reconnect especially) can do the same to any pair segment it decides to redo.
+Measured on one board: `route_diff` emitted the pair correctly at 0.8 mm, and by
+the end of the chain **14 segments of it were 0.15 mm**, with `failed_diff_pairs`
+empty and every step reporting success.
+
+The fix is the same one 9.3c rule 2 gives for rips — a net returns at the
+**calling** command's parameters — applied to the peel path:
+
+```bash
+# on the signal step AND the Step 5c reconnect, not just one of them
+route.py ... --nets "*" "!GND" \
+    --power-nets USB_DP USB_DM USB_DP_R USB_DM_R --power-nets-widths 0.8 0.8 0.8 0.8
+```
+
+`--power-nets` is not only for power: it is the per-net width channel, and it is
+the only way a `"*"` pass can honour a geometry an earlier step established. Then
+verify with the width counter below — `board_score --net-min-widths` will show it
+as `net_widths` if you miss it, but only if you passed the file.
 
 ### Check for DDR/High-Speed Memory Signals
 
@@ -2653,7 +2751,7 @@ python3 -X utf8 converge.py record --ledger wk/ledger.jsonl \
     --board wk/iter03.kicad_pcb --kind completion \
     --lever 'rip lever: --rip-existing-nets QSPI_SD2 + --grid-step 0.025' \
     --score "$(cat wk/score_iter03.json)" \
-    --argv -- python3 -X utf8 route.py wk/iter02.kicad_pcb wk/iter03.kicad_pcb --nets QSPI_SD1 ...
+    --argv python3 -X utf8 route.py wk/iter02.kicad_pcb wk/iter03.kicad_pcb --nets QSPI_SD1 ...
 
 python3 -X utf8 converge.py status --ledger wk/ledger.jsonl      # EVERY iteration
 ```

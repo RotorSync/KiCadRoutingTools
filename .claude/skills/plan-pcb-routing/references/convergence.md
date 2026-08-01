@@ -112,7 +112,15 @@ addressing: `record` stores the board by SHA, which is what makes stepping back
 exact after three iterations have overwritten the same path.
 
 ```bash
-python3 -X utf8 converge.py record --ledger wk/ledger.jsonl     --board wk/iter03.kicad_pcb --kind completion     --lever 'rip lever: --rip-existing-nets QSPI_SD2 + --grid-step 0.025'     --score "$(cat wk/score_iter03.json)"     --argv -- python3 -X utf8 route.py wk/iter02.kicad_pcb wk/iter03.kicad_pcb --nets QSPI_SD1 ...
+python3 -X utf8 converge.py record --ledger wk/ledger.jsonl \
+    --board wk/iter03.kicad_pcb --kind completion \
+    --lever 'rip lever: --rip-existing-nets QSPI_SD2 + --grid-step 0.025' \
+    --score "$(cat wk/score_iter03.json)" \
+    --argv python3 -X utf8 route.py wk/iter02.kicad_pcb wk/iter03.kicad_pcb --nets QSPI_SD1
+
+# `--argv` is a REMAINDER: everything after it is the command. Do NOT write
+# `--argv -- python3 ...` -- the bare `--` lands inside the captured argv and
+# argparse rejects the line.
 ```
 
 **Then run `converge.py status --ledger wk/ledger.jsonl` every iteration and read
