@@ -271,6 +271,13 @@ def _empty_results_data() -> dict:
     }
 
 
+# --json-out collects every JSON_SUMMARY this process emits -- the first pass
+# and, when it fires, the reconciliation sub-run's -- so the file carries ONE
+# merged tally instead of whichever emission a reader happened to scrape.
+_SUMMARY_SINK: List[dict] = []
+_RECONCILE_RAISED = [False]
+
+
 def batch_route(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
@@ -288,6 +295,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 neckdown_length: float = 2.5,
                 neckdown_taper_length: float = 0.5,
                 track_width_floor: float = 0.0,
+                json_out: Optional[str] = None,
                 clearance: float = defaults.CLEARANCE,
                 via_size: float = defaults.VIA_SIZE,
                 via_drill: float = defaults.VIA_DRILL,
@@ -428,9 +436,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _reconcile_kwargs = dict(locals())
     # net_name_patterns must not forward either: the reconcile sub-run scopes
     # by exact retried-net names, which are then the correct override source.
+    # json_out joins them: the sub-run must not write the parent's file. The
+    # OUTERMOST call owns it, and writes the MERGED tally after reconciliation.
     for _k in ('input_file', 'output_file', 'net_names', 'pcb_data',
-               'net_name_patterns'):
+               'net_name_patterns', 'json_out'):
         _reconcile_kwargs.pop(_k, None)
+    if json_out:
+        _SUMMARY_SINK.clear()
+        _RECONCILE_RAISED[0] = False
     if env_knobs.DUMP_BATCH_KWARGS:
         # Parameter-parity probe: dump THIS call's full parameter set so the
         # CLI front (argparse->main) and the GUI front (plan setters->tab
@@ -2441,6 +2454,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     except Exception:
         pass
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
+    _SUMMARY_SINK.append(summary)
 
     # Write output file or return results for direct application
     if return_results:
@@ -2753,12 +2767,23 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 successful += _rok
                 failed = max(0, failed - _rok)
         except Exception as _e:
+            _RECONCILE_RAISED[0] = True
             print(f"{RED}  final reconciliation pass failed: {_e}{RESET}")
 
 
     # Per-net story dump (KICAD_NET_STORY=1): the complete journey of every
     # net -- bus membership, ordering, failures with named blockers, rips,
     # rescues, Phase-3 tap order, costs -- assembled from state.
+    if json_out:
+        try:
+            from route_summary import merge_summaries
+            _merged = merge_summaries(list(_SUMMARY_SINK), _RECONCILE_RAISED[0])
+            with open(json_out, 'w', encoding='utf-8') as _jf:
+                json.dump(_merged if _merged is not None else {}, _jf, indent=1)
+            print(f"  route summary written to {json_out}")
+        except Exception as _e:
+            print(f"  WARNING: could not write --json-out {json_out}: {_e}")
+
     from net_story import net_story_enabled, dump_net_story
     if net_story_enabled():
         try:
@@ -2949,6 +2974,13 @@ For differential pair routing, use route_diff.py:
                              "Distinct from check_drc.py's identically-named GRADING flag: this one "
                              "constrains what gets routed, that one what gets graded (default: 0 = "
                              "no floor beyond the --fab-tier minimum)")
+    parser.add_argument("--json-out", metavar="FILE", default=None,
+                        help="Also write the run's JSON_SUMMARY to FILE. This is the MERGED "
+                             "tally: when the end-of-run reconciliation fires, route.py emits a "
+                             "SECOND, reconcile-subset-scoped summary to stdout, and scraping "
+                             "either one alone is wrong -- the first counts every recovery as a "
+                             "failure, the second narrows the whole-board pad-pair denominator to "
+                             "the retried subset. Prefer this over parsing stdout.")
     parser.add_argument("--neckdown-length", type=float, default=defaults.NECKDOWN_LENGTH,
                         help="Length in mm of narrow track from the target pad on neck-down tap routes; the track "
                              "returns to the power width beyond this where clearance allows (default: 2.5)")
@@ -3537,6 +3569,7 @@ For differential pair routing, use route_diff.py:
                 neckdown_length=args.neckdown_length,
                 neckdown_taper_length=args.neckdown_taper_length,
                 track_width_floor=args.track_width_floor,
+                json_out=args.json_out,
                 clearance=args.clearance,
                 net_clearances=_net_clearances_map,
                 keep_input_copper=args.keep_input_copper,
