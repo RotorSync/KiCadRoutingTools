@@ -1526,6 +1526,43 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             print("Per-layer clearance rules (.kicad_dru, #498): "
                   + ", ".join(f"{l}:{v:g}" for l, v in sorted(_lcl.items())))
 
+    # #549: track-scoped clearance rules from the same .kicad_dru. Grader-side
+    # they are PAIR-EXACT (a rule binds a specific (a, b) pair, other_only
+    # exempts member siblings), which is <= the router's per-obstacle-net
+    # over-approximation -- so router output always grades clean. Applied at
+    # the SEG-SEG site only (KiCad's Type=='track' binds tracks).
+    from kicad_dru import read_board_track_clearances
+    _track_rules, _track_notes = read_board_track_clearances(pcb_file)
+    _cls_of: Dict[int, set] = {}
+    if _track_rules:
+        try:
+            from list_nets import net_class_memberships
+            _cls_of = net_class_memberships(
+                pcb_file, {nid: n.name for nid, n in pcb_data.nets.items()
+                           if n.name})
+        except Exception:
+            _track_rules = []
+    if not quiet and _track_rules:
+        for _n in _track_notes:
+            print(f"  .kicad_dru: {_n}")
+        print("Track-to-track clearance rules (.kicad_dru, #549): "
+              + ", ".join(f"'{r.cls}':{r.clearance_mm:g}"
+                          f"{'(other-only)' if r.other_only else ''}"
+                          for r in _track_rules))
+
+    def _track_pair_cl(net_a: int, net_b: int, layer: str) -> float:
+        eff = _pair_cl(net_a, net_b, layer=layer)
+        if not _track_rules:
+            return eff
+        a_cls = _cls_of.get(net_a, ())
+        b_cls = _cls_of.get(net_b, ())
+        for r in _track_rules:
+            a_in, b_in = r.cls in a_cls, r.cls in b_cls
+            binds = ((a_in != b_in) or (a_in and b_in and not r.other_only))
+            if binds and r.clearance_mm > eff:
+                eff = r.clearance_mm
+        return eff
+
     def _layer_cl(layer: str, eff: float) -> float:
         v = _lcl.get(layer) if _lcl else None
         return v if v is not None else eff
@@ -1697,7 +1734,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 continue
             checked_pairs.add(pair_key)
 
-            _eff = _pair_cl(net1, net2, layer=seg1.layer)
+            _eff = _track_pair_cl(net1, net2, layer=seg1.layer)
             has_violation, overlap, pt1, pt2 = check_segment_overlap(seg1, seg2, _eff, clearance_margin)
             if has_violation and _graphic_pair_is_same_net(seg1, seg2, net1, net2):
                 has_violation = False

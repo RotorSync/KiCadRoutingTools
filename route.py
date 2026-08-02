@@ -360,6 +360,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # #498: {layer: mm} per-layer clearance. None (both fronts) ->
                 # auto-read the sibling .kicad_dru; explicit dict (tests) wins.
                 layer_clearances: Optional[Dict[str, float]] = None,
+                # #549: {net_id: mm} track-to-track clearance (effective
+                # per-obstacle map). None (both fronts) -> auto-read the
+                # sibling .kicad_dru track rules; explicit dict (tests) wins.
+                track_clearances: Optional[Dict[int, float]] = None,
                 final_reconcile: bool = True,
                 add_teardrops: bool = False,
                 collect_stats: bool = False,
@@ -1315,8 +1319,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     config.set_net_clearances(net_clearances, base_map_exclusions)
     # #498: per-layer .kicad_dru clearance rules, installed engine-side so the
     # GUI inherits them with no wiring (see kicad_dru.install_layer_clearances).
-    from kicad_dru import install_layer_clearances
+    from kicad_dru import install_layer_clearances, install_track_clearances
     install_layer_clearances(config, layer_clearances, input_file, pcb_data)
+    # #549: track-scoped .kicad_dru rules, same engine-side pattern (raise-only
+    # on seg-vs-seg stamps; effective map over THIS call's routed set).
+    install_track_clearances(config, track_clearances, input_file, pcb_data,
+                             routed_net_ids=base_map_exclusions)
     # Carry the RESOLVED map into the end-of-run reconciliation kwargs, exactly
     # like board_edge_clearance above: the reconciliation self-invocation reads
     # the OUTPUT file, whose sibling .kicad_dru does not exist yet (main()'s
@@ -1325,6 +1333,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # rules (caught by test_dru_layer_clearance_e2e: a reconciliation +3V3 via
     # 0.25mm inside the B.Cu rule against GND).
     _reconcile_kwargs['layer_clearances'] = dict(config.layer_clearances)
+    _reconcile_kwargs['track_clearances'] = dict(config.track_clearances)
     if visualize:
         base_obstacles, base_vis_data = build_base_obstacle_map_with_vis(
             pcb_data, config, base_map_exclusions,

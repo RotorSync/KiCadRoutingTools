@@ -114,6 +114,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 # #498: {layer: mm} per-layer clearance. None (both fronts) ->
                 # auto-read the sibling .kicad_dru; explicit dict (tests) wins.
                 layer_clearances: Optional[Dict[str, float]] = None,
+                # #549: {net_id: mm} track-to-track clearance map; None ->
+                # auto-read the sibling .kicad_dru track rules.
+                track_clearances: Optional[Dict[int, float]] = None,
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
                 direction_order: str = None,
                 ordering_strategy: str = "inside_out",
@@ -710,8 +713,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     config.set_net_clearances(net_clearances, [nid for _, nid in net_ids])
     # #498: per-layer .kicad_dru clearance rules, installed engine-side so the
     # GUI inherits them with no wiring (see kicad_dru.install_layer_clearances).
-    from kicad_dru import install_layer_clearances
+    from kicad_dru import install_layer_clearances, install_track_clearances
     install_layer_clearances(config, layer_clearances, input_file, pcb_data)
+    # #549: track-scoped .kicad_dru rules (raise-only on seg-vs-seg stamps).
+    install_track_clearances(config, track_clearances, input_file, pcb_data,
+                             routed_net_ids=[nid for _, nid in net_ids])
 
     # Upfront layer swap optimization: analyze all diff pairs and apply beneficial swaps
     # BEFORE MPS ordering, so ordering sees correct segment layers
