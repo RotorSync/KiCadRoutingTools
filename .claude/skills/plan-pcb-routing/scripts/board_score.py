@@ -66,6 +66,14 @@ import tempfile
 # Source: check_drc.py's `by_type` grouping (:2801) over the 'type' key.
 SIZE_TYPES = frozenset({'track-width', 'via-size', 'via-drill-size'})
 
+# #549: seg-seg pairs whose violation exists ONLY because a .kicad_dru track
+# rule raised the pair clearance (check_drc tags them with a distinct type and
+# the binding rule's name). They are the structural, registered-floor-governed
+# population -- a repo's check_dru gate is their arbiter -- so board_score
+# reports them as ADVISORY, outside `blocking`. Run 6 measured why: 610 such
+# pairs drowned a blocking of ~17 physical defects into an unusable 627.
+RULE_PAIR_TYPES = frozenset({'segment-segment-track-rule'})
+
 _DRC_TOTAL = re.compile(r'^FOUND (\d+) DRC VIOLATIONS', re.M)
 _DRC_TYPE = re.compile(r'^([A-Z0-9-]+) violations \((\d+)\):', re.M)
 _CONN_TOTAL = re.compile(r'^FOUND (\d+) ISSUES', re.M)
@@ -211,7 +219,8 @@ def score_connectivity(root: str, board: str) -> dict:
 
 
 def score_drc(root: str, board: str, clearance=None, sizes=None) -> tuple:
-    """(drc, undersized) -- clearance violations and sub-floor copper.
+    """(drc, undersized, rule_pairs) -- physical clearance violations,
+    sub-floor copper, and #549 track-rule-governed pairs (advisory).
 
     Both come from ONE check_drc run, split on the violation type. Omitting
     --clearance is the norm and not an oversight: check_drc then reads the
@@ -239,16 +248,20 @@ def score_drc(root: str, board: str, clearance=None, sizes=None) -> tuple:
     rc, out = run_tool(root, 'check_drc.py', *args)
     if 'NO DRC VIOLATIONS FOUND' in out:
         return ({'ran': True, 'count': 0, 'by_type': {}, 'graded_at': _graded_at(out)},
+                {'ran': True, 'count': 0, 'by_type': {}},
                 {'ran': True, 'count': 0, 'by_type': {}})
     if not _DRC_TOTAL.search(out):
         r = skipped(f'check_drc.py produced no summary (rc={rc})')
-        return r, dict(r)
+        return r, dict(r), dict(r)
     by_type = {t.lower(): int(n) for t, n in _DRC_TYPE.findall(out)}
     size = {t: n for t, n in by_type.items() if t in SIZE_TYPES}
-    clear = {t: n for t, n in by_type.items() if t not in SIZE_TYPES}
+    rule = {t: n for t, n in by_type.items() if t in RULE_PAIR_TYPES}
+    clear = {t: n for t, n in by_type.items()
+             if t not in SIZE_TYPES and t not in RULE_PAIR_TYPES}
     return ({'ran': True, 'count': sum(clear.values()), 'by_type': clear,
              'graded_at': _graded_at(out)},
-            {'ran': True, 'count': sum(size.values()), 'by_type': size})
+            {'ran': True, 'count': sum(size.values()), 'by_type': size},
+            {'ran': True, 'count': sum(rule.values()), 'by_type': rule})
 
 
 def _graded_at(out: str):
@@ -519,7 +532,7 @@ def main():
     # the user's project. `--json` is the copy you keep.
     with tempfile.TemporaryDirectory(prefix='board_score_') as tmp:
         conn = score_connectivity(root, args.board)
-        drc, undersized = score_drc(root, args.board, args.clearance, sizes)
+        drc, undersized, rule_pairs = score_drc(root, args.board, args.clearance, sizes)
         floorplan = score_floorplan(root, args.board, args.intent, tmp)
         _imp_nets = ([g for tok in args.impedance_nets for g in tok.split(',') if g]
                      if args.impedance_nets else args.impedance_nets)
@@ -538,6 +551,12 @@ def main():
              'drc': drc, 'undersized': undersized, 'floorplan': floorplan,
              'impedance': imped, 'length': length, 'net_widths': net_widths}
 
+    # #549 rule-governed pairs are ADVISORY: their gate is the repo's own
+    # registered-floor checker (check_dru), not this scalar. They live beside
+    # `parts`, never in it -- the blocking sum below iterates parts, and 610
+    # floor-governed pairs must not drown ~17 physical defects (run 6).
+    advisory = {'drc_rule_pairs': rule_pairs}
+
     # A component that was ASKED for and could not run leaves blocking unknown.
     # Reporting 0 there would let the loop stop on a board nothing graded.
     counts = [v.get('count') for v in parts.values()]
@@ -548,9 +567,11 @@ def main():
     score = {'schema': 1, 'kind': 'board-score', 'board': os.path.abspath(args.board),
              'label': args.label, 'blocking': blocking,
              'blocking_by': {k: v.get('count') for k, v in parts.items()},
+             'advisory': {k: v.get('count') for k, v in advisory.items()},
              'ungraded': sorted(k for k, v in parts.items() if v.get('ran') is False),
              'unknown': sorted(unknown), 'quality': quality(args.board),
-             'components': parts, 'connectivity_nets': conn.get('nets', [])}
+             'components': {**parts, **advisory},
+             'connectivity_nets': conn.get('nets', [])}
 
     if args.json:
         with open(args.json, 'w', encoding='utf-8') as f:
@@ -562,6 +583,9 @@ def main():
     q = score['quality']
     print(f"BLOCKING={blocking}  ({bits})  "
           f"vias={q.get('vias')} copper_mm={q.get('copper_mm')}")
+    _adv_bits = ' '.join(f'{k}={v}' for k, v in score['advisory'].items() if v)
+    if _adv_bits:
+        print(f"ADVISORY (floor-governed, not blocking): {_adv_bits}")
     if score['ungraded']:
         # Loud, because this is the difference between "clean" and "unexamined".
         print(f"UNGRADED (not scored, not passed): {', '.join(score['ungraded'])}")

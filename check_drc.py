@@ -1332,7 +1332,8 @@ def write_debug_lines(pcb_file: str, violations: List[dict], clearance: float, l
     debug_lines = []
     print(f"\nDebug lines (center-to-center distance, required clearance = {clearance}mm):")
     for v in violations:
-        if v['type'] == 'segment-segment' and 'closest_pt1' in v and v['closest_pt1']:
+        if v['type'] in ('segment-segment', 'segment-segment-track-rule') \
+                and 'closest_pt1' in v and v['closest_pt1']:
             pt1 = v['closest_pt1']
             pt2 = v['closest_pt2']
             dist = math.sqrt((pt2[0] - pt1[0])**2 + (pt2[1] - pt1[1])**2)
@@ -1658,10 +1659,15 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                           f"{'(other-only)' if r.other_only else ''}"
                           for r in _track_rules))
 
-    def _track_pair_cl(net_a: int, net_b: int, layer: str) -> float:
+    def _track_pair_cl(net_a: int, net_b: int, layer: str):
+        """Effective seg-seg clearance for the pair, plus the #549 TrackRule
+        that RAISED it (None when no track rule binds above the base value).
+        The rule identity is what lets the violation record distinguish a
+        structural, floor-governed rule pair from a physical graze."""
         eff = _pair_cl(net_a, net_b, layer=layer)
+        rule = None
         if not _track_rules:
-            return eff
+            return eff, rule
         a_cls = _cls_of.get(net_a, ())
         b_cls = _cls_of.get(net_b, ())
         for r in _track_rules:
@@ -1669,7 +1675,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             binds = ((a_in != b_in) or (a_in and b_in and not r.other_only))
             if binds and r.clearance_mm > eff:
                 eff = r.clearance_mm
-        return eff
+                rule = r
+        return eff, rule
 
     def _layer_cl(layer: str, eff: float) -> float:
         v = _lcl.get(layer) if _lcl else None
@@ -1842,7 +1849,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 continue
             checked_pairs.add(pair_key)
 
-            _eff = _track_pair_cl(net1, net2, layer=seg1.layer)
+            _eff, _trule = _track_pair_cl(net1, net2, layer=seg1.layer)
             has_violation, overlap, pt1, pt2 = check_segment_overlap(seg1, seg2, _eff, clearance_margin)
             if has_violation and _graphic_pair_is_same_net(seg1, seg2, net1, net2):
                 has_violation = False
@@ -1851,8 +1858,19 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 net2_name = pcb_data.nets.get(net2, None)
                 net1_str = net1_name.name if net1_name else f"net_{net1}"
                 net2_str = net2_name.name if net2_name else f"net_{net2}"
-                violations.append(_mark_required({
-                    'type': 'segment-segment',
+                # #549 classification: the pair is RULE-governed (not a
+                # physical graze) when a track rule raised the clearance AND
+                # the copper gap (eff - overlap) still clears the base pair
+                # value -- i.e. the violation exists only because of the rule.
+                # Those pairs are the structural population a registered
+                # check_dru floor gates; graders may treat them as advisory.
+                _rule_only = False
+                if _trule is not None:
+                    _base = _pair_cl(net1, net2, layer=seg1.layer)
+                    _rule_only = (_eff - overlap) >= _base * (1 - clearance_margin)
+                _v = {
+                    'type': ('segment-segment-track-rule' if _rule_only
+                             else 'segment-segment'),
                     'net1': net1_str,
                     'net2': net2_str,
                     'layer': seg1.layer,
@@ -1861,7 +1879,12 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     'loc2': (seg2.start_x, seg2.start_y, seg2.end_x, seg2.end_y),
                     'closest_pt1': pt1,
                     'closest_pt2': pt2,
-                }, _eff))
+                }
+                if _rule_only:
+                    # full rule name; harness floors key on the prefix before
+                    # ':' (split(':')[0]) -- keep both derivable.
+                    _v['track_rule'] = _trule.name
+                violations.append(_mark_required(_v, _eff))
 
             # Also check for segment crossings (different nets)
             crosses, cross_point = segments_cross(seg1, seg2)
@@ -2947,9 +2970,11 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 print(f"\n{vtype.upper()} violations ({len(vlist)}):")
                 print("-" * 40)
                 for v in vlist[:limit]:  # Show first `limit` of each type
-                    if vtype == 'segment-segment':
+                    if vtype in ('segment-segment', 'segment-segment-track-rule'):
                         print(f"  {v['net1']} <-> {v['net2']}")
                         print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
+                        if v.get('track_rule'):
+                            print(f"    Track rule: '{v['track_rule']}' (#549; floor-governed pair)")
                         print(f"    Seg1: ({v['loc1'][0]:.2f},{v['loc1'][1]:.2f})-({v['loc1'][2]:.2f},{v['loc1'][3]:.2f})")
                         print(f"    Seg2: ({v['loc2'][0]:.2f},{v['loc2'][1]:.2f})-({v['loc2'][2]:.2f},{v['loc2'][3]:.2f})")
                     elif vtype == 'via-segment':
