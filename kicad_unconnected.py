@@ -23,6 +23,16 @@ Exit codes follow the repo's gate convention: 0 clean, 4 when items remain,
 net + both endpoints with x/y/layer/kind) -- a machine-readable work list
 naming each remaining join, so an endgame step can target exact pad<->copper
 pairs instead of re-deriving them from the human-readable --items text.
+
+Two caller contracts on --pairs-json worth stating (both verified):
+  * on exit 3 (no oracle) NO pairs file is written -- the failure return
+    happens before the writer runs, so a caller reading the path
+    unconditionally will see a stale or missing file. Check the exit first.
+  * the pairs count can be BELOW the item count (items whose endpoints fail
+    to parse or straddle nets are dropped), so ``KICAD_UNCONNECTED_PAIRS: 0``
+    beside exit 4 is a legitimate state -- it must never be read as clean;
+    the exit code carries the verdict, the pairs file only the targetable
+    subset.
 """
 from __future__ import annotations
 
