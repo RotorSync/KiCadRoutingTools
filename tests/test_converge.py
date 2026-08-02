@@ -160,6 +160,55 @@ def test_status_warns_when_the_budget_goes_to_the_instrument():
     print("  PASS: status splits the budget and warns on a lopsided one")
 
 
+# ------------------------------------------------------------ where --oracle
+
+def test_parse_pairs_yields_join_specs():
+    """parse_pairs turns raw DRC unconnected items into {net, a, b} join
+    specs with x/y/layer/kind -- no kicad-cli needed to verify the shape."""
+    from kicad_unconnected import parse_pairs
+    items = [
+        {'items': [
+            {'description': 'Pad 1 [GND] of R1 on F.Cu',
+             'pos': {'x': 10.0, 'y': 20.0}},
+            {'description': 'Track [GND] on F.Cu',
+             'pos': {'x': 11.5, 'y': 20.0}}]},
+        # straddles nets -> dropped, exactly as the oracle drops it
+        {'items': [
+            {'description': 'Pad 2 [VCC] of R1 on F.Cu',
+             'pos': {'x': 1.0, 'y': 1.0}},
+            {'description': 'Track [GND] on F.Cu',
+             'pos': {'x': 2.0, 'y': 1.0}}]},
+    ]
+    pairs = parse_pairs(items)
+    assert len(pairs) == 1, pairs
+    p = pairs[0]
+    assert p['net'] == 'GND'
+    assert p['a'] == {'x': 10.0, 'y': 20.0, 'layer': 'F.Cu', 'kind': 'pad'}
+    assert p['b']['kind'] == 'track'
+    print("  PASS: raw DRC items become exact join specs; cross-net pairs drop")
+
+
+def test_where_without_nets_or_oracle_refuses():
+    r = _cv(['where', BOARD])
+    assert r.returncode == 2, (r.returncode, r.stdout)
+    assert '--oracle' in r.stdout
+    print("  PASS: where with neither --nets nor --oracle refuses with advice")
+
+
+def test_where_oracle_prints_the_join_work_list():
+    """On the unrouted fixture, KiCad's own DRC (zones refilled) must surface
+    joins, each as an exact endpoint-pair spec, before the forensics."""
+    from kicad_unconnected import find_kicad_cli
+    if find_kicad_cli() is None:
+        print("  SKIP: kicad-cli not installed")
+        return
+    r = _cv(['where', BOARD, '--oracle', '--nets', 'GND'], timeout=600)
+    assert 'ORACLE:' in r.stdout, r.stdout[:1500]
+    assert 'join(s) remain' in r.stdout
+    assert ' <-> ' in r.stdout, "no pair spec printed:\n" + r.stdout[:1500]
+    print("  PASS: where --oracle prints KiCad's join list as pair specs")
+
+
 if __name__ == '__main__':
     for k, v in sorted(globals().items()):
         if k.startswith('test_'):

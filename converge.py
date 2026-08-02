@@ -206,10 +206,39 @@ def cmd_poses(a):
 
 def cmd_where(a):
     """net_forensics already answers 'where is the gap and what is walling it
-    in', per layer, nearest-first. Nothing in the usual chain calls it."""
+    in', per layer, nearest-first. Nothing in the usual chain calls it.
+
+    --oracle prepends KiCad's OWN join list (kicad-cli DRC after a real zone
+    refill, parsed to endpoint pairs): each remaining join printed as an
+    exact net + pad<->copper pair spec, THEN the per-net forensics. Run-5's
+    endgame worked joins one at a time from --items prose; this makes the
+    work list machine-shaped and scopes forensics to the nets that still
+    need work."""
+    nets = list(a.nets or [])
+    if getattr(a, 'oracle', False):
+        from kicad_unconnected import kicad_unconnected, parse_pairs
+        n, items, err = kicad_unconnected(a.board)
+        if n is None:
+            print(f"ORACLE: ERR {err}")
+            return 3
+        pairs = parse_pairs(items)
+        print(f"ORACLE: {len(pairs)} join(s) remain (kicad-cli DRC, zones refilled)")
+        for p in pairs:
+            pa, pb = p['a'], p['b']
+            print(f"  {p['net']}: {pa['kind']}@({pa['x']:.3f},{pa['y']:.3f},"
+                  f"{pa['layer'] or 'all'}) <-> {pb['kind']}@({pb['x']:.3f},"
+                  f"{pb['y']:.3f},{pb['layer'] or 'all'})")
+        oracle_nets = sorted({p['net'] for p in pairs})
+        if not nets:
+            nets = oracle_nets
+        if not nets:
+            return 0
+    if not nets:
+        print("where: no nets given (pass --nets, or --oracle to derive them)")
+        return 2
     argv = [sys.executable, '-X', 'utf8',
             os.path.join(ROOT, 'net_forensics.py'), a.board,
-            '--nets'] + list(a.nets) + ['--radius', str(a.radius)]
+            '--nets'] + nets + ['--radius', str(a.radius)]
     return subprocess.run(argv, cwd=ROOT).returncode
 
 
@@ -309,8 +338,14 @@ def build_parser():
 
     w = sub.add_parser('where', help='islands, gaps and the copper walling them in')
     w.add_argument('board')
-    w.add_argument('--nets', nargs='+', required=True)
+    w.add_argument('--nets', nargs='+', default=None,
+                   help='nets to run forensics on (optional with --oracle, '
+                        'which derives them from the remaining joins)')
     w.add_argument('--radius', type=float, default=1.0)
+    w.add_argument('--oracle', action='store_true',
+                   help="prepend KiCad's own join list (kicad-cli DRC after a "
+                        "zone refill) as exact endpoint-pair specs, and scope "
+                        "forensics to those nets when --nets is omitted")
     w.set_defaults(fn=cmd_where)
 
     r = sub.add_parser('record', help='store a board and record what produced it')
