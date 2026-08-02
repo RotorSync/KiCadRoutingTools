@@ -116,6 +116,8 @@ LIST_FLAGS = {
     # route to TextCtrls via ai_plan's alias table.
     '--rip-existing-nets': 'rip_existing_nets',
     '--protect-nets': 'protect_nets',
+    # #549: plane scripts' corridor-seed allowlist.
+    '--corridor-nets': 'corridor_nets',
     '--nets': None,  # handled per action
     '--pairs': None,
     '--plane-layers': None,
@@ -340,7 +342,7 @@ def parse_command(argv):
         step['nets'] = [str(n) for n in nets] or ['*']
     for k in ('--power-nets', '--power-nets-widths', '--layer-costs',
               '--layers', '--polarity-swap-nets', '--coplanar-nets',
-              '--rip-existing-nets', '--protect-nets'):
+              '--rip-existing-nets', '--protect-nets', '--corridor-nets'):
         if k in lists:
             step['params'][LIST_FLAGS[k]] = lists[k]
     return step

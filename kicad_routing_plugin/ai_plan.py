@@ -231,6 +231,8 @@ _PARAM_CONTROL_ALIASES = {
     # #521 run-6: nets protected from rip-up for the run (both route tabs
     # name their TextCtrl protect_nets_ctrl).
     'protect_nets': 'protect_nets_ctrl',
+    # #549: plane via placement's corridor-seed allowlist (planes tab).
+    'corridor_nets': 'corridor_nets_ctrl',
     'ordering': 'ordering_strategy',
     'direction': 'direction_choice',
     'time_matching': 'time_matching_check',

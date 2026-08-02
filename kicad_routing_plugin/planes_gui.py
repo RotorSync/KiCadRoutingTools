@@ -345,6 +345,19 @@ class CreatePlanesOptionsPanel(wx.Panel):
             "them (it handles rip-up/restore safely).")
         ripup_sizer.Add(self.rip_blocker_check, 0, wx.ALL, 5)
 
+        # #549: soft via-site preference around path-critical nets' copper.
+        corridor_row = wx.BoxSizer(wx.HORIZONTAL)
+        corridor_row.Add(wx.StaticText(self, label="Corridor nets:"),
+                         0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.corridor_nets_ctrl = wx.TextCtrl(self, value="")
+        self.corridor_nets_ctrl.SetToolTip(
+            "Net patterns whose committed-copper corridors via placement should "
+            "prefer to keep clear (soft, never excludes the only site). Empty = "
+            "AUTO (the board's protected nets + impedance declarations); "
+            "'none' disables.")
+        corridor_row.Add(self.corridor_nets_ctrl, 1, wx.ALIGN_CENTER_VERTICAL)
+        ripup_sizer.Add(corridor_row, 0, wx.EXPAND | wx.ALL, 5)
+
         sizer.Add(ripup_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
 
         # Area via stitching (#485). Controls named after the engine params
@@ -480,7 +493,10 @@ class CreatePlanesOptionsPanel(wx.Panel):
             'zone_clearance': (self.zone_clearance.GetValue()
                                if self.zone_clearance_check.GetValue() else None),
             'max_search_radius': self.max_search_radius.GetValue(),
-            'rip_blocker_nets': self.rip_blocker_check.GetValue(),            'add_gnd_vias': self.add_gnd_vias_check.GetValue(),
+            'rip_blocker_nets': self.rip_blocker_check.GetValue(),
+            'corridor_nets': ([t for t in self.corridor_nets_ctrl.GetValue().split() if t]
+                              or None),
+            'add_gnd_vias': self.add_gnd_vias_check.GetValue(),
             'gnd_via_distance': self.gnd_via_distance.GetValue(),
             'gnd_via_net': self.gnd_via_net.GetValue(),
             'same_net_pad_clearance': same_net_clr,
@@ -590,7 +606,10 @@ class RepairPlanesOptionsPanel(wx.Panel):
             'min_track_width': self.min_track_width.GetValue(),
             'analysis_grid_step': self.analysis_grid.GetValue(),
             'repair_pads': self.repair_pads.GetValue(),
-            'rip_blocker_nets': self.rip_blocker_check.GetValue(),        }
+            'rip_blocker_nets': self.rip_blocker_check.GetValue(),
+            'corridor_nets': ([t for t in self.corridor_nets_ctrl.GetValue().split() if t]
+                              or None) if hasattr(self, 'corridor_nets_ctrl') else None,
+        }
 
     def _on_max_track_width_changed(self, event):
         """Validate max track width >= track width from Basic tab."""
@@ -1132,6 +1151,7 @@ class PlanesTab(wx.Panel):
              reconnect_strips) = create_plane(
                 input_file=self.board_filename,
                 output_file="",
+                corridor_nets=config.get('corridor_nets'),
                 net_names=expanded_nets,
                 plane_layers=expanded_layers,
                 via_size=config.get('via_size', defaults.VIA_SIZE),
@@ -1379,6 +1399,7 @@ class PlanesTab(wx.Panel):
              ripped_net_ids, strip_segments) = repair_planes(
                 input_file=self.board_filename,
                 output_file="",
+                corridor_nets=config.get('corridor_nets'),
                 net_names=net_names,
                 plane_layers=plane_layers,
                 track_width=config.get('track_width', defaults.TRACK_WIDTH),

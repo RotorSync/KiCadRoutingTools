@@ -57,6 +57,7 @@ BOOL_FLAGS = {
 LIST_FLAGS = {
     '--rip-existing-nets': 'rip_existing_nets',
     '--protect-nets': 'protect_nets',
+    '--corridor-nets': 'corridor_nets',
     '--polarity-swap-nets': 'polarity_swap_nets',
     '--coplanar-nets': 'coplanar_nets',
 }
@@ -268,7 +269,7 @@ _ACTION_BLOCK_HANDLED = {
 # Params that MUST resolve to a GUI control (the D5 fallback list + D3 polarity
 # + D7 QFN width/clearance).
 _MUST_RESOLVE = {
-    'rip_existing_nets', 'protect_nets',
+    'rip_existing_nets', 'protect_nets', 'corridor_nets',
     'impedance', 'ordering', 'direction', 'time_matching',
     'keepout', 'guide_corridor', 'length_match_groups', 'swappable_nets',
     'polarity_swap_nets', 'qfn_track_width', 'qfn_clearance',

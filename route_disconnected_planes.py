@@ -353,7 +353,8 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
                         protected_net_ids, first_failure, ripped_net_ids, verbose,
                         distant_trace_radius=0.0, shared_via_maps=None,
                         partial_restores=None, plane_oracle=None,
-                        corridor_ghosts=None, write_lists=None):
+                        corridor_ghosts=None, write_lists=None,
+                        corridor_seeds=None):
     """A plane-net pad too small to drop a via in needs a trace to the plane (or
     to an adjacent same-net pad); if signal nets block that trace, rip them (up
     to max_rip_nets), retry the tap. Identifies the blocker from the failed
@@ -444,6 +445,7 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
             verbose=verbose, fine_for_all=True, distant_trace_radius=distant_trace_radius,
             shared_via_maps=shared_via_maps, plane_oracle=plane_oracle,
             corridor_ghosts=corridor_ghosts,
+            corridor_seeds=corridor_seeds,
             # This tap's own rips freed this corridor FOR the tap: their
             # ghosts must not repel it.
             ghost_exclude_ids=frozenset(ripped_ids_local))
@@ -763,6 +765,10 @@ def route_planes(
     clamp_netclasses: bool = True,
     clearance_ceiling: Optional[float] = None,
     add_teardrops: bool = False,
+    # #549 B: glob patterns naming nets whose committed-copper corridors via
+    # placement should prefer to keep clear. None -> AUTO (the board's
+    # protected/impedance records); ['none'] -> off.
+    corridor_nets: Optional[List[str]] = None,
 ) -> Tuple[int, int]:
     """
     Route between disconnected regions in power plane zones.
@@ -1002,6 +1008,14 @@ def route_planes(
     corridor_ghosts = CorridorGhosts(_sb_mode) if _sb_mode else None
     if corridor_ghosts is not None:
         print(f"  (#517 corridor ghosts armed: {_sb_mode} mode)")
+
+    # #549 B: SEPARATE seed registry from COMMITTED copper of path-critical
+    # nets (auto: the board's protected/impedance records). Soft via-site
+    # preference only; independent of KICAD_PLANE_RIP_SOFTBLOCK.
+    from plane_corridor_ghosts import seed_corridor_ghosts
+    corridor_seeds = seed_corridor_ghosts(pcb_data, corridor_nets,
+                                          via_size, clearance,
+                                          input_file=input_file)
 
     # #517 instrumentation: which PASS placed each piece of this run's new
     # copper (pad-tap, region-join, partial-restore, reconnect, custody
@@ -1400,7 +1414,8 @@ def route_planes(
                         distant_trace_radius=distant_radius,
                         shared_via_maps=shared_maps,
                         plane_oracle=plane_oracle,
-                        corridor_ghosts=corridor_ghosts
+                        corridor_ghosts=corridor_ghosts,
+                        corridor_seeds=corridor_seeds
                     )
                     _rips_before = len(ripped_net_ids)
                     if not result.success and rip_blocker_nets:
@@ -1425,6 +1440,7 @@ def route_planes(
                                               else None),
                             plane_oracle=plane_oracle,
                             corridor_ghosts=corridor_ghosts,
+                            corridor_seeds=corridor_seeds,
                             write_lists=(all_new_segments, all_new_vias))
                         if rr is not None:
                             result = rr
@@ -2582,7 +2598,8 @@ def route_planes(
                             distant_trace_radius=0.0, disable_reuse=True,
                             shared_via_maps=shared_maps,
                             plane_oracle=sweep_oracle,
-                            corridor_ghosts=corridor_ghosts)
+                            corridor_ghosts=corridor_ghosts,
+                            corridor_seeds=corridor_seeds)
                         if result.success and result.via is not None:
                             if (vtry, dtry) in _escalated_pairs:
                                 warn_fab_escalation(
@@ -2670,7 +2687,8 @@ def route_planes(
                             verbose=verbose, fine_for_all=True, pour_trace_only=True,
                             distant_trace_radius=max_search_radius, disable_reuse=True,
                             plane_oracle=sweep_oracle,
-                            corridor_ghosts=corridor_ghosts)
+                            corridor_ghosts=corridor_ghosts,
+                            corridor_seeds=corridor_seeds)
                         if not (track_res.success and track_res.segments):
                             continue
                         new_seg_objs = []
@@ -3198,6 +3216,12 @@ Examples:
     # cannot get its own via by tracing to an adjacent same-net pad, ripping the
     # signal net(s) blocking that trace, then re-routing them with the original
     # signal parameters - which must therefore be passed through.
+    parser.add_argument("--corridor-nets", nargs="+", metavar="PATTERN", default=None,
+                        help="#549: net-name globs whose committed-copper corridors via "
+                             "placement should prefer to keep clear (soft preference, "
+                             "never excludes the only viable site). Default: AUTO -- the "
+                             "board's protected nets and impedance declarations. Pass "
+                             "'none' to disable.")
     parser.add_argument("--rip-blocker-nets", action="store_true",
                         help="When a plane-net pad cannot be connected, trace to a nearby same-net "
                              "pad, ripping the signal net(s) blocking it, then re-route the ripped nets.")
@@ -3356,6 +3380,7 @@ Examples:
     _rdp_result = route_planes(
         input_file=args.input_file,
         output_file=args.output_file,
+        corridor_nets=args.corridor_nets,
         net_names=net_names,
         plane_layers=plane_layers,
         net_layers=_net_layers,
