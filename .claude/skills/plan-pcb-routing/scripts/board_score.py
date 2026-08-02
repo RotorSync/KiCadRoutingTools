@@ -295,8 +295,13 @@ def score_impedance(root: str, board: str, nets, tmp: str) -> dict:
     tot = d.get('totals') or {}
     if not tot.get('nets_analyzed'):
         # Asked for, but nothing matched -- that is a FINDING (the globs are
-        # wrong, or the nets are unrouted), not a pass.
-        return skipped('no routed nets matched --impedance-nets')
+        # wrong, or the nets are unrouted), not a pass. ran=True with count=None
+        # routes this to UNKNOWN (blocking None, exit 4), never to `ungraded`:
+        # the comma-joined form of --impedance-nets silently zero-matched for
+        # four whole runs on one board while blocking summed without the
+        # component and the exit code read 0 (test-board run 5, journal [11]).
+        return {'ran': True, 'count': None,
+                'reason': 'no routed nets matched --impedance-nets'}
     return {'ran': True, 'count': int(tot.get('nets_with_crossing') or 0),
             'nets_analyzed': tot.get('nets_analyzed'),
             'crossings': tot.get('crossings'),
@@ -471,8 +476,10 @@ def build_parser():
     g.add_argument('--size-margin', type=float, metavar='MM',
                    help='absolute tolerance on the size checks (default: exact floor)')
     p.add_argument('--impedance-nets', nargs='+', metavar='GLOB',
-                   help='route.py --nets glob syntax; enables the impedance '
-                        'component')
+                   help='route.py --nets glob syntax, SPACE separated; commas '
+                        'inside a token are split too (a comma-joined list used '
+                        'to become one impossible glob that silently matched '
+                        'nothing). Enables the impedance component')
     p.add_argument('--net-min-widths', metavar='JSON',
                    help='JSON FILE of {"<net glob>": <min mm>} -- per-net width '
                         'requirements. `undersized` only sees BOARD-WIDE floors, '
@@ -509,7 +516,9 @@ def main():
         conn = score_connectivity(root, args.board)
         drc, undersized = score_drc(root, args.board, args.clearance, sizes)
         floorplan = score_floorplan(root, args.board, args.intent, tmp)
-        imped = score_impedance(root, args.board, args.impedance_nets, tmp)
+        _imp_nets = ([g for tok in args.impedance_nets for g in tok.split(',') if g]
+                     if args.impedance_nets else args.impedance_nets)
+        imped = score_impedance(root, args.board, _imp_nets, tmp)
         length = score_length(args.board, args.length_groups)
         net_widths = score_net_widths(args.board, args.net_min_widths)
 
