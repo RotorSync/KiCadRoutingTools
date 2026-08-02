@@ -835,6 +835,14 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    ordering concern lives here, not at the pour. Prefer NO `--rip-blocker-nets`
    on boards whose BGAs were plane-dropped (the measured failure mode of
    ripping here is routed signals lost for tap pads the drops already serve).
+   **Stitching is normal human practice, not an exotic add-on**: 58% of ~400
+   human corpus boards carry a free-standing GND stitch lattice, median pitch
+   ~2 mm (p25 1.2, p75 3.5) — when the board has GND pours on 2+ layers,
+   recommend `--stitch-vias` here with a pitch in that range (the λ/20
+   `--stitch-max-freq` rule still tightens it for high-speed boards).
+   **Do not recommend `--add-teardrops`** (7% of human boards use teardrops)
+   and **do not set `--thermal-relief`** — leave the tool's default connection
+   style alone.
 5. **Plane Repair** - Reconnect any broken plane regions
 6. **Verification** - DRC and connectivity checks
 
@@ -925,6 +933,19 @@ python3 -X utf8 route_planes.py board_step1b.kicad_pcb board_step1c.kicad_pcb \
     --nets GND VCC \
     --plane-layers B.Cu F.Cu \
     2>&1 | tee /tmp/step1c_pour.txt
+
+**Zone clearance is a MINIMUM-ALLOWED, not a target — never pass a
+`--zone-clearance` larger than the routed clearance.** The default already
+follows `--clearance` and auto-steps down to the fab floor when the pour
+can't thread the densest BGA via lattice; a larger value only stops pours
+from penetrating between balls/vias (human boards pour at ~0.1 for exactly
+this reason). Watch the pour output for
+`pour cannot thread the densest BGA lattice even at the fab floor`: when it
+fires, no clearance setting can get an INNER-layer pour through that field —
+the fix is a pour on the balls' OWN (outer) layer, which connects the pads by
+direct contact (the plane-drop pass then skips those vias: `N pour-covered`).
+`--min-thickness` (default 0.1) matches human under-BGA pours (0.089–0.1);
+leave it unless a fab demands wider minimum copper.
 
 Expect `check_connected` to show the plane nets fully connected from here on
 (the drops + pour serve every BGA plane ball with no tap search).
@@ -1748,11 +1769,11 @@ boards stay 100% connected at every setting — the win is via count and balance
 
 | board | default `1.0 3.0` | `1.0 1.5` |
 |-------|-------------------|-----------|
-| urchin  | B/F 0.17, 177 vias | **B/F 1.01, 98 vias** |
-| piantor | B/F 0.19, 102 vias | **B/F 1.85, 59 vias** |
+| 2-layer corpus board A | B/F 0.17, 177 vias | **B/F 1.01, 98 vias** |
+| 2-layer corpus board B | B/F 0.19, 102 vias | **B/F 1.85, 59 vias** |
 
 `1.0 1.5` roughly **halves the via count** and pulls the layer balance from a
-~6:1 F.Cu skew to near parity (the human urchin layout sits around B/F 0.89).
+~6:1 F.Cu skew to near parity (board A's human layout sits around B/F 0.89).
 `1.0 1.0` lands in the same neighbourhood — pick the one with fewer vias.
 
 #### Route signals at the FAB floor by default (thin is faster AND more complete)
