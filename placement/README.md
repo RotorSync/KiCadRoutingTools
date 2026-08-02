@@ -2,10 +2,12 @@
 
 Perturbative placement optimization for KiCad PCB files. Starts from an
 existing (hand- or AI-made) placement and improves it for routability —
-it does not place boards from scratch. Background research and experiment
-results: [docs/placement-optimization.md](../docs/placement-optimization.md).
+it does not place boards from scratch *unaided* (`place_seed.py` below is
+the aided path: a declared floorplan intent carries the constraints a
+from-scratch run lacks). Background research and experiment results:
+[docs/placement-optimization.md](../docs/placement-optimization.md).
 
-Two command-line tools sit on top of this module:
+Four command-line tools sit on top of this module:
 
 ## place_optimize.py — greedy quench
 
@@ -64,6 +66,85 @@ python place_route_loop.py input.kicad_pcb repaired.kicad_pcb \
 On the kit-dev-coldfire demo board this repaired the hand placement from
 3 failed nets to 0 with 4.8× less router effort, moving only
 resistors/caps/jumpers.
+
+## place_portfolio.py — K diverse candidates from one placement
+
+The quench is deterministic by design (#457), so re-running it never produces
+a different placement: every run walks into the same local minimum. When the
+question is "what are my placement OPTIONS", this tool generates them: legal
+seeded perturbations of the input placement (`jitter` disc offsets, `poses`
+rotation variants pruned by `pair_order` inversions, `swap` block-interior
+position exchanges), each quenched with the ordinary engine, scored **without
+routing**, pruned to a diverse slate, probe-routed at the top, and presented
+as per-candidate renders plus `portfolio.json`.
+
+```bash
+python place_portfolio.py board.kicad_pcb --out-dir pf --seed 0 \
+    --intent floorplan.json --ignore-nets GND VCC
+```
+
+What the contract guarantees:
+
+- **Candidate 0 is the plain quench of the input** — "keep what I have" is a
+  first-class outcome, and its numbers equal a `place_optimize.py` run with
+  the same knobs (asserted by `tests/test_portfolio.py`).
+- **Same `--seed` + same input ⇒ byte-identical portfolio**, across
+  `PYTHONHASHSEED` values. Each candidate draws from its own
+  `random.Random(f"{seed}:{i}:{strategy}")` stream, so `--only N`
+  regenerates candidate N alone, byte-identically — that is the replay
+  primitive the `--ledger` records (`converge.py replay` runs it).
+- **Hard gates, then an ungameable rank.** A candidate is ranked only if it
+  adds no courtyard overlap and no out-of-board parts beyond the baseline's,
+  and (with `--intent`) grades error-free. Rank is lexicographic over
+  numbers the repo already trusts: `(crossings, inversions, hpwl,
+  health_penalty, displacement, index)` — no new magic weights.
+- **Diversity is pose distance, not hpwl distance** (hpwl reads per-net
+  extremes, so a mirrored arrangement can tie a clone). Kept candidates sit
+  ≥ `--diversity-mm` apart, the baseline included; when fewer survive, the
+  slate is backfilled by rank and SAYS so.
+- **Probe tier (`--route-top 2` by default)**: baseline + top kept candidates
+  are actually routed (one shared affected-net set, so verdicts compare like
+  with like; the `_ratsnest_screen` veto skips a probe on a candidate whose
+  ratsnest clearly regressed). `portfolio.json` carries TWO rankings —
+  `ranking_static` and `ranking_routed` — because measured copper and a
+  proxy must not interleave in one list.
+
+A board that already carries copper is refused (exit 3): placement moves
+footprints, not tracks. Run the portfolio on the placed pre-route board and
+re-route the chosen candidate.
+
+## place_seed.py — intent-driven initial placement
+
+The aided from-scratch path. Given an UNPLACED board (netlist import, a
+generator's pile) plus a floorplan intent, it emits a legal starting
+placement: edge connectors on their declared edge inside their overhang band,
+single-ref zones at the spec coordinate, multi-ref zones packed radially,
+everything else at the nearest legal pose to its connectivity centroid (which
+is also what lands a decap next to its IC). The intent's `must_lock` refs are
+stamped `(locked yes)` into the output, a quench polish tidies the free
+parts, and the result is **graded against the same intent it was built
+from** — a seed that fails its own intent exits 4, deliberately.
+
+```bash
+python place_seed.py unplaced.kicad_pcb seed.kicad_pcb --intent floorplan.json
+python place_seed.py unplaced.kicad_pcb seed3.kicad_pcb --intent floorplan.json --seed 3
+```
+
+Rotations: the input rotation is tried in full first and kept when it fits; a
+part with no contained legal pose at it falls back to its 90° lattice (noted
+in the output — measured: an LDO with 0 legal poses at rot 0 and 3 at rot 90
+on a packed board). A part whose rotation is a *decision* (pin order, the U3
+rot-180 case) must be **locked** — the intent schema cannot express a
+rotation, and an unlocked load-bearing rotation was never protected from the
+quench either. Explore rotations deliberately with
+`place_portfolio.py --strategy poses`.
+
+Requires an Edge.Cuts outline (exit 3 without one — the outline is spec-owned
+and will not be invented) and refuses a board that already looks placed
+(use `place_portfolio.py` to explore around an existing placement, or
+`--force` to discard it). Different `--seed` values give genuinely different
+legal seeds; the same seed reproduces byte for byte. The two compose:
+`place_seed --seed N` → `place_portfolio` diversifies and ranks.
 
 ## place_fanout_clearance.py — decoupling-cap clearance repair (issue #130)
 
@@ -150,6 +231,10 @@ python3 tests/test_456_courtyard_parser.py   # courtyard shapes + silk bleed (#4
 python3 tests/test_456_side_and_outline.py   # board side, real outline, graders (#456)
 python3 tests/test_459_groups.py             # block sources + parsing (#459)
 python3 tests/test_459_group_moves.py        # rigid block translation (#459)
+python3 tests/test_portfolio_strategies.py   # perturbation strategy invariants
+python3 tests/test_portfolio_determinism.py  # portfolio seed/replay contract (slow)
+python3 tests/test_portfolio.py              # portfolio smoke + identity anchor (slow)
+python3 tests/test_place_seed.py             # intent-driven seeding (slow)
 ```
 
 Quench output is reproducible across processes — the same board and arguments
@@ -625,6 +710,8 @@ is followed by a settle beat, so the moves only play once the camera has arrived
 | File | Purpose |
 |------|---------|
 | `quench.py` | The optimizer: cost terms, move generation, greedy quench |
+| `portfolio.py` | K diverse candidates: perturbation strategies, gates, ranking, diversity selection |
+| `seeder.py` | Intent-driven initial placement for unplaced boards, and `(locked yes)` stamping |
 | `../group_routing.py` | Block → net scoping, and the undo, for `route.py` (#459) |
 | `fanout_clearance.py` | Post-fanout decoupling-cap clearance repair (#130) |
 | `groups.py` | Placement blocks: which parts move as one rigid body (#459) |

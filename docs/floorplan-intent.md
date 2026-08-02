@@ -18,6 +18,14 @@ python3 check_floorplan.py board.kicad_pcb --intent floorplan.json
 python3 check_floorplan.py board.kicad_pcb --intent floorplan.json --json findings.json
 ```
 
+The intent is also a GENERATOR input, not only a grader's: `place_seed.py`
+turns a declared intent into an initial placement for an unplaced board
+(zones, edge bands, locks and decap rules become placement constraints, and
+the emitted seed is graded against the same intent it was built from), and
+`place_portfolio.py` uses the intent as the hard gate plus the `health`
+signals when ranking K perturbed placement candidates. See
+`placement/README.md` for both.
+
 ## The board outline is not editable by this toolchain
 
 `envelope` is **read from the board**, never authored. A part outside it is a

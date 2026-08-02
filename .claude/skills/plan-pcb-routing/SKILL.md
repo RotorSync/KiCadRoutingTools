@@ -22,11 +22,12 @@ python3 -X utf8 place_optimize.py board.kicad_pcb --suggest-locks
 
 | board state | run placement? | tool |
 |---|---|---|
-| **unplaced** (test it — see below) | **NO** — out of scope; report and stop | — |
+| **unplaced** (test it — see below) | follow the **unplaced ladder** below — seeder, then intent-driven `place_seed.py`, and report-and-stop only when NEITHER applies | see below |
 | careful hand placement, routing not yet attempted | **NO** | — |
 | routing already completed clean | **NO** — *unless* a spec clause placement could fix is still violated; see the last row of 9.3d | — |
 | board already carries copper (the tools exit 3) | **NO** — placement moves footprints, not tracks | — |
 | rough / imported / auto-generated placement | yes | `place_optimize.py --max-displacement 3` |
+| placed, and the user wants placement OPTIONS — or a converged run's remaining failures were classified **floorplan-shaped** | yes — generate a SLATE, not a nudge | `place_portfolio.py` (Step 0c-bis) |
 | routing FAILED and `/diagnose-routing-failures` blames **congestion / blockers** | yes | `place_route_loop.py` |
 | routing FAILED and the diagnosis is **parameters** (grid, ripup budget, layer costs) | **NO** — fix the parameters | — |
 
@@ -57,14 +58,40 @@ len({(round(f.x, 3), round(f.y, 3)) for f in pcb.footprints.values()}) < len(pcb
 `state_unplaced` / `state_partially_unplaced` / `state_spread_ratio` for the
 cases where an outline does exist.
 
-This toolchain **refines** an existing placement; it does not place a board from
-scratch. Report that plainly, tell the user to place the parts in KiCad, and
-offer to show them the current state:
+This toolchain does not place a board from scratch **unaided** — but "report
+and stop" is the LAST rung of a ladder now, not the first answer. Walk it in
+order:
 
-**If the repo has its own seeder** (a script that writes a starting floorplan and
-the outline from the spec), that is the placement step — run it, then treat its
-output as the "rough / generated placement" row of the table above. The skill
-does not place a board, but it should not stop in front of a repo that does.
+1. **The repo has its own seeder** (a script that writes a starting floorplan
+   and the outline from the spec): that is the placement step — run it, then
+   treat its output as the "rough / generated placement" row of the table
+   above. If the seeder takes a `--seed`/`--variant` axis, that plus
+   Step 0c-bis is how you offer the user OPTIONS instead of one take-it-or-
+   leave-it arrangement.
+2. **No seeder, but an intent exists — or the spec states placement facts**
+   (connector edges, a fixed regulator cluster, a decap rule): author/verify
+   the intent with the Step 0e machinery, then generate the seed from it:
+
+   ```bash
+   python3 -X utf8 place_seed.py board.kicad_pcb seed.kicad_pcb \
+       --intent floorplan.json [--seed N]
+   ```
+
+   The seeder turns the intent's constructs into placement (edge bands →
+   edge poses, single-ref zones → the spec coordinate, multi-ref zones →
+   a packed block, everything else → its connectivity centroid), stamps
+   `must_lock` refs `(locked yes)`, polishes, and **grades its own output
+   against the same intent** — exit 4 means the seed does not satisfy the
+   intent it was built from, and says which rule broke. Rotations: the input
+   rotation is kept when it fits, with a noted 90° lattice fallback when it
+   does not; a part whose rotation is a DECISION (pin order) must be locked —
+   the intent schema cannot express one, and an unlocked load-bearing
+   rotation was never protected from the quench either. Explore rotations
+   deliberately with the portfolio's `poses` strategy afterwards.
+3. **Neither** — no seeder, no intent, and the spec pins nothing (or there
+   is no outline; the outline is spec-owned and is never invented): report
+   that plainly, tell the user to place the parts in KiCad, and offer to
+   show them the current state.
 
 **Then copy the `.kicad_pro` and `.kicad_dru` onto its output yourself.** A
 seeder writes a `.kicad_pcb` and, like `place_optimize.py`, usually nothing else
@@ -244,6 +271,59 @@ python3 -X utf8 place_route_loop.py board.kicad_pcb board_repaired.kicad_pcb \
 
 Costly: it re-routes the whole board every round. `--ratsnest-screen 20` buys
 some of that back by skipping candidates whose ratsnest clearly regressed.
+
+### Step 0c-bis: when one placement is not enough — the portfolio
+
+The quench is deterministic by design, so re-running Step 0c can never
+produce a different arrangement — every run walks into the same local
+minimum, and each converged run's measurements tend to get folded back into
+the seed as constants, ratcheting the search space smaller. When the right
+question is "what are the placement OPTIONS", generate a slate:
+
+```bash
+python3 -X utf8 place_portfolio.py board.kicad_pcb --out-dir pf --seed 0 \
+    --intent floorplan.json --ignore-nets <the Step 5 plane nets> \
+    --lock <the 0a/0b locks>
+```
+
+**WHEN:** (a) run N+1 of a converged board whose remaining failures were
+classified **floorplan-shaped** (9.3d) — the portfolio explores exactly the
+axis those findings blame; (b) right after a seeder produced the first
+placement, before sinking a full chain into the only arrangement anyone has
+ever tried; (c) the user asks for options. It runs on the placed PRE-ROUTE
+board (copper → exit 3), and candidate 0 is always the plain quench of the
+input — "keep what I have" stays a first-class outcome.
+
+**The acceptance rule generalizes K-way, and stays a conjunction.** The
+Step 0c rule (metrics no worse + intent passes + repo gates pass) applies
+**per candidate against the baseline row**; the portfolio pre-applies the
+first two as its hard gates, the repo-local gates are still yours to run on
+the candidate you pick. Among survivors:
+
+1. Prefer `ranking_routed` over `ranking_static` — the probe tier
+   (`--route-top`, default: baseline + top 2) routes one SHARED affected-net
+   set, so its `failures`/`iterations` compare like with like. Never adopt
+   on static rank alone when the budget allows one probe route: crossings
+   and hpwl are proxies, and the router is the judge that counts.
+2. Ties go to the LEAST displacement (the slate is diverse by construction —
+   kept candidates sit ≥ `--diversity-mm` apart in pose distance — so a tie
+   is a real tie, not two clones).
+3. A `backfilled` entry in portfolio.json means the diversity bar was not
+   met and that candidate is a near-clone kept only to fill the count —
+   weigh it accordingly.
+
+**Reading the slate is ONE image-budget item, not K.** The per-candidate
+renders (or the `--montage` grid) answer a single question — which
+arrangement — so read them together as one budgeted read, then quote
+`portfolio.json`'s numbers, not the pictures, as evidence.
+
+**Adopting a candidate:** copy it out WITH its siblings (`copy_board.py` —
+the portfolio writes `.kicad_pro`/`.kicad_dru` next to every candidate), and
+it becomes the input to the normal chain. With `--ledger`, every kept
+candidate is stored content-addressed with an exact `--only N` replay
+command (`converge.py replay` runs it); record your adoption as an
+`accepted: true` entry so the chain's provenance survives. Same `--seed` +
+same input reproduces the whole portfolio byte for byte.
 
 ### Step 0d: see it before trusting it
 
@@ -747,7 +827,9 @@ HOW MUCH (never clearance from pixels).
 - Default to **not** running placement. The measured verdict is that the quench
   is a repair tool for rough/generated placements, not a polish pass — on a good
   hand placement it was neutral at best and its default weights caused 2 new
-  routing failures.
+  routing failures. (Exploring OPTIONS is different from polishing: when the
+  question is "which arrangement", `place_portfolio.py` generates a diverse
+  slate without touching the default path — Step 0c-bis.)
 - Run the lock advisor **before** the first placement run, and read the reasons
   rather than pasting the list blind.
 - Keep `--max-displacement` at ~3 mm. It is the dominant safety knob; 10 mm with
@@ -1872,11 +1954,15 @@ Based on the analysis, generate a step-by-step plan. The general order is:
 ### Routing Order Rationale
 
 0. **Placement (conditional -- normally SKIPPED).** Run it ONLY for a rough /
-   imported / generated placement, or when routing has already FAILED and
-   `/diagnose-routing-failures` blames congestion rather than parameters. See
-   Step 0's decision table; the default is **do not run it**. Run the lock
-   advisor first and pass its `--lock` list. A placement step claims NO nets
-   (see the Step 5b carve-out) and invalidates every downstream routed board.
+   imported / generated placement, when routing has already FAILED and
+   `/diagnose-routing-failures` blames congestion rather than parameters, or
+   when the user wants placement OPTIONS / a converged run's failures were
+   floorplan-shaped (then it is `place_portfolio.py`, Step 0c-bis — a slate,
+   not a nudge; and an unplaced board with an intent gets `place_seed.py`
+   first, per the Step 0 ladder). See Step 0's decision table; the default is
+   **do not run it**. Run the lock advisor first and pass its `--lock` list.
+   A placement step claims NO nets (see the Step 5b carve-out) and
+   invalidates every downstream routed board.
 1. **Fanout** (if needed) - Escape routing first, while the board is empty. Exclude
    nets that planes will handle (`"*" "!GND" "!VCC"`) — the exclusion also marks
    them for automatic **plane-drop vias** (#424): each excluded plane ball gets a
