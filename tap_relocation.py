@@ -41,6 +41,8 @@ from __future__ import annotations
 
 import math
 import os
+
+import env_knobs
 from typing import List, Optional, Set, Tuple
 
 from kicad_parser import PCBData, Segment, Via
@@ -48,14 +50,11 @@ from routing_config import GridRouteConfig
 
 
 def tap_relocation_enabled() -> bool:
-    return os.environ.get('KICAD_TAP_RELOCATION', '') in ('1', 'true', 'on')
+    return env_knobs.TAP_RELOCATION
 
 
 def tap_relocation_max() -> int:
-    try:
-        return int(os.environ.get('KICAD_TAP_RELOCATION_MAX', '2') or 2)
-    except ValueError:
-        return 2
+    return env_knobs.TAP_RELOCATION_MAX
 
 
 def plane_zone_net_ids(pcb_data: PCBData) -> Set[int]:

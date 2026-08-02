@@ -318,7 +318,7 @@ def _attempt_edge(pcb_data, net_id, gap, config, net_clearances):
             try:
                 from routing_config import GridCoord as _GC
                 _dx, _dy = (float(t) for t in
-                            os.environ['KICAD_RESCUE_DEBUG_VIA'].split(','))
+                            env_knobs.RESCUE_DEBUG_VIA.split(','))
                 _c = _GC(cfg.grid_step)
                 _g = _c.to_grid(_dx, _dy)
                 print(f"    RESCUE-DEBUG net={net_id} window="

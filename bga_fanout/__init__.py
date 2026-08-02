@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import math
 from typing import List, Dict, Tuple, Optional, Set
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 import sys
 import os
@@ -1841,7 +1841,7 @@ def _underpad_shrink_rescue(footprint, pcb_data, grid, layers, up_kw,
     return tracks, vias_to_add, failed_nets
 
 
-def generate_bga_fanout(footprint: Footprint,
+def _generate_bga_fanout_core(footprint: Footprint,
                         pcb_data: PCBData,
                         net_filter: Optional[List[str]] = None,
                         diff_pair_patterns: Optional[List[str]] = None,
@@ -1903,28 +1903,6 @@ def generate_bga_fanout(footprint: Footprint,
     Returns:
         Tuple of (tracks, vias_to_add, vias_to_remove, failed_nets)
     """
-    # Config-parity probe (#493). The plane engines have dumped their kwargs
-    # since #362; fanout did not, which is why a GUI/CLI escape divergence here
-    # had to be chased by eye. Same contract: only active under
-    # KICAD_DUMP_BATCH_KWARGS + ..._CONTINUE=1, never alters routing. footprint
-    # and pcb_data are dropped (board payload); the component ref is kept so
-    # calls pair up across the two captures.
-    try:
-        from route import _dump_engine_config as _dump
-        _cfg = {k: v for k, v in locals().items()
-                if k not in ('footprint', 'pcb_data', '_dump')}
-        _cfg['component'] = getattr(footprint, 'reference', None)
-        _dump('bga_fanout', _cfg)
-    except Exception as _e:
-        # A missing dep / stale Rust router must NOT be swallowed here. Before
-        # #457 that surfaced as SystemExit -- a BaseException, which this clause
-        # never caught -- but the checks now raise StartupCheckError, which IS an
-        # Exception, so this debug probe silently ate a real startup failure on
-        # every fanout call.
-        from startup_checks import StartupCheckError
-        if isinstance(_e, StartupCheckError):
-            raise
-
     if layers is None:
         layers = ["F.Cu", "B.Cu"]
 
@@ -1955,7 +1933,7 @@ def generate_bga_fanout(footprint: Footprint,
         print(f"  {footprint.reference} placed at {footprint.rotation:.1f}° - routing "
               f"in the footprint frame and mapping back (issue #137)")
         rp, back = to_axis_aligned_frame(pcb_data, footprint.reference)
-        tracks, vias_to_add, vias_to_remove, failed_nets = generate_bga_fanout(
+        tracks, vias_to_add, vias_to_remove, failed_nets = _generate_bga_fanout_core(
             rp.footprints[footprint.reference], rp,
             net_filter=net_filter, diff_pair_patterns=diff_pair_patterns, layers=layers,
             track_width=track_width, clearance=clearance, diff_pair_gap=diff_pair_gap,
@@ -2065,7 +2043,7 @@ def generate_bga_fanout(footprint: Footprint,
             # the downstream chain (ottercast_audio: 4 needlessly strapped
             # balls cascaded into +10 disconnected nets). Escape priority is
             # strictly a RESCUE for boards where the single pass drops balls.
-            t0, v0, vr0, f0 = generate_bga_fanout(
+            t0, v0, vr0, f0 = _generate_bga_fanout_core(
                 footprint, pcb_data, check_for_previous=check_for_previous,
                 _single_pass=True, **_kw)
             if not f0:
@@ -2084,7 +2062,7 @@ def generate_bga_fanout(footprint: Footprint,
             _tw = max(track_width, _ff(_ncu)['track_width'])
             _all_keys = {(_p.global_x, _p.global_y) for _p in footprint.pads}
             _extra_keys = {(_p.global_x, _p.global_y) for _p in _extras}
-            tracks, vias_to_add, vias_to_remove, failed_nets = generate_bga_fanout(
+            tracks, vias_to_add, vias_to_remove, failed_nets = _generate_bga_fanout_core(
                 footprint, pcb_data, check_for_previous=check_for_previous,
                 _pad_filter=_all_keys - _extra_keys, **_kw)
             # Pass 2: extras route against pass-1 copper (check_for_previous
@@ -2103,7 +2081,7 @@ def generate_bga_fanout(footprint: Footprint,
                         x=_v['x'], y=_v['y'], size=_v['size'], drill=_v['drill'],
                         layers=_v.get('layers') or ['F.Cu', 'B.Cu'],
                         net_id=_v['net_id']))
-                t2, v2, vr2, f2 = generate_bga_fanout(
+                t2, v2, vr2, f2 = _generate_bga_fanout_core(
                     footprint, pcb_data, check_for_previous=True,
                     _pad_filter=_extra_keys, _ignore_prefanned=True, **_kw)
             finally:
@@ -2991,7 +2969,7 @@ def generate_bga_fanout(footprint: Footprint,
         print(f"\n  Channel escape dropped {len(failed_nets)} ball(s) "
               f"({', '.join(failed_nets)}) - retrying with the under-pad grid "
               f"escape (issue #288)...")
-        up_tracks, up_vias, up_vias_rm, up_failed = generate_bga_fanout(
+        up_tracks, up_vias, up_vias_rm, up_failed = _generate_bga_fanout_core(
             footprint, pcb_data, net_filter=net_filter,
             diff_pair_patterns=diff_pair_patterns, layers=underpad_layers,
             layer_costs=underpad_layer_costs,  # filtered to match (#519)
@@ -3033,6 +3011,208 @@ def generate_bga_fanout(footprint: Footprint,
               f"dead via-in-pad: "
               f"{sorted({_names_by_net[r.net_id] for r in _orphans})}")
 
+    return tracks, vias_to_add, vias_to_remove, failed_nets
+
+
+# Per-call report of the plane-ball drop pass (#424 D2), for JSON_SUMMARY /
+# the GUI results panel. Refreshed by every top-level generate_bga_fanout call.
+LAST_PLANE_DROP_REPORT: Dict = {}
+
+
+def generate_plane_drops(footprint: Footprint,
+                         pcb_data: PCBData,
+                         layers: Optional[List[str]] = None,
+                         track_width: float = 0.1,
+                         clearance: float = 0.1,
+                         via_size: float = 0.5,
+                         via_drill: float = 0.3,
+                         net_filter: Optional[List[str]] = None,
+                         grid_step: float = 0.0,
+                         plane_min_pads: int = 6,
+                         verbose: bool = True
+                         ) -> Tuple[List[Dict], List[Dict], Dict]:
+    """Drop a via for every plane-net ball of `footprint` (#424 D2).
+
+    Plane nets are auto-detected with the SAME classification the escape
+    engines use to skip them: a net the caller EXCLUDED via `net_filter` with
+    >= `plane_min_pads` balls on this footprint (with no filter, the pad-count
+    heuristic alone) -- plus any excluded net that already owns a copper zone,
+    so boards with existing pours drop regardless of ball count. Each such SMD
+    ball gets a dog-bone stub + via in a free inter-ball gap (#128 allocator),
+    falling back to an exact-checked, pad-clamped via-in-pad tap; the ball is
+    not routed anywhere -- the plane poured later picks the via up at fill.
+    This kills the tap-behind-the-ball-wall class (#360) by claiming the tap
+    while the under-package space is still open.
+
+    Returns (tracks, vias_to_add, report). Existing same-net connections are
+    respected (idempotent re-runs); failures are reported, never fatal -- the
+    plane step's tap search remains the fallback.
+    """
+    fp_pads = [p for p in footprint.pads if p.net_id]
+    counts = Counter(p.net_name for p in fp_pads)
+    zone_ids = {z.net_id for z in (pcb_data.zones or []) if z.net_id}
+    drop_ids: Set[int] = set()
+    for p in fp_pads:
+        if net_filter is not None:
+            if matches_net_filter(p.net_name, net_filter):
+                continue                      # fanned as a signal, not a plane
+            if counts[p.net_name] >= plane_min_pads or p.net_id in zone_ids:
+                drop_ids.add(p.net_id)
+        elif counts[p.net_name] >= plane_min_pads:
+            drop_ids.add(p.net_id)
+    if not drop_ids:
+        return [], [], {}
+    try:
+        grid = analyze_bga_grid(footprint)
+    except Exception as e:
+        if verbose:
+            print(f"  Plane drops skipped: grid analysis failed ({e})")
+        return [], [], {}
+    from bga_fanout.underpad import generate_underpad_escape
+    net_filter_fn = None
+    if net_filter:
+        net_filter_fn = lambda name: matches_net_filter(name, net_filter)
+    rep: Dict = {}
+    d_tracks, d_vias, _failed = generate_underpad_escape(
+        footprint, pcb_data, grid, layers or ['F.Cu', 'B.Cu'],
+        track_width, clearance, via_size, via_drill, exit_margin=0.5,
+        plane_min_pads=plane_min_pads, net_filter_fn=net_filter_fn,
+        grid_step=grid_step, only_pad_keys=frozenset(),
+        plane_drop_nets=drop_ids, plane_drop_report=rep, verbose=verbose)
+    return d_tracks, d_vias, rep
+
+
+def _plane_drop_pass(footprint, pcb_data, new_tracks, new_vias, net_filter,
+                     layers, track_width, clearance, via_size, via_drill,
+                     grid_step):
+    """Plane-ball drops against the board PLUS this call's fresh copper.
+
+    The signal escape's tracks/vias are only result dicts at this point, so
+    they are materialized into pcb_data for the duration of the drop pass
+    (the #129 escape-priority pattern) -- the drop-only underpad invocation
+    then sees them as ordinary obstacles regardless of which engine (channel,
+    underpad, dog-bone) produced them. Rotated parts (#137) run the pass in
+    their axis-aligned frame like everything else.
+    """
+    from kicad_parser import Segment as _Seg, Via as _Via
+    n_seg0, n_via0 = len(pcb_data.segments), len(pcb_data.vias)
+    try:
+        for t in new_tracks:
+            pcb_data.segments.append(_Seg(
+                start_x=t['start'][0], start_y=t['start'][1],
+                end_x=t['end'][0], end_y=t['end'][1],
+                width=t['width'], layer=t['layer'], net_id=t['net_id']))
+        for v in new_vias:
+            pcb_data.vias.append(_Via(
+                x=v['x'], y=v['y'], size=v['size'], drill=v['drill'],
+                layers=v.get('layers') or ['F.Cu', 'B.Cu'],
+                net_id=v['net_id']))
+        from bga_fanout.rotate_frame import (is_orthogonal,
+                                             to_axis_aligned_frame,
+                                             back_transform_results)
+        if not is_orthogonal(footprint.rotation):
+            rp, back = to_axis_aligned_frame(pcb_data, footprint.reference)
+            d_tracks, d_vias, rep = generate_plane_drops(
+                rp.footprints[footprint.reference], rp, layers,
+                track_width=track_width, clearance=clearance,
+                via_size=via_size, via_drill=via_drill,
+                net_filter=net_filter, grid_step=grid_step)
+            back_transform_results(d_tracks, d_vias, [], back)
+            return d_tracks, d_vias, rep
+        return generate_plane_drops(
+            footprint, pcb_data, layers,
+            track_width=track_width, clearance=clearance,
+            via_size=via_size, via_drill=via_drill,
+            net_filter=net_filter, grid_step=grid_step)
+    finally:
+        del pcb_data.segments[n_seg0:]
+        del pcb_data.vias[n_via0:]
+
+
+def generate_bga_fanout(footprint: Footprint,
+                        pcb_data: PCBData,
+                        net_filter: Optional[List[str]] = None,
+                        diff_pair_patterns: Optional[List[str]] = None,
+                        layers: List[str] = None,
+                        track_width: float = 0.1,
+                        clearance: float = 0.1,
+                        diff_pair_gap: float = 0.101,
+                        exit_margin: float = 0.5,
+                        primary_escape: str = 'horizontal',
+                        force_escape_direction: bool = False,
+                        rebalance_escape: bool = False,
+                        via_size: float = 0.5,
+                        via_drill: float = 0.3,
+                        check_for_previous: bool = False,
+                        no_inner_top_layer: bool = False,
+                        escape_method: str = 'auto',
+                        grid_step: float = 0.0,
+                        layer_costs: Optional[List[float]] = None,
+                        plane_drop: str = 'auto',
+                        _pad_filter: Optional[Set[Tuple[float, float]]] = None,
+                        _ignore_prefanned: bool = False,
+                        _single_pass: bool = False) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+    """BGA fanout: the signal escape engines plus the plane-ball drop pass.
+
+    See _generate_bga_fanout_core for the escape-engine parameters. After the
+    signal escape completes (whichever engine won), every skipped plane-net
+    ball is dropped to a via -- dog-bone gap site preferred, exact-checked
+    via-in-pad fallback -- so the plane poured later picks it up directly
+    (#424 D2 / #360). `plane_drop='auto'` (default) detects plane nets from
+    the fanout's own exclusions and any existing zones; 'off' disables. The
+    KICAD_FANOUT_PLANE_DROP env knob overrides both ('0'/'off' or '1'/'auto'),
+    so recorded manifests can A/B the pass without editing. The per-net drop
+    report is published as bga_fanout.LAST_PLANE_DROP_REPORT.
+    """
+    # Config-parity probe (#493). The plane engines have dumped their kwargs
+    # since #362; fanout did not, which is why a GUI/CLI escape divergence here
+    # had to be chased by eye. Same contract: only active under
+    # KICAD_DUMP_BATCH_KWARGS + ..._CONTINUE=1, never alters routing. footprint
+    # and pcb_data are dropped (board payload); the component ref is kept so
+    # calls pair up across the two captures. Lives on the public wrapper so
+    # plane_drop is part of the compared set; core-internal recursions
+    # (escape priority, auto retry, rotation) no longer dump -- symmetrically
+    # on both fronts, so pairing is unaffected.
+    try:
+        from route import _dump_engine_config as _dump
+        _cfg = {k: v for k, v in locals().items()
+                if k not in ('footprint', 'pcb_data', '_dump')}
+        _cfg['component'] = getattr(footprint, 'reference', None)
+        _dump('bga_fanout', _cfg)
+    except Exception as _e:
+        # A missing dep / stale Rust router must NOT be swallowed here (#457):
+        # startup failures raise StartupCheckError, which IS an Exception.
+        from startup_checks import StartupCheckError
+        if isinstance(_e, StartupCheckError):
+            raise
+
+    tracks, vias_to_add, vias_to_remove, failed_nets = _generate_bga_fanout_core(
+        footprint, pcb_data, net_filter=net_filter,
+        diff_pair_patterns=diff_pair_patterns, layers=layers,
+        track_width=track_width, clearance=clearance,
+        diff_pair_gap=diff_pair_gap, exit_margin=exit_margin,
+        primary_escape=primary_escape,
+        force_escape_direction=force_escape_direction,
+        rebalance_escape=rebalance_escape,
+        via_size=via_size, via_drill=via_drill,
+        check_for_previous=check_for_previous,
+        no_inner_top_layer=no_inner_top_layer, escape_method=escape_method,
+        grid_step=grid_step, layer_costs=layer_costs,
+        _pad_filter=_pad_filter, _ignore_prefanned=_ignore_prefanned,
+        _single_pass=_single_pass)
+
+    LAST_PLANE_DROP_REPORT.clear()
+    _knob = (env_knobs.FANOUT_PLANE_DROP or '').strip().lower()
+    _enabled = {'0': False, 'off': False, 'no': False,
+                '1': True, 'on': True, 'auto': True}.get(
+                    _knob, plane_drop != 'off')
+    if _enabled and _pad_filter is None and not _single_pass:
+        d_tracks, d_vias, rep = _plane_drop_pass(
+            footprint, pcb_data, tracks, vias_to_add, net_filter,
+            layers, track_width, clearance, via_size, via_drill, grid_step)
+        tracks = tracks + d_tracks
+        vias_to_add = vias_to_add + d_vias
+        LAST_PLANE_DROP_REPORT.update(rep)
     return tracks, vias_to_add, vias_to_remove, failed_nets
 
 
@@ -3095,6 +3275,15 @@ def main():
                              'barrels on the inner layers (the standard hand-layout escape). '
                              '"auto" = channel first, and if it drops any ball, retry with '
                              'underpad and keep whichever escapes more (issue #288).')
+    parser.add_argument('--plane-drop', choices=['auto', 'off'], default='auto',
+                        help='Drop a via for every plane-net ball after the signal escape '
+                             '(#424): dog-bone gap via where free, else via-in-pad, so the '
+                             'plane poured later picks the ball up directly instead of the '
+                             'plane step tapping through the finished ball field (#360). '
+                             '"auto" (default) detects plane nets from the --nets exclusions '
+                             '(>= 6 balls, or any excluded net that already owns a zone); '
+                             '"off" disables. KICAD_FANOUT_PLANE_DROP=0/1 overrides both '
+                             '(the recorded-manifest A/B switch).')
     parser.add_argument('--grid-step', type=float, default=0.1,
                         help='Routing grid step in mm (default: 0.1). Escape stub ends are '
                              'snapped to this grid so the router gets on-grid terminals (issue '
@@ -3206,7 +3395,8 @@ def main():
         no_inner_top_layer=args.no_inner_top_layer,
         escape_method=args.escape_method,
         grid_step=args.grid_step,
-        layer_costs=args.layer_costs
+        layer_costs=args.layer_costs,
+        plane_drop=args.plane_drop
     )
 
     if tracks:
@@ -3237,7 +3427,14 @@ def main():
     # `requested` = balls actually attempted (escaped + dropped); skipped power
     # balls and already-fanned nets are not counted. (issue #122)
     import json as _json
-    escaped_net_ids = {t['net_id'] for t in tracks if t.get('net_id') is not None}
+    # #424 D2: plane-drop stubs are taps, not escapes -- keep their nets out
+    # of the requested/escaped ledger (they were never requested).
+    _drop_names = set((LAST_PLANE_DROP_REPORT.get('nets') or {}).keys())
+    _drop_ids = {nid for nid, net in pcb_data.nets.items()
+                 if net.name in _drop_names}
+    escaped_net_ids = {t['net_id'] for t in tracks
+                       if t.get('net_id') is not None
+                       and t['net_id'] not in _drop_ids}
     unescaped = sorted(set(_failed_nets))
     escaped = len(escaped_net_ids)
     requested = escaped + len(unescaped)
@@ -3316,6 +3513,9 @@ def main():
         # direct-routed by a later step). Not failures. The route steps'
         # bare-ball zone exemption keeps them routable automatically.
         'deferred_fanout_nets': sorted(_direct_route_nets),
+        # #424 D2: per-net plane-ball drop counts (gap/in_pad/existing/failed);
+        # empty when the pass is off or the part has no plane balls.
+        'plane_drop': dict(LAST_PLANE_DROP_REPORT),
     }
     print(f"JSON_SUMMARY: {_json.dumps(summary)}")
 

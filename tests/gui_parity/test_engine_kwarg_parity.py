@@ -86,6 +86,10 @@ CLI_ONLY_OK = {
     # its own recorder (movie_recorder.py) driven from the dialog, so it does not
     # hand the engine a callback.
     "vis_callback": "GUI uses movie_recorder.py instead of an engine callback (#482/#506)",
+    # Run-6 A5: the pour gate can only REFUSE on the CLI (exit 3). The GUI
+    # path is warn-only by engine design (return_results=True), so the
+    # opt-out flag has no GUI meaning.
+    "allow_bare_pads": "pour gate refuses only on the CLI; GUI path is warn-only by design (run-6 A5)",
 }
 
 # Kwargs only the GUI passes: the in-memory/live-board plumbing that has no CLI

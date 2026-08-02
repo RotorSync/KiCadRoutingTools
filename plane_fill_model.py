@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import math
 import os
+
+import env_knobs
 from typing import Optional
 
 import numpy as np
@@ -132,7 +134,7 @@ class ZoneFillModel:
         # fidelity terms below make the model predict LESS fill, and every
         # consumer keys off that prediction, so being able to flip each one
         # without a rebuild is how the corpus A/B attributes a delta.
-        if os.environ.get('KICAD_NO_FILL_NETCLASS'):
+        if env_knobs.NO_FILL_NETCLASS:
             _nc = {}
         zc = zone.clearance if zone.clearance is not None \
             else defaults.PLANE_ZONE_CLEARANCE
@@ -184,6 +186,29 @@ class ZoneFillModel:
         def _gi(v, o):
             return int((v - o) / cell)
 
+        def _rings_inside_rows(sub_x, ys, rings):
+            """Even-odd inside test of the (ys x sub_x) sub-grid against the
+            union of `rings` (outer + holes concatenated), via the #546
+            scanline kernel (#556). Bit-identical to the per-row crossing
+            loops it replaces: same strict-straddle condition, the same
+            intercept expression up to commutative float ops, and the same
+            strict `x < xc` count parity (searchsorted side='right' excludes
+            ties exactly like the old `sub_x < xc`). O(rows x edges)
+            vectorized instead of a Python loop per row -- a whole-board
+            keep-out or outline paid rows x edges Python iterations here.
+            Returns (len(ys), len(sub_x)) bool."""
+            from obstacle_map import _scanline_inside_rows
+            arrs = [np.asarray(r, dtype=np.float64) for r in rings if len(r) >= 3]
+            if not arrs:
+                return np.zeros((len(ys), len(sub_x)), dtype=bool)
+            ex1 = np.concatenate([a[:, 0] for a in arrs])
+            ey1 = np.concatenate([a[:, 1] for a in arrs])
+            ex2 = np.concatenate([np.roll(a[:, 0], -1) for a in arrs])
+            ey2 = np.concatenate([np.roll(a[:, 1], -1) for a in arrs])
+            return _scanline_inside_rows(np.asarray(sub_x, dtype=np.float64),
+                                         np.asarray(ys, dtype=np.float64),
+                                         ex1, ey1, ex2, ey2)
+
         def _stamp_disc(px, py, r):
             R = r + guard
             i0, i1 = max(0, _gi(px - R, x0)), min(nx, _gi(px + R, x0) + 2)
@@ -234,18 +259,8 @@ class ZoneFillModel:
             j1 = min(ny, _gi(max(rys) + guard, y0) + 2)
             if i0 >= i1 or j0 >= j1:
                 return
-            sub_x = cxs[i0:i1]
-            for j in range(j0, j1):
-                yv = cys[j]
-                crossings = np.zeros(i1 - i0, dtype=np.int32)
-                for k in range(len(ring)):
-                    rx1, ry1 = ring[k]
-                    rx2, ry2 = ring[(k + 1) % len(ring)]
-                    if (ry1 > yv) == (ry2 > yv):
-                        continue
-                    xc = rx1 + (yv - ry1) * (rx2 - rx1) / (ry2 - ry1)
-                    crossings += (sub_x < xc)
-                free[i0:i1, j] &= (crossings % 2) == 0
+            ins = _rings_inside_rows(cxs[i0:i1], cys[j0:j1], [ring])
+            free[i0:i1, j0:j1] &= ~ins.T
             for k in range(len(ring)):
                 rx1, ry1 = ring[k]
                 rx2, ry2 = ring[(k + 1) % len(ring)]
@@ -412,19 +427,8 @@ class ZoneFillModel:
             j1 = min(ny, _gi(max(kys) + rim, y0) + 2)
             if i0 >= i1 or j0 >= j1:
                 continue
-            sub_x = cxs[i0:i1]
-            for j in range(j0, j1):
-                yv = cys[j]
-                crossings = np.zeros(i1 - i0, dtype=np.int32)
-                for r in rings:
-                    for k in range(len(r)):
-                        rx1, ry1 = r[k]
-                        rx2, ry2 = r[(k + 1) % len(r)]
-                        if (ry1 > yv) == (ry2 > yv):
-                            continue
-                        xc = rx1 + (yv - ry1) * (rx2 - rx1) / (ry2 - ry1)
-                        crossings += (sub_x < xc)
-                free[i0:i1, j] &= (crossings % 2) == 0
+            ins = _rings_inside_rows(cxs[i0:i1], cys[j0:j1], rings)
+            free[i0:i1, j0:j1] &= ~ins.T
             for r in rings:
                 for k in range(len(r)):
                     rx1, ry1 = r[k]
@@ -473,23 +477,9 @@ class ZoneFillModel:
             if len(_ec) >= 3:
                 _stamp_ring_band(_ec)
 
-        # Outline clip (polygon test, vectorized ray cast per row).
-        poly = zone.polygon
-        inside = np.zeros((nx, ny), dtype=bool)
-        px_arr = np.asarray([p[0] for p in poly])
-        py_arr = np.asarray([p[1] for p in poly])
-        for j in range(ny):
-            yv = cys[j]
-            crossings = np.zeros(nx, dtype=np.int32)
-            for k in range(len(poly)):
-                x1, y1 = px_arr[k], py_arr[k]
-                x2, y2 = px_arr[(k + 1) % len(poly)], py_arr[(k + 1) % len(poly)]
-                if (y1 > yv) == (y2 > yv):
-                    continue
-                xc = x1 + (yv - y1) * (x2 - x1) / (y2 - y1)
-                crossings += (cxs < xc)
-            inside[:, j] = (crossings % 2) == 1
-        free &= inside
+        # Outline clip (#556: scanline kernel, bit-identical to the old
+        # per-row ray cast -- see _rings_inside_rows).
+        free &= _rings_inside_rows(cxs, cys, [zone.polygon]).T
 
         # Min-thickness OPENING (KiCad parity): erode by mth/2 then dilate
         # by mth/2 -- exactly the filler's deflate-then-stroke. Regions

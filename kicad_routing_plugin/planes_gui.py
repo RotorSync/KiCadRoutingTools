@@ -358,6 +358,28 @@ class CreatePlanesOptionsPanel(wx.Panel):
         corridor_row.Add(self.corridor_nets_ctrl, 1, wx.ALIGN_CENTER_VERTICAL)
         ripup_sizer.Add(corridor_row, 0, wx.EXPAND | wx.ALL, 5)
 
+        # Run-6 blocker guards (shared engine policy, see
+        # protected_nets.blocker_never_rip_ids).
+        exclude_row = wx.BoxSizer(wx.HORIZONTAL)
+        exclude_row.Add(wx.StaticText(self, label="Never rip as blocker:"),
+                        0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.rip_blocker_exclude_ctrl = wx.TextCtrl(self, value="")
+        self.rip_blocker_exclude_ctrl.SetToolTip(
+            "Net-name globs the blocker rip ladder must never pick, on top of "
+            "the built-in guards (plane nets, protected nets, multi-pad rails).")
+        exclude_row.Add(self.rip_blocker_exclude_ctrl, 1, wx.ALIGN_CENTER_VERTICAL)
+        ripup_sizer.Add(exclude_row, 0, wx.EXPAND | wx.ALL, 5)
+
+        allow_row = wx.BoxSizer(wx.HORIZONTAL)
+        allow_row.Add(wx.StaticText(self, label="Allow rail rip (exact):"),
+                      0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.rip_blocker_allow_ctrl = wx.TextCtrl(self, value="")
+        self.rip_blocker_allow_ctrl.SetToolTip(
+            "EXACT net names for which the multi-pad rail guard is lifted -- a "
+            "deliberate single-rail rip. Does not lift protection.")
+        allow_row.Add(self.rip_blocker_allow_ctrl, 1, wx.ALIGN_CENTER_VERTICAL)
+        ripup_sizer.Add(allow_row, 0, wx.EXPAND | wx.ALL, 5)
+
         sizer.Add(ripup_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
 
         # Area via stitching (#485). Controls named after the engine params
@@ -496,6 +518,10 @@ class CreatePlanesOptionsPanel(wx.Panel):
             'rip_blocker_nets': self.rip_blocker_check.GetValue(),
             'corridor_nets': ([t for t in self.corridor_nets_ctrl.GetValue().split() if t]
                               or None),
+            'rip_blocker_exclude': ([t for t in self.rip_blocker_exclude_ctrl.GetValue().split() if t]
+                                    or None),
+            'rip_blocker_allow': ([t for t in self.rip_blocker_allow_ctrl.GetValue().split() if t]
+                                  or None),
             'add_gnd_vias': self.add_gnd_vias_check.GetValue(),
             'gnd_via_distance': self.gnd_via_distance.GetValue(),
             'gnd_via_net': self.gnd_via_net.GetValue(),
@@ -592,6 +618,27 @@ class RepairPlanesOptionsPanel(wx.Panel):
             "Ripped nets are left unrouted - run the routing tab afterward to reconnect them.")
         sizer.Add(self.rip_blocker_check, 0, wx.LEFT | wx.TOP, 5)
 
+        # Run-6 blocker guards (mirror of the Create tab controls).
+        exclude_row = wx.BoxSizer(wx.HORIZONTAL)
+        exclude_row.Add(wx.StaticText(self, label="Never rip as blocker:"),
+                        0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.rip_blocker_exclude_ctrl = wx.TextCtrl(self, value="")
+        self.rip_blocker_exclude_ctrl.SetToolTip(
+            "Net-name globs the blocker rip ladder must never pick, on top of "
+            "the built-in guards (plane nets, protected nets, multi-pad rails).")
+        exclude_row.Add(self.rip_blocker_exclude_ctrl, 1, wx.ALIGN_CENTER_VERTICAL)
+        sizer.Add(exclude_row, 0, wx.EXPAND | wx.ALL, 5)
+
+        allow_row = wx.BoxSizer(wx.HORIZONTAL)
+        allow_row.Add(wx.StaticText(self, label="Allow rail rip (exact):"),
+                      0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.rip_blocker_allow_ctrl = wx.TextCtrl(self, value="")
+        self.rip_blocker_allow_ctrl.SetToolTip(
+            "EXACT net names for which the multi-pad rail guard is lifted -- a "
+            "deliberate single-rail rip. Does not lift protection.")
+        allow_row.Add(self.rip_blocker_allow_ctrl, 1, wx.ALIGN_CENTER_VERTICAL)
+        sizer.Add(allow_row, 0, wx.EXPAND | wx.ALL, 5)
+
         # Info text
         info = wx.StaticText(self, label="Leave nets/layers empty to auto-detect existing zones.")
         info.SetForegroundColour(wx.Colour(100, 100, 100))
@@ -609,6 +656,10 @@ class RepairPlanesOptionsPanel(wx.Panel):
             'rip_blocker_nets': self.rip_blocker_check.GetValue(),
             'corridor_nets': ([t for t in self.corridor_nets_ctrl.GetValue().split() if t]
                               or None) if hasattr(self, 'corridor_nets_ctrl') else None,
+            'rip_blocker_exclude': ([t for t in self.rip_blocker_exclude_ctrl.GetValue().split() if t]
+                                    or None) if hasattr(self, 'rip_blocker_exclude_ctrl') else None,
+            'rip_blocker_allow': ([t for t in self.rip_blocker_allow_ctrl.GetValue().split() if t]
+                                  or None) if hasattr(self, 'rip_blocker_allow_ctrl') else None,
         }
 
     def _on_max_track_width_changed(self, event):
@@ -1152,6 +1203,8 @@ class PlanesTab(wx.Panel):
                 input_file=self.board_filename,
                 output_file="",
                 corridor_nets=config.get('corridor_nets'),
+                rip_blocker_exclude=config.get('rip_blocker_exclude'),
+                rip_blocker_allow=config.get('rip_blocker_allow'),
                 net_names=expanded_nets,
                 plane_layers=expanded_layers,
                 via_size=config.get('via_size', defaults.VIA_SIZE),
@@ -1400,6 +1453,8 @@ class PlanesTab(wx.Panel):
                 input_file=self.board_filename,
                 output_file="",
                 corridor_nets=config.get('corridor_nets'),
+                rip_blocker_exclude=config.get('rip_blocker_exclude'),
+                rip_blocker_allow=config.get('rip_blocker_allow'),
                 net_names=net_names,
                 plane_layers=plane_layers,
                 track_width=config.get('track_width', defaults.TRACK_WIDTH),

@@ -73,8 +73,11 @@ with tempfile.TemporaryDirectory() as td:
     outs = {}
     for label, extra in (('auto', []), ('none', ['--corridor-nets', 'none'])):
         out = os.path.join(td, f'p_{label}.kicad_pcb')
+        # --allow-bare-pads: this fixture deliberately pours a PARTIAL board
+        # (only the protected net is routed); the run-6 A5 pour gate would
+        # otherwise refuse, which is its job on a real chain.
         r = _run(['route_planes.py', routed, out, '--nets', 'GND',
-                  '--plane-layers', 'B.Cu'] + extra)
+                  '--plane-layers', 'B.Cu', '--allow-bare-pads'] + extra)
         outs[label] = (out, r)
         check(f"pour ({label}) completed", r.returncode == 0 and os.path.isfile(out),
               f"rc={r.returncode}\n{r.stdout[-500:]}")

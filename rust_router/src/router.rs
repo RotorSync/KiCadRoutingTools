@@ -414,6 +414,37 @@ pub(crate) struct GridSearch {
     opts: SearchOptions,
     /// Best heuristic over the sources (RouteStats.initial_h).
     pub(crate) initial_h: i32,
+    /// #529 dynamic iterations -- closest approach: minimum cost-to-go
+    /// (f - g at pop time) over all EXPANDED nodes so far. Seeded with
+    /// initial_h (the sources are the initial frontier).
+    pub(crate) best_h: i32,
+    /// Absolute iteration ceiling for tranche extension. At or below
+    /// max_iterations => the feature is disabled (the default).
+    iteration_ceiling: u32,
+    /// The base budget (max_iterations at construction); each earned
+    /// tranche grants one more of these.
+    base_iterations: u32,
+    /// best_h reference the current tranche must beat by a quantum to earn
+    /// the next tranche. i32::MAX until the first snapshot is taken.
+    tranche_ref_h: i32,
+    /// Iteration at which to take the FIRST reference snapshot (base/2:
+    /// "improved vs iteration 0" is trivially satisfied, so the first grant
+    /// must show improvement over the second half of the base budget).
+    /// u32::MAX once taken; later tranches reference the grant point.
+    snapshot_at: u32,
+    /// One grid cell of approach in weighted-heuristic units.
+    cell_h_unit: i32,
+    /// Quantum floor in h units (quantum_cells * cell_h_unit).
+    quantum_h: i32,
+    /// Relative quantum: fraction (0.02 = 2%) of tranche-start best_h.
+    quantum_frac: f32,
+    /// Consecutive quantum-failing tranches tolerated before denial (#529
+    /// plateau grace). 0 = deny on the first failing tranche.
+    grace_tranches: u32,
+    /// Failing tranches consumed in the CURRENT plateau (reset on progress).
+    grace_used: u32,
+    /// Extension tranches granted (RouteStats.iteration_tranches).
+    pub(crate) tranches_granted: u32,
 }
 
 impl GridSearch {
@@ -470,6 +501,12 @@ impl GridSearch {
             }
         }
 
+        // #529: one grid cell of orthogonal approach, expressed in the same
+        // units as the stored f/g scores (min-layer-cost scaled, h_weight
+        // multiplied -- uniform across all comparisons, so no un-weighting).
+        let cell_h_unit = (((ORTHO_COST as i64 * min_layer_cost as i64 / 1000) as f32)
+            * router.h_weight).max(1.0) as i32;
+
         Self {
             open_set,
             store,
@@ -482,7 +519,67 @@ impl GridSearch {
             target_hint,
             opts,
             initial_h,
+            best_h: initial_h,
+            iteration_ceiling: max_iterations, // disabled unless raised
+            base_iterations: max_iterations,
+            tranche_ref_h: i32::MAX,
+            snapshot_at: max_iterations / 2,
+            cell_h_unit,
+            quantum_h: 2 * cell_h_unit,
+            quantum_frac: 0.02,
+            grace_tranches: 0,
+            grace_used: 0,
+            tranches_granted: 0,
         }
+    }
+
+    /// #529: allow the search to earn extra +base_iterations tranches up to
+    /// `ceiling` total iterations (see extend_budget). A ceiling at or below
+    /// max_iterations (including the pyo3 default 0) leaves the static cap.
+    /// quantum_cells / quantum_pct set the per-tranche improvement quantum:
+    /// max(quantum_cells grid cells, quantum_pct% of tranche-start best_h).
+    /// grace_tranches: consecutive quantum-failing tranches tolerated before
+    /// denial (plateau tolerance -- A* contouring a wall stalls best_h for a
+    /// stretch, then plunges; the reference does NOT advance during grace, so
+    /// progress is judged cumulatively over the whole plateau window).
+    pub(crate) fn set_iteration_ceiling(&mut self, ceiling: u32,
+                                        quantum_cells: f64, quantum_pct: f64,
+                                        grace_tranches: u32) {
+        self.iteration_ceiling = ceiling.max(self.max_iterations);
+        self.quantum_h = ((self.cell_h_unit as f64 * quantum_cells).max(1.0)) as i32;
+        self.quantum_frac = (quantum_pct / 100.0) as f32;
+        self.grace_tranches = grace_tranches;
+    }
+
+    /// #529 tranche grant, called with the iteration cap reached: returns true
+    /// (and raises the cap by one base budget) iff the tranche just completed
+    /// improved best_h by at least a quantum -- max(2 grid cells, 2% of best_h
+    /// at the tranche start). Each tranche must pay for the next, so a
+    /// slow-creep flood cannot ride to the ceiling without genuinely
+    /// approaching the targets. Pure search-internal state: deterministic.
+    fn extend_budget(&mut self) -> bool {
+        if self.max_iterations >= self.iteration_ceiling || self.tranche_ref_h == i32::MAX {
+            return false;
+        }
+        let quantum = self.quantum_h
+            .max((self.tranche_ref_h as f32 * self.quantum_frac) as i32);
+        if self.tranche_ref_h.saturating_sub(self.best_h) < quantum {
+            // Plateau: tolerate up to grace_tranches consecutive failing
+            // tranches, keeping the reference where real progress last stood
+            // so the eventual grant is judged against the pre-plateau mark.
+            if self.grace_used >= self.grace_tranches {
+                return false;
+            }
+            self.grace_used += 1;
+        } else {
+            self.tranche_ref_h = self.best_h;
+            self.grace_used = 0;
+        }
+        self.max_iterations = self.max_iterations
+            .saturating_add(self.base_iterations)
+            .min(self.iteration_ceiling);
+        self.tranches_granted += 1;
+        true
     }
 
     /// True when the search cannot make further progress.
@@ -501,10 +598,16 @@ impl GridSearch {
             Some(e) => e,
             None => return SearchStep::Exhausted,
         };
-        if self.iterations >= self.max_iterations {
+        if self.iterations >= self.max_iterations && !self.extend_budget() {
             return SearchStep::IterationCap;
         }
         self.iterations += 1;
+        // #529 first-tranche reference snapshot (>= not ==: the boundary pop
+        // may be a duplicate skip below, but iterations counts it either way).
+        if self.iterations >= self.snapshot_at {
+            self.tranche_ref_h = self.best_h;
+            self.snapshot_at = u32::MAX;
+        }
 
         let current = current_entry.state;
         let current_key = current.as_key();
@@ -516,6 +619,15 @@ impl GridSearch {
             return SearchStep::Skipped;
         }
         sink.on_expand();
+
+        // #529 closest approach: h = f - g of the expanded node is its
+        // estimated cost-to-go, free at pop time. Cost-to-go (not geometric
+        // distance) so wrong-layer-over-the-target correctly reads as "not
+        // there yet".
+        let h_now = current_entry.f_score.saturating_sub(g);
+        if h_now < self.best_h {
+            self.best_h = h_now;
+        }
 
         // Check if reached target
         if self.target_set.contains(&current_key) {
@@ -989,8 +1101,13 @@ impl GridRouter {
     /// list of floats (#156). When > 0 on a layer, the swept-capsule check
     /// reserves that Euclidean radius along every move on that layer.
     ///
+    /// max_iterations_ceiling: #529 dynamic iterations -- when above
+    /// max_iterations, hitting the cap grants +1x max_iterations tranches
+    /// while best_h keeps improving by a quantum per tranche, up to the
+    /// ceiling. 0 (the default) disables: existing callers are unchanged.
+    ///
     /// C1: thin wrapper over the shared GridSearch core with a StatsSink.
-    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=TrackMarginArg::Scalar(0.0)))]
+    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=TrackMarginArg::Scalar(0.0), max_iterations_ceiling=0, quantum_cells=2.0, quantum_pct=2.0, grace_tranches=0))]
     #[allow(clippy::too_many_arguments)]
     pub fn route_multi(
         &self,
@@ -1004,12 +1121,17 @@ impl GridRouter {
         end_direction: Option<(f64, f64)>,
         direction_steps: i32,
         track_margin: TrackMarginArg,
+        max_iterations_ceiling: u32,
+        quantum_cells: f64,
+        quantum_pct: f64,
+        grace_tranches: u32,
     ) -> (Option<Vec<(i32, i32, u8)>>, u32, std::collections::HashMap<String, f64>) {
         let opts = SearchOptions::new(collinear_vias, via_exclusion_radius,
                                       start_direction, end_direction,
                                       direction_steps, track_margin);
         let mut sink = StatsSink::default();
         let mut search = GridSearch::new(self, sources, targets, max_iterations, opts, &mut sink);
+        search.set_iteration_ceiling(max_iterations_ceiling, quantum_cells, quantum_pct, grace_tranches);
         sink.stats.initial_h = search.initial_h;
 
         loop {
@@ -1020,6 +1142,8 @@ impl GridRouter {
                     stats.path_length = path.len() as u32;
                     stats.path_cost = g;
                     stats.final_g = g;
+                    stats.best_h = search.best_h;
+                    stats.iteration_tranches = search.tranches_granted;
                     stats.open_set_size = search.open_set.len() as u32;
                     stats.closed_set_size = search.store.closed_len();
                     // Count vias in path
@@ -1037,6 +1161,8 @@ impl GridRouter {
         }
 
         // No path found - fill in final stats
+        sink.stats.best_h = search.best_h;
+        sink.stats.iteration_tranches = search.tranches_granted;
         sink.stats.open_set_size = search.open_set.len() as u32;
         sink.stats.closed_set_size = search.store.closed_len();
         let stats_dict = self.stats_to_dict(&sink.stats);
@@ -1053,8 +1179,11 @@ impl GridRouter {
     /// - On success: path is Some, blocked_cells is empty
     /// - On failure: path is None, blocked_cells contains cells that blocked expansion
     ///
+    /// max_iterations_ceiling: #529 dynamic iterations (see route_multi);
+    /// 0 (the default) disables.
+    ///
     /// C1: thin wrapper over the shared GridSearch core with a FrontierSink.
-    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=TrackMarginArg::Scalar(0.0)))]
+    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=TrackMarginArg::Scalar(0.0), max_iterations_ceiling=0, quantum_cells=2.0, quantum_pct=2.0, grace_tranches=0))]
     #[allow(clippy::too_many_arguments)]
     pub fn route_with_frontier(
         &self,
@@ -1068,12 +1197,17 @@ impl GridRouter {
         end_direction: Option<(f64, f64)>,
         direction_steps: i32,
         track_margin: TrackMarginArg,
+        max_iterations_ceiling: u32,
+        quantum_cells: f64,
+        quantum_pct: f64,
+        grace_tranches: u32,
     ) -> (Option<Vec<(i32, i32, u8)>>, u32, Vec<(i32, i32, u8)>) {
         let opts = SearchOptions::new(collinear_vias, via_exclusion_radius,
                                       start_direction, end_direction,
                                       direction_steps, track_margin);
         let mut sink = FrontierSink::new();
         let mut search = GridSearch::new(self, sources, targets, max_iterations, opts, &mut sink);
+        search.set_iteration_ceiling(max_iterations_ceiling, quantum_cells, quantum_pct, grace_tranches);
 
         loop {
             match search.step(self, obstacles, &mut sink) {
@@ -1439,6 +1573,8 @@ impl GridRouter {
         dict.insert("path_length".to_string(), stats.path_length as f64);
         dict.insert("path_cost".to_string(), stats.path_cost as f64);
         dict.insert("initial_h".to_string(), stats.initial_h as f64);
+        dict.insert("best_h".to_string(), stats.best_h as f64);
+        dict.insert("iteration_tranches".to_string(), stats.iteration_tranches as f64);
         dict.insert("final_g".to_string(), stats.final_g as f64);
         dict.insert("open_set_size".to_string(), stats.open_set_size as f64);
         dict.insert("closed_set_size".to_string(), stats.closed_set_size as f64);

@@ -50,6 +50,7 @@ BOOL_FLAGS = {
     '--no-bga-zones': 'no_bga_zone', '--no-bga-zone': 'no_bga_zone',
     '--no-gnd-vias': 'no_gnd_vias', '--rip-blocker-nets': 'rip_blocker_nets',
     '--keep-input-copper': 'keep_input_copper',
+    '--allow-bare-pads': 'allow_bare_pads',
 }
 # nargs='+' glob-list flags: every pattern must survive into the plan param
 # (as a list, or a single scalar for one pattern). #521 --protect-nets and the
@@ -58,6 +59,8 @@ LIST_FLAGS = {
     '--rip-existing-nets': 'rip_existing_nets',
     '--protect-nets': 'protect_nets',
     '--corridor-nets': 'corridor_nets',
+    '--rip-blocker-exclude': 'rip_blocker_exclude',
+    '--rip-blocker-allow': 'rip_blocker_allow',
     '--polarity-swap-nets': 'polarity_swap_nets',
     '--coplanar-nets': 'coplanar_nets',
 }
@@ -270,6 +273,7 @@ _ACTION_BLOCK_HANDLED = {
 # + D7 QFN width/clearance).
 _MUST_RESOLVE = {
     'rip_existing_nets', 'protect_nets', 'corridor_nets',
+    'rip_blocker_exclude', 'rip_blocker_allow',
     'impedance', 'ordering', 'direction', 'time_matching',
     'keepout', 'guide_corridor', 'length_match_groups', 'swappable_nets',
     'polarity_swap_nets', 'qfn_track_width', 'qfn_clearance',

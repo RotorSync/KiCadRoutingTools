@@ -249,6 +249,93 @@ def exact_names(patterns: Optional[Iterable[str]]) -> Set[str]:
     return {p for p in patterns if p and not (_GLOB_CHARS & set(p))}
 
 
+def stash_rip_overrides(pcb_data, patterns: Optional[Iterable[str]]) -> Set[str]:
+    """Record the exact-name rip overrides on pcb_data so the IN-RUN ladders
+    can honor them (run-6 z2 fix). The pre-run filters (--rip-existing-nets /
+    --force-reroute) already lift 'user' protection for exactly-named nets,
+    but the in-run ladders re-consult cached_protection_map, which still
+    lists them -- so the phase-3 tap cascade refused a net the operator had
+    explicitly named ('protected_skipped {"phase3 tap cascade":
+    {USB_DM_R: user}}' while --rip-existing-nets named it). 'locked' is
+    never overridable, here or anywhere."""
+    names = exact_names(patterns)
+    if names:
+        pcb_data._rip_override_names = set(
+            getattr(pcb_data, '_rip_override_names', None) or set()) | names
+    return getattr(pcb_data, '_rip_override_names', None) or set()
+
+
+def rip_override_names(pcb_data) -> Set[str]:
+    """The exact-name rip overrides stashed for this run (empty set if none)."""
+    return getattr(pcb_data, '_rip_override_names', None) or set()
+
+
+def blocker_never_rip_ids(pcb_data, plane_net_ids: Set[int],
+                          input_file: Optional[str] = None,
+                          max_pads: Optional[int] = None,
+                          exclude_patterns: Optional[Iterable[str]] = None,
+                          allow_names: Optional[Iterable[str]] = None,
+                          announce: bool = True) -> Set[int]:
+    """The never-pick-as-blocker id set for the plane scripts' tap/join rip
+    ladders (shared by route_planes AND route_disconnected_planes so the
+    create side stops being protection-blind -- it used to pass only its own
+    plane nets). Union of:
+
+      * the plane nets themselves,
+      * #521-protected nets (.kicad_pro record, --protect-nets, KiCad-locked),
+      * (run-6 guard) nets with more than ``max_pads`` pads -- a rail has the
+        most copper near any pad, so every blocker selector preferentially
+        picks it, and ripping it opens all its pads at once with an in-step
+        reconnect that measured 0/2 at restoring them. Lifted per net by
+        naming it EXACTLY in ``allow_names`` (--rip-blocker-allow),
+      * any net matching ``exclude_patterns`` (--rip-blocker-exclude).
+    """
+    from net_queries import matches_net_filter
+    if max_pads is None:
+        from routing_defaults import PLANE_BLOCKER_MAX_PADS
+        max_pads = PLANE_BLOCKER_MAX_PADS
+    allow = set(allow_names or ())
+    never = set(plane_net_ids)
+    prot = {}
+    try:
+        prot = protection_map(pcb_data, input_file)
+    except Exception:
+        pass
+    prot_ids = {nid for nid, n in pcb_data.nets.items()
+                if n.name and n.name in prot} - set(plane_net_ids)
+    rail_ids = set()
+    if max_pads and max_pads > 0:
+        for nid, pads in (getattr(pcb_data, 'pads_by_net', None) or {}).items():
+            if nid in never or nid in prot_ids:
+                continue
+            name = pcb_data.nets[nid].name if nid in pcb_data.nets else None
+            if name and name in allow:
+                continue
+            if len(pads) > max_pads:
+                rail_ids.add(nid)
+    excl_ids = set()
+    if exclude_patterns:
+        excl_ids = {nid for nid, n in pcb_data.nets.items()
+                    if n.name and matches_net_filter(n.name, list(exclude_patterns))}
+        excl_ids -= never | prot_ids | rail_ids
+    if announce:
+        def _names(ids, cap=4):
+            xs = sorted(pcb_data.nets[i].name for i in ids if i in pcb_data.nets)
+            return f"{', '.join(xs[:cap])}{'...' if len(xs) > cap else ''}"
+        if prot_ids:
+            print(f"  {len(prot_ids)} PROTECTED net(s) excluded from blocker "
+                  f"rip-up ({_names(prot_ids)})")
+        if rail_ids:
+            print(f"  {len(rail_ids)} multi-pad net(s) (> {max_pads} pads) "
+                  f"excluded from blocker rip-up ({_names(rail_ids)}) -- "
+                  f"name one exactly in --rip-blocker-allow to rip it "
+                  f"deliberately")
+        if excl_ids:
+            print(f"  {len(excl_ids)} net(s) excluded from blocker rip-up by "
+                  f"--rip-blocker-exclude ({_names(excl_ids)})")
+    return never | prot_ids | rail_ids | excl_ids
+
+
 # What the last run's rip filters refused, and why: {context: {net: reason}}.
 # The print below is for a human reading a log; a PROGRAM driving the router
 # cannot see it, and the router's own failure hint tells that program to retry

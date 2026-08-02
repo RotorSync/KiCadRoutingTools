@@ -423,6 +423,16 @@ class PCBData:
     # per-layer clearance rules. parse_kicad_pcb sets it from its argument;
     # build_pcb_data_from_board from board.GetFileName().
     source_path: str = ""
+    # #424: callable returning {(net_name, layer): [island_polygon, ...]}
+    # (the refill_islands result shape) for exact-fill consumers
+    # (plane_fragility, anything wanting KiCad fill truth). None = refill
+    # source_path. build_pcb_data_from_board sets it to an IN-PROCESS
+    # ZONE_FILLER refill of the LIVE board (kicad_exact_fill.
+    # live_fill_islands) -- the on-disk file can be stale mid-plan (earlier
+    # steps' copper applied to the live board only), and the fill truth must
+    # match the copper the engine is routing against. Not a file path on
+    # purpose: the GUI never needs to save to be priced correctly.
+    exact_fill_provider: object = None
     # #459: KiCad (group "name" (uuid ...) (members <uuid> ...)) blocks, as
     # {group name: [footprint reference, ...]}. The designer's own statement that
     # these parts belong together, so placement grouping ranks it above any
@@ -4100,6 +4110,15 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
     # Drop Edge.Cuts contours mis-classified as cutouts (they enclose pads).
     drop_pad_containing_cutouts(board_info, pads_by_net)
 
+    # #424: exact-fill consumers must price the LIVE board's fill, not the
+    # possibly-stale file at source_path (mid-plan, steps apply copper to the
+    # live board first). No save needed: an in-process ZONE_FILLER refill
+    # reads the truth straight off the board object at the moment a consumer
+    # asks for it.
+    def _live_fill(_board=board):
+        from kicad_exact_fill import live_fill_islands
+        return live_fill_islands(_board)
+
     return PCBData(
         board_info=board_info,
         nets=nets,
@@ -4112,7 +4131,9 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         guide_paths=guide_paths,
         keepout_zones=keepout_zones,
         # #498 parity with parse_kicad_pcb: sibling-file discovery (.kicad_dru)
-        source_path=os.path.abspath(board.GetFileName()) if board.GetFileName() else ""
+        source_path=os.path.abspath(board.GetFileName()) if board.GetFileName() else "",
+        # #424: exact-fill consumers read the LIVE board, never a stale file
+        exact_fill_provider=_live_fill
     )
 
 

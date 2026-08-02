@@ -276,7 +276,9 @@ def generate_underpad_escape(footprint: Footprint,
                              verbose: bool = True,
                              grid_step: float = 0.0,
                              only_pad_keys: Optional[Set[Tuple[float, float]]] = None,
-                             dogbone: bool = False
+                             dogbone: bool = False,
+                             plane_drop_nets: Optional[Set[int]] = None,
+                             plane_drop_report: Optional[Dict] = None
                              ) -> Tuple[List[Dict], List[Dict], List[str]]:
     """Route BGA signal balls to the boundary under the pad field.
 
@@ -306,6 +308,18 @@ def generate_underpad_escape(footprint: Footprint,
     A ball whose four gap sites are all taken falls back to the classic
     via-in-pad escape, so dog-bone can never escape fewer balls than underpad.
     Coupled diff-pair escapes use each ball's dog-bone site the same way.
+
+    Plane-ball drops (#424 D2): with `plane_drop_nets` (a set of net ids), every
+    SMD ball on those nets that the fanout would otherwise skip gets a via NOW
+    -- a dog-bone stub + gap via where a gap site is free, else an exact-checked
+    via-in-pad tap -- and is NOT routed anywhere: the plane poured later picks
+    the via up at fill. This claims the tap while the under-package space is
+    still open, instead of leaving the plane step to push a via through the
+    finished ball field (the #360 tap-behind-the-ball-wall class). Per-net
+    counts are written into `plane_drop_report` when a dict is passed. Drop
+    failures are reported there, never in the returned failed list (plane nets
+    are not part of the requested/escaped ledger; the plane step's tap search
+    remains the fallback).
     """
     ref = footprint.reference
     fp_pads = [p for p in footprint.pads if p.net_id]
@@ -745,7 +759,7 @@ def generate_underpad_escape(footprint: Footprint,
                 segs.append((x1, y1, x2, y2, tr['width'] / 2.0, tr['net_id']))
         return {'vias': vias, 'resv': resv, 'pads': pads, 'segs': segs}
 
-    def _via_site_conflict(x, y, net_id, ctx):
+    def _via_site_conflict(x, y, net_id, ctx, vr=None, vdr=None):
         """Reason a full-size OFF-CENTRE via cannot sit at (x, y), or None.
 
         Mirrors the channel engine's via_in_pad_conflict (#370 B4) but also
@@ -754,10 +768,14 @@ def generate_underpad_escape(footprint: Footprint,
         reservation contract, so its ring and drill must prove themselves
         against exact geometry (#393). Drill hole-to-hole is net-INDEPENDENT
         (same-net drill overlap is still a fab violation, #282); copper checks
-        skip same-net items.
+        skip same-net items. `vr`/`vdr` override the nominal via ring/drill
+        radii (the plane-drop centre fallback checks its pad-CLAMPED size --
+        the nominal size would falsely reject small pads, #202).
         """
-        vr = via_size / 2.0
-        vdr = (via_drill or 0.0) / 2.0
+        if vr is None:
+            vr = via_size / 2.0
+        if vdr is None:
+            vdr = (via_drill or 0.0) / 2.0
         for (ox, oy, orr, odr, onid) in ctx['vias']:
             d = math.hypot(ox - x, oy - y)
             if d < vdr + odr + HOLE_TO_HOLE_CLEARANCE - 1e-6:
@@ -910,12 +928,12 @@ def generate_underpad_escape(footprint: Footprint,
     # top-layer escape attempt before falling to via-in-pad. Default is
     # UNLIMITED (#424): Phase A runs outside-in, so trying every ball is
     # safe and fewer under-package barrels measured as better completion.
-    import os as _os
-    try:
-        outer_rings = float(_os.environ.get('KICAD_UNDERPAD_OUTER_RINGS',
-                                            str(outer_rings)))
-    except ValueError:
-        pass
+    import env_knobs
+    if env_knobs.UNDERPAD_OUTER_RINGS:
+        try:
+            outer_rings = float(env_knobs.UNDERPAD_OUTER_RINGS)
+        except ValueError:
+            pass
     if dogbone and math.isinf(outer_rings):
         # Dog-bone (#128) WANTS its vias in the gaps -- an unlimited surface
         # phase claims the diagonal gap sites and forces via-in-pad fallbacks
@@ -1643,6 +1661,102 @@ def generate_underpad_escape(footprint: Footprint,
             failed.append(p.net_name)
             continue
         commit(p, path, carve)
+
+    # Plane-ball drops (#424 D2): stub + via for the skipped plane-net balls,
+    # placed while the under-package space is still claimable. Runs after every
+    # signal phase so signals keep first claim (the measured F-plan ordering).
+    if plane_drop_nets:
+        _sig_ids = {id(p) for p in signal_pads}
+        drop_pads = [p for p in fp_pads
+                     if p.net_id in plane_drop_nets
+                     and not (p.drill and p.drill > 0)  # TH barrels already span all layers
+                     and id(p) not in _sig_ids
+                     and board_net_counts[p.net_id] >= 2]
+        drop_pads.sort(key=depth, reverse=True)
+        # Existing same-net connections (re-runs, prior taps): a via whose ring
+        # overlaps the pad copper, or a track endpoint on the pad, means this
+        # ball is already served -- skip it, keeping the pass idempotent.
+        _net_vias: Dict[int, List[Tuple[float, float, float]]] = {}
+        for v in pcb_data.vias:
+            if v.net_id in plane_drop_nets:
+                _net_vias.setdefault(v.net_id, []).append((v.x, v.y, v.size / 2.0))
+        _net_seg_ends: Dict[int, List[Tuple[float, float]]] = {}
+        for s in pcb_data.segments:
+            if s.net_id in plane_drop_nets:
+                _net_seg_ends.setdefault(s.net_id, []).extend(
+                    [(s.start_x, s.start_y), (s.end_x, s.end_y)])
+        _rep_nets: Dict[str, Dict[str, int]] = {}
+        n_gap = n_ctr = n_exist = n_fail = 0
+        for p in drop_pads:
+            r = _rep_nets.setdefault(p.net_name,
+                                     {'gap': 0, 'in_pad': 0, 'existing': 0,
+                                      'failed': 0})
+            gx, gy = p.global_x, p.global_y
+            pad_half = max(p.size_x, p.size_y) / 2.0
+            if any(math.hypot(vx - gx, vy - gy) < pad_half + vr_ + 1e-6
+                   for (vx, vy, vr_) in _net_vias.get(p.net_id, ())) or \
+               any(abs(ex - gx) < 0.05 and abs(ey - gy) < 0.05
+                   for (ex, ey) in _net_seg_ends.get(p.net_id, ())):
+                n_exist += 1
+                r['existing'] += 1
+                continue
+            # This ball's centre was reserved up front as its future plane-tap
+            # site; the drop replaces that tap, so the reservation must not
+            # veto its own via (drill-vs-drill at distance 0) or the gap site
+            # at fine pitch. Void it; restore only if the drop fails outright.
+            _own = [(rx, ry, rr, rd, rn) for (rx, ry, rr, rd, rn) in reserved_sites
+                    if rn == p.net_id and abs(rx - gx) < 1e-6 and abs(ry - gy) < 1e-6]
+            for t in _own:
+                reserved_sites.remove(t)
+            site = _choose_dogbone_site(p)
+            if site is not None:
+                _reserve_dogbone(p, site)
+                vx, vy = site
+                tracks.append({'start': (gx, gy), 'end': (vx, vy),
+                               'width': track_width, 'layer': layers[top_idx],
+                               'net_id': p.net_id})
+                vias_to_add.append({'x': vx, 'y': vy, 'size': via_size,
+                                    'drill': via_drill,
+                                    'layers': [layers[0], layers[-1]],
+                                    'net_id': p.net_id})
+                _net_vias.setdefault(p.net_id, []).append((vx, vy, via_size / 2.0))
+                n_gap += 1
+                r['gap'] += 1
+                continue
+            # Centre fallback: via-in-pad tap at the ball, pad-clamped (#202).
+            # Exact-checked at the CLAMPED size: after a channel-engine signal
+            # pass, inner-layer runs may legally cross this centre, so the
+            # underpad centre-reservation contract cannot be assumed here.
+            cs, cd, ckeep = via_for_pad(p)
+            _ctx = _via_ctx(p.net_id, gx, gy)
+            ok = not (locked_smd_pads and not via_site_ok(gx, gy, cs / 2.0))
+            if ok and _via_site_conflict(gx, gy, p.net_id, _ctx,
+                                         vr=cs / 2.0, vdr=cd / 2.0) is not None:
+                ok = False
+            if not ok:
+                reserved_sites.extend(_own)   # plane step may still tap here
+                n_fail += 1
+                r['failed'] += 1
+                continue
+            occ.block_all(gx, gy, ckeep)
+            exact_vias.append((gx, gy, cs / 2.0, cd / 2.0, p.net_id))
+            vias_to_add.append({'x': gx, 'y': gy, 'size': cs, 'drill': cd,
+                                'layers': [layers[0], layers[-1]],
+                                'net_id': p.net_id})
+            _net_vias.setdefault(p.net_id, []).append((gx, gy, cs / 2.0))
+            n_ctr += 1
+            r['in_pad'] += 1
+        if plane_drop_report is not None:
+            plane_drop_report.update(
+                {'nets': _rep_nets, 'gap_vias': n_gap, 'pad_vias': n_ctr,
+                 'skipped_existing': n_exist, 'failed': n_fail})
+        if verbose and drop_pads:
+            per = ", ".join(f"{n} {c['gap']}+{c['in_pad']}"
+                            for n, c in sorted(_rep_nets.items()))
+            extra = f", {n_exist} already connected" if n_exist else ""
+            extra += f", {n_fail} FAILED (left for the plane tap)" if n_fail else ""
+            print(f"  Plane drops (#424): {n_gap} gap + {n_ctr} in-pad vias "
+                  f"[{per}]{extra}")
 
     if verbose:
         already = f", {len(fanned_net_ids)} already-fanned skipped" if fanned_net_ids else ""

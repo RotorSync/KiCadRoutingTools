@@ -888,9 +888,12 @@ def filter_rippable_blockers(
     5, journal [10]: the #444 seam re-ask and the tap ladder churned a
     committed net's copper repeatedly). Refusals are recorded in
     PROTECTED_SKIPPED under `context` so they surface in JSON_SUMMARY.
-    There is deliberately NO override here: in-run the operator has no
-    channel to name a net, and the pre-run filters already honored exact
-    names before routing began.
+    The operator's exact-name overrides DO reach here (run-6 z2 fix): a net
+    named exactly (no glob) in --rip-existing-nets / --nets is stashed by the
+    pre-run filters (protected_nets.stash_rip_overrides) and lifts 'user'
+    protection in-run as well -- 'locked' never lifts. Before the stash, the
+    tap cascade refused nets the operator had explicitly named, and the
+    printed "name it exactly to override" advice was a lie for in-run stages.
 
     Args:
         blockers: List of BlockingInfo from analyze_frontier_blocking
@@ -904,9 +907,11 @@ def filter_rippable_blockers(
         Tuple of (rippable_blockers, seen_canonical_ids)
     """
     protected = {}
+    overrides = set()
     if pcb_data is not None:
-        from protected_nets import cached_protection_map
+        from protected_nets import cached_protection_map, rip_override_names
         protected = cached_protection_map(pcb_data)
+        overrides = rip_override_names(pcb_data)
     rippable_blockers = []
     seen_canonical_ids = set()
     for b in blockers:
@@ -914,7 +919,9 @@ def filter_rippable_blockers(
             if protected:
                 _net = pcb_data.nets.get(b.net_id)
                 _name = _net.name if _net else None
-                if _name and _name in protected:
+                if _name and _name in protected and (
+                        protected[_name] == 'locked'
+                        or _name not in overrides):
                     from protected_nets import PROTECTED_SKIPPED
                     PROTECTED_SKIPPED.setdefault(context, {})[_name] = \
                         protected[_name]

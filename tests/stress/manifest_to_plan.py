@@ -118,12 +118,18 @@ LIST_FLAGS = {
     '--protect-nets': 'protect_nets',
     # #549: plane scripts' corridor-seed allowlist.
     '--corridor-nets': 'corridor_nets',
+    # Run-6 blocker guards (plane scripts).
+    '--rip-blocker-exclude': 'rip_blocker_exclude',
+    '--rip-blocker-allow': 'rip_blocker_allow',
     '--nets': None,  # handled per action
     '--pairs': None,
     '--plane-layers': None,
 }
 BOOL_FLAGS = {
     '--rip-blocker-nets': 'rip_blocker_nets',
+    # Run-6 A5 pour gate opt-out (GUI path is warn-only; the plan executor
+    # notes-and-ignores the param, which matches that semantic).
+    '--allow-bare-pads': 'allow_bare_pads',
     '--add-gnd-vias': 'add_gnd_vias',
     # #485: route_planes area via stitching toggles (planes-tab checkboxes
     # stitch_vias / stitch_edge_fence, applied by the plan executor's
@@ -342,7 +348,8 @@ def parse_command(argv):
         step['nets'] = [str(n) for n in nets] or ['*']
     for k in ('--power-nets', '--power-nets-widths', '--layer-costs',
               '--layers', '--polarity-swap-nets', '--coplanar-nets',
-              '--rip-existing-nets', '--protect-nets', '--corridor-nets'):
+              '--rip-existing-nets', '--protect-nets', '--corridor-nets',
+              '--rip-blocker-exclude', '--rip-blocker-allow'):
         if k in lists:
             step['params'][LIST_FLAGS[k]] = lists[k]
     return step

@@ -20,8 +20,7 @@ from obstacle_map import (point_in_polygon, point_to_polygon_edge_distance,
                           block_via_cells_near_drills, block_track_cells_near_drills,
                           block_track_cells_near_override_pad_holes,
                           _pad_has_copper,
-                          _rasterize_polygon, _points_inside_polygon,
-                          _points_edge_distance, _scanline_inside_rows,
+                          _rasterize_polygon, _scanline_inside_rows,
                           _banded_edge_distance_rows, _block_cells_on_layers,
                           _batch_cells_one_layer, _batch_vias)
 

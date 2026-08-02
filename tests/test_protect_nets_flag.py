@@ -92,6 +92,62 @@ def test_protect_glob_rip_and_exact_override():
     print("  PASS: exact name in the rip set lifts the protection")
 
 
+def test_in_run_ladder_honors_exact_override():
+    """Run-6 z2 defect: the pre-run filters lifted 'user' protection for an
+    exactly-named net, but the in-run ladders (all six flow through
+    filter_rippable_blockers) re-consulted cached_protection_map and refused
+    it anyway -- 'protected_skipped {"phase3 tap cascade": {USB_DM_R: user}}'
+    while --rip-existing-nets named it. Unit-pins the choke point:
+    stashed exact-name overrides lift 'user' in-run; 'locked' never lifts;
+    without a stash the refusal + record behave as before."""
+    from types import SimpleNamespace
+    from blocking_analysis import filter_rippable_blockers
+    from protected_nets import (PROTECTED_SKIPPED, clear_skipped,
+                                stash_rip_overrides)
+
+    class _Net:
+        def __init__(self, name):
+            self.name = name
+
+    def _pcb(protection):
+        p = SimpleNamespace()
+        p.nets = {1: _Net('RAIL_A'), 2: _Net('LOCKED_B'), 3: _Net('FREE_C')}
+        p._protection_map_cache = dict(protection)
+        return p
+
+    blockers = [SimpleNamespace(net_id=i) for i in (1, 2, 3)]
+    routed = {1: object(), 2: object(), 3: object()}
+    prot = {'RAIL_A': 'user', 'LOCKED_B': 'locked'}
+
+    # (a) no stash: both protected nets refused, recorded with reasons
+    clear_skipped()
+    pcb = _pcb(prot)
+    kept, _ = filter_rippable_blockers(blockers, routed, {}, lambda n, d: n,
+                                       pcb_data=pcb, context='unit cascade')
+    assert {b.net_id for b in kept} == {3}, kept
+    assert PROTECTED_SKIPPED.get('unit cascade') == prot, PROTECTED_SKIPPED
+
+    # (b) exact-name stash lifts 'user', never 'locked'
+    clear_skipped()
+    pcb = _pcb(prot)
+    stash_rip_overrides(pcb, ['RAIL_A', 'LOCKED_B', 'GLOB_*'])
+    kept, _ = filter_rippable_blockers(blockers, routed, {}, lambda n, d: n,
+                                       pcb_data=pcb, context='unit cascade')
+    assert {b.net_id for b in kept} == {1, 3}, kept
+    assert PROTECTED_SKIPPED.get('unit cascade') == {'LOCKED_B': 'locked'}, \
+        PROTECTED_SKIPPED
+
+    # (c) a glob in the stash list is NOT an override
+    clear_skipped()
+    pcb = _pcb({'RAIL_A': 'user'})
+    stash_rip_overrides(pcb, ['RAIL_*'])
+    kept, _ = filter_rippable_blockers(blockers, routed, {}, lambda n, d: n,
+                                       pcb_data=pcb, context='unit cascade')
+    assert {b.net_id for b in kept} == {2, 3}, kept
+    print("  PASS: in-run ladder honors exact-name overrides ('locked' never)")
+
+
 if __name__ == '__main__':
     test_protect_glob_rip_and_exact_override()
+    test_in_run_ladder_honors_exact_override()
     print("ALL PASS")

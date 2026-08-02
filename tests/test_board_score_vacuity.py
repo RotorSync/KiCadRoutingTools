@@ -76,6 +76,26 @@ def test_comma_joined_real_nets_grade():
         print(f"  PASS: comma-joined pair graded ({comp.get('nets_analyzed')} nets analyzed)")
 
 
+def test_net_min_widths_comment_key_is_not_a_pattern():
+    """A "_comment" annotation key in --net-min-widths must not pollute
+    patterns_matching_no_routed_net (the field a reader scans for typo'd
+    globs) -- run 6 carried it in every score."""
+    if not os.path.isfile(BOARD):
+        print("  SKIP: fixture missing")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        spec = os.path.join(td, 'widths.json')
+        with open(spec, 'w', encoding='utf-8') as fh:
+            json.dump({'_comment': 'annotation, not a net', 'NO_SUCH_NET': 0.4}, fh)
+        rc, data, out = _score(BOARD, ['--net-min-widths', spec], td)
+        comp = (data.get('components') or {}).get('net_widths') or {}
+        unmatched = comp.get('patterns_matching_no_routed_net') or []
+        assert '_comment' not in unmatched, unmatched
+        assert 'NO_SUCH_NET' in unmatched, unmatched
+        print("  PASS: _comment filtered, real unmatched glob still reported")
+
+
 if __name__ == '__main__':
     test_zero_match_is_unknown_and_exit_4()
     test_comma_joined_real_nets_grade()
+    test_net_min_widths_comment_key_is_not_a_pattern()

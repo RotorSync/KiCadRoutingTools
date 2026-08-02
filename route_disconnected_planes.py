@@ -769,6 +769,10 @@ def route_planes(
     # placement should prefer to keep clear. None -> AUTO (the board's
     # protected/impedance records); ['none'] -> off.
     corridor_nets: Optional[List[str]] = None,
+    # Run-6 blocker guards: extra never-rip patterns, and exact names that
+    # lift the multi-pad rail guard (see protected_nets.blocker_never_rip_ids).
+    rip_blocker_exclude: Optional[List[str]] = None,
+    rip_blocker_allow: Optional[List[str]] = None,
 ) -> Tuple[int, int]:
     """
     Route between disconnected regions in power plane zones.
@@ -1017,6 +1021,24 @@ def route_planes(
                                           via_size, clearance,
                                           input_file=input_file)
 
+    # Run-6 A5, warn-only here (the repair legitimately runs mid-loop on
+    # boards with known opens): every tap via this step adds shrinks a bare
+    # pad's escape channel further, and tap fields are not rippable copper.
+    try:
+        from check_connected import bare_pad_nets
+        _bare = bare_pad_nets(pcb_data, exclude_net_ids=set(unique_nets))
+        if _bare:
+            _bn = sorted(pcb_data.nets[i].name for i in _bare
+                         if i in pcb_data.nets)
+            print(f"  WARNING: {len(_bare)} net(s) still have >=2 pads and "
+                  f"ZERO copper ({', '.join(_bn[:6])}"
+                  f"{', ...' if len(_bn) > 6 else ''}) -- this step's tap "
+                  f"vias will crowd their escape channels; route them first "
+                  f"if their pads must connect (the pour is a one-way door "
+                  f"for bare pads).")
+    except Exception:
+        pass
+
     # #517 instrumentation: which PASS placed each piece of this run's new
     # copper (pad-tap, region-join, partial-restore, reconnect, custody
     # restore), so a custody REFUSED-restore can name the occupier class
@@ -1102,26 +1124,15 @@ def route_planes(
 
     # Plane nets are never ripped to clear a blocker (--rip-blocker-nets); only
     # signal nets are, and they are left unrouted for a subsequent route.py pass.
-    plane_net_ids = set(unique_nets.keys())
-    # #521: nets protected in the sibling .kicad_pro (length-matched groups,
-    # routed diff pairs) and nets with KiCad-LOCKED copper join the never-rip
-    # set -- a blocker rip here strips the net for a later generic route.py
-    # reconnect, which cannot reproduce matching/coupling/hand-routing. (The
-    # tap simply fails over its other candidates.)
-    try:
-        from protected_nets import protection_map
-        _prot_names = protection_map(pcb_data)
-        if _prot_names:
-            _prot_ids = {nid for nid, n in pcb_data.nets.items()
-                         if n.name in _prot_names}
-            _prot_ids -= plane_net_ids
-            if _prot_ids and rip_blocker_nets:
-                _ex = sorted(pcb_data.nets[i].name for i in _prot_ids)[:4]
-                print(f"  {len(_prot_ids)} PROTECTED net(s) excluded from blocker "
-                      f"rip-up ({', '.join(_ex)}{'...' if len(_prot_ids) > 4 else ''})")
-            plane_net_ids |= _prot_ids
-    except Exception:
-        pass
+    # The never-rip set also carries #521-protected nets, the run-6 multi-pad
+    # rail guard, and --rip-blocker-exclude patterns -- shared helper so the
+    # create side (route_planes) applies the identical policy.
+    from protected_nets import blocker_never_rip_ids
+    plane_net_ids = blocker_never_rip_ids(
+        pcb_data, set(unique_nets.keys()),
+        exclude_patterns=rip_blocker_exclude,
+        allow_names=rip_blocker_allow,
+        announce=bool(rip_blocker_nets))
     ripped_net_ids: List[int] = []
     # #517 arm 3 (#524 root cause): nets whose immediate reconnect SUCCEEDED
     # leave ripped_net_ids (they are no longer casualties) -- but their
@@ -2801,7 +2812,49 @@ def route_planes(
     if repair_pads:
         print(f"  Pad repair: {total_pads_repaired}/{total_pads_unconnected} unconnected pad(s) reconnected")
         if failed_repair_pads:
-            print(f"  Pads still unconnected: {', '.join(failed_repair_pads)}")
+            # Run-6 fix: failed_repair_pads is a historical accumulator graded
+            # by the KRT fill model, which under-credits narrow real fill
+            # corridors (~0.05mm raster floor) -- it claimed pads unconnected
+            # that KiCad's refilled pour connects (C16.2 class). Re-grade the
+            # list against the exact/kicad oracle before printing; entries the
+            # oracle proves connected are reported separately, not as opens.
+            _confirmed, _cleared = list(failed_repair_pads), []
+            try:
+                if _gate_oracle_links[0] is None:
+                    _gate_oracle_links[0] = _gate_oracle_query()
+                _olinks = _gate_oracle_links[0]
+                if _olinks is not False and _olinks is not None:
+                    def _pad_open_per_oracle(entry):
+                        # entry format: "REF.PAD (NET)"
+                        try:
+                            _refpad = entry.split(' ')[0]
+                            _ref, _pn = _refpad.rsplit('.', 1)
+                            _fp = pcb_data.footprints.get(_ref)
+                            _pad = next(p for p in (_fp.pads if _fp else [])
+                                        if p.pad_number == _pn)
+                        except Exception:
+                            return True     # unparseable: keep as open
+                        for _net, _a, _b in _olinks:
+                            for _e in (_a, _b):
+                                if (abs(_e[0] - _pad.global_x) < 0.1
+                                        and abs(_e[1] - _pad.global_y) < 0.1):
+                                    return True
+                        return False
+                    _confirmed = [e for e in failed_repair_pads
+                                  if _pad_open_per_oracle(e)]
+                    _cleared = [e for e in failed_repair_pads
+                                if e not in _confirmed]
+            except Exception:
+                pass    # incl. NameError when the gate closure never built
+            if _cleared:
+                print(f"  {len(_cleared)} reported-unconnected pad(s) are "
+                      f"CONNECTED per KiCad's exact fill (model quantization): "
+                      f"{', '.join(_cleared)}")
+            if _confirmed:
+                print(f"  Pads still unconnected: {', '.join(_confirmed)}")
+            else:
+                print("  Pads still unconnected: none (all model-only; "
+                      "confirmed connected by the oracle)")
     if debug_lines and all_debug_lines:
         print(f"  Debug lines on User.4: {len(all_debug_lines)}")
 
@@ -3225,6 +3278,15 @@ Examples:
     parser.add_argument("--rip-blocker-nets", action="store_true",
                         help="When a plane-net pad cannot be connected, trace to a nearby same-net "
                              "pad, ripping the signal net(s) blocking it, then re-route the ripped nets.")
+    parser.add_argument("--rip-blocker-exclude", nargs="+", metavar="PATTERN",
+                        default=None,
+                        help="Net-name globs the blocker rip ladder must never pick, on top of "
+                             "the built-in guards (plane nets, #521-protected nets, and nets "
+                             "with more pads than the rail guard allows).")
+    parser.add_argument("--rip-blocker-allow", nargs="+", metavar="NET",
+                        default=None,
+                        help="EXACT net names for which the multi-pad rail guard is lifted -- "
+                             "a deliberate single-rail rip. Does not lift #521 protection.")
     parser.add_argument("--max-rip-nets", type=int, default=defaults.PLANE_MAX_RIP_NETS,
                         help="Maximum number of blocker nets to rip per pad (default: 3)")
     parser.add_argument("--reroute-ripped-nets", action="store_true",
@@ -3381,6 +3443,8 @@ Examples:
         input_file=args.input_file,
         output_file=args.output_file,
         corridor_nets=args.corridor_nets,
+        rip_blocker_exclude=args.rip_blocker_exclude,
+        rip_blocker_allow=args.rip_blocker_allow,
         net_names=net_names,
         plane_layers=plane_layers,
         net_layers=_net_layers,
