@@ -1685,12 +1685,43 @@ def generate_underpad_escape(footprint: Footprint,
             if s.net_id in plane_drop_nets:
                 _net_seg_ends.setdefault(s.net_id, []).extend(
                     [(s.start_x, s.start_y), (s.end_x, s.end_y)])
+        # Surface-pour direct connect: a same-net zone on the ball's OWN copper
+        # layer whose computed fill reaches the pad (and belongs to the zone's
+        # main component, not an islet) connects the ball at fill time with no
+        # via at all -- the dominant human pattern for rail balls under outer-
+        # layer floods (corpus survey: up to 86% of a part's balls served this
+        # way). The fill models must see THIS call's fresh copper (materialized
+        # into pcb_data by the drop pass), so drop any stale per-board cache.
+        _pour_models: Dict[Tuple[int, str], list] = {}
+        import env_knobs
+        if env_knobs.FANOUT_POUR_DIRECT and \
+                any((z.net_id in plane_drop_nets) for z in (pcb_data.zones or [])):
+            try:
+                delattr(pcb_data, '_plane_fill_models')
+            except AttributeError:
+                pass
+            from plane_fill_model import get_fill_models
+            for nid in {p.net_id for p in drop_pads}:
+                for lay, models in get_fill_models(pcb_data, nid).items():
+                    _pour_models[(nid, lay)] = models
+
+        def _pour_covers(p):
+            lay = next((l for l in (p.layers or []) if l.endswith('.Cu')), None)
+            if lay is None:
+                return False
+            for m in _pour_models.get((p.net_id, lay), ()):
+                comp = m.query_component(p.global_x, p.global_y,
+                                         size=min(p.size_x, p.size_y))
+                if comp and comp == m.largest_component():
+                    return True
+            return False
+
         _rep_nets: Dict[str, Dict[str, int]] = {}
-        n_gap = n_ctr = n_exist = n_fail = 0
+        n_gap = n_ctr = n_exist = n_fail = n_pour = 0
         for p in drop_pads:
             r = _rep_nets.setdefault(p.net_name,
                                      {'gap': 0, 'in_pad': 0, 'existing': 0,
-                                      'failed': 0})
+                                      'pour': 0, 'failed': 0})
             gx, gy = p.global_x, p.global_y
             pad_half = max(p.size_x, p.size_y) / 2.0
             if any(math.hypot(vx - gx, vy - gy) < pad_half + vr_ + 1e-6
@@ -1699,6 +1730,14 @@ def generate_underpad_escape(footprint: Footprint,
                    for (ex, ey) in _net_seg_ends.get(p.net_id, ())):
                 n_exist += 1
                 r['existing'] += 1
+                continue
+            if _pour_covers(p):
+                # Served by the surface pour on its own layer -- no via needed.
+                # (The pad-centre tap reservation stays: if a later step's
+                # copper carves the pour away from this pad, the plane repair
+                # can still tap here.)
+                n_pour += 1
+                r['pour'] += 1
                 continue
             # This ball's centre was reserved up front as its future plane-tap
             # site; the drop replaces that tap, so the reservation must not
@@ -1749,11 +1788,14 @@ def generate_underpad_escape(footprint: Footprint,
         if plane_drop_report is not None:
             plane_drop_report.update(
                 {'nets': _rep_nets, 'gap_vias': n_gap, 'pad_vias': n_ctr,
-                 'skipped_existing': n_exist, 'failed': n_fail})
+                 'skipped_existing': n_exist, 'skipped_pour': n_pour,
+                 'failed': n_fail})
         if verbose and drop_pads:
             per = ", ".join(f"{n} {c['gap']}+{c['in_pad']}"
                             for n, c in sorted(_rep_nets.items()))
             extra = f", {n_exist} already connected" if n_exist else ""
+            extra += (f", {n_pour} pour-covered (no via needed)"
+                      if n_pour else "")
             extra += f", {n_fail} FAILED (left for the plane tap)" if n_fail else ""
             print(f"  Plane drops (#424): {n_gap} gap + {n_ctr} in-pad vias "
                   f"[{per}]{extra}")

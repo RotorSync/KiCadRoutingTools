@@ -324,30 +324,45 @@ nets** as escapes — but every skipped plane ball still gets a **plane-drop via
 (below), so nothing is left stranded. Rule of thumb: try `channel` first (keeps
 diff pairs); fall back to `underpad` when `channel` can't escape a dense array.
 
-**How humans escape big BGAs (survey of 54 human corpus boards with a real
-≥100-ball array):**
+**How humans escape big BGAs — and which of OUR tool options that maps to**
+(survey of 54 human corpus boards with a real ≥100-ball array; the fanout
+places vias itself, so this is about choosing its options, not via positions):
 
-- **They do NOT via every ball** — median ~0.44 vias per ball. The outer 2–3
-  rings escape on the surface with no via at all (median ~18% of balls have no
-  via within 1.5 pitch; on fine-pitch parts it reaches half). Rail balls
-  connect by dropping a via into a pour — or directly into a SURFACE pour with
-  zero routing — never by tracks threaded through the escape field.
+- **Dog-bone is the dominant human method at every pitch** (median 30–43% of
+  balls; via-in-pad is ~0% on most boards, appearing only on a handful of very
+  dense 6/8-layer designs). Roughly HALF of all balls get no via at all — the
+  outer rings escape on the surface, rails connect into pours. Mapping: for a
+  populated array prefer **`--escape-method dogbone`** — each ball vias in a
+  free inter-ball gap and falls back per-ball to via-in-pad, so it never
+  escapes fewer balls than `underpad` while keeping the inner-layer streets
+  open. `channel` (the `auto` default) already leaves the outer rings via-free;
+  keep it for sparse/perimeter-heavy arrays and diff pairs.
+- **Rail balls under a pour need NO via when the pour is on their own layer**
+  — the plane-drop pass (#424) detects this automatically when the pours
+  already exist (pour-first Step 1c order): it prints `N pour-covered (no via
+  needed)` and skips those vias (measured: 104 of 127 GND balls on a 285-ball
+  BGA, ~100 via barrels kept out of the escape field;
+  `KICAD_FANOUT_POUR_DIRECT=0` reverts). To benefit, POUR BEFORE FANOUT and
+  put rail pours on the layers that carry the rail balls (the outer layer for
+  a surface flood).
 - **Escape via, by pitch:** at 0.8–1.0 mm the median minimum via in the
   courtyard is 0.45/0.20; at ≤0.5 mm humans go to 0.28/0.15 and even
   0.25/0.10. Escape-track minimum: median 0.125 mm at coarse pitch, 0.089–0.10
-  (the fab floor) at fine pitch. Matching our knobs: the computed
-  budget-per-pitch above lands in the same range — trust it, and treat
-  0.25/0.15 as the floor for ≤0.5 mm parts.
-- **Deep balls leave through the inners, not the surface.** The inner-layer
-  share of courtyard copper rises with layer count — ~0–15% on 4-layer boards
-  but 30–67% on 6/8-layer: a deep ball drops ONE via and runs out on an inner
-  layer, surfacing outside the courtyard, instead of wiggling between balls on
-  F.Cu. On 6+ layers, plan for the fanout AND the signal step to use the inner
-  layers under the BGA (full `--layers` list, low cost on the escape-depth
-  layers).
+  (the fab floor) at fine pitch. The computed budget-per-pitch above lands in
+  the same range — trust it, and treat 0.25/0.15 as the floor for ≤0.5 mm.
+- **Deep balls leave through the inners, not the surface.** Inner-layer share
+  of courtyard copper: ~0–15% on 4-layer boards, 30–67% on 6/8-layer. Mapping:
+  give the fanout the FULL `--layers` list, and keep the escape-depth inner
+  layers ROUTABLE — on a 6-layer board that means at most ONE solid inner
+  plane next to each outer (fine-pitch-BGA humans keep a median of ONE solid
+  plane total; **pouring 2–3 solid inner planes on a 6-layer BGA board is the
+  classic self-inflicted failure** — it leaves signals a 2-layer board).
+  Rails beyond GND go as SPLIT region pours or late route+pour, not extra
+  solid planes and not wide tracks.
 - **Buses concentrate.** A RAM/DDR bus runs on ONE inner "highway" layer with
-  a solid GND plane adjacent (plus the outers), not spread thinly across every
-  layer.
+  a solid GND plane adjacent (plus the outers). Mapping: pick the highway
+  layer at plan time, keep its `--layer-costs` at 1.0–1.5, and put the solid
+  GND plane on the layer NEXT to it.
 
 **Plane-net balls are dropped to vias automatically (#424).** With any escape
 method, after the signal escape each SMD ball on a plane net — a net excluded
@@ -1240,6 +1255,15 @@ boards, grouped by dominant component/function):**
 | **MCU / QFN, light 2-layer** | Modest: GND flood both sides (80%), rails poured on ~40–60%; a couple of pours is normal, don't force more. |
 
 - More fanout options available.
+
+**MANDATORY whenever any layer carries a solid plane: derive `--layer-costs`
+from the plane plan and pass it to EVERY signal-routing step** (`route.py`,
+the Step 5c reconnect, and retries). A measured failure mode: a 6-layer BGA
+chain poured three solid inner planes and then passed NO `--layer-costs`
+anywhere — signals crossed all three pours at cost 1.0, shredded them into
+islands, and the board graded worse than a plane-light plan. Pour-first order
+means the plane layers are already known when the signal steps run; there is
+no excuse to omit this.
 
 **Derive `--layer-costs` from the plane plan — penalize the plane-reserved
 layers (issue #185).** The 4-layer default is **all 1.0**, so the router has no
