@@ -82,7 +82,7 @@ machine before):
   outer layers only, which silently caps deep-ball escape (RUNBOOK rule 5).
   `route_diff.py` has the same F.Cu/B.Cu default and the same trap: pass the
   full copper-layer list or pairs are silently stranded (issue #116,
-  butterstick 8/40 -> 22/40).
+  measured on an 8-layer corpus board: 8/40 -> 22/40).
 - **Check the fanout `JSON_SUMMARY` and retry on dropped balls (issue #122).**
   `bga_fanout.py` ends with `JSON_SUMMARY: {"requested","escaped","failed",
   "unescaped_nets",...}`. Dropped balls are removed from the output and resurface
@@ -93,7 +93,8 @@ machine before):
   track won't fit the ~0.45 mm inter-ball gap) but escapes all of them at 0.1.
   If still short, add the fine-pitch escape via / smaller `--track-width`. If a
   **dense, fully-populated array** still drops balls at the floor (the channel
-  router over-subscribes the between-row channels — e.g. ulx3s 22×22 drops ~20),
+  router over-subscribes the between-row channels — e.g. a fully-populated 22×22
+  array drops ~20),
   re-run with **`--escape-method underpad`** and a small via/track (e.g.
   `--via-size 0.35 --track-width 0.12 --clearance 0.1`): it routes each ball under
   the pad field on inner layers and escapes what `channel` can't (→ 0). It routes

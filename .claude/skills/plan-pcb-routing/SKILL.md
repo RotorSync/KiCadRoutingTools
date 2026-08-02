@@ -408,7 +408,7 @@ Use the printed flags as-is:
   **Do NOT keep the net-class gap/width for impedance-controlled (diff-pair) nets** —
   the stock net class is usually wide (`diff_pair_gap` 0.25 / width 0.2 mm), and a
   fat pair is a wider bundle that gets dropped on congested boards (measured:
-  `glasgow_revC` routes all 13 FPGA pairs at `--diff-pair-gap 0.1` but loses 2 at
+  a 4-layer FPGA corpus board routes all 13 of its pairs at `--diff-pair-gap 0.1` but loses 2 at
   0.25). Per `/find-high-speed-nets`, route those at the **fab floor for gap and
   clearance (~0.1 mm)** while keeping `--impedance` for the width (the router
   computes it from the stackup and clamps it to the floor). `route_diff.py` then
@@ -459,7 +459,7 @@ Use the printed flags as-is:
     track width, so narrowing them widens the gap between the two converging
     diagonals. Step down toward the fab-floor track (e.g. 0.15 → 0.13 → 0.10 mm)
     until `segment_segment == 0`; all pads still escape (`failed` stays 0).
-    (Measured on hackrf_one U17: 3 grazes at `--width 0.15`/`0.13`, 0 at `0.10`.)
+    (Measured on a dense QFN corpus board: 3 grazes at `--width 0.15`/`0.13`, 0 at `0.10`.)
 
   These grazes are typically a uniform ~1-grid-cell shortfall, so even one size step
   down usually clears them all; shrinking the via also relieves escape congestion.
@@ -761,7 +761,7 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    the **plane-fragility field** (default on: `KICAD_PLANE_FRAGILITY_COST`,
    2.0 mm-equiv, `=0` reverts) then makes every later routing step pay to cut
    the real fill where it is narrow — so signals cross planes mid-pour, not at
-   necks. On ottercast this order + the field: power nets fully connected,
+   necks. Measured on a 4-layer corpus board, this order + the field: power nets fully connected,
    +3V3 pour ONE intact island, GND weld copper cut to a third, connectivity
    net-better, DRC clean. With planes poured signals-first style instead, the
    pour under a BGA arrives pre-shredded and every drop via needs repair welds.
@@ -1002,7 +1002,7 @@ pads, retry the repair in this order — cheapest/safest first:**
    pad connects by a *trace* to an adjacent already-connected same-net ball (the
    repair does this automatically): the trace is already thin, but at a coarse
    grid the A* can't thread the 0.65 mm-pitch BGA escape. **Measured on
-   ottercast_audio: GND U1.N4 fails to route at `--grid-step 0.05` but connects
+   a 4-layer corpus board: a GND ball fails to route at `--grid-step 0.05` but connects
    to its neighbour ball at `0.025`** — it's a grid-resolution limit, not a width
    one (the trace runs at the thin signal track in both the A* and obstacle map).
 
@@ -1026,8 +1026,8 @@ bare `cp`** — see the warning below.)
 > holds the DRC floor (the Default-netclass clearance/track/via the chain routed to).
 > The next routing step then reads no project, resolves its floor from the STOCK
 > (looser) netclass, and its writeback stamps that looser floor over tighter copper —
-> so KiCad grades correct sub-floor copper as phantom clearance violations (icepi_zero:
-> a dropped 0.09 floor became 0.10 → 160 phantom grazes). Use
+> so KiCad grades correct sub-floor copper as phantom clearance violations (measured:
+> a dropped 0.09 floor became 0.10 → 160 phantom grazes on one corpus board). Use
 > **`python3 copy_board.py src.kicad_pcb dst.kicad_pcb`** — it copies the board plus every
 > sibling (`.kicad_pro`/`.kicad_prl`) and self-records into the redo manifest — or, if you
 > must use `cp`, copy the `.kicad_pro` too. The routing scripts also WARN when an input
@@ -1129,13 +1129,14 @@ insufficient routing channels. Options:
 
 **Dense 2-layer boards: treat B.Cu as a real routing layer, not a plane.**
 Reserving B.Cu for a GND plane (and/or pricing it 3×) turns a congested
-2-layer board into single-layer routing — neo6502's human original carries
-47% of its routed length on B.Cu and pours GND *around* the routes on both
-sides afterwards; our plane-first chain left 25 nets open. On a dense 2-layer
-board: route signals on BOTH layers at cost 1.0 (long-haul nets cross on the
-back), then pour GND last (`route_planes.py` after the signal steps — the pour
-flows around existing copper). Only plane-first on 2-layer boards with light
-signal content.
+2-layer board into single-layer routing — a dense 2-layer corpus board's human
+original carries 47% of its routed length on B.Cu and pours GND *around* the
+routes on both sides afterwards; a plane-first chain on the same board left 25
+nets open. On a dense 2-layer board: route signals on BOTH layers at cost 1.0
+(long-haul nets cross on the back), then pour GND (and any many-pad rails)
+last (`route_planes.py` after the signal steps — the pour flows around
+existing copper; most human 2-layer boards pour BOTH sides this way). Only
+plane-first on 2-layer boards with light signal content.
 
 **Important:** If you skip fanout for a BGA/PGA component but still need to connect its
 internal pads, use `--no-bga-zone <component>` to disable the automatic exclusion zone
@@ -1153,27 +1154,49 @@ leave internal pads unconnected if they weren't fanned out.
 
 ### Multi-Layer Boards (4+ layers)
 
-- Use inner layers for planes (In1.Cu for GND, In2.Cu for VCC). On a board with
-  light-to-moderate routing density, **roughly half the copper layers as
-  planes** works — on a 4-layer board that's In1+In2 as planes, F.Cu+B.Cu for
-  signals.
-- **EXCEPTION — dense boards (any BGA ≥ ~100 balls, DDR/SDRAM buses, or a
-  signal step that already failed >5 nets): never plane ALL inner layers.**
-  Corpus triage of the worst-connectivity boards (ulx3s, butterstick,
-  orangecrab, zynq_ad9364) found this the single most damaging planning error:
-  solid planes on both inner layers + 3× inner costs leaves a 2-layer board
-  around the BGA, and 20–50 nets ship open while the human-routed originals
-  route their long-haul nets *through* inner layers (1–2 vias each, the
-  "cross-under highway"). On these boards: GND plane on ONE inner layer, and
-  either keep the other inner layer a plain routing layer, or make it a SPLIT
-  power plane (region pours per rail — `/recommend-plane-mappings` Step 3b) and
-  keep its layer cost low (≤1.5) so signals can still cross in the gaps. On 6+
-  layers, plane the middle layers and keep the layers at the BGA escape depth
-  routable (human butterstick: planes In3/In4, DDR3 on In2/In5).
+**Pour philosophy (from a survey of the human-routed corpus): pour EVERY GND
+and power net that has more than a few pads, and treat pours as cheap.** Human
+boards deliver power as copper pours, not tracks — a rail's ball/pad drops a
+via straight into a pour instead of consuming a routed track through the
+congested escape field. A dense 6-layer BGA board in the corpus that a
+plane-light plan (GND-only, rails as wide tracks) left ~26% incomplete spends
+~20% of its track copper on rails the human never routes at all. Concretely:
+
+- **Which nets:** GND always, plus every power rail with more than a few pads
+  (corpus median poured net ≈ 6 pads; 2–3-pad local rails are optional). A
+  board with many rails gets many pours — human 4-layer boards commonly pour
+  5–15 distinct nets, dense 6-layer boards 10–20.
+- **Which layers — any, including routing layers.** Pours are not confined to
+  dedicated plane layers: nearly every human board in the corpus pours copper
+  ON its routing layers (both outer layers on 2-layer boards, F.Cu+B.Cu on
+  multilayer), flooding GND/rails around the finished tracks. The layer
+  typology that recurs:
+  - **4-layer:** signals+pours on F/B; inner layers as planes — one solid GND,
+    the other either solid power, a SPLIT multi-rail plane
+    (`/recommend-plane-mappings` Step 3b), or route+pour when the board is
+    dense and signals need to cross inner.
+  - **6/8-layer:** solid GND planes nearest the outer signal layers (In1 and
+    the last inner are the usual choices), split power planes and/or
+    route+pour in the middle, signals concentrated on F/B plus one
+    inner "highway" layer.
+- **High-speed nets need an UNSPLIT reference plane on the adjacent layer.**
+  Whatever else moves, keep one solid (not split, not track-fragmented) GND
+  plane directly under each layer that carries high-speed routes (DDR/RAM
+  buses, USB HS, SerDes, RF — from `/find-high-speed-nets`). Split planes and
+  route+pour layers are fine anywhere that isn't a high-speed reference.
+- **Dense boards (BGA ≥ ~100 balls, DDR/SDRAM buses): keep escape-depth layers
+  ROUTABLE, but still poured.** Don't let plane assignments turn the region
+  around a big BGA into 2-layer routing — long-haul nets need to cross
+  *through* inner layers (1–2 vias each). The resolution is order, not
+  abstinence: solid planes pour FIRST (Step 1c); a layer signals must cross
+  keeps its cost low (≤1.5) and gets its rail pours LATE (after the signal
+  steps, like the 2-layer flow below — the pour flows around existing copper).
+  Never leave a many-pad rail as pure tracks because its natural layer is
+  shared with routing.
 - **Check where the BGA fanout escapes landed before finalizing the plane
   layers** — a plane on a layer full of escape stubs forces `--rip-blocker-nets`
   to shred those escapes during tap placement (each rip risks a permanent
-  casualty). Pick plane layers the escapes avoid.
+  casualty). Pick solid-plane layers the escapes avoid.
 - More fanout options available.
 
 **Derive `--layer-costs` from the plane plan — penalize the plane-reserved
@@ -1195,12 +1218,13 @@ route.py ... --layers F.Cu In1.Cu In2.Cu B.Cu --layer-costs 1.0 3.0 3.0 1.0
   ~100 balls / DDR buses) where an inner layer was deliberately left
   signal-routable (see the dense-board exception above), keep that layer at
   1.0–1.5** — 3× on the only spare layer starves the long-haul nets that need
-  it (ulx3s failed 72 nets at 3×; its retry at 1.5 was the correct call).
+  it (measured: a 4-layer FPGA corpus board failed 72 nets at 3×; its retry at
+  1.5 was the correct call).
 - **Why it matters — it's a cascade, not just tidiness.** Signals crossing a
   plane layer fragment the pour into islands; `route_disconnected_planes` then
   carpets the layer with island-stitching tracks. Keep signals off the plane
   layers and the planes stay whole, so the repair has almost nothing to stitch.
-- **Measured on castor_pollux** (4-layer, In1=GND, In2=+3.3V/+3.3VA), full chain,
+- **Measured on a 4-layer corpus board** (In1=GND, In2=+3.3V/+3.3VA), full chain,
   default `1.0 1.0 1.0 1.0` vs smart `1.0 3.0 3.0 1.0`, both fully connected and
   DRC-clean:
 
@@ -1572,7 +1596,7 @@ Rules of the loop:
     try a **failed-first split**: re-run the step as two invocations, first
     `--nets <the failed nets>` on the clean input, then everything else to a
     fresh output. Ordering is the cheapest knob but rarely decisive:
-    measured on castor / butterstick / ddr5 / glasgow, an automatic
+    measured on four corpus boards of varying density, an automatic
     failed-first restart NEVER beat the normal order (twice it graded
     worse), so an in-engine restart was tried and removed — only reach for
     this manually when the failure histories actually show corridor
@@ -1671,7 +1695,7 @@ boards stay 100% connected at every setting — the win is via count and balance
 the subtlety — **the fab floor is NOT the board's `min_track_width` constraint
 either.** Three different numbers get confused here; keep them straight:
 
-- **Board `min_track_width`** (from `.kicad_pro`, e.g. ottercast = 0.2 mm) — the
+- **Board `min_track_width`** (from `.kicad_pro`, often 0.2 mm) — the
   author's self-imposed DRC rule. Often conservative. Note `list_nets
   --design-rules` reports its "manufacturing floor" track as `max(this, JLC min)`,
   so it currently **clamps the track floor to this constraint** (0.2) and does NOT
@@ -1679,12 +1703,12 @@ either.** Three different numbers get confused here; keep them straight:
   real floor (it's right for clearance/via, just not for track).
 - **Fab physical track minimum** (JLC ≈ **0.0889 mm / 3.5 mil** standard; **0.127
   mm / 5 mil** is the safe no-extra-cost width) — the actual floor. **This is the
-  target.** It can be *below* the board's `min_track_width`: the human ottercast
-  board routes most signals at 0.127 mm, under its own 0.2 mm constraint, which is
-  exactly why it fits channels our 0.2 mm net-class tracks can't.
+  target.** It can be *below* the board's `min_track_width`: human corpus
+  boards routinely route most signals at 0.127 mm, under their own 0.2 mm constraint,
+  which is exactly why they fit channels our 0.2 mm net-class tracks can't.
 
 For ordinary signals there is **no benefit to routing fat** and a real cost.
-Measured on ottercast_audio (signal pass, same clearance/grid, width only):
+Measured on a 4-layer corpus board (signal pass, same clearance/grid, width only):
 
 | Signal track width | Multipoint nets routed | Pads connected | Time |
 |--------------------|------------------------|----------------|------|
