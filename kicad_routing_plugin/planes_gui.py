@@ -2074,6 +2074,19 @@ class PlanesTab(wx.Panel):
         # can never break an already-applied plane result.
         self._run_plane_copper_cleanup(board, get_layer_id)
 
+        # Castellated landings (run-6 fix 1.7, GUI twin of the plane mains'
+        # retract_castellated_landings): plane taps/joins that landed inside a
+        # castellated pad's edge-clearance zone are pulled to its inner reach.
+        from .gui_utils import apply_castellated_landing_retract
+        try:
+            _live_edge = (board.GetDesignSettings().m_CopperEdgeClearance
+                          or 0) / 1e6
+        except Exception:
+            _live_edge = 0.0
+        _cfg_edge = (getattr(self, '_plane_drc_config', {}) or {}).get(
+            'board_edge_clearance') or 0.0
+        apply_castellated_landing_retract(board, max(_cfg_edge, _live_edge))
+
         # Make the live board's DRC constraints consistent with the plane routing
         # floors (issue #160), mirroring route_planes.py's auto-fix. Best-effort.
         cfg = getattr(self, "_plane_drc_config", None)

@@ -114,6 +114,7 @@ section. Used for accurate length/time matching.
 | `roundrect_rratio` | float | Corner radius ratio for roundrect pads (0–0.5) |
 | `rect_rotation` | float | Residual rectangle tilt in the global frame, in (-90, 90]. `0` for axis-aligned pads (the common case); non-zero only for pads on non-orthogonal angles. |
 | `local_clearance` | float | The pad's **resolved** clearance override in mm (issue #326): its own `(clearance …)` token, else the footprint-level override, else `0` (= use the global/netclass clearance). KiCad enforces `max(the two items' clearances)` per pair; the router's obstacle stamps and `check_drc` honor this the same way. Negative (shrinking) overrides clamp to `0`. |
+| `castellated` | bool | KiCad's `(property pad_prop_castellated)`: a deliberate half-hole pad **on** the board outline. Set by both parse paths. The routing mains run a castellated-landing retract post-pass that pulls track ends landing inside such a pad's edge-clearance zone back to the pad's inner reach (`pcb_modification.retract_castellated_landings`). |
 
 Pad dimensions are resolved into board space using the pad's **absolute** angle
 (the KiCad `(at … angle)` already includes the footprint rotation; applying the

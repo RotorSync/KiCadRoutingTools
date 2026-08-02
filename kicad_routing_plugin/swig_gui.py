@@ -3606,6 +3606,18 @@ class RoutingDialog(wx.Dialog):
         self.net_panel.refresh(sync_from_visible=False)
         self._update_status_bar()
 
+        # Castellated landings (run-6 fix 1.7, GUI twin of route.py's
+        # retract_castellated_landings): the effective edge rule is the larger
+        # of the config value and the live board's own m_CopperEdgeClearance.
+        from .gui_utils import apply_castellated_landing_retract
+        try:
+            _live_edge = (board.GetDesignSettings().m_CopperEdgeClearance
+                          or 0) / 1e6
+        except Exception:
+            _live_edge = 0.0
+        apply_castellated_landing_retract(
+            board, max(config.get('board_edge_clearance') or 0.0, _live_edge))
+
         # Per-step live DRC floors (GUI twin of the CLI's per-step
         # fix_project_for_output): a DRC pressed right after this step must
         # grade at the routed floors, not stock constraints.
