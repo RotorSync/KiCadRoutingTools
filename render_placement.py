@@ -548,6 +548,10 @@ Examples:
                         'failed and blocker nets to highlight')
     p.add_argument('--zoom-group', metavar='BLOCK',
                    help='frame one placement block (same names as route.py --group)')
+    p.add_argument('--view', metavar='X0,Y0,X1,Y1',
+                   help='frame an explicit world rect in board mm (the '
+                        'question-scoped crop: an intrusion, an edge row, a '
+                        'DRC cluster). Mutually exclusive with --zoom-group.')
     p.add_argument('--group-by', default='auto', metavar='SOURCES',
                    help='how blocks are derived (default: auto = kicad,sheet)')
     p.add_argument('--list-groups', action='store_true',
@@ -681,7 +685,19 @@ def main(argv=None):
 
     view = None
     tag = os.path.splitext(os.path.basename(args.board))[0]
-    if args.zoom_group:
+    if args.view and args.zoom_group:
+        print("ERROR: --view and --zoom-group both frame the panel; pick one",
+              file=sys.stderr)
+        return 2
+    if args.view:
+        from route_render import parse_view
+        try:
+            view = parse_view(args.view)
+        except ValueError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 2
+        tag += '_view'
+    elif args.zoom_group:
         from group_routing import GroupRoutingError, block_refs, resolved_name
         from placement.groups import parse_sources, short_name
         srcs = parse_sources(args.group_by)

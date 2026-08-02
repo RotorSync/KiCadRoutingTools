@@ -489,22 +489,42 @@ def render_board_file(board_path: str, out_png: Optional[str] = None,
                       show_pads: bool = True, show_zones: bool = True,
                       layers: Optional[Sequence[str]] = None,
                       layer_alpha: int = 150,
+                      view: Optional[Tuple[float, float, float, float]] = None,
+                      label: Optional[str] = None,
                       quiet: bool = False) -> Optional[str]:
-    """Parse ``board_path`` and write a PNG. Returns the path written."""
+    """Parse ``board_path`` and write a PNG. Returns the path written.
+
+    ``view`` crops to a world rect (board mm) -- the question-scoped-crop seam
+    (set_view) exposed to callers; a cropped frame is auto-labeled with its
+    rect so the picture says where on the board it is."""
     from kicad_parser import parse_kicad_pcb
     pcb = parse_kicad_pcb(board_path)
     r = BoardRenderer(pcb, size=size, supersample=supersample,
                       show_pads=show_pads, show_zones=show_zones, layers=layers,
-                      layer_alpha=layer_alpha)
+                      layer_alpha=layer_alpha, view=view)
     if out_png is None:
         out_png = os.path.splitext(board_path)[0] + '.png'
-    r.render().save(out_png)
+    if label is None and view is not None:
+        label = (f"view ({view[0]:g},{view[1]:g})-({view[2]:g},{view[3]:g})mm")
+    r.frame(label=label).save(out_png)
     if not quiet:
         n_layers = len(r.copper_layers)
         print(f"route_render: wrote {out_png} "
               f"({len(pcb.segments)} segs, {len(pcb.vias)} vias, {n_layers}L, "
               f"{r.W}x{r.H})")
     return out_png
+
+
+def parse_view(text: Optional[str]) -> Optional[Tuple[float, float, float, float]]:
+    """'X0,Y0,X1,Y1' (board mm) -> a view rect, or None. Shared by every CLI
+    that exposes the crop seam, so the spelling cannot drift."""
+    if not text:
+        return None
+    parts = [p for p in text.replace(',', ' ').split() if p]
+    if len(parts) != 4:
+        raise ValueError(f"--view wants X0,Y0,X1,Y1 in board mm, got {text!r}")
+    x0, y0, x1, y1 = (float(p) for p in parts)
+    return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
 
 
 def main() -> int:
@@ -524,13 +544,18 @@ def main() -> int:
                          'layers at crossings, 255 = opaque (default 150)')
     ap.add_argument('--no-pads', action='store_true')
     ap.add_argument('--no-zones', action='store_true')
+    ap.add_argument('--view', default=None, metavar='X0,Y0,X1,Y1',
+                    help='crop to this world rect in board mm (question-scoped '
+                         'zoom; the frame is labeled with the rect). Example: '
+                         '--view 117,73,121,79')
     args = ap.parse_args()
     layers = args.layers.split(',') if args.layers else None
     out = render_board_file(args.board, args.output, size=args.size,
                             supersample=args.supersample,
                             show_pads=not args.no_pads,
                             show_zones=not args.no_zones, layers=layers,
-                            layer_alpha=args.layer_alpha)
+                            layer_alpha=args.layer_alpha,
+                            view=parse_view(args.view))
     return 0 if out else 1
 
 

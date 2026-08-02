@@ -392,7 +392,7 @@ quoting any number. The headline pairings:
 | 0b lock advice | *(none)* | `JSON_SUMMARY` `unlocked_high` — re-run with your `--lock` list until it is **0**, or say which findings you are deliberately leaving free and why |
 | 0c `place_optimize` | `render_placement.py placed --before seed -o delta.png` | `JSON_SUMMARY` `crossings_after` vs `crossings_before`, `hpwl_after` vs `hpwl_before`. **Both must improve or you discard the result.** The arrows show what moved; only these say whether it helped |
 | 0c on a two-sided board | add `--per-side` | `overlap_area` — a per-side panel is the only place a back-side collision is visible, and `overlap_area > 0` tells you one exists before you go looking |
-| chasing one bus / clock | add `--ratsnest-nets '/CLK*'` | the same crossings/hpwl pair. Use this when the default delta view is too busy to read |
+| chasing one bus / clock | add `--ratsnest-nets '/CLK*'` | the same crossings/hpwl pair — and on a POSE/ORDER decision this is a READ, not a show: two renders, one per candidate pose, side by side (image case 5) |
 | a `place_route_loop` round | `make_movie.py WORKDIR --camera auto` | per-round `failures` and `iterations` from the loop's own output. A round that moved a lot and changed neither is noise |
 | a run that TRIED more than it kept | `make_film.py --from-loop-dir WORKDIR` | the same per-round numbers, for the **rejected** rounds too — the badged beats are the ones whose `failures` did not improve, and seeing where the search went is the point |
 | routing failed after placement | `--summary-json <route log>` on the render | the `failed_nets` and `blockers` in that same summary — the render colours exactly those, so the picture and the diagnosis are the same data |
@@ -411,7 +411,9 @@ question you actually have, is the same as not producing it. Each row is a
 | any accepted placement change | `render_placement after --before <the ledger's parent board — step-back its parent_sha>` | did the macro structure survive? **`--before` is the last ACCEPTED board**, not iteration N−1 — N−1 renders a delta that never existed |
 | any route step failed | `render_placement board --summary-json <route log> --focus` | do the failures share one pocket (→ placement) or scatter (→ parameters)? **`--focus` emits nothing without `--summary-json`** |
 | a `--group-by` decision is live | `render_placement --zoom-group <name> --group-by sheet` | which parts does this block actually pull in? |
-| chasing one bus, pair or clock | `render_placement --ratsnest-nets '*USB*'` | route.py `--nets` glob syntax, exclusions included. Use it when the default delta view is too busy to read |
+| chasing one bus, pair or clock | `render_placement --ratsnest-nets '*USB*'` | route.py `--nets` glob syntax, exclusions included. On a pose/order decision: TWO renders, one per pose, and READ them (image case 5) |
+| a claim about ONE spot (an intrusion, an edge row, a wedge, a stop claim) | `route_render.py BOARD --view x0,y0,x1,y1` (or the same flag on `render_placement`) | the question-scoped crop; it labels itself with its rect. READ it (image case 6). Numbers still decide magnitudes |
+| `check_drc` failed | re-run with `--render wk/drcN/` | one panel per violation cluster, red rings + count/types/rect caption. READ them (image case 7): one cluster = local fix, board-wide = grading floor (9.1b) |
 | every placement render | add `--ignore-nets <same as place_optimize>` | **must match** or `crossings`/`hpwl` will not reproduce the optimizer's `JSON_SUMMARY`, and you will chase a phantom disagreement |
 | every placement render | add `--clearance <the board's real floor>` | halo and overlap are otherwise graded at the wrong gap |
 | every render, always | add `--json` | the re-measurement channel. A tool's own report never satisfies its own gate. **It is a bare FLAG on `render_placement`**, not a path: it prints a `JSON_SUMMARY:`-prefixed line into stdout among the progress text, so grep that prefix and strip it. Only `board_score.py --json <path>` takes a file |
@@ -433,20 +435,47 @@ orientation, which pocket the failures sit in. It never answers *"is this
 legal?"*: clearance, overlap, off-board, connectivity and DRC all come from
 numbers. **Do not adjudicate clearance from pixels.**
 
-**`Read` the PNG yourself, and say what you saw, in exactly these four cases:**
+**`Read` the PNG yourself, and say what you saw, in exactly these seven cases.
+These are MANDATES tied to triggers, not permissions** — run 5 had this list as
+four permissions and read **zero** images across the whole run: the placement
+delta was produced and never opened, the R10-in-the-corridor fact that a crop
+shows instantly was found by a subagent rebuilding geometry from coordinates,
+and the U3 pin-order flip cost fifteen ordering experiments that two ratsnest
+renders would have replaced. An unread mandated image is a skipped step, and
+the ledger entry must name the panels read (see 9.4).
 
 1. **Before writing an intent** — `--per-side` on any board with back-side
    parts. You cannot declare zones for a board you have not looked at.
 2. **After any accepted placement change** — the delta against the board it
    actually came from. One question only: *did the macro structure survive?*
-3. **When routing failed and you need to know why** —
-   `--summary-json <route log> --focus`. One question: *do the failures share
-   one pocket* (→ placement) *or are they scattered* (→ parameters)?
+3. **Every Step 9 iteration whose score has `unrouted` or `broken` > 0** —
+   `render_placement --summary-json wk/routeN.json --focus -o wk/focusN/`.
+   One question: *do the failures share one pocket* (→ placement) *or are
+   they scattered* (→ parameters)? This is 9.1a's classification made
+   visual; do it BEFORE picking the lever, not after three levers failed.
 4. **When a block decision is live** — `--zoom-group`.
+5. **Any pose or ordering decision on a bus** (a `converge poses` candidate,
+   a rot-0-vs-rot-180 tie, an escape-order experiment) — TWO
+   `--ratsnest-nets '<bus>*'` renders, one per candidate pose, read side by
+   side. The pin-order fan is directly visible; count the crossings you see
+   and check them against `components.inversions`. Run 5's measured
+   exchange rate: fifteen routing experiments for what two renders show.
+6. **Before any stop-3/stop-4 claim** — a `--view x0,y0,x1,y1` crop of the
+   claimed-blocked region (route_render or render_placement, both take it),
+   read by YOU and handed to the watcher with the pad coordinates. A
+   "boxed in" claim whose crop shows open copper is refuted before it
+   costs a report.
+7. **When `check_drc` fails** — re-run with `--render wk/drcN/` and read the
+   cluster panels (red rings at each violation, count/types/rect in the
+   caption). One question: *is this one cluster* (a local fix — a rip, a
+   nudge, a retract) *or board-wide* (a grading-floor or class problem,
+   9.1b)?
 
 **Show without reading:** the movie, `--ratsnest-all` hairballs, full panel
-dumps. Those are for the human. Budget **≤3 images read per turn** — pick by the
-question you have, not by what is available.
+dumps. Those are for the human. Budget **≤3 images read per turn**, crops
+count as cheap — pick by the question you have, not by what is available. The
+budget bounds curiosity, never a mandate: a turn whose triggers demand four
+reads takes four.
 
 ### Always produce the movie — it is the only artifact that shows *how*
 
@@ -676,6 +705,15 @@ variable the claim had frozen, and it CONFIRMED the homotopy floors on the
 QSPI lengths by recomputing them (16.91/18.89 routed vs 16.81/18.48 floors).
 A stop condition that has survived one hostile rebuild is a finding; one that
 has not is a hypothesis.
+
+Pair the coordinates with a picture — image read-case 6: render a
+`--view x0,y0,x1,y1` crop of the claimed-blocked region (route_render.py or
+render_placement.py, both take the flag; the crop labels itself with its
+rect), READ it yourself first, and hand it to the watcher beside the numbers.
+Run 5's refuted claim — R10 astride SD1's corridor — is fully visible in a
+4×6 mm crop; the watcher found it only by re-deriving the geometry from pad
+coordinates. The crop shows WHERE; the watcher's arithmetic still decides
+HOW MUCH (never clearance from pixels).
 
 ### Good and bad, concretely
 
@@ -2890,7 +2928,7 @@ have booted.
 
 | order | component | why it outranks the rest |
 |---|---|---|
-| 1 | `unrouted` | a net with no copper is a dead wire. Nothing else matters while one exists. **Run `converge.py where BOARD --nets <names>` before touching a parameter** — it names the gap endpoints and the foreign copper walling them in, per layer, nearest-first (9.1b-ii). Guessing from the score is how eleven iterations went to clearances while five nets sat dead |
+| 1 | `unrouted` | a net with no copper is a dead wire. Nothing else matters while one exists. **Run `converge.py where BOARD --nets <names>` before touching a parameter** — it names the gap endpoints and the foreign copper walling them in, per layer, nearest-first (9.1b-ii). **And READ the focus panels** — image read-case 3: `render_placement --summary-json wk/routeN.json --focus` classifies pocket-vs-scattered in one look, BEFORE the first lever. Guessing from the score is how eleven iterations went to clearances while five nets sat dead |
 | 2 | `broken` | a net in N pieces is N−1 dead wires. **Read `components.broken.nets`, not the count** — see below; the count alone is not a work list and a loop driven on it does not move |
 | 3 | `net_widths`, `undersized` | real copper, wrong size — fixable by re-routing what is already there |
 | 4 | `floorplan` | placement or intent |
@@ -2987,6 +3025,7 @@ writing a script to answer a question, check whether one of them already does.
 |---|---|---|
 | where is the gap, and what is walling it in | `net_forensics.py --nets N --radius 1.0` | per net: the connected ISLANDS, the exact unclosed gap endpoints, and an inventory of the foreign copper around each gap — **named, per layer, nearest-first**. Better than a ratsnest, which tells you two pads are unjoined and nothing about why |
 | the honest unconnected count | `kicad_unconnected.py board --items` | KiCad's own DRC, and it **refills the zones itself** — which is 9.1c's whole problem, already solved. Exit 4 = items remain, 3 = no oracle (NOT clean) |
+| WHERE the DRC violations sit, as a picture | `check_drc.py board --render wk/drc/` | one cropped panel per spatial cluster, red rings at each violation, count/types/rect in the caption — image read-case 7. The panel shows WHERE; the violation records say how much |
 | the endgame work list, join by join | `kicad_unconnected.py board --pairs-json wk/pairs.json`, or `converge.py where BOARD --oracle` | each remaining join as an exact net + pad↔copper endpoint pair (x/y/layer/kind) — the JOIN SPEC for a scoped route, no re-deriving from prose. `where --oracle` prints the pairs then runs forensics on exactly those nets |
 | what kind of failure is this | `converge.py where` / the router's own hint | the hint names the flag and the nets (9.3b); it diagnoses better than the score does |
 | where should this part go, facing which way | `converge.py poses BOARD --ref R` | ranks legal (x, y, rotation) poses by placement cost in **milliseconds**, with a per-component breakdown, and `--route` pays for tier 3 on only the top few |
@@ -3310,6 +3349,13 @@ python3 -X utf8 converge.py status --ledger wk/ledger.jsonl      # EVERY iterati
 `status` is the alarm for 9.2's failure mode: it splits the budget into completion
 vs systemic and warns when at least half went to the instrument. Nothing else in
 the loop says that out loud, and the run that needed to hear it did not.
+
+**Name the panels you READ in the `--lever` text** (`... [read: focus3/panel1,
+drc3/cluster1]`). The image mandates are auditable only through the ledger: run
+5's breach — a produced-but-never-opened delta render — was invisible precisely
+because nothing recorded reads. An iteration whose score had `unrouted`/`broken`
+> 0 or a failed `check_drc`, with no `[read: ...]` in its entry, skipped
+read-case 3 or 7.
 
 **What `record` actually writes is this, and only this:**
 
