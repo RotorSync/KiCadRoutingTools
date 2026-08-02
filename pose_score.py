@@ -103,6 +103,14 @@ def rank_poses(pcb_data, board_path: str, ref: str, *, radius: float = 2.0,
     base = st.total_cost()
     rots = list(rotations) if allow_rotations else [rot0]
 
+    # Pin-order inversions (run-6, placement/pair_order.py): a LOWER BOUND on
+    # crossings a router cannot remove, carried as a component but NOT in the
+    # ranked total -- the objective must not chase a bound it can't trade off
+    # (fact (a): proxies mislead optimizers). rot-0 vs rot-180 ties in `cost`
+    # are exactly where this number decides (test-board U3: 9 -> 0).
+    from placement.pair_order import ref_inversions
+    base_inv = ref_inversions(st, ref)
+
     scored = []
     for dx, dy in _offsets(radius, step):
         for rot in rots:
@@ -112,16 +120,20 @@ def rank_poses(pcb_data, board_path: str, ref: str, *, radius: float = 2.0,
             st.apply_move(ref, x, y, rot)
             cost = st.total_cost()
             st.apply_move(ref, x0, y0, rot0)          # always restore
+            inv = ref_inversions(st, ref, x, y, rot)
             scored.append({
                 'x': round(x, 4), 'y': round(y, 4), 'rot': rot,
                 'cost': round(cost['total'], 4),
                 'delta': round(cost['total'] - base['total'], 4),
                 'dist_mm': round((dx * dx + dy * dy) ** 0.5, 4),
                 'legal': True,
-                'components': {k: round(v, 4) for k, v in cost.items()
-                               if k != 'total'},
-                'component_delta': {k: round(v - base.get(k, 0), 4)
-                                    for k, v in cost.items() if k != 'total'},
+                'components': dict(
+                    {k: round(v, 4) for k, v in cost.items() if k != 'total'},
+                    inversions=inv),
+                'component_delta': dict(
+                    {k: round(v - base.get(k, 0), 4)
+                     for k, v in cost.items() if k != 'total'},
+                    inversions=inv - base_inv),
             })
     # cost, then least disturbance, then a stable rotation order
     scored.sort(key=lambda p: (p['cost'], p['dist_mm'], p['rot']))
