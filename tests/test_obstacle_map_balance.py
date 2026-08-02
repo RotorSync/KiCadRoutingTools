@@ -128,7 +128,9 @@ def main():
     rc, log = run_cmd(["route_planes.py", kit_out, kit_plane,
                        "--nets", "+3.3V", "GND", "+3.3V", "GND",
                        "--plane-layers", "F.Cu", "In1.Cu", "In2.Cu", "B.Cu",
-                       "--max-via-reuse-radius", "3", "--rip-blocker-nets"] + kit_geom)
+                       "--max-via-reuse-radius", "3", "--rip-blocker-nets",
+                       # deliberate partial-board pour (run-6 A5 gate opt-out)
+                       "--allow-bare-pads"] + kit_geom)
     check("route_planes: run completed", rc == 0, f"rc={rc}")
     rips = len(re.findall(r"[Rr]ipping", log))
     check("route_planes: rip churn engaged (recipe still churns)", rips >= 1, f"rips={rips}")
@@ -147,7 +149,8 @@ def main():
     iu_fixed = os.path.join(tmp, "iu_repair.kicad_pcb")
     rc, _ = run_cmd(["route_planes.py", os.path.join(KF, "interf_u_unrouted.kicad_pcb"),
                      iu_plane, "--nets", "VCC", "GND",
-                     "--plane-layers", "F.Cu", "B.Cu"], audit=False)
+                     "--plane-layers", "F.Cu", "B.Cu",
+                     "--allow-bare-pads"], audit=False)
     check("repair: interf_u planes step completed", rc == 0, f"rc={rc}")
     rc, _ = run_cmd(["bga_fanout.py", iu_plane, "--component", "U9",
                      "--output", iu_fan, "--nets", "/*"], audit=False)
