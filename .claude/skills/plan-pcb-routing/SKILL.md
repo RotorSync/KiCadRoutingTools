@@ -1706,6 +1706,24 @@ Rules of the loop:
 
 ### Diagnose and Retry
 
+**Soft-cost retry levers, by board type (measured on full chains; the
+defaults are deliberately mild — these are RETRY settings, not universal):**
+
+- **Congested multi-net boards that thrash** (many rip-up retries in the log,
+  moderate density): add `--ripped-route-avoidance-cost 3
+  --track-proximity-cost 2 --via-proximity-cost 100` — measured +2.4 pts
+  completion and conn 21→12 on a 389-ball 4-layer chain at +13% runtime.
+- **Dense fine-pitch BGA boards** (≥100 balls ≤0.8 mm): add
+  `--ripped-route-avoidance-cost 3 --track-proximity-cost 2` but do NOT
+  raise `--via-proximity-cost` — cheap vias are load-bearing in the escape
+  competition (with the via tamer the same board LOST 7.6 pts; without it,
+  +6.1 pts, the largest single-knob chain gain measured).
+- **Boards routing fine at defaults:** leave everything alone — these levers
+  cost runtime (up to 2x on the wrong board type) and buy nothing.
+- Never set `--via-proximity-cost 0` (a measured ~200x CPU explosion), and
+  leave `--ripped-route-avoidance-radius` at its default (widening it
+  measured worse).
+
 After running routing commands:
 1. Report how many nets were routed successfully
 2. **If routes failed**, invoke `/diagnose-routing-failures <board> <log files>` — it parses
