@@ -2264,6 +2264,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     print(f"  Total vias:    {total_vias}")
     print(f"  Total time:    {total_time:.2f}s")
     print(f"  Iterations:    {total_iterations:,}")
+    _frag = getattr(config, '_fragility_field', None)
+    if _frag is not None and _frag.refreshes:
+        print(f"  Fragility refresh (#466): {_frag.refreshes} windows, "
+              f"{_frag.refresh_s:.2f}s total")
 
     # Print detailed failure summary
     if failed_single:
