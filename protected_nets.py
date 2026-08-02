@@ -249,6 +249,27 @@ def exact_names(patterns: Optional[Iterable[str]]) -> Set[str]:
     return {p for p in patterns if p and not (_GLOB_CHARS & set(p))}
 
 
+def stash_rip_overrides(pcb_data, patterns: Optional[Iterable[str]]) -> Set[str]:
+    """Record the exact-name rip overrides on pcb_data so the IN-RUN ladders
+    can honor them (run-6 z2 fix). The pre-run filters (--rip-existing-nets /
+    --force-reroute) already lift 'user' protection for exactly-named nets,
+    but the in-run ladders re-consult cached_protection_map, which still
+    lists them -- so the phase-3 tap cascade refused a net the operator had
+    explicitly named ('protected_skipped {"phase3 tap cascade":
+    {USB_DM_R: user}}' while --rip-existing-nets named it). 'locked' is
+    never overridable, here or anywhere."""
+    names = exact_names(patterns)
+    if names:
+        pcb_data._rip_override_names = set(
+            getattr(pcb_data, '_rip_override_names', None) or set()) | names
+    return getattr(pcb_data, '_rip_override_names', None) or set()
+
+
+def rip_override_names(pcb_data) -> Set[str]:
+    """The exact-name rip overrides stashed for this run (empty set if none)."""
+    return getattr(pcb_data, '_rip_override_names', None) or set()
+
+
 # What the last run's rip filters refused, and why: {context: {net: reason}}.
 # The print below is for a human reading a log; a PROGRAM driving the router
 # cannot see it, and the router's own failure hint tells that program to retry

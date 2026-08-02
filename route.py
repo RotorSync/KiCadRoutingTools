@@ -952,15 +952,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"{', '.join(_fr_skipped_plane[:6])}"
                   f"{', ...' if len(_fr_skipped_plane) > 6 else ''}")
         if _fr_cand:
-            from protected_nets import protection_map, filter_rippable_names
+            from protected_nets import (protection_map, filter_rippable_names,
+                                        stash_rip_overrides)
             _fr_prot = protection_map(pcb_data, input_file)
+            _fr_overrides = list(net_name_patterns
+                                 if net_name_patterns is not None
+                                 else net_names)
+            # Run-6 z2 fix: the in-run ladders must see the same exact-name
+            # overrides this pre-run filter honors.
+            stash_rip_overrides(pcb_data, _fr_overrides)
             _fr_keep = set(_n for _n, _ in _fr_cand)
             if _fr_prot:
                 _fr_keep = set(filter_rippable_names(
                     [_n for _n, _ in _fr_cand], _fr_prot,
-                    override_patterns=list(net_name_patterns
-                                           if net_name_patterns is not None
-                                           else net_names),
+                    override_patterns=_fr_overrides,
                     context="--force-reroute"))
             for _name, _nid in _fr_cand:
                 if _name not in _fr_keep:
@@ -1213,19 +1218,24 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # --rip-existing-nets or --nets is the deliberate override. Nets with
         # KiCad-LOCKED copper are excluded unconditionally (no override).
         if existing_rippable:
-            from protected_nets import protection_map, filter_rippable_names
+            from protected_nets import (protection_map, filter_rippable_names,
+                                        stash_rip_overrides)
             _prot = protection_map(pcb_data, input_file)
+            # Override source: the RAW --nets patterns when main() passed
+            # them -- expansion turns a glob into exact names, which made
+            # any glob-selected protected net "exactly named" here (#521's
+            # override is deliberately no-glob; found by the force-reroute
+            # test). rip_existing_nets is never expanded, so it stays as-is.
+            _rip_overrides = (list(rip_existing_nets)
+                              + list(net_name_patterns
+                                     if net_name_patterns is not None
+                                     else (net_names or [])))
+            # Run-6 z2 fix: stash for the in-run ladders too.
+            stash_rip_overrides(pcb_data, _rip_overrides)
             if _prot:
-                # Override source: the RAW --nets patterns when main() passed
-                # them -- expansion turns a glob into exact names, which made
-                # any glob-selected protected net "exactly named" here (#521's
-                # override is deliberately no-glob; found by the force-reroute
-                # test). rip_existing_nets is never expanded, so it stays as-is.
                 _keep = set(filter_rippable_names(
                     [pcb_data.nets[n].name for n in existing_rippable], _prot,
-                    override_patterns=list(rip_existing_nets)
-                    + list(net_name_patterns if net_name_patterns is not None
-                           else (net_names or [])),
+                    override_patterns=_rip_overrides,
                     context="--rip-existing-nets"))
                 existing_rippable = [n for n in existing_rippable
                                      if pcb_data.nets[n].name in _keep]
