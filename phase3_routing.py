@@ -870,8 +870,17 @@ def try_phase3_ripup(
     # Feed the exact identities as validator-named blockers instead -- they
     # sort ahead of every frontier-inferred tier under all select algorithms.
     _blame = getattr(pcb_data, '_via_unblock_blame', None)
-    _blame_ids = _blame.pop(net_id, None) if _blame else None
-    _known = [(nid, 1) for nid in _blame_ids] if _blame_ids else None
+    _blame_ids = set(_blame.pop(net_id, None) or ()) if _blame else set()
+    # Same channel, second producer (run-6 fix): the stuck-probe wall cells.
+    # A probe that exhausts below its limit proves the endpoint is walled, and
+    # the wall's TRACK owners are recorded by _identify_blocking_obstacles --
+    # often a 1-3 cell decisive net that count-ranking buries under
+    # large-perimeter bystanders (test-board run 5: GPIO7 at "1 cell, near
+    # tgt" under whole rails, N=3 exhausted on the wrong victims).
+    _wall = getattr(pcb_data, '_stuck_wall_blame', None)
+    _wall_ids = set(_wall.pop(net_id, None) or ()) if _wall else set()
+    _known_ids = (_blame_ids | _wall_ids) - exclude_ids
+    _known = [(nid, 1) for nid in sorted(_known_ids)] or None
 
     # PER-EDGE attribution (audit #2i): three tap edges failing in three
     # corners used to become one merged cell soup ranked by whichever net
