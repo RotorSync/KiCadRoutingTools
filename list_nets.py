@@ -299,17 +299,41 @@ def net_clearance_map_by_id(pcb_path, nets, design_rules=None):
     do not translate to a glob simply fail to match -> that net falls back to
     config.clearance (the safe/inert direction), never over-blocked.
     """
-    import fnmatch
     dr = design_rules if design_rules is not None else read_design_rules(pcb_path)
     classes = dr.get('classes') or {}
-    assignments = dr.get('assignments') or {}
-    patterns = dr.get('patterns') or []
 
     def _class_clr(cname):
         c = classes.get(cname) or {}
         v = c.get('clearance')
         return float(v) if isinstance(v, (int, float)) else None
 
+    out = {}
+    for nid, cand in net_class_memberships(pcb_path, nets,
+                                           design_rules=dr).items():
+        # Only NON-Default class memberships matter: a Default-only net routes at
+        # config.clearance. Take the strictest (max) NON-Default class clearance.
+        clrs = [c for c in (_class_clr(cn) for cn in cand if cn != 'Default')
+                if c is not None]
+        if not clrs:
+            continue
+        out[nid] = max(clrs)
+    return out
+
+
+def net_class_memberships(pcb_path, nets, design_rules=None):
+    """{net_id: set of net-class names} from the sibling .kicad_pro: the
+    explicit ``netclass_assignments`` entry UNION every matching
+    ``netclass_patterns`` glob (KiCad merges memberships). The SHARED membership
+    resolver -- net_clearance_map_by_id and the #549 .kicad_dru track-clearance
+    channel both resolve through this, so router and grader cannot drift on who
+    is in a class. Nets with no membership are omitted (not mapped to set()).
+
+    Pattern matching is glob-style; an exotic pattern that does not translate
+    simply fails to match (safe/inert direction)."""
+    import fnmatch
+    dr = design_rules if design_rules is not None else read_design_rules(pcb_path)
+    assignments = dr.get('assignments') or {}
+    patterns = dr.get('patterns') or []
     out = {}
     for nid, name in nets.items():
         if not name:
@@ -326,13 +350,8 @@ def net_clearance_map_by_id(pcb_path, nets, design_rules=None):
                     cand.add(cname)
             except Exception:
                 pass
-        # Only NON-Default class memberships matter: a Default-only net routes at
-        # config.clearance. Take the strictest (max) NON-Default class clearance.
-        clrs = [c for c in (_class_clr(cn) for cn in cand if cn != 'Default')
-                if c is not None]
-        if not clrs:
-            continue
-        out[nid] = max(clrs)
+        if cand:
+            out[nid] = cand
     return out
 
 
