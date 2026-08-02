@@ -36,8 +36,9 @@ from kicad_parser import parse_kicad_pcb
 from placement.groups import derive_groups, short_name
 from placement.quench import QuenchState
 from placement.routability import (Corridor, DISPLACEMENT_MAX_FANOUT,
-                                   block_displacements, corridors_from_intent,
-                                   foreign_crossings, health)
+                                   block_displacements, corridor_intrusions,
+                                   corridors_from_intent, foreign_crossings,
+                                   health)
 import routing_defaults as defaults
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -263,8 +264,35 @@ def test_health_reports_nothing_it_was_not_asked_for():
           f"no blocks -> displacement skipped too")
 
 
+def test_a_part_body_parked_in_the_channel_is_reported_with_its_depth():
+    """foreign_crossings sees airwires; it cannot see a COURTYARD parked in
+    the corridor (run 5's R10: 1.03mm INSIDE the QSPI channel, measured by
+    hand). corridor_intrusions makes that number mechanical: a synthetic
+    corridor driven straight through a known part must report that part with
+    a positive depth, and a corridor routed through empty space reports
+    nothing."""
+    pcb, st, _blocks = _state()
+    ref, part = next((r, p) for r, p in sorted(st.parts.items())
+                     if p.pin_count >= 2)
+    x1, y1, x2, y2 = part.rect()
+    cy = (y1 + y2) / 2
+    through = Corridor(name='probe', net_ids=(),
+                       a=(x1 - 5.0, cy), b=(x2 + 5.0, cy), width_mm=2.0)
+    rows = corridor_intrusions(st, through)
+    hit = next((r for r in rows if r['ref'] == ref), None)
+    assert hit is not None, f"{ref} sits in the corridor but is not reported"
+    assert 0 < hit['depth_mm'] <= 2.0 and hit['along_mm'] > 0, hit
+    # empty space: a corridor far off-board reports nothing
+    empty = Corridor(name='void', net_ids=(), a=(-500.0, -500.0),
+                     b=(-400.0, -500.0), width_mm=2.0)
+    assert corridor_intrusions(st, empty) == []
+    print(f"  PASS: {ref} reported {hit['depth_mm']}mm inside the channel; "
+          f"an empty corridor reports nothing")
+
+
 TESTS = [
     test_power_nets_would_otherwise_swamp_the_displacement_signal,
+    test_a_part_body_parked_in_the_channel_is_reported_with_its_depth,
     test_the_fanout_threshold_separates_this_boards_rails_cleanly,
     test_an_explicit_ignore_list_is_honoured_like_ignore_nets,
     test_a_corridor_counts_crossings_with_the_quenchs_own_kernel,

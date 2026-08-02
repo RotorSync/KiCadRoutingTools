@@ -21,6 +21,7 @@ import sys
 import os
 import math
 import argparse
+import json
 from dataclasses import replace
 from typing import List, Tuple, Dict, Optional, Set
 
@@ -352,7 +353,8 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
                         protected_net_ids, first_failure, ripped_net_ids, verbose,
                         distant_trace_radius=0.0, shared_via_maps=None,
                         partial_restores=None, plane_oracle=None,
-                        corridor_ghosts=None, write_lists=None):
+                        corridor_ghosts=None, write_lists=None,
+                        corridor_seeds=None):
     """A plane-net pad too small to drop a via in needs a trace to the plane (or
     to an adjacent same-net pad); if signal nets block that trace, rip them (up
     to max_rip_nets), retry the tap. Identifies the blocker from the failed
@@ -443,6 +445,7 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
             verbose=verbose, fine_for_all=True, distant_trace_radius=distant_trace_radius,
             shared_via_maps=shared_via_maps, plane_oracle=plane_oracle,
             corridor_ghosts=corridor_ghosts,
+            corridor_seeds=corridor_seeds,
             # This tap's own rips freed this corridor FOR the tap: their
             # ghosts must not repel it.
             ghost_exclude_ids=frozenset(ripped_ids_local))
@@ -689,6 +692,30 @@ def auto_detect_zones(
     return zone_pairs
 
 
+def reconnect_batches(names, net_layers, default_layers):
+    """{(layer, ...): [net, ...]} -- how to split a ripped-net reconnect.
+
+    batch_route takes ONE layer list per call, so a reconnect that re-routes
+    every casualty together necessarily routes them all across the same layers.
+    For a net the caller pinned to a single layer -- a crystal leg, a bus with a
+    zero-via rule -- that silently discards the restriction: it comes back
+    wherever the router liked, with vias.
+
+    Grouping by allowed-layer-set fixes it without touching the A*: each group
+    is one batch_route call with `layers` set to its own restriction, and a
+    single-layer group cannot produce a via at all, by construction.
+
+    Nets with no entry fall in the default group, so a board that declares
+    nothing behaves exactly as before (one group, one call).
+    """
+    groups = {}
+    for name in names:
+        lay = (net_layers or {}).get(name)
+        groups.setdefault(tuple(lay) if lay else tuple(default_layers),
+                          []).append(name)
+    return groups
+
+
 def route_planes(
     input_file: str,
     output_file: str,
@@ -725,9 +752,23 @@ def route_planes(
     progress_callback=None,
     cancel_check=None,
     net_clearances: Optional[dict] = None,
+    # Per-net geometry that must SURVIVE a rip. The ripped-net reconnect below
+    # re-routes whatever the pad repairs tore out, and until these existed the
+    # only thing it preserved was width (#513 item 5) -- a net the caller had
+    # restricted to one layer came back on any layer, with vias.
+    #   net_layers: {net name: [layer, ...]} -- the reconnect batches by this,
+    #     so a single-layer net cannot take a via at all, by construction.
+    #   track_width_floor: a HARD floor is not a floor if a repair can route
+    #     under it.
+    net_layers: Optional[dict] = None,
+    track_width_floor: float = 0.0,
     clamp_netclasses: bool = True,
     clearance_ceiling: Optional[float] = None,
     add_teardrops: bool = False,
+    # #549 B: glob patterns naming nets whose committed-copper corridors via
+    # placement should prefer to keep clear. None -> AUTO (the board's
+    # protected/impedance records); ['none'] -> off.
+    corridor_nets: Optional[List[str]] = None,
 ) -> Tuple[int, int]:
     """
     Route between disconnected regions in power plane zones.
@@ -968,6 +1009,14 @@ def route_planes(
     if corridor_ghosts is not None:
         print(f"  (#517 corridor ghosts armed: {_sb_mode} mode)")
 
+    # #549 B: SEPARATE seed registry from COMMITTED copper of path-critical
+    # nets (auto: the board's protected/impedance records). Soft via-site
+    # preference only; independent of KICAD_PLANE_RIP_SOFTBLOCK.
+    from plane_corridor_ghosts import seed_corridor_ghosts
+    corridor_seeds = seed_corridor_ghosts(pcb_data, corridor_nets,
+                                          via_size, clearance,
+                                          input_file=input_file)
+
     # #517 instrumentation: which PASS placed each piece of this run's new
     # copper (pad-tap, region-join, partial-restore, reconnect, custody
     # restore), so a custody REFUSED-restore can name the occupier class
@@ -1128,8 +1177,11 @@ def route_planes(
         their vacated corridors (the window-shrink half of the #480 knob).
         Successes leave ripped_net_ids -- their new copper enters the write
         list here; failures stay queued for the end-of-run reconnect and its
-        custody. Mirrors the end-of-run batch (same batch_route call, same
-        #513 width preservation, same #338/#441 edge floor)."""
+        custody. Mirrors the end-of-run batch: same batch_route call, same
+        #513 width preservation, same #338/#441 edge floor, and -- since the
+        run-6 fix -- the same reconnect_batches layer grouping and
+        track_width_floor, so a --net-layers pin survives this path too (a
+        single-layer group cannot take a via at all, by construction)."""
         _names = [pcb_data.nets[_n].name for _n in _rip_ids
                   if _n in pcb_data.nets]
         if not _names:
@@ -1157,21 +1209,45 @@ def route_planes(
                         continue
                     _pn.append(_cn)
                     _pw.append(_cw)
-            _ok, _fail, _t, _rdata = batch_route(
-                input_file, "", _names,
-                layers=routing_layers,
-                track_width=track_width, clearance=clearance,
-                via_size=via_size, via_drill=via_drill,
-                grid_step=grid_step, max_iterations=max_iterations,
-                power_nets=_pn or None, power_nets_widths=_pw or None,
-                board_edge_clearance=_edge,
-                disable_bga_zones=([] if no_bga_zone else None),
-                net_clearances=net_clearances,
-                hole_to_hole_clearance=hole_to_hole_clearance,
-                return_results=True, pcb_data=pcb_data,
-                # #540 item 2: price the OTHER pending casualties' corridors
-                # (this batch's own nets excluded -- theirs to reclaim).
-                **_ghost_kwargs(corridor_ghosts, _rip_ids))
+            # Group by allowed-layer set and carry the width floor, exactly
+            # like the end-of-run batch. This path used to route ALL
+            # casualties across the full layer list in one call with no
+            # floor -- measured on test-board run 5: USB_DP, ripped for a
+            # tap, returned with 2 vias and B.Cu segments DESPITE an F.Cu
+            # --net-layers pin, and the pour-repair's thin reconnects are
+            # where a 0.4mm rail's sub-width segments came from.
+            _groups = reconnect_batches(_names, net_layers, routing_layers)
+            _rdata = {'results': [], 'all_swap_vias': [],
+                      'all_swap_segments': []}
+            for _glay, _gnames in _groups.items():
+                if len(_groups) > 1:
+                    print(f"    (#517 reconnect batch on {','.join(_glay)}: "
+                          f"{', '.join(_gnames)})")
+                _ok, _fail, _t, _rd = batch_route(
+                    input_file, "", _gnames,
+                    layers=list(_glay),
+                    track_width=track_width, clearance=clearance,
+                    track_width_floor=track_width_floor,
+                    via_size=via_size, via_drill=via_drill,
+                    grid_step=grid_step, max_iterations=max_iterations,
+                    power_nets=_pn or None, power_nets_widths=_pw or None,
+                    board_edge_clearance=_edge,
+                    disable_bga_zones=([] if no_bga_zone else None),
+                    net_clearances=net_clearances,
+                    hole_to_hole_clearance=hole_to_hole_clearance,
+                    return_results=True, pcb_data=pcb_data,
+                    # #540 item 2: price the OTHER pending casualties'
+                    # corridors (this batch's own nets excluded -- theirs
+                    # to reclaim).
+                    **_ghost_kwargs(corridor_ghosts, _rip_ids))
+                _rdata['results'] += list(_rd.get('results') or [])
+                _rdata['all_swap_vias'] += list(_rd.get('all_swap_vias')
+                                                or [])
+                _rdata['all_swap_segments'] += list(
+                    _rd.get('all_swap_segments') or [])
+                # segments_to_remove/vias_to_remove are per-call channels;
+                # consume them per group, not off the merged dict.
+                _consume_inner_strips(_rd, "immediate-reconnect")
             for _r in _rdata.get('results', []):
                 for _s in (_r.get('new_segments') or []):
                     all_new_segments.append(
@@ -1201,7 +1277,6 @@ def route_planes(
                      'net_id': _s.net_id})
                 _prov_seg(_s.net_id, _s.layer, _s.start_x, _s.start_y,
                           _s.end_x, _s.end_y, 'reconnect')
-            _consume_inner_strips(_rdata, "immediate-reconnect")
             # A net is done only if it is CONNECTED now (batch_route's own
             # success flag is not the arbiter -- #479's lesson).
             from check_connected import check_net_connectivity as _cnc517
@@ -1339,7 +1414,8 @@ def route_planes(
                         distant_trace_radius=distant_radius,
                         shared_via_maps=shared_maps,
                         plane_oracle=plane_oracle,
-                        corridor_ghosts=corridor_ghosts
+                        corridor_ghosts=corridor_ghosts,
+                        corridor_seeds=corridor_seeds
                     )
                     _rips_before = len(ripped_net_ids)
                     if not result.success and rip_blocker_nets:
@@ -1364,6 +1440,7 @@ def route_planes(
                                               else None),
                             plane_oracle=plane_oracle,
                             corridor_ghosts=corridor_ghosts,
+                            corridor_seeds=corridor_seeds,
                             write_lists=(all_new_segments, all_new_vias))
                         if rr is not None:
                             result = rr
@@ -1691,32 +1768,61 @@ def route_planes(
                         print(f"  Preserving routed width {_cw}mm for ripped "
                               f"net {_cn} across the reconnect (this run's "
                               f"default is {track_width}mm)")
-                _ok, _fail, _t, _rdata = batch_route(
-                    input_file, "", _cnames,
-                    layers=routing_layers,
-                    track_width=track_width, clearance=clearance,
-                    via_size=via_size, via_drill=via_drill,
-                    grid_step=grid_step, max_iterations=max_iterations,
-                    power_nets=_pn or None, power_nets_widths=_pw or None,
-                    board_edge_clearance=_edge,
-                    disable_bga_zones=([] if no_bga_zone else None),
-                    # #434: forward the map resolved from the ORIGINAL input's
-                    # project (batch_route's own auto-read would find no
-                    # netclasses next to a not-yet-written output).
-                    net_clearances=net_clearances,
-                    hole_to_hole_clearance=hole_to_hole_clearance,
-                    # #527: forward progress/cancel -- a multi-net reconnect
-                    # used to run minutes behind one static message.
-                    progress_callback=(
-                        (lambda c, t, m: progress_callback(
-                            c, t, f"Reconnect: {m}"))
-                        if progress_callback else None),
-                    cancel_check=cancel_check,
-                    return_results=True, pcb_data=pcb_data,
-                    # #540 item 2: the end-of-run batch routes the casualties
-                    # themselves, so only ghosts NOT in this batch remain --
-                    # normally none, but a cancel/partial path can leave some.
-                    **_ghost_kwargs(corridor_ghosts, _casualties))
+                # #: a ripped net must come back with the GEOMETRY it had, not
+                # just the width (#513 item 5 above). A net the caller restricted
+                # to one layer -- a crystal leg, a bus with a zero-via rule --
+                # was re-routed here across every routing layer, because this
+                # call passes ONE global `layers` list. Measured: a crystal net
+                # came back on the opposite layer with 5 vias against a HARD
+                # zero-via rule, and no parameter the caller could pass reached
+                # inside this pass.
+                #
+                # Fix without touching the A*: BATCH BY ALLOWED LAYER SET. Nets
+                # sharing a restriction are routed together with `layers` set to
+                # it. A net restricted to a single layer then cannot take a via
+                # at all -- by construction, which is the same guarantee
+                # `route.py --layers F.Cu` already gives a caller who can reach
+                # the command line.
+                _groups = reconnect_batches(_cnames, net_layers,
+                                           routing_layers)
+
+                _ok = _fail = 0
+                _rdatas = []
+                for _glay, _gnames in _groups.items():
+                    if len(_groups) > 1:
+                        print(f"  reconnect batch on {','.join(_glay)}: "
+                              f"{', '.join(_gnames)}")
+                    _o, _f, _t, _rd = batch_route(
+                        input_file, "", _gnames,
+                        layers=list(_glay),
+                        track_width=track_width, clearance=clearance,
+                        track_width_floor=track_width_floor,
+                        via_size=via_size, via_drill=via_drill,
+                        grid_step=grid_step, max_iterations=max_iterations,
+                        power_nets=_pn or None, power_nets_widths=_pw or None,
+                        board_edge_clearance=_edge,
+                        disable_bga_zones=([] if no_bga_zone else None),
+                        # #434: forward the map resolved from the ORIGINAL
+                        # input's project (batch_route's own auto-read would
+                        # find no netclasses next to a not-yet-written output).
+                        net_clearances=net_clearances,
+                        hole_to_hole_clearance=hole_to_hole_clearance,
+                        # #527: forward progress/cancel -- a multi-net reconnect
+                        # used to run minutes behind one static message.
+                        progress_callback=(
+                            (lambda c, t, m: progress_callback(
+                                c, t, f"Reconnect: {m}"))
+                            if progress_callback else None),
+                        cancel_check=cancel_check,
+                        return_results=True, pcb_data=pcb_data,
+                        # #540 item 2: the end-of-run batch routes the
+                        # casualties themselves, so only ghosts NOT in this
+                        # batch remain -- normally none, but a cancel/partial
+                        # path can leave some.
+                        **_ghost_kwargs(corridor_ghosts, _casualties))
+                    _ok += _o
+                    _fail += _f
+                    _rdatas.append(_rd)
 
                 def _sd(_s):
                     return {'start': (_s.start_x, _s.start_y),
@@ -1728,22 +1834,23 @@ def route_planes(
                     return {'x': _v.x, 'y': _v.y, 'size': _v.size,
                             'drill': _v.drill, 'layers': _v.layers,
                             'net_id': _v.net_id}
-                for _r in _rdata.get('results', []):
-                    for _s in (_r.get('new_segments') or []):
-                        all_new_segments.append(_sd(_s))
-                        _prov_seg(_s.net_id, _s.layer, _s.start_x, _s.start_y,
-                                  _s.end_x, _s.end_y, 'reconnect')
-                    for _v in (_r.get('new_vias') or []):
-                        all_new_vias.append(_vd(_v))
-                        _prov_via(_v.net_id, _v.x, _v.y, 'reconnect')
-                for _v in (_rdata.get('all_swap_vias') or []):
-                    all_new_vias.append(_vd(_v))
-                    _prov_via(_v.net_id, _v.x, _v.y, 'reconnect')
-                for _s in (_rdata.get('all_swap_segments') or []):
-                    all_new_segments.append(_sd(_s))
-                    _prov_seg(_s.net_id, _s.layer, _s.start_x, _s.start_y,
-                              _s.end_x, _s.end_y, 'reconnect')
-                _consume_inner_strips(_rdata, "reconnect")
+                for _rdata in _rdatas:
+                  for _r in _rdata.get('results', []):
+                      for _s in (_r.get('new_segments') or []):
+                          all_new_segments.append(_sd(_s))
+                          _prov_seg(_s.net_id, _s.layer, _s.start_x, _s.start_y,
+                                    _s.end_x, _s.end_y, 'reconnect')
+                      for _v in (_r.get('new_vias') or []):
+                          all_new_vias.append(_vd(_v))
+                          _prov_via(_v.net_id, _v.x, _v.y, 'reconnect')
+                  for _v in (_rdata.get('all_swap_vias') or []):
+                      all_new_vias.append(_vd(_v))
+                      _prov_via(_v.net_id, _v.x, _v.y, 'reconnect')
+                  for _s in (_rdata.get('all_swap_segments') or []):
+                      all_new_segments.append(_sd(_s))
+                      _prov_seg(_s.net_id, _s.layer, _s.start_x, _s.start_y,
+                                _s.end_x, _s.end_y, 'reconnect')
+                  _consume_inner_strips(_rdata, "reconnect")
                 # The reconnect mutated copper, and the plane fill models are
                 # cached on pcb_data (they subtract foreign-copper halos, so a
                 # reconnected blocker can re-pinch a fill they no longer see).
@@ -2491,7 +2598,8 @@ def route_planes(
                             distant_trace_radius=0.0, disable_reuse=True,
                             shared_via_maps=shared_maps,
                             plane_oracle=sweep_oracle,
-                            corridor_ghosts=corridor_ghosts)
+                            corridor_ghosts=corridor_ghosts,
+                            corridor_seeds=corridor_seeds)
                         if result.success and result.via is not None:
                             if (vtry, dtry) in _escalated_pairs:
                                 warn_fab_escalation(
@@ -2579,7 +2687,8 @@ def route_planes(
                             verbose=verbose, fine_for_all=True, pour_trace_only=True,
                             distant_trace_radius=max_search_radius, disable_reuse=True,
                             plane_oracle=sweep_oracle,
-                            corridor_ghosts=corridor_ghosts)
+                            corridor_ghosts=corridor_ghosts,
+                            corridor_seeds=corridor_seeds)
                         if not (track_res.success and track_res.segments):
                             continue
                         new_seg_objs = []
@@ -3037,6 +3146,20 @@ Examples:
                         help="Maximum track width for connections in mm (default: 2.0)")
     parser.add_argument("--min-track-width", type=float, default=defaults.REPAIR_MIN_TRACK_WIDTH,
                         help="Minimum track width for connections in mm (default: 0.2)")
+    parser.add_argument("--net-layers", metavar="JSON", default=None,
+                        help="JSON FILE of {\"<net name>\": [\"F.Cu\", ...]} -- the layers "
+                             "each named net may use. The ripped-net reconnect batches by "
+                             "this, so a net the spec pins to ONE layer comes back on that "
+                             "layer and, being single-layer, cannot take a via at all. "
+                             "Without it a pad repair re-routes whatever it tore out across "
+                             "every routing layer: a zero-via crystal leg came back on the "
+                             "opposite layer with 5 vias, and no CLI flag could reach inside "
+                             "that pass.")
+    parser.add_argument("--track-width-floor", type=float, default=0.0,
+                        help="HARD floor (mm) the ripped-net reconnect may not route under. "
+                             "Same meaning as route.py's flag: a floor is not a floor if a "
+                             "repair pass can go under it (default: 0 = no floor beyond the "
+                             "fab tier's).")
     parser.add_argument("--track-width", type=float, default=None,
                         help="Default track width for routing config in mm (default: the board Default net-class width, else 0.3)")
 
@@ -3093,6 +3216,12 @@ Examples:
     # cannot get its own via by tracing to an adjacent same-net pad, ripping the
     # signal net(s) blocking that trace, then re-routing them with the original
     # signal parameters - which must therefore be passed through.
+    parser.add_argument("--corridor-nets", nargs="+", metavar="PATTERN", default=None,
+                        help="#549: net-name globs whose committed-copper corridors via "
+                             "placement should prefer to keep clear (soft preference, "
+                             "never excludes the only viable site). Default: AUTO -- the "
+                             "board's protected nets and impedance declarations. Pass "
+                             "'none' to disable.")
     parser.add_argument("--rip-blocker-nets", action="store_true",
                         help="When a plane-net pad cannot be connected, trace to a nearby same-net "
                              "pad, ripping the signal net(s) blocking it, then re-route the ripped nets.")
@@ -3239,11 +3368,23 @@ Examples:
         for net, layer in zone_pairs:
             print(f"  {net} on {layer}")
 
+    _net_layers = None
+    if args.net_layers:
+        # A FILE, like --net-clearances: a layer list per net is too long to
+        # want on a command line, and it is usually generated.
+        with open(args.net_layers, encoding='utf-8') as _nlf:
+            _net_layers = json.load(_nlf)
+        print(f"Per-net layer restrictions for {len(_net_layers)} net(s) "
+              f"from {args.net_layers}")
+
     _rdp_result = route_planes(
         input_file=args.input_file,
         output_file=args.output_file,
+        corridor_nets=args.corridor_nets,
         net_names=net_names,
         plane_layers=plane_layers,
+        net_layers=_net_layers,
+        track_width_floor=args.track_width_floor,
         track_width=args.track_width,
         clearance=args.clearance,
         zone_clearance=args.zone_clearance,
@@ -3283,6 +3424,17 @@ Examples:
                                                 args.clearance, args.grid_step)
         if _snapped or _removed:
             print(f"Plane cleanup: closed {_snapped} stub gap(s), trimmed {_removed} dead-end segment(s)")
+        # Castellated landings (run-6 fix 1.7): reconnect/tap copper that
+        # landed in a castellated pad's edge-clearance zone is pulled back to
+        # the pad's inner reach.
+        try:
+            from fix_kicad_drc_settings import effective_board_edge_clearance
+            from pcb_modification import retract_castellated_landings
+            _edge = effective_board_edge_clearance(args.input_file, 0.0)
+            if _edge > 0:
+                retract_castellated_landings(args.output_file, _edge)
+        except Exception as e:
+            print(f"  (skipped castellated-landing retract: {e})")
 
     # KiCad-oracle recheck (#217): our fill model over-credits, so gaps
     # KiCad's REAL fill produces can survive every model-based pass (castor

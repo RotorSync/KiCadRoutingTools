@@ -114,6 +114,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 # #498: {layer: mm} per-layer clearance. None (both fronts) ->
                 # auto-read the sibling .kicad_dru; explicit dict (tests) wins.
                 layer_clearances: Optional[Dict[str, float]] = None,
+                # #549: {net_id: mm} track-to-track clearance map; None ->
+                # auto-read the sibling .kicad_dru track rules.
+                track_clearances: Optional[Dict[int, float]] = None,
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
                 direction_order: str = None,
                 ordering_strategy: str = "inside_out",
@@ -192,6 +195,10 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 return_results: bool = False,
                 pcb_data=None,
                 net_clearances: dict = None,
+                # Net-name globs to PROTECT for this run (reason 'user', #521):
+                # rip machinery skips matches, and they persist to the output
+                # .kicad_pro so later steps honor them without the flag.
+                protect_nets: Optional[List[str]] = None,
                 cancel_check=None,
                 progress_callback=None) -> Tuple[int, int, float]:
     """
@@ -300,6 +307,10 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         pcb_data = parse_kicad_pcb(input_file, keepout_layer=keepout_layer)
     else:
         print("Using provided PCB data...")
+
+    if protect_nets:
+        from protected_nets import stash_user_protection
+        stash_user_protection(pcb_data, protect_nets)
 
     # Route trace (#482, KICAD_ROUTE_TRACE=1): record diff-pair copper as it is
     # committed/ripped/restored for animating the run. Default-off; gated on a
@@ -702,8 +713,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     config.set_net_clearances(net_clearances, [nid for _, nid in net_ids])
     # #498: per-layer .kicad_dru clearance rules, installed engine-side so the
     # GUI inherits them with no wiring (see kicad_dru.install_layer_clearances).
-    from kicad_dru import install_layer_clearances
+    from kicad_dru import install_layer_clearances, install_track_clearances
     install_layer_clearances(config, layer_clearances, input_file, pcb_data)
+    # #549: track-scoped .kicad_dru rules (raise-only on seg-vs-seg stamps).
+    install_track_clearances(config, track_clearances, input_file, pcb_data,
+                             routed_net_ids=[nid for _, nid in net_ids])
 
     # Upfront layer swap optimization: analyze all diff pairs and apply beneficial swaps
     # BEFORE MPS ordering, so ordering sees correct segment layers
@@ -1748,6 +1762,11 @@ Examples:
                         choices=list(defaults.RIPUP_BLOCKER_SELECT_CHOICES),
                         default=defaults.RIPUP_BLOCKER_SELECT,
                         help="""Blocker SELECTION algorithm for the rip-up ladder (see route.py --help / docs/rip-up-reroute.md)""")
+    parser.add_argument("--protect-nets", nargs="+", metavar="PATTERN", default=None,
+                        help="Net names or glob patterns to PROTECT for this run (#521): "
+                             "the rip ladder skips them, and they persist to the output "
+                             ".kicad_pro so later chain steps honor them without the flag. "
+                             "Override later by naming a net EXACTLY (no glob) in a rip set.")
     parser.add_argument("--max-setback-angle", type=float, default=45.0,
                         help="Maximum angle (degrees) for setback position search (default: 45.0)")
     parser.add_argument("--routing-clearance-margin", type=float, default=1.0,
@@ -2021,6 +2040,7 @@ Examples:
                 verbose=args.verbose,
                 polarity_swap_nets=args.polarity_swap_nets,
                 max_rip_up_count=args.max_ripup,
+                protect_nets=args.protect_nets,
                 ripup_blocker_select=args.ripup_blocker_select,
                 max_setback_angle=args.max_setback_angle,
                 enable_layer_switch=not args.no_stub_layer_swap,

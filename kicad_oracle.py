@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from typing import List, Optional, Tuple
@@ -80,6 +81,17 @@ def find_kicad_cli() -> Optional[str]:
     for c in KICAD_CLI_CANDIDATES:
         if c and os.path.exists(c):
             return c
+    # KICAD_CLI env override, then versioned Windows installs (not on PATH;
+    # newest wins). Run 5 silently skipped every oracle recheck on Windows
+    # because none of the unix candidates exist there.
+    env = os.environ.get('KICAD_CLI', '')
+    if env and os.path.exists(env):
+        return env
+    if sys.platform == 'win32':
+        import glob
+        hits = sorted(glob.glob(r'C:\Program Files\KiCad\*\bin\kicad-cli.exe'))
+        if hits:
+            return hits[-1]
     return None
 
 

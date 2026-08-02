@@ -310,7 +310,11 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                             else config.route_reserve_width(layer_name))
         # #498: a .kicad_dru layer rule REPLACES the net/class value on its layer.
         clr_l = config.layer_clearance(layer_name, obs_clearance)
-        expansion_mm = layer_width / 2 + clr_l + config.route_reserve_width(layer_name) / 2 + extra_clearance
+        # #549: a track-scoped DRU rule RAISES the seg-vs-seg capsule only;
+        # the via ring keeps clr_l. Add/remove parity is automatic (the same
+        # NetObstacleData arrays are batch-added and batch-removed).
+        trk_l = config.track_obstacle_clearance(net_id, clr_l)
+        expansion_mm = layer_width / 2 + trk_l + config.route_reserve_width(layer_name) / 2 + extra_clearance
         # Float keep-out half-width for the capsule segment stamp (no floor): the
         # true perpendicular clearance, so off-grid / diagonal tracks are covered.
         expansion_mm_by_layer[layer_name] = max(coord.grid_step, expansion_mm)
@@ -357,8 +361,9 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             via_block_mm = via_block_mm_by_layer.get(seg.layer)
         else:
             _clr_l = config.layer_clearance(seg.layer, obs_clearance)  # #498
+            _trk_l = config.track_obstacle_clearance(net_id, _clr_l)  # #549
             expansion_mm = max(coord.grid_step,
-                               own_half + _clr_l
+                               own_half + _trk_l
                                + config.route_reserve_width(seg.layer) / 2 + extra_clearance)
             via_block_mm = config.via_size / 2 + own_half + _clr_l + extra_clearance
         _collect_segment_obstacles(seg, coord, layer_idx, expansion_mm,

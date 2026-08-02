@@ -37,6 +37,15 @@ from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 Rect = Tuple[float, float, float, float]
 
+# Floor on the frames a PART MOVE gets. A placement beat is the one thing in a
+# routing film that is not copper appearing, and at a handful of frames it reads
+# as a jump cut rather than as a part travelling -- you cannot see WHICH part
+# went WHERE, which is the only reason the beat is in the film. Applies to the
+# glide and to the runtime budget alike: the budget may cut a pan to nothing,
+# and it may not cut a move below this. `tween=0` stays an explicit "no glide,
+# cut straight there" and is left alone.
+MIN_MOVE_FRAMES = 10
+
 # --- easing (shared; animate_fanout_clearance imports these) -----------------
 
 
@@ -313,10 +322,15 @@ def apply_budget(shots: Sequence[Shot], seconds: float, fps: float
            if s.kind != 'action' else s for s in out]
     if sum(s.frames for s in out) > budget:
         over = sum(s.frames for s in out) - budget
-        # Only now touch the content, proportionally, never below 2.
+        # Only now touch the content, proportionally. A ROUTING beat may go to
+        # 2; a PART MOVE may not go below MIN_MOVE_FRAMES -- squeezing the
+        # travel out of a placement round to save a pan is the trade this
+        # function exists to refuse.
         acts = [i for i, s in enumerate(out) if s.kind == 'action']
         for i in acts:
-            share = max(2, out[i].frames - max(1, over // max(1, len(acts))))
+            floor = (MIN_MOVE_FRAMES if (out[i].action and
+                                         out[i].action.kind == 'place') else 2)
+            share = max(floor, out[i].frames - max(1, over // max(1, len(acts))))
             out[i] = out[i]._replace(frames=share)
     return out
 
@@ -367,7 +381,8 @@ class Stage:
         # what carries the story; the glide is decoration, and on a long run it
         # is most of the runtime. Anything else is clamped to >=2, since a
         # 1-frame "glide" is just a cut with extra steps.
-        self.tween_frames = 0 if int(tween) <= 0 else max(2, int(tween))
+        self.tween_frames = (0 if int(tween) <= 0
+                             else max(MIN_MOVE_FRAMES, int(tween)))
         self.quiet = quiet
         self.movie = None
         self.r = None
@@ -581,8 +596,15 @@ class Stage:
         moved = rd.get('moved') or []
         self._drain_until_action(label)
 
-        # silent clear: the copper of the PREVIOUS round is genuinely gone
-        self.movie.reconcile_to([], [], f"{label}: re-placing")
+        # silent clear: the copper of the PREVIOUS round is genuinely gone.
+        # That is a fact about the LOOP -- it re-routes from scratch every
+        # round -- not about placement. A chain that merely moved some parts
+        # keeps the copper it has, so trueup to THIS board instead of to
+        # nothing; for a loop round the board carries none and the two are the
+        # same call.
+        self.movie.reconcile_to(seg_rows if rd.get('synth') else [],
+                                via_rows if rd.get('synth') else [],
+                                f"{label}: re-placing")
         if moved:
             self._tween(pcb, moved, label)
         else:
@@ -711,12 +733,70 @@ def _moved_side(pcb, moved):
     return 'B' if b > f else 'F'
 
 
-def load_round_sidecars(work_dir):
-    """`loop_round{N}.json` records, ordered by round, accepted ones only.
+def synth_rounds(boards):
+    """Round records for a chain that has NO loop_round*.json sidecars.
+
+    Footprint motion is already animated -- but only through a Stage, and a
+    Stage was only ever built from `place_route_loop`'s sidecars. Every other
+    chain (a hand-driven one, a plan run, anything a person assembled step by
+    step) therefore got `stage=None`, and `build_boards` animates COPPER deltas.
+    A placement step changes no copper, so it rendered as a single frame: the
+    parts jumped, or more often the step vanished from the film entirely.
+
+    The records a Stage needs are derivable from the boards themselves -- the
+    poses are right there in both files -- so a missing sidecar is no reason to
+    drop the motion. Diff consecutive boards and hand back the same shape
+    `load_round_sidecars` returns.
+
+    Every synthesised round is `accepted`: this is a sequence someone chose to
+    put in a film, not a search tree with rejects in it. A caller that wants to
+    show rejected attempts should say so by passing them and labelling them,
+    not by having them inferred here.
+    """
+    from kicad_parser import parse_kicad_pcb
+    out, prev = [], None
+    for i, b in enumerate(boards):
+        try:
+            pcb = parse_kicad_pcb(b)
+        except Exception:
+            continue
+        moved = []
+        if prev is not None:
+            for ref, fp in pcb.footprints.items():
+                old = prev.footprints.get(ref)
+                if old is None:
+                    continue
+                a_ = (round(old.x, 4), round(old.y, 4), round(old.rotation or 0.0, 3))
+                b_ = (round(fp.x, 4), round(fp.y, 4), round(fp.rotation or 0.0, 3))
+                if a_ != b_:
+                    # ROTATION is part of the pose. A part that turns 180 in
+                    # place moves no origin at all, and a position-only diff
+                    # shows nothing -- which is exactly how a rotation that
+                    # relocated a pin to the far side of a package went
+                    # unnoticed in a real run.
+                    moved.append({'reference': ref, 'from': list(a_), 'to': list(b_)})
+        if moved:
+            # ONLY a board whose parts moved is a placement beat. Emitting a
+            # record for every board would make `enter_step` intercept the
+            # routing steps too -- and it clears the copper on the way in.
+            out.append({'schema': 1, 'round': i, 'board': os.path.abspath(b),
+                        'accepted': True, 'screened': False, 'synth': True,
+                        'moved': sorted(moved, key=lambda m: m['reference'])})
+        prev = pcb
+    return out
+
+
+def load_round_sidecars(work_dir, accepted_only=False):
+    """`loop_round{N}.json` records, ordered by round.
 
     Keyed on the SIDECARS rather than a loop_round*.kicad_pcb glob: --work-dir
     defaults to the output board's directory, which may hold unrelated boards,
     and mtime ordering would animate a REJECTED round as though it were kept.
+
+    Every round is returned; the callers that want the accepted spine filter on
+    `accepted` themselves (`Stage._plan`, `make_movie.placement_chain`), and
+    `make_film` wants the dropped ones precisely because they are the search.
+    `accepted_only=True` asks for the spine directly.
     """
     import glob
     import json
@@ -728,6 +808,8 @@ def load_round_sidecars(work_dir):
         except Exception:
             continue
         if doc.get('schema') == 1 and 'round' in doc:
+            if accepted_only and not doc.get('accepted'):
+                continue
             out.append(doc)
     out.sort(key=lambda d: d['round'])
     return out

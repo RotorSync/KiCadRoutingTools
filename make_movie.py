@@ -108,7 +108,7 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
                supersample=DEFAULT_SUPERSAMPLE, layer_alpha=DEFAULT_LAYER_ALPHA,
                rip_hold=DEFAULT_RIP_HOLD, chunks=DEFAULT_CHUNKS,
                end_hold=DEFAULT_END_HOLD, png_dir=None, quiet=False,
-               camera=None, camera_budget=60.0, tween=8):
+               camera=None, camera_budget=60.0, tween=10):
     """Render the movie. ``inputs`` is a run dir (one entry) or a board sequence.
 
     Returns the path actually written -- which is a sibling ``.gif`` when an
@@ -145,13 +145,33 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
                 rounds = load_round_sidecars(inputs[0])
             except Exception:
                 rounds = []
+        work_dir = inputs[0] if (len(inputs) == 1 and os.path.isdir(inputs[0])) else ''
+        if not rounds:
+            # No sidecars: only place_route_loop writes them, so every chain a
+            # person drove by hand landed here and got stage=None -- which
+            # animates COPPER deltas only. A placement step changes no copper,
+            # so the first placements, the very thing the camera exists to show,
+            # rendered as ONE frame or vanished. The poses are in the boards;
+            # diff them and the camera has everything it needs.
+            try:
+                from movie_camera import synth_rounds
+                rounds = synth_rounds([s[1] for s in steps])
+                if not any(rd['moved'] for rd in rounds):
+                    rounds = []      # pure routing chain: nothing to tween
+                elif not quiet:
+                    n = sum(len(rd['moved']) for rd in rounds)
+                    print(f"make_movie: no loop_round*.json sidecars; recovered "
+                          f"{n} footprint moves from the boards themselves",
+                          file=sys.stderr)
+            except Exception as exc:
+                if not quiet:
+                    print(f"make_movie: could not read poses off the boards "
+                          f"({exc}); rendering without a camera", file=sys.stderr)
+                rounds = []
         if rounds:
             from movie_camera import Stage
-            stage = Stage(rounds, inputs[0], fps=fps,
+            stage = Stage(rounds, work_dir, fps=fps,
                           budget=camera_budget, tween=tween, quiet=quiet)
-        elif not quiet:
-            print("make_movie: --camera asked for but no loop_round*.json "
-                  "sidecars found; rendering without one", file=sys.stderr)
     frames = a.build_boards(steps, final, size, supersample, layer_alpha,
                             rip_hold, chunks, stage=stage)
     if not frames:
@@ -216,7 +236,7 @@ def main():
     ap.add_argument('--camera-budget', type=float, default=60.0,
                     metavar='SECONDS',
                     help='cap the camera runtime (0 = unlimited)')
-    ap.add_argument('--tween', type=int, default=8,
+    ap.add_argument('--tween', type=int, default=10,
                     help='frames per placement glide; 0 = no glide, cut straight to the new placement (default: 8)')
     args = ap.parse_args()
 

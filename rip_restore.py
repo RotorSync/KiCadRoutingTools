@@ -62,12 +62,20 @@ def _copper_conflicts(pcb_data: PCBData, config: GridRouteConfig,
             return config.stack_clearance(v)
         return v
 
+    def _track_pair_clr(a_net, b_net, layer):
+        # #549: a track-scoped DRU rule raises the SEG-SEG requirement only.
+        v = _pair_clr(a_net, b_net, layer)
+        if hasattr(config, 'track_obstacle_clearance'):
+            v = max(config.track_obstacle_clearance(a_net, v),
+                    config.track_obstacle_clearance(b_net, v))
+        return v
+
     for cand in segments:
         c_clr_half = cand.width / 2
         for s in pcb_data.segments:
             if s.net_id in own_ids or s.layer != cand.layer:
                 continue
-            need = c_clr_half + s.width / 2 + _pair_clr(cand.net_id, s.net_id, cand.layer)
+            need = c_clr_half + s.width / 2 + _track_pair_clr(cand.net_id, s.net_id, cand.layer)
             if any(point_to_segment_distance(px, py, s.start_x, s.start_y,
                                              s.end_x, s.end_y) < need
                    for px, py in _seg_points(cand)):

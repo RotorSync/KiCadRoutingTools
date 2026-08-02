@@ -289,6 +289,64 @@ def foreign_crossings(state, corridor: Corridor,
                                              key=lambda kv: (-kv[1], kv[0]))]
 
 
+def corridor_intrusions(state, corridor: Corridor,
+                        refs: Optional[Sequence[str]] = None
+                        ) -> List[Dict]:
+    """Parts whose COURTYARD physically sits inside a corridor, with the depth.
+
+    `foreign_crossings` sees airwires; it cannot see a part BODY parked in the
+    channel (test-board run 5: R10's courtyard reached 1.03 mm INSIDE the QSPI
+    corridor and every escape had to bend around it -- the watcher measured it
+    by hand from pad coordinates). This makes that number mechanical: for each
+    part (default: all movable+locked parts not owning a corridor net), test
+    courtyard-rect vs corridor-rect by separating axes (exact for two rects),
+    and report the overlap thickness along the corridor's cross-section --
+    "how deep into the channel the body reaches", in mm.
+
+    Returns [{'ref', 'depth_mm', 'along_mm'}] sorted deepest first. `along_mm`
+    is the longitudinal overlap, so a part clipping a corner shows a small
+    number on both axes.
+    """
+    dxc, dyc = corridor.b[0] - corridor.a[0], corridor.b[1] - corridor.a[1]
+    length = math.hypot(dxc, dyc)
+    if length < 1e-9:
+        return []
+    ux, uy = dxc / length, dyc / length          # along the channel
+    vx, vy = -uy, ux                             # cross-section
+    h = corridor.width_mm / 2.0
+    own = set(corridor.net_ids)
+    out = []
+    for ref in sorted(refs if refs is not None else state.parts):
+        part = state.parts.get(ref)
+        if part is None or set(part.nets) & own:
+            continue                             # its pads belong in the channel
+        x1, y1, x2, y2 = part.rect()
+        corners = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+        us = [(cx - corridor.a[0]) * ux + (cy - corridor.a[1]) * uy
+              for cx, cy in corners]
+        vs = [(cx - corridor.a[0]) * vx + (cy - corridor.a[1]) * vy
+              for cx, cy in corners]
+        along = min(max(us), length) - max(min(us), 0.0)
+        depth = min(max(vs), h) - max(min(vs), -h)
+        if along <= 0 or depth <= 0:
+            continue
+        # The interval tests above are a 2-axis SAT (corridor frame); finish
+        # the rect-vs-rect test on the courtyard's own axes so a diagonal
+        # corridor can't flag a part that only overlaps the bounding box.
+        cor_pts = [(corridor.a[0] + vx * s * h, corridor.a[1] + vy * s * h)
+                   for s in (-1, 1)] + \
+                  [(corridor.b[0] + vx * s * h, corridor.b[1] + vy * s * h)
+                   for s in (-1, 1)]
+        xs = [p[0] for p in cor_pts]
+        ys = [p[1] for p in cor_pts]
+        if min(xs) >= x2 or max(xs) <= x1 or min(ys) >= y2 or max(ys) <= y1:
+            continue
+        out.append({'ref': ref, 'depth_mm': round(depth, 3),
+                    'along_mm': round(along, 3)})
+    out.sort(key=lambda r: (-r['depth_mm'], r['ref']))
+    return out
+
+
 def corridor_convergence(state, corridors: Sequence[Corridor],
                          class_nets: Dict[str, Sequence[int]],
                          ignore_net_ids: Optional[Sequence[int]] = None,
@@ -349,7 +407,10 @@ def health(state, pcb_data, blocks: Dict[str, Sequence[str]],
             rows.append({**c.to_dict(), 'foreign_crossings': n,
                          'worst_nets': [pcb_data.nets[i].name
                                         for i in guilty[:5]
-                                        if i in pcb_data.nets]})
+                                        if i in pcb_data.nets],
+                         # run-6: part BODIES parked in the channel, deepest
+                         # first (airwire counts cannot see them)
+                         'intrusions': corridor_intrusions(state, c)[:5]})
         out['bus_corridors'] = rows
         out['bus_foreign_crossings'] = sum(r['foreign_crossings'] for r in rows)
         classes = spec.get('classes') or {}

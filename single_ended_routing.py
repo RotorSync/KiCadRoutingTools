@@ -836,12 +836,26 @@ def _identify_blocking_obstacles(
                 pad_rows.append((gx, gy, ex_x, ex_y, pad.net_id, mask))
     pads = np.asarray(pad_rows, dtype=np.int64) if pad_rows else np.empty((0, 6), dtype=np.int64)
 
-    counts = rust_fn(blocked, segs, vias, pads,
-                     int(expansion_grid), int(via_expansion_grid), int(num_layers))
-    blockers: Dict[int, Tuple[str, int]] = {}
-    for net_id, count in counts.items():
-        net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"net_{net_id}"
-        blockers[net_id] = (net_name, count)
+    # Two calls, split by obstacle KIND (run-6 fix): copper (segments+vias,
+    # rippable) versus pads (static). The merged count sent the operator on
+    # named-rip goose chases -- measured on test-board run 5: GPIO7 kept being
+    # cited AFTER its rip because the residue was its unrippable PAD, and the
+    # decisive 1-cell track wall ranked under big-perimeter bystanders.
+    _no_segs = np.empty((0, 6), dtype=np.int64)
+    _no_vias = np.empty((0, 3), dtype=np.int64)
+    _no_pads = np.empty((0, 6), dtype=np.int64)
+    counts_copper = rust_fn(blocked, segs, vias, _no_pads,
+                            int(expansion_grid), int(via_expansion_grid),
+                            int(num_layers))
+    counts_pads = rust_fn(blocked, _no_segs, _no_vias, pads,
+                          int(expansion_grid), int(via_expansion_grid),
+                          int(num_layers))
+    blockers: Dict[int, Tuple[str, int, int, int]] = {}
+    for nid in set(counts_copper) | set(counts_pads):
+        net_name = pcb_data.nets[nid].name if nid in pcb_data.nets else f"net_{nid}"
+        tc = int(counts_copper.get(nid, 0))
+        pc = int(counts_pads.get(nid, 0))
+        blockers[nid] = (net_name, tc + pc, tc, pc)
     return blockers
 
 
@@ -920,10 +934,31 @@ def _diagnose_blocked_start(obstacles: 'GridObstacleMap', cells: List, label: st
             if blocked_positions:
                 blockers = _identify_blocking_obstacles(blocked_positions, pcb_data, config, current_net_id)
                 if blockers:
-                    # Sort by count descending
-                    sorted_blockers = sorted(blockers.items(), key=lambda x: x[1][1], reverse=True)
-                    blocker_strs = [f"{name}({count})" for net_id, (name, count) in sorted_blockers[:5]]
+                    # Sort by count descending; say WHICH KIND of copper blocks.
+                    # "GPIO7(1 pad)" is not a rip candidate; "GPIO7(2 track)"
+                    # is -- the merged count used to read identically.
+                    sorted_blockers = sorted(blockers.items(),
+                                             key=lambda x: x[1][1], reverse=True)
+                    blocker_strs = []
+                    for _bnid, (name, _tot, tc, pc) in sorted_blockers[:5]:
+                        parts = ([f"{tc} track"] if tc else []) \
+                            + ([f"{pc} pad"] if pc else [])
+                        blocker_strs.append(f"{name}({', '.join(parts) or 0})")
                     print(f"{print_prefix}    Blocking obstacles: {', '.join(blocker_strs)}")
+                    # Feed the TRACK-blocking identities to the net's own rip
+                    # cascade (same channel shape as _via_unblock_blame): the
+                    # wall that stopped a stuck probe is micron-exact evidence,
+                    # and validator-named blockers sort ahead of every
+                    # frontier-inferred tier. Pads are deliberately excluded --
+                    # a pad cannot be ripped.
+                    if current_net_id >= 0:
+                        _wall = getattr(pcb_data, '_stuck_wall_blame', None)
+                        if _wall is None:
+                            _wall = {}
+                            pcb_data._stuck_wall_blame = _wall
+                        _wall.setdefault(current_net_id, set()).update(
+                            _bnid for _bnid, (_n, _t, tc, _p)
+                            in blockers.items() if tc)
 
 
 def _via_drill_exclusion_radius(config: 'GridRouteConfig') -> int:

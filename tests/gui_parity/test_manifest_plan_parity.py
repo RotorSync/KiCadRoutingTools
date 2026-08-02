@@ -51,6 +51,16 @@ BOOL_FLAGS = {
     '--no-gnd-vias': 'no_gnd_vias', '--rip-blocker-nets': 'rip_blocker_nets',
     '--keep-input-copper': 'keep_input_copper',
 }
+# nargs='+' glob-list flags: every pattern must survive into the plan param
+# (as a list, or a single scalar for one pattern). #521 --protect-nets and the
+# previously-unasserted --rip-existing-nets.
+LIST_FLAGS = {
+    '--rip-existing-nets': 'rip_existing_nets',
+    '--protect-nets': 'protect_nets',
+    '--corridor-nets': 'corridor_nets',
+    '--polarity-swap-nets': 'polarity_swap_nets',
+    '--coplanar-nets': 'coplanar_nets',
+}
 # Per-action overrides of SCALAR_FLAGS. #381 D4: route_diff.py's trace width is
 # --track-width, but its GUI home is the diff tab's diff_pair_width control (not
 # the Basic-tab track_width), so a diff step must carry it there.
@@ -186,6 +196,18 @@ def check_pair(argv, step):
                 bad.append((a, f"bool flag not set ({BOOL_FLAGS[a]})"))
             i += 1
             continue
+        if a in LIST_FLAGS:
+            want = []
+            i += 1
+            while i < len(argv) and not argv[i].startswith('--'):
+                want.append(argv[i]); i += 1
+            got = params.get(LIST_FLAGS[a])
+            got = [str(x) for x in got] if isinstance(got, list) else \
+                  ([str(got)] if got is not None else [])
+            n += 1
+            if not set(want).issubset(set(got)):
+                bad.append((a, f"want {want} got {got}"))
+            continue
         i += 1
     # Positional diff-pair globs must survive into step['pairs'].
     if step.get('action') == 'route_diff':
@@ -247,7 +269,8 @@ _ACTION_BLOCK_HANDLED = {
 # Params that MUST resolve to a GUI control (the D5 fallback list + D3 polarity
 # + D7 QFN width/clearance).
 _MUST_RESOLVE = {
-    'rip_existing_nets', 'impedance', 'ordering', 'direction', 'time_matching',
+    'rip_existing_nets', 'protect_nets', 'corridor_nets',
+    'impedance', 'ordering', 'direction', 'time_matching',
     'keepout', 'guide_corridor', 'length_match_groups', 'swappable_nets',
     'polarity_swap_nets', 'qfn_track_width', 'qfn_clearance',
 }

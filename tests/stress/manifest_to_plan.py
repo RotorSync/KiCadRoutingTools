@@ -112,6 +112,12 @@ LIST_FLAGS = {
     # #486: route.py's coplanar-waveguide net allowlist (nargs='+' globs).
     # LIST, not FLAG_PARAMS -- as a scalar flag only the FIRST pattern survived.
     '--coplanar-nets': 'coplanar_nets',
+    # #284/#521: rip-existing and protect allowlists (nargs='+' globs). Both
+    # route to TextCtrls via ai_plan's alias table.
+    '--rip-existing-nets': 'rip_existing_nets',
+    '--protect-nets': 'protect_nets',
+    # #549: plane scripts' corridor-seed allowlist.
+    '--corridor-nets': 'corridor_nets',
     '--nets': None,  # handled per action
     '--pairs': None,
     '--plane-layers': None,
@@ -335,7 +341,8 @@ def parse_command(argv):
         step['kind'] = 'bga' if tool == 'bga_fanout.py' else 'qfn'
         step['nets'] = [str(n) for n in nets] or ['*']
     for k in ('--power-nets', '--power-nets-widths', '--layer-costs',
-              '--layers', '--polarity-swap-nets', '--coplanar-nets'):
+              '--layers', '--polarity-swap-nets', '--coplanar-nets',
+              '--rip-existing-nets', '--protect-nets', '--corridor-nets'):
         if k in lists:
             step['params'][LIST_FLAGS[k]] = lists[k]
     return step

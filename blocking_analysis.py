@@ -872,25 +872,53 @@ def filter_rippable_blockers(
     blockers: List[BlockingInfo],
     routed_results: Dict,
     diff_pair_by_net_id: Dict,
-    get_canonical_net_id_func
+    get_canonical_net_id_func,
+    pcb_data=None,
+    context: str = "in-run rip ladder",
 ) -> Tuple[List[BlockingInfo], Set[int]]:
     """
     Filter blockers to only those that can be ripped (in routed_results),
     deduplicating by diff pair (P and N count as one).
+
+    With `pcb_data`, PROTECTED nets are also dropped (run-6 fix): this is the
+    one choke point all six in-run rip ladders flow through, and none of them
+    consulted protection_map -- so a .kicad_pro protected net, KiCad-locked
+    copper, or a --protect-nets match could be ripped mid-run by the phase-3
+    cascade even though every PRE-run rip channel refused it (test-board run
+    5, journal [10]: the #444 seam re-ask and the tap ladder churned a
+    committed net's copper repeatedly). Refusals are recorded in
+    PROTECTED_SKIPPED under `context` so they surface in JSON_SUMMARY.
+    There is deliberately NO override here: in-run the operator has no
+    channel to name a net, and the pre-run filters already honored exact
+    names before routing began.
 
     Args:
         blockers: List of BlockingInfo from analyze_frontier_blocking
         routed_results: Dict of net_id -> result for routed nets
         diff_pair_by_net_id: Dict mapping net_id -> (pair_name, pair)
         get_canonical_net_id_func: Function to get canonical net ID
+        pcb_data: enables the protection filter (optional, keyword)
+        context: PROTECTED_SKIPPED bucket for refusals
 
     Returns:
         Tuple of (rippable_blockers, seen_canonical_ids)
     """
+    protected = {}
+    if pcb_data is not None:
+        from protected_nets import cached_protection_map
+        protected = cached_protection_map(pcb_data)
     rippable_blockers = []
     seen_canonical_ids = set()
     for b in blockers:
         if b.net_id in routed_results:
+            if protected:
+                _net = pcb_data.nets.get(b.net_id)
+                _name = _net.name if _net else None
+                if _name and _name in protected:
+                    from protected_nets import PROTECTED_SKIPPED
+                    PROTECTED_SKIPPED.setdefault(context, {})[_name] = \
+                        protected[_name]
+                    continue
             canonical = get_canonical_net_id_func(b.net_id, diff_pair_by_net_id)
             if canonical not in seen_canonical_ids:
                 seen_canonical_ids.add(canonical)

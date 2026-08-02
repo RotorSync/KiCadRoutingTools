@@ -7,6 +7,7 @@ import sys
 import argparse
 import math
 import fnmatch
+import os
 import numpy as np
 from collections import defaultdict
 from typing import List, Tuple, Set, Optional, Dict, Any
@@ -1426,6 +1427,113 @@ def _np_capsule_to_tracks(h1x, h1y, h2x, h2y,
     return dist
 
 
+def _violation_xy(v: dict) -> Optional[Tuple[float, float]]:
+    """One representative board coordinate for a violation record. The record
+    shapes vary by check; try the point-bearing keys, midpoint a 4-tuple."""
+    for k in ('closest_pt1', 'cross_point', 'via_loc', 'pad_loc',
+              'loc1', 'seg_loc', 'loc2'):
+        p = v.get(k)
+        if not p:
+            continue
+        try:
+            if len(p) >= 4:
+                return ((p[0] + p[2]) / 2.0, (p[1] + p[3]) / 2.0)
+            if len(p) >= 2:
+                return (float(p[0]), float(p[1]))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def render_violation_panels(pcb_file: str, violations: List[dict],
+                            out_dir: str, size: int = 900,
+                            margin_mm: float = 1.5, cluster_gap: float = 4.0,
+                            max_panels: int = 8) -> List[str]:
+    """Question-scoped crops of the violation clusters (run-6 image work).
+
+    Nothing in the toolchain drew DRC positions before this: the numbers said
+    "278 violations" and the picture that would show WHERE never existed, so
+    run 5 re-derived every cluster from coordinates by hand. One panel per
+    spatial cluster (greedy merge within ``cluster_gap`` mm), largest cluster
+    first, each labeled with the count, the dominant types and the rect --
+    the paired number rides in the caption, so the "no clearance from pixels"
+    rule holds: the panel shows WHERE, the record says HOW MUCH.
+
+    Returns the panel paths (also printed). Accepted (waived) records are
+    skipped. Degrades to [] with a note if Pillow is unavailable.
+    """
+    pts = []
+    for v in violations:
+        if v.get('accepted'):
+            continue
+        xy = _violation_xy(v)
+        if xy is not None:
+            pts.append((xy[0], xy[1], v))
+    if not pts:
+        return []
+    try:
+        from route_render import (BoardRenderer, mm_ruler_overlay,
+                                  ref_label_overlay)
+        from kicad_parser import parse_kicad_pcb
+    except Exception as e:
+        print(f"  (--render skipped: {e})")
+        return []
+    # Greedy spatial clustering: a point joins the first cluster whose bbox it
+    # sits within cluster_gap of; clusters are merged transitively enough for
+    # a triage picture (this mirrors render_placement's focus-gap approach).
+    clusters: List[dict] = []
+    for x, y, v in sorted(pts, key=lambda p: (p[0], p[1])):
+        home = None
+        for c in clusters:
+            if (c['x0'] - cluster_gap <= x <= c['x1'] + cluster_gap and
+                    c['y0'] - cluster_gap <= y <= c['y1'] + cluster_gap):
+                home = c
+                break
+        if home is None:
+            home = {'x0': x, 'y0': y, 'x1': x, 'y1': y, 'items': []}
+            clusters.append(home)
+        home['x0'] = min(home['x0'], x); home['y0'] = min(home['y0'], y)
+        home['x1'] = max(home['x1'], x); home['y1'] = max(home['y1'], y)
+        home['items'].append((x, y, v))
+
+    clusters.sort(key=lambda c: -len(c['items']))
+    os.makedirs(out_dir, exist_ok=True)
+    pcb = parse_kicad_pcb(pcb_file)
+    dropped = sum(len(c['items']) for c in clusters[max_panels:])
+    paths = []
+    for i, c in enumerate(clusters[:max_panels]):
+        view = (c['x0'] - margin_mm, c['y0'] - margin_mm,
+                c['x1'] + margin_mm, c['y1'] + margin_mm)
+        r = BoardRenderer(pcb, size=size, view=view)
+        marker_pts = [(x, y) for x, y, _ in c['items']]
+
+        def _marks(d, rr, _pts=marker_pts):
+            rad = max(3.0, rr.tf.length(0.25))
+            for mx, my in _pts:
+                px, py = rr.tf.pt(mx, my)
+                d.ellipse([px - rad, py - rad, px + rad, py + rad],
+                          outline=(255, 60, 60), width=max(2, int(rad / 3)))
+        from collections import Counter
+        types = Counter(v.get('type', '?') for _, _, v in c['items'])
+        top = ', '.join(f"{t} x{n}" for t, n in types.most_common(3))
+        label = (f"drc {len(c['items'])}: {top} @"
+                 f"({c['x0']:.1f},{c['y0']:.1f})-({c['x1']:.1f},{c['y1']:.1f})mm")
+        out = os.path.join(out_dir, f"drc_cluster{i + 1}.png")
+        # Ref labels + mm ruler make the panel matchable to the violation
+        # records (which cite nets and coordinates): under the rings, above
+        # the copper.
+        r.frame(label=label,
+                overlays=[ref_label_overlay(pcb), mm_ruler_overlay(),
+                          _marks]).save(out)
+        paths.append(out)
+        print(f"  DRC render: {out} -- {label}")
+    if dropped:
+        print(f"  DRC render: {dropped} violation(s) in "
+              f"{len(clusters) - max_panels} further cluster(s) NOT rendered "
+              f"(--render caps at {max_panels} panels)")
+    return paths
+
+
 def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[str]] = None,
             debug_output: bool = False, quiet: bool = False,
             hole_to_hole_clearance: float = defaults.HOLE_TO_HOLE_CLEARANCE, board_edge_clearance: float = 0.0,
@@ -1525,6 +1633,43 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         if _lcl:
             print("Per-layer clearance rules (.kicad_dru, #498): "
                   + ", ".join(f"{l}:{v:g}" for l, v in sorted(_lcl.items())))
+
+    # #549: track-scoped clearance rules from the same .kicad_dru. Grader-side
+    # they are PAIR-EXACT (a rule binds a specific (a, b) pair, other_only
+    # exempts member siblings), which is <= the router's per-obstacle-net
+    # over-approximation -- so router output always grades clean. Applied at
+    # the SEG-SEG site only (KiCad's Type=='track' binds tracks).
+    from kicad_dru import read_board_track_clearances
+    _track_rules, _track_notes = read_board_track_clearances(pcb_file)
+    _cls_of: Dict[int, set] = {}
+    if _track_rules:
+        try:
+            from list_nets import net_class_memberships
+            _cls_of = net_class_memberships(
+                pcb_file, {nid: n.name for nid, n in pcb_data.nets.items()
+                           if n.name})
+        except Exception:
+            _track_rules = []
+    if not quiet and _track_rules:
+        for _n in _track_notes:
+            print(f"  .kicad_dru: {_n}")
+        print("Track-to-track clearance rules (.kicad_dru, #549): "
+              + ", ".join(f"'{r.cls}':{r.clearance_mm:g}"
+                          f"{'(other-only)' if r.other_only else ''}"
+                          for r in _track_rules))
+
+    def _track_pair_cl(net_a: int, net_b: int, layer: str) -> float:
+        eff = _pair_cl(net_a, net_b, layer=layer)
+        if not _track_rules:
+            return eff
+        a_cls = _cls_of.get(net_a, ())
+        b_cls = _cls_of.get(net_b, ())
+        for r in _track_rules:
+            a_in, b_in = r.cls in a_cls, r.cls in b_cls
+            binds = ((a_in != b_in) or (a_in and b_in and not r.other_only))
+            if binds and r.clearance_mm > eff:
+                eff = r.clearance_mm
+        return eff
 
     def _layer_cl(layer: str, eff: float) -> float:
         v = _lcl.get(layer) if _lcl else None
@@ -1697,7 +1842,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 continue
             checked_pairs.add(pair_key)
 
-            _eff = _pair_cl(net1, net2, layer=seg1.layer)
+            _eff = _track_pair_cl(net1, net2, layer=seg1.layer)
             has_violation, overlap, pt1, pt2 = check_segment_overlap(seg1, seg2, _eff, clearance_margin)
             if has_violation and _graphic_pair_is_same_net(seg1, seg2, net1, net2):
                 has_violation = False
@@ -2959,6 +3104,12 @@ if __name__ == "__main__":
                         help='Also check pad-to-board-edge clearance (issue #236). '
                              'Off by default: pad-edge violations are almost always '
                              'pre-existing edge-connector pads, not router-introduced.')
+    parser.add_argument('--render', metavar='DIR', default=None,
+                        help='write question-scoped crop panels of the violation '
+                             'clusters to DIR (one PNG per spatial cluster, red '
+                             'rings at each violation, count/types/rect in the '
+                             'caption). The picture shows WHERE; the numbers '
+                             'above say how much.')
 
     from fab_tiers import add_fab_tier_args, fab_tier_from_args, set_default_fab_tier
     add_fab_tier_args(parser)
@@ -3054,6 +3205,8 @@ if __name__ == "__main__":
                          size_margin=args.size_margin,
                          check_pad_edge=args.check_pad_edge,
                          net_clearances=net_clearances)
+    if args.render and any(not v.get('accepted') for v in violations):
+        render_violation_panels(args.pcb, violations, args.render)
     # 'accepted' items (e.g. a track covered by an edge-exempt pad) are published in
     # the return for other graders but are NOT failures -- exclude from exit status.
     sys.exit(1 if any(not v.get('accepted') for v in violations) else 0)

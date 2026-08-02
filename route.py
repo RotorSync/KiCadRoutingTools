@@ -271,6 +271,13 @@ def _empty_results_data() -> dict:
     }
 
 
+# --json-out collects every JSON_SUMMARY this process emits -- the first pass
+# and, when it fires, the reconciliation sub-run's -- so the file carries ONE
+# merged tally instead of whichever emission a reader happened to scrape.
+_SUMMARY_SINK: List[dict] = []
+_RECONCILE_RAISED = [False]
+
+
 def batch_route(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
@@ -288,6 +295,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 neckdown_length: float = 2.5,
                 neckdown_taper_length: float = 0.5,
                 track_width_floor: float = 0.0,
+                json_out: Optional[str] = None,
                 clearance: float = defaults.CLEARANCE,
                 via_size: float = defaults.VIA_SIZE,
                 via_drill: float = defaults.VIA_DRILL,
@@ -352,6 +360,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # #498: {layer: mm} per-layer clearance. None (both fronts) ->
                 # auto-read the sibling .kicad_dru; explicit dict (tests) wins.
                 layer_clearances: Optional[Dict[str, float]] = None,
+                # #549: {net_id: mm} track-to-track clearance (effective
+                # per-obstacle map). None (both fronts) -> auto-read the
+                # sibling .kicad_dru track rules; explicit dict (tests) wins.
+                track_clearances: Optional[Dict[int, float]] = None,
                 final_reconcile: bool = True,
                 add_teardrops: bool = False,
                 collect_stats: bool = False,
@@ -362,6 +374,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 net_clearances: dict = None,
                 keep_input_copper: bool = False,
                 rip_existing_nets: Optional[List[str]] = None,
+                # Net name patterns whose matches are protected for THIS run
+                # (reason 'user') and persisted to the output .kicad_pro like
+                # a routed diff pair's record: no rip glob, --rip-blocker-nets
+                # pick, in-run phase-3 ladder or seam re-ask may touch them.
+                # Override = naming the net EXACTLY (no glob), same as every
+                # non-'locked' reason. This is the missing guard for
+                # single-ended constrained nets (a committed QSPI wrap, a
+                # flat USB pair) that no match group ever writes (#521 covers
+                # pairs and matched groups only; test-board run 5 journal
+                # [10]: "the only guard is discipline").
+                protect_nets: Optional[List[str]] = None,
                 force_reroute: bool = False,
                 # The RAW --nets patterns as the operator typed them, BEFORE
                 # main()'s expand_net_patterns. #521's protection override is
@@ -428,9 +451,24 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _reconcile_kwargs = dict(locals())
     # net_name_patterns must not forward either: the reconcile sub-run scopes
     # by exact retried-net names, which are then the correct override source.
+    # json_out joins them: the sub-run must not write the parent's file. The
+    # OUTERMOST call owns it, and writes the MERGED tally after reconciliation.
     for _k in ('input_file', 'output_file', 'net_names', 'pcb_data',
-               'net_name_patterns'):
+               'net_name_patterns', 'json_out'):
         _reconcile_kwargs.pop(_k, None)
+    if json_out:
+        _SUMMARY_SINK.clear()
+        _RECONCILE_RAISED[0] = False
+    if not _SUMMARY_SINK:
+        # First (outermost) entry of this process's run: start the
+        # protected-net refusal record clean. The reconciliation sub-run
+        # re-enters here with the sink non-empty and must NOT reset it --
+        # its own refusals are part of the same run's report.
+        try:
+            from protected_nets import clear_skipped
+            clear_skipped()
+        except Exception:
+            pass
     if env_knobs.DUMP_BATCH_KWARGS:
         # Parameter-parity probe: dump THIS call's full parameter set so the
         # CLI front (argparse->main) and the GUI front (plan setters->tab
@@ -516,6 +554,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # swap phase had already consumed the un-canonical order.
     from kicad_parser import canonicalize_pcb_data_order
     canonicalize_pcb_data_order(pcb_data)
+
+    # --protect-nets: resolve the patterns against the board's nets ONCE and
+    # stash the matches on pcb_data, where protection_map() overlays them for
+    # every consumer in this run (the rip-existing filter, --force-reroute,
+    # the in-run phase-3 ladder, the seam re-ask). Also note them as
+    # candidates so main()'s existing persist writes them to the output
+    # .kicad_pro -- from the next step on they are protected without the flag.
+    if protect_nets:
+        from protected_nets import stash_user_protection
+        stash_user_protection(pcb_data, protect_nets)
 
     # Cross-class clearance: when no map was passed (net_clearances is None -- e.g.
     # the plane routers reroute ripped nets by calling batch_route directly), AUTO-
@@ -1271,8 +1319,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     config.set_net_clearances(net_clearances, base_map_exclusions)
     # #498: per-layer .kicad_dru clearance rules, installed engine-side so the
     # GUI inherits them with no wiring (see kicad_dru.install_layer_clearances).
-    from kicad_dru import install_layer_clearances
+    from kicad_dru import install_layer_clearances, install_track_clearances
     install_layer_clearances(config, layer_clearances, input_file, pcb_data)
+    # #549: track-scoped .kicad_dru rules, same engine-side pattern (raise-only
+    # on seg-vs-seg stamps; effective map over THIS call's routed set).
+    install_track_clearances(config, track_clearances, input_file, pcb_data,
+                             routed_net_ids=base_map_exclusions)
     # Carry the RESOLVED map into the end-of-run reconciliation kwargs, exactly
     # like board_edge_clearance above: the reconciliation self-invocation reads
     # the OUTPUT file, whose sibling .kicad_dru does not exist yet (main()'s
@@ -1281,6 +1333,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # rules (caught by test_dru_layer_clearance_e2e: a reconciliation +3V3 via
     # 0.25mm inside the B.Cu rule against GND).
     _reconcile_kwargs['layer_clearances'] = dict(config.layer_clearances)
+    _reconcile_kwargs['track_clearances'] = dict(config.track_clearances)
     if visualize:
         base_obstacles, base_vis_data = build_base_obstacle_map_with_vis(
             pcb_data, config, base_map_exclusions,
@@ -2326,6 +2379,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # T5 coverage gate: disturbed out-of-scope nets shipping broken
         # (additive; also present as failed_multipoint entries above).
         summary['coverage_gate_nets'] = coverage_gate_nets
+    try:
+        from protected_nets import PROTECTED_SKIPPED
+        if PROTECTED_SKIPPED:
+            # {context: {net: reason}}. reason 'locked' has NO override --
+            # a caller retrying with the net named exactly will be refused
+            # again, so it must stop rather than loop.
+            summary['protected_skipped'] = {
+                _c: dict(_m) for _c, _m in PROTECTED_SKIPPED.items()}
+    except Exception:
+        pass
     # #409: report-only frontier-blocking attribution per net still failed at
     # END of run (additive; key omitted when no failed net has a recorded
     # analysis). Last-wins per net -- 'stage' names the loop that recorded it;
@@ -2441,6 +2504,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     except Exception:
         pass
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
+    _SUMMARY_SINK.append(summary)
 
     # Write output file or return results for direct application
     if return_results:
@@ -2753,12 +2817,23 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 successful += _rok
                 failed = max(0, failed - _rok)
         except Exception as _e:
+            _RECONCILE_RAISED[0] = True
             print(f"{RED}  final reconciliation pass failed: {_e}{RESET}")
 
 
     # Per-net story dump (KICAD_NET_STORY=1): the complete journey of every
     # net -- bus membership, ordering, failures with named blockers, rips,
     # rescues, Phase-3 tap order, costs -- assembled from state.
+    if json_out:
+        try:
+            from route_summary import merge_summaries
+            _merged = merge_summaries(list(_SUMMARY_SINK), _RECONCILE_RAISED[0])
+            with open(json_out, 'w', encoding='utf-8') as _jf:
+                json.dump(_merged if _merged is not None else {}, _jf, indent=1)
+            print(f"  route summary written to {json_out}")
+        except Exception as _e:
+            print(f"  WARNING: could not write --json-out {json_out}: {_e}")
+
     from net_story import net_story_enabled, dump_net_story
     if net_story_enabled():
         try:
@@ -2872,6 +2947,15 @@ For differential pair routing, use route_diff.py:
                              "(e.g. on a board routed by a previous run). Use '*' to allow "
                              "any non-plane net. Without this flag, committed tracks are "
                              "never ripped.")
+    parser.add_argument("--protect-nets", nargs="+", default=None,
+                        metavar="PATTERN",
+                        help="Net name patterns to PROTECT for this run and persist to "
+                             "the output .kicad_pro (reason 'user', like a routed diff "
+                             "pair's record): no rip glob, in-run rip ladder or seam "
+                             "re-ask may touch them. Override by naming a net EXACTLY "
+                             "(no glob) in --nets/--rip-existing-nets. The guard for "
+                             "single-ended constrained copper (a committed bus wrap, a "
+                             "flat USB pair) that no match group ever records.")
     parser.add_argument("--force-reroute", action="store_true",
                         help="Rip and re-route from scratch every net selected by "
                              "--nets, even if already fully connected (#515's "
@@ -2949,6 +3033,20 @@ For differential pair routing, use route_diff.py:
                              "Distinct from check_drc.py's identically-named GRADING flag: this one "
                              "constrains what gets routed, that one what gets graded (default: 0 = "
                              "no floor beyond the --fab-tier minimum)")
+    parser.add_argument("--capabilities", action="store_true",
+                        help="Print this clone's module and flag inventory as JSON and "
+                             "exit. A consumer that pins a KRT clone can only check that "
+                             "route.py exists as a file, which passes for a clone on the "
+                             "wrong branch or missing the module its chain needs -- the "
+                             "run then prints green while describing an engine the repo "
+                             "does not pin. See krt_capabilities.py --require.")
+    parser.add_argument("--json-out", metavar="FILE", default=None,
+                        help="Also write the run's JSON_SUMMARY to FILE. This is the MERGED "
+                             "tally: when the end-of-run reconciliation fires, route.py emits a "
+                             "SECOND, reconcile-subset-scoped summary to stdout, and scraping "
+                             "either one alone is wrong -- the first counts every recovery as a "
+                             "failure, the second narrows the whole-board pad-pair denominator to "
+                             "the retried subset. Prefer this over parsing stdout.")
     parser.add_argument("--neckdown-length", type=float, default=defaults.NECKDOWN_LENGTH,
                         help="Length in mm of narrow track from the target pad on neck-down tap routes; the track "
                              "returns to the power width beyond this where clearance allows (default: 2.5)")
@@ -3141,6 +3239,16 @@ For differential pair routing, use route_diff.py:
     from fab_tiers import (add_fab_tier_args, fab_tier_from_args, set_default_fab_tier,
                            enforce_fab_floors, count_copper_layers_in_file)
     add_fab_tier_args(parser)
+    if '--capabilities' in sys.argv[1:]:
+        # Answered BEFORE parse_args, and before any board is touched:
+        # `input_file` is a required positional, and "is this the engine I
+        # pinned?" has to be answerable without naming a board -- a consumer
+        # asks it precisely because it does not yet trust anything else this
+        # clone would tell it. sys.exit rather than return: this block lives
+        # directly under `if __name__ == "__main__":`, not inside a main().
+        from krt_capabilities import capabilities as _caps
+        print(json.dumps(_caps(), indent=1, sort_keys=True))
+        sys.exit(0)
     args = parser.parse_args()
     # #439: the PRESENCE of --clearance is the clamp switch. Given -> it is the
     # ceiling: non-Default classes are capped at min(class, --clearance) and the
@@ -3521,6 +3629,7 @@ For differential pair routing, use route_diff.py:
                 ordering_strategy=args.ordering,
                 disable_bga_zones=args.no_bga_zones,
                 rip_existing_nets=args.rip_existing_nets,
+                protect_nets=args.protect_nets,
                 force_reroute=args.force_reroute,
                 # RAW patterns (pre-expansion): the #521 protection override
                 # must see what the operator TYPED, not the expanded names.
@@ -3537,6 +3646,7 @@ For differential pair routing, use route_diff.py:
                 neckdown_length=args.neckdown_length,
                 neckdown_taper_length=args.neckdown_taper_length,
                 track_width_floor=args.track_width_floor,
+                json_out=args.json_out,
                 clearance=args.clearance,
                 net_clearances=_net_clearances_map,
                 keep_input_copper=args.keep_input_copper,
@@ -3632,6 +3742,21 @@ For differential pair routing, use route_diff.py:
         # read-only mode the only one that can kill a `set -e` redo_commands.sh
         # replay -- at a step that changes nothing.
         sys.exit(0)
+
+    # Castellated landings (run-6 fix 1.7): pull track ends that landed inside
+    # a castellated pad's edge-clearance zone back to the pad's inner reach.
+    # No-op on boards without pad_prop_castellated pads or an edge rule.
+    if not args.skip_routing and args.output_file \
+            and os.path.isfile(args.output_file):
+        try:
+            from fix_kicad_drc_settings import effective_board_edge_clearance
+            from pcb_modification import retract_castellated_landings
+            _edge = effective_board_edge_clearance(
+                args.input_file, args.board_edge_clearance or 0.0)
+            if _edge > 0:
+                retract_castellated_landings(args.output_file, _edge)
+        except Exception as e:
+            print(f"  (skipped castellated-landing retract: {e})")
 
     # Make the written project's KiCad DRC constraints consistent with the
     # clearances/sizes we just routed to, so a manual DRC only flags genuine

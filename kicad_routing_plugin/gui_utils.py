@@ -106,6 +106,58 @@ def apply_via_protection(pcb_via, tenting_attrs):
     return applied
 
 
+def apply_castellated_landing_retract(board, board_edge_clearance):
+    """CLI/GUI parity twin of pcb_modification.retract_castellated_landings
+    (run-6 fix 1.7): compute the shared castellated-landing retract delta on
+    PCBData built from the LIVE board, then move the matching live track
+    endpoints in place. Returns the number of endpoints moved. Best-effort --
+    a failure never blocks an already-applied routing result."""
+    if not board_edge_clearance or board_edge_clearance <= 0:
+        return 0
+    try:
+        import pcbnew
+        from kicad_parser import build_pcb_data_from_board
+        from pcb_modification import compute_castellated_landing_retract
+        pcb = build_pcb_data_from_board(board)
+        delta = compute_castellated_landing_retract(pcb, board_edge_clearance)
+        if delta.is_empty:
+            return 0
+        # Match live tracks by rounded endpoints + net, the same key style as
+        # the planes tab's cleanup applier.
+        moves = {}
+        for s, end, nx, ny in delta.moves:
+            k = (round(s.start_x, 3), round(s.start_y, 3),
+                 round(s.end_x, 3), round(s.end_y, 3), s.net_id)
+            moves[k] = (end, nx, ny)
+        moved = 0
+        for item in board.GetTracks():
+            if item.Type() != pcbnew.PCB_TRACE_T:
+                continue
+            k = (round(pcbnew.ToMM(item.GetStart().x), 3),
+                 round(pcbnew.ToMM(item.GetStart().y), 3),
+                 round(pcbnew.ToMM(item.GetEnd().x), 3),
+                 round(pcbnew.ToMM(item.GetEnd().y), 3),
+                 item.GetNetCode())
+            mv = moves.get(k)
+            if mv is None:
+                continue
+            end, nx, ny = mv
+            pt = pcbnew.VECTOR2I(pcbnew.FromMM(nx), pcbnew.FromMM(ny))
+            if end == 'start':
+                item.SetStart(pt)
+            else:
+                item.SetEnd(pt)
+            moved += 1
+        if moved:
+            board.SetModified()
+            print(f"  Castellated landings: {moved} track end(s) retracted "
+                  f"inside the edge-clearance zone (pad_prop_castellated)")
+        return moved
+    except Exception as e:
+        print(f"  (skipped castellated-landing retract: {e})")
+        return 0
+
+
 def apply_teardrops_to_board(board):
     """Enable teardrops on every pad and via of the live board (#489 §9).
 

@@ -1239,6 +1239,18 @@ class RoutingDialog(wx.Dialog):
         rip_existing_sizer.Add(self.rip_existing_nets_ctrl, 1, wx.EXPAND)
         options_inner.Add(rip_existing_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
+        # Protect nets (#521 run-6): globs whose matches the rip machinery must
+        # not touch this run; persisted to the project so later steps honor
+        # them too. Mirrors the CLI --protect-nets flag.
+        protect_nets_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        protect_nets_sizer.Add(wx.StaticText(options_scroll, label="Protect Nets:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.protect_nets_ctrl = wx.TextCtrl(options_scroll, value="")
+        self.protect_nets_ctrl.SetToolTip("Net-name patterns to PROTECT this run: rip-up skips them and the "
+                                          "protection persists to the project for later steps. Override later "
+                                          "by naming a net exactly (no glob) in a rip field.")
+        protect_nets_sizer.Add(self.protect_nets_ctrl, 1, wx.EXPAND)
+        options_inner.Add(protect_nets_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
         # Force re-route (#515 / PR #533): rip and re-route from scratch every
         # net SELECTED for this run, even if already fully connected. Mirrors
         # the CLI --force-reroute flag; the protection rules live engine-side
@@ -2407,6 +2419,7 @@ class RoutingDialog(wx.Dialog):
         self.power_widths_ctrl.SetValue("")
         self.no_bga_zones_ctrl.SetValue("")  # empty == CLI default (None: keep BGA zones)
         self.rip_existing_nets_ctrl.SetValue("")
+        self.protect_nets_ctrl.SetValue("")
         self.force_reroute.SetValue(False)  # match creation default + CLI (store_true)
         self.layer_costs_ctrl.SetValue("")
 
@@ -2829,6 +2842,12 @@ class RoutingDialog(wx.Dialog):
         else:
             config['rip_existing_nets'] = _split_net_list(rip_existing_text)
 
+        # Protect nets (#521): empty -> None (nothing protected beyond the
+        # project's own list), else fnmatch patterns.
+        protect_nets_text = self.protect_nets_ctrl.GetValue().strip()
+        config['protect_nets'] = (_split_net_list(protect_nets_text)
+                                  if protect_nets_text else None)
+
         # Parse layer costs
         config['layer_costs'] = self._selected_layer_costs()
 
@@ -3213,6 +3232,7 @@ class RoutingDialog(wx.Dialog):
                     power_nets_widths=config.get('power_nets_widths', []),
                     disable_bga_zones=config.get('no_bga_zones'),
                     rip_existing_nets=config.get('rip_existing_nets'),
+                    protect_nets=config.get('protect_nets'),
                     force_reroute=config.get('force_reroute', False),
                     layer_costs=config.get('layer_costs', []),
                     length_match_groups=config.get('length_match_groups'),
@@ -3585,6 +3605,18 @@ class RoutingDialog(wx.Dialog):
         # Refresh net list to hide newly connected nets (don't sync from visible since we just cleared)
         self.net_panel.refresh(sync_from_visible=False)
         self._update_status_bar()
+
+        # Castellated landings (run-6 fix 1.7, GUI twin of route.py's
+        # retract_castellated_landings): the effective edge rule is the larger
+        # of the config value and the live board's own m_CopperEdgeClearance.
+        from .gui_utils import apply_castellated_landing_retract
+        try:
+            _live_edge = (board.GetDesignSettings().m_CopperEdgeClearance
+                          or 0) / 1e6
+        except Exception:
+            _live_edge = 0.0
+        apply_castellated_landing_retract(
+            board, max(config.get('board_edge_clearance') or 0.0, _live_edge))
 
         # Per-step live DRC floors (GUI twin of the CLI's per-step
         # fix_project_for_output): a DRC pressed right after this step must

@@ -51,6 +51,7 @@ def get_dialog_settings(dialog):
         'power_widths': dialog.power_widths_ctrl.GetValue(),
         'no_bga_zones': dialog.no_bga_zones_ctrl.GetValue(),
         'rip_existing_nets': dialog.rip_existing_nets_ctrl.GetValue(),
+        'protect_nets': dialog.protect_nets_ctrl.GetValue(),
         'layer_costs': dialog.layer_costs_ctrl.GetValue(),
 
         # Advanced parameters
@@ -175,6 +176,7 @@ def get_dialog_settings(dialog):
         'chamfer_extra': dialog.differential_tab.chamfer_extra.GetValue(),
         'centerline_setback': dialog.differential_tab.centerline_setback.GetValue(),
         'polarity_swap_nets_text': dialog.differential_tab.polarity_swap_nets_text.GetValue(),
+        'diff_protect_nets': dialog.differential_tab.protect_nets_ctrl.GetValue(),
         'gnd_via_check': dialog.differential_tab.gnd_via_check.GetValue(),
         'intra_match_check': dialog.differential_tab.intra_match_check.GetValue(),
         'ac_couple_check': dialog.differential_tab.ac_couple_check.GetValue(),
@@ -220,6 +222,7 @@ def get_dialog_settings(dialog):
         'planes_thermal_vias': dialog.planes_tab.create_options.thermal_vias.GetValue(),
         'planes_max_search_radius': dialog.planes_tab.create_options.max_search_radius.GetValue(),
         'planes_rip_blocker_check': dialog.planes_tab.create_options.rip_blocker_check.GetValue(),
+        'planes_corridor_nets': dialog.planes_tab.create_options.corridor_nets_ctrl.GetValue(),
         'planes_add_gnd_vias': dialog.planes_tab.create_options.add_gnd_vias_check.GetValue(),
         'planes_gnd_via_distance': dialog.planes_tab.create_options.gnd_via_distance.GetValue(),
         'planes_stitch_vias': dialog.planes_tab.create_options.stitch_vias.GetValue(),
@@ -327,6 +330,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.no_bga_zones_ctrl.SetValue(settings['no_bga_zones'])
     if 'rip_existing_nets' in settings:
         dialog.rip_existing_nets_ctrl.SetValue(settings['rip_existing_nets'])
+    if 'protect_nets' in settings:
+        dialog.protect_nets_ctrl.SetValue(settings['protect_nets'])
     if 'layer_costs' in settings:
         dialog.layer_costs_ctrl.SetValue(settings['layer_costs'])
 
@@ -589,6 +594,8 @@ def restore_dialog_settings(dialog, settings):
         # Migrate the pre-#279 boolean: True -> allow all pairs, False -> none.
         dialog.differential_tab.polarity_swap_nets_text.SetValue(
             '*' if settings['fix_polarity_check'] else '')
+    if 'diff_protect_nets' in settings:
+        dialog.differential_tab.protect_nets_ctrl.SetValue(settings['diff_protect_nets'])
     if 'gnd_via_check' in settings:
         dialog.differential_tab.gnd_via_check.SetValue(settings['gnd_via_check'])
     if 'intra_match_check' in settings:
@@ -685,6 +692,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.planes_tab.create_options.max_search_radius.SetValue(settings['planes_max_search_radius'])
     if 'planes_rip_blocker_check' in settings:
         dialog.planes_tab.create_options.rip_blocker_check.SetValue(settings['planes_rip_blocker_check'])
+    if 'planes_corridor_nets' in settings:
+        dialog.planes_tab.create_options.corridor_nets_ctrl.SetValue(settings['planes_corridor_nets'])
     if 'planes_add_gnd_vias' in settings:
         dialog.planes_tab.create_options.add_gnd_vias_check.SetValue(settings['planes_add_gnd_vias'])
     if 'planes_gnd_via_distance' in settings:

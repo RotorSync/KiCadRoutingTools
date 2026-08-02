@@ -58,7 +58,7 @@ the board**.
 
 **Pass the same `--ignore-nets` you gave `place_optimize`, or the re-measurement
 below compares two different net sets and always "fails".** B's numbers exclude
-the plane nets; this tool's do not unless told to. On the test-board run, GND
+the plane nets; this tool's do not unless told to. On one run, GND
 alone moved the same board from 53 crossings to 116 — which reads exactly like a
 corrupted write and is not one.
 
@@ -129,8 +129,8 @@ The feedback edge back into placement.
 | `pad_pairs_connected` / `pad_pairs_total` | The honest completion number for comparing two placements |
 | `total_iterations` | Effort. A placement that halves iterations at equal completion is a real win |
 | `total_vias` | The cost side of the same trade |
-| `power_trace_ampacity[].bottleneck_width_mm` | **Did the width you asked for actually happen?** `--power-nets-widths` degrades quietly: a wide tap that will not fit is re-routed at the layer default (#72's neckdown retry), and on a dense board that fallback can take the *whole* run, not just the pad. On test-board, `--power-nets-widths 0.8` on the USB nets produced **1.30 mm of 0.8 mm copper out of 41 mm** — three of the four nets got none at all. Compare this key against what you asked for, every time; the routed board is DRC-clean either way |
-| `min_clearance_used` | The floor the run actually reached, which is **not** what you asked for. Below your netclass means the gap-rescue stepped down toward the fab floor. test-board: nominal 0.16, `min_clearance_used` 0.127, and **25% of all copper (180 of 710 mm) ended up at 0.127** — under the board's own 0.15 minimum. The `.kicad_pro` writeback then clamps the DRC floor to the routed value, so **KiCad grades it clean**. This key is the only place the step-down is visible |
+| `power_trace_ampacity[].bottleneck_width_mm` | **Did the width you asked for actually happen?** `--power-nets-widths` degrades quietly: a wide tap that will not fit is re-routed at the layer default (#72's neckdown retry), and on a dense board that fallback can take the *whole* run, not just the pad. Measured, `--power-nets-widths 0.8` on a pair produced **1.30 mm of 0.8 mm copper out of 41 mm** — three of the four nets got none at all. Compare this key against what you asked for, every time; the routed board is DRC-clean either way |
+| `min_clearance_used` | The floor the run actually reached, which is **not** what you asked for. Below your netclass means the gap-rescue stepped down toward the fab floor. Measured: nominal 0.16, `min_clearance_used` 0.127, and **25% of all copper (180 of 710 mm) ended up at 0.127** — under the board's own 0.15 minimum. The `.kicad_pro` writeback then clamps the DRC floor to the routed value, so **KiCad grades it clean**. This key is the only place the step-down is visible |
 | `rescue.unchanged` | Nets the rescue pass could not improve. Distinguishes "nearly made it" from "never had a path" |
 
 ### Routed length: half of it is already built, and the half that is not will bite you
@@ -150,7 +150,7 @@ must be under N mm" or "this net must have 0 vias". (`check_orthonormal
 `XTAL <= 10 mm/leg` have to be measured from `pcb.segments` by hand — do it, and
 say plainly that you did.
 
-On test-board the routed board graded **`check_floorplan` PASS** and 86%
+One routed board graded **`check_floorplan` PASS** and 86%
 connected while breaking **19** such limits, including a QSPI net at 32.6 mm
 against a 15 mm HARD budget and crystal legs 6.03 mm apart against 1 mm. Green
 on the KRT gates is not green on the spec.
@@ -159,7 +159,7 @@ on the KRT gates is not green on the spec.
 
 `route.py` clamps the sibling `.kicad_pro` down to what the run actually
 achieved, and **that includes `track_width`, which the next step reads back as
-its nominal**. Measured across one test-board chain:
+its nominal**. Measured across one chain:
 
 | project | `Default.clearance` | `Default.track_width` |
 |---|---|---|
@@ -222,16 +222,15 @@ python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/board_score.py board.kic
 the floor the board was actually routed to (see F's writeback ratchet). Pass one
 only when you know better than the board.
 
-### `convergence.json` — the Step 9 ledger
+### `ledger.jsonl` — the Step 9 ledger (one `converge.py record` line per iteration)
 
 | key | decision |
 |---|---|
-| `iterations[].parent_board` | the last **accepted** board. This is `render_placement --before`; using N−1 renders a delta that never existed |
-| `iterations[].lever` | must be reproducible. "tuned parameters" is not a lever |
-| `iterations[].accepted` / `.reverted_to` | a rejected iteration is data — keeping it is what makes "3 unchanged iterations" detectable |
-| `iterations[].score.blocking` | flat across three iterations and three levers ⇒ stop condition 3 |
-| `iterations[].verdicts[]` | a `VERDICT=FAIL` here means `blocking` was not really 0 |
-| `stopped_by` | `1`…`4`. The final report quotes it by number |
-| accepted boards, in order | the frame list for `make_movie.py`. Reverted boards animate a change that was undone |
+| `parent_sha` | the last **accepted** board (content hash; `step-back --to` checks it out). Resolve it for `render_placement --before`; using N−1 renders a delta that never existed |
+| `lever` + `lever_argv` | `lever` is the one-line intent, `lever_argv` the reproducible command — `replay` refuses prose-only entries. "tuned parameters" is not a lever. Verdicts and stop-condition claims have no field of their own: name them **in the `--lever` text** |
+| `accepted` (`--rejected` at record time) | a rejected iteration is data — keeping it is what makes "3 unchanged iterations" detectable |
+| `score.blocking` | flat across three iterations and three levers ⇒ stop condition 3 |
+| `kind` | `systemic` = budget went to the instrument; `status` warns when that share hits half |
+| accepted `result_sha`s, in order | the frame list for `make_movie.py`. Reverted boards animate a change that was undone |
 
 Full procedure: [`convergence.md`](convergence.md).

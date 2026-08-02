@@ -51,129 +51,11 @@ from placement.writer import write_placed_output
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _ROUTE_PY = os.path.join(_SCRIPT_DIR, 'route.py')
 
-_SUMMARY_RE = re.compile(r'JSON_SUMMARY: (\{.*\})')
-
-# route.py prints this from the except around its reconciliation self-invoke
-# (route.py:2294). The sub-run prints its JSON_SUMMARY BEFORE the board is
-# written, so a summary followed by this marker advertises recoveries that may
-# never have reached the file on disk.
-_RECONCILE_ABORTED = 'final reconciliation pass failed:'
-
-# Counters that measure WORK DONE, so they add across passes. Everything else
-# in a summary is state, and state is whatever the LAST pass measured.
-_EFFORT_KEYS = ('total_iterations', 'total_vias', 'total_time')
-
-
-def merge_route_summaries(log: str):
-    """Reduce every JSON_SUMMARY in a route.py log to one honest tally.
-
-    route.py runs an end-of-run reconciliation pass (route.py:2144, #348)
-    exactly when the first pass left failures. It self-invokes batch_route one
-    level deep on the written board and prints a SECOND JSON_SUMMARY, scoped
-    to the retried nets, whose failure lists route.py itself calls "the honest
-    still-open set". Reading only the first summary counted every
-    reconciliation recovery as a failure: the loop quenched parts anchoring
-    nets that were already solved, and better() compared tallies taken at
-    different points in the run.
-
-    Per field class:
-
-    * FAILURE STATE (failed_single / failed_multipoint / multipoint_pads_*)
-      comes from the LAST summary, and is exact rather than a delta. Every net
-      with a nonzero failure term is in the retry set by construction, and the
-      sub-run re-derives each retried net's pad counts over ALL of that net's
-      pads from the final-board union-find (route.py:1840), so the last
-      summary's numbers are absolute. Summing pad counts would double-count.
-    * EFFORT (total_iterations / total_vias / total_time) is SUMMED: both
-      passes are work this placement cost the router, and better()'s iteration
-      tiebreak should see all of it. Taking effort from the last summary would
-      make a badly failing candidate look cheap, since the reconciliation pass
-      only re-routes a handful of nets.
-    * The #432 keys are REBUILT, because they are whole-board in the first
-      summary but reconcile-subset-scoped in the sub-run's: pad_pairs_total
-      keeps pass 1's whole-board denominator, pad_pairs_connected = that
-      total minus the deficit of every net still open at END of run (the
-      last summary's pad_pairs_open -- every pass-1 open net is in the retry
-      set by construction, so absence from the sub-run's list means
-      recovered). A sub-run that printed no pad-pair keys at all restores
-      pass 1's, the newest numbers that exist. 'blockers' is last-wins when
-      the sub-run emitted the key; when it did not, pass 1's entries are kept
-      filtered to the nets still failed, so a recovered net's attribution
-      dies with it and run_route never regresses to the whole-log regex.
-    * Anything else is last-wins.
-
-    Degrades to the single-summary case unchanged: no failures, or a sub-run
-    that returned before printing, leaves one summary that is both the first
-    and the last. Returns None when the log carries no summary at all.
-    """
-    raw = _SUMMARY_RE.findall(log)
-    if not raw:
-        return None
-    summaries = [json.loads(s) for s in raw]
-
-    # A reconciliation that raised AFTER printing its summary claims
-    # recoveries the board write may never have committed; fall back to the
-    # first pass, which is what is definitely on disk.
-    aborted = log.rfind(_RECONCILE_ABORTED) > log.rfind(raw[-1])
-    merged = dict(summaries[0] if aborted else summaries[-1])
-
-    for key in _EFFORT_KEYS:
-        merged[key] = sum(s.get(key, 0) for s in summaries)
-
-    # #432 x #458: rebuild the pad-pair tallies and the blockers key, which
-    # last-wins would silently narrow to the reconcile subset (a 50/40
-    # whole-board reading becomes the sub-run's 3/2, or vanishes entirely).
-    # Skipped when aborted: merged is already pass 1 wholesale, which is
-    # what is on disk.
-    if len(summaries) > 1 and not aborted:
-        first, last = summaries[0], summaries[-1]
-        if 'pad_pairs_total' in first:
-            if 'pad_pairs_total' in last:
-                # Denominator: pass 1's whole board. Connected: that total
-                # minus what is STILL open at end of run. A net the
-                # reconciliation itself broke that pass 1 never graded
-                # subtracts its deficit without widening the denominator --
-                # conservative, same spirit as the coverage-gate widening
-                # below. merged's pad_pairs_open is already the last
-                # summary's, which is the correct final open set.
-                _deficit = sum(
-                    e.get('pairs_total', 0) - e.get('pairs_connected', 0)
-                    for e in (last.get('pad_pairs_open') or []))
-                _total = first['pad_pairs_total']
-                merged['pad_pairs_total'] = _total
-                merged['pad_pairs_connected'] = max(0, _total - _deficit)
-            else:
-                # The sub-run printed a summary without pad-pair keys (its
-                # emission is defensively try/except'd): pass 1's numbers are
-                # the newest that exist.
-                merged['pad_pairs_total'] = first['pad_pairs_total']
-                merged['pad_pairs_connected'] = first.get(
-                    'pad_pairs_connected', 0)
-                if 'pad_pairs_open' in first:
-                    merged['pad_pairs_open'] = first['pad_pairs_open']
-        if 'blockers' in first and 'blockers' not in merged:
-            _failed = set(merged.get('failed_single') or [])
-            _failed |= {d.get('net_name') if isinstance(d, dict) else d
-                        for d in (merged.get('failed_multipoint') or [])}
-            merged['blockers'] = [e for e in first['blockers']
-                                  if e.get('net') in _failed]
-
-    # Coverage-gate nets (route.py:1881) have NO routed result, so their pads
-    # never reach multipoint_pads_total and the caller's
-    # failures = len(failed_single) + pad-deficit weighs them ZERO, though
-    # they ship at broken copper. Give each one weight 1, matching what
-    # failed_single gives a net that produced no result at all, by widening
-    # the pad denominator. They are in neither failed_single nor the pad
-    # tallies (route.py:1887 excludes single_ended_nets and routed_results),
-    # so this cannot double-count. It matters most on the LAST summary: those
-    # are nets the reconciliation pass ITSELF broke through its rip
-    # escalation, and without this the loop can read failures=0 on a board
-    # shipping disconnected copper and stop.
-    gate = merged.get('coverage_gate_nets') or []
-    if gate:
-        merged['multipoint_pads_total'] = (
-            merged.get('multipoint_pads_total', 0) + len(gate))
-    return merged
+# The one-or-two-summary reduction now lives in route_summary.py, so route.py
+# --json-out and this loop cannot drift apart on what "the tally" means.
+from route_summary import (merge_route_summaries, SUMMARY_RE as _SUMMARY_RE,
+                           RECONCILE_ABORTED as _RECONCILE_ABORTED,
+                           EFFORT_KEYS as _EFFORT_KEYS)
 
 
 def _log_tail(log: str, lines: int = 15) -> str:
@@ -190,15 +72,67 @@ def _run_route_cmd(cmd, log_file):
         return subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT).returncode
 
 
-def run_route(pcb_file: str, routed_file: str, route_args: str, log_file: str):
-    """Run route.py, return (metrics dict, log text)."""
+def accept_score(cmd: str, placed: str, routed: str, json_file: str):
+    """(score, note) from an external, spec-aware accept test. None = reject.
+
+    better() compares failures then iterations, and that is all it CAN compare:
+    it has no way to see a max-length rule, a via ban, a required track width or
+    a decap-proximity limit. On a board with a real specification those are
+    exactly the constraints that decide whether a placement got better, and a
+    loop blind to them will accept a round that broke one.
+
+    Reworking better() is out of scope by its own comment, so this does not
+    touch it -- it BYPASSES it when the operator supplies a judge:
+
+        CMD <placed.kicad_pcb> <routed.kicad_pcb> <route.json>
+
+    The judge prints one line `SCORE=<float>`, LOWER IS BETTER. A non-zero exit,
+    a missing SCORE line, or an unparseable number all mean REJECT: a judge that
+    cannot answer is not evidence that the round was good.
+
+    Post-route mirror of _ratsnest_screen's pre-route veto -- same shape, same
+    contract of reporting the numbers behind every decision.
+    """
+    argv = shlex.split(cmd) + [placed, routed, json_file or '']
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True,
+                           encoding='utf-8', errors='replace')
+    except OSError as e:
+        return None, f"accept-cmd could not run: {e}"
+    if r.returncode != 0:
+        detail = (r.stdout or r.stderr or '').strip().splitlines()
+        return None, (f"accept-cmd exit {r.returncode}"
+                      + (f": {detail[-1][:160]}" if detail else ''))
+    m = re.search(r'^SCORE=([-+0-9.eE]+)', r.stdout or '', re.M)
+    if not m:
+        return None, 'accept-cmd printed no SCORE= line'
+    try:
+        val = float(m.group(1))
+    except ValueError:
+        return None, f"accept-cmd SCORE= unparseable: {m.group(1)!r}"
+    return val, f"score {val:g}"
+
+
+def run_route(pcb_file: str, routed_file: str, route_args: str, log_file: str,
+              json_file: str = None, extra_targets=None):
+    """Run route.py and return its metrics dict.
+
+    `json_file` asks route.py to also write its MERGED summary there
+    (route.py --json-out). The loop does not read it back -- it already has the
+    metrics -- but --accept-cmd is handed the path, so an external judge sees
+    the same tally the loop is using instead of re-scraping the log. Skipped
+    when the operator already put --json-out in --route-args: that
+    destination is theirs to choose.
+    """
     # Absolute path to the sibling route.py, so the loop runs from any cwd.
     # No cwd= override: route.py resolves its own assets from __file__, and
     # relative paths inside --route-args (--net-clearances foo.json) must keep
     # resolving against the OPERATOR's cwd, which a cwd= would silently break.
     # -X utf8 mirrors how the test suite invokes route.py.
-    cmd = [sys.executable, '-X', 'utf8', _ROUTE_PY, pcb_file, routed_file] + \
-        shlex.split(route_args)
+    _extra = shlex.split(route_args)
+    if json_file and '--json-out' not in _extra:
+        _extra += ['--json-out', json_file]
+    cmd = [sys.executable, '-X', 'utf8', _ROUTE_PY, pcb_file, routed_file] + _extra
     rc = _run_route_cmd(cmd, log_file)
     # errors='replace': route.py forces its own stream to UTF-8, but a cp1252
     # default locale on the READING side would raise on the first non-ASCII
@@ -218,10 +152,11 @@ def run_route(pcb_file: str, routed_file: str, route_args: str, log_file: str):
         raise RuntimeError(f"route.py produced no JSON_SUMMARY (see {log_file})"
                            f"\n" + _log_tail(log))
 
-    return metrics_from_summary(summary, log)
+    return metrics_from_summary(summary, log, extra_targets)
 
 
-def metrics_from_summary(summary: dict, log: str = '') -> dict:
+def metrics_from_summary(summary: dict, log: str = '',
+                         extra_targets=None) -> dict:
     """Round metrics from an already-merged JSON_SUMMARY.
 
     Split out of run_route (#431) so a renderer can caption a recorded round
@@ -230,6 +165,16 @@ def metrics_from_summary(summary: dict, log: str = '') -> dict:
     the pre-#409 blocker fallback.
     """
     failed_nets = list(summary.get('failed_single', []))
+    # Nets the CALLER named as the thing to work on, whether or not the router
+    # failed them (#549). Without this the loop's entire target set comes from
+    # `failed_single` + `failed_multipoint`, so a board where EVERY NET ROUTES
+    # but a spec clause is violated -- a maximum length, a via ban, a required
+    # width -- yields an empty target list and the loop has nothing to move. It
+    # is not that it moves the wrong parts; it does not run. Pair with
+    # `--accept-cmd`, which is the other half: one supplies the targets, the
+    # other supplies the gradient, and neither alone lets the loop chase a
+    # requirement the router is happy with.
+    failed_nets += [n for n in (extra_targets or []) if n not in failed_nets]
     # failed_multipoint entries are dicts {net_name, failed_pads}; keep just the
     # name so failed_nets is uniformly net-name strings (downstream uses them as
     # dict keys -> a dict here raises "unhashable type: 'dict'").
@@ -407,6 +352,15 @@ def main():
     parser.add_argument("output_file", nargs="?")
     parser.add_argument("--route-args", default=None,
                         help="Arguments passed to route.py (quoted string)")
+    parser.add_argument("--target-nets", nargs="*", default=None, metavar="NET",
+                        help="Net names to treat as targets EVEN IF the router "
+                             "routed them. The loop's move candidates otherwise "
+                             "come only from failed nets, so a board where "
+                             "everything routes but a SPEC clause is violated "
+                             "(a maximum length, a via ban, a required width) "
+                             "gives it an empty target list and it does nothing. "
+                             "Pair with --accept-cmd: this supplies the targets, "
+                             "that supplies the gradient.")
     parser.add_argument("--rounds", type=int, default=5,
                         help="Max repair rounds (default: 5)")
     parser.add_argument("--max-displacement", type=float, default=3.0,
@@ -432,6 +386,15 @@ def main():
                              "in its whole block, so a block is no longer "
                              "half-frozen because its IC exceeds "
                              "--max-target-pins")
+    parser.add_argument("--accept-cmd", default=None, metavar="CMD",
+                        help="External accept test, run after each round's route as "
+                             "CMD <placed> <routed> <route.json>; print one line "
+                             "SCORE=<float>, LOWER IS BETTER. Replaces the built-in "
+                             "failures-then-iterations comparison, which cannot see a "
+                             "max-length rule, a via ban, a required width or a "
+                             "decap-proximity limit -- on a spec'd board those are what "
+                             "decide whether a placement got better. A non-zero exit or "
+                             "a missing SCORE line REJECTS the round.")
     parser.add_argument("--ratsnest-screen", type=float, default=0.0,
                         help="Skip the routing run when a candidate placement's "
                              "airwire crossings or HPWL regress by more than "
@@ -478,7 +441,7 @@ def main():
     parser.add_argument("--no-movie", dest='movie', action='store_const',
                         const=None,
                         help="skip the end-of-run movie (see --movie)")
-    parser.add_argument("--movie-tween", type=int, default=8, metavar="N",
+    parser.add_argument("--movie-tween", type=int, default=10, metavar="N",
                         help="frames per placement glide in --movie; 0 = no "
                              "glide, cut straight to the new placement")
     add_board_state_args(parser)
@@ -551,7 +514,21 @@ def main():
     screened = 0
     print("Round 0: routing initial placement...")
     best = run_route(cur_file, os.path.join(work, 'loop_round0_routed.kicad_pcb'),
-                     args.route_args, os.path.join(work, 'loop_round0_route.log'))
+                     args.route_args, os.path.join(work, 'loop_round0_route.log'),
+                     json_file=os.path.join(work, 'loop_round0_route.json'),
+                     extra_targets=args.target_nets)
+    # Round 0 is the unconditional baseline, so the judge is not a gate here --
+    # it is scored only so later rounds have an incumbent to beat.
+    best_score = None
+    if args.accept_cmd:
+        best_score, _note = accept_score(
+            args.accept_cmd, cur_file,
+            os.path.join(work, 'loop_round0_routed.kicad_pcb'),
+            os.path.join(work, 'loop_round0_route.json'))
+        print(f"  baseline accept-cmd: {_note}")
+        if best_score is None:
+            print('  WARNING: the judge could not score the BASELINE. Every round '
+                  'it can score will now be accepted on its first success.')
     print(f"  failures={best['failures']} iterations={best['iterations']:,}"
           f" vias={best['vias']}")
     # Round 0 is the baseline: its own parent, nothing moved, always "accepted".
@@ -667,7 +644,9 @@ def main():
 
         metrics = run_route(
             cand_file, os.path.join(work, f'loop_round{rnd}_routed.kicad_pcb'),
-            args.route_args, os.path.join(work, f'loop_round{rnd}_route.log'))
+            args.route_args, os.path.join(work, f'loop_round{rnd}_route.log'),
+            json_file=os.path.join(work, f'loop_round{rnd}_route.json'),
+            extra_targets=args.target_nets)
         # Report-only, exactly like the pad_pairs_* keys above: every round now
         # records placement quality next to the routing result. better() is
         # deliberately untouched -- reworking the comparator is #458's scope.
@@ -679,7 +658,20 @@ def main():
 
         # Record BEFORE the accept/revert bookkeeping mutates cur_file, so
         # `parent` names the board this candidate was actually derived from.
-        _accepted = better(metrics, best)
+        if args.accept_cmd:
+            _score, _note = accept_score(
+                args.accept_cmd, cand_file,
+                os.path.join(work, f'loop_round{rnd}_routed.kicad_pcb'),
+                os.path.join(work, f'loop_round{rnd}_route.json'))
+            metrics['accept_score'] = _score
+            # Strictly better, and a judge that could not answer never wins.
+            _accepted = _score is not None and (best_score is None
+                                                or _score < best_score)
+            print(f"  accept-cmd: {_note}"
+                  + (f" vs incumbent {best_score:g}" if best_score is not None
+                     else " (no incumbent score)"))
+        else:
+            _accepted = better(metrics, best)
         write_round_sidecar(work, rnd, board=cand_file,
                             routed=os.path.join(
                                 work, f'loop_round{rnd}_routed.kicad_pcb'),
@@ -691,6 +683,8 @@ def main():
             print(f"  ACCEPTED (was failures={best['failures']},"
                   f" iterations={best['iterations']:,})")
             best = metrics
+            if args.accept_cmd:
+                best_score = metrics.get('accept_score')
             cur_file = cand_file
             max_disp = args.max_displacement
         else:

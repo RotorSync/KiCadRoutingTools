@@ -134,6 +134,23 @@ class ViaSpatialIndex:
         return best_via
 
 
+def _compose_prefs(base_pref, corridor_seeds, via_size, net_id):
+    """AND-compose the fill-aware via preference with the #549 corridor-seed
+    daylight test. Pure bool, honoring find_via_position's SOFT contract (a
+    preference only ranks; the full candidate set survives). Returns whichever
+    single predicate exists when only one does, and None when neither."""
+    seed_pref = None
+    if corridor_seeds is not None:
+        def seed_pref(x, y):
+            return corridor_seeds.via_site_clear(x, y, via_size,
+                                                 exclude_net_ids={net_id})
+    if base_pref is None:
+        return seed_pref
+    if seed_pref is None:
+        return base_pref
+    return lambda x, y: base_pref(x, y) and seed_pref(x, y)
+
+
 def find_via_position(
     pad: Pad,
     obstacles: GridObstacleMap,
@@ -2938,6 +2955,10 @@ def create_plane(
     stitch_fence_pitch: Optional[float] = None,
     stitch_inset: Optional[float] = None,
     stitch_max_freq: Optional[float] = None,
+    # #549 B: glob patterns naming nets whose committed-copper corridors via
+    # placement should prefer to keep clear. None -> AUTO (the board's
+    # protected/impedance records); ['none'] -> off.
+    corridor_nets: Optional[List[str]] = None,
 ) -> Union[Tuple[int, int, int],
            Tuple[int, int, int, list, list, list, int, list]]:
     """
@@ -3196,6 +3217,12 @@ def create_plane(
     # joins and blocker reroutes must obey them like every other routed copper.
     from kicad_dru import install_layer_clearances
     install_layer_clearances(config, None, input_file, pcb_data)
+    # #549 B: soft via-site preference around path-critical nets' committed
+    # copper (auto: the board's protected/impedance records).
+    from plane_corridor_ghosts import seed_corridor_ghosts
+    corridor_seeds = seed_corridor_ghosts(pcb_data, corridor_nets,
+                                          via_size, clearance,
+                                          input_file=input_file)
     # Cross-class clearance (#434, mirrors batch_route/repair): auto-read the
     # board's non-Default netclasses from the INPUT's sibling .kicad_pro when
     # no map was passed, so tap tracks/vias and blocker reroutes honor KiCad's
@@ -3713,7 +3740,9 @@ def create_plane(
                 failed_route_positions=failed_route_positions,
                 pending_pads=pending_pads,
                 router=via_pad_router,
-                position_preference=fill_via_preference
+                position_preference=_compose_prefs(fill_via_preference,
+                                                   corridor_seeds, via_size,
+                                                   net_id)
             )
 
             # Board-edge clamp: an in-pad via placed at the pad's true (off-grid)
@@ -3963,6 +3992,7 @@ def create_plane(
                     extra_segments=new_segments,
                     verbose=verbose,
                     try_default=False,  # run params already failed for this pad
+                    corridor_seeds=corridor_seeds,
                 )
                 if result.success:
                     if result.via is not None:
@@ -4646,6 +4676,12 @@ Examples:
              "same obstacle/hole-to-hole/edge checks pad-tap vias use.")
     parser.add_argument("--stitch-pitch", type=float, default=defaults.STITCH_PITCH,
         help=f"Lattice pitch for --stitch-vias in mm (default: {defaults.STITCH_PITCH})")
+    parser.add_argument("--corridor-nets", nargs="+", metavar="PATTERN", default=None,
+                        help="#549: net-name globs whose committed-copper corridors via "
+                             "placement should prefer to keep clear (soft preference, "
+                             "never excludes the only viable site). Default: AUTO -- the "
+                             "board's protected nets and impedance declarations. Pass "
+                             "'none' to disable.")
     parser.add_argument("--stitch-max-freq", type=float, default=None,
         help="Maximum frequency of interest in MHz: derives the stitching "
              "pitch as lambda/20 using the largest dielectric epsilon_r in "
@@ -4804,6 +4840,7 @@ Examples:
     create_plane(
         input_file=args.input_file,
         output_file=args.output_file,
+        corridor_nets=args.corridor_nets,
         ripup_blocker_select=args.ripup_blocker_select,
         net_names=net_names,
         plane_layers=plane_layers,
@@ -4892,8 +4929,8 @@ Examples:
             # outline. Without it this config carried the 0.0 default, the map had
             # no edge keep-out at all, and add_gnd_vias -- which checks track and
             # via-to-via clearance but never the outline -- placed a GND via
-            # 1.40mm BEYOND the board edge (test-board: (124.20, 82.40) against a
-            # y=81.0 edge), i.e. copper that is milled away at depanelization.
+            # 1.40mm BEYOND the board edge, i.e. copper that is milled away at
+            # depanelization.
             #
             # NOT args.board_edge_clearance: that one is the plane-zone INSET
             # (see the note at the DRC writeback below), not the enforced
@@ -4949,6 +4986,16 @@ Examples:
                                                 args.clearance, args.grid_step)
         if _snapped or _removed:
             print(f"Plane cleanup: closed {_snapped} stub gap(s), trimmed {_removed} dead-end segment(s)")
+        # Castellated landings (run-6 fix 1.7): tap/join copper that landed in
+        # a castellated pad's edge-clearance zone is pulled to its inner reach.
+        try:
+            from fix_kicad_drc_settings import effective_board_edge_clearance
+            from pcb_modification import retract_castellated_landings
+            _edge = effective_board_edge_clearance(args.input_file, 0.0)
+            if _edge > 0:
+                retract_castellated_landings(args.output_file, _edge)
+        except Exception as e:
+            print(f"  (skipped castellated-landing retract: {e})")
 
     # NO KiCad-oracle recheck here (#217): the plane this step just poured has NOT
     # yet been stitched -- tying pads/islands into the pour is route_disconnected_

@@ -93,49 +93,76 @@ Exit codes: `0` blocking is zero · `4` graded with blockers · `3` board state 
 ### Accept or revert
 
 Accept **only** if `blocking` strictly decreased, or `blocking` is unchanged and
-`quality` improved. Otherwise revert to `parent_board` and take the next lever.
+`quality` improved. Otherwise record the entry `--rejected` and step back to the
+parent (`converge.py step-back` checks out the last accepted board byte-exact).
 
 `quality` is `(vias, copper_mm, segments)` and is compared **only at
 `blocking == 0`**. Comparing it earlier lets a router trade a disconnected net
 for a lower via count.
 
-## 2. The ledger — `convergence.json`
+## 2. The ledger — `wk/ledger.jsonl`
 
 One record per iteration, appended **before** the next iteration starts.
 
+**Write it with `converge.py record`, not by hand.** The tools that read a ledger
+— `converge.py step-back` / `replay` / `status`, and `make_film.py --from-ledger`
+— read append-only **JSONL** through `board_store.Ledger`. A hand-written single
+JSON document is readable by a person and by nothing else, so the byte-exact step
+back and the replay are both unreachable from it. It also loses the content
+addressing: `record` stores the board by SHA, which is what makes stepping back
+exact after three iterations have overwritten the same path.
+
+```bash
+python3 -X utf8 converge.py record --ledger wk/ledger.jsonl \
+    --board wk/iter03.kicad_pcb --kind completion \
+    --lever 'rip lever: --rip-existing-nets QSPI_SD2 + --grid-step 0.025' \
+    --score "$(cat wk/score_iter03.json)" \
+    --argv python3 -X utf8 route.py wk/iter02.kicad_pcb wk/iter03.kicad_pcb --nets QSPI_SD1
+
+# `--argv` is a REMAINDER: everything after it is the command. Do NOT write
+# `--argv -- python3 ...` -- the bare `--` lands inside the captured argv and
+# argparse rejects the line.
+```
+
+**Then run `converge.py status --ledger wk/ledger.jsonl` every iteration and read
+what it prints.** It is the alarm for the failure this whole section exists to
+prevent: it splits the budget into completion vs systemic and warns when at least
+half went to the instrument. A run once spent nine of eleven iterations on how the
+chain measures itself and finished with five nets carrying no copper — `status`
+says that out loud, and nothing else in the loop does.
+
+The shape below is what `record` ACTUALLY writes — one JSONL line per
+iteration (there is no wrapper object, no `convergence.json`; the ledger IS
+the `.jsonl` file):
+
 ```jsonc
-{
-  "schema": 1,
-  "budget": {"per": "board", "limit": 20, "group": null},
-  "iterations": [
-    {"iteration": 0, "parent_board": null, "lever": "baseline",
-     "commands": ["python3 -X utf8 route.py seed.kicad_pcb wk/iter00.kicad_pcb ..."],
-     "score": {"blocking": 47, "blocking_by": {"unrouted": 5, "drc": 11, "undersized": 31}},
-     "verdicts": [], "accepted": true, "reverted_to": null},
-
-    {"iteration": 1, "parent_board": "wk/iter00.kicad_pcb",
-     "lever": "parameters: --min via 0.6 -> re-route at spec sizes",
-     "score": {"blocking": 16, "blocking_by": {"unrouted": 5, "drc": 11, "undersized": 0}},
-     "accepted": true, "reverted_to": null},
-
-    {"iteration": 2, "parent_board": "wk/iter01.kicad_pcb",
-     "lever": "placement detail: place_route_loop --lock 'J*' 'H*'",
-     "score": {"blocking": 19, "blocking_by": {"unrouted": 6, "drc": 13}},
-     "accepted": false, "reverted_to": "wk/iter01.kicad_pcb"}
-  ],
-  "stopped_by": null
-}
+{"iteration": 3,                       // position in the ledger
+ "kind": "completion",                 // or "systemic": budget went to the instrument
+ "parent_sha": "9c41f0...",            // result_sha of the last ACCEPTED entry
+ "result_sha": "2ab77e...",            // content hash; step-back checks it out byte-exact
+ "lever": "rip lever: --rip-existing-nets GPIO7, width pinned",
+ "lever_argv": ["python3", "-X", "utf8", "route.py", "..."],  // what makes replay possible
+ "score": {"blocking": 16, "blocking_by": {"unrouted": 5, "drc": 11}},
+ "accepted": true}
 ```
 
 Fields that carry weight:
 
-- **`parent_board`** — the last *accepted* board, **not** iteration N−1. It is
-  what `render_placement --before` takes. Using N−1 renders a delta that never
+- **`parent_sha` / `result_sha`** — boards live in the content store, not at
+  paths; `converge.py step-back --to <sha>` checks one out byte-exact. The
+  parent is the last *accepted* board, **not** iteration N−1 — it is what
+  `render_placement --before` takes; using N−1 renders a delta that never
   existed.
-- **`lever`** — enough to reproduce it. "tuned parameters" is not a lever.
-- **`accepted` / `reverted_to`** — a rejected iteration is data, not a mistake.
-  Keeping it is what makes stop condition 3 detectable.
-- **`stopped_by`** — `1`…`4`, filled in at the end. The final report quotes it.
+- **`lever` + `lever_argv`** — `lever` is the one-line intent; `lever_argv` is
+  the reproducible command (`replay` refuses prose-only entries, exit 4).
+  Anything the schema has no field for — the verdict list, a stop-condition
+  claim — goes **into the `--lever` text by name** so `status`/the report can
+  quote it; do not invent fields the reader will never see.
+- **`kind`** — `systemic` marks iterations spent on the instrument (grader
+  fixes, reconciliation); `status` warns when at least half the budget went
+  there.
+- **`accepted`** (`--rejected` at record time) — a rejected iteration is data,
+  not a mistake. Keeping it is what makes stop condition 3 detectable.
 
 ## 3. Stop conditions
 
@@ -178,8 +205,6 @@ python3 -X utf8 make_movie.py \
     -o wk/convergence.gif --size 1600 --fps 12 --chunks 30 --end-hold 12
 ```
 
-- `--camera auto` needs `place_route_loop`'s `loop_round*.json` sidecars; without
-  them it **warns and continues**, it does not fail.
 - `.mp4` needs `imageio` + `imageio-ffmpeg` and silently falls back to a sibling
   `.gif`. Ask for `.gif` directly when you know they are missing.
 - Hand it over with `SendUserFile`. **Do not `Read` it** — show-without-reading,
