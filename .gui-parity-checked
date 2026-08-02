@@ -1,3 +1,43 @@
+HEAD 2026-08-02 parity audit d73b1d6..3106f7e (95 commits). Outcome: no gaps
+(one fixed in-flight: the diff GUI lacked a protect-nets control until the
+same commit that added the flag).
+
+  * Run-6 prep wave (PR#558 round 2, 15 commits at the head of the range):
+    every new engine parameter/flag was wired to BOTH fronts in the same
+    commit -- --protect-nets (route.py + route_diff.py; swig_gui + the diff
+    tab's protect_nets_ctrl, reset, config build, engine calls,
+    settings_persistence, ai_plan alias, manifest_to_plan LIST_FLAGS +
+    parity-gate table + fixture), --corridor-nets (both plane scripts;
+    planes-tab corridor_nets_ctrl on the create panel, repair inherits the
+    AUTO default engine-side, persistence/alias/manifest wired),
+    --track-clearances/#549 (deliberately NO flag or control, the .kicad_dru
+    is the source of truth -- install_track_clearances runs engine-side so
+    the GUI inherits it, same pattern as #498). New CLI post-pass
+    retract_castellated_landings registered in test_cli_postpass_coverage
+    with a real GUI twin (gui_utils.apply_castellated_landing_retract,
+    called from the signal apply path and the planes tab). Engine-internal
+    fixes (immediate reconnect, MST free ends, rescue widths, blocker
+    attribution, seam damping, pair_order, corridor seeds' engine seeding)
+    are shared-function changes both fronts inherit.
+  * Earlier commits in the range (run-5 tooling wave, PR#558 round 1):
+    audited as they landed -- --json-out (main()-only, report channel;
+    GUI reads results directly), converge/board_score/film tooling is
+    CLI-analysis-only by nature (no board mutation, no GUI counterpart
+    needed), place_route_loop flags are placement (CLI-only by design,
+    manifest converter refuses them loudly).
+  * Gates at 3106f7e (2026-08-02, Windows KiCad 10.0 python, wx 4.2.2):
+    test_gui_engine_parity VERDICT: PARITY -- segments CLI=GUI=1307, vias
+    144=144, copper sets IDENTICAL (kicad_unconnected/drc both -1: kicad-cli
+    grading skipped identically on both sides inside the gate env; the
+    copper-set comparison is the decisive check and is exact).
+    test_manifest_plan_parity: 37 flag-checks + LIST_FLAGS rows, 14
+    params resolved, 0 mismatches. test_cli_postpass_coverage: 7 registered,
+    0 failures. Caveat per the marker convention: the gate's plan is
+    signal+plane, so diff-pair/impedance params ride on
+    test_manifest_plan_parity + the diff tab wiring review only.
+
+== previous audit ==
+
 HEAD 2026-07-30 parity audit 191abc4..d73b1d6 (3 commits). Outcome: no gaps.
 
   * bc8d77d (PR#534 1/2): kicad_parser text-pattern fix (uuid optional in all
