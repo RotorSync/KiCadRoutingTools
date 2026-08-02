@@ -453,6 +453,53 @@ This validates the core hypothesis of the whole investigation: **proxies
 propose, the router disposes.** Wall-clock cost was ~5 routing runs
 (~4 minutes total on this board).
 
+## The portfolio: diversity without giving up determinism
+
+Everything above converges on ONE answer: the quench is a zero-temperature
+greedy descent, deliberately de-randomized (#457), so the same board and
+knobs produce the same placement byte for byte. That is the right property
+for reproducibility and exactly the wrong one for exploring — a re-run can
+never say "here is a different arrangement worth considering".
+
+`place_portfolio.py` injects diversity at the SEED instead of un-suppressing
+it in the engine, which keeps both properties at once:
+
+- Each candidate is a legal perturbation of the input placement — `jitter`
+  (seeded disc offsets of the free parts), `poses` (rotation variants of the
+  highest-pin free parts, pruned by `pair_order.ref_inversions` so a
+  rotation that provably raises the forced-crossing floor is never even
+  quenched), `swap` (position exchanges inside a declared block, the move
+  the quench's own displacement-capped swap phase cannot reach).
+- Every candidate is then quenched by the ORDINARY engine — `quench.py` is
+  not modified, and a default `place_optimize.py` run is bit-identical with
+  the portfolio in the tree.
+- Randomness is scoped, never ambient: candidate i draws from
+  `random.Random(f"{seed}:{i}:{strategy}")`, so the portfolio is a pure
+  function of (board, knobs, seed) and any single candidate replays alone
+  via `--only i`. `tests/test_portfolio_determinism.py` pins this across
+  PYTHONHASHSEED values, test_457-style.
+- Ranking is a lexicographic tuple of numbers this document already
+  establishes as trustworthy — crossings, the inversion lower bound, hpwl,
+  the floorplan health signals, displacement — and the top candidates are
+  probe-ROUTED (`--route-top`, default 2), because proxies propose and the
+  router disposes applies to a slate exactly as it applies to a single
+  repair.
+
+The perturb-then-descend shape is classical basin hopping (Wales & Doye) —
+the "extend the scorer to evaluate a perturbation" note in the SA section
+above, finally built, with the acceptance step replaced by an explicit
+ranked presentation to the user.
+
+`place_seed.py` is the same idea one step earlier: for a board with NO
+placement yet, a declared floorplan intent (zones, edge bands, locks, decap
+rules — `docs/floorplan-intent.md`) carries exactly the unmodeled
+constraints whose absence makes naive from-scratch placement fail (see "Why
+from-scratch autoplacement fails" above). The seeder turns the intent's
+constructs into a legal, seeded initial placement, grades its own output
+against the same intent, and hands the result to the portfolio. The
+from-scratch verdict stands: unaided is still out of scope; *aided by a
+declared intent* is now a supported path.
+
 ## References and further reading
 
 ### PCB-specific placement research
