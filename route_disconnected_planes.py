@@ -2794,7 +2794,49 @@ def route_planes(
     if repair_pads:
         print(f"  Pad repair: {total_pads_repaired}/{total_pads_unconnected} unconnected pad(s) reconnected")
         if failed_repair_pads:
-            print(f"  Pads still unconnected: {', '.join(failed_repair_pads)}")
+            # Run-6 fix: failed_repair_pads is a historical accumulator graded
+            # by the KRT fill model, which under-credits narrow real fill
+            # corridors (~0.05mm raster floor) -- it claimed pads unconnected
+            # that KiCad's refilled pour connects (C16.2 class). Re-grade the
+            # list against the exact/kicad oracle before printing; entries the
+            # oracle proves connected are reported separately, not as opens.
+            _confirmed, _cleared = list(failed_repair_pads), []
+            try:
+                if _gate_oracle_links[0] is None:
+                    _gate_oracle_links[0] = _gate_oracle_query()
+                _olinks = _gate_oracle_links[0]
+                if _olinks is not False and _olinks is not None:
+                    def _pad_open_per_oracle(entry):
+                        # entry format: "REF.PAD (NET)"
+                        try:
+                            _refpad = entry.split(' ')[0]
+                            _ref, _pn = _refpad.rsplit('.', 1)
+                            _fp = pcb_data.footprints.get(_ref)
+                            _pad = next(p for p in (_fp.pads if _fp else [])
+                                        if p.pad_number == _pn)
+                        except Exception:
+                            return True     # unparseable: keep as open
+                        for _net, _a, _b in _olinks:
+                            for _e in (_a, _b):
+                                if (abs(_e[0] - _pad.global_x) < 0.1
+                                        and abs(_e[1] - _pad.global_y) < 0.1):
+                                    return True
+                        return False
+                    _confirmed = [e for e in failed_repair_pads
+                                  if _pad_open_per_oracle(e)]
+                    _cleared = [e for e in failed_repair_pads
+                                if e not in _confirmed]
+            except Exception:
+                pass    # incl. NameError when the gate closure never built
+            if _cleared:
+                print(f"  {len(_cleared)} reported-unconnected pad(s) are "
+                      f"CONNECTED per KiCad's exact fill (model quantization): "
+                      f"{', '.join(_cleared)}")
+            if _confirmed:
+                print(f"  Pads still unconnected: {', '.join(_confirmed)}")
+            else:
+                print("  Pads still unconnected: none (all model-only; "
+                      "confirmed connected by the oracle)")
     if debug_lines and all_debug_lines:
         print(f"  Debug lines on User.4: {len(all_debug_lines)}")
 
