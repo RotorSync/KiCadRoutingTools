@@ -95,11 +95,13 @@ machine before):
   **dense, fully-populated array** still drops balls at the floor (the channel
   router over-subscribes the between-row channels — e.g. a fully-populated 22×22
   array drops ~20),
-  re-run with **`--escape-method underpad`** and a small via/track (e.g.
-  `--via-size 0.35 --track-width 0.12 --clearance 0.1`): it routes each ball under
-  the pad field on inner layers and escapes what `channel` can't (→ 0). It routes
-  diff pairs single-ended and skips power/plane nets (plane them first), so reach
-  for it specifically when `channel` floors out on a dense array. Don't start
+  re-run with **`--escape-method dogbone`** and a small via/track (e.g.
+  `--via-size 0.35 --track-width 0.12 --clearance 0.1`): each ball vias in a free
+  inter-ball gap (the dominant method on human-routed BGAs) and falls back
+  per-ball to via-in-pad, so it escapes everything `underpad` can (→ 0) while
+  keeping the inner-layer streets clear of barrels. Both dogbone and underpad
+  route diff pairs single-ended and skip power/plane nets (plane them first), so
+  reach for them specifically when `channel` floors out on a dense array. Don't start
   signal routing with balls still dropped.
 - Track liveness from disk (results JSON + run-dir activity) via
   `stress_status.sh` — NOT the notification stream, which drops and duplicates.

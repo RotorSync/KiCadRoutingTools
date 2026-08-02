@@ -413,6 +413,13 @@ For this board, the tightest interface is **[interface]** at **[freq]**, so use:
 are routed with `route_diff.py`, which adds its own GND return vias automatically.
 The `--gnd-via-distance` recommendation here applies to single-ended signal vias only.
 
+**Stitch-via pitch (this skill is the ONLY thing that tightens it).** When the
+plan's finalize-planes step runs `--stitch-vias`, the lattice pitch stays at
+the tool default unless THIS skill recommends `--stitch-max-freq <MHz>` — set
+it to the highest frequency of interest found above (the tool derives the
+lambda/20 pitch itself; pass the frequency, not a pitch). Boards whose top
+tier is Low/Medium need no recommendation — the default pitch stands.
+
 ### Impedance-Controlled Routing Recommendation (actionable)
 
 List every controlled-impedance net found in Steps 4.5/5 with its target and the
