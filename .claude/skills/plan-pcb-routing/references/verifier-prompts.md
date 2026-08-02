@@ -31,7 +31,7 @@ wk/turn<N>/
   intent.json  intent_result.json  # E -- check_floorplan
   route.log  drc.txt  conn.txt   # F -- routing + the authoritative checkers
   list_groups.txt                # G
-  score.json  convergence.json   # H -- board_score.py + the Step 9 ledger
+  score.json  ledger.jsonl       # H -- board_score.py + the Step 9 ledger
 ```
 
 ## The nine lenses
@@ -139,7 +139,9 @@ VERDICT=FAIL:lens=drc;finding=8 vias below the 0.6 mm spec on B.Cu;
   evidence=wk/score.json#/components/undersized/by_type/via-size;route=Step 2
 ```
 
-1. **Append the verdict to the ledger's `verdicts[]`** for the current iteration.
+1. **Record the verdict in the ledger entry's `--lever` text** (the record
+   schema has no verdict field; a verdict that is not in the ledger line is
+   invisible to `status` and the report).
 2. **Spend another iteration at the step named in `route=`**, if budget remains.
 3. If the budget is exhausted, stop on **condition 2** and report the finding as
    an outstanding blocker with its measurement — never as a passing board with a

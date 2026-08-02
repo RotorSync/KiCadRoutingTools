@@ -222,16 +222,15 @@ python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/board_score.py board.kic
 the floor the board was actually routed to (see F's writeback ratchet). Pass one
 only when you know better than the board.
 
-### `convergence.json` — the Step 9 ledger
+### `ledger.jsonl` — the Step 9 ledger (one `converge.py record` line per iteration)
 
 | key | decision |
 |---|---|
-| `iterations[].parent_board` | the last **accepted** board. This is `render_placement --before`; using N−1 renders a delta that never existed |
-| `iterations[].lever` | must be reproducible. "tuned parameters" is not a lever |
-| `iterations[].accepted` / `.reverted_to` | a rejected iteration is data — keeping it is what makes "3 unchanged iterations" detectable |
-| `iterations[].score.blocking` | flat across three iterations and three levers ⇒ stop condition 3 |
-| `iterations[].verdicts[]` | a `VERDICT=FAIL` here means `blocking` was not really 0 |
-| `stopped_by` | `1`…`4`. The final report quotes it by number |
-| accepted boards, in order | the frame list for `make_movie.py`. Reverted boards animate a change that was undone |
+| `parent_sha` | the last **accepted** board (content hash; `step-back --to` checks it out). Resolve it for `render_placement --before`; using N−1 renders a delta that never existed |
+| `lever` + `lever_argv` | `lever` is the one-line intent, `lever_argv` the reproducible command — `replay` refuses prose-only entries. "tuned parameters" is not a lever. Verdicts and stop-condition claims have no field of their own: name them **in the `--lever` text** |
+| `accepted` (`--rejected` at record time) | a rejected iteration is data — keeping it is what makes "3 unchanged iterations" detectable |
+| `score.blocking` | flat across three iterations and three levers ⇒ stop condition 3 |
+| `kind` | `systemic` = budget went to the instrument; `status` warns when that share hits half |
+| accepted `result_sha`s, in order | the frame list for `make_movie.py`. Reverted boards animate a change that was undone |
 
 Full procedure: [`convergence.md`](convergence.md).
