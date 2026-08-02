@@ -1163,8 +1163,11 @@ def route_planes(
         their vacated corridors (the window-shrink half of the #480 knob).
         Successes leave ripped_net_ids -- their new copper enters the write
         list here; failures stay queued for the end-of-run reconnect and its
-        custody. Mirrors the end-of-run batch (same batch_route call, same
-        #513 width preservation, same #338/#441 edge floor)."""
+        custody. Mirrors the end-of-run batch: same batch_route call, same
+        #513 width preservation, same #338/#441 edge floor, and -- since the
+        run-6 fix -- the same reconnect_batches layer grouping and
+        track_width_floor, so a --net-layers pin survives this path too (a
+        single-layer group cannot take a via at all, by construction)."""
         _names = [pcb_data.nets[_n].name for _n in _rip_ids
                   if _n in pcb_data.nets]
         if not _names:
@@ -1192,21 +1195,45 @@ def route_planes(
                         continue
                     _pn.append(_cn)
                     _pw.append(_cw)
-            _ok, _fail, _t, _rdata = batch_route(
-                input_file, "", _names,
-                layers=routing_layers,
-                track_width=track_width, clearance=clearance,
-                via_size=via_size, via_drill=via_drill,
-                grid_step=grid_step, max_iterations=max_iterations,
-                power_nets=_pn or None, power_nets_widths=_pw or None,
-                board_edge_clearance=_edge,
-                disable_bga_zones=([] if no_bga_zone else None),
-                net_clearances=net_clearances,
-                hole_to_hole_clearance=hole_to_hole_clearance,
-                return_results=True, pcb_data=pcb_data,
-                # #540 item 2: price the OTHER pending casualties' corridors
-                # (this batch's own nets excluded -- theirs to reclaim).
-                **_ghost_kwargs(corridor_ghosts, _rip_ids))
+            # Group by allowed-layer set and carry the width floor, exactly
+            # like the end-of-run batch. This path used to route ALL
+            # casualties across the full layer list in one call with no
+            # floor -- measured on test-board run 5: USB_DP, ripped for a
+            # tap, returned with 2 vias and B.Cu segments DESPITE an F.Cu
+            # --net-layers pin, and the pour-repair's thin reconnects are
+            # where a 0.4mm rail's sub-width segments came from.
+            _groups = reconnect_batches(_names, net_layers, routing_layers)
+            _rdata = {'results': [], 'all_swap_vias': [],
+                      'all_swap_segments': []}
+            for _glay, _gnames in _groups.items():
+                if len(_groups) > 1:
+                    print(f"    (#517 reconnect batch on {','.join(_glay)}: "
+                          f"{', '.join(_gnames)})")
+                _ok, _fail, _t, _rd = batch_route(
+                    input_file, "", _gnames,
+                    layers=list(_glay),
+                    track_width=track_width, clearance=clearance,
+                    track_width_floor=track_width_floor,
+                    via_size=via_size, via_drill=via_drill,
+                    grid_step=grid_step, max_iterations=max_iterations,
+                    power_nets=_pn or None, power_nets_widths=_pw or None,
+                    board_edge_clearance=_edge,
+                    disable_bga_zones=([] if no_bga_zone else None),
+                    net_clearances=net_clearances,
+                    hole_to_hole_clearance=hole_to_hole_clearance,
+                    return_results=True, pcb_data=pcb_data,
+                    # #540 item 2: price the OTHER pending casualties'
+                    # corridors (this batch's own nets excluded -- theirs
+                    # to reclaim).
+                    **_ghost_kwargs(corridor_ghosts, _rip_ids))
+                _rdata['results'] += list(_rd.get('results') or [])
+                _rdata['all_swap_vias'] += list(_rd.get('all_swap_vias')
+                                                or [])
+                _rdata['all_swap_segments'] += list(
+                    _rd.get('all_swap_segments') or [])
+                # segments_to_remove/vias_to_remove are per-call channels;
+                # consume them per group, not off the merged dict.
+                _consume_inner_strips(_rd, "immediate-reconnect")
             for _r in _rdata.get('results', []):
                 for _s in (_r.get('new_segments') or []):
                     all_new_segments.append(
@@ -1236,7 +1263,6 @@ def route_planes(
                      'net_id': _s.net_id})
                 _prov_seg(_s.net_id, _s.layer, _s.start_x, _s.start_y,
                           _s.end_x, _s.end_y, 'reconnect')
-            _consume_inner_strips(_rdata, "immediate-reconnect")
             # A net is done only if it is CONNECTED now (batch_route's own
             # success flag is not the arbiter -- #479's lesson).
             from check_connected import check_net_connectivity as _cnc517
