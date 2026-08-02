@@ -410,6 +410,11 @@ def score_net_widths(board: str, spec_file: str) -> dict:
 
     with open(spec_file, encoding='utf-8') as fh:
         want = json.load(fh)
+    # Non-numeric values are annotations (a "_comment" key), not net patterns;
+    # letting them through pollutes patterns_matching_no_routed_net -- the
+    # exact field a reader scans for typo'd globs. Same idiom as check_dru's
+    # floors filter.
+    want = {k: v for k, v in want.items() if isinstance(v, (int, float))}
     pcb = parse_kicad_pcb(board)
     by_id = {n.net_id: n.name for n in pcb.nets.values()}
     seen = defaultdict(list)
