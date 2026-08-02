@@ -491,12 +491,17 @@ def render_board_file(board_path: str, out_png: Optional[str] = None,
                       layer_alpha: int = 150,
                       view: Optional[Tuple[float, float, float, float]] = None,
                       label: Optional[str] = None,
+                      refs: Optional[bool] = None,
+                      ruler: Optional[bool] = None,
                       quiet: bool = False) -> Optional[str]:
     """Parse ``board_path`` and write a PNG. Returns the path written.
 
     ``view`` crops to a world rect (board mm) -- the question-scoped-crop seam
     (set_view) exposed to callers; a cropped frame is auto-labeled with its
-    rect so the picture says where on the board it is."""
+    rect so the picture says where on the board it is. ``refs``/``ruler``
+    (None = auto: ON for a cropped view, OFF whole-board) draw reference
+    designators at footprint origins and a mm coordinate ruler, so what the
+    crop shows is matchable against the JSON that cites refs/coordinates."""
     from kicad_parser import parse_kicad_pcb
     pcb = parse_kicad_pcb(board_path)
     r = BoardRenderer(pcb, size=size, supersample=supersample,
@@ -506,13 +511,85 @@ def render_board_file(board_path: str, out_png: Optional[str] = None,
         out_png = os.path.splitext(board_path)[0] + '.png'
     if label is None and view is not None:
         label = (f"view ({view[0]:g},{view[1]:g})-({view[2]:g},{view[3]:g})mm")
-    r.frame(label=label).save(out_png)
+    overlays = []
+    if (view is not None if refs is None else refs):
+        overlays.append(ref_label_overlay(pcb))
+    if (view is not None if ruler is None else ruler):
+        overlays.append(mm_ruler_overlay())
+    r.frame(label=label, overlays=overlays or None).save(out_png)
     if not quiet:
         n_layers = len(r.copper_layers)
         print(f"route_render: wrote {out_png} "
               f"({len(pcb.segments)} segs, {len(pcb.vias)} vias, {n_layers}L, "
               f"{r.W}x{r.H})")
     return out_png
+
+
+def ref_label_overlay(pcb, min_mm_px: float = 8.0):
+    """Overlay: reference designators anchored at each footprint's ORIGIN
+    (a small cross marks the exact (x, y) the JSON quotes, the label sits
+    beside it) -- so what the picture shows is matchable against score/DRC/
+    forensics records by name. Scale-gated: below ``min_mm_px`` px per mm
+    (a whole-board view) the labels would blanket the copper, so nothing is
+    drawn; at crop scales they are legible."""
+    def fn(d, r):
+        px_per_mm = r.tf.length(1.0)
+        if px_per_mm < min_mm_px:
+            return
+        Wp, Hp = r.W * r.ss, r.H * r.ss
+        font = load_font(max(11, int(Hp / 55)))
+        cross = max(3.0, r.tf.length(0.15))
+        for ref, fp in sorted(pcb.footprints.items()):
+            x, y = r.tf.pt(fp.x, fp.y)
+            if not (-50 <= x <= Wp + 50 and -50 <= y <= Hp + 50):
+                continue
+            d.line([x - cross, y, x + cross, y], fill=(255, 235, 130), width=2)
+            d.line([x, y - cross, x, y + cross], fill=(255, 235, 130), width=2)
+            try:
+                bb = d.textbbox((0, 0), ref, font=font)
+                tw, th = bb[2] - bb[0], bb[3] - bb[1]
+            except Exception:
+                tw, th = 7 * len(ref), 12
+            tx, ty = x + cross + 2, y - th - 2
+            d.rectangle([tx - 2, ty - 2, tx + tw + 2, ty + th + 3],
+                        fill=(0, 0, 0, 180) if d.mode == 'RGBA' else (0, 0, 0))
+            d.text((tx, ty), ref, fill=(255, 235, 130), font=font)
+    return fn
+
+
+def mm_ruler_overlay():
+    """Overlay: mm tick marks + coordinates along the top and left edges, so
+    anything seen in a crop can be located in BOARD coordinates and matched
+    to the JSON that cites them. Tick step auto-picks from the visible width
+    (0.5/1/2/5/10/20 mm, aiming for <=14 ticks)."""
+    def fn(d, r):
+        tf = r.tf
+        Wp, Hp = r.W * r.ss, r.H * r.ss
+        # Invert the transform over the canvas to get the visible world rect.
+        wx0 = (0 - tf.off_x) / tf.scale + tf.min_x
+        wx1 = (Wp - tf.off_x) / tf.scale + tf.min_x
+        wy0 = (0 - tf.off_y) / tf.scale + tf.min_y
+        wy1 = (Hp - tf.off_y) / tf.scale + tf.min_y
+        span = max(wx1 - wx0, wy1 - wy0, 1e-6)
+        step = next((s for s in (0.5, 1, 2, 5, 10, 20, 50) if span / s <= 14),
+                    100.0)
+        font = load_font(max(10, int(Hp / 70)))
+        tick = max(6, int(Hp / 90))
+        col = (200, 200, 200)
+        import math as _m
+        gx = _m.ceil(wx0 / step) * step
+        while gx <= wx1:
+            px, _ = tf.pt(gx, wy0)
+            d.line([px, 0, px, tick], fill=col, width=2)
+            d.text((px + 3, 2), f"{gx:g}", fill=col, font=font)
+            gx += step
+        gy = _m.ceil(wy0 / step) * step
+        while gy <= wy1:
+            _, py = tf.pt(wx0, gy)
+            d.line([0, py, tick, py], fill=col, width=2)
+            d.text((3, py + 2), f"{gy:g}", fill=col, font=font)
+            gy += step
+    return fn
 
 
 def parse_view(text: Optional[str]) -> Optional[Tuple[float, float, float, float]]:
@@ -548,6 +625,14 @@ def main() -> int:
                     help='crop to this world rect in board mm (question-scoped '
                          'zoom; the frame is labeled with the rect). Example: '
                          '--view 117,73,121,79')
+    ap.add_argument('--refs', default=None, action=argparse.BooleanOptionalAction,
+                    help='draw reference designators at footprint origins (a '
+                         'cross marks the exact JSON coordinate). Default: on '
+                         'for a --view crop, off whole-board')
+    ap.add_argument('--ruler', default=None, action=argparse.BooleanOptionalAction,
+                    help='mm coordinate ticks along the top/left edges, so the '
+                         'picture is matchable to JSON coordinates. Default: '
+                         'on for a --view crop, off whole-board')
     args = ap.parse_args()
     layers = args.layers.split(',') if args.layers else None
     out = render_board_file(args.board, args.output, size=args.size,
@@ -555,7 +640,8 @@ def main() -> int:
                             show_pads=not args.no_pads,
                             show_zones=not args.no_zones, layers=layers,
                             layer_alpha=args.layer_alpha,
-                            view=parse_view(args.view))
+                            view=parse_view(args.view),
+                            refs=args.refs, ruler=args.ruler)
     return 0 if out else 1
 
 

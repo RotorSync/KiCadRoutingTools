@@ -36,6 +36,32 @@ def test_parse_view_contract():
     print("  PASS: parse_view normalizes corners and refuses malformed rects")
 
 
+def test_ref_and_ruler_overlays_are_scale_gated():
+    """Refs/ruler default ON for a crop, OFF whole-board -- and the ref
+    overlay draws nothing when zoomed out (labels would blanket the board)."""
+    if not os.path.isfile(BOARD):
+        print("  SKIP: fixture missing")
+        return
+    from kicad_parser import parse_kicad_pcb
+    from route_render import BoardRenderer, ref_label_overlay
+    pcb = parse_kicad_pcb(BOARD)
+    calls = []
+
+    class _Probe:
+        mode = 'RGB'
+        def line(self, *a, **k): calls.append('line')
+        def rectangle(self, *a, **k): calls.append('rect')
+        def text(self, *a, **k): calls.append('text')
+        def textbbox(self, *a, **k): return (0, 0, 10, 10)
+
+    fn = ref_label_overlay(pcb)
+    fn(_Probe(), BoardRenderer(pcb, size=800))            # whole board: gated
+    assert not calls, "whole-board scale must draw no ref labels"
+    fn(_Probe(), BoardRenderer(pcb, size=800, view=(60, 30, 70, 40)))
+    assert 'text' in calls, "crop scale must draw ref labels"
+    print("  PASS: ref labels gate on scale (crop yes, whole-board no)")
+
+
 def test_route_render_view_cli():
     if not os.path.isfile(BOARD):
         print("  SKIP: fixture missing")

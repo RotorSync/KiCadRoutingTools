@@ -412,8 +412,8 @@ question you actually have, is the same as not producing it. Each row is a
 | any route step failed | `render_placement board --summary-json <route log> --focus` | do the failures share one pocket (→ placement) or scatter (→ parameters)? **`--focus` emits nothing without `--summary-json`** |
 | a `--group-by` decision is live | `render_placement --zoom-group <name> --group-by sheet` | which parts does this block actually pull in? |
 | chasing one bus, pair or clock | `render_placement --ratsnest-nets '*USB*'` | route.py `--nets` glob syntax, exclusions included. On a pose/order decision: TWO renders, one per pose, and READ them (image case 5) |
-| a claim about ONE spot (an intrusion, an edge row, a wedge, a stop claim) | `route_render.py BOARD --view x0,y0,x1,y1` (or the same flag on `render_placement`) | the question-scoped crop; it labels itself with its rect. READ it (image case 6). Numbers still decide magnitudes |
-| `check_drc` failed | re-run with `--render wk/drcN/` | one panel per violation cluster, red rings + count/types/rect caption. READ them (image case 7): one cluster = local fix, board-wide = grading floor (9.1b) |
+| a claim about ONE spot (an intrusion, an edge row, a wedge, a stop claim) | `route_render.py BOARD --view x0,y0,x1,y1` (or the same flag on `render_placement`) | the question-scoped crop, self-describing: rect label, ref designators cross-marked at their JSON origins, mm ruler on the edges (`--refs`/`--ruler` default ON for crops). READ it (image case 6). Numbers still decide magnitudes |
+| `check_drc` failed | re-run with `--render wk/drcN/` | one panel per violation cluster: red rings, ref labels + mm ruler for JSON matching, count/types/rect caption. READ them (image case 7): one cluster = local fix, board-wide = grading floor (9.1b) |
 | every placement render | add `--ignore-nets <same as place_optimize>` | **must match** or `crossings`/`hpwl` will not reproduce the optimizer's `JSON_SUMMARY`, and you will chase a phantom disagreement |
 | every placement render | add `--clearance <the board's real floor>` | halo and overlap are otherwise graded at the wrong gap |
 | every render, always | add `--json` | the re-measurement channel. A tool's own report never satisfies its own gate. **It is a bare FLAG on `render_placement`**, not a path: it prints a `JSON_SUMMARY:`-prefixed line into stdout among the progress text, so grep that prefix and strip it. Only `board_score.py --json <path>` takes a file |
@@ -461,8 +461,12 @@ the ledger entry must name the panels read (see 9.4).
    and check them against `components.inversions`. Run 5's measured
    exchange rate: fifteen routing experiments for what two renders show.
 6. **Before any stop-3/stop-4 claim** — a `--view x0,y0,x1,y1` crop of the
-   claimed-blocked region (route_render or render_placement, both take it),
-   read by YOU and handed to the watcher with the pad coordinates. A
+   claimed-blocked region (route_render or render_placement, both take it).
+   A crop self-describes: its rect in the corner label, **reference
+   designators cross-marked at their exact origins, and a mm ruler on the
+   edges** — so everything seen matches the JSON that cites refs and
+   coordinates by name. Read it YOURSELF, then hand it to the watcher with
+   the pad coordinates. A
    "boxed in" claim whose crop shows open copper is refuted before it
    costs a report.
 7. **When `check_drc` fails** — re-run with `--render wk/drcN/` and read the

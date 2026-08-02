@@ -1472,7 +1472,8 @@ def render_violation_panels(pcb_file: str, violations: List[dict],
     if not pts:
         return []
     try:
-        from route_render import BoardRenderer
+        from route_render import (BoardRenderer, mm_ruler_overlay,
+                                  ref_label_overlay)
         from kicad_parser import parse_kicad_pcb
     except Exception as e:
         print(f"  (--render skipped: {e})")
@@ -1518,7 +1519,12 @@ def render_violation_panels(pcb_file: str, violations: List[dict],
         label = (f"drc {len(c['items'])}: {top} @"
                  f"({c['x0']:.1f},{c['y0']:.1f})-({c['x1']:.1f},{c['y1']:.1f})mm")
         out = os.path.join(out_dir, f"drc_cluster{i + 1}.png")
-        r.frame(label=label, overlays=[_marks]).save(out)
+        # Ref labels + mm ruler make the panel matchable to the violation
+        # records (which cite nets and coordinates): under the rings, above
+        # the copper.
+        r.frame(label=label,
+                overlays=[ref_label_overlay(pcb), mm_ruler_overlay(),
+                          _marks]).save(out)
         paths.append(out)
         print(f"  DRC render: {out} -- {label}")
     if dropped:
