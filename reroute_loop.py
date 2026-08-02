@@ -331,6 +331,22 @@ def run_reroute_loop(
                             if already_tried:
                                 continue
 
+                            # PROTOTYPE (worktree): churn gate v2 -- allow each
+                            # net ONE committed rip; refuse rip sets containing
+                            # a net already ripped >= K times (measured: 55/82
+                            # ripped nets churn repeatedly and #134 refusals ~=
+                            # the final failure count). KICAD_SE_RIP_CHURN_GATE=K.
+                            import os as _os
+                            _ck = int(_os.environ.get('KICAD_SE_RIP_CHURN_GATE', '0') or 0)
+                            if _ck > 0:
+                                _cc = getattr(state, '_churn_counts', {})
+                                _hot = [rippable_blockers[i].net_name for i in range(N)
+                                        if _cc.get(rippable_blockers[i].net_id, 0) >= _ck]
+                                if _hot:
+                                    print(f"  CHURN GATE: refusing rip set N={N} "
+                                          f"(churned: {', '.join(_hot)})")
+                                    break
+
                             rip_successful = True
                             new_ripped_this_level = []
 
@@ -482,7 +498,10 @@ def run_reroute_loop(
 
                                 # Queue ripped nets and add to history
                                 rip_and_retry_history.add((ripped_net_id, blocker_canonicals))
+                                if not hasattr(state, '_churn_counts'):
+                                    state._churn_counts = {}
                                 for net_id_tmp, saved_result_tmp, ripped_ids, was_in_results in ripped_items:
+                                    state._churn_counts[net_id_tmp] = state._churn_counts.get(net_id_tmp, 0) + 1
                                     # Committed rip: custody of the pre-rip copper
                                     # for the casualties-only final reconcile.
                                     record_casualty(state, net_id_tmp, saved_result_tmp,
@@ -747,6 +766,22 @@ def run_reroute_loop(
                             if already_tried:
                                 continue
 
+                            # PROTOTYPE (worktree): churn gate v2 -- allow each
+                            # net ONE committed rip; refuse rip sets containing
+                            # a net already ripped >= K times (measured: 55/82
+                            # ripped nets churn repeatedly and #134 refusals ~=
+                            # the final failure count). KICAD_SE_RIP_CHURN_GATE=K.
+                            import os as _os
+                            _ck = int(_os.environ.get('KICAD_SE_RIP_CHURN_GATE', '0') or 0)
+                            if _ck > 0:
+                                _cc = getattr(state, '_churn_counts', {})
+                                _hot = [rippable_blockers[i].net_name for i in range(N)
+                                        if _cc.get(rippable_blockers[i].net_id, 0) >= _ck]
+                                if _hot:
+                                    print(f"  CHURN GATE: refusing rip set N={N} "
+                                          f"(churned: {', '.join(_hot)})")
+                                    break
+
                             # Rip up blockers
                             rip_successful = True
                             new_ripped_this_level = []
@@ -863,7 +898,10 @@ def run_reroute_loop(
 
                                 # Queue ripped nets and add to history
                                 rip_and_retry_history.add((current_canonical, blocker_canonicals))
+                                if not hasattr(state, '_churn_counts'):
+                                    state._churn_counts = {}
                                 for net_id_tmp, saved_result_tmp, ripped_ids, was_in_results in ripped_items:
+                                    state._churn_counts[net_id_tmp] = state._churn_counts.get(net_id_tmp, 0) + 1
                                     # Committed rip: custody of the pre-rip copper
                                     # for the casualties-only final reconcile.
                                     record_casualty(state, net_id_tmp, saved_result_tmp,

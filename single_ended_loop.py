@@ -1069,6 +1069,38 @@ def route_single_ended_nets(
                         if already_tried:
                             continue
 
+                        # PROTOTYPE (worktree): pad-weighted net-positive VALUE
+                        # GATE on the SE rip ladder. The victims' connected pads
+                        # are a bird in hand; the attacker's pads are a bird in
+                        # the bush (its retry may still fail, and queued victim
+                        # reroutes may strand -- the #134/#468 leak class). Skip
+                        # rip sets whose at-stake victim pads exceed F x the
+                        # attacker's pads. KICAD_SE_RIP_VALUE_GATE=<F> arms it.
+                        import os as _os
+                        _churn_k = int(_os.environ.get('KICAD_SE_RIP_CHURN_GATE', '0') or 0)
+                        if _churn_k > 0:
+                            _churn = getattr(state, '_churn_counts', {})
+                            _hot = [rippable_blockers[i].net_name
+                                    for i in range(N)
+                                    if _churn.get(rippable_blockers[i].net_id, 0) >= _churn_k]
+                            if _hot:
+                                print(f"  CHURN GATE: rip set N={N} includes "
+                                      f"previously-ripped net(s) {', '.join(_hot)} "
+                                      f"(k>={_churn_k}); stopping ladder")
+                                break
+                        _gate_f = float(_os.environ.get('KICAD_SE_RIP_VALUE_GATE', '0') or 0)
+                        if _gate_f > 0:
+                            _atk_pads = len(pcb_data.pads_by_net.get(net_id, []))
+                            _victim_pads = sum(
+                                len(pcb_data.pads_by_net.get(rippable_blockers[i].net_id, []))
+                                for i in range(N))
+                            if _victim_pads > _gate_f * max(1, _atk_pads):
+                                print(f"  VALUE GATE: rip set N={N} puts "
+                                      f"{_victim_pads} victim pad(s) at stake for "
+                                      f"{_atk_pads} attacker pad(s) (F={_gate_f}); "
+                                      f"stopping ladder")
+                                break
+
                         # Rip up only the new blocker(s) for this N level
                         rip_successful = True
                         new_ripped_this_level = []
@@ -1220,10 +1252,140 @@ def route_single_ended_nets(
                             # Invalidate blocking analysis cache since we added segments
                             invalidate_obstacle_cache(obstacle_cache, net_id)
 
+                            # PROTOTYPE (worktree): frame arbitration on the
+                            # SE ladder (#85 semantics brought from phase 3).
+                            # Modes (env):
+                            #   KICAD_SE_RIP_PROBE=1  probe victims, commit none
+                            #   KICAD_SE_RIP_EAGER=1  EAGER: reroute+commit each
+                            #     single-ended victim in-frame (later victims see
+                            #     earlier reroutes); if the REALIZED loss (pads of
+                            #     victims that failed) exceeds the attacker's
+                            #     pads, roll the whole frame back: rip the
+                            #     committed reroutes + the attacker, restore all
+                            #     victims verbatim (clean -- nothing else routed
+                            #     in-frame). Only actually-bad trades are refused.
+                            import os as _os
+                            _mode = ('eager' if _os.environ.get('KICAD_SE_RIP_EAGER', '') == '1'
+                                     else 'probe' if _os.environ.get('KICAD_SE_RIP_PROBE', '') == '1'
+                                     else None)
+                            if _mode:
+                                _atk_pads = len(pcb_data.pads_by_net.get(net_id, []))
+                                _lost_pads = 0
+                                _fail_names = []
+                                _eager_ok = []   # (rid, committed result)
+                                for _rid, _sv, _rids, _wir in ripped_items:
+                                    if _rid in diff_pair_by_net_id or                                        get_multipoint_net_pads(pcb_data, _rid, config):
+                                        continue  # SE victims only; others queue as today
+                                    _p_via_cells = None
+                                    if state.working_obstacles is not None and state.net_obstacles_cache is not None:
+                                        _, _p_via_cells = prepare_obstacles_inplace(
+                                            state.working_obstacles, pcb_data, config, _rid,
+                                            all_unrouted_net_ids, routed_net_ids,
+                                            track_proximity_cache, layer_map,
+                                            state.net_obstacles_cache,
+                                            state.ripped_route_layer_costs,
+                                            state.ripped_route_via_positions)
+                                        _p_obs = state.working_obstacles
+                                    else:
+                                        _p_obs, _ = build_single_ended_obstacles(
+                                            base_obstacles, pcb_data, config, routed_net_ids,
+                                            remaining_net_ids, all_unrouted_net_ids, _rid,
+                                            gnd_net_id, track_proximity_cache, layer_map,
+                                            ripped_route_layer_costs=state.ripped_route_layer_costs,
+                                            ripped_route_via_positions=state.ripped_route_via_positions)
+                                    _pr = route_net_with_obstacles(pcb_data, _rid, config, _p_obs)
+                                    _ok = bool(_pr) and not _pr.get('failed')
+                                    if _mode == 'eager' and _ok:
+                                        # COMMIT the victim's reroute in-frame
+                                        results.append(_pr)
+                                        add_route_to_pcb_data(pcb_data, _pr,
+                                                              debug_lines=config.debug_lines)
+                                        if _rid in remaining_net_ids:
+                                            remaining_net_ids.remove(_rid)
+                                        routed_net_ids.append(_rid)
+                                        routed_results[_rid] = _pr
+                                        if _pr.get('path'):
+                                            routed_net_paths[_rid] = _pr['path']
+                                        track_proximity_cache[_rid] = compute_track_proximity_for_net(
+                                            pcb_data, _rid, config, layer_map)
+                                        successful += 1
+                                        if state.working_obstacles is not None and state.net_obstacles_cache is not None:
+                                            update_net_obstacles_after_routing(
+                                                pcb_data, _rid, _pr, config, state.net_obstacles_cache)
+                                            if _p_via_cells is not None:
+                                                restore_obstacles_inplace(state.working_obstacles, _rid,
+                                                                          state.net_obstacles_cache, _p_via_cells)
+                                            else:
+                                                add_net_obstacles_from_cache(state.working_obstacles,
+                                                                             state.net_obstacles_cache[_rid])
+                                        _eager_ok.append((_rid, _pr))
+                                        continue
+                                    if _p_via_cells is not None:
+                                        restore_obstacles_inplace(state.working_obstacles, _rid,
+                                                                  state.net_obstacles_cache, _p_via_cells)
+                                    if not _ok:
+                                        _lost_pads += len(pcb_data.pads_by_net.get(_rid, []))
+                                        _fail_names.append(pcb_data.nets[_rid].name
+                                                           if _rid in pcb_data.nets else str(_rid))
+                                if _lost_pads > max(1, _atk_pads):
+                                    print(f"  FRAME ARBITRATION ({_mode}): abandoning rip frame -- "
+                                          f"failed victims ({', '.join(_fail_names)}) put "
+                                          f"{_lost_pads} pad(s) at stake vs attacker's {_atk_pads}")
+                                    # undo committed victim reroutes (eager mode)
+                                    for _rid, _pr in reversed(_eager_ok):
+                                        rip_up_net(_rid, pcb_data, routed_net_ids, routed_net_paths,
+                                                   routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                                   results, config, track_proximity_cache,
+                                                   state.working_obstacles, state.net_obstacles_cache,
+                                                   state.ripped_route_layer_costs,
+                                                   state.ripped_route_via_positions, layer_map)
+                                        successful -= 1
+                                    # undo the attacker
+                                    rip_up_net(net_id, pcb_data, routed_net_ids, routed_net_paths,
+                                               routed_results, diff_pair_by_net_id, remaining_net_ids,
+                                               results, config, track_proximity_cache,
+                                               state.working_obstacles, state.net_obstacles_cache,
+                                               state.ripped_route_layer_costs,
+                                               state.ripped_route_via_positions, layer_map)
+                                    successful -= 1
+                                    state.pending_multipoint_nets.pop(net_id, None)
+                                    for _rid, _sv, _rids, _wir in reversed(ripped_items):
+                                        restore_net(_rid, _sv, _rids, _wir,
+                                                    pcb_data, routed_net_ids, routed_net_paths,
+                                                    routed_results, diff_pair_by_net_id,
+                                                    remaining_net_ids, results, config,
+                                                    track_proximity_cache, layer_map,
+                                                    state.working_obstacles, state.net_obstacles_cache,
+                                                    state.ripped_route_layer_costs,
+                                                    state.ripped_route_via_positions,
+                                                    refused_sink=state.collision_refused_net_ids)
+                                        if _wir:
+                                            successful += 1
+                                    ripped_items.clear()
+                                    rip_and_retry_history.add((net_id, blocker_canonicals))
+                                    record_net_event(state, net_id, "reroute_failed", {
+                                        "reason": f"{_mode} arbitration: net-negative rip frame",
+                                        "lost_pads": _lost_pads, "atk_pads": _atk_pads})
+                                    continue  # next N level
+                                elif _eager_ok:
+                                    # KEEP: eager-rerouted victims are already
+                                    # routed -- exclude them from the queue loop
+                                    # below (their custody is their live route).
+                                    _ok_ids = {r for r, _ in _eager_ok}
+                                    print(f"  FRAME ARBITRATION (eager): kept -- "
+                                          f"{len(_eager_ok)} victim(s) rerouted in-frame"
+                                          + (f", {len(_fail_names)} queued after failing "
+                                             f"({', '.join(_fail_names)})" if _fail_names else ""))
+                                    ripped_items = [it for it in ripped_items
+                                                    if it[0] not in _ok_ids]
+
                             # Queue all ripped-up nets for rerouting and add to history
                             rip_and_retry_history.add((net_id, blocker_canonicals))
 
+                            if not hasattr(state, '_churn_counts'):
+                                state._churn_counts = {}
                             for rid, saved_result, ripped_ids, was_in_results in ripped_items:
+                                state._churn_counts[rid] = state._churn_counts.get(rid, 0) + 1
                                 # Committed rip: custody of the pre-rip copper so
                                 # the end-of-run casualties-only reconcile can
                                 # restore it if the queued reroute never lands

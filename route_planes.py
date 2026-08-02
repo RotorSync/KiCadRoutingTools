@@ -3592,6 +3592,54 @@ def create_plane(
                 if strapped:
                     continue
 
+            # PROTOTYPE (worktree): perforation-aware tap ordering. A NEW
+            # through-barrel at this pad pierces every FOREIGN pour whose fill
+            # covers this (x,y) -- the middle-plane shredder. When it would,
+            # prefer REUSING an existing same-net via (surface trace joins the
+            # tap tree, sharing the barrel) BEFORE trying via-in-pad, and
+            # widen the reuse search. KICAD_PLANE_TAP_PREFER_REUSE=1 arms;
+            # radius multiplier via KICAD_PLANE_TAP_REUSE_RMULT (default 3).
+            import os as _os
+            if _os.environ.get('KICAD_PLANE_TAP_PREFER_REUSE', '') == '1':
+                from plane_fill_model import get_fill_models as _gfm
+                _pierce = 0
+                for _z in (pcb_data.zones or []):
+                    if _z.net_id == net_id:
+                        continue
+                    for _m in _gfm(pcb_data, _z.net_id).get(_z.layer, []):
+                        if (_m.query_component(pad.global_x, pad.global_y) or 0) > 0:
+                            _pierce += 1
+                            break
+                if _pierce:
+                    _rmult = float(_os.environ.get('KICAD_PLANE_TAP_REUSE_RMULT', '1.5') or 1.5)
+                    _ev = via_index.find_nearest(pad.global_x, pad.global_y,
+                                                 max_via_reuse_radius * _rmult)
+                    # Two-sided cost: the reuse trace BLOCKS the escape field on
+                    # the pad's layer -- worth it only when short relative to
+                    # the perforation saved. Budget: COEF mm of trace per pour
+                    # pierced (default 0.8mm; humans link at pitch scale).
+                    if _ev is not None:
+                        import math as _math
+                        _coef = float(_os.environ.get('KICAD_PLANE_TAP_REUSE_COEF', '0.8') or 0.8)
+                        _dd = _math.hypot(_ev[0] - pad.global_x, _ev[1] - pad.global_y)
+                        if _dd > _coef * _pierce:
+                            _ev = None
+                    if _ev and pad_layer:
+                        _ro = get_routing_obstacles(pad_layer)
+                        _rr = route_via_to_pad(_ev, pad, pad_layer, net_id, _ro,
+                                               config, verbose=verbose,
+                                               return_blocked_cells=True,
+                                               router=via_pad_router)
+                        if _rr.success and _rr.segments is not None:
+                            new_segments.extend(_rr.segments)
+                            traces_added += len(_rr.segments)
+                            vias_reused += 1
+                            print(f"perforation-aware reuse: joined tap tree at "
+                                  f"({_ev[0]:.2f}, {_ev[1]:.2f}) instead of a new "
+                                  f"barrel through {_pierce} foreign pour(s)")
+                            processed_pad_ids.add(current_pad_key)
+                            continue
+
             # Next, try to place via within pad boundary (preferred - no trace needed)
             # This avoids creating long traces that block other signals
             # Search from pad center outward within pad bounds

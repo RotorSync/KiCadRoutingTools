@@ -1718,6 +1718,7 @@ def generate_underpad_escape(footprint: Footprint,
 
         _rep_nets: Dict[str, Dict[str, int]] = {}
         n_gap = n_ctr = n_exist = n_fail = n_pour = 0
+        n_trk = [0]
         for p in drop_pads:
             r = _rep_nets.setdefault(p.net_name,
                                      {'gap': 0, 'in_pad': 0, 'existing': 0,
@@ -1739,6 +1740,59 @@ def generate_underpad_escape(footprint: Footprint,
                 n_pour += 1
                 r['pour'] += 1
                 continue
+            # TRACK-CONNECT (worktree prototype): a through-barrel here
+            # perforates EVERY foreign pour whose fill covers this (x,y) --
+            # the mechanism that shreds middle-layer rail planes. When it
+            # would, and an already-placed same-net drop via sits within
+            # reach on this ball's own layer, connect by a short surface
+            # TRACK to that via instead (humans: ~0.44 vias/ball -- balls
+            # chain to shared barrels). KICAD_FANOUT_TRACK_CONNECT=1 arms.
+            import os as _os
+            if _os.environ.get('KICAD_FANOUT_TRACK_CONNECT', '') == '1':
+                from plane_fill_model import get_fill_models as _gfm
+                _gx, _gy = p.global_x, p.global_y
+                _pierced = 0
+                for _z in (pcb_data.zones or []):
+                    if _z.net_id == p.net_id:
+                        continue
+                    _ms = _gfm(pcb_data, _z.net_id).get(_z.layer, [])
+                    if any((_m.query_component(_gx, _gy) or 0) > 0 for _m in _ms):
+                        _pierced += 1
+                if _pierced >= 1:
+                    _lay_i = top_idx
+                    _r_mm = float(_os.environ.get('KICAD_FANOUT_TRACK_CONNECT_R', '2.0') or 2.0)
+                    _tw2 = track_width / 2.0 + clearance
+                    _best = None
+                    for (_vx, _vy, _vr) in _net_vias.get(p.net_id, ()):
+                        _d = math.hypot(_vx - _gx, _vy - _gy)
+                        if _d <= _r_mm and (_best is None or _d < _best[2]):
+                            _best = (_vx, _vy, _d)
+                    if _best is not None:
+                        _vx, _vy, _d = _best
+                        _n = max(2, int(_d / max(occ.res, 1e-3)))
+                        _free = True
+                        for _t in range(_n + 1):
+                            _sx = _gx + (_vx - _gx) * _t / _n
+                            _sy = _gy + (_vy - _gy) * _t / _n
+                            if math.hypot(_sx - _gx, _sy - _gy) < max(p.size_x, p.size_y) / 2.0:
+                                continue
+                            if math.hypot(_sx - _vx, _sy - _vy) < _vr:
+                                continue
+                            _ix, _iy = occ.cell(_sx, _sy)
+                            if not occ.inside(_ix, _iy) or occ.blocked(_lay_i, _ix, _iy):
+                                _free = False
+                                break
+                        if _free:
+                            tracks.append({'start': (_gx, _gy), 'end': (_vx, _vy),
+                                           'width': track_width,
+                                           'layer': layers[top_idx],
+                                           'net_id': p.net_id})
+                            occ.block_segment(_lay_i, (_gx, _gy), (_vx, _vy), _tw2)
+                            _net_seg_ends.setdefault(p.net_id, []).extend(
+                                [(_gx, _gy), (_vx, _vy)])
+                            r['track'] = r.get('track', 0) + 1
+                            n_trk[0] += 1
+                            continue
             # This ball's centre was reserved up front as its future plane-tap
             # site; the drop replaces that tap, so the reservation must not
             # veto its own via (drill-vs-drill at distance 0) or the gap site
@@ -1789,13 +1843,15 @@ def generate_underpad_escape(footprint: Footprint,
             plane_drop_report.update(
                 {'nets': _rep_nets, 'gap_vias': n_gap, 'pad_vias': n_ctr,
                  'skipped_existing': n_exist, 'skipped_pour': n_pour,
-                 'failed': n_fail})
+                 'track_connects': n_trk[0], 'failed': n_fail})
         if verbose and drop_pads:
             per = ", ".join(f"{n} {c['gap']}+{c['in_pad']}"
                             for n, c in sorted(_rep_nets.items()))
             extra = f", {n_exist} already connected" if n_exist else ""
             extra += (f", {n_pour} pour-covered (no via needed)"
                       if n_pour else "")
+            extra += (f", {n_trk[0]} track-connected (shared barrel)"
+                      if n_trk[0] else "")
             extra += f", {n_fail} FAILED (left for the plane tap)" if n_fail else ""
             print(f"  Plane drops (#424): {n_gap} gap + {n_ctr} in-pad vias "
                   f"[{per}]{extra}")
