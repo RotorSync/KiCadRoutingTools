@@ -109,6 +109,15 @@ LAYERS like this:
 - **Say which layer costs the signal steps should use.** When one inner layer
   is planed and one is free, recommend `--layer-costs` ~1.0-1.5 for the free
   inner layer (3.0 starves it and pushes everything onto F/B).
+- **Weight the recommendation by board type** (human-corpus measurements):
+  fine-pitch big BGAs (≥100 balls, ≤0.5 mm) are the most pour-heavy class
+  (median 5/17/21 poured nets on 4/6/8 layers) yet keep a median of ONE solid
+  plane — recommend many split/route+pour rails and few solid reservations,
+  with every rail near the BGA delivered by pour+via. RF boards want ONE GND
+  net poured on every layer around the RF path and few rail pours.
+  Power/motor boards deliver every heavy-current rail (V+, GNDPWR, phases) as
+  pours on every layer it visits, never as wide tracks. Light MCU 2-layer
+  boards: GND flood both sides, a couple of rail pours at most.
 - **Power rails at fine-pitch BGAs (<= 0.8 mm) cannot arrive as 0.3-0.5 mm
   trunks** — at 0.5 mm pitch only one ~0.09 mm track fits between balls. If a
   rail feeds interior balls, either give it a plane/region (vias reach it

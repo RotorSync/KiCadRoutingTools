@@ -1201,6 +1201,19 @@ plane-light plan (GND-only, rails as wide tracks) left ~26% incomplete spends
   layers** — a plane on a layer full of escape stubs forces `--rip-blocker-nets`
   to shred those escapes during tap placement (each rip risks a permanent
   casualty). Pick solid-plane layers the escapes avoid.
+
+**Adapt the pour plan to the BOARD TYPE (measured across ~400 human corpus
+boards, grouped by dominant component/function):**
+
+| board type | human pour strategy |
+|---|---|
+| **Fine-pitch big BGA** (≥100 balls, ≤0.5 mm) | The most pour-heavy class: median poured nets 5 (4L) → 17 (6L) → 21 (8L). But median only ONE solid plane per board — a third have NONE. Keep nearly every layer routable (split + route+pour), pour many rails around the routes, and deliver every rail near the BGA by pour+via, never by tracks through the escape field. |
+| **Big BGA, coarser pitch** (≥100 balls, >0.5 mm) | Same direction, milder: rails poured on 84% of boards, median ~6 nets; solid GND + split power inners are common. |
+| **RF / radio** | GND-dominated: typically ONE GND net poured as many islands on every layer (coplanar grounding around RF traces); few rail pours. Keep GND pours tight to the RF path; rails as tracks are fine. |
+| **Power / motor** | Heavy-current rails (V+, GNDPWR, phase outputs) are ALWAYS pours — 40–90-pad rails delivered as multi-layer copper regions, never wide tracks. Pour every supply rail on every layer it visits. |
+| **Keyboard / LED matrix** | Humans pour nearly every net (rows, columns, LED chains) as small local zones on both sides of a 2-layer board. Our chain approximates this with: route both sides thin, then GND+rail pours; don't fight for a dedicated plane side. |
+| **MCU / QFN, light 2-layer** | Modest: GND flood both sides (80%), rails poured on ~40–60%; a couple of pours is normal, don't force more. |
+
 - More fanout options available.
 
 **Derive `--layer-costs` from the plane plan — penalize the plane-reserved
