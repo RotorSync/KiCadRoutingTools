@@ -252,6 +252,91 @@ def _net_pads_connected_by_overlap(pads: List[Pad], copper_layers, tolerance: fl
     return len({find(i) for i in range(len(pads))}) == 1
 
 
+def bare_pad_nets(pcb_data, exclude_net_ids=None,
+                  include_partial: bool = True) -> Dict[int, List[Pad]]:
+    """Pads that would enter a pour BARE: nets with >=2 pads and ZERO copper
+    (all their pads), plus -- with ``include_partial`` -- the stranded pads of
+    partially-routed zone-less nets (per check_net_connectivity's
+    disconnected_pads). Hardened against the false positives
+    run_connectivity_check already handles: overlap-connected pad stacks
+    (castellated modules, issue #92), KiCad auto-named 'unconnected-*'
+    no-connects, and multi-board outlines where no single outline holds two
+    of the net's pads.
+
+    Consumer (run-6 A5): the plane scripts' pour gate. A pad that enters the
+    pour unconnected has its escape channel consumed by the tap-via carpet,
+    which is not rippable copper -- measured on test-board run 6, five bare
+    QFN rail pads (on PARTIALLY-routed rails) oscillated 6-9 oracle joins
+    across five post-pour repair attempts and never closed.
+    Returns {net_id: bare pads}.
+    """
+    exclude = set(exclude_net_ids or ())
+    pads_by_net = pcb_data.pads_by_net
+    segments_by_net: Dict[int, list] = {}
+    for s in pcb_data.segments:
+        segments_by_net.setdefault(s.net_id, []).append(s)
+    vias_by_net: Dict[int, list] = {}
+    for v in pcb_data.vias:
+        vias_by_net.setdefault(v.net_id, []).append(v)
+    zones_by_net: Dict[int, list] = {}
+    for z in (getattr(pcb_data, 'zones', None) or []):
+        if getattr(z, 'net_id', None) is not None:
+            zones_by_net.setdefault(z.net_id, []).append(z)
+    copper_layers = pcb_data.board_info.copper_layers or ['F.Cu', 'B.Cu']
+    outlines = getattr(pcb_data.board_info, 'board_outlines', None) or []
+    bare: Dict[int, List[Pad]] = {}
+    for net_id, net_info in pcb_data.nets.items():
+        if not net_info.name or net_id in exclude:
+            continue
+        pads = pads_by_net.get(net_id) or []
+        if len(pads) < 2:
+            continue
+        if net_id in zones_by_net:
+            continue        # zone-owning nets are the pour's own business
+        if net_info.name.lower().startswith('unconnected-'):
+            continue
+        has_copper = net_id in segments_by_net or net_id in vias_by_net
+        if not has_copper:
+            if _net_pads_connected_by_overlap(pads, copper_layers):
+                continue
+            if len(outlines) > 1:
+                counts: Dict[int, int] = {}
+                for p in pads:
+                    for i, poly in enumerate(outlines):
+                        if point_in_polygon(p.global_x, p.global_y, poly):
+                            counts[i] = counts.get(i, 0) + 1
+                            break
+                if not any(c >= 2 for c in counts.values()):
+                    continue
+            bare[net_id] = list(pads)
+            continue
+        if not include_partial:
+            continue
+        # Partially-routed net: its STRANDED pads are just as bare to the
+        # pour (the run-6 case -- rails with copper elsewhere, five pads
+        # never reached).
+        try:
+            res = check_net_connectivity(
+                net_id, segments_by_net.get(net_id, []),
+                vias_by_net.get(net_id, []), pads, [], pcb_data=pcb_data)
+        except Exception:
+            continue
+        locs = res.get('disconnected_pads') or []
+        if not locs:
+            continue
+        stranded = []
+        for loc in locs:
+            lx, ly = loc[0], loc[1]
+            for p in pads:
+                if abs(p.global_x - lx) < 1e-3 and abs(p.global_y - ly) < 1e-3:
+                    if p not in stranded:
+                        stranded.append(p)
+                    break
+        if stranded:
+            bare[net_id] = stranded
+    return bare
+
+
 def _point_in_pad(px: float, py: float, pad: Pad, margin: float = 0.0) -> bool:
     """True if (px, py) lies within `pad`'s copper outline (+margin).
 

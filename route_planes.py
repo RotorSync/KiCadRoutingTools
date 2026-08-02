@@ -2963,6 +2963,10 @@ def create_plane(
     # lift the multi-pad rail guard (see protected_nets.blocker_never_rip_ids).
     rip_blocker_exclude: Optional[List[str]] = None,
     rip_blocker_allow: Optional[List[str]] = None,
+    # Run-6 A5 pour gate: a bare pad (>=2-pad net with zero copper) at pour
+    # time has its escape channel consumed by the tap-via carpet, permanently.
+    # CLI refuses (exit 3) unless --allow-bare-pads; the GUI path warns only.
+    allow_bare_pads: bool = False,
 ) -> Union[Tuple[int, int, int],
            Tuple[int, int, int, list, list, list, int, list]]:
     """
@@ -3070,6 +3074,41 @@ def create_plane(
             return _empty_plane_results(return_results)
         net_ids.append(net_id)
         print(f"Found net '{net_name}' with ID {net_id}")
+
+    # Run-6 A5 POUR GATE: every unrouted pad's escape channel is consumed by
+    # the tap-via carpet, which is not rippable copper -- measured, 5 bare
+    # QFN rail pads at pour time never closed across five post-pour repair
+    # attempts (6-9 oracle joins oscillating). A bare pad at pour time is a
+    # blocking defect: connect it first (step back to the pre-pour board),
+    # or pass --allow-bare-pads to proceed deliberately.
+    from check_connected import bare_pad_nets
+    _bare = bare_pad_nets(pcb_data, exclude_net_ids=set(net_ids))
+    if _bare:
+        print(f"\n{'!'*60}")
+        print(f"POUR GATE: {len(_bare)} net(s) carry BARE (unconnected) pads "
+              f"-- the pour's tap-via carpet will permanently seal their "
+              f"escape channels:")
+        for _bnid, _bpads in sorted(_bare.items(),
+                                    key=lambda kv: -len(kv[1]))[:12]:
+            _bn = pcb_data.nets[_bnid].name
+            _bp = ', '.join(f"{p.component_ref}.{p.pad_number}"
+                            for p in _bpads[:6])
+            print(f"  {_bn}: {len(_bpads)} pad(s) ({_bp}"
+                  f"{', ...' if len(_bpads) > 6 else ''})")
+        if len(_bare) > 12:
+            print(f"  ... and {len(_bare) - 12} more net(s)")
+        if allow_bare_pads:
+            print("  --allow-bare-pads given: pouring anyway (deliberate).")
+        elif return_results:
+            print("  WARNING (GUI path): pouring anyway -- route these nets "
+                  "before pouring, or their pads may become unreachable.")
+        else:
+            print("  Refusing to pour. Route these nets first (the pour is a "
+                  "one-way door for bare pads), or re-run with "
+                  "--allow-bare-pads to proceed deliberately.")
+            print(f"{'!'*60}\n")
+            sys.exit(3)
+        print(f"{'!'*60}\n")
 
     # Run-6 fix: the create side's tap rip ladder used to protect ONLY its own
     # plane nets -- protection_map was never consulted here, so it could rip a
@@ -4706,6 +4745,11 @@ Examples:
                         default=None,
                         help="EXACT net names for which the multi-pad rail guard is lifted -- "
                              "a deliberate single-rail rip. Does not lift #521 protection.")
+    parser.add_argument("--allow-bare-pads", action="store_true",
+                        help="Pour even when nets with >=2 pads carry ZERO copper. Default "
+                             "REFUSES (exit 3): the tap-via carpet permanently seals a bare "
+                             "pad's escape channel, and no post-pour repair can rip a via "
+                             "field (run-6 A5). Route those nets first instead.")
     parser.add_argument("--stitch-max-freq", type=float, default=None,
         help="Maximum frequency of interest in MHz: derives the stitching "
              "pitch as lambda/20 using the largest dielectric epsilon_r in "
@@ -4867,6 +4911,7 @@ Examples:
         corridor_nets=args.corridor_nets,
         rip_blocker_exclude=args.rip_blocker_exclude,
         rip_blocker_allow=args.rip_blocker_allow,
+        allow_bare_pads=args.allow_bare_pads,
         ripup_blocker_select=args.ripup_blocker_select,
         net_names=net_names,
         plane_layers=plane_layers,
