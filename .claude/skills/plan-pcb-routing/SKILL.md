@@ -324,6 +324,31 @@ nets** as escapes — but every skipped plane ball still gets a **plane-drop via
 (below), so nothing is left stranded. Rule of thumb: try `channel` first (keeps
 diff pairs); fall back to `underpad` when `channel` can't escape a dense array.
 
+**How humans escape big BGAs (survey of 54 human corpus boards with a real
+≥100-ball array):**
+
+- **They do NOT via every ball** — median ~0.44 vias per ball. The outer 2–3
+  rings escape on the surface with no via at all (median ~18% of balls have no
+  via within 1.5 pitch; on fine-pitch parts it reaches half). Rail balls
+  connect by dropping a via into a pour — or directly into a SURFACE pour with
+  zero routing — never by tracks threaded through the escape field.
+- **Escape via, by pitch:** at 0.8–1.0 mm the median minimum via in the
+  courtyard is 0.45/0.20; at ≤0.5 mm humans go to 0.28/0.15 and even
+  0.25/0.10. Escape-track minimum: median 0.125 mm at coarse pitch, 0.089–0.10
+  (the fab floor) at fine pitch. Matching our knobs: the computed
+  budget-per-pitch above lands in the same range — trust it, and treat
+  0.25/0.15 as the floor for ≤0.5 mm parts.
+- **Deep balls leave through the inners, not the surface.** The inner-layer
+  share of courtyard copper rises with layer count — ~0–15% on 4-layer boards
+  but 30–67% on 6/8-layer: a deep ball drops ONE via and runs out on an inner
+  layer, surfacing outside the courtyard, instead of wiggling between balls on
+  F.Cu. On 6+ layers, plan for the fanout AND the signal step to use the inner
+  layers under the BGA (full `--layers` list, low cost on the escape-depth
+  layers).
+- **Buses concentrate.** A RAM/DDR bus runs on ONE inner "highway" layer with
+  a solid GND plane adjacent (plus the outers), not spread thinly across every
+  layer.
+
 **Plane-net balls are dropped to vias automatically (#424).** With any escape
 method, after the signal escape each SMD ball on a plane net — a net excluded
 from the fanout with ≥ 6 balls on the part, or an excluded net that already
