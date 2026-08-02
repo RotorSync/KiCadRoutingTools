@@ -1,3 +1,15 @@
+MERGED 2026-08-02: upstream/main (d7a8ab2..cae82e3, #424/#529/#556/#465,
+Rust 0.19.3) merged into issue-549-floorplan-intent at ad559bf, on top of the
+run-7 prep wave (11 commits). Gates re-run on the MERGED state, grid_router
+v0.19.3: test_gui_engine_parity VERDICT: PARITY, copper sets IDENTICAL;
+test_manifest_plan_parity 0 mismatches (incl. the new --rip-blocker-exclude/
+--rip-blocker-allow/--allow-bare-pads rows); test_cli_postpass_coverage 0
+failures. Known pre-existing: engine-kwarg-parity's 4 findings (verified at
+branch baseline). Merge-specific parity note: allow_bare_pads is CLI_ONLY_OK
+(pour gate refuses only on the CLI; GUI path warn-only by design).
+
+----
+
 HEAD 2026-08-02 parity audit d73b1d6..3106f7e (95 commits). Outcome: no gaps
 (one fixed in-flight: the diff GUI lacked a protect-nets control until the
 same commit that added the flag).
