@@ -51,6 +51,7 @@ def get_dialog_settings(dialog):
         'power_widths': dialog.power_widths_ctrl.GetValue(),
         'no_bga_zones': dialog.no_bga_zones_ctrl.GetValue(),
         'rip_existing_nets': dialog.rip_existing_nets_ctrl.GetValue(),
+        'protect_nets': dialog.protect_nets_ctrl.GetValue(),
         'layer_costs': dialog.layer_costs_ctrl.GetValue(),
 
         # Advanced parameters
@@ -175,6 +176,7 @@ def get_dialog_settings(dialog):
         'chamfer_extra': dialog.differential_tab.chamfer_extra.GetValue(),
         'centerline_setback': dialog.differential_tab.centerline_setback.GetValue(),
         'polarity_swap_nets_text': dialog.differential_tab.polarity_swap_nets_text.GetValue(),
+        'diff_protect_nets': dialog.differential_tab.protect_nets_ctrl.GetValue(),
         'gnd_via_check': dialog.differential_tab.gnd_via_check.GetValue(),
         'intra_match_check': dialog.differential_tab.intra_match_check.GetValue(),
         'ac_couple_check': dialog.differential_tab.ac_couple_check.GetValue(),
@@ -327,6 +329,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.no_bga_zones_ctrl.SetValue(settings['no_bga_zones'])
     if 'rip_existing_nets' in settings:
         dialog.rip_existing_nets_ctrl.SetValue(settings['rip_existing_nets'])
+    if 'protect_nets' in settings:
+        dialog.protect_nets_ctrl.SetValue(settings['protect_nets'])
     if 'layer_costs' in settings:
         dialog.layer_costs_ctrl.SetValue(settings['layer_costs'])
 
@@ -589,6 +593,8 @@ def restore_dialog_settings(dialog, settings):
         # Migrate the pre-#279 boolean: True -> allow all pairs, False -> none.
         dialog.differential_tab.polarity_swap_nets_text.SetValue(
             '*' if settings['fix_polarity_check'] else '')
+    if 'diff_protect_nets' in settings:
+        dialog.differential_tab.protect_nets_ctrl.SetValue(settings['diff_protect_nets'])
     if 'gnd_via_check' in settings:
         dialog.differential_tab.gnd_via_check.SetValue(settings['gnd_via_check'])
     if 'intra_match_check' in settings:

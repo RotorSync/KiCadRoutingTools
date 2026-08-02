@@ -691,7 +691,8 @@ def route_diff_pairs(
                     print_blocking_analysis(blockers)
 
                     rippable_blockers, seen_canonical_ids = filter_rippable_blockers(
-                        blockers, routed_results, diff_pair_by_net_id, get_canonical_net_id
+                        blockers, routed_results, diff_pair_by_net_id, get_canonical_net_id,
+                        pcb_data=pcb_data, context="diff-pair rip ladder"
                     )
                     if rippable_blockers:
                         # Committed copper blocks the path: congestion, not a
