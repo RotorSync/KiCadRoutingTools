@@ -228,8 +228,8 @@ only when you know better than the board.
 |---|---|
 | `parent_sha` | the last **accepted** board (content hash; `step-back --to` checks it out). Resolve it for `render_placement --before`; using N−1 renders a delta that never existed |
 | `lever` + `lever_argv` | `lever` is the one-line intent, `lever_argv` the reproducible command — `replay` refuses prose-only entries. "tuned parameters" is not a lever. Verdicts and stop-condition claims have no field of their own: name them **in the `--lever` text** |
-| `accepted` (`--rejected` at record time) | a rejected iteration is data — keeping it is what makes "3 unchanged iterations" detectable |
-| `score.blocking` | flat across three iterations and three levers ⇒ stop condition 3 |
+| `accepted` (`--rejected` at record time) | a rejected iteration is data — keeping it is what makes "five unchanged iterations" (stop-3) detectable |
+| `score.blocking` | flat across FIVE consecutive iterations, after the rip lever / finer grid / layer change ⇒ stop condition 3 (9.5 and convergence.md both say five; the connectivity components are what must be flat, not drc) |
 | `kind` | `systemic` = budget went to the instrument; `status` warns when that share hits half |
 | accepted `result_sha`s, in order | the frame list for `make_movie.py`. Reverted boards animate a change that was undone |
 

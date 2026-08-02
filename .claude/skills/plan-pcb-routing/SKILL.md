@@ -316,10 +316,16 @@ Four things follow that nothing will tell you:
   is flagged `SEGMENT-BOARD-EDGE` and the tool exits non-zero. Do not call that
   board clean — say what the tool reports, then why it is benign, and check the
   flagged coordinates really are on exempt pads before claiming they are.
-- **Set `pad_prop_castellated` on the pads.** KiCad has the property; without it
-  the fab has nothing machine-readable saying these half-holes are deliberate,
-  and KiCad's own DRC reports pad-outside-outline on every one. Setting it is
-  also what arms the retract below.
+- **Set `pad_prop_castellated` on the pads — after COUNTING what is already
+  there.** KiCad has the property; without it the fab has nothing
+  machine-readable saying these half-holes are deliberate, and KiCad's own DRC
+  reports pad-outside-outline on every one. Setting it is also what arms the
+  retract below. First `grep -c pad_prop_castellated` the board against the
+  spec's half-hole count: a seeder may pre-encode the marks, making a repo
+  marking script a required no-op — trust the board over the repo README's
+  recipe, and a fixup whose recorded usage demands an artifact that no longer
+  exists is a stale recipe to flag, not a step to force (run 6's
+  `fix_castellated --verify` case).
 - **Expect landings at the pad center — which IS the board edge — and let the
   retract fix them.** The router lands on a castellated pad's center, on the
   outline by construction. With the property set, the routing mains' post-pass
@@ -584,6 +590,15 @@ only in `check_floorplan`'s `outline` block.
   ```bash
   grep -oE '"routed_single": \[[^]]*\]|"failed_single": \[[^]]*\]|"failed_multipoint": \[[^]]*' run.log
   ```
+
+  **This is a family, not a route.py quirk**: ANY truncated or piped read of
+  ANY instrument — an exit code through a pipe, a `grep | tail -N` of a long
+  log, a score payload copied forward between iterations — will eventually
+  read success where the instrument printed failure. Read the structured tail
+  (JSON_SUMMARY / the EXIT line / the final tally block) or parse it; never
+  conclude from a truncated grep. Run 6 logged three incidents on three
+  different instruments read three different lossy ways; the instrument was
+  right every time.
 - **Before concluding a clause is geometrically unsatisfiable, check your own
   flags.** One net was reported "walled in by its neighbours" when the actual
   blocker was a `--track-width 0.4` the analyst had passed: a 0.4 mm trace cannot
@@ -619,10 +634,16 @@ only in `check_floorplan`'s `outline` block.
   the stock netclass, which is the exact failure the `copy_board.py` warning
   exists to prevent, arriving through a door nothing guards. Copy the
   `.kicad_pro` (and `.kicad_dru`) onto the placed board yourself.
-- **A netclass-scoped `.kicad_dru` rule is enforced by nothing in this chain.**
-  `read_board_layer_clearances` extracts only *layer*-scoped rules and skips the
-  rest with a note saying KiCad will still enforce it — true in KiCad, false for
-  `check_drc.py` and for the router. Without `kicad-cli` installed, such a rule
+- **A `.kicad_dru` rule outside the two honored grammars is enforced by nothing
+  in this chain.** Layer-scoped rules are auto-read (#498), and (#549) so is the
+  track-channel grammar `A.NetClass=='X' && B.NetClass!='X' && A.Type=='track'
+  && B.Type=='track'` — the router enforces it as a hard, per-layer, seg-vs-seg
+  obstacle expansion (pass order decides who pays it), and `check_drc` grades it
+  pair-exact, tagging rule-governed pairs as `segment-segment-track-rule`
+  (board_score reports them as `advisory`, gated by a repo's registered floors,
+  not by `blocking`). Anything else — an area scope, a mixed condition — is
+  skipped with a note saying KiCad will still enforce it: true in KiCad, false
+  for `check_drc.py` and the router. Without `kicad-cli` installed, such a rule
   is graded by **nobody**, and the score cannot even list it as `ungraded`
   because it never knew about it. Say so explicitly rather than letting the rule
   read as covered.
@@ -1000,6 +1021,9 @@ south-face pins whose escape channel their own already-routed neighbours filled.
 The rule below says a perimeter at ≤0.65 mm with many pads wants fanout; a QFN-60
 at 0.4 mm is squarely inside it. Fanout runs on the EMPTY board (Step 1), so
 skipping it is expensive to undo — you cannot bolt it on after the bulk route.
+(When a HARD spec via makes every escape method infeasible, the mandate reads
+as "resolve every pad's escape before the pour" instead — see the
+spec-via-vs-pitch exit under the via-sizing budget below.)
 
 ### Does this part actually BENEFIT from fanout? (check before planning it)
 
@@ -1154,6 +1178,17 @@ Pass the computed `--via-size via --via-drill via_drill --track-width track
 --clearance C` to the fanout step. If `infeasible`, the pitch can't take a channel
 escape even at the fab floor → switch to `--escape-method underpad` and/or add
 escape layers; don't ship the graze.
+
+**If `infeasible` survives even `underpad` because the via floor is a HARD
+SPEC value** (a 0.6/0.3 spec via at 0.4 mm pitch fits neither a channel nor a
+pad — its 0.9+ mm exclusion cannot enter the pad field at all), **fanout is
+off the table for that part** — and the same arithmetic closes Step 5's
+smaller-via repair rung. The play becomes: route EVERY pad of the part as a
+plain perimeter signal BEFORE any pour, let the pour gate hold you to it (a
+bare pad on that part at pour time is a blocking defect, run 6's five-pad
+loss), and report the spec-via-vs-pitch arithmetic as a requirement finding.
+Read the Step 3 QFN mandate as "resolve every pad's escape before the pour",
+not "run the fanout tool".
 
 **Plan params can set ANY GUI option:** in the GUI's RESULT schema, each
 step's `params` may include any option shown on that step's tab or the shared
@@ -1987,16 +2022,20 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    - **`net_impedance` declarations**: persisted, and recomputed identically by a
      later step from the stackup;
    - **`.kicad_dru` per-LAYER clearance**: auto-read by every routing step. Note
-     the qualifier — **only layer-scoped rules**. A rule scoped to a netclass, an
-     area, or anything else is *skipped with a printed note* ("KiCad will still
-     enforce it"), which is true in KiCad and false for `check_drc.py` and for
-     the router. Without `kicad-cli`, such a rule is graded by **nobody**, and it
-     cannot even appear in `ungraded` because no component ever knew about it.
-     Measured on one board: both of its `.kicad_dru` rules were netclass-scoped
-     3W separation clauses, enforced by nothing in the chain — the only thing
-     holding them was `route.py --net-clearances`, which **neither plane script
-     accepts**. If your spec's separation rules live in the dru, say in the
-     report exactly which steps enforced them and which did not;
+     the qualifier — layer-scoped rules, **and (#549) the track-channel
+     grammar**: a rule of the form `A.NetClass=='X' && B.NetClass!='X' &&
+     A.Type=='track' && B.Type=='track'` IS honored natively by the router as
+     a per-layer, seg-vs-seg hard obstacle expansion around committed foreign
+     copper (pads/vias exempt, raise-only over the fab floor). Consequence:
+     pass ORDER decides which side pays the channel — route the protected
+     class first so the stamp protects its copper from later passes. Only
+     rules outside BOTH grammars (an area scope, a mixed condition) are
+     *skipped with a printed note* ("KiCad will still enforce it"), which is
+     true in KiCad and false for `check_drc.py` and for the router — without
+     `kicad-cli`, such a rule is graded by **nobody**, and it cannot even
+     appear in `ungraded` because no component ever knew about it. If your
+     spec's separation rules live in the dru, say in the report exactly which
+     steps enforced them and which did not;
    - **an explicit exclusion**: a bulk pass with `"!QSPI_*"` leaves that copper
      byte-identical — the exclusion works, it just isn't sufficient on its own.
 
@@ -2167,6 +2206,17 @@ rip of a geometry-constrained net can only put its copper back where it was —
 see 9.3c rule 5. Route anything whose PATH matters before this step, and get
 its geometry right there.
 
+**And it is a one-way door for UNROUTED pads, not just routed paths.** Every
+open pad's escape channel is consumed by the tap-via carpet, which is not
+rippable copper — `--rip-blocker-nets` can move a NET, never a tap field.
+Measured (run 6): 5 bare fine-pitch rail pads at pour time oscillated 6-9
+oracle joins across five post-pour repair/replan attempts and never closed.
+**`route_planes` now GATES on this: it refuses to pour (exit 3) while any
+net carries bare/stranded pads**, listing them; `--allow-bare-pads` is the
+deliberate opt-out (the GUI path warns instead). Treat the refusal as a
+blocking defect, not an obstacle: go back to the pre-pour board (9.3a),
+connect the named pads, re-pour.
+
 Signal traces and GND return vias may have cut through planes. This step
 reconnects any isolated copper islands AND repairs pad-level plane connections.
 With `--rip-blocker-nets`, a plane-net pad that can't reach its plane (e.g. a tiny
@@ -2198,6 +2248,16 @@ So this call carries the per-net pins itself:
   the rip set by name, and treat any `ripped_reconnect.nets` entry that
   intersects a length-clause net as an automatic re-run of that net's Step 2c
   mirror — not as a step that succeeded.
+- **One constraint has NO pin at all: the dru.** This step auto-reads the
+  sibling `.kicad_dru` (#498/#549, deliberately no flag) and the in-step
+  reconnect prices the FULL rules — a net that only routed under a
+  staged/lifted rule cannot be re-joined here once ripped (run 6: rails
+  ripped, `ripped_reconnect` 0/2, the failure visible only in that key while
+  the step exited clean). Either keep every staged-lift net out of the rip
+  set (protect it on a prior committing step — the blocker guard now also
+  refuses multi-pad rails by default, `--rip-blocker-allow` to override), or
+  stage this step's INPUT sibling dru exactly as the routing pass was staged.
+  Rule 2's "pass its params in the same call" does not cover dru rules.
 
 **And `protected_nets` is what normally keeps a routed diff pair out of the rip
 set — check it is still there.** `route_diff` records the pair under
@@ -2659,7 +2719,7 @@ consolidating routing corridors.
 |----------|------|----------|
 | MPS (default) | `--ordering mps` | General routing, minimizes crossings |
 | Inside-Out | `--ordering inside_out` | BGA escape routing |
-| Original | `--ordering original` | Manual control |
+| Original | `--ordering original` | **Rails-first bulk routing** (netlist order puts power nets before GPIOs) — when mps keeps stranding fine-pitch RAIL pads, this is the lever it lacks (see the 9.3d row). Also manual control |
 
 ### Useful Utility Scripts
 
@@ -3037,6 +3097,25 @@ writing a script to answer a question, check whether one of them already does.
 | step back to iteration N | `converge.py step-back --iteration N` | byte-exact, because the board is addressed by content instead of by a path three iterations overwrote |
 | re-run what iteration N did | `converge.py replay --iteration N` | replays the recorded argv. If it refuses, the ledger recorded prose instead of a command — fix the ledger, not the memory |
 
+**Trust order when instruments disagree on connectivity: the KiCad oracle
+(`kicad_unconnected`) > `net_forensics` islands > `board_score` components >
+route.py's own JSON_SUMMARY tallies.** The router's multipoint model reported
+25/27 pads connected on a net the oracle showed in **7 islands** (run 6,
+VCC3V3). Router tallies pick the next lever; **only the oracle accepts an
+iteration.** When a tally and the oracle diverge, that divergence is itself a
+`--kind systemic` finding — file it, don't average it. (route.py now runs the
+oracle itself at end of run — `oracle_check`/`oracle_open` in JSON_SUMMARY —
+and a `fragmented_nets` key names pad-connected nets whose copper is several
+KiCad islands; both feed its own reconciliation. `oracle_check: unavailable`
+means the run had no kicad-cli and you are on in-process grading alone.)
+
+**Ratchet floors measured by a refill-jittery instrument (kicad-cli DRC) flap
+at exact equality.** (1) A single exit-4 at floor==count is a RE-MEASURE
+event, not a regression — re-run the checker once before reverting anything.
+(2) Register or lower a floor only to a count observed twice. (3) Name
+at-equality rules in the promote note as jitter-exposed, and keep the flap
+log.
+
 ##### 9.1c — The authoritative ratsnest needs the zones FILLED
 
 `route_planes` writes a zone **outline** with no `filled_polygon`. Until something
@@ -3225,25 +3304,38 @@ learn:
    originally routed with.** Ripping a 0.8 mm USB net from a plain signal call
    brings it back at 0.16 mm and silently destroys the spec geometry. **Whenever
    the rip set contains a width-bearing net, pass its `--power-nets` /
-   `--power-nets-widths` (or `--impedance`) in the same call.**
+   `--power-nets-widths` (or `--impedance`) in the same call.** And the rule
+   does not extend to dru rules — a net routed under a staged/lifted dru
+   cannot be re-made by any call that reads the full sibling dru (see Step 5's
+   dru-has-no-pin bullet).
 3. **One net per call.** Routing two nets together let the second rip the first —
    reported as `1/2 routed` twice running, a different net each time. Sequential
    single-net calls connected both.
 4. **A glob does not override a lock.** `--rip-existing-nets 'QSPI_*'` silently
    skips a locked or protected net (#521) while the router keeps asking for that
-   exact rip. Name it EXACTLY, and if it is KiCad-locked, nothing overrides that —
-   unlock it or route around it. To protect a net YOU verified (not just
-   matcher-produced ones), pass `--protect-nets <name>` on the step that routes
-   it — the protection persists in the `.kicad_pro` and every later step's rip
-   machinery honors it, in-run ladders included.
+   exact rip. Name it EXACTLY (the exact-name override now reaches the in-run
+   ladders too, not just the pre-run filters), and if it is KiCad-locked,
+   nothing overrides that — unlock it or route around it. To protect a
+   SINGLE net YOU verified (not just matcher-produced ones), pass
+   `--protect-nets <name>` on the step that routes it — the protection
+   persists in the `.kicad_pro` and every later step's rip machinery honors
+   it. **A GROUP routed together must NOT be protected on its own pass**: the
+   protection binds that same call's in-run ladder, so the bus can no longer
+   rip/reorder itself (measured, run 6: 6/7 with `protected_skipped` on the
+   group's own QSPI pass; 7/7 without). Protect the group on the NEXT
+   committing step instead; the `.kicad_pro` record carries it from there.
 5. **The pour is a one-way door.** Never name a geometry-constrained net in a
    post-pour rip set expecting a better return path: after the pour + taps, the
    corridors it used are gone (run 5 measured the static frontier at
    **10,903/10,939 cells** around the wrapped nets — the rip could only put the
    copper back where it was, minus luck). Anything whose PATH matters routes
    before Step 5, or not at all; post-pour rips are for freeing a blocked pad,
-   never for improving a route. (Cross-ref: the Step 5 ordering block says the
-   same from the other side.)
+   never for improving a route. **The door also closes on UNROUTED pads**: the
+   tap-via carpet consumes every open pad's escape channel and is not rippable
+   copper (run 6: 5 bare pads at pour time, never recovered post-pour) —
+   `route_planes` refuses to pour over them (exit 3, `--allow-bare-pads` to
+   override); connect every pad first, or accept losing it. (Cross-ref: the
+   Step 5 ordering block says the same from the other side.)
 
 For plane-net pads that cannot reach their pour, the equivalent is
 `route_disconnected_planes --rip-blocker-nets` (it leaves the ripped nets unrouted
@@ -3275,8 +3367,9 @@ top blocker on the exact keys, not on impressions:
 | `broken` is mostly plane-net pads | **the pour could not reach them** | `route_disconnected_planes --rip-blocker-nets`, then the Step 5c reconnect |
 | `check_connected` and `kicad-cli` disagree badly | **the zones are unfilled** | 9.1c — fill, then re-read. Do not "average" them |
 | a **symmetry/match clause fails SHORT** (one leg under-length, not over) | **routing lever first** | `--length-match-group` on the pair's own pass meanders the short leg up; only if the group cannot meander (no room) is it placement — then the lever is the **free terminal's position** (the series R/C in the chain), not the ICs |
-| a **multi-net rip-return rotates its victim** (each order strands a different net) | **stop rotating orders** | run each candidate order as a FULL chain lineage and compare their `blocking` scores in the ledger — order A's board vs order B's board, not order A's tail vs order B's head. Fifteen ordering experiments in run 5 re-learned this |
+| a **multi-net rip-return rotates its victim** (each order strands a different net) | **stop rotating orders** | run each candidate order as a FULL chain lineage and compare their `blocking` scores in the ledger — order A's board vs order B's board, not order A's tail vs order B's head. Fifteen ordering experiments in run 5 re-learned this. **Quote each lineage's `min_clearance_used` in the compare**: branch boards inherit their branch-point's `.kicad_pro` floor (run 6 had three floors live at once — 0.1508/0.1532/0.1556), and a floor delta is a confound unless the LOSING side held the looser floor |
 | the **same victim set recurs under every order** at every grid | **capacity, not order** | the lane ledger (escape-channel section) will show the deficit; that is stop condition 3 with the ledger as the measurement, not another ordering lap |
+| the **bulk pass keeps stranding fine-pitch RAIL pads** under mps | **ordering, before placement** | re-run the bulk with `--ordering original`, rails FIRST (netlist order puts power nets before GPIOs). Order cannot change how many strand — but it chooses WHICH, and a stranded leaf GPIO is recoverable after the pour while a stranded rail pad is not (Step 5's one-way door). Spend the strandings on the recoverable class. Measured (run 6): mps stranded 5 QFN rail pads; rails-first closed them and moved the fails to leaf nets |
 
 **Accept an iteration only if `blocking` strictly decreased**, or `blocking` is
 unchanged and `quality` improved. Otherwise **revert to the parent board** and
@@ -3359,7 +3452,11 @@ drc3/cluster1]`). The image mandates are auditable only through the ledger: run
 5's breach — a produced-but-never-opened delta render — was invisible precisely
 because nothing recorded reads. An iteration whose score had `unrouted`/`broken`
 > 0 or a failed `check_drc`, with no `[read: ...]` in its entry, skipped
-read-case 3 or 7.
+read-case 3 or 7. **Record NON-triggers the same way**: when a mandate's
+trigger is checked and absent, say so in the entry (`[checked: 0 B.Cu parts ->
+no --per-side]`) — an unrecorded non-trigger is indistinguishable from a
+skipped mandate to any later audit (run 6's watcher had to grep the board to
+tell them apart).
 
 **What `record` actually writes is this, and only this:**
 
@@ -3426,6 +3523,16 @@ cannot state it was not keeping a ledger.
    *as written*, and it took one measurement to prove. **Do not silently relax
    it, and do not grind iterations against it.**
 
+   **When the unsatisfiable clause is a dru rule the router hard-enforces**
+   (#549 track channel or a layer rule), stop-4 scopes to the REGION, not the
+   run: (1) route the pass WITH the rule first and measure the failure —
+   decide on the measurement, not in advance; (2) then stage a sibling dru
+   for that pass with ONLY the unsatisfiable rule lifted — never a bare
+   no-dru copy, which silently drops every OTHER rule's protection for that
+   pass (run 6's watcher caught exactly this before it shipped); (3) grade
+   the residue against the registered floor and report the clause as a
+   requirement finding. The rest of the chain keeps the full dru.
+
 ##### These are NOT stop conditions
 
 Stopping for any of these is a process failure, not an outcome. If one of them is
@@ -3453,6 +3560,16 @@ authored 0.427 and 0.442 mm candidates that both failed the arithmetic before
 edited board, recorded in the ledger like any other lever, revert on regression.
 A hand segment that skips the gate is not a fix, it is an unmeasured edit.
 
+**Rung 8 has TWO exits: placed-and-gated copper, or an exhaustive NO-JOIN —
+and the second is a result, not a failure.** A sweep that clears no candidate
+at physical clearance IS the hostile rebuild the watcher pattern demands, over
+its enumerated families — record the envelope (width, clearance, path
+families, step) in the ledger like any lever. Pair it with ONE scoped route at
+the router's own hinted finest grid to cover paths outside the families;
+together they close the stop-3 checklist for that pad. Do not follow a NO-JOIN
+sweep with more router laps at the grid that already failed (run 6 ran two
+rotation laps after its sweep proved the fabric sealed).
+
 **A worked case of stopping wrongly, because it is the most expensive mistake in
 this document.** One run reported four unrouted nets, wrote up "stop condition 3"
 and named the next lever *in the same write-up without trying it*. Budget spent:
@@ -3474,6 +3591,14 @@ whole obstacle map says is decisive. When they disagree, take the router's set.
 **Before invoking condition 2 or 3, answer in writing:** how many nets are
 unrouted, what is the router's own hint for each, and which of the 9.3c rip rules
 has not been tried on them? If any of those is unanswered, the loop is not done.
+**The answers are already printed:** each failing net's `Hint:` line is an
+untried rung until you run it or refute it — quote it; and any
+`protected_skipped: {net: user}` line means YOUR OWN protection is the named
+blocker — exercise the exact-name override or write why not (run 6's final
+watcher found both classes sitting unread in the logs while the stop was
+claimed). And an endgame burst is still iterations: **one ledger entry per
+board-state, journal per phase** — a stop-3 claim rising out of a one-entry
+endgame cannot exhibit its five unchanged iterations.
 
 Ending on 2, 3 or 4 is a legitimate outcome. Ending on any of them **while
 calling the board finished is not**, and ending on none of them is not an ending.
