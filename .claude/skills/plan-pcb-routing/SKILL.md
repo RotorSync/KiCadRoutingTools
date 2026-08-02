@@ -993,7 +993,14 @@ python3 -X utf8 route.py board_step1c.kicad_pcb board_step2.kicad_pcb \
     --nets "*" "!GND" "!VCC" \
     --no-bga-zone \
     --max-ripup 10 \
+    --layers <ALL copper layers> --layer-costs <1.0 signals / 3.0 solid planes / 1.5 split-or-highway> \
     2>&1 | tee /tmp/step2_routing.txt
+
+The `--layer-costs` line is NOT optional when Step 1c poured any solid plane:
+without it signals cross the pours at cost 1.0 and shred them (measured: split
+power pours at 0–2% connected under a BGA on a chain that omitted it). Order
+matches `--layers`; 3.0 on solid-plane layers, 1.0–1.5 on split/route+pour and
+highway layers, 1.0 on F/B.
 
 (When Step 2b ran, add its impedance nets to the exclusions, e.g.
 `--nets "*" "!GND" "!VCC" "!RF"`, and route from `board_step2b.kicad_pcb`.)
@@ -1100,6 +1107,7 @@ python3 -X utf8 route.py board_step5_repair.kicad_pcb board_step5.kicad_pcb \
     --clearance <floor> --via-size <V> --via-drill <D> --track-width <signal_track> --grid-step <G> \
     --max-ripup 10 [--no-bga-zone] \
     --power-nets <PWR...> --power-nets-widths <W...> \
+    --layers <ALL copper layers> --layer-costs <same map as Step 2> \
     2>&1 | tee /tmp/step5c_reconnect.txt
 
 ### Step 6: Verify Results
