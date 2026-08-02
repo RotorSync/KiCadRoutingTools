@@ -836,10 +836,11 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    on boards whose BGAs were plane-dropped (the measured failure mode of
    ripping here is routed signals lost for tap pads the drops already serve).
    **Stitching is normal human practice, not an exotic add-on**: 58% of ~400
-   human corpus boards carry a free-standing GND stitch lattice, median pitch
-   ~2 mm (p25 1.2, p75 3.5) — when the board has GND pours on 2+ layers,
-   recommend `--stitch-vias` here with a pitch in that range (the λ/20
-   `--stitch-max-freq` rule still tightens it for high-speed boards).
+   human corpus boards carry a free-standing GND stitch lattice — when the
+   board has GND pours on 2+ layers, recommend `--stitch-vias` here. Leave
+   the PITCH at the tool default (20 mm); only `/find-high-speed-nets` output
+   tightens it (via `--stitch-max-freq`, which derives λ/20 and overrides the
+   pitch). Do not hand-pick a pitch from corpus statistics.
    **Do not recommend `--add-teardrops`** (7% of human boards use teardrops)
    and **do not set `--thermal-relief`** — leave the tool's default connection
    style alone.
