@@ -73,7 +73,11 @@ corpus, and both cost 20–50 open nets on dense boards:**
    needed, and shipped ~26% incomplete.
 
 **Recommend pours for every GND and power net with more than a few pads**
-(corpus median poured net ≈ 6 pads), then budget the LAYERS like this:
+(across ~400 human corpus boards the median poured net has ≈ 3 pads, and
+power-rail pouring is near-universal on 4+ layers: 86% of 4-layer, 97% of
+6-layer, 100% of 8-layer boards; on 2-layer boards GND-only flood on both
+sides is the norm and rail pours are a ~38% minority), then budget the
+LAYERS like this:
 
 - **High-speed reference first:** each layer carrying high-speed routes
   (DDR/RAM, USB HS, SerDes, RF) needs a solid UNSPLIT GND plane on an adjacent

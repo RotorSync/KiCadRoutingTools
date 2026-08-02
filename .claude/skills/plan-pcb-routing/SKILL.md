@@ -1133,10 +1133,12 @@ Reserving B.Cu for a GND plane (and/or pricing it 3×) turns a congested
 original carries 47% of its routed length on B.Cu and pours GND *around* the
 routes on both sides afterwards; a plane-first chain on the same board left 25
 nets open. On a dense 2-layer board: route signals on BOTH layers at cost 1.0
-(long-haul nets cross on the back), then pour GND (and any many-pad rails)
-last (`route_planes.py` after the signal steps — the pour flows around
-existing copper; most human 2-layer boards pour BOTH sides this way). Only
-plane-first on 2-layer boards with light signal content.
+(long-haul nets cross on the back), then pour GND last (`route_planes.py`
+after the signal steps — the pour flows around existing copper; 80% of human
+2-layer boards pour BOTH sides this way). Power rails as pours are a minority
+practice on 2-layer (≈38% of human boards) — pour them too when there's room,
+but GND-both-sides is the priority. Only plane-first on 2-layer boards with
+light signal content.
 
 **Important:** If you skip fanout for a BGA/PGA component but still need to connect its
 internal pads, use `--no-bga-zone <component>` to disable the automatic exclusion zone
@@ -1163,22 +1165,24 @@ plane-light plan (GND-only, rails as wide tracks) left ~26% incomplete spends
 ~20% of its track copper on rails the human never routes at all. Concretely:
 
 - **Which nets:** GND always, plus every power rail with more than a few pads
-  (corpus median poured net ≈ 6 pads; 2–3-pad local rails are optional). A
-  board with many rails gets many pours — human 4-layer boards commonly pour
-  5–15 distinct nets, dense 6-layer boards 10–20.
+  — and pouring scales with layer count. Across ~400 human corpus boards,
+  86% of 4-layer, 97% of 6-layer, and 100% of 8-layer boards pour power rails
+  (2-layer boards: 38% — GND-only flood is the 2-layer norm). Humans pour
+  even small rails (corpus median poured net ≈ 3 pads); a board with many
+  rails gets many pours — human 4-layer boards commonly pour 5–15 distinct
+  nets, dense 6-layer boards 10–20.
 - **Which layers — any, including routing layers.** Pours are not confined to
-  dedicated plane layers: nearly every human board in the corpus pours copper
-  ON its routing layers (both outer layers on 2-layer boards, F.Cu+B.Cu on
-  multilayer), flooding GND/rails around the finished tracks. The layer
-  typology that recurs:
-  - **4-layer:** signals+pours on F/B; inner layers as planes — one solid GND,
-    the other either solid power, a SPLIT multi-rail plane
-    (`/recommend-plane-mappings` Step 3b), or route+pour when the board is
-    dense and signals need to cross inner.
+  dedicated plane layers: 80–100% of human boards at every layer count pour
+  copper ON their outer routing layers, flooding GND/rails around the
+  finished tracks. The layer typology that recurs:
+  - **4-layer:** signals+pours on F/B; one inner = solid GND; the second
+    inner is a minority-solid choice (corpus: ~23% solid power, the rest
+    SPLIT multi-rail (`/recommend-plane-mappings` Step 3b), route+pour, or
+    plain routing when the board is dense and signals need to cross inner).
   - **6/8-layer:** solid GND planes nearest the outer signal layers (In1 and
-    the last inner are the usual choices), split power planes and/or
-    route+pour in the middle, signals concentrated on F/B plus one
-    inner "highway" layer.
+    the last inner — 2/3 of human 6/8-layer boards have a solid plane
+    adjacent to an outer layer), split power planes and/or route+pour in the
+    middle, signals concentrated on F/B plus one inner "highway" layer.
 - **High-speed nets need an UNSPLIT reference plane on the adjacent layer.**
   Whatever else moves, keep one solid (not split, not track-fragmented) GND
   plane directly under each layer that carries high-speed routes (DDR/RAM
