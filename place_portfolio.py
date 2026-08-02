@@ -265,6 +265,18 @@ def _montage(path, rows, out_dir):
 def main():
     parser = build_parser()
     args = parser.parse_args()
+    # The probe/render subprocesses run with cwd=ROOT (the repo), so a path
+    # relative to the CALLER's cwd silently breaks every one of them
+    # (measured: 3/3 probe routes rc=1 "no summary", 6/6 renders rc=1, on a
+    # portfolio invoked from a board repo). Absolutize at the door.
+    args.input_file = os.path.abspath(args.input_file)
+    args.out_dir = os.path.abspath(args.out_dir)
+    if args.montage:
+        args.montage = os.path.abspath(args.montage)
+    if args.ledger:
+        args.ledger = os.path.abspath(args.ledger)
+    if args.intent:
+        args.intent = os.path.abspath(args.intent)
     if args.only is not None and args.only < 1:
         parser.error("--only takes a candidate index >= 1 (0 is the baseline "
                      "quench, which needs no stream to reproduce)")
