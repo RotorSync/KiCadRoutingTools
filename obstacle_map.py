@@ -21,6 +21,7 @@ from net_queries import expand_pad_layers
 # Import Rust router
 import sys
 import os
+import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
 import rust_alloc  # noqa: E402,F401  # issue #419: set MIMALLOC_PURGE_DELAY before grid_router loads
 
@@ -67,11 +68,38 @@ class _StaticStampProxy:
         return getattr(self._real, name)
 
 
+def _obstacle_progress_reporter(progress_callback):
+    """Throttled sub-phase progress for the base obstacle build (#556).
+
+    Returns ``report(phase, i, n, force=False)``: forwards to
+    ``progress_callback(i, n, "Obstacles: <phase>")`` at most ~4x/s (the GUI
+    renders (i, n) as a percentage and the repeated calls keep its gauge
+    alive), and prints a throttled log line at most every ~5s so a
+    minutes-long build is visibly progressing in the logfile without
+    spamming fast builds (sub-second builds print nothing). Reporting only:
+    the map contents are untouched."""
+    t0 = time.time()
+    last_cb = [0.0]
+    last_print = [t0]
+
+    def report(phase: str, i: int, n: int, force: bool = False):
+        now = time.time()
+        if progress_callback and (force or now - last_cb[0] >= 0.25):
+            last_cb[0] = now
+            progress_callback(i, n, f"Obstacles: {phase}")
+        if now - last_print[0] >= 5.0:
+            last_print[0] = now
+            print(f"  obstacles: {phase} {i}/{n} ({now - t0:.0f}s elapsed)",
+                  flush=True)
+    return report
+
+
 def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                             nets_to_route: List[int],
                             extra_clearance: float = 0.0,
                             net_clearances: dict = None,
-                            static_base: bool = False) -> GridObstacleMap:
+                            static_base: bool = False,
+                            progress_callback=None) -> GridObstacleMap:
     """Build base obstacle map with static obstacles (BGA zones, pads, pre-existing tracks/vias).
 
     Excludes all nets that will be routed (nets_to_route) - their stubs will be added
@@ -160,9 +188,16 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                             for pid in c['partner_pad_ids']}
     _tie_recorded: List[tuple] = []  # ('pad', pad_id, cells array)
 
+    # #556: sub-phase progress (GUI percentage + throttled log lines) so a
+    # minutes-long build on a big board is distinguishable from a hang.
+    _report = _obstacle_progress_reporter(progress_callback)
+
     # Add segments as obstacles (excluding nets we'll route - their stubs added per-net)
     # Use actual segment width for obstacle, and layer-specific width for routing track
-    for seg in pcb_data.segments:
+    _n_segs = len(pcb_data.segments)
+    for _seg_i, seg in enumerate(pcb_data.segments):
+        if (_seg_i & 511) == 0:
+            _report("copper", _seg_i, _n_segs)
         if seg.net_id in nets_to_route_set:
             continue
         layer_idx = layer_map.get(seg.layer)
@@ -201,7 +236,10 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_mm, via_block_mm)
 
     # Add vias as obstacles (excluding nets we'll route)
-    for via in pcb_data.vias:
+    _n_vias = len(pcb_data.vias)
+    for _via_i, via in enumerate(pcb_data.vias):
+        if (_via_i & 255) == 0:
+            _report("vias", _via_i, _n_vias)
         if via.net_id in nets_to_route_set:
             continue
         # Compute expansion based on actual via size:
@@ -230,7 +268,10 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
 
     # Add pads as obstacles (excluding nets we'll route - their pads added per-net)
     # Priced per obstacle: max(routing-side clearance, the pad net's own class clearance)
-    for net_id, pads in pcb_data.pads_by_net.items():
+    _n_pad_nets = len(pcb_data.pads_by_net)
+    for _pn_i, (net_id, pads) in enumerate(pcb_data.pads_by_net.items()):
+        if (_pn_i & 63) == 0:
+            _report("pads", _pn_i, _n_pad_nets)
         if net_id in nets_to_route_set:
             continue
         for pad in pads:
@@ -258,15 +299,19 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                 obstacles.remove_blocked_cells_batch(_arr)
 
     # Add board edge clearance
-    add_board_edge_obstacles(obstacles, pcb_data, config, extra_clearance)
+    _report("board edge", 0, 0, force=True)
+    add_board_edge_obstacles(obstacles, pcb_data, config, extra_clearance,
+                             progress=_report)
 
     # Add user-drawn User-layer keepout polygons (issue #27) - block all copper layers
+    _report("keepouts", 0, 0, force=True)
     add_user_keepout_obstacles(obstacles, pcb_data, config, coord, num_layers)
 
     # Block KiCad native keep-out rule areas (zone (keepout ...)), per-layer (PR #25)
     add_rule_area_keepout_obstacles(obstacles, pcb_data, config)
 
     # Add hole-to-hole clearance blocking for existing drills
+    _report("drill holes", 0, 0, force=True)
     add_drill_hole_obstacles(obstacles, pcb_data, config, nets_to_route_set,
                              extra_clearance)
 
@@ -679,24 +724,40 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
         # Holes: the keep-out is the outer polygon MINUS its holes (a ring).
         # Cells deep inside a hole (>= the relevant clearance from the hole
         # edge) are routable; cells in the ring, or in the hole but within
-        # clearance of the ring copper, stay blocked (issue #95). Evaluated
-        # vectorized on the OUTER cell array - the earlier per-cell Python set +
-        # generator was O(cells*holes) and dominated every obstacle-map build
-        # (76s of an 86s plane pad-repair on glasgow's whole-board ring keepout).
+        # clearance of the ring copper, stay blocked (issue #95).
+        # #556: evaluated on the HOLE's own raster (scanline inside + banded
+        # edge distance, like every other polygon pass) and mapped back into
+        # the outer meshgrid arithmetically. The previous dense
+        # (_points_inside_polygon + _points_edge_distance over the whole OUTER
+        # array) was the last cells-x-edges kernel in the build: a whole-board
+        # ring keep-out paid outer_cells x hole_edges PER HOLE. Byte-identical:
+        # a cell outside the hole raster has h_inside False (no mask change),
+        # and inside it the banded distance is exact below the threshold while
+        # values at/above it still satisfy `>= clear` exactly as the true
+        # distance would (threshold strictly exceeds both clearances).
         holes = ko.get('holes') or []
         if holes:
-            px = gx_flat.astype(np.float64) * coord.grid_step
-            py = gy_flat.astype(np.float64) * coord.grid_step
+            o_gx_lo = int(gx_flat[0]); o_gy_lo = int(gy_flat[0])
+            o_nx = int(gx_flat.max()) - o_gx_lo + 1
+            o_ny = int(gy_flat.max()) - o_gy_lo + 1
+            assert o_nx * o_ny == gx_flat.size  # meshgrid layout, gx fastest
             for hole in holes:
-                hp = np.asarray(hole, dtype=np.float64)
-                if hp.shape[0] < 3:
+                if len(hole) < 3:
                     continue
-                hx1, hy1 = hp[:, 0], hp[:, 1]
-                hx2, hy2 = np.roll(hp[:, 0], -1), np.roll(hp[:, 1], -1)
-                h_inside = _points_inside_polygon(px, py, hx1, hy1, hx2, hy2)
-                h_edge = _points_edge_distance(px, py, hx1, hy1, hx2, hy2)
-                track_mask &= ~(h_inside & (h_edge >= track_clear))
-                via_mask &= ~(h_inside & (h_edge >= via_clear))
+                h_margin = max(track_clear, via_clear)
+                hgx, hgy, h_inside, h_edge = _rasterize_polygon(
+                    hole, coord, h_margin, clip_bounds=clip)
+                if hgx is None:
+                    continue
+                sel = (h_inside & (hgx >= o_gx_lo) & (hgx < o_gx_lo + o_nx)
+                       & (hgy >= o_gy_lo) & (hgy < o_gy_lo + o_ny))
+                if not sel.any():
+                    continue
+                idx = ((hgy[sel].astype(np.int64) - o_gy_lo) * o_nx
+                       + (hgx[sel].astype(np.int64) - o_gx_lo))
+                h_sel_edge = h_edge[sel]
+                track_mask[idx[h_sel_edge >= track_clear]] = False
+                via_mask[idx[h_sel_edge >= via_clear]] = False
 
         if block_tracks:
             _block_cells_on_layers(obstacles, gx_flat, gy_flat, track_mask, layer_idxs)
@@ -708,7 +769,8 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
 def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                               config: GridRouteConfig, extra_clearance: float = 0.0,
                               layers: Optional[List[str]] = None,
-                              track_width: Optional[float] = None):
+                              track_width: Optional[float] = None,
+                              progress=None):
     """Block tracks and vias near the board edge.
 
     Supports both rectangular and non-rectangular board outlines. For non-rectangular
@@ -778,7 +840,7 @@ def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         _add_polygon_edge_obstacles(obstacles, board_outlines, coord, num_layers,
                                      track_edge_clearance, via_edge_clearance,
                                      gmin_x, gmin_y, gmax_x, gmax_y, track_expand, via_expand,
-                                     layer_exempt=layer_exempt)
+                                     layer_exempt=layer_exempt, progress=progress)
     else:
         # Use simple rectangular blocking
         _add_rectangular_edge_obstacles(obstacles, coord, num_layers,
@@ -1065,7 +1127,8 @@ def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygons,
                                  coord: GridCoord, num_layers: int,
                                  track_edge_clearance: float, via_edge_clearance: float,
                                  gmin_x: int, gmin_y: int, gmax_x: int, gmax_y: int,
-                                 track_expand: int, via_expand: int, layer_exempt=None):
+                                 track_expand: int, via_expand: int, layer_exempt=None,
+                                 progress=None):
     """Add obstacles for non-rectangular board outline using polygon testing.
 
     ``polygons`` is one outer ring or a LIST of outer rings (#304): a cell is
@@ -1110,7 +1173,12 @@ def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygons,
     # #546: threshold for the banded distance kernel -- strictly above both
     # consumer clearances so their `<` comparisons are exact.
     _dist_thr = max(track_edge_clearance, via_edge_clearance) + coord.grid_step
-    for band_lo in range(gy_lo, gy_hi + 1, rows_per_band):
+    # #556: per-band progress (the edge pass is the long pole on complex
+    # outlines; the band index gives the GUI a real percentage).
+    _n_bands = (gy_hi - gy_lo) // rows_per_band + 1 if gy_hi >= gy_lo else 0
+    for _band_i, band_lo in enumerate(range(gy_lo, gy_hi + 1, rows_per_band)):
+        if progress is not None:
+            progress("board edge", _band_i, _n_bands)
         band_hi = min(band_lo + rows_per_band - 1, gy_hi)
         gy_range = np.arange(band_lo, band_hi + 1, dtype=np.int32)
         gx_grid, gy_grid = np.meshgrid(gx_range, gy_range)  # (nband, nx)

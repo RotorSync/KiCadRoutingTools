@@ -65,6 +65,40 @@ def find_kicad_python() -> Optional[str]:
     return None
 
 
+def live_fill_islands(board):
+    """{(net_name, layer_name): [island_polygon, ...]} from an IN-PROCESS
+    ZONE_FILLER refill of a live pcbnew BOARD (#424 GUI path).
+
+    Same result shape as refill_islands, with no file round-trip and no
+    subprocess: the fill reflects exactly the copper the caller is routing
+    against, unsaved edits included -- staleness is impossible by
+    construction. Only callable under KiCad's python (pcbnew importable).
+    Side effect: the live board's zone fills are recomputed, which is
+    derived data KiCad refreshes on any fill action anyway.
+    """
+    import pcbnew
+    zones = board.Zones()
+    pcbnew.ZONE_FILLER(board).Fill(zones)
+    out: Dict = {}
+    for z in zones:
+        if z.GetIsRuleArea():
+            continue
+        net = z.GetNetname()
+        for lid in z.GetLayerSet().Seq():
+            if not pcbnew.IsCopperLayer(lid):
+                continue
+            lname = board.GetLayerName(lid)
+            sps = z.GetFilledPolysList(lid)
+            for i in range(sps.OutlineCount()):
+                ol = sps.Outline(i)
+                poly = [(pcbnew.ToMM(ol.CPoint(j).x),
+                         pcbnew.ToMM(ol.CPoint(j).y))
+                        for j in range(ol.PointCount())]
+                if len(poly) >= 3:
+                    out.setdefault((net, lname), []).append(poly)
+    return out
+
+
 def _balanced_block(text: str, start: int) -> Tuple[str, int]:
     """The parenthesized block starting at text[start] == '(' and the index
     one past its closing paren. Quote-aware (net names may hold parens)."""

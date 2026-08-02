@@ -33,6 +33,8 @@ into the corridor; their present stubs must not veto it).
 """
 
 from dataclasses import replace
+
+import env_knobs
 from typing import Dict, List, Optional, Tuple
 
 from bus_detection import BusGroup, get_bus_routing_order
@@ -110,7 +112,6 @@ def plan_bus_corridors(pcb_data, config, bus_groups: List[BusGroup],
             # wider per side keeps that much margin from every obstacle on
             # the shared map. Neck-down is disabled so the rung fails
             # honestly instead of silently degrading to rung 0.
-            import os
             # LAMINAR probe: the corridor centerline is the reference every
             # member is attracted to -- if the probe itself wanders layers,
             # "same-layer attraction" chases a different layer every span
@@ -118,11 +119,7 @@ def plan_bus_corridors(pcb_data, config, bus_groups: List[BusGroup],
             # four layers at the old 4x). The probe pays a much stiffer
             # layer-change price than member routing, so the skeleton stays
             # on one layer unless a change is genuinely unavoidable.
-            try:
-                via_mult = float(os.environ.get(
-                    'KICAD_BUS_CORRIDOR_PROBE_VIA_MULT', '20'))
-            except ValueError:
-                via_mult = 20.0
+            via_mult = env_knobs.BUS_CORRIDOR_PROBE_VIA_MULT
             cfg_k = replace(
                 config, power_tap_neckdown=False,
                 via_cost=int(round(config.via_cost * via_mult)),
@@ -172,11 +169,7 @@ def plan_bus_corridors(pcb_data, config, bus_groups: List[BusGroup],
             1 for i in range(1, len(_path))
             if _path[i][2] != _path[i - 1][2]
             and _ramp < _cum[i] < _total - _ramp)
-        try:
-            _max_changes = int(os.environ.get(
-                'KICAD_BUS_MAX_CORRIDOR_LAYER_CHANGES', '1'))
-        except ValueError:
-            _max_changes = 1
+        _max_changes = env_knobs.BUS_MAX_CORRIDOR_LAYER_CHANGES
         if _changes > _max_changes:
             demoted.append(g.name)
             print(f"  {g.name}: corridor needs {_changes} layer change(s) "

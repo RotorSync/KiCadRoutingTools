@@ -4,10 +4,18 @@ A signal track only BISECTS a plane where the plane is NARROW: a crossing
 through a wide pour region costs nothing (copper flows around it at fill
 time), while a crossing at a neck severs the pour into islands the repair
 step then has to stitch. Bisection is topological, but local narrowness is
-a computable proxy: this module rasterizes each filled zone's outline at
-the routing grid, measures every fill cell's distance to the zone boundary
-(iterative erosion, no scipy), and stamps a soft per-cell cost on the
-zone's layer that is negligible mid-pour and steep at necks.
+a computable proxy: this module rasterizes the pour's copper at the routing
+grid, measures every fill cell's distance to the copper boundary (iterative
+erosion, no scipy), and stamps a soft per-cell cost on the zone's layer
+that is negligible mid-pour and steep at necks.
+
+The copper rasterized is the EXACT KiCad fill when available (a ZONE_FILLER
+refill of the batch's input board via kicad_exact_fill -- so voids cut by
+fanout barrels and earlier copper make the surviving straits expensive,
+which is the "penalize what would break the plane" semantics), falling back
+to the drawn zone outline when no board file / KiCad python exists (live GUI
+boards). For a full-board outline the fallback prices only a board-edge
+band -- near-useless; the exact fill is the real lever.
 
 Delivery reuses the congestion-field transport (#424 Phase D): the field is
 computed once at batch start into (N, 4) [layer, gx, gy, cost] rows under a
@@ -20,13 +28,26 @@ Static v1: the field reflects the pours as they exist at batch start (in a
 planes-first chain, the just-poured planes). Necks created later by in-run
 copper are invisible; a dynamic refresh is the #466 extension.
 
-Experimental knobs via environment (no CLI flags until the lever proves
-itself; promotion requires the full parity wiring per CLAUDE.md):
+DEFAULT ON at 2.0 mm-equivalent (2026-08-01, Andy): with plane drops (#424
+D2) and a planes-first chain this measured the winning composition on
+ottercast (4 vs 5 conn issues, GND+power fully connected, +3V3 pour a
+single intact island, GND weld segments 3075 -> 1063, 63/70 balls served
+by the pour alone). Inert on boards with no zones (signals-then-planes
+chains feel it only after the pour exists). Corpus A/B pending -- revert
+per-run with KICAD_PLANE_FRAGILITY_COST=0.
+
+Knobs via environment (no CLI flags; both fronts inherit the default
+through batch_route, so CLI/GUI parity needs no wiring):
   KICAD_PLANE_FRAGILITY_COST   mm-equivalent per-cell cost at a zone
-                               boundary cell (0 = disabled, the default)
+                               boundary cell (default 2.0; 0 = off)
   KICAD_PLANE_FRAGILITY_WIDTH  half-width in mm at which the ramp reaches
                                zero (default 2.0: cells deeper than this
                                into the pour cost nothing)
+
+GUI caveat: a live pcbnew board has no source file, so the field falls
+back to the drawn OUTLINE there (near-inert for full-board pours) -- a
+known CLI/GUI fidelity gap of the same class as the other
+source_path-gated exact-fill features.
 """
 from __future__ import annotations
 
@@ -44,9 +65,9 @@ PLANE_FRAGILITY_CACHE_KEY = -3
 
 def fragility_cost_mm() -> float:
     try:
-        return float(os.environ.get('KICAD_PLANE_FRAGILITY_COST', '0') or 0)
+        return float(os.environ.get('KICAD_PLANE_FRAGILITY_COST', '2.0') or 0)
     except ValueError:
-        return 0.0
+        return 2.0
 
 
 def _rasterize_polygon(poly, coord, gx0, gy0, W, H) -> np.ndarray:
@@ -89,18 +110,53 @@ def compute_plane_fragility_cells(pcb_data: PCBData,
     depth = max(1, int(round(width_mm / config.grid_step)))
     rows = []
 
-    for zone in pcb_data.zones:
-        li = layer_index.get(zone.layer)
-        if li is None or len(zone.polygon) < 3:
+    # Exact fill polygons (KiCad truth): the GUI's live-board provider first
+    # (#424: an in-process ZONE_FILLER refill of the board object itself --
+    # no save, no staleness), then a refill of the source file (CLI), then
+    # the drawn zone outlines as the last resort. Each entry: (layer, poly).
+    polys = []
+    provider = getattr(pcb_data, 'exact_fill_provider', None)
+    if provider is not None:
+        try:
+            fills = provider()
+            polys = [(layer, poly) for (_net, layer), pp in fills.items()
+                     for poly in pp]
+            if polys:
+                print(f"Plane fragility: exact-fill geometry "
+                      f"({len(polys)} filled island(s) from the LIVE board)")
+        except Exception as e:
+            print(f"Plane fragility: live-board fill unavailable ({e}); "
+                  f"trying the source file")
+            polys = []
+    src = getattr(pcb_data, 'source_path', None)
+    if not polys and src and os.path.isfile(src):
+        try:
+            from kicad_exact_fill import refill_islands
+            fills = refill_islands(src)
+            polys = [(layer, poly) for (_net, layer), pp in fills.items()
+                     for poly in pp]
+            if polys:
+                print(f"Plane fragility: exact-fill geometry "
+                      f"({len(polys)} filled island(s) from KiCad refill)")
+        except Exception as e:
+            print(f"Plane fragility: exact refill unavailable ({e}); "
+                  f"using zone outlines")
+            polys = []
+    if not polys:
+        polys = [(z.layer, z.polygon) for z in pcb_data.zones]
+
+    for zlayer, zpoly in polys:
+        li = layer_index.get(zlayer)
+        if li is None or len(zpoly) < 3:
             continue
-        xs = [p[0] for p in zone.polygon]
-        ys = [p[1] for p in zone.polygon]
+        xs = [p[0] for p in zpoly]
+        ys = [p[1] for p in zpoly]
         gx0, gy0 = coord.to_grid(min(xs), min(ys))
         gx1, gy1 = coord.to_grid(max(xs), max(ys))
         W, H = int(gx1 - gx0 + 1), int(gy1 - gy0 + 1)
         if W <= 2 or H <= 2 or W * H > 40_000_000:
             continue  # degenerate or absurdly large raster
-        mask = _rasterize_polygon(zone.polygon, coord, gx0, gy0, W, H)
+        mask = _rasterize_polygon(zpoly, coord, gx0, gy0, W, H)
         if not mask.any():
             continue
         # distance-to-boundary in grid steps by iterative 4-neighbour erosion,

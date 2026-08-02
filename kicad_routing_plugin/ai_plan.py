@@ -456,6 +456,16 @@ def apply_step_params(step, dialog):
                 choice.SetSelection(methods.index(v))
                 return True
             return False
+        if name == 'plane_drop':
+            # #424: the CLI value is a token ('auto'/'off'); the BGA panel
+            # control is a checkbox. A generic SetValue('off') would be truthy,
+            # so coerce explicitly.
+            opts = getattr(getattr(dialog, 'fanout_tab', None), 'bga_options', None)
+            chk = getattr(opts, 'plane_drop', None)
+            if chk is None:
+                return False
+            chk.SetValue(str(value).strip().lower() not in ('off', '0', 'false', 'no'))
+            return True
         if name == 'impedance':
             # #381 D5: route.py's --impedance drives a checkbox+value pair on the
             # Basic tab (impedance_check enables impedance-based width). A plain
@@ -669,6 +679,11 @@ def apply_step_params(step, dialog):
             opts = dialog.fanout_tab.bga_options
             if "escape_method" in params:
                 opts.set_escape_method(params["escape_method"])
+            if "plane_drop" in params:
+                # CLI token 'auto'/'off' (or a plan bool) -> checkbox (#424)
+                opts.plane_drop.SetValue(
+                    str(params["plane_drop"]).strip().lower()
+                    not in ('off', '0', 'false', 'no'))
             if "exit_margin" in params:
                 try:
                     opts.exit_margin.SetValue(float(params["exit_margin"]))

@@ -152,3 +152,55 @@ scipy (it is in requirements.txt), so run_all_checks raised StartupCheckError
 inside the GUI leg and the gate reported GUI=0 segments — which reads like
 "the GUI routed nothing" rather than "the GUI never started". Fix:
   "C:\Program Files\KiCad\10.0\bin\python.exe" -m pip install --user scipy
+
+----
+
+HEAD 2026-08-01 parity audit d73b1d6..646401b (22 commits). Outcome: no gaps.
+
+  Gates run at HEAD (dynamic iterations DEFAULT ON, a7f2b6d):
+  * test_manifest_plan_parity: 12 params checked, 0 unresolved.
+  * test_cli_postpass_coverage: 6 registered, 13 in CLI use, 0 failures
+    (run_drc stays the acknowledged report-only CLI-only pass).
+  * test_gui_engine_parity (headless RoutingDialog, KiCad python): PARITY,
+    copper sets IDENTICAL (segments 1307/1307, vias 144/144, drc 0/0,
+    kicad_unconnected 0/0) -- both fronts ran WITH #529 self-budgeting.
+
+  Audit notes for the range:
+  * #529 dynamic iterations (a4f4768, e792652, a7f2b6d): env-knob surface
+    ONLY by design (KICAD_DYNAMIC_ITERATIONS/_CLAMP/_QUANTUM_*/_GRACE) --
+    no CLI flag, no GUI control; gate lives in shared single_ended_routing,
+    both fronts inherit via env_knobs. Copper-identical parity above is the
+    direct check that the default flip forked nothing.
+  * #465 hot-loop knob migration (be91c47): read-site moves only.
+  * #556 (cca2f78): build_base_obstacle_map(progress_callback=...) is an
+    ENGINE-internal kwarg fed by the callback the GUI already passes into
+    batch_route -- no dialog wiring needed; byte-equivalence pinned by
+    tests/test_556_obstacle_build.py.
+  * #424 wave (278b122, b1e8b7c, a8055a8, aef616f, c86e70a + concurrent
+    session): --plane-drop and plane-fragility carry their own GUI/plan
+    wiring in those commits; covered by the gates above at HEAD.
+
+HEAD 2026-07-30 parity audit 191abc4..d73b1d6 (3 commits). Outcome: no gaps.
+
+  * bc8d77d (PR#534 1/2): kicad_parser text-pattern fix (uuid optional in all
+    six copper patterns). Text-parse path only BY NATURE: pcbnew objects
+    always carry uuids, so build_pcb_data_from_board needs no counterpart --
+    the parser-parity concern class is one-sided here.
+  * 93f3f2f (PR#534 2/2) + d73b1d6 (#545 fix wave): engine-side changes in
+    shared modules only (connectivity.py, single_ended_routing.py,
+    net_queries.py, net_rescue.py, diff_pair_multipoint.py) -- both fronts
+    call these through the shared engine functions; no new CLI flags, no new
+    engine kwargs surfaced to either front, no new post-passes, no
+    argparse/GUI-control/persistence/manifest work needed. GUI/CLI
+    order-independence handled INSIDE the fixes (position-sorted via
+    terminals in Case 1/Case 3/F4/F9's vias_by_component, copper-ranked stub
+    groups in net_queries F12) because net_vias/board order differs between
+    the text parser and pcbnew -- the 6515b1c divergence class.
+  * Gates at d73b1d6 (2026-07-30): test_gui_engine_parity VERDICT: PARITY --
+    segments CLI=GUI=1307, vias 144=144, DRC 0/0, kicad_unconnected 0/0,
+    copper sets IDENTICAL (run in the f-wave worktree with the full wave
+    applied). test_manifest_plan_parity and test_cli_postpass_coverage
+    unaffected (no flag/post-pass changes). Functional: tests/
+    test_uuidless_and_via_terminals.py + tests/test_terminal_anchor_fixes.py
+    pass; set1 three-wave replay graded (see #545 closing comment; residual
+    connection_width churn tracked as #547).

@@ -387,11 +387,8 @@ def bus_stick_config(config, attraction_path):
     8mm northern flight while its lane ran direct at y~94). Forbidden
     layers (cost -1) stay forbidden; the member's config is otherwise
     untouched (via cost, clearances, caches all nominal)."""
-    import os as _os
-    try:
-        m = float(_os.environ.get('KICAD_BUS_OFFLANE_MULT', '1.0'))
-    except ValueError:
-        m = 1.0
+    import env_knobs
+    m = env_knobs.BUS_OFFLANE_MULT
     if m == 1.0 or not attraction_path:
         return config
     from dataclasses import replace as _replace

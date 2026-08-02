@@ -814,7 +814,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     print("Building base obstacle map...")
     base_start = time.time()
     base_obstacles = build_base_obstacle_map(pcb_data, config, all_net_ids_to_route,
-                                             net_clearances=net_clearances)
+                                             net_clearances=net_clearances,
+                                             progress_callback=progress_callback)
     base_elapsed = time.time() - base_start
     print(f"Base obstacle map built in {base_elapsed:.2f}s")
     if debug_memory:

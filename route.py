@@ -1362,7 +1362,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # #422: base holds only permanent copper/geometry (target + rippable
             # nets live in the per-net caches on a CLONE); stamp it straight into
             # the static keep-out bitmap so the working clone carries it as bits.
-            static_base=not env_knobs.NO_STATIC_BASE)
+            static_base=not env_knobs.NO_STATIC_BASE,
+            # #556: sub-phase progress so the GUI bar moves during the build
+            progress_callback=progress_callback)
 
     base_elapsed = time.time() - base_start
     print(f"Base obstacle map built in {base_elapsed:.2f}s")
@@ -1517,8 +1519,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     register_congestion_field(pcb_data, config, track_proximity_cache)
 
     # Plane-fragility soft costs (#424 planes-first): near-boundary pour
-    # cells cost extra so signal avoids BISECTING a plane at its necks;
-    # env-gated (KICAD_PLANE_FRAGILITY_COST=0 default off).
+    # cells (of the EXACT fill when the board file is reachable) cost extra
+    # so signals avoid BISECTING a plane at its necks. DEFAULT ON at 2.0
+    # mm-equiv (KICAD_PLANE_FRAGILITY_COST=0 reverts); inert on boards
+    # with no zones.
     from plane_fragility import register_plane_fragility
     register_plane_fragility(pcb_data, config, track_proximity_cache)
 

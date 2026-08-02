@@ -50,21 +50,39 @@ with tempfile.TemporaryDirectory() as d:
     import shutil
     shutil.copyfile(BOARD, src)
 
-    # 2. gate refuses: pouring GND on the raw board (every signal net bare)
+    # 2a. #424 pour-FIRST exemption: pouring the RAW board (no signal copper
+    #     at all) is Step 1c and must be ALLOWED without any flag.
+    out1c = os.path.join(d, 'pour_1c.kicad_pcb')
+    r1c = subprocess.run([sys.executable, '-X', 'utf8',
+                          os.path.join(REPO, 'route_planes.py'), src, out1c,
+                          '--nets', 'GND', '--plane-layers', 'B.Cu'],
+                         capture_output=True, text=True, timeout=1200)
+    check("empty-board pour (Step 1c) allowed", r1c.returncode == 0
+          and os.path.isfile(out1c), f"rc={r1c.returncode}")
+    check("1c exemption disclosed", 'pour-first Step 1c' in r1c.stdout)
+
+    # 2b. gate refuses on a PARTIALLY-routed board with bare pads: route one
+    #     signal net first, then pour.
+    partial = os.path.join(d, 'partial.kicad_pcb')
+    rr = subprocess.run([sys.executable, '-X', 'utf8',
+                         os.path.join(REPO, 'route.py'), src, partial,
+                         '--nets', '/OUT_A_PHASE_A'],
+                        capture_output=True, text=True, timeout=1200)
+    assert rr.returncode == 0, rr.stdout[-500:]
     out = os.path.join(d, 'pour.kicad_pcb')
     r = subprocess.run([sys.executable, '-X', 'utf8',
-                        os.path.join(REPO, 'route_planes.py'), src, out,
+                        os.path.join(REPO, 'route_planes.py'), partial, out,
                         '--nets', 'GND', '--plane-layers', 'B.Cu'],
                        capture_output=True, text=True, timeout=600)
-    check("gate refuses with exit 3", r.returncode == 3,
+    check("gate refuses with exit 3 on the partial board", r.returncode == 3,
           f"rc={r.returncode}\n{(r.stdout + r.stderr)[-500:]}")
     check("refusal names the gate and pads", 'POUR GATE' in r.stdout
           and 'BARE (unconnected) pads' in r.stdout, r.stdout[-400:])
     check("no board written on refusal", not os.path.isfile(out))
 
-    # 3. --allow-bare-pads proceeds
+    # 3. --allow-bare-pads proceeds on the partial board
     r2 = subprocess.run([sys.executable, '-X', 'utf8',
-                         os.path.join(REPO, 'route_planes.py'), src, out,
+                         os.path.join(REPO, 'route_planes.py'), partial, out,
                          '--nets', 'GND', '--plane-layers', 'B.Cu',
                          '--allow-bare-pads'],
                         capture_output=True, text=True, timeout=1200)

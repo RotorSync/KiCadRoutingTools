@@ -3077,12 +3077,25 @@ def create_plane(
 
     # Run-6 A5 POUR GATE: every unrouted pad's escape channel is consumed by
     # the tap-via carpet, which is not rippable copper -- measured, 5 bare
-    # QFN rail pads at pour time never closed across five post-pour repair
+    # QFN rail pads at a LATE pour never closed across five post-pour repair
     # attempts (6-9 oracle joins oscillating). A bare pad at pour time is a
     # blocking defect: connect it first (step back to the pre-pour board),
     # or pass --allow-bare-pads to proceed deliberately.
+    # EXEMPT: the #424 pour-FIRST Step 1c call on a board with no signal
+    # copper at all -- taps placed before any signal routes exist are
+    # ordinary obstacles the router sees from the start; the hazard is
+    # specific to pouring over a PARTIALLY-routed board.
     from check_connected import bare_pad_nets
-    _bare = bare_pad_nets(pcb_data, exclude_net_ids=set(net_ids))
+    _plane_ids = set(net_ids)
+    _has_signal_copper = (any(s.net_id not in _plane_ids
+                              for s in pcb_data.segments)
+                         or any(v.net_id not in _plane_ids
+                                for v in pcb_data.vias))
+    _bare = (bare_pad_nets(pcb_data, exclude_net_ids=_plane_ids)
+             if _has_signal_copper else {})
+    if not _has_signal_copper:
+        print("  (pour gate: no signal copper on the board yet -- pour-first "
+              "Step 1c, bare pads expected and safe)")
     if _bare:
         print(f"\n{'!'*60}")
         print(f"POUR GATE: {len(_bare)} net(s) carry BARE (unconnected) pads "

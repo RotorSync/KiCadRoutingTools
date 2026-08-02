@@ -72,13 +72,32 @@ def refresh() -> None:
     g['IMPEDANCE_NECKDOWN'] = (_s('KICAD_IMPEDANCE_NECKDOWN', '1').strip().lower()
                                not in ('0', 'false', 'no', 'off'))
     g['NET_RESCUE'] = _s('KICAD_NET_RESCUE', '1') != '0'
+    # #529 dynamic iterations, DEFAULT ON (=0 reverts to static caps): full
+    # searches run at min(base, CLAMP) and earn +1x base tranches while the
+    # heuristic keeps approaching, up to a flat 1e7 ceiling. CLAMP defaults
+    # to 1e7 = no clamping (corpus: -29 incomplete nets over 150 boards);
+    # set CLAMP=200000 as the deliberate speed-over-completion dial.
+    g['DYNAMIC_ITERATIONS'] = _s('KICAD_DYNAMIC_ITERATIONS', '1') != '0'
+    g['DYNAMIC_ITERATIONS_CLAMP'] = _i('KICAD_DYNAMIC_ITERATIONS_CLAMP', 10_000_000)
 
     # --- opt-in experiments (env turns ON) ----------------------------------
     g['COLLINEAR_VIAS'] = _opt_in('KICAD_COLLINEAR_VIAS')  # #487: on-axis vias
+    # per-tranche quantum = max(CELLS grid cells, PCT% of tranche-start best_h)
+    g['DYNAMIC_ITERATIONS_QUANTUM_CELLS'] = _f('KICAD_DYNAMIC_ITERATIONS_QUANTUM_CELLS', 2.0)
+    g['DYNAMIC_ITERATIONS_QUANTUM_PCT'] = _f('KICAD_DYNAMIC_ITERATIONS_QUANTUM_PCT', 2.0)
+    # plateau grace: consecutive quantum-failing tranches tolerated before
+    # denial (progress judged cumulatively over the plateau; emulates a wider
+    # window without a bigger base)
+    g['DYNAMIC_ITERATIONS_GRACE'] = _i('KICAD_DYNAMIC_ITERATIONS_GRACE', 0)
     g['MULTIPOINT_DENSE_FIRST'] = _opt_in('KICAD_MULTIPOINT_DENSE_FIRST')
     g['FANOUT_DIRECT'] = _opt_in('KICAD_FANOUT_DIRECT')
     g['FANOUT_TOWARD_TARGETS'] = _opt_in('KICAD_FANOUT_TOWARD_TARGETS')
+    # '' = follow the --plane-drop param (default auto); '0'/'off' forces the
+    # plane-ball drop pass OFF, '1'/'auto' forces it ON -- the manifest-replay
+    # A/B switch for #424 D2 (recorded chains carry no flag either way).
+    g['FANOUT_PLANE_DROP'] = _s('KICAD_FANOUT_PLANE_DROP', '')
     g['STOP_CLEANUP'] = _opt_in('KICAD_STOP_CLEANUP')
+    g['TAP_RELOCATION'] = _opt_in('KICAD_TAP_RELOCATION')  # phase-3 tap pocket moves
     g['PLANE_PARTIAL_RESTORE'] = _s('KICAD_PLANE_PARTIAL_RESTORE') == '1'
     g['DUMP_BATCH_KWARGS_CONTINUE'] = _s('KICAD_DUMP_BATCH_KWARGS_CONTINUE') == '1'
     # #431: the placement-movie camera. 'off' (default) keeps every existing
@@ -103,16 +122,22 @@ def refresh() -> None:
     g['NO_SWEEP_PLATED'] = _truthy('KICAD_NO_SWEEP_PLATED')
     g['NO_SOFT_JOINT_BRIDGE'] = _truthy('KICAD_NO_SOFT_JOINT_BRIDGE')
     g['BOARD_LEDGER'] = _truthy('KICAD_BOARD_LEDGER')
-    g['RESCUE_DEBUG_VIA'] = _truthy('KICAD_RESCUE_DEBUG_VIA')
+    # "x,y" via position string ('' = off; consumers test truthiness + parse)
+    g['RESCUE_DEBUG_VIA'] = _s('KICAD_RESCUE_DEBUG_VIA')
     g['MEM_PROBE'] = _truthy('KICAD_MEM_PROBE')
     g['NO_STATIC_BASE'] = _truthy('KICAD_NO_STATIC_BASE')
     g['ALLOW_STAGGERED_BGA'] = _truthy('KICAD_ALLOW_STAGGERED_BGA')
     g['QFN_UNDERPAD_NO_ALT_STAGGER'] = _truthy('QFN_UNDERPAD_NO_ALT_STAGGER')
     g['LEGACY_ORACLE'] = _truthy('KICAD_LEGACY_ORACLE')
     g['NO_EXACT_FILL'] = _truthy('KICAD_NO_EXACT_FILL')
+    g['NO_FILL_NETCLASS'] = _truthy('KICAD_NO_FILL_NETCLASS')  # fill-model A/B
 
     # --- numeric knobs -------------------------------------------------------
     g['BUS_XLAYER_PCT'] = _i('KICAD_BUS_XLAYER_PCT', 35)
+    g['BUS_OFFLANE_MULT'] = _f('KICAD_BUS_OFFLANE_MULT', 1.0)   # off-lane surcharge (1.0 = off)
+    g['BUS_CORRIDOR_PROBE_VIA_MULT'] = _f('KICAD_BUS_CORRIDOR_PROBE_VIA_MULT', 20.0)
+    g['BUS_MAX_CORRIDOR_LAYER_CHANGES'] = _i('KICAD_BUS_MAX_CORRIDOR_LAYER_CHANGES', 1)
+    g['TAP_RELOCATION_MAX'] = _i('KICAD_TAP_RELOCATION_MAX', 2)
     g['SEAM_SE_RATIO'] = _f('KICAD_SEAM_SE_RATIO', 1.3)
     g['SEAM_SE_MAX'] = _i('KICAD_SEAM_SE_MAX', 16)
     g['HYBRID_COUPLE_RADIUS'] = _f('KICAD_HYBRID_COUPLE_RADIUS', 1.0)
@@ -134,6 +159,9 @@ def refresh() -> None:
     g['STOP_AFTER'] = _s('KICAD_STOP_AFTER')
     g['STOP_FILE'] = _s('KICAD_STOP_FILE')
     g['DUMP_BATCH_KWARGS'] = _s('KICAD_DUMP_BATCH_KWARGS')  # dump file path
+    # raw override for underpad outer-ring count ('' = keep the caller's
+    # default, which differs by escape method; consumer parses float/inf)
+    g['UNDERPAD_OUTER_RINGS'] = _s('KICAD_UNDERPAD_OUTER_RINGS')
 
 
 refresh()

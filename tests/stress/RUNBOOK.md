@@ -9,7 +9,7 @@ non-interactively and record everything.
 The whole set-1 + set-2 corpus is driven by ONE queue manager:
 
 ```bash
-bash tests/stress/run_queue.sh [concurrency=4] [model=sonnet]
+bash tests/stress/run_queue.sh [concurrency=10] [model=sonnet]
 ```
 
 It keeps N headless `claude -p` board workers in flight until every board has a
@@ -55,10 +55,12 @@ stderr, the per-tool `*.log` files update live, and after the run
 ### Manual fallback (driving by hand, no queue script)
 
 If you must drive without `run_queue.sh` (e.g. orchestrating from a chat
-session), launch one background board worker/agent at a time and keep **4 in
-flight**, refilling off `stress_status.sh` — NOT the notification stream, which
-drops and duplicates. Order the queue ~2 heavy + 2 light to stay under the
-4 GB-per-job RAM cap (heavy = dense 4-layer / many pads / BGA fanout). Derive
+session), launch one background board worker/agent at a time and keep **10 in
+flight** (workers are LLM-latency-bound, not CPU-bound — see the concurrency
+note in `run_queue.sh`), refilling off `stress_status.sh` — NOT the notification
+stream, which drops and duplicates. Interleave heavy and light boards so several
+route steps don't coincide (heavy = dense 4-layer / many pads / BGA fanout);
+`run_limited.sh`'s per-job RAM cap is the backstop. Derive
 state from disk, never from tracked agent IDs (they are lost on context
 summarization).
 

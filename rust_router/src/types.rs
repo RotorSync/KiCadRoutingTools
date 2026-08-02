@@ -237,6 +237,10 @@ pub struct RouteStats {
     pub path_cost: i32,
     /// Initial heuristic estimate from best source to targets
     pub initial_h: i32,
+    /// Closest approach: min cost-to-go (f - g) over expanded nodes (#529)
+    pub best_h: i32,
+    /// Dynamic-iteration tranches granted beyond the base budget (#529)
+    pub iteration_tranches: u32,
     /// Final g-cost (actual cost to reach goal)
     pub final_g: i32,
     /// Size of open set at termination

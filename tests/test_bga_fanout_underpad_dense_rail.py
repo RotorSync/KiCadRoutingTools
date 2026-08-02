@@ -47,10 +47,12 @@ def main():
     rail_nid = rail_pads[0].net_id if rail_pads else None
     print(f"  {RAIL}: {len(rail_pads)} pads on U1 (net_id={rail_nid})")
 
+    # plane_drop off: this test asserts the excluded GND plane stays BARE at
+    # the escape layer; #424 drops are covered by test_bga_fanout_plane_drop.
     tracks, vias, _vr, failed = generate_bga_fanout(
         fp, pcb, layers=LAYERS,
         track_width=0.12, clearance=0.1, via_size=0.35, via_drill=0.2,
-        escape_method="underpad", net_filter=NET_FILTER,
+        escape_method="underpad", net_filter=NET_FILTER, plane_drop='off',
     )
 
     checks = []
