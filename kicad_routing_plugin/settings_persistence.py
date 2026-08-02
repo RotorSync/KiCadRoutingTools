@@ -223,6 +223,8 @@ def get_dialog_settings(dialog):
         'planes_max_search_radius': dialog.planes_tab.create_options.max_search_radius.GetValue(),
         'planes_rip_blocker_check': dialog.planes_tab.create_options.rip_blocker_check.GetValue(),
         'planes_corridor_nets': dialog.planes_tab.create_options.corridor_nets_ctrl.GetValue(),
+        'planes_rip_blocker_exclude': dialog.planes_tab.create_options.rip_blocker_exclude_ctrl.GetValue(),
+        'planes_rip_blocker_allow': dialog.planes_tab.create_options.rip_blocker_allow_ctrl.GetValue(),
         'planes_add_gnd_vias': dialog.planes_tab.create_options.add_gnd_vias_check.GetValue(),
         'planes_gnd_via_distance': dialog.planes_tab.create_options.gnd_via_distance.GetValue(),
         'planes_stitch_vias': dialog.planes_tab.create_options.stitch_vias.GetValue(),
@@ -694,6 +696,10 @@ def restore_dialog_settings(dialog, settings):
         dialog.planes_tab.create_options.rip_blocker_check.SetValue(settings['planes_rip_blocker_check'])
     if 'planes_corridor_nets' in settings:
         dialog.planes_tab.create_options.corridor_nets_ctrl.SetValue(settings['planes_corridor_nets'])
+    if 'planes_rip_blocker_exclude' in settings:
+        dialog.planes_tab.create_options.rip_blocker_exclude_ctrl.SetValue(settings['planes_rip_blocker_exclude'])
+    if 'planes_rip_blocker_allow' in settings:
+        dialog.planes_tab.create_options.rip_blocker_allow_ctrl.SetValue(settings['planes_rip_blocker_allow'])
     if 'planes_add_gnd_vias' in settings:
         dialog.planes_tab.create_options.add_gnd_vias_check.SetValue(settings['planes_add_gnd_vias'])
     if 'planes_gnd_via_distance' in settings:

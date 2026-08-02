@@ -118,6 +118,9 @@ LIST_FLAGS = {
     '--protect-nets': 'protect_nets',
     # #549: plane scripts' corridor-seed allowlist.
     '--corridor-nets': 'corridor_nets',
+    # Run-6 blocker guards (plane scripts).
+    '--rip-blocker-exclude': 'rip_blocker_exclude',
+    '--rip-blocker-allow': 'rip_blocker_allow',
     '--nets': None,  # handled per action
     '--pairs': None,
     '--plane-layers': None,
@@ -342,7 +345,8 @@ def parse_command(argv):
         step['nets'] = [str(n) for n in nets] or ['*']
     for k in ('--power-nets', '--power-nets-widths', '--layer-costs',
               '--layers', '--polarity-swap-nets', '--coplanar-nets',
-              '--rip-existing-nets', '--protect-nets', '--corridor-nets'):
+              '--rip-existing-nets', '--protect-nets', '--corridor-nets',
+              '--rip-blocker-exclude', '--rip-blocker-allow'):
         if k in lists:
             step['params'][LIST_FLAGS[k]] = lists[k]
     return step

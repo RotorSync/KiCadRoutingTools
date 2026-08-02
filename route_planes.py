@@ -2959,6 +2959,10 @@ def create_plane(
     # placement should prefer to keep clear. None -> AUTO (the board's
     # protected/impedance records); ['none'] -> off.
     corridor_nets: Optional[List[str]] = None,
+    # Run-6 blocker guards: extra never-rip patterns, and exact names that
+    # lift the multi-pad rail guard (see protected_nets.blocker_never_rip_ids).
+    rip_blocker_exclude: Optional[List[str]] = None,
+    rip_blocker_allow: Optional[List[str]] = None,
 ) -> Union[Tuple[int, int, int],
            Tuple[int, int, int, list, list, list, int, list]]:
     """
@@ -3066,6 +3070,17 @@ def create_plane(
             return _empty_plane_results(return_results)
         net_ids.append(net_id)
         print(f"Found net '{net_name}' with ID {net_id}")
+
+    # Run-6 fix: the create side's tap rip ladder used to protect ONLY its own
+    # plane nets -- protection_map was never consulted here, so it could rip a
+    # length-matched or diff-pair net the repair script refuses to touch. The
+    # shared helper also applies the multi-pad rail guard and the CLI excludes.
+    from protected_nets import blocker_never_rip_ids
+    _never_rip_ids = blocker_never_rip_ids(
+        pcb_data, set(net_ids),
+        exclude_patterns=rip_blocker_exclude,
+        allow_names=rip_blocker_allow,
+        announce=bool(rip_blocker_nets))
 
     # Track failed pads per net for retry passes
     # Each entry is (net_id, net_name, plane_layer, pad_info)
@@ -3795,7 +3810,7 @@ def create_plane(
                     new_vias=new_vias,
                     hole_to_hole_clearance=hole_to_hole_clearance,
                     via_drill=via_drill,
-                    protected_net_ids=set(net_ids),  # Protect all nets being routed (don't rip power nets we're routing)
+                    protected_net_ids=set(_never_rip_ids),  # plane nets + #521 + rail guard (run-6 fix)
                     verbose=verbose,
                     find_via_position_fn=find_via_position,
                     route_via_to_pad_fn=route_via_to_pad,
@@ -4682,6 +4697,15 @@ Examples:
                              "never excludes the only viable site). Default: AUTO -- the "
                              "board's protected nets and impedance declarations. Pass "
                              "'none' to disable.")
+    parser.add_argument("--rip-blocker-exclude", nargs="+", metavar="PATTERN",
+                        default=None,
+                        help="Net-name globs the blocker rip ladder must never pick, on top of "
+                             "the built-in guards (plane nets, #521-protected nets, and nets "
+                             "with more pads than the rail guard allows).")
+    parser.add_argument("--rip-blocker-allow", nargs="+", metavar="NET",
+                        default=None,
+                        help="EXACT net names for which the multi-pad rail guard is lifted -- "
+                             "a deliberate single-rail rip. Does not lift #521 protection.")
     parser.add_argument("--stitch-max-freq", type=float, default=None,
         help="Maximum frequency of interest in MHz: derives the stitching "
              "pitch as lambda/20 using the largest dielectric epsilon_r in "
@@ -4841,6 +4865,8 @@ Examples:
         input_file=args.input_file,
         output_file=args.output_file,
         corridor_nets=args.corridor_nets,
+        rip_blocker_exclude=args.rip_blocker_exclude,
+        rip_blocker_allow=args.rip_blocker_allow,
         ripup_blocker_select=args.ripup_blocker_select,
         net_names=net_names,
         plane_layers=plane_layers,

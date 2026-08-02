@@ -214,6 +214,13 @@ PLANE_PAD_STRAP_RADIUS = 1.5  # mm - max distance to strap a plane pad to an
                               # adjacent already-connected same-net pad instead
                               # of drilling another via (issue #349)
 PLANE_MAX_RIP_NETS = 3  # max blocker nets to rip up
+# Run-6 guard: nets with more pads than this are never PICKED as tap/join
+# blockers by the plane scripts' rip ladders -- ripping a rail as collateral
+# opens every one of its pads at once, and the in-step reconnect repeatedly
+# failed to restore them (test-board run 6: VCC3V3/VCC1V1 destroyed twice,
+# ripped_reconnect 0/2). Deliberately ripping a rail is still possible by
+# naming it exactly in --rip-blocker-allow.
+PLANE_BLOCKER_MAX_PADS = 5
 PLANE_TRACK_VIA_CLEARANCE = 0.8  # mm - clearance from track center to other nets' via centers
 SAME_NET_PAD_CLEARANCE = -1.0  # mm - edge-to-edge clearance between via and same-net pads
                                # when placing plane stitching vias. -1 disables (allow via-in-pad).

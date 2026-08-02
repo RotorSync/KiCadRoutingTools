@@ -769,6 +769,10 @@ def route_planes(
     # placement should prefer to keep clear. None -> AUTO (the board's
     # protected/impedance records); ['none'] -> off.
     corridor_nets: Optional[List[str]] = None,
+    # Run-6 blocker guards: extra never-rip patterns, and exact names that
+    # lift the multi-pad rail guard (see protected_nets.blocker_never_rip_ids).
+    rip_blocker_exclude: Optional[List[str]] = None,
+    rip_blocker_allow: Optional[List[str]] = None,
 ) -> Tuple[int, int]:
     """
     Route between disconnected regions in power plane zones.
@@ -1102,26 +1106,15 @@ def route_planes(
 
     # Plane nets are never ripped to clear a blocker (--rip-blocker-nets); only
     # signal nets are, and they are left unrouted for a subsequent route.py pass.
-    plane_net_ids = set(unique_nets.keys())
-    # #521: nets protected in the sibling .kicad_pro (length-matched groups,
-    # routed diff pairs) and nets with KiCad-LOCKED copper join the never-rip
-    # set -- a blocker rip here strips the net for a later generic route.py
-    # reconnect, which cannot reproduce matching/coupling/hand-routing. (The
-    # tap simply fails over its other candidates.)
-    try:
-        from protected_nets import protection_map
-        _prot_names = protection_map(pcb_data)
-        if _prot_names:
-            _prot_ids = {nid for nid, n in pcb_data.nets.items()
-                         if n.name in _prot_names}
-            _prot_ids -= plane_net_ids
-            if _prot_ids and rip_blocker_nets:
-                _ex = sorted(pcb_data.nets[i].name for i in _prot_ids)[:4]
-                print(f"  {len(_prot_ids)} PROTECTED net(s) excluded from blocker "
-                      f"rip-up ({', '.join(_ex)}{'...' if len(_prot_ids) > 4 else ''})")
-            plane_net_ids |= _prot_ids
-    except Exception:
-        pass
+    # The never-rip set also carries #521-protected nets, the run-6 multi-pad
+    # rail guard, and --rip-blocker-exclude patterns -- shared helper so the
+    # create side (route_planes) applies the identical policy.
+    from protected_nets import blocker_never_rip_ids
+    plane_net_ids = blocker_never_rip_ids(
+        pcb_data, set(unique_nets.keys()),
+        exclude_patterns=rip_blocker_exclude,
+        allow_names=rip_blocker_allow,
+        announce=bool(rip_blocker_nets))
     ripped_net_ids: List[int] = []
     # #517 arm 3 (#524 root cause): nets whose immediate reconnect SUCCEEDED
     # leave ripped_net_ids (they are no longer casualties) -- but their
@@ -3225,6 +3218,15 @@ Examples:
     parser.add_argument("--rip-blocker-nets", action="store_true",
                         help="When a plane-net pad cannot be connected, trace to a nearby same-net "
                              "pad, ripping the signal net(s) blocking it, then re-route the ripped nets.")
+    parser.add_argument("--rip-blocker-exclude", nargs="+", metavar="PATTERN",
+                        default=None,
+                        help="Net-name globs the blocker rip ladder must never pick, on top of "
+                             "the built-in guards (plane nets, #521-protected nets, and nets "
+                             "with more pads than the rail guard allows).")
+    parser.add_argument("--rip-blocker-allow", nargs="+", metavar="NET",
+                        default=None,
+                        help="EXACT net names for which the multi-pad rail guard is lifted -- "
+                             "a deliberate single-rail rip. Does not lift #521 protection.")
     parser.add_argument("--max-rip-nets", type=int, default=defaults.PLANE_MAX_RIP_NETS,
                         help="Maximum number of blocker nets to rip per pad (default: 3)")
     parser.add_argument("--reroute-ripped-nets", action="store_true",
@@ -3381,6 +3383,8 @@ Examples:
         input_file=args.input_file,
         output_file=args.output_file,
         corridor_nets=args.corridor_nets,
+        rip_blocker_exclude=args.rip_blocker_exclude,
+        rip_blocker_allow=args.rip_blocker_allow,
         net_names=net_names,
         plane_layers=plane_layers,
         net_layers=_net_layers,

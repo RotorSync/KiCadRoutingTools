@@ -233,6 +233,9 @@ _PARAM_CONTROL_ALIASES = {
     'protect_nets': 'protect_nets_ctrl',
     # #549: plane via placement's corridor-seed allowlist (planes tab).
     'corridor_nets': 'corridor_nets_ctrl',
+    # Run-6 blocker guards (planes tabs).
+    'rip_blocker_exclude': 'rip_blocker_exclude_ctrl',
+    'rip_blocker_allow': 'rip_blocker_allow_ctrl',
     'ordering': 'ordering_strategy',
     'direction': 'direction_choice',
     'time_matching': 'time_matching_check',
