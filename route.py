@@ -984,7 +984,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"{sum(len(v) for _, v in force_ripped.values())} via(s) from "
                   f"{len(force_ripped)} net(s) for a from-scratch re-route")
 
-    net_ids, _already_routed = filter_already_routed(pcb_data, net_ids, config)
+    # fragment_gate (#549 A-2): a zone-less net whose copper KiCad holds in
+    # pieces must not be skipped as "Already fully connected". route_diff
+    # deliberately keeps the default (a fragmented net entering the diff
+    # engine is a separate behavior question).
+    net_ids, _already_routed = filter_already_routed(pcb_data, net_ids, config,
+                                                     fragment_gate=True)
     # #515: --rip-existing-nets only rips copper that BLOCKS a net being
     # routed; a net dropped here as already-connected never routes, so naming
     # it in both --nets and --rip-existing-nets is a no-op. Warn instead of
@@ -2273,6 +2278,48 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 for _p in _dp],
         })
 
+    # ---- FRAGMENT SWEEP (#549 C3) ------------------------------------------
+    # The grading verdict above is pad-oriented: a zone-less net can grade
+    # "connected" while its copper sits in several KiCad islands (run 6's
+    # VCC3V3: 25/27 reported, 7 islands real). Census every such net with the
+    # strict-fragment model and report splits honestly -- the entries feed the
+    # end-of-run reconciliation, whose filter_already_routed(fragment_gate)
+    # retry now SEES the fragments and routes the joins.
+    fragmented_nets = []
+    _frag_already = {m['net_id'] for m in failed_multipoint}
+    for _nid, _res in sorted(routed_results.items()):
+        if _nid in _frag_already or _zones_by_net.get(_nid):
+            continue
+        _segs = _segs_by_net.get(_nid, [])
+        if not _segs:
+            continue
+        try:
+            from check_connected import net_copper_fragments
+            from routing_common import _max_fragments_within_one_outline
+            _frag = net_copper_fragments(
+                _nid, _segs, _vias_by_net.get(_nid, []),
+                pcb_data.pads_by_net.get(_nid, []), [], pcb_data=pcb_data)
+            _nf = _max_fragments_within_one_outline(
+                pcb_data, _frag['fragment_anchors'])
+        except Exception:
+            continue
+        if _nf <= 1:
+            continue
+        _net_name = (pcb_data.nets[_nid].name if _nid in pcb_data.nets
+                     else f"Net {_nid}")
+        print(f"{RED}FRAGMENT SWEEP: {_net_name} grades pad-connected but its "
+              f"copper is {_nf} separate fragment(s) "
+              f"({_frag['padless_fragments']} pad-less) -- reporting as "
+              f"failed and queuing for the final reconciliation{RESET}")
+        fragmented_nets.append(_net_name)
+        failed_multipoint.append({
+            'net_name': _net_name,
+            'net_id': _nid,
+            'failed_pads': [
+                {'x': _x, 'y': _y, 'component_ref': '?', 'pad_number': '?'}
+                for (_x, _y) in _frag['fragment_anchors'][1:]],
+        })
+
     # Derive final counts set-based from this run's scope rather than the loop
     # counters (issue #87): a net with unconnected pads is not fully routed, and
     # a net ripped during Phase 3 whose re-route failed never reaches the failure
@@ -2389,6 +2436,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # T5 coverage gate: disturbed out-of-scope nets shipping broken
         # (additive; also present as failed_multipoint entries above).
         summary['coverage_gate_nets'] = coverage_gate_nets
+    if fragmented_nets:
+        # #549 C3: pad-connected nets whose copper is several KiCad islands
+        # (additive; also present as failed_multipoint entries above).
+        summary['fragmented_nets'] = fragmented_nets
+    _ripped_open = sorted({m['net_name'] for m in failed_multipoint
+                           if m['net_id'] not in scope_ids})
+    if _ripped_open:
+        # 1.3 rip-return integrity: nets OUTSIDE this run's --nets scope
+        # (ripped pre-existing / disturbed) shipping with opens. They cannot
+        # move successful/failed (scope-based), so they get their own key --
+        # a caller that only reads the scoped tallies must still see them.
+        summary['ripped_open'] = _ripped_open
     try:
         from protected_nets import PROTECTED_SKIPPED
         if PROTECTED_SKIPPED:

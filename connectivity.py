@@ -374,10 +374,24 @@ def get_terminal_component_info(
     # that bridges two islands (e.g. both escapes land in one connector pad).
     net_pads = pcb_data.pads_by_net.get(net_id, [])
 
+    # #549 A-2: the PLANNER rides the strict-fragment view -- the permissive
+    # grading credits (flat pad radius, epsilon caps, legacy zone blob) are
+    # exactly what collapsed 7 true islands into <=2 components and made the
+    # MST emit nothing (run 6, VCC3V3 25/27 phantom). Every planner-domain
+    # consumer (phase-1 grouping, exhausted-base pick, phase-3 island maps,
+    # _reconcile_multipoint_connectivity) flips atomically through this call.
     res = check_net_connectivity(net_id, net_segments, net_vias, net_pads,
                                  net_zones, return_graph=True,
-                                 pcb_data=pcb_data)
+                                 pcb_data=pcb_data, strict_fragments=True)
     graph = res.get('graph') or {}
+    if graph.get('zone_blob_fallback'):
+        # No fill model existed for a zone here -- the strict view degraded
+        # to outline-blob credit. Stash for the callers' disclosure prints.
+        _zbf = getattr(pcb_data, '_zone_blob_fallback_nets', None)
+        if _zbf is None:
+            _zbf = set()
+            pcb_data._zone_blob_fallback_nets = _zbf
+        _zbf.add(net_id)
     uf = UnionFind()
     for a, b in graph.get('edges', []):
         uf.union(a, b)

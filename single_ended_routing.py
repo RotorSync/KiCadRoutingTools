@@ -3029,6 +3029,12 @@ def route_multipoint_main(
     if num_components < len(pad_info):
         print(f"  Existing copper joins {len(pad_info)} terminals into "
               f"{num_components} group(s)")
+    if net_id in (getattr(pcb_data, '_zone_blob_fallback_nets', None) or ()):
+        # #549: the strict grouping above fell back to zone-outline credit
+        # for a zone with no fill model (scipy absent / oversize) -- the
+        # fragment view for this net is DEGRADED, disclose it.
+        print("  (fragment view degraded to zone-outline credit: no fill "
+              "model for a zone on this net)")
     # #479 multi-board: never ATTEMPT an MST edge between two board outlines
     # -- no copper can join them (grading exempts them, and
     # filter_already_routed skips the net entirely once each outline is
@@ -3079,6 +3085,10 @@ def route_multipoint_main(
             'tap_edges_failed': 0,
             'tap_pads_connected': len(pad_info),
             'tap_pads_total': len(pad_info),
+            # #549 A-2: the STRICT component count behind this verdict --
+            # with the planner on the strict view, an "already connected"
+            # return now really means one fragment per outline.
+            'strict_fragments': num_components,
         }
 
     # Sort MST edges by length (longest first), then let the corridor /

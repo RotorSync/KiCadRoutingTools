@@ -308,7 +308,8 @@ def warn_targets_outside_board(pcb_data: PCBData,
 def filter_already_routed(
     pcb_data: PCBData,
     net_ids: List[Tuple[str, int]],
-    config: GridRouteConfig
+    config: GridRouteConfig,
+    fragment_gate: bool = False,
 ) -> Tuple[List[Tuple[str, int]], List[Tuple[str, str]]]:
     """
     Filter out nets that are already fully connected.
@@ -323,6 +324,13 @@ def filter_already_routed(
         pcb_data: Parsed PCB data
         net_ids: List of (net_name, net_id) tuples
         config: Routing configuration
+        fragment_gate: #549 A-2 -- a ZONE-LESS net whose pads grade connected
+            but whose copper is multiple strict fragments within one outline
+            is NOT already routed: a plain --nets call must route the joins
+            (run 6's VCC3V3 sat in 7 KiCad islands while this filter said
+            "Already fully connected"). Zone-owning nets keep today's exact
+            behavior (their truth channel is the oracle reconciliation and
+            route_planes).
 
     Returns:
         Tuple of (nets_to_route, already_routed) where:
@@ -385,6 +393,22 @@ def filter_already_routed(
         # (net_break_within_outlines); skipping here keeps the router from
         # burning iterations on impossible edges and reporting phantom fails.
         _broken, _ = net_break_within_outlines(pcb_data, result)
+        if not _broken and fragment_gate and not net_zones and net_segments:
+            # #549 A-2 fragment gate: pads connected != copper whole.
+            from check_connected import net_copper_fragments
+            frag = net_copper_fragments(net_id, net_segments, net_vias,
+                                        net_pads, net_zones,
+                                        pcb_data=pcb_data)
+            n = _max_fragments_within_one_outline(
+                pcb_data, frag['fragment_anchors'])
+            if n > 1:
+                print(f"  {net_name}: pads grade connected, but its copper "
+                      f"is {n} separate track fragment(s)"
+                      + (f" ({frag['padless_fragments']} pad-less)"
+                         if frag['padless_fragments'] else "")
+                      + " -- routing to join them (#549)")
+                nets_to_route.append((net_name, net_id))
+                continue
         if not _broken:
             already_routed.append(
                 (net_name, "Already fully connected" if result['connected']
@@ -398,6 +422,22 @@ def filter_already_routed(
             print(f"  {net_name}: {reason}")
 
     return nets_to_route, already_routed
+
+
+def _max_fragments_within_one_outline(pcb_data, anchors):
+    """How many strict fragments share a single board outline (#479 parity:
+    fragments split only ACROSS outlines are not joinable by copper)."""
+    outlines = getattr(pcb_data.board_info, 'board_outlines', None) or []
+    if len(outlines) <= 1:
+        return len(anchors)
+    from check_connected import point_in_polygon
+    counts: Dict[int, int] = {}
+    for (x, y) in anchors:
+        for i, poly in enumerate(outlines):
+            if point_in_polygon(x, y, poly):
+                counts[i] = counts.get(i, 0) + 1
+                break
+    return max(counts.values()) if counts else len(anchors)
 
 
 def run_length_matching(
