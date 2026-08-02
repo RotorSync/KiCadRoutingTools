@@ -297,7 +297,7 @@ plan must therefore carry via/track that are **already** DRC-safe for the pitch.
 Computing them here — both dimensions, with margin, clamped to the fab floor — is
 what lets the single fanout the GUI runs come out clean the first time.
 
-Worked example (keks U1, pitch 0.8, clearance 0.1, fab floor track 0.1 / via 0.45):
+Worked example (a 256-ball 0.8 mm-pitch BGA, clearance 0.1, fab floor track 0.1 / via 0.45):
 `budget = 0.8 − 0.2 − 0.05 = 0.55`; track 0.127 → via = min(working, 0.55−0.127) =
 **0.42** (≥ floor) → DRC-clean, vs the Ø0.5 the net-class default would have used
 (163 grazes). At 0.4 mm pitch the budget forces both to the floor (track 0.10, via
