@@ -1022,7 +1022,7 @@ The rule below says a perimeter at ≤0.65 mm with many pads wants fanout; a QFN
 at 0.4 mm is squarely inside it. Fanout runs on the EMPTY board (Step 1), so
 skipping it is expensive to undo — you cannot bolt it on after the bulk route.
 (When a HARD spec via makes every escape method infeasible, the mandate reads
-as "resolve every pad's escape before the pour" instead — see the
+as "resolve every pad's escape before the late tap passes" instead — see the
 spec-via-vs-pitch exit under the via-sizing budget below.)
 
 ### Does this part actually BENEFIT from fanout? (check before planning it)
@@ -1181,14 +1181,17 @@ escape layers; don't ship the graze.
 
 **If `infeasible` survives even `underpad` because the via floor is a HARD
 SPEC value** (a 0.6/0.3 spec via at 0.4 mm pitch fits neither a channel nor a
-pad — its 0.9+ mm exclusion cannot enter the pad field at all), **fanout is
-off the table for that part** — and the same arithmetic closes Step 5's
-smaller-via repair rung. The play becomes: route EVERY pad of the part as a
-plain perimeter signal BEFORE any pour, let the pour gate hold you to it (a
-bare pad on that part at pour time is a blocking defect, run 6's five-pad
-loss), and report the spec-via-vs-pitch arithmetic as a requirement finding.
-Read the Step 3 QFN mandate as "resolve every pad's escape before the pour",
-not "run the fanout tool".
+pad — its 0.9+ mm exclusion cannot enter the pad field at all), **fanout AND
+its `--plane-drop` are both off the table for that part** — and the same
+arithmetic closes Step 5's smaller-via repair rung. The play becomes: the
+Step 1c pour still runs first (its taps land on an empty board and serve the
+part's plane pads from outside the pad field), then route EVERY signal pad
+of the part as a plain perimeter signal BEFORE the plane FINALIZE/repair
+passes place their taps — the pour gate holds you to it (a bare pad on a
+partially-routed board is a blocking defect, run 6's five-pad loss) — and
+report the spec-via-vs-pitch arithmetic as a requirement finding. Read the
+Step 3 QFN mandate as "resolve every pad's escape before the late tap
+passes", not "run the fanout tool".
 
 **Plan params can set ANY GUI option:** in the GUI's RESULT schema, each
 step's `params` may include any option shown on that step's tab or the shared
@@ -3398,18 +3401,22 @@ learn:
    rip/reorder itself (measured, run 6: 6/7 with `protected_skipped` on the
    group's own QSPI pass; 7/7 without). Protect the group on the NEXT
    committing step instead; the `.kicad_pro` record carries it from there.
-5. **The pour is a one-way door.** Never name a geometry-constrained net in a
-   post-pour rip set expecting a better return path: after the pour + taps, the
-   corridors it used are gone (run 5 measured the static frontier at
-   **10,903/10,939 cells** around the wrapped nets — the rip could only put the
-   copper back where it was, minus luck). Anything whose PATH matters routes
-   before Step 5, or not at all; post-pour rips are for freeing a blocked pad,
-   never for improving a route. **The door also closes on UNROUTED pads**: the
-   tap-via carpet consumes every open pad's escape channel and is not rippable
-   copper (run 6: 5 bare pads at pour time, never recovered post-pour) —
-   `route_planes` refuses to pour over them (exit 3, `--allow-bare-pads` to
-   override); connect every pad first, or accept losing it. (Cross-ref: the
-   Step 5 ordering block says the same from the other side.)
+5. **Tap passes over routed copper are a one-way door.** With the pour-first
+   order (#424) the Step 1c pour ambushes nobody — its taps land on an empty
+   board and every later route sees them from the start. The door is the
+   LATE tap passes: the plane FINALIZE (`--add-gnd-vias`/`--stitch-*`), the
+   repair, and any re-pour over a routed board. Never name a
+   geometry-constrained net in a rip set after those have run: the corridors
+   it used are gone (run 5 measured the static frontier at **10,903/10,939
+   cells** around the wrapped nets — the rip could only put the copper back
+   where it was, minus luck); their rips are for freeing a blocked pad,
+   never for improving a route. **The door also closes on UNROUTED pads**:
+   a tap carpet consumes every open pad's escape channel and is not
+   rippable copper (run 6: 5 bare pads at a late pour, never recovered) —
+   `route_planes` refuses to pour over a partially-routed board with bare
+   pads (exit 3, `--allow-bare-pads` to override; the empty-board 1c pour
+   is exempt); connect every pad first, or accept losing it. (Cross-ref:
+   the Step 5 ordering block says the same from the other side.)
 
 For plane-net pads that cannot reach their pour, the equivalent is
 `route_disconnected_planes --rip-blocker-nets` (it leaves the ripped nets unrouted
@@ -3434,7 +3441,7 @@ top blocker on the exact keys, not on impressions:
 | `undersized` non-zero | **parameters** | re-route at the spec's width/via. Placement is not the lever |
 | a **maximum-length clause fails** and the net's own geometry pass ran at the default `--heuristic-weight` | **parameters — rung 1, seconds** | 1.9 is inadmissible; it returns a path up to ~1.9× optimal. Re-run **that pass**, on **its own input board**, at `--heuristic-weight 1.0` with a finer `--grid-step` (the #529 dynamic budget self-extends; do not pass `--max-iterations`), then re-measure routed:straight-line. Measured: 44.50 mm → 7.73 mm against a 7.71 mm direct. **Do not go to placement before this.** See Step 2c |
 | `--heuristic-weight 1.0` **on the net's own FIRST pass**, on a board carrying only what must precede it, did not change the length | **placement** | now the router genuinely had no shorter path. Signature: routed length far above the straight-line pad distance *and stable under an admissible search*. Go to `place_route_loop` — see the warning below, it needs BOTH `--target-nets` and `--accept-cmd` to see this at all. **A null measured on a SATURATED board proves nothing** — one run tested 1.0 at iteration 4, after fanout, USB and every signal were committed, got a byte-identical board, and recorded "no shorter path exists at this placement". Re-tested on the first pass that lays the net's copper, the same flag was worth 5.8× |
-| `unrouted` names a plane net | **the pour step** | it was excluded and never poured — Step 3/5, not placement |
+| `unrouted` names a plane net | **the pour step** | it was excluded and never poured — Step 1c (or the Step 3 finalize / Step 5 repair), not placement |
 | the log names **pre-existing nets** it is "not allowed to rip" | **rip lever** | 9.3c — `--rip-existing-nets` with the set it named |
 | a net fails on ONE layer at every grid and rip set, and routes instantly with a second layer | **the single-layer constraint is the blocker** | not a router failure. Report it against the requirement that imposed the layer restriction, with both measurements |
 | `drc` is large, uniform, one net pair, one overlap value | **grading artifact** | 9.1b — re-grade at the right class. Not a lever at all |
@@ -3443,7 +3450,7 @@ top blocker on the exact keys, not on impressions:
 | a **symmetry/match clause fails SHORT** (one leg under-length, not over) | **routing lever first** | `--length-match-group` on the pair's own pass meanders the short leg up; only if the group cannot meander (no room) is it placement — then the lever is the **free terminal's position** (the series R/C in the chain), not the ICs |
 | a **multi-net rip-return rotates its victim** (each order strands a different net) | **stop rotating orders** | run each candidate order as a FULL chain lineage and compare their `blocking` scores in the ledger — order A's board vs order B's board, not order A's tail vs order B's head. Fifteen ordering experiments in run 5 re-learned this. **Quote each lineage's `min_clearance_used` in the compare**: branch boards inherit their branch-point's `.kicad_pro` floor (run 6 had three floors live at once — 0.1508/0.1532/0.1556), and a floor delta is a confound unless the LOSING side held the looser floor |
 | the **same victim set recurs under every order** at every grid | **capacity, not order** | the lane ledger (escape-channel section) will show the deficit; that is stop condition 3 with the ledger as the measurement, not another ordering lap |
-| the **bulk pass keeps stranding fine-pitch RAIL pads** under mps | **ordering, before placement** | re-run the bulk with `--ordering original`, rails FIRST (netlist order puts power nets before GPIOs). Order cannot change how many strand — but it chooses WHICH, and a stranded leaf GPIO is recoverable after the pour while a stranded rail pad is not (Step 5's one-way door). Spend the strandings on the recoverable class. Measured (run 6): mps stranded 5 QFN rail pads; rails-first closed them and moved the fails to leaf nets |
+| the **bulk pass keeps stranding fine-pitch RAIL pads** under mps | **ordering, before placement** | re-run the bulk with `--ordering original`, rails FIRST (netlist order puts power nets before GPIOs). Order cannot change how many strand — but it chooses WHICH, and a stranded leaf GPIO can still be re-routed before the plane FINALIZE/repair taps land, while a stranded trace-fed rail pad tends to stay lost once they do (rule 5's one-way door; poured rails are already connected from Step 1c and out of this fight). Spend the strandings on the recoverable class. Measured (run 6, signals-first era): mps stranded 5 QFN rail pads; rails-first closed them and moved the fails to leaf nets |
 
 **Accept an iteration only if `blocking` strictly decreased**, or `blocking` is
 unchanged and `quality` improved. Otherwise **revert to the parent board** and
