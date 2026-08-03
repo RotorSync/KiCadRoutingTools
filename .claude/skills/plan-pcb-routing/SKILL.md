@@ -241,6 +241,37 @@ placement that routes slightly worse beats a spec-violating one that routes well
 a part that needed to move and the failure is invisible — which is the same
 reason nothing is auto-locked.
 
+**Then RE-SEAT the locked cluster instead of leaving it frozen.** Locking is the
+right answer to "the quench walks a different cap out every run"; it is the
+wrong answer to "these parts are in the wrong places". `placement/reseat.py`
+gives the second one without giving up the first: it re-assigns a cluster's
+members among slots generated *around the anchor's own pins*, so every candidate
+satisfies the proximity rule by construction, and it accepts only when the
+cluster's exact objective improves.
+
+```python
+from placement import reseat
+cl = reseat.clusters_from_tethers(pcb, state, radius_mm=3.0)
+for row in reseat.reseat(state, cl):
+    print(row.to_dict())     # moved / before / after / repairs / accepted
+```
+
+Use it when a rotation moved the pins a decap was seated to (Step 0a-bis:
+rotating a part silently breaks the proximity clause — measured 7.74 mm against
+a 3 mm limit until the re-seat), or when the caps are locked and the rest of the
+board has since moved around them. It cannot make the cluster worse — acceptance
+is on the exact objective, not on the assignment surrogate — but re-run the
+proximity gate afterwards anyway, because `radius_mm` is what *you* told it the
+rule was.
+
+**Expect most decap clusters to report "every member net is an ignored or
+high-fanout rail" and be left alone, and do not read that as a failure.** A
+decoupling cap's nets *are* rails, and scoring a pose against a 96-part GND MST
+would measure distance from the middle of the board. Where such a cap sits is
+governed by its pin, which the slot pool already enforces. The rows that matter
+are clusters carrying **signal** nets — a series termination, a filter network,
+a part tethered into a zone.
+
 ### Step 0a-bis: enumerate the POSES of every part under a HARD geometric clause
 
 For any part a HARD clause constrains geometrically (a matched pair's skew, a

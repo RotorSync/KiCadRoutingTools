@@ -614,6 +614,55 @@ is implemented, the rest are documented targets.
    part that caused it (run 7's west-fan capacity finding is exactly this
    shape).
 
+2b. **Constrained-part re-seating** (`placement/reseat.py`). *Done.* The
+   observation it comes from: parts under a proximity rule are **locked**,
+   because the quench has no proximity term and will otherwise walk a different
+   member past the limit every run — lock one and the next moves. That works,
+   and it freezes exactly the parts whose re-seating produced most of run 8's
+   placement wins.
+
+   The move that removes the need for both the locks and a proximity cost term:
+   **make the proximity rule the definition of the slot pool.** Slots are
+   generated on rings around the anchor's relevant *pins* (not its centre — that
+   would send a decap to the middle of the die), so every candidate satisfies
+   the constraint by construction and there is nothing to price.
+
+   What remains is an assignment problem, and it is exactly additive: each
+   member is scored with every other member's pads overridden to an **empty
+   list**, which removes them from the airwire model. No member–member term ⇒
+   Hungarian-legal. The constant the rows share (the rest of the board's
+   contribution to the same nets) is uniform across the matrix, and Hungarian is
+   invariant to adding a constant everywhere. `scipy.linear_sum_assignment` when
+   present, deterministic greedy otherwise — KiCad's bundled Python has no
+   scipy and this runs on the same paths.
+
+   Three properties that make it safe rather than merely clever: identity is
+   always in the pool, so "leave it alone" is a possible answer; **acceptance is
+   on the exact cluster objective**, re-evaluated with every member in place, so
+   a lying surrogate can waste time but can never ship a worse board; and there
+   is no RNG anywhere.
+
+   **The limit, stated rather than left to be discovered:** the objective is the
+   cluster's airwire cost, so the cluster must carry a net worth scoring. The
+   only tether source in-repo is `decap_tethers`, and a decoupling cap's two
+   nets are *rails* — which the fanout cut correctly drops, because scoring a
+   pose against a 96-part GND MST measures distance from the middle of the
+   board. Those clusters report that and are left alone, which is right: where a
+   decap sits is governed by its pin, and the slot pool already guarantees that.
+   The mechanism earns its keep on clusters carrying **signal** nets (series
+   terminations, filter networks, a part tethered to a zone), and it is generic
+   over `(member, anchor, radius)`, so a new tether source needs no change here.
+
+   Two traps, both found by writing the tests rather than by reasoning:
+   Hungarian returns distinct slot *indices*, which is not the same as
+   non-overlapping courtyards, so members are seated one at a time with an
+   explicit check against the poses already assigned (`state.parts` still holds
+   the old ones) and the bumps are reported as `repairs` rather than hidden. And
+   snapping a ring to the placement grid moves a point by up to half a cell per
+   axis, so slots generated *at* the radius land outside it — the pool shrinks
+   by the snap diagonal, or the by-construction claim is false at exactly the
+   outer ring where a re-seat wants to look.
+
 3. **The #411 undo-a-known-good-placement harness.** The grading
    instrument this document keeps needing: take a board a human placed and
    routed clean, scramble it in controlled ways, and measure which score

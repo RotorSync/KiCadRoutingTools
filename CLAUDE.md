@@ -147,6 +147,29 @@ board corpus, use `tests/stress/ab_replay_grade.py` (whole-set replay + DRC/
 connectivity grading) or `tests/stress/redo_diff_stage.py` (diff-pair stages only).
 See `tests/stress/RUNBOOK.md` ("Replaying & A/B (no LLM)") for the recipes.
 
+**A new PLACEMENT objective term goes through `tests/test_placement_ab.py`
+before it ships on.** It runs the same board twice (flag off, flag on), writes
+both, and grades both with an *independent* check — `floorplan.grade(...,
+with_health=True)` re-derives its corridors from the FINAL poses, so a term that
+only improves the model it is computed from shows up as "improved nothing". Add
+a row to `ROWS`, do not add a file. Three rules the table encodes and that are
+easy to get wrong:
+
+- **Judge on ≥3 boards, paired and directional** (improve on ≥ N−1, regress on
+  none), never a per-board absolute. Neutral boards are printed, not dropped.
+- **Keep the row that disagrees.** A term that helps on one board of three is
+  not a term, and deleting the dissenting row is how that becomes folklore.
+- **A rejected term keeps its rows**, marked `rejected` with its measured
+  `expect`, so it stays a change detector instead of a permanent red mark that
+  someone eventually deletes along with the finding.
+
+Two traps measured the hard way: the first run of that harness reported the
+corridor term inert because it had been pointed at a **merged** net glob whose
+`cover` was 0.46 — a phantom corridor (declare sub-buses separately; `SDRAM_A*`
+scores 0.81, `SDRAM_*` 0.46). And grade intent errors **paired**, not against
+zero: both arms quench the board, so both walk parts out of the emitted intent's
+zones for reasons the flag did not cause.
+
 ## Keep CLI and GUI routing in sync
 
 There are two front-ends to the same routing engine, and a fix to one is
