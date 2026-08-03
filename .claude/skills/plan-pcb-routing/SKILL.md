@@ -525,6 +525,43 @@ Four things follow that nothing will tell you:
   rail sits nearer to half the decaps than their real IC, and it used to capture
   them — which made a distant decap grade **clean** against the wrong part.
 
+### No impossibility claim without a numeric field
+
+**Never write "no placement can fix this", "this pad is sealed", or "this was
+never routable" without a measured number.** Across four recorded runs, **9 of
+14** such claims were later refuted — and *every* claim that a pad was
+unroutable in principle was wrong. They came from renders, from the router
+failing, and from arithmetic on the wrong two edges. A router failing is
+evidence about the **router**; only a measurement is evidence about the board.
+
+```bash
+python3 -X utf8 check_reachability.py board.kicad_pcb --pad U3.23
+python3 -X utf8 check_reachability.py board.kicad_pcb --net GND --at 142.5,88.1 --json
+```
+
+It measures the widest track that can actually reach the rest of the net —
+Euclidean distance transform per clearance class, then an exact Kruskal
+widest-path — and returns one of two verdicts that mean different things:
+
+| verdict | what it licenses |
+|---|---|
+| **PASSABLE** at track *t* | a route EXISTS at *t*. If the router failed, the finding is about the ROUTER: grid, ordering, ripup budget, layer pin. Do not touch placement on this evidence. |
+| **CAGED** at track *t* | no route exists at ANY grid. This one IS geometry, and placement or the spec is the fix. |
+
+Exit code 0 PASSABLE, 1 CAGED, 2 usage/"nothing to reach". Clearances come from
+the board's netclasses, so **quote the clearance with the verdict** — the same
+copper is passable at 0.10 mm and caged at 0.20 mm, and a verdict without its
+clearance is not a verdict.
+
+Two ways to misread it, both seen:
+
+- **`BOTTLENECK >= …mm` with "bounded by the VIEW"** is not a measurement of
+  the board. Nothing was in the way inside the window; the number is the size
+  of the question you asked.
+- **A margin inside one raster step is not resolved.** The default step is
+  0.01 mm. Run 8's decisive case was a **6.4 µm** throat; halve `--step` until
+  the verdict stops moving before believing a margin under ~20 µm.
+
 ### Before routing a dense escape: is the channel even wide enough?
 
 If a board fans a bus out to an edge, measure the corridor before blaming the
@@ -533,18 +570,34 @@ router: `escapes x trace pitch / channel width`. It is the difference between
 tell those apart on measures nothing. A spec may set its own gate — one asks for
 ≤75%, and the as-built channel measured 5.60mm against 2.40mm of escape, 42.9%.
 
-Go one level finer on a dense part: a **per-face lane ledger**. For each face
-of the part, count lanes SUPPLIED (face length ÷ trace pitch at the routed
-clearance, minus lanes consumed by pads, keepouts and **supply taps** — a via
-field feeding the part eats lanes exactly like signals do) against lanes
-DEMANDED (nets that must escape through that face). A face in deficit is the
-**binding constraint**: reordering nets only chooses WHICH nets strand there,
-never how many (run 5 spent multiple ordering experiments proving this on a
-face whose ledger would have said it in seconds). One caveat before declaring
-a deficit structural: recompute the supply at the finest legal grid — run 5's
-v2 bulk ran at 0.05 mm grid, and a lane count taken at that pitch understated
-supply that a 0.025 mm pass could reach (the grid confound). A deficit that
-survives the finest grid is a floorplan/pose finding, not a routing one.
+Go one level finer on a dense part: the **per-face lane ledger**. This is a
+tool now — do not compute it by hand:
+
+```bash
+python3 -X utf8 check_floorplan.py board.kicad_pcb --intent fp.json --health
+```
+
+Every `--health` run reports it, with no declaration needed, for every
+fine-pitch part on the board (`placement/escape.py`; `health_escape_deficit_parts`
+and `health_escape_worst_deficit` reach `JSON_SUMMARY`). It counts lanes
+SUPPLIED (face span ÷ (track+clearance) **read from the board's own netclass**,
+minus span eaten by neighbours) against lanes DEMANDED (nets that must escape
+through that face). A face in deficit is the **binding constraint**: reordering
+nets only chooses WHICH nets strand there, never how many (run 5 spent multiple
+ordering experiments proving this on a face whose ledger would have said it in
+seconds).
+
+Read **`blockers` first** — it names the neighbouring parts whose bodies ate the
+lanes, which is the move to make. `U9 west: supply 6 < demand 14 … 15.35mm of
+that face is taken by SD1` is an instruction; "west face is short" is not.
+Interior pads are reported separately and are a **fanout** question, not a lane
+one — they need a via, not a channel.
+
+Two caveats before calling a deficit structural: recompute the supply at the
+finest legal grid (run 5's v2 bulk ran at 0.05 mm and a lane count at that
+pitch understated supply a 0.025 mm pass could reach), and remember the ledger
+does not model **supply taps** — a via field feeding the part eats lanes exactly
+like signals do, so subtract those by hand before trusting a marginal pass.
 
 ### THE BOARD OUTLINE IS NOT YOURS TO CHANGE
 
@@ -938,6 +991,23 @@ Run 5's refuted claim — R10 astride SD1's corridor — is fully visible in a
 4×6 mm crop; the watcher found it only by re-deriving the geometry from pad
 coordinates. The crop shows WHERE; the watcher's arithmetic still decides
 HOW MUCH (never clearance from pixels).
+
+**Prefer the field over the rebuild where one exists.** For "sealed",
+"unreachable", "no path at any grid", `check_reachability.py --pad REF.NUM`
+is the hostile rebuild, done exactly and in seconds. Run 8's watcher refuted a
+sealed-pad claim with a hand-derived 6.4 µm throat; the field agreed to within
+a micron and also confirmed the one genuinely caged pad. Give the watcher the
+tool's output *and* the coordinates — a claim that survives a numeric field is
+much stronger than one that survives an argument.
+
+**Watch the argv, not only the ledger.** A watcher brief that covers ledger
+discipline will not catch a *dropped* flag, because nothing in the ledger is
+missing — the recorded command is simply the command that ran. Run 8 lost 12
+plane-void crossings to a `--layers F.Cu` pin omitted from one scoped pass, and
+no audit caught it: the entry was complete, consistent and wrong. When a pass
+is scoped (a layer pin, a width, a net subset), diff its argv against the pass
+it was derived from and say in the ledger which flags were **deliberately**
+dropped.
 
 ### Good and bad, concretely
 
@@ -3687,7 +3757,9 @@ top blocker on the exact keys, not on impressions:
 | `check_connected` and `kicad-cli` disagree badly | **the zones are unfilled** | 9.1c — fill, then re-read. Do not "average" them |
 | a **symmetry/match clause fails SHORT** (one leg under-length, not over) | **routing lever first** | `--length-match-group` on the pair's own pass meanders the short leg up; only if the group cannot meander (no room) is it placement — then the lever is the **free terminal's position** (the series R/C in the chain), not the ICs |
 | a **multi-net rip-return rotates its victim** (each order strands a different net) | **stop rotating orders** | run each candidate order as a FULL chain lineage and compare their `blocking` scores in the ledger — order A's board vs order B's board, not order A's tail vs order B's head. Fifteen ordering experiments in run 5 re-learned this. **Quote each lineage's `min_clearance_used` in the compare**: branch boards inherit their branch-point's `.kicad_pro` floor (run 6 had three floors live at once — 0.1508/0.1532/0.1556), and a floor delta is a confound unless the LOSING side held the looser floor |
-| the **same victim set recurs under every order** at every grid | **capacity, not order** | the lane ledger (escape-channel section) will show the deficit; that is stop condition 3 with the ledger as the measurement, not another ordering lap |
+| the **same victim set recurs under every order** at every grid | **capacity, not order** | the lane ledger (`check_floorplan --health`) will show the deficit; that is stop condition 3 with the ledger as the measurement, not another ordering lap |
+| you are about to write **"this pad cannot be routed"** | **unproven until measured** | `check_reachability.py --pad REF.NUM`. PASSABLE means it is a ROUTER finding and placement is the wrong lever; CAGED means geometry. 9 of 14 such claims across four runs were later refuted — see the impossibility-claim rule |
+| one part carries most of a critical net while its BLOCK sits elsewhere | **floorplan, at PART granularity** | `health_net_affinity_offenders` names it and prints the `converge.py poses --ref` line. Block displacement averages this away, so a quiet block metric is not evidence of absence |
 | the **bulk pass keeps stranding fine-pitch RAIL pads** under mps | **ordering, before placement** | re-run the bulk with `--ordering original`, rails FIRST (netlist order puts power nets before GPIOs). Order cannot change how many strand — but it chooses WHICH, and a stranded leaf GPIO can still be re-routed before the plane FINALIZE/repair taps land, while a stranded trace-fed rail pad tends to stay lost once they do (rule 5's one-way door; poured rails are already connected from Step 1c and out of this fight). Spend the strandings on the recoverable class. Measured (run 6, signals-first era): mps stranded 5 QFN rail pads; rails-first closed them and moved the fails to leaf nets |
 
 **Accept an iteration only if `blocking` strictly decreased**, or `blocking` is
