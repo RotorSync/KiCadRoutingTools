@@ -3049,29 +3049,55 @@ def route_multipoint_main(
                                 _votes[pad_components.get(_idx, _idx)] += 1
                     if _votes:
                         _pcid = _votes.most_common(1)[0][0]
+                        # DISTANCE LADDER (per straggler terminal): best-N
+                        # nearest fill cells within expanding rungs, so the
+                        # target set stays compact and short taps win by
+                        # construction (was: 73k cells of global sampling).
+                        _RUNGS = (1.0, 2.5, 6.0, 15.0)   # mm
+                        _NBEST = 12
                         _added = 0
                         _cells = _island_cells.setdefault(_pcid, {})
-                        for _lay, _ms in _models.items():
-                            if _lay not in layer_names:
-                                continue
-                            _li = layer_names.index(_lay)
-                            for _m in _ms:
-                                _main = _m.largest_component()
-                                if not _main:
-                                    continue
-                                _jj, _ii = _np.nonzero(_m.labels == _main)
-                                _step = max(1, int(round(1.0 / _m.cell)))
-                                for _j, _i in zip(_jj[::7], _ii[::7]):
-                                    _fx = _m.x0 + float(_i) * _m.cell
-                                    _fy = _m.y0 + float(_j) * _m.cell
-                                    _g = coord.to_grid(_fx, _fy)
-                                    _k = (_g[0], _g[1], _li)
-                                    if _k not in _cells:
-                                        _cells[_k] = (_fx, _fy)
-                                        _added += 1
+                        _stragglers = [(_info[3], _info[4])
+                                       for _idx, _info in enumerate(pad_info)
+                                       if pad_components.get(_idx, _idx) != _pcid]
+                        for _sx, _sy in _stragglers:
+                            _found = []
+                            for _r in _RUNGS:
+                                for _lay, _ms in _models.items():
+                                    if _lay not in layer_names:
+                                        continue
+                                    _li = layer_names.index(_lay)
+                                    for _m in _ms:
+                                        _main = _m.largest_component()
+                                        if not _main:
+                                            continue
+                                        _i0 = max(0, int((_sx - _r - _m.x0) / _m.cell))
+                                        _i1 = min(_m.nx, int((_sx + _r - _m.x0) / _m.cell) + 1)
+                                        _j0 = max(0, int((_sy - _r - _m.y0) / _m.cell))
+                                        _j1 = min(_m.ny, int((_sy + _r - _m.y0) / _m.cell) + 1)
+                                        if _i0 >= _i1 or _j0 >= _j1:
+                                            continue
+                                        _win = _m.labels[_i0:_i1, _j0:_j1]
+                                        _jj, _ii = _np.nonzero(_win == _main)
+                                        for _j, _i in zip(_jj, _ii):
+                                            _fx = _m.x0 + float(_i + _i0) * _m.cell
+                                            _fy = _m.y0 + float(_j + _j0) * _m.cell
+                                            _d2 = (_fx - _sx) ** 2 + (_fy - _sy) ** 2
+                                            if _d2 <= _r * _r:
+                                                _found.append((_d2, _fx, _fy, _li))
+                                if _found:
+                                    break   # nearest rung with fill wins
+                            _found.sort()
+                            for _d2, _fx, _fy, _li in _found[:_NBEST]:
+                                _g = coord.to_grid(_fx, _fy)
+                                _k = (_g[0], _g[1], _li)
+                                if _k not in _cells:
+                                    _cells[_k] = (_fx, _fy)
+                                    _added += 1
                         if _added:
-                            print(f"  POUR-LAUNCH: +{_added} fill cell(s) as "
-                                  f"attach surface for component {_pcid}")
+                            print(f"  POUR-LAUNCH: +{_added} laddered fill "
+                                  f"cell(s) for {len(_stragglers)} straggler(s) "
+                                  f"-> component {_pcid}")
             except Exception as _e:
                 print(f"  POUR-LAUNCH unavailable ({_e})")
     num_components = len(set(pad_components.values()))
