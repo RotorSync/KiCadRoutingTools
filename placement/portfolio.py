@@ -69,6 +69,7 @@ class Candidate:
     intent: Optional[Dict] = None
     health: Optional[Dict] = None
     route: Optional[Dict] = None
+    route_full: Optional[Dict] = None   # --full-probe verdict (whole board)
     note: str = ''
 
     @property
@@ -91,6 +92,8 @@ class Candidate:
             d['health'] = self.health
         if self.route is not None:
             d['route'] = self.route
+        if self.route_full is not None:
+            d['route_full'] = self.route_full
         return d
 
 
@@ -574,7 +577,15 @@ def rank_key(cand: Candidate) -> Tuple:
       inversions     the forced-crossing floor -- equal-crossings ties break
                      toward the more REMOVABLE set (pair_order is a lower
                      bound a router cannot beat)
+      plane_islands  --plane-score only (0 otherwise): how many pieces the
+                     poured plane lands in. Before hpwl deliberately -- a
+                     split pour is a MEASURED plane-step loss the repair
+                     step must stitch, and hpwl is a proxy (#118: "routing
+                     is as much about planes as traces")
       hpwl           order-invariant geometry
+      plane_neck     --plane-score only: the #424 fragility field summed
+                     over the fill (mm-equivalents, whole-mm rounded) --
+                     a neck tiebreak below hpwl
       health         advisory floorplan-fight signals (0 without an intent)
       displacement   least disturbance wins what is left
       index          stability
@@ -582,7 +593,9 @@ def rank_key(cand: Candidate) -> Tuple:
     m = cand.metrics
     return (m.get('crossings', 1 << 30),
             m.get('inversions', 1 << 30),
+            m.get('plane_islands', 0),
             round(m.get('hpwl', float('inf')), 3),
+            round(m.get('plane_neck', 0.0)),
             m.get('health_penalty', 0),
             round(cand.displacement_rms, 2),
             cand.index)
@@ -592,6 +605,50 @@ def rank_static(cands: Sequence[Candidate]) -> List[int]:
     """Indices of the gate-passing candidates, best first."""
     return [c.index for c in sorted((c for c in cands if c.viable),
                                     key=rank_key)]
+
+
+def rule1_check(cand: Candidate, baseline: Candidate) -> List[str]:
+    """Rule 1 of the Step-0c acceptance conjunction, applied K-way (run-7
+    S6): crossings and hpwl must be NO WORSE than the baseline row.
+
+    The hard gates in score_candidate are legality + intent (rule 2). This
+    metric clause was DOCUMENTED as pre-applied but never was, so a
+    candidate measuring worse on both proxies could top the slate and ship
+    through JSON_SUMMARY['best'] unremarked. Pure: returns the violation
+    strings; empty means it passes. Violators are still ranked, probed and
+    recorded -- they are only barred from being the silent headline pick
+    (select_best); a probe verdict that argues for one anyway is a decision
+    the operator makes deliberately, reading portfolio.json.
+    """
+    out: List[str] = []
+    bm, cm = baseline.metrics, cand.metrics
+    bx, cx = bm.get('crossings'), cm.get('crossings')
+    if bx is not None and cx is not None and cx > bx:
+        out.append(f'crossings {cx} > baseline {bx}')
+    bh, ch = bm.get('hpwl'), cm.get('hpwl')
+    if bh is not None and ch is not None and ch > bh + EPS:
+        out.append(f'hpwl {ch:.1f} > baseline {bh:.1f}')
+    return out
+
+
+def select_best(ranking_primary: Sequence[int], ranking_static: Sequence[int],
+                rule1_violators: Set[int]) -> Optional[int]:
+    """The slate's headline pick: the first ranked index that passes rule 1.
+
+    `ranking_primary` (a probe ranking -- full-board when --full-probe ran,
+    else the shared-window one) outranks the static ranking. The baseline
+    (index 0) trivially passes rule 1 against itself, so "keep what you
+    have" stays a first-class outcome. Returns None when nothing ranked
+    passes -- the caller falls back to the baseline, never to a violator.
+    """
+    seen = set()
+    for idx in list(ranking_primary) + list(ranking_static):
+        if idx in seen:
+            continue
+        seen.add(idx)
+        if idx == 0 or idx not in rule1_violators:
+            return idx
+    return None
 
 
 def select_diverse(cands: Sequence[Candidate], order: Sequence[int],

@@ -134,6 +134,25 @@ Examples:
                         "only)")
     p.add_argument("--route-args", nargs="+", default=None,
                    help="Extra args for the probe routes (e.g. --clearance)")
+    p.add_argument("--plane-score", nargs="+", default=None,
+                   metavar="NET[:LAYER]",
+                   help="pour these nets on a scratch copy of every viable "
+                        "candidate (KiCad ZONE_FILLER refill, the #424 "
+                        "exact-fill truth) and fold plane fragility into "
+                        "the ranking: island count before hpwl, neck sum "
+                        "after it. A bare NET pours the last copper layer. "
+                        "Needs KiCad python; see plane_score.py")
+    p.add_argument("--plane-score-budget", type=float, default=300.0,
+                   help="total seconds for --plane-score across all "
+                        "candidates; on overrun the plane terms are "
+                        "annotated but EXCLUDED from the ranking "
+                        "(default: 300)")
+    p.add_argument("--full-probe", action="store_true",
+                   help="After the shared-window probe, route the WHOLE "
+                        "board on the baseline + the window winner; that "
+                        "verdict outranks the window one (a candidate can "
+                        "win its window while losing the board). Costs two "
+                        "extra full routes.")
     p.add_argument("--route-timeout", type=float, default=900,
                    help="Seconds per probe route (default: 900)")
     # Presentation & provenance
@@ -362,6 +381,62 @@ def main():
               file=sys.stderr)
         return 3
 
+    # ----- plane-fragility scoring (--plane-score, #118 follow-up) ----------
+    # Pour the declared plane nets on a scratch copy of every board (KiCad
+    # refill, the #424 exact-fill truth) and fold the result into the rank:
+    # island count before hpwl, neck sum after it (see portfolio.rank_key).
+    # All-or-nothing: partial coverage would rank scored candidates against
+    # unscored ones, so on budget overrun / no KiCad python the flat rank
+    # keys are stripped and only the annotation (metrics['plane']) survives.
+    if args.plane_score:
+        import time as _time
+        from plane_score import parse_plane_specs, plane_fragility_score
+        specs = parse_plane_specs(
+            args.plane_score,
+            list(pcb.board_info.copper_layers or ['F.Cu', 'B.Cu']))
+        contenders = [baseline] + [c for c in cands if c.board]
+        t0 = _time.time()
+        incomplete = False
+        for c in contenders:
+            spent = _time.time() - t0
+            if spent > args.plane_score_budget:
+                print(f"[plane] budget {args.plane_score_budget:.0f}s "
+                      f"exhausted before cand {c.index} -- plane terms "
+                      f"EXCLUDED from ranking (partial coverage ranks "
+                      f"unfairly); annotations kept")
+                incomplete = True
+                break
+            sc = plane_fragility_score(c.board, specs,
+                                       grid_step=args.grid_step)
+            if sc is None:
+                print("[plane] refill unavailable (KiCad python not found, "
+                      "or no named net) -- plane scoring skipped")
+                incomplete = True
+                break
+            c.metrics['plane'] = sc
+            c.metrics['plane_islands'] = sc['islands']
+            c.metrics['plane_neck'] = sc['neck_sum']
+            who = 'baseline' if c.index == 0 else f'cand {c.index}'
+            print(f"[plane] {who}: islands={sc['islands']} "
+                  f"neck={sc['neck_sum']}mm-eq")
+        if incomplete:
+            for c in contenders:
+                c.metrics.pop('plane_islands', None)
+                c.metrics.pop('plane_neck', None)
+
+    # Rule 1 of the acceptance conjunction, K-way (run-7 S6): annotate every
+    # candidate whose crossings/hpwl are WORSE than the baseline row.
+    # Annotate, not gate: violators stay ranked and probed, they are only
+    # barred from the silent JSON_SUMMARY['best'] pick below.
+    rule1_violators = set()
+    for c in cands:
+        if not c.board:
+            continue
+        r1 = portfolio.rule1_check(c, baseline)
+        c.gates['rule1'] = r1
+        if r1:
+            rule1_violators.add(c.index)
+
     ranking_static = portfolio.rank_static(cands)
     kept, backfilled = portfolio.select_diverse(
         cands, ranking_static, args.keep, args.diversity_mm, free, baseline)
@@ -376,6 +451,8 @@ def main():
               f"hpwl={c.metrics.get('hpwl')} "
               f"inv={c.metrics.get('inversions')} "
               f"disp={c.displacement_rms:.2f}mm"
+              + (f"  RULE1: {'; '.join(c.gates['rule1'])}"
+                 if c.gates.get('rule1') else '')
               + (f"  ({'; '.join(c.gates.get('reasons', []))})"
                  if not c.viable and c.gates.get('reasons') else ''))
     if backfilled:
@@ -386,6 +463,7 @@ def main():
 
     # ----- probe tier -------------------------------------------------------
     ranking_routed = []
+    window_kind = 'window'
     if args.route_top > 0 and kept:
         from place_route_loop import _ratsnest_screen
         ids = portfolio.ignore_net_ids(pcb, args.ignore_nets)
@@ -395,6 +473,7 @@ def main():
                        if nid > 0 and nid not in ids and len(net.pads) >= 2)
         if routable and len(nets) > 0.5 * routable:
             nets = ['*'] + [f'!{p}' for p in (args.ignore_nets or [])]
+            window_kind = 'full'
             print(f"[probe] affected set exceeds half the board -- "
                   f"full probe routes")
         elif not nets:
@@ -403,6 +482,7 @@ def main():
             print(f"[probe] routing {len(nets)} net pattern(s) on baseline + "
                   f"top {len(probe_cands)}")
             baseline.route = _probe(baseline.board, nets, args)
+            baseline.route['probe_kind'] = window_kind
             base_rat = {'crossings': baseline.metrics.get('crossings'),
                         'hpwl': baseline.metrics.get('hpwl')}
             for c in probe_cands:
@@ -415,6 +495,7 @@ def main():
                     print(f"[probe] cand {c.index}: skipped ({note})")
                     continue
                 c.route = _probe(c.board, nets, args)
+                c.route['probe_kind'] = window_kind
                 print(f"[probe] cand {c.index}: failures="
                       f"{c.route['failures']} ({c.route['note']})")
             probed = [c for c in [baseline] + probe_cands
@@ -425,6 +506,36 @@ def main():
                                        c.route.get('iterations') or 0,
                                        static_pos.get(c.index, 1 << 30)))
             ranking_routed = [c.index for c in probed]
+
+    # ----- full-board probe (--full-probe, run-7 S2/S7) ---------------------
+    # The window probe compares like with like on the AFFECTED set, but a
+    # candidate can win its window while losing the board (the run-7 adoption
+    # question was answered by exactly this escalation, hand-rolled). Route
+    # the whole board on the baseline + the window winner; this verdict
+    # OUTRANKS the window one.
+    ranking_full = []
+    if args.full_probe and ranking_routed and window_kind != 'full':
+        full_nets = ['*'] + [f'!{p}' for p in (args.ignore_nets or [])]
+        top_cand = next((by_index[i] for i in ranking_routed if i != 0), None)
+        contenders = [baseline] + ([top_cand] if top_cand is not None else [])
+        print(f"[probe] FULL-BOARD probe (--full-probe): baseline"
+              + (f" + cand {top_cand.index}" if top_cand is not None else ""))
+        for c in contenders:
+            c.route_full = _probe(c.board, full_nets, args)
+            c.route_full['probe_kind'] = 'full'
+            who = 'baseline' if c.index == 0 else f'cand {c.index}'
+            print(f"[probe/full] {who}: failures={c.route_full['failures']} "
+                  f"({c.route_full['note']})")
+        probed_f = [c for c in contenders
+                    if c.route_full and c.route_full.get('failures') is not None]
+        probed_f.sort(key=lambda c: (c.route_full['failures'],
+                                     c.route_full.get('iterations') or 0,
+                                     c.index))
+        ranking_full = [c.index for c in probed_f]
+    elif args.full_probe and window_kind == 'full':
+        # The window probe already routed the whole board; its ranking IS the
+        # full verdict.
+        ranking_full = list(ranking_routed)
 
     # ----- renders ----------------------------------------------------------
     renders = {}
@@ -484,6 +595,8 @@ def main():
            'candidates': [c.to_dict() for c in cands],
            'ranking_static': ranking_static,
            'ranking_routed': ranking_routed,
+           'ranking_full': ranking_full,
+           'rule1_violators': sorted(rule1_violators),
            'kept': kept, 'backfilled': backfilled,
            'renders': {str(k): v for k, v in renders.items()}}
     doc_path = os.path.join(args.out_dir, 'portfolio.json')
@@ -491,12 +604,25 @@ def main():
         json.dump(doc, f, indent=1, sort_keys=True)
     print(f"Wrote {doc_path}")
 
-    best = (ranking_routed[0] if ranking_routed
-            else (ranking_static[0] if ranking_static else None))
+    # Headline pick: probe ranking (full-board when --full-probe ran) over
+    # static, first index that passes rule 1. Every ranked candidate
+    # violating rule 1 -> fall back to the BASELINE, never to a violator
+    # (run-7 S6: a worse-on-both-proxies candidate topped the slate).
+    ranking_primary = ranking_full or ranking_routed
+    best = portfolio.select_best(ranking_primary, ranking_static,
+                                 rule1_violators)
+    if best is None and (ranking_primary or ranking_static):
+        best = 0
+        print("NOTE: every ranked candidate violates rule 1 (metrics worse "
+              "than the baseline) -- best falls back to the baseline; read "
+              "portfolio.json before adopting a violator deliberately")
     best_c = by_index.get(best, baseline) if best is not None else None
     print("JSON_SUMMARY: " + json.dumps({
         'candidates': len(cands) + 1, 'viable': len(viable),
         'kept': len(kept), 'best': best,
+        'probe_kind': ('full' if ranking_full
+                       else (window_kind if ranking_routed else None)),
+        'rule1_excluded': sorted(rule1_violators),
         'best_crossings': (best_c.metrics.get('crossings')
                            if best_c else None),
         'baseline_crossings': baseline.metrics.get('crossings'),
