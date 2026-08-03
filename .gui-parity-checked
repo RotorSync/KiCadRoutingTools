@@ -1,3 +1,36 @@
+HEAD 2026-08-03 parity audit 8bd1344..b60d597 (11 commits, the post-run-7
+wave). Outcome: no gaps.
+
+  * Engine honesty (4775c7b): open_single classification, terminal-restore
+    grading, via dedup + stacked_copper -- ALL inside batch_route /
+    reroute_loop / rip_restore (shared functions, both fronts inherit);
+    summary keys are additive, no new engine kwargs surfaced to either
+    front, no CLI-main post-passes (the dedup runs pre-write inside
+    batch_route, which is exactly why the gate's copper sets stay
+    identical).
+  * converge (13cb297), check_floorplan/check_join (fc1c200),
+    compare_seeds (99c4018), plane_score (cb2ede5): analysis/verification
+    CLIs with no board-mutating GUI counterpart needed; place_portfolio's
+    new --full-probe/--plane-score/--plane-score-budget are placement
+    flags, CLI-only by design like the rest of the placement family (the
+    manifest converter refuses placement tools loudly -- prior precedent).
+  * kicad_exact_fill.find_kicad_python now probes versioned Windows
+    installs (C:\Program Files\KiCad\10.0\...) -- shared helper; the GUI's
+    live-fill path never needed it, the CLI exact-fill consumers were
+    silently disabled on standard Windows installs before this.
+  * Gates at b60d597 (2026-08-03, Windows KiCad 10.0 python, wx 4.2.2):
+    test_gui_engine_parity VERDICT: PARITY -- segments CLI=GUI=1307, vias
+    144=144, copper sets IDENTICAL (kicad_unconnected/drc both -1: kicad-cli
+    grading skipped identically on both sides in the gate env; the exact
+    copper-set comparison is the decisive check). test_manifest_plan_parity
+    0 mismatches (placement-block flags refused loudly).
+    test_cli_postpass_coverage 7 registered, 0 failures (run_drc stays the
+    acknowledged report-only CLI-only pass). Marker convention caveat: the
+    gate's plan is signal+plane, so diff-pair/impedance params ride on
+    test_manifest_plan_parity only.
+
+== previous audit ==
+
 MERGED 2026-08-02: upstream/main (d7a8ab2..cae82e3, #424/#529/#556/#465,
 Rust 0.19.3) merged into issue-549-floorplan-intent at ad559bf, on top of the
 run-7 prep wave (11 commits). Gates re-run on the MERGED state, grid_router
