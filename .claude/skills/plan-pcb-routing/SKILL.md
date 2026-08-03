@@ -67,7 +67,9 @@ order:
    treat its output as the "rough / generated placement" row of the table
    above. If the seeder takes a `--seed`/`--variant` axis, that plus
    Step 0c-bis is how you offer the user OPTIONS instead of one take-it-or-
-   leave-it arrangement.
+   leave-it arrangement — but rank the SEEDS first (`compare_seeds.py`, next
+   rung): the portfolio explores around ONE seed and cannot rank across
+   them.
 2. **No seeder, but an intent exists — or the spec states placement facts**
    (connector edges, a fixed regulator cluster, a decap rule): author/verify
    the intent with the Step 0e machinery, then generate the seed from it:
@@ -86,8 +88,41 @@ order:
    rotation is kept when it fits, with a noted 90° lattice fallback when it
    does not; a part whose rotation is a DECISION (pin order) must be locked —
    the intent schema cannot express one, and an unlocked load-bearing
-   rotation was never protected from the quench either. Explore rotations
-   deliberately with the portfolio's `poses` strategy afterwards.
+   rotation was never protected from the quench either. Explore a LOCKED
+   part's rotation with Step 0a-bis arithmetic (below) — **the portfolio's
+   `poses` strategy never perturbs locked refs, so it cannot explore exactly
+   the rotations the lock protects** (measured, run 7: five poses iterations
+   across two slates, zero pose changes; the winning rot-180 came only from
+   the manual 0a-bis pass).
+
+   **When the seeder takes `--seed`, rank the seeds with ONE identical
+   full-board probe each BEFORE sinking 0a-bis/portfolio effort into any of
+   them** — crossings/hpwl cannot rank seeds, and the portfolio's shared-net
+   window never crosses seeds (measured, run 7: the crossings-best seed's
+   family probed 53 full-board failures while a crossings-middle seed probed
+   39, at a third of the search effort — the whole first portfolio line was
+   spent on the seed the wider instrument then displaced). That is one
+   command now:
+
+   ```bash
+   python3 -X utf8 compare_seeds.py board.kicad_pcb --intent floorplan.json \
+       --seeds 0 1 2 --out-dir wk/seedcmp --ignore-nets <the Step 5 plane nets>
+   ```
+
+   It runs place_seed per seed (a seed failing its own intent gate is
+   recorded, never ranked), probes every survivor with the SAME net patterns
+   and route args, and emits the ranked table + `seeds.json` +
+   `best_seed`.
+
+   **For every must_lock part under a HARD geometric clause, run Step 0a-bis
+   ON THE SEEDED OUTPUT before the portfolio** — the seeder keeps the pile's
+   input rotation, which is a generator default, not a decision. If a
+   rotation wins on inversions, apply it with `write_placed_output` and
+   RE-SEAT the decaps that served its supply pins (`seeder._try_place` at
+   the relocated pin, zone-constrained), then re-run the pin-exact gate:
+   rotating a part moves its pins, and a decap seated to the old pin
+   silently breaks the proximity clause (measured, run 7: 7.74 mm vs the
+   3 mm limit until the re-seat).
 3. **Neither** — no seeder, no intent, and the spec pins nothing (or there
    is no outline; the outline is spec-owned and is never invented): report
    that plainly, tell the user to place the parts in KiCad, and offer to
@@ -146,6 +181,13 @@ python3 -X utf8 place_optimize.py board.kicad_pcb placed.kicad_pcb \
     --lock 'J*' 'H*' 'U1' --max-displacement 2
 ```
 
+`(locked yes)` stamped in the board file (a seeder's `must_lock` output)
+satisfies this for every place_* tool — the file lock is honored everywhere
+`--lock` is. When you rely on it instead of `--lock`, say so once in the
+ledger, so an auditor can tell a carried lock from a dropped one (run 7's
+portfolio argvs carried no `--lock` and the audit had to reverse-engineer
+that the in-file stamps made it harmless).
+
 **3. Record them in the intent, so they are GRADED and not merely hoped for.**
 A lock you forgot to re-pass is silent. A `must_lock` the grader checks is not:
 
@@ -198,6 +240,19 @@ The mechanical tools: `converge.py poses --ref U3` ranks legal poses and its
 tie). A **series part in a matched chain** (source-termination resistor, AC
 cap) is a *free terminal*: its pose is the knob that sets where the chain's
 segment lands, so enumerate its poses too, not just the ICs'.
+
+**Read `poses` output with two caveats** (run-7 S4). The JSON now discloses
+its `knobs` (unset clearance/edge resolve from the BOARD's own floor) and a
+`dropped_in_place` census — a nonempty `dropped_in_place` on a thin or empty
+ranking means the knobs (or the lattice) vetoed rotations at the part's own
+spot, not that the part is stuck; check the resolved knobs against the
+board's floor before believing "no legal pose". And the candidate lattice
+does not necessarily contain the part's CURRENT coordinate, so check the
+four rotations AT THE PART'S OWN (x, y) with `candidate_valid` besides
+reading the ranked list — the cheapest and most common 0a-bis candidate,
+flip in place, can be absent from an otherwise-legal ranking (measured:
+U3 rot-180 legal in place on two seeds where the enumeration listed no
+rot-180 pose at all).
 
 Run this **second**, after Step 0a, and read the reasons. Nothing is locked
 automatically, deliberately: a wrong auto-lock silently freezes a part that
@@ -296,15 +351,34 @@ input — "keep what I have" stays a first-class outcome.
 
 **The acceptance rule generalizes K-way, and stays a conjunction.** The
 Step 0c rule (metrics no worse + intent passes + repo gates pass) applies
-**per candidate against the baseline row**; the portfolio pre-applies the
-first two as its hard gates, the repo-local gates are still yours to run on
-the candidate you pick. Among survivors:
+**per candidate against the baseline row**. What the portfolio enforces as
+HARD gates is legality + intent (rule 2); **rule 1 — metrics no worse than
+the baseline — is ANNOTATED, not gated**: violators carry `gates.rule1` /
+`rule1_violators` in portfolio.json and are excluded from the
+JSON_SUMMARY `best` pick (which falls back to the baseline), but they stay
+in the rankings. Verify rule 1 YOURSELF against the baseline row before
+adopting ANY index (measured, run 7: a slate's routed-best carried
+crossings 74 vs baseline 67 with hpwl also worse; only the manual
+conjunction check at adoption caught it). The repo-local gates are still
+yours to run on the candidate you pick. Among survivors:
 
 1. Prefer `ranking_routed` over `ranking_static` — the probe tier
    (`--route-top`, default: baseline + top 2) routes one SHARED affected-net
    set, so its `failures`/`iterations` compare like with like. Never adopt
    on static rank alone when the budget allows one probe route: crossings
    and hpwl are proxies, and the router is the judge that counts.
+   **`ranking_routed: []` with `--route-top >= 1` means the probe tier
+   FAILED, not that it was skipped** — read the `[probe]` log lines and fix
+   before adopting; empty-routed is never a license to adopt on static rank
+   (measured: caller-relative paths broke every probe rc=1 and the slate
+   silently degraded to static). And **the shared window compares like with
+   like WITHIN the slate; it is not whole-board routability** — it routes
+   only the affected nets (run 7: 13–16 of 45). Pruning on it is fine;
+   before ADOPTING on it, pass `--full-probe`: it routes the WHOLE board on
+   the baseline + the window winner and that verdict outranks the window
+   (measured: window-best 14 failures, same board full-probed 52 vs
+   baseline 41 — verdict reversed). `probe_kind` in the summary says which
+   instrument produced the ranking you are reading.
 2. Ties go to the LEAST displacement (the slate is diverse by construction —
    kept candidates sit ≥ `--diversity-mm` apart in pose distance — so a tie
    is a real tie, not two clones).
@@ -355,6 +429,15 @@ python3 -X utf8 check_floorplan.py board.kicad_pcb --intent /tmp/intent.json --h
 Exit **0** clean, **4** violations, **3** the board is not in a state it can
 grade. Each violation carries the measured number beside the limit it broke, so
 `--json` output is quotable evidence rather than an opinion.
+
+**The grading knobs resolve from the BOARD when unset** — the legality rules
+inflate part rects by the grading clearance, so a fixed default looser than
+the board's floor manufactures phantom oob/overlap findings (run-7 S1: a
+phantom 5th oob part, budget 4, exit 4, on a board that grades 0 errors at
+its real 0.15/0.3 floor). The JSON_SUMMARY discloses `clearance_used` /
+`edge_clearance_used` with their source — quote them with any violation you
+report, and pass explicit `--clearance`/`--board-edge-clearance` only when
+you mean to grade at a different floor than the board's own.
 
 Worth declaring, in rough order of value: `must_lock` for the parts the lock
 advisor flagged; `edge_connectors` for anything that is *meant* to overhang
