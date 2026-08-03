@@ -117,29 +117,59 @@ def main(argv=None):
         print(f"probe needs converge.scoped_route: {exc}", file=sys.stderr)
         return 2
 
-    print(f"OFF {json.dumps(off, sort_keys=True)}")
-    print(f"ON  {json.dumps(on, sort_keys=True)}")
-
-    def _get(d, *keys):
-        for k in keys:
-            if isinstance(d, dict) and k in d:
-                return d[k]
-        return None
-
-    fa, fb = _get(off, 'failed', 'unrouted'), _get(on, 'failed', 'unrouted')
-    if fa is None or fb is None:
-        print("\nINCONCLUSIVE: the probe returned no failure count to compare")
+    # scoped_route returns {'summary': {...}, 'argv': ..., 'stdout_tail': ...}.
+    # The counts are INSIDE 'summary'; reading the top level finds nothing and
+    # reports INCONCLUSIVE on a probe that ran perfectly well.
+    sa = (off or {}).get('summary') or {}
+    sb = (on or {}).get('summary') or {}
+    if not sa or not sb:
+        print(f"OFF {json.dumps(off, sort_keys=True)[:400]}")
+        print(f"ON  {json.dumps(on, sort_keys=True)[:400]}")
+        print("\nINCONCLUSIVE: the router returned no summary to compare")
         return 2
-    print(f"\nfailures on the claimed nets: {fa} -> {fb}")
-    if fb < fa:
-        print("BETTER -- the signal is predictive on the nets it named")
+
+    def _unconnected(s):
+        return int(s.get('pad_pairs_total', 0)) - int(
+            s.get('pad_pairs_connected', 0))
+
+    # A ladder, most-decisive first, matching how the repo ranks a board:
+    # connectivity before cost. Vias are the tie-break because on a 2-layer
+    # board every via is a plane cut -- the damage the corridor work is about.
+    LADDER = (
+        ('failed nets', lambda s: int(s.get('failed', 0) or 0)),
+        ('open nets', lambda s: len(s.get('open_single') or ())),
+        ('unconnected pad pairs', _unconnected),
+        ('vias', lambda s: int(s.get('total_vias', 0) or 0)),
+    )
+    print(f"{'metric':<24} {'OFF':>8} {'ON':>8}")
+    verdict = None
+    for label, fn in LADDER:
+        a, b = fn(sa), fn(sb)
+        mark = '' if a == b else ('  BETTER' if b < a else '  WORSE')
+        print(f"{label:<24} {a:>8} {b:>8}{mark}")
+        if verdict is None and a != b:
+            verdict = (label, a, b, b < a)
+
+    if verdict is None:
+        print("\nNO CHANGE on any rung -- the placement proxies moved and the "
+              "routing did not. That is a reason to doubt the term, not a "
+              "pass.")
         return 0
-    if fb > fa:
-        print("WORSE -- do not ship this change")
-        return 1
-    print("NO CHANGE -- the proxies moved and the routing did not. That is a "
-          "reason to doubt the term, not a pass.")
-    return 0
+    label, a, b, better = verdict
+    print(f"\n{'BETTER' if better else 'WORSE'} on the first rung that moved "
+          f"({label} {a} -> {b})")
+    # Materiality. The bottom rung moving by a couple of percent is not a
+    # result, and calling it one is how a rejected term gets rehabilitated by a
+    # rounding difference. Measured: the corridor A/B pair probes 51 -> 50 vias
+    # while the placement grade says its own signal got WORSE.
+    if label == LADDER[-1][0] and a and abs(b - a) / a < 0.05:
+        print(f"...but that is a {100.0 * abs(b - a) / a:.1f}% move on the "
+              f"LAST rung with connectivity identical. Not a result. Judge "
+              f"this change on the placement grade, and if that disagrees, "
+              f"believe the disagreement.")
+    if not better:
+        print("do not ship this change")
+    return 0 if better else 1
 
 
 if __name__ == '__main__':
