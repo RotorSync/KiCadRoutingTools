@@ -129,8 +129,11 @@ def try_terminal_restore(pcb_data: PCBData, config: GridRouteConfig,
                          net_id: int, working_obstacles=None,
                          net_obstacles_cache=None) -> Optional[str]:
     """At a rip victim's TERMINAL reroute failure: 'full' when the saved
-    copper is conflict-free (caller must then run restore_net, which pops
-    the registry and does all bookkeeping); 'stub' when only the escape
+    copper is conflict-free AND grades connected (caller must then run
+    restore_net, which pops the registry and does all bookkeeping);
+    'full_open' when it is conflict-free but the restored net would still
+    have disconnected pads -- the caller should restore it (more copper
+    than nothing) WITHOUT counting a success; 'stub' when only the escape
     subset could be re-inserted (done here, pcb_data-only); None when
     nothing was recoverable."""
     reg = getattr(pcb_data, '_rip_saved', None)
@@ -145,6 +148,43 @@ def try_terminal_restore(pcb_data: PCBData, config: GridRouteConfig,
     own = set(ripped_ids) | {net_id}
 
     if not _copper_conflicts(pcb_data, config, own, segments, vias):
+        # Conflict-free is necessary, not sufficient (run-7 E2): the saved
+        # payload can itself be partial -- recorded off a net that was already
+        # broken, or one whose copper never covered every pad -- and restoring
+        # it while claiming success ships an open net reported as routed.
+        # Grade the POST-RESTORE state (the net's copper still on the board
+        # plus the payload) with the authoritative union-find, per member net
+        # (a pair payload carries both ids in ripped_ids).
+        try:
+            from check_connected import (check_net_connectivity,
+                                         net_break_within_outlines)
+            for _nid in sorted(own):
+                pads = pcb_data.pads_by_net.get(_nid, [])
+                if len(pads) < 2:
+                    continue
+                segs_all = ([s for s in pcb_data.segments if s.net_id == _nid]
+                            + [s for s in segments if s.net_id == _nid])
+                vias_all = ([v for v in pcb_data.vias if v.net_id == _nid]
+                            + [v for v in vias if v.net_id == _nid])
+                zones = [z for z in getattr(pcb_data, 'zones', []) or []
+                         if z.net_id == _nid]
+                _r = check_net_connectivity(_nid, segs_all, vias_all, pads,
+                                            zones, tolerance=0.02,
+                                            pcb_data=pcb_data)
+                _broken, _dp = net_break_within_outlines(pcb_data, _r)
+                if _broken and _dp:
+                    return 'full_open'
+        except Exception as _e:
+            # Grading must never turn a restorable net into a strip, so a
+            # grader failure still restores the copper. But it silently
+            # reinstates the very over-claim this block exists to prevent
+            # ('full' == "restored AND connected"), so it is announced rather
+            # than swallowed: an unexplained 'full' is exactly the kind of
+            # false success that costs a debugging session downstream.
+            print(f"  WARNING: rip-restore connectivity grading failed for net "
+                  f"{net_id} ({type(_e).__name__}: {_e}); claiming 'full' "
+                  f"WITHOUT a connectivity check -- treat this net's restore "
+                  f"as unverified")
         return 'full'
 
     stub_segs, stub_vias = _stub_subset(pcb_data, net_id, segments, vias)
@@ -176,7 +216,8 @@ def try_terminal_restore(pcb_data: PCBData, config: GridRouteConfig,
         pcb_data.segments.extend(kept_s)
         pcb_data.vias.extend(kept_v)
     name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else str(net_id)
-    print(f"  RIP-RESTORE (#468): {name} kept its escape stub "
-          f"({len(kept_s)} seg(s), {len(kept_v)} via(s)) -- full restore "
-          f"would short against copper routed since the rip")
+    print(f"  RIP-RESTORE (#468): {name} remains UNROUTED -- kept only its "
+          f"escape stub ({len(kept_s)} seg(s), {len(kept_v)} via(s)) so the "
+          f"pads keep their landing sites; full restore would short against "
+          f"copper routed since the rip")
     return 'stub'
