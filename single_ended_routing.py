@@ -3025,6 +3025,55 @@ def route_multipoint_main(
             # that started elsewhere on the island (SDC0_CMD, busstop7).
             _island_cells[_cid] = {(p[0], p[1], p[2]): (p[3], p[4])
                                    for p in _pts}
+
+        # PROTOTYPE (worktree): POUR AS LAUNCH SURFACE (KICAD_POUR_LAUNCH=1).
+        # This net's zone fill joins its component's launch/target set as
+        # sampled cells, so straggler pads route INTO the nearest fill (a
+        # tap placed by the router, with rip-up) instead of detouring to
+        # some pad of the pour-connected component. Component attribution:
+        # the component owning the most fill-covered pads owns the pour.
+        import os as _os
+        if _os.environ.get('KICAD_POUR_LAUNCH', '') == '1' and _island_cells:
+            try:
+                from plane_fill_model import get_fill_models
+                import numpy as _np
+                _models = get_fill_models(pcb_data, net_id)
+                if _models:
+                    from collections import Counter as _Ctr
+                    _votes = _Ctr()
+                    for _idx, _info in enumerate(pad_info):
+                        _px, _py = _info[3], _info[4]
+                        for _lay, _ms in _models.items():
+                            if any((m.query_component(_px, _py) or 0) > 0
+                                   for m in _ms):
+                                _votes[pad_components.get(_idx, _idx)] += 1
+                    if _votes:
+                        _pcid = _votes.most_common(1)[0][0]
+                        _added = 0
+                        _cells = _island_cells.setdefault(_pcid, {})
+                        for _lay, _ms in _models.items():
+                            if _lay not in layer_names:
+                                continue
+                            _li = layer_names.index(_lay)
+                            for _m in _ms:
+                                _main = _m.largest_component()
+                                if not _main:
+                                    continue
+                                _jj, _ii = _np.nonzero(_m.labels == _main)
+                                _step = max(1, int(round(1.0 / _m.cell)))
+                                for _j, _i in zip(_jj[::7], _ii[::7]):
+                                    _fx = _m.x0 + float(_i) * _m.cell
+                                    _fy = _m.y0 + float(_j) * _m.cell
+                                    _g = coord.to_grid(_fx, _fy)
+                                    _k = (_g[0], _g[1], _li)
+                                    if _k not in _cells:
+                                        _cells[_k] = (_fx, _fy)
+                                        _added += 1
+                        if _added:
+                            print(f"  POUR-LAUNCH: +{_added} fill cell(s) as "
+                                  f"attach surface for component {_pcid}")
+            except Exception as _e:
+                print(f"  POUR-LAUNCH unavailable ({_e})")
     num_components = len(set(pad_components.values()))
     if num_components < len(pad_info):
         print(f"  Existing copper joins {len(pad_info)} terminals into "
