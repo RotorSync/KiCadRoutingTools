@@ -57,16 +57,19 @@ Validate routed boards against the *real* spec, with the right checker — most
 - **Routers can report false success.** A router's own "routed" tally may come from
   a local/heuristic proxy while pads stay disconnected; re-verify with the
   authoritative, zone/fill-aware `check_net_connectivity` before trusting it.
-- **Read the failure buckets by their real definitions (run-7 wave).**
-  `failed_single` = "no result at all"; `open_single` = a KEPT result whose pads
-  are still disconnected (non-multipoint only — multipoint shortfalls are the
-  pad deficit); a verdict is `len(failed_single) + len(open_single) +
-  pad-deficit` (converge.route_verdict / place_route_loop count exactly this).
-  `terminal_restores` names rip victims restored at terminal failure with their
-  outcome ('full' is the only success; 'full_open'/'stub' ship broken).
-  `stacked_copper` disclosures are same-net duplicate copper KiCad's DRC will
-  never flag — the writer dedups exact via stacks before writing, and what
-  survives is in the summary, not silent.
+- **Read the failure buckets by their real definitions.** `failed_single` = "no
+  result at all"; `open_single` = a KEPT result whose pads are still disconnected
+  (non-multipoint only — a multipoint shortfall is already the pad deficit). A
+  verdict is `len(failed_single) + len(open_single) + pad-deficit`, which is what
+  `place_route_loop` counts. Reading only `failed_single` + the deficit is how a
+  board shipping open copper reports `failures=0`: a NON-multipoint open net
+  contributes to neither term. `terminal_restores` names rip victims restored at
+  terminal failure with their outcome (`full` is the only success; `full_open`
+  and `stub` ship broken). `stacked_copper` discloses same-net duplicate copper
+  KiCad's DRC will never flag — the writer drops exact via re-emissions before
+  writing, and whatever still stacks (e.g. two same-net barrels at one point with
+  DIFFERENT drill/size, which is a fab question, not a bookkeeping one) is named
+  in the summary rather than shipped silently.
 - **Net classes are RESPECTED (PR392), and `--clearance` is a pure CEILING over ALL
   of them (#439).** The router honors KiCad's pairwise `max(classA, classB)` between
   nets of different classes — including copper routed earlier in the SAME call (in-run)
@@ -146,6 +149,35 @@ full chain with **no LLM**. To regression-test or A/B an engine change across th
 board corpus, use `tests/stress/ab_replay_grade.py` (whole-set replay + DRC/
 connectivity grading) or `tests/stress/redo_diff_stage.py` (diff-pair stages only).
 See `tests/stress/RUNBOOK.md` ("Replaying & A/B (no LLM)") for the recipes.
+
+**A new PLACEMENT objective term goes through `tests/test_placement_ab.py`
+before it ships on.** It runs the same board twice (flag off, flag on), writes
+both, and grades both with an *independent* check — `floorplan.grade(...,
+with_health=True)` re-derives its corridors from the FINAL poses, so a term that
+only improves the model it is computed from shows up as "improved nothing". Add
+a row to `ROWS`, do not add a file. Three rules the table encodes and that are
+easy to get wrong:
+
+- **Judge on ≥3 boards, paired and directional** (improve on ≥ N−1, regress on
+  none), never a per-board absolute. Neutral boards are printed, not dropped.
+- **Keep the row that disagrees.** A term that helps on one board of three is
+  not a term, and deleting the dissenting row is how that becomes folklore.
+- **A rejected term keeps its rows**, marked `rejected` with its measured
+  `expect`, so it stays a change detector instead of a permanent red mark that
+  someone eventually deletes along with the finding.
+
+Two traps measured the hard way: the first run of that harness reported the
+corridor term inert because it had been pointed at a **merged** net glob whose
+`cover` was 0.46 — a phantom corridor (declare sub-buses separately; `SDRAM_A*`
+scores 0.81, `SDRAM_*` 0.46). And grade intent errors **paired**, not against
+zero: both arms quench the board, so both walk parts out of the emitted intent's
+zones for reasons the flag did not cause.
+
+Every metric in that harness is still a **proxy**, so `tests/test_placement_probe.py`
+(opt-in, slower) actually routes. It scopes the route **causally, not by which
+parts moved** — the nets `net_affinity` flagged plus the declared corridor nets,
+fixed from the OFF board and identical on both. Scoping by moved parts is
+circular: a term that moves nothing would score a perfect null.
 
 ## Keep CLI and GUI routing in sync
 

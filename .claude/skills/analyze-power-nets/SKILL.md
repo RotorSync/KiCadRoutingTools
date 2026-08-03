@@ -171,6 +171,16 @@ When analyzing a board like kit-dev-coldfire-xilinx_5213:
 
 ## Important Notes
 
+0. **Widths are for TRACKS; most power nets should be POURS.** Human corpus
+   boards deliver nearly every rail with more than a few pads as a copper
+   pour, not a routed track (86–100% of 4/6/8-layer boards pour power) —
+   `/recommend-plane-mappings` and `/plan-pcb-routing` decide which rails get
+   poured on which layers. Still pass ALL power nets in `--power-nets` with
+   these widths: poured rails are excluded from signal routing anyway, and any
+   track segments the chain DOES draw for them (taps, necks, small rails not
+   worth a pour) then come out at the right ampacity width. Never turn this
+   skill's width table into a reason to route a many-pad rail as tracks
+   instead of pouring it.
 1. **Do not rely on component reference prefixes** for ICs, connectors, or transistors - always look up the actual part
 2. **Check net connections** - a connector on a power net is likely a power connector
 3. **Trace upstream** - if a component feeds into a known power net, its input is also a power net

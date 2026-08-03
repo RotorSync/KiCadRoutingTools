@@ -2120,12 +2120,25 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # authoritative sweep, so the tally, the sweep, the writer and the GUI
     # results all see the same deduped copper. Same-net only (the key carries
     # net_id): cross-net coincidence is a real short the DRC sweep owns.
-    _DEDUP_VIA_TOL_MM = 0.01
+    # The key is EXACT, not a proximity bucket: this pass exists to drop
+    # byte-identical re-emissions, and only those. Rounding to a coarse grid
+    # (the original 0.01mm bucket) is not a tolerance -- it is a bucket, so it
+    # both misses duplicates that straddle a bucket edge and can collapse two
+    # DISTINCT vias that happen to share one. Quantize instead to the 0.1um
+    # the writer itself emits (KiCad's 4-decimal mm text), which makes the key
+    # exact for anything that would round-trip through the file identically.
+    # drill/size are IN the key: two same-net barrels at one point with
+    # different geometry are not interchangeable, so dropping either would be
+    # a silent geometry change rather than a duplicate removal. Whatever this
+    # pass declines to merge is still censused into summary['stacked_copper'],
+    # which is the disclosure that actually matters (KiCad never flags a
+    # same-net stack).
     _survive_via_strip = {id(v) for v in stale_input_vias}
 
     def _via_dedup_key(v):
         return (v.net_id, tuple(v.layers or ()),
-                round(v.x / _DEDUP_VIA_TOL_MM), round(v.y / _DEDUP_VIA_TOL_MM))
+                round(v.drill, 4), round(v.size, 4),
+                round(v.x, 4), round(v.y, 4))
 
     _kept_via_keys = set()
     for _lst0 in _orig_via_by_net.values():
@@ -2575,6 +2588,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     print(f"  Total vias:    {total_vias}")
     print(f"  Total time:    {total_time:.2f}s")
     print(f"  Iterations:    {total_iterations:,}")
+    _frag = getattr(config, '_fragility_field', None)
+    if _frag is not None and _frag.refreshes:
+        print(f"  Fragility refresh (#466): {_frag.refreshes} windows, "
+              f"{_frag.refresh_s:.2f}s total")
 
     # Print detailed failure summary
     if failed_single:

@@ -59,6 +59,11 @@ Examples:
                    help="Polish displacement cap in mm (default: 3.0)")
     p.add_argument("--no-polish", action="store_true",
                    help="Skip the quench polish; emit the raw packed seed")
+    p.add_argument("--corridor-weight", type=float, default=0.0, metavar="W",
+                   help="Price the length each foreign airwire cuts through "
+                        "the intent's health.bus_corridors during the polish, "
+                        "at W per mm. 0 = off (default). See "
+                        "place_portfolio.py --corridor-weight")
     p.add_argument("--force", action="store_true",
                    help="Re-seed a board that already looks placed. The "
                         "existing placement is DISCARDED; to explore around "
@@ -158,7 +163,10 @@ Examples:
             crossing_penalty=30.0, length_weight=0.3, halo_base=0.5,
             halo_coef=0.15, halo_weight=2.0, edge_halo=2.0, edge_weight=2.0,
             ignore_nets=args.ignore_nets,
-            lock_refs=edge_refs or None, metrics_out=ratsnest)
+            lock_refs=edge_refs or None, metrics_out=ratsnest,
+            corridor_weight=args.corridor_weight,
+            corridor_specs=list((intent.health or {}).get('bus_corridors')
+                                or ()) or None)
         if placements:
             tmp = args.output_file + '.polish'
             write_placed_output(args.output_file, tmp, placements)

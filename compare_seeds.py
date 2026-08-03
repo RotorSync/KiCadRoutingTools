@@ -25,10 +25,28 @@ intent gate (nothing rankable); 2 for usage errors.
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+
+
+def _split_forwarded(tokens):
+    """Normalize --seed-args/--route-args values into an argv list.
+
+    argparse's nargs="+" refuses dash-prefixed values, so forwarded flags must
+    arrive as ONE quoted string via the = form
+    (--seed-args='--clearance 0.15 --max-displacement 2'); split those on
+    shell rules. Plain tokens pass through untouched.
+    """
+    out = []
+    for t in tokens or []:
+        if any(ch.isspace() for ch in t):
+            out.extend(shlex.split(t))
+        else:
+            out.append(t)
+    return out
 
 
 def build_parser():
@@ -40,7 +58,7 @@ Examples:
   python compare_seeds.py board.kicad_pcb --intent fp.json --seeds 0 1 2 \\
       --out-dir seedcmp --ignore-nets GND VCC
   python compare_seeds.py board.kicad_pcb --intent fp.json --seeds 0 5 \\
-      --out-dir seedcmp --route-args --clearance 0.15
+      --out-dir seedcmp --route-args='--clearance 0.15'
 """)
     p.add_argument("input_file", help="Unplaced board (outline + parts pile)")
     p.add_argument("--intent", required=True,
@@ -53,11 +71,13 @@ Examples:
                    help="Net patterns excluded from the probe (plane-routed "
                         "rails) and forwarded to place_seed's polish")
     p.add_argument("--seed-args", nargs="+", default=None,
-                   help="Extra args forwarded verbatim to every place_seed "
-                        "call (e.g. --clearance 0.15)")
+                   help="Extra args forwarded to every place_seed call. "
+                        "Dash-prefixed flags must ride in ONE quoted = value: "
+                        "--seed-args='--clearance 0.15 --max-displacement 2'")
     p.add_argument("--route-args", nargs="+", default=None,
                    help="Extra args for every probe route -- identical "
-                        "across seeds by construction")
+                        "across seeds by construction. Same quoting rule as "
+                        "--seed-args: --route-args='--clearance 0.15'")
     p.add_argument("--route-timeout", type=int, default=1800,
                    help="Per-probe timeout in seconds (default: 1800)")
     p.add_argument("--skip-gated", action="store_true", default=True,
@@ -98,6 +118,8 @@ def main():
     args.input_file = os.path.abspath(args.input_file)
     args.intent = os.path.abspath(args.intent)
     args.out_dir = os.path.abspath(args.out_dir)
+    args.seed_args = _split_forwarded(args.seed_args)
+    args.route_args = _split_forwarded(args.route_args)
     if len(set(args.seeds)) != len(args.seeds):
         parser.error("--seeds has duplicates")
     os.makedirs(args.out_dir, exist_ok=True)

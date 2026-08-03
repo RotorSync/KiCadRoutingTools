@@ -37,7 +37,7 @@ import os
 import random
 import shutil
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 
 DEFAULT_STRATEGIES: Tuple[str, ...] = ('jitter', 'poses', 'swap')
 # How many of the highest-pin-count free parts the `poses` strategy enumerates
@@ -556,7 +556,14 @@ def score_candidate(cand: Candidate, *, free: Sequence[str],
                            + '; '.join(v['message'] for v in errors[:3]))
         h = result.health or {}
         rows = h.get('bus_corridors') or []
-        intrusions = sum(len(r.get('intrusions') or ()) for r in rows)
+        # `intrusions` in the row is TRUNCATED for display (routability.health
+        # keeps the five deepest). Summing len() of it silently saturated the
+        # intrusion component at 5 per corridor, so a channel with twelve parts
+        # parked in it scored the same as one with five. Read the untruncated
+        # count; fall back to the list for health JSON written before it.
+        intrusions = sum(int(r['intrusions_total']) if 'intrusions_total' in r
+                         else len(r.get('intrusions') or ())
+                         for r in rows)
         health_penalty = (int(h.get('bus_foreign_crossings') or 0)
                           + intrusions + int(h.get('blocks_displaced') or 0))
         cand.health = {
@@ -569,7 +576,25 @@ def score_candidate(cand: Candidate, *, free: Sequence[str],
     cand.gates = {'passed': not reasons, 'reasons': reasons}
 
 
-def rank_key(cand: Candidate) -> Tuple:
+class RankKey(NamedTuple):
+    """The static order, as a NamedTuple so the slots have names.
+
+    It IS a tuple, so every ``rank_key(a) < rank_key(b)`` comparison and every
+    positional index keeps working; the names exist so a future reorder fails
+    loudly in tests that mean a specific term instead of passing by accident.
+    """
+    crossings_band: int
+    health_banded: int
+    inversions: int
+    plane_islands: int
+    hpwl: float
+    plane_neck: int
+    health_legacy: int
+    displacement: float
+    index: int
+
+
+def rank_key(cand: Candidate, q: int = 0) -> RankKey:
     """The static order: lexicographic over numbers the repo already trusts,
     most significant first, no new magic weights.
 
@@ -589,22 +614,67 @@ def rank_key(cand: Candidate) -> Tuple:
       health         advisory floorplan-fight signals (0 without an intent)
       displacement   least disturbance wins what is left
       index          stability
+
+    ``q`` is the crossings BAND width, and it is what lets the advisory health
+    signal ever speak. Measured: crossings is near-injective over a real slate,
+    so slot 1 decides and nothing below it runs -- health at slot 6 never
+    spoke, and health at slot 2 would speak just as rarely. Banding the first
+    slot is the lever, not reordering it.
+
+      q = 0 (default)  legacy order, bit-identical: health stays in its old
+                       slot 6 and crossings are compared raw.
+      q >= 1           crossings quantised to ceil(c/q) and health promoted to
+                       slot 2, so inside one band the term that says "this
+                       floorplan will FIGHT the router" decides. inversions,
+                       plane_* and hpwl are all the same family as crossings
+                       ("how hard is this to route"); health is the only one
+                       that is about the floorplan fighting back.
+
+    Quantisation, never a tolerance compare: ``abs(a-b) <= tol`` is not
+    transitive, and ``sorted()`` on a non-transitive key is undefined. Integer
+    ceil-div is a function into a totally ordered set, so it is well defined.
     """
     m = cand.metrics
-    return (m.get('crossings', 1 << 30),
-            m.get('inversions', 1 << 30),
-            m.get('plane_islands', 0),
-            round(m.get('hpwl', float('inf')), 3),
-            round(m.get('plane_neck', 0.0)),
-            m.get('health_penalty', 0),
-            round(cand.displacement_rms, 2),
-            cand.index)
+    crossings = m.get('crossings', 1 << 30)
+    health = m.get('health_penalty', 0)
+    banded = q >= 1
+    return RankKey(
+        crossings_band=-(-crossings // q) if banded else crossings,
+        health_banded=health if banded else 0,
+        inversions=m.get('inversions', 1 << 30),
+        plane_islands=m.get('plane_islands', 0),
+        hpwl=round(m.get('hpwl', float('inf')), 3),
+        plane_neck=round(m.get('plane_neck', 0.0)),
+        health_legacy=0 if banded else health,
+        displacement=round(cand.displacement_rms, 2),
+        index=cand.index)
 
 
-def rank_static(cands: Sequence[Candidate]) -> List[int]:
+def band_width(cands: Sequence[Candidate], band_frac: float,
+               baseline_crossings: Optional[int] = None) -> int:
+    """The band width q for `band_frac`, or 0 when banding is off/inert.
+
+    Two ways to end up at 0, both deliberate:
+      * band_frac <= 0 -- the default, legacy order.
+      * every ranked candidate scores health_penalty 0 (no --intent, or an
+        intent with no health block). Banding then coarsens the strongest
+        signal to buy nothing, so it is refused rather than applied blind.
+    """
+    if band_frac <= 0:
+        return 0
+    viable = [c for c in cands if c.viable]
+    if not any(c.metrics.get('health_penalty', 0) for c in viable):
+        return 0
+    if baseline_crossings is None:
+        baseline_crossings = min((c.metrics.get('crossings', 0)
+                                  for c in viable), default=0)
+    return max(1, round(band_frac * baseline_crossings))
+
+
+def rank_static(cands: Sequence[Candidate], q: int = 0) -> List[int]:
     """Indices of the gate-passing candidates, best first."""
     return [c.index for c in sorted((c for c in cands if c.viable),
-                                    key=rank_key)]
+                                    key=lambda c: rank_key(c, q))]
 
 
 def rule1_check(cand: Candidate, baseline: Candidate) -> List[str]:

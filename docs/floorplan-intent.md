@@ -205,7 +205,47 @@ could fix because the answer was re-floorplanning a quadrant.
 | **block displacement** | from geometry alone | the block's own pad centroid vs the centroid of everything it connects to. This is #459's "connectivity-centroid displacement" |
 | **bus crossings** | pre-route, but the corridor is a **model** | a straight rectangle between the bus's two pad clusters; its long sides are fed to the quench's own crossing kernel. A screening signal, not a verdict — real routes bend |
 | **convergence** | only with declared `classes` | which critical classes crowd one corridor. Placement has no net-class notion and "critical" is design intent, not a fact in the file, so **it is skipped rather than guessed** |
+| **net affinity** | from geometry alone | the per-PART inverse of block displacement: which single part carries a net its own block sits away from. See below |
+| **escape lanes** | from geometry alone | per fine-pitch part, per face: lanes that fit against nets that must leave. Needs no declaration. See below |
 | **blocked-cell share** | **not pre-route at all** | needs #409's blocker JSON, which only exists after a routing attempt. Reported as skipped, with that reason |
+
+### `net_affinity`: the member a block metric averages away
+
+Block displacement is an average over a block's members, so it is quiet when
+*one* member is the problem. Measured on a real board: a series resistor zoned
+into a far-edge block carried **85.7% of a critical bus net's routed length**,
+forcing ten drop-vias and eight reference-plane voids. The block it sat in was
+flagged as displaced; the resistor was not, and four runs went by before a
+human found it.
+
+Reported per (part, net), ranked, advisory. Two numbers reach `JSON_SUMMARY`:
+`health_net_affinity_offenders` (rows that dominate a net *and* pierce a
+declared corridor) and `health_net_affinity_worst_norm` (the largest
+recoverable length as a fraction of the board diagonal — mm never compares
+across boards).
+
+Four entry conditions, none of them a tuned constant, because a diagnostic
+that cries wolf is worse than none:
+
+- the same fanout / `ignore_net_ids` cut as block displacement, so a rail never
+  appears;
+- the part must sit in a block **that has a zone** — without a declared seat
+  there is nothing to blame for where it ended up;
+- **three or more owning parts.** A two-owner net has one MST edge, incident on
+  both parts, so `share` is 1.0 for each and dominance would mean nothing;
+- moving the part onto its own net's centroid must free at least 10% of what it
+  carries. A part in the MIDDLE of a net's span is incident on the edges either
+  side of it and also scores 1.0, while being exactly where it belongs — the
+  recoverable test is what separates a misplacement from a topological hub.
+
+Locked parts are reported **with a flag**, not suppressed: "this cannot move"
+is triage, not absence. `health.affinity_exempt_nets` (globs) silences a
+deliberately long net.
+
+`recoverable_mm` is a mechanical counterfactual, not a guess — the net's MST is
+rebuilt with the part translated onto the centroid of the pads it talks to,
+using the same override primitive the quench scores real moves with. It is an
+upper bound: nothing checks that the part may legally sit there.
 
 ### Power and ground are excluded, and that is what makes these signals work
 
@@ -224,6 +264,45 @@ GND owns **96** of ulx3s's parts and `+3V3` owns **45**, out of 329 nets whose
 
 Pass `health.ignore_net_ids` to name the plane nets explicitly (as `--ignore-nets`
 does elsewhere); `health.max_fanout` is the backstop, default 20.
+
+### `escape_lanes`: the difference between "the router failed" and "this was never routable"
+
+For each fine-pitch part, per face: lanes **supplied** (the face's usable span
+divided by one track plus one clearance, at the board's own floor) against lanes
+**demanded** (nets that must leave through it). A face in deficit is a *binding
+constraint* — net ordering only chooses which nets strand there, never how many.
+Runs have been spent on ordering experiments against a face this settles in
+seconds.
+
+Reported without any declaration, on every board: a face that cannot pass its
+own nets is a fact about geometry, and requiring an opt-in would mean it is only
+measured where someone already suspected it. `health_escape_deficit_parts` and
+`health_escape_worst_deficit` reach `JSON_SUMMARY`.
+
+Three things keep it honest:
+
+- **The lane pitch is read from the board**, not assumed. At 0.20 mm a face
+  passes and at 0.35 mm the same face is short, so a constant would manufacture
+  or hide a structural finding depending on the board it met.
+- **`blockers` names who ate the lanes.** A count says a face is short; the
+  blocker list says which neighbour to move. Read that field first — it is the
+  difference between a signal and an action.
+- **Interior pads count toward no face** and are reported separately. A boxed-in
+  pad does not escape sideways at any pitch; it needs a via. Rolling it into a
+  face's demand would blame the face for a fanout problem.
+
+Detection is by **pad pitch, not footprint name** (a house library carries no
+pitch in its name) and is deliberately wider than the fanout test: fanout asks
+"is this pad boxed in", which needs interior pads; escape asks "do this face's
+pads fit through the channel beside it", which a fine-pitch *perimeter* part
+fails with no interior pad at all. Through-hole parts are excluded — a THT pin
+is reachable on every copper layer, so there is no escape to be short of.
+
+A worked pairing from ulx3s: the ledger reports `U9 west: supply 6 < demand 14`
+with `15.35mm of that face is taken by SD1`, and `net_affinity` independently
+reports SD1 carrying 57–63% of `SD_D0`, `SD_D1` and `SD_CMD`. Two signals
+computed from different quantities naming the same part is the case worth
+acting on.
 
 ## What `--emit-intent` does and does not claim
 

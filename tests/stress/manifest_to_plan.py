@@ -49,6 +49,14 @@ REFUSED_TOOLS = {
     'place_route_loop.py': (
         'routes and moves footprints in a loop; the plan format has no placement '
         'step. Run it on the CLI'),
+    'place_seed.py': (
+        'seeds a placement from a floorplan intent; the plan format has no '
+        'placement step. Run it BEFORE the plan and start the plan from the '
+        'seeded board'),
+    'place_portfolio.py': (
+        'generates a SLATE of placements to choose between; the plan format has '
+        'no placement step, and picking one is a decision, not a replayable '
+        'step. Run it on the CLI and start the plan from the adopted board'),
     'render_placement.py': (
         'renders a PNG; it changes no board and has nothing to replay'),
 }

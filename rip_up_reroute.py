@@ -129,6 +129,10 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
         partial = {'new_segments': _live, 'new_vias': _live_vias,
                    'partial_leg_rip': True, 'net_id': net_id}
         remove_route_from_pcb_data(pcb_data, partial)
+        # #466: freed copper may have re-widened a pour strait -- refresh the
+        # dynamic fragility field's window (no-op unless armed).
+        from plane_fragility import fragility_on_copper_change
+        fragility_on_copper_change(config, pcb_data, _live, _live_vias)
         # Keep the owning result in the write-list but shrink it to what remains,
         # or the removed copper ships anyway (#369 A2 / #508 write-list class).
         for _key, _removed in (('new_segments', _keep_ids),
@@ -189,6 +193,11 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
 
     # Remove from pcb_data
     remove_route_from_pcb_data(pcb_data, saved_result)
+    # #466: refresh the dynamic fragility field over the freed copper
+    from plane_fragility import fragility_on_copper_change
+    fragility_on_copper_change(config, pcb_data,
+                               saved_result.get('new_segments'),
+                               saved_result.get('new_vias'))
 
     # Remove from results list if present
     if was_in_results:
