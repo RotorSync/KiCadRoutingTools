@@ -423,6 +423,57 @@ def generate_underpad_escape(footprint: Footprint,
     pad = max(exit_margin + 0.5, 1.0)
     bounds = (grid.min_x - pad, grid.min_y - pad, grid.max_x + pad, grid.max_y + pad)
     occ = _Occ(bounds, res, layers)
+
+    # #563 PROTOTYPE (worktree): pour-preserving escape costs.
+    # KICAD_FANOUT_POUR_PRESERVE=<mm-equiv> (0/unset = off). For every zone
+    # whose layer is an escape layer, rasterize the PRE-escape fill inside
+    # this occupancy window and charge escapes a fragility-style ramp: full
+    # cost at fill boundaries/straits, zero deeper than ~1mm into the fill.
+    # Under the BGA the flood is all straits, so escapes soft-prefer other
+    # layers there and the flood survives for pour-direct; mid-flood
+    # crossings outside stay ~free.
+    occ.pour_soft = None
+    try:
+        _pp = float(os.environ.get('KICAD_FANOUT_POUR_PRESERVE', '0') or 0)
+    except ValueError:
+        _pp = 0.0
+    if _pp > 0 and getattr(pcb_data, 'zones', None):
+        try:
+            from plane_fill_model import get_zone_model
+            from plane_fragility import _erode_depth
+            import numpy as _np
+            _ramp_mm = 1.0
+            _depth = max(1, int(round(_ramp_mm / occ.res)))
+            _fields = {}
+            for _z in pcb_data.zones:
+                if _z.layer not in layers:
+                    continue
+                _li = layers.index(_z.layer)
+                _m = get_zone_model(pcb_data, _z)
+                if _m is None:
+                    continue
+                # sample the model over THIS occupancy window
+                _mask = _np.zeros((occ.nx, occ.ny), dtype=bool)
+                for _a in range(occ.nx):
+                    _x = bounds[0] + (_a + 0.5) * occ.res
+                    for _b in range(occ.ny):
+                        _y = bounds[1] + (_b + 0.5) * occ.res
+                        _mask[_a, _b] = (_m.query_component(_x, _y) or 0) > 0
+                if not _mask.any():
+                    continue
+                _dist = _erode_depth(_mask, _depth)
+                _fld = _fields.setdefault(_li, _np.zeros((occ.nx, occ.ny)))
+                _frac = _np.where(_mask,
+                                  1.0 - (_np.maximum(_dist, 1) - 1) / _depth,
+                                  0.0)
+                _np.maximum(_fld, _pp * _frac, out=_fld)
+            if _fields:
+                occ.pour_soft = {li: f.ravel().tolist() for li, f in _fields.items()}
+                print(f"  Pour-preserve (#563): fragility field on "
+                      f"{len(_fields)} escape layer(s) at {_pp}mm-equiv")
+        except Exception as _e:
+            print(f"  Pour-preserve unavailable ({_e})")
+
     # The BGA's own layer is the "top" for escape purposes - its SMD pads block
     # only this layer, the via-less edge escape runs on it, and inner routing
     # goes UNDER the pads on the other layers. For a bottom-side BGA this is
@@ -891,6 +942,7 @@ def generate_underpad_escape(footprint: Footprint,
         _soft_foreign = occ.soft_foreign
         _steps = _STEPS
         _home = home
+        _pour_soft = getattr(occ, 'pour_soft', None)
         _vcache = {}
         while pq:
             _, cur = _heappop(pq)
@@ -929,6 +981,10 @@ def generate_underpad_escape(footprint: Footprint,
                     if _has_soft and (nx, ny) not in _home and \
                             _soft_foreign(L, nx, ny, net_id):
                         step += 4.0
+                    if _pour_soft is not None:
+                        _ps = _pour_soft.get(L)
+                        if _ps is not None:
+                            step += _ps[nx * _ony + ny]
                     nxt = (nx, ny, L)
                     ng = cg + step
                     if ng < _g_get(nxt, 1e18):
