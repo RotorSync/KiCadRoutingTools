@@ -1469,6 +1469,23 @@ def _generate_multinet_layer_zones(
                     seeds.append((px, py))
                     seen.add(k)
 
+    # PROTOTYPE (worktree): deferred under-BGA pads (KICAD_PLANE_DEFER_BGA)
+    # participate as point seeds so each rail's cell reserves its ball
+    # territory before the fanout drops the actual vias.
+    _dseeds = getattr(pcb_data, '_deferred_bga_seeds', None) \
+        if 'pcb_data' in dir() else None
+    if _dseeds:
+        for _nid, _pts in _dseeds.items():
+            _lst = augmented_vias_by_net.setdefault(_nid, [])
+            _seen = {(round(x, 3), round(y, 3)) for x, y in _lst}
+            for _x, _y in _pts:
+                _k = (round(_x, 3), round(_y, 3))
+                if _k not in _seen:
+                    _lst.append((_x, _y))
+                    _seen.add(_k)
+        print(f"  Added deferred-BGA point seeds for "
+              f"{len(_dseeds)} net(s) to the Voronoi")
+
     # Compute final Voronoi zones
     total_seeds = sum(len(vias) for vias in augmented_vias_by_net.values())
     print(f"  Computing final Voronoi zones with {total_seeds} seed points")
@@ -3332,9 +3349,19 @@ def create_plane(
                       if pd['type'] == 'via_needed' and _in_court(pd)]
             if _defer:
                 target_pads = [pd for pd in target_pads if pd not in _defer]
+                # Virtual Voronoi seeds: the pour must still reserve each
+                # deferred ball's territory on split layers even though its
+                # via arrives later (fanout stage) -- record positions for
+                # the zone-boundary seeding below (#114-style point seeds).
+                _dseeds = getattr(pcb_data, '_deferred_bga_seeds', None)
+                if _dseeds is None:
+                    _dseeds = pcb_data._deferred_bga_seeds = {}
+                _dseeds.setdefault(net_id, []).extend(
+                    (pd['pad'].global_x, pd['pad'].global_y) for pd in _defer)
                 print(f"  Deferred {len(_defer)} under-BGA pad(s) on "
                       f"'{net_name}' to the fanout stage "
-                      f"(KICAD_PLANE_DEFER_BGA)")
+                      f"(KICAD_PLANE_DEFER_BGA; positions kept as Voronoi "
+                      f"seeds)")
 
         pads_through_hole = sum(1 for p in target_pads if p['type'] == 'through_hole')
         pads_direct = sum(1 for p in target_pads if p['type'] == 'direct')
