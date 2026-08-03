@@ -89,6 +89,24 @@ Examples:
                         "order). Crossings is near-injective over a real "
                         "slate, so without a band the first slot decides and "
                         "health never speaks. Try 0.02")
+    p.add_argument("--corridor-weight", type=float, default=0.0,
+                   metavar="W",
+                   help="EXPERIMENTAL and NOT ADOPTED -- read this before "
+                        "using it. Prices the LENGTH each foreign airwire cuts "
+                        "through a corridor declared in the intent's "
+                        "health.bus_corridors, at W per mm. 0 = off (default), "
+                        "and at 0 no corridor is built at all. The A/B "
+                        "(tests/test_placement_ab.py) measured it on three "
+                        "boards: it does move parts, but the re-derived "
+                        "bus_foreign_crossings improved on only ONE of the "
+                        "three and hpwl got worse on ulx3s. The optimizer "
+                        "minimises against corridors frozen at construction "
+                        "while the grader re-derives them from the final poses "
+                        "-- and since a corridor is defined by the bus's own "
+                        "pads, moving parts moves the corridor, so the gain "
+                        "does not transfer. Read the cut as a DIAGNOSTIC "
+                        "instead: 'check_floorplan --intent --health' reports "
+                        "cut_mm and cover per corridor")
     p.add_argument("--intent", default=None, metavar="JSON",
                    help="Floorplan intent: hard gate (error-free grade "
                         "required) plus the health signals in the rank key")
@@ -180,7 +198,16 @@ Examples:
     return p
 
 
-def _quench_kw(args):
+def _quench_kw(args, intent=None):
+    corridor_specs = None
+    if args.corridor_weight > 0.0 and intent is not None:
+        # The SAME `health.bus_corridors` the grader reads, so the optimizer
+        # cannot be priced against lanes the check then re-derives differently.
+        corridor_specs = list(
+            (getattr(intent, 'health', None) or {}).get('bus_corridors') or ())
+        if not corridor_specs:
+            print("--corridor-weight given but the intent declares no "
+                  "health.bus_corridors: the term is inert", file=sys.stderr)
     return dict(
         max_displacement=args.max_displacement, step=args.step,
         grid_step=args.grid_step, clearance=args.clearance,
@@ -193,7 +220,8 @@ def _quench_kw(args):
         max_passes=args.max_passes, ignore_nets=args.ignore_nets,
         lock_refs=args.lock, align_weight=args.align_weight,
         align_radius=args.align_radius, align_span=args.align_span,
-        orient_weight=args.orient_weight)
+        orient_weight=args.orient_weight,
+        corridor_weight=args.corridor_weight, corridor_specs=corridor_specs)
 
 
 def _replay_argv(args, index):
@@ -354,7 +382,7 @@ def main():
         n_candidates=args.candidates, strategies=args.strategy,
         radius=args.radius, lock_globs=args.lock,
         ignore_nets=args.ignore_nets, swap_blocks=swap_blocks,
-        quench_kw=_quench_kw(args), only=args.only)
+        quench_kw=_quench_kw(args, intent), only=args.only)
     baseline = result['baseline']
     cands = result['candidates']
     free = result['free']
@@ -608,6 +636,7 @@ def main():
            'diversity_mm': args.diversity_mm,
            'rank_crossing_band': args.rank_crossing_band,
            'rank_band_q': band_q,
+           'corridor_weight': args.corridor_weight,
            'baseline': baseline.to_dict(),
            'candidates': [c.to_dict() for c in cands],
            'ranking_static': ranking_static,

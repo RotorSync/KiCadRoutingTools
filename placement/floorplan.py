@@ -1224,11 +1224,49 @@ def format_text(r: GradeResult) -> str:
                 lines.append(f"      {d['block']}  {d['distance_mm']:.2f}mm  "
                              f"({d['members']} parts, {d['foreign_pads']} "
                              f"foreign pads on {d['nets']} nets)")
+        esc = r.health.get('escape_lanes') or []
+        short = [p for p in esc if p.get('worst_deficit')]
+        if short:
+            lines.append(
+                f"    escape lanes ({r.health.get('escape_deficit_parts')} of "
+                f"{r.health.get('escape_parts')} fine-pitch part(s) have a "
+                f"face that cannot pass its own nets):")
+            for p in short[:3]:
+                w = next((f for f in p['faces']
+                          if f['face'] == p['worst_face']), None)
+                if not w:
+                    continue
+                lines.append(
+                    f"      {p['ref']} {w['face']}: supply {w['supply']} < "
+                    f"demand {w['demand']} (short {w['deficit']} lane(s) at "
+                    f"{w['lane_pitch_mm']}mm pitch)")
+                if w['blockers']:
+                    lines.append(
+                        f"        {w['blocked_mm']}mm of that face is taken by "
+                        f"{', '.join(w['blockers'][:3])} -- move those, not "
+                        f"the nets: ordering only chooses WHICH nets strand")
+                if p.get('interior_pads'):
+                    lines.append(
+                        f"        {p['interior_pads']} interior pad(s) escape "
+                        f"through no face at all -- a fanout question")
+
+        phantom = set(r.health.get('bus_corridors_phantom') or ())
         for row in (r.health.get('bus_corridors') or []):
+            # cut_mm before the count: a shallow diagonal does several times
+            # the damage of a square crossing and both score 1.
             lines.append(f"    corridor {row['name']}: "
+                         f"{row.get('cut_mm', 0.0)}mm cut by "
                          f"{row['foreign_crossings']} foreign crossing(s)"
                          + (f", worst {', '.join(row['worst_nets'][:3])}"
                             if row['worst_nets'] else ''))
+            if row['name'] in phantom:
+                lines.append(
+                    f"      NOT A CORRIDOR: only {row.get('cover', 0.0):.0%} "
+                    f"of this bus's pads sit at its ends, so the rectangle is "
+                    f"an average of clusters that are not there. Every number "
+                    f"above is measuring a fiction. Declare the sub-buses "
+                    f"separately (ADDR and DATA leave a part on different "
+                    f"faces), or drop the corridor.")
         for row in (r.health.get('convergence') or []):
             lines.append(f"    convergence in {row['corridor']}: "
                          f"{', '.join(row['classes'])}")
@@ -1311,7 +1349,12 @@ def summary(r: GradeResult) -> Dict:
                              ('net_affinity_offenders',
                               'health_net_affinity_offenders'),
                              ('net_affinity_worst_norm',
-                              'health_net_affinity_worst_norm')):
+                              'health_net_affinity_worst_norm'),
+                             ('bus_cut_mm', 'health_bus_cut_mm'),
+                             ('escape_deficit_parts',
+                              'health_escape_deficit_parts'),
+                             ('escape_worst_deficit',
+                              'health_escape_worst_deficit')):
             if key in r.health:
                 out[out_key] = r.health[key]
         out['health_signals_skipped'] = len(r.health.get('skipped') or {})

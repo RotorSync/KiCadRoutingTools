@@ -289,6 +289,94 @@ def foreign_crossings(state, corridor: Corridor,
                                              key=lambda kv: (-kv[1], kv[0]))]
 
 
+# Below this share of a bus's pads sitting near either endpoint, the corridor
+# is a phantom: `_cluster_ends` averaged clusters that are not there. Measured
+# on the corpus -- a real point-to-point bus scores 0.8-1.0 (ulx3s SDRAM_A* is
+# 1.0), while N repeated LOCAL sub-blocks under one name score ~0.0 and still
+# produce a confident-looking rectangle (splitflap OUT_* : 24 nets, cover 0.0).
+CORRIDOR_MIN_COVER = 0.5
+
+
+def corridor_cover(state, corridor: Corridor) -> float:
+    """Fraction of the bus's own pads that sit at one of the corridor's ends.
+
+    The honesty check on a declared corridor. `corridors_from_intent` will build
+    a rectangle for ANY set of nets, including one whose "bus" is really six
+    identical motor channels scattered over the board -- their endpoint
+    centroids average to the middle of nothing, and every signal computed
+    against that rectangle is measuring a fiction. This is what lets a consumer
+    say so instead of grading it.
+
+    "At an end" means within a quarter of the corridor's length of either
+    endpoint, which is a shape test rather than a tuned distance: it scales with
+    the corridor and is unit-free.
+    """
+    n = corridor.length_mm
+    if n < 1e-9:
+        return 0.0
+    tol = n / 4.0
+    near = total = 0
+    for nid in corridor.net_ids:
+        for ref in state.net_refs.get(nid, ()):
+            if ref not in state.parts:
+                continue
+            for gx, gy, pn in state.parts[ref].pad_globals():
+                if pn != nid:
+                    continue
+                total += 1
+                if (math.hypot(gx - corridor.a[0], gy - corridor.a[1]) <= tol
+                        or math.hypot(gx - corridor.b[0],
+                                      gy - corridor.b[1]) <= tol):
+                    near += 1
+    return near / total if total else 0.0
+
+
+def corridor_cut_mm(state, corridor: Corridor,
+                    ignore_net_ids: Optional[Sequence[int]] = None,
+                    max_fanout: int = DISPLACEMENT_MAX_FANOUT) -> float:
+    """Total LENGTH foreign airwires spend inside this corridor.
+
+    The same event `foreign_crossings` counts, measured instead of tallied. It
+    is the better number of the two to READ, for a reason the count cannot
+    express: a wire crossing a width-w lane at angle theta runs w/sin(theta)
+    under the bus, so a shallow diagonal does several times the damage of a
+    square crossing while both score 1. On two layers that length is the
+    geometric lower bound on reference-plane copper the crossing removes, which
+    is the quantity `check_impedance.py`'s void-run counter later grades.
+
+    It is NOT a useful thing to minimise by nudging parts, and that is measured,
+    not assumed -- see `docs/placement-optimization.md`. A wire that fully
+    traverses the lane pays w/sin(theta) wherever along the lane it crosses, so
+    the chord is POSITION-INVARIANT and a small move slides the crossing point
+    without changing the toll.
+    """
+    from .quench import _CorridorBox, _aw_array, _corridor_cut_np
+    import numpy as np
+    n = corridor.length_mm
+    if n < 1e-9 or corridor.width_mm <= 0.0:
+        return 0.0
+    size = max(max(state.net_airwires, default=-1),
+               max(corridor.net_ids, default=-1),
+               *(ignore_net_ids or (-1,))) + 1
+    skip = np.zeros(max(size, 1), dtype=bool)
+    for nid in (ignore_net_ids or ()):
+        if 0 <= nid < len(skip):
+            skip[nid] = True
+    if max_fanout:
+        for nid, refs in state.net_refs.items():
+            if len(refs) > max_fanout and 0 <= nid < len(skip):
+                skip[nid] = True
+    for nid in corridor.net_ids:
+        if 0 <= nid < len(skip):
+            skip[nid] = True
+    box = _CorridorBox(ax=corridor.a[0], ay=corridor.a[1],
+                       ux=(corridor.b[0] - corridor.a[0]) / n,
+                       uy=(corridor.b[1] - corridor.a[1]) / n,
+                       length=n, half_w=corridor.width_mm / 2.0, skip=skip)
+    aw = [a for lst in state.net_airwires.values() for a in lst]
+    return _corridor_cut_np(_aw_array(aw), [box])
+
+
 @dataclass(frozen=True)
 class PartAffinity:
     """One part that carries most of a net its own block sits away from."""
@@ -614,6 +702,37 @@ def health(state, pcb_data, blocks: Dict[str, Sequence[str]],
         out['skipped']['block_displacement'] = (
             'no blocks resolved; derive them with --group-by')
 
+    # Escape lanes. Reported for every fine-pitch part the board HAS, with no
+    # declaration needed -- a face in deficit is a fact about geometry, not
+    # about intent, and requiring a declaration would mean it is only ever
+    # measured on boards where someone already suspected it.
+    try:
+        from . import escape as _escape
+        led = _escape.escape_ledger(
+            pcb_data, pcb_file=getattr(pcb_data, 'source_path', None),
+            ignore_net_ids=spec.get('ignore_net_ids'))
+    except Exception as exc:                      # noqa: BLE001
+        out['skipped']['escape_lanes'] = f'not computed: {exc}'
+        led = []
+    if led:
+        short = [p for p in led if p.worst]
+        out['escape_lanes'] = [p.to_dict() for p in led[:10]]
+        out['escape_parts'] = len(led)
+        out['escape_deficit_parts'] = len(short)
+        out['escape_worst_deficit'] = (led[0].worst.deficit
+                                       if led[0].worst else 0)
+        # WHO to move, deduped across parts in face order. This is the field
+        # that turns "a face is short" into an action.
+        blockers: List[str] = []
+        for p in short:
+            for f in p.faces:
+                for b in f.blockers:
+                    if f.deficit and b not in blockers:
+                        blockers.append(b)
+        out['escape_blockers'] = blockers[:10]
+    elif 'escape_lanes' not in out['skipped']:
+        out['skipped']['escape_lanes'] = 'no fine-pitch parts on this board'
+
     specs = spec.get('bus_corridors') or []
     corridors_for_affinity: List[Corridor] = []
     if specs:
@@ -631,6 +750,8 @@ def health(state, pcb_data, blocks: Dict[str, Sequence[str]],
             # with twelve parts in it ranked level with one that had five.
             intr = corridor_intrusions(state, c)
             rows.append({**c.to_dict(), 'foreign_crossings': n,
+                         'cut_mm': round(corridor_cut_mm(state, c, ign, fan), 3),
+                         'cover': round(corridor_cover(state, c), 3),
                          'worst_nets': [pcb_data.nets[i].name
                                         for i in guilty[:5]
                                         if i in pcb_data.nets],
@@ -638,6 +759,13 @@ def health(state, pcb_data, blocks: Dict[str, Sequence[str]],
                          'intrusions_total': len(intr)})
         out['bus_corridors'] = rows
         out['bus_foreign_crossings'] = sum(r['foreign_crossings'] for r in rows)
+        out['bus_cut_mm'] = round(sum(r['cut_mm'] for r in rows), 3)
+        # A corridor whose own pads do not sit at its ends is a FICTION -- the
+        # endpoints are an average of clusters that are not there. Surfaced so a
+        # declared corridor can be disbelieved, rather than silently graded.
+        phantom = [r['name'] for r in rows if r['cover'] < CORRIDOR_MIN_COVER]
+        if phantom:
+            out['bus_corridors_phantom'] = phantom
         classes = spec.get('classes') or {}
         if classes:
             from net_queries import matches_net_filter

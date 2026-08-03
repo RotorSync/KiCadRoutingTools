@@ -175,6 +175,95 @@ Two additions the literature argues for:
    with FreeRouting; we have a faster router in-house, so "fraction of pin
    pairs routed" becomes a measurable, optimizable number.
 
+### Corridor cut length: a good measurement and a bad objective
+
+*(A negative result, kept because the reasoning that produced it was
+plausible and wrong, and the next person will have the same idea.)*
+
+When the intent declares `health.bus_corridors`, we can measure the **length**
+each foreign airwire cuts through a bus's lane instead of counting that it
+does. The argument for putting that in the objective went: `foreign_crossings`
+is a count, a count is piecewise constant in pose, its gradient is zero almost
+everywhere, so a greedy descent sees a cliff instead of a slope; the chord
+length is piecewise linear, so every millimetre of a move gets priced.
+
+The first half is right. The second half is right about the *shape* of the
+function and wrong about what it buys. Three measurements, in the order they
+were made, because the order is the lesson:
+
+**1. The chord of a fully-traversing wire is position-invariant.** It is
+`w/sin θ` wherever along the lane the wire crosses. A nudge slides the crossing
+point and changes the toll not at all; the term responds only to *angle*, and a
+3 mm move barely turns a 40 mm airwire. Pinned in
+`tests/test_corridor_diagnostics.py`.
+
+**2. The parts that block a corridor are not the parts whose airwires cut it.**
+Ten parts intrude into ulx3s's SDRAM corridor; with the term at weight 20, zero
+of them move differently. They are decaps, and their nets are power rails —
+which the fanout cut correctly drops. Body obstruction and airwire crossing are
+two different measurements, and only `corridor_intrusions` was ever measuring
+the first.
+
+**3. It does change the placement — and the gain does not survive.** The first
+A/B reported the term completely inert, and *that run was wrong*: it had been
+pointed at `sdram_*`, a merged glob whose `cover` is 0.46, i.e. a phantom
+corridor. Re-run against `SDRAM_A*` and `SDRAM_D*` declared separately, the
+term moves parts on every board — and the independent grade says:
+
+| board | crossings | hpwl | `bus_foreign_crossings` (re-derived) |
+|---|---|---|---|
+| ulx3s | 2417 → 2390 | 7512 → **7634** | 62 → **63** |
+| orangecrab_ext_pll | 1051 → 1041 | 2120 → 2116 | 32 → **33** |
+| kit-dev-coldfire | 1377 → 1371 | 7413 → 7219 | 148 → 143 |
+
+One board of three improved the number the term exists to improve. **The
+mechanism is the frozen model:** the optimizer minimises the cut against
+corridors frozen at construction, but the corridor is *defined by the pads of
+the bus*, so when parts move the corridor moves with them and the grader's
+re-derived rectangle is not the one that was minimised. Freezing is still
+required — an unfrozen corridor makes the objective non-stationary — so the
+term is caught between two necessities.
+
+Worth keeping from run 3: **a term that helps on one board of three is not a
+term.** The `corridor-coldfire` row stays in the A/B table precisely because it
+disagrees with the other two; dropping the disagreeing row is how a one-in-three
+result becomes folklore about a term that "works".
+
+So the cut ships as a **diagnostic**, not as an objective term:
+
+- `check_floorplan --intent --health` reports `cut_mm` per corridor. It is
+  strictly the better of the two numbers to *read* — it prices obliqueness, and
+  on two layers it is the geometric lower bound on reference-plane copper the
+  crossing removes, which is exactly what `check_impedance.py`'s void-run
+  counter grades later.
+- Alongside it, `cover`: the fraction of a bus's own pads that actually sit at
+  the corridor's endpoints. `corridors_from_intent` will build a confident
+  rectangle for any set of nets, including six identical motor channels
+  scattered over a board whose endpoint centroids average to the middle of
+  nothing (splitflap `OUT_*`: 24 nets, cover 0.0). Below `CORRIDOR_MIN_COVER`
+  the corridor is reported as `bus_corridors_phantom` so it can be disbelieved
+  rather than silently graded. Related trap from the same survey: **do not
+  merge sub-buses.** `SDRAM_*` scores cover 0.62 where `SDRAM_A*` and
+  `SDRAM_D*` separately score 1.0, because address and data leave the part on
+  different faces and the average lands between them.
+- `--corridor-weight` remains, default 0.0, flagged experimental with this
+  result in its `--help`. It is kept rather than deleted because the kernel is
+  exact and tested, and because a future move set that can relocate a part
+  *across* a bus is exactly the regime where the term would bite.
+
+Two design points that were right and are worth keeping if anyone revisits it:
+
+- **The corridors are frozen at `QuenchState.__init__` and never rebuilt.**
+  `_cluster_ends` derives endpoints from live pad positions, so a corridor that
+  followed its parts would make the cost of a pose depend on *when* it was
+  evaluated — an accepted gain would not match the recomputed total and the
+  descent could cycle. Freezing makes that impossible rather than avoided by
+  discipline.
+- **The check must not be the model.** `check_floorplan --intent --health`
+  re-derives corridors from the *final* poses, so it cannot be gamed by the
+  frozen rectangles the optimizer minimised against. That independence is what
+  let the A/B return "improved nothing" instead of a flattering self-report.
+
 ### Metric cheat-sheet
 
 | Metric | Cost per move | Routability signal at PCB scale | Verdict |
@@ -517,13 +606,13 @@ is implemented, the rest are documented targets.
    after calibration on boards with a measured probe order (run 7's seed
    archive is the first known-answer case).
 
-2. **Channel occupancy as a nonlocality proxy.** `check_channel_utilisation`
-   and the intent's `bus_corridors` already measure what crosses a declared
-   channel; neither feeds the candidate score. A candidate that fills a
-   corridor past capacity fails ROUTING nonlocally — the failure surfaces on
-   whatever net routes last, far from the part that caused it (run 7's
-   west-fan capacity finding is exactly this shape). Wire corridor
-   occupancy into `score_candidate` next to `health_penalty`.
+2. **Channel occupancy as a nonlocality proxy.** *(partly done —
+   `--corridor-weight`, below. What remains is occupancy against a capacity,
+   which needs the escape-lane supply model; the cut term prices damage, not
+   fullness.)* A candidate that fills a corridor past capacity fails ROUTING
+   nonlocally — the failure surfaces on whatever net routes last, far from the
+   part that caused it (run 7's west-fan capacity finding is exactly this
+   shape).
 
 3. **The #411 undo-a-known-good-placement harness.** The grading
    instrument this document keeps needing: take a board a human placed and
