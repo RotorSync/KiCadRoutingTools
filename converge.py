@@ -175,28 +175,13 @@ def _pose_knobs(board, clearance, board_edge_clearance):
     The old fixed argparse defaults (0.25/0.55) silently vetoed legal
     rotations on any board routed to a tighter floor (0.15/0.3): the grader
     was stricter than the board's own spec, and `poses` reported "no legal
-    pose" for poses the router would happily route. Mirror the route.py
-    mains' resolution order: explicit CLI value > the board's own Default
-    netclass / board constraint > the fixed default.
+    pose" for poses the router would happily route. Resolution order (shared
+    with check_floorplan via list_nets.board_floor_knobs): explicit CLI
+    value > the board's own Default netclass / board constraint > the fixed
+    default.
     """
-    from list_nets import board_default_netclass_clearance, board_constraint
-    knobs = {}
-    if clearance is None:
-        v = board_default_netclass_clearance(board)
-        clearance, src = ((v, 'board netclass') if v is not None
-                          else (0.25, 'fixed default'))
-    else:
-        src = 'cli'
-    knobs['clearance'] = {'value': clearance, 'source': src}
-    if board_edge_clearance is None:
-        v = board_constraint(board, 'min_copper_edge_clearance')
-        board_edge_clearance, src = ((v, 'board constraint') if v is not None
-                                     else (0.55, 'fixed default'))
-    else:
-        src = 'cli'
-    knobs['board_edge_clearance'] = {'value': board_edge_clearance,
-                                     'source': src}
-    return clearance, board_edge_clearance, knobs
+    from list_nets import board_floor_knobs
+    return board_floor_knobs(board, clearance, board_edge_clearance)
 
 
 def cmd_poses(a):

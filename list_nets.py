@@ -268,6 +268,42 @@ def board_constraint(pcb_path, key, design_rules=None):
         return None
 
 
+def board_floor_knobs(pcb_path, clearance=None, board_edge_clearance=None,
+                      clearance_default=0.25, edge_default=0.55,
+                      design_rules=None):
+    """Resolve grading/legality knobs BOARD-first (run-7 S1/S4).
+
+    An explicit value wins; an unset one resolves from the board's own
+    Default netclass clearance / min_copper_edge_clearance constraint; only
+    a project-less board falls back to the fixed default. Grading a board at
+    a fixed constant tighter than its own floor manufactures phantom
+    violations (S1: check_floorplan oob), and one LOOSER lets real ones
+    pass; the same mistake vetoed legal poses in converge (S4).
+
+    Returns ``(clearance, board_edge_clearance, knobs)`` where ``knobs``
+    records each value's source (``'cli'`` | ``'board netclass'`` |
+    ``'board constraint'`` | ``'fixed default'``) for JSON disclosure.
+    """
+    knobs = {}
+    if clearance is None:
+        v = board_default_netclass_clearance(pcb_path, design_rules)
+        clearance, src = ((v, 'board netclass') if v is not None
+                          else (clearance_default, 'fixed default'))
+    else:
+        src = 'cli'
+    knobs['clearance'] = {'value': clearance, 'source': src}
+    if board_edge_clearance is None:
+        v = board_constraint(pcb_path, 'min_copper_edge_clearance',
+                             design_rules)
+        board_edge_clearance, src = ((v, 'board constraint') if v is not None
+                                     else (edge_default, 'fixed default'))
+    else:
+        src = 'cli'
+    knobs['board_edge_clearance'] = {'value': board_edge_clearance,
+                                     'source': src}
+    return clearance, board_edge_clearance, knobs
+
+
 def net_clearance_map_by_id(pcb_path, nets, design_rules=None):
     """Resolve each net to its net-class clearance (mm) from the sibling
     .kicad_pro netclasses, for the routing CLIs' cross-class clearance map.

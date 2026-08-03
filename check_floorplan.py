@@ -76,12 +76,14 @@ def build_parser():
                         "Deriving is read-only here, which is why this defaults "
                         "ON unlike on the placement CLIs")
     p.add_argument('--clearance', type=float, metavar='MM',
-                   help='clearance the legality model grades at (default: the '
-                        'routing default). Pass the floor the board was routed '
-                        'to, or halo and overlap are graded at the wrong gap')
+                   help="clearance the legality model grades at (default: "
+                        "the board's own Default netclass, else 0.25). "
+                        "Grading a fixed constant tighter than the board's "
+                        "floor manufactures phantom violations")
     p.add_argument('--board-edge-clearance', type=float, metavar='MM',
-                   help='board-edge clearance for the outline gate '
-                        '(default: 0.55)')
+                   help="board-edge clearance for the outline gate (default: "
+                        "the board's own min_copper_edge_clearance, else "
+                        "0.55)")
     p.add_argument('--health', action='store_true',
                    help="also report the routability signals from the intent's "
                         "`health` block: how far each block sits from the parts "
@@ -142,10 +144,20 @@ def main(argv=None):
     except IntentError as exc:
         parser_error(str(exc))
 
+    # Run-7 S1: unset knobs grade at the BOARD's floor, not fixed constants
+    # (a 0.25 default on a 0.15 board manufactured phantom oob findings).
+    from list_nets import board_floor_knobs
+    clearance, edge_clearance, knobs = board_floor_knobs(
+        args.board, args.clearance, args.board_edge_clearance)
+    if not args.quiet:
+        print(f"grading at clearance {clearance} "
+              f"({knobs['clearance']['source']}), edge {edge_clearance} "
+              f"({knobs['board_edge_clearance']['source']})")
+
     try:
         result = grade(intent, pcb, args.board, group_sources=sources or (),
-                       clearance=args.clearance,
-                       board_edge_clearance=args.board_edge_clearance,
+                       clearance=clearance,
+                       board_edge_clearance=edge_clearance,
                        with_health=args.health)
     except UntrustworthyOutline as exc:
         print(f"ERROR: {args.board}: {exc}", file=sys.stderr)
@@ -164,7 +176,10 @@ def main(argv=None):
         if not args.quiet:
             print(f"  wrote {args.json}")
 
-    print("JSON_SUMMARY: " + json.dumps(summary(result), sort_keys=True))
+    s = summary(result)
+    s['clearance_used'] = knobs['clearance']
+    s['edge_clearance_used'] = knobs['board_edge_clearance']
+    print("JSON_SUMMARY: " + json.dumps(s, sort_keys=True))
     if result.errors and not args.exit_zero:
         return VIOLATIONS_EXIT
     return 0
