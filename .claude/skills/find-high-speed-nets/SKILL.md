@@ -413,6 +413,13 @@ For this board, the tightest interface is **[interface]** at **[freq]**, so use:
 are routed with `route_diff.py`, which adds its own GND return vias automatically.
 The `--gnd-via-distance` recommendation here applies to single-ended signal vias only.
 
+**Stitch-via pitch (this skill is the ONLY thing that tightens it).** When the
+plan's finalize-planes step runs `--stitch-vias`, the lattice pitch stays at
+the tool default unless THIS skill recommends `--stitch-max-freq <MHz>` — set
+it to the highest frequency of interest found above (the tool derives the
+lambda/20 pitch itself; pass the frequency, not a pitch). Boards whose top
+tier is Low/Medium need no recommendation — the default pitch stands.
+
 ### Impedance-Controlled Routing Recommendation (actionable)
 
 List every controlled-impedance net found in Steps 4.5/5 with its target and the
@@ -460,7 +467,7 @@ then set `--diff-pair-gap` ≥ that** — for tight coupling, put BOTH at the fa
 net class.** The stock Default net class is usually wide (e.g. `diff_pair_gap`
 0.25 mm, `diff_pair_width`/`track_width` 0.2 mm). A wide pair is a *fatter
 bundle* that needs more lateral room, so on a congested board the router drops
-pairs it would otherwise route — measured: on `glasgow_revC` all 13 FPGA pairs
+pairs it would otherwise route — measured: on a 4-layer FPGA corpus board all 13 pairs
 couple at `--diff-pair-gap 0.1`, but 2 fail at `0.25`. So for every
 impedance-controlled net:
 

@@ -57,16 +57,19 @@ Validate routed boards against the *real* spec, with the right checker — most
 - **Routers can report false success.** A router's own "routed" tally may come from
   a local/heuristic proxy while pads stay disconnected; re-verify with the
   authoritative, zone/fill-aware `check_net_connectivity` before trusting it.
-- **Read the failure buckets by their real definitions (run-7 wave).**
-  `failed_single` = "no result at all"; `open_single` = a KEPT result whose pads
-  are still disconnected (non-multipoint only — multipoint shortfalls are the
-  pad deficit); a verdict is `len(failed_single) + len(open_single) +
-  pad-deficit` (converge.route_verdict / place_route_loop count exactly this).
-  `terminal_restores` names rip victims restored at terminal failure with their
-  outcome ('full' is the only success; 'full_open'/'stub' ship broken).
-  `stacked_copper` disclosures are same-net duplicate copper KiCad's DRC will
-  never flag — the writer dedups exact via stacks before writing, and what
-  survives is in the summary, not silent.
+- **Read the failure buckets by their real definitions.** `failed_single` = "no
+  result at all"; `open_single` = a KEPT result whose pads are still disconnected
+  (non-multipoint only — a multipoint shortfall is already the pad deficit). A
+  verdict is `len(failed_single) + len(open_single) + pad-deficit`, which is what
+  `place_route_loop` counts. Reading only `failed_single` + the deficit is how a
+  board shipping open copper reports `failures=0`: a NON-multipoint open net
+  contributes to neither term. `terminal_restores` names rip victims restored at
+  terminal failure with their outcome (`full` is the only success; `full_open`
+  and `stub` ship broken). `stacked_copper` discloses same-net duplicate copper
+  KiCad's DRC will never flag — the writer drops exact via re-emissions before
+  writing, and whatever still stacks (e.g. two same-net barrels at one point with
+  DIFFERENT drill/size, which is a fab question, not a bookkeeping one) is named
+  in the summary rather than shipped silently.
 - **Net classes are RESPECTED (PR392), and `--clearance` is a pure CEILING over ALL
   of them (#439).** The router honors KiCad's pairwise `max(classA, classB)` between
   nets of different classes — including copper routed earlier in the SAME call (in-run)

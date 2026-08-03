@@ -152,7 +152,8 @@ class _Occ:
         disk -- mirrors the main obstacle map's polygon rasteriser so a
         meander-antenna / comb pad stops phantom-blocking escapes far from any
         real copper (#232 class, BGA side)."""
-        from check_drc import _point_to_polys_distance
+        from check_drc import _point_in_poly
+        from geometry_utils import point_to_segment_distance
         pts = [pt for poly in polys for pt in poly]
         if not pts:
             return
@@ -161,10 +162,36 @@ class _Occ:
         ia, ja = self.cell(min(xs) - r, min(ys) - r)
         ib, jb = self.cell(max(xs) + r, max(ys) + r)
         thr = r + 1e-9
+        # #561: threshold DECISION, not exact distance -- early-exit on the
+        # first edge within thr, with a per-edge bbox reject (identical
+        # accept/reject outcome to _point_to_polys_distance(...) <= thr;
+        # profiled 55 of 65 s at 72M exact distance calls).
+        edges = []
+        for poly in polys:
+            n = len(poly)
+            e = []
+            for i in range(n):
+                x1, y1 = poly[i]
+                x2, y2 = poly[(i + 1) % n]
+                e.append((min(x1, x2) - thr, max(x1, x2) + thr,
+                          min(y1, y2) - thr, max(y1, y2) + thr,
+                          x1, y1, x2, y2))
+            edges.append((poly, e))
+
+        def _within(x, y):
+            for poly, e in edges:
+                if _point_in_poly(x, y, poly):
+                    return True
+                for (bx0, bx1e, by0, by1e, x1, y1, x2, y2) in e:
+                    if x < bx0 or x > bx1e or y < by0 or y > by1e:
+                        continue
+                    if point_to_segment_distance(x, y, x1, y1, x2, y2) <= thr:
+                        return True
+            return False
         for a in range(max(0, ia), min(self.nx, ib + 1)):
             for b in range(max(0, ja), min(self.ny, jb + 1)):
                 x, y = self.xy(a, b)
-                if _point_to_polys_distance(x, y, polys) <= thr:
+                if _within(x, y):
                     if li is None:
                         for k in range(self.nl):
                             self.grid[k][a * self.ny + b] = 1
@@ -849,10 +876,25 @@ def generate_underpad_escape(footprint: Footprint,
         g = {start: 0.0}
         pq = [(heur(sx, sy), start)]
         came = {}
+        # #561 hot-loop: byte-equivalent mechanical speedup -- localize the
+        # per-iteration lookups and index the occupancy bytearrays directly
+        # (identical arithmetic, identical heap tuples, identical step order,
+        # so the search expands and ties exactly as before).
+        _heappop = heapq.heappop
+        _heappush = heapq.heappush
+        _g_get = g.get
+        _ony = occ.ny
+        _onx = occ.nx
+        _ogrid = occ.grid
+        _has_soft = occ.has_soft
+        _soft_foreign = occ.soft_foreign
+        _steps = _STEPS
+        _home = home
+        _vcache = {}
         while pq:
-            _, cur = heapq.heappop(pq)
+            _, cur = _heappop(pq)
             cx, cy, L = cur
-            if not in_bbox(cx, cy):
+            if not (bx0 <= cx <= bx1 and by0 <= cy <= by1):
                 path = [cur]
                 while cur in came:
                     cur = came[cur]
@@ -861,19 +903,21 @@ def generate_underpad_escape(footprint: Footprint,
                 return path
             cg = g[cur]
             if L in route_layers:
-                for dx, dy in _STEPS:
+                _gL = _ogrid[L]
+                for dx, dy in _steps:
                     nx, ny = cx + dx, cy + dy
-                    if not occ.inside(nx, ny):
+                    if not (0 <= nx < _onx and 0 <= ny < _ony):
                         continue
-                    if in_bbox(nx, ny) and occ.blocked(L, nx, ny) \
+                    if (bx0 <= nx <= bx1 and by0 <= ny <= by1) \
+                            and _gL[nx * _ony + ny] \
                             and not exempt(L, (nx, ny)):
                         continue
                     # No corner-cutting: a diagonal step past a blocked orthogonal
                     # neighbour clips that obstacle's clearance (the diagonal line
                     # passes nearer the via/pad than either cell). Forbid it.
                     if dx != 0 and dy != 0:
-                        if (occ.blocked(L, cx + dx, cy) and not exempt(L, (cx + dx, cy))) or \
-                           (occ.blocked(L, cx, cy + dy) and not exempt(L, (cx, cy + dy))):
+                        if (_gL[(cx + dx) * _ony + cy] and not exempt(L, (cx + dx, cy))) or \
+                           (_gL[cx * _ony + cy + dy] and not exempt(L, (cx, cy + dy))):
                             continue
                     step = 1.0 if (dx == 0 or dy == 0) else 1.6   # discourage zig-zag
                     # Soft keep-out (#278): stepping through a movable
@@ -881,15 +925,15 @@ def generate_underpad_escape(footprint: Footprint,
                     # cap-placement step may be unable to clear -- pay a
                     # steep per-cell premium so routes detour when any
                     # detour exists, and only graze when boxed in.
-                    if occ.has_soft and (nx, ny) not in home and \
-                            occ.soft_foreign(L, nx, ny, net_id):
+                    if _has_soft and (nx, ny) not in _home and \
+                            _soft_foreign(L, nx, ny, net_id):
                         step += 4.0
                     nxt = (nx, ny, L)
                     ng = cg + step
-                    if ng < g.get(nxt, 1e18):
+                    if ng < _g_get(nxt, 1e18):
                         g[nxt] = ng
                         came[nxt] = cur
-                        heapq.heappush(pq, (ng + heur(nx, ny), nxt))
+                        _heappush(pq, (ng + max(0, min(nx - bx0, bx1 - nx, ny - by0, by1 - ny)), nxt))
             # The single via, only in the ball's own pad. A through via spans
             # all layers, so the site must also clear immovable foreign copper
             # on layers the run-blocking test never looks at (via_ok, #253/
@@ -897,8 +941,20 @@ def generate_underpad_escape(footprint: Footprint,
             # centre cell (sx, sy); any other home cell gets the full via_size
             # -- the gate must use the size that will actually be emitted.
             _at_center = (cx, cy) == (sx, sy)
+            # #561: memoize via_ok per (cell, at_center) WITHIN this search --
+            # the answer is pure until commit() mutates copper (after astar
+            # returns), and the same home cells are re-queried on every heap
+            # visit (profiled: 1.6M calls, 503 of 582 s). Byte-equivalent.
+            if allow_via and (cx, cy) in home and via_ok is not None:
+                _vk = (cx, cy, _at_center)
+                _vr = _vcache.get(_vk)
+                if _vr is None:
+                    _vr = bool(via_ok(*occ.xy(cx, cy), _at_center))
+                    _vcache[_vk] = _vr
+            else:
+                _vr = True
             if allow_via and (cx, cy) in home and \
-                    (via_ok is None or via_ok(*occ.xy(cx, cy), _at_center)):
+                    (via_ok is None or _vr):
                 for L2 in route_layers:
                     if L2 == L:
                         continue
@@ -1685,12 +1741,43 @@ def generate_underpad_escape(footprint: Footprint,
             if s.net_id in plane_drop_nets:
                 _net_seg_ends.setdefault(s.net_id, []).extend(
                     [(s.start_x, s.start_y), (s.end_x, s.end_y)])
+        # Surface-pour direct connect: a same-net zone on the ball's OWN copper
+        # layer whose computed fill reaches the pad (and belongs to the zone's
+        # main component, not an islet) connects the ball at fill time with no
+        # via at all -- the dominant human pattern for rail balls under outer-
+        # layer floods (corpus survey: up to 86% of a part's balls served this
+        # way). The fill models must see THIS call's fresh copper (materialized
+        # into pcb_data by the drop pass), so drop any stale per-board cache.
+        _pour_models: Dict[Tuple[int, str], list] = {}
+        import env_knobs
+        if env_knobs.FANOUT_POUR_DIRECT and \
+                any((z.net_id in plane_drop_nets) for z in (pcb_data.zones or [])):
+            try:
+                delattr(pcb_data, '_plane_fill_models')
+            except AttributeError:
+                pass
+            from plane_fill_model import get_fill_models
+            for nid in {p.net_id for p in drop_pads}:
+                for lay, models in get_fill_models(pcb_data, nid).items():
+                    _pour_models[(nid, lay)] = models
+
+        def _pour_covers(p):
+            lay = next((l for l in (p.layers or []) if l.endswith('.Cu')), None)
+            if lay is None:
+                return False
+            for m in _pour_models.get((p.net_id, lay), ()):
+                comp = m.query_component(p.global_x, p.global_y,
+                                         size=min(p.size_x, p.size_y))
+                if comp and comp == m.largest_component():
+                    return True
+            return False
+
         _rep_nets: Dict[str, Dict[str, int]] = {}
-        n_gap = n_ctr = n_exist = n_fail = 0
+        n_gap = n_ctr = n_exist = n_fail = n_pour = 0
         for p in drop_pads:
             r = _rep_nets.setdefault(p.net_name,
                                      {'gap': 0, 'in_pad': 0, 'existing': 0,
-                                      'failed': 0})
+                                      'pour': 0, 'failed': 0})
             gx, gy = p.global_x, p.global_y
             pad_half = max(p.size_x, p.size_y) / 2.0
             if any(math.hypot(vx - gx, vy - gy) < pad_half + vr_ + 1e-6
@@ -1699,6 +1786,14 @@ def generate_underpad_escape(footprint: Footprint,
                    for (ex, ey) in _net_seg_ends.get(p.net_id, ())):
                 n_exist += 1
                 r['existing'] += 1
+                continue
+            if _pour_covers(p):
+                # Served by the surface pour on its own layer -- no via needed.
+                # (The pad-centre tap reservation stays: if a later step's
+                # copper carves the pour away from this pad, the plane repair
+                # can still tap here.)
+                n_pour += 1
+                r['pour'] += 1
                 continue
             # This ball's centre was reserved up front as its future plane-tap
             # site; the drop replaces that tap, so the reservation must not
@@ -1749,11 +1844,14 @@ def generate_underpad_escape(footprint: Footprint,
         if plane_drop_report is not None:
             plane_drop_report.update(
                 {'nets': _rep_nets, 'gap_vias': n_gap, 'pad_vias': n_ctr,
-                 'skipped_existing': n_exist, 'failed': n_fail})
+                 'skipped_existing': n_exist, 'skipped_pour': n_pour,
+                 'failed': n_fail})
         if verbose and drop_pads:
             per = ", ".join(f"{n} {c['gap']}+{c['in_pad']}"
                             for n, c in sorted(_rep_nets.items()))
             extra = f", {n_exist} already connected" if n_exist else ""
+            extra += (f", {n_pour} pour-covered (no via needed)"
+                      if n_pour else "")
             extra += f", {n_fail} FAILED (left for the plane tap)" if n_fail else ""
             print(f"  Plane drops (#424): {n_gap} gap + {n_ctr} in-pad vias "
                   f"[{per}]{extra}")

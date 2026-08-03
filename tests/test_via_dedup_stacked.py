@@ -87,15 +87,20 @@ def test_end_to_end_clean_run_has_no_stacked_key():
         return
     import tempfile
     with tempfile.TemporaryDirectory() as td:
-        js = os.path.join(td, 's.json')
         out = os.path.join(td, 's.kicad_pcb')
+        # Read the summary off the run's own JSON_SUMMARY stdout line: every
+        # route.py emits it, while the --json-out file flag does not exist on
+        # every branch. Same data, one interface older.
         r = subprocess.run([sys.executable, '-X', 'utf8',
                             os.path.join(ROOT, 'route.py'), board, out,
-                            '--nets', 'GND', '--json-out', js],
+                            '--nets', 'GND'],
                            capture_output=True, text=True, encoding='utf-8',
                            errors='replace', cwd=ROOT)
         assert r.returncode == 0, r.stdout[-2000:]
-        summary = json.load(open(js, encoding='utf-8'))
+        lines = [l for l in r.stdout.splitlines()
+                 if l.startswith('JSON_SUMMARY: ')]
+        assert lines, f"no JSON_SUMMARY line in the run output: {r.stdout[-2000:]}"
+        summary = json.loads(lines[-1][len('JSON_SUMMARY: '):])
         assert 'stacked_copper' not in summary, (
             f"clean run reported stacks: {summary.get('stacked_copper')}")
     print("  PASS: clean run ships no stacked_copper key")

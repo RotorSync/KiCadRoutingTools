@@ -1512,7 +1512,7 @@ plan must therefore carry via/track that are **already** DRC-safe for the pitch.
 Computing them here — both dimensions, with margin, clamped to the fab floor — is
 what lets the single fanout the GUI runs come out clean the first time.
 
-Worked example (keks U1, pitch 0.8, clearance 0.1, fab floor track 0.1 / via 0.45):
+Worked example (a 256-ball 0.8 mm-pitch BGA, clearance 0.1, fab floor track 0.1 / via 0.45):
 `budget = 0.8 − 0.2 − 0.05 = 0.55`; track 0.127 → via = min(working, 0.55−0.127) =
 **0.42** (≥ floor) → DRC-clean, vs the Ø0.5 the net-class default would have used
 (163 grazes). At 0.4 mm pitch the budget forces both to the floor (track 0.10, via
@@ -1538,6 +1538,46 @@ Caveats: it routes diff pairs as **single-ended**, and it **skips power/plane
 nets** as escapes — but every skipped plane ball still gets a **plane-drop via**
 (below), so nothing is left stranded. Rule of thumb: try `channel` first (keeps
 diff pairs); fall back to `underpad` when `channel` can't escape a dense array.
+
+**How humans escape big BGAs — and which of OUR tool options that maps to**
+(survey of 54 human corpus boards with a real ≥100-ball array; the fanout
+places vias itself, so this is about choosing its options, not via positions):
+
+- **Dog-bone is the dominant human method at every pitch** (median 30–43% of
+  balls; via-in-pad is ~0% on most boards, appearing only on a handful of very
+  dense 6/8-layer designs). Roughly HALF of all balls get no via at all — the
+  outer rings escape on the surface, rails connect into pours. Mapping: for a
+  populated array prefer **`--escape-method dogbone`** — each ball vias in a
+  free inter-ball gap and falls back per-ball to via-in-pad, so it never
+  escapes fewer balls than `underpad` while keeping the inner-layer streets
+  open. `channel` (the `auto` default) already leaves the outer rings via-free;
+  keep it for sparse/perimeter-heavy arrays and diff pairs.
+- **Rail balls under a pour need NO via when the pour is on their own layer**
+  — the plane-drop pass (#424) detects this automatically when the pours
+  already exist (pour-first Step 1c order): it prints `N pour-covered (no via
+  needed)` and skips those vias (measured: 104 of 127 GND balls on a 285-ball
+  BGA, ~100 via barrels kept out of the escape field;
+  `KICAD_FANOUT_POUR_DIRECT=0` reverts). To benefit, POUR BEFORE FANOUT and
+  put rail pours on the layers that carry the rail balls (the outer layer for
+  a surface flood).
+- **Escape via, by pitch:** at 0.8–1.0 mm the median minimum via in the
+  courtyard is 0.45/0.20; at ≤0.5 mm humans go to 0.28/0.15 and even
+  0.25/0.10. Escape-track minimum: median 0.125 mm at coarse pitch, 0.089–0.10
+  (the fab floor) at fine pitch. The computed budget-per-pitch above lands in
+  the same range — trust it, and treat 0.25/0.15 as the floor for ≤0.5 mm.
+- **Deep balls leave through the inners, not the surface.** Inner-layer share
+  of courtyard copper: ~0–15% on 4-layer boards, 30–67% on 6/8-layer. Mapping:
+  give the fanout the FULL `--layers` list, and keep the escape-depth inner
+  layers ROUTABLE — on a 6-layer board that means at most ONE solid inner
+  plane next to each outer (fine-pitch-BGA humans keep a median of ONE solid
+  plane total; **pouring 2–3 solid inner planes on a 6-layer BGA board is the
+  classic self-inflicted failure** — it leaves signals a 2-layer board).
+  Rails beyond GND go as SPLIT region pours or late route+pour, not extra
+  solid planes and not wide tracks.
+- **Buses concentrate.** A RAM/DDR bus runs on ONE inner "highway" layer with
+  a solid GND plane adjacent (plus the outers). Mapping: pick the highway
+  layer at plan time, keep its `--layer-costs` at 1.0–1.5, and put the solid
+  GND plane on the layer NEXT to it.
 
 **Plane-net balls are dropped to vias automatically (#424).** With any escape
 method, after the signal escape each SMD ball on a plane net — a net excluded
@@ -1671,7 +1711,7 @@ Use the printed flags as-is **only when the board has no spec of its own**:
   **Do NOT keep the net-class gap/width for impedance-controlled (diff-pair) nets** —
   the stock net class is usually wide (`diff_pair_gap` 0.25 / width 0.2 mm), and a
   fat pair is a wider bundle that gets dropped on congested boards (measured:
-  `glasgow_revC` routes all 13 FPGA pairs at `--diff-pair-gap 0.1` but loses 2 at
+  a 4-layer FPGA corpus board routes all 13 of its pairs at `--diff-pair-gap 0.1` but loses 2 at
   0.25). Per `/find-high-speed-nets`, route those at the **fab floor for gap and
   clearance (~0.1 mm)** while keeping `--impedance` for the width (the router
   computes it from the stackup and clamps it to the floor). `route_diff.py` then
@@ -1741,7 +1781,7 @@ Use the printed flags as-is **only when the board has no spec of its own**:
     track width, so narrowing them widens the gap between the two converging
     diagonals. Step down toward the fab-floor track (e.g. 0.15 → 0.13 → 0.10 mm)
     until `segment_segment == 0`; all pads still escape (`failed` stays 0).
-    (Measured on hackrf_one U17: 3 grazes at `--width 0.15`/`0.13`, 0 at `0.10`.)
+    (Measured on a dense QFN corpus board: 3 grazes at `--width 0.15`/`0.13`, 0 at `0.10`.)
 
   These grazes are typically a uniform ~1-grid-cell shortfall, so even one size step
   down usually clears them all; shrinking the via also relieves escape congestion.
@@ -2215,7 +2255,7 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    the **plane-fragility field** (default on: `KICAD_PLANE_FRAGILITY_COST`,
    2.0 mm-equiv, `=0` reverts) then makes every later routing step pay to cut
    the real fill where it is narrow — so signals cross planes mid-pour, not at
-   necks. On ottercast this order + the field: power nets fully connected,
+   necks. Measured on a 4-layer corpus board, this order + the field: power nets fully connected,
    +3V3 pour ONE intact island, GND weld copper cut to a third, connectivity
    net-better, DRC clean. With planes poured signals-first style instead, the
    pour under a BGA arrives pre-shredded and every drop via needs repair welds.
@@ -2424,6 +2464,15 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    ordering concern lives here, not at the pour. Prefer NO `--rip-blocker-nets`
    on boards whose BGAs were plane-dropped (the measured failure mode of
    ripping here is routed signals lost for tap pads the drops already serve).
+   **Stitching is normal human practice, not an exotic add-on**: 58% of ~400
+   human corpus boards carry a free-standing GND stitch lattice — when the
+   board has GND pours on 2+ layers, recommend `--stitch-vias` here. Leave
+   the PITCH at the tool default (20 mm); only `/find-high-speed-nets` output
+   tightens it (via `--stitch-max-freq`, which derives λ/20 and overrides the
+   pitch). Do not hand-pick a pitch from corpus statistics.
+   **Do not recommend `--add-teardrops`** (7% of human boards use teardrops)
+   and **do not set `--thermal-relief`** — leave the tool's default connection
+   style alone.
 5. **Plane Repair** - Reconnect any broken plane regions
 6. **Verification** - DRC and connectivity checks
 
@@ -2515,6 +2564,19 @@ python3 -X utf8 route_planes.py board_step1b.kicad_pcb board_step1c.kicad_pcb \
     --plane-layers B.Cu F.Cu \
     2>&1 | tee /tmp/step1c_pour.txt
 
+**Zone clearance is a MINIMUM-ALLOWED, not a target — never pass a
+`--zone-clearance` larger than the routed clearance.** The default already
+follows `--clearance` and auto-steps down to the fab floor when the pour
+can't thread the densest BGA via lattice; a larger value only stops pours
+from penetrating between balls/vias (human boards pour at ~0.1 for exactly
+this reason). Watch the pour output for
+`pour cannot thread the densest BGA lattice even at the fab floor`: when it
+fires, no clearance setting can get an INNER-layer pour through that field —
+the fix is a pour on the balls' OWN (outer) layer, which connects the pads by
+direct contact (the plane-drop pass then skips those vias: `N pour-covered`).
+`--min-thickness` (default 0.1) matches human under-BGA pours (0.089–0.1);
+leave it unless a fab demands wider minimum copper.
+
 Expect `check_connected` to show the plane nets fully connected from here on
 (the drops + pour serve every BGA plane ball with no tap search).
 
@@ -2543,7 +2605,7 @@ expensive, which is what keeps them intact through this step.
 
 For boards with BGA/PGA components, use `--no-bga-zone` to allow the router
 to find alternative paths through the dense pin area (even when fanout was
-done, some paths may require this). Use `--max-ripup 10` for difficult
+done, some paths may require this). Use `--max-ripup 5` for difficult
 2-layer boards.
 
 > **Do NOT pass `--max-iterations` (#529 dynamic iterations, default on).**
@@ -2559,8 +2621,15 @@ done, some paths may require this). Use `--max-ripup 10` for difficult
 python3 -X utf8 route.py board_step1c.kicad_pcb board_step2.kicad_pcb \
     --nets "*" "!GND" "!VCC" \
     --no-bga-zone \
-    --max-ripup 10 \
+    --max-ripup 5 \
+    --layers <ALL copper layers> --layer-costs <1.0 signals / 3.0 solid planes / 1.5 split-or-highway> \
     2>&1 | tee /tmp/step2_routing.txt
+
+The `--layer-costs` line is NOT optional when Step 1c poured any solid plane:
+without it signals cross the pours at cost 1.0 and shred them (measured: split
+power pours at 0–2% connected under a BGA on a chain that omitted it). Order
+matches `--layers`; 3.0 on solid-plane layers, 1.0–1.5 on split/route+pour and
+highway layers, 1.0 on F/B.
 
 (When Step 2b ran, add its impedance nets to the exclusions, e.g.
 `--nets "*" "!GND" "!VCC" "!RF"`, and route from `board_step2b.kicad_pcb`.)
@@ -2693,7 +2762,7 @@ pads, retry the repair in this order — cheapest/safest first:**
    pad connects by a *trace* to an adjacent already-connected same-net ball (the
    repair does this automatically): the trace is already thin, but at a coarse
    grid the A* can't thread the 0.65 mm-pitch BGA escape. **Measured on
-   ottercast_audio: GND U1.N4 fails to route at `--grid-step 0.05` but connects
+   a 4-layer corpus board: a GND ball fails to route at `--grid-step 0.05` but connects
    to its neighbour ball at `0.025`** — it's a grid-resolution limit, not a width
    one (the trace runs at the thin signal track in both the A* and obstacle map).
 
@@ -2717,8 +2786,8 @@ bare `cp`** — see the warning below.)
 > holds the DRC floor (the Default-netclass clearance/track/via the chain routed to).
 > The next routing step then reads no project, resolves its floor from the STOCK
 > (looser) netclass, and its writeback stamps that looser floor over tighter copper —
-> so KiCad grades correct sub-floor copper as phantom clearance violations (icepi_zero:
-> a dropped 0.09 floor became 0.10 → 160 phantom grazes). Use
+> so KiCad grades correct sub-floor copper as phantom clearance violations (measured:
+> a dropped 0.09 floor became 0.10 → 160 phantom grazes on one corpus board). Use
 > **`python3 copy_board.py src.kicad_pcb dst.kicad_pcb`** — it copies the board plus every
 > sibling (`.kicad_pro`/`.kicad_prl`) and self-records into the redo manifest — or, if you
 > must use `cp`, copy the `.kicad_pro` too. The routing scripts also WARN when an input
@@ -2727,8 +2796,9 @@ bare `cp`** — see the warning below.)
 python3 -X utf8 route.py board_step5_repair.kicad_pcb board_step5.kicad_pcb \
     --nets "*" "!GND" "!<other_plane_nets...>" "!<every Step 2c net>" \
     --clearance <floor> --via-size <V> --via-drill <D> --track-width <signal_track> --grid-step <G> \
-    --max-ripup 10 [--no-bga-zone] \
+    --max-ripup 5 [--no-bga-zone] \
     --power-nets <PWR...> --power-nets-widths <W...> \
+    --layers <ALL copper layers> --layer-costs <same map as Step 2> \
     2>&1 | tee /tmp/step5c_reconnect.txt
 
 ### Step 6: Verify Results
@@ -2854,13 +2924,16 @@ insufficient routing channels. Options:
 
 **Dense 2-layer boards: treat B.Cu as a real routing layer, not a plane.**
 Reserving B.Cu for a GND plane (and/or pricing it 3×) turns a congested
-2-layer board into single-layer routing — neo6502's human original carries
-47% of its routed length on B.Cu and pours GND *around* the routes on both
-sides afterwards; our plane-first chain left 25 nets open. On a dense 2-layer
-board: route signals on BOTH layers at cost 1.0 (long-haul nets cross on the
-back), then pour GND last (`route_planes.py` after the signal steps — the pour
-flows around existing copper). Only plane-first on 2-layer boards with light
-signal content.
+2-layer board into single-layer routing — a dense 2-layer corpus board's human
+original carries 47% of its routed length on B.Cu and pours GND *around* the
+routes on both sides afterwards; a plane-first chain on the same board left 25
+nets open. On a dense 2-layer board: route signals on BOTH layers at cost 1.0
+(long-haul nets cross on the back), then pour GND last (`route_planes.py`
+after the signal steps — the pour flows around existing copper; 80% of human
+2-layer boards pour BOTH sides this way). Power rails as pours are a minority
+practice on 2-layer (≈38% of human boards) — pour them too when there's room,
+but GND-both-sides is the priority. Only plane-first on 2-layer boards with
+light signal content.
 
 **Important:** If you skip fanout for a BGA/PGA component but still need to connect its
 internal pads, use `--no-bga-zone <component>` to disable the automatic exclusion zone
@@ -2878,28 +2951,74 @@ leave internal pads unconnected if they weren't fanned out.
 
 ### Multi-Layer Boards (4+ layers)
 
-- Use inner layers for planes (In1.Cu for GND, In2.Cu for VCC). On a board with
-  light-to-moderate routing density, **roughly half the copper layers as
-  planes** works — on a 4-layer board that's In1+In2 as planes, F.Cu+B.Cu for
-  signals.
-- **EXCEPTION — dense boards (any BGA ≥ ~100 balls, DDR/SDRAM buses, or a
-  signal step that already failed >5 nets): never plane ALL inner layers.**
-  Corpus triage of the worst-connectivity boards (ulx3s, butterstick,
-  orangecrab, zynq_ad9364) found this the single most damaging planning error:
-  solid planes on both inner layers + 3× inner costs leaves a 2-layer board
-  around the BGA, and 20–50 nets ship open while the human-routed originals
-  route their long-haul nets *through* inner layers (1–2 vias each, the
-  "cross-under highway"). On these boards: GND plane on ONE inner layer, and
-  either keep the other inner layer a plain routing layer, or make it a SPLIT
-  power plane (region pours per rail — `/recommend-plane-mappings` Step 3b) and
-  keep its layer cost low (≤1.5) so signals can still cross in the gaps. On 6+
-  layers, plane the middle layers and keep the layers at the BGA escape depth
-  routable (human butterstick: planes In3/In4, DDR3 on In2/In5).
+**Pour philosophy (from a survey of the human-routed corpus): pour EVERY GND
+and power net that has more than a few pads, and treat pours as cheap.** Human
+boards deliver power as copper pours, not tracks — a rail's ball/pad drops a
+via straight into a pour instead of consuming a routed track through the
+congested escape field. A dense 6-layer BGA board in the corpus that a
+plane-light plan (GND-only, rails as wide tracks) left ~26% incomplete spends
+~20% of its track copper on rails the human never routes at all. Concretely:
+
+- **Which nets:** GND always, plus every power rail with more than a few pads
+  — and pouring scales with layer count. Across ~400 human corpus boards,
+  86% of 4-layer, 97% of 6-layer, and 100% of 8-layer boards pour power rails
+  (2-layer boards: 38% — GND-only flood is the 2-layer norm). Humans pour
+  even small rails (corpus median poured net ≈ 3 pads); a board with many
+  rails gets many pours — human 4-layer boards commonly pour 5–15 distinct
+  nets, dense 6-layer boards 10–20.
+- **Which layers — any, including routing layers.** Pours are not confined to
+  dedicated plane layers: 80–100% of human boards at every layer count pour
+  copper ON their outer routing layers, flooding GND/rails around the
+  finished tracks. The layer typology that recurs:
+  - **4-layer:** signals+pours on F/B; one inner = solid GND; the second
+    inner is a minority-solid choice (corpus: ~23% solid power, the rest
+    SPLIT multi-rail (`/recommend-plane-mappings` Step 3b), route+pour, or
+    plain routing when the board is dense and signals need to cross inner).
+  - **6/8-layer:** solid GND planes nearest the outer signal layers (In1 and
+    the last inner — 2/3 of human 6/8-layer boards have a solid plane
+    adjacent to an outer layer), split power planes and/or route+pour in the
+    middle, signals concentrated on F/B plus one inner "highway" layer.
+- **High-speed nets need an UNSPLIT reference plane on the adjacent layer.**
+  Whatever else moves, keep one solid (not split, not track-fragmented) GND
+  plane directly under each layer that carries high-speed routes (DDR/RAM
+  buses, USB HS, SerDes, RF — from `/find-high-speed-nets`). Split planes and
+  route+pour layers are fine anywhere that isn't a high-speed reference.
+- **Dense boards (BGA ≥ ~100 balls, DDR/SDRAM buses): keep escape-depth layers
+  ROUTABLE, but still poured.** Don't let plane assignments turn the region
+  around a big BGA into 2-layer routing — long-haul nets need to cross
+  *through* inner layers (1–2 vias each). The resolution is order, not
+  abstinence: solid planes pour FIRST (Step 1c); a layer signals must cross
+  keeps its cost low (≤1.5) and gets its rail pours LATE (after the signal
+  steps, like the 2-layer flow below — the pour flows around existing copper).
+  Never leave a many-pad rail as pure tracks because its natural layer is
+  shared with routing.
 - **Check where the BGA fanout escapes landed before finalizing the plane
   layers** — a plane on a layer full of escape stubs forces `--rip-blocker-nets`
   to shred those escapes during tap placement (each rip risks a permanent
-  casualty). Pick plane layers the escapes avoid.
+  casualty). Pick solid-plane layers the escapes avoid.
+
+**Adapt the pour plan to the BOARD TYPE (measured across ~400 human corpus
+boards, grouped by dominant component/function):**
+
+| board type | human pour strategy |
+|---|---|
+| **Fine-pitch big BGA** (≥100 balls, ≤0.5 mm) | The most pour-heavy class: median poured nets 5 (4L) → 17 (6L) → 21 (8L). But median only ONE solid plane per board — a third have NONE. Keep nearly every layer routable (split + route+pour), pour many rails around the routes, and deliver every rail near the BGA by pour+via, never by tracks through the escape field. |
+| **Big BGA, coarser pitch** (≥100 balls, >0.5 mm) | Same direction, milder: rails poured on 84% of boards, median ~6 nets; solid GND + split power inners are common. |
+| **RF / radio** | GND-dominated: typically ONE GND net poured as many islands on every layer (coplanar grounding around RF traces); few rail pours. Keep GND pours tight to the RF path; rails as tracks are fine. |
+| **Power / motor** | Heavy-current rails (V+, GNDPWR, phase outputs) are ALWAYS pours — 40–90-pad rails delivered as multi-layer copper regions, never wide tracks. Pour every supply rail on every layer it visits. |
+| **Keyboard / LED matrix** | Humans pour nearly every net (rows, columns, LED chains) as small local zones on both sides of a 2-layer board. Our chain approximates this with: route both sides thin, then GND+rail pours; don't fight for a dedicated plane side. |
+| **MCU / QFN, light 2-layer** | Modest: GND flood both sides (80%), rails poured on ~40–60%; a couple of pours is normal, don't force more. |
+
 - More fanout options available.
+
+**MANDATORY whenever any layer carries a solid plane: derive `--layer-costs`
+from the plane plan and pass it to EVERY signal-routing step** (`route.py`,
+the Step 5c reconnect, and retries). A measured failure mode: a 6-layer BGA
+chain poured three solid inner planes and then passed NO `--layer-costs`
+anywhere — signals crossed all three pours at cost 1.0, shredded them into
+islands, and the board graded worse than a plane-light plan. Pour-first order
+means the plane layers are already known when the signal steps run; there is
+no excuse to omit this.
 
 **Derive `--layer-costs` from the plane plan — penalize the plane-reserved
 layers (issue #185).** The 4-layer default is **all 1.0**, so the router has no
@@ -2920,12 +3039,13 @@ route.py ... --layers F.Cu In1.Cu In2.Cu B.Cu --layer-costs 1.0 3.0 3.0 1.0
   ~100 balls / DDR buses) where an inner layer was deliberately left
   signal-routable (see the dense-board exception above), keep that layer at
   1.0–1.5** — 3× on the only spare layer starves the long-haul nets that need
-  it (ulx3s failed 72 nets at 3×; its retry at 1.5 was the correct call).
+  it (measured: a 4-layer FPGA corpus board failed 72 nets at 3×; its retry at
+  1.5 was the correct call).
 - **Why it matters — it's a cascade, not just tidiness.** Signals crossing a
   plane layer fragment the pour into islands; `route_disconnected_planes` then
   carpets the layer with island-stitching tracks. Keep signals off the plane
   layers and the planes stay whole, so the repair has almost nothing to stitch.
-- **Measured on castor_pollux** (4-layer, In1=GND, In2=+3.3V/+3.3VA), full chain,
+- **Measured on a 4-layer corpus board** (In1=GND, In2=+3.3V/+3.3VA), full chain,
   default `1.0 1.0 1.0 1.0` vs smart `1.0 3.0 3.0 1.0`, both fully connected and
   DRC-clean:
 
@@ -3205,7 +3325,7 @@ python3 route.py board.kicad_pcb --nets "*" \
 14. **BGA/PGA power pins and planes** - When using power planes, BGA/PGA power pins (GND, VCC) connect most efficiently via direct vias to the plane rather than fanout routing. Create planes first, then fanout only signal nets. Through-hole PGA pads automatically connect to planes on that layer; SMD BGA pads need vias placed by `route_planes.py`. This approach:
     - Reduces routing congestion (power pins don't consume escape channels)
     - Provides lower impedance power connections
-15. **Aggressive parameters for 2-layer BGA/PGA boards** - Use `--max-ripup 10` from the start for boards with dense components. Do NOT add `--max-iterations` — the router self-budgets (#529 dynamic iterations, default on, up to a 1e7 ceiling while a search progresses); see the note in the routing-step section.
+15. **Rip-up depth: MORE IS NOT BETTER (measured).** On a 6-board chain A/B, `--max-ripup 5` beat 10 (+0.78 pts completion, 13 fewer connectivity items, 3 boards better / 0 worse) and 20 was worse than 10 — each extra rip level risks a permanent casualty (a ripped victim whose corridor gets taken cannot be restored), and the gains from deep ripping don't materialize because victims can almost always reroute anyway. The optimum sits in 3-5 and wobbles by board (measured: one board monotone-better all the way down to 3, another best at 5) -- use 5 as the default, try 3 as a free retry variant (deterministic: keep whichever grades better), and escalate ABOVE 5 only as a last resort on a specific failing net, never as the opening move. Do NOT add `--max-iterations` — the router self-budgets (#529 dynamic iterations, default on, up to a 1e7 ceiling while a search progresses); see the note in the routing-step section.
 16. **Guide corridors and keepouts are user-drawn** - Never draw `User.1` guide polylines or `User.2` keepout polygons yourself; suggest in words where they should go and let the user draw them, then add `--guide-corridor` / `--keepout` to the plan. Exception: a polygon the SPEC itself cites with coordinates is transcription, not authoring — draw exactly that (see the Keepout Zones carve-out).
 17. **Companion skills** - Defer to `/identify-diff-pairs` (datasheet-based pair detection), `/recommend-stackup` (before impedance/time-matching work), `/diagnose-routing-failures` (after failures), and `/review-routed-board` (final verification) rather than duplicating their logic inline.
 
@@ -3256,7 +3376,10 @@ grep -A5 "FAILED NET HISTORIES" /tmp/route_output.txt
 ```
 
 The JSON_SUMMARY line contains structured data including:
-- `failed_single`: List of failed single-ended net names
+- `failed_single`: List of single-ended nets with NO result at all
+- `open_single`: Nets that KEPT a result whose copper still leaves pads disconnected (non-multipoint only). A run is clean only when `failed_single` AND `open_single` are both empty — a board can ship open copper with `failed_single: []`
+- `terminal_restores`: `{net: outcome}` for rip victims restored at terminal failure — `full` is the only success; `full_open`/`stub` ship broken
+- `stacked_copper`: Same-net duplicate copper KiCad's DRC never flags (disclosure only, not a routing failure)
 - `failed_multipoint`: List of nets with unconnected pads (includes pad coordinates)
 - `blockers`: Per still-failed net, which routed nets wall it off (`blocked_by` with cell counts; #409)
 - `pad_pairs_connected`/`pad_pairs_total` + `pad_pairs_open`: Pad-pair routability tallies (PRR = connected/total) and per-open-net outcome — route-time failures are opens; shorts are DRC's domain (#409 follow-up)
@@ -3305,7 +3428,7 @@ Rules of the loop:
     try a **failed-first split**: re-run the step as two invocations, first
     `--nets <the failed nets>` on the clean input, then everything else to a
     fresh output. Ordering is the cheapest knob but rarely decisive:
-    measured on castor / butterstick / ddr5 / glasgow, an automatic
+    measured on four corpus boards of varying density, an automatic
     failed-first restart NEVER beat the normal order (twice it graded
     worse), so an in-engine restart was tried and removed — only reach for
     this manually when the failure histories actually show corridor
@@ -4099,6 +4222,30 @@ calling the board finished is not**, and ending on none of them is not an ending
 
 ### Diagnose and Retry
 
+**Soft-cost retry levers (measured on 12-board challenging-chain A/B; these
+are RETRY settings — the defaults stay mild on purpose):**
+
+- **First-choice retry on any struggling board:** re-run the failing signal
+  step (or chain) with `--ripped-route-avoidance-cost 3
+  --track-proximity-cost 2` and **KEEP WHICHEVER RESULT GRADES BETTER** —
+  routing is deterministic and the comparison is cheap. Across 12 hard
+  boards this improved 8 (top gains +6.1 and +4.1 pts, connectivity down on
+  nearly every win), regressed 2, and timed out 2 (expect up to 2× runtime).
+  Board-type prediction is IMPERFECT — a 6-layer RAM board regressed −5.0 —
+  so never blind-apply: always retry-and-compare.
+- **Thrash-class variant:** on boards whose logs show heavy rip-up churn,
+  ALSO try `--via-proximity-cost 100` on top (rescued one thrash board
+  +2.4 pts where the base combo timed out) — but it fails more often than
+  it helps elsewhere (3 wins / 5 losses / 3 timeouts); strictly a
+  second-attempt lever, same keep-better rule.
+- **Do not stack these with `--bga-proximity-cost` or a lower `--max-ripup`**
+  — both combinations measured WORSE than either alone (they remove exactly
+  the freedom the corridor pricing needs).
+- **Boards routing fine at defaults:** leave everything alone.
+- Never set `--via-proximity-cost 0` (a measured ~200x CPU explosion), and
+  leave `--ripped-route-avoidance-radius` at its default (widening it
+  measured worse).
+
 After running routing commands:
 1. Report how many nets were routed successfully
 2. **If routes failed**, invoke `/diagnose-routing-failures <board> <log files>` — it parses
@@ -4110,7 +4257,7 @@ After running routing commands:
 |-----------------|--------------|----------|
 | "no rippable blockers found" | Route blocked by non-rippable obstacle | Use `--no-bga-zone`; if pads are "boxed in by static obstacles", shrink geometry / finer grid (see "Congestion escalation" below) |
 | "Re-route FAILED: no path found" | Ripped net couldn't find new path | Capacity problem (`--max-iterations` self-extends, #529): `--max-ripup`, clearance, or layers |
-| Many multipoint pads failed on same component | Congested area | Use `--max-ripup 10` or higher; shrink geometry toward the fab floor (see below) |
+| Many multipoint pads failed on same component | Congested area | Shrink geometry toward the fab floor (see below); keep `--max-ripup` at ~5 (deeper measured worse) |
 | Many failures cluster in one channel/region | Tracks too fat for the channel | **Congestion escalation**: re-route the failed nets at smaller track/via/clearance down to the fab floor (see below) |
 | 2-layer board: low completion, via count far above a hand layout, or copper badly skewed to F.Cu while B.Cu sits empty | Default B.Cu cost (3.0×) over-penalizes the back layer | Retry with balanced `--layer-costs 1.0 1.5` (down toward `1.0 1.0`) — see "Dense 2-layer boards: rebalance layer costs" below |
 | Routes near BGA boundary failing | BGA exclusion zone too aggressive | Use `--no-bga-zone` |
@@ -4119,7 +4266,7 @@ After running routing commands:
 python3 -X utf8 route.py board_prev.kicad_pcb board_routed.kicad_pcb \
     --nets "*" \
     --no-bga-zone \
-    --max-ripup 10 \
+    --max-ripup 5 \
     2>&1 | tee /tmp/route_retry.txt
 ```
 
@@ -4171,11 +4318,11 @@ boards stay 100% connected at every setting — the win is via count and balance
 
 | board | default `1.0 3.0` | `1.0 1.5` |
 |-------|-------------------|-----------|
-| urchin  | B/F 0.17, 177 vias | **B/F 1.01, 98 vias** |
-| piantor | B/F 0.19, 102 vias | **B/F 1.85, 59 vias** |
+| 2-layer corpus board A | B/F 0.17, 177 vias | **B/F 1.01, 98 vias** |
+| 2-layer corpus board B | B/F 0.19, 102 vias | **B/F 1.85, 59 vias** |
 
 `1.0 1.5` roughly **halves the via count** and pulls the layer balance from a
-~6:1 F.Cu skew to near parity (the human urchin layout sits around B/F 0.89).
+~6:1 F.Cu skew to near parity (board A's human layout sits around B/F 0.89).
 `1.0 1.0` lands in the same neighbourhood — pick the one with fewer vias.
 
 #### Route signals at the FAB floor by default (thin is faster AND more complete)
@@ -4184,7 +4331,7 @@ boards stay 100% connected at every setting — the win is via count and balance
 the subtlety — **the fab floor is NOT the board's `min_track_width` constraint
 either.** Three different numbers get confused here; keep them straight:
 
-- **Board `min_track_width`** (from `.kicad_pro`, e.g. ottercast = 0.2 mm) — the
+- **Board `min_track_width`** (from `.kicad_pro`, often 0.2 mm) — the
   author's self-imposed DRC rule. Often conservative. Note `list_nets
   --design-rules` reports its "manufacturing floor" track as `max(this, JLC min)`,
   so it currently **clamps the track floor to this constraint** (0.2) and does NOT
@@ -4192,12 +4339,12 @@ either.** Three different numbers get confused here; keep them straight:
   real floor (it's right for clearance/via, just not for track).
 - **Fab physical track minimum** (JLC ≈ **0.0889 mm / 3.5 mil** standard; **0.127
   mm / 5 mil** is the safe no-extra-cost width) — the actual floor. **This is the
-  target.** It can be *below* the board's `min_track_width`: the human ottercast
-  board routes most signals at 0.127 mm, under its own 0.2 mm constraint, which is
-  exactly why it fits channels our 0.2 mm net-class tracks can't.
+  target.** It can be *below* the board's `min_track_width`: human corpus
+  boards routinely route most signals at 0.127 mm, under their own 0.2 mm constraint,
+  which is exactly why they fit channels our 0.2 mm net-class tracks can't.
 
 For ordinary signals there is **no benefit to routing fat** and a real cost.
-Measured on ottercast_audio (signal pass, same clearance/grid, width only):
+Measured on a 4-layer corpus board (signal pass, same clearance/grid, width only):
 
 | Signal track width | Multipoint nets routed | Pads connected | Time |
 |--------------------|------------------------|----------------|------|
