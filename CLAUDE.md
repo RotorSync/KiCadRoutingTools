@@ -170,6 +170,12 @@ scores 0.81, `SDRAM_*` 0.46). And grade intent errors **paired**, not against
 zero: both arms quench the board, so both walk parts out of the emitted intent's
 zones for reasons the flag did not cause.
 
+Every metric in that harness is still a **proxy**, so `tests/test_placement_probe.py`
+(opt-in, slower) actually routes. It scopes the route **causally, not by which
+parts moved** — the nets `net_affinity` flagged plus the declared corridor nets,
+fixed from the OFF board and identical on both. Scoping by moved parts is
+circular: a term that moves nothing would score a perfect null.
+
 ## Keep CLI and GUI routing in sync
 
 There are two front-ends to the same routing engine, and a fix to one is
