@@ -3036,68 +3036,113 @@ def route_multipoint_main(
         if _os.environ.get('KICAD_POUR_LAUNCH', '') == '1' and _island_cells:
             try:
                 from plane_fill_model import get_fill_models
+                from plane_fragility import _erode_depth
                 import numpy as _np
                 _models = get_fill_models(pcb_data, net_id)
                 if _models:
                     from collections import Counter as _Ctr
-                    _votes = _Ctr()
-                    for _idx, _info in enumerate(pad_info):
-                        _px, _py = _info[3], _info[4]
-                        for _lay, _ms in _models.items():
-                            if any((m.query_component(_px, _py) or 0) > 0
-                                   for m in _ms):
-                                _votes[pad_components.get(_idx, _idx)] += 1
-                    if _votes:
-                        _pcid = _votes.most_common(1)[0][0]
-                        # DISTANCE LADDER (per straggler terminal): best-N
-                        # nearest fill cells within expanding rungs, so the
-                        # target set stays compact and short taps win by
-                        # construction (was: 73k cells of global sampling).
-                        _RUNGS = (1.0, 2.5, 6.0, 15.0)   # mm
-                        _NBEST = 12
-                        _added = 0
-                        _cells = _island_cells.setdefault(_pcid, {})
+                    # LADDER v2: (a) PER-POUR component attribution -- every
+                    # pour joins ITS OWN connectivity component's launch set,
+                    # not just the majority pour's; (b) each rung's candidate
+                    # pool is fill cells PLUS the pour component's existing
+                    # copper (via/track island cells), so a same-net via 0.8mm
+                    # away stops the ladder from escalating to far fill; (c)
+                    # fill candidates are scored dist + fragility (boundary/
+                    # strait attach pinches the pour; deep fill is free) --
+                    # existing copper carries no fragility penalty.
+                    _RUNGS = (1.0, 2.5, 6.0, 15.0)   # mm
+                    _NBEST = 12
+                    # ablation knobs (prototype): fragility penalty coefficient
+                    # and copper-aware rung break, both defaulted ON
+                    _FRAG_MM = float(_os.environ.get(
+                        'KICAD_POUR_LAUNCH_FRAG', '1.0') or 0)
+                    _COPPER_RUNGS = _os.environ.get(
+                        'KICAD_POUR_LAUNCH_COPPER', '1') == '1'
+                    _DEEP_MM = 0.5      # depth at which fill attach is free
+                    _attr = []           # (layer_idx, model, comp_id, main)
+                    for _lay, _ms in _models.items():
+                        if _lay not in layer_names:
+                            continue
+                        _li = layer_names.index(_lay)
+                        for _m in _ms:
+                            _main = _m.largest_component()
+                            if not _main:
+                                continue
+                            _v = _Ctr()
+                            for _idx, _info in enumerate(pad_info):
+                                if (_m.query_component(_info[3], _info[4]) or 0) > 0:
+                                    _v[pad_components.get(_idx, _idx)] += 1
+                            if _v:
+                                _attr.append((_li, _m, _v.most_common(1)[0][0],
+                                              _main))
+                    _added = _nstrag = 0
+                    _by_comp = {}
+                    for _li, _m, _cid, _main in _attr:
+                        _by_comp.setdefault(_cid, []).append((_li, _m, _main))
+                    for _cid, _pours in _by_comp.items():
+                        _cells = _island_cells.setdefault(_cid, {})
+                        _copper = [(_fx, _fy, _k[2])
+                                   for _k, (_fx, _fy) in _cells.items()]
                         _stragglers = [(_info[3], _info[4])
                                        for _idx, _info in enumerate(pad_info)
-                                       if pad_components.get(_idx, _idx) != _pcid]
+                                       if pad_components.get(_idx, _idx) != _cid]
+                        _nstrag = max(_nstrag, len(_stragglers))
+                        _depth_cache = {}
                         for _sx, _sy in _stragglers:
                             _found = []
                             for _r in _RUNGS:
-                                for _lay, _ms in _models.items():
-                                    if _lay not in layer_names:
+                                # existing copper of the pour's component
+                                # within this rung: full candidates, no
+                                # fragility penalty (attach damages nothing).
+                                if _COPPER_RUNGS:
+                                    for _fx, _fy, _fl in _copper:
+                                        _d2 = (_fx - _sx) ** 2 + (_fy - _sy) ** 2
+                                        if _d2 <= _r * _r:
+                                            _found.append((_d2 ** 0.5, _fx, _fy, _fl))
+                                for _li, _m, _main in _pours:
+                                    _dc = int(round(_DEEP_MM / _m.cell)) or 1
+                                    _i0 = max(0, int((_sx - _r - _m.x0) / _m.cell) - _dc)
+                                    _i1 = min(_m.nx, int((_sx + _r - _m.x0) / _m.cell) + 1 + _dc)
+                                    _j0 = max(0, int((_sy - _r - _m.y0) / _m.cell) - _dc)
+                                    _j1 = min(_m.ny, int((_sy + _r - _m.y0) / _m.cell) + 1 + _dc)
+                                    if _i0 >= _i1 or _j0 >= _j1:
                                         continue
-                                    _li = layer_names.index(_lay)
-                                    for _m in _ms:
-                                        _main = _m.largest_component()
-                                        if not _main:
-                                            continue
-                                        _i0 = max(0, int((_sx - _r - _m.x0) / _m.cell))
-                                        _i1 = min(_m.nx, int((_sx + _r - _m.x0) / _m.cell) + 1)
-                                        _j0 = max(0, int((_sy - _r - _m.y0) / _m.cell))
-                                        _j1 = min(_m.ny, int((_sy + _r - _m.y0) / _m.cell) + 1)
-                                        if _i0 >= _i1 or _j0 >= _j1:
-                                            continue
+                                    _ck = (id(_m), _i0, _i1, _j0, _j1)
+                                    _dep = _depth_cache.get(_ck)
+                                    if _dep is None:
                                         _win = _m.labels[_i0:_i1, _j0:_j1]
-                                        _jj, _ii = _np.nonzero(_win == _main)
-                                        for _j, _i in zip(_jj, _ii):
-                                            _fx = _m.x0 + float(_i + _i0) * _m.cell
-                                            _fy = _m.y0 + float(_j + _j0) * _m.cell
-                                            _d2 = (_fx - _sx) ** 2 + (_fy - _sy) ** 2
-                                            if _d2 <= _r * _r:
-                                                _found.append((_d2, _fx, _fy, _li))
+                                        _dep = _erode_depth(_win == _main, _dc)
+                                        _depth_cache[_ck] = _dep
+                                    _win = _m.labels[_i0:_i1, _j0:_j1]
+                                    # labels is [x, y] (query_component's own
+                                    # indexing) -- v1 paired the y-index with
+                                    # x0 and vice versa, mirroring every fill
+                                    # target across the window diagonal.
+                                    _xi, _yi = _np.nonzero(_win == _main)
+                                    for _a, _b in zip(_xi, _yi):
+                                        _fx = _m.x0 + float(_a + _i0) * _m.cell
+                                        _fy = _m.y0 + float(_b + _j0) * _m.cell
+                                        _d2 = (_fx - _sx) ** 2 + (_fy - _sy) ** 2
+                                        if _d2 > _r * _r:
+                                            continue
+                                        _dmm = float(_dep[_a, _b]) * _m.cell
+                                        _frag = max(0.0, 1.0 - _dmm / _DEEP_MM)
+                                        _found.append((_d2 ** 0.5 + _FRAG_MM * _frag,
+                                                       _fx, _fy, _li))
                                 if _found:
-                                    break   # nearest rung with fill wins
+                                    break   # nearest rung with ANY target wins
                             _found.sort()
-                            for _d2, _fx, _fy, _li in _found[:_NBEST]:
+                            for _sc, _fx, _fy, _li in _found[:_NBEST]:
                                 _g = coord.to_grid(_fx, _fy)
                                 _k = (_g[0], _g[1], _li)
                                 if _k not in _cells:
                                     _cells[_k] = (_fx, _fy)
                                     _added += 1
-                        if _added:
-                            print(f"  POUR-LAUNCH: +{_added} laddered fill "
-                                  f"cell(s) for {len(_stragglers)} straggler(s) "
-                                  f"-> component {_pcid}")
+                    if _added:
+                        print(f"  POUR-LAUNCH v2: +{_added} laddered target(s) "
+                              f"({len(_by_comp)} pour component(s), "
+                              f"{_nstrag} straggler(s); dist+fragility scored, "
+                              f"copper-aware rungs)")
             except Exception as _e:
                 print(f"  POUR-LAUNCH unavailable ({_e})")
     num_components = len(set(pad_components.values()))
