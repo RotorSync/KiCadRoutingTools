@@ -3283,17 +3283,26 @@ def create_plane(
         # as the trigger; the output writer text-splices and never
         # serializes pcb_data.zones, so this cannot duplicate output.
         import os as _os
-        if _os.environ.get('KICAD_PLANE_TAP_PREFER_REUSE', '') == '1'                 and should_create_zone:
-            _bb = pcb_data.board_info.board_bounds
-            if _bb:
+        if _os.environ.get('KICAD_PLANE_TAP_PREFER_REUSE', '') == '1':
+            # Register the PREVIOUS net's zone (deferred one iteration):
+            # registering before THIS net's own pad analysis made
+            # identify_target_pads classify its pads as already_connected ->
+            # taps silently skipped (measured -6.1 pts on a BGA chain).
+            # Later nets still see every earlier pour.
+            _pend = getattr(pcb_data, '_pending_inrun_zone', None)
+            if _pend is not None:
                 from kicad_parser import Zone as _Zone
-                _poly = [(_bb[0], _bb[1]), (_bb[2], _bb[1]),
-                         (_bb[2], _bb[3]), (_bb[0], _bb[3])]
-                pcb_data.zones.append(_Zone(
-                    net_id=net_id, net_name=net_name, layer=plane_layer,
-                    polygon=_poly))
-                print(f"  (registered in-run zone {net_name}/{plane_layer} "
-                      f"for perforation checks)")
+                pcb_data.zones.append(_Zone(**_pend))
+                print(f"  (registered in-run zone {_pend['net_name']}/"
+                      f"{_pend['layer']} for perforation checks)")
+                pcb_data._pending_inrun_zone = None
+            if should_create_zone:
+                _bb = pcb_data.board_info.board_bounds
+                if _bb:
+                    pcb_data._pending_inrun_zone = dict(
+                        net_id=net_id, net_name=net_name, layer=plane_layer,
+                        polygon=[(_bb[0], _bb[1]), (_bb[2], _bb[1]),
+                                 (_bb[2], _bb[3]), (_bb[0], _bb[3])])
 
         # Step 5: Identify target pads for this net
         if progress_callback:
