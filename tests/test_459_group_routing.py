@@ -349,7 +349,13 @@ def test_undo_never_touches_a_locked_arc():
 def test_undo_reports_a_surviving_zone():
     """A filled pour IS copper. Claiming a net is back to 'no copper' while its
     plane is still poured is simply false."""
-    src = os.path.join(KF, 'interf_u_plane.kicad_pcb')
+    # interf_u_plane is GENERATED (route_planes over the tracked
+    # interf_u_unrouted root) and gitignored, so it does not exist in a fresh
+    # clone -- #457 item 3. Build it on demand instead of hardcoding the path,
+    # which made this test fail outright anywhere the board had not already
+    # been produced by an earlier local run.
+    from fixture_boards import ensure
+    src = ensure('interf_u_plane.kicad_pcb')
     r = _run(src, os.devnull, '--nets', 'VCC', '--undo')
     assert r.returncode == 0, r.stdout[-400:]
     assert 'ZONE' in r.stdout, r.stdout[-600:]
