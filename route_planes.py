@@ -3332,12 +3332,21 @@ def create_plane(
         # via the pour-launch feature; fanout drops own the BGA balls.
         import os as _os0
         if _os0.environ.get('KICAD_PLANE_NO_TAPS', '') == '1':
-            _n_skip = sum(1 for pd in target_pads if pd['type'] == 'via_needed')
+            _skip = [pd for pd in target_pads if pd['type'] == 'via_needed']
             target_pads = [pd for pd in target_pads
                            if pd['type'] != 'via_needed']
-            if _n_skip:
-                print(f"  NO-TAPS mode: left {_n_skip} via-needed pad(s) on "
-                      f"'{net_name}' for the signal pass (KICAD_PLANE_NO_TAPS)")
+            if _skip:
+                # Every skipped pad still seeds the split-layer Voronoi so its
+                # net's cell reserves the territory the signal pass will tap
+                # into (same #114-style point-seed path as the defer mode).
+                _dseeds = getattr(pcb_data, '_deferred_bga_seeds', None)
+                if _dseeds is None:
+                    _dseeds = pcb_data._deferred_bga_seeds = {}
+                _dseeds.setdefault(net_id, []).extend(
+                    (pd['pad'].global_x, pd['pad'].global_y) for pd in _skip)
+                print(f"  NO-TAPS mode: left {len(_skip)} via-needed pad(s) on "
+                      f"'{net_name}' for the signal pass (KICAD_PLANE_NO_TAPS; "
+                      f"positions kept as Voronoi seeds)")
 
         # PROTOTYPE (worktree): defer under-BGA pads to the fanout stage
         # (KICAD_PLANE_DEFER_BGA=1). The plane step pours and taps the OPEN
