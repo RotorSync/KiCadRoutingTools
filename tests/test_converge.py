@@ -117,8 +117,11 @@ def test_record_step_back_replay_round_trip():
         return
     with tempfile.TemporaryDirectory() as td:
         led = os.path.join(td, 'l.jsonl')
+        # sys.executable, not 'echo': echo is a shell builtin, so it neither
+        # replays on Windows nor passes the record-time replayability guard.
         r = _cv(['record', '--ledger', led, '--board', BOARD,
-                 '--lever', 'seed', '--argv', 'echo', 'replayed-ok'])
+                 '--lever', 'seed', '--argv', sys.executable, '-c',
+                 "print('replayed-ok')"])
         assert r.returncode == 0, r.stderr
         sha = json.loads(r.stdout)['result_sha']
 
@@ -131,6 +134,51 @@ def test_record_step_back_replay_round_trip():
         r = _cv(['replay', '--ledger', led, '--iteration', '0'])
         assert r.returncode == 0 and 'replayed-ok' in r.stdout
     print("  PASS: record -> step-back (byte-exact) -> replay")
+
+
+def test_record_refuses_an_argv_that_cannot_replay():
+    """Run-7 F4: entries recorded with placeholder script names made replay a
+    reconstruction -- exactly what the ledger exists to prevent."""
+    with tempfile.TemporaryDirectory() as td:
+        led = os.path.join(td, 'l.jsonl')
+        r = _cv(['record', '--ledger', led, '--board', BOARD,
+                 '--lever', 'x', '--argv', 'route_v12_placeholder.sh', 'b.pcb'])
+        assert r.returncode == 2, (r.returncode, r.stderr)
+        assert 'never replay' in r.stderr
+        assert not os.path.exists(led), "nothing may be written on refusal"
+    print("  PASS: a placeholder --argv is refused, ledger untouched")
+
+
+def test_record_final_requires_stop_condition():
+    with tempfile.TemporaryDirectory() as td:
+        led = os.path.join(td, 'l.jsonl')
+        r = _cv(['record', '--ledger', led, '--board', BOARD, '--final'])
+        assert r.returncode == 2 and 'stop-condition' in r.stderr
+        assert not os.path.exists(led), "nothing may be written on refusal"
+        r = _cv(['record', '--ledger', led, '--board', BOARD, '--final',
+                 '--stop-condition', 'plateau: 3 iterations, no new copper'])
+        assert r.returncode == 0, r.stderr
+        e = json.loads(r.stdout)
+        assert e.get('final') is True
+        assert e.get('stop_condition', '').startswith('plateau')
+    print("  PASS: --final without --stop-condition is refused; with it, recorded")
+
+
+def test_record_score_failures_want_names():
+    """Run-7 S10/F5: a score carrying only a COUNT forces every later read to
+    re-derive which nets -- and a truncated re-derivation shipped a wrong
+    close-out. Names print when given; a count without names draws a NOTE."""
+    with tempfile.TemporaryDirectory() as td:
+        led = os.path.join(td, 'l.jsonl')
+        r = _cv(['record', '--ledger', led, '--board', BOARD,
+                 '--score', '{"failures": 3}'])
+        assert r.returncode == 0
+        assert 'names no nets' in r.stderr, r.stderr
+        r = _cv(['record', '--ledger', led, '--board', BOARD,
+                 '--score', '{"failures": 2, "failed_nets": ["SWDIO", "GPIO1"]}'])
+        assert r.returncode == 0
+        assert 'SWDIO' in r.stderr and 'GPIO1' in r.stderr, r.stderr
+    print("  PASS: failing-net names surface; a bare count draws a NOTE")
 
 
 def test_a_prose_only_entry_refuses_to_replay_without_a_traceback():
