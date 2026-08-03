@@ -344,7 +344,11 @@ places vias itself, so this is about choosing its options, not via positions):
   BGA, ~100 via barrels kept out of the escape field;
   `KICAD_FANOUT_POUR_DIRECT=0` reverts). To benefit, POUR BEFORE FANOUT and
   put rail pours on the layers that carry the rail balls (the outer layer for
-  a surface flood).
+  a surface flood). This generalizes beyond BGAs: **choose each outer-layer
+  flood net by same-layer SMD pad count** — every SMD pad of the flood net on
+  that layer connects by fill contact with no via at all. `list_nets.py
+  --power` prints per-net `(F.Cu n SMD, B.Cu n SMD, TH n)` for this choice;
+  ignore the TH counts (barrels connect on every layer regardless).
 - **Escape via, by pitch:** at 0.8–1.0 mm the median minimum via in the
   courtyard is 0.45/0.20; at ≤0.5 mm humans go to 0.28/0.15 and even
   0.25/0.10. Escape-track minimum: median 0.125 mm at coarse pitch, 0.089–0.10

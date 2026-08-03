@@ -52,6 +52,14 @@ python3 -X utf8 list_nets.py path/to/file.kicad_pcb --power
   capacitance; e.g. VCC on In2.Cu against GND on In1.Cu).
 - High-speed content raises the stakes: reference-plane adjacency for the layers
   carrying fast signals comes first, rail convenience second.
+- **Outer layers (F.Cu/B.Cu): pick the flood net by same-layer SMD pad count.**
+  An outer pour reaches its own-layer SMD pads by fill contact — zero vias for
+  every such pad (the fanout's pour-direct drop skips the barrel when fill
+  reaches the ball). `list_nets.py --power` prints per-net `(F.Cu n SMD,
+  B.Cu n SMD, TH n)` for exactly this decision: between candidate nets for an
+  outer flood, the one with the most SMD pads on that layer saves the most
+  vias and escape congestion. TH-heavy nets gain nothing from layer choice
+  (barrels connect everywhere), so don't let TH counts sway it.
 - Mention existing zones that already cover a recommendation instead of repeating them.
 
 ## Step 3b: Routability Budget (do this BEFORE finalizing layers)

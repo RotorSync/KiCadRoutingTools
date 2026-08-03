@@ -555,6 +555,37 @@ def _is_two_terminal_resonator_pair(pcb_data, name2net, pos_name, neg_name):
     return False
 
 
+def net_outer_pad_profile(pcb_data, net_name):
+    """Per-outer-layer SMD pad counts + plated-TH count for a net (#562).
+
+    An outer-layer flood of this net connects its same-layer SMD pads by
+    fill contact (pour-direct, NO via each), and its plated-TH barrels on
+    every layer. Planners should weigh this when choosing which net floods
+    F.Cu/B.Cu: the net with the most SMD pads on a layer saves the most
+    vias when poured there. Returns ({'F.Cu': n, 'B.Cu': n}, th_count).
+    """
+    from kicad_parser import pad_is_plated_through
+    prof = {}
+    th = 0
+    net = next((n for n in pcb_data.nets.values() if n.name == net_name), None)
+    for p in (net.pads if net else []):
+        if pad_is_plated_through(p):
+            th += 1
+        elif not p.drill:
+            for lay in ('F.Cu', 'B.Cu'):
+                if lay in p.layers:
+                    prof[lay] = prof.get(lay, 0) + 1
+    return prof, th
+
+
+def _fmt_outer_profile(pcb_data, net_name):
+    prof, th = net_outer_pad_profile(pcb_data, net_name)
+    parts = [f"{lay} {n} SMD" for lay, n in sorted(prof.items()) if n]
+    if th:
+        parts.append(f"TH {th}")
+    return f"  ({', '.join(parts)})" if parts else ""
+
+
 def find_power_nets(pcb_data):
     """Find power and ground nets by name patterns and connection count.
 
@@ -681,15 +712,20 @@ def main():
         gnd_nets, vcc_nets, candidates = find_power_nets(pcb_data)
         print(f"\nGround Nets ({len(gnd_nets)} found):")
         for name, count in gnd_nets:
-            print(f"  {name}: {count} pads")
+            print(f"  {name}: {count} pads{_fmt_outer_profile(pcb_data, name)}")
         print(f"\nPower Nets ({len(vcc_nets)} found):")
         for name, count in vcc_nets:
-            print(f"  {name}: {count} pads")
+            print(f"  {name}: {count} pads{_fmt_outer_profile(pcb_data, name)}")
         if candidates:
             print(f"\nHigh pad-count nets NOT matched by power patterns "
                   f"(possible power rails - verify):")
             for name, count in candidates:
-                print(f"  {name}: {count} pads")
+                print(f"  {name}: {count} pads{_fmt_outer_profile(pcb_data, name)}")
+        print("\nOuter-layer flood hint: SMD counts above are pads an F.Cu/B.Cu "
+              "pour of that net would reach by fill contact (no via each); "
+              "TH barrels connect on every layer. When picking the net to "
+              "flood an outer layer, prefer the one with the most SMD pads "
+              "on that layer.")
         print()
 
     # Component-specific listing
