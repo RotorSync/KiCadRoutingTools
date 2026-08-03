@@ -3309,7 +3309,13 @@ def create_plane(
             _pend = getattr(pcb_data, '_pending_inrun_zone', None)
             if _pend is not None:
                 from kicad_parser import Zone as _Zone
-                pcb_data.zones.append(_Zone(**_pend))
+                # PRIVATE registry -- never pcb_data.zones: a synthetic
+                # board-rect outline there poisons every same-step fill
+                # consumer (cleanup/reconcile/stitching saw a full-board
+                # GND 'zone'; measured -6.1 pts).
+                if not hasattr(pcb_data, '_inrun_zones'):
+                    pcb_data._inrun_zones = []
+                pcb_data._inrun_zones.append(_Zone(**_pend))
                 print(f"  (registered in-run zone {_pend['net_name']}/"
                       f"{_pend['layer']} for perforation checks)")
                 pcb_data._pending_inrun_zone = None
@@ -3708,13 +3714,16 @@ def create_plane(
             if _os.environ.get('KICAD_PLANE_TAP_PREFER_REUSE', '') == '1':
                 from plane_fill_model import get_fill_models as _gfm
                 _pierce = 0
-                for _z in (pcb_data.zones or []):
+                from plane_fill_model import get_zone_model as _gzm2
+                _all_z = list(pcb_data.zones or []) + \
+                    list(getattr(pcb_data, '_inrun_zones', []) or [])
+                for _z in _all_z:
                     if _z.net_id == net_id:
                         continue
-                    for _m in _gfm(pcb_data, _z.net_id).get(_z.layer, []):
-                        if (_m.query_component(pad.global_x, pad.global_y) or 0) > 0:
-                            _pierce += 1
-                            break
+                    _m2 = _gzm2(pcb_data, _z)
+                    if _m2 is not None and \
+                            (_m2.query_component(pad.global_x, pad.global_y) or 0) > 0:
+                        _pierce += 1
                 if _pierce:
                     _rmult = float(_os.environ.get('KICAD_PLANE_TAP_REUSE_RMULT', '1.5') or 1.5)
                     _ev = via_index.find_nearest(pad.global_x, pad.global_y,
