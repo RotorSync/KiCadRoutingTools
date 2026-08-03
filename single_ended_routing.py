@@ -3830,8 +3830,18 @@ def _route_multipoint_taps_impl(
         # a legal launch (its stubs, trunks, vias on all layers), exactly
         # like Phase 1's island-wide launch. Restricted to routed components
         # (#189). sorted() for GUI/CLI order-independence.
+        # The ids MUST come from the same labeling that keys
+        # _p3_island_cells: `routed_components` is Phase-1's labeling, and
+        # get_terminal_component_info renumbers densely after Phase-1 copper
+        # merges pads -- indexing the fresh map with the stale ids collided
+        # a routed pad's old singleton label with an UNROUTED island's fresh
+        # label, seeding sources on the target's own island. A* then popped
+        # a source that was the goal on iteration 1 and credited a
+        # zero-length phantom "routed" edge -- the exact #189 violation this
+        # branch guards against (test_432 scenario C: 2/0 edges where the
+        # truth was 1/1, and on real boards a suppressed failure record).
         if _p3_use_islands:
-            for _cid in sorted(routed_components):
+            for _cid in sorted({_p3_comps.get(i, i) for i in routed_indices}):
                 _isl = _p3_island_cells.get(_cid)
                 if not _isl:
                     continue
@@ -3863,8 +3873,12 @@ def _route_multipoint_taps_impl(
         # landing cell back to ITS owner point, never the distant pad centre.
         _tgt_isl = {}
         if _p3_use_islands:
+            # Same ID-space rule as the source seeding above: look the
+            # target's island up through the FRESH labeling, not Phase-1's
+            # pad_components (the stale id usually missed entirely, so #545
+            # F2 target-island landing silently never worked).
             _tgt_isl = _p3_island_cells.get(
-                pad_components.get(tgt_idx, tgt_idx), {})
+                _p3_comps.get(tgt_idx, tgt_idx), {})
             if _tgt_isl:
                 _tset = set(targets)
                 for _cell in _tgt_isl:

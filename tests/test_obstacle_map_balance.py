@@ -53,7 +53,8 @@ def check(name, cond, detail=""):
         FAILS.append(name)
 
 
-def run_cmd(args, audit=True, ledger=False, tap_verify=False):
+def run_cmd(args, audit=True, ledger=False, tap_verify=False,
+            fragility_off=False):
     env = dict(os.environ)
     env.pop("KICAD_OBSTACLE_AUDIT", None)
     env.pop("KICAD_OBSTACLE_LEDGER", None)
@@ -64,6 +65,15 @@ def run_cmd(args, audit=True, ledger=False, tap_verify=False):
         env["KICAD_OBSTACLE_LEDGER"] = "1"
     if tap_verify:
         env["TAP_MAP_VERIFY"] = "1"
+    if fragility_off:
+        # The stage-1 churn recipe's last routing failure is cost-surface
+        # sensitive: with the #424 plane-fragility field priced from the
+        # EXACT KiCad fill (which depends on whether a KiCad python is
+        # discoverable on the machine), the failing MST edge routes and the
+        # recipe stops churning -- making the balance checks vacuous and the
+        # test environment-dependent. Pin the field off for that stage; the
+        # audit under churn is what this test exists to exercise.
+        env["KICAD_PLANE_FRAGILITY_COST"] = "0"
     p = subprocess.run([sys.executable, "-X", "utf8"] + args, cwd=ROOT_DIR,
                        env=env, capture_output=True, text=True, timeout=1200)
     return p.returncode, p.stdout + p.stderr
@@ -79,7 +89,7 @@ def main():
                        "--track-width", "0.8", "--clearance", "0.7",
                        "--via-size", "1.0", "--via-drill", "0.6",
                        "--layers", "F.Cu", "B.Cu", "--max-ripup", "10"],
-                      ledger=True)
+                      ledger=True, fragility_off=True)
     check("route.py: run completed", rc == 0, f"rc={rc}")
     rips = len(re.findall(r"[Rr]ipping|Extending to N", log))
     check("route.py: rip churn engaged (recipe still churns)", rips >= 1, f"rips={rips}")

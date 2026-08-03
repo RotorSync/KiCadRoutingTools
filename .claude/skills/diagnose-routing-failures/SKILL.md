@@ -16,7 +16,19 @@ grep "JSON_SUMMARY" /tmp/route_output.txt | sed 's/.*JSON_SUMMARY: //' | python3
 ```
 
 Key fields:
-- `failed_single`: failed single-ended net names
+- `failed_single`: failed single-ended net names — nets with NO result at all
+- `open_single`: nets that KEPT a result whose copper still leaves pads
+  disconnected (non-multipoint only; a multipoint shortfall is already the pad
+  deficit). **Always read this alongside `failed_single`** — a board can ship
+  open copper with `failed_single: []`, so a run is only clean when both are
+  empty. These nets also appear by name in `failed_multipoint`.
+- `terminal_restores`: `{net: outcome}` for rip victims restored at terminal
+  failure. `full` is the only success; `full_open` restored copper that never
+  covered every pad, and `stub` kept only the escape stubs — both ship broken
+  and are worth reporting as failures with a distinct cause (the reroute failed
+  and the pre-rip copper could not be fully put back).
+- `stacked_copper`: same-net duplicate copper KiCad's DRC will never flag. Not a
+  routing failure, but if present, say so — it is invisible to every other check.
 - `failed_multipoint`: nets with unconnected pads, including pad coordinates
 - `blockers`: per still-failed net, the run's LAST frontier blocking analysis
   (#409): `{net, stage, blocked_by: [{net, blocked_count, unique_cells,

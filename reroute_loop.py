@@ -556,7 +556,7 @@ def run_reroute_loop(
                         pcb_data, config, ripped_net_id,
                         working_obstacles=state.working_obstacles,
                         net_obstacles_cache=state.net_obstacles_cache)
-                    if _tr == 'full':
+                    if _tr in ('full', 'full_open'):
                         _sv, _rids, _wir = pcb_data._rip_saved[ripped_net_id]
                         restore_net(ripped_net_id, _sv, _rids, _wir,
                                     pcb_data, routed_net_ids, routed_net_paths,
@@ -567,12 +567,24 @@ def run_reroute_loop(
                                     state.ripped_route_layer_costs,
                                     state.ripped_route_via_positions,
                                     refused_sink=state.collision_refused_net_ids)
-                        print(f"  RIP-RESTORE (#468): {ripped_net_name} restored "
-                              f"to its pre-rip route (reroute failed, corridor "
-                              f"still clear)")
-                        if _wir:
-                            successful += 1
+                        state.terminal_restores[ripped_net_id] = _tr
+                        if _tr == 'full':
+                            print(f"  RIP-RESTORE (#468): {ripped_net_name} restored "
+                                  f"to its pre-rip route (reroute failed, corridor "
+                                  f"still clear)")
+                            if _wir:
+                                successful += 1
+                        else:
+                            # Conflict-free but NOT connected: the saved payload
+                            # never covered every pad. Keep the copper, refuse
+                            # the success claim (run-7 E2).
+                            print(f"  {RED}RIP-RESTORE (#468): {ripped_net_name} "
+                                  f"restored its pre-rip copper but the net "
+                                  f"remains OPEN -- counted failed{RESET}")
+                            failed += 1
                     else:
+                        if _tr == 'stub':
+                            state.terminal_restores[ripped_net_id] = 'stub'
                         failed += 1
 
         elif reroute_item[0] == 'diff_pair':
@@ -1033,7 +1045,7 @@ def run_reroute_loop(
                         pcb_data, config, ripped_pair.p_net_id,
                         working_obstacles=state.working_obstacles,
                         net_obstacles_cache=state.net_obstacles_cache)
-                    if _tr == 'full':
+                    if _tr in ('full', 'full_open'):
                         _sv, _rids, _wir = pcb_data._rip_saved[ripped_pair.p_net_id]
                         restore_net(ripped_pair.p_net_id, _sv, _rids, _wir,
                                     pcb_data, routed_net_ids, routed_net_paths,
@@ -1044,11 +1056,22 @@ def run_reroute_loop(
                                     state.ripped_route_layer_costs,
                                     state.ripped_route_via_positions,
                                     refused_sink=state.collision_refused_net_ids)
-                        print(f"  RIP-RESTORE (#468): pair {ripped_pair_name} "
-                              f"restored to its pre-rip route")
-                        if _wir:
-                            successful += 1
+                        state.terminal_restores[ripped_pair.p_net_id] = _tr
+                        state.terminal_restores[ripped_pair.n_net_id] = _tr
+                        if _tr == 'full':
+                            print(f"  RIP-RESTORE (#468): pair {ripped_pair_name} "
+                                  f"restored to its pre-rip route")
+                            if _wir:
+                                successful += 1
+                        else:
+                            print(f"  {RED}RIP-RESTORE (#468): pair "
+                                  f"{ripped_pair_name} restored its pre-rip "
+                                  f"copper but remains OPEN -- counted failed{RESET}")
+                            failed += 1
                     else:
+                        if _tr == 'stub':
+                            state.terminal_restores[ripped_pair.p_net_id] = 'stub'
+                            state.terminal_restores[ripped_pair.n_net_id] = 'stub'
                         failed += 1
 
     return successful, failed, total_time, total_iterations, route_index
