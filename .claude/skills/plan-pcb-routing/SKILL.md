@@ -114,6 +114,20 @@ order:
    and route args, and emits the ranked table + `seeds.json` +
    `best_seed`.
 
+   **Its printed note TRUNCATES the failed-net list and `seeds.json` does not
+   carry the rest** — so ledgering the ranking from either one records a
+   count in disguise, against 9.4's names-not-counts rule. Recover the full
+   list from the per-seed probe output before ledgering. The same gap opens
+   at ADOPTION: the board you adopt is a quench of the seed you ranked, i.e.
+   a different board, so probe THAT one for its own failed names — otherwise
+   the routing phase's first whack-a-mole comparison has no baseline to diff
+   against.
+
+   **Forwarded flags need the `=` form**: `--seed-args` / `--route-args` are
+   `nargs="+"`, which argparse refuses to fill with dash-prefixed values, so
+   `--seed-args --clearance 0.15` exits 2. Pass one quoted string —
+   `--seed-args='--clearance 0.15 --max-displacement 2'`.
+
    **For every must_lock part under a HARD geometric clause, run Step 0a-bis
    ON THE SEEDED OUTPUT before the portfolio** — the seeder keeps the pile's
    input rotation, which is a generator default, not a decision. If a
@@ -625,6 +639,15 @@ the ledger entry must name the panels read (see 9.4).
    parts. You cannot declare zones for a board you have not looked at.
 2. **After any accepted placement change** — the delta against the board it
    actually came from. One question only: *did the macro structure survive?*
+   Two cases the bare rule leaves undefined, and both get skipped because of
+   it: for a seeder's FIRST output the parent is a PILE at one coordinate,
+   so the delta is all-arrows noise and the question has no referent — read
+   a plain `render_placement` of the seed instead. And a RUN of micro-moves
+   (a sub-millimetre re-seat, then another, then another) still owes one
+   read: render the CUMULATIVE delta against the last board you read, rather
+   than skipping each move on the reasoning that one part cannot change the
+   macro structure — that reasoning is exactly what the read exists to test.
+   Record the read, or record the non-trigger, every time.
 3. **Every Step 9 iteration whose score has `unrouted` or `broken` > 0** —
    `render_placement --summary-json wk/routeN.json --focus -o wk/focusN/`.
    One question: *do the failures share one pocket* (→ placement) *or are
