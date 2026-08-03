@@ -173,6 +173,14 @@ coordinate, a pitch, a mating standard or an enclosure feature is fixed:
 | castellated edges | the carrier's pad field | pad centred **on** the outline |
 | test points, antennas, sensors | mechanical or RF | an antenna keepout is not negotiable |
 
+The table is the mechanical-facts slice of a broader taxonomy (#118): **part
+classes obey different placement logic** — a decap is governed by pin
+proximity, a connector by the mating standard, a crystal by field distance
+and leg symmetry, a series termination by being the chain's free terminal, a
+bulk cap by almost nothing. When a part fits no row above, ask which CLASS
+governs it — and which rule and grading signal that class implies — before
+treating it as free for the optimizer to trade.
+
 **2. Lock every one of them, and pass the locks to EVERY placement invocation.**
 Not just the first — `place_optimize`, `place_route_loop` and every retry:
 
@@ -1451,6 +1459,14 @@ Use `list_nets.py` to detect differential pairs and power/ground nets:
 python3 list_nets.py path/to/file.kicad_pcb --diff-pairs --power
 ```
 
+**While the spec's widths are in hand, check each declared width against the
+net's smallest pad and its neighbor pitch NOW.** A 0.4 mm trace cannot leave
+a 0.200 mm QFN pad (the neckdown handles the pad END, but a width wider than
+`pitch − clearance` cannot pass BETWEEN neighbors on the escape), and a
+width the geometry cannot carry found here is a spec conversation; found at
+Step 9 it reads as a mystery routing failure and has twice been written up
+as one ("walled in by its neighbours" — the wall was the width).
+
 ### Read the board's design rules and pass them to the CLI
 
 The router does NOT read the board's design rules — it falls back to a generic
@@ -1962,6 +1978,15 @@ multiple rails). Follow its methodology here, seeded by the `list_nets.py --powe
 output, and put the resulting net -> layer assignments into the plan's
 `route_planes` steps. Nets it leaves to wide traces become `--power-nets` /
 `--power-nets-widths` on the route step instead.
+
+**Routing is as much about planes as traces (#118): treat pour continuity as
+first-class work, not cleanup.** The same lens exists at three stages and
+they should agree — `--plane-score` at placement time (portfolio candidates
+priced by the fill's islands/necks), the #424 fragility field in-run (signal
+routes pay to cross the pour's straits), and the `fragmented_nets` /
+`stacked_copper` summary keys at grading. A run that only meets the pour at
+the repair step has skipped the two stages where the damage was cheap to
+avoid.
 
 Report to user:
 - Identified GND nets and pad counts
@@ -3687,6 +3712,16 @@ victim keeps rotating across MORE than two nets as you permute the order, stop
 permuting: score each order as its own full-chain lineage and let the ledger
 pick (9.3d's rip-return row) — and if the same victim SET survives every order,
 it is capacity (the lane ledger has the number), not ordering.
+
+**The tooling-vs-placement discriminator (#118), for a converged board with
+few failures left:** ask whether a competent human could hand-route the
+remaining nets on THIS placement. If yes, the gap is tooling — file it as a
+systemic finding and take rung 8, which exists for exactly this. If no human
+could either, it is placement or capacity — the lane ledger has the number,
+and the finding goes to the next run's Step 0, not to more router laps.
+Run 7's west fan answered "no human could" (~25 exact-clearance candidates,
+every one within 0.1 mm of committed constrained copper), which is what made
+it a capacity finding rather than an engine complaint.
 
 **After ANY placement change every downstream routed board is stale** — re-run
 the chain from the placed board. Never keep a routed artifact from before it.
