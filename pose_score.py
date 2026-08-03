@@ -79,7 +79,8 @@ def make_state(pcb_data, board_path: str, *, clearance: float = 0.25,
 def rank_poses(pcb_data, board_path: str, ref: str, *, radius: float = 2.0,
                step: float = 0.5, rotations: Sequence[float] = ROTATIONS,
                limit: int = 12, allow_rotations: bool = True,
-               state=None, **state_kw) -> List[Dict]:
+               state=None, diagnostics: Optional[Dict] = None,
+               **state_kw) -> List[Dict]:
     """Legal poses for `ref`, cheapest first.
 
     Returns `[{x, y, rot, cost, delta, dist_mm, legal}]`, sorted by cost. `delta`
@@ -88,7 +89,12 @@ def rank_poses(pcb_data, board_path: str, ref: str, *, radius: float = 2.0,
     answer and one a caller should be able to get without paying for a route.
 
     Illegal poses are dropped, not scored: an illegal pose has no meaningful
-    cost, and returning one ranked would invite a caller to try it.
+    cost, and returning one ranked would invite a caller to try it. They are
+    no longer dropped SILENTLY, though (run-7 S4): pass `diagnostics={}` and
+    it comes back with `dropped_total` and `dropped_in_place` -- the rotations
+    at the part's OWN (x, y) that candidate_valid vetoed. An empty ranked list
+    whose dropped_in_place includes the part's current rotation says "the
+    knobs veto even staying put", which is a knob problem, not a pose answer.
     """
     st = state if state is not None else make_state(pcb_data, board_path, **state_kw)
     part = st.parts.get(ref) if hasattr(st, 'parts') else None
@@ -112,10 +118,15 @@ def rank_poses(pcb_data, board_path: str, ref: str, *, radius: float = 2.0,
     base_inv = ref_inversions(st, ref)
 
     scored = []
+    dropped_total = 0
+    dropped_in_place = []
     for dx, dy in _offsets(radius, step):
         for rot in rots:
             x, y = x0 + dx, y0 + dy
             if not st.candidate_valid(ref, x, y, rot):
+                dropped_total += 1
+                if dx == 0.0 and dy == 0.0:
+                    dropped_in_place.append(rot)
                 continue
             st.apply_move(ref, x, y, rot)
             cost = st.total_cost()
@@ -135,6 +146,9 @@ def rank_poses(pcb_data, board_path: str, ref: str, *, radius: float = 2.0,
                      for k, v in cost.items() if k != 'total'},
                     inversions=inv - base_inv),
             })
+    if diagnostics is not None:
+        diagnostics['dropped_total'] = dropped_total
+        diagnostics['dropped_in_place'] = dropped_in_place
     # cost, then least disturbance, then a stable rotation order
     scored.sort(key=lambda p: (p['cost'], p['dist_mm'], p['rot']))
     return scored[:limit]

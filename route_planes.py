@@ -3407,8 +3407,17 @@ def create_plane(
                 progress_callback(0, 0, f"{net_name}: building via obstacle map...")
             obstacles = build_via_obstacle_map(pcb_data, config, net_id,
                                                same_net_pad_clearance=same_net_pad_clearance)
-            # Also block positions of vias we've already placed in previous nets
+            # Also block positions of vias we've already placed in previous nets.
+            # from_restore entries are EXCLUDED: a restored rip victim's vias
+            # are already back in pcb_data, so build_via_obstacle_map has
+            # priced them at their float centre -- stamping them again here at
+            # session-via pricing (grid-snapped centre, <= drill ring) is a
+            # conservative over-block, and it is what made the balance audit's
+            # fresh rebuild diverge from the correctly-maintained map (the
+            # same filter the pcb_data sync below already applies).
             for placed_via in all_new_vias:
+                if placed_via.get('from_restore'):
+                    continue
                 block_via_position(obstacles, placed_via['x'], placed_via['y'], coord,
                                    hole_to_hole_clearance, via_drill,
                                    via_size, config.clearance)
@@ -4095,10 +4104,18 @@ def create_plane(
         # class as #208): after all rips/placements the maintained map must
         # equal a fresh rebuild from the CURRENT pcb_data plus the session vias
         # (mirroring its Step-7 construction + per-placement blocking).
+        # from_restore vias are filtered for the same reason as at Step 7:
+        # they are already in pcb_data, so the fresh rebuild prices them at
+        # their float centre -- stamping them AGAIN at snapped-centre session
+        # pricing contaminated the audit's reference and flagged the correct
+        # maintained map as "under-blocked" (a single boundary cell, false
+        # positive). Both filters are required together: filtering only the
+        # audit flips the report to the mirror-image "wrongly-blocked" leak.
         if env_knobs.OBSTACLE_AUDIT and obstacles is not None:
             _audit_plane_via_map(obstacles, pcb_data, config, net_id,
                                  same_net_pad_clearance,
-                                 all_new_vias + new_vias, coord,
+                                 [v for v in all_new_vias + new_vias
+                                  if not v.get('from_restore')], coord,
                                  hole_to_hole_clearance, via_drill, via_size,
                                  net_name)
 

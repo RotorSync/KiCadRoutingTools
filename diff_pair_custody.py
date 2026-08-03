@@ -172,9 +172,17 @@ def build_pair_reports(state, diff_pair_ids_to_route, member_audit,
             'failure_stage': (diag.get('stage')
                               ) if outcome in ('failed', 'deferred') else None,
             'incomplete_members': incomplete,
-            # Coupled/partial claim contradicted by actual pad connectivity:
-            # the "one member silently incomplete" class.
-            'member_audit_mismatch': bool(outcome in ('coupled', 'partial')
+            # A COUPLED claim contradicted by actual pad connectivity: the
+            # "one member silently incomplete" class (#514, peaksat CAN).
+            # 'partial' is deliberately NOT in this tuple: a partial pair
+            # already DECLARES disconnected members (its peeled terminals
+            # close in the single-ended follow-up, which runs after this
+            # audit), so flagging it here made every multipoint pair with a
+            # by-design peeled leg -- tigard /USB_D's redundant J1 row --
+            # read as a contradicted claim and demoted it from
+            # routed_diff_pairs while its trunk was coupled and its board
+            # finished clean. incomplete_members stays populated either way.
+            'member_audit_mismatch': bool(outcome == 'coupled'
                                           and incomplete),
         }
         if diag.get('blocking_nets'):

@@ -2110,6 +2110,59 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 for _dv in _cd['dropped_vias']:
                     print(f"      dropped via @ ({_dv['x']:.3f}, {_dv['y']:.3f})")
 
+    # ---- VIA DEDUP (run-7 E3) ----------------------------------------------
+    # Failed/partial attempts can leave a result emitting a via at the exact
+    # position of a surviving input via, or of another result's via for the
+    # same net: identical coords, same span -- two barrels stacked in one
+    # hole. KiCad tolerates same-net stacks, so no DRC flags them; they ship
+    # silently and read as parser/net rot when the file is inspected later.
+    # Drop the duplicates from the write list HERE, before total_vias and the
+    # authoritative sweep, so the tally, the sweep, the writer and the GUI
+    # results all see the same deduped copper. Same-net only (the key carries
+    # net_id): cross-net coincidence is a real short the DRC sweep owns.
+    _DEDUP_VIA_TOL_MM = 0.01
+    _survive_via_strip = {id(v) for v in stale_input_vias}
+
+    def _via_dedup_key(v):
+        return (v.net_id, tuple(v.layers or ()),
+                round(v.x / _DEDUP_VIA_TOL_MM), round(v.y / _DEDUP_VIA_TOL_MM))
+
+    _kept_via_keys = set()
+    for _lst0 in _orig_via_by_net.values():
+        for _v0 in _lst0:
+            if id(_v0) not in _survive_via_strip:
+                _kept_via_keys.add(_via_dedup_key(_v0))
+    for _v0 in all_swap_vias:
+        _kept_via_keys.add(_via_dedup_key(_v0))
+    _via_dup_dropped = []
+    for _r0 in results:
+        _nv0 = _r0.get('new_vias') or []
+        if not _nv0:
+            continue
+        _kept0 = []
+        for _v0 in _nv0:
+            _k0 = _via_dedup_key(_v0)
+            if _k0 in _kept_via_keys:
+                _via_dup_dropped.append(_v0)
+                continue
+            _kept_via_keys.add(_k0)
+            _kept0.append(_v0)
+        if len(_kept0) != len(_nv0):
+            _r0['new_vias'] = _kept0
+    if _via_dup_dropped:
+        # Keep pcb_data == write model: remove the dropped OBJECTS from the
+        # board too -- unless the same object also survives as a kept
+        # occurrence (the same via listed by two results keeps its first).
+        _kept_obj_ids = {id(v) for _r0 in results
+                         for v in (_r0.get('new_vias') or [])}
+        _drop_obj_ids = {id(v) for v in _via_dup_dropped} - _kept_obj_ids
+        if _drop_obj_ids:
+            pcb_data.vias = [v for v in pcb_data.vias
+                             if id(v) not in _drop_obj_ids]
+        print(f"Via dedup: dropped {len(_via_dup_dropped)} duplicate stacked "
+              f"via(s) already present at the same position/span for the "
+              f"same net")
+
     # Count total vias from results
     total_vias = sum(len(r.get('new_vias', [])) for r in results)
 
@@ -2163,6 +2216,31 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # sweep's model -- phantom failed_multipoint entries.
     for _s in all_swap_segments:
         _segs_by_net.setdefault(_s.net_id, []).append(_s)
+
+    # ---- STACKED-COPPER SURFACING (run-7 E3) -------------------------------
+    # The dedup above drops the attributable duplicates; census what is STILL
+    # stacked on the write model (duplicate same-net segments, coincident
+    # same-net vias) and surface it in the summary. check_drc stays silent on
+    # same-net stacks by design (KiCad permits them), so without this the
+    # only way to see one was to read the raw file.
+    stacked_copper_findings = []
+    try:
+        from check_weird import stacked_copper_over_model
+        stacked_copper_findings = stacked_copper_over_model(
+            _segs_by_net, _vias_by_net,
+            lambda _n: (pcb_data.nets[_n].name if _n in pcb_data.nets
+                        else f"Net {_n}"))
+    except Exception as _swe:
+        print(f"  (stacked-copper check failed: {_swe})")
+    if stacked_copper_findings:
+        print(f"\n{RED}WARNING: {len(stacked_copper_findings)} stacked-copper "
+              f"finding(s) on the write model (same-net duplicates KiCad "
+              f"will not flag):{RESET}")
+        for _f in stacked_copper_findings[:8]:
+            print(f"  {RED}{_f['net']} {_f['layer']}: {_f['detail']}{RESET}")
+        if len(stacked_copper_findings) > 8:
+            print(f"  {RED}... and {len(stacked_copper_findings) - 8} more{RESET}")
+
     _zones_by_net: Dict[int, list] = {}
     for _z in getattr(pcb_data, 'zones', []) or []:
         _zones_by_net.setdefault(_z.net_id, []).append(_z)
@@ -2252,7 +2330,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _cov_disturbed = (set(getattr(state, 'casualty_custody', {}) or {})
                       | set(state.collision_refused_net_ids or set())
                       | {s.net_id for s in _stale_input_segs}
-                      | {v.net_id for v in stale_input_vias})
+                      | {v.net_id for v in stale_input_vias}
+                      # #468 follow-up: a broken terminal restore ('full_open'
+                      # / 'stub') puts the original copper BACK, unwinding the
+                      # stale-strip signal above -- without this the net leaves
+                      # the disturbed set and ships open, unreported.
+                      | {nid for nid, v in
+                         (getattr(state, 'terminal_restores', None) or {}).items()
+                         if v != 'full'})
     _cov_classified = {nid for _, nid in single_ended_nets} | set(routed_results)
     for _nid in sorted((_cov_disturbed & sweep_scope_ids) - _cov_classified):
         _pads = pcb_data.pads_by_net.get(_nid, [])
@@ -2436,24 +2521,41 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # if it is fully connected (issue #189): one that routed a result but left
     # pads disconnected (a failed MST edge) is in failed_multipoint_ids and is
     # NOT routed. failed_single stays "no result at all" so the place/route loop
-    # does not double-count it (its deficit is already in mp_deficit).
+    # does not double-count it (its deficit is already in mp_deficit). The third
+    # bucket, open_single, names the nets BETWEEN those two: a kept result whose
+    # copper still leaves pads disconnected. Multipoint nets are excluded from
+    # it -- their shortfall is already priced pad-by-pad in the multipoint
+    # deficit, and counting the net again would double-charge it; a
+    # non-multipoint open net previously contributed to NO count at all, so a
+    # verdict of failed_single + pad-deficit read 0 while the board shipped
+    # open (run-7 west-fan class).
     routed_single = []
     failed_single = []
     failed_single_ids = []  # Track IDs for history output
+    open_single = []
+    open_single_ids = []
     for net_name, net_id in single_ended_nets:
         if net_id in fully_routed_ids:
             routed_single.append(net_name)
         elif net_id not in routed_results:
             failed_single.append(net_name)
             failed_single_ids.append(net_id)
+        elif not routed_results[net_id].get('is_multipoint'):
+            open_single.append(net_name)
+            open_single_ids.append(net_id)
 
     # Print human-readable summary
     print("\n" + "=" * 60)
     print("Routing complete")
     print("=" * 60)
     if single_ended_nets:
-        if failed_single:
-            print(f"  {RED}Single-ended:  {len(routed_single)}/{len(single_ended_nets)} routed ({len(failed_single)} FAILED){RESET}")
+        if failed_single or open_single:
+            _bad_bits = []
+            if failed_single:
+                _bad_bits.append(f"{len(failed_single)} FAILED")
+            if open_single:
+                _bad_bits.append(f"{len(open_single)} OPEN")
+            print(f"  {RED}Single-ended:  {len(routed_single)}/{len(single_ended_nets)} routed ({', '.join(_bad_bits)}){RESET}")
         else:
             print(f"  Single-ended:  {len(routed_single)}/{len(single_ended_nets)} routed")
     if multipoint_nets > 0:
@@ -2479,6 +2581,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print(f"\n{RED}Failed single-ended nets:{RESET}")
         for net_name in failed_single:
             print(f"  {RED}{net_name}{RESET}")
+    if open_single:
+        # A kept result is NOT a connection: these nets ship copper with pads
+        # still disconnected (pad detail follows in the multi-point list).
+        print(f"\n{RED}Routed-but-OPEN single-ended nets (result kept, pads disconnected):{RESET}")
+        for net_name in open_single:
+            print(f"  {RED}{net_name}{RESET}")
     if failed_multipoint:
         print(f"\n{RED}Failed multi-point connections:{RESET}")
         for item in failed_multipoint:
@@ -2486,14 +2594,21 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             for pad in item['failed_pads']:
                 print(f"  {RED}{net_name}: {pad['component_ref']} pad {pad['pad_number']} at ({pad['x']:.2f}, {pad['y']:.2f}) not connected{RESET}")
 
-    # Print history for all failed nets (helps debug why they failed)
-    if failed_single_ids:
-        print_failed_net_histories(state, failed_single_ids, pcb_data)
+    # Print history for all failed nets (helps debug why they failed) --
+    # open nets included: their history shows which attempt left the stub.
+    if failed_single_ids or open_single_ids:
+        print_failed_net_histories(state, failed_single_ids + open_single_ids,
+                                   pcb_data)
 
     from target_swap import summarize_target_swaps  # cycle-safe swap list (#380)
     summary = {
         'routed_single': routed_single,
         'failed_single': failed_single,
+        # Nets with a KEPT result whose pads are still disconnected (their pad
+        # detail is in failed_multipoint). Excludes multipoint nets, whose
+        # shortfall is already the multipoint pad deficit -- so a verdict may
+        # safely count len(failed_single) + len(open_single) + pad-deficit.
+        'open_single': open_single,
         'failed_multipoint': [
             {
                 'net_name': item['net_name'],
@@ -2537,10 +2652,23 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # T5 coverage gate: disturbed out-of-scope nets shipping broken
         # (additive; also present as failed_multipoint entries above).
         summary['coverage_gate_nets'] = coverage_gate_nets
+    if getattr(state, 'terminal_restores', None):
+        # #468 follow-up (run-7 E2): terminal-restore outcomes per net --
+        # 'full' is a true restoration; 'full_open' restored copper that never
+        # covered every pad; 'stub' kept only the escape stubs. Additive; the
+        # broken outcomes are also graded by the sweeps/coverage gate above.
+        summary['terminal_restores'] = {
+            (pcb_data.nets[_n].name if _n in pcb_data.nets else str(_n)): _v
+            for _n, _v in sorted(state.terminal_restores.items())}
     if fragmented_nets:
         # #549 C3: pad-connected nets whose copper is several KiCad islands
         # (additive; also present as failed_multipoint entries above).
         summary['fragmented_nets'] = fragmented_nets
+    if stacked_copper_findings:
+        # run-7 E3: same-net duplicate copper still on the write model after
+        # the via dedup (additive; KiCad's DRC never flags same-net stacks,
+        # so this key is the only disclosure).
+        summary['stacked_copper'] = stacked_copper_findings
     summary['oracle_check'] = oracle_check
     if oracle_open:
         # #549 B-1: KiCad's own open-link counts for this run's scope

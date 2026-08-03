@@ -42,8 +42,9 @@ def merge_summaries(summaries: List[Dict], aborted: bool = False) -> Optional[Di
 
     Per field class:
 
-    * FAILURE STATE (failed_single / failed_multipoint / multipoint_pads_*)
-      comes from the LAST summary, and is exact rather than a delta. Every net
+    * FAILURE STATE (failed_single / open_single / failed_multipoint /
+      multipoint_pads_*) comes from the LAST summary, and is exact rather
+      than a delta. Every net
       with a nonzero failure term is in the retry set by construction, and the
       sub-run re-derives each retried net's pad counts over ALL of that net's
       pads from the final-board union-find, so the last summary's numbers are

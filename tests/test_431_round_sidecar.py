@@ -73,7 +73,8 @@ def test_run_route_is_now_a_one_line_caller():
     """If someone re-inlines the body, the renderer and the loop start drifting."""
     import inspect
     src = inspect.getsource(L.run_route)
-    assert 'return metrics_from_summary(summary, log)' in src
+    # arg list left open: #549 added extra_targets and the pin broke
+    assert 'return metrics_from_summary(summary, log' in src
     assert 'failed_multipoint' not in src, "the parsing belongs in the pure function"
 
 

@@ -442,6 +442,22 @@ def _check_stacked(net_id, name, net_segs, net_vias, findings):
                             size=getattr(v, 'size', None)))
 
 
+def stacked_copper_over_model(segs_by_net, vias_by_net, net_name):
+    """The stacked-copper check over a per-net write model (run-7 E3).
+
+    route.py calls this on the copper it is ABOUT to write, after its via
+    dedup, so anything still stacked is surfaced in the run summary instead
+    of shipping silently (KiCad permits same-net stacks, so no DRC ever
+    flags them). `net_name` is a net_id -> str callable. Returns the same
+    finding dicts check_weird's CLI reports.
+    """
+    findings = []
+    for nid in sorted(set(segs_by_net) | set(vias_by_net)):
+        _check_stacked(nid, net_name(nid), segs_by_net.get(nid, []),
+                       vias_by_net.get(nid, []), findings)
+    return findings
+
+
 def _check_unsupported_vias(net_id, name, net_segs, net_vias, net_pads,
                             net_zones, copper_layers, findings):
     """Floating vias: no same-net track copper reaching the barrel, no

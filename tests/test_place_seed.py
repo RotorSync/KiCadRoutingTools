@@ -102,5 +102,22 @@ with tempfile.TemporaryDirectory() as d:
     check("seeded board assesses as PLACED", not st.unplaced,
           '; '.join(st.reasons))
 
+    # sibling carry (d310ab3 regression): the seeder is the FIRST step that
+    # touches the board, so a dropped .kicad_pro propagates a stock-netclass
+    # floor through the whole chain (#441 class). Give the pile siblings and
+    # the output must get them too.
+    with open(os.path.join(d, 'pile.kicad_pro'), 'w', encoding='utf-8') as f:
+        json.dump({'net_settings': {'classes': [
+            {'name': 'Default', 'clearance': 0.15}]}}, f)
+    with open(os.path.join(d, 'pile.kicad_dru'), 'w', encoding='utf-8') as f:
+        f.write('(version 1)\n')
+    out_s = os.path.join(d, 's.kicad_pcb')
+    r = run([seed_py, pile, out_s, '--intent', intent_path])
+    check("sibling run exits 0", r.returncode == 0)
+    check("seed output carries the .kicad_pro sibling",
+          os.path.isfile(os.path.join(d, 's.kicad_pro')))
+    check("seed output carries the .kicad_dru sibling",
+          os.path.isfile(os.path.join(d, 's.kicad_dru')))
+
 print(f"\n{passed}/{passed + failed} checks passed")
 sys.exit(1 if failed else 0)

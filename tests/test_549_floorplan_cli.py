@@ -183,6 +183,25 @@ def test_the_summary_carries_the_keys_a_caller_branches_on():
     print(f"  PASS: {len(s)} keys, all JSON-round-trippable")
 
 
+def test_grading_knobs_resolve_from_the_board_and_are_disclosed():
+    """Run-7 S1: a fixed 0.25 default on a 0.15-floor board manufactured
+    phantom oob findings. Unset knobs must resolve from the board and the
+    summary must say what was used, with its source."""
+    code, out, _ = _run(BOARD, '--intent', _emit_once(), '-q')
+    s = _summary(out)
+    for k in ('clearance_used', 'edge_clearance_used'):
+        assert k in s, f"JSON_SUMMARY lost {k}"
+        assert 'value' in s[k] and 'source' in s[k], s[k]
+        assert s[k]['source'] in ('cli', 'board netclass', 'board constraint',
+                                  'fixed default'), s[k]
+    code, out, _ = _run(BOARD, '--intent', _emit_once(), '-q',
+                        '--clearance', '0.11')
+    s = _summary(out)
+    assert s['clearance_used'] == {'value': 0.11, 'source': 'cli'}, (
+        "an explicit --clearance must win and be labeled cli")
+    print("  PASS: knobs resolve board-first and the summary discloses them")
+
+
 def test_the_full_json_carries_the_measured_numbers():
     raw = json.load(open(_emit_once(), encoding='utf-8'))
     x0, y0, x1, y1 = raw['envelope']['rect']

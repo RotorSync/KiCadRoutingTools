@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Issue #295 / #439: the standalone fix_kicad_drc_settings writeback clamps EVERY
-net class (Default and the impedance design's HDMI/USB/Zxx classes) DOWN to the
-routed floor so KiCad's per-net-class DRC does not storm copper legitimately routed
-at the smaller run clearance. #439 removed the old --no-clamp-netclasses flag: the
-standalone fixer always clamps (clamping only ever lowers a class to the copper
-actually routed, so it is always DRC-safe). To PRESERVE a class spec instead, route
-with route.py and OMIT --clearance -- the router then honors each class in full and
-the writeback keeps it. The .kicad_pcb is never touched.
+net class's CLEARANCE (Default and the impedance design's HDMI/USB/Zxx classes)
+DOWN to the routed floor so KiCad's per-net-class DRC does not storm copper
+legitimately routed at the smaller run clearance. Since 6b971f1 the non-Default
+clamp is restricted to _NONDEFAULT_CLAMP_FIELDS (clearance + the diff-pair
+readback fields): per-class track_width/via_diameter/via_drill are declared
+geometry (an impedance class's width IS its spec) and are preserved. #439
+removed the old --no-clamp-netclasses flag: the standalone fixer always clamps
+(the clearance clamp only ever lowers a class to the copper actually routed, so
+it is always DRC-safe). To PRESERVE a class spec in full, route with route.py
+and OMIT --clearance -- the router then honors each class and the writeback
+keeps it. The .kicad_pcb is never touched.
 """
 import json
 import os
@@ -60,22 +64,31 @@ def main():
     def near(a, b):
         return abs((a if a is not None else -1) - b) <= 1e-9
 
-    # DEFAULT behaviour (clamp on): both Default and the impedance class drop to
-    # the routed floor.
+    # DEFAULT behaviour (clamp on): every class's CLEARANCE drops to the routed
+    # floor (KiCad's one DRC-enforced per-class field). Since 6b971f1, a
+    # non-Default class's track/via values are PRESERVED: they are declared
+    # geometry, not DRC constraints -- clamping them destroyed impedance specs
+    # (a QFN fanout rewrote USB_FS_DIFF's 0.8mm width to 0.15 on nets it never
+    # routed). Z100_inner's 0.162 track_width IS its 100-ohm spec. The Default
+    # class still clamps in full (it is the writeback's own floor record).
     with tempfile.TemporaryDirectory() as tmp:
         cls = _run(tmp)
         if not near(cls["Default"]["clearance"], 0.09):
             fails.append(f"[clamp] Default.clearance = {cls['Default'].get('clearance')}, expected 0.09")
+        if not near(cls["Default"]["track_width"], 0.0889):
+            fails.append(f"[clamp] Default.track_width = {cls['Default'].get('track_width')}, expected 0.0889")
         if not near(cls["Z100_inner"]["clearance"], 0.09):
             fails.append(f"[clamp] Z100_inner.clearance = {cls['Z100_inner'].get('clearance')}, expected 0.09 (should clamp)")
-        if not near(cls["Z100_inner"]["track_width"], 0.0889):
-            fails.append(f"[clamp] Z100_inner.track_width = {cls['Z100_inner'].get('track_width')}, expected 0.0889")
+        if not near(cls["Z100_inner"]["track_width"], 0.162):
+            fails.append(f"[clamp] Z100_inner.track_width = {cls['Z100_inner'].get('track_width')}, "
+                         "expected 0.162 preserved (declared geometry, not DRC-enforced; 6b971f1)")
 
     if fails:
         print("FAIL: " + "; ".join(fails))
         return 1
-    print("PASS: the standalone writeback clamps every net class (Default + impedance) "
-          "to the routed floor; --no-clamp-netclasses is gone (#439)")
+    print("PASS: the standalone writeback clamps every class's CLEARANCE to the "
+          "routed floor and preserves non-Default declared geometry (6b971f1); "
+          "--no-clamp-netclasses is gone (#439)")
     return 0
 
 

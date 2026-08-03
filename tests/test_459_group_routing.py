@@ -55,13 +55,23 @@ def test_internal_and_touching_differ_and_both_are_useful():
     print(f"  PASS: sheet block -> {len(inner)} internal of {len(outer)} touching")
 
 
-def test_a_decap_block_has_no_internal_nets():
-    """Not a bug -- a decoupling cap bridges VCC to GND, both board-wide. It is
-    why 'touching' has to exist as a scope."""
+def test_a_decap_block_is_mostly_boundary_nets():
+    """A decoupling cap bridges a rail to GND, and board-wide nets cross the
+    block boundary -- which is why 'touching' has to exist as a scope. But
+    "0% internal by construction" is FALSE since f38204e tethers caps on
+    their RAIL: an IC's own local regulator rail (IC + its bypass caps only,
+    tigard's VREG) is legitimately 100% internal to the decap block. GND
+    must never be internal; anything internal must also be touching."""
     pcb = parse_kicad_pcb(FLAT)
     refs = block_refs(pcb, 'decap:U3', parse_sources('decap'))
-    assert block_net_names(pcb, refs, 'internal') == []
-    assert len(block_net_names(pcb, refs, 'touching')) > 10
+    inner = set(block_net_names(pcb, refs, 'internal'))
+    outer = set(block_net_names(pcb, refs, 'touching'))
+    assert inner == {'VREG'}, (
+        f"internal nets {sorted(inner)}: expected exactly the FT2232H's "
+        f"local VREG rail (its owners are U3 + its own bypass caps, all "
+        f"inside the block since f38204e's rail tethering)")
+    assert 'GND' not in inner and inner < outer
+    assert len(outer) > 10
 
 
 def test_unknown_block_names_what_exists():
@@ -433,7 +443,7 @@ def test_preview_of_an_undone_block_reports_real_additions():
 
 TESTS = [
     test_internal_and_touching_differ_and_both_are_useful,
-    test_a_decap_block_has_no_internal_nets,
+    test_a_decap_block_is_mostly_boundary_nets,
     test_unknown_block_names_what_exists,
     test_short_name_is_accepted,
     test_list_groups_reports_both_net_counts,

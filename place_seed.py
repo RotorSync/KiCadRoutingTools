@@ -102,19 +102,33 @@ Examples:
               f"{st.vias} via(s); seeding moves footprints and would strand "
               f"every track. Seed the unrouted board.", file=sys.stderr)
         return UNPLACED_EXIT
-    if not st.unplaced and not args.force:
+    if not st.unplaced and not st.partially_unplaced and not args.force:
+        # PARTIALLY unplaced boards (a stacked pile beside real placements --
+        # a netlist re-import, or a seeder that pinned only the spec-fixed
+        # parts) are a legitimate seeding target, not a refusal: locked parts
+        # are treated as authoritative and the pile is what gets placed.
         print("place_seed: this board already looks PLACED. Seeding would "
               "discard that placement; use place_portfolio.py to explore "
               "variations of it, or --force to re-seed anyway.",
               file=sys.stderr)
         return UNPLACED_EXIT
 
+    # Partially unplaced without --force: seed ONLY the stacked pile. The
+    # genuinely-placed unlocked parts are someone's work, not this tool's to
+    # re-derive; --force widens the scope back to everything unlocked.
+    seed_refs = None
+    if st.partially_unplaced and not st.unplaced and not args.force:
+        seed_refs = set(st.stacked_refs)
+        print(f"place_seed: partially unplaced -- seeding only the "
+              f"{len(seed_refs)} stacked part(s); the rest stand as placed "
+              f"(--force re-seeds everything unlocked)")
+
     rng = random.Random(f"{args.seed}")
     result = seeder.seed_from_intent(
         pcb, args.input_file, intent, rng, group_sources=sources,
         clearance=args.clearance,
         board_edge_clearance=args.board_edge_clearance,
-        grid_step=args.grid_step)
+        grid_step=args.grid_step, seed_refs=seed_refs)
     for note in result['notes']:
         print(f"  NOTE: {note}")
     print(f"Seeded {len(result['placements'])} part(s); "
@@ -151,12 +165,63 @@ Examples:
             os.replace(tmp, args.output_file)
 
     # ---- self-check: the seed must grade clean against its own intent ------
-    pcb_out = parse_kicad_pcb(args.output_file)
+    def _grade():
+        pcb_out = parse_kicad_pcb(args.output_file)
+        return floorplan.grade(intent, pcb_out, args.output_file,
+                               group_sources=sources,
+                               clearance=args.clearance,
+                               board_edge_clearance=args.board_edge_clearance)
+
     try:
-        graded = floorplan.grade(intent, pcb_out, args.output_file,
-                                 group_sources=sources,
-                                 clearance=args.clearance,
-                                 board_edge_clearance=args.board_edge_clearance)
+        graded = _grade()
+        # The quench has no zone term, so a polish nudge can walk a declared
+        # zone member past its tolerance (measured: a crystal load cap,
+        # 0.86mm past its zone's edge at one seed). A plain revert to the
+        # seeded pose is not enough -- the polish moved NEIGHBORS into that
+        # space too (measured: 0.784mm2 of new overlap) -- so the part is
+        # RE-SEATED: the seeder's own search, targeted at its seeded pose,
+        # constrained to its zone, against the post-polish board.
+        if not args.no_polish:
+            broke = sorted({v.ref for v in graded.errors
+                            if v.rule == 'zone_containment' and v.ref})
+            if broke:
+                import pose_score
+                pcb_cur = parse_kicad_pcb(args.output_file)
+                st = pose_score.make_state(
+                    pcb_cur, args.output_file, clearance=args.clearance,
+                    board_edge_clearance=args.board_edge_clearance,
+                    grid_step=args.grid_step)
+                blocks2, _p = floorplan.resolve_blocks(intent, pcb_cur,
+                                                       sources)
+                zone_of = {}
+                for z in intent.blocks:
+                    if z.rect is None:
+                        continue
+                    for r in blocks2.get(z.name, ()):
+                        zone_of.setdefault(r, z)
+                seeded_pose = {p['reference']: p for p in result['placements']}
+                fixes = []
+                for ref in broke:
+                    z = zone_of.get(ref)
+                    sp = seeded_pose.get(ref)
+                    if z is None or sp is None or ref not in st.parts:
+                        continue
+                    clr = seeder._try_place(
+                        st, ref, sp['new_x'], sp['new_y'], set(),
+                        constraint=z.rect, tol=intent.zone_tolerance(z))
+                    if clr is not None:
+                        p2 = st.parts[ref]
+                        fixes.append({'reference': ref, 'new_x': p2.x,
+                                      'new_y': p2.y, 'new_rotation': p2.rot})
+                if fixes:
+                    print(f"  polish walked "
+                          f"{', '.join(f['reference'] for f in fixes)} out "
+                          f"of a declared zone; re-seated in-zone against "
+                          f"the polished board")
+                    tmp = args.output_file + '.reseat'
+                    write_placed_output(args.output_file, tmp, fixes)
+                    os.replace(tmp, args.output_file)
+                    graded = _grade()
     except floorplan.UntrustworthyOutline as exc:
         print(f"place_seed: outline cannot be trusted for grading: {exc}",
               file=sys.stderr)

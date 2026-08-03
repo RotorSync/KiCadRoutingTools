@@ -300,7 +300,10 @@ def test_the_score_is_the_gate_and_the_router_is_not_the_judge():
     conv = os.path.join(ROOT, '.claude/skills/plan-pcb-routing/references/convergence.md')
     assert os.path.isfile(conv), "references/convergence.md is missing"
     ctext = open(conv, encoding='utf-8').read()
-    for key in ('ledger.jsonl', 'parent_board', 'stopped_by', 'blocking'):
+    # parent_sha / "stop condition" are the REAL schema (board_store.Ledger +
+    # converge.py record); the old parent_board/stopped_by names never existed
+    # in any writer and the pin rotted silently.
+    for key in ('ledger.jsonl', 'parent_sha', 'stop condition', 'blocking'):
         assert key in ctext, f"convergence.md does not document `{key}`"
     # The ledger has to be the one the TOOLS read. `board_store.Ledger` is
     # append-only JSONL and `converge.py record` is its only writer, so a
@@ -310,8 +313,11 @@ def test_the_score_is_the_gate_and_the_router_is_not_the_judge():
     for verb in ('record', 'status'):
         assert f'converge.py {verb}' in ctext or f'converge.py {verb}' in skill, \
             f"neither the skill nor convergence.md names `converge.py {verb}`"
-    assert '"limit": 100' in ctext, \
-        "the ledger template must carry the same budget the prose states (100)"
+    # The ledger is bare JSONL with NO wrapper object (convergence.md says so
+    # itself), so there is no "limit" field to pin -- the budget lives in
+    # prose and in stop condition 2's "100 ledger entries actually written".
+    assert '100 per board' in ctext, \
+        "convergence.md must state the 100-per-board budget"
     print("  PASS: score is the gate, router self-report demoted, loop bounded")
 
 

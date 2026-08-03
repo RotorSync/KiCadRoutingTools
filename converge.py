@@ -83,11 +83,16 @@ def route_verdict(summary):
     if not summary:
         return None, 'no summary'
     failed = list(summary.get('failed_single') or [])
+    # Routed-but-OPEN nets (kept result, disconnected pads). Before this key a
+    # non-multipoint open net weighed ZERO here -- probes read failures=0 on
+    # boards shipping open copper. Multipoint nets are excluded from the key by
+    # the emitter, so adding it to the pad deficit cannot double-count.
+    opened = list(summary.get('open_single') or [])
     fm = [d.get('net_name') if isinstance(d, dict) else d
           for d in (summary.get('failed_multipoint') or [])]
     deficit = (summary.get('multipoint_pads_total', 0)
                - summary.get('multipoint_pads_connected', 0))
-    n = len(failed) + max(0, deficit)
+    n = len(failed) + len(opened) + max(0, deficit)
     parts = []
     if failed or fm:
         parts.append('failed: ' + ', '.join(sorted(set(failed + fm))[:6]))
@@ -164,19 +169,44 @@ class _StdoutToStderr:
         return False
 
 
+def _pose_knobs(board, clearance, board_edge_clearance):
+    """Resolve unset pose knobs from the BOARD (run-7 S4).
+
+    The old fixed argparse defaults (0.25/0.55) silently vetoed legal
+    rotations on any board routed to a tighter floor (0.15/0.3): the grader
+    was stricter than the board's own spec, and `poses` reported "no legal
+    pose" for poses the router would happily route. Resolution order (shared
+    with check_floorplan via list_nets.board_floor_knobs): explicit CLI
+    value > the board's own Default netclass / board constraint > the fixed
+    default.
+    """
+    from list_nets import board_floor_knobs
+    return board_floor_knobs(board, clearance, board_edge_clearance)
+
+
 def cmd_poses(a):
     from kicad_parser import parse_kicad_pcb
     import pose_score
+    clearance, board_edge_clearance, knobs = _pose_knobs(
+        a.board, a.clearance, a.board_edge_clearance)
     with _StdoutToStderr():
         pcb = parse_kicad_pcb(a.board)
-        st = pose_score.make_state(pcb, a.board, clearance=a.clearance,
-                                   board_edge_clearance=a.board_edge_clearance)
+        st = pose_score.make_state(pcb, a.board, clearance=clearance,
+                                   board_edge_clearance=board_edge_clearance)
+    diag = {}
     with _StdoutToStderr():
         poses = pose_score.rank_poses(pcb, a.board, a.ref, radius=a.radius,
-                                      step=a.step, limit=a.limit, state=st)
+                                      step=a.step, limit=a.limit, state=st,
+                                      diagnostics=diag)
     if not poses:
-        print(json.dumps({'ref': a.ref, 'poses': [],
-                          'note': 'no legal pose, including staying put'}, indent=1))
+        # The dropped-pose census is the difference between "this part has
+        # nowhere to go" and "your knobs veto even staying put" (run-7 S4:
+        # flip-in-place WAS enumerated, then silently dropped).
+        print(json.dumps({'ref': a.ref, 'poses': [], 'knobs': knobs,
+                          'dropped_total': diag.get('dropped_total', 0),
+                          'dropped_in_place': diag.get('dropped_in_place', []),
+                          'note': 'no legal pose, including staying put'},
+                         indent=1))
         return 1
 
     if a.route:
@@ -200,6 +230,9 @@ def cmd_poses(a):
                               'iterations': res['summary'].get('total_iterations'),
                               'vias': res['summary'].get('total_vias')}
     print(json.dumps({'ref': a.ref, 'base_cost': poses[0]['cost'] - poses[0]['delta'],
+                      'knobs': knobs,
+                      'dropped_total': diag.get('dropped_total', 0),
+                      'dropped_in_place': diag.get('dropped_in_place', []),
                       'poses': poses}, indent=1))
     return 0
 
@@ -244,17 +277,57 @@ def cmd_where(a):
 
 def cmd_record(a):
     from board_store import BoardStore, Ledger
+    # Refuse an --argv that can never replay (run-7 F4: entries recorded with
+    # placeholder script names made replay a reconstruction, which is exactly
+    # what the ledger exists to prevent). Nothing is written on refusal.
+    if a.argv:
+        import shutil
+        exe = a.argv[0]
+        if not (os.path.isfile(exe) or shutil.which(exe)):
+            print(f"record: --argv starts with '{exe}', which is neither an "
+                  f"existing file nor an executable on PATH -- this entry "
+                  f"could never replay. Record the REAL command (the one that "
+                  f"produced the board), or omit --argv for a prose-only "
+                  f"entry. Nothing was written.", file=sys.stderr)
+            return 2
+    # A run-closing record must name its stop condition (run-7 F5: the final
+    # entry shipped a headline count that contradicted the oracle; forcing
+    # the stop condition into the record is what makes the close-out gradable).
+    if a.final and not a.stop_condition:
+        print("record: --final requires --stop-condition (which of the run's "
+              "stop conditions ended it). Nothing was written.",
+              file=sys.stderr)
+        return 2
     store = BoardStore(a.store or os.path.join(os.path.dirname(a.ledger), 'boards'))
     sha = store.put(a.board)
     lg = Ledger(a.ledger)
     prev = lg.last_accepted()
-    e = lg.append({'iteration': len(lg.entries()), 'kind': a.kind,
-                   'parent_sha': (prev or {}).get('result_sha'),
-                   'result_sha': sha, 'lever': a.lever,
-                   'lever_argv': list(a.argv) if a.argv else None,
-                   'score': json.loads(a.score) if a.score else None,
-                   'accepted': not a.rejected})
+    entry = {'iteration': len(lg.entries()), 'kind': a.kind,
+             'parent_sha': (prev or {}).get('result_sha'),
+             'result_sha': sha, 'lever': a.lever,
+             'lever_argv': list(a.argv) if a.argv else None,
+             'score': json.loads(a.score) if a.score else None,
+             'accepted': not a.rejected}
+    if a.final:
+        entry['final'] = True
+        entry['stop_condition'] = a.stop_condition
+    e = lg.append(entry)
     print(json.dumps(e, indent=1, sort_keys=True))
+    # Failing-net NAMES belong in the record (run-7 S10/F5): a score that
+    # carries only a count forces every later read to re-derive which nets,
+    # and a truncated re-derivation shipped a wrong close-out.
+    sc = e.get('score') or {}
+    fails = sc.get('failures')
+    names = sc.get('failed_nets') or sc.get('failed') or []
+    if fails:
+        if names:
+            print("failing nets: " + ", ".join(str(n) for n in names[:12]),
+                  file=sys.stderr)
+        else:
+            print(f"NOTE: score records failures={fails} but names no nets -- "
+                  f"add 'failed_nets' to the score JSON so the ledger stays "
+                  f"readable without re-deriving the open set.",
+                  file=sys.stderr)
     return 0
 
 
@@ -325,8 +398,14 @@ def build_parser():
     q.add_argument('--radius', type=float, default=2.0)
     q.add_argument('--step', type=float, default=0.5)
     q.add_argument('--limit', type=int, default=12)
-    q.add_argument('--clearance', type=float, default=0.25)
-    q.add_argument('--board-edge-clearance', type=float, default=0.55)
+    q.add_argument('--clearance', type=float, default=None,
+                   help='pose-legality clearance (default: the board\'s own '
+                        'Default netclass, else 0.25; run-7 S4 -- a fixed '
+                        'default tighter than the board floor silently '
+                        'vetoes legal poses)')
+    q.add_argument('--board-edge-clearance', type=float, default=None,
+                   help='pose-legality edge clearance (default: the board\'s '
+                        'own min_copper_edge_clearance, else 0.55)')
     q.add_argument('--route', action='store_true',
                    help='also run tier 3 (a scoped route) on the top poses')
     q.add_argument('--route-top', type=int, default=2,
@@ -356,8 +435,14 @@ def build_parser():
     r.add_argument('--lever', default=None)
     r.add_argument('--score', default=None, help='JSON')
     r.add_argument('--rejected', action='store_true')
+    r.add_argument('--final', action='store_true',
+                   help='mark the run-closing record; requires --stop-condition')
+    r.add_argument('--stop-condition', default=None,
+                   help='which stop condition ended the run (with --final)')
     r.add_argument('--argv', nargs=argparse.REMAINDER, default=None,
-                   help='the command that produced it -- what makes replay possible')
+                   help='the command that produced it -- what makes replay '
+                        'possible. Refused (exit 2) when its first token is '
+                        'neither an existing file nor on PATH.')
     r.set_defaults(fn=cmd_record)
 
     s = sub.add_parser('step-back', help='check out an earlier board, exactly')

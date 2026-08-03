@@ -67,7 +67,9 @@ order:
    treat its output as the "rough / generated placement" row of the table
    above. If the seeder takes a `--seed`/`--variant` axis, that plus
    Step 0c-bis is how you offer the user OPTIONS instead of one take-it-or-
-   leave-it arrangement.
+   leave-it arrangement — but rank the SEEDS first (`compare_seeds.py`, next
+   rung): the portfolio explores around ONE seed and cannot rank across
+   them.
 2. **No seeder, but an intent exists — or the spec states placement facts**
    (connector edges, a fixed regulator cluster, a decap rule): author/verify
    the intent with the Step 0e machinery, then generate the seed from it:
@@ -86,8 +88,41 @@ order:
    rotation is kept when it fits, with a noted 90° lattice fallback when it
    does not; a part whose rotation is a DECISION (pin order) must be locked —
    the intent schema cannot express one, and an unlocked load-bearing
-   rotation was never protected from the quench either. Explore rotations
-   deliberately with the portfolio's `poses` strategy afterwards.
+   rotation was never protected from the quench either. Explore a LOCKED
+   part's rotation with Step 0a-bis arithmetic (below) — **the portfolio's
+   `poses` strategy never perturbs locked refs, so it cannot explore exactly
+   the rotations the lock protects** (measured, run 7: five poses iterations
+   across two slates, zero pose changes; the winning rot-180 came only from
+   the manual 0a-bis pass).
+
+   **When the seeder takes `--seed`, rank the seeds with ONE identical
+   full-board probe each BEFORE sinking 0a-bis/portfolio effort into any of
+   them** — crossings/hpwl cannot rank seeds, and the portfolio's shared-net
+   window never crosses seeds (measured, run 7: the crossings-best seed's
+   family probed 53 full-board failures while a crossings-middle seed probed
+   39, at a third of the search effort — the whole first portfolio line was
+   spent on the seed the wider instrument then displaced). That is one
+   command now:
+
+   ```bash
+   python3 -X utf8 compare_seeds.py board.kicad_pcb --intent floorplan.json \
+       --seeds 0 1 2 --out-dir wk/seedcmp --ignore-nets <the Step 5 plane nets>
+   ```
+
+   It runs place_seed per seed (a seed failing its own intent gate is
+   recorded, never ranked), probes every survivor with the SAME net patterns
+   and route args, and emits the ranked table + `seeds.json` +
+   `best_seed`.
+
+   **For every must_lock part under a HARD geometric clause, run Step 0a-bis
+   ON THE SEEDED OUTPUT before the portfolio** — the seeder keeps the pile's
+   input rotation, which is a generator default, not a decision. If a
+   rotation wins on inversions, apply it with `write_placed_output` and
+   RE-SEAT the decaps that served its supply pins (`seeder._try_place` at
+   the relocated pin, zone-constrained), then re-run the pin-exact gate:
+   rotating a part moves its pins, and a decap seated to the old pin
+   silently breaks the proximity clause (measured, run 7: 7.74 mm vs the
+   3 mm limit until the re-seat).
 3. **Neither** — no seeder, no intent, and the spec pins nothing (or there
    is no outline; the outline is spec-owned and is never invented): report
    that plainly, tell the user to place the parts in KiCad, and offer to
@@ -138,6 +173,14 @@ coordinate, a pitch, a mating standard or an enclosure feature is fixed:
 | castellated edges | the carrier's pad field | pad centred **on** the outline |
 | test points, antennas, sensors | mechanical or RF | an antenna keepout is not negotiable |
 
+The table is the mechanical-facts slice of a broader taxonomy (#118): **part
+classes obey different placement logic** — a decap is governed by pin
+proximity, a connector by the mating standard, a crystal by field distance
+and leg symmetry, a series termination by being the chain's free terminal, a
+bulk cap by almost nothing. When a part fits no row above, ask which CLASS
+governs it — and which rule and grading signal that class implies — before
+treating it as free for the optimizer to trade.
+
 **2. Lock every one of them, and pass the locks to EVERY placement invocation.**
 Not just the first — `place_optimize`, `place_route_loop` and every retry:
 
@@ -145,6 +188,13 @@ Not just the first — `place_optimize`, `place_route_loop` and every retry:
 python3 -X utf8 place_optimize.py board.kicad_pcb placed.kicad_pcb \
     --lock 'J*' 'H*' 'U1' --max-displacement 2
 ```
+
+`(locked yes)` stamped in the board file (a seeder's `must_lock` output)
+satisfies this for every place_* tool — the file lock is honored everywhere
+`--lock` is. When you rely on it instead of `--lock`, say so once in the
+ledger, so an auditor can tell a carried lock from a dropped one (run 7's
+portfolio argvs carried no `--lock` and the audit had to reverse-engineer
+that the in-file stamps made it harmless).
 
 **3. Record them in the intent, so they are GRADED and not merely hoped for.**
 A lock you forgot to re-pass is silent. A `must_lock` the grader checks is not:
@@ -198,6 +248,19 @@ The mechanical tools: `converge.py poses --ref U3` ranks legal poses and its
 tie). A **series part in a matched chain** (source-termination resistor, AC
 cap) is a *free terminal*: its pose is the knob that sets where the chain's
 segment lands, so enumerate its poses too, not just the ICs'.
+
+**Read `poses` output with two caveats** (run-7 S4). The JSON now discloses
+its `knobs` (unset clearance/edge resolve from the BOARD's own floor) and a
+`dropped_in_place` census — a nonempty `dropped_in_place` on a thin or empty
+ranking means the knobs (or the lattice) vetoed rotations at the part's own
+spot, not that the part is stuck; check the resolved knobs against the
+board's floor before believing "no legal pose". And the candidate lattice
+does not necessarily contain the part's CURRENT coordinate, so check the
+four rotations AT THE PART'S OWN (x, y) with `candidate_valid` besides
+reading the ranked list — the cheapest and most common 0a-bis candidate,
+flip in place, can be absent from an otherwise-legal ranking (measured:
+U3 rot-180 legal in place on two seeds where the enumeration listed no
+rot-180 pose at all).
 
 Run this **second**, after Step 0a, and read the reasons. Nothing is locked
 automatically, deliberately: a wrong auto-lock silently freezes a part that
@@ -296,15 +359,34 @@ input — "keep what I have" stays a first-class outcome.
 
 **The acceptance rule generalizes K-way, and stays a conjunction.** The
 Step 0c rule (metrics no worse + intent passes + repo gates pass) applies
-**per candidate against the baseline row**; the portfolio pre-applies the
-first two as its hard gates, the repo-local gates are still yours to run on
-the candidate you pick. Among survivors:
+**per candidate against the baseline row**. What the portfolio enforces as
+HARD gates is legality + intent (rule 2); **rule 1 — metrics no worse than
+the baseline — is ANNOTATED, not gated**: violators carry `gates.rule1` /
+`rule1_violators` in portfolio.json and are excluded from the
+JSON_SUMMARY `best` pick (which falls back to the baseline), but they stay
+in the rankings. Verify rule 1 YOURSELF against the baseline row before
+adopting ANY index (measured, run 7: a slate's routed-best carried
+crossings 74 vs baseline 67 with hpwl also worse; only the manual
+conjunction check at adoption caught it). The repo-local gates are still
+yours to run on the candidate you pick. Among survivors:
 
 1. Prefer `ranking_routed` over `ranking_static` — the probe tier
    (`--route-top`, default: baseline + top 2) routes one SHARED affected-net
    set, so its `failures`/`iterations` compare like with like. Never adopt
    on static rank alone when the budget allows one probe route: crossings
    and hpwl are proxies, and the router is the judge that counts.
+   **`ranking_routed: []` with `--route-top >= 1` means the probe tier
+   FAILED, not that it was skipped** — read the `[probe]` log lines and fix
+   before adopting; empty-routed is never a license to adopt on static rank
+   (measured: caller-relative paths broke every probe rc=1 and the slate
+   silently degraded to static). And **the shared window compares like with
+   like WITHIN the slate; it is not whole-board routability** — it routes
+   only the affected nets (run 7: 13–16 of 45). Pruning on it is fine;
+   before ADOPTING on it, pass `--full-probe`: it routes the WHOLE board on
+   the baseline + the window winner and that verdict outranks the window
+   (measured: window-best 14 failures, same board full-probed 52 vs
+   baseline 41 — verdict reversed). `probe_kind` in the summary says which
+   instrument produced the ranking you are reading.
 2. Ties go to the LEAST displacement (the slate is diverse by construction —
    kept candidates sit ≥ `--diversity-mm` apart in pose distance — so a tie
    is a real tie, not two clones).
@@ -355,6 +437,15 @@ python3 -X utf8 check_floorplan.py board.kicad_pcb --intent /tmp/intent.json --h
 Exit **0** clean, **4** violations, **3** the board is not in a state it can
 grade. Each violation carries the measured number beside the limit it broke, so
 `--json` output is quotable evidence rather than an opinion.
+
+**The grading knobs resolve from the BOARD when unset** — the legality rules
+inflate part rects by the grading clearance, so a fixed default looser than
+the board's floor manufactures phantom oob/overlap findings (run-7 S1: a
+phantom 5th oob part, budget 4, exit 4, on a board that grades 0 errors at
+its real 0.15/0.3 floor). The JSON_SUMMARY discloses `clearance_used` /
+`edge_clearance_used` with their source — quote them with any violation you
+report, and pass explicit `--clearance`/`--board-edge-clearance` only when
+you mean to grade at a different floor than the board's own.
 
 Worth declaring, in rough order of value: `must_lock` for the parts the lock
 advisor flagged; `edge_connectors` for anything that is *meant* to overhang
@@ -678,7 +769,12 @@ only in `check_floorplan`'s `outline` block.
   (JSON_SUMMARY / the EXIT line / the final tally block) or parse it; never
   conclude from a truncated grep. Run 6 logged three incidents on three
   different instruments read three different lossy ways; the instrument was
-  right every time.
+  right every time. **An oracle LISTING gets the same rule**: never `head`/
+  `tail` it — consume the whole list and assert the lines you consumed equal
+  the count the instrument itself printed. Run 7's close-out shipped "5
+  opens" off a `tail -5` of a list whose sixth line (SWDIO) sat above the
+  window; the oracle had printed 6, and the wrong number reached the final
+  report and the promotion decision before the watcher caught it.
 - **Before concluding a clause is geometrically unsatisfiable, check your own
   flags.** One net was reported "walled in by its neighbours" when the actual
   blocker was a `--track-width 0.4` the analyst had passed: a 0.4 mm trace cannot
@@ -1363,6 +1459,14 @@ Use `list_nets.py` to detect differential pairs and power/ground nets:
 python3 list_nets.py path/to/file.kicad_pcb --diff-pairs --power
 ```
 
+**While the spec's widths are in hand, check each declared width against the
+net's smallest pad and its neighbor pitch NOW.** A 0.4 mm trace cannot leave
+a 0.200 mm QFN pad (the neckdown handles the pad END, but a width wider than
+`pitch − clearance` cannot pass BETWEEN neighbors on the escape), and a
+width the geometry cannot carry found here is a spec conversation; found at
+Step 9 it reads as a mystery routing failure and has twice been written up
+as one ("walled in by its neighbours" — the wall was the width).
+
 ### Read the board's design rules and pass them to the CLI
 
 The router does NOT read the board's design rules — it falls back to a generic
@@ -1874,6 +1978,15 @@ multiple rails). Follow its methodology here, seeded by the `list_nets.py --powe
 output, and put the resulting net -> layer assignments into the plan's
 `route_planes` steps. Nets it leaves to wide traces become `--power-nets` /
 `--power-nets-widths` on the route step instead.
+
+**Routing is as much about planes as traces (#118): treat pour continuity as
+first-class work, not cleanup.** The same lens exists at three stages and
+they should agree — `--plane-score` at placement time (portfolio candidates
+priced by the fill's islands/necks), the #424 fragility field in-run (signal
+routes pay to cross the pour's straits), and the `fragmented_nets` /
+`stacked_copper` summary keys at grading. A run that only meets the pour at
+the repair step has skipped the two stages where the damage was cheap to
+avoid.
 
 Report to user:
 - Identified GND nets and pad counts
@@ -3256,6 +3369,7 @@ writing a script to answer a question, check whether one of them already does.
 | the endgame work list, join by join | `kicad_unconnected.py board --pairs-json wk/pairs.json`, or `converge.py where BOARD --oracle` | each remaining join as an exact net + pad↔copper endpoint pair (x/y/layer/kind) — the JOIN SPEC for a scoped route, no re-deriving from prose. `where --oracle` prints the pairs then runs forensics on exactly those nets |
 | what kind of failure is this | `converge.py where` / the router's own hint | the hint names the flag and the nets (9.3b); it diagnoses better than the score does |
 | where should this part go, facing which way | `converge.py poses BOARD --ref R` | ranks legal (x, y, rotation) poses by placement cost in **milliseconds**, with a per-component breakdown, and `--route` pays for tier 3 on only the top few |
+| will this hand join fit, BEFORE committing it | `check_join.py BOARD NET x,y,layer ... via:x,y` | stages the candidate polyline+vias onto a copy of the board and diffs the REAL check_drc engine (netclasses, `.kicad_dru`, rotated pads, edge, hole-to-hole), plus missing-via and same-net-stack checks DRC omits. Exit 0 clean / 1 violations. Rung 8's condition 3 |
 | is this even the engine I pinned | `route.py --capabilities` / `krt_capabilities.py --require` | a chain can otherwise run green against a clone missing the module it depends on. **Spelling is `module:--flag`, WITH the dashes.** And ground-truth a PLANE-step flag with `--help`: `--require` scans imports one level to catch shared registrars, and both plane scripts import `route.py` — so they used to inherit its whole vocabulary and answer OK for flags argparse rejects with exit 2 (fixed, but the lesson stands: a capability gate is evidence, not proof) |
 | step back to iteration N | `converge.py step-back --iteration N` | byte-exact, because the board is addressed by content instead of by a path three iterations overwrote |
 | re-run what iteration N did | `converge.py replay --iteration N` | replays the recorded argv. If it refuses, the ledger recorded prose instead of a command — fix the ledger, not the memory |
@@ -3271,6 +3385,21 @@ oracle itself at end of run — `oracle_check`/`oracle_open` in JSON_SUMMARY —
 and a `fragmented_nets` key names pad-connected nets whose copper is several
 KiCad islands; both feed its own reconciliation. `oracle_check: unavailable`
 means the run had no kicad-cli and you are on in-process grading alone.)
+
+**The divergence is a MODE, not an event.** After the model's success channel
+is caught lying ONCE on a board (`failed_single`/routed tallies vs oracle
+opens), demote it for the remainder of that board's endgame: the oracle's
+`--pairs-json` work list is the only open-set, every accept runs the oracle,
+and after every FAILED call diff the board itself (per-net segment/via
+counts, duplicate vias at identical coords) before trusting "no change" — a
+failed rip-restore can write fragments while reporting success. Run 7 held
+the trust order per event but kept consuming the model's tallies lap after
+lap, and paid one oracle run of latency for each of three defect classes.
+(The engine now counts routed-but-OPEN nets in `open_single`, grades
+terminal restores before claiming them — `terminal_restores` — and dedups
+stacked vias with a `stacked_copper` disclosure; a summary carrying those
+keys has already had this class of lie audited once, which narrows the gap
+but does not repeal the trust order.)
 
 **Ratchet floors measured by a refill-jittery instrument (kicad-cli DRC) flap
 at exact equality.** (1) A single exit-4 at floor==count is a RE-MEASURE
@@ -3584,6 +3713,16 @@ permuting: score each order as its own full-chain lineage and let the ledger
 pick (9.3d's rip-return row) — and if the same victim SET survives every order,
 it is capacity (the lane ledger has the number), not ordering.
 
+**The tooling-vs-placement discriminator (#118), for a converged board with
+few failures left:** ask whether a competent human could hand-route the
+remaining nets on THIS placement. If yes, the gap is tooling — file it as a
+systemic finding and take rung 8, which exists for exactly this. If no human
+could either, it is placement or capacity — the lane ledger has the number,
+and the finding goes to the next run's Step 0, not to more router laps.
+Run 7's west fan answered "no human could" (~25 exact-clearance candidates,
+every one within 0.1 mm of committed constrained copper), which is what made
+it a capacity finding rather than an engine complaint.
+
 **After ANY placement change every downstream routed board is stale** — re-run
 the chain from the placed board. Never keep a routed artifact from before it.
 
@@ -3623,7 +3762,11 @@ read-case 3 or 7. **Record NON-triggers the same way**: when a mandate's
 trigger is checked and absent, say so in the entry (`[checked: 0 B.Cu parts ->
 no --per-side]`) — an unrecorded non-trigger is indistinguishable from a
 skipped mandate to any later audit (run 6's watcher had to grep the board to
-tell them apart).
+tell them apart). **A pose decision is read-case 5 even when the arithmetic
+is decisive**: a rot-0-vs-rot-180 call made on `components.inversions` alone,
+with no side-by-side ratsnest reads in the ledger, is a mandate skipped —
+run 7 decided the U3 pose twice that way; the number was right, and the
+breach is still a breach the audit had to flag.
 
 **What `record` actually writes is this, and only this:**
 
@@ -3651,7 +3794,14 @@ record of the one thing 9.3d says decides an iteration. Until they do exist,
 **Record the failing nets by NAME, not by count.** Counts hide whack-a-mole
 completely: measured on one run, `unrouted` read **4 → 4** across an iteration
 that had in fact fixed four nets and broken five different ones. The scalar said
-"no progress"; the names said the iteration was churning.
+"no progress"; the names said the iteration was churning. **This applies to
+PROBE records too, and to the BASELINE side of every comparison**: run 7's
+adoption entry recorded `full_probe_failures: 41` — a count — and the 41
+names the ADOPTED board failed appeared nowhere, so the routing phase's first
+whack-a-mole comparison had nothing to diff against. A probe verdict enters
+the ledger as names (`score.failed_nets`, or the names in the lever text),
+for the candidate AND the baseline row it beat. `record` now nags exactly
+this: a score carrying `failures` without `failed_nets` draws a NOTE.
 
 **`parent_sha` is the board this iteration actually came from** — `record`
 derives it from the last accepted entry, not from iteration N−1. When you need a
@@ -3661,6 +3811,18 @@ reuse an output path across iterations**: a ledger that says
 `wk/placed.kicad_pcb` when three iterations wrote that name is unauditable, and
 one that named a *rejected* board as the parent of everything downstream got
 shipped.
+
+**The argv must be real, and the close-out must name its stop condition —
+`record` now enforces both.** An `--argv` whose first token is neither an
+existing file nor on PATH is refused (exit 2, nothing written): run 7's
+endgame recorded `["python3","-X","utf8","dummy"]`, which `replay` can never
+run — a placeholder argv turns the ledger back into prose. The run-closing
+entry takes `--final --stop-condition '<which of 9.5 fired>'`; `--final`
+without a stop condition is refused the same way. And **before quoting a
+headline in the lever text, diff it against the SAME entry's score payload**:
+run 7's final entry said "SWD closed, 5 opens" while its own score listed
+SWDIO among 6 unrouted — the prose shipped into the report and the correction
+cost a commit. The score is the record; the lever text is a caption of it.
 
 **Log the systemic/completion split in the final report**: *"41 iterations: 9
 systemic, 32 completion"* is a fact about how the budget was spent, and a run that
@@ -3719,23 +3881,62 @@ pulling at you, write the next ledger entry instead:
   rungs than you have tried: rip set → grid → layer → via cost → width → order →
   placement → hand-authored micro-copper.
 
-**Rung 8, hand-authored micro-copper, exists — with three hard conditions.**
-Only after every mechanical rung is exhausted; only with **round-cap arithmetic
-off the ACTUAL copper widths** (a track's reach is `endpoint + width/2`; run 5
-authored 0.427 and 0.442 mm candidates that both failed the arithmetic before
-0.465 mm passed); and **always re-gated** — drc + connectivity + score on the
-edited board, recorded in the ledger like any other lever, revert on regression.
-A hand segment that skips the gate is not a fix, it is an unmeasured edit.
+**Rung 8, hand-authored micro-copper, exists — with FIVE hard conditions.**
+
+1. **Only after every mechanical rung is exhausted** (dru lifts, nc-map fixes,
+   scoped grids, rip sets — run 7 entered rung 8 only after all four were
+   demonstrably spent, and that part it got right).
+2. **Round-cap arithmetic off the ACTUAL copper widths** (a track's reach is
+   `endpoint + width/2`; run 5 authored 0.427 and 0.442 mm candidates that
+   both failed the arithmetic before 0.465 mm passed).
+3. **A join verifier BEFORE the first segment, graded against ALL copper.**
+   Reach is the easy half; the shorts live in the other half — third-party
+   segments, vias, pads, pour. Run every candidate polyline+via through
+   `check_join.py BOARD NET x,y,layer ... via:x,y` — it stages the candidate
+   onto a copy of the board and diffs the REAL check_drc engine (netclasses,
+   `.kicad_dru` layers, rotated pads, board edge, hole-to-hole), plus the
+   join-specific checks DRC omits: a layer change with no `via:` and same-net
+   via stacks. (No check_join in the pinned engine? A scratch-board
+   `check_drc.py` run per candidate is the zero-build version.) Measured,
+   run 7: pad-edge-only arithmetic at 0.1575+ margins authored **42 shorts**;
+   the verifier was built mid-recovery instead of first.
+4. **Re-gate EVERY edit** — drc + connectivity + score on the edited board,
+   recorded in the ledger like any other lever, revert on regression. Per
+   EDIT, not per phase: run 7 gated a whole hand-copper session on
+   connectivity alone with DRC deferred, and the deferred DRC was where the
+   42 shorts surfaced. A hand segment that skips the gate is not a fix, it is
+   an unmeasured edit.
+5. **Lock it, and commit it FIRST.** Stamp every hand-authored segment and via
+   `(locked yes)` at authoring time — locked copper's net is never
+   rip-eligible (#521), which is exactly the semantics a hand join needs: no
+   later `--rip-existing-nets` glob, in-run ladder, or plane-repair
+   `--rip-blocker-nets` picker may treat the one corridor you proved as free
+   space (measured, run 7: the plane repair picked three hand-routed GPIOs as
+   tap blockers and ripped them; unlock deliberately if a rebuild must move
+   them). And hand joins are the most constrained copper on the board — one
+   proven corridor, zero router flexibility — so constrained-first applies
+   across the hand/router boundary: commit them BEFORE the flexible nets'
+   final routing and make the router route around them (strip and re-route
+   the flexible set last if needed). Never author a hand join into a fabric
+   of committed copper the router could have placed elsewhere (measured,
+   run 7: fixed-joins-first closed at 0 shorts where the reverse order had
+   authored 42).
 
 **Rung 8 has TWO exits: placed-and-gated copper, or an exhaustive NO-JOIN —
-and the second is a result, not a failure.** A sweep that clears no candidate
-at physical clearance IS the hostile rebuild the watcher pattern demands, over
-its enumerated families — record the envelope (width, clearance, path
-families, step) in the ledger like any lever. Pair it with ONE scoped route at
-the router's own hinted finest grid to cover paths outside the families;
-together they close the stop-3 checklist for that pad. Do not follow a NO-JOIN
-sweep with more router laps at the grid that already failed (run 6 ran two
-rotation laps after its sweep proved the fabric sealed).
+and the second is a result, not a failure, but ONLY when it ships all four
+parts:** (1) the sweep envelope (width, clearance, path families, step)
+recorded in the ledger like any lever; (2) ONE scoped route at the router's
+own hinted finest grid (0.025 at ≤0.4 mm pitch) to cover paths outside the
+enumerated families; (3) a `--view` crop of the region, read and ledgered;
+(4) the verification-mode disclosure — a fanned-out hostile rebuild, or the
+single-agent statement that the sweep itself is the rebuild. A NO-JOIN
+missing any part is a HYPOTHESIS, and every report that quotes it must say
+so (run 7's west-fan capacity claim shipped with the envelope, the
+finest-grid route and the crop all missing — it is a hypothesis pending the
+next run, by this rule). A complete sweep IS the hostile rebuild the watcher
+pattern demands; do not follow it with more router laps at the grid that
+already failed (run 6 ran two rotation laps after its sweep proved the
+fabric sealed).
 
 **A worked case of stopping wrongly, because it is the most expensive mistake in
 this document.** One run reported four unrouted nets, wrote up "stop condition 3"

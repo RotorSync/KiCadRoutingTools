@@ -193,11 +193,17 @@ def _edge_correct(state, ref: str, edge: str, x: float, y: float,
 
 def _partner_centroid(state, ref: str, placed: Set[str],
                       max_fanout: int = 20) -> Optional[Tuple[float, float]]:
-    """Centroid of already-placed partners' pads on shared nets. Nets owned by
-    more than `max_fanout` parts are excluded for the routability.py reason:
-    they reach everywhere by design and would collapse every centroid onto the
-    board middle. Plane nets are NOT otherwise excluded here -- for a decap,
-    the rail net is exactly what tethers it to its IC."""
+    """Centroid of already-placed partners on shared nets: ONE vote per
+    (partner footprint, net), each vote the mean of that partner's matching
+    pads. Voting per PAD (the pre-run-7 behavior) let a partner with
+    duplicated pins outvote one with a single pin -- a USB-C receptacle's
+    doubled A6/B6 DP pads pulled the 27R series pair 2:1 toward the
+    connector, seating R7 15.3mm from the U1 face the intent named. Nets
+    owned by more than `max_fanout` parts are excluded for the
+    routability.py reason: they reach everywhere by design and would
+    collapse every centroid onto the board middle. Plane nets are NOT
+    otherwise excluded here -- for a decap, the rail net is exactly what
+    tethers it to its IC."""
     part = state.parts.get(ref)
     if part is None:
         return None
@@ -210,10 +216,13 @@ def _partner_centroid(state, ref: str, placed: Set[str],
         for other in owners:
             if other == ref or other not in placed:
                 continue
-            for gx, gy, pn in state.parts[other].pad_globals():
-                if pn == nid:
-                    xs.append(gx)
-                    ys.append(gy)
+            pxs = [gx for gx, gy, pn in state.parts[other].pad_globals()
+                   if pn == nid]
+            pys = [gy for gx, gy, pn in state.parts[other].pad_globals()
+                   if pn == nid]
+            if pxs:
+                xs.append(sum(pxs) / len(pxs))
+                ys.append(sum(pys) / len(pys))
     if not xs:
         return None
     return sum(xs) / len(xs), sum(ys) / len(ys)
@@ -223,13 +232,19 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                      group_sources: Sequence[str] = (),
                      clearance: float = 0.25,
                      board_edge_clearance: float = 0.55,
-                     grid_step: float = 0.1) -> Dict:
+                     grid_step: float = 0.1,
+                     seed_refs: Optional[Set[str]] = None) -> Dict:
     """Compute a full placement for an unplaced board from its intent.
 
     Returns {'placements': [...], 'lock_refs': [...], 'unseated': [...],
     'notes': [...]}. `placements` covers every ref that was placed (writer
     format); `unseated` names parts NO legal pose was found for -- the caller
     reports them and the grade fails, deliberately.
+
+    `seed_refs`, when given, scopes the seeding to exactly those refs: every
+    other part is treated as authoritatively placed where it stands (the
+    PARTIALLY-unplaced case -- a stacked pile beside a real placement, where
+    re-deriving the placed parts would discard someone's work).
     """
     import pose_score
     from placement import floorplan
@@ -257,9 +272,11 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
     # that pre-placed its spec-fixed parts and stamped them (locked yes) must
     # not have the seeder re-derive them. Treated as placed from the start:
     # they anchor the connectivity centroids and obstruct packing, and every
-    # later stage (edge connectors included) skips them.
+    # later stage (edge connectors included) skips them. The same applies to
+    # every ref outside an explicit `seed_refs` scope.
     for ref in sorted(state.parts):
-        if state.parts[ref].locked:
+        if state.parts[ref].locked or (seed_refs is not None
+                                       and ref not in seed_refs):
             placed.add(ref)
             unplaced.discard(ref)
     # Deterministic tie-break values, drawn once in sorted order so the
@@ -297,6 +314,19 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             placed.add(ref)
             unplaced.discard(ref)
 
+    # Decap-governed caps are claimed by stage 2.5, never zone-packed: a
+    # zone is a REGION and the decap rule is a distance to a specific pin --
+    # a cap packed anywhere in a 15x9 zone routinely lands >3mm from the pin
+    # it exists to serve (measured: the flash decap, zone-packed, graded
+    # 3.5mm from the flash's VCC pin).
+    decap_spec = getattr(intent, 'decaps', None) or {}
+    decap_scope: Set[str] = set()
+    if decap_spec.get('max_distance_mm') is not None:
+        exempt = tuple(decap_spec.get('exempt') or ())
+        decap_scope = {r for r in state.parts
+                       if r[0] == 'C' and state.parts[r].pin_count == 2
+                       and not any(fnmatch.fnmatch(r, pat) for pat in exempt)}
+
     # ---- 2. zoned blocks: radial pack from the zone center -----------------
     # A single-member zone is the spec-coordinate pattern (a rect a few
     # hundred microns wide around where the spec pins the part), so it gets
@@ -304,7 +334,8 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
     # seeds pack differently.
     for name in sorted(zones_by_name):
         z = zones_by_name[name]
-        members = _order(blocks.get(name, ()))
+        members = [r for r in _order(blocks.get(name, ()))
+                   if r not in decap_scope]
         if not members:
             continue
         cx = (z.rect[0] + z.rect[2]) / 2.0
@@ -329,6 +360,115 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             else:
                 unseated.append(ref)
                 notes.append(f"{ref}: no legal pose inside zone {name!r}")
+
+    # ---- 2.5 decap-governed caps: one cap per supply PIN -------------------
+    # A 100nF's two nets are a rail and GND -- both usually above the fanout
+    # cap -- so the generic centroid stage would park every decap mid-board
+    # and a pin-exact decap gate (3mm pad-edge per SUPPLY PIN) would fail.
+    # The iteration is PIN-FIRST, not cap-first: a cap-first greedy spends
+    # every cap on the biggest IC's pads and starves the flash (measured --
+    # all ten caps claimed U1 pads, U3.8 graded 3.5mm). Pins are the rail
+    # pads of PLACED ICs (U-prefix: a castellated row carries the rail too
+    # and must not eat a claim), pair-collapsed (adjacent same-rail pins
+    # under 1mm share one cap by design), biggest owner first; each pin
+    # takes a matching-rail cap, preferring one whose declared zone CONTAINS
+    # the pin so a zone-member cap serves its own block.
+    if decap_scope:
+        avail = [r for r in _order(sorted(unplaced)) if r in decap_scope]
+        rail_of: Dict[str, int] = {}
+        for ref in avail:
+            rail = min((nid for nid in state.parts[ref].nets
+                        if len(state.net_refs.get(nid, ())) >= 2),
+                       key=lambda nid: (len(state.net_refs[nid]), nid),
+                       default=None)
+            if rail is not None:
+                rail_of[ref] = rail
+        rails = set(rail_of.values())
+        pins: List[Tuple[int, str, float, float, int]] = []
+        for owner in sorted(placed):
+            if owner[0] != 'U':
+                continue
+            o = state.parts[owner]
+            for gx, gy, pn in o.pad_globals():
+                if pn in rails:
+                    pins.append((-o.pin_count, owner, round(gx, 3),
+                                 round(gy, 3), pn))
+        pins.sort()
+        zone_of_cap = {}
+        for name in sorted(zones_by_name):
+            for r in blocks.get(name, ()):
+                if r in decap_scope and r not in zone_of_cap:
+                    zone_of_cap[r] = zones_by_name[name]
+
+        def _seat(ref, tx, ty, owner, pn, constraint=None, tol=0.5):
+            clr = _try_place(state, ref, tx, ty, unplaced - {ref},
+                             constraint=constraint, tol=tol)
+            if clr is None and constraint is not None:
+                clr = _try_place(state, ref, tx, ty, unplaced - {ref})
+            if clr is None:
+                return False
+            avail.remove(ref)
+            placed.add(ref)
+            unplaced.discard(ref)
+            p2 = state.parts[ref]
+            net = getattr(pcb_data.nets.get(pn), 'name', pn)
+            notes.append(f"{ref}: decap for {owner} pad(s) near ({tx}, {ty})"
+                         f" [{net}], landed "
+                         f"{math.hypot(p2.x - tx, p2.y - ty):.2f}mm"
+                         + (f" at reduced clearance {clr:g}"
+                            if clr < state.clearance else ""))
+            return True
+
+        # Pass 1: a cap declared in a zone serves a pin INSIDE that zone --
+        # the flash's own decap covers the flash, whatever the owner-size
+        # ordering says.
+        remaining = []
+        for key in pins:
+            _, owner, x, y, pn = key
+            hit = next((r for r in avail if rail_of.get(r) == pn
+                        and zone_of_cap.get(r) is not None
+                        and zone_of_cap[r].rect[0] <= x <= zone_of_cap[r].rect[2]
+                        and zone_of_cap[r].rect[1] <= y <= zone_of_cap[r].rect[3]),
+                       None)
+            if hit is not None and _seat(
+                    hit, x, y, owner, pn,
+                    constraint=zone_of_cap[hit].rect,
+                    tol=intent.zone_tolerance(zone_of_cap[hit])):
+                continue
+            remaining.append(key)
+
+        # Pass 2, per rail: CLUSTER the remaining pins until they fit the
+        # remaining caps, then seat one cap per cluster centroid. Twelve
+        # graded pins over ten caps is the DESIGNED shape -- adjacent supply
+        # pins share a cap -- so the collapse radius grows (1.0 -> 3.0mm)
+        # until every pin belongs to a served cluster; a fixed radius either
+        # starves the last pin or wastes two caps on one pair (both
+        # measured).
+        for rail in sorted(rails):
+            pins_r = [k for k in remaining if k[4] == rail]
+            caps_r = [r for r in avail if rail_of.get(r) == rail]
+            if not pins_r or not caps_r:
+                continue
+            radius = 1.0
+            while True:
+                clusters: List[List[Tuple]] = []
+                for key in pins_r:
+                    _, owner, x, y, pn = key
+                    home = next((c for c in clusters
+                                 if c[0][1] == owner
+                                 and math.hypot(x - c[0][2], y - c[0][3])
+                                 <= radius), None)
+                    (home.append(key) if home is not None
+                     else clusters.append([key]))
+                if len(clusters) <= len(caps_r) or radius >= 3.0:
+                    break
+                radius += 0.5
+            for cluster, ref in zip(clusters, list(caps_r)):
+                cx2 = round(sum(k[2] for k in cluster) / len(cluster), 3)
+                cy2 = round(sum(k[3] for k in cluster) / len(cluster), 3)
+                _seat(ref, cx2, cy2, cluster[0][1], rail)
+            # pins beyond the cap supply, and caps no pin wanted, fall
+            # through to the generic stage, which reports honestly
 
     # ---- 3. the rest: connectivity centroid --------------------------------
     center = ((bounds[0] + bounds[2]) / 2.0, (bounds[1] + bounds[3]) / 2.0)
