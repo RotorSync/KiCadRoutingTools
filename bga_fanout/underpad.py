@@ -278,7 +278,8 @@ def generate_underpad_escape(footprint: Footprint,
                              only_pad_keys: Optional[Set[Tuple[float, float]]] = None,
                              dogbone: bool = False,
                              plane_drop_nets: Optional[Set[int]] = None,
-                             plane_drop_report: Optional[Dict] = None
+                             plane_drop_report: Optional[Dict] = None,
+                             plane_net_layers: Optional[Dict[str, List[str]]] = None
                              ) -> Tuple[List[Dict], List[Dict], List[str]]:
     """Route BGA signal balls to the boundary under the pad field.
 
@@ -1693,6 +1694,34 @@ def generate_underpad_escape(footprint: Footprint,
         # way). The fill models must see THIS call's fresh copper (materialized
         # into pcb_data by the drop pass), so drop any stale per-board cache.
         _pour_models: Dict[Tuple[int, str], list] = {}
+        # DECLARED future pours (--plane-net-layers, worktree prototype): for a
+        # declared (net, layer) with the layer on this BALL side, build a
+        # SYNTHETIC board-rect zone and fill-model it against the copper that
+        # exists NOW -- a predictor of whether the future pour will reach each
+        # ball. Balls the predicted fill reaches skip their drop via entirely
+        # (the fanout-time form of pour-direct; plane repair backstops misses).
+        if plane_net_layers:
+            try:
+                from kicad_parser import Zone as _Zone
+                from plane_fill_model import get_zone_model as _gzm
+                _bb = pcb_data.board_info.board_bounds
+                _name2id = {n.name: n.net_id for n in pcb_data.nets.values()}
+                for _nname, _lays in plane_net_layers.items():
+                    _nid = _name2id.get(_nname)
+                    if _nid is None or not _bb:
+                        continue
+                    for _lay in _lays:
+                        _z = _Zone(net_id=_nid, net_name=_nname, layer=_lay,
+                                   polygon=[(_bb[0], _bb[1]), (_bb[2], _bb[1]),
+                                            (_bb[2], _bb[3]), (_bb[0], _bb[3])])
+                        _m = _gzm(pcb_data, _z)
+                        if _m is not None:
+                            _pour_models.setdefault((_nid, _lay), []).append(_m)
+                if verbose and _pour_models:
+                    print(f"  Declared-pour prediction: {len(_pour_models)} "
+                          f"(net,layer) synthetic fill model(s)")
+            except Exception as _e:
+                print(f"  Declared-pour prediction unavailable ({_e})")
         import env_knobs
         if env_knobs.FANOUT_POUR_DIRECT and \
                 any((z.net_id in plane_drop_nets) for z in (pcb_data.zones or [])):

@@ -3029,7 +3029,8 @@ def generate_plane_drops(footprint: Footprint,
                          net_filter: Optional[List[str]] = None,
                          grid_step: float = 0.0,
                          plane_min_pads: int = 6,
-                         verbose: bool = True
+                         verbose: bool = True,
+                         plane_net_layers: Optional[Dict[str, List[str]]] = None
                          ) -> Tuple[List[Dict], List[Dict], Dict]:
     """Drop a via for every plane-net ball of `footprint` (#424 D2).
 
@@ -3078,13 +3079,14 @@ def generate_plane_drops(footprint: Footprint,
         track_width, clearance, via_size, via_drill, exit_margin=0.5,
         plane_min_pads=plane_min_pads, net_filter_fn=net_filter_fn,
         grid_step=grid_step, only_pad_keys=frozenset(),
-        plane_drop_nets=drop_ids, plane_drop_report=rep, verbose=verbose)
+        plane_drop_nets=drop_ids, plane_drop_report=rep, verbose=verbose,
+        plane_net_layers=plane_net_layers)
     return d_tracks, d_vias, rep
 
 
 def _plane_drop_pass(footprint, pcb_data, new_tracks, new_vias, net_filter,
                      layers, track_width, clearance, via_size, via_drill,
-                     grid_step):
+                     grid_step, plane_net_layers=None):
     """Plane-ball drops against the board PLUS this call's fresh copper.
 
     The signal escape's tracks/vias are only result dicts at this point, so
@@ -3116,14 +3118,16 @@ def _plane_drop_pass(footprint, pcb_data, new_tracks, new_vias, net_filter,
                 rp.footprints[footprint.reference], rp, layers,
                 track_width=track_width, clearance=clearance,
                 via_size=via_size, via_drill=via_drill,
-                net_filter=net_filter, grid_step=grid_step)
+                net_filter=net_filter, grid_step=grid_step,
+                plane_net_layers=plane_net_layers)
             back_transform_results(d_tracks, d_vias, [], back)
             return d_tracks, d_vias, rep
         return generate_plane_drops(
             footprint, pcb_data, layers,
             track_width=track_width, clearance=clearance,
             via_size=via_size, via_drill=via_drill,
-            net_filter=net_filter, grid_step=grid_step)
+            net_filter=net_filter, grid_step=grid_step,
+            plane_net_layers=plane_net_layers)
     finally:
         del pcb_data.segments[n_seg0:]
         del pcb_data.vias[n_via0:]
@@ -3149,6 +3153,7 @@ def generate_bga_fanout(footprint: Footprint,
                         grid_step: float = 0.0,
                         layer_costs: Optional[List[float]] = None,
                         plane_drop: str = 'auto',
+                        plane_net_layers: Optional[Dict[str, List[str]]] = None,
                         _pad_filter: Optional[Set[Tuple[float, float]]] = None,
                         _ignore_prefanned: bool = False,
                         _single_pass: bool = False) -> Tuple[List[Dict], List[Dict], List[Dict]]:
@@ -3209,7 +3214,8 @@ def generate_bga_fanout(footprint: Footprint,
     if _enabled and _pad_filter is None and not _single_pass:
         d_tracks, d_vias, rep = _plane_drop_pass(
             footprint, pcb_data, tracks, vias_to_add, net_filter,
-            layers, track_width, clearance, via_size, via_drill, grid_step)
+            layers, track_width, clearance, via_size, via_drill, grid_step,
+            plane_net_layers=plane_net_layers)
         tracks = tracks + d_tracks
         vias_to_add = vias_to_add + d_vias
         LAST_PLANE_DROP_REPORT.update(rep)
@@ -3275,6 +3281,14 @@ def main():
                              'barrels on the inner layers (the standard hand-layout escape). '
                              '"auto" = channel first, and if it drops any ball, retry with '
                              'underpad and keep whichever escapes more (issue #288).')
+    parser.add_argument('--plane-net-layers', nargs='+', default=None,
+                        metavar='NET:LAYER[,LAYER...]',
+                        help="Declare the FUTURE plane plan (worktree prototype): "
+                             "for each plane net, the layer(s) it will be poured "
+                             "on, e.g. GND:In1.Cu,In4.Cu P3.3V:In2.Cu. Balls whose "
+                             "OWN layer is declared get a synthetic-fill reach "
+                             "prediction; balls the future pour will reach skip "
+                             "their drop via entirely (fanout-time pour-direct).")
     parser.add_argument('--plane-drop', choices=['auto', 'off'], default='auto',
                         help='Drop a via for every plane-net ball after the signal escape '
                              '(#424): dog-bone gap via where free, else via-in-pad, so the '
@@ -3396,7 +3410,11 @@ def main():
         escape_method=args.escape_method,
         grid_step=args.grid_step,
         layer_costs=args.layer_costs,
-        plane_drop=args.plane_drop
+        plane_drop=args.plane_drop,
+        plane_net_layers=(
+            {spec.split(':', 1)[0]: spec.split(':', 1)[1].split(',')
+             for spec in args.plane_net_layers}
+            if args.plane_net_layers else None)
     )
 
     if tracks:
