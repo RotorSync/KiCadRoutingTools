@@ -850,10 +850,25 @@ def generate_underpad_escape(footprint: Footprint,
         g = {start: 0.0}
         pq = [(heur(sx, sy), start)]
         came = {}
+        # #561 hot-loop: byte-equivalent mechanical speedup -- localize the
+        # per-iteration lookups and index the occupancy bytearrays directly
+        # (identical arithmetic, identical heap tuples, identical step order,
+        # so the search expands and ties exactly as before).
+        _heappop = heapq.heappop
+        _heappush = heapq.heappush
+        _g_get = g.get
+        _ony = occ.ny
+        _onx = occ.nx
+        _ogrid = occ.grid
+        _has_soft = occ.has_soft
+        _soft_foreign = occ.soft_foreign
+        _steps = _STEPS
+        _home = home
+        _vcache = {}
         while pq:
-            _, cur = heapq.heappop(pq)
+            _, cur = _heappop(pq)
             cx, cy, L = cur
-            if not in_bbox(cx, cy):
+            if not (bx0 <= cx <= bx1 and by0 <= cy <= by1):
                 path = [cur]
                 while cur in came:
                     cur = came[cur]
@@ -862,19 +877,21 @@ def generate_underpad_escape(footprint: Footprint,
                 return path
             cg = g[cur]
             if L in route_layers:
-                for dx, dy in _STEPS:
+                _gL = _ogrid[L]
+                for dx, dy in _steps:
                     nx, ny = cx + dx, cy + dy
-                    if not occ.inside(nx, ny):
+                    if not (0 <= nx < _onx and 0 <= ny < _ony):
                         continue
-                    if in_bbox(nx, ny) and occ.blocked(L, nx, ny) \
+                    if (bx0 <= nx <= bx1 and by0 <= ny <= by1) \
+                            and _gL[nx * _ony + ny] \
                             and not exempt(L, (nx, ny)):
                         continue
                     # No corner-cutting: a diagonal step past a blocked orthogonal
                     # neighbour clips that obstacle's clearance (the diagonal line
                     # passes nearer the via/pad than either cell). Forbid it.
                     if dx != 0 and dy != 0:
-                        if (occ.blocked(L, cx + dx, cy) and not exempt(L, (cx + dx, cy))) or \
-                           (occ.blocked(L, cx, cy + dy) and not exempt(L, (cx, cy + dy))):
+                        if (_gL[(cx + dx) * _ony + cy] and not exempt(L, (cx + dx, cy))) or \
+                           (_gL[cx * _ony + cy + dy] and not exempt(L, (cx, cy + dy))):
                             continue
                     step = 1.0 if (dx == 0 or dy == 0) else 1.6   # discourage zig-zag
                     # Soft keep-out (#278): stepping through a movable
@@ -882,15 +899,15 @@ def generate_underpad_escape(footprint: Footprint,
                     # cap-placement step may be unable to clear -- pay a
                     # steep per-cell premium so routes detour when any
                     # detour exists, and only graze when boxed in.
-                    if occ.has_soft and (nx, ny) not in home and \
-                            occ.soft_foreign(L, nx, ny, net_id):
+                    if _has_soft and (nx, ny) not in _home and \
+                            _soft_foreign(L, nx, ny, net_id):
                         step += 4.0
                     nxt = (nx, ny, L)
                     ng = cg + step
-                    if ng < g.get(nxt, 1e18):
+                    if ng < _g_get(nxt, 1e18):
                         g[nxt] = ng
                         came[nxt] = cur
-                        heapq.heappush(pq, (ng + heur(nx, ny), nxt))
+                        _heappush(pq, (ng + max(0, min(nx - bx0, bx1 - nx, ny - by0, by1 - ny)), nxt))
             # The single via, only in the ball's own pad. A through via spans
             # all layers, so the site must also clear immovable foreign copper
             # on layers the run-blocking test never looks at (via_ok, #253/
@@ -898,8 +915,20 @@ def generate_underpad_escape(footprint: Footprint,
             # centre cell (sx, sy); any other home cell gets the full via_size
             # -- the gate must use the size that will actually be emitted.
             _at_center = (cx, cy) == (sx, sy)
+            # #561: memoize via_ok per (cell, at_center) WITHIN this search --
+            # the answer is pure until commit() mutates copper (after astar
+            # returns), and the same home cells are re-queried on every heap
+            # visit (profiled: 1.6M calls, 503 of 582 s). Byte-equivalent.
+            if allow_via and (cx, cy) in home and via_ok is not None:
+                _vk = (cx, cy, _at_center)
+                _vr = _vcache.get(_vk)
+                if _vr is None:
+                    _vr = bool(via_ok(*occ.xy(cx, cy), _at_center))
+                    _vcache[_vk] = _vr
+            else:
+                _vr = True
             if allow_via and (cx, cy) in home and \
-                    (via_ok is None or via_ok(*occ.xy(cx, cy), _at_center)):
+                    (via_ok is None or _vr):
                 for L2 in route_layers:
                     if L2 == L:
                         continue
