@@ -193,11 +193,17 @@ def _edge_correct(state, ref: str, edge: str, x: float, y: float,
 
 def _partner_centroid(state, ref: str, placed: Set[str],
                       max_fanout: int = 20) -> Optional[Tuple[float, float]]:
-    """Centroid of already-placed partners' pads on shared nets. Nets owned by
-    more than `max_fanout` parts are excluded for the routability.py reason:
-    they reach everywhere by design and would collapse every centroid onto the
-    board middle. Plane nets are NOT otherwise excluded here -- for a decap,
-    the rail net is exactly what tethers it to its IC."""
+    """Centroid of already-placed partners on shared nets: ONE vote per
+    (partner footprint, net), each vote the mean of that partner's matching
+    pads. Voting per PAD (the pre-run-7 behavior) let a partner with
+    duplicated pins outvote one with a single pin -- a USB-C receptacle's
+    doubled A6/B6 DP pads pulled the 27R series pair 2:1 toward the
+    connector, seating R7 15.3mm from the U1 face the intent named. Nets
+    owned by more than `max_fanout` parts are excluded for the
+    routability.py reason: they reach everywhere by design and would
+    collapse every centroid onto the board middle. Plane nets are NOT
+    otherwise excluded here -- for a decap, the rail net is exactly what
+    tethers it to its IC."""
     part = state.parts.get(ref)
     if part is None:
         return None
@@ -210,10 +216,13 @@ def _partner_centroid(state, ref: str, placed: Set[str],
         for other in owners:
             if other == ref or other not in placed:
                 continue
-            for gx, gy, pn in state.parts[other].pad_globals():
-                if pn == nid:
-                    xs.append(gx)
-                    ys.append(gy)
+            pxs = [gx for gx, gy, pn in state.parts[other].pad_globals()
+                   if pn == nid]
+            pys = [gy for gx, gy, pn in state.parts[other].pad_globals()
+                   if pn == nid]
+            if pxs:
+                xs.append(sum(pxs) / len(pxs))
+                ys.append(sum(pys) / len(pys))
     if not xs:
         return None
     return sum(xs) / len(xs), sum(ys) / len(ys)
