@@ -80,6 +80,15 @@ Examples:
                    help="Minimum pairwise pose distance among kept candidates "
                         "(default: 2.0). Below it a candidate is a near-clone "
                         "and is skipped in favour of the next-ranked one")
+    p.add_argument("--rank-crossing-band", type=float, default=0.0,
+                   metavar="FRAC",
+                   help="Treat crossing counts within FRAC of the baseline as "
+                        "TIED, so the advisory health signal (bus-corridor "
+                        "crossings, corridor intrusions, displaced blocks) "
+                        "decides inside the band. 0 = off (default, legacy "
+                        "order). Crossings is near-injective over a real "
+                        "slate, so without a band the first slot decides and "
+                        "health never speaks. Try 0.02")
     p.add_argument("--intent", default=None, metavar="JSON",
                    help="Floorplan intent: hard gate (error-free grade "
                         "required) plus the health signals in the rank key")
@@ -437,7 +446,13 @@ def main():
         if r1:
             rule1_violators.add(c.index)
 
-    ranking_static = portfolio.rank_static(cands)
+    band_q = portfolio.band_width(cands, args.rank_crossing_band,
+                                  baseline.metrics.get('crossings'))
+    if band_q:
+        print(f"Ranking: crossings banded at {band_q} "
+              f"(--rank-crossing-band {args.rank_crossing_band}); the advisory "
+              f"health signal decides inside a band")
+    ranking_static = portfolio.rank_static(cands, band_q)
     kept, backfilled = portfolio.select_diverse(
         cands, ranking_static, args.keep, args.diversity_mm, free, baseline)
     by_index = {c.index: c for c in cands}
@@ -591,6 +606,8 @@ def main():
     doc = {'input': args.input_file, 'seed': args.seed,
            'argv': sys.argv[1:], 'free': free,
            'diversity_mm': args.diversity_mm,
+           'rank_crossing_band': args.rank_crossing_band,
+           'rank_band_q': band_q,
            'baseline': baseline.to_dict(),
            'candidates': [c.to_dict() for c in cands],
            'ranking_static': ranking_static,

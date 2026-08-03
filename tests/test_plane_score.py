@@ -61,7 +61,10 @@ def test_absent_metrics_leave_ranking_unchanged():
     a = _cand(1, hpwl=100.0)
     b = _cand(2, hpwl=110.0)
     assert rank_key(a) < rank_key(b)
-    assert rank_key(a)[2] == 0, "no --plane-score -> islands term is 0"
+    # By NAME, not by index: a positional check keeps passing after a reorder
+    # even when it is no longer reading the term it means.
+    assert rank_key(a).plane_islands == 0, \
+        "no --plane-score -> islands term is 0"
     print("  PASS: flag off is inert")
 
 

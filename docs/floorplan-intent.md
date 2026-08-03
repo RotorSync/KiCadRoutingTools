@@ -205,7 +205,46 @@ could fix because the answer was re-floorplanning a quadrant.
 | **block displacement** | from geometry alone | the block's own pad centroid vs the centroid of everything it connects to. This is #459's "connectivity-centroid displacement" |
 | **bus crossings** | pre-route, but the corridor is a **model** | a straight rectangle between the bus's two pad clusters; its long sides are fed to the quench's own crossing kernel. A screening signal, not a verdict — real routes bend |
 | **convergence** | only with declared `classes` | which critical classes crowd one corridor. Placement has no net-class notion and "critical" is design intent, not a fact in the file, so **it is skipped rather than guessed** |
+| **net affinity** | from geometry alone | the per-PART inverse of block displacement: which single part carries a net its own block sits away from. See below |
 | **blocked-cell share** | **not pre-route at all** | needs #409's blocker JSON, which only exists after a routing attempt. Reported as skipped, with that reason |
+
+### `net_affinity`: the member a block metric averages away
+
+Block displacement is an average over a block's members, so it is quiet when
+*one* member is the problem. Measured on a real board: a series resistor zoned
+into a far-edge block carried **85.7% of a critical bus net's routed length**,
+forcing ten drop-vias and eight reference-plane voids. The block it sat in was
+flagged as displaced; the resistor was not, and four runs went by before a
+human found it.
+
+Reported per (part, net), ranked, advisory. Two numbers reach `JSON_SUMMARY`:
+`health_net_affinity_offenders` (rows that dominate a net *and* pierce a
+declared corridor) and `health_net_affinity_worst_norm` (the largest
+recoverable length as a fraction of the board diagonal — mm never compares
+across boards).
+
+Four entry conditions, none of them a tuned constant, because a diagnostic
+that cries wolf is worse than none:
+
+- the same fanout / `ignore_net_ids` cut as block displacement, so a rail never
+  appears;
+- the part must sit in a block **that has a zone** — without a declared seat
+  there is nothing to blame for where it ended up;
+- **three or more owning parts.** A two-owner net has one MST edge, incident on
+  both parts, so `share` is 1.0 for each and dominance would mean nothing;
+- moving the part onto its own net's centroid must free at least 10% of what it
+  carries. A part in the MIDDLE of a net's span is incident on the edges either
+  side of it and also scores 1.0, while being exactly where it belongs — the
+  recoverable test is what separates a misplacement from a topological hub.
+
+Locked parts are reported **with a flag**, not suppressed: "this cannot move"
+is triage, not absence. `health.affinity_exempt_nets` (globs) silences a
+deliberately long net.
+
+`recoverable_mm` is a mechanical counterfactual, not a guess — the net's MST is
+rebuilt with the part translated onto the centroid of the pads it talks to,
+using the same override primitive the quench scores real moves with. It is an
+upper bound: nothing checks that the part may legally sit there.
 
 ### Power and ground are excluded, and that is what makes these signals work
 

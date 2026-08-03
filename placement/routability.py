@@ -289,6 +289,224 @@ def foreign_crossings(state, corridor: Corridor,
                                              key=lambda kv: (-kv[1], kv[0]))]
 
 
+@dataclass(frozen=True)
+class PartAffinity:
+    """One part that carries most of a net its own block sits away from."""
+    ref: str
+    block: str
+    net: str
+    net_id: int
+    share: float             # fraction of the net's MST length incident on ref
+    length_mm: float         # that length
+    reach_norm: float        # length_mm / board diagonal -- board-comparable
+    pierced: Tuple[str, ...]  # declared corridors this part's edges cross
+    recoverable_mm: float    # MST length freed by moving ref to its net centroid
+    recoverable_norm: float
+    locked: bool
+
+    def to_dict(self):
+        return {'ref': self.ref, 'block': self.block, 'net': self.net,
+                'share': round(self.share, 4),
+                'length_mm': round(self.length_mm, 3),
+                'reach_norm': round(self.reach_norm, 4),
+                'pierced': list(self.pierced),
+                'recoverable_mm': round(self.recoverable_mm, 3),
+                'recoverable_norm': round(self.recoverable_norm, 4),
+                'locked': self.locked}
+
+
+# A part "dominates" a net when it carries more than half of it. Necessary but
+# NOT sufficient: a part sitting in the middle of a net's span is incident on
+# the edges either side of it, so it scores 1.0 while being exactly where it
+# belongs. Dominance says "this part carries the net"; it takes the recoverable
+# test below to say "and it should not".
+AFFINITY_DOMINANT_SHARE = 0.5
+
+# Moving the part onto the centroid of what it talks to must free at least this
+# fraction of what it carries, or the length is topology rather than
+# misplacement. A hub frees ~0; a part zoned into the wrong block frees nearly
+# all of it (measured: 31.0 of 31.0 mm on the fixture, 21.7 of 21.7 on a real
+# board).
+AFFINITY_MIN_RECOVERABLE_FRACTION = 0.10
+
+
+def _incident_edges(state, ref: str, net_id: int):
+    """The net's MST edges that touch one of `ref`'s pads, each once."""
+    pts = {(round(gx, 6), round(gy, 6))
+           for gx, gy, n in state.parts[ref].pad_globals() if n == net_id}
+    if not pts:
+        return []
+    out = []
+    for aw in state.net_airwires.get(net_id, ()):
+        x1, y1, x2, y2 = aw[0], aw[1], aw[2], aw[3]
+        if ((round(x1, 6), round(y1, 6)) in pts
+                or (round(x2, 6), round(y2, 6)) in pts):
+            out.append(aw)
+    return out
+
+
+def _mst_length(airwires) -> float:
+    return sum(math.hypot(a[2] - a[0], a[3] - a[1]) for a in airwires)
+
+
+def net_affinity(state, pcb_data, blocks: Dict[str, Sequence[str]],
+                 corridors: Optional[Sequence[Corridor]] = None,
+                 ignore_net_ids: Optional[Sequence[int]] = None,
+                 max_fanout: int = DISPLACEMENT_MAX_FANOUT,
+                 exempt_net_ids: Optional[Sequence[int]] = None
+                 ) -> List[PartAffinity]:
+    """Parts that carry a net their own block sits away from.
+
+    `block_displacements` asks the block-level question: how far is this block
+    from what it talks to. This is the per-PART inverse, and it catches a
+    failure the block metric averages away -- ONE member seated by block
+    membership while a net's mass sits elsewhere becomes the sole carrier of
+    that net's traverse. Measured on a real board: a series resistor zoned into
+    a far-edge block owned 85.7% of a critical bus net's routed length, forcing
+    ten drop-vias and eight reference-plane voids. The intent's own zone caused
+    it, and four runs went by without anything measuring it.
+
+    Reported per (part, net), ranked, advisory. The entry conditions are the
+    false-positive killers, and none of them is a tuned constant:
+
+      * the same fanout / ignore-net cut `block_displacements` uses, so a rail
+        or a ground net -- which reaches everywhere by design -- never appears;
+      * the part must belong to a block THAT HAS A ZONE. Without a declared
+        seat there is no membership to blame, and blaming a part for being
+        where nothing asked it to be is noise;
+      * `share > AFFINITY_DOMINANT_SHARE`, a definition rather than a
+        threshold: below half, no single part carries the net;
+      * nets whose every owner sits inside the part's own block are skipped --
+        there is no membership conflict to report.
+
+    Locked parts are reported WITH a flag, not suppressed: "this cannot move"
+    is triage, not absence.
+
+    `recoverable_mm` is a mechanical counterfactual, not a guess -- the net's
+    MST is rebuilt with the part translated onto the centroid of the pads it
+    talks to, using the same override primitive the quench scores moves with.
+    It is an UPPER BOUND that ignores legality: nothing checks that the part
+    may actually sit there.
+    """
+    ignored = set(ignore_net_ids or ())
+    if max_fanout:
+        ignored.update(nid for nid, refs in state.net_refs.items()
+                       if len(refs) > max_fanout)
+    ignored.update(exempt_net_ids or ())
+
+    block_of: Dict[str, str] = {}
+    for name in sorted(blocks):
+        for ref in blocks[name]:
+            block_of.setdefault(ref, name)
+
+    diag = _board_diagonal(state, pcb_data)
+    out: List[PartAffinity] = []
+
+    for ref in sorted(block_of):
+        part = state.parts.get(ref)
+        if part is None:
+            continue
+        own_block = block_of[ref]
+        members = set(blocks.get(own_block) or ())
+        for net_id in sorted({n for _x, _y, n in part.pad_globals()
+                              if n and n not in ignored}):
+            owners = set(state.net_refs.get(net_id, ()))
+            if owners <= members:
+                continue                      # wholly inside its own block
+            if len(owners) < 3:
+                # A two-owner net has ONE MST edge, incident on both parts, so
+                # `share` is 1.0 for each of them and "dominates" means
+                # nothing -- it would only be restating that the net is long.
+                # That is block_displacement's question, and it already
+                # answers it. Dominance needs a net one part can dominate.
+                continue
+            edges = _incident_edges(state, ref, net_id)
+            if not edges:
+                continue
+            total = _mst_length(state.net_airwires.get(net_id, ()))
+            if total <= 0:
+                continue
+            mine = _mst_length(edges)
+            share = mine / total
+            if share <= AFFINITY_DOMINANT_SHARE:
+                continue
+
+            pierced = tuple(c.name for c in (corridors or ())
+                            if net_id not in c.net_ids
+                            and _edges_cross_corridor(edges, c))
+
+            recoverable = _recoverable(state, ref, net_id)
+            if recoverable <= AFFINITY_MIN_RECOVERABLE_FRACTION * mine:
+                # A part in the MIDDLE of a net's span is incident on both of
+                # its edges, so it scores share 1.0 while being exactly where
+                # it belongs -- share alone cannot tell a misplacement from a
+                # topological hub. Moving a hub onto its own net's centroid
+                # frees nothing; moving a misplaced part frees most of what it
+                # carries. That difference is the discriminator, not `share`.
+                continue
+            out.append(PartAffinity(
+                ref=ref, block=own_block,
+                net=pcb_data.nets[net_id].name if net_id in pcb_data.nets
+                    else str(net_id),
+                net_id=net_id, share=share, length_mm=mine,
+                reach_norm=mine / diag if diag else 0.0,
+                pierced=pierced,
+                recoverable_mm=recoverable,
+                recoverable_norm=recoverable / diag if diag else 0.0,
+                locked=bool(getattr(part, 'locked', False))))
+
+    # Rank, do not threshold: corridors pierced first (the near-zero
+    # false-positive signal), then how much a move could win, then dominance.
+    out.sort(key=lambda a: (-len(a.pierced), -round(a.recoverable_norm, 4),
+                            -round(a.share, 4), a.ref))
+    return out
+
+
+def _board_diagonal(state, pcb_data) -> float:
+    """Board diagonal, for normalising a length into something comparable
+    across boards. mm never is."""
+    b = getattr(getattr(pcb_data, 'board_info', None), 'board_bounds', None)
+    if b:
+        return math.hypot(b[2] - b[0], b[3] - b[1])
+    pts = [(p.x, p.y) for p in state.parts.values()]
+    if len(pts) < 2:
+        return 0.0
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+
+
+def _edges_cross_corridor(edges, corridor: Corridor) -> bool:
+    from .quench import _aw_array, _count_crossings_np
+    sides = corridor.side_edges()
+    if not sides or not edges:
+        return False
+    wall = _aw_array([(x1, y1, x2, y2, -1.0) for x1, y1, x2, y2 in sides])
+    n, _w = _count_crossings_np(_aw_array(list(edges)), wall)
+    return bool(n)
+
+
+def _recoverable(state, ref: str, net_id: int) -> float:
+    """MST length freed by moving `ref` onto the centroid of what it talks to.
+
+    Upper bound: legality is not checked. Uses the quench's own override
+    primitive so the number is the one the optimizer would see.
+    """
+    part = state.parts[ref]
+    foreign = [(gx, gy) for other in state.net_refs.get(net_id, ())
+               if other != ref and other in state.parts
+               for gx, gy, n in state.parts[other].pad_globals() if n == net_id]
+    if not foreign:
+        return 0.0
+    cx = sum(p[0] for p in foreign) / len(foreign)
+    cy = sum(p[1] for p in foreign) / len(foreign)
+    before = _mst_length(state.net_airwires.get(net_id, ()))
+    moved = part.pad_globals(cx, cy, part.rot)
+    after = _mst_length(state._build_net_airwires(
+        net_id, override_ref=ref, override_pads=moved))
+    return max(0.0, before - after)
+
+
 def corridor_intrusions(state, corridor: Corridor,
                         refs: Optional[Sequence[str]] = None
                         ) -> List[Dict]:
@@ -397,20 +615,27 @@ def health(state, pcb_data, blocks: Dict[str, Sequence[str]],
             'no blocks resolved; derive them with --group-by')
 
     specs = spec.get('bus_corridors') or []
+    corridors_for_affinity: List[Corridor] = []
     if specs:
         corridors = corridors_from_intent(state, pcb_data, specs)
+        corridors_for_affinity = list(corridors)
         ign = spec.get('ignore_net_ids')
         fan = int(spec.get('max_fanout', DISPLACEMENT_MAX_FANOUT))
         rows = []
         for c in corridors:
             n, guilty = foreign_crossings(state, c, ign, fan)
+            # run-6: part BODIES parked in the channel, deepest first (airwire
+            # counts cannot see them). The row carries the five deepest for
+            # display AND the untruncated count: consumers that scored
+            # len(intrusions) were saturating at 5 per corridor, so a channel
+            # with twelve parts in it ranked level with one that had five.
+            intr = corridor_intrusions(state, c)
             rows.append({**c.to_dict(), 'foreign_crossings': n,
                          'worst_nets': [pcb_data.nets[i].name
                                         for i in guilty[:5]
                                         if i in pcb_data.nets],
-                         # run-6: part BODIES parked in the channel, deepest
-                         # first (airwire counts cannot see them)
-                         'intrusions': corridor_intrusions(state, c)[:5]})
+                         'intrusions': intr[:5],
+                         'intrusions_total': len(intr)})
         out['bus_corridors'] = rows
         out['bus_foreign_crossings'] = sum(r['foreign_crossings'] for r in rows)
         classes = spec.get('classes') or {}
@@ -431,6 +656,36 @@ def health(state, pcb_data, blocks: Dict[str, Sequence[str]],
     else:
         out['skipped']['bus_corridors'] = 'health.bus_corridors not declared'
         out['skipped']['convergence'] = 'no corridors to converge in'
+
+    # Per-part net affinity: which single part carries a net its own block
+    # sits away from. Needs ZONED blocks -- a block with no declared seat
+    # cannot be blamed for where its members ended up.
+    zoned = spec.get('zoned_blocks')
+    zoned_blocks = ({k: v for k, v in blocks.items() if k in set(zoned)}
+                    if zoned is not None else blocks)
+    if zoned_blocks:
+        exempt = spec.get('affinity_exempt_net_ids')
+        rows_aff = net_affinity(
+            state, pcb_data, zoned_blocks, corridors_for_affinity,
+            ignore_net_ids=spec.get('ignore_net_ids'),
+            max_fanout=int(spec.get('max_fanout', DISPLACEMENT_MAX_FANOUT)),
+            exempt_net_ids=exempt)
+        out['net_affinity'] = [a.to_dict() for a in rows_aff[:5]]
+        out['net_affinity_rows'] = len(rows_aff)
+        # The near-zero-false-positive count: dominates a net AND pierces a
+        # declared corridor. That pair is what turned into ten drop-vias and
+        # eight plane voids on a real board.
+        out['net_affinity_offenders'] = sum(1 for a in rows_aff if a.pierced)
+        out['net_affinity_worst_norm'] = round(
+            max((a.recoverable_norm for a in rows_aff), default=0.0), 4)
+        if not corridors_for_affinity:
+            out['skipped']['net_affinity_corridors'] = (
+                'no corridors declared; affinity ranked on recoverable '
+                'length alone, without the pierced-corridor signal')
+    else:
+        out['skipped']['net_affinity'] = (
+            'no zoned blocks; without a declared seat there is no membership '
+            'to blame for where a part sits')
 
     out['skipped']['blocked_cell_share'] = (
         'needs a routing attempt: the blocker JSON (#409) only exists after '

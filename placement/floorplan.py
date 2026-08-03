@@ -999,7 +999,20 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
     health_out: Dict[str, object] = {}
     if with_health:
         from . import routability
-        health_out = routability.health(state, pcb_data, blocks, intent.health)
+        # Which blocks carry a declared seat. net_affinity blames a part for
+        # sitting where its BLOCK put it, so a block with no zone has nothing
+        # to answer for and its members must not be reported.
+        spec = dict(intent.health or {})
+        spec.setdefault('zoned_blocks',
+                        [z.name for z in intent.blocks if z.rect])
+        exempt = spec.get('affinity_exempt_nets')
+        if exempt:
+            from net_queries import matches_net_filter
+            spec['affinity_exempt_net_ids'] = [
+                nid for nid, n in pcb_data.nets.items()
+                if nid > 0 and n.name
+                and matches_net_filter(n.name, list(exempt))]
+        health_out = routability.health(state, pcb_data, blocks, spec)
 
     st = placement_state.assess_placement(pcb_data, pcb_file)
     return GradeResult(
@@ -1219,6 +1232,24 @@ def format_text(r: GradeResult) -> str:
         for row in (r.health.get('convergence') or []):
             lines.append(f"    convergence in {row['corridor']}: "
                          f"{', '.join(row['classes'])}")
+        aff = r.health.get('net_affinity') or []
+        if aff:
+            total = r.health.get('net_affinity_rows', len(aff))
+            lines.append(f"    net affinity ({total} part/net pair(s); a part "
+                         f"seated by its BLOCK while the net's mass is "
+                         f"elsewhere):")
+            for a in aff:
+                pierced = (f", pierces {', '.join(a['pierced'])}"
+                           if a['pierced'] else '')
+                lock = ' [LOCKED]' if a['locked'] else ''
+                lines.append(
+                    f"      {a['ref']}{lock} in '{a['block']}' carries "
+                    f"{100 * a['share']:.0f}% of {a['net']} "
+                    f"({a['length_mm']:.2f}mm){pierced}; moving it onto that "
+                    f"net's centroid frees {a['recoverable_mm']:.2f}mm")
+                lines.append(
+                    f"        try: converge.py poses {os.path.basename(r.board)}"
+                    f" --ref {a['ref']} --route")
         for name in sorted(r.health.get('skipped') or {}):
             lines.append(f"    - {name} not measured: "
                          f"{r.health['skipped'][name]}")
@@ -1276,7 +1307,11 @@ def summary(r: GradeResult) -> Dict:
                               'health_block_displacement_max_mm'),
                              ('blocks_displaced', 'health_blocks_displaced'),
                              ('bus_foreign_crossings',
-                              'health_bus_foreign_crossings')):
+                              'health_bus_foreign_crossings'),
+                             ('net_affinity_offenders',
+                              'health_net_affinity_offenders'),
+                             ('net_affinity_worst_norm',
+                              'health_net_affinity_worst_norm')):
             if key in r.health:
                 out[out_key] = r.health[key]
         out['health_signals_skipped'] = len(r.health.get('skipped') or {})
