@@ -3275,6 +3275,26 @@ def create_plane(
         print(f"Processing net '{net_name}' on layer {plane_layer}")
         print(f"{'='*60}")
 
+        # PROTOTYPE (worktree): register THIS net's upcoming zone in
+        # pcb_data.zones so LATER nets' perforation-aware tap checks (and
+        # their fill models) can see it -- without this, a single multi-net
+        # create_plane call is invisible to the tap-reuse trigger (its own
+        # zones only exist as write-time sexprs). Gated under the same env
+        # as the trigger; the output writer text-splices and never
+        # serializes pcb_data.zones, so this cannot duplicate output.
+        import os as _os
+        if _os.environ.get('KICAD_PLANE_TAP_PREFER_REUSE', '') == '1'                 and should_create_zone:
+            _bb = pcb_data.board_info.board_bounds
+            if _bb:
+                from kicad_parser import Zone as _Zone
+                _poly = [(_bb[0], _bb[1]), (_bb[2], _bb[1]),
+                         (_bb[2], _bb[3]), (_bb[0], _bb[3])]
+                pcb_data.zones.append(_Zone(
+                    net_id=net_id, net_name=net_name, layer=plane_layer,
+                    polygon=_poly))
+                print(f"  (registered in-run zone {net_name}/{plane_layer} "
+                      f"for perforation checks)")
+
         # Step 5: Identify target pads for this net
         if progress_callback:
             progress_callback(0, 0, f"{net_name}: analyzing pads on {plane_layer}...")
