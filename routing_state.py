@@ -82,6 +82,12 @@ class RoutingState:
     # restore, so they were left ripped instead. Given a clean reroute pass
     # after Phase 3 so the collision-safe restore does not cost completion.
     collision_refused_net_ids: Set[int] = field(default_factory=set)
+    # #468 follow-up (run-7 E2): terminal-restore outcomes, net_id ->
+    # 'full' | 'full_open' | 'stub'. 'full_open' and 'stub' nets ship broken:
+    # route.py folds them into the coverage-gate disturbed set (a full restore
+    # unwinds the stale-strip signal the gate otherwise keys on) and exports
+    # the outcomes as summary['terminal_restores'].
+    terminal_restores: Dict[int, str] = field(default_factory=dict)
     # Rip-up cycle guard across the reroute QUEUE (extends the phase3 recursion
     # guard, commit e3e4b57, to the single-ended rip/reroute paths). Maps a net to
     # the set of nets that ripped it (transitively) to get here; that net must not

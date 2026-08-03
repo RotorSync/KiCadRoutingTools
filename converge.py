@@ -83,11 +83,16 @@ def route_verdict(summary):
     if not summary:
         return None, 'no summary'
     failed = list(summary.get('failed_single') or [])
+    # Routed-but-OPEN nets (kept result, disconnected pads). Before this key a
+    # non-multipoint open net weighed ZERO here -- probes read failures=0 on
+    # boards shipping open copper. Multipoint nets are excluded from the key by
+    # the emitter, so adding it to the pad deficit cannot double-count.
+    opened = list(summary.get('open_single') or [])
     fm = [d.get('net_name') if isinstance(d, dict) else d
           for d in (summary.get('failed_multipoint') or [])]
     deficit = (summary.get('multipoint_pads_total', 0)
                - summary.get('multipoint_pads_connected', 0))
-    n = len(failed) + max(0, deficit)
+    n = len(failed) + len(opened) + max(0, deficit)
     parts = []
     if failed or fm:
         parts.append('failed: ' + ', '.join(sorted(set(failed + fm))[:6]))

@@ -182,7 +182,14 @@ def metrics_from_summary(summary: dict, log: str = '',
                     for d in summary.get('failed_multipoint', [])]
     mp_deficit = (summary.get('multipoint_pads_total', 0)
                   - summary.get('multipoint_pads_connected', 0))
-    failures = len(summary.get('failed_single', [])) + mp_deficit
+    # open_single: kept-result nets with disconnected pads. Their names are
+    # already in failed_nets via failed_multipoint; the COUNT needs its own
+    # term because a non-multipoint open net contributes nothing to either
+    # failed_single or the pad deficit (the emitter excludes multipoint nets
+    # from the key, so this cannot double-count against mp_deficit).
+    failures = (len(summary.get('failed_single', []))
+                + len(summary.get('open_single', []))
+                + mp_deficit)
 
     # Blocker nets from frontier diagnostics. Prefer the structured
     # JSON_SUMMARY 'blockers' key (#409): the last-wins attribution of nets
