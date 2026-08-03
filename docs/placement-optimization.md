@@ -500,6 +500,49 @@ against the same intent, and hands the result to the portfolio. The
 from-scratch verdict stands: unaided is still out of scope; *aided by a
 declared intent* is now a supported path.
 
+## Roadmap: placement science after run 7 (August 2026)
+
+Run 7 (the first clean-slate run whose placement this stack generated) and
+the discussion-#118 thread converged on the same diagnosis: the candidate
+score is built from signal proxies while several measured placement
+failures live elsewhere. Ordered by cost-to-value, cheapest first; item 1
+is implemented, the rest are documented targets.
+
+1. **Plane fragility in the candidate score — implemented** (`--plane-score`
+   on `place_portfolio.py`, backed by `plane_score.py`). Quench and
+   portfolio were plane-blind while the router-side #424 machinery already
+   prices exact fill damage. The score pours the declared plane nets on a
+   scratch copy (KiCad ZONE_FILLER refill), and folds (islands, neck sum)
+   into `rank_key` — islands before hpwl, neck sum after it. Trust it only
+   after calibration on boards with a measured probe order (run 7's seed
+   archive is the first known-answer case).
+
+2. **Channel occupancy as a nonlocality proxy.** `check_channel_utilisation`
+   and the intent's `bus_corridors` already measure what crosses a declared
+   channel; neither feeds the candidate score. A candidate that fills a
+   corridor past capacity fails ROUTING nonlocally — the failure surfaces on
+   whatever net routes last, far from the part that caused it (run 7's
+   west-fan capacity finding is exactly this shape). Wire corridor
+   occupancy into `score_candidate` next to `health_penalty`.
+
+3. **The #411 undo-a-known-good-placement harness.** The grading
+   instrument this document keeps needing: take a board a human placed and
+   routed clean, scramble it in controlled ways, and measure which score
+   terms recover the ranking. Move-set and weight work should wait for it —
+   without the harness every new term is calibrated on anecdotes.
+
+4. **Per-component best-location heatmap** (the #118 ask): for a chosen
+   part, render the board as a heatmap of the candidate score over
+   positions (with matching JSON), so a human can SEE why the optimizer
+   wants a part somewhere — and where the score is flat, which is where
+   declared intent has to carry the decision.
+
+5. **Part-class rule table as seeder configuration.** #118's taxonomy:
+   different part classes obey different placement logic (decap ≠ connector
+   ≠ crystal ≠ series termination). The seeder hardcodes a version of this;
+   making it a declared table would let a repo tune class behavior without
+   engine edits.
+
 ## References and further reading
 
 ### PCB-specific placement research
