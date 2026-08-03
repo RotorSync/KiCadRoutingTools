@@ -976,7 +976,7 @@ expensive, which is what keeps them intact through this step.
 
 For boards with BGA/PGA components, use `--no-bga-zone` to allow the router
 to find alternative paths through the dense pin area (even when fanout was
-done, some paths may require this). Use `--max-ripup 10` for difficult
+done, some paths may require this). Use `--max-ripup 5` for difficult
 2-layer boards.
 
 > **Do NOT pass `--max-iterations` (#529 dynamic iterations, default on).**
@@ -992,7 +992,7 @@ done, some paths may require this). Use `--max-ripup 10` for difficult
 python3 -X utf8 route.py board_step1c.kicad_pcb board_step2.kicad_pcb \
     --nets "*" "!GND" "!VCC" \
     --no-bga-zone \
-    --max-ripup 10 \
+    --max-ripup 5 \
     --layers <ALL copper layers> --layer-costs <1.0 signals / 3.0 solid planes / 1.5 split-or-highway> \
     2>&1 | tee /tmp/step2_routing.txt
 
@@ -1105,7 +1105,7 @@ bare `cp`** — see the warning below.)
 python3 -X utf8 route.py board_step5_repair.kicad_pcb board_step5.kicad_pcb \
     --nets "*" "!GND" "!<other_plane_nets...>" \
     --clearance <floor> --via-size <V> --via-drill <D> --track-width <signal_track> --grid-step <G> \
-    --max-ripup 10 [--no-bga-zone] \
+    --max-ripup 5 [--no-bga-zone] \
     --power-nets <PWR...> --power-nets-widths <W...> \
     --layers <ALL copper layers> --layer-costs <same map as Step 2> \
     2>&1 | tee /tmp/step5c_reconnect.txt
@@ -1592,7 +1592,7 @@ python3 route.py board.kicad_pcb --nets "*" \
 14. **BGA/PGA power pins and planes** - When using power planes, BGA/PGA power pins (GND, VCC) connect most efficiently via direct vias to the plane rather than fanout routing. Create planes first, then fanout only signal nets. Through-hole PGA pads automatically connect to planes on that layer; SMD BGA pads need vias placed by `route_planes.py`. This approach:
     - Reduces routing congestion (power pins don't consume escape channels)
     - Provides lower impedance power connections
-15. **Aggressive parameters for 2-layer BGA/PGA boards** - Use `--max-ripup 10` from the start for boards with dense components. Do NOT add `--max-iterations` — the router self-budgets (#529 dynamic iterations, default on, up to a 1e7 ceiling while a search progresses); see the note in the routing-step section.
+15. **Rip-up depth: MORE IS NOT BETTER (measured).** On a 6-board chain A/B, `--max-ripup 5` beat 10 (+0.78 pts completion, 13 fewer connectivity items, 3 boards better / 0 worse) and 20 was worse than 10 — each extra rip level risks a permanent casualty (a ripped victim whose corridor gets taken cannot be restored), and the gains from deep ripping don't materialize because victims can almost always reroute anyway. Use `--max-ripup 5` even on dense boards; escalate ABOVE 5 only as a last resort on a specific failing net, never as the opening move. Do NOT add `--max-iterations` — the router self-budgets (#529 dynamic iterations, default on, up to a 1e7 ceiling while a search progresses); see the note in the routing-step section.
 16. **Guide corridors and keepouts are user-drawn** - Never draw `User.1` guide polylines or `User.2` keepout polygons yourself; suggest in words where they should go and let the user draw them, then add `--guide-corridor` / `--keepout` to the plan.
 17. **Companion skills** - Defer to `/identify-diff-pairs` (datasheet-based pair detection), `/recommend-stackup` (before impedance/time-matching work), `/diagnose-routing-failures` (after failures), and `/review-routed-board` (final verification) rather than duplicating their logic inline.
 
@@ -1741,7 +1741,7 @@ After running routing commands:
 |-----------------|--------------|----------|
 | "no rippable blockers found" | Route blocked by non-rippable obstacle | Use `--no-bga-zone`; if pads are "boxed in by static obstacles", shrink geometry / finer grid (see "Congestion escalation" below) |
 | "Re-route FAILED: no path found" | Ripped net couldn't find new path | Capacity problem (`--max-iterations` self-extends, #529): `--max-ripup`, clearance, or layers |
-| Many multipoint pads failed on same component | Congested area | Use `--max-ripup 10` or higher; shrink geometry toward the fab floor (see below) |
+| Many multipoint pads failed on same component | Congested area | Shrink geometry toward the fab floor (see below); keep `--max-ripup` at ~5 (deeper measured worse) |
 | Many failures cluster in one channel/region | Tracks too fat for the channel | **Congestion escalation**: re-route the failed nets at smaller track/via/clearance down to the fab floor (see below) |
 | 2-layer board: low completion, via count far above a hand layout, or copper badly skewed to F.Cu while B.Cu sits empty | Default B.Cu cost (3.0×) over-penalizes the back layer | Retry with balanced `--layer-costs 1.0 1.5` (down toward `1.0 1.0`) — see "Dense 2-layer boards: rebalance layer costs" below |
 | Routes near BGA boundary failing | BGA exclusion zone too aggressive | Use `--no-bga-zone` |
@@ -1750,7 +1750,7 @@ After running routing commands:
 python3 -X utf8 route.py board_prev.kicad_pcb board_routed.kicad_pcb \
     --nets "*" \
     --no-bga-zone \
-    --max-ripup 10 \
+    --max-ripup 5 \
     2>&1 | tee /tmp/route_retry.txt
 ```
 

@@ -103,7 +103,7 @@ Work through the failure modes most-targeted-first. Do not jump straight to glob
 | Failed nets have source and target stubs on conflicting layers; rip-up histories show repeated mutual ripping | Same-layer crossing conflicts | `--mps-layer-swap`, or revisit `--layer-costs` |
 | "Re-route FAILED: no path found" for ripped nets | Search space exhausted | NOT a budget problem: the router self-budgets (#529, default on — auto-extends to 1e7 iterations while progressing), so do not suggest raising `--max-iterations`. A "dynamic iterations (#529): search extended to N" line followed by failure means genuine progress ran out — escalate capacity: `--max-ripup`, clearance/track toward fab floor, or layers. (`KICAD_DYNAMIC_ITERATIONS=0` restores legacy static caps for A/B only) |
 | Many multipoint pads failed on the same fine-pitch component | Grid too coarse for the pad geometry | `--grid-step 0.05`, and check `--track-width`/`--clearance` against the pad pitch |
-| Failures spread across the board, blockers vary | Genuine capacity problem | Escalate in order: `--max-ripup 10` → reduce `--clearance`/`--track-width` toward fab minimums → add routing layers |
+| Failures spread across the board, blockers vary | Genuine capacity problem | Escalate in order: reduce `--clearance`/`--track-width` toward fab minimums → add routing layers. Do NOT raise `--max-ripup` past ~5 (measured worse: deep rip chains strand their victims) |
 
 ## Step 4: Output the Retry Command
 
@@ -113,7 +113,7 @@ Produce one command that retries **only the failed nets** with the targeted fixe
 python3 -X utf8 route.py board_routed.kicad_pcb board_retry.kicad_pcb \
     --nets "SDA" "Net-(U1-Pad8)" \
     --no-bga-zone U9 \
-    --max-ripup 10 \
+    --max-ripup 5 \
     2>&1 | tee /tmp/route_retry.txt
 ```
 
