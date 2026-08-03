@@ -160,7 +160,100 @@ def test_degenerate_circle_ignored():
 
 
 # --------------------------------------------------------------------------
-# 6. THE INVARIANT, over every board in kicad_files/: the bbox scan and the
+# 6-8. THE FOOTPRINT-LEVEL TWIN of the same bug. Boards keep outlines inside a
+#    footprint (an "outline" footprint, split-keyboard halves), and the two
+#    footprint scans had the identical asymmetry:
+#
+#      _footprint_edge_points      (bbox)    arc circle line poly rect
+#      _collect_footprint_edge_segments      arc circle line      rect
+#
+#    fp_curve was read by NEITHER -- a footprint-embedded bezier edge was
+#    invisible to both, so the bulge was missing from bounds AND the outline
+#    never chained through it. fp_poly was bbox-only: bounds looked right while
+#    board_outlines came back EMPTY, which silently degrades the keep-out to the
+#    bounding box (concave regions outside the polygon go unblocked) and drops
+#    footprint-embedded CUTOUTS entirely -- on tallytime_lora that was 2 real
+#    holes the router would route straight through (0% blocked -> 100%).
+# --------------------------------------------------------------------------
+def _fp_board(shapes, at='(at 0 0)'):
+    return (_HDR + '  (footprint "outline:board" (layer "F.Cu") %s\n'
+            '    (property "Reference" "G1" (at 0 0) (layer "F.SilkS"))\n' % at
+            + shapes + '\n  )\n)\n')
+
+
+def test_footprint_fp_curve_outline():
+    """Outline inside a footprint whose right edge is a bezier bulging to x=55."""
+    bi = _parse(_fp_board('\n'.join([
+        '    (fp_line (start 0 0) (end 40 0) %s (layer "Edge.Cuts"))' % _STROKE,
+        '    (fp_curve (pts (xy 40 0) (xy 60 10) (xy 60 30) (xy 40 40)) %s '
+        '(layer "Edge.Cuts"))' % _STROKE,
+        '    (fp_line (start 40 40) (end 0 40) %s (layer "Edge.Cuts"))' % _STROKE,
+        '    (fp_line (start 0 40) (end 0 0) %s (layer "Edge.Cuts"))' % _STROKE])))
+    b = bi.board_bounds
+    # Pre-fix: bounds (0,0,40,40) and a 4-point ring -- the curved edge was
+    # missing from BOTH, so the bulge did not exist as far as the router knew.
+    check("fp_curve: bbox includes the bezier bulge (max_x ~ 55)",
+          b is not None and abs(b[2] - 55.0) < 0.05)
+    check("fp_curve: bbox does NOT over-report to the control hull (60)",
+          b is not None and b[2] < 59.0)
+    rings = [r for r in (bi.board_outlines or []) if r]
+    check("fp_curve: outline chains THROUGH the curve (not just the 3 lines)",
+          bool(rings) and max(len(r) for r in rings) > 4)
+    check("fp_curve: bounds contain every ring vertex",
+          bool(rings) and _contains(b, [p for r in rings for p in r]))
+
+
+def test_footprint_fp_poly_outline():
+    """A whole outline drawn as one fp_poly must produce a real outline RING,
+    not just bounds -- otherwise the keep-out silently falls back to the bbox."""
+    bi = _parse(_fp_board(
+        '    (fp_poly (pts (xy 0 0) (xy 30 0) (xy 30 20) (xy 15 25) (xy 0 20)) '
+        '%s (layer "Edge.Cuts"))' % _STROKE))
+    rings = [r for r in (bi.board_outlines or []) if r]
+    check("fp_poly: contour scan yields an outline ring (was 0)", len(rings) == 1)
+    check("fp_poly: ring carries the polygon vertices",
+          bool(rings) and len(rings[0]) >= 5)
+    check("fp_poly: bounds still the polygon extent",
+          bi.board_bounds is not None
+          and all(abs(g - e) < 1e-6
+                  for g, e in zip(bi.board_bounds, (0.0, 0.0, 30.0, 25.0))))
+    check("fp_poly: bounds contain every ring vertex",
+          _contains(bi.board_bounds, [p for r in rings for p in r]))
+
+
+def test_footprint_rotation_parity():
+    """The two footprint scans use DIFFERENT transform helpers
+    (_footprint_edge_points -> local_to_global, _collect_footprint_edge_segments
+    -> its own to_g). If their rotation conventions disagreed, the ring would
+    land outside the bbox. Pin it at a non-orthogonal angle and an offset."""
+    shapes = '\n'.join([
+        '    (fp_line (start 0 0) (end 40 0) %s (layer "Edge.Cuts"))' % _STROKE,
+        '    (fp_curve (pts (xy 40 0) (xy 60 10) (xy 60 30) (xy 40 40)) %s '
+        '(layer "Edge.Cuts"))' % _STROKE,
+        '    (fp_line (start 40 40) (end 0 40) %s (layer "Edge.Cuts"))' % _STROKE,
+        '    (fp_line (start 0 40) (end 0 0) %s (layer "Edge.Cuts"))' % _STROKE])
+    for at in ('(at 12 34)', '(at 12 34 90)', '(at -5 7 37.5)'):
+        bi = _parse(_fp_board(shapes, at=at))
+        rings = [r for r in (bi.board_outlines or []) if r]
+        ok = bool(rings) and _contains(bi.board_bounds,
+                                       [p for r in rings for p in r], tol=1e-4)
+        check("fp rotation parity %-16s bbox contains the chained ring" % at, ok)
+        # Rotation-invariant evidence that the CURVE itself survived the
+        # transform: a ring built from the 3 fp_lines alone is 4 points. (An
+        # extent check would be wrong here -- the axis-aligned bbox of a
+        # rotated shape is not the shape's own extent.)
+        check("fp rotation parity %-16s curve present in the ring" % at,
+              bool(rings) and max(len(r) for r in rings) > 4)
+        # Only at orthogonal angles does the bbox equal the shape's extent.
+        if bi.board_bounds and at.split()[-1].rstrip(')') in ('34', '90'):
+            w = bi.board_bounds[2] - bi.board_bounds[0]
+            h = bi.board_bounds[3] - bi.board_bounds[1]
+            check("fp rotation parity %-16s extent preserved" % at,
+                  abs(max(w, h) - 55.0) < 0.6)
+
+
+# --------------------------------------------------------------------------
+# 9. THE INVARIANT, over every board in kicad_files/: the bbox scan and the
 #    contour chainer read the same primitive set, so a non-empty
 #    board_outlines implies board_bounds contains every ring vertex.
 # --------------------------------------------------------------------------
@@ -195,6 +288,9 @@ def run():
     test_interior_circle_cutout_does_not_grow_bounds()
     test_non_edge_cuts_circle_ignored()
     test_degenerate_circle_ignored()
+    test_footprint_fp_curve_outline()
+    test_footprint_fp_poly_outline()
+    test_footprint_rotation_parity()
     test_corpus_bounds_contain_outlines()
     print()
     if fails:

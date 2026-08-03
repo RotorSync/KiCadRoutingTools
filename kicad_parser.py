@@ -1223,10 +1223,18 @@ _GR_ELEMENT_GAP = r'(?:(?!\(gr_|\(layers?\b)[\s\S])*?'
 # primitive set: a shape only the chainer knows about yields an outline ring
 # outside board_bounds, and a round board (one gr_circle) reported no bounds at
 # all, so add_board_edge_obstacles stamped no keep-out whatsoever (#550).
-_GR_CURVE_PATTERN = (r'\(gr_curve\s+\(pts\s+'
-                     r'\(xy\s+([\d.-]+)\s+([\d.-]+)\)\s*\(xy\s+([\d.-]+)\s+([\d.-]+)\)\s*'
-                     r'\(xy\s+([\d.-]+)\s+([\d.-]+)\)\s*\(xy\s+([\d.-]+)\s+([\d.-]+)\)\s*\)'
-                     + _GR_ELEMENT_GAP + r'\(layer\s+"Edge\.Cuts"\)')
+def _curve_pattern(token: str) -> str:
+    """Cubic-bezier Edge.Cuts pattern for ``gr_curve`` (board) / ``fp_curve``
+    (footprint-embedded). One template so the board- and footprint-level scans
+    cannot describe the same primitive differently."""
+    return (r'\(' + token + r'\s+\(pts\s+'
+            r'\(xy\s+([\d.-]+)\s+([\d.-]+)\)\s*\(xy\s+([\d.-]+)\s+([\d.-]+)\)\s*'
+            r'\(xy\s+([\d.-]+)\s+([\d.-]+)\)\s*\(xy\s+([\d.-]+)\s+([\d.-]+)\)\s*\)'
+            + _GR_ELEMENT_GAP + r'\(layer\s+"Edge\.Cuts"\)')
+
+
+_GR_CURVE_PATTERN = _curve_pattern('gr_curve')
+_FP_CURVE_PATTERN = _curve_pattern('fp_curve')
 _GR_CIRCLE_PATTERN = (r'\(gr_circle\s+\(center\s+([\d.-]+)\s+([\d.-]+)\)\s+'
                       r'\(end\s+([\d.-]+)\s+([\d.-]+)\)' + _GR_ELEMENT_GAP
                       + r'\(layer\s+"Edge\.Cuts"\)')
@@ -1311,6 +1319,14 @@ def _footprint_edge_points(content: str) -> List[Tuple[float, float]]:
                 r'\(layer\s+"Edge\.Cuts"\)', fp_text, re.DOTALL):
             sx, sy, mx, my, ex, ey = (float(sm.group(i)) for i in range(1, 7))
             for seg in _arc_to_segments((sx, sy), (mx, my), (ex, ey)):
+                local += list(seg)
+        # fp_curve: a footprint-embedded bezier edge. Linearize in LOCAL coords
+        # (the control points do not bound the curve) and let the shared
+        # transform below place it -- mirrors the board-level gr_curve scan.
+        for sm in re.finditer(_FP_CURVE_PATTERN, fp_text, re.DOTALL):
+            g = [float(v) for v in sm.groups()]
+            for seg in _bezier_to_segments((g[0], g[1]), (g[2], g[3]),
+                                           (g[4], g[5]), (g[6], g[7])):
                 local += list(seg)
         for lx, ly in local:
             pts.append(local_to_global(fx, fy, frot, lx, ly))
@@ -1557,6 +1573,27 @@ def _collect_footprint_edge_segments(content: str):
             if r > 1e-6:
                 for p1, p2 in _circle_to_segments(cx, cy, r):
                     out.append((to_g(*p1), to_g(*p2)))
+        # fp_curve: without it a footprint-embedded curved edge never reaches
+        # the chainer, so the outline cannot close and the true extent is
+        # invisible to BOTH scans (the board-level twin of #550).
+        for m in re.finditer(_FP_CURVE_PATTERN, block, re.DOTALL):
+            g = [float(v) for v in m.groups()]
+            for p1, p2 in _bezier_to_segments((g[0], g[1]), (g[2], g[3]),
+                                              (g[4], g[5]), (g[6], g[7])):
+                out.append((to_g(*p1), to_g(*p2)))
+        # fp_poly: a closed polygon outline drawn inside a footprint. The bbox
+        # scan already read it, so bounds looked right while board_outlines came
+        # back EMPTY -- the keep-out then degrades to the bounding box and any
+        # concave region outside the polygon goes unblocked.
+        for pm in re.finditer(r'\(fp_poly\s*\(pts', block):
+            p_end = find_matching_paren(block, pm.start())
+            poly_text = block[pm.start():p_end]
+            if not re.search(r'\(layer\s+"Edge\.Cuts"\)', poly_text):
+                continue
+            pts = [to_g(float(xm.group(1)), float(xm.group(2)))
+                   for xm in re.finditer(r'\(xy\s+([\d.-]+)\s+([\d.-]+)\)', poly_text)]
+            for i in range(len(pts)):
+                out.append((pts[i], pts[(i + 1) % len(pts)]))
     return out
 
 
