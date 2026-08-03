@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import heapq
 import math
+import os
 from collections import Counter
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -463,8 +464,15 @@ def generate_underpad_escape(footprint: Footprint,
                     continue
                 _dist = _erode_depth(_mask, _depth)
                 _fld = _fields.setdefault(_li, _np.zeros((occ.nx, occ.ny)))
+                # Straits/boundaries cost full; interior fill is floored at
+                # 0.4, not ~0 -- an inner plane is SOLID under the BGA (SMD
+                # balls don't carve it), and with a free interior the escapes
+                # dice it to sub-min slivers (measured In1 82%->42% from
+                # tracks alone). Every fill cell consumed is copper lost.
                 _frac = _np.where(_mask,
-                                  1.0 - (_np.maximum(_dist, 1) - 1) / _depth,
+                                  _np.maximum(
+                                      1.0 - (_np.maximum(_dist, 1) - 1) / _depth,
+                                      0.4),
                                   0.0)
                 _np.maximum(_fld, _pp * _frac, out=_fld)
             if _fields:
@@ -900,7 +908,7 @@ def generate_underpad_escape(footprint: Footprint,
                    p.global_y - grid.min_y, grid.max_y - p.global_y)
 
     def astar(sx, sy, home, route_layers, allow_via, via_ok=None, net_id=0,
-              carve=None, start_layer=None):
+              carve=None, start_layer=None, cost_out=None):
         """Route from the pad to any boundary cell.
 
         `route_layers` = the set of layer indices the track may run on. The pad
@@ -948,6 +956,10 @@ def generate_underpad_escape(footprint: Footprint,
             _, cur = _heappop(pq)
             cx, cy, L = cur
             if not (bx0 <= cx <= bx1 and by0 <= cy <= by1):
+                if cost_out is not None:
+                    # outside the window the tie-break heuristic is 0, so the
+                    # popped priority IS the path's g-cost (#563 layer compare)
+                    cost_out.append(_)
                 path = [cur]
                 while cur in came:
                     cur = came[cur]
@@ -1734,11 +1746,28 @@ def generate_underpad_escape(footprint: Footprint,
                                    home, {p.net_id})
             vsx, vsy = occ.cell(*_site)
             path = None
-            for _L in sorted(inner_layers):
-                path = astar(vsx, vsy, home, {_L}, allow_via=False,
-                             net_id=p.net_id, carve=carve, start_layer=_L)
-                if path is not None:
-                    break
+            if getattr(occ, 'pour_soft', None) is not None:
+                # #563: layer choice was first-path-wins, so per-cell pour
+                # costs could never move an escape off a flooded layer. With
+                # the field active, route EVERY candidate layer and keep the
+                # cheapest total (pour charge included); ties keep the lowest
+                # layer index (the old deterministic order).
+                best = None
+                for _L in sorted(inner_layers):
+                    _co = []
+                    _pth = astar(vsx, vsy, home, {_L}, allow_via=False,
+                                 net_id=p.net_id, carve=carve, start_layer=_L,
+                                 cost_out=_co)
+                    if _pth is not None and (best is None or _co[0] < best[0]):
+                        best = (_co[0], _pth)
+                if best is not None:
+                    path = best[1]
+            else:
+                for _L in sorted(inner_layers):
+                    path = astar(vsx, vsy, home, {_L}, allow_via=False,
+                                 net_id=p.net_id, carve=carve, start_layer=_L)
+                    if path is not None:
+                        break
             if path is not None:
                 commit_dogbone(p, _site, path, carve)
                 continue
