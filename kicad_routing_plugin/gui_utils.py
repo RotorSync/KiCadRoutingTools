@@ -116,7 +116,7 @@ def apply_castellated_landing_retract(board, board_edge_clearance):
         return 0
     try:
         import pcbnew
-        from kicad_parser import build_pcb_data_from_board
+        from kicad_parser import build_pcb_data_from_board, mm_to_iu
         from pcb_modification import compute_castellated_landing_retract
         pcb = build_pcb_data_from_board(board)
         delta = compute_castellated_landing_retract(pcb, board_edge_clearance)
@@ -142,7 +142,12 @@ def apply_castellated_landing_retract(board, board_edge_clearance):
             if mv is None:
                 continue
             end, nx, ny = mv
-            pt = pcbnew.VECTOR2I(pcbnew.FromMM(nx), pcbnew.FromMM(ny))
+            # mm_to_iu, never pcbnew.FromMM: FromMM truncates (1 nm low on
+            # ~2% of 4-decimal coordinates), so the GUI would store a
+            # different integer than the CLI's text write of the same
+            # retracted endpoint -- the #493 divergence class this module's
+            # own docstring promises cannot happen.
+            pt = pcbnew.VECTOR2I(mm_to_iu(nx), mm_to_iu(ny))
             if end == 'start':
                 item.SetStart(pt)
             else:
