@@ -3309,6 +3309,33 @@ def create_plane(
             progress_callback(0, 0, f"{net_name}: analyzing pads on {plane_layer}...")
         target_pads = identify_target_pads(pcb_data, net_id, plane_layer)
 
+        # PROTOTYPE (worktree): defer under-BGA pads to the fanout stage
+        # (KICAD_PLANE_DEFER_BGA=1). The plane step pours and taps the OPEN
+        # board; every via-needed pad inside a BGA courtyard is left for
+        # bga_fanout, which decides via/track/pour-direct against the REAL
+        # pour this step just created. Ownership split: planes = the board,
+        # fanout = the ball field.
+        import os as _os
+        if _os.environ.get('KICAD_PLANE_DEFER_BGA', '') == '1':
+            from kicad_parser import find_components_by_type as _fcbt
+            _courts = []
+            for _fp in _fcbt(pcb_data, 'BGA'):
+                _xs = [q.global_x for q in _fp.pads]
+                _ys = [q.global_y for q in _fp.pads]
+                _courts.append((min(_xs) - 0.5, min(_ys) - 0.5,
+                                max(_xs) + 0.5, max(_ys) + 0.5))
+            def _in_court(pd):
+                x, y = pd['pad'].global_x, pd['pad'].global_y
+                return any(cx0 <= x <= cx1 and cy0 <= y <= cy1
+                           for cx0, cy0, cx1, cy1 in _courts)
+            _defer = [pd for pd in target_pads
+                      if pd['type'] == 'via_needed' and _in_court(pd)]
+            if _defer:
+                target_pads = [pd for pd in target_pads if pd not in _defer]
+                print(f"  Deferred {len(_defer)} under-BGA pad(s) on "
+                      f"'{net_name}' to the fanout stage "
+                      f"(KICAD_PLANE_DEFER_BGA)")
+
         pads_through_hole = sum(1 for p in target_pads if p['type'] == 'through_hole')
         pads_direct = sum(1 for p in target_pads if p['type'] == 'direct')
         pads_already_connected = sum(1 for p in target_pads if p['type'] == 'already_connected')
