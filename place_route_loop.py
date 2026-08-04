@@ -38,6 +38,7 @@ import sys
 
 from kicad_parser import parse_kicad_pcb
 import routing_defaults as defaults
+from placement.portfolio import copy_siblings
 from placement.groups import GroupError, derive_groups, describe, parse_sources
 from placement.cli_gates import (add_board_state_args,
                                  add_lock_advisor_args, add_tidiness_args)
@@ -517,6 +518,12 @@ def main():
 
     cur_file = os.path.join(work, 'loop_round0.kicad_pcb')
     shutil.copy(args.input_file, cur_file)
+    # #441. This one is load-bearing rather than cosmetic: round 0 ROUTES this
+    # copy, and a board without its .kicad_pro resolves the DRC floor from the
+    # STOCK netclass instead of the one the board was built to. Every round of
+    # the loop -- and the accept/reject decision that reads their failure counts
+    # -- would then be measured at the wrong clearance.
+    copy_siblings(args.input_file, cur_file)
 
     screened = 0
     print("Round 0: routing initial placement...")
@@ -542,6 +549,11 @@ def main():
     write_round_sidecar(work, 0, board=cur_file,
                         routed=os.path.join(work, 'loop_round0_routed.kicad_pcb'),
                         parent=None, accepted=True, metrics=best)
+    # Kept separately from `best`, which advances on every accept. Without it
+    # the run cannot report what it started from, which is half of any delta.
+    baseline = dict(best)
+    accepted_rounds = 0
+    rounds_run = 0
 
     max_disp = args.max_displacement
     # The swap cap is pinned to the BASE displacement and never widened (#458).
@@ -565,6 +577,7 @@ def main():
         if not targets:
             print("No movable target parts - stopping.")
             break
+        rounds_run = rnd
 
         # #459: a targeted part pulls in its whole block, so the block moves as
         # one body instead of its members fighting each other -- and a block is
@@ -694,18 +707,47 @@ def main():
                 best_score = metrics.get('accept_score')
             cur_file = cand_file
             max_disp = args.max_displacement
+            accepted_rounds += 1
         else:
             print(f"  REJECTED - reverting, widening the nudge cap"
                   f" (swap cap stays {swap_cap:.1f}mm).")
             max_disp *= 1.5
 
     shutil.copy(cur_file, args.output_file)
+    copy_siblings(cur_file, args.output_file)          # #441, as at round 0
     if args.ratsnest_screen > 0:
         print(f"Ratsnest screen: {screened} round(s) skipped the routing run"
               f" at {args.ratsnest_screen:g}% regression.")
     print(f"Final: failures={best['failures']} iterations={best['iterations']:,}"
           f" vias={best['vias']}")
     print(f"Wrote {args.output_file}")
+
+    # A machine-readable verdict. Before this the ONLY structured output of a
+    # loop run was the per-round `loop_round{N}.json` sidecars: the normal path
+    # printed a text `Final:` line and nothing else, and `main()` returned None
+    # so the process exited 0 whether `failures` was 0 or 400. Any harness that
+    # wanted to know how the run went had to scrape stdout or reassemble the
+    # sidecars. Same key shape as the other placement CLIs (before/after pairs).
+    summary = {
+        'rounds': args.rounds,
+        'rounds_run': rounds_run,
+        'rounds_accepted': accepted_rounds,
+        'rounds_screened': screened,
+        'failures_before': baseline['failures'],
+        'failures_after': best['failures'],
+        'iterations_before': baseline['iterations'],
+        'iterations_after': best['iterations'],
+        'vias_before': baseline['vias'],
+        'vias_after': best['vias'],
+        'failed_nets_before': sorted(baseline.get('failed_nets') or []),
+        'failed_nets_after': sorted(best.get('failed_nets') or []),
+        'max_displacement': args.max_displacement,
+        'max_target_pins': args.max_target_pins,
+        'group_by': args.group_by,
+        'work_dir': work,
+        'output': args.output_file,
+    }
+    print("JSON_SUMMARY: " + json.dumps(summary, sort_keys=True))
 
     if args.movie is not None:
         # The work dir already holds every round board plus the loop_round{N}.json
@@ -719,6 +761,17 @@ def main():
         except Exception as e:
             print(f"  (movie skipped: {e})")
 
+    # 0 = the loop RAN. Deliberately not "0 = the board routes": every other
+    # tool in this family reserves non-zero for "this tool could not do its
+    # job" (2 argparse, 3 board-state refusal), and route.py does not exit
+    # non-zero for unrouted nets either. Making a remaining routing failure a
+    # process failure would make this the only tool that conflates the two, and
+    # would break every `set -e` caller in tests/stress the first time a hard
+    # board did not close. The verdict is the JSON_SUMMARY above.
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    # The return value used to be dropped here, so a refusal deeper in main()
+    # still exited 0 (the #551 family). Propagate it.
+    sys.exit(main() or 0)

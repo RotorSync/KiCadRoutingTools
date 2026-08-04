@@ -18,12 +18,14 @@ See docs/placement-optimization.md for the background research.
 
 import json
 import os
+import sys
 
 from kicad_parser import parse_kicad_pcb
 import routing_defaults as defaults
 from placement.groups import GroupError, derive_groups, describe, parse_sources
 from placement.cli_gates import (add_board_state_args,
                                  add_lock_advisor_args, add_tidiness_args)
+from placement.portfolio import copy_siblings
 from placement.quench import quench
 from placement.writer import write_placed_output
 
@@ -195,6 +197,13 @@ Examples:
 
     print(f"{len(placements)} parts moved")
     write_placed_output(args.input_file, args.output_file, placements)
+    # #441: the sibling .kicad_pro carries the DRC floor the chain routed to.
+    # Without it the next step resolves its floor from the STOCK netclass and
+    # stamps that looser value over tighter copper, so KiCad grades correct
+    # sub-floor copper as phantom clearance DRC. place_seed and place_portfolio
+    # already did this; these two did not, and SKILL.md documented the gap as a
+    # manual `cp` the caller had to remember.
+    copy_siblings(args.input_file, args.output_file)
 
     # #504: the ratsnest and legality numbers used to be printed and discarded,
     # so nothing downstream could gate on what a quench run actually achieved.
@@ -220,4 +229,7 @@ Examples:
 
 
 if __name__ == "__main__":
-    main()
+    # main() already returns 0 from the --suggest-locks branch; that value was
+    # dropped here, so the process exited 0 regardless of what main() decided
+    # (the #551 family). Propagate it so a future refusal is visible to a caller.
+    sys.exit(main() or 0)
