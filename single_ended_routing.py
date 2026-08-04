@@ -1403,6 +1403,23 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
 
     coord = GridCoord(config.grid_step)
 
+    # #544: 2-pad fill anchors -- offer the far side's proven fill regions as
+    # extra near-side terminal rows so a pour-covered partner doesn't force a
+    # full-span route (the deriver above is fill-blind). Added BEFORE the
+    # exemption/allowed/source-target marking so anchors flow through every
+    # downstream consumer as ordinary endpoint rows; the start/end-original
+    # lookup then welds to the anchor's own fill float (sub-cell bridge).
+    # Scoped rescue keeps its exact override split untouched.
+    if sources_override is None:
+        _pl_src, _pl_tgt = _pour_launch_pair_anchors(
+            pcb_data, net_id, sources, targets, config.layers, coord,
+            config, bounds)
+        if _pl_src or _pl_tgt:
+            print(f"  POUR-LAUNCH pair anchors: +{len(_pl_src)} source, "
+                  f"+{len(_pl_tgt)} target fill cells")
+            sources = sources + _pl_src
+            targets = targets + _pl_tgt
+
     # Endpoint stub-proximity exemption (soft-knobs C5): a target that sits
     # beside ANOTHER net's stub paid full stub cost on the final approach
     # cells; exempt a one-track disk around each endpoint, mirroring the
@@ -3060,6 +3077,147 @@ def _pour_launch_region_cells(pcb_data, net_id, pad_info, pad_components,
               f"zone island policy are not yet nodes (deferred)")
     pcb_data._pour_launch_memo = (_mk, pad_components, out)
     return out
+
+
+def _pour_launch_pair_anchors(pcb_data, net_id, sources, targets,
+                              layer_names, coord, config, bounds=None):
+    """#544: fill anchors for the 2-group endpoint path.
+
+    The endpoint deriver is fill-blind: a route to a pad that already sits
+    on this net's pour crosses the whole span even though reaching the
+    pour's fill ANYWHERE would connect it. Offer laddered cells of the FAR
+    side's fill regions as extra terminal rows for the near side,
+    region-honest like the multipoint ladder: a region is offered only when
+    a far-side terminal provably touches it, probed exactly like the
+    fill-aware checker (query_component at the terminal float, size = the
+    pad's copper for pad rows -- a thermal-relieved pad's centre cell is
+    eroded but its spokes within the radius prove contact -- else the track
+    width for stub rows). Each anchor row carries the fill cell's own float
+    as its weld point, so the terminal bridge the converter draws is
+    sub-cell and lands ON fill copper -- never the any-angle slash back to
+    the distant pad that the multipoint owner map exists to prevent.
+
+    When both sides carry regions, a route may weld anchor to anchor: a
+    short region-to-region joint connecting the pads through their pours.
+
+    Returns (extra_source_rows, extra_target_rows) in the get_net_endpoints
+    row shape (gx, gy, layer_idx, fx, fy). Gated by KICAD_POUR_LAUNCH=1;
+    ([], []) when off, no zones, or unavailable.
+    """
+    import os as _os
+    if _os.environ.get('KICAD_POUR_LAUNCH', '') != '1':
+        return [], []
+    try:
+        from plane_fill_model import get_zone_model
+        from plane_fragility import _erode_depth
+        import numpy as _np
+    except Exception:
+        return [], []
+    _zones = [z for z in (getattr(pcb_data, 'zones', None) or [])
+              if z.net_id == net_id and z.layer in layer_names]
+    if not _zones:
+        return [], []
+    _RUNGS = (1.0, 2.5, 6.0, 15.0)   # mm, same ladder as the multipoint side
+    _NBEST = 12
+    try:
+        _FRAG_MM = float(_os.environ.get('KICAD_POUR_LAUNCH_FRAG', '1.0') or 0)
+    except ValueError:
+        _FRAG_MM = 1.0
+    _DEEP_MM = 0.5
+    _models = []
+    for _z in _zones:
+        try:
+            _models.append(get_zone_model(pcb_data, _z))
+        except Exception:
+            _models.append(None)
+    if not any(_m is not None for _m in _models):
+        return [], []
+    _net_pads = pcb_data.pads_by_net.get(net_id, [])
+
+    def _probe_size(fx, fy):
+        for _p in _net_pads:
+            if abs(_p.global_x - fx) < 0.01 and abs(_p.global_y - fy) < 0.01:
+                return max(_p.size_x, _p.size_y)
+        return config.track_width
+
+    def _regions(rows):
+        got = set()
+        for _zi, _m in enumerate(_models):
+            if _m is None:
+                continue
+            for _row in rows:
+                _c = _m.query_component(_row[3], _row[4],
+                                        size=_probe_size(_row[3], _row[4]))
+                if _c and _c > 0:
+                    got.add((_zi, _c))
+        return got
+
+    def _scan(near_rows, far_regions, taken):
+        if not far_regions or not near_rows:
+            return []
+        _cx = sum(r[3] for r in near_rows) / len(near_rows)
+        _cy = sum(r[4] for r in near_rows) / len(near_rows)
+        _found = []
+        for _r in _RUNGS:
+            for _zi, _lb in far_regions:
+                _m = _models[_zi]
+                if _m is None:
+                    continue
+                _li = layer_names.index(_zones[_zi].layer)
+                _dc = max(1, int(round(_DEEP_MM / _m.cell)))
+                _i0 = max(0, int((_cx - _r - _m.x0) / _m.cell) - _dc)
+                _i1 = min(_m.nx, int((_cx + _r - _m.x0) / _m.cell) + 1 + _dc)
+                _j0 = max(0, int((_cy - _r - _m.y0) / _m.cell) - _dc)
+                _j1 = min(_m.ny, int((_cy + _r - _m.y0) / _m.cell) + 1 + _dc)
+                if _i0 >= _i1 or _j0 >= _j1:
+                    continue
+                _win = _m.labels[_i0:_i1, _j0:_j1]
+                _mask = _win == _lb
+                if not _mask.any():
+                    continue
+                _dep = _erode_depth(_mask, _dc)
+                # labels is [x, y] (query_component's indexing)
+                _xi, _yi = _np.nonzero(_mask)
+                for _a, _b in zip(_xi, _yi):
+                    _fx = _m.x0 + float(_a + _i0) * _m.cell
+                    _fy = _m.y0 + float(_b + _j0) * _m.cell
+                    _d2 = (_fx - _cx) ** 2 + (_fy - _cy) ** 2
+                    if _d2 > _r * _r:
+                        continue
+                    _dmm = float(_dep[_a, _b]) * _m.cell
+                    _frag = max(0.0, 1.0 - _dmm / _DEEP_MM)
+                    _found.append((_d2 ** 0.5 + _FRAG_MM * _frag,
+                                   _fx, _fy, _li))
+            if _found:
+                break
+        _found.sort()
+        _out = []
+        for _sc, _fx, _fy, _li in _found:
+            _g = coord.to_grid(_fx, _fy)
+            _k = (_g[0], _g[1], _li)
+            if _k in taken:
+                continue
+            if bounds is not None and not (
+                    bounds[0] <= _g[0] <= bounds[2]
+                    and bounds[1] <= _g[1] <= bounds[3]):
+                continue
+            taken.add(_k)
+            _out.append((_g[0], _g[1], _li, _fx, _fy))
+            if len(_out) >= _NBEST:
+                break
+        return _out
+
+    try:
+        _src_regions = _regions(sources)
+        _tgt_regions = _regions(targets)
+        _taken = set((r[0], r[1], r[2]) for r in sources)
+        _taken.update((r[0], r[1], r[2]) for r in targets)
+        _extra_t = _scan(sources, _tgt_regions, _taken)
+        _extra_s = _scan(targets, _src_regions, _taken)
+        return _extra_s, _extra_t
+    except Exception as _e:
+        print(f"  POUR-LAUNCH pair anchors unavailable ({_e})")
+        return [], []
 
 
 def _select_multipoint_main_edge(pcb_data, pad_info, pad_components,
