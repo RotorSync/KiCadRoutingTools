@@ -1892,6 +1892,112 @@ def _power_width_ladder(net_width, layer_width):
     return out
 
 
+def _via_rung_retry(router, obstacles, config, sources, targets, pcb_data,
+                    net_id, print_prefix, direction_labels, single_direction,
+                    waypoints):
+    """#562 via escalation: last-resort re-search with a SMALLER via rung.
+
+    The width ladder searches all share via-legality maps built at the
+    configured via reserve, so an edge can exhaust every width and still die
+    where an advanced-rung (e.g. 0.25/0.15) via would open the corridor --
+    the search never gets to ask. This retry asks: sample the edge's bbox on
+    a coarse subgrid, exact-validate the next fab-ladder via size at each
+    currently via-BLOCKED cell (copper-exact, the #339 validator's core),
+    add the passing cells as free-via positions (the search's own override:
+    free_here bypasses is_via_blocked), register their emission sizes so the
+    shipped vias ARE the small rung (#339 re-validates at emission), and
+    re-search once at the caller's floor width. Fires only on edges that
+    would otherwise FAIL; KICAD_VIA_RUNG=0 disables.
+
+    Known softness: free-via cells price the transition at via_cost 0 (the
+    same-net-hole discount) -- acceptable for a would-fail edge. Returns the
+    route result tuple, or None-path result when even this fails.
+    """
+    import os as _os
+    if _os.environ.get('KICAD_VIA_RUNG', '1') != '1' or pcb_data is None:
+        return None
+    from fab_tiers import fab_floor_ladder
+    layers = [l for l in (pcb_data.board_info.copper_layers or [])
+              if l.endswith('.Cu')]
+    ncu = len(layers) or 2
+    rung = None
+    for f in fab_floor_ladder(ncu):
+        pair = (round(f['via_diameter'], 3), round(f['via_drill'], 3))
+        if pair[0] < config.via_size - 1e-9:
+            rung = pair
+            break
+    if rung is None:
+        return None
+    vs, dr = rung
+    coord = GridCoord(config.grid_step)
+    gx0 = min(p[0] for p in sources + targets)
+    gx1 = max(p[0] for p in sources + targets)
+    gy0 = min(p[1] for p in sources + targets)
+    gy1 = max(p[1] for p in sources + targets)
+    marg = coord.to_grid_dist(2.0)
+    gx0, gx1, gy0, gy1 = gx0 - marg, gx1 + marg, gy0 - marg, gy1 + marg
+    # coarse subgrid: ~0.4mm stride, widened until <=1200 samples
+    stride = max(1, coord.to_grid_dist(0.4))
+    while ((gx1 - gx0) // stride + 1) * ((gy1 - gy0) // stride + 1) > 1200:
+        stride += 1
+    need = vs / 2.0 + config.clearance - 0.001
+    # drill-to-drill h2h: the free-via override bypasses the map's h2h ring,
+    # so candidate sites must prove their DRILL against nearby holes here
+    # (board vias + plated-TH pads in the bbox; in-run vias of OTHER nets are
+    # a known small gap -- their copper rings are still checked above).
+    h2h = getattr(config, 'hole_to_hole_clearance', 0.25) or 0.25
+    fx0, fy0 = coord.to_float(gx0, gy0)
+    fx1, fy1 = coord.to_float(gx1, gy1)
+    holes = [(v.x, v.y, (v.drill or 0.0) / 2.0) for v in pcb_data.vias
+             if fx0 - 1 <= v.x <= fx1 + 1 and fy0 - 1 <= v.y <= fy1 + 1]
+    for pads in pcb_data.pads_by_net.values():
+        for pd in pads:
+            if pd.drill and fx0 - 1 <= pd.global_x <= fx1 + 1 \
+                    and fy0 - 1 <= pd.global_y <= fy1 + 1:
+                holes.append((pd.hole_x if pd.hole_x is not None else pd.global_x,
+                              pd.hole_y if pd.hole_y is not None else pd.global_y,
+                              pd.drill / 2.0))
+    opened = []
+    for gx in range(gx0, gx1 + 1, stride):
+        for gy in range(gy0, gy1 + 1, stride):
+            if not obstacles.is_via_blocked(gx, gy):
+                continue           # full-size via already legal here
+            x, y = coord.to_float(gx, gy)
+            ok = True
+            for hx, hy, hr in holes:
+                if (hx - x) ** 2 + (hy - y) ** 2 < (dr / 2.0 + hr + h2h) ** 2:
+                    ok = False
+                    break
+            if not ok:
+                continue
+            for layer in layers:
+                if _seg_foreign_seg_dist(pcb_data, net_id, x, y, x, y,
+                                         layer) < need:
+                    ok = False
+                    break
+                if _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer,
+                                        base_clearance=config.clearance) < need:
+                    ok = False
+                    break
+            if ok:
+                opened.append((gx, gy))
+    if not opened:
+        return None
+    obstacles.add_free_vias_batch(opened)
+    sizes = getattr(pcb_data, '_unblock_via_sizes', None)
+    if sizes is None:
+        sizes = pcb_data._unblock_via_sizes = {}
+    for gx, gy in opened:
+        sizes.setdefault((gx, gy), (vs, dr))
+    print(f"{print_prefix}{YELLOW}Via rung retry: {len(opened)} site(s) "
+          f"opened at {vs}/{dr} (was {config.via_size}/{config.via_drill}); "
+          f"re-searching at floor width{RESET}")
+    return _route_connection_at_margin(
+        router, obstacles, config, sources, targets,
+        config.base_track_margins(), pcb_data, net_id, print_prefix,
+        direction_labels, single_direction, waypoints)
+
+
 def _edge_span_mm(sources, targets, grid_step):
     """Min source->target span (mm): a cheap 'is this a short escape vs a trunk' proxy."""
     best = float('inf')
@@ -2326,6 +2432,11 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
                 print(f"{print_prefix}{YELLOW}Wide {'power' if power_wide else 'impedance'} route blocked - routed short edge at "
                       f"{w:.4f}mm (down from {net_w:.4f}){RESET}")
                 return (r[0], total_iters) + r[2:] + (False, w)
+        _vr = _via_rung_retry(router, obstacles, config, sources, targets,
+                              pcb_data, net_id, print_prefix,
+                              direction_labels, single_direction, waypoints)
+        if _vr is not None and _vr[0] is not None:
+            return (_vr[0], total_iters + _vr[1]) + _vr[2:] + (False, neck_floor)
         return (result[0], total_iters) + result[2:] + (False, None)
 
     # Long trunk: keep the existing single wide->narrow retry + neck-down.
@@ -2342,6 +2453,11 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
         # Keep the WIDE attempt's frontier for rip-up analysis: blockers found
         # by the narrow frontier only help a narrow route, but ripped nets
         # re-route at their own wide width and can fail entirely
+        _vr = _via_rung_retry(router, obstacles, config, sources, targets,
+                              pcb_data, net_id, print_prefix,
+                              direction_labels, single_direction, waypoints)
+        if _vr is not None and _vr[0] is not None:
+            return (_vr[0], result[1] + retry[1] + _vr[1]) + _vr[2:] + (True, None)
         return (result[0], result[1] + retry[1]) + result[2:] + (False, None)
     return (retry[0], result[1] + retry[1]) + retry[2:] + (True, None)
 
