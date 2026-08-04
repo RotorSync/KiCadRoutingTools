@@ -1015,7 +1015,7 @@ then re-run. The script is idempotent and accepts either the `.kicad_pcb` or the
 ### Runs automatically after routing
 
 You normally don't run this by hand: **`route.py`, `route_diff.py`,
-`route_planes.py`, and `route_disconnected_planes.py` invoke it as their final
+`route_planes.py`, and `repair_planes.py` invoke it as their final
 step** (issue #160), pinning the floors to the clearances/sizes they just routed
 with, so the written project is DRC-consistent by default. If the output is a new
 file with no project yet, they copy the input board's `.kicad_pro` (or seed a
@@ -1082,7 +1082,7 @@ manufacturing **floor ladder** every routing/DRC CLI shrinks tracks, vias and
 clearances *down toward*. It is stdlib-only so the lightweight DRC-settings
 script can import it without the PCB parser, and it exposes the two flags
 (`--fab-tier` / `--fab-overrides`) that `route.py`, `route_diff.py`,
-`route_planes.py`, `route_disconnected_planes.py`, `bga_fanout.py`,
+`route_planes.py`, `repair_planes.py`, `bga_fanout.py`,
 `qfn_fanout.py`, `check_drc.py`, `fix_kicad_drc_settings.py` and `list_nets.py`
 all add through its `add_fab_tier_args()` helper (so the flag is identical
 everywhere).

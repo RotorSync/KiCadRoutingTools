@@ -42,7 +42,7 @@ failures = []
 # Files whose list(set(...)) provably builds LAYER lists. Kept explicit rather
 # than pattern-matched: the same idiom over int tuples is fine.
 LAYER_ORDER_FILES = ('route_planes.py', 'check_drc.py', 'route.py',
-                     'route_disconnected_planes.py', 'obstacle_map.py')
+                     'repair_planes.py', 'obstacle_map.py')
 
 
 def _list_of_set_calls(path):

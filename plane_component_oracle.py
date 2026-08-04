@@ -1,7 +1,7 @@
 """
 Plane connected-component oracle (T6 "mutual-floating-strap" false success).
 
-The plane-tap machinery (plane_pad_tap, route_disconnected_planes) connects a
+The plane-tap machinery (plane_pad_tap, repair_planes) connects a
 pad to a power/GND plane by reusing nearby same-net copper -- a via, an
 already-tapped pad, a segment. That "same-net copper" can itself be a FLOATING
 island or strap of the plane (copper another tap just placed, a disconnected
@@ -24,7 +24,7 @@ Because "main" here is exactly "connected to the main component" there, a tap
 the oracle accepts is one the grader will credit: honest failure beats false
 success.
 
-Scope: route_disconnected_planes' pad-repair pass and final sweep thread an
+Scope: repair_planes' pad-repair pass and final sweep thread an
 oracle through plane_pad_tap.try_tap_pad (plane_oracle=...). route_planes'
 create_plane does NOT need one: it places taps BEFORE pouring its zone over
 the board, so every through via it drops lands under the future fill by

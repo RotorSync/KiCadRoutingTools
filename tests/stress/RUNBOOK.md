@@ -138,7 +138,7 @@ python3 make_movie.py step1.kicad_pcb step2.kicad_pcb -o out.mp4
   last in order. (mp4 needs `pip install imageio imageio-ffmpeg`.)
 - **Route tracing is ON by default** (`KICAD_ROUTE_TRACE=1`, exported by
   `run_board.sh`, set by `redo_stress_test.py`). Each `route.py`, `route_diff.py`,
-  `route_planes.py`, and `route_disconnected_planes.py` step then drops a sibling
+  `route_planes.py`, and `repair_planes.py` step then drops a sibling
   `<output>_routetrace.json` recording every segment/via committed, ripped, and
   restored — which the movie splices in for fine animation. Set
   `KICAD_ROUTE_TRACE=0` in the environment to skip tracing (leaner/faster runs;
@@ -278,11 +278,11 @@ harmless.
      taps + region joins), the plane-copper cleanup, and a KiCad-oracle
      completion verify, at the route step's own parameters, with stubborn
      nets joining that run's final reconciliation. So the old Step 5
-     (route_disconnected_planes), Step 5c (reconnect the nets it ripped) and
+     (repair_planes), Step 5c (reconnect the nets it ripped) and
      Step 5d (final plane verify) are all GONE from recorded chains: just
      make sure a route step runs LAST, and its finalize does all three.
      `KICAD_PLANE_FINALIZE=0` is the kill switch. The standalone
-     `route_disconnected_planes.py` (engine now `repair_planes`, alias kept)
+     `repair_planes.py` (engine now `repair_planes`, alias kept)
      is only for repairing a board routed OUTSIDE this chain.
      The GUI plan executor enforces the same rule -- it appends a final
      `route` step when copper-modifying steps follow the last plane step
@@ -382,7 +382,7 @@ harmless.
    flagging anything genuinely sub-manufacturable.
    GRADE AT THE HOLE-TO-HOLE YOU ROUTED AT. The drill hole-to-hole minimum is
    only met if the via placers were *given* it: pass `--hole-to-hole-clearance
-   <floor>` to route.py / route_planes.py / route_disconnected_planes.py, then
+   <floor>` to route.py / route_planes.py / repair_planes.py, then
    grade at that SAME value. Grading at a hole-to-hole the routing never enforced
    invents phantom VIA-VIA-SAME-NET / VIA-DRILL-HOLE violations — the routed vias
    were never asked to meet it (a board routed without the flag shows 0 at its
@@ -587,7 +587,7 @@ them in place (dry-run by default, idempotent, surgical: it excises only the
 flag and leaves every other byte alone, because the corpus is NOT under version
 control). It is scoped per script — the #562 pass touched only `route_planes.py`
 lines (54 of 459 chains, 63 `--rip-blocker-nets`) and deliberately left
-`route_disconnected_planes.py` lines alone, since that engine still has those
+`repair_planes.py` lines alone, since that engine still has those
 flags. Extend its table when a future flag goes.
 
 - **One board:** `python3 tests/stress/redo_stress_test.py

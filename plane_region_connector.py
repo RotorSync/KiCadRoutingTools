@@ -1728,7 +1728,7 @@ def _try_route_between_regions(
 # source/target seeds. A giant plane region (e.g. daisho's GND Region 0 has
 # 320 anchors) otherwise pushes thousands of source/target cells into EVERY A*
 # attempt, across N track widths x N region pairs -- the dominant cost of
-# route_disconnected_planes on dense boards. Regions are internally connected,
+# repair_planes on dense boards. Regions are internally connected,
 # so routing between the anchors nearest each region's connection point is
 # optimal; the full anchor set is retried as a fallback if the reduced route
 # fails, so no connection is lost.

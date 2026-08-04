@@ -459,7 +459,7 @@ def _rasterize_polygon(poly_points, coord: GridCoord, margin: float, clip_bounds
     ``clip_bounds`` (min_x, min_y, max_x, max_y) restricts the rasterized region
     to the obstacle map's actual extent. Without it, a large polygon -- e.g. a
     whole-board ring keep-out -- rasterizes the entire board on EVERY build, even
-    a tiny local-window build, dominating route_disconnected_planes and the
+    a tiny local-window build, dominating repair_planes and the
     via-in-pad unblock (the map only covers the window, so cells outside it are
     never blocked anyway). Clipping is a pure optimisation: no cell inside the map
     changes. A full-board build passes the board bounds, so nothing is clipped.
@@ -671,7 +671,7 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
     via_clear = config.clearance + config.via_size / 2
     # Restrict rasterization to the map's extent: on a local-window build a
     # whole-board ring keep-out would otherwise rasterize the entire board per
-    # call (the dominant cost of route_disconnected_planes and the via-in-pad
+    # call (the dominant cost of repair_planes and the via-in-pad
     # unblock). Full-board builds set board_bounds to the whole board -> no clip.
     clip = getattr(pcb_data.board_info, 'board_bounds', None)
 
@@ -794,7 +794,7 @@ def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     edge_clearance = config.board_edge_clearance if config.board_edge_clearance > 0 else config.clearance
     # Add track half-width to clearance (tracks need to stay away from edge).
     # #447: the edge band must use the width the map is STAMPED at -- build_base_obstacles
-    # (route_disconnected_planes plane connections) stamps every obstacle at
+    # (repair_planes plane connections) stamps every obstacle at
     # min_track_width, wider than config.track_width, and routes the narrowest
     # connection with track_margin=0; a config.track_width band lets that wider copper
     # graze the outline sub-fab (crkbd/dilemma). Callers pass the stamped width here.

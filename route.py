@@ -1415,7 +1415,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # remove_route_from_pcb_data) log every segment/via added, ripped, and
     # restored, in order, for animating the routing process. Default-off.
     # Gate on a real output path: an internal reconnect batch_route (e.g.
-    # route_disconnected_planes) calls this with output_file="" and must not
+    # repair_planes) calls this with output_file="" and must not
     # start/dump a trace of its own (the plane front-end keeps a local one).
     if output_file:
         from route_trace import attach_trace as _attach_route_trace
@@ -2735,7 +2735,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # end-of-run check above knows exactly which nets are incomplete; give
     # them ONE more standard pass against the board as written. Self-invokes
     # batch_route on the output file (one level -- final_reconcile=False),
-    # mirroring route_disconnected_planes' rip-casualty self-reconnect. The
+    # mirroring repair_planes' rip-casualty self-reconnect. The
     # reconcile pass prints its own summary/JSON_SUMMARY scoped to the
     # retried nets; the failure lists in that LAST summary are the honest
     # still-open set. Runs on BOTH fronts: CLI re-invokes on the written
@@ -2775,7 +2775,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             and os.environ.get('KICAD_PLANE_FINALIZE', '1') == '1'):
         try:
             _finalize_depth(+1)
-            from route_disconnected_planes import (
+            from repair_planes import (
                 repair_planes as _rdp_engine, auto_detect_zones as _adz)
             _gui9 = bool(return_results)
             if _gui9:

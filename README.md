@@ -422,23 +422,23 @@ python route_planes.py kicad_files/input.kicad_pcb --nets GND --plane-layers B.C
 > `KICAD_PLANE_FINALIZE=0` is the kill switch. Use the standalone script
 > below for a board routed OUTSIDE that chain (e.g. hand-edited copper).
 
-After creating power planes, regions may become split by vias and traces from other nets. Use `route_disconnected_planes.py` to reconnect them:
+After creating power planes, regions may become split by vias and traces from other nets. Use `repair_planes.py` to reconnect them:
 
 ```bash
 # Auto-detect all zones in PCB and repair disconnected regions (outputs to input_routed.kicad_pcb)
-python route_disconnected_planes.py kicad_files/input.kicad_pcb
+python repair_planes.py kicad_files/input.kicad_pcb
 
 # Auto-detect all zones, overwrite input
-python route_disconnected_planes.py kicad_files/input.kicad_pcb --overwrite
+python repair_planes.py kicad_files/input.kicad_pcb --overwrite
 
 # Auto-detect all zones to specific output file
-python route_disconnected_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb
+python repair_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb
 
 # Specific nets and layers
-python route_disconnected_planes.py kicad_files/input.kicad_pcb --nets GND --plane-layers B.Cu
+python repair_planes.py kicad_files/input.kicad_pcb --nets GND --plane-layers B.Cu
 
 # Customize track width and clearance
-python route_disconnected_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
+python repair_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
     --track-width 0.5 --clearance 0.2
 ```
 
@@ -578,7 +578,7 @@ KiCadRoutingTools/
 ├── route.py                  # Main CLI - single-ended routing
 ├── route_diff.py             # Main CLI - differential pair routing
 ├── route_planes.py           # Main CLI - power/ground plane via connections
-├── route_disconnected_planes.py  # CLI - repair disconnected plane regions
+├── repair_planes.py  # CLI - repair disconnected plane regions
 ├── plane_io.py               # Plane I/O utilities (zone extraction, output writing)
 ├── plane_obstacle_builder.py # Obstacle map building for plane via placement
 ├── plane_blocker_detection.py # Blocker detection and rip-up for plane vias
@@ -712,7 +712,7 @@ runnable examples.
 | `route.py` | CLI for single-ended routing |
 | `route_diff.py` | CLI for differential pair routing |
 | `route_planes.py` | CLI for power/ground plane via connections |
-| `route_disconnected_planes.py` | CLI for repairing disconnected plane regions |
+| `repair_planes.py` | CLI for repairing disconnected plane regions |
 | `routing_config.py` | Configuration dataclasses (`GridRouteConfig`, `GridCoord`, `DiffPair`) |
 | `routing_state.py` | `RoutingState` class tracking progress, results, and PCB modifications |
 | `routing_context.py` | Helper functions for building obstacles and recording success |
@@ -806,7 +806,7 @@ Every tool prints its full option list with `--help`, and **[docs/configuration.
 | `route.py` | Single-ended routing | [Configuration](docs/configuration.md) |
 | `route_diff.py` | Differential-pair routing | [Differential Pairs](docs/differential-pairs.md) |
 | `route_planes.py` | Power/ground plane via connections | [Plane Routing](docs/route-plane.md) |
-| `route_disconnected_planes.py` | Plane region repair + pad taps | [Plane Routing](docs/route-plane.md) |
+| `repair_planes.py` | Plane region repair + pad taps | [Plane Routing](docs/route-plane.md) |
 | `bga_fanout.py` / `qfn_fanout.py` | BGA / QFN escape fanout | [BGA](bga_fanout/README.md) · [QFN](qfn_fanout/README.md) · [Utilities](docs/utilities.md) |
 | `place_fanout_clearance.py` | Move decoupling caps off fanout vias | [Utilities](docs/utilities.md) |
 | `place_optimize.py` | Placement for routability | [Placement Optimization](docs/placement-optimization.md) |

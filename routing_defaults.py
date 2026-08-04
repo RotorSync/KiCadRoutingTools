@@ -235,7 +235,7 @@ FINE_TAP_SEARCH_RADIUS = 3.0     # mm - cap on NEW-via search during the fine re
                                  # (a far new via at fine width butterflies neighbours;
                                  # far EXISTING vias are reached via the distant-trace path)
 
-# Repair disconnected planes defaults (route_disconnected_planes.py)
+# Repair disconnected planes defaults (repair_planes.py)
 REPAIR_MAX_TRACK_WIDTH = 2.0  # mm - maximum track width for connections
 REPAIR_MIN_TRACK_WIDTH = 0.2  # mm - minimum track width for connections
 REPAIR_ANALYSIS_GRID_STEP = 0.5  # mm - grid step for connectivity analysis

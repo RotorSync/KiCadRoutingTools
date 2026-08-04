@@ -60,7 +60,7 @@ def dump_trace(pcb_data, output_file: str) -> None:
 
 def start_plane_trace(pcb_data, output_file: str):
     """A LOCAL RouteTrace for the plane front-ends (route_planes /
-    route_disconnected_planes), which add copper OUTSIDE the choke points and
+    repair_planes), which add copper OUTSIDE the choke points and
     call batch_route internally. Attached at ``pcb_data._plane_trace`` (a
     DISTINCT attribute from ``_route_trace``) so the plane code can capture at
     fine per-join / per-rip boundaries without threading it through every
@@ -190,7 +190,7 @@ class RouteTrace:
         """Snapshot ``pcb_data`` copper, diff against the previous capture, and
         emit the delta (segments/vias added and removed since) as one event.
 
-        For the plane front-ends (route_planes / route_disconnected_planes),
+        For the plane front-ends (route_planes / repair_planes),
         whose taps, joins and blocker rips mutate ``pcb_data.segments``/``vias``
         directly rather than through ``add_route_to_pcb_data``. Call once right
         after parsing (a 'preexisting' baseline of the input copper) and then at

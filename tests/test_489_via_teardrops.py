@@ -157,7 +157,7 @@ def run():
     # the two scripts that place the most pad-entry copper and from plane repair.
     import re as _re
     for rel in ("route.py", "route_diff.py", "route_planes.py",
-                "route_disconnected_planes.py",
+                "repair_planes.py",
                 "bga_fanout/__init__.py", "qfn_fanout/__init__.py"):
         src = open(os.path.join(ROOT_DIR, rel), encoding="utf-8").read()
         check("--add-teardrops" in src,

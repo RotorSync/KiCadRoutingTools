@@ -18,7 +18,7 @@ reconnect (``batch_route(return_results=True, pcb_data=...)``):
   emitted into the write list BEFORE the reconnect runs; the reconnect may
   re-route the same net and delete that copper from pcb_data.
 
-Both were built (and corpus-proven) in route_disconnected_planes; #508
+Both were built (and corpus-proven) in repair_planes; #508
 finding 1 is that route_planes' GUI reconnect had NEITHER. They live here so
 each engine drives the SAME function the tests pin (the parity-gate lesson:
 a hand-mirrored copy silently drifts).

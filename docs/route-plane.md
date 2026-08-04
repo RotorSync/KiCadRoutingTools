@@ -117,7 +117,7 @@ A net earns a Voronoi zone on a shared layer if it has **any** connection point 
 | `--power-nets` | - | Glob patterns for power nets to route with wider tracks |
 | `--power-nets-widths` | - | Track widths in mm for each power-net pattern |
 
-The pour step does **no tapping and no ripping** (#562). Every pad that would need a tap via is deferred to the route step, which welds it into the pour with the full routing machinery (pour-launch) and taps whatever the fill cannot reach in its in-run plane finalize. The one exception is an exposed/thermal pad, whose via **array** (#487) stamps vias without drawing any trace. The blocker rip-up knobs (`--rip-blocker-nets`, `--max-rip-nets`, `--reroute-ripped-nets`) and the via-search radii (`--max-search-radius`, `--max-via-reuse-radius`, `--close-via-radius`) are **removed** from this script accordingly; `route_disconnected_planes.py` still has them and its recorded lines are untouched. Recorded manifests were migrated in place by `tests/stress/migrate_manifests.py` (54 of 459 chains, 63 occurrences, all `--rip-blocker-nets`); passing a removed flag here now fails in argparse, which is the intended behavior.
+The pour step does **no tapping and no ripping** (#562). Every pad that would need a tap via is deferred to the route step, which welds it into the pour with the full routing machinery (pour-launch) and taps whatever the fill cannot reach in its in-run plane finalize. The one exception is an exposed/thermal pad, whose via **array** (#487) stamps vias without drawing any trace. The blocker rip-up knobs (`--rip-blocker-nets`, `--max-rip-nets`, `--reroute-ripped-nets`) and the via-search radii (`--max-search-radius`, `--max-via-reuse-radius`, `--close-via-radius`) are **removed** from this script accordingly; `repair_planes.py` still has them and its recorded lines are untouched. Recorded manifests were migrated in place by `tests/stress/migrate_manifests.py` (54 of 459 chains, 63 occurrences, all `--rip-blocker-nets`); passing a removed flag here now fails in argparse, which is the intended behavior.
 
 After writing output, `route_planes.py` runs a **geometric verification** pass: it re-parses the board and reports, per plane net, how many pads are actually joined to the plane (via `check_net_connectivity`), and prints a NOTE when this disagrees with the via-placement counters. This surfaces pads whose stitching via is not electrically joined and TH pads on multi-net Voronoi layers that fell in the other net's region.
 
@@ -333,7 +333,7 @@ When a via cannot be placed at the pad center, the tool routes a trace from the 
 
 The pour no longer places taps, so it never needs to rip a blocker.
 The rip-up algorithm still exists in the repair engine
-(`route_disconnected_planes.py`, documented below), which the route
+(`repair_planes.py`, documented below), which the route
 step's in-run plane finalize calls -- with ripping OFF by default.
 
 ### Multi-Net Layer Zone Generation
@@ -613,7 +613,7 @@ The plane generation code is organized into several modules:
 
 ## Repairing Disconnected Plane Regions
 
-After power planes are created, regions may become effectively split due to vias and traces from other nets cutting through the plane. The `route_disconnected_planes.py` script detects these disconnected regions and routes tracks between them to ensure electrical continuity.
+After power planes are created, regions may become effectively split due to vias and traces from other nets cutting through the plane. The `repair_planes.py` script detects these disconnected regions and routes tracks between them to ensure electrical continuity.
 
 **Note (#562): in the default chain this runs for you.** `route.py`'s in-run
 plane finalize calls this same engine, then the plane-copper cleanup and the
@@ -630,22 +630,22 @@ Key features:
 
 ```bash
 # Auto-detect all zones in PCB and repair disconnected regions (outputs to input_routed.kicad_pcb)
-python route_disconnected_planes.py input.kicad_pcb
+python repair_planes.py input.kicad_pcb
 
 # Auto-detect all zones, overwrite input
-python route_disconnected_planes.py input.kicad_pcb --overwrite
+python repair_planes.py input.kicad_pcb --overwrite
 
 # Auto-detect all zones to specific output file
-python route_disconnected_planes.py input.kicad_pcb output.kicad_pcb
+python repair_planes.py input.kicad_pcb output.kicad_pcb
 
 # Specific nets and layers
-python route_disconnected_planes.py input.kicad_pcb --nets GND --plane-layers B.Cu
+python repair_planes.py input.kicad_pcb --nets GND --plane-layers B.Cu
 
 # Customize track width and clearance
-python route_disconnected_planes.py input.kicad_pcb --max-track-width 1.0 --clearance 0.2
+python repair_planes.py input.kicad_pcb --max-track-width 1.0 --clearance 0.2
 
 # Increase iterations for difficult routes
-python route_disconnected_planes.py input.kicad_pcb --max-iterations 500000
+python repair_planes.py input.kicad_pcb --max-iterations 500000
 ```
 
 ### Command-Line Options
@@ -727,7 +727,7 @@ A net that cannot re-route is **restored** to its original trace rather than lef
 disconnected (issue #88). Example:
 
 ```bash
-python route_disconnected_planes.py step_planes.kicad_pcb out.kicad_pcb \
+python repair_planes.py step_planes.kicad_pcb out.kicad_pcb \
     --clearance 0.15 --via-size 0.5 --via-drill 0.3 --track-width 0.127 --grid-step 0.05 \
     --rip-blocker-nets --reroute-ripped-nets \
     --power-nets +12V -12V --power-nets-widths 0.5 0.5 --no-bga-zone
@@ -887,12 +887,12 @@ Increasing `--max-iterations` can help with complex routes. Reducing `--analysis
 
 | Module | Description |
 |--------|-------------|
-| `route_disconnected_planes.py` | CLI and orchestration - loads PCB, detects zones, coordinates region repair |
+| `repair_planes.py` | CLI and orchestration - loads PCB, detects zones, coordinates region repair |
 | `plane_region_connector.py` | Region detection and routing - flood fill analysis, multi-point A* routing, open-space fallback |
 
 ### Key Functions
 
-**route_disconnected_planes.py:**
+**repair_planes.py:**
 - `repair_planes()` (alias `route_planes` kept) - Main orchestration: loads PCB, iterates over nets, writes output
 - `auto_detect_zones()` - Scans PCB for existing zones and returns net/layer pairs
 

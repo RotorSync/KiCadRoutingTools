@@ -24,7 +24,10 @@ TOOL_ACTIONS = {
     'route.py': 'route',
     'route_diff.py': 'route_diff',
     'route_planes.py': 'route_planes',
+    # BOTH names: recorded manifests carry the historical spelling forever;
+    # the module (CLI remains a standalone utility) is repair_planes.py now.
     'route_disconnected_planes.py': 'repair_planes',
+    'repair_planes.py': 'repair_planes',
     'bga_fanout.py': 'fanout',
     'qfn_fanout.py': 'fanout',
 }

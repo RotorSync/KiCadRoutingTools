@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
 """
-Route Disconnected Planes - Connects disconnected regions within power plane zones.
+Repair Planes - Connects disconnected regions within power plane zones.
 
-After power planes are created, regions may be effectively split due to vias and
-traces from other nets cutting through the plane. This script detects disconnected
-regions and routes wide, short tracks between them to ensure electrical continuity.
+(Renamed from route_disconnected_planes.py, 2026-08-04.) After power planes
+are created, regions may be effectively split due to vias and traces from
+other nets cutting through the plane. The repair engine detects disconnected
+regions and routes wide, short tracks between them to ensure electrical
+continuity.
+
+NOT A CHAIN STEP since #562: route.py's in-run plane finalize calls the
+`repair_planes` engine function below on every route step, so the default
+chain never invokes this file. The CLI remains as a STANDALONE utility for
+boards routed outside the chain (e.g. a hand-routed board whose pours need
+welding). Recorded manifests that reference route_disconnected_planes.py
+are historical records, not runnable chains.
 
 Usage:
     # Auto-detect all zones in PCB:
-    python route_disconnected_planes.py input.kicad_pcb output.kicad_pcb
+    python repair_planes.py input.kicad_pcb output.kicad_pcb
 
     # Specific nets and layers:
-    python route_disconnected_planes.py input.kicad_pcb output.kicad_pcb \\
+    python repair_planes.py input.kicad_pcb output.kicad_pcb \\
         --nets GND --plane-layers B.Cu
 """
 from __future__ import annotations
@@ -592,7 +601,7 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
 def _report_unrouted_ripped_nets(pcb_data, ripped_net_ids):
     """Report the nets ripped to clear blocked pad repairs and left UNROUTED.
 
-    route_disconnected_planes no longer re-routes ripped nets in-step (issue #141
+    repair_planes no longer re-routes ripped nets in-step (issue #141
     reverted -- its restore-on-failure put a failed net's original copper back on
     top of whatever had been routed through its freed corridor, shorting them). The
     ripped nets are stripped from the output and reconnected by a route.py pass run
@@ -3025,18 +3034,18 @@ def main():
         epilog="""
 Examples:
     # Auto-detect all zones in PCB:
-    python route_disconnected_planes.py input.kicad_pcb output.kicad_pcb
+    python repair_planes.py input.kicad_pcb output.kicad_pcb
 
     # Only process specific layers (all nets on those layers):
-    python route_disconnected_planes.py input.kicad_pcb output.kicad_pcb \\
+    python repair_planes.py input.kicad_pcb output.kicad_pcb \\
         --plane-layers B.Cu In1.Cu
 
     # Only process specific nets (on all layers they have zones):
-    python route_disconnected_planes.py input.kicad_pcb output.kicad_pcb \\
+    python repair_planes.py input.kicad_pcb output.kicad_pcb \\
         --nets GND +3.3V
 
     # Specific net/layer pairs (counts must match):
-    python route_disconnected_planes.py input.kicad_pcb output.kicad_pcb \\
+    python repair_planes.py input.kicad_pcb output.kicad_pcb \\
         --nets GND +3.3V --plane-layers B.Cu In1.Cu \\
         --max-track-width 1.0
 """

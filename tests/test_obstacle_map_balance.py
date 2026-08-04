@@ -23,7 +23,7 @@ here is pinned to a recipe measured to actually churn:
                     vs a fresh rebuild. NO churn since #562 -- the pour step
                     defers every via-needed pad to the route step, so it
                     cannot rip; stage 4 carries the churn coverage.
-  4. route_disconnected_planes - interf_u chain (planes -> U9 fanout ->
+  4. repair_planes - interf_u chain (planes -> U9 fanout ->
                     signal route -> repair): the repair pass runs under
                     TAP_MAP_VERIFY=1, whose built-in asserts compare the
                     shared via maps against fresh builds on every rip and
@@ -156,7 +156,7 @@ def main():
           all(a == "BALANCED" for a in audits) and "DIVERGED" not in log,
           f"audits={audits}")
 
-    # ---- 4. route_disconnected_planes under TAP_MAP_VERIFY -------------------
+    # ---- 4. repair_planes under TAP_MAP_VERIFY -------------------
     iu_plane = os.path.join(tmp, "iu_plane.kicad_pcb")
     iu_fan = os.path.join(tmp, "iu_fanout.kicad_pcb")
     iu_routed = os.path.join(tmp, "iu_routed.kicad_pcb")
@@ -174,7 +174,7 @@ def main():
                      "--max-iterations", "1000000",
                      "--board-edge-clearance", "0.55"], audit=False)
     check("repair: interf_u signal route completed", rc == 0, f"rc={rc}")
-    rc, log = run_cmd(["route_disconnected_planes.py", iu_routed, iu_fixed,
+    rc, log = run_cmd(["repair_planes.py", iu_routed, iu_fixed,
                        "--board-edge-clearance", "0.6"], audit=False, tap_verify=True)
     check("repair: run completed under TAP_MAP_VERIFY", rc == 0, f"rc={rc}")
     check("repair: no shared-map divergence",

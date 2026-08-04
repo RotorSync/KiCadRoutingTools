@@ -1952,7 +1952,7 @@ def _write_output_and_reroute(
         broken_names = [pcb_data.nets[r].name for r in broken_ids
                         if r in pcb_data.nets]
 
-        # #347 (same contract as route_disconnected_planes): a net this run
+        # #347 (same contract as repair_planes): a net this run
         # ripped to place plane vias must not depend on a LATER chain step
         # existing to reconnect it -- without this, manifests that stop after
         # the plane step ship those nets OPEN with only a warning (orangecrab
@@ -3005,7 +3005,7 @@ def create_plane(
         pcb_data = parse_kicad_pcb(input_file)
 
     # Same canonicalisation as route.batch_route and
-    # route_disconnected_planes: the two fronts hand this engine identical
+    # repair_planes: the two fronts hand this engine identical
     # copper in different ORDER, and list position leaks into decisions.
     from kicad_parser import canonicalize_pcb_data_order
     canonicalize_pcb_data_order(pcb_data)
@@ -3982,7 +3982,7 @@ def create_plane(
         # GUI parity with the CLI's in-run ripped-net reconnect (#347): the
         # file path above reroutes verified-broken casualties after writing;
         # the GUI (dry_run) path reconnects them here, in memory, exactly
-        # like route_disconnected_planes' return_results block. pcb_data has
+        # like repair_planes' return_results block. pcb_data has
         # the ripped copper removed and this run's copper appended, so
         # batch_route routes against the live in-memory board; the new copper
         # is merged into the emit lists (the applier deletes the ripped nets'
@@ -4197,7 +4197,7 @@ Examples:
                         help="Radius around other nets' vias to add proximity cost when routing plane connections (mm, default: 3.0)")
     parser.add_argument("--plane-proximity-cost", type=float, default=2.0,
                         help="Maximum proximity cost around other nets' vias when routing plane connections (mm equivalent, default: 2.0)")
-    # #381 D9: --track-via-clearance is the same constant route_disconnected_planes
+    # #381 D9: --track-via-clearance is the same constant repair_planes
     # spells that way; accept both here (dest stays plane_track_via_clearance).
     parser.add_argument("--plane-track-via-clearance", "--track-via-clearance",
                         type=float, default=defaults.PLANE_TRACK_VIA_CLEARANCE,
@@ -4532,8 +4532,8 @@ Examples:
     # not-yet-stitched pad as a missing link (hackrf: 26 plane links / 42 total),
     # so an oracle pass here thrashes routing links that don't exist as failures
     # (18 routed, 77 failed, 3 kicad-cli rounds) -- a 2-8x route_planes regression
-    # for work route_disconnected_planes does properly. The oracle runs ONCE, as an
-    # end-of-pipeline fallback at the end of route_disconnected_planes, on the
+    # for work repair_planes does properly. The oracle runs ONCE, as an
+    # end-of-pipeline fallback at the end of repair_planes, on the
     # already-repaired board -- do not re-add it here.
 
     # Make the output project's KiCad DRC constraints consistent with the routed

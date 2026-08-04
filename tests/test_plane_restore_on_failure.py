@@ -35,7 +35,7 @@ sys.path.insert(0, ROOT)
 
 from kicad_parser import BoardInfo, Net, PCBData, Pad, Segment, Via
 from routing_config import GridRouteConfig
-import route_disconnected_planes as rdp
+import repair_planes as rdp
 import route_trace
 
 GND, SIG = 2, 5

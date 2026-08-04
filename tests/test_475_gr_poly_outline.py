@@ -14,7 +14,7 @@ ways, plus a latent unbound-local bug it exposed:
    any pad outside a real polygon outline raised UnboundLocalError.
 
 3. REPAIR (the `route_planes` crash -- INDEPENDENT of the outline):
-   `route_disconnected_planes.route_planes` did not resolve `zone_clearance=None`
+   `repair_planes.route_planes` did not resolve `zone_clearance=None`
    (the GUI zone-clearance "auto" value), so None threaded into
    find_disconnected_zone_regions' layer_clearance and detonated pad_rect_halfspan
    as `float + None`.
@@ -150,7 +150,7 @@ def test_shape_t_poly_extractor():
 
 
 # --------------------------------------------------------------------------
-# 3. route_disconnected_planes.route_planes: zone_clearance=None (the GUI "auto"
+# 3. repair_planes.route_planes: zone_clearance=None (the GUI "auto"
 #    value) must be resolved, not threaded into a `float + None` crash. Needs the
 #    Rust router; skipped (not failed) when it is unavailable.
 # --------------------------------------------------------------------------
@@ -166,7 +166,7 @@ def test_repair_zone_clearance_none():
 
     import tempfile
     import route_planes
-    import route_disconnected_planes as rdp
+    import repair_planes as rdp
     from kicad_parser import parse_kicad_pcb
 
     # A minimal 2-net, 4-layer board with two GND pads and two +3V3 pads far

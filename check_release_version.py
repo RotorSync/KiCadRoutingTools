@@ -39,7 +39,7 @@ def fail(msg: str) -> None:
 # itself does not. Keep in sync with CLAUDE.md's parity rule-of-thumb.
 PARITY_SURFACES = (
     "route.py", "route_diff.py", "route_planes.py",
-    "route_disconnected_planes.py", "bga_fanout.py", "place_fanout_clearance.py",
+    "repair_planes.py", "bga_fanout.py", "place_fanout_clearance.py",
     "placement/", "single_ended_routing.py", "single_ended_loop.py",
     "diff_pair_routing.py", "diff_pair_loop.py", "layer_swap_optimization.py",
     "layer_swap_fallback.py", "mps_layer_swap.py", "stub_layer_switching.py",

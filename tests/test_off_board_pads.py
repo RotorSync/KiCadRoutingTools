@@ -12,7 +12,7 @@ are now dropped from every routing endpoint set:
 - connectivity.get_net_endpoints / get_multipoint_net_pads: single-ended and
   multipoint routing (route.py, GUI, rip/reroute loops)
 - plane_obstacle_builder.identify_target_pads: route_planes.py taps
-- plane_pad_tap.find_unconnected_plane_pads: route_disconnected_planes.py
+- plane_pad_tap.find_unconnected_plane_pads: repair_planes.py
 
     python3 tests/test_off_board_pads.py
 """

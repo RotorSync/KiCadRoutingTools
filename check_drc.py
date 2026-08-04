@@ -2970,7 +2970,7 @@ if __name__ == "__main__":
     # routers lower to the smallest clearance used in ANY step (incl. fine-pitch
     # tap escalation). Grading stricter than that invents phantom violations on
     # legitimately tight copper; grading looser hides real ones. (issue follow-up
-    # to the route_disconnected_planes fine-tap grading confusion.)
+    # to the repair_planes fine-tap grading confusion.)
     if args.clearance is None:
         args.clearance = 0.2
         found = False

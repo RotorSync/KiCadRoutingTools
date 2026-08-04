@@ -1,7 +1,7 @@
 """Soft reservation of vacated ripped-net corridors in the plane-repair pass
 (#517 arm 2, the #343 proposal made deliberate).
 
-When `route_disconnected_planes --rip-blocker-nets` rips a signal net to clear
+When `repair_planes --rip-blocker-nets` rips a signal net to clear
 a pad tap, the vacated corridor is claimed first-come-first-served by whatever
 routes next (later pads' taps, region-join straps, other nets' reconnects).
 The #517 arm-1 attribution measured exactly that: under the default full rip,
@@ -16,7 +16,7 @@ unrestored copper and steers OTHER claimants away from it:
   position_preference hook -- never excludes, only ranks). The via maps stay
   #342-precise.
 - hard mode (`KICAD_PLANE_RIP_SOFTBLOCK=hard`): the cheap pre-#342 baseline --
-  route_disconnected_planes skips SharedViaMaps.note_net_ripped so the ripped
+  repair_planes skips SharedViaMaps.note_net_ripped so the ripped
   copper's via-map stamps stay blocked. No routing-map costs (that replica is
   what the 0708 vs 0708a waves accidentally measured at ~+8 nets). Breaks the
   TAP_MAP_VERIFY invariant by design; never run both together.

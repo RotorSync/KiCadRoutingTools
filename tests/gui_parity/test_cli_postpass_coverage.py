@@ -8,7 +8,7 @@ both for free (Class 1). The drift happens when a CLI `main()` runs an extra
 pass AFTER its engine call -- clean_plane_copper, oracle_reconnect,
 fix_project_for_output, ... -- that the GUI must separately replicate (Class 2).
 That is exactly how the set11 GUI board shipped 35 plane shorts the CLI board
-didn't have: route_disconnected_planes.main() ran clean_plane_copper on its
+didn't have: repair_planes.main() ran clean_plane_copper on its
 output file and the planes tab never did.
 
 This lint has no gate-able runtime; it is a STATIC guard:
@@ -40,7 +40,7 @@ PLUGIN = REPO / "kicad_routing_plugin"
 # post-passes (run_drc graze audit, fix_project_for_output) were a blind spot.
 # Point at the package __init__ where main() actually lives.
 CLI_MAINS = ["route.py", "route_diff.py", "route_planes.py",
-             "route_disconnected_planes.py",
+             "repair_planes.py",
              "bga_fanout/__init__.py", "qfn_fanout/__init__.py"]
 
 # Known post-engine passes -> GUI counterpart symbol(s). A pass is "covered" if

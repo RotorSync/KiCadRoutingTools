@@ -1012,7 +1012,7 @@ net as a track web, and the run **finishes with the plane finalize**: the
 plane-repair engine (pad taps + region joins), the plane-copper cleanup,
 and the KiCad-oracle exact-fill verify/reconnect all run IN this step, with
 any stubborn oracle links joining the run's own final reconciliation. There
-is **no separate plane-repair step anymore** — `route_disconnected_planes.py`
+is **no separate plane-repair step anymore** — `repair_planes.py`
 remains only for repairing a board outside this chain. Exclude only the
 single-ended impedance nets already routed in Step 2b (`"!RF"`), so the
 bulk pass cannot re-route them off their controlled width. The pours don't
@@ -1103,14 +1103,14 @@ Adjust `--gnd-via-distance` based on the board's highest signal speed:
 - Minimum physical limit: 3 x (via_size + clearance)
 
 ### (No separate repair step — absorbed into Step 2, #562)
-The old Step 5 (`route_disconnected_planes.py`) and its Step 5c reconnect
+The old Step 5 (`repair_planes.py`) and its Step 5c reconnect
 are **gone from the chain**: `route.py` finishes every run with the same
 plane-repair engine (pad taps + region joins), the plane-copper cleanup,
 and the KiCad-oracle exact-fill verify — and any oracle links its own
 router can't route join the run's final reconciliation WITH rip authority,
 so the old rip-then-reconnect two-step happens inside one invocation. If
 Step 3 ripped nets, reconnect them with a follow-up `route.py` pass naming
-them at Step 2's parameters. `route_disconnected_planes.py` still exists
+them at Step 2's parameters. `repair_planes.py` still exists
 for repairing a board OUTSIDE this chain (e.g. a hand-edited board).
 
 > **Never `cp` a board without its `.kicad_pro`.** A bare `cp a.kicad_pcb
@@ -1709,7 +1709,7 @@ Rules of the loop:
     `--diff-pair-gap`/width/vias toward the fab floor (keep `--impedance`).
   - The route step's plane finalize ships tap failures with fill nearby →
     re-run the route step at the advanced fab tier so smaller tap vias fit
-    (or, outside the chain, `route_disconnected_planes` with a larger
+    (or, outside the chain, `repair_planes` with a larger
     `--max-search-radius`).
   - A handful of nets fail on a NOT-saturated board (few failed nets, short
     detours available, failures share a corridor with early-routed nets) →

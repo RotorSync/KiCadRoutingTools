@@ -141,7 +141,7 @@ the routed result), and cheap.
 | Signal routing | `route.py` | **Individual** — every commit / rip / restore, in true order |
 | Differential pairs | `route_diff.py` | **Individual** — same choke points |
 | Plane creation | `route_planes.py` | Per-**plane** taps + the pour **fills in** on the frame it is created |
-| Plane repair | `route_disconnected_planes.py` | **Individual** per-join and per-rip, in order |
+| Plane repair | `repair_planes.py` | **Individual** per-join and per-rip, in order |
 | BGA fanout | `bga_fanout.py` | Coarse — no trace; shown as the step's board delta |
 
 Signal and diff-pair copper flows through the two `pcb_modification.py` choke

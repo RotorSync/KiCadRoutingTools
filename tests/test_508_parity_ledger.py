@@ -8,7 +8,7 @@ serious finding sat on an unledgered path. These tests pin:
 1. LEDGER WIRING (source-level): all four engines call
    verify_written_file_parity, so a pass that changes one representation
    without the other is catchable with KICAD_BOARD_LEDGER=1 everywhere.
-2. LIVE LEDGER (end-to-end): route.py / route_planes / route_disconnected_planes
+2. LIVE LEDGER (end-to-end): route.py / route_planes / repair_planes
    runs on a tiny board under KICAD_BOARD_LEDGER=1 come back [FILE_LEDGER] OK.
    Skipped (not failed) when the Rust router is unavailable.
 3. RECONCILE UNITS (the real functions, never mirrored copies):
@@ -49,7 +49,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # --------------------------------------------------------------------------
 def test_ledger_wiring():
     for engine in ('route.py', 'route_diff.py', 'route_planes.py',
-                   'route_disconnected_planes.py'):
+                   'repair_planes.py'):
         src = open(os.path.join(ROOT, engine), encoding='utf-8').read()
         n = src.count('verify_written_file_parity(')
         # >= 1 CALL beyond a bare import (the import line has no open paren
@@ -99,7 +99,7 @@ def test_live_ledger():
     try:
         import route
         import route_planes
-        import route_disconnected_planes as rdp
+        import repair_planes as rdp
         with tempfile.TemporaryDirectory() as d:
             src = os.path.join(d, 'b.kicad_pcb')
             routed = os.path.join(d, 'b_routed.kicad_pcb')

@@ -2,7 +2,7 @@
 Single-pad plane tap placement with fine-pitch parameter escalation.
 
 Shared by route_planes.py (fine-pitch retry of failed taps, issue #104) and
-route_disconnected_planes.py (per-pad repair pass, issue #99).
+repair_planes.py (per-pad repair pass, issue #99).
 
 A "tap" is a stitching via near a pad plus an optional short trace from the
 via to the pad on the pad's layer. The default route_planes parameters
@@ -695,7 +695,7 @@ class TapResult:
     reused_via_pos: Optional[Tuple[float, float]] = None
     params_label: str = ""              # 'default' or 'fine'
     clearance_used: float = 0.0         # copper clearance this tap was routed at
-    # Failure diagnostics for rip-up (route_disconnected_planes --rip-blocker-nets):
+    # Failure diagnostics for rip-up (repair_planes --rip-blocker-nets):
     via_blocked: bool = False           # True if NO via position could be found
     blocked_cells: List = field(default_factory=list)  # frontier from a failed via->pad route
 
@@ -1263,7 +1263,7 @@ def tap_pad_with_escalation(
     track = min(pad min dimension, 0.15) and a smaller via search radius.
 
     fine_for_all=True drops the fine-pitch gate and escalates every failed
-    pad (used by the route_disconnected_planes repair pass, where only a
+    pad (used by the repair_planes repair pass, where only a
     handful of last-resort pads remain and small pads in congested
     fine-pitch neighborhoods also benefit from the fine parameters).
     """
@@ -1360,7 +1360,7 @@ def find_unconnected_plane_pads(
       to a zone layer.
 
     Zone-fill islands are NOT considered here - the island repair pass in
-    route_disconnected_planes handles those.
+    repair_planes handles those.
 
     Returns list of (pad, pad_layer) for pads needing repair.
     """

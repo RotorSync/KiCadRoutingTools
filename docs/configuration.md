@@ -112,7 +112,7 @@ python route.py in.kicad_pcb out.kicad_pcb --nets "/CLK" --force-reroute
 
 The **fab tier** is the JLCPCB manufacturing floor every routing step shrinks tracks,
 vias and clearances *down toward* when it needs to. It is shared by every CLI
-(`route.py`, `route_diff.py`, `route_planes.py`, `route_disconnected_planes.py`,
+(`route.py`, `route_diff.py`, `route_planes.py`, `repair_planes.py`,
 `bga_fanout.py`, `qfn_fanout.py`, `check_drc.py`, `fix_kicad_drc_settings.py`,
 `list_nets.py`) and the GUI (one selector on the Basic tab). Values are sourced from
 [jlcpcb.com/capabilities](https://jlcpcb.com/capabilities).
@@ -177,7 +177,7 @@ legitimately-escalated fine geometry is not flagged.
 ### Post-Route DRC Settings
 
 As their final step, all four routing CLIs (`route.py`, `route_diff.py`,
-`route_planes.py`, `route_disconnected_planes.py`) rewrite the output's sibling
+`route_planes.py`, `repair_planes.py`) rewrite the output's sibling
 `.kicad_pro` so KiCad's Board Setup floors match the clearances/sizes just routed
 — a manual DRC in KiCad then flags only genuine problems instead of stock-default
 noise (issue #160). The [DRC Settings Fixer](utilities.md#drc-settings-fixer-fix_kicad_drc_settingspy)
@@ -486,7 +486,7 @@ See [Length Matching](length-matching.md#time-matching) for how propagation dela
 | `--skip-routing` | false | Skip actual routing, only do swaps and write debug info |
 | `--debug-memory` | false | Print memory usage statistics at key points during routing |
 | `--stats` | false | Print A* search statistics (cells expanded, heuristic efficiency) |
-| `--add-teardrops` | false | Add teardrop settings to all pads **and vias** in the output file. Available on every step that writes pad/via copper: `route.py`, `route_diff.py`, `route_planes.py`, `route_disconnected_planes.py`, `bga_fanout.py`, `qfn_fanout.py` (#489 §9). In the GUI it is the one shared "Add teardrops" checkbox, which now reaches the fanout and planes tabs too. |
+| `--add-teardrops` | false | Add teardrop settings to all pads **and vias** in the output file. Available on every step that writes pad/via copper: `route.py`, `route_diff.py`, `route_planes.py`, `repair_planes.py`, `bga_fanout.py`, `qfn_fanout.py` (#489 §9). In the GUI it is the one shared "Add teardrops" checkbox, which now reaches the fanout and planes tabs too. |
 
 ## GridRouteConfig Class
 

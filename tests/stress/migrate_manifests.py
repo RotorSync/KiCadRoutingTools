@@ -12,9 +12,13 @@ Idempotent: a migrated manifest is left untouched on a second run.
 WHAT IT DOES TODAY
   route_planes.py lines: drop flags the pours-first architecture removed
   (#562 -- the pour places no taps and cannot rip, so these fed nothing).
-  Only route_planes.py lines are touched: route_disconnected_planes.py still
-  HAS --rip-blocker-nets / --max-rip-nets / --reroute-ripped-nets /
-  --max-search-radius, and its lines must be left exactly as recorded.
+  Only route_planes.py lines are touched. route_disconnected_planes.py
+  lines are left exactly as recorded -- NOTE that module is now
+  repair_planes.py (standalone utility, not a chain step), so manifests
+  carrying the old name no longer replay past that step; the decision
+  (2026-08-04) is that old manifests are historical records, not runnable
+  chains. The pours-first STEP-ORDER rewrite below is what would make a
+  manifest runnable again.
 
 WHAT IT DOES NOT DO YET
   The pours-first STEP-ORDER rewrite (pour first, drop the now-no-op repair

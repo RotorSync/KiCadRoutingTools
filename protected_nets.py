@@ -23,7 +23,7 @@ filtered with a printed exclusion. Consumers:
 
   * route.py's ``--rip-existing-nets`` expansion (collateral rip of non-target
     nets) skips protected nets unless exactly named.
-  * route_disconnected_planes' ``--rip-blocker-nets`` tap rip never selects a
+  * repair_planes' ``--rip-blocker-nets`` tap rip never selects a
     protected net as a blocker.
 
 **Writers** (engine-side, so the GUI/AI-plan path inherits them): length/time

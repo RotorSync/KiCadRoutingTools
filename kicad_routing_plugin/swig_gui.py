@@ -708,7 +708,7 @@ class RoutingDialog(wx.Dialog):
         return self._fab_floored('board_edge_clearance', val)
 
     def _effective_plane_edge_clearance(self):
-        """Plane-zone edge inset (mirrors route_planes.py / route_disconnected_planes.py):
+        """Plane-zone edge inset (mirrors route_planes.py / repair_planes.py):
         the board's DECLARED copper-edge rule if it has one, else PLANE_EDGE_CLEARANCE
         (0.5 -- plane pours want more edge margin than signal traces); pinned up to the
         fab copper-to-edge floor. NOT the signal _effective_board_edge_clearance, which
@@ -1692,7 +1692,7 @@ class RoutingDialog(wx.Dialog):
             edge_clearance = self._effective_plane_edge_clearance()
             # Power nets/widths from the route tab, so plane rip-up re-routes a
             # ripped wide power net at its proper width, not the signal default
-            # (matches the CLI passing --power-nets to route_disconnected_planes).
+            # (matches the CLI passing --power-nets to repair_planes).
             power_nets = _split_net_list(self.power_nets_ctrl.GetValue()) or None
             try:
                 power_widths = [float(w) for w in self.power_widths_ctrl.GetValue().split()] or None

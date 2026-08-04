@@ -64,7 +64,7 @@ silently drops. Audit every commit since the last-confirmed SHA:
 LAST=$(awk '{print $1}' .gui-parity-checked)
 git log --oneline $LAST..HEAD
 git diff $LAST..HEAD -- route.py route_diff.py route_planes.py \
-    route_disconnected_planes.py bga_fanout.py place_fanout_clearance.py \
+    repair_planes.py bga_fanout.py place_fanout_clearance.py \
     placement/ single_ended_routing.py layer_swap_optimization.py \
     stub_layer_switching.py obstacle_map.py kicad_parser.py
 ```

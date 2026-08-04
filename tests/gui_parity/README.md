@@ -172,7 +172,7 @@ parity; closing it to ~98% is the order-canonicalization follow-up.
 ### Plane engines + diff_engine_kwargs.py (the #362 sweep)
 
 The dump now also covers the PLANE engines: `create_plane` (route_planes.py)
-and the repair `route_planes` (route_disconnected_planes.py) each write a line
+and the repair `route_planes` (repair_planes.py) each write a line
 via `route._dump_engine_config` in CONTINUE mode, INCLUDING `all_layers` /
 `plane_layers` (layer content/order is a live divergence class). So one
 `KICAD_DUMP_BATCH_KWARGS_CONTINUE=1` run of a whole plan captures every engine
@@ -232,7 +232,7 @@ The converter gate above covers the plan->params translation; this one covers
 the OTHER drift axis: a CLI `main()` running a finalization pass AFTER its
 shared engine call that the GUI must separately replicate (Class 2). That is
 how the set11 GUI board shipped 35 plane shorts the CLI board didn't have --
-route_disconnected_planes.main() ran clean_plane_copper and the planes tab
+repair_planes.main() ran clean_plane_copper and the planes tab
 never did.
 
 Static, no wx/pcbnew. It AST-scans each CLI main() for post-engine passes,

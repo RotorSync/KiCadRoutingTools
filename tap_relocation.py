@@ -12,7 +12,7 @@ step) plus its short attached stub, retry the failing net, and rely on the
 plane-repair step later in the chain to re-tap the affected pad from the
 pour (the net-coverage invariant: copper removed by one stage is re-claimed
 by a later stage that owns that net's connectivity -
-route_disconnected_planes detects and repairs disconnected plane components
+repair_planes detects and repairs disconnected plane components
 by design).
 
 Obstacle-map custody (the part that must be exact): per-net cached cell

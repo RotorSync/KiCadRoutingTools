@@ -603,7 +603,7 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
 def add_drc_fix_args(parser, *, include_no_fix=True):
     """Add the post-route DRC-settings-fix CLI options shared by the routing
     front-ends (``route.py`` / ``route_diff.py`` / ``route_planes.py`` /
-    ``route_disconnected_planes.py``). Wiring a new shared DRC-fix flag in here
+    ``repair_planes.py``). Wiring a new shared DRC-fix flag in here
     adds it to all of them at once; pair with :func:`drc_fix_kwargs` to forward the
     parsed values into :func:`fix_project_for_output`.
 

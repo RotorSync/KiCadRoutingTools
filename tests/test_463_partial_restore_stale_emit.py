@@ -1,6 +1,6 @@
 """#463 spartan6_6layer: a partial restore must not ship copper the reconnect withdrew.
 
-route_disconnected_planes emits a partial restore's kept-set into the write
+repair_planes emits a partial restore's kept-set into the write
 list BEFORE the ripped-net reconnect runs, and unconditionally. The same net is
 also queued as a reconnect casualty, so the reconnect can RE-ROUTE it and
 delete that copper from pcb_data -- while the write list still carries it. The
@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from kicad_parser import Segment, Via  # noqa: E402
 # Drive the REAL function, not a copy of its logic: a hand-mirrored gate
 # silently drifts from the code it is meant to pin (the GUI-parity lesson).
-from route_disconnected_planes import (  # noqa: E402
+from repair_planes import (  # noqa: E402
     drop_withdrawn_partial_restores)
 
 

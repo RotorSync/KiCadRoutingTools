@@ -508,7 +508,7 @@ class CreatePlanesOptionsPanel(wx.Panel):
 # of every route.py run -- the in-run plane finalize runs the repair engine
 # (pad taps + region joins), the plane-copper cleanup, and the kicad-oracle
 # exact-fill verify at the ROUTE step's parameters. The standalone
-# route_disconnected_planes.py CLI remains for boards routed outside the
+# repair_planes.py CLI remains for boards routed outside the
 # chain; it needs no GUI surface.)
 
 

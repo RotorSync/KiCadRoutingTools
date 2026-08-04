@@ -157,7 +157,9 @@ There are two front-ends to the same routing engine, and a fix to one is
 **not** automatically a fix to the other:
 
 - **CLI scripts** — `route.py`, `route_diff.py`, `route_planes.py`,
-  `route_disconnected_planes.py`, `bga_fanout.py`, etc. Their `main()`
+  `repair_planes.py` (renamed from `route_disconnected_planes.py`; the CLI
+  remains a standalone utility only — the chain step is absorbed into
+  route.py's finalize, #562), `bga_fanout.py`, etc. Their `main()`
   parses args and calls the shared engine functions (`batch_route`,
   `batch_route_diff_pairs`, `create_plane`, `generate_bga_fanout`, ...).
 - **GUI plugin** — `kicad_routing_plugin/` (`swig_gui.py`,
@@ -200,8 +202,8 @@ picked up by both for free. The gaps appear at the edges:
 - **A post-pass added to a CLI `main()`** (running *after* the shared engine
   call — cleanup, oracle recheck, DRC-floor writeback) is invisible to the
   GUI unless separately replicated (the set11 plane-shorts bug:
-  `route_disconnected_planes.main()` ran `clean_plane_copper`, the planes tab
-  didn't). Prefer putting the pass INSIDE the shared engine function; when it
+  `repair_planes.main()` (then `route_disconnected_planes`) ran
+  `clean_plane_copper`, the planes tab didn't). Prefer putting the pass INSIDE the shared engine function; when it
   must operate on the written file, refactor a **board-level core** and call
   it from both fronts (as `compute_plane_copper_cleanup` now backs both
   `clean_plane_copper` and `planes_gui._run_plane_copper_cleanup`).

@@ -7,7 +7,7 @@ LLM agent does not always do so. Having each board-mutating CLI record its OWN
 invocation makes capture reliable regardless of how the tool was launched.
 
 Each of route.py / route_diff.py / route_planes.py /
-route_disconnected_planes.py / bga_fanout.py calls record_invocation() at the
+repair_planes.py / bga_fanout.py calls record_invocation() at the
 top of main(). It is a no-op unless the REDO_MANIFEST env var points at a
 manifest file (run_board.sh sets it to <run-dir>/redo_commands.sh; set it to
 /dev/null or leave it unset to disable). The manifest format matches what

@@ -2770,7 +2770,7 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
     The router lays a terminal/tap segment toward its own pad/via through the
     obstacle-exempt endpoint region, so at tight connector / fine pad pitch it can
     sit sub-clearance to a NEIGHBOURING foreign pad -- a route.py launch jog, a
-    route_disconnected_planes tap. `_neck_terminal_grazes` only narrows such a
+    repair_planes tap. `_neck_terminal_grazes` only narrows such a
     segment and is floored at the fab track minimum, so a sub-floor graze survives
     to DRC. But these grazing segments are frequently a REDUNDANT detour/appendix:
     the adjacent (wider) copper already overlaps enough to carry the connection, so
@@ -4311,7 +4311,7 @@ def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
     """Apply prune_grazing_segments + nudge_grazing_octolinear + sweep_dead_ends to a
     PLANE script's write-list (issue #224).
 
-    route_planes / route_disconnected_planes carry their new copper as
+    route_planes / repair_planes carry their new copper as
     {'start','end','width','layer','net_id'} DICTS in `all_new_segments` (not the
     route.py `results` list of Segment objects), so the passes -- which operate on
     pcb_data and the route.py results -- are driven here with an empty results list
