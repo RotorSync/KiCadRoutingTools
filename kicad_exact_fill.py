@@ -132,6 +132,32 @@ _NET_NAME_RE = re.compile(r'\(net_name\s+"((?:[^"\\]|\\.)*)"\)')
 _NET_STR_RE = re.compile(r'\(net\s+"((?:[^"\\]|\\.)*)"\)')
 
 
+_REFILL_MEMO: Dict[tuple, dict] = {}
+_REFILL_MEMO_CAP = 8
+
+
+def _refill_memo_key(board_file: str, project_from: str = None):
+    """Identity of everything a refill's result depends on: the board file's
+    bytes (path + mtime_ns + size as proxy) and the EFFECTIVE .kicad_pro
+    (the sibling, else project_from's -- netclass rules change the fill).
+    None = unkeyable (missing file); caller skips the memo."""
+    try:
+        bp = os.path.abspath(board_file)
+        st = os.stat(bp)
+        key = [bp, st.st_mtime_ns, st.st_size]
+        pro = os.path.splitext(bp)[0] + '.kicad_pro'
+        if not os.path.isfile(pro) and project_from:
+            pro = os.path.splitext(os.path.abspath(project_from))[0] + '.kicad_pro'
+        if os.path.isfile(pro):
+            pst = os.stat(pro)
+            key += [os.path.abspath(pro), pst.st_mtime_ns, pst.st_size]
+        else:
+            key += [None]
+        return tuple(key)
+    except OSError:
+        return None
+
+
 def refill_islands(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
                    verbose: bool = False, project_from: str = None
                    ) -> Optional[Dict[Tuple[str, str],
@@ -144,10 +170,21 @@ def refill_islands(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
     stock rules and shrinks tight pours -- the phantom-divergence trap).
     Each (filled_polygon ...) block of the saved board is one connected
     island polygon (KiCad's fracture output), so island discovery is free.
+
+    MEMOIZED on (board bytes, effective .kicad_pro bytes) identity -- a
+    refill is a pure function of those, and the plane-finalize pipeline
+    (#562) refills the same unchanged file from several consumers
+    (per-net fragility, the oracle's first round) at a pcbnew subprocess
+    apiece. A file rewrite changes mtime_ns -> miss. Deep-copied on hit so
+    a caller mutating its polygons cannot poison later consumers.
     """
     kpy = find_kicad_python()
     if kpy is None:
         return None
+    _mk = _refill_memo_key(board_file, project_from)
+    if _mk is not None and _mk in _REFILL_MEMO:
+        import copy as _copy
+        return _copy.deepcopy(_REFILL_MEMO[_mk])
     tmpdir = tempfile.mkdtemp(prefix='exact_fill_')
     try:
         stem = os.path.splitext(os.path.basename(board_file))[0]
@@ -181,7 +218,13 @@ def refill_islands(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
         return None
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
-    return parse_filled_islands(text)
+    _out = parse_filled_islands(text)
+    if _mk is not None:
+        if len(_REFILL_MEMO) >= _REFILL_MEMO_CAP:
+            _REFILL_MEMO.pop(next(iter(_REFILL_MEMO)))
+        import copy as _copy
+        _REFILL_MEMO[_mk] = _copy.deepcopy(_out)
+    return _out
 
 
 def parse_filled_islands(text: str

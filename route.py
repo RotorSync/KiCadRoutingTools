@@ -2798,6 +2798,27 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 print(f"\nPlane finalize (#562): repairing "
                       f"{len(set(_zn))} zone net(s) in-run: "
                       f"{', '.join(sorted(set(_zn)))}")
+                import time as _time9
+                _t9 = _time9.time()
+                # Live-board reuse (KICAD_PLANE_FINALIZE_LIVE=1): hand the
+                # engine THIS run's pcb_data instead of re-parsing the file it
+                # just wrote -- kills the parse and, bigger, reuses the
+                # ZoneFillModel caches the pour-launch ladder already built
+                # for every plane net. SNAP FIRST (the reconcile lesson: the
+                # written file is nm-grid-exact, the in-memory board is not,
+                # and repairing against a different board than the file forks
+                # the outcome). #508-class risk (write-list vs pcb_data
+                # divergence) is why this has its own gate; A/B with
+                # KICAD_BOARD_LEDGER=1 before defaulting it on.
+                _live9 = None
+                if os.environ.get('KICAD_PLANE_FINALIZE_LIVE', '') == '1':
+                    from kicad_parser import snap_pcb_data_to_iu_grid \
+                        as _snap9
+                    _snapped9 = _snap9(pcb_data)
+                    if _snapped9:
+                        print(f"  Plane finalize: snapped {_snapped9} "
+                              f"in-memory coordinate(s) onto the nm grid")
+                    _live9 = pcb_data
                 _rdp_engine(
                     output_file, output_file, _zn, _zl,
                     track_width=config.track_width,
@@ -2807,11 +2828,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     via_drill=config.via_drill,
                     hole_to_hole_clearance=config.hole_to_hole_clearance,
                     routing_layers=config.layers,
-                    net_clearances=net_clearances)
+                    net_clearances=net_clearances,
+                    pcb_data=_live9)
+                print(f"  [finalize timing] engine leg: "
+                      f"{_time9.time() - _t9:.1f}s")
+                _t9 = _time9.time()
                 from pcb_modification import clean_plane_copper
                 _cs, _cr = clean_plane_copper(
                     output_file, sorted(set(_zn)),
                     config.clearance, config.grid_step)
+                print(f"  [finalize timing] cleanup leg: "
+                      f"{_time9.time() - _t9:.1f}s")
+                _t9 = _time9.time()
                 if _cs or _cr:
                     print(f"  Plane finalize cleanup: closed {_cs} stub "
                           f"gap(s), trimmed {_cr} dead-end segment(s)")
@@ -2835,6 +2863,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     track_via_clearance=defaults.PLANE_TRACK_VIA_CLEARANCE,
                     hole_to_hole_clearance=config.hole_to_hole_clearance,
                     project_from=input_file)
+                print(f"  [finalize timing] oracle leg: "
+                      f"{_time9.time() - _t9:.1f}s")
                 try:
                     import json as _json9
                     print('JSON_ORACLE: ' + _json9.dumps(
@@ -2855,11 +2885,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     print(f"\nPlane finalize: {_orc['remaining']} oracle "
                           f"link(s) unroutable without rip authority -- "
                           f"retrying their nets with full engine custody")
+                    _t9 = _time9.time()
                     _rk9 = dict(_reconcile_kwargs)
                     _rk9.update(final_reconcile=False, skip_routing=False,
                                 force_reroute=False, return_results=False)
                     _rok9, _rfail9, _rt9 = batch_route(
                         output_file, output_file, sorted(set(_zn)), **_rk9)
+                    print(f"  [finalize timing] custody leg: "
+                          f"{_time9.time() - _t9:.1f}s")
                     if _rok9:
                         print(f"  Plane finalize custody pass: "
                               f"{_rok9} net(s) improved")
