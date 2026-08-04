@@ -2810,15 +2810,30 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # the outcome). #508-class risk (write-list vs pcb_data
                 # divergence) is why this has its own gate; A/B with
                 # KICAD_BOARD_LEDGER=1 before defaulting it on.
+                # Soundness precondition for live reuse: pcb_data == the
+                # written file. The final-reconcile CLI sub-run writes ITS
+                # copper via its own parsed board -- the parent's pcb_data
+                # never receives it (ux: +3V3 file-only=27, GND file-only=59
+                # -> the live engine leg repaired a stale board and shipped
+                # 30 conflicting-weld DRC; the FILE_LEDGER probe caught it).
+                # When the reconcile fired, fall back to the re-parse.
+                _reconcile_fired9 = bool(
+                    (failed_single or failed_multipoint)
+                    and (output_file or return_results))
                 _live9 = None
                 if os.environ.get('KICAD_PLANE_FINALIZE_LIVE', '') == '1':
-                    from kicad_parser import snap_pcb_data_to_iu_grid \
-                        as _snap9
-                    _snapped9 = _snap9(pcb_data)
-                    if _snapped9:
-                        print(f"  Plane finalize: snapped {_snapped9} "
-                              f"in-memory coordinate(s) onto the nm grid")
-                    _live9 = pcb_data
+                    if _reconcile_fired9:
+                        print("  Plane finalize: final reconcile wrote "
+                              "file-only copper -- live reuse unsound, "
+                              "re-parsing the written board instead")
+                    else:
+                        from kicad_parser import snap_pcb_data_to_iu_grid \
+                            as _snap9
+                        _snapped9 = _snap9(pcb_data)
+                        if _snapped9:
+                            print(f"  Plane finalize: snapped {_snapped9} "
+                                  f"in-memory coordinate(s) onto the nm grid")
+                        _live9 = pcb_data
                 _rdp_engine(
                     output_file, output_file, _zn, _zl,
                     track_width=config.track_width,
