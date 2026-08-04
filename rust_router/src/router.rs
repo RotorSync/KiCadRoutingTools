@@ -282,6 +282,10 @@ impl TrackMarginArg {
 pub(crate) struct SearchOptions {
     collinear_vias: bool,
     via_exclusion_radius: i32,
+    /// #568: which via-legality rung the search uses (0 = configured via,
+    /// >=1 = small fab via when the map is populated). Set per search by
+    /// the Python escalation retry; default 0 keeps baseline behaviour.
+    pub via_rung: usize,
     norm_start_dir: Option<(i32, i32)>,
     norm_end_dir: Option<(f64, f64)>,
     direction_steps: i32,
@@ -308,6 +312,7 @@ impl SearchOptions {
         Self {
             collinear_vias,
             via_exclusion_radius,
+            via_rung: 0,
             norm_start_dir,
             norm_end_dir,
             direction_steps,
@@ -888,7 +893,7 @@ impl GridSearch {
         // dropped a couple cells away beside a perfectly good via-in-pad.
         let free_here = obstacles.is_free_via(current.gx, current.gy);
         if can_place_via && (!via_too_close || free_here)
-            && (!obstacles.is_via_blocked(current.gx, current.gy) || free_here) {
+            && (!obstacles.is_via_blocked_rung(current.gx, current.gy, self.opts.via_rung) || free_here) {
             for layer in 0..obstacles.num_layers as u8 {
                 if layer == current.layer {
                     continue;
@@ -1107,7 +1112,7 @@ impl GridRouter {
     /// ceiling. 0 (the default) disables: existing callers are unchanged.
     ///
     /// C1: thin wrapper over the shared GridSearch core with a StatsSink.
-    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=TrackMarginArg::Scalar(0.0), max_iterations_ceiling=0, quantum_cells=2.0, quantum_pct=2.0, grace_tranches=0))]
+    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=TrackMarginArg::Scalar(0.0), max_iterations_ceiling=0, quantum_cells=2.0, quantum_pct=2.0, grace_tranches=0, via_rung=0))]
     #[allow(clippy::too_many_arguments)]
     pub fn route_multi(
         &self,
@@ -1125,10 +1130,12 @@ impl GridRouter {
         quantum_cells: f64,
         quantum_pct: f64,
         grace_tranches: u32,
+        via_rung: usize,
     ) -> (Option<Vec<(i32, i32, u8)>>, u32, std::collections::HashMap<String, f64>) {
-        let opts = SearchOptions::new(collinear_vias, via_exclusion_radius,
+        let mut opts = SearchOptions::new(collinear_vias, via_exclusion_radius,
                                       start_direction, end_direction,
                                       direction_steps, track_margin);
+        opts.via_rung = via_rung;
         let mut sink = StatsSink::default();
         let mut search = GridSearch::new(self, sources, targets, max_iterations, opts, &mut sink);
         search.set_iteration_ceiling(max_iterations_ceiling, quantum_cells, quantum_pct, grace_tranches);
@@ -1183,7 +1190,7 @@ impl GridRouter {
     /// 0 (the default) disables.
     ///
     /// C1: thin wrapper over the shared GridSearch core with a FrontierSink.
-    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=TrackMarginArg::Scalar(0.0), max_iterations_ceiling=0, quantum_cells=2.0, quantum_pct=2.0, grace_tranches=0))]
+    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=TrackMarginArg::Scalar(0.0), max_iterations_ceiling=0, quantum_cells=2.0, quantum_pct=2.0, grace_tranches=0, via_rung=0))]
     #[allow(clippy::too_many_arguments)]
     pub fn route_with_frontier(
         &self,
@@ -1201,10 +1208,12 @@ impl GridRouter {
         quantum_cells: f64,
         quantum_pct: f64,
         grace_tranches: u32,
+        via_rung: usize,
     ) -> (Option<Vec<(i32, i32, u8)>>, u32, Vec<(i32, i32, u8)>) {
-        let opts = SearchOptions::new(collinear_vias, via_exclusion_radius,
+        let mut opts = SearchOptions::new(collinear_vias, via_exclusion_radius,
                                       start_direction, end_direction,
                                       direction_steps, track_margin);
+        opts.via_rung = via_rung;
         let mut sink = FrontierSink::new();
         let mut search = GridSearch::new(self, sources, targets, max_iterations, opts, &mut sink);
         search.set_iteration_ceiling(max_iterations_ceiling, quantum_cells, quantum_pct, grace_tranches);
