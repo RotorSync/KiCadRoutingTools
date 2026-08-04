@@ -288,6 +288,18 @@ def _attempt_edge(pcb_data, net_id, gap, config, net_clearances):
         # (get_same_net_through_hole_positions), completing the reuse.
         from routing_context import _add_free_via_positions
         _add_free_via_positions(obstacles, window, [net_id], cfg)
+        # Same-net via/drill spacing (the custody-pass h2h bug, cy GND<->GND
+        # drill): seeding alone lets the search drop a NEW via 1-2 cells off
+        # an existing same-net barrel -- sub-h2h drills, a real KiCad
+        # violation (hole clearance is net-blind). Every OTHER seeding site
+        # (routing_context prepare paths, diff pairs) pairs the seeding with
+        # these guards; rescue was the one that didn't. The seeded free cells
+        # still override AT the barrel, so the semantics are "reuse it
+        # exactly, or keep your distance" -- reuse itself is unaffected.
+        from obstacle_map import (add_same_net_via_clearance,
+                                  add_same_net_pad_drill_via_clearance)
+        add_same_net_via_clearance(obstacles, window, net_id, cfg)
+        add_same_net_pad_drill_via_clearance(obstacles, window, net_id, cfg)
         # Constrain the route to the window: drop endpoints outside it and keep the
         # source/target overrides from punching the fence, so the A* can never leave
         # the stamped region and cross foreign copper the window never modelled (#396).
