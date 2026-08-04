@@ -2583,18 +2583,45 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # sound by construction, and the custody nets merge into the reconcile's
     # single sub-run (one parse/base-build serves both).
     # In-process bonus: clearance_ledger is shared, so tap-escalated floors
-    # flow into this run's own DRC writeback. CLI file-mode only for now --
-    # the GUI planes tab remains the return_results counterpart (repair's
-    # dict-emission strip-and-replace shape does not merge into
-    # results_data; documented divergence like the mains' oracle recheck).
-    # Gate: KICAD_PLANE_FINALIZE=1 (default OFF until #562 graduation).
+    # flow into this run's own DRC writeback.
+    # BOTH FRONTS (#562 graduation): CLI file-mode runs repair's file trio on
+    # the written output; GUI (return_results) runs the SAME engine against
+    # the in-memory board -- repair_planes(pcb_data=..., return_results=True)
+    # already runs the shared cleanup pipeline in-memory, and the finalize
+    # merges the resulting BOARD DELTA (object diff of pcb_data before/after)
+    # into results_data, so the reconcile's identity-based strip de-dup keeps
+    # working. The ORACLE leg needs a real file for kicad-cli's exact fill,
+    # so under return_results it is deferred to the applier: the finalize
+    # posts results_data['plane_finalize_oracle'] and swig_gui runs the
+    # staged-save oracle (planes-tab pattern) after the copper lands on the
+    # live board.
+    # Gate: KICAD_PLANE_FINALIZE=1 (default ON; env var is a kill switch).
     if (final_reconcile and not skip_routing and not _ckpt_stop
-            and output_file and not return_results
+            and (output_file or return_results)
             and os.environ.get('KICAD_PLANE_FINALIZE', '1') == '1'):
         try:
             from route_disconnected_planes import (
                 repair_planes as _rdp_engine, auto_detect_zones as _adz)
-            _zpairs = _adz(output_file)
+            _gui9 = bool(return_results)
+            if _gui9:
+                # No written file to detect zones from: derive the (net,
+                # layer) pairs from the in-memory board, in zone order,
+                # deduped -- the same pairs auto_detect_zones reads from the
+                # file (one entry per copper layer of each pour).
+                _zpairs = []
+                _seen9 = set()
+                for _z9 in (getattr(pcb_data, 'zones', None) or []):
+                    _nm9 = (pcb_data.nets[_z9.net_id].name
+                            if _z9.net_id in pcb_data.nets
+                            else getattr(_z9, 'net_name', None))
+                    _ly9 = getattr(_z9, 'layer', None)
+                    if not _nm9 or not _ly9 or not _ly9.endswith('.Cu'):
+                        continue
+                    if (_nm9, _ly9) not in _seen9:
+                        _seen9.add((_nm9, _ly9))
+                        _zpairs.append((_nm9, _ly9))
+            else:
+                _zpairs = _adz(output_file)
             # Respect the caller's net filter: a net excluded by pattern is
             # excluded BY PLAN (same rule as the reconciliation above).
             if net_names:
@@ -2662,8 +2689,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # (FILE_LEDGER-verified at the main write). The old guard
                 # existed because the reconcile's CLI sub-run wrote file-only
                 # copper ahead of the finalize -- that ordering is gone.
+                _pcb9 = None
+                if progress_callback:
+                    _pcb9 = (lambda c, t, m, _o=progress_callback:
+                             _o(c, t, f"Plane finalize: {m}"))
                 _live9 = None
-                if os.environ.get('KICAD_PLANE_FINALIZE_LIVE', '1') == '1':
+                if _gui9 or os.environ.get('KICAD_PLANE_FINALIZE_LIVE',
+                                           '1') == '1':
                     from kicad_parser import snap_pcb_data_to_iu_grid \
                         as _snap9
                     _snapped9 = _snap9(pcb_data)
@@ -2671,30 +2703,155 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         print(f"  Plane finalize: snapped {_snapped9} "
                               f"in-memory coordinate(s) onto the nm grid")
                     _live9 = pcb_data
-                _rdp_engine(
-                    output_file, output_file, _zn, _zl,
-                    track_width=config.track_width,
-                    clearance=config.clearance,
-                    grid_step=config.grid_step,
-                    via_size=config.via_size,
-                    via_drill=config.via_drill,
-                    hole_to_hole_clearance=config.hole_to_hole_clearance,
-                    routing_layers=config.layers,
-                    net_clearances=net_clearances,
-                    pcb_data=_live9)
+                if _gui9:
+                    # In-memory engine leg (GUI): repair appends its kept
+                    # copper to pcb_data as REAL objects and its return
+                    # branch runs the shared cleanup pipeline (the same
+                    # run_post_route_cleanup call clean_plane_copper wraps),
+                    # so the separate cleanup leg below is CLI-file-only.
+                    # Merge the BOARD DELTA -- not the dict emissions --
+                    # into results_data: identity survives into the
+                    # reconcile's strip de-dup, and the delta also captures
+                    # any strip-and-replace outcome exactly.
+                    _b4sid9 = {id(s) for s in pcb_data.segments}
+                    _b4vid9 = {id(v) for v in pcb_data.vias}
+                    _b4segs9 = list(pcb_data.segments)
+                    _b4vias9 = list(pcb_data.vias)
+                    _rdp_engine(
+                        input_file or "", "", _zn, _zl,
+                        track_width=config.track_width,
+                        clearance=config.clearance,
+                        grid_step=config.grid_step,
+                        via_size=config.via_size,
+                        via_drill=config.via_drill,
+                        hole_to_hole_clearance=config.hole_to_hole_clearance,
+                        routing_layers=config.layers,
+                        net_clearances=net_clearances,
+                        pcb_data=pcb_data, return_results=True,
+                        progress_callback=_pcb9)
+                    _cursid9 = {id(s) for s in pcb_data.segments}
+                    _curvid9 = {id(v) for v in pcb_data.vias}
+                    _new_s9 = [s for s in pcb_data.segments
+                               if id(s) not in _b4sid9]
+                    _new_v9 = [v for v in pcb_data.vias
+                               if id(v) not in _b4vid9]
+                    _rm_s9 = [s for s in _b4segs9 if id(s) not in _cursid9]
+                    _rm_v9 = [v for v in _b4vias9 if id(v) not in _curvid9]
+                    # A removal naming copper THIS run emitted must drop it
+                    # from our write-lists instead of riding the remove
+                    # channels (reconcile-merge pattern: the applier's
+                    # key-based remove would no-op on a not-yet-added
+                    # object and the withdrawn copper would ship).
+                    _ours_s9 = {id(s) for _r in results_data.get('results', [])
+                                for s in (_r.get('new_segments') or [])}
+                    _ours_v9 = {id(v) for _r in results_data.get('results', [])
+                                for v in (_r.get('new_vias') or [])}
+                    _drop_s9 = {id(s) for s in _rm_s9 if id(s) in _ours_s9}
+                    _drop_v9 = {id(v) for v in _rm_v9 if id(v) in _ours_v9}
+                    if _drop_s9 or _drop_v9:
+                        for _r in results_data.get('results', []):
+                            if _drop_s9:
+                                _r['new_segments'] = [
+                                    s for s in (_r.get('new_segments') or [])
+                                    if id(s) not in _drop_s9]
+                            if _drop_v9:
+                                _r['new_vias'] = [
+                                    v for v in (_r.get('new_vias') or [])
+                                    if id(v) not in _drop_v9]
+                    if _new_s9 or _new_v9:
+                        results_data.setdefault('results', []).append({
+                            'net_name': '(plane finalize)',
+                            'success': True,
+                            'new_segments': _new_s9,
+                            'new_vias': _new_v9})
+                    results_data.setdefault('segments_to_remove', []).extend(
+                        s for s in _rm_s9 if id(s) not in _drop_s9)
+                    results_data.setdefault('vias_to_remove', []).extend(
+                        v for v in _rm_v9 if id(v) not in _drop_v9)
+                    print(f"  Plane finalize (GUI): +{len(_new_s9)} seg(s) "
+                          f"+{len(_new_v9)} via(s), -{len(_rm_s9)} seg(s) "
+                          f"-{len(_rm_v9)} via(s) merged into results")
+                else:
+                    _rdp_engine(
+                        output_file, output_file, _zn, _zl,
+                        track_width=config.track_width,
+                        clearance=config.clearance,
+                        grid_step=config.grid_step,
+                        via_size=config.via_size,
+                        via_drill=config.via_drill,
+                        hole_to_hole_clearance=config.hole_to_hole_clearance,
+                        routing_layers=config.layers,
+                        net_clearances=net_clearances,
+                        pcb_data=_live9,
+                        progress_callback=_pcb9)
                 print(f"  [finalize timing] engine leg: "
                       f"{_time9.time() - _t9:.1f}s")
-                _t9 = _time9.time()
-                from pcb_modification import clean_plane_copper
-                _cs, _cr = clean_plane_copper(
-                    output_file, sorted(set(_zn)),
-                    config.clearance, config.grid_step)
-                print(f"  [finalize timing] cleanup leg: "
-                      f"{_time9.time() - _t9:.1f}s")
-                if _cs or _cr:
-                    print(f"  Plane finalize cleanup: closed {_cs} stub "
-                          f"gap(s), trimmed {_cr} dead-end segment(s)")
-            if _zpairs_all:
+                if not _gui9:
+                    _t9 = _time9.time()
+                    from pcb_modification import clean_plane_copper
+                    _cs, _cr = clean_plane_copper(
+                        output_file, sorted(set(_zn)),
+                        config.clearance, config.grid_step)
+                    print(f"  [finalize timing] cleanup leg: "
+                          f"{_time9.time() - _t9:.1f}s")
+                    if _cs or _cr:
+                        print(f"  Plane finalize cleanup: closed {_cs} stub "
+                              f"gap(s), trimmed {_cr} dead-end segment(s)")
+            if _zpairs_all and _gui9:
+                # ORACLE leg (GUI): kicad-cli's exact fill needs a real
+                # file, and mid-engine there is none -- the LIVE board only
+                # receives this run's copper when the applier lands it. So
+                # defer: post the net list + engine-resolved params in
+                # results_data and swig_gui runs the staged-save oracle
+                # after apply (the planes-tab pattern). Custody cannot merge
+                # into the reconcile here (no oracle verdict yet); measured
+                # custody net-level gains were 0 on all 3 A/B boards, and
+                # the post-apply oracle is the completion earner.
+                _zna = sorted({n for n, _l in _zpairs_all})
+                results_data['plane_finalize_oracle'] = {
+                    'nets': _zna,
+                    'clearance': config.clearance,
+                    'track_width': config.track_width,
+                    'via_size': config.via_size,
+                    'via_drill': config.via_drill,
+                    'grid_step': config.grid_step,
+                    'hole_to_hole_clearance': config.hole_to_hole_clearance,
+                }
+                # Hands-off for the reconcile comes from the FILL-AWARE
+                # checker instead of the oracle verdict: zone nets the model
+                # says are complete after the engine leg must not be
+                # re-touched by the STALE failure buckets (the pf7
+                # regression class). Model over-credit only defers a fix to
+                # the post-apply oracle -- never breaks a healthy net.
+                try:
+                    from check_connected import (
+                        check_net_connectivity as _cnc9b)
+                    _zbn9b = {}
+                    for _z9b in (getattr(pcb_data, 'zones', None) or []):
+                        _zbn9b.setdefault(_z9b.net_id, []).append(_z9b)
+                    for _nid9b, _net9b in pcb_data.nets.items():
+                        if _net9b.name not in set(_zna):
+                            continue
+                        try:
+                            _r9b = _cnc9b(
+                                _nid9b,
+                                [s for s in pcb_data.segments
+                                 if s.net_id == _nid9b],
+                                [v for v in pcb_data.vias
+                                 if v.net_id == _nid9b],
+                                pcb_data.pads_by_net.get(_nid9b, []),
+                                _zbn9b.get(_nid9b, []), pcb_data=pcb_data)
+                            if _r9b.get('connected'):
+                                _zone_complete9.add(_net9b.name)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                if _zone_complete9:
+                    print(f"  Plane finalize (GUI): {len(_zone_complete9)} "
+                          f"zone net(s) verified complete (fill-aware) -- "
+                          f"hands-off for the reconciliation")
+            if _zpairs_all and not _gui9:
                 # Oracle + custody scope: ALL zone nets (see the pre-gate
                 # note -- the oracle is the model-independent verifier).
                 import time as _time9

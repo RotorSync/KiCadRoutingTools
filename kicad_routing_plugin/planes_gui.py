@@ -1580,12 +1580,7 @@ class PlanesTab(wx.Panel):
             # and the user cannot tell it ran.
             sys.stdout = StdoutRedirector(self.append_log, _orig_stdout)
         try:
-            import tempfile
-            import pcbnew
-            from kicad_oracle import oracle_reconnect, find_kicad_cli
             import routing_defaults as defaults
-            if find_kicad_cli() is None:
-                return
             cfg_src = getattr(self, '_plane_drc_config', {}) or {}
             result = getattr(self, '_operation_result', {}) or {}
             # The PLANE nets only -- exactly the `net_names` the CLI hands
@@ -1602,29 +1597,6 @@ class PlanesTab(wx.Panel):
                 nets.extend(a[0])
             if not nets:
                 return
-            from routing_config import GridRouteConfig
-            # #338 (CLI parity with route_disconnected_planes main): the temp
-            # save below has no sibling .kicad_pro, so oracle_reconnect cannot
-            # resolve the board's copper-to-edge rule itself -- read it from
-            # the live board's design settings (nm -> mm). NOT the plane-zone
-            # inset cfg 'board_edge_clearance': that is a pour aesthetic, not
-            # an enforced routing floor.
-            try:
-                _edge_mm = (board.GetDesignSettings().m_CopperEdgeClearance
-                            or 0) / 1e6
-            except Exception:
-                _edge_mm = 0.0
-            ocfg = GridRouteConfig(
-                clearance=cfg_src.get('clearance', defaults.CLEARANCE),
-                track_width=cfg_src.get('track_width', defaults.TRACK_WIDTH),
-                via_size=cfg_src.get('via_size', defaults.VIA_SIZE),
-                via_drill=cfg_src.get('via_drill', defaults.VIA_DRILL),
-                grid_step=cfg_src.get('grid_step', defaults.GRID_STEP),
-                board_edge_clearance=_edge_mm)
-            with tempfile.NamedTemporaryFile(suffix='.kicad_pcb',
-                                             delete=False) as f:
-                tmp = f.name
-            pcbnew.SaveBoard(tmp, board)
 
             def _oracle_progress(current, total, label=""):
                 # Apply runs on the MAIN thread: update and force-repaint the
@@ -1645,16 +1617,22 @@ class PlanesTab(wx.Panel):
                 except Exception:
                     pass
 
-            # #490: the temp save has no sibling .kicad_pro; the exact-fill
-            # link source must stage the REAL project's netclasses or the
-            # refill runs at stock rules (phantom-divergence trap).
-            try:
-                _proj_from = board.GetFileName() or None
-            except Exception:
-                _proj_from = None
-            orc = oracle_reconnect(
-                tmp, nets, ocfg,
-                project_from=_proj_from,
+            # Shared staged-save core (gui_utils.run_kicad_oracle_on_live_board):
+            # temp-save, oracle_reconnect, stranded-fragment deletions (#508
+            # finding 15), copper apply-back. One implementation for the
+            # planes tab and the signal tab's plane-finalize oracle leg
+            # (#562) -- an oracle fix lands once and both fronts inherit it.
+            # NOT the plane-zone inset cfg 'board_edge_clearance' for the
+            # edge rule: the core reads the live board's design settings
+            # (#338), a pour aesthetic is not an enforced routing floor.
+            from .gui_utils import run_kicad_oracle_on_live_board
+            run_kicad_oracle_on_live_board(
+                board, nets,
+                clearance=cfg_src.get('clearance', defaults.CLEARANCE),
+                track_width=cfg_src.get('track_width', defaults.TRACK_WIDTH),
+                via_size=cfg_src.get('via_size', defaults.VIA_SIZE),
+                via_drill=cfg_src.get('via_drill', defaults.VIA_DRILL),
+                grid_step=cfg_src.get('grid_step', defaults.GRID_STEP),
                 track_via_clearance=cfg_src.get(
                     'track_via_clearance',
                     defaults.PLANE_TRACK_VIA_CLEARANCE),
@@ -1662,70 +1640,6 @@ class PlanesTab(wx.Panel):
                     'hole_to_hole_clearance',
                     defaults.HOLE_TO_HOLE_CLEARANCE),
                 progress_callback=_oracle_progress)
-            import os as _os
-            try:
-                _os.unlink(tmp)
-            except OSError:
-                pass
-            # #508 finding 15: the oracle's stranded-fragment deletions are
-            # stripped from its temp file and pcb_data, but the LIVE board
-            # still holds that copper -- delete it here (before the adds, so
-            # a same-position emission is never collateral).
-            _orc_rm = ((orc.get('removed_segments') or [])
-                       + (orc.get('removed_vias') or []))
-            if _orc_rm:
-                _rm_keys = set()
-                for s in _orc_rm:
-                    if hasattr(s, 'start_x'):
-                        _rm_keys.add((round(s.start_x, 3), round(s.start_y, 3),
-                                      round(s.end_x, 3), round(s.end_y, 3),
-                                      s.net_id))
-                    else:
-                        _rm_keys.add((round(s.x, 3), round(s.y, 3), s.net_id))
-                _n_orc_rm = 0
-                for item in list(board.GetTracks()):
-                    if item.Type() == pcbnew.PCB_VIA_T:
-                        k = (round(pcbnew.ToMM(item.GetPosition().x), 3),
-                             round(pcbnew.ToMM(item.GetPosition().y), 3),
-                             item.GetNetCode())
-                    else:
-                        k = (round(pcbnew.ToMM(item.GetStart().x), 3),
-                             round(pcbnew.ToMM(item.GetStart().y), 3),
-                             round(pcbnew.ToMM(item.GetEnd().x), 3),
-                             round(pcbnew.ToMM(item.GetEnd().y), 3),
-                             item.GetNetCode())
-                        if k not in _rm_keys:
-                            k = (k[2], k[3], k[0], k[1], k[4])
-                    if k in _rm_keys:
-                        board.RemoveNative(item)
-                        _n_orc_rm += 1
-                if _n_orc_rm:
-                    print(f"KiCad-oracle (GUI): deleted {_n_orc_rm} stranded "
-                          f"fragment piece(s) from the live board")
-            for s in orc.get('new_segments') or []:
-                track = pcbnew.PCB_TRACK(board)
-                track.SetStart(pcbnew.VECTOR2I(
-                    mm_to_iu(s.start_x), mm_to_iu(s.start_y)))
-                track.SetEnd(pcbnew.VECTOR2I(
-                    mm_to_iu(s.end_x), mm_to_iu(s.end_y)))
-                track.SetWidth(mm_to_iu(s.width))
-                track.SetLayer(board.GetLayerID(s.layer))
-                track.SetNetCode(s.net_id)
-                board.Add(track)
-            for v in orc.get('new_vias') or []:
-                via = pcbnew.PCB_VIA(board)
-                via.SetPosition(pcbnew.VECTOR2I(
-                    mm_to_iu(v.x), mm_to_iu(v.y)))
-                via.SetDrill(mm_to_iu(v.drill))
-                via.SetWidth(mm_to_iu(v.size))
-                via.SetNetCode(v.net_id)
-                lys = v.layers or ['F.Cu', 'B.Cu']
-                via.SetLayerPair(board.GetLayerID(lys[0]),
-                                 board.GetLayerID(lys[-1]))
-                board.Add(via)
-            if orc.get('links_routed'):
-                print(f"KiCad-oracle (GUI): routed {orc['links_routed']} "
-                      f"missing link(s), applied to the live board")
         except Exception as e:
             print(f"KiCad-oracle (GUI) skipped: {e}")
         finally:

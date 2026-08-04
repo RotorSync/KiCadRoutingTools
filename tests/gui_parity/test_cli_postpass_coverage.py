@@ -49,8 +49,17 @@ CLI_MAINS = ["route.py", "route_diff.py", "route_planes.py",
 REGISTRY = {
     # plane dead-end / graze cleanup (this session's fix)
     'clean_plane_copper': ['_run_plane_copper_cleanup', 'compute_plane_copper_cleanup'],
-    # KiCad-oracle recheck after plane repair
-    'oracle_reconnect': ['_run_kicad_oracle_after_apply', 'oracle_reconnect'],
+    # KiCad-oracle recheck after plane repair AND route.py's plane-finalize
+    # oracle leg (#562): the GUI staged-save core is
+    # gui_utils.run_kicad_oracle_on_live_board (planes tab delegates; the
+    # signal tab consumes results_data['plane_finalize_oracle'] after apply).
+    'oracle_reconnect': ['_run_kicad_oracle_after_apply', 'oracle_reconnect',
+                         'run_kicad_oracle_on_live_board'],
+    # Plane finalize (#562): repair_planes runs INSIDE batch_route (Class 1)
+    # for both fronts -- under return_results it merges its board delta into
+    # results_data and posts the oracle spec; the plugin-side evidence is
+    # swig_gui's plane_finalize_oracle consumption.
+    'repair_planes': ['plane_finalize_oracle'],
     # DRC-floor / project-file writeback after routing
     'fix_project_for_output': ['_write_drc_floors', 'update_live_drc_floors'],
     # #521: protected-nets record in the sibling .kicad_pro after routing.
