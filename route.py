@@ -2569,6 +2569,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # file; GUI (return_results) re-invokes on the in-memory board and
     # merges the sub-run's results (claude-tab/stress parity gap closure).
     _custody_nets9 = []
+    _zone_complete9 = set()
     # PLANE FINALIZE (#562): the pours-first chain's repair step, absorbed.
     # Measured (3-board arch chains): the standalone repair step's entire
     # remaining value is plane-net completion its TAP machinery + the
@@ -2738,10 +2739,27 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # the reconcile then retries signals against the WELDED
                 # planes, pours-first-consistent).
                 if _orc.get('available') and _orc.get('remaining', 0) > 0:
+                    # Custody scope = exactly the nets with remaining links
+                    # (ux pf7: the 6 stubborn links were ALL GND; putting
+                    # every zone net in custody re-touched gate-connected
+                    # +3V3 and broke it). Fallback to all zone nets only if
+                    # the per-link detail is unavailable.
+                    _rl9 = _orc.get('remaining_links')
+                    _custody_nets9 = (sorted({l[0] for l in _rl9})
+                                      if _rl9 else list(_zna))
+                    # Zone nets KiCad verified COMPLETE are hands-off for
+                    # the reconcile: the main run's failure buckets are
+                    # STALE after the finalize fixes nets.
+                    _zone_complete9 = set(_zna) - set(_custody_nets9)
                     print(f"  Plane finalize: {_orc['remaining']} oracle "
-                          f"link(s) unroutable without rip authority -- "
-                          f"their nets join the final reconciliation")
-                    _custody_nets9 = list(_zna)
+                          f"link(s) unroutable without rip authority on "
+                          f"{', '.join(_custody_nets9)} -- joining the "
+                          f"final reconciliation")
+                else:
+                    # Oracle verdict: every zone net complete -- none of
+                    # them may be re-touched by the stale failure buckets.
+                    if _orc.get('available'):
+                        _zone_complete9 = set(_zna)
         except Exception as _e:
             print(f"{RED}  plane finalize pass failed: {_e}{RESET}")
 
@@ -2753,8 +2771,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # parse/base-build serves both, and signal retries now run against
         # the welded planes.
         _rec_names = list(dict.fromkeys(
-            failed_single + [m['net_name'] for m in failed_multipoint]
-            + _custody_nets9))
+            n for n in (failed_single
+                        + [m['net_name'] for m in failed_multipoint]
+                        + _custody_nets9)
+            if n not in _zone_complete9))
         print(f"\nFinal reconciliation: retrying {len(_rec_names)} "
               f"incomplete/custody net(s) against the finished board: "
               f"{', '.join(_rec_names)}")

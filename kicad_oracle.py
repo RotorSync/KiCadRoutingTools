@@ -1732,6 +1732,7 @@ def oracle_reconnect(board_file: str, net_names, config,
     # fragment is invisible to the pads-only "connected" verdict, protected
     # as input copper by every cleanup, so nothing else will EVER touch it
     # and KiCad demands the link on every future run.
+    _debris_resolved = set()
     if rounds and links:
         _stranded_deleted = 0
         _content2 = None
@@ -1779,6 +1780,7 @@ def oracle_reconnect(board_file: str, net_names, config,
                   f"{len(_dvias)} via(s))")
             if _lnet in names:
                 remaining = max(0, remaining - 1)
+                _debris_resolved.add(id(lk))
         if _content2 is not None:
             with open(board_file, 'w', encoding='utf-8') as f:
                 f.write(_content2)
@@ -1789,6 +1791,14 @@ def oracle_reconnect(board_file: str, net_names, config,
               f"unconnected per KiCad after {rounds} round(s){_xb}")
     return {'available': True, 'rounds': rounds, 'links_routed': routed,
             'links_failed': failed, 'remaining': remaining,
+            # #562 order swap: the FINAL flagged links with net names, so the
+            # caller can scope custody to exactly the stubborn nets and keep
+            # the reconcile's hands off KiCad-verified-complete plane nets
+            # (ux pf7: a stale failure bucket re-touched gate-connected +3V3
+            # and broke it).
+            'remaining_links': [l for l in (links or [])
+                                if l[0] in names
+                                and id(l) not in _debris_resolved],
             'cross_board': cross_board,
             'new_segments': emitted_segments, 'new_vias': emitted_vias,
             # #508 finding 15: stranded-fragment copper deleted from the
