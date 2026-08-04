@@ -3326,6 +3326,8 @@ def main():
     from fix_kicad_drc_settings import add_drc_fix_args
     add_drc_fix_args(parser)
     args = parser.parse_args()
+    from fix_kicad_drc_settings import warn_if_missing_project_floor
+    warn_if_missing_project_floor(args.pcb)  # #441: a dropped sibling .kicad_pro strands the DRC floor
     set_default_fab_tier(*fab_tier_from_args(args))
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.pcb),

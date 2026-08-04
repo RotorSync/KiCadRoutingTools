@@ -921,6 +921,8 @@ def main():
     from fix_kicad_drc_settings import add_drc_fix_args
     add_drc_fix_args(parser)
     args = parser.parse_args()
+    from fix_kicad_drc_settings import warn_if_missing_project_floor
+    warn_if_missing_project_floor(args.pcb)  # #441: a dropped sibling .kicad_pro strands the DRC floor
     # #513 item 15: default the edge keep-out to the BOARD'S OWN
     # min_copper_edge_clearance (route.py's documented behavior and the GUI's
     # unchecked-override behavior), not the copper-copper --clearance. ice4pi

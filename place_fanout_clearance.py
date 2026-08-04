@@ -89,6 +89,8 @@ Examples:
                         help="Print each accepted move")
 
     args = parser.parse_args()
+    from fix_kicad_drc_settings import warn_if_missing_project_floor
+    warn_if_missing_project_floor(args.input_file)  # #441: a dropped sibling .kicad_pro strands the DRC floor
 
     if args.output_file is None:
         base, ext = os.path.splitext(args.input_file)

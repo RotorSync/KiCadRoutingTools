@@ -643,15 +643,26 @@ def drc_fix_kwargs(args):
 
 
 def warn_if_missing_project_floor(input_pcb) -> bool:
-    """Warn loudly when an input board arrives WITHOUT its sibling ``.kicad_pro`` (#441).
+    """Complain LOUDLY when an input board arrives WITHOUT its sibling ``.kicad_pro`` (#441).
 
     The ``.kicad_pro`` carries the DRC floor -- the Default-netclass clearance/width the
     board was actually routed to. A bare ``cp board.kicad_pcb copy.kicad_pcb`` that omits
-    the sibling ``.kicad_pro`` strands that floor: the next routing step reads NO project,
-    resolves its floor from the STOCK (looser) netclass, and its writeback then stamps that
-    looser floor over copper routed tighter -- so KiCad grades correct sub-floor copper as
-    a clearance violation (icepi_zero: a dropped 0.09 floor became 0.10 -> 160 phantom
-    grazes). Keep the ``.kicad_pro`` with the board (copy both, or use ``copy_board.py``).
+    the sibling ``.kicad_pro`` strands that floor, and the damage comes in two forms:
+
+    1. Phantom DRC. The next routing step reads NO project, resolves its floor from the
+       STOCK (looser) netclass, and its writeback stamps that looser floor over copper
+       routed tighter -- so KiCad grades correct sub-floor copper as a clearance
+       violation (icepi_zero: a dropped 0.09 floor became 0.10 -> 160 phantom grazes).
+    2. Front divergence. With no project, the CLI seeds a minimal one pinned to the FAB
+       floors while a live pcbnew board carries KiCad's stock defaults -- so the CLI and
+       the GUI legitimately route DIFFERENT copper from the same board (the copper-parity
+       gate measured 12/8 divergent GND segments from exactly this before its harness
+       started staging a project).
+
+    The old single-line text version of this warning scrolled away unread through an
+    entire debugging session, hence the banner. It stays a WARNING, not an error: a
+    pristine never-routed board legitimately has no project yet, so aborting would
+    break first-step runs -- the banner is for the mid-chain copy that lost its floor.
 
     Returns True iff the project is missing (so callers may also record it in a summary)."""
     if not input_pcb:
@@ -659,11 +670,24 @@ def warn_if_missing_project_floor(input_pcb) -> bool:
     proj = os.path.splitext(input_pcb)[0] + ".kicad_pro"
     if os.path.isfile(proj):
         return False
-    print(f"WARNING: input board '{os.path.basename(input_pcb)}' has NO sibling "
-          f".kicad_pro -- its DRC floor is unknown. This routing step will resolve the "
-          f"floor from the STOCK netclass, which can be LOOSER than the copper already on "
-          f"the board and make KiCad report phantom sub-clearance DRC (#441). If the board "
-          f"was copied/renamed, copy its .kicad_pro too (or use copy_board.py).")
+    try:
+        from terminal_colors import RED, RESET
+    except Exception:
+        RED = RESET = ""
+    bar = "!" * 74
+    print(f"{RED}{bar}\n"
+          f"!! NO .kicad_pro NEXT TO '{os.path.basename(input_pcb)}' (#441)\n"
+          f"!!\n"
+          f"!! The sibling project carries the board's DRC floor. Without it this\n"
+          f"!! step resolves clearances from the STOCK netclass, which can be LOOSER\n"
+          f"!! than the copper already on the board:\n"
+          f"!!   - KiCad will then report phantom sub-clearance DRC on correct copper\n"
+          f"!!   - CLI and GUI runs will route DIFFERENT copper from this same board\n"
+          f"!!\n"
+          f"!! If this board was copied or renamed, bring its .kicad_pro along:\n"
+          f"!!   python3 copy_board.py src.kicad_pcb dst.kicad_pcb\n"
+          f"!! (Ignore only if this is a pristine board that has never been routed.)\n"
+          f"{bar}{RESET}")
     return True
 
 
