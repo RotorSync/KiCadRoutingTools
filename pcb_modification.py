@@ -4653,9 +4653,30 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
         pruned_segments.extend(kept_net)
     cleaned_segments = pruned_segments
 
+    # A result's copper must appear on the board EXACTLY ONCE. This is the one
+    # choke point every path uses to commit a result (initial route, retry,
+    # swap, and rip_up_reroute's trace_event='restore'), and the restore/retry
+    # paths hand back a saved result whose objects can still be on the board --
+    # appending them again puts the SAME object in the list twice. That is
+    # always a bug: the write model holds the object once, so the BOARD ledger
+    # reports phantom board-only copper; obstacles get double-stamped (the
+    # #208/#309 ref-count class); and gates treating pcb_data.segments as a
+    # node set are defeated (#195). ulx3s shipped it -- FPDI_D0+ with a
+    # tripled segment entry and GN27 with a tripled via -- alongside "Dropped 2
+    # superseded rip-reroute result(s) from the write-list".
+    # Identity, not geometry: two DISTINCT objects of equal geometry are two
+    # real pieces of copper and both belong.
+    _have_s = {id(s) for s in pcb_data.segments}
     for seg in cleaned_segments:
+        if id(seg) in _have_s:
+            continue
+        _have_s.add(id(seg))
         pcb_data.segments.append(seg)
+    _have_v = {id(v) for v in pcb_data.vias}
     for via in result['new_vias']:
+        if id(via) in _have_v:
+            continue
+        _have_v.add(id(via))
         pcb_data.vias.append(via)
     # Update result so output file also gets cleaned segments
     result['new_segments'] = cleaned_segments
