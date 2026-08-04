@@ -253,7 +253,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
             _snap.pop(_k, None)
         _dump = {}
         for _k, _v in sorted(_snap.items()):
-            if callable(_v) or _k in ('vis_callback', 'cancel_check',
+            if callable(_v) or _k in ('cancel_check',
                                       'progress_callback'):
                 continue
             try:

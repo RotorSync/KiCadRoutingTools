@@ -81,7 +81,6 @@ CLI_ONLY_OK = {
     # The CLI streams a route trace to build the stress movie (#482). The GUI has
     # its own recorder (movie_recorder.py) driven from the dialog, so it does not
     # hand the engine a callback.
-    "vis_callback": "GUI uses movie_recorder.py instead of an engine callback (#482/#506)",
 }
 
 # Kwargs only the GUI passes: the in-memory/live-board plumbing that has no CLI

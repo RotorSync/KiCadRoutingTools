@@ -589,11 +589,6 @@ class PlanesTab(wx.Panel):
             self.options_scroll, on_ask_ai=self._on_ask_ai_gnd_via)
         options_scroll_sizer.Add(self.create_options, 0, wx.EXPAND | wx.BOTTOM, 5)
 
-        # Repair options panel (initially hidden)
-        def get_track_width():
-            if self.get_shared_params:
-                return self.get_shared_params().get('track_width', defaults.TRACK_WIDTH)
-            return defaults.TRACK_WIDTH
         self.options_scroll.SetSizer(options_scroll_sizer)
         self.options_scroll.SetScrollRate(0, 10)
         self.options_scroll.FitInside()
@@ -771,7 +766,7 @@ class PlanesTab(wx.Panel):
         # Poll for completion
         self._poll_operation()
 
-    def _build_mode_config(self, mode=0):
+    def _build_mode_config(self):
         """Assemble the engine config for a create run.
 
         The ONE assembly point (the kwarg-parity gate drives this method
@@ -782,7 +777,6 @@ class PlanesTab(wx.Panel):
         """
         config = self.create_options.get_config()
         config.update(self.get_shared_params() if self.get_shared_params else {})
-        config['mode'] = 'create'
         return config
 
     def _run_planes_operation(self, config):
@@ -1109,12 +1103,6 @@ class PlanesTab(wx.Panel):
             'config': config,
         }
 
-    def _get_all_copper_layers(self):
-        """Get all copper layers from PCB data."""
-        if hasattr(self.pcb_data, 'board_info') and self.pcb_data.board_info:
-            if hasattr(self.pcb_data.board_info, 'copper_layers'):
-                return self.pcb_data.board_info.copper_layers
-        return ['F.Cu', 'B.Cu']
 
     def _poll_operation(self):
         """Poll for operation completion."""

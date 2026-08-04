@@ -1259,7 +1259,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     print("Building base obstacle map...")
     base_start = time.time()
 
-    # Use visualization-aware building if callback is provided
     # Tap relocation (#424): zone-backed plane nets become base-map-excluded
     # and per-net cached so single-tap surgery is exact whole-net cache
     # recompute (ref-count-balanced by construction); deliberately NOT in

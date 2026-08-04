@@ -2811,7 +2811,7 @@ def remove_pads_via_keepout(obstacles: GridObstacleMap, pads: list,
 
 
 # ============================================================================
-# Visualization support - captures blocked cell data for rendering
+# Line/clearance geometry helpers
 # ============================================================================
 
 def check_line_clearance(obstacles: GridObstacleMap,

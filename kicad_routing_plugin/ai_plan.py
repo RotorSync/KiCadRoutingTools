@@ -39,7 +39,7 @@ PLAN_RESULT_SCHEMA = (
     '{"action": "route_planes", "assignments": [{"nets": ["<exact net name>", ...], '
     '"layer": "<copper layer e.g. In1.Cu>"}], '
     '"params": {"add_gnd_vias": true|false, "gnd_via_distance": <mm>, '
-    '"gnd_via_net": "<net name>", "rip_blocker_nets": true|false, '
+    '"gnd_via_net": "<net name>", '
     '"stitch_vias": true|false, "stitch_pitch": <mm, default 20>, '
     '"stitch_max_freq": <MHz, derives pitch as lambda/20 from the stackup>, '
     '"stitch_edge_fence": true|false, "stitch_fence_pitch": <mm>, '
@@ -284,6 +284,16 @@ def apply_step_params(step, dialog):
     notes = []
     action = step["action"]
     params = step.get("params") or {}
+    if action == "repair_planes":
+        # Obsolete step (#562): the executor skips it, so applying its params
+        # is not merely pointless -- the generic loop below calls
+        # _enable_geometry_override, TICKING the Basic-tab override
+        # checkboxes (via size/drill, ...) for a step that then does nothing.
+        # Those overrides persist into the NEXT step and silently change its
+        # geometry. Apply nothing.
+        return ["repair_planes params ignored (#562: the step is a skipped "
+                "no-op; applying them would leak geometry overrides into "
+                "the next step)"]
     # ANY GUI parameter (Andy): a plan step's params may name any control
     # on the step's tab or the shared options panels; resolve by attribute
     # name and coerce by control type. Composite fields with special
