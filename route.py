@@ -3056,13 +3056,22 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # -- saves a whole parse + base-build self-invocation, and
                 # the reconcile then retries signals against the WELDED
                 # planes, pours-first-consistent).
-                if _orc.get('available') and _orc.get('remaining', 0) > 0:
+                _rl9 = _orc.get('remaining_links')
+                # `remaining` counts links that no copper can ever join
+                # (cross-board) as well, so gate custody on the FILTERED
+                # detail when we have it -- otherwise a multi-outline board
+                # pays a doomed reconcile (with rip authority) every run.
+                # remaining_links is None ONLY when the link detail was never
+                # obtained (source failure / cancel), where `remaining` may
+                # be a stale count: fall back to all zone nets there, but
+                # never on an empty list, which honestly means "none left".
+                _has_custody = (_rl9 is None and _orc.get('remaining', 0) > 0) \
+                    or bool(_rl9)
+                if _orc.get('available') and _has_custody:
                     # Custody scope = exactly the nets with remaining links
                     # (ux pf7: the 6 stubborn links were ALL GND; putting
                     # every zone net in custody re-touched gate-connected
-                    # +3V3 and broke it). Fallback to all zone nets only if
-                    # the per-link detail is unavailable.
-                    _rl9 = _orc.get('remaining_links')
+                    # +3V3 and broke it).
                     _custody_nets9 = (sorted({l[0] for l in _rl9})
                                       if _rl9 else list(_zna))
                     # Zone nets KiCad verified COMPLETE are hands-off for

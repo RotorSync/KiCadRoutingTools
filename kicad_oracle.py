@@ -910,6 +910,11 @@ def oracle_reconnect(board_file: str, net_names, config,
     names = set(net_names)
     routed = failed = rounds = cross_board = 0
     remaining = -1
+    links = None
+    # True when we never obtained a trustworthy link list (source failure or
+    # cancel): `remaining` may then be a STALE count from a previous round,
+    # so remaining_links must report None ("unknown"), never [] ("none").
+    _links_unavailable = False
     emitted_segments = []  # parser objects, for callers that apply results
     emitted_vias = []      # to a live board instead of reading the file
     # Stranded-fragment deletions (#508 findings 4+15): copper deleted from
@@ -918,9 +923,25 @@ def oracle_reconnect(board_file: str, net_names, config,
     removed_board_segments = []
     removed_board_vias = []
     attempted = {}  # (net, endpoints) -> attempt count (graduated retries)
+    # #562 custody: links no copper can ever join (cross-board) stay in
+    # `links` and keep counting in `remaining`, so a caller that treats
+    # `remaining > 0` as "put these nets in custody" would retry a doomed
+    # net on EVERY run -- with rip authority. Record their keys and filter
+    # them out of remaining_links.
+    exempt_keys = set()
+
+    def _link_key(l):
+        """The same (net, rounded endpoints) key `attempted` uses."""
+        try:
+            _n, (_ax, _ay, _al, _ak), (_bx, _by, _bl, _bk) = l
+            return (_n, round(_ax, 2), round(_ay, 2),
+                    round(_bx, 2), round(_by, 2))
+        except Exception:
+            return None
     for rnd in range(max_rounds):
         if cancel_check and cancel_check():
             print("  KiCad-oracle recheck: cancelled")
+            _links_unavailable = True
             break
         if progress_callback:
             progress_callback(0, 0, f"KiCad-oracle: running kicad-cli DRC "
@@ -949,6 +970,7 @@ def oracle_reconnect(board_file: str, net_names, config,
             links = kicad_unconnected(board_file, kicad_cli)
         if links is None:
             print("  KiCad-oracle recheck: kicad-cli DRC failed, skipping")
+            _links_unavailable = True
             break
         ours = [l for l in links if l[0] in names]
         remaining = len(ours)
@@ -1144,6 +1166,7 @@ def oracle_reconnect(board_file: str, net_names, config,
                           f"different board outlines -- board-to-board "
                           f"link, no copper can join it)")
                     attempted[_key] = 99  # never retry
+                    exempt_keys.add(_key)
                     cross_board += 1
                     return 'exempt', None
                 if _ex is None:
@@ -1796,9 +1819,11 @@ def oracle_reconnect(board_file: str, net_names, config,
             # the reconcile's hands off KiCad-verified-complete plane nets
             # (ux pf7: a stale failure bucket re-touched gate-connected +3V3
             # and broke it).
-            'remaining_links': [l for l in (links or [])
-                                if l[0] in names
-                                and id(l) not in _debris_resolved],
+            'remaining_links': (None if _links_unavailable else
+                                [l for l in (links or [])
+                                 if l[0] in names
+                                 and id(l) not in _debris_resolved
+                                 and _link_key(l) not in exempt_keys]),
             'cross_board': cross_board,
             'new_segments': emitted_segments, 'new_vias': emitted_vias,
             # #508 finding 15: stranded-fragment copper deleted from the
