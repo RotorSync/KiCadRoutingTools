@@ -34,6 +34,11 @@ ROOT = os.path.abspath(os.path.join(_here, '..', '..'))
 sys.path.insert(0, ROOT)
 
 BOARDS_DIR = os.path.join(ROOT, 'kicad_files')
+# The manufacturing floor each board is actually routed and graded at, from
+# `list_nets.py --design-rules`. Grading at anything else manufactures phantom
+# violations or hides real ones.
+CLEARANCE = {'tigard': 0.09, 'splitflap_driver': 0.10, 'glasgow_revC': 0.09}
+WANT_ARMS = ('quench', 'loop')
 # Rails, so block displacement does not degenerate into "distance from the
 # middle of the board" (GND owns 96 of ulx3s's parts).
 IGNORE_NETS = ['GND', 'VCC', 'VDD', '+3V3', '+5V', '+1V8', '+1V1', 'GNDA']
@@ -129,6 +134,100 @@ def quench_arm(board, out_board, work, label, max_disp, locks,
             'argv': argv, 'summary': _json_summary(out)}
 
 
+def causal_nets(control_board, members, ignore_nets):
+    """The nets the perturbed unit owns, computed on the ORIGINAL board.
+
+    Frozen before either arm runs and identical for every arm, so a recovery
+    cannot choose its own exam -- the same causal-scoping design as
+    tests/test_placement_probe.py, and for the same reason: scoping by "nets
+    touching parts that moved" is circular, because an arm that moves nothing
+    then scores a perfect null.
+    """
+    from kicad_parser import parse_kicad_pcb
+    pcb = parse_kicad_pcb(control_board)
+    ig = {n.upper() for n in ignore_nets}
+    want = set()
+    for ref in members:
+        fp = pcb.footprints.get(ref)
+        if not fp:
+            continue
+        for pad in fp.pads:
+            if pad.net_id and pad.net_name:
+                nm = pad.net_name
+                base = nm.split('/')[-1].upper()
+                if base in ig or nm.upper() in ig:
+                    continue
+                if len(pcb.pads_by_net.get(pad.net_id, ())) >= 2:
+                    want.add(nm)
+    return sorted(want)
+
+
+# The two loop configurations. Running ONLY the shipped defaults would make the
+# answer a tautology: `nets_to_refs` drops any footprint over --max-target-pins,
+# and --group-by defaults to none, so L0 structurally cannot move a block and
+# "recovers nothing" would be the documented behaviour of the stop-loss rather
+# than a measurement. L3 removes both limits, so a null there is a real null.
+LOOP_ARMS = {
+    # The shipped command, on a FULL-board route. Scoping the route to the
+    # unit's own nets is what the cheap tier does, and it is wrong here:
+    # measured on splitflap_driver/translate, a 63-net scoped route of the
+    # PERTURBED board returned failures=0, so the loop printed "No failures
+    # left - stopping" with rounds_run=0 and handed back its input byte for
+    # byte. Scoping makes routing EASIER, and the loop only ever moves parts
+    # that own a failed or blocking net.
+    'loop@shipped': dict(max_disp=3.0, step=0.5, pins=40, group='none',
+                         targeted=False),
+    # Cap matched to the dose, pin gate lifted, blocks enabled. Without this
+    # arm a null is the documented behaviour of the stop-loss rather than a
+    # measurement.
+    'loop@allon':   dict(max_disp=None, step=None, pins=100000,
+                         group='sheet,decap', targeted=False),
+    # The skill's own answer to "everything routes but the floorplan is wrong":
+    # --target-nets supplies targets even at zero failures. Shipped caps, so the
+    # ONLY difference from loop@shipped is whether the loop engages at all --
+    # which separates "the caps are too small" from "it never got to targeting".
+    'loop@targeted': dict(max_disp=3.0, step=0.5, pins=40, group='none',
+                          targeted=True),
+}
+
+
+def loop_arm(board, out_board, work, label, cfg, nets, clearance, applied,
+             rounds=5, timeout=5400):
+    """place_route_loop -- the only arm that re-routes and accept/reverts."""
+    max_disp = cfg['max_disp'] if cfg['max_disp'] else max(3.0, round(applied * 1.5, 2))
+    step = cfg['step'] if cfg['step'] else max(0.5, round(max_disp / 6.0, 3))
+    excl = ' '.join(f'"!{n}"' for n in IGNORE_NETS)
+    route_args = f'--nets "*" {excl} --clearance {clearance}'
+    argv = [sys.executable, '-X', 'utf8',
+            os.path.join(ROOT, 'place_route_loop.py'), board, out_board,
+            '--route-args', route_args,
+            '--work-dir', os.path.join(work, label.replace('@', '_')),
+            '--rounds', str(rounds),
+            '--max-displacement', str(max_disp), '--step', str(step),
+            '--max-target-pins', str(cfg['pins']),
+            '--group-by', cfg['group'],
+            '--no-movie']
+    if cfg.get('targeted'):
+        argv += ['--target-nets'] + nets
+    argv += ['--ignore-nets'] + IGNORE_NETS
+    t0 = time.time()
+    try:
+        rc, out = _run(argv, os.path.join(work, f'{label}.log'), timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {'rc': None, 'timed_out': True, 'max_displacement': max_disp,
+                'seconds': round(time.time() - t0, 1), 'argv': argv,
+                'summary': {}, 'nets': len(nets)}
+    # The analytic ceiling on how far this arm could POSSIBLY travel: the cap
+    # widens 1.5x per rejected round and resets on accept, so a dose beyond
+    # this is out of reach by arithmetic, not by any property of the search.
+    ceiling = max_disp * (1.5 ** max(0, rounds - 1))
+    return {'rc': rc, 'timed_out': False, 'seconds': round(time.time() - t0, 1),
+            'max_displacement': max_disp, 'step': step, 'rounds': rounds,
+            'cap_ceiling_mm': round(ceiling, 3),
+            'cap_infeasible': bool(applied > ceiling),
+            'nets': len(nets), 'argv': argv, 'summary': _json_summary(out)}
+
+
 def grade_floorplan(board, intent, work, label):
     """Step 0e -- an INDEPENDENT check: not produced by the thing being graded."""
     rc, out = _run([sys.executable, '-X', 'utf8',
@@ -178,15 +277,37 @@ def do_board(name, kind, out_dir, doses):
         locks, lock_tally = suggest_locks(perturbed, cell)
 
         arms = {'none': perturbed}
-        # The cap the skill PRESCRIBES, and a cap CAPABLE of the dose. The
-        # difference between them is the finding.
         arms_meta = {}
-        for label, cap in (('quench@3mm', 3.0),
-                           ('quench@dose', max(3.0, round(applied * 1.5, 2)))):
-            ob = os.path.join(cell, f'{label.replace("@", "_")}.kicad_pcb')
-            arms_meta[label] = quench_arm(perturbed, ob, cell, label, cap, locks)
-            if os.path.exists(ob):
-                arms[label] = ob
+        if 'quench' in WANT_ARMS:
+            # The cap the skill PRESCRIBES, and a cap CAPABLE of the dose. The
+            # difference between them is the finding.
+            for label, cap in (('quench@3mm', 3.0),
+                               ('quench@dose', max(3.0, round(applied * 1.5, 2)))):
+                ob = os.path.join(cell, f'{label.replace("@", "_")}.kicad_pcb')
+                arms_meta[label] = quench_arm(perturbed, ob, cell, label, cap,
+                                              locks)
+                if os.path.exists(ob):
+                    arms[label] = ob
+        if 'loop' in WANT_ARMS:
+            nets = causal_nets(control, members, IGNORE_NETS)
+            if not nets:
+                print(f'  {name}/{kind}: no causal nets for the unit; '
+                      f'skipping the loop arms', flush=True)
+            else:
+                print(f'  {name}/{kind}: {len(nets)} causal net(s), frozen from '
+                      f'the original', flush=True)
+                for label, cfg in LOOP_ARMS.items():
+                    ob = os.path.join(cell, f'{label.replace("@", "_")}.kicad_pcb')
+                    meta = loop_arm(perturbed, ob, cell, label, cfg, nets,
+                                    CLEARANCE.get(name, 0.1), applied)
+                    arms_meta[label] = meta
+                    print(f'    {label:14s} {meta["seconds"]:8.1f}s '
+                          f'cap {meta["max_displacement"]}mm '
+                          f'ceiling {meta.get("cap_ceiling_mm")}mm '
+                          f'infeasible={meta.get("cap_infeasible")} '
+                          f'timed_out={meta["timed_out"]}', flush=True)
+                    if os.path.exists(ob):
+                        arms[label] = ob
 
         for label, b in arms.items():
             score = R.score_board(b, rec)
@@ -323,7 +444,12 @@ def main(argv=None):
     p.add_argument('--doses', nargs='+', type=float, default=[10.0])
     p.add_argument('--scoreboard', default=None,
                    help='append-only JSONL (default <out-dir>/scoreboard.jsonl)')
+    p.add_argument('--arms', nargs='+', default=['quench', 'loop'],
+                   choices=['quench', 'loop'],
+                   help='arm families to run (loop re-routes; hours, not minutes)')
     a = p.parse_args(argv)
+    global WANT_ARMS
+    WANT_ARMS = tuple(a.arms)
 
     os.makedirs(a.out_dir, exist_ok=True)
     sb = a.scoreboard or os.path.join(a.out_dir, 'scoreboard.jsonl')
