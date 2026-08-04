@@ -26,6 +26,7 @@ python3 -X utf8 place_optimize.py board.kicad_pcb --suggest-locks
 | careful hand placement, routing not yet attempted | **NO** | — |
 | routing already completed clean | **NO** — *unless* a spec clause placement could fix is still violated; see the last row of 9.3d | — |
 | board already carries copper (the tools exit 3) | **NO** — placement moves footprints, not tracks | — |
+| **placed, but placed WRONG** — `check_drc` on the **copper-free** board returns violations, or a mechanically-fixed part sits where mechanics forbid (an edge connector clear of every outline edge, a hole away from the pattern its siblings define) | yes, and **the quench is the wrong tool** | **Step 0a-0 first: RECONSTRUCT.** Only then `place_optimize` on the residue |
 | rough / imported / auto-generated placement | yes | `place_optimize.py --max-displacement 3` |
 | placed, and the user wants placement OPTIONS — or a converged run's remaining failures were classified **floorplan-shaped** | yes — generate a SLATE, not a nudge | `place_portfolio.py` (Step 0c-bis) |
 | routing FAILED and `/diagnose-routing-failures` blames **congestion / blockers** | yes | `place_route_loop.py` |
@@ -38,6 +39,126 @@ best, and the default weights *caused 2 new routing failures*.
 
 **Placement invalidates every downstream routed board.** Never run it mid-chain;
 re-run the whole chain from the placed board.
+
+### Step 0a-0: RECONSTRUCT before you optimise — the mechanical parts are arithmetic
+
+**Run this before Step 0a, and it takes seconds.** The quench is a local search over a
+continuous lattice; it is the right tool for a *rough* placement and the wrong one for a
+*wrong* placement. Anything whose position is a mechanical fact should be **computed and
+placed**, not handed to an optimizer — and computing it usually also collapses the search
+space for everything else.
+
+**First, one command Step 0 has never had, on the board with ZERO copper:**
+
+```bash
+python3 -X utf8 check_drc.py board.kicad_pcb --clearance <floor>   # NOT piped
+echo "EXIT=$?"
+```
+
+A copper-free board has no routing, so **every violation this returns is a placement
+defect that no router can ever remove**, and it lands straight in `board_score`'s
+`blocking`. Measured on one board: **68 PAD-PAD violations** with zero copper, against
+**0** for the same 92 parts correctly placed. Every other Step 0 instrument called that
+board fine — `--suggest-locks` exited 0 with advice, `check_floorplan --health` returned
+`pass: true, violations: 0`, and `render_placement`'s `overlap_area` is *courtyard*
+overlap, a soft number with no DRC meaning. `check_drc` on the bare board is the only
+instrument in Step 0 that measures the thing that reaches `blocking`.
+
+**Then reconstruct, in this order. Each rung has an applicability test — run the test,
+and when it fails, say so and fall through to the next rung.** None of these invents
+geometry: every one either reads a determinant off the board or reads it from the spec.
+
+**R1 — Separate the parts whose position is NOT a netlist question.** For each, name what
+determines it. This is Step 0a's table, used as a *placement* list rather than a lock
+list:
+
+| class | what determines the position | detection test on ANY board |
+|---|---|---|
+| mounting holes, NPTH, drill-outs | the enclosure's standoff pattern | `pad.pad_type == 'np_thru_hole'`, or 0 connected pins. **The quench provably cannot place these** — the advisor says so itself: *"0 connected pin(s) → invisible to the airwire cost, so only the halo term decides where it goes"* |
+| edge connectors, castellations, card edges | the mating standard / the outline | courtyard must intersect (castellated: be centred on) the outline. `check_floorplan`'s `edge_connectors` block already computes the edge and overhang |
+| enclosure-referenced parts (USB/barrel/RF jacks, buttons, LEDs, displays) | an aperture in the spec | no board-derivable test — **spec only** |
+| fiducials, test points | a fab or test-fixture rule | usually spec; sometimes a symmetric pattern (see R2) |
+
+**R2 — Ask whether the board itself determines the position. Often it does, and then it
+is arithmetic rather than search. But PROPOSE, never trigger.**
+
+The idea: a part may belong to a family whose pattern is over-determined by its surviving
+members, so you can fit the pattern to the survivors and predict the rest. Worked, on one
+board: a rectangular outline `30–76` with two mounting holes still at `(73,33)` and
+`(73,73)` over-determines a **3.00 mm corner inset**, which predicts the two displaced
+holes at `(33,33)` and `(33,73)` — **2 µm from where the human had put them**, with no
+spec and no reference board.
+
+**Do not turn that into a detector.** Written as one it is unsafe, and both failure modes
+were measured over this repo's 33 in-repo boards:
+
+- **False positive.** `flat_hierarchy` has six holes: four at a `(3.81, 3.81)` corner
+  inset and two elsewhere. A "hole off its siblings' pattern" rule flags those two, and
+  they are a perfectly ordinary **mid-edge mounting pattern**. Reconstructing that board
+  would damage a correct one.
+- **False negative, on the board the rule was derived from.** tigard's four holes sit at
+  one 3 mm inset, but its outline is `30.0 – 75.99764`, so nearest-corner insets come out
+  as `3.000` and `2.998` and a naive comparison reports *four distinct patterns* and
+  stays silent. Sub-µm outline asymmetry is normal, not exceptional.
+
+So the safe shape is: **the pattern fit PROPOSES a position; the bare-board `check_drc`
+DECIDES.** Apply a proposal only when
+
+- the fit is over-determined (≥ 2 survivors for a translation, ≥ 3 for anything with a
+  rotation or a scale), **and**
+- the residual on the survivors collapses to a grid step when compared with a tolerance,
+  **not** to exact equality, **and**
+- **applying it measurably improves the copper-free `check_drc` count** — the one Step 0
+  instrument with a measured false-positive rate of **0 on 31 of 31** in-repo boards,
+  from 4-part fixtures to a 266-part glasgow.
+
+If the count does not improve, **revert the proposal**: the determinant was not on the
+board. Then go to the spec, and **if there is no spec, say so and stop reconstructing.**
+A predicted position that no instrument confirms is an invention, and inventing
+mechanical geometry is what this skill forbids everywhere else.
+
+**R3 — Apply the positions you derived.** `place_seed.py` is the only tool here that
+places from constraints rather than from a part's current position (*"edge bands → edge
+poses, single-ref zones → the spec coordinate"*). Put each derived position in the intent
+as a tight `blocks` zone (or an `edge_connectors` entry where only the edge is known),
+list the refs in `must_lock`, and:
+
+```bash
+python3 -X utf8 place_seed.py board.kicad_pcb reseated.kicad_pcb \
+    --intent floorplan.json --force
+```
+
+**`--force` is required and this is the row that authorises it.** `place_seed` refuses a
+placed board — *"this board already looks PLACED … or `--force` to re-seed anyway"* — so
+on a placed-but-wrong board the tool that could fix it is unreachable without the flag.
+It stamps `must_lock` refs `(locked yes)`, which is the lock Step 0a wants, now applied to
+a position you verified rather than to one you inherited.
+
+**R4 — Then test for a rigid displacement, because R2/R3 just gave you the vector.**
+When parts moved as a block (a bad merge, a re-imported netlist, a dragged selection),
+every member moved by the **same** vector, and the offset between where a known part *is*
+and where R2/R3 says it *must be* is a candidate for it. The test, on any board:
+
+- compute that offset for **every** part whose correct position you established;
+- **if two or more agree to within a grid step, it is a real group vector.** If they
+  disagree, there is no single rigid displacement — **this rung does not apply, stop
+  here** and hand the board to Step 0c;
+- when it does apply, the remaining parts no longer live on a continuous plane. Each has
+  a small discrete candidate set — `{0, +v, −v, …}` — and you can choose per part by
+  coordinate descent, with **pad-clearance conflict as the hard term and `hpwl` to break
+  its ties**. Neither alone works: conflict alone has many zero-cost arrangements, and
+  `hpwl` alone is what the quench already minimises.
+
+Measured on a 92-part board: two mounting holes collapsed the problem to a **three-way
+choice per part**; that descent took PAD-PAD DRC to **0**, `overlap_area` 142 → 13, and
+put **25 %** of the displaced parts within 2 mm of home. Every quench and loop arm on the
+same board, across seven caps, left PAD-PAD at 25–51 and **0.00 %** of parts home.
+
+**Hand the residue to Step 0c, not the original mess.** The two are complementary and the
+measured split is stark: reconstruction fixes the hard, blocking-relevant metrics and is
+indifferent to the soft ones (it left `crossings` at 392); the quench fixes the soft ones
+(`crossings` 412 → 227) and never touches the hard ones. Running only the quench on a
+wrong placement optimises a board that cannot pass DRC however well it routes.
 
 ### If the board is UNPLACED
 
@@ -181,7 +302,25 @@ bulk cap by almost nothing. When a part fits no row above, ask which CLASS
 governs it — and which rule and grading signal that class implies — before
 treating it as free for the optimizer to trade.
 
-**2. Lock every one of them, and pass the locks to EVERY placement invocation.**
+**2. CHECK EACH ONE IS ALREADY THERE, and move it if it is not — a lock is not a
+placement.** This step has exactly one verb in most runs, `--lock`, and `--lock` means
+*freeze it where it currently sits*. On a correctly-placed board that is the same as
+correct. **On a misplaced board both branches are wrong**: lock the list and you pin the
+error at exactly the parts whose position is a mechanical fact; leave it unlocked and you
+hand a connector to an optimizer that has no idea where a connector belongs. Measured on
+one board: of the 13 refs the advisor printed, **8 were displaced**, including a USB-C
+receptacle, two headers, a JST connector and two mounting holes — each 15.8 mm from its
+mating position, and nothing in the advisor's output hinted at it. Its two HIGH
+*geometric* reasons (`courtyard leaves the board outline`) were **products of the
+misplacement being reported as evidence for preserving it**, and on the correct board the
+same advisor rated two other connectors HIGH that it demoted to name-only MEDIUM on the
+damaged one — it loses true signals as well as manufacturing false ones.
+
+So the order is **place it, then lock it** (Step 0a-0 above computes the position;
+`place_seed.py --intent … --force` applies it), and the lock is only meaningful once you
+have confirmed the part is where the mechanics say.
+
+**Then pass the locks to EVERY placement invocation.**
 Not just the first — `place_optimize`, `place_route_loop` and every retry:
 
 ```bash
@@ -302,9 +441,28 @@ the optimizer would otherwise chase across the board.
 three parts are required:
 
 1. Read the `JSON_SUMMARY:` line from 0c. If `crossings_after > crossings_before`
-   or `hpwl_after > hpwl_before`, **discard the result.**
+   or `hpwl_after > hpwl_before`, **discard the result.** **And add a third term the
+   quench has no objective for: `check_drc` PAD-PAD must not rise.** Rule 1 as written is
+   built entirely out of the quench's own cost function, so it can only measure whether
+   the quench succeeded at being a quench. Measured across 29 candidates on one board,
+   against distance-to-the-correct-placement: **r(crossings) = +0.780** and
+   **r(overlap_area) = +0.723** — *lower crossings goes with a WORSE placement*. One
+   candidate reached **233 crossings, better than the human original's 276**, while
+   sitting 18.7 mm out of position. `hpwl` behaves (its minimum is at the truth) and is
+   what actually does the work in this rule. **Gate on `hpwl` and on PAD-PAD DRC; report
+   `crossings` and `overlap_area` and never gate on them.**
 2. `check_floorplan --intent` must still **pass**. It did not, once: the quench
    walked a crystal 1.40 mm out of its declared zone while both metrics improved.
+   **But an intent emitted from the board under repair INVERTS this rule.**
+   `--emit-intent` records the board as it is, so on a misplaced board it writes the
+   damage down as the requirement: a displaced connector's position becomes its declared
+   edge, and the measured `overlap_area` becomes the `legality_budget`. Measured, one
+   emitted intent: it **failed the correct board** (`H1 sits nearest the north edge but
+   is declared on the west edge`; `oob 7 exceeds the declared budget 5`) and **passed the
+   142 mm² pile-up** with zero violations — so rule 2 would have vetoed the repair and
+   blessed the defect. Before trusting rule 2, check the intent was authored or verified
+   against something other than the board you are repairing; if it was not, say so and
+   fall back to rules 1 and 3.
 3. Any repo-local requirement gate must still pass.
 
 **Two numbers produced by the optimizer cannot adjudicate a requirement the
