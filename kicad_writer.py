@@ -1017,7 +1017,8 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
     return True
 
 
-def modify_segment_layers(content: str, segment_mods: List[Dict]) -> Tuple[str, int]:
+def modify_segment_layers(content: str, segment_mods: List[Dict],
+                          unapplied_out: List[Dict] = None) -> Tuple[str, int]:
     """
     Modify the layer of existing segments in the KiCad PCB content.
 
@@ -1111,7 +1112,43 @@ def modify_segment_layers(content: str, segment_mods: List[Dict]) -> Tuple[str, 
             mods = mod_lookup_by_id.get(coord_only_key + (net_id,))
         if mods is None and net_name is not None:
             mods = mod_lookup_by_name.get(coord_only_key + (net_name,))
-        mod = mods[-1] if mods else None
+        # Prefer a mod whose old_layer IS this block's current layer. A mod
+        # says "the copper on old_layer moves to new_layer", so old_layer is
+        # part of its identity -- taking mods[-1] blindly mis-assigns when ONE
+        # net owns twin segments of identical geometry on different layers
+        # (the #264 ambiguity, which is not limited to twins of DIFFERENT
+        # nets). cynthion shipped the failure this guards: VCCRAM's stub
+        # (138.425,92.1)-(138.5,92.1) stayed In1.Cu in the file while pcb_data
+        # moved it to In3.Cu, leaving a 0.075mm In1 sliver between two In3
+        # segments with NO via -- a broken track plus stray copper.
+        mod = None
+        chain = []
+        if mods and any(m.get('old_layer') for m in mods):
+            # FOLLOW THE CHAIN from THIS block's current layer: repeatedly take
+            # the mod whose old_layer is where the copper currently sits. That
+            # satisfies both cases at once -- chained swaps on one segment
+            # (In1->In2->B lands on B) and twin disambiguation (a twin already
+            # on In3 has no In3-rooted mod, so it is left alone).
+            cur = layer
+            seen = {layer}
+            while True:
+                cands = [m for m in mods if m.get('old_layer') == cur]
+                if not cands:
+                    break
+                step = cands[-1]
+                chain.append(step)
+                nxt = step['new_layer']
+                if nxt in seen:      # cycle guard (a true A<->B swap)
+                    cur = nxt
+                    break
+                seen.add(nxt)
+                cur = nxt
+            if chain:
+                mod = dict(chain[-1])
+                mod['new_layer'] = cur
+        elif mods:
+            # No old_layer recorded anywhere -> legacy "last mod wins".
+            mod = mods[-1]
         # Fallback: coordinate match with the net left unmatched (the net was
         # reassigned between recording and writing, e.g. by target swaps). Only
         # accept mods whose old_layer equals THIS segment's current layer, so a
@@ -1123,13 +1160,27 @@ def modify_segment_layers(content: str, segment_mods: List[Dict]) -> Tuple[str, 
 
         if mod:
             new_layer = mod['new_layer']
+            # Credit every mod the chain consumed (mod itself may be a
+            # synthesized end-of-chain dict). Satisfied either way: a layer
+            # that already reads correctly needs no edit.
+            for _m in (chain or [mod]):
+                satisfied.add(id(_m))
             if layer != new_layer:
                 count += 1
                 # Replace the layer in the match
                 return full_match.replace(f'(layer "{layer}")', f'(layer "{new_layer}")')
         return full_match
 
+    satisfied = set()
     result = segment_pattern.sub(replace_layer, content)
+    # A mod that matched NO block in the file is the dangerous case: the
+    # in-memory board already moved the copper (stub_layer_switching mutates
+    # seg.layer at decision time), so a silent miss ships a file that
+    # disagrees with pcb_data -- exactly the break cynthion shipped. Surface
+    # it; the FILE_LEDGER only catches it when that audit is enabled.
+    if unapplied_out is not None:
+        unapplied_out.extend(m for m in segment_mods
+                             if 'start' in m and id(m) not in satisfied)
     return result, count
 
 

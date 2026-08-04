@@ -11,6 +11,7 @@ This module handles writing the routed PCB output file, including:
 from __future__ import annotations
 
 from typing import List, Dict, Optional
+from terminal_colors import RED, RESET
 from kicad_parser import is_kicad_10, board_uses_name_nets, KICAD_10_MIN_VERSION
 from kicad_writer import (
     generate_segment_sexpr, generate_via_sexpr, generate_gr_line_sexpr,
@@ -135,8 +136,26 @@ def write_routed_output(
     # Apply segment layer modifications from stub layer switching AFTER target swaps
     # (layer mods were recorded with post-swap net IDs, so file must be swapped first)
     if all_segment_modifications:
-        content, mod_count = modify_segment_layers(content, all_segment_modifications)
+        _unapplied_mods: list = []
+        content, mod_count = modify_segment_layers(
+            content, all_segment_modifications,
+            unapplied_out=_unapplied_mods)
         print(f"Applied {mod_count} segment layer modifications (layer switching)")
+        if _unapplied_mods:
+            # NOT cosmetic: stub_layer_switching already moved the copper in
+            # pcb_data, so an unmatched mod ships a file that disagrees with
+            # the board model -- cynthion shipped VCCRAM's stub left on
+            # In1.Cu between two In3.Cu segments with no via (a broken track
+            # plus a stray sliver). Name them instead of discarding silently.
+            print(f"{RED}WARNING: {len(_unapplied_mods)} segment layer "
+                  f"modification(s) matched NO block in the file -- the "
+                  f"written copper disagrees with pcb_data on these:{RESET}")
+            for _m in _unapplied_mods[:5]:
+                print(f"    {_m.get('net_name') or _m.get('net_id')} "
+                      f"{_m['start']}-{_m['end']} "
+                      f"{_m.get('old_layer')} -> {_m.get('new_layer')}")
+            if len(_unapplied_mods) > 5:
+                print(f"    ... and {len(_unapplied_mods) - 5} more")
 
     # Apply pad and stub net swaps for polarity fixes
     content = _apply_polarity_swaps(content, pad_swaps, pcb_data, net_id_to_name if kicad_v10 else None)
