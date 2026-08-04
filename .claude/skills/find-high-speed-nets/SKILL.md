@@ -432,12 +432,14 @@ diff-pair step and before the general single-ended signal route** (a "Step 2b").
 Like diff pairs, they are highly constrained (fixed width, want a short/direct path
 over a clean ground reference) so they must claim their channel before the bulk
 signals fill the area. They must then be **excluded from the general signal route**
-(`"*" "!GND" "!VCC" "!RF"`) so a later rip-up cannot re-route them at the wrong
-width, and counted as "claimed by the impedance step" in the coverage ledger.
+(`"*" "!RF"` — the plane nets stay IN that route since #562: their pads weld
+into the pour and the route step's in-run finalize completes them) so a later
+rip-up cannot re-route the impedance nets at the wrong width, and counted as
+"claimed by the impedance step" in the coverage ledger.
 
 ```bash
 # Step 2b: impedance-controlled single-ended nets (e.g. the antenna feed), on an
-# outer layer over the GND plane created later; short/direct is the router default.
+# outer layer over the GND pour created in Step 1c; short/direct is the router default.
 python3 -X utf8 route.py board_diff.kicad_pcb board_imp.kicad_pcb \
     --nets RF --impedance 50 --layers F.Cu --clearance <floor> ...
 ```
