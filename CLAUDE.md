@@ -292,10 +292,13 @@ through there too.
     diff-pair board and `check_impedance.py`.
 
   Siblings worth running the same way: `test_gui_livechain_rp2350.py`
-  (**caveat**: its plan still carries `repair_planes` steps that the executor
-  now skips as #562 no-ops, while its CLI leg still shells
-  `route_disconnected_planes.py` — the two legs are no longer stage-aligned,
-  so reshape the plan before trusting its per-stage comparison), and
+  (reshaped to the #562 chain — pour → ONE route step carrying the plane
+  nets in its `--nets`, whose in-run finalize is the weld/repair/oracle;
+  both legs stage-aligned again and PASS. Two teachings baked into it: the
+  plane nets must ride in the route step's net list or the finalize excludes
+  the pours BY PLAN, and it stages its project-less fixture with a
+  pcbnew-authored `.kicad_pro` — a project-less board makes the two fronts
+  legitimately diverge), and
   `replay_plan_vs_run.py` — the latter is the *general* harness (a real headless
   `RoutingDialog` + real `PlanExecutor`, nothing mocked; it caught #493's
   one-ULP netclass clearance bug on its first run). See
