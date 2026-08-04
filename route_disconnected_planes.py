@@ -1179,6 +1179,12 @@ def repair_planes(
                 return_results=True, pcb_data=pcb_data,
                 # #540 item 2: price the OTHER pending casualties' corridors
                 # (this batch's own nets excluded -- theirs to reclaim).
+                # #562 RE-ENTRY GUARD: batch_route's plane finalize calls THIS
+                # engine, so a sub-run that runs its own finalize recurses:
+                # finalize -> repair -> batch_route -> finalize -> ... (measured
+                # 57 levels on schoko, ~7 GB before the cap killed it). This
+                # sub-run is a repair DETAIL, not a chain step -- never finalize.
+                final_reconcile=False,
                 **_ghost_kwargs(corridor_ghosts, _rip_ids))
             for _r in _rdata.get('results', []):
                 for _s in (_r.get('new_segments') or []):
@@ -1724,6 +1730,12 @@ def repair_planes(
                     # #540 item 2: the end-of-run batch routes the casualties
                     # themselves, so only ghosts NOT in this batch remain --
                     # normally none, but a cancel/partial path can leave some.
+                    # #562 RE-ENTRY GUARD: batch_route's plane finalize calls THIS
+                    # engine, so a sub-run that runs its own finalize recurses:
+                    # finalize -> repair -> batch_route -> finalize -> ... (measured
+                    # 57 levels on schoko, ~7 GB before the cap killed it). This
+                    # sub-run is a repair DETAIL, not a chain step -- never finalize.
+                    final_reconcile=False,
                     **_ghost_kwargs(corridor_ghosts, _casualties))
 
                 def _sd(_s):
@@ -2297,6 +2309,12 @@ def repair_planes(
                     return_results=True, pcb_data=pcb_data,
                     # #540 item 2: gate straps must not squat the pending
                     # casualties' corridors either.
+                    # #562 RE-ENTRY GUARD: batch_route's plane finalize calls THIS
+                    # engine, so a sub-run that runs its own finalize recurses:
+                    # finalize -> repair -> batch_route -> finalize -> ... (measured
+                    # 57 levels on schoko, ~7 GB before the cap killed it). This
+                    # sub-run is a repair DETAIL, not a chain step -- never finalize.
+                    final_reconcile=False,
                     **_ghost_kwargs(corridor_ghosts, {_nid}))
                 for _r in _rdata3.get('results', []):
                     all_new_segments.extend(

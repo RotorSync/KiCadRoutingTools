@@ -271,6 +271,25 @@ def _empty_results_data() -> dict:
     }
 
 
+
+# #562 finalize re-entry guard. batch_route's plane finalize calls
+# repair_planes, whose own rip-casualty / pad-repair sub-runs call batch_route
+# again -- if such a sub-run finalizes, the two recurse without bound
+# (measured 57 levels and ~7 GB on one corpus board). The sub-runs now pass
+# final_reconcile=False, and this flag is the structural backstop so a future
+# caller that forgets cannot reintroduce the recursion.
+_PLANE_FINALIZE_DEPTH = 0
+
+
+def _finalize_depth(delta: int) -> None:
+    global _PLANE_FINALIZE_DEPTH
+    _PLANE_FINALIZE_DEPTH = max(0, _PLANE_FINALIZE_DEPTH + delta)
+
+
+def _plane_finalize_active() -> bool:
+    return _PLANE_FINALIZE_DEPTH > 0
+
+
 def batch_route(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
@@ -2734,8 +2753,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Gate: KICAD_PLANE_FINALIZE=1 (default ON; env var is a kill switch).
     if (final_reconcile and not skip_routing and not _ckpt_stop
             and (output_file or return_results)
+            and not _plane_finalize_active()
             and os.environ.get('KICAD_PLANE_FINALIZE', '1') == '1'):
         try:
+            _finalize_depth(+1)
             from route_disconnected_planes import (
                 repair_planes as _rdp_engine, auto_detect_zones as _adz)
             _gui9 = bool(return_results)
@@ -3072,6 +3093,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         _zone_complete9 = set(_zna)
         except Exception as _e:
             print(f"{RED}  plane finalize pass failed: {_e}{RESET}")
+        finally:
+            _finalize_depth(-1)
 
     if (final_reconcile and not skip_routing and not _ckpt_stop
             and (output_file or return_results)
