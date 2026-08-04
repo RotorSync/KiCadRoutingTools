@@ -25,8 +25,19 @@
 #      fab_floor_ladder smallest (diameter, drill) PAIR: dia/2 + clearance +
 #      track/2, drill h2h from the drill) and add/remove_net_obstacles_from_cache
 #      stamp/remove both maps.
-#   2. run_obstacle_audit: extend get_stats consumers + hard-set labels with
-#      blocked_vias_small (the leak audit must cover every rung map).
+#   2. run_obstacle_audit: Rust get_stats now emits blocked_vias_small as the
+#      8th element (appended LAST; all Python consumers are index-based, none
+#      unpack a fixed arity -- verified obstacle_map.py/_ledger,
+#      memory_debug.py stats[:6], test_obstacle_addremove_parity indexing).
+#      Python side: append "blocked_vias_small" to the audit labels tuple AND
+#      the HARD set in run_obstacle_audit, so a small-map leak fails the same
+#      working==base+caches gate as blocked_vias.
+#      RUN the balance gates after integration (they are the acceptance bar
+#      for touching the core map, per Andy):
+#        - tests/test_obstacle_map_balance.py  (standing gate)
+#        - a chain board with KICAD_OBSTACLE_AUDIT=1 -> "BALANCED" incl. the
+#          new label, and KICAD_OBSTACLE_LEDGER=1 for per-serial attribution
+#          if it is not.
 #   3. _via_rung_retry: replace the free-via overlay + bbox sampling + exact
 #      site validator with a plain re-search passing via_rung=1; register the
 #      small (dia, drill) in pcb_data._unblock_via_sizes for each via cell of
@@ -55,7 +66,7 @@ diff -ruN a/rust_router/Cargo.toml b/rust_router/Cargo.toml
  # whole project. The top-level /VERSION file mirrors major.minor and bumps
 diff -ruN a/rust_router/src/obstacle_map.rs b/rust_router/src/obstacle_map.rs
 --- a/rust_router/src/obstacle_map.rs	2026-08-04 07:24:37
-+++ b/rust_router/src/obstacle_map.rs	2026-08-04 07:24:37
++++ b/rust_router/src/obstacle_map.rs	2026-08-04 07:29:07
 @@ -219,6 +219,12 @@
      static_via_bitmap: BlockedBitmap,
      /// Blocked via positions: packed (gx, gy) -> ref count
@@ -93,7 +104,31 @@ diff -ruN a/rust_router/src/obstacle_map.rs b/rust_router/src/obstacle_map.rs
              stub_proximity: self.stub_proximity.clone(),
              layer_proximity_costs: self.layer_proximity_costs.clone(),
              num_layers: self.num_layers,
-@@ -413,6 +422,11 @@
+@@ -373,9 +382,12 @@
+     /// Get memory statistics for this obstacle map
+     /// Returns (blocked_cells_count, blocked_vias_count, stub_proximity_count,
+     ///          layer_proximity_count, cross_layer_count, source_target_count, free_vias_count)
+-    pub fn get_stats(&self) -> (usize, usize, usize, usize, usize, usize, usize) {
++    pub fn get_stats(&self) -> (usize, usize, usize, usize, usize, usize, usize, usize) {
+         let blocked_cells_count: usize = self.blocked_cells.iter().map(|m| m.len()).sum();
+         let blocked_vias_count = self.blocked_vias.len();
++        // #568: small-rung via map appended LAST so positional consumers of the
++        // legacy 7-tuple (audit labels, dump harnesses) stay index-compatible.
++        let blocked_vias_small_count = self.blocked_vias_small.len();
+         let stub_proximity_count = self.stub_proximity.len();
+         let layer_proximity_count: usize = self.layer_proximity_costs.iter().map(|m| m.len()).sum();
+         let cross_layer_count = self.cross_layer_tracks.len();
+@@ -383,7 +395,8 @@
+         let free_vias_count = self.free_via_positions.len();
+ 
+         (blocked_cells_count, blocked_vias_count, stub_proximity_count,
+-         layer_proximity_count, cross_layer_count, source_target_count, free_vias_count)
++         layer_proximity_count, cross_layer_count, source_target_count, free_vias_count,
++         blocked_vias_small_count)
+     }
+ 
+     /// #422: Promote ALL current dynamic blocked cells/vias into the permanent
+@@ -413,6 +426,11 @@
              let (gx, gy) = unpack_xy(key);
              self.static_via_bitmap.set(gx, gy, 0);
          }
@@ -105,7 +140,7 @@ diff -ruN a/rust_router/src/obstacle_map.rs b/rust_router/src/obstacle_map.rs
      }
  
      /// #422 diagnostic: (distinct_cells, cells_with_refcount>=2, max_refcount,
-@@ -506,6 +520,60 @@
+@@ -506,6 +524,60 @@
      pub fn add_blocked_via(&mut self, gx: i32, gy: i32) {
          let key = pack_xy(gx, gy);
          *self.blocked_vias.entry(key).or_insert(0) += 1;
