@@ -1,0 +1,22 @@
+#!/bin/bash
+set -u
+cd /private/tmp/claude-501/-Users-andy-Documents-KiCadRoutingTools/fc2b685e-a28d-4687-92a8-e3da6dd45526/scratchpad/arch
+# ulx3s
+KICAD_PLANE_NO_TAPS=1 python3 -X utf8 /Users/andy/Documents/KiCadRoutingTools/.claude/worktrees/se-arbitration/route_planes.py /Users/andy/Documents/kicad_stress_test/boards_unrouted_set2/ulx3s.kicad_pcb ux_pours.kicad_pcb --nets GND GND +3V3 --plane-layers F.Cu In1.Cu In2.Cu --clearance 0.1 --track-width 0.127 --via-size 0.5 --via-drill 0.3 > ux_pours.log 2>&1
+python3 -X utf8 /Users/andy/Documents/KiCadRoutingTools/.claude/worktrees/se-arbitration/bga_fanout.py ux_pours.kicad_pcb --component U1 --nets '*' '!GND' '!+3V3' --escape-method dogbone --layers F.Cu In1.Cu In2.Cu B.Cu --via-size 0.5 --via-drill 0.3 --clearance 0.1 --track-width 0.127 --output ux_fan.kicad_pcb > ux_fan.log 2>&1
+KICAD_POUR_LAUNCH=1 python3 -X utf8 /Users/andy/Documents/KiCadRoutingTools/.claude/worktrees/se-arbitration/route.py ux_fan.kicad_pcb --nets '*' --layers F.Cu In1.Cu In2.Cu B.Cu --clearance 0.1 --track-width 0.127 --via-size 0.5 --via-drill 0.3 --max-ripup 5 --max-iterations 1000000 --power-nets +1V1 +2V5 +5V /power/VBAT /power/RTCVDD /usb/US2VBUS 2V5_3V3 --power-nets-widths 0.5 0.4 0.5 0.3 0.3 0.3 0.4 --output ux_sig.kicad_pcb > ux_sig.log 2>&1
+python3 -X utf8 /Users/andy/Documents/KiCadRoutingTools/.claude/worktrees/se-arbitration/route_disconnected_planes.py ux_sig.kicad_pcb ux_rep.kicad_pcb --clearance 0.1 --via-size 0.5 --via-drill 0.3 --track-width 0.127 > ux_rep.log 2>&1
+echo ux_CHAIN_DONE
+# cynthion
+KICAD_PLANE_NO_TAPS=1 python3 -X utf8 /Users/andy/Documents/KiCadRoutingTools/.claude/worktrees/se-arbitration/route_planes.py /Users/andy/Documents/kicad_stress_test/boards_unrouted_set2/cynthion.kicad_pcb cy_pours.kicad_pcb --nets GND GND +3V3 --plane-layers F.Cu In1.Cu In2.Cu --clearance 0.1 --track-width 0.127 --via-size 0.45 --via-drill 0.2 > cy_pours.log 2>&1
+python3 -X utf8 /Users/andy/Documents/KiCadRoutingTools/.claude/worktrees/se-arbitration/bga_fanout.py cy_pours.kicad_pcb --component IC1 --nets '*' '!GND' '!+3V3' --escape-method dogbone --layers F.Cu In1.Cu In2.Cu In3.Cu In4.Cu B.Cu --via-size 0.45 --via-drill 0.2 --clearance 0.1 --track-width 0.127 --output cy_fan.kicad_pcb > cy_fan.log 2>&1
+KICAD_POUR_LAUNCH=1 python3 -X utf8 /Users/andy/Documents/KiCadRoutingTools/.claude/worktrees/se-arbitration/route.py cy_fan.kicad_pcb --nets '*' --layers F.Cu In1.Cu In2.Cu In3.Cu In4.Cu B.Cu --clearance 0.1 --track-width 0.127 --via-size 0.45 --via-drill 0.2 --max-ripup 5 --max-iterations 1000000 --power-nets VCCRAM +1V1 +5V +2V5 AUX_VBUS CONTROL_VBUS TARGET_C_VBUS AUX_VBUS_IN CONTROL_VBUS_IN TARGET_A_VBUS_IN TARGET_A_VBUS --power-nets-widths 0.3 0.3 0.4 0.3 0.3 0.3 0.3 0.3 0.3 0.3 0.3 --output cy_sig.kicad_pcb > cy_sig.log 2>&1
+python3 -X utf8 /Users/andy/Documents/KiCadRoutingTools/.claude/worktrees/se-arbitration/route_disconnected_planes.py cy_sig.kicad_pcb cy_rep.kicad_pcb --clearance 0.1 --via-size 0.45 --via-drill 0.2 --track-width 0.127 > cy_rep.log 2>&1
+echo cy_CHAIN_DONE
+# schoko
+KICAD_PLANE_NO_TAPS=1 python3 -X utf8 /Users/andy/Documents/KiCadRoutingTools/.claude/worktrees/se-arbitration/route_planes.py /Users/andy/Documents/kicad_stress_test/boards_unrouted_set2/schoko.kicad_pcb sk_pours.kicad_pcb --nets GND GND /PWR3V3 --plane-layers F.Cu In1.Cu In2.Cu --clearance 0.1 --track-width 0.127 --via-size 0.45 --via-drill 0.2 > sk_pours.log 2>&1
+python3 -X utf8 /Users/andy/Documents/KiCadRoutingTools/.claude/worktrees/se-arbitration/bga_fanout.py sk_pours.kicad_pcb --component U1 --nets '*' '!GND' '!/PWR3V3' --escape-method dogbone --layers F.Cu In1.Cu In2.Cu B.Cu --via-size 0.45 --via-drill 0.2 --clearance 0.1 --track-width 0.127 --output sk_fan.kicad_pcb > sk_fan.log 2>&1
+KICAD_POUR_LAUNCH=1 python3 -X utf8 /Users/andy/Documents/KiCadRoutingTools/.claude/worktrees/se-arbitration/route.py sk_fan.kicad_pcb --nets '*' --layers F.Cu In1.Cu In2.Cu B.Cu --clearance 0.1 --track-width 0.127 --via-size 0.45 --via-drill 0.2 --max-ripup 5 --max-iterations 1000000 --power-nets /PWR3V3 --power-nets-widths 0.4 --output sk_sig.kicad_pcb > sk_sig.log 2>&1
+python3 -X utf8 /Users/andy/Documents/KiCadRoutingTools/.claude/worktrees/se-arbitration/route_disconnected_planes.py sk_sig.kicad_pcb sk_rep.kicad_pcb --clearance 0.1 --via-size 0.45 --via-drill 0.2 --track-width 0.127 > sk_rep.log 2>&1
+echo sk_CHAIN_DONE
+echo ARCH3_ALL_DONE

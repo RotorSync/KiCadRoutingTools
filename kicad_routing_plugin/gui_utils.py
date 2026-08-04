@@ -542,3 +542,135 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
     except Exception as e:
         if log:
             log(f"(live DRC floor update skipped: {e})\n")
+
+
+def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
+                                   track_width, via_size, via_drill,
+                                   grid_step, track_via_clearance=None,
+                                   hole_to_hole_clearance=None,
+                                   progress_callback=None):
+    """Staged-save kicad-oracle recheck against the LIVE pcbnew board.
+
+    The CLI plane fronts (and route.py's plane finalize, #562) finish with
+    oracle_reconnect on their WRITTEN file; kicad-cli's exact fill needs a
+    real file, so the GUI counterpart temp-saves the live board, routes the
+    exact links KiCad reports missing, and applies the returned copper (and
+    stranded-fragment deletions, #508 finding 15) back onto the live board.
+
+    Shared core for the planes tab's post-apply recheck and the signal tab's
+    plane-finalize oracle leg -- one implementation, both fronts. Callers
+    refill zones AFTER this returns (the routed links change the fill).
+    Returns the oracle result dict, or None when skipped (no kicad-cli).
+    Skips quietly on any error: the recheck is an earner, never a blocker.
+    """
+    try:
+        import os
+        import tempfile
+        import pcbnew
+        from kicad_parser import mm_to_iu
+        from kicad_oracle import oracle_reconnect, find_kicad_cli
+        import routing_defaults as defaults
+        if find_kicad_cli() is None:
+            return None
+        nets = [n for n in (net_names or []) if n]
+        if not nets:
+            return None
+        from routing_config import GridRouteConfig
+        # #338: the temp save has no sibling .kicad_pro, so oracle_reconnect
+        # cannot resolve the board's copper-to-edge rule itself -- read it
+        # from the live board's design settings (nm -> mm).
+        try:
+            _edge_mm = (board.GetDesignSettings().m_CopperEdgeClearance
+                        or 0) / 1e6
+        except Exception:
+            _edge_mm = 0.0
+        ocfg = GridRouteConfig(
+            clearance=clearance, track_width=track_width,
+            via_size=via_size, via_drill=via_drill, grid_step=grid_step,
+            board_edge_clearance=_edge_mm)
+        with tempfile.NamedTemporaryFile(suffix='.kicad_pcb',
+                                         delete=False) as f:
+            tmp = f.name
+        pcbnew.SaveBoard(tmp, board)
+        # #490: stage the REAL project's netclasses for the refill, or the
+        # exact-fill link source runs at stock rules.
+        try:
+            _proj_from = board.GetFileName() or None
+        except Exception:
+            _proj_from = None
+        orc = oracle_reconnect(
+            tmp, nets, ocfg,
+            project_from=_proj_from,
+            track_via_clearance=(track_via_clearance
+                                 if track_via_clearance is not None
+                                 else defaults.PLANE_TRACK_VIA_CLEARANCE),
+            hole_to_hole_clearance=(hole_to_hole_clearance
+                                    if hole_to_hole_clearance is not None
+                                    else defaults.HOLE_TO_HOLE_CLEARANCE),
+            progress_callback=progress_callback)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        # #508 finding 15: the oracle's stranded-fragment deletions are
+        # stripped from its temp file, but the LIVE board still holds that
+        # copper -- delete it here, BEFORE the adds, so a same-position
+        # emission is never collateral.
+        _orc_rm = ((orc.get('removed_segments') or [])
+                   + (orc.get('removed_vias') or []))
+        if _orc_rm:
+            _rm_keys = set()
+            for s in _orc_rm:
+                if hasattr(s, 'start_x'):
+                    _rm_keys.add((round(s.start_x, 3), round(s.start_y, 3),
+                                  round(s.end_x, 3), round(s.end_y, 3),
+                                  s.net_id))
+                else:
+                    _rm_keys.add((round(s.x, 3), round(s.y, 3), s.net_id))
+            _n_orc_rm = 0
+            for item in list(board.GetTracks()):
+                if item.Type() == pcbnew.PCB_VIA_T:
+                    k = (round(pcbnew.ToMM(item.GetPosition().x), 3),
+                         round(pcbnew.ToMM(item.GetPosition().y), 3),
+                         item.GetNetCode())
+                else:
+                    k = (round(pcbnew.ToMM(item.GetStart().x), 3),
+                         round(pcbnew.ToMM(item.GetStart().y), 3),
+                         round(pcbnew.ToMM(item.GetEnd().x), 3),
+                         round(pcbnew.ToMM(item.GetEnd().y), 3),
+                         item.GetNetCode())
+                    if k not in _rm_keys:
+                        k = (k[2], k[3], k[0], k[1], k[4])
+                if k in _rm_keys:
+                    board.RemoveNative(item)
+                    _n_orc_rm += 1
+            if _n_orc_rm:
+                print(f"KiCad-oracle (GUI): deleted {_n_orc_rm} stranded "
+                      f"fragment piece(s) from the live board")
+        for s in orc.get('new_segments') or []:
+            track = pcbnew.PCB_TRACK(board)
+            track.SetStart(pcbnew.VECTOR2I(
+                mm_to_iu(s.start_x), mm_to_iu(s.start_y)))
+            track.SetEnd(pcbnew.VECTOR2I(
+                mm_to_iu(s.end_x), mm_to_iu(s.end_y)))
+            track.SetWidth(mm_to_iu(s.width))
+            track.SetLayer(board.GetLayerID(s.layer))
+            track.SetNetCode(s.net_id)
+            board.Add(track)
+        for v in orc.get('new_vias') or []:
+            via = pcbnew.PCB_VIA(board)
+            via.SetPosition(pcbnew.VECTOR2I(mm_to_iu(v.x), mm_to_iu(v.y)))
+            via.SetDrill(mm_to_iu(v.drill))
+            via.SetWidth(mm_to_iu(v.size))
+            via.SetNetCode(v.net_id)
+            lys = v.layers or ['F.Cu', 'B.Cu']
+            via.SetLayerPair(board.GetLayerID(lys[0]),
+                             board.GetLayerID(lys[-1]))
+            board.Add(via)
+        if orc.get('links_routed'):
+            print(f"KiCad-oracle (GUI): routed {orc['links_routed']} "
+                  f"missing link(s), applied to the live board")
+        return orc
+    except Exception as e:
+        print(f"KiCad-oracle (GUI) skipped: {e}")
+        return None

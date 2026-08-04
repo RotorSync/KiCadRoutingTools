@@ -1864,6 +1864,44 @@ def _ledger_close(obstacles, pre, tag: str):
     _oc.ledger_raw_delta(obstacles, f"{tag} @ {site}", st[0] - pre[0], st[1] - pre[1])
 
 
+def _rung_small_armed():
+    """#568 rust mode (KICAD_VIA_RUNG=2): the working map carries a second
+    via-legality map at the small fab rung. Raw (non-cache) copper adds must
+    not be invisible to it -- a rung-1 search would treat their surroundings
+    as small-legal. Raw adds mirror their FULL-size via cells into the small
+    map (conservative over-blocking near raw copper; never wrong), and the
+    remove twins mirror the same cells so refcounts balance per rung."""
+    import os as _os
+    return _os.environ.get('KICAD_VIA_RUNG', '2') == '2'
+
+
+def _via_raw_block_cells(via, config, coord, num_layers, extra_clearance,
+                         diagonal_margin):
+    """The (gx, gy) via-block cells add_vias_list_as_obstacles stamps for one
+    via (via-via disc + #441 h2h disc), rebuilt exactly like the remove twin.
+    Used only for the #568 small-map mirror."""
+    gx, gy = coord.to_grid(via.x, via.y)
+    via_size = via.size if hasattr(via, 'size') and via.size > 0 else config.via_size
+    via_clearance = config.obstacle_clearance(getattr(via, 'net_id', 0))
+    via_via_mm = (via_size / 2 + config.via_size / 2
+                  + config.stack_clearance(via_clearance))
+    via_via_expansion_grid = max(1.0, via_via_mm * coord.inv_step)
+    off_cells = math.hypot(via.x - gx * coord.grid_step,
+                           via.y - gy * coord.grid_step) / coord.grid_step
+    out = []
+    via_radius = via_via_expansion_grid + off_cells
+    vr_range = int(math.ceil(via_radius))
+    vr_sq = via_radius * via_radius
+    for ex in range(-vr_range, vr_range + 1):
+        for ey in range(-vr_range, vr_range + 1):
+            if ex * ex + ey * ey <= vr_sq:
+                out.append((gx + ex, gy + ey))
+    _h2h = _via_h2h_cells(via, config, coord)
+    if _h2h is not None:
+        out.extend((int(a), int(b)) for a, b in _h2h)
+    return out
+
+
 def add_vias_list_as_obstacles(obstacles: GridObstacleMap, vias: list,
                                 config: GridRouteConfig,
                                 extra_clearance: float = 0.0,
@@ -1905,6 +1943,15 @@ def add_vias_list_as_obstacles(obstacles: GridObstacleMap, vias: list,
         _h2h = _via_h2h_cells(via, config, coord)
         if _h2h is not None:
             obstacles.add_blocked_vias_batch(_h2h)
+    # #568 small-map mirror (see _rung_small_armed)
+    if _rung_small_armed() and vias:
+        _small = []
+        for via in vias:
+            _small.extend(_via_raw_block_cells(via, config, coord, num_layers,
+                                               extra_clearance, diagonal_margin))
+        if _small:
+            obstacles.add_blocked_vias_small_batch(
+                np.array(_small, dtype=np.int32))
     _ledger_close(obstacles, _pre, "add_vias_list")
 
 
@@ -1939,6 +1986,14 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
             expansion_mm = reserve_width / 2 + seg_width / 2 + seg_clearance + extra_clearance
             via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance
             _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_mm, via_block_mm)
+            # #568 small-map mirror (see _rung_small_armed): same via capsule
+            if _rung_small_armed():
+                _sm = segment_blocked_cells_array(
+                    seg.start_x, seg.start_y, seg.end_x, seg.end_y,
+                    via_block_mm, coord.grid_step)
+                if len(_sm):
+                    obstacles.add_blocked_vias_small_batch(
+                        np.asarray(_sm, dtype=np.int32))
     _ledger_close(obstacles, _pre, "add_segments_list")
 
 
@@ -1994,6 +2049,8 @@ def remove_segments_list_from_obstacles(obstacles: GridObstacleMap, segments: li
     if vias_to_remove:
         vias_array = np.array(vias_to_remove, dtype=np.int32)
         obstacles.remove_blocked_vias_batch(vias_array)
+        if _rung_small_armed():  # #568: mirror of the add-side small stamp
+            obstacles.remove_blocked_vias_small_batch(vias_array)
     _ledger_close(obstacles, _pre, "remove_segments_list")
 
 
@@ -2076,6 +2133,8 @@ def remove_vias_list_from_obstacles(obstacles: GridObstacleMap, vias: list,
     if vias_to_remove:
         vias_array = np.array(vias_to_remove, dtype=np.int32)
         obstacles.remove_blocked_vias_batch(vias_array)
+        if _rung_small_armed():  # #568: mirror of the add-side small stamp
+            obstacles.remove_blocked_vias_small_batch(vias_array)
     _ledger_close(obstacles, _pre, "remove_vias_list")
 
 

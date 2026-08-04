@@ -689,7 +689,7 @@ def auto_detect_zones(
     return zone_pairs
 
 
-def route_planes(
+def repair_planes(
     input_file: str,
     output_file: str,
     net_names: List[str],
@@ -3239,7 +3239,7 @@ Examples:
         for net, layer in zone_pairs:
             print(f"  {net} on {layer}")
 
-    _rdp_result = route_planes(
+    _rdp_result = repair_planes(
         input_file=args.input_file,
         output_file=args.output_file,
         net_names=net_names,
@@ -3378,3 +3378,10 @@ if __name__ == "__main__":
     from console_encoding import enable_utf8_console
     enable_utf8_console()  # cp1252-safe non-ASCII prints (issue #152)
     main()
+
+
+# Naming (#562): this module's engine used to be called route_planes,
+# colliding with route_planes.py (the pours-CREATION script) -- the GUI
+# already imported it 'as repair_planes'. The old name stays as an alias
+# for external callers; new code should import repair_planes.
+route_planes = repair_planes

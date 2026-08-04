@@ -58,8 +58,8 @@ PLUG = os.path.join(REPO, "kicad_routing_plugin")
 
 # (CLI module, GUI module, CLI-side function name, GUI-side call name).
 # The names differ when the GUI imports the engine under an alias
-# (planes_gui: `from route_disconnected_planes import route_planes as
-# repair_planes`).
+# (historically planes_gui imported route_disconnected_planes.route_planes
+# as repair_planes; #562 renamed the engine itself to repair_planes).
 PAIRS = [
     ("route.py",            "kicad_routing_plugin/swig_gui.py",
      "batch_route", "batch_route"),
@@ -71,7 +71,7 @@ PAIRS = [
     # and the first one was hiding a real Class-1 gap (ripup_blocker_select
     # supplied in config but never forwarded to the repair engine).
     ("route_disconnected_planes.py", "kicad_routing_plugin/planes_gui.py",
-     "route_planes", "repair_planes"),
+     "repair_planes", "repair_planes"),
     ("bga_fanout/__init__.py", "kicad_routing_plugin/fanout_gui.py",
      "generate_bga_fanout", "generate_bga_fanout"),
     ("qfn_fanout/__init__.py", "kicad_routing_plugin/fanout_gui.py",

@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.19.3**
+**Current Version: 0.20.0**
 
 ## Features
 
@@ -306,6 +306,15 @@ src/
 
 ## Version History
 
+- **0.20.0**: **#568 per-rung via legality** — `blocked_vias_small`, a second
+  refcounted via-block map at the small fab-rung reserve (subset semantics:
+  EMPTY = unpopulated, rung>=1 queries fall back to `blocked_vias`, so
+  single-rung callers are byte-identical). `is_via_blocked_rung(gx, gy, rung)`;
+  add/remove single+batch mirrors; clone/clone_fresh copy it; freeze clears it
+  (the static bitmap blocks every rung — conservative). `route_multi` /
+  `route_with_frontier` accept `via_rung=0` per search. `get_stats` appends the
+  small-map count as the 8th element (positional consumers unaffected) so the
+  #309 refcount balance audit covers the new map.
 - **0.19.3**: **#529 plateau grace** — `route_multi` / `route_with_frontier`
   accept `grace_tranches=0`: up to N consecutive quantum-failing tranches
   are tolerated before extension is denied, with the progress reference

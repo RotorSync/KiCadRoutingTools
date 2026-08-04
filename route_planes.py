@@ -1469,6 +1469,23 @@ def _generate_multinet_layer_zones(
                     seeds.append((px, py))
                     seen.add(k)
 
+    # PROTOTYPE (worktree): deferred under-BGA pads (KICAD_PLANE_DEFER_BGA)
+    # participate as point seeds so each rail's cell reserves its ball
+    # territory before the fanout drops the actual vias.
+    _dseeds = getattr(pcb_data, '_deferred_bga_seeds', None) \
+        if 'pcb_data' in dir() else None
+    if _dseeds:
+        for _nid, _pts in _dseeds.items():
+            _lst = augmented_vias_by_net.setdefault(_nid, [])
+            _seen = {(round(x, 3), round(y, 3)) for x, y in _lst}
+            for _x, _y in _pts:
+                _k = (round(_x, 3), round(_y, 3))
+                if _k not in _seen:
+                    _lst.append((_x, _y))
+                    _seen.add(_k)
+        print(f"  Added deferred-BGA point seeds for "
+              f"{len(_dseeds)} net(s) to the Voronoi")
+
     # Compute final Voronoi zones
     total_seeds = sum(len(vias) for vias in augmented_vias_by_net.values())
     print(f"  Computing final Voronoi zones with {total_seeds} seed points")
@@ -3275,10 +3292,104 @@ def create_plane(
         print(f"Processing net '{net_name}' on layer {plane_layer}")
         print(f"{'='*60}")
 
+        # PROTOTYPE (worktree): register THIS net's upcoming zone in
+        # pcb_data.zones so LATER nets' perforation-aware tap checks (and
+        # their fill models) can see it -- without this, a single multi-net
+        # create_plane call is invisible to the tap-reuse trigger (its own
+        # zones only exist as write-time sexprs). Gated under the same env
+        # as the trigger; the output writer text-splices and never
+        # serializes pcb_data.zones, so this cannot duplicate output.
+        import os as _os
+        if _os.environ.get('KICAD_PLANE_TAP_PREFER_REUSE', '') == '1':
+            # Register the PREVIOUS net's zone (deferred one iteration):
+            # registering before THIS net's own pad analysis made
+            # identify_target_pads classify its pads as already_connected ->
+            # taps silently skipped (measured -6.1 pts on a BGA chain).
+            # Later nets still see every earlier pour.
+            _pend = getattr(pcb_data, '_pending_inrun_zone', None)
+            if _pend is not None:
+                from kicad_parser import Zone as _Zone
+                # PRIVATE registry -- never pcb_data.zones: a synthetic
+                # board-rect outline there poisons every same-step fill
+                # consumer (cleanup/reconcile/stitching saw a full-board
+                # GND 'zone'; measured -6.1 pts).
+                if not hasattr(pcb_data, '_inrun_zones'):
+                    pcb_data._inrun_zones = []
+                pcb_data._inrun_zones.append(_Zone(**_pend))
+                print(f"  (registered in-run zone {_pend['net_name']}/"
+                      f"{_pend['layer']} for perforation checks)")
+                pcb_data._pending_inrun_zone = None
+            if should_create_zone:
+                _bb = pcb_data.board_info.board_bounds
+                if _bb:
+                    pcb_data._pending_inrun_zone = dict(
+                        net_id=net_id, net_name=net_name, layer=plane_layer,
+                        polygon=[(_bb[0], _bb[1]), (_bb[2], _bb[1]),
+                                 (_bb[2], _bb[3]), (_bb[0], _bb[3])])
+
         # Step 5: Identify target pads for this net
         if progress_callback:
             progress_callback(0, 0, f"{net_name}: analyzing pads on {plane_layer}...")
         target_pads = identify_target_pads(pcb_data, net_id, plane_layer)
+
+        # PROTOTYPE (worktree): bare-pour mode -- place NO taps at all
+        # (KICAD_PLANE_NO_TAPS=1). The signal pass connects plane pads to
+        # the pour with the full routing machinery (rip-up, soft costs)
+        # via the pour-launch feature; fanout drops own the BGA balls.
+        import os as _os0
+        if _os0.environ.get('KICAD_PLANE_NO_TAPS', '') == '1':
+            _skip = [pd for pd in target_pads if pd['type'] == 'via_needed']
+            target_pads = [pd for pd in target_pads
+                           if pd['type'] != 'via_needed']
+            if _skip:
+                # Every skipped pad still seeds the split-layer Voronoi so its
+                # net's cell reserves the territory the signal pass will tap
+                # into (same #114-style point-seed path as the defer mode).
+                _dseeds = getattr(pcb_data, '_deferred_bga_seeds', None)
+                if _dseeds is None:
+                    _dseeds = pcb_data._deferred_bga_seeds = {}
+                _dseeds.setdefault(net_id, []).extend(
+                    (pd['pad'].global_x, pd['pad'].global_y) for pd in _skip)
+                print(f"  NO-TAPS mode: left {len(_skip)} via-needed pad(s) on "
+                      f"'{net_name}' for the signal pass (KICAD_PLANE_NO_TAPS; "
+                      f"positions kept as Voronoi seeds)")
+
+        # PROTOTYPE (worktree): defer under-BGA pads to the fanout stage
+        # (KICAD_PLANE_DEFER_BGA=1). The plane step pours and taps the OPEN
+        # board; every via-needed pad inside a BGA courtyard is left for
+        # bga_fanout, which decides via/track/pour-direct against the REAL
+        # pour this step just created. Ownership split: planes = the board,
+        # fanout = the ball field.
+        import os as _os
+        if _os.environ.get('KICAD_PLANE_DEFER_BGA', '') == '1':
+            from kicad_parser import find_components_by_type as _fcbt
+            _courts = []
+            for _fp in _fcbt(pcb_data, 'BGA'):
+                _xs = [q.global_x for q in _fp.pads]
+                _ys = [q.global_y for q in _fp.pads]
+                _courts.append((min(_xs) - 0.5, min(_ys) - 0.5,
+                                max(_xs) + 0.5, max(_ys) + 0.5))
+            def _in_court(pd):
+                x, y = pd['pad'].global_x, pd['pad'].global_y
+                return any(cx0 <= x <= cx1 and cy0 <= y <= cy1
+                           for cx0, cy0, cx1, cy1 in _courts)
+            _defer = [pd for pd in target_pads
+                      if pd['type'] == 'via_needed' and _in_court(pd)]
+            if _defer:
+                target_pads = [pd for pd in target_pads if pd not in _defer]
+                # Virtual Voronoi seeds: the pour must still reserve each
+                # deferred ball's territory on split layers even though its
+                # via arrives later (fanout stage) -- record positions for
+                # the zone-boundary seeding below (#114-style point seeds).
+                _dseeds = getattr(pcb_data, '_deferred_bga_seeds', None)
+                if _dseeds is None:
+                    _dseeds = pcb_data._deferred_bga_seeds = {}
+                _dseeds.setdefault(net_id, []).extend(
+                    (pd['pad'].global_x, pd['pad'].global_y) for pd in _defer)
+                print(f"  Deferred {len(_defer)} under-BGA pad(s) on "
+                      f"'{net_name}' to the fanout stage "
+                      f"(KICAD_PLANE_DEFER_BGA; positions kept as Voronoi "
+                      f"seeds)")
 
         pads_through_hole = sum(1 for p in target_pads if p['type'] == 'through_hole')
         pads_direct = sum(1 for p in target_pads if p['type'] == 'direct')
@@ -3600,6 +3711,57 @@ def create_plane(
                         break
                 if strapped:
                     continue
+
+            # PROTOTYPE (worktree): perforation-aware tap ordering. A NEW
+            # through-barrel at this pad pierces every FOREIGN pour whose fill
+            # covers this (x,y) -- the middle-plane shredder. When it would,
+            # prefer REUSING an existing same-net via (surface trace joins the
+            # tap tree, sharing the barrel) BEFORE trying via-in-pad, and
+            # widen the reuse search. KICAD_PLANE_TAP_PREFER_REUSE=1 arms;
+            # radius multiplier via KICAD_PLANE_TAP_REUSE_RMULT (default 3).
+            import os as _os
+            if _os.environ.get('KICAD_PLANE_TAP_PREFER_REUSE', '') == '1':
+                from plane_fill_model import get_fill_models as _gfm
+                _pierce = 0
+                from plane_fill_model import get_zone_model as _gzm2
+                _all_z = list(pcb_data.zones or []) + \
+                    list(getattr(pcb_data, '_inrun_zones', []) or [])
+                for _z in _all_z:
+                    if _z.net_id == net_id:
+                        continue
+                    _m2 = _gzm2(pcb_data, _z)
+                    if _m2 is not None and \
+                            (_m2.query_component(pad.global_x, pad.global_y) or 0) > 0:
+                        _pierce += 1
+                if _pierce:
+                    _rmult = float(_os.environ.get('KICAD_PLANE_TAP_REUSE_RMULT', '1.5') or 1.5)
+                    _ev = via_index.find_nearest(pad.global_x, pad.global_y,
+                                                 max_via_reuse_radius * _rmult)
+                    # Two-sided cost: the reuse trace BLOCKS the escape field on
+                    # the pad's layer -- worth it only when short relative to
+                    # the perforation saved. Budget: COEF mm of trace per pour
+                    # pierced (default 0.8mm; humans link at pitch scale).
+                    if _ev is not None:
+                        import math as _math
+                        _coef = float(_os.environ.get('KICAD_PLANE_TAP_REUSE_COEF', '0.8') or 0.8)
+                        _dd = _math.hypot(_ev[0] - pad.global_x, _ev[1] - pad.global_y)
+                        if _dd > _coef * _pierce:
+                            _ev = None
+                    if _ev and pad_layer:
+                        _ro = get_routing_obstacles(pad_layer)
+                        _rr = route_via_to_pad(_ev, pad, pad_layer, net_id, _ro,
+                                               config, verbose=verbose,
+                                               return_blocked_cells=True,
+                                               router=via_pad_router)
+                        if _rr.success and _rr.segments is not None:
+                            new_segments.extend(_rr.segments)
+                            traces_added += len(_rr.segments)
+                            vias_reused += 1
+                            print(f"perforation-aware reuse: joined tap tree at "
+                                  f"({_ev[0]:.2f}, {_ev[1]:.2f}) instead of a new "
+                                  f"barrel through {_pierce} foreign pour(s)")
+                            processed_pad_ids.add(current_pad_key)
+                            continue
 
             # Next, try to place via within pad boundary (preferred - no trace needed)
             # This avoids creating long traces that block other signals

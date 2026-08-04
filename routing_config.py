@@ -163,6 +163,12 @@ class GridRouteConfig:
     # neckdown_length mm from the target pad; beyond that the track returns
     # to the power width wherever the wide clearance fits.
     power_tap_neckdown: bool = True
+    # #568 per-rung via legality: 0 = the configured via (baseline); 1 = the
+    # small fab-rung via where the obstacle map's blocked_vias_small proves it
+    # legal (populated only under KICAD_VIA_RUNG=2 dual stamping). Set on a
+    # dataclasses.replace CLONE for one retry search -- never mutate a shared
+    # config, the field must not leak into sibling routes.
+    via_rung: int = 0
     neckdown_length: float = 2.5  # mm of narrow track from the target pad
     neckdown_taper_length: float = 0.5  # mm narrow->wide taper (0 = abrupt width step)
     gnd_via_enabled: bool = True  # Enable GND via placement near diff pair signal vias

@@ -137,10 +137,14 @@ def run_obstacle_audit(base_obstacles, working_obstacles,
         for _nid, _cd in list(cache.items()):
             remove_net_obstacles_from_cache(probe, _cd)
         labels = ("blocked_cells", "blocked_vias", "stub_prox",
-                  "layer_prox", "cross_layer", "source_target", "free_vias")
+                  "layer_prox", "cross_layer", "source_target", "free_vias",
+                  "blocked_vias_small")  # #568: 8th get_stats element
         # HARD = ref-counted obstacle sets that cause DRC/routing errors when
         # leaked; SOFT = proximity/cost maps whose residual is expected.
-        hard = {"blocked_cells", "blocked_vias", "source_target", "free_vias"}
+        # blocked_vias_small is HARD with a sharper failure mode than a leak:
+        # an unbalanced small map makes rung-1 vias LEGAL where they aren't.
+        hard = {"blocked_cells", "blocked_vias", "source_target", "free_vias",
+                "blocked_vias_small"}
         bs, ps = base_obstacles.get_stats(), probe.get_stats()
         resid = [(labels[i], ps[i] - bs[i])
                  for i in range(min(len(labels), len(bs), len(ps)))]
@@ -253,11 +257,47 @@ class NetObstacleData:
     blocked_cells: np.ndarray = field(default_factory=lambda: np.empty((0, 3), dtype=np.int32))
     # Blocked via positions as numpy array of shape (M, 2) with columns [gx, gy]
     blocked_vias: np.ndarray = field(default_factory=lambda: np.empty((0, 2), dtype=np.int32))
+    # #568: via-block cells at the SMALL fab-rung reserve (KICAD_VIA_RUNG=2
+    # only; empty otherwise). Stamped/removed in lockstep with blocked_vias --
+    # once the map's small set is non-empty, rung-1 queries trust it
+    # EXCLUSIVELY for dynamic copper, so an unbalanced stamp doesn't just leak
+    # cells, it makes small vias legal where they aren't (audit-enforced).
+    blocked_vias_small: np.ndarray = field(default_factory=lambda: np.empty((0, 2), dtype=np.int32))
+
+
+def _small_via_pair(config, pcb_data):
+    """#568: the fab-ladder (diameter, drill) the rung-1 legality map is
+    stamped at -- the FIRST ladder entry smaller than the configured via,
+    the SAME selection rule as the escalation retry (_via_rung_retry), so
+    map and retry agree by construction. None when rust mode is off
+    (KICAD_VIA_RUNG != 2) or no smaller rung exists."""
+    if os.environ.get('KICAD_VIA_RUNG', '2') != '2':
+        return None
+    # Safety interlock: rung-1 legality is only sound when BASE copper blocks
+    # every rung (the frozen static bitmap). A flow that builds an UNFROZEN
+    # base and then adds small-stamped caches would leave base copper missing
+    # from the small map -- under-blocking, not leaking. Such flows (the vis
+    # branch) mark the board; stamping then never arms, small stays empty,
+    # and rung-1 queries fall back to full-size legality (safe everywhere).
+    if getattr(pcb_data, '_via_rung_unsafe', False):
+        return None
+    try:
+        from fab_tiers import fab_floor_ladder
+        ncu = len([l for l in (pcb_data.board_info.copper_layers or [])
+                   if l.endswith('.Cu')]) or 2
+        for f in fab_floor_ladder(ncu):
+            pair = (round(f['via_diameter'], 3), round(f['via_drill'], 3))
+            if pair[0] < config.via_size - 1e-9:
+                return pair
+    except Exception:
+        return None
+    return None
 
 
 def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                               extra_clearance: float = 0.0,
-                              diagonal_margin: float = defaults.DIAGONAL_MARGIN) -> NetObstacleData:
+                              diagonal_margin: float = defaults.DIAGONAL_MARGIN,
+                              _small_pass: bool = False) -> NetObstacleData:
     """Pre-compute obstacle cells for a single net.
 
     Returns cached data that can be quickly added to obstacle maps via batch operations.
@@ -432,7 +472,20 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         blocked_cells=blocked_cells_arr,
         blocked_vias=blocked_vias_arr
     )
-    if _LEDGER is not None:
+    # #568 dual stamping: a second pass with the via size/drill swapped for the
+    # small fab rung; only its blocked_vias survive (blocked_cells are
+    # via-size-independent and discarded). Two-pass is the correct-first cut --
+    # single-pass dual radii is the optimization if the cost shows up.
+    if not _small_pass:
+        _sp = _small_via_pair(config, pcb_data)
+        if _sp is not None:
+            from dataclasses import replace as _dc_replace
+            _sd = precompute_net_obstacles(
+                pcb_data, net_id,
+                _dc_replace(config, via_size=_sp[0], via_drill=_sp[1]),
+                extra_clearance, diagonal_margin, _small_pass=True)
+            data.blocked_vias_small = _sd.blocked_vias
+    if _LEDGER is not None and not _small_pass:
         data._audit_serial = next(_LEDGER["serial"])
         _LEDGER["meta"][data._audit_serial] = (net_id, _ledger_site(depth=2))
     return data
@@ -665,6 +718,9 @@ def add_net_obstacles_from_cache(obstacles: GridObstacleMap, cache_data: NetObst
         obstacles.add_blocked_cells_batch(cache_data.blocked_cells)
     if len(cache_data.blocked_vias) > 0:
         obstacles.add_blocked_vias_batch(cache_data.blocked_vias)
+    _small = getattr(cache_data, 'blocked_vias_small', None)
+    if _small is not None and len(_small) > 0:
+        obstacles.add_blocked_vias_small_batch(_small)
 
 
 def remove_net_obstacles_from_cache(obstacles: GridObstacleMap, cache_data: NetObstacleData):
@@ -683,6 +739,9 @@ def remove_net_obstacles_from_cache(obstacles: GridObstacleMap, cache_data: NetO
         obstacles.remove_blocked_cells_batch(cache_data.blocked_cells)
     if len(cache_data.blocked_vias) > 0:
         obstacles.remove_blocked_vias_batch(cache_data.blocked_vias)
+    _small = getattr(cache_data, 'blocked_vias_small', None)
+    if _small is not None and len(_small) > 0:
+        obstacles.remove_blocked_vias_small_batch(_small)
 
 
 def build_working_obstacle_map(base_obstacles: GridObstacleMap,

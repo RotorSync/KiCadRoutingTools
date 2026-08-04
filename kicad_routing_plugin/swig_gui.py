@@ -3473,6 +3473,35 @@ class RoutingDialog(wx.Dialog):
         if _rf:
             print(f"Refilled {_rf} zone(s) around the new copper")
 
+        # Plane-finalize ORACLE leg (#562): batch_route's finalize ran the
+        # repair engine in-memory and merged its board delta above, but the
+        # kicad-oracle exact-fill reconnect needs a REAL file -- it posted
+        # the net list + engine-resolved params instead, and now that the
+        # copper is on the live board the staged-save oracle runs here (the
+        # planes-tab pattern, shared core in gui_utils). Refill afterwards:
+        # the routed links change the fill.
+        _pfo = results_data.get('plane_finalize_oracle') or None
+        if _pfo and _pfo.get('nets'):
+            try:
+                from .gui_utils import run_kicad_oracle_on_live_board
+                _orc = run_kicad_oracle_on_live_board(
+                    board, _pfo['nets'],
+                    clearance=_pfo.get('clearance'),
+                    track_width=_pfo.get('track_width'),
+                    via_size=_pfo.get('via_size'),
+                    via_drill=_pfo.get('via_drill'),
+                    grid_step=_pfo.get('grid_step'),
+                    hole_to_hole_clearance=_pfo.get(
+                        'hole_to_hole_clearance'))
+                if _orc is not None:
+                    board.BuildConnectivity()
+                    _rf2 = refill_all_zones(board)
+                    if _rf2:
+                        print(f"Refilled {_rf2} zone(s) after the "
+                              f"plane-finalize oracle")
+            except Exception as e:
+                print(f"(plane-finalize oracle skipped: {e})")
+
         # Make the live board's DRC constraints consistent with what we just
         # routed to (issue #160), the GUI counterpart of the CLI's
         # fix_kicad_drc_settings: loosen the Board Setup floors + Default net

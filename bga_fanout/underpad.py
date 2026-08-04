@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import heapq
 import math
+import os
 from collections import Counter
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -305,7 +306,8 @@ def generate_underpad_escape(footprint: Footprint,
                              only_pad_keys: Optional[Set[Tuple[float, float]]] = None,
                              dogbone: bool = False,
                              plane_drop_nets: Optional[Set[int]] = None,
-                             plane_drop_report: Optional[Dict] = None
+                             plane_drop_report: Optional[Dict] = None,
+                             plane_net_layers: Optional[Dict[str, List[str]]] = None
                              ) -> Tuple[List[Dict], List[Dict], List[str]]:
     """Route BGA signal balls to the boundary under the pad field.
 
@@ -422,6 +424,64 @@ def generate_underpad_escape(footprint: Footprint,
     pad = max(exit_margin + 0.5, 1.0)
     bounds = (grid.min_x - pad, grid.min_y - pad, grid.max_x + pad, grid.max_y + pad)
     occ = _Occ(bounds, res, layers)
+
+    # #563 PROTOTYPE (worktree): pour-preserving escape costs.
+    # KICAD_FANOUT_POUR_PRESERVE=<mm-equiv> (0/unset = off). For every zone
+    # whose layer is an escape layer, rasterize the PRE-escape fill inside
+    # this occupancy window and charge escapes a fragility-style ramp: full
+    # cost at fill boundaries/straits, zero deeper than ~1mm into the fill.
+    # Under the BGA the flood is all straits, so escapes soft-prefer other
+    # layers there and the flood survives for pour-direct; mid-flood
+    # crossings outside stay ~free.
+    occ.pour_soft = None
+    try:
+        _pp = float(os.environ.get('KICAD_FANOUT_POUR_PRESERVE', '0') or 0)
+    except ValueError:
+        _pp = 0.0
+    if _pp > 0 and getattr(pcb_data, 'zones', None):
+        try:
+            from plane_fill_model import get_zone_model
+            from plane_fragility import _erode_depth
+            import numpy as _np
+            _ramp_mm = 1.0
+            _depth = max(1, int(round(_ramp_mm / occ.res)))
+            _fields = {}
+            for _z in pcb_data.zones:
+                if _z.layer not in layers:
+                    continue
+                _li = layers.index(_z.layer)
+                _m = get_zone_model(pcb_data, _z)
+                if _m is None:
+                    continue
+                # sample the model over THIS occupancy window
+                _mask = _np.zeros((occ.nx, occ.ny), dtype=bool)
+                for _a in range(occ.nx):
+                    _x = bounds[0] + (_a + 0.5) * occ.res
+                    for _b in range(occ.ny):
+                        _y = bounds[1] + (_b + 0.5) * occ.res
+                        _mask[_a, _b] = (_m.query_component(_x, _y) or 0) > 0
+                if not _mask.any():
+                    continue
+                _dist = _erode_depth(_mask, _depth)
+                _fld = _fields.setdefault(_li, _np.zeros((occ.nx, occ.ny)))
+                # Straits/boundaries cost full; interior fill is floored at
+                # 0.4, not ~0 -- an inner plane is SOLID under the BGA (SMD
+                # balls don't carve it), and with a free interior the escapes
+                # dice it to sub-min slivers (measured In1 82%->42% from
+                # tracks alone). Every fill cell consumed is copper lost.
+                _frac = _np.where(_mask,
+                                  _np.maximum(
+                                      1.0 - (_np.maximum(_dist, 1) - 1) / _depth,
+                                      0.4),
+                                  0.0)
+                _np.maximum(_fld, _pp * _frac, out=_fld)
+            if _fields:
+                occ.pour_soft = {li: f.ravel().tolist() for li, f in _fields.items()}
+                print(f"  Pour-preserve (#563): fragility field on "
+                      f"{len(_fields)} escape layer(s) at {_pp}mm-equiv")
+        except Exception as _e:
+            print(f"  Pour-preserve unavailable ({_e})")
+
     # The BGA's own layer is the "top" for escape purposes - its SMD pads block
     # only this layer, the via-less edge escape runs on it, and inner routing
     # goes UNDER the pads on the other layers. For a bottom-side BGA this is
@@ -786,7 +846,8 @@ def generate_underpad_escape(footprint: Footprint,
                 segs.append((x1, y1, x2, y2, tr['width'] / 2.0, tr['net_id']))
         return {'vias': vias, 'resv': resv, 'pads': pads, 'segs': segs}
 
-    def _via_site_conflict(x, y, net_id, ctx, vr=None, vdr=None):
+    def _via_site_conflict(x, y, net_id, ctx, vr=None, vdr=None,
+                           skip_resv=False):
         """Reason a full-size OFF-CENTRE via cannot sit at (x, y), or None.
 
         Mirrors the channel engine's via_in_pad_conflict (#370 B4) but also
@@ -809,7 +870,7 @@ def generate_underpad_escape(footprint: Footprint,
                 return "drill hole-to-hole vs a via"
             if onid != net_id and d < vr + orr + clearance - 1e-6:
                 return "via ring vs a foreign via"
-        for (ox, oy, orr, odr, onid) in ctx['resv']:
+        for (ox, oy, orr, odr, onid) in ([] if skip_resv else ctx['resv']):
             d = math.hypot(ox - x, oy - y)
             if d < vdr + odr + HOLE_TO_HOLE_CLEARANCE - 1e-6:
                 return "drill hole-to-hole vs a reserved via site"
@@ -848,7 +909,7 @@ def generate_underpad_escape(footprint: Footprint,
                    p.global_y - grid.min_y, grid.max_y - p.global_y)
 
     def astar(sx, sy, home, route_layers, allow_via, via_ok=None, net_id=0,
-              carve=None, start_layer=None):
+              carve=None, start_layer=None, cost_out=None):
         """Route from the pad to any boundary cell.
 
         `route_layers` = the set of layer indices the track may run on. The pad
@@ -890,11 +951,16 @@ def generate_underpad_escape(footprint: Footprint,
         _soft_foreign = occ.soft_foreign
         _steps = _STEPS
         _home = home
+        _pour_soft = getattr(occ, 'pour_soft', None)
         _vcache = {}
         while pq:
             _, cur = _heappop(pq)
             cx, cy, L = cur
             if not (bx0 <= cx <= bx1 and by0 <= cy <= by1):
+                if cost_out is not None:
+                    # outside the window the tie-break heuristic is 0, so the
+                    # popped priority IS the path's g-cost (#563 layer compare)
+                    cost_out.append(_)
                 path = [cur]
                 while cur in came:
                     cur = came[cur]
@@ -928,6 +994,10 @@ def generate_underpad_escape(footprint: Footprint,
                     if _has_soft and (nx, ny) not in _home and \
                             _soft_foreign(L, nx, ny, net_id):
                         step += 4.0
+                    if _pour_soft is not None:
+                        _ps = _pour_soft.get(L)
+                        if _ps is not None:
+                            step += _ps[nx * _ony + ny]
                     nxt = (nx, ny, L)
                     ng = cg + step
                     if ng < _g_get(nxt, 1e18):
@@ -1677,11 +1747,28 @@ def generate_underpad_escape(footprint: Footprint,
                                    home, {p.net_id})
             vsx, vsy = occ.cell(*_site)
             path = None
-            for _L in sorted(inner_layers):
-                path = astar(vsx, vsy, home, {_L}, allow_via=False,
-                             net_id=p.net_id, carve=carve, start_layer=_L)
-                if path is not None:
-                    break
+            if getattr(occ, 'pour_soft', None) is not None:
+                # #563: layer choice was first-path-wins, so per-cell pour
+                # costs could never move an escape off a flooded layer. With
+                # the field active, route EVERY candidate layer and keep the
+                # cheapest total (pour charge included); ties keep the lowest
+                # layer index (the old deterministic order).
+                best = None
+                for _L in sorted(inner_layers):
+                    _co = []
+                    _pth = astar(vsx, vsy, home, {_L}, allow_via=False,
+                                 net_id=p.net_id, carve=carve, start_layer=_L,
+                                 cost_out=_co)
+                    if _pth is not None and (best is None or _co[0] < best[0]):
+                        best = (_co[0], _pth)
+                if best is not None:
+                    path = best[1]
+            else:
+                for _L in sorted(inner_layers):
+                    path = astar(vsx, vsy, home, {_L}, allow_via=False,
+                                 net_id=p.net_id, carve=carve, start_layer=_L)
+                    if path is not None:
+                        break
             if path is not None:
                 commit_dogbone(p, _site, path, carve)
                 continue
@@ -1689,18 +1776,35 @@ def generate_underpad_escape(footprint: Footprint,
         home = home_of(p)
         _anchors = [(p.global_x, p.global_y)] + ([_site] if _site else [])
         carve = _carve_foreign(_anchors, home, {p.net_id})
-        _cs = clamp_via_to_pad(via_size, via_drill, p, floors)[0]
+        _cs, _cd = clamp_via_to_pad(via_size, via_drill, p, floors)[:2]
         _ctx = _via_ctx(p.net_id, p.global_x, p.global_y)
         _memo = {}
 
-        def _via_ok(x, y, at_center, _cs=_cs, _nid=p.net_id, _c=_ctx, _m=_memo):
+        def _via_ok(x, y, at_center, _cs=_cs, _cd=_cd, _nid=p.net_id,
+                    _c=_ctx, _m=_memo):
             if locked_smd_pads and not via_site_ok(
                     x, y, (_cs if at_center else via_size) / 2.0):
                 return False
             if at_center:
-                # centre via-in-pads keep their mutual-reservation contract
-                # (Phase B keep-outs) -- clamped inside the pad by commit().
-                return True
+                # The centre's mutual-reservation contract (Phase B) only
+                # covers RESERVATIONS -- #567: a neighbour's COMMITTED escape
+                # run can lawfully pass within (clamped ring + clearance) of
+                # this pad centre (an earlier pass or an equal-depth sort tie
+                # routes it first; the SMD pad blocks only its own layer), and
+                # the old blanket True dropped the via straight through that
+                # copper. Check the pad-CLAMPED ring/drill against REAL copper
+                # (board incl. materialized earlier-pass results, this run's
+                # tracks/vias, pads) and skip only the resv list -- the
+                # contract's actual domain. Vetoed centres fall to the checked
+                # off-centre search or fail the ball honestly to the router.
+                key = ('c', round(x, 6), round(y, 6))
+                ok = _m.get(key)
+                if ok is None:
+                    ok = _via_site_conflict(x, y, _nid, _c, vr=_cs / 2.0,
+                                            vdr=(_cd or 0.0) / 2.0,
+                                            skip_resv=True) is None
+                    _m[key] = ok
+                return ok
             key = (round(x, 6), round(y, 6))
             ok = _m.get(key)
             if ok is None:
@@ -1749,6 +1853,34 @@ def generate_underpad_escape(footprint: Footprint,
         # way). The fill models must see THIS call's fresh copper (materialized
         # into pcb_data by the drop pass), so drop any stale per-board cache.
         _pour_models: Dict[Tuple[int, str], list] = {}
+        # DECLARED future pours (--plane-net-layers, worktree prototype): for a
+        # declared (net, layer) with the layer on this BALL side, build a
+        # SYNTHETIC board-rect zone and fill-model it against the copper that
+        # exists NOW -- a predictor of whether the future pour will reach each
+        # ball. Balls the predicted fill reaches skip their drop via entirely
+        # (the fanout-time form of pour-direct; plane repair backstops misses).
+        if plane_net_layers:
+            try:
+                from kicad_parser import Zone as _Zone
+                from plane_fill_model import get_zone_model as _gzm
+                _bb = pcb_data.board_info.board_bounds
+                _name2id = {n.name: n.net_id for n in pcb_data.nets.values()}
+                for _nname, _lays in plane_net_layers.items():
+                    _nid = _name2id.get(_nname)
+                    if _nid is None or not _bb:
+                        continue
+                    for _lay in _lays:
+                        _z = _Zone(net_id=_nid, net_name=_nname, layer=_lay,
+                                   polygon=[(_bb[0], _bb[1]), (_bb[2], _bb[1]),
+                                            (_bb[2], _bb[3]), (_bb[0], _bb[3])])
+                        _m = _gzm(pcb_data, _z)
+                        if _m is not None:
+                            _pour_models.setdefault((_nid, _lay), []).append(_m)
+                if verbose and _pour_models:
+                    print(f"  Declared-pour prediction: {len(_pour_models)} "
+                          f"(net,layer) synthetic fill model(s)")
+            except Exception as _e:
+                print(f"  Declared-pour prediction unavailable ({_e})")
         import env_knobs
         if env_knobs.FANOUT_POUR_DIRECT and \
                 any((z.net_id in plane_drop_nets) for z in (pcb_data.zones or [])):
@@ -1774,6 +1906,7 @@ def generate_underpad_escape(footprint: Footprint,
 
         _rep_nets: Dict[str, Dict[str, int]] = {}
         n_gap = n_ctr = n_exist = n_fail = n_pour = 0
+        n_trk = [0]
         for p in drop_pads:
             r = _rep_nets.setdefault(p.net_name,
                                      {'gap': 0, 'in_pad': 0, 'existing': 0,
@@ -1795,6 +1928,59 @@ def generate_underpad_escape(footprint: Footprint,
                 n_pour += 1
                 r['pour'] += 1
                 continue
+            # TRACK-CONNECT (worktree prototype): a through-barrel here
+            # perforates EVERY foreign pour whose fill covers this (x,y) --
+            # the mechanism that shreds middle-layer rail planes. When it
+            # would, and an already-placed same-net drop via sits within
+            # reach on this ball's own layer, connect by a short surface
+            # TRACK to that via instead (humans: ~0.44 vias/ball -- balls
+            # chain to shared barrels). KICAD_FANOUT_TRACK_CONNECT=1 arms.
+            import os as _os
+            if _os.environ.get('KICAD_FANOUT_TRACK_CONNECT', '') == '1':
+                from plane_fill_model import get_fill_models as _gfm
+                _gx, _gy = p.global_x, p.global_y
+                _pierced = 0
+                for _z in (pcb_data.zones or []):
+                    if _z.net_id == p.net_id:
+                        continue
+                    _ms = _gfm(pcb_data, _z.net_id).get(_z.layer, [])
+                    if any((_m.query_component(_gx, _gy) or 0) > 0 for _m in _ms):
+                        _pierced += 1
+                if _pierced >= 1:
+                    _lay_i = top_idx
+                    _r_mm = float(_os.environ.get('KICAD_FANOUT_TRACK_CONNECT_R', '2.0') or 2.0)
+                    _tw2 = track_width / 2.0 + clearance
+                    _best = None
+                    for (_vx, _vy, _vr) in _net_vias.get(p.net_id, ()):
+                        _d = math.hypot(_vx - _gx, _vy - _gy)
+                        if _d <= _r_mm and (_best is None or _d < _best[2]):
+                            _best = (_vx, _vy, _d)
+                    if _best is not None:
+                        _vx, _vy, _d = _best
+                        _n = max(2, int(_d / max(occ.res, 1e-3)))
+                        _free = True
+                        for _t in range(_n + 1):
+                            _sx = _gx + (_vx - _gx) * _t / _n
+                            _sy = _gy + (_vy - _gy) * _t / _n
+                            if math.hypot(_sx - _gx, _sy - _gy) < max(p.size_x, p.size_y) / 2.0:
+                                continue
+                            if math.hypot(_sx - _vx, _sy - _vy) < _vr:
+                                continue
+                            _ix, _iy = occ.cell(_sx, _sy)
+                            if not occ.inside(_ix, _iy) or occ.blocked(_lay_i, _ix, _iy):
+                                _free = False
+                                break
+                        if _free:
+                            tracks.append({'start': (_gx, _gy), 'end': (_vx, _vy),
+                                           'width': track_width,
+                                           'layer': layers[top_idx],
+                                           'net_id': p.net_id})
+                            occ.block_segment(_lay_i, (_gx, _gy), (_vx, _vy), _tw2)
+                            _net_seg_ends.setdefault(p.net_id, []).extend(
+                                [(_gx, _gy), (_vx, _vy)])
+                            r['track'] = r.get('track', 0) + 1
+                            n_trk[0] += 1
+                            continue
             # This ball's centre was reserved up front as its future plane-tap
             # site; the drop replaces that tap, so the reservation must not
             # veto its own via (drill-vs-drill at distance 0) or the gap site
@@ -1845,13 +2031,15 @@ def generate_underpad_escape(footprint: Footprint,
             plane_drop_report.update(
                 {'nets': _rep_nets, 'gap_vias': n_gap, 'pad_vias': n_ctr,
                  'skipped_existing': n_exist, 'skipped_pour': n_pour,
-                 'failed': n_fail})
+                 'track_connects': n_trk[0], 'failed': n_fail})
         if verbose and drop_pads:
             per = ", ".join(f"{n} {c['gap']}+{c['in_pad']}"
                             for n, c in sorted(_rep_nets.items()))
             extra = f", {n_exist} already connected" if n_exist else ""
             extra += (f", {n_pour} pour-covered (no via needed)"
                       if n_pour else "")
+            extra += (f", {n_trk[0]} track-connected (shared barrel)"
+                      if n_trk[0] else "")
             extra += f", {n_fail} FAILED (left for the plane tap)" if n_fail else ""
             print(f"  Plane drops (#424): {n_gap} gap + {n_ctr} in-pad vias "
                   f"[{per}]{extra}")
