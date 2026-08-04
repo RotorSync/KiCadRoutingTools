@@ -1285,6 +1285,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             net_clearances=net_clearances)
         # Set bounds for visualization
         base_vis_data.bounds = get_net_bounds(pcb_data, all_net_ids_to_route, padding=5.0)
+        # #568: this branch builds an UNFROZEN base -- rung-1 via legality
+        # would under-block base copper if caches small-stamped. Disarm the
+        # dual stamping for this run (see obstacle_cache._small_via_pair).
+        pcb_data._via_rung_unsafe = True
     else:
         base_obstacles = build_base_obstacle_map(
             pcb_data, config, base_map_exclusions,

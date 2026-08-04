@@ -1089,6 +1089,9 @@ def _probe_route_with_frontier_once(
     first_label, second_label = direction_labels
     probe_iterations = config.max_probe_iterations
     _ver = via_exclusion_radius
+    # #568: rung-aware via legality for THIS search only (set via a config
+    # clone by the escalation retry; 0 = baseline, byte-identical in Rust).
+    _vrung = getattr(config, 'via_rung', 0)
 
     # Track iterations per direction (first/second maps to forward/backward based on labels)
     first_total_iters = 0
@@ -1096,7 +1099,7 @@ def _probe_route_with_frontier_once(
 
     # Probe forward direction
     path, iterations, blocked_cells = router.route_with_frontier(
-        obstacles, forward_sources, forward_targets, probe_iterations, track_margin=track_margin, via_exclusion_radius=_ver,
+        obstacles, forward_sources, forward_targets, probe_iterations, track_margin=track_margin, via_exclusion_radius=_ver, via_rung=_vrung,
         collinear_vias=env_knobs.COLLINEAR_VIAS)
     first_probe_iters = iterations
     first_total_iters = first_probe_iters
@@ -1136,7 +1139,7 @@ def _probe_route_with_frontier_once(
         print(f"{print_prefix}Probe: {first_label}={first_probe_iters} iters [single-direction bus mode], trying full iterations...")
         _dyn_base, _dyn_kw = _dynamic_iterations(config)
         path, full_iters, full_blocked = router.route_with_frontier(
-            obstacles, forward_sources, forward_targets, _dyn_base, track_margin=track_margin, via_exclusion_radius=_ver,
+            obstacles, forward_sources, forward_targets, _dyn_base, track_margin=track_margin, via_exclusion_radius=_ver, via_rung=_vrung,
         collinear_vias=env_knobs.COLLINEAR_VIAS, **_dyn_kw)
         _note_dynamic_extension(full_iters, _dyn_base, print_prefix)
         first_total_iters += full_iters
@@ -1151,7 +1154,7 @@ def _probe_route_with_frontier_once(
 
     # Probe backward direction (bidirectional mode)
     path, iterations, blocked_cells = router.route_with_frontier(
-        obstacles, forward_targets, forward_sources, probe_iterations, track_margin=track_margin, via_exclusion_radius=_ver,
+        obstacles, forward_targets, forward_sources, probe_iterations, track_margin=track_margin, via_exclusion_radius=_ver, via_rung=_vrung,
         collinear_vias=env_knobs.COLLINEAR_VIAS)
     second_probe_iters = iterations
     second_total_iters = second_probe_iters
@@ -1198,7 +1201,7 @@ def _probe_route_with_frontier_once(
 
     _dyn_base, _dyn_kw = _dynamic_iterations(config)
     path, full_iters, full_blocked = router.route_with_frontier(
-        obstacles, forward_sources, forward_targets, _dyn_base, track_margin=track_margin, via_exclusion_radius=_ver,
+        obstacles, forward_sources, forward_targets, _dyn_base, track_margin=track_margin, via_exclusion_radius=_ver, via_rung=_vrung,
         collinear_vias=env_knobs.COLLINEAR_VIAS, **_dyn_kw)
     _note_dynamic_extension(full_iters, _dyn_base, print_prefix)
     first_total_iters += full_iters
@@ -1214,7 +1217,7 @@ def _probe_route_with_frontier_once(
     forward_blocked = full_blocked
 
     path, backward_full_iters, backward_full_blocked = router.route_with_frontier(
-        obstacles, forward_targets, forward_sources, _dyn_base, track_margin=track_margin, via_exclusion_radius=_ver,
+        obstacles, forward_targets, forward_sources, _dyn_base, track_margin=track_margin, via_exclusion_radius=_ver, via_rung=_vrung,
         collinear_vias=env_knobs.COLLINEAR_VIAS, **_dyn_kw)
     _note_dynamic_extension(backward_full_iters, _dyn_base, print_prefix)
     second_total_iters += backward_full_iters
@@ -1924,14 +1927,19 @@ def _via_rung_retry(router, obstacles, config, sources, targets, pcb_data,
     free_here bypasses is_via_blocked), register their emission sizes so the
     shipped vias ARE the small rung (#339 re-validates at emission), and
     re-search once at the caller's floor width. Fires only on edges that
-    would otherwise FAIL; KICAD_VIA_RUNG=0 disables.
+    would otherwise FAIL. KICAD_VIA_RUNG: 0 disables, 1 = this overlay
+    (default), 2 = #568 rust mode -- per-rung via legality in the map itself
+    (blocked_vias_small dual stamping + via_rung=1 search; no sampling, no
+    free-via cost softness, and in-run foreign via drills are protected at
+    the exact small-drill h2h, the overlay's known gap).
 
     Known softness: free-via cells price the transition at via_cost 0 (the
     same-net-hole discount) -- acceptable for a would-fail edge. Returns the
     route result tuple, or None-path result when even this fails.
     """
     import os as _os
-    if _os.environ.get('KICAD_VIA_RUNG', '1') != '1' or pcb_data is None:
+    _mode = _os.environ.get('KICAD_VIA_RUNG', '1')
+    if _mode not in ('1', '2') or pcb_data is None:
         return None
     from fab_tiers import fab_floor_ladder
     layers = [l for l in (pcb_data.board_info.copper_layers or [])
@@ -1946,6 +1954,32 @@ def _via_rung_retry(router, obstacles, config, sources, targets, pcb_data,
     if rung is None:
         return None
     vs, dr = rung
+    if _mode == '2':
+        # #568 rust mode: the working map carries blocked_vias_small stamped at
+        # exactly this rung's reserve (obstacle_cache dual stamping, same env),
+        # so legality is the SEARCH's question -- no sampling, no overlay, no
+        # site validator, and no via_cost-0 softness. Re-search once at the
+        # caller's floor width with a via_rung=1 config clone (per-search;
+        # never leaks). Emission: register the small pair for the path's via
+        # cells where the FULL size is blocked -- those transitions only exist
+        # by rung-1 legality; #339 re-validates at emission as always.
+        # An EMPTY small map (rescue windows, unarmed flows) makes rung 1 fall
+        # back to full-size legality -- the search would just repeat the
+        # failure; skip instead of burning the budget twice.
+        if obstacles.get_stats()[7] == 0:
+            return None
+        from dataclasses import replace as _replace
+        print(f"{print_prefix}{YELLOW}Via rung retry (rust): re-searching at "
+              f"rung {vs}/{dr} (was {config.via_size}/{config.via_drill}) "
+              f"at floor width{RESET}")
+        _rcfg = _replace(config, via_rung=1)
+        _res = _route_connection_at_margin(
+            router, obstacles, _rcfg, sources, targets,
+            _rcfg.base_track_margins(), pcb_data, net_id, print_prefix,
+            direction_labels, single_direction, waypoints)
+        if _res and _res[0]:
+            _register_rung_path_vias(pcb_data, obstacles, _res[0], vs, dr)
+        return _res
     coord = GridCoord(config.grid_step)
     gx0 = min(p[0] for p in sources + targets)
     gx1 = max(p[0] for p in sources + targets)
@@ -2013,6 +2047,28 @@ def _via_rung_retry(router, obstacles, config, sources, targets, pcb_data,
         router, obstacles, config, sources, targets,
         config.base_track_margins(), pcb_data, net_id, print_prefix,
         direction_labels, single_direction, waypoints)
+
+
+def _register_rung_path_vias(pcb_data, obstacles, path, vs, dr):
+    """#568: register the small (dia, drill) for the path's via cells where
+    the FULL size is blocked -- those transitions exist only by rung-1
+    legality, so emission must ship the small rung (#339 re-validates).
+    Cells legal at full size are NOT registered (they ship the configured
+    via; registering small there would shrink vias needlessly)."""
+    sizes = getattr(pcb_data, '_unblock_via_sizes', None)
+    if sizes is None:
+        sizes = pcb_data._unblock_via_sizes = {}
+    for a, b in zip(path, path[1:]):
+        if a[2] != b[2] and obstacles.is_via_blocked(a[0], a[1]):
+            sizes.setdefault((a[0], a[1]), (vs, dr))
+
+
+def _rung_search_pair(config, pcb_data):
+    """The (dia, drill) a via_rung=1 search would ship, or None when rust
+    mode (KICAD_VIA_RUNG=2) is off or no smaller fab rung exists. Shared
+    selection rule with the obstacle-cache dual stamping by construction."""
+    from obstacle_cache import _small_via_pair
+    return _small_via_pair(config, pcb_data)
 
 
 def _edge_span_mm(sources, targets, grid_step):
@@ -2283,6 +2339,31 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
     fwd_i, bwd_i = res[5], res[6]
     lim = config.max_probe_iterations
     coord = GridCoord(config.grid_step)
+
+    # #568 rust mode: before COMMITTING copper (the #189 pre-placed in-pad
+    # via), let the search itself try the small rung -- a boxed pad is often
+    # boxed only at the configured via reserve, and a rung-1 via the A* places
+    # where it wants beats a forced in-pad via (no free-via cost softness, no
+    # windowed board scan, no IPC-4761 via-in-pad note). Capped at the probe
+    # budget, same fail-fast rationale as the placement retry below.
+    # Pre-placement remains the fallback for genuinely small-rung-boxed pads.
+    if (((bwd_i and bwd_i < lim) or (fwd_i and fwd_i < lim))
+            and obstacles.get_stats()[7] > 0):
+        _rp = _rung_search_pair(config, pcb_data)
+        if _rp is not None:
+            _rcfg = replace(config, via_rung=1,
+                            max_iterations=config.max_probe_iterations)
+            _r1 = _route_main_connection(
+                router, obstacles, _rcfg, sources, targets, track_margin,
+                pcb_data, net_id, print_prefix, direction_labels,
+                single_direction, waypoints)
+            if _r1[0] is not None:
+                print(f"{print_prefix}{GREEN}Boxed endpoint unblocked by "
+                      f"rung-{_rp[0]}/{_rp[1]} via search (no pre-placed "
+                      f"via){RESET}")
+                _register_rung_path_vias(pcb_data, obstacles, _r1[0],
+                                         _rp[0], _rp[1])
+                return _r1 + ([],)
 
     _dbg = _unblock_debug()
     placed = []  # (via, vgx, vgy, pad_layer_idx)
