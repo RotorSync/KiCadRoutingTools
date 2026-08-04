@@ -802,9 +802,10 @@ Based on the analysis, generate a step-by-step plan. The general order is:
 
 1. **Pour the planes FIRST** — before fanout, before any routing. A bare
    `route_planes`
-   call: nets + layers only. NO `--add-gnd-vias`, NO `--stitch-vias`, NO
-   `--rip-blocker-nets` — those adapt to signals that don't exist yet (the old
-   #56 hazard) and belong in Step 3. Why the pour comes first (#424, measured):
+   call: nets + layers only. NO `--add-gnd-vias`, NO `--stitch-vias` — those
+   adapt to signals that don't exist yet (the old #56 hazard) and belong in
+   Step 3. (The pour cannot rip at all any more: `--rip-blocker-nets` and the
+   other tap knobs were REMOVED from `route_planes` with the tap machinery.) Why the pour comes first (#424, measured):
    the fanout's plane-drop vias connect to a still-intact pour immediately, and
    the **plane-fragility field** (default on: `KICAD_PLANE_FRAGILITY_COST`,
    2.0 mm-equiv, `=0` reverts) then makes every later routing step pay to cut
@@ -850,9 +851,8 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    Re-run `route_planes` with the same nets/layers plus `--add-gnd-vias` (and
    any `--stitch-*` flags): an existing same-net zone is REPLACED in place, and
    the return/stitching vias now adapt around the finished signals — the #56
-   ordering concern lives here, not at the pour. Prefer NO `--rip-blocker-nets`
-   on boards whose BGAs were plane-dropped (the measured failure mode of
-   ripping here is routed signals lost for tap pads the drops already serve).
+   ordering concern lives here, not at the pour. This step cannot rip either --
+   the pour never taps, so there is no blocker to clear.
    **Stitching is normal human practice, not an exotic add-on**: 58% of ~400
    human corpus boards carry a free-standing GND stitch lattice — when the
    board has GND pours on 2+ layers, recommend `--stitch-vias` here. Leave
@@ -892,9 +892,8 @@ Present the plan to the user as a numbered list with explanations:
 ## Step-by-Step Routing Commands
 
 ### Step 1: Pour the Power Planes (FIRST — before fanout and routing, #424/#562)
-A bare pour: nets and layers ONLY. No `--add-gnd-vias`, no `--stitch-*`, no
-`--rip-blocker-nets` — those adapt to signals that don't exist yet and run in
-Step 3 instead. **The pour runs FIRST, before fanout**: the fanout's
+A bare pour: nets and layers ONLY. No `--add-gnd-vias`, no `--stitch-*` —
+those adapt to signals that don't exist yet and run in Step 3 instead. **The pour runs FIRST, before fanout**: the fanout's
 plane-drop pass then sees real fill, so a ball the pour already covers needs
 no via at all (pour-direct) and the ones that do get a via land on intact
 copper. The pour step itself does no routing at all (#562: it places no taps
@@ -1077,11 +1076,12 @@ target layer is REPLACED in place (CLI default), and `--add-gnd-vias` places
 return-current vias that adapt around the now-finished signals — the old
 "stitching vias placed early block a diff pair's only channel" concern (#56)
 is why these vias run HERE and not at the Step 1 pour. BGA plane balls
-already carry their fanout-time plane-drop vias (#424), so this step should
-need no tapping under a dropped BGA — and prefer NO `--rip-blocker-nets`
-here: the measured failure mode of ripping is routed signals lost for tap
-pads the drops already serve. (If it must rip, the ripped nets are left
-unrouted — reconnect them with a follow-up `route.py` pass naming them,
+already carry their fanout-time plane-drop vias (#424), so this step needs
+no tapping under a dropped BGA. It cannot rip anything either: the pour
+places no taps, so `--rip-blocker-nets` is gone from `route_planes`. (For
+the record, the measured failure mode of ripping here was routed signals
+lost for tap pads the drops already serve. Reconnect anything a chain does
+leave open with a follow-up `route.py` pass naming them,
 using the same parameters as Step 2.)
 
 > **Note to user:** GND return vias improve signal integrity for high-speed
@@ -1290,9 +1290,9 @@ plane-light plan (GND-only, rails as wide tracks) left ~26% incomplete spends
   Never leave a many-pad rail as pure tracks because its natural layer is
   shared with routing.
 - **Check where the BGA fanout escapes landed before finalizing the plane
-  layers** — a plane on a layer full of escape stubs forces `--rip-blocker-nets`
-  to shred those escapes during tap placement (each rip risks a permanent
-  casualty). Pick solid-plane layers the escapes avoid.
+  layers** — a plane on a layer full of escape stubs leaves the route step
+  threading its plane taps through a crowded field. Pick solid-plane layers
+  the escapes avoid.
 
 **Adapt the pour plan to the BOARD TYPE (measured across ~400 human corpus
 boards, grouped by dominant component/function):**
@@ -1520,7 +1520,7 @@ consolidating routing corridors.
 
 - Multiple nets can share one plane layer (Voronoi partitioning): `--nets GND VCC --plane-layers In2.Cu In2.Cu`
 - `--same-net-pad-clearance <mm>` forces plane vias outside same-net pads with that edge-to-edge clearance (default places at pad center when possible)
-- `--rip-blocker-nets` rips up interfering routed nets to maximize via placement and leaves them unrouted (reconnect with a follow-up route.py pass naming them). `--reroute-ripped-nets` is a deprecated no-op.
+- The pour places NO tap vias and draws NO traces (#562), so it has no via-search or blocker-rip knobs: `--max-search-radius`, `--max-via-reuse-radius`, `--close-via-radius`, `--rip-blocker-nets`, `--max-rip-nets` and `--reroute-ripped-nets` are REMOVED. Do not emit them. Plane pads are welded by the route step's pour-launch and its in-run plane finalize.
 
 ### Net Ordering Strategies
 

@@ -102,8 +102,8 @@ def main():
             run(f'python3 route.py {src_pcb} {out} '+target+" "+options, unbuffered)
 
         # Route some power nets with vias to planes
-        run(f'python3 route_planes.py {out} {out_plane} --nets +3.3V GND +3.3V GND --plane-layers F.Cu In1.Cu In2.Cu B.Cu \
-        --max-via-reuse-radius 3 --rip-blocker-nets --reroute-ripped-nets '+base_options, unbuffered)
+        run(f'python3 route_planes.py {out} {out_plane} --nets +3.3V GND +3.3V GND --plane-layers F.Cu In1.Cu In2.Cu B.Cu '
+            +base_options, unbuffered)
 
         # Connect broken plane regions
         run(f'python3 route_disconnected_planes.py {out_plane} {out_conn} --analysis-grid-step 0.1 '+base_options)

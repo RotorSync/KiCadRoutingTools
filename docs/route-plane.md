@@ -51,10 +51,6 @@ python route_planes.py input.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In
 # Create VCC plane on inner layer with larger vias
 python route_planes.py input.kicad_pcb --nets VCC --plane-layers In2.Cu --via-size 0.5 --via-drill 0.4
 
-# Legacy tap mode only (KICAD_PLANE_NO_TAPS=0): rip blockers to fit taps.
-# At defaults these flags do nothing -- the pour places no taps at all.
-python route_planes.py input.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets
-
 # Preview what would be placed without writing
 python route_planes.py input.kicad_pcb --nets GND --plane-layers B.Cu --dry-run
 ```
@@ -92,8 +88,6 @@ When specifying multiple nets, each net is paired with its corresponding plane l
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--grid-step` | 0.1 | Grid resolution in mm |
-| `--max-search-radius` | 10.0 | Maximum radius to search for valid via position in mm |
-| `--max-via-reuse-radius` | 1.0 | Prefer reusing existing vias within this radius in mm |
 | `--hole-to-hole-clearance` | 0.2 | Minimum clearance between drill holes in mm (fab floor) |
 | `--same-net-pad-clearance` | -1.0 | Edge-to-edge clearance (mm) between stitching vias and same-net pads. `-1` allows via-in-pad placement (the default for the CLI). Any value `>= 0` forces vias to be placed outside same-net pads with that clearance |
 | `--layers`, `-l` | F.Cu + plane-layers + B.Cu | All copper layers for routing and via span (auto-computed) |
@@ -115,20 +109,15 @@ The `--plane-track-via-clearance` parameter ensures MST routes don't pass throug
 
 A net earns a Voronoi zone on a shared layer if it has **any** connection point there — a stitching via *or* a pad. A net whose pads are all through-hole or already on the layer places zero stitching vias, but its zone is still poured (seeded from those pads' positions); the partition is not gated on placing ≥1 via (issue #114).
 
-### Blocker Rip-up Options
+### Re-routing Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--rip-blocker-nets` | off | Enable blocker identification and removal |
-| `--max-rip-nets` | 3 | Maximum blocker nets to rip up per pad |
-| `--reroute-ripped-nets` | off | Automatically re-route ripped nets after via placement |
 | `--no-bga-zone` | off | Disable BGA auto-exclusion zones when re-routing ripped nets — use when the original signal route used `--no-bga-zones`, so the reroute uses compatible parameters |
 | `--power-nets` | - | Glob patterns for power nets to route with wider tracks |
 | `--power-nets-widths` | - | Track widths in mm for each power-net pattern |
 
-When `--rip-blocker-nets` is enabled, if via placement or routing fails for a pad, the tool identifies which net is blocking and temporarily removes it from the PCB data. It then retries via placement. This process repeats up to `--max-rip-nets` times per pad. If an attempt ultimately fails, ripped nets are restored **collision-aware**: a net is put back only when none of its segments/vias overlap the plane copper placed this run; any piece that would overlap is left ripped (and returned for re-routing) instead of restoring a short.
-
-When `--reroute-ripped-nets` is also enabled, after all plane vias are placed, the tool automatically re-routes the ripped nets using the batch router from `route.py`. This uses all copper layers specified by `--layers` for proper via clearance checking. Pass `--no-bga-zone` so the reroute matches the original signal route's parameters. After the reroute the tool geometrically re-checks each ripped net, and for any that is **still disconnected it restores the net's original trace** — re-read from the pristine input — and removes the plane stitching via(s) that would short against it, so the net returns to exactly its pre-rip connected state rather than being left worse than the input (issue #88). A net with no original copper to restore is reported by name instead.
+The pour step does **no tapping and no ripping** (#562). Every pad that would need a tap via is deferred to the route step, which welds it into the pour with the full routing machinery (pour-launch) and taps whatever the fill cannot reach in its in-run plane finalize. The one exception is an exposed/thermal pad, whose via **array** (#487) stamps vias without drawing any trace. The blocker rip-up knobs (`--rip-blocker-nets`, `--max-rip-nets`, `--reroute-ripped-nets`) and the via-search radii (`--max-search-radius`, `--max-via-reuse-radius`, `--close-via-radius`) are **removed** from this script accordingly; `route_disconnected_planes.py` still has them, and old chains that pass them here are accepted with a note and ignored until the manifest migration rewrites them.
 
 After writing output, `route_planes.py` runs a **geometric verification** pass: it re-parses the board and reports, per plane net, how many pads are actually joined to the plane (via `check_net_connectivity`), and prints a NOTE when this disagrees with the via-placement counters. This surfaces pads whose stitching via is not electrically joined and TH pads on multi-net Voronoi layers that fell in the other net's region.
 
@@ -313,12 +302,12 @@ The tool classifies each pad on the target net into three categories:
 
 For each pad needing a via, the algorithm:
 
-1. **Check for nearby existing via** - If a via on the same net exists within `--max-via-reuse-radius`, reuse it
+1. **Check for nearby existing via** - If a via on the same net exists close by, reuse it
 2. **Try pad center first** - If the pad center is not blocked, place via there (no trace needed). Skipped when `--same-net-pad-clearance >= 0`, in which case same-net pads are treated as obstacles and vias are always placed outside the pad with the requested edge-to-edge clearance.
 3. **Spiral search outward** - Search in expanding rings for a valid position that:
    - Has clearance from existing vias, tracks, and pads on ALL copper layers
    - Can be routed to the pad using A* pathfinding
-4. **Fallback to farther via** - If no new via position works, try reusing any existing via within `--max-search-radius`
+4. **Fallback to farther via** - If no new via position works, try reusing any existing via farther out
 
 #### Same-net pad clearance / via-in-pad
 
@@ -340,35 +329,12 @@ When a via cannot be placed at the pad center, the tool routes a trace from the 
 - Respects clearance requirements
 - Uses the pad's layer for the trace
 
-### Blocker Rip-up
+### Blocker Rip-up (removed from this script)
 
-When `--rip-blocker-nets` is enabled and via placement or routing fails:
-
-1. **Identify blocker** - Analyzes what net is blocking:
-   - For via placement failures: finds the nearest segment/via from another net
-   - For routing failures: analyzes the A* frontier to find which net's obstacles are blocking the most cells
-   - **Protected nets** (the plane nets being processed) are never identified as blockers
-
-2. **Remove blocker** - Temporarily removes the blocking net's segments and vias from the PCB data
-
-3. **Rebuild obstacles** - Rebuilds the obstacle maps without the ripped net (also re-blocks any vias already placed in this run)
-
-4. **Retry placement** - Attempts via placement and routing again
-
-5. **Repeat** - If still blocked, identifies the next blocker and repeats (up to `--max-rip-nets` times)
-
-The tool also uses a skip optimization: when routing fails from a particular via position, nearby positions (within 2x via-size) are skipped to avoid redundant attempts.
-
-### Automatic Re-routing
-
-When `--reroute-ripped-nets` is enabled, after all plane vias are placed:
-
-1. The tool collects all ripped net names
-2. Calls `batch_route` from `route.py` with the ripped nets
-3. Uses all copper layers (`--layers`) for routing and via clearance checking
-4. Reports how many nets were successfully re-routed
-
-This ensures that ripped nets are re-routed while respecting clearance from the newly placed plane vias on all layers.
+The pour no longer places taps, so it never needs to rip a blocker.
+The rip-up algorithm still exists in the repair engine
+(`route_disconnected_planes.py`, documented below), which the route
+step's in-run plane finalize calls -- with ripping OFF by default.
 
 ### Multi-Net Layer Zone Generation
 
@@ -458,22 +424,11 @@ A via position was found (or an existing via was selected), but the A* router co
    --via-size 0.4 --via-drill 0.3
    ```
 
-2. **Increase search radius** - Search farther for valid positions
-   ```bash
-   --max-search-radius 15.0
-   ```
+2. **Run after other routing** - Place plane vias last so they work around existing routes
 
-3. **Reduce reuse radius** - Place more local vias instead of routing long distances
-   ```bash
-   --max-via-reuse-radius 0.5
-   ```
-
-4. **Run after other routing** - Place plane vias last so they work around existing routes
-
-5. **Use blocker rip-up with re-routing** - For maximum via placement, enable both options:
-   ```bash
-   --rip-blocker-nets --reroute-ripped-nets --max-rip-nets 5
-   ```
+3. **Let the route step do the work** - Plane pads the pour cannot reach are not a
+   pour failure: the route step welds them (pour-launch) and its in-run finalize
+   taps the rest. Grade plane connectivity AFTER the route step, never here.
 
 ## Example Output
 

@@ -2,7 +2,8 @@
 
 Two things make this load-bearing since #562:
 
-  * the pour places NO taps (KICAD_PLANE_NO_TAPS default ON), so plane pads
+  * the pour places NO taps (unconditionally, since #562 deleted the tap
+    machinery and its kill switch), so plane pads
     are welded by the ROUTE step's pour-launch -- a plan that pours and then
     never routes connects nothing at all; and
   * every route step ends with the in-run plane finalize (repair engine +

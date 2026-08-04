@@ -55,24 +55,12 @@ from plane_obstacle_builder import (
     _add_segment_routing_obstacle,
     _add_board_edge_track_obstacles
 )
-from plane_blocker_detection import (
-    ViaPlacementResult,
-    find_via_position_blocker,
-    find_route_blocker_from_frontier,
-    try_place_via_with_ripup
-)
 from plane_zone_geometry import (
     compute_zone_boundaries,
     find_polygon_groups,
     sample_route_for_voronoi
 )
-from plane_pad_tap import (
-    pad_is_fine_pitch,
-    tap_pad_with_escalation,
-    fab_floor_clearance_track,
-    clamp_tap_via_to_edge,
-    FINE_TAP_GRID_STEP,
-)
+from plane_pad_tap import clamp_tap_via_to_edge
 from terminal_colors import GREEN, RED, RESET
 
 # Import Rust router (startup_checks ensures it's available and up-to-date)
@@ -1894,7 +1882,6 @@ def _write_output_and_reroute(
     all_ripped_net_ids: List[int],
     zones_to_replace: List[Tuple[int, str]],
     pcb_data: PCBData,
-    reroute_ripped_nets: bool,
     all_layers: List[str],
     plane_layers: List[str],
     track_width: float,
@@ -1969,8 +1956,9 @@ def _write_output_and_reroute(
         # ripped to place plane vias must not depend on a LATER chain step
         # existing to reconnect it -- without this, manifests that stop after
         # the plane step ship those nets OPEN with only a warning (orangecrab
-        # shipped 24 such nets). Handle the verified-broken subset in-run
-        # even when --reroute-ripped-nets was not passed.
+        # shipped 24 such nets). Handle the verified-broken subset in-run,
+        # unconditionally -- this used to be opt-in behind
+        # --reroute-ripped-nets, which no longer exists.
         #
         # ORDER MATTERS (DRC safety by construction, not by collision
         # filtering): the #88 restore is a blind re-add of the net's ORIGINAL
@@ -1979,18 +1967,14 @@ def _write_output_and_reroute(
         # restore_failed_reroute_nets already removes where it collides, and
         # originals cannot collide with each other or with untouched input
         # copper (the input board was legal). Rerouting FIRST and restoring
-        # after (the old --reroute-ripped-nets order) stacked originals onto
-        # sibling reroutes that had claimed the vacated corridors -- the
+        # after (the order the removed --reroute-ripped-nets flag asked for)
+        # stacked originals onto sibling reroutes that had claimed the
+        # vacated corridors -- the
         # #141/eis hazard (measured on orangecrab: 60+ violations). After the
         # restore, whatever is STILL broken (no original copper to restore,
         # or a partial restore that did not reconnect) gets a FRESH
         # batch_route against the written board; routing is obstacle-aware,
         # so it cannot create collisions.
-        if broken_names and not reroute_ripped_nets:
-            print(f"\nNote: {len(broken_names)} ripped net(s) are broken in the "
-                  f"output; restoring/rerouting them in-run (#347) even though "
-                  f"--reroute-ripped-nets was not passed.")
-
         if broken_names:
             print(f"\n{'='*60}")
             print(f"Reconnecting {len(broken_names)} ripped net(s) "
@@ -2915,16 +2899,10 @@ def create_plane(
     min_thickness: float = defaults.PLANE_MIN_THICKNESS,
     ripup_blocker_select: str = defaults.RIPUP_BLOCKER_SELECT,
     grid_step: float = defaults.GRID_STEP,
-    max_search_radius: float = defaults.PLANE_MAX_SEARCH_RADIUS,
-    max_via_reuse_radius: float = defaults.PLANE_MAX_VIA_REUSE_RADIUS,
-    close_via_radius: float = None,
     hole_to_hole_clearance: float = defaults.HOLE_TO_HOLE_CLEARANCE,
     all_layers: List[str] = None,
     verbose: bool = False,
     dry_run: bool = False,
-    rip_blocker_nets: bool = False,
-    max_rip_nets: int = defaults.PLANE_MAX_RIP_NETS,
-    reroute_ripped_nets: bool = False,
     layer_nets: Dict[str, List[str]] = None,
     plane_proximity_radius: float = 3.0,
     plane_proximity_cost: float = 2.0,
@@ -2963,10 +2941,6 @@ def create_plane(
     Args:
         net_names: List of net names to process (e.g., ['GND', 'VCC'])
         plane_layers: List of layers for each net (e.g., ['In1.Cu', 'In2.Cu'])
-        rip_blocker_nets: If True, identify and temporarily remove nets blocking
-                          via placement, then retry. Ripped nets excluded from output.
-        max_rip_nets: Maximum number of blocker nets to rip up.
-        reroute_ripped_nets: If True, automatically re-route ripped nets after placing vias.
         plane_proximity_radius: Radius around other nets' vias for proximity cost (mm).
         plane_proximity_cost: Maximum proximity cost around other nets' vias (mm equivalent).
         plane_track_via_clearance: Clearance from track center to other nets' via centers (mm).
@@ -3515,7 +3489,11 @@ def create_plane(
             if placed_via['net_id'] == net_id:
                 available_vias.append((placed_via['x'], placed_via['y']))
         # Build spatial index for fast nearest-via queries
-        via_index = ViaSpatialIndex(bucket_size=max_search_radius)
+        # Bucket size is a spatial-index tuning constant, not a search limit:
+        # the pour places only thermal arrays now, so there is no user-facing
+        # search radius left to key it off (#562).
+        via_index = ViaSpatialIndex(
+            bucket_size=defaults.PLANE_MAX_SEARCH_RADIUS)
         via_index.add_all(available_vias)
 
         # Cache for incremental obstacle updates during rip-up
@@ -3610,77 +3588,11 @@ def create_plane(
                 _ds.setdefault(net_id, []).append((pad.global_x, pad.global_y))
                 print("thermal array did not fit -- deferred to the route step")
 
-        # Step 9.5: Fine-pitch retry pass (issue #104). Pads whose tap failed
-        # at the run parameters get one scoped retry with fine parameters
-        # (grid 0.05 / clearance 0.15 / track <= 0.15, verified on
-        # castor_pollux) if they are fine-pitch: a same-component neighbor
-        # pad within 0.65mm or pad min dimension < 0.35mm. Obstacle maps for
-        # the retry are built on a small window around the pad, so the fine
-        # grid stays cheap even on large boards.
-        net_failed = failed_pad_infos[net_failed_start:]
-        fine_candidates = [e for e in net_failed
-                           if pad_is_fine_pitch(e[3]['pad'], pcb_data)]
-        if fine_candidates:
-            _fab_clear, _fab_track = fab_floor_clearance_track(pcb_data)
-            print(f"\nRetrying {len(fine_candidates)} failed fine-pitch pad(s) with scoped "
-                  f"fine parameters (grid {FINE_TAP_GRID_STEP}mm, clearance stepped down "
-                  f"to the fab floor {_fab_clear}mm, track >= {_fab_track}mm):")
-            if progress_callback:
-                progress_callback(0, 0, f"{net_name}: fine-pitch retry "
-                                        f"({len(fine_candidates)} pad(s))...")
-            recovered_entries = []
-            for entry in fine_candidates:
-                pad_info = entry[3]
-                pad = pad_info['pad']
-                pad_layer = pad_info.get('pad_layer')
-                current_pad_key = (pad.global_x, pad.global_y)
-                if current_pad_key in processed_pad_ids:
-                    continue
-                pending_pads = [
-                    pp for pp in base_pending_pads
-                    if (pp['pad'].global_x, pp['pad'].global_y) != current_pad_key
-                    and (pp['pad'].global_x, pp['pad'].global_y) not in processed_pad_ids
-                ]
-                print(f"  Pad {pad.component_ref}.{pad.pad_number} (fine retry)...", end=" ", flush=True)
-                result = tap_pad_with_escalation(
-                    pad, pad_layer, net_id, pcb_data, config,
-                    max_search_radius, via_size, via_drill,
-                    same_net_pad_clearance=same_net_pad_clearance,
-                    pending_pads=pending_pads,
-                    extra_vias=new_vias,
-                    extra_segments=new_segments,
-                    verbose=verbose,
-                    try_default=False,  # run params already failed for this pad
-                )
-                if result.success:
-                    if result.via is not None:
-                        new_vias.append(result.via)
-                        vias_placed += 1
-                        available_vias.append((result.via['x'], result.via['y']))
-                        via_index.add(result.via['x'], result.via['y'])
-                        block_via_position(obstacles, result.via['x'], result.via['y'],
-                                           coord, hole_to_hole_clearance, via_drill,
-                                   via_size, config.clearance)
-                    else:
-                        vias_reused += 1
-                    if result.segments:
-                        new_segments.extend(result.segments)
-                        traces_added += len(result.segments)
-                    processed_pad_ids.add(current_pad_key)
-                    failed_pads -= 1
-                    recovered_entries.append(entry)
-                    if result.via is not None:
-                        print(f"{GREEN}placed via at ({result.via['x']:.2f}, {result.via['y']:.2f}), "
-                              f"{len(result.segments)} trace segment(s){RESET}")
-                    else:
-                        print(f"{GREEN}reused via at ({result.reused_via_pos[0]:.2f}, "
-                              f"{result.reused_via_pos[1]:.2f}), {len(result.segments)} trace segment(s){RESET}")
-                else:
-                    print(f"{RED}STILL FAILED{RESET}")
-            for entry in recovered_entries:
-                failed_pad_infos.remove(entry)
-            if recovered_entries:
-                print(f"  Fine-pitch retry recovered {len(recovered_entries)}/{len(fine_candidates)} pad(s)")
+        # (The fine-pitch retry pass, issue #104, lived here. It is gone with
+        # the tap machinery: the loop above places thermal-via ARRAYS only and
+        # never records a failure, so failed_pad_infos stayed empty for this
+        # net and the retry could not fire. A pad the array cannot serve is
+        # deferred to the route step like every other plane pad -- #562.)
 
         # Ref-count integrity audit of this net's via-placement map (#309, same
         # class as #208): after all rips/placements the maintained map must
@@ -4022,7 +3934,6 @@ def create_plane(
             all_ripped_net_ids=all_ripped_net_ids,
             zones_to_replace=zones_to_replace,
             pcb_data=pcb_data,
-            reroute_ripped_nets=reroute_ripped_nets,
             all_layers=all_layers,
             plane_layers=plane_layers,
             track_width=track_width,
@@ -4208,6 +4119,10 @@ def create_plane(
 
 
 def main():
+    # Strip flags this script no longer has BEFORE recording, so a newly
+    # recorded manifest is already migrated (#562 removed the tap/rip knobs).
+    from legacy_flags import strip_removed
+    sys.argv[1:] = strip_removed(sys.argv[1:], 'route_planes.py')
     from redo_record import record_invocation
     record_invocation()  # stress-test redo manifest (#132); no-op unless REDO_MANIFEST set
     parser = argparse.ArgumentParser(
@@ -4221,8 +4136,6 @@ Examples:
     # Multiple nets (each net paired with corresponding plane layer):
     python route_planes.py input.kicad_pcb output.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu
 
-    # With rip-up and automatic re-routing:
-    python route_planes.py input.kicad_pcb output.kicad_pcb --nets GND VCC --plane-layers In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets
 """
     )
     parser.add_argument("input_file", help="Input KiCad PCB file")
@@ -4264,9 +4177,6 @@ Examples:
 
     # Algorithm options
     parser.add_argument("--grid-step", type=float, default=defaults.GRID_STEP, help="Grid resolution in mm (default: 0.1)")
-    parser.add_argument("--max-search-radius", type=float, default=defaults.PLANE_MAX_SEARCH_RADIUS, help="Max radius to search for valid via position in mm (default: 10.0)")
-    parser.add_argument("--max-via-reuse-radius", type=float, default=defaults.PLANE_MAX_VIA_REUSE_RADIUS, help="Max radius to reuse existing via instead of placing new one in mm (default: 1.0)")
-    parser.add_argument("--close-via-radius", type=float, default=None, help="Radius to check for nearby vias before placing new one (default: 2.5 * via-size)")
     parser.add_argument("--hole-to-hole-clearance", type=float, default=None, help=f"Minimum clearance between drill holes in mm (default: the board min_hole_to_hole, else {defaults.HOLE_TO_HOLE_CLEARANCE})")
     parser.add_argument("--layers", "-l", nargs="+", default=None,
                         help="All copper layers for routing and via span (default: F.Cu + plane-layers + B.Cu)")
@@ -4275,13 +4185,6 @@ Examples:
                              "forbidden: the layer stays an obstacle / via span but gets no routed copper). "
                              "Order matches --layers. Example: --layer-costs 1.0 -1 -1 3.0")
 
-    # Blocker rip-up options
-    parser.add_argument("--rip-blocker-nets", action="store_true",
-                        help="Identify and rip up nets blocking via placement, then retry. Ripped nets are excluded from output.")
-    parser.add_argument("--max-rip-nets", type=int, default=defaults.PLANE_MAX_RIP_NETS,
-                        help="Maximum number of blocker nets to rip up (default: 3)")
-    parser.add_argument("--reroute-ripped-nets", action="store_true",
-                        help="Automatically re-route ripped nets after via placement")
     # #381 D9: accept the plural --no-bga-zones spelling too (route.py uses the
     # plural). Same store_true dest -- additive, old spelling kept.
     parser.add_argument("--no-bga-zone", "--no-bga-zones", action="store_true",
@@ -4520,16 +4423,10 @@ Examples:
         stitch_inset=args.stitch_inset,
         stitch_max_freq=args.stitch_max_freq,
         grid_step=args.grid_step,
-        max_search_radius=args.max_search_radius,
-        max_via_reuse_radius=args.max_via_reuse_radius,
-        close_via_radius=args.close_via_radius,
         hole_to_hole_clearance=args.hole_to_hole_clearance,
         all_layers=args.layers,
         verbose=args.verbose,
         dry_run=args.dry_run,
-        rip_blocker_nets=args.rip_blocker_nets,
-        max_rip_nets=args.max_rip_nets,
-        reroute_ripped_nets=args.reroute_ripped_nets,
         layer_nets=layer_nets,
         plane_proximity_radius=args.plane_proximity_radius,
         plane_proximity_cost=args.plane_proximity_cost,

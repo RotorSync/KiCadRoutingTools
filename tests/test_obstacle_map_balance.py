@@ -19,9 +19,10 @@ here is pinned to a recipe measured to actually churn:
   2. route_diff   - lvds_converter_dualclk CLK/DATA pairs, same audit on
                     route_diff's own working map.
   3. route_planes - kit-dev quick chain (/AN* signals, then 4-layer
-                    +3.3V/GND planes with --rip-blocker-nets): the per-net
-                    via-placement map audit vs a fresh rebuild, with real
-                    rip churn.
+                    +3.3V/GND planes): the per-net via-placement map audit
+                    vs a fresh rebuild. NO churn since #562 -- the pour step
+                    defers every via-needed pad to the route step, so it
+                    cannot rip; stage 4 carries the churn coverage.
   4. route_disconnected_planes - interf_u chain (planes -> U9 fanout ->
                     signal route -> repair): the repair pass runs under
                     TAP_MAP_VERIFY=1, whose built-in asserts compare the
@@ -30,7 +31,10 @@ here is pinned to a recipe measured to actually churn:
 
 If a stage's churn assertion starts failing after an engine change, the
 recipe needs re-tuning (more congestion), NOT deletion - without churn the
-balance check is vacuous.
+balance check is vacuous. The ONE exception is a front-end that can no longer
+churn by construction (route_planes since #562): there, re-tuning is
+impossible and the churn coverage must MOVE to a front-end that still rips,
+never be quietly dropped.
 
     python3 tests/test_obstacle_map_balance.py
 """
@@ -137,18 +141,20 @@ def main():
     kit_plane = os.path.join(tmp, "kit_plane.kicad_pcb")
     rc, log = run_cmd(["route_planes.py", kit_out, kit_plane,
                        "--nets", "+3.3V", "GND", "+3.3V", "GND",
-                       "--plane-layers", "F.Cu", "In1.Cu", "In2.Cu", "B.Cu",
-                       "--max-via-reuse-radius", "3", "--rip-blocker-nets"] + kit_geom)
+                       "--plane-layers", "F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+                      + kit_geom)
     check("route_planes: run completed", rc == 0, f"rc={rc}")
-    rips = len(re.findall(r"[Rr]ipping", log))
-    check("route_planes: rip churn engaged (recipe still churns)", rips >= 1, f"rips={rips}")
+    # NO rip-churn assertion here any more, and re-tuning cannot bring one
+    # back: since #562 the pour step neither taps nor rips (every via-needed
+    # pad is deferred to the route step), so route_planes can no longer churn
+    # BY CONSTRUCTION. The churn half of this stage now lives in stage 4,
+    # which exercises the same via maps in the engine that still rips. What
+    # remains here is still worth asserting: the maps the pour DOES build
+    # (thermal-via arrays) must balance against a fresh rebuild.
     audits = re.findall(r"OBSTACLE AUDIT route_planes:\S+\] via map (\w+)", log)
-    # 3, not 4: the second GND pass finds all its pads already processed by the
-    # earlier layer pass (pads_need_via == 0), so no via map is built there.
-    check("route_planes: per-net via-map audits ran", len(audits) >= 3, f"audits={len(audits)}")
     check("route_planes: every via map BALANCED vs fresh rebuild",
-          bool(audits) and all(a == "BALANCED" for a in audits)
-          and "DIVERGED" not in log)
+          all(a == "BALANCED" for a in audits) and "DIVERGED" not in log,
+          f"audits={audits}")
 
     # ---- 4. route_disconnected_planes under TAP_MAP_VERIFY -------------------
     iu_plane = os.path.join(tmp, "iu_plane.kicad_pcb")

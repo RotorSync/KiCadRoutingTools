@@ -217,7 +217,6 @@ def get_dialog_settings(dialog):
         'planes_zone_clearance': dialog.planes_tab.create_options.zone_clearance.GetValue(),
         'planes_thermal_relief': dialog.planes_tab.create_options.thermal_relief.GetValue(),
         'planes_thermal_vias': dialog.planes_tab.create_options.thermal_vias.GetValue(),
-        'planes_max_search_radius': dialog.planes_tab.create_options.max_search_radius.GetValue(),
         'planes_add_gnd_vias': dialog.planes_tab.create_options.add_gnd_vias_check.GetValue(),
         'planes_gnd_via_distance': dialog.planes_tab.create_options.gnd_via_distance.GetValue(),
         'planes_stitch_vias': dialog.planes_tab.create_options.stitch_vias.GetValue(),
@@ -672,8 +671,6 @@ def restore_dialog_settings(dialog, settings):
         dialog.planes_tab.create_options.thermal_relief.SetValue(settings['planes_thermal_relief'])
     if 'planes_thermal_vias' in settings:
         dialog.planes_tab.create_options.thermal_vias.SetValue(settings['planes_thermal_vias'])
-    if 'planes_max_search_radius' in settings:
-        dialog.planes_tab.create_options.max_search_radius.SetValue(settings['planes_max_search_radius'])
     if 'planes_add_gnd_vias' in settings:
         dialog.planes_tab.create_options.add_gnd_vias_check.SetValue(settings['planes_add_gnd_vias'])
     if 'planes_gnd_via_distance' in settings:

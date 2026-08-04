@@ -403,8 +403,8 @@ python route_planes.py kicad_files/input.kicad_pcb --nets GND +3.3V --plane-laye
 # Create VCC plane with larger vias
 python route_planes.py kicad_files/input.kicad_pcb --nets VCC --plane-layers In2.Cu --via-size 0.5 --via-drill 0.4
 
-# Rip up blocking nets and automatically re-route them
-python route_planes.py kicad_files/input.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets
+# Pour planes (the pour places no taps: the route step welds plane pads)
+python route_planes.py kicad_files/input.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu
 
 # Multiple nets sharing same layer via Voronoi partitioning (use | separator)
 python route_planes.py kicad_files/input.kicad_pcb --nets GND "VA19|VA11" --plane-layers In4.Cu In5.Cu

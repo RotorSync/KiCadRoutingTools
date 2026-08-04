@@ -279,15 +279,6 @@ class CreatePlanesOptionsPanel(wx.Panel):
         _zrow.Add(self.zone_clearance, 1, wx.EXPAND)
         grid.Add(_zrow, 0, wx.EXPAND)
 
-        # Max search radius
-        grid.Add(wx.StaticText(self, label="Max Search Radius (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        r = defaults.PARAM_RANGES['plane_max_search_radius']
-        self.max_search_radius = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
-                                                    initial=defaults.PLANE_MAX_SEARCH_RADIUS, inc=r['inc'])
-        self.max_search_radius.SetDigits(r['digits'])
-        self.max_search_radius.SetToolTip("Maximum radius to search for valid via placement")
-        grid.Add(self.max_search_radius, 0, wx.EXPAND)
-
         # Same-net pad clearance (default = main clearance; checkbox below overrides to via-in-pad)
         grid.Add(wx.StaticText(self, label="Same-net Pad Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
         r = defaults.PARAM_RANGES['same_net_pad_clearance']
@@ -474,7 +465,6 @@ class CreatePlanesOptionsPanel(wx.Panel):
         return {
             'zone_clearance': (self.zone_clearance.GetValue()
                                if self.zone_clearance_check.GetValue() else None),
-            'max_search_radius': self.max_search_radius.GetValue(),
             'add_gnd_vias': self.add_gnd_vias_check.GetValue(),
             'gnd_via_distance': self.gnd_via_distance.GetValue(),
             'gnd_via_net': self.gnd_via_net.GetValue(),
@@ -960,9 +950,6 @@ class PlanesTab(wx.Panel):
                 stitch_inset=config.get('stitch_inset'),
                 stitch_max_freq=config.get('stitch_max_freq'),
                 grid_step=config.get('grid_step', defaults.GRID_STEP),
-                max_search_radius=config.get('max_search_radius', defaults.PLANE_MAX_SEARCH_RADIUS),
-                max_via_reuse_radius=config.get('max_via_reuse_radius', defaults.PLANE_MAX_VIA_REUSE_RADIUS),
-                close_via_radius=config.get('close_via_radius'),
                 hole_to_hole_clearance=config.get('hole_to_hole_clearance', defaults.HOLE_TO_HOLE_CLEARANCE),
                 # #424: route_planes.py passes --ripup-blocker-select to
                 # create_plane; the shared Basic-tab dropdown reaches the plane
@@ -976,7 +963,6 @@ class PlanesTab(wx.Panel):
                 # config-driven, defaulting to the same value route_planes.py's
                 # argparse uses so current GUI behavior is unchanged unless a
                 # plan/control sets them.
-                reroute_ripped_nets=config.get('reroute_ripped_nets', False),
                 plane_proximity_radius=config.get('plane_proximity_radius', 3.0),
                 plane_proximity_cost=config.get('plane_proximity_cost', 2.0),
                 plane_track_via_clearance=config.get('plane_track_via_clearance',
@@ -1000,7 +986,7 @@ class PlanesTab(wx.Panel):
                 board_edge_clearance=(config.get('board_edge_clearance') or defaults.PLANE_EDGE_CLEARANCE),
                 all_layers=all_layers,
                 dry_run=True,  # Don't write to file, apply via pcbnew
-                max_rip_nets=config.get('max_rip_nets', defaults.PLANE_MAX_RIP_NETS),                # Re-route a ripped wide power net at its proper width.
+                # Re-route a ripped wide power net at its proper width.
                 power_nets=config.get('power_nets'),
                 power_nets_widths=config.get('power_nets_widths'),
                 # Match signal routing's No-BGA-Zones intent when rerouting
