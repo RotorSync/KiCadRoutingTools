@@ -1,3 +1,40 @@
+HEAD 2026-08-04 parity audit 646401b..a1cf6da (merge of se-rip-arbitration,
+41 commits + 10 main-side). Outcome: one Class-2 gap FOUND AND CLOSED in the
+same wave -- route.py's #562 plane finalize (repair engine -> cleanup ->
+oracle trio in batch_route) was CLI-file-only; it now runs on BOTH fronts
+(GUI: board-delta merge into results_data + post-apply staged-save oracle
+via the NEW shared core gui_utils.run_kicad_oracle_on_live_board, which
+planes_gui's _run_kicad_oracle_after_apply now delegates to; registered in
+test_cli_postpass_coverage as repair_planes -> plane_finalize_oracle).
+
+  Gates run at the merge (defaults ON: POUR_LAUNCH, VIA_RUNG=2,
+  PLANE_FINALIZE+LIVE, dynamic iterations):
+  * test_manifest_plan_parity: 17327 flag-checks, 457 manifests, 0 mismatches;
+    param->control 12 checked, 0 unresolved.
+  * test_cli_postpass_coverage: 7 registered, 14 in CLI use, 0 failures
+    (run_drc stays the acknowledged report-only CLI-only pass).
+  * test_gui_engine_parity (headless RoutingDialog, KiCad python): PARITY,
+    copper sets IDENTICAL (segments 1307/1307, vias 144/144, drc 0/0).
+    NOTE its old-chain plan leaves the new finalize INERT by construction
+    (its repair step pre-fixes everything); a pours-first plan variant
+    (planes -> route '*', real headless dialog) was run additionally:
+    grades identical 0/0/0/0 both fronts, GUI finalize fired end-to-end
+    (pre-gate, fill-aware hands-off, post-apply oracle, re-refill). The
+    ~114-segment +12V copper divergence on arch-shaped plans is
+    PRE-EXISTING (identical with KICAD_PLANE_FINALIZE=0 on both legs;
+    live-board fill vs file fill class), not a finalize gap.
+
+  Known-deliberate divergences unchanged: CLI mains' kicad-oracle recheck,
+  end-of-run reconciliation nuances, .kicad_pro floor carryover, the
+  plan-parameter whitelist. Custody (stubborn-oracle-link nets joining the
+  final reconciliation) is CLI-only by design -- no oracle verdict exists
+  mid-run under return_results; measured custody net-level gains were 0 on
+  all 3 A/B boards, and the GUI's post-apply oracle is the completion earner.
+
+  Pre-existing GUI kwarg gaps flagged by KICAD_DUMP_BATCH_KWARGS and NOT
+  yet closed (carried): net_name_patterns (batch_route), plane_net_layers
+  (generate_bga_fanout).
+
 HEAD 2026-08-01 parity audit d73b1d6..646401b (22 commits). Outcome: no gaps.
 
   Gates run at HEAD (dynamic iterations DEFAULT ON, a7f2b6d):
