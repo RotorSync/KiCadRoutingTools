@@ -2792,6 +2792,46 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             if net_names:
                 from net_queries import matches_net_filter as _mnf9
                 _zpairs = [(n, l) for n, l in _zpairs if _mnf9(n, net_names)]
+            # PRE-GATE for the MODEL-BASED legs (engine taps/joins +
+            # cleanup): run them only for zone nets the fill-aware checker
+            # says are incomplete on THIS run's board. The check is against
+            # in-memory pcb_data, which is PESSIMISTIC vs the file whenever
+            # the reconcile wrote file-only copper -- skipping only on
+            # all-complete is sound. The ORACLE leg deliberately stays
+            # UNGATED on the full zone-net set: the raster model
+            # OVER-credits (castor-class gaps only KiCad's exact fill
+            # sees), and the oracle is the model-independent verifier --
+            # on a healthy board it costs one refill and exits at round 0.
+            _zpairs_all = list(_zpairs)
+            if _zpairs:
+                from check_connected import check_net_connectivity as _cnc9
+                _zbn9 = {}
+                for _z9 in (getattr(pcb_data, 'zones', None) or []):
+                    _zbn9.setdefault(_z9.net_id, []).append(_z9)
+                _broken9 = []
+                for _nid9, _net9 in pcb_data.nets.items():
+                    if _net9.name not in {n for n, _l in _zpairs}:
+                        continue
+                    try:
+                        _r9 = _cnc9(
+                            _nid9,
+                            [s for s in pcb_data.segments
+                             if s.net_id == _nid9],
+                            [v for v in pcb_data.vias if v.net_id == _nid9],
+                            pcb_data.pads_by_net.get(_nid9, []),
+                            _zbn9.get(_nid9, []), pcb_data=pcb_data)
+                        if not _r9.get('connected'):
+                            _broken9.append(_net9.name)
+                    except Exception:
+                        _broken9.append(_net9.name)  # unknown -> repair it
+                if not _broken9:
+                    print("\nPlane finalize (#562): all zone nets complete "
+                          "(fill-aware) -- skipping engine/cleanup legs, "
+                          "oracle verifies")
+                    _zpairs = []
+                else:
+                    _zpairs = [(n, _l) for n, _l in _zpairs
+                               if n in set(_broken9)]
             if _zpairs:
                 _zn = [n for n, _l in _zpairs]
                 _zl = [_l for _n, _l in _zpairs]
@@ -2854,10 +2894,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     config.clearance, config.grid_step)
                 print(f"  [finalize timing] cleanup leg: "
                       f"{_time9.time() - _t9:.1f}s")
-                _t9 = _time9.time()
                 if _cs or _cr:
                     print(f"  Plane finalize cleanup: closed {_cs} stub "
                           f"gap(s), trimmed {_cr} dead-end segment(s)")
+            if _zpairs_all:
+                # Oracle + custody scope: ALL zone nets (see the pre-gate
+                # note -- the oracle is the model-independent verifier).
+                import time as _time9
+                _zna = sorted({n for n, _l in _zpairs_all})
+                _t9 = _time9.time()
                 from kicad_oracle import oracle_reconnect
                 try:
                     from fix_kicad_drc_settings import \
@@ -2874,7 +2919,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 from kicad_dru import install_layer_clearances
                 install_layer_clearances(_ocfg, None, input_file, None)
                 _orc = oracle_reconnect(
-                    output_file, sorted(set(_zn)), _ocfg,
+                    output_file, _zna, _ocfg,
                     track_via_clearance=defaults.PLANE_TRACK_VIA_CLEARANCE,
                     hole_to_hole_clearance=config.hole_to_hole_clearance,
                     project_from=input_file)
@@ -2905,7 +2950,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _rk9.update(final_reconcile=False, skip_routing=False,
                                 force_reroute=False, return_results=False)
                     _rok9, _rfail9, _rt9 = batch_route(
-                        output_file, output_file, sorted(set(_zn)), **_rk9)
+                        output_file, output_file, _zna, **_rk9)
                     print(f"  [finalize timing] custody leg: "
                           f"{_time9.time() - _t9:.1f}s")
                     if _rok9:
