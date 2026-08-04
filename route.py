@@ -2568,13 +2568,196 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # still-open set. Runs on BOTH fronts: CLI re-invokes on the written
     # file; GUI (return_results) re-invokes on the in-memory board and
     # merges the sub-run's results (claude-tab/stress parity gap closure).
+    _custody_nets9 = []
+    # PLANE FINALIZE (#562): the pours-first chain's repair step, absorbed.
+    # Measured (3-board arch chains): the standalone repair step's entire
+    # remaining value is plane-net completion its TAP machinery + the
+    # kicad-oracle exact-fill reconnect earn (ux +3V3: 21 pad taps + gate
+    # multipoint + rescue; oc P3.3V: one pad tap) -- the casualties-only and
+    # failed-nets reconciles above cannot reach it (multipoint plane deficits
+    # are neither). Run repair's exact trio IN-RUN on the written output:
+    # route_planes engine (taps + region joins) -> clean_plane_copper ->
+    # oracle_reconnect (KiCad exact-fill links, the completion earner).
+    # ORDER SWAP: runs BEFORE the final reconciliation -- live reuse is then
+    # sound by construction, and the custody nets merge into the reconcile's
+    # single sub-run (one parse/base-build serves both).
+    # In-process bonus: clearance_ledger is shared, so tap-escalated floors
+    # flow into this run's own DRC writeback. CLI file-mode only for now --
+    # the GUI planes tab remains the return_results counterpart (repair's
+    # dict-emission strip-and-replace shape does not merge into
+    # results_data; documented divergence like the mains' oracle recheck).
+    # Gate: KICAD_PLANE_FINALIZE=1 (default OFF until #562 graduation).
+    if (final_reconcile and not skip_routing and not _ckpt_stop
+            and output_file and not return_results
+            and os.environ.get('KICAD_PLANE_FINALIZE', '') == '1'):
+        try:
+            from route_disconnected_planes import (
+                route_planes as _rdp_engine, auto_detect_zones as _adz)
+            _zpairs = _adz(output_file)
+            # Respect the caller's net filter: a net excluded by pattern is
+            # excluded BY PLAN (same rule as the reconciliation above).
+            if net_names:
+                from net_queries import matches_net_filter as _mnf9
+                _zpairs = [(n, l) for n, l in _zpairs if _mnf9(n, net_names)]
+            # PRE-GATE for the MODEL-BASED legs (engine taps/joins +
+            # cleanup): run them only for zone nets the fill-aware checker
+            # says are incomplete on THIS run's board (pcb_data == file
+            # here -- the finalize precedes the reconcile). The ORACLE leg deliberately stays
+            # UNGATED on the full zone-net set: the raster model
+            # OVER-credits (castor-class gaps only KiCad's exact fill
+            # sees), and the oracle is the model-independent verifier --
+            # on a healthy board it costs one refill and exits at round 0.
+            _zpairs_all = list(_zpairs)
+            if _zpairs:
+                from check_connected import check_net_connectivity as _cnc9
+                _zbn9 = {}
+                for _z9 in (getattr(pcb_data, 'zones', None) or []):
+                    _zbn9.setdefault(_z9.net_id, []).append(_z9)
+                _broken9 = []
+                for _nid9, _net9 in pcb_data.nets.items():
+                    if _net9.name not in {n for n, _l in _zpairs}:
+                        continue
+                    try:
+                        _r9 = _cnc9(
+                            _nid9,
+                            [s for s in pcb_data.segments
+                             if s.net_id == _nid9],
+                            [v for v in pcb_data.vias if v.net_id == _nid9],
+                            pcb_data.pads_by_net.get(_nid9, []),
+                            _zbn9.get(_nid9, []), pcb_data=pcb_data)
+                        if not _r9.get('connected'):
+                            _broken9.append(_net9.name)
+                    except Exception:
+                        _broken9.append(_net9.name)  # unknown -> repair it
+                if not _broken9:
+                    print("\nPlane finalize (#562): all zone nets complete "
+                          "(fill-aware) -- skipping engine/cleanup legs, "
+                          "oracle verifies")
+                    _zpairs = []
+                else:
+                    _zpairs = [(n, _l) for n, _l in _zpairs
+                               if n in set(_broken9)]
+            if _zpairs:
+                _zn = [n for n, _l in _zpairs]
+                _zl = [_l for _n, _l in _zpairs]
+                print(f"\nPlane finalize (#562): repairing "
+                      f"{len(set(_zn))} zone net(s) in-run: "
+                      f"{', '.join(sorted(set(_zn)))}")
+                import time as _time9
+                _t9 = _time9.time()
+                # Live-board reuse (KICAD_PLANE_FINALIZE_LIVE=1): hand the
+                # engine THIS run's pcb_data instead of re-parsing the file it
+                # just wrote -- kills the parse and, bigger, reuses the
+                # ZoneFillModel caches the pour-launch ladder already built
+                # for every plane net. SNAP FIRST (the reconcile lesson: the
+                # written file is nm-grid-exact, the in-memory board is not,
+                # and repairing against a different board than the file forks
+                # the outcome). #508-class risk (write-list vs pcb_data
+                # divergence) is why this has its own gate; A/B with
+                # KICAD_BOARD_LEDGER=1 before defaulting it on.
+                # Live reuse is sound BY CONSTRUCTION here: the finalize now
+                # runs BEFORE the final reconciliation (order swap), so the
+                # only writes since pcb_data was current are this run's own
+                # (FILE_LEDGER-verified at the main write). The old guard
+                # existed because the reconcile's CLI sub-run wrote file-only
+                # copper ahead of the finalize -- that ordering is gone.
+                _live9 = None
+                if os.environ.get('KICAD_PLANE_FINALIZE_LIVE', '') == '1':
+                    from kicad_parser import snap_pcb_data_to_iu_grid \
+                        as _snap9
+                    _snapped9 = _snap9(pcb_data)
+                    if _snapped9:
+                        print(f"  Plane finalize: snapped {_snapped9} "
+                              f"in-memory coordinate(s) onto the nm grid")
+                    _live9 = pcb_data
+                _rdp_engine(
+                    output_file, output_file, _zn, _zl,
+                    track_width=config.track_width,
+                    clearance=config.clearance,
+                    grid_step=config.grid_step,
+                    via_size=config.via_size,
+                    via_drill=config.via_drill,
+                    hole_to_hole_clearance=config.hole_to_hole_clearance,
+                    routing_layers=config.layers,
+                    net_clearances=net_clearances,
+                    pcb_data=_live9)
+                print(f"  [finalize timing] engine leg: "
+                      f"{_time9.time() - _t9:.1f}s")
+                _t9 = _time9.time()
+                from pcb_modification import clean_plane_copper
+                _cs, _cr = clean_plane_copper(
+                    output_file, sorted(set(_zn)),
+                    config.clearance, config.grid_step)
+                print(f"  [finalize timing] cleanup leg: "
+                      f"{_time9.time() - _t9:.1f}s")
+                if _cs or _cr:
+                    print(f"  Plane finalize cleanup: closed {_cs} stub "
+                          f"gap(s), trimmed {_cr} dead-end segment(s)")
+            if _zpairs_all:
+                # Oracle + custody scope: ALL zone nets (see the pre-gate
+                # note -- the oracle is the model-independent verifier).
+                import time as _time9
+                _zna = sorted({n for n, _l in _zpairs_all})
+                _t9 = _time9.time()
+                from kicad_oracle import oracle_reconnect
+                try:
+                    from fix_kicad_drc_settings import \
+                        effective_board_edge_clearance
+                    _oedge = effective_board_edge_clearance(input_file, 0.0)
+                except Exception:
+                    _oedge = 0.0
+                _ocfg = GridRouteConfig(
+                    clearance=config.clearance,
+                    track_width=config.track_width,
+                    via_size=config.via_size, via_drill=config.via_drill,
+                    grid_step=config.grid_step,
+                    board_edge_clearance=_oedge)
+                from kicad_dru import install_layer_clearances
+                install_layer_clearances(_ocfg, None, input_file, None)
+                _orc = oracle_reconnect(
+                    output_file, _zna, _ocfg,
+                    track_via_clearance=defaults.PLANE_TRACK_VIA_CLEARANCE,
+                    hole_to_hole_clearance=config.hole_to_hole_clearance,
+                    project_from=input_file)
+                print(f"  [finalize timing] oracle leg: "
+                      f"{_time9.time() - _t9:.1f}s")
+                try:
+                    import json as _json9
+                    print('JSON_ORACLE: ' + _json9.dumps(
+                        {k: v for k, v in _orc.items()
+                         if k not in ('new_segments', 'new_vias')}))
+                except Exception:
+                    pass
+                # Custody (the reason this runs IN-RUN): links the oracle's
+                # own router leaves flagged after 3 rounds failed WITHOUT
+                # rip authority -- its link-router cannot rip a signal net
+                # sitting on the only corridor. Their nets MERGE into the
+                # final reconciliation below (order swap: finalize first,
+                # ONE sub-run for failed signal nets + stubborn plane nets
+                # -- saves a whole parse + base-build self-invocation, and
+                # the reconcile then retries signals against the WELDED
+                # planes, pours-first-consistent).
+                if _orc.get('available') and _orc.get('remaining', 0) > 0:
+                    print(f"  Plane finalize: {_orc['remaining']} oracle "
+                          f"link(s) unroutable without rip authority -- "
+                          f"their nets join the final reconciliation")
+                    _custody_nets9 = list(_zna)
+        except Exception as _e:
+            print(f"{RED}  plane finalize pass failed: {_e}{RESET}")
+
     if (final_reconcile and not skip_routing and not _ckpt_stop
             and (output_file or return_results)
-            and (failed_single or failed_multipoint)):
+            and (failed_single or failed_multipoint or _custody_nets9)):
+        # #562 order swap: stubborn-oracle-link plane nets (custody) merge
+        # into THIS sub-run instead of a second self-invocation -- one
+        # parse/base-build serves both, and signal retries now run against
+        # the welded planes.
         _rec_names = list(dict.fromkeys(
-            failed_single + [m['net_name'] for m in failed_multipoint]))
-        print(f"\nFinal reconciliation: retrying {len(_rec_names)} incomplete "
-              f"net(s) against the finished board: {', '.join(_rec_names)}")
+            failed_single + [m['net_name'] for m in failed_multipoint]
+            + _custody_nets9))
+        print(f"\nFinal reconciliation: retrying {len(_rec_names)} "
+              f"incomplete/custody net(s) against the finished board: "
+              f"{', '.join(_rec_names)}")
         try:
             _rk = dict(_reconcile_kwargs)
             # force_reroute must NOT forward: the strip already happened in
@@ -2765,199 +2948,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         except Exception as _e:
             print(f"{RED}  final reconciliation pass failed: {_e}{RESET}")
 
-    # PLANE FINALIZE (#562): the pours-first chain's repair step, absorbed.
-    # Measured (3-board arch chains): the standalone repair step's entire
-    # remaining value is plane-net completion its TAP machinery + the
-    # kicad-oracle exact-fill reconnect earn (ux +3V3: 21 pad taps + gate
-    # multipoint + rescue; oc P3.3V: one pad tap) -- the casualties-only and
-    # failed-nets reconciles above cannot reach it (multipoint plane deficits
-    # are neither). Run repair's exact trio IN-RUN on the written output:
-    # route_planes engine (taps + region joins) -> clean_plane_copper ->
-    # oracle_reconnect (KiCad exact-fill links, the completion earner).
-    # In-process bonus: clearance_ledger is shared, so tap-escalated floors
-    # flow into this run's own DRC writeback. CLI file-mode only for now --
-    # the GUI planes tab remains the return_results counterpart (repair's
-    # dict-emission strip-and-replace shape does not merge into
-    # results_data; documented divergence like the mains' oracle recheck).
-    # Gate: KICAD_PLANE_FINALIZE=1 (default OFF until #562 graduation).
-    if (final_reconcile and not skip_routing and not _ckpt_stop
-            and output_file and not return_results
-            and os.environ.get('KICAD_PLANE_FINALIZE', '') == '1'):
-        try:
-            from route_disconnected_planes import (
-                route_planes as _rdp_engine, auto_detect_zones as _adz)
-            _zpairs = _adz(output_file)
-            # Respect the caller's net filter: a net excluded by pattern is
-            # excluded BY PLAN (same rule as the reconciliation above).
-            if net_names:
-                from net_queries import matches_net_filter as _mnf9
-                _zpairs = [(n, l) for n, l in _zpairs if _mnf9(n, net_names)]
-            # PRE-GATE for the MODEL-BASED legs (engine taps/joins +
-            # cleanup): run them only for zone nets the fill-aware checker
-            # says are incomplete on THIS run's board. The check is against
-            # in-memory pcb_data, which is PESSIMISTIC vs the file whenever
-            # the reconcile wrote file-only copper -- skipping only on
-            # all-complete is sound. The ORACLE leg deliberately stays
-            # UNGATED on the full zone-net set: the raster model
-            # OVER-credits (castor-class gaps only KiCad's exact fill
-            # sees), and the oracle is the model-independent verifier --
-            # on a healthy board it costs one refill and exits at round 0.
-            _zpairs_all = list(_zpairs)
-            if _zpairs:
-                from check_connected import check_net_connectivity as _cnc9
-                _zbn9 = {}
-                for _z9 in (getattr(pcb_data, 'zones', None) or []):
-                    _zbn9.setdefault(_z9.net_id, []).append(_z9)
-                _broken9 = []
-                for _nid9, _net9 in pcb_data.nets.items():
-                    if _net9.name not in {n for n, _l in _zpairs}:
-                        continue
-                    try:
-                        _r9 = _cnc9(
-                            _nid9,
-                            [s for s in pcb_data.segments
-                             if s.net_id == _nid9],
-                            [v for v in pcb_data.vias if v.net_id == _nid9],
-                            pcb_data.pads_by_net.get(_nid9, []),
-                            _zbn9.get(_nid9, []), pcb_data=pcb_data)
-                        if not _r9.get('connected'):
-                            _broken9.append(_net9.name)
-                    except Exception:
-                        _broken9.append(_net9.name)  # unknown -> repair it
-                if not _broken9:
-                    print("\nPlane finalize (#562): all zone nets complete "
-                          "(fill-aware) -- skipping engine/cleanup legs, "
-                          "oracle verifies")
-                    _zpairs = []
-                else:
-                    _zpairs = [(n, _l) for n, _l in _zpairs
-                               if n in set(_broken9)]
-            if _zpairs:
-                _zn = [n for n, _l in _zpairs]
-                _zl = [_l for _n, _l in _zpairs]
-                print(f"\nPlane finalize (#562): repairing "
-                      f"{len(set(_zn))} zone net(s) in-run: "
-                      f"{', '.join(sorted(set(_zn)))}")
-                import time as _time9
-                _t9 = _time9.time()
-                # Live-board reuse (KICAD_PLANE_FINALIZE_LIVE=1): hand the
-                # engine THIS run's pcb_data instead of re-parsing the file it
-                # just wrote -- kills the parse and, bigger, reuses the
-                # ZoneFillModel caches the pour-launch ladder already built
-                # for every plane net. SNAP FIRST (the reconcile lesson: the
-                # written file is nm-grid-exact, the in-memory board is not,
-                # and repairing against a different board than the file forks
-                # the outcome). #508-class risk (write-list vs pcb_data
-                # divergence) is why this has its own gate; A/B with
-                # KICAD_BOARD_LEDGER=1 before defaulting it on.
-                # Soundness precondition for live reuse: pcb_data == the
-                # written file. The final-reconcile CLI sub-run writes ITS
-                # copper via its own parsed board -- the parent's pcb_data
-                # never receives it (ux: +3V3 file-only=27, GND file-only=59
-                # -> the live engine leg repaired a stale board and shipped
-                # 30 conflicting-weld DRC; the FILE_LEDGER probe caught it).
-                # When the reconcile fired, fall back to the re-parse.
-                _reconcile_fired9 = bool(
-                    (failed_single or failed_multipoint)
-                    and (output_file or return_results))
-                _live9 = None
-                if os.environ.get('KICAD_PLANE_FINALIZE_LIVE', '') == '1':
-                    if _reconcile_fired9:
-                        print("  Plane finalize: final reconcile wrote "
-                              "file-only copper -- live reuse unsound, "
-                              "re-parsing the written board instead")
-                    else:
-                        from kicad_parser import snap_pcb_data_to_iu_grid \
-                            as _snap9
-                        _snapped9 = _snap9(pcb_data)
-                        if _snapped9:
-                            print(f"  Plane finalize: snapped {_snapped9} "
-                                  f"in-memory coordinate(s) onto the nm grid")
-                        _live9 = pcb_data
-                _rdp_engine(
-                    output_file, output_file, _zn, _zl,
-                    track_width=config.track_width,
-                    clearance=config.clearance,
-                    grid_step=config.grid_step,
-                    via_size=config.via_size,
-                    via_drill=config.via_drill,
-                    hole_to_hole_clearance=config.hole_to_hole_clearance,
-                    routing_layers=config.layers,
-                    net_clearances=net_clearances,
-                    pcb_data=_live9)
-                print(f"  [finalize timing] engine leg: "
-                      f"{_time9.time() - _t9:.1f}s")
-                _t9 = _time9.time()
-                from pcb_modification import clean_plane_copper
-                _cs, _cr = clean_plane_copper(
-                    output_file, sorted(set(_zn)),
-                    config.clearance, config.grid_step)
-                print(f"  [finalize timing] cleanup leg: "
-                      f"{_time9.time() - _t9:.1f}s")
-                if _cs or _cr:
-                    print(f"  Plane finalize cleanup: closed {_cs} stub "
-                          f"gap(s), trimmed {_cr} dead-end segment(s)")
-            if _zpairs_all:
-                # Oracle + custody scope: ALL zone nets (see the pre-gate
-                # note -- the oracle is the model-independent verifier).
-                import time as _time9
-                _zna = sorted({n for n, _l in _zpairs_all})
-                _t9 = _time9.time()
-                from kicad_oracle import oracle_reconnect
-                try:
-                    from fix_kicad_drc_settings import \
-                        effective_board_edge_clearance
-                    _oedge = effective_board_edge_clearance(input_file, 0.0)
-                except Exception:
-                    _oedge = 0.0
-                _ocfg = GridRouteConfig(
-                    clearance=config.clearance,
-                    track_width=config.track_width,
-                    via_size=config.via_size, via_drill=config.via_drill,
-                    grid_step=config.grid_step,
-                    board_edge_clearance=_oedge)
-                from kicad_dru import install_layer_clearances
-                install_layer_clearances(_ocfg, None, input_file, None)
-                _orc = oracle_reconnect(
-                    output_file, _zna, _ocfg,
-                    track_via_clearance=defaults.PLANE_TRACK_VIA_CLEARANCE,
-                    hole_to_hole_clearance=config.hole_to_hole_clearance,
-                    project_from=input_file)
-                print(f"  [finalize timing] oracle leg: "
-                      f"{_time9.time() - _t9:.1f}s")
-                try:
-                    import json as _json9
-                    print('JSON_ORACLE: ' + _json9.dumps(
-                        {k: v for k, v in _orc.items()
-                         if k not in ('new_segments', 'new_vias')}))
-                except Exception:
-                    pass
-                # The whole point of doing this IN-RUN rather than as a chain
-                # step: links the oracle's own router leaves flagged after 3
-                # rounds ("already attempted") failed WITHOUT rip authority --
-                # its link-router cannot rip a signal net sitting on the only
-                # corridor. Feed those nets one reconcile-style self-invocation
-                # with the FULL engine custody (rip arbitration + reroute-or-
-                # restore + multipoint anchors + rescue). Complete nets among
-                # them no-op cheaply; this is where the absorbed finalize can
-                # BEAT the standalone repair step, not just match it.
-                if _orc.get('available') and _orc.get('remaining', 0) > 0:
-                    print(f"\nPlane finalize: {_orc['remaining']} oracle "
-                          f"link(s) unroutable without rip authority -- "
-                          f"retrying their nets with full engine custody")
-                    _t9 = _time9.time()
-                    _rk9 = dict(_reconcile_kwargs)
-                    _rk9.update(final_reconcile=False, skip_routing=False,
-                                force_reroute=False, return_results=False)
-                    _rok9, _rfail9, _rt9 = batch_route(
-                        output_file, output_file, _zna, **_rk9)
-                    print(f"  [finalize timing] custody leg: "
-                          f"{_time9.time() - _t9:.1f}s")
-                    if _rok9:
-                        print(f"  Plane finalize custody pass: "
-                              f"{_rok9} net(s) improved")
-        except Exception as _e:
-            print(f"{RED}  plane finalize pass failed: {_e}{RESET}")
 
 
     # Per-net story dump (KICAD_NET_STORY=1): the complete journey of every
