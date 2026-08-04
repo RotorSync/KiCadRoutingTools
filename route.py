@@ -2842,6 +2842,27 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                          if k not in ('new_segments', 'new_vias')}))
                 except Exception:
                     pass
+                # The whole point of doing this IN-RUN rather than as a chain
+                # step: links the oracle's own router leaves flagged after 3
+                # rounds ("already attempted") failed WITHOUT rip authority --
+                # its link-router cannot rip a signal net sitting on the only
+                # corridor. Feed those nets one reconcile-style self-invocation
+                # with the FULL engine custody (rip arbitration + reroute-or-
+                # restore + multipoint anchors + rescue). Complete nets among
+                # them no-op cheaply; this is where the absorbed finalize can
+                # BEAT the standalone repair step, not just match it.
+                if _orc.get('available') and _orc.get('remaining', 0) > 0:
+                    print(f"\nPlane finalize: {_orc['remaining']} oracle "
+                          f"link(s) unroutable without rip authority -- "
+                          f"retrying their nets with full engine custody")
+                    _rk9 = dict(_reconcile_kwargs)
+                    _rk9.update(final_reconcile=False, skip_routing=False,
+                                force_reroute=False, return_results=False)
+                    _rok9, _rfail9, _rt9 = batch_route(
+                        output_file, output_file, sorted(set(_zn)), **_rk9)
+                    if _rok9:
+                        print(f"  Plane finalize custody pass: "
+                              f"{_rok9} net(s) improved")
         except Exception as _e:
             print(f"{RED}  plane finalize pass failed: {_e}{RESET}")
 
