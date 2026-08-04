@@ -2803,6 +2803,149 @@ def _dense_fanout_refs(pcb_data: PCBData) -> set:
     return refs
 
 
+def _pour_launch_region_cells(pcb_data, net_id, pad_info, pad_components,
+                              layer_names, coord, island_cells):
+    """#544/#562 POUR-LAUNCH ladder v3: per-REGION fill launch cells.
+
+    Every pad-covered fill REGION of this net's zones contributes laddered
+    launch cells keyed to the component its covered pads belong to. The
+    fill-aware grouping (check_net_connectivity) already unioned those pads
+    with their region, so the keying is exact -- no majority vote, no
+    cross-region credit: attaching to a region unions you with THAT
+    region's component only, and the MST plans the region's own join edge.
+
+    Regions covering NO terminal follow the zone's own island policy:
+    under island_removal_mode 0 (KiCad's default, remove isolated) they
+    are phantom copper -- never a node, never attach surface. Modes 1/2
+    keep them at fill time; their pseudo-terminal nodehood is deferred
+    (counted + noted, not offered).
+
+    Per straggler, expanding rungs (1/2.5/6/15 mm); candidates = the
+    region's fill cells scored dist + fragility (strait/boundary attach
+    pays up to _FRAG_MM; fill deeper than _DEEP_MM is free) plus, when
+    KICAD_POUR_LAUNCH_COPPER=1, the owning component's existing copper
+    cells (no fragility penalty); first rung with any candidate wins,
+    best _NBEST kept.
+
+    Returns {component_id: {(gx, gy, layer_idx): (fx, fy)}} for the caller
+    to merge into its island-cell map (Phase 1's _island_cells AND Phase
+    3's _p3_island_cells -- v2 only fed Phase 1, so the straggler edges
+    Phase 3 routes never saw fill targets at all). Gated by
+    KICAD_POUR_LAUNCH=1; {} when off or unavailable.
+    """
+    import os as _os
+    if _os.environ.get('KICAD_POUR_LAUNCH', '') != '1':
+        return {}
+    # Same-invocation memo: Phase 1 and Phase 3 call this back-to-back with
+    # the IDENTICAL pad_components object (main_result carries it), and every
+    # rescue reroute of a big plane net repeats the pair -- the scan is pure
+    # in (net, grouping), so keying on (net_id, id(pad_components), #pads)
+    # halves the ladder cost per invocation and per reroute.
+    _mk = (net_id, id(pad_components), len(pad_info))
+    _memo = getattr(pcb_data, '_pour_launch_memo', None)
+    # The memo HOLDS pad_components (id() alone is unsafe: a freed dict's id
+    # can be reused by a different grouping -- the memo's strong ref pins it).
+    if (_memo is not None and _memo[0] == _mk
+            and _memo[1] is pad_components):
+        return _memo[2]
+    try:
+        from plane_fill_model import get_zone_model
+        from plane_fragility import _erode_depth
+        import numpy as _np
+    except Exception:
+        return {}
+    _RUNGS = (1.0, 2.5, 6.0, 15.0)   # mm
+    _NBEST = 12
+    try:
+        _FRAG_MM = float(_os.environ.get('KICAD_POUR_LAUNCH_FRAG', '1.0') or 0)
+    except ValueError:
+        _FRAG_MM = 1.0
+    _COPPER_RUNGS = _os.environ.get('KICAD_POUR_LAUNCH_COPPER', '1') == '1'
+    _DEEP_MM = 0.5
+    out = {}
+    _bare_kept = 0
+    try:
+        _zones = [z for z in (pcb_data.zones or []) if z.net_id == net_id
+                  and z.layer in layer_names]
+        for _z in _zones:
+            _m = get_zone_model(pcb_data, _z)
+            if _m is None:
+                continue
+            _li = layer_names.index(_z.layer)
+            # region -> covered terminal indices
+            _cov = {}
+            for _idx, _info in enumerate(pad_info):
+                _c = _m.query_component(_info[3], _info[4])
+                if _c and _c > 0:
+                    _cov.setdefault(_c, []).append(_idx)
+            # bare-region census (island policy; nodehood deferred)
+            _labels = set(int(x) for x in _np.unique(_m.labels) if x > 0)
+            for _lb in _labels - set(_cov):
+                if getattr(_z, 'island_removal_mode', 0) in (1, 2):
+                    _bare_kept += 1
+            for _lb, _idxs in _cov.items():
+                from collections import Counter as _Ctr
+                _comp = _Ctr(pad_components.get(_i, _i)
+                             for _i in _idxs).most_common(1)[0][0]
+                _cells_out = out.setdefault(_comp, {})
+                _copper = []
+                if _COPPER_RUNGS:
+                    _copper = [(_fx, _fy, _k[2]) for _k, (_fx, _fy) in
+                               (island_cells.get(_comp) or {}).items()]
+                _stragglers = [(_info[3], _info[4])
+                               for _i, _info in enumerate(pad_info)
+                               if pad_components.get(_i, _i) != _comp]
+                _dc = max(1, int(round(_DEEP_MM / _m.cell)))
+                _depth_cache = {}
+                for _sx, _sy in _stragglers:
+                    _found = []
+                    for _r in _RUNGS:
+                        for _fx, _fy, _fl in _copper:
+                            _d2 = (_fx - _sx) ** 2 + (_fy - _sy) ** 2
+                            if _d2 <= _r * _r:
+                                _found.append((_d2 ** 0.5, _fx, _fy, _fl))
+                        _i0 = max(0, int((_sx - _r - _m.x0) / _m.cell) - _dc)
+                        _i1 = min(_m.nx, int((_sx + _r - _m.x0) / _m.cell) + 1 + _dc)
+                        _j0 = max(0, int((_sy - _r - _m.y0) / _m.cell) - _dc)
+                        _j1 = min(_m.ny, int((_sy + _r - _m.y0) / _m.cell) + 1 + _dc)
+                        if _i0 < _i1 and _j0 < _j1:
+                            _ck = (_i0, _i1, _j0, _j1)
+                            _dep = _depth_cache.get(_ck)
+                            _win = _m.labels[_i0:_i1, _j0:_j1]
+                            if _dep is None:
+                                _dep = _erode_depth(_win == _lb, _dc)
+                                _depth_cache[_ck] = _dep
+                            # labels is [x, y] (query_component's indexing)
+                            _xi, _yi = _np.nonzero(_win == _lb)
+                            for _a, _b in zip(_xi, _yi):
+                                _fx = _m.x0 + float(_a + _i0) * _m.cell
+                                _fy = _m.y0 + float(_b + _j0) * _m.cell
+                                _d2 = (_fx - _sx) ** 2 + (_fy - _sy) ** 2
+                                if _d2 > _r * _r:
+                                    continue
+                                _dmm = float(_dep[_a, _b]) * _m.cell
+                                _frag = max(0.0, 1.0 - _dmm / _DEEP_MM)
+                                _found.append(
+                                    (_d2 ** 0.5 + _FRAG_MM * _frag,
+                                     _fx, _fy, _li))
+                        if _found:
+                            break
+                    _found.sort()
+                    for _sc, _fx, _fy, _fl in _found[:_NBEST]:
+                        _g = coord.to_grid(_fx, _fy)
+                        _k = (_g[0], _g[1], _fl)
+                        if _k not in _cells_out:
+                            _cells_out[_k] = (_fx, _fy)
+    except Exception as _e:
+        print(f"  POUR-LAUNCH unavailable ({_e})")
+        return {}
+    if _bare_kept:
+        print(f"  POUR-LAUNCH: {_bare_kept} bare fill region(s) kept by the "
+              f"zone island policy are not yet nodes (deferred)")
+    pcb_data._pour_launch_memo = (_mk, pad_components, out)
+    return out
+
+
 def _select_multipoint_main_edge(pcb_data, pad_info, pad_components,
                                  mst_edges, attraction_path):
     """Pick which MST edge Phase 1 routes NOW; the rest defer to Phase 3.
@@ -3026,125 +3169,23 @@ def route_multipoint_main(
             _island_cells[_cid] = {(p[0], p[1], p[2]): (p[3], p[4])
                                    for p in _pts}
 
-        # PROTOTYPE (worktree): POUR AS LAUNCH SURFACE (KICAD_POUR_LAUNCH=1).
-        # This net's zone fill joins its component's launch/target set as
-        # sampled cells, so straggler pads route INTO the nearest fill (a
-        # tap placed by the router, with rip-up) instead of detouring to
-        # some pad of the pour-connected component. Component attribution:
-        # the component owning the most fill-covered pads owns the pour.
-        import os as _os
-        if _os.environ.get('KICAD_POUR_LAUNCH', '') == '1' and _island_cells:
-            try:
-                from plane_fill_model import get_fill_models
-                from plane_fragility import _erode_depth
-                import numpy as _np
-                _models = get_fill_models(pcb_data, net_id)
-                if _models:
-                    from collections import Counter as _Ctr
-                    # LADDER v2: (a) PER-POUR component attribution -- every
-                    # pour joins ITS OWN connectivity component's launch set,
-                    # not just the majority pour's; (b) each rung's candidate
-                    # pool is fill cells PLUS the pour component's existing
-                    # copper (via/track island cells), so a same-net via 0.8mm
-                    # away stops the ladder from escalating to far fill; (c)
-                    # fill candidates are scored dist + fragility (boundary/
-                    # strait attach pinches the pour; deep fill is free) --
-                    # existing copper carries no fragility penalty.
-                    _RUNGS = (1.0, 2.5, 6.0, 15.0)   # mm
-                    _NBEST = 12
-                    # ablation knobs (prototype): fragility penalty coefficient
-                    # and copper-aware rung break, both defaulted ON
-                    _FRAG_MM = float(_os.environ.get(
-                        'KICAD_POUR_LAUNCH_FRAG', '1.0') or 0)
-                    _COPPER_RUNGS = _os.environ.get(
-                        'KICAD_POUR_LAUNCH_COPPER', '1') == '1'
-                    _DEEP_MM = 0.5      # depth at which fill attach is free
-                    _attr = []           # (layer_idx, model, comp_id, main)
-                    for _lay, _ms in _models.items():
-                        if _lay not in layer_names:
-                            continue
-                        _li = layer_names.index(_lay)
-                        for _m in _ms:
-                            _main = _m.largest_component()
-                            if not _main:
-                                continue
-                            _v = _Ctr()
-                            for _idx, _info in enumerate(pad_info):
-                                if (_m.query_component(_info[3], _info[4]) or 0) > 0:
-                                    _v[pad_components.get(_idx, _idx)] += 1
-                            if _v:
-                                _attr.append((_li, _m, _v.most_common(1)[0][0],
-                                              _main))
-                    _added = _nstrag = 0
-                    _by_comp = {}
-                    for _li, _m, _cid, _main in _attr:
-                        _by_comp.setdefault(_cid, []).append((_li, _m, _main))
-                    for _cid, _pours in _by_comp.items():
-                        _cells = _island_cells.setdefault(_cid, {})
-                        _copper = [(_fx, _fy, _k[2])
-                                   for _k, (_fx, _fy) in _cells.items()]
-                        _stragglers = [(_info[3], _info[4])
-                                       for _idx, _info in enumerate(pad_info)
-                                       if pad_components.get(_idx, _idx) != _cid]
-                        _nstrag = max(_nstrag, len(_stragglers))
-                        _depth_cache = {}
-                        for _sx, _sy in _stragglers:
-                            _found = []
-                            for _r in _RUNGS:
-                                # existing copper of the pour's component
-                                # within this rung: full candidates, no
-                                # fragility penalty (attach damages nothing).
-                                if _COPPER_RUNGS:
-                                    for _fx, _fy, _fl in _copper:
-                                        _d2 = (_fx - _sx) ** 2 + (_fy - _sy) ** 2
-                                        if _d2 <= _r * _r:
-                                            _found.append((_d2 ** 0.5, _fx, _fy, _fl))
-                                for _li, _m, _main in _pours:
-                                    _dc = int(round(_DEEP_MM / _m.cell)) or 1
-                                    _i0 = max(0, int((_sx - _r - _m.x0) / _m.cell) - _dc)
-                                    _i1 = min(_m.nx, int((_sx + _r - _m.x0) / _m.cell) + 1 + _dc)
-                                    _j0 = max(0, int((_sy - _r - _m.y0) / _m.cell) - _dc)
-                                    _j1 = min(_m.ny, int((_sy + _r - _m.y0) / _m.cell) + 1 + _dc)
-                                    if _i0 >= _i1 or _j0 >= _j1:
-                                        continue
-                                    _ck = (id(_m), _i0, _i1, _j0, _j1)
-                                    _dep = _depth_cache.get(_ck)
-                                    if _dep is None:
-                                        _win = _m.labels[_i0:_i1, _j0:_j1]
-                                        _dep = _erode_depth(_win == _main, _dc)
-                                        _depth_cache[_ck] = _dep
-                                    _win = _m.labels[_i0:_i1, _j0:_j1]
-                                    # labels is [x, y] (query_component's own
-                                    # indexing) -- v1 paired the y-index with
-                                    # x0 and vice versa, mirroring every fill
-                                    # target across the window diagonal.
-                                    _xi, _yi = _np.nonzero(_win == _main)
-                                    for _a, _b in zip(_xi, _yi):
-                                        _fx = _m.x0 + float(_a + _i0) * _m.cell
-                                        _fy = _m.y0 + float(_b + _j0) * _m.cell
-                                        _d2 = (_fx - _sx) ** 2 + (_fy - _sy) ** 2
-                                        if _d2 > _r * _r:
-                                            continue
-                                        _dmm = float(_dep[_a, _b]) * _m.cell
-                                        _frag = max(0.0, 1.0 - _dmm / _DEEP_MM)
-                                        _found.append((_d2 ** 0.5 + _FRAG_MM * _frag,
-                                                       _fx, _fy, _li))
-                                if _found:
-                                    break   # nearest rung with ANY target wins
-                            _found.sort()
-                            for _sc, _fx, _fy, _li in _found[:_NBEST]:
-                                _g = coord.to_grid(_fx, _fy)
-                                _k = (_g[0], _g[1], _li)
-                                if _k not in _cells:
-                                    _cells[_k] = (_fx, _fy)
-                                    _added += 1
-                    if _added:
-                        print(f"  POUR-LAUNCH v2: +{_added} laddered target(s) "
-                              f"({len(_by_comp)} pour component(s), "
-                              f"{_nstrag} straggler(s); dist+fragility scored, "
-                              f"copper-aware rungs)")
-            except Exception as _e:
-                print(f"  POUR-LAUNCH unavailable ({_e})")
+        # POUR AS LAUNCH SURFACE (KICAD_POUR_LAUNCH=1), ladder v3: shared
+        # per-region builder (_pour_launch_region_cells); Phase 3 merges the
+        # same cells into ITS map -- v2 fed only this phase-1 map, so the
+        # straggler edges Phase 3 routes never saw fill targets.
+        _pl_cells = _pour_launch_region_cells(
+            pcb_data, net_id, pad_info, pad_components, layer_names, coord,
+            _island_cells)
+        _pl_added = 0
+        for _cid, _cmap in _pl_cells.items():
+            _cells = _island_cells.setdefault(_cid, {})
+            for _k, _v in _cmap.items():
+                if _k not in _cells:
+                    _cells[_k] = _v
+                    _pl_added += 1
+        if _pl_added:
+            print(f"  POUR-LAUNCH v3: +{_pl_added} region-laddered target(s) "
+                  f"across {len(_pl_cells)} component(s) (phase 1)")
     num_components = len(set(pad_components.values()))
     if num_components < len(pad_info):
         print(f"  Existing copper joins {len(pad_info)} terminals into "
@@ -3528,6 +3569,11 @@ def route_multipoint_main(
         _own = _island_cells.get(pad_components.get(idx_b, idx_b), {}).get(tuple(path[-1]))
         if _own is not None:
             _end_orig = (_own[0], _own[1], layer_names[path[-1][2]])
+    # Barrel-in-fill completion (#562), Phase-1 parity with the tap edges.
+    path, _fill_end = _trim_after_fill_via(path, coord, layer_names,
+                                           pcb_data, net_id)
+    if _fill_end is not None:
+        _end_orig = _fill_end
     segments, vias = _path_to_segments_vias(
         path, coord, layer_names, net_id, config,
         _start_orig,
@@ -3791,6 +3837,24 @@ def _route_multipoint_taps_impl(
         # the router actually used, never to a distant anchor).
         _p3_island_cells[_cid] = {(p[0], p[1], p[2]): (p[3], p[4])
                                   for p in _pts}
+    # POUR-LAUNCH ladder v3 (#544/#562): fill-region launch cells, keyed by
+    # the SAME pad_components id space the lookups below use. Sources union
+    # across routed_components as the tree grows (#545 F1), so a joined
+    # region's fill becomes launchable for every later edge -- the
+    # union-on-completion falls out of the existing routed-tree semantics.
+    _pl_cells = _pour_launch_region_cells(
+        pcb_data, net_id, pad_info, pad_components, layer_names, coord,
+        _p3_island_cells)
+    _pl_added = 0
+    for _cid, _cmap in _pl_cells.items():
+        _cells = _p3_island_cells.setdefault(_cid, {})
+        for _k, _v in _cmap.items():
+            if _k not in _cells:
+                _cells[_k] = _v
+                _pl_added += 1
+    if _pl_added:
+        print(f"  POUR-LAUNCH v3: +{_pl_added} region-laddered target(s) "
+              f"across {len(_pl_cells)} component(s) (phase 3)")
     _p3_use_islands = bool(_p3_island_cells) and (
         env_knobs.ISLAND_LAUNCH or main_result.get('phase1_exhausted'))
     if _p3_use_islands and main_result.get('phase1_exhausted'):
@@ -4143,6 +4207,13 @@ def _route_multipoint_taps_impl(
             end_original = (_ex, _ey, path_end_layer)
         else:
             end_original = (tgt_x, tgt_y, path_end_layer)
+        # Barrel-in-fill completion (#562): the edge is done at the first via
+        # piercing the landing region -- truncate the tail before emission.
+        path, _fill_end = _trim_after_fill_via(path, coord, layer_names,
+                                               pcb_data, net_id)
+        if _fill_end is not None:
+            end_original = _fill_end
+            path_end_layer = _fill_end[2]
         segments, vias = _path_to_segments_vias(
             path, coord, layer_names, net_id, config,
             (tap_x, tap_y, tap_layer),  # start_original (actual tap point used)
@@ -4306,6 +4377,59 @@ def _terminal_copper_on_layer(pcb_data, net_id, x, y, layer) -> bool:
         if layer in spanned:
             return True
     return False
+
+
+def _trim_after_fill_via(path, coord, layer_names, pcb_data, net_id):
+    """#562 barrel-in-fill completion (the U2-class tail trim).
+
+    A weld edge is electrically complete at the first VIA whose barrel
+    pierces the same surviving fill region its landing cell lies in -- the
+    barrel spans every layer, so fill contact at the via IS the connection
+    (#424 pour-direct's economy, mirrored on the route side). Without this,
+    the A* must run on to stand on an explicit sampled ladder cell, paying
+    ~2mm + a second via per affected weld (measured on an SDRAM rail
+    cluster). Truncate the path just after that via and weld the end to the
+    via's own float point.
+
+    Only fires under KICAD_POUR_LAUNCH=1 and only when the path's end cell
+    resolves to a fill region of this net (i.e. this IS a pour-launch weld);
+    the trim keeps the via pair itself, and the same-region requirement
+    keeps completion honest (piercing an unrelated island is not arrival).
+    Returns (possibly-truncated path, end_original override or None).
+    """
+    import os as _os
+    if _os.environ.get('KICAD_POUR_LAUNCH', '') != '1' or len(path) < 4:
+        return path, None
+    try:
+        from plane_fill_model import get_fill_models
+        models = get_fill_models(pcb_data, net_id)
+    except Exception:
+        return path, None
+    if not models:
+        return path, None
+    egx, egy, eli = path[-1]
+    ex, ey = coord.to_float(egx, egy)
+    end_model = end_label = None
+    for _m in models.get(layer_names[eli], []):
+        _c = _m.query_component(ex, ey) or 0
+        if _c > 0:
+            end_model, end_label = _m, _c
+            break
+    if end_model is None:
+        return path, None
+    for i in range(len(path) - 2):
+        a, b = path[i], path[i + 1]
+        # A via is emitted on ANY consecutive layer change, placed at the
+        # FIRST node's cell (_path_to_segments_vias contract) -- the path
+        # never duplicates a cell across the transition.
+        if a[2] != b[2]:
+            vx, vy = coord.to_float(a[0], a[1])
+            if (end_model.query_component(vx, vy) or 0) == end_label:
+                print(f"      barrel-in-fill: weld complete at via "
+                      f"({vx:.2f},{vy:.2f}); trimmed {len(path) - i - 2} "
+                      f"tail node(s)")
+                return path[:i + 2], (vx, vy, layer_names[b[2]])
+    return path, None
 
 
 def _path_to_segments_vias(
