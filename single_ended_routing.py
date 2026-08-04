@@ -1680,6 +1680,41 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         for _s in new_segments:
             _s.width = uniform_width
 
+    # Terminal-bridge SHORT gate: the start/end bridges above are the only
+    # copper this function emits WITHOUT search validation -- straight
+    # geometry from the path's end cell to the anchor float. When the anchor
+    # cell itself is blocked (foreign copper under/near the pad), the A* ends
+    # at the nearest legal cell and the bridge slashes across whatever lies
+    # between (ux pf8: GND's rescue bridge into C61 crossed SDRAM_A2's
+    # In1.Cu trunk running 0.03mm from the pad centre -- a shipped SHORT,
+    # invisible to every check because bridges bypass the map). A bridge
+    # whose CENTERLINE overlaps foreign segment copper (dist < its own
+    # half-width) fails the route -- callers (rescue rungs, reroutes) fall
+    # through to their next option, and an honest failure beats a shipped
+    # short. Clearance-only grazes (0 <= overlap < clearance) stay in the
+    # #157 neck regime below, unchanged.
+    for _br, _bo in ((new_segments[0] if start_original and new_segments
+                      else None, 'start'),
+                     (new_segments[-1] if end_original and new_segments
+                      else None, 'end')):
+        if _br is None or _br.layer not in layer_names:
+            continue
+        _d = _seg_foreign_seg_dist(pcb_data, net_id, _br.start_x, _br.start_y,
+                                   _br.end_x, _br.end_y, _br.layer)
+        if _d < _br.width / 2 - 1e-3:
+            print(f"  {YELLOW}terminal bridge at the {_bo} anchor would "
+                  f"OVERLAP foreign copper on {_br.layer} "
+                  f"(edge dist {_d:.3f}mm < half-width) -- rejecting the "
+                  f"route rather than shipping a short{RESET}")
+            return {
+                'failed': True,
+                'iterations': total_iterations,
+                'blocked_cells_forward': [],
+                'blocked_cells_backward': [],
+                'iterations_forward': fwd_iters,
+                'iterations_backward': bwd_iters,
+            }
+
     # Neck any terminal-connection segment that grazes a foreign pad (#157): the
     # endpoint stub is laid geometrically with the endpoint region obstacle-exempt,
     # so a full-width terminal can sit sub-clearance to a neighbouring foreign pad.
