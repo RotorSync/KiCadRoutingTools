@@ -440,8 +440,26 @@ def exact_unconnected(board_file: str, net_names=None, pcb_data=None,
     debris pass keeps seeing stranded-fragment links (XTAL_O class).
     """
     import math as _m
-    m = refill_islands(board_file, verbose=verbose,
-                       project_from=project_from)
+    # LIVE board first (#424 provider): the GUI applies each step's copper to
+    # the in-memory board and only saves at the end, so `board_file` is the
+    # ORIGINAL board mid-plan -- refilling it would price the oracle against a
+    # board missing every step's copper. When pcb_data carries a provider it IS
+    # the current board, so ask it. Same {(net, layer): [poly, ...]} shape.
+    # (plane_fragility.py has consumed this provider since #424; the oracle was
+    # the last exact-fill consumer still insisting on a file.)
+    provider = getattr(pcb_data, 'exact_fill_provider', None)
+    if provider is not None:
+        try:
+            m = provider()
+        except Exception as e:
+            if verbose:
+                print(f"  exact_unconnected: live fill provider failed ({e}); "
+                      f"falling back to the file")
+            m = refill_islands(board_file, verbose=verbose,
+                               project_from=project_from)
+    else:
+        m = refill_islands(board_file, verbose=verbose,
+                           project_from=project_from)
     if m is None:
         return None
     if pcb_data is None:
