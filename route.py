@@ -2765,6 +2765,85 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         except Exception as _e:
             print(f"{RED}  final reconciliation pass failed: {_e}{RESET}")
 
+    # PLANE FINALIZE (#562): the pours-first chain's repair step, absorbed.
+    # Measured (3-board arch chains): the standalone repair step's entire
+    # remaining value is plane-net completion its TAP machinery + the
+    # kicad-oracle exact-fill reconnect earn (ux +3V3: 21 pad taps + gate
+    # multipoint + rescue; oc P3.3V: one pad tap) -- the casualties-only and
+    # failed-nets reconciles above cannot reach it (multipoint plane deficits
+    # are neither). Run repair's exact trio IN-RUN on the written output:
+    # route_planes engine (taps + region joins) -> clean_plane_copper ->
+    # oracle_reconnect (KiCad exact-fill links, the completion earner).
+    # In-process bonus: clearance_ledger is shared, so tap-escalated floors
+    # flow into this run's own DRC writeback. CLI file-mode only for now --
+    # the GUI planes tab remains the return_results counterpart (repair's
+    # dict-emission strip-and-replace shape does not merge into
+    # results_data; documented divergence like the mains' oracle recheck).
+    # Gate: KICAD_PLANE_FINALIZE=1 (default OFF until #562 graduation).
+    if (final_reconcile and not skip_routing and not _ckpt_stop
+            and output_file and not return_results
+            and os.environ.get('KICAD_PLANE_FINALIZE', '') == '1'):
+        try:
+            from route_disconnected_planes import (
+                route_planes as _rdp_engine, auto_detect_zones as _adz)
+            _zpairs = _adz(output_file)
+            # Respect the caller's net filter: a net excluded by pattern is
+            # excluded BY PLAN (same rule as the reconciliation above).
+            if net_names:
+                from net_queries import matches_net_filter as _mnf9
+                _zpairs = [(n, l) for n, l in _zpairs if _mnf9(n, net_names)]
+            if _zpairs:
+                _zn = [n for n, _l in _zpairs]
+                _zl = [_l for _n, _l in _zpairs]
+                print(f"\nPlane finalize (#562): repairing "
+                      f"{len(set(_zn))} zone net(s) in-run: "
+                      f"{', '.join(sorted(set(_zn)))}")
+                _rdp_engine(
+                    output_file, output_file, _zn, _zl,
+                    track_width=config.track_width,
+                    clearance=config.clearance,
+                    grid_step=config.grid_step,
+                    via_size=config.via_size,
+                    via_drill=config.via_drill,
+                    hole_to_hole_clearance=config.hole_to_hole_clearance,
+                    routing_layers=config.layers,
+                    net_clearances=net_clearances)
+                from pcb_modification import clean_plane_copper
+                _cs, _cr = clean_plane_copper(
+                    output_file, sorted(set(_zn)),
+                    config.clearance, config.grid_step)
+                if _cs or _cr:
+                    print(f"  Plane finalize cleanup: closed {_cs} stub "
+                          f"gap(s), trimmed {_cr} dead-end segment(s)")
+                from kicad_oracle import oracle_reconnect
+                try:
+                    from fix_kicad_drc_settings import \
+                        effective_board_edge_clearance
+                    _oedge = effective_board_edge_clearance(input_file, 0.0)
+                except Exception:
+                    _oedge = 0.0
+                _ocfg = GridRouteConfig(
+                    clearance=config.clearance,
+                    track_width=config.track_width,
+                    via_size=config.via_size, via_drill=config.via_drill,
+                    grid_step=config.grid_step,
+                    board_edge_clearance=_oedge)
+                from kicad_dru import install_layer_clearances
+                install_layer_clearances(_ocfg, None, input_file, None)
+                _orc = oracle_reconnect(
+                    output_file, sorted(set(_zn)), _ocfg,
+                    hole_to_hole_clearance=config.hole_to_hole_clearance,
+                    project_from=input_file)
+                try:
+                    import json as _json9
+                    print('JSON_ORACLE: ' + _json9.dumps(
+                        {k: v for k, v in _orc.items()
+                         if k not in ('new_segments', 'new_vias')}))
+                except Exception:
+                    pass
+        except Exception as _e:
+            print(f"{RED}  plane finalize pass failed: {_e}{RESET}")
+
 
     # Per-net story dump (KICAD_NET_STORY=1): the complete journey of every
     # net -- bus membership, ordering, failures with named blockers, rips,
