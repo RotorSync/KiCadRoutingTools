@@ -130,7 +130,7 @@ what runs here is what the buttons run.
 
 ### /plan-pcb-routing
 
-The orchestrator. Analyzes the board structure, identifies components needing fanout (BGA/QFN/QFP/PGA, with actual pad-depth analysis for hollow-center packages), detects differential pairs and DDR length-matching groups, categorizes power/ground nets, and assesses signal speeds. Produces a numbered plan — planes first, then fanout, diff pairs, signals, GND return vias, plane repair, verification — with each command explained, then runs it on approval. Defers to the other six skills at the appropriate points rather than duplicating their logic.
+The orchestrator. Analyzes the board structure, identifies components needing fanout (BGA/QFN/QFP/PGA, with actual pad-depth analysis for hollow-center packages), detects differential pairs and DDR length-matching groups, categorizes power/ground nets, and assesses signal speeds. Produces a numbered plan — pours first, then fanout (+cap clearance), diff pairs, impedance nets, one route step over ALL nets whose in-run plane finalize does the repair, optional GND return vias/stitching, verification — with each command explained, then runs it on approval. Defers to the other six skills at the appropriate points rather than duplicating their logic.
 
 Note: guide corridors (`User.1` polylines) and keepout zones (`User.2` polygons) are **user-drawn** — the skill suggests in words where they would help, but never draws the geometry itself.
 

@@ -640,6 +640,12 @@ The plane generation code is organized into several modules:
 
 After power planes are created, regions may become effectively split due to vias and traces from other nets cutting through the plane. The `route_disconnected_planes.py` script detects these disconnected regions and routes tracks between them to ensure electrical continuity.
 
+**Note (#562): in the default chain this runs for you.** `route.py`'s in-run
+plane finalize calls this same engine, then the plane-copper cleanup and the
+KiCad-oracle completion check, at the route step's own parameters — so the
+standalone invocation below is for boards routed outside that chain.
+`KICAD_PLANE_FINALIZE=0` disables the in-run pass.
+
 Key features:
 - **Per-net processing** - Zones with the same net on multiple layers (e.g., GND on B.Cu and In1.Cu) are processed together, avoiding redundant routes since vias connect all layers
 - **Cross-layer connectivity** - Uses vias and through-hole pads to track connectivity across all zone layers for a net

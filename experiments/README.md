@@ -7,7 +7,15 @@ and verdicts: session memories `pour-doctrine-466-dynamic-0802` and
 `~/Documents/kicad_stress_test/param_tune_0802/` (tune_driver.py +
 results.jsonl).
 
-## Env knobs on this branch (all default-off)
+## Env knobs (defaults AS OF THE #562 MERGE)
+
+Several of these GRADUATED to default-ON at the merge and are now kill
+switches, not opt-ins: `KICAD_POUR_LAUNCH=1`, `KICAD_VIA_RUNG=2`,
+`KICAD_PLANE_NO_TAPS=1` (the pour step does no routing), and
+`KICAD_PLANE_FINALIZE`/`_LIVE=1` (plane repair runs inside every route
+step). Set any of them to `0` to revert that piece. The table below is the
+branch-time record of what each knob was FOR; the "verdict" column is the
+study outcome, not the current default.
 
 | knob | file | verdict |
 |---|---|---|

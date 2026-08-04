@@ -412,6 +412,13 @@ python route_planes.py kicad_files/input.kicad_pcb --nets GND --plane-layers B.C
 
 ### 3b. Repair Disconnected Plane Regions
 
+> **Since #562 you normally do not run this step.** Every `route.py` run
+> finishes with an in-run *plane finalize* that applies this same engine
+> (pad taps + region joins), the plane-copper cleanup, and a KiCad-oracle
+> completion check — so a pours-first chain repairs its planes automatically.
+> `KICAD_PLANE_FINALIZE=0` is the kill switch. Use the standalone script
+> below for a board routed OUTSIDE that chain (e.g. hand-edited copper).
+
 After creating power planes, regions may become split by vias and traces from other nets. Use `route_disconnected_planes.py` to reconnect them:
 
 ```bash

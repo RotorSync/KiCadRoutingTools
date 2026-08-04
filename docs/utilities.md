@@ -352,7 +352,7 @@ Options:
                         suppressed when both nets land on a single
                         crystal/oscillator footprint, since a 2-terminal
                         resonator is not a differential signal — issue #145)
-  --power, -p           Show power/ground nets with pad counts
+  --power, -p           Show power/ground nets with pad counts, plus each net's per-layer SMD/TH pad profile `(F.Cu n SMD, B.Cu n SMD, TH n)` and the outer-layer flood hint the plane-mapping skill reads
   --design-rules, -r    Show net-class clearance/track/via/diff-pair rules
                         and the CLI flags to pass them to the routing tools
   --top N               Show top N most-connected nets (default: 10)
