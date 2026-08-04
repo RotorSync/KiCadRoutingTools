@@ -3332,12 +3332,14 @@ def create_plane(
             progress_callback(0, 0, f"{net_name}: analyzing pads on {plane_layer}...")
         target_pads = identify_target_pads(pcb_data, net_id, plane_layer)
 
-        # PROTOTYPE (worktree): bare-pour mode -- place NO taps at all
-        # (KICAD_PLANE_NO_TAPS=1). The signal pass connects plane pads to
-        # the pour with the full routing machinery (rip-up, soft costs)
-        # via the pour-launch feature; fanout drops own the BGA balls.
+        # Bare-pour mode, DEFAULT ON (#562 pours-first): the plane step does
+        # no routing -- it places NO taps. The route pass connects plane pads
+        # to the pour with the full routing machinery (rip-up, soft costs)
+        # via pour-launch, its in-run plane finalize taps whatever fill
+        # cannot reach, and fanout drops own the BGA balls.
+        # KICAD_PLANE_NO_TAPS=0 is the kill switch restoring pour-time taps.
         import os as _os0
-        if _os0.environ.get('KICAD_PLANE_NO_TAPS', '') == '1':
+        if _os0.environ.get('KICAD_PLANE_NO_TAPS', '1') == '1':
             _skip = [pd for pd in target_pads if pd['type'] == 'via_needed']
             target_pads = [pd for pd in target_pads
                            if pd['type'] != 'via_needed']

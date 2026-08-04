@@ -268,9 +268,6 @@ skip cleanly without KiCad python). Run any directly:
 - `test_footprint_position_sync.py` -- `_sync_pcb_data_from_board` refreshes
   footprint/pad positions after optimize_caps (matched by iteration ORDER, not
   pad number -- U6 has 11 pads numbered "61"); a no-op sync moves ZERO pads.
-- `test_plane_rip_blocker_panel.py` -- the plan executor sets `rip_blocker_nets`
-  on the CORRECT plane options panel per action (repair vs create), not the
-  first panel sharing the control name.
 - `test_plane_all_layers_parity.py` -- GUI create passes `all_layers` =
   outer+pour (the route_planes default), not all 6 copper layers (mocks
   create_plane to capture the kwarg).

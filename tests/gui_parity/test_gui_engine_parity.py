@@ -133,21 +133,16 @@ def run_cli_leg(board, workdir):
                   '--nets', 'GND', '--plane-layers', 'B.Cu',
                   '--clearance', '0.15', '--via-size', '0.45',
                   '--via-drill', '0.2'])
-    s3 = os.path.join(workdir, 'cli_step3.kicad_pcb')
-    steps.append([py, '-X', 'utf8',
-                  os.path.join(REPO, 'route_disconnected_planes.py'), s2, s3,
-                  '--clearance', '0.15', '--via-size', '0.45',
-                  '--via-drill', '0.2', '--track-width', '0.127',
-                  '--grid-step', '0.1', '--power-nets', '+3V3', '+12V',
-                  '--power-nets-widths', '0.4', '0.4', '--rip-blocker-nets'])
+    # (No standalone repair step since #562: the final route step's in-run
+    # plane finalize runs the repair engine + cleanup + kicad-oracle verify.)
     s4 = os.path.join(workdir, 'cli_final.kicad_pcb')
-    steps.append([py, '-X', 'utf8', os.path.join(REPO, 'route.py'), s3, s4,
+    steps.append([py, '-X', 'utf8', os.path.join(REPO, 'route.py'), s2, s4,
                   '--nets', 'GND', '--clearance', '0.127',
                   '--track-width', '0.127', '--via-size', '0.45',
                   '--via-drill', '0.2', '--max-ripup', '10',
                   '--max-iterations', '1000000'])
     for i, cmd in enumerate(steps):
-        print(f"[cli] step {i + 1}/4 ...", flush=True)
+        print(f"[cli] step {i + 1}/{len(steps)} ...", flush=True)
         r = subprocess.run(cmd, capture_output=True, text=True, cwd=workdir,
                            env=_host_env())
         if r.returncode != 0:
@@ -179,12 +174,6 @@ GUI_PLAN = [
      'nets': ['*', '!GND']},
     {'action': 'route_planes',
      'params': dict(clearance=0.15, via_size=0.45, via_drill=0.2),
-     'assignments': [{'nets': ['GND'], 'layer': 'B.Cu'}]},
-    {'action': 'repair_planes',
-     'params': dict(clearance=0.15, via_size=0.45, via_drill=0.2,
-                    track_width=0.127, grid_step=0.1,
-                    power_nets=['+3V3', '+12V'], power_nets_widths=[0.4, 0.4],
-                    rip_blocker_nets=True),
      'assignments': [{'nets': ['GND'], 'layer': 'B.Cu'}]},
     {'action': 'route',
      'params': dict(clearance=0.127, track_width=0.127, via_size=0.45,

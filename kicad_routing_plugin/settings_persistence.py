@@ -209,7 +209,6 @@ def get_dialog_settings(dialog):
 
         # Planes tab settings
         'planes_net_panel_checked': list(dialog.planes_tab.net_panel.get_selected_nets()),
-        'planes_mode': dialog.planes_tab.mode_selector.GetSelection(),
         'planes_assignments': dialog.planes_tab.assignment_panel.get_assignments(),
         'planes_hide': dialog.planes_tab.net_panel.hide_check.GetValue() if dialog.planes_tab.net_panel.hide_check else False,
         'planes_filter': dialog.planes_tab.net_panel.filter_ctrl.GetValue(),
@@ -230,11 +229,6 @@ def get_dialog_settings(dialog):
         'planes_stitch_max_freq': dialog.planes_tab.create_options.stitch_max_freq.GetValue(),
         'planes_gnd_via_net': dialog.planes_tab.create_options.gnd_via_net.GetValue(),
         # Repair mode options
-        'planes_repair_max_track_width': dialog.planes_tab.repair_options.max_track_width.GetValue(),
-        'planes_repair_min_track_width': dialog.planes_tab.repair_options.min_track_width.GetValue(),
-        'planes_repair_analysis_grid': dialog.planes_tab.repair_options.analysis_grid.GetValue(),
-        'planes_repair_pads': dialog.planes_tab.repair_options.repair_pads.GetValue(),
-        'planes_repair_rip_blocker_check': dialog.planes_tab.repair_options.rip_blocker_check.GetValue(),
 
         # AI tab settings (issue #40; backend selection #503). Model/effort
         # entries are stored per backend so switching backends doesn't lose
@@ -657,8 +651,6 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab.qfn_options.allow_via_in_pad.SetValue(settings['fanout_qfn_allow_via_in_pad'])
 
     # Restore planes tab settings
-    if 'planes_mode' in settings:
-        dialog.planes_tab.mode_selector.SetSelection(settings['planes_mode'])
         # Trigger mode change to show/hide appropriate options
         dialog.planes_tab._on_mode_changed(None)
     if 'planes_assignments' in settings:
@@ -704,16 +696,6 @@ def restore_dialog_settings(dialog, settings):
     if 'planes_gnd_via_net' in settings:
         dialog.planes_tab.create_options.gnd_via_net.SetValue(settings['planes_gnd_via_net'])
     # Repair mode options
-    if 'planes_repair_max_track_width' in settings:
-        dialog.planes_tab.repair_options.max_track_width.SetValue(settings['planes_repair_max_track_width'])
-    if 'planes_repair_min_track_width' in settings:
-        dialog.planes_tab.repair_options.min_track_width.SetValue(settings['planes_repair_min_track_width'])
-    if 'planes_repair_analysis_grid' in settings:
-        dialog.planes_tab.repair_options.analysis_grid.SetValue(settings['planes_repair_analysis_grid'])
-    if 'planes_repair_pads' in settings:
-        dialog.planes_tab.repair_options.repair_pads.SetValue(settings['planes_repair_pads'])
-    if 'planes_repair_rip_blocker_check' in settings:
-        dialog.planes_tab.repair_options.rip_blocker_check.SetValue(settings['planes_repair_rip_blocker_check'])
 
     # Restore AI tab backend/model/effort (issue #40; #503). Per-backend
     # model/effort entries first, then the backend selection LAST so its

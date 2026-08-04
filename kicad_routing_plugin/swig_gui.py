@@ -1946,13 +1946,8 @@ class RoutingDialog(wx.Dialog):
         if event.GetSelection() == 0 and getattr(self, 'differential_tab', None):
             self.net_panel.refresh()
 
-        # Check if switching to Planes tab (index 4)
-        if event.GetSelection() == 4:
-            # Validate max_track_width >= track_width
-            track_width = self._effective_track_width()
-            max_width = self.planes_tab.repair_options.max_track_width.GetValue()
-            if max_width < track_width:
-                self.planes_tab.repair_options.max_track_width.SetValue(track_width)
+        # (Planes tab needs no cross-validation since #562: its repair
+        # panel is gone -- the route step's finalize owns repair widths.)
 
     def _on_update_schematic_changed(self, event):
         """Handle update schematic checkbox change."""
@@ -2311,25 +2306,12 @@ class RoutingDialog(wx.Dialog):
                 _po.gnd_via_distance.SetValue(defaults.GND_VIA_DISTANCE)
             if hasattr(_po, 'gnd_via_net'):
                 _po.gnd_via_net.SetValue(defaults.GND_VIA_NET)
-            if hasattr(_po, 'rip_blocker_check'):
-                _po.rip_blocker_check.SetValue(False)
             if hasattr(_po, 'via_in_pad_check'):
                 # Default ON = same_net_pad_clearance -1.0 (CLI parity, big plane
                 # connectivity win; see CreatePlanesOptionsPanel #362).
                 _po.via_in_pad_check.SetValue(True)
                 if hasattr(_po, 'same_net_pad_clearance'):
                     _po.same_net_pad_clearance.Enable(False)
-            _ro = self.planes_tab.repair_options
-            if hasattr(_ro, 'rip_blocker_check'):
-                _ro.rip_blocker_check.SetValue(False)
-            if hasattr(_ro, 'repair_pads'):
-                _ro.repair_pads.SetValue(True)
-            if hasattr(_ro, 'max_track_width'):
-                _ro.max_track_width.SetValue(defaults.REPAIR_MAX_TRACK_WIDTH)
-            if hasattr(_ro, 'min_track_width'):
-                _ro.min_track_width.SetValue(defaults.REPAIR_MIN_TRACK_WIDTH)
-            if hasattr(_ro, 'analysis_grid'):
-                _ro.analysis_grid.SetValue(defaults.REPAIR_ANALYSIS_GRID_STEP)
         except Exception:
             pass
         try:
@@ -2569,8 +2551,6 @@ class RoutingDialog(wx.Dialog):
         self.fanout_tab._on_type_changed(None)
 
         # Reset planes tab
-        self.planes_tab.mode_selector.SetSelection(0)
-        self.planes_tab._on_mode_changed(None)
         self.planes_tab.assignment_panel.clear_assignments()
 
         # Reset transparency to default
@@ -2934,9 +2914,6 @@ class RoutingDialog(wx.Dialog):
                 wx.OK | wx.ICON_ERROR, parent=self,
             )
             return False
-
-        self.planes_tab.mode_selector.SetSelection(0)  # Create Planes
-        self.planes_tab._on_mode_changed(None)  # show create options panel
 
         existing = self.planes_tab.assignment_panel.get_assignments()
         existing_keys = {(tuple(nets), tuple(layers)) for nets, layers in existing}
