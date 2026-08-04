@@ -580,6 +580,16 @@ whatever is checked out — this is how you A/B an engine change. DRC is always
 graded at each board's own routed `--clearance` (parsed from the manifest); never
 grade stricter or you manufacture phantom grazes.
 
+**When the CLI drops a flag, migrate the corpus — do not add a compatibility
+shim.** Manifests are replayed verbatim, so a removed flag kills the chain in
+argparse. `python3 tests/stress/migrate_manifests.py [ROOT] [--apply]` rewrites
+them in place (dry-run by default, idempotent, surgical: it excises only the
+flag and leaves every other byte alone, because the corpus is NOT under version
+control). It is scoped per script — the #562 pass touched only `route_planes.py`
+lines (54 of 459 chains, 63 `--rip-blocker-nets`) and deliberately left
+`route_disconnected_planes.py` lines alone, since that engine still has those
+flags. Extend its table when a future flag goes.
+
 - **One board:** `python3 tests/stress/redo_stress_test.py
   runs_set1/<board>/redo_commands.sh --workdir <fresh-dir> --continue-on-error`.
   `--workdir` runs every command in the fresh dir (relative outputs chain there;

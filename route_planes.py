@@ -4119,10 +4119,6 @@ def create_plane(
 
 
 def main():
-    # Strip flags this script no longer has BEFORE recording, so a newly
-    # recorded manifest is already migrated (#562 removed the tap/rip knobs).
-    from legacy_flags import strip_removed
-    sys.argv[1:] = strip_removed(sys.argv[1:], 'route_planes.py')
     from redo_record import record_invocation
     record_invocation()  # stress-test redo manifest (#132); no-op unless REDO_MANIFEST set
     parser = argparse.ArgumentParser(
