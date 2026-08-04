@@ -268,6 +268,12 @@ skip cleanly without KiCad python). Run any directly:
 - `test_footprint_position_sync.py` -- `_sync_pcb_data_from_board` refreshes
   footprint/pad positions after optimize_caps (matched by iteration ORDER, not
   pad number -- U6 has 11 pads numbered "61"); a no-op sync moves ZERO pads.
+- `test_settings_roundtrip.py` -- save/restore of the dialog's settings dict
+  against the REAL headless dialog: the close path (`get_dialog_settings`),
+  the reopen path (`restore_dialog_settings`), restore from a LEGACY dict
+  carrying keys a newer version dropped, and re-save key parity. Deleting or
+  renaming a control without updating persistence crashes on CLOSE and loses
+  the user's settings -- this gate is what catches that.
 - `test_plane_all_layers_parity.py` -- GUI create passes `all_layers` =
   outer+pour (the route_planes default), not all 6 copper layers (mocks
   create_plane to capture the kwarg).
