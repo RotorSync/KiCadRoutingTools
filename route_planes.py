@@ -3332,47 +3332,32 @@ def create_plane(
             progress_callback(0, 0, f"{net_name}: analyzing pads on {plane_layer}...")
         target_pads = identify_target_pads(pcb_data, net_id, plane_layer)
 
-        # Bare-pour mode, DEFAULT ON (#562 pours-first): the plane step does
-        # no routing -- it places NO taps. The route pass connects plane pads
-        # to the pour with the full routing machinery (rip-up, soft costs)
-        # via pour-launch, its in-run plane finalize taps whatever fill
-        # cannot reach, and fanout drops own the BGA balls.
-        # KICAD_PLANE_NO_TAPS=0 is the kill switch restoring pour-time taps.
-        import os as _os0
-        if _os0.environ.get('KICAD_PLANE_NO_TAPS', '1') == '1':
-            # EXPOSED/THERMAL PADS ARE EXEMPT (#487). A thermal via ARRAY is
-            # a pour/fab feature, not routing: it stamps a lattice of vias
-            # under a big exposed pad and draws no traces, and NOTHING else
-            # in the chain places one -- the route step's pour-launch welds
-            # and the finalize's tap escalation both give a pad a SINGLE
-            # via. Skipping them here silently turned off a default-ON
-            # feature (--thermal-vias) whose checkbox and help text still
-            # advertise it. So bare-pour mode defers ordinary tap pads only.
-            _therm = [pd for pd in target_pads
-                      if pd['type'] == 'via_needed' and thermal_vias
-                      and is_thermal_pad(pd['pad'], pcb_data)]
-            for _tp in _therm:
-                _tp['thermal_only'] = True   # array-or-defer, never a trace
-            _skip = [pd for pd in target_pads
-                     if pd['type'] == 'via_needed' and pd not in _therm]
-            target_pads = [pd for pd in target_pads
-                           if pd['type'] != 'via_needed'] + _therm
-            if _therm:
-                print(f"  NO-TAPS mode: {len(_therm)} exposed/thermal pad(s) "
-                      f"still get their via ARRAY (#487); ordinary tap pads "
-                      f"deferred to the route step")
-            if _skip:
-                # Every skipped pad still seeds the split-layer Voronoi so its
-                # net's cell reserves the territory the signal pass will tap
-                # into (same #114-style point-seed path as the defer mode).
-                _dseeds = getattr(pcb_data, '_deferred_bga_seeds', None)
-                if _dseeds is None:
-                    _dseeds = pcb_data._deferred_bga_seeds = {}
-                _dseeds.setdefault(net_id, []).extend(
-                    (pd['pad'].global_x, pd['pad'].global_y) for pd in _skip)
-                print(f"  NO-TAPS mode: left {len(_skip)} via-needed pad(s) on "
-                      f"'{net_name}' for the signal pass (KICAD_PLANE_NO_TAPS; "
-                      f"positions kept as Voronoi seeds)")
+        # THE PLANE STEP DOES NO ROUTING (#562). Every pad that would need
+        # a tap via is deferred to the route step, which welds it into the
+        # pour with the full routing machinery (pour-launch) and taps what
+        # the fill cannot reach in its in-run plane finalize. Exposed/thermal
+        # pads are the ONE exception -- their via ARRAY (#487) stamps vias
+        # without drawing traces and nothing else in the chain places one.
+        _therm = [pd for pd in target_pads
+                  if pd['type'] == 'via_needed' and thermal_vias
+                  and is_thermal_pad(pd['pad'], pcb_data)]
+        _skip = [pd for pd in target_pads
+                 if pd['type'] == 'via_needed' and pd not in _therm]
+        target_pads = [pd for pd in target_pads
+                       if pd['type'] != 'via_needed'] + _therm
+        if _therm:
+            print(f"  {len(_therm)} exposed/thermal pad(s) get a via ARRAY "
+                  f"(#487)")
+        if _skip:
+            # Every deferred pad still seeds the split-layer Voronoi so its
+            # net's cell reserves the territory the route pass will tap into.
+            _dseeds = getattr(pcb_data, '_deferred_bga_seeds', None)
+            if _dseeds is None:
+                _dseeds = pcb_data._deferred_bga_seeds = {}
+            _dseeds.setdefault(net_id, []).extend(
+                (pd['pad'].global_x, pd['pad'].global_y) for pd in _skip)
+            print(f"  {len(_skip)} pad(s) on '{net_name}' deferred to the "
+                  f"route step (positions kept as Voronoi seeds)")
 
         # PROTOTYPE (worktree): defer under-BGA pads to the fanout stage
         # (KICAD_PLANE_DEFER_BGA=1). The plane step pours and taps the OPEN
@@ -3575,559 +3560,55 @@ def create_plane(
         # the fine-pitch retry pass below).
         net_failed_start = len(failed_pad_infos)
 
+        # THERMAL VIA ARRAYS ONLY (#487). The plane step does no routing:
+        # it places no tap vias and draws no traces, so every other pad that
+        # would need one is deferred above and welded by the route step's
+        # pour-launch / in-run plane finalize. An exposed pad's via ARRAY is
+        # a pour/fab feature (it stamps vias, draws nothing) and nothing else
+        # in the chain places one, so it stays here.
         for pad_idx, pad_info in enumerate(pads_needing_vias):
             if cancel_check and cancel_check():
                 print("  (cancelled)")
                 break
             pad = pad_info['pad']
-            pad_layer = pad_info.get('pad_layer')
             current_pad_key = (pad.global_x, pad.global_y)
-            if progress_callback:
-                progress_callback(pad_idx + 1, len(pads_needing_vias),
-                                  f"{net_name}: via for {pad.component_ref}.{pad.pad_number}")
-
-            # Skip pads already processed in previous layer passes
-            # (a via connects ALL layers, so once placed, pad is done)
             if current_pad_key in processed_pad_ids:
                 continue
-
-            # Incrementally add pads from newly ripped nets
-            if len(all_ripped_net_ids) > last_ripped_count:
-                for ripped_id in all_ripped_net_ids[last_ripped_count:]:
-                    ripped_pads = pcb_data.pads_by_net.get(ripped_id, [])
-                    for rp in ripped_pads:
-                        ripped_pending_pads.append({'pad': rp, 'needs_via': True})
-                last_ripped_count = len(all_ripped_net_ids)
-
-            # Filter base + ripped pending pads by current state
-            pending_pads = [
-                pp for pp in base_pending_pads
-                if (pp['pad'].global_x, pp['pad'].global_y) != current_pad_key
-                and (pp['pad'].global_x, pp['pad'].global_y) not in processed_pad_ids
-            ]
-            if ripped_pending_pads:
-                pending_pads.extend(
-                    pp for pp in ripped_pending_pads
-                    if (pp['pad'].global_x, pp['pad'].global_y) != current_pad_key
-                    and (pp['pad'].global_x, pp['pad'].global_y) not in processed_pad_ids
-                )
-
+            if progress_callback:
+                progress_callback(pad_idx + 1, len(pads_needing_vias),
+                                  f"{net_name}: thermal array for "
+                                  f"{pad.component_ref}.{pad.pad_number}")
             print(f"  Pad {pad.component_ref}.{pad.pad_number}...", end=" ")
-
-            # #487: an exposed/thermal pad gets a via ARRAY, not the shared
-            # via the reuse/strap logic below would give it. Checked FIRST
-            # so a nearby via cannot satisfy a 5x5mm EP with one drill.
-            if thermal_vias and is_thermal_pad(pad, pcb_data):
-                _arr = compute_thermal_via_array(
-                    pad, obstacles, coord, config, via_size, via_drill,
-                    hole_to_hole_clearance, pcb_data)
-                _placed = 0
-                for (_ax, _ay) in _arr:
-                    _agx, _agy = coord.to_grid(_ax, _ay)
-                    if obstacles.is_via_blocked(_agx, _agy):
-                        continue  # a just-placed array via blocks this cell
-                    new_vias.append({'x': _ax, 'y': _ay, 'size': via_size,
-                                     'drill': via_drill,
-                                     'layers': ['F.Cu', 'B.Cu'], 'net_id': net_id})
-                    available_vias.append((_ax, _ay))
-                    via_index.add(_ax, _ay)
-                    block_via_position(obstacles, _ax, _ay, coord,
-                                       hole_to_hole_clearance, via_drill,
-                                       via_size, config.clearance)
-                    _placed += 1
-                if _placed:
-                    vias_placed += _placed
-                    print(f"thermal via array: {_placed} via(s) over "
-                          f"{pad.size_x:.1f}x{pad.size_y:.1f}mm pad")
-                    processed_pad_ids.add(current_pad_key)
-                    continue
-                if pad_info.get('thermal_only'):
-                    # Bare-pour mode (#562) exempted this pad ONLY so its
-                    # thermal ARRAY could be stamped. The array did not fit,
-                    # and falling through would place a single via and ROUTE
-                    # A TRACE to it -- exactly the routing bare-pour mode
-                    # exists to avoid. Defer it like every other tap pad;
-                    # the route step's pour-launch will connect it.
-                    _ds = getattr(pcb_data, '_deferred_bga_seeds', None)
-                    if _ds is None:
-                        _ds = pcb_data._deferred_bga_seeds = {}
-                    _ds.setdefault(net_id, []).append(
-                        (pad.global_x, pad.global_y))
-                    print("thermal array did not fit -- deferred to the "
-                          "route step (no trace drawn)")
-                    processed_pad_ids.add(current_pad_key)
-                    continue
-                # nothing fit: fall through to the normal single-via path
-
-            # First, check if there's already a via very close by (within ~2 via diameters)
-            # This handles cases like decoupling caps where both pads are on same net
-            # Check for nearby existing via before placing a new one
-            effective_close_via_radius = close_via_radius if close_via_radius is not None else via_size * 2.5
-            nearby_via = via_index.find_nearest(pad.global_x, pad.global_y, effective_close_via_radius)
-            if nearby_via:
-                # Via already very close - try to reuse it
-                via_pos = nearby_via
-                dist = ((via_pos[0] - pad.global_x)**2 + (via_pos[1] - pad.global_y)**2)**0.5
-
-                if pad_layer:
-                    routing_obs = get_routing_obstacles(pad_layer)
-                    route_result = route_via_to_pad(via_pos, pad, pad_layer, net_id,
-                                                   routing_obs, config, verbose=verbose,
-                                                   return_blocked_cells=True, router=via_pad_router)
-                    trace_segments = route_result.segments if route_result.success else None
-                    if trace_segments is not None:
-                        if trace_segments:
-                            new_segments.extend(trace_segments)
-                            traces_added += len(trace_segments)
-                        vias_reused += 1
-                        print(f"reused nearby via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), {dist:.2f}mm away, routed {len(trace_segments) if trace_segments else 0} segments to pad")
-                        processed_pad_ids.add(current_pad_key)
-                        continue  # Move to next pad
-                else:
-                    # No pad layer (through-hole) - just count as reused
-                    vias_reused += 1
-                    print(f"reused nearby via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), {dist:.2f}mm away")
-                    processed_pad_ids.add(current_pad_key)
-                    continue
-
-            # Issue #349: before drilling, strap to an ADJACENT same-net pad that
-            # is already plane-connected (processed earlier this run, or a plated
-            # through-hole). Adjacent same-net pad clusters (fine-pitch power
-            # pins, GND rows) then share ONE via plus short pad-layer straps
-            # instead of a via per pad -- fewer drills and less via congestion
-            # near connectors (the #347/#348 corridor-contention class). The
-            # strap uses the same obstacle-aware trace as via reuse, so a strap
-            # that doesn't fit falls through to normal via placement below.
-            if pad_layer:
-                strap_cands = []
-                for npad in pcb_data.pads_by_net.get(net_id, []):
-                    nkey = (npad.global_x, npad.global_y)
-                    if nkey == current_pad_key:
-                        continue
-                    if not (nkey in processed_pad_ids or pad_is_plated_through(npad)):
-                        continue
-                    if not (pad_layer in npad.layers
-                            or any(l.startswith('*') for l in npad.layers)
-                            or pad_is_plated_through(npad)):
-                        continue
-                    d = ((npad.global_x - pad.global_x) ** 2 +
-                         (npad.global_y - pad.global_y) ** 2) ** 0.5
-                    if d > defaults.PLANE_PAD_STRAP_RADIUS:
-                        continue
-                    # Anchor the strap on the neighbour's VIA when one sits in
-                    # its pad copper (via-in-pad taps land off-center): the
-                    # connectivity graph follows exact endpoint/via keys, so a
-                    # strap ending at the pad CENTER next to an off-center
-                    # in-pad via reads as unconnected and gets re-tapped by the
-                    # repair pass. A plated through-hole neighbour conducts at
-                    # its center (barrel), so the center is the right anchor.
-                    npos = nkey
-                    if not pad_is_plated_through(npad):
-                        nv = via_index.find_nearest(
-                            npad.global_x, npad.global_y,
-                            max(npad.size_x, npad.size_y) / 2)
-                        if nv is not None:
-                            npos = nv
-                    strap_cands.append((d, npos))
-                strapped = False
-                for d, npos in sorted(strap_cands):
-                    routing_obs = get_routing_obstacles(pad_layer)
-                    route_result = route_via_to_pad(npos, pad, pad_layer, net_id,
-                                                    routing_obs, config, verbose=verbose,
-                                                    return_blocked_cells=True,
-                                                    router=via_pad_router)
-                    if route_result.success and route_result.segments:
-                        new_segments.extend(route_result.segments)
-                        traces_added += len(route_result.segments)
-                        pads_strapped += 1
-                        print(f"strapped to same-net pad at ({npos[0]:.2f}, {npos[1]:.2f}), "
-                              f"{d:.2f}mm away, {len(route_result.segments)} segment(s), no via (#349)")
-                        processed_pad_ids.add(current_pad_key)
-                        strapped = True
-                        break
-                if strapped:
-                    continue
-
-            # PROTOTYPE (worktree): perforation-aware tap ordering. A NEW
-            # through-barrel at this pad pierces every FOREIGN pour whose fill
-            # covers this (x,y) -- the middle-plane shredder. When it would,
-            # prefer REUSING an existing same-net via (surface trace joins the
-            # tap tree, sharing the barrel) BEFORE trying via-in-pad, and
-            # widen the reuse search. KICAD_PLANE_TAP_PREFER_REUSE=1 arms;
-            # radius multiplier via KICAD_PLANE_TAP_REUSE_RMULT (default 3).
-            import os as _os
-            if _os.environ.get('KICAD_PLANE_TAP_PREFER_REUSE', '') == '1':
-                from plane_fill_model import get_fill_models as _gfm
-                _pierce = 0
-                from plane_fill_model import get_zone_model as _gzm2
-                _all_z = list(pcb_data.zones or []) + \
-                    list(getattr(pcb_data, '_inrun_zones', []) or [])
-                for _z in _all_z:
-                    if _z.net_id == net_id:
-                        continue
-                    _m2 = _gzm2(pcb_data, _z)
-                    if _m2 is not None and \
-                            (_m2.query_component(pad.global_x, pad.global_y) or 0) > 0:
-                        _pierce += 1
-                if _pierce:
-                    _rmult = float(_os.environ.get('KICAD_PLANE_TAP_REUSE_RMULT', '1.5') or 1.5)
-                    _ev = via_index.find_nearest(pad.global_x, pad.global_y,
-                                                 max_via_reuse_radius * _rmult)
-                    # Two-sided cost: the reuse trace BLOCKS the escape field on
-                    # the pad's layer -- worth it only when short relative to
-                    # the perforation saved. Budget: COEF mm of trace per pour
-                    # pierced (default 0.8mm; humans link at pitch scale).
-                    if _ev is not None:
-                        import math as _math
-                        _coef = float(_os.environ.get('KICAD_PLANE_TAP_REUSE_COEF', '0.8') or 0.8)
-                        _dd = _math.hypot(_ev[0] - pad.global_x, _ev[1] - pad.global_y)
-                        if _dd > _coef * _pierce:
-                            _ev = None
-                    if _ev and pad_layer:
-                        _ro = get_routing_obstacles(pad_layer)
-                        _rr = route_via_to_pad(_ev, pad, pad_layer, net_id, _ro,
-                                               config, verbose=verbose,
-                                               return_blocked_cells=True,
-                                               router=via_pad_router)
-                        if _rr.success and _rr.segments is not None:
-                            new_segments.extend(_rr.segments)
-                            traces_added += len(_rr.segments)
-                            vias_reused += 1
-                            print(f"perforation-aware reuse: joined tap tree at "
-                                  f"({_ev[0]:.2f}, {_ev[1]:.2f}) instead of a new "
-                                  f"barrel through {_pierce} foreign pour(s)")
-                            processed_pad_ids.add(current_pad_key)
-                            continue
-
-            # Next, try to place via within pad boundary (preferred - no trace needed)
-            # This avoids creating long traces that block other signals
-            # Search from pad center outward within pad bounds
-            # Skipped when same_net_pad_clearance >= 0 (caller wants vias outside same-net pads).
-            pad_gx, pad_gy = coord.to_grid(pad.global_x, pad.global_y)
-            _phw, _phh = pad_rect_halfspan(pad)  # rotated-rect bbox bound
-            pad_half_w_grid = max(1, coord.to_grid_dist(_phw))
-            pad_half_h_grid = max(1, coord.to_grid_dist(_phh))
-            _rotated = bool(getattr(pad, 'rect_rotation', 0.0))
-
-            via_in_pad = None
-            if same_net_pad_clearance >= 0:
-                pass  # via-in-pad disabled by same_net_pad_clearance
-            # Check pad center first
-            elif not obstacles.is_via_blocked(pad_gx, pad_gy):
-                via_in_pad = (pad.global_x, pad.global_y)
-            else:
-                # Spiral search within pad boundary for closest unblocked position
-                max_r = max(pad_half_w_grid, pad_half_h_grid)
-                for r in range(1, max_r + 1):
-                    if via_in_pad:
-                        break
-                    for dx in range(-r, r + 1):
-                        if via_in_pad:
-                            break
-                        for dy in range(-r, r + 1):
-                            if abs(dx) != r and abs(dy) != r:
-                                continue  # Only check ring edge
-                            # Check if within pad bbox
-                            if abs(dx) > pad_half_w_grid or abs(dy) > pad_half_h_grid:
-                                continue
-                            gx, gy = pad_gx + dx, pad_gy + dy
-                            bx, by = gx * config.grid_step, gy * config.grid_step
-                            if _rotated and not point_in_pad_rect(bx, by, pad):
-                                continue  # outside the (rotated) pad copper
-                            if not obstacles.is_via_blocked(gx, gy):
-                                # Convert grid back to world coordinates
-                                via_in_pad = (bx, by)
-                                break
-
-            if via_in_pad:
-                # Board-edge clamp: the pad-centre / in-pad via site is placed at
-                # its true (off-grid) coordinate, which can sit sub-grid closer to
-                # the edge than the obstacle map's grid keep-out blocks. Pull it
-                # interior to honor min_copper_edge_clearance while staying inside
-                # the pad copper (inert without an edge rule / when it already
-                # clears). See plane_pad_tap.clamp_tap_via_to_edge.
-                via_in_pad, _ = clamp_tap_via_to_edge(
-                    via_in_pad, pad, pcb_data, config, via_size)
-                # Found position within pad - place via there (no trace needed)
-                # KiCad vias only specify start/end layers, not intermediate
-                new_vias.append({
-                    'x': via_in_pad[0], 'y': via_in_pad[1],
-                    'size': via_size, 'drill': via_drill,
-                    'layers': ['F.Cu', 'B.Cu'], 'net_id': net_id
-                })
-                available_vias.append(via_in_pad)
-                via_index.add(via_in_pad[0], via_in_pad[1])
-                vias_placed += 1
-                # Block this via position for hole-to-hole clearance
-                block_via_position(obstacles, via_in_pad[0], via_in_pad[1], coord,
+            _arr = compute_thermal_via_array(
+                pad, obstacles, coord, config, via_size, via_drill,
+                hole_to_hole_clearance, pcb_data)
+            _placed = 0
+            for (_ax, _ay) in _arr:
+                _agx, _agy = coord.to_grid(_ax, _ay)
+                if obstacles.is_via_blocked(_agx, _agy):
+                    continue      # a just-placed array via blocks this cell
+                new_vias.append({'x': _ax, 'y': _ay, 'size': via_size,
+                                 'drill': via_drill,
+                                 'layers': ['F.Cu', 'B.Cu'], 'net_id': net_id})
+                available_vias.append((_ax, _ay))
+                via_index.add(_ax, _ay)
+                block_via_position(obstacles, _ax, _ay, coord,
                                    hole_to_hole_clearance, via_drill,
                                    via_size, config.clearance)
-                if via_in_pad == (pad.global_x, pad.global_y):
-                    print(f"placed via at pad center (no trace needed)")
-                else:
-                    print(f"placed via at ({via_in_pad[0]:.2f}, {via_in_pad[1]:.2f}) within pad (no trace needed)")
-                processed_pad_ids.add(current_pad_key)
-                continue  # Move to next pad
-
-            # Pad center blocked - check if there's an existing via nearby to reuse
-            existing_via = via_index.find_nearest(pad.global_x, pad.global_y, max_via_reuse_radius)
-
-            if existing_via:
-                # Try to reuse existing via - route trace to connect
-                via_pos = existing_via
-                reuse_success = False
-
-                if pad_layer:
-                    routing_obs = get_routing_obstacles(pad_layer)
-                    route_result = route_via_to_pad(via_pos, pad, pad_layer, net_id,
-                                                       routing_obs, config, verbose=verbose,
-                                                       return_blocked_cells=True, router=via_pad_router)
-                    trace_segments = route_result.segments if route_result.success else None
-                    if trace_segments is None:
-                        # Routing to existing via failed - fall back to placing new via
-                        print(f"can't route to existing via, ", end="")
-                        existing_via = None  # Trigger new via placement below
-                    elif trace_segments:
-                        new_segments.extend(trace_segments)
-                        traces_added += len(trace_segments)
-                        vias_reused += 1
-                        reuse_success = True
-                        dist = ((via_pos[0] - pad.global_x)**2 + (via_pos[1] - pad.global_y)**2)**0.5
-                        print(f"reused existing via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), {dist:.2f}mm away, routed {len(trace_segments)} segments to pad")
-                    else:
-                        vias_reused += 1
-                        reuse_success = True
-                        print(f"reused via at pad center")
-                else:
-                    vias_reused += 1
-                    reuse_success = True
-                    print(f"reused existing via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
-
-                if reuse_success:
-                    processed_pad_ids.add(current_pad_key)
-                    continue  # Move to next pad
-
-            # Need to place a new via (pad center blocked, and either no existing via or reuse failed)
-            routing_obs = get_routing_obstacles(pad_layer) if pad_layer else None
-            failed_route_positions: Set[Tuple[int, int]] = set()  # Track failed positions for this pad
-            via_pos = find_via_position(
-                pad, obstacles, coord, max_search_radius,
-                routing_obstacles=routing_obs,
-                config=config,
-                pad_layer=pad_layer,
-                net_id=net_id,
-                verbose=verbose,
-                failed_route_positions=failed_route_positions,
-                pending_pads=pending_pads,
-                router=via_pad_router,
-                position_preference=fill_via_preference
-            )
-
-            # Board-edge clamp: an in-pad via placed at the pad's true (off-grid)
-            # centre can sit sub-grid closer to the edge than the obstacle map's
-            # grid keep-out blocks; pull it interior to honor
-            # min_copper_edge_clearance (inert without an edge rule / when it
-            # already clears). See plane_pad_tap.clamp_tap_via_to_edge.
-            edge_moved = False
-            if via_pos:
-                via_pos, edge_moved = clamp_tap_via_to_edge(
-                    via_pos, pad, pcb_data, config, via_size)
-
-            placement_success = False
-            trace_segments = None
-            via_blocked = via_pos is None
-            blocked_cells = []
-
-            if via_pos:
-                # An edge-clamped via stays inside the pad copper, so it still
-                # connects by overlap (via-in-pad, no trace) even though it is no
-                # longer at the exact centre.
-                via_at_pad_center = (abs(via_pos[0] - pad.global_x) < 0.001 and
-                                     abs(via_pos[1] - pad.global_y) < 0.001) or \
-                    (edge_moved and point_in_pad_rect(via_pos[0], via_pos[1], pad, 1e-6))
-
-                if via_at_pad_center:
-                    placement_success = True
-                elif pad_layer:
-                    route_result = route_via_to_pad(via_pos, pad, pad_layer, net_id,
-                                                       routing_obs, config, verbose=verbose,
-                                                       return_blocked_cells=True, router=via_pad_router)
-                    if route_result.success:
-                        trace_segments = route_result.segments
-                        placement_success = True
-                    else:
-                        blocked_cells = route_result.blocked_cells
-                else:
-                    placement_success = True
-
-            # If fast path failed and rip_blocker_nets enabled, try iterative rip-up
-            if not placement_success and rip_blocker_nets:
-                print(f"blocked, trying rip-up...", end=" ")
-                result = try_place_via_with_ripup(
-                    pad, pad_layer, net_id, pcb_data, config, coord,
-                    max_search_radius, max_rip_nets,
-                    obstacles, routing_obs,
-                    via_obstacle_cache, routing_obstacles_cache, all_layers,
-                    via_blocked=via_blocked,
-                    blocked_cells=blocked_cells,
-                    new_vias=new_vias,
-                    hole_to_hole_clearance=hole_to_hole_clearance,
-                    via_drill=via_drill,
-                    protected_net_ids=set(net_ids),  # Protect all nets being routed (don't rip power nets we're routing)
-                    verbose=verbose,
-                    find_via_position_fn=find_via_position,
-                    route_via_to_pad_fn=route_via_to_pad,
-                    pending_pads=pending_pads,
-                    # Issue #88.1: pass all plane copper placed this run so a
-                    # failed rip-up restores only collision-free ripped copper.
-                    plane_vias=all_new_vias + new_vias,
-                    plane_segments=all_new_segments + new_segments,
-                    via_size=via_size,
-                    clearance=clearance,
-                )
-
-                # Collision-checked restore (#329 route_planes side): every
-                # ripped net's kept copper must ALSO be re-emitted as new
-                # copper with the net's input copper stripped -- the writer
-                # works from the input file, so a pcb_data-only restore would
-                # resurrect the dropped (colliding) pieces (#319 board==file).
-                # A net left STILL-RIPPED after settle (its restore collided)
-                # may have a stale emission from an earlier rip's restore --
-                # purge it or the writer ships copper that pcb_data and the
-                # obstacle maps no longer track (H9 drilled a via on +1V1's
-                # stale-emitted trunk).
-                for rid in (result.ripped_net_ids or []):
-                    new_segments[:] = [x for x in new_segments if x.get('net_id') != rid]
-                    new_vias[:] = [x for x in new_vias if x.get('net_id') != rid]
-                    all_new_segments[:] = [x for x in all_new_segments if x.get('net_id') != rid]
-                    all_new_vias[:] = [x for x in all_new_vias if x.get('net_id') != rid]
-                for rid, ksegs, kvias, _dropped in (result.restored_nets or []):
-                    if rid not in ripped_net_ids:
-                        ripped_net_ids.append(rid)
-                    # A net can be ripped AGAIN by a later pad (its restored
-                    # copper is back in pcb_data); purge any earlier emission
-                    # of this net or the stale set resurrects pieces the newer
-                    # settle dropped (+1V1 ripped at C98.2 then U1.J9: 6 GND
-                    # vias landed on a stale-emitted trunk segment).
-                    new_segments[:] = [x for x in new_segments if x.get('net_id') != rid]
-                    new_vias[:] = [x for x in new_vias if x.get('net_id') != rid]
-                    all_new_segments[:] = [x for x in all_new_segments if x.get('net_id') != rid]
-                    all_new_vias[:] = [x for x in all_new_vias if x.get('net_id') != rid]
-                    # from_restore: settle already put these OBJECTS back in
-                    # pcb_data; the net-end sync must not add them again or
-                    # every re-rip doubles the net's copper (dup drill pairs).
-                    for ks in ksegs:
-                        new_segments.append({
-                            'start': (ks.start_x, ks.start_y),
-                            'end': (ks.end_x, ks.end_y),
-                            'width': ks.width, 'layer': ks.layer, 'net_id': rid,
-                            'from_restore': True})
-                    for kv in kvias:
-                        new_vias.append({
-                            'x': kv.x, 'y': kv.y, 'size': kv.size,
-                            'drill': kv.drill, 'layers': kv.layers, 'net_id': rid,
-                            'from_restore': True})
-                if result.success:
-                    # Track ripped nets and remove their vias/segments from all_new_* lists
-                    for rid in result.ripped_net_ids:
-                        if rid not in ripped_net_ids:
-                            ripped_net_ids.append(rid)
-                        # Remove ripped net's vias and segments from accumulator lists
-                        # (they were removed from pcb_data during rip-up)
-                        all_new_vias[:] = [v for v in all_new_vias if v['net_id'] != rid]
-                        all_new_segments[:] = [s for s in all_new_segments if s['net_id'] != rid]
-                    # Note: obstacle maps were already updated incrementally in try_place_via_with_ripup
-
-                    # Add via
-                    new_vias.append({
-                        'x': result.via_pos[0], 'y': result.via_pos[1],
-                        'size': via_size, 'drill': via_drill,
-                        'layers': ['F.Cu', 'B.Cu'], 'net_id': net_id
-                    })
-                    vias_placed += 1
-                    processed_pad_ids.add(current_pad_key)
-                    available_vias.append(result.via_pos)
-                    via_index.add(result.via_pos[0], result.via_pos[1])
-                    new_segments.extend(result.segments)
-                    traces_added += len(result.segments)
-                    block_via_position(obstacles, result.via_pos[0], result.via_pos[1], coord,
-                                       hole_to_hole_clearance, via_drill,
-                                   via_size, config.clearance)
-                    print(f"{GREEN}placed via at ({result.via_pos[0]:.2f}, {result.via_pos[1]:.2f}) after ripping {len(result.ripped_net_ids)} nets{RESET}")
-                else:
-                    failed_pads += 1
-                    failed_pad_infos.append((net_id, net_name, plane_layer, pad_info))
-                    for rid in result.ripped_net_ids:
-                        if rid not in ripped_net_ids:
-                            ripped_net_ids.append(rid)
-                    # Issue #88.1: result.ripped_net_ids is now non-empty when a
-                    # net was left ripped (not restored) because restoring it
-                    # would short onto plane copper. Those nets are excluded from
-                    # output and re-routed; restored (collision-free) nets are
-                    # absent from the list as before.
-                    print(f"{RED}FAILED{RESET}")
-
-            elif placement_success:
-                # Fast path succeeded
-                via_at_pad_center = (abs(via_pos[0] - pad.global_x) < 0.001 and
-                                     abs(via_pos[1] - pad.global_y) < 0.001)
-                new_vias.append({
-                    'x': via_pos[0], 'y': via_pos[1],
-                    'size': via_size, 'drill': via_drill,
-                    'layers': ['F.Cu', 'B.Cu'], 'net_id': net_id
-                })
-                vias_placed += 1
-                processed_pad_ids.add(current_pad_key)
-                available_vias.append(via_pos)
-                via_index.add(via_pos[0], via_pos[1])
-                if trace_segments:
-                    new_segments.extend(trace_segments)
-                    traces_added += len(trace_segments)
-                block_via_position(obstacles, via_pos[0], via_pos[1], coord,
-                                   hole_to_hole_clearance, via_drill,
-                                   via_size, config.clearance)
-
-                if via_at_pad_center:
-                    print(f"placed via at pad center (no trace needed)")
-                else:
-                    print(f"placed via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), routed {len(trace_segments) if trace_segments else 0} segments to pad")
-
-            elif not rip_blocker_nets:
-                # Fast path failed, no rip-up enabled - try fallback via reuse
-                fallback_via = via_index.find_nearest(pad.global_x, pad.global_y, max_search_radius)
-                if fallback_via:
-                    via_pos = fallback_via
-                    if pad_layer:
-                        routing_obs = get_routing_obstacles(pad_layer)
-                        trace_segments = route_via_to_pad(via_pos, pad, pad_layer, net_id,
-                                                           routing_obs, config, verbose=verbose,
-                                                           router=via_pad_router)
-                        if trace_segments is None:
-                            print(f"{RED}ROUTING FAILED{RESET}")
-                            failed_pads += 1
-                            failed_pad_infos.append((net_id, net_name, plane_layer, pad_info))
-                        elif trace_segments:
-                            new_segments.extend(trace_segments)
-                            traces_added += len(trace_segments)
-                            vias_reused += 1
-                            processed_pad_ids.add(current_pad_key)
-                            print(f"reused fallback via at ({via_pos[0]:.2f}, {via_pos[1]:.2f}), routed {len(trace_segments)} segments to pad")
-                        else:
-                            vias_reused += 1
-                            processed_pad_ids.add(current_pad_key)
-                            print(f"reused fallback via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
-                    else:
-                        vias_reused += 1
-                        processed_pad_ids.add(current_pad_key)
-                        print(f"reused fallback via at ({via_pos[0]:.2f}, {via_pos[1]:.2f})")
-                else:
-                    print(f"{RED}FAILED - no valid position{RESET}")
-                    failed_pads += 1
-                    failed_pad_infos.append((net_id, net_name, plane_layer, pad_info))
+                _placed += 1
+            processed_pad_ids.add(current_pad_key)
+            if _placed:
+                vias_placed += _placed
+                print(f"thermal via array: {_placed} via(s) over "
+                      f"{pad.size_x:.1f}x{pad.size_y:.1f}mm pad")
             else:
-                print(f"{RED}FAILED - no valid position{RESET}")
-                failed_pads += 1
-                failed_pad_infos.append((net_id, net_name, plane_layer, pad_info))
+                # No lattice site fits -- defer like any other plane pad.
+                # NEVER fall back to a single via + trace: that is routing.
+                _ds = getattr(pcb_data, '_deferred_bga_seeds', None)
+                if _ds is None:
+                    _ds = pcb_data._deferred_bga_seeds = {}
+                _ds.setdefault(net_id, []).append((pad.global_x, pad.global_y))
+                print("thermal array did not fit -- deferred to the route step")
 
         # Step 9.5: Fine-pitch retry pass (issue #104). Pads whose tap failed
         # at the run parameters get one scoped retry with fine parameters
@@ -4571,10 +4052,12 @@ def create_plane(
         if geo_results:
             geo_failed = sum(info['failed'] for info in geo_results.values())
             if geo_failed != total_failed_pads:
-                print(f"\n  NOTE: via-placement counters reported "
-                      f"{total_failed_pads} failed pad(s), but geometric check "
-                      f"found {geo_failed} pad(s) not connected to their plane "
-                      f"(see per-net breakdown above).")
+                print(f"\n  {geo_failed} pad(s) are not connected to their "
+                      f"plane by the pour alone -- EXPECTED (#562): the plane "
+                      f"step places no taps, so these are welded by the route "
+                      f"step's pour-launch and completed by its in-run plane "
+                      f"finalize. Grade the board AFTER the route step, not "
+                      f"here (see per-net breakdown above).")
 
     if progress_callback:
         progress_callback(1, 1, "Plane creation complete")
