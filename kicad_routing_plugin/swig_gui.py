@@ -3122,6 +3122,29 @@ class RoutingDialog(wx.Dialog):
                 except Exception as e:
                     print(f"Warning: could not read keepout zones from board: {e}")
 
+            def _stage_live_board():
+                """Temp-save the LIVE board for the finalize's oracle leg.
+
+                Returns a path the engine owns and deletes, or None so the
+                engine falls back to the post-apply oracle. Never raises: the
+                oracle leg is an earner, never a blocker.
+                """
+                try:
+                    import tempfile
+                    import pcbnew
+                    _b = pcbnew.GetBoard()
+                    if _b is None:
+                        return None
+                    with tempfile.NamedTemporaryFile(
+                            suffix='.kicad_pcb', delete=False) as _f:
+                        _p = _f.name
+                    pcbnew.SaveBoard(_p, _b)
+                    return _p
+                except Exception as e:
+                    print(f"(could not stage the live board for the "
+                          f"plane-finalize oracle: {e})")
+                    return None
+
             def run_batch(net_names, track_width, clearance, via_size, via_drill):
                 """Run batch_route with given parameters."""
                 return batch_route(
@@ -3215,6 +3238,13 @@ class RoutingDialog(wx.Dialog):
                     return_results=True,
                     pcb_data=self.pcb_data,
                     net_clearances=net_clearances,
+                    # #562 parity: let the plane finalize run its ORACLE leg
+                    # IN-RUN, at the CLI's own sequence point, by handing it a
+                    # save of the LIVE board to stage onto. Saving the live
+                    # board (not re-reading self.board_filename) is the whole
+                    # point -- the file on disk lacks copper that earlier
+                    # chain steps applied in this session.
+                    stage_board_fn=_stage_live_board,
                 )
 
             # Standard routing with a single set of parameters for all selected nets
@@ -3450,13 +3480,16 @@ class RoutingDialog(wx.Dialog):
         if _rf:
             print(f"Refilled {_rf} zone(s) around the new copper")
 
-        # Plane-finalize ORACLE leg (#562): batch_route's finalize ran the
-        # repair engine in-memory and merged its board delta above, but the
-        # kicad-oracle exact-fill reconnect needs a REAL file -- it posted
-        # the net list + engine-resolved params instead, and now that the
-        # copper is on the live board the staged-save oracle runs here (the
-        # planes-tab pattern, shared core in gui_utils). Refill afterwards:
-        # the routed links change the fill.
+        # Plane-finalize ORACLE leg (#562) -- FALLBACK PATH ONLY.
+        # Normally the finalize runs the oracle IN-RUN (stage_board_fn above),
+        # at the CLI's own sequence point, so its copper lands before the
+        # final reconciliation and its unroutable links feed custody. The
+        # engine posts 'plane_finalize_oracle' only when it could NOT stage a
+        # board (no callback, or the save failed); then the copper is already
+        # on the live board and the staged-save oracle runs here instead (the
+        # planes-tab pattern, shared core in gui_utils). Post-apply means the
+        # reconcile has already run, so this path earns completion but cannot
+        # feed custody. Refill afterwards: routed links change the fill.
         _pfo = results_data.get('plane_finalize_oracle') or None
         if _pfo and _pfo.get('nets'):
             try:

@@ -393,7 +393,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # into the ripped-route avoidance dicts so every search in
                 # this batch prices the vacated corridors exactly like an
                 # internal rip's; keys must not be nets routed by this batch.
-                external_ripped_ghosts: Optional[Dict[int, dict]] = None) -> Tuple[int, int, float]:
+                external_ripped_ghosts: Optional[Dict[int, dict]] = None,
+                # #562 GUI parity: zero-arg callable returning a path to a
+                # freshly saved copy of the caller's LIVE board (the GUI's
+                # pcbnew.SaveBoard). Only the GUI can produce one, and the
+                # plane finalize's ORACLE leg needs a real file because
+                # kicad-cli computes the exact fill. With it the GUI runs the
+                # oracle IN-RUN at the CLI's own sequence point -- so oracle
+                # copper lands before the final reconciliation and its
+                # unroutable links feed custody, exactly as in file mode.
+                # Without it (tests, headless callers) the leg is skipped.
+                # NOTE: it must save the LIVE board, not re-read input_file --
+                # the GUI's input_file is the ORIGINAL on disk and does not
+                # carry copper earlier chain steps applied in-session.
+                stage_board_fn=None) -> Tuple[int, int, float]:
     """
     Route single-ended nets using the Rust router.
 
@@ -2965,16 +2978,61 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     if _cs or _cr:
                         print(f"  Plane finalize cleanup: closed {_cs} stub "
                               f"gap(s), trimmed {_cr} dead-end segment(s)")
-            if _zpairs_all and _gui9:
-                # ORACLE leg (GUI): kicad-cli's exact fill needs a real
-                # file, and mid-engine there is none -- the LIVE board only
-                # receives this run's copper when the applier lands it. So
-                # defer: post the net list + engine-resolved params in
-                # results_data and swig_gui runs the staged-save oracle
-                # after apply (the planes-tab pattern). Custody cannot merge
-                # into the reconcile here (no oracle verdict yet); measured
-                # custody net-level gains were 0 on all 3 A/B boards, and
-                # the post-apply oracle is the completion earner.
+            # ORACLE leg: kicad-cli computes the exact fill, so this leg
+            # needs a REAL file on disk.
+            #   CLI -- the written output_file.
+            #   GUI -- a STAGED file: the caller's live board (stage_board_fn)
+            #          with this run's pending copper written onto it, which
+            #          is exactly what output_file holds at this point in file
+            #          mode. Staging here (rather than deferring to the
+            #          applier) is what makes the two fronts agree: the oracle
+            #          copper lands BEFORE the final reconciliation and its
+            #          unroutable links feed custody, same as the CLI.
+            # The base MUST come from stage_board_fn, never from input_file:
+            # the GUI's input_file is the ORIGINAL board on disk and is
+            # missing whatever earlier chain steps applied in-session
+            # (staging from it measured GUI DRC 431 vs CLI 0).
+            _orc_file9 = None
+            _orc_tmp9 = []
+            if _zpairs_all and not _gui9:
+                _orc_file9 = output_file
+            elif _zpairs_all and _gui9 and stage_board_fn is not None:
+                try:
+                    import tempfile as _tf9
+                    _base9 = stage_board_fn()
+                    if _base9:
+                        _orc_tmp9.append(_base9)
+                        _fd9, _stg9 = _tf9.mkstemp(suffix='.kicad_pcb')
+                        os.close(_fd9)
+                        _orc_tmp9.append(_stg9)
+                        if write_routed_output(
+                                input_file=_base9, output_file=_stg9,
+                                results=results,
+                                all_segment_modifications=(
+                                    all_segment_modifications),
+                                all_swap_vias=all_swap_vias,
+                                all_swap_segments=all_swap_segments,
+                                target_swap_info=[],
+                                single_ended_target_swap_info=(
+                                    single_ended_target_swap_info),
+                                pad_swaps=pad_swaps, pcb_data=pcb_data,
+                                skip_routing=skip_routing,
+                                add_teardrops=add_teardrops,
+                                segments_to_remove=results_data.get(
+                                    'segments_to_remove'),
+                                vias_to_remove=results_data.get(
+                                    'vias_to_remove')):
+                            _orc_file9 = _stg9
+                except Exception as _e9:
+                    print(f"  Plane finalize (GUI): could not stage a board "
+                          f"for the oracle leg ({_e9}); deferring to apply")
+                    _orc_file9 = None
+            if _zpairs_all and _gui9 and _orc_file9 is None:
+                # FALLBACK only (no stage_board_fn, or staging failed): post
+                # the net list + engine-resolved params and let the applier
+                # run the staged-save oracle after the copper lands (the
+                # planes-tab pattern). Custody cannot merge into the
+                # reconcile on this path -- there is no verdict yet.
                 _zna = sorted({n for n, _l in _zpairs_all})
                 results_data['plane_finalize_oracle'] = {
                     'nets': _zna,
@@ -3021,7 +3079,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     print(f"  Plane finalize (GUI): {len(_zone_complete9)} "
                           f"zone net(s) verified complete (fill-aware) -- "
                           f"hands-off for the reconciliation")
-            if _zpairs_all and not _gui9:
+            if _orc_file9:
                 # Oracle + custody scope: ALL zone nets (see the pre-gate
                 # note -- the oracle is the model-independent verifier).
                 import time as _time9
@@ -3043,12 +3101,63 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 from kicad_dru import install_layer_clearances
                 install_layer_clearances(_ocfg, None, input_file, None)
                 _orc = oracle_reconnect(
-                    output_file, _zna, _ocfg,
+                    _orc_file9, _zna, _ocfg,
                     track_via_clearance=defaults.PLANE_TRACK_VIA_CLEARANCE,
                     hole_to_hole_clearance=config.hole_to_hole_clearance,
                     project_from=input_file)
                 print(f"  [finalize timing] oracle leg: "
                       f"{_time9.time() - _t9:.1f}s")
+                if _gui9:
+                    # The staged file is a throwaway: hand the oracle's copper
+                    # back through the SAME channels the engine leg uses, so
+                    # the applier lands it and the reconcile's identity-based
+                    # de-dup keeps working. Removals go first (the #508
+                    # finding-15 ordering) and any removal naming copper THIS
+                    # run emitted is dropped from the write-list instead of
+                    # riding the remove channel -- a key-based remove would
+                    # no-op on a not-yet-added object and the withdrawn copper
+                    # would ship.
+                    _os9 = list(_orc.get('new_segments') or [])
+                    _ov9 = list(_orc.get('new_vias') or [])
+                    _ors9 = list(_orc.get('removed_segments') or [])
+                    _orv9 = list(_orc.get('removed_vias') or [])
+                    _oours_s9 = {id(s)
+                                 for _r in results_data.get('results', [])
+                                 for s in (_r.get('new_segments') or [])}
+                    _oours_v9 = {id(v)
+                                 for _r in results_data.get('results', [])
+                                 for v in (_r.get('new_vias') or [])}
+                    _odrop_s9 = {id(s) for s in _ors9 if id(s) in _oours_s9}
+                    _odrop_v9 = {id(v) for v in _orv9 if id(v) in _oours_v9}
+                    if _odrop_s9 or _odrop_v9:
+                        for _r in results_data.get('results', []):
+                            if _odrop_s9:
+                                _r['new_segments'] = [
+                                    s for s in (_r.get('new_segments') or [])
+                                    if id(s) not in _odrop_s9]
+                            if _odrop_v9:
+                                _r['new_vias'] = [
+                                    v for v in (_r.get('new_vias') or [])
+                                    if id(v) not in _odrop_v9]
+                    if _ors9 or _orv9:
+                        results_data.setdefault(
+                            'segments_to_remove', []).extend(
+                                s for s in _ors9 if id(s) not in _odrop_s9)
+                        results_data.setdefault('vias_to_remove', []).extend(
+                            v for v in _orv9 if id(v) not in _odrop_v9)
+                    if _os9 or _ov9:
+                        results_data.setdefault('results', []).append({
+                            'net_name': '(plane finalize oracle)',
+                            'success': True,
+                            'new_segments': _os9, 'new_vias': _ov9})
+                        # Also into pcb_data, so the final reconciliation
+                        # below prices this copper as a real obstacle and
+                        # sees the nets it just completed.
+                        pcb_data.segments.extend(_os9)
+                        pcb_data.vias.extend(_ov9)
+                    print(f"  Plane finalize oracle (GUI): +{len(_os9)} "
+                          f"seg(s) +{len(_ov9)} via(s), -{len(_ors9)} seg(s) "
+                          f"-{len(_orv9)} via(s) merged into results")
                 try:
                     import json as _json9
                     print('JSON_ORACLE: ' + _json9.dumps(
@@ -3100,6 +3209,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             print(f"{RED}  plane finalize pass failed: {_e}{RESET}")
         finally:
             _finalize_depth(-1)
+            # Drop the GUI oracle's staging files (locals() guard: the names
+            # only exist once the finalize body got that far).
+            for _p9 in (locals().get('_orc_tmp9') or []):
+                try:
+                    os.unlink(_p9)
+                except OSError:
+                    pass
 
     if (final_reconcile and not skip_routing and not _ckpt_stop
             and (output_file or return_results)
@@ -3322,6 +3438,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # timeline recorded at the choke points, for animate_route.py (#482).
     from route_trace import dump_trace as _dump_route_trace
     _dump_route_trace(state.pcb_data, output_file)
+
+    # KICAD_DUP_TRAP=1: final verdict. Says whether the traps SURVIVED the
+    # run -- a rebind swaps in a plain list and disarms them, so a bare
+    # "0 hits" is only meaningful once this confirms they were still armed.
+    from dup_trap import verify as _verify_dup_trap
+    _verify_dup_trap(pcb_data)
 
     if return_results:
         return successful, failed, total_time, results_data
