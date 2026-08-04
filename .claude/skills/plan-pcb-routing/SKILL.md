@@ -154,10 +154,47 @@ choice per part**; that descent took PAD-PAD DRC to **0**, `overlap_area` 142 �
 put **25 %** of the displaced parts within 2 mm of home. Every quench and loop arm on the
 same board, across seven caps, left PAD-PAD at 25–51 and **0.00 %** of parts home.
 
-**Hand the residue to Step 0c, not the original mess.** The two are complementary and the
-measured split is stark: reconstruction fixes the hard, blocking-relevant metrics and is
-indifferent to the soft ones (it left `crossings` at 392); the quench fixes the soft ones
-(`crossings` 412 → 227) and never touches the hard ones. Running only the quench on a
+**R5 — Anchor the LARGE parts next, and size the gaps between them from what has to
+live there.** After the mechanically-fixed parts, the big parts are what set the
+floorplan: everything else is assigned to one of them. **Nothing in the placement code
+orders by size** — the quench sweeps its parts in reference order and moves whatever the
+cost function likes — so this ordering is yours to impose, by placing/locking the anchors
+before you run it.
+
+**The gap between two adjacent anchors has to fit two things, and only one of them is
+what you would guess:**
+
+```
+gap  >=  (small parts that belong in the corridor: sum of their extents, plus clearance)
+       +  cut_nets x (track_width + clearance) / copper_layers        # the routing
+```
+
+**Measured, and the second term is almost never binding.** Across the in-repo boards the
+routing demand between adjacent large parts comes out at 0.4–1.6 mm while the gaps humans
+actually left are 2.9–9.8 mm — 2 to 6× more. **The corridor is for the PARTS.** Scored
+against the gap a human chose, per board (gaps scale with board size, so the comparison
+is within a board, never pooled across them):
+
+| predictor | what it is | correlation with the human's gap |
+|---|---|---|
+| **small parts in the corridor** | count, or summed extent | **positive on 8 of 8 distinct boards, r = +0.41 … +0.90** |
+| routing cut | nets crossing ÷ layers | ~0, and often negative (−0.48 … +0.08) |
+| **the quench's own whitespace term** | `halo_base + halo_coef·sqrt(pin_count)` | **no consistent sign — 5 boards negative, 3 positive** |
+
+So **do not expect `--halo-coef` to reserve the corridor**: it is a function of pin count,
+which is not the quantity that decides. The assignment you need already exists — `route.py
+--list-groups --group-by decap` names which small parts belong to which IC — so the
+corridor between two anchors is *their* small parts, and its width is a number you can
+compute before placing anything.
+
+**When this rung does not apply:** a board with no clear size hierarchy (all parts
+similar), or one where the large parts are already mechanically fixed by R1–R3 and there
+is no freedom left. Say which, and go to Step 0c.
+
+**Hand the residue to Step 0c, not the original mess.** The rungs are complementary and
+the measured split is stark: reconstruction fixes the hard, blocking-relevant metrics and
+is indifferent to the soft ones (it left `crossings` at 392); the quench fixes the soft
+ones (`crossings` 412 → 227) and never touches the hard ones. Running only the quench on a
 wrong placement optimises a board that cannot pass DRC however well it routes.
 
 ### If the board is UNPLACED
