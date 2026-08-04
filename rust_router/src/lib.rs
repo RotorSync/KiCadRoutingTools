@@ -14,13 +14,11 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;  // v0.17.3: return free
 mod types;
 mod obstacle_map;
 mod router;
-mod visual_router;
 mod dubins;
 mod pose_router;
 
 pub use obstacle_map::GridObstacleMap;
 pub use router::GridRouter;
-pub use visual_router::{VisualRouter, SearchSnapshot};
 pub use pose_router::PoseRouter;
 
 /// Identify which nets' copper overlaps a set of blocked grid cells, returning
@@ -145,8 +143,6 @@ fn grid_router(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<GridObstacleMap>()?;
     m.add_class::<GridRouter>()?;
     m.add_class::<PoseRouter>()?;
-    m.add_class::<VisualRouter>()?;
-    m.add_class::<SearchSnapshot>()?;
     m.add_function(wrap_pyfunction!(identify_blocking_obstacles, m)?)?;
     Ok(())
 }

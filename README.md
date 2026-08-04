@@ -63,7 +63,6 @@ Fast, grid-based A\* routing with a native Rust core (~10× faster than pure Pyt
 **Interfaces**
 - Full [KiCad plugin GUI](#kicad-plugin) (KiCad 9 & 10) and a scriptable [CLI](#command-line-interface)
 - [AI assistance](docs/claude-skills.md) — a **AI tab** that plans an entire routing workflow, per-field "Ask AI" helpers, and datasheet-driven power / high-speed / diff-pair analysis
-- Optional [real-time PyGame visualizer](pygame_visualizer/README.md) (`route.py --visualize`)
 - [Board rendering & routing animation](docs/route-animation.md) — fast geometry PNG renderer, plus a movie of the router laying/ripping/restoring copper (`make_movie.py`, or the Advanced tab's **Make routing movie** debug checkbox → `.mp4`/`.gif`)
 - [Routing plans as files](docs/claude-skills.md#plans-from-the-command-line) — save/load a whole routing chain as JSON: build one from a recorded command chain (`make_plan.py`), run it headless through the real plugin (`run_plan.py`), or load it in the GUI
 
@@ -560,7 +559,6 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 | [BGA Fanout](bga_fanout/README.md) | BGA escape routing generator |
 | [QFN Fanout](qfn_fanout/README.md) | QFN/QFP escape routing generator |
 | [Rust Router](rust_router/README.md) | Building and using the Rust A* module |
-| [Visualizer](pygame_visualizer/README.md) | Real-time A* visualization with PyGame |
 | [Power Net Analysis](docs/power-nets.md) | Power net detection, AI analysis, track width guidelines |
 | [Claude Skills](docs/claude-skills.md) | All nine AI skills: routing plans, power/high-speed/diff-pair analysis, stackup, plane mappings, failure diagnosis, board review |
 | [Placement](placement/README.md) | Placement optimization for routability |
@@ -664,7 +662,6 @@ KiCadRoutingTools/
 │   └── stress/                   # Real-world-board stress-test harness (run_queue.sh) — see tests/README.md
 │
 ├── rust_router/              # Rust A* implementation
-├── pygame_visualizer/        # Real-time visualization
 ├── kicad_routing_plugin/     # KiCad ActionPlugin
 │   ├── action_plugin.py      # ActionPlugin entry point
 │   ├── swig_gui.py           # Main routing dialog (Basic/Advanced tabs)
@@ -834,7 +831,6 @@ The shared option groups — geometry, power-net widths, algorithm/strategy, pro
 - scipy (`pip3 install scipy`) - used for optimal target assignment and Voronoi partitioning
 - shapely (`pip3 install shapely`) - used for polygon union in multi-net plane layers
 - Rust toolchain — only needed if you build the router from source (`python build_router.py --from-source`); not required when using the prebuilt binary
-- pygame-ce (optional, for visualizer: `pip3 install pygame-ce`)
 
 ## Limitations
 

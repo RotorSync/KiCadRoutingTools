@@ -299,7 +299,6 @@ src/
 ├── types.rs         # Shared types: GridState, OpenEntry, PoseState, constants
 ├── obstacle_map.rs  # GridObstacleMap implementation
 ├── router.rs        # GridRouter A* implementation
-├── visual_router.rs # VisualRouter for debugging/visualization
 ├── dubins.rs        # Dubins path calculator for orientation heuristic
 └── pose_router.rs   # PoseRouter for orientation-aware routing
 ```
@@ -316,7 +315,7 @@ src/
 
 ## Version History
 
-- **0.20.0**: **#568 per-rung via legality** — `blocked_vias_small`, a second
+- **0.20.0**: Removed `VisualRouter`/`SearchSnapshot` and `visual_router.rs` with the pygame visualizer (#569) -- the debugging workflow it served is covered by grading, manifest replay and the GUI. **#568 per-rung via legality** — `blocked_vias_small`, a second
   refcounted via-block map at the small fab-rung reserve (subset semantics:
   EMPTY = unpopulated, rung>=1 queries fall back to `blocked_vias`, so
   single-rung callers are byte-identical). `is_via_blocked_rung(gx, gy, rung)`;

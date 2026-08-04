@@ -477,16 +477,6 @@ python route.py input.kicad_pcb output.kicad_pcb --nets "*DQ*" \
 
 See [Length Matching](length-matching.md#time-matching) for how propagation delay is computed from the stackup, including via barrel delays.
 
-### Visualization Options
-
-Available in `route.py` only (not `route_diff.py` or `route_planes.py`). See the [PyGame visualizer documentation](../pygame_visualizer/README.md) for the full list of interactive controls (pause/step, zoom/pan, layer filtering, speed). Requires pygame (`pip install pygame-ce`); without it, routing falls back to normal batch mode.
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--visualize` / `-V` | false | Show real-time visualization of routing (requires pygame) |
-| `--auto` | false | Auto-advance to next net without waiting (with `--visualize`) |
-| `--display-time` | 0.0 | Seconds to display completed route before advancing (with `--visualize --auto`) |
-
 ### Debug Options
 
 | Option | Default | Description |

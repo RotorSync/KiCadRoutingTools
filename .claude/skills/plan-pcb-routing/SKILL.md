@@ -1549,8 +1549,6 @@ python3 route.py board.kicad_pcb --nets "*" --verbose --output board_debug.kicad
 # Debug geometry on User layers (visible in KiCad)
 python3 route.py board.kicad_pcb --nets "*" --debug-lines --output board_debug.kicad_pcb
 
-# Real-time visualization (requires pygame-ce)
-python3 route.py board.kicad_pcb --nets "*" --visualize --output board_debug.kicad_pcb
 
 # A* search statistics
 python3 route.py board.kicad_pcb --nets "*" --stats --output board_debug.kicad_pcb

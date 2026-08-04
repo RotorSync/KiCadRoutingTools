@@ -62,8 +62,8 @@ from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
 from obstacle_map import (
     build_base_obstacle_map, add_net_stubs_as_obstacles, add_net_pads_as_obstacles,
     add_net_vias_as_obstacles, add_same_net_via_clearance,
-    build_base_obstacle_map_with_vis, get_net_bounds,
-    VisualizationData, add_connector_region_via_blocking, add_diff_pair_own_stubs_as_obstacles,
+    get_net_bounds,
+    add_connector_region_via_blocking, add_diff_pair_own_stubs_as_obstacles,
     draw_exclusion_zones_debug, add_vias_list_as_obstacles, add_segments_list_as_obstacles
 )
 from obstacle_costs import (

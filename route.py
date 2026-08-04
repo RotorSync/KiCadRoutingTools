@@ -59,8 +59,8 @@ from impedance import calculate_layer_widths_for_impedance, print_impedance_rout
 from obstacle_map import (
     build_base_obstacle_map, add_net_stubs_as_obstacles, add_net_pads_as_obstacles,
     add_net_vias_as_obstacles, add_same_net_via_clearance,
-    build_base_obstacle_map_with_vis, get_net_bounds,
-    VisualizationData, draw_exclusion_zones_debug, add_vias_list_as_obstacles, add_segments_list_as_obstacles
+    get_net_bounds,
+    draw_exclusion_zones_debug, add_vias_list_as_obstacles, add_segments_list_as_obstacles
 )
 from obstacle_costs import (
     add_stub_proximity_costs, compute_track_proximity_for_net,
@@ -69,7 +69,7 @@ from obstacle_costs import (
 from obstacle_cache import (
     precompute_all_net_obstacles, build_working_obstacle_map, update_net_obstacles_after_routing
 )
-from single_ended_routing import (route_net_with_obstacles, route_net_with_visualization,
+from single_ended_routing import (route_net_with_obstacles,
                                    route_multipoint_taps, build_corridor_waypoints)
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
 from rip_up_reroute import rip_up_net, restore_net
@@ -232,7 +232,7 @@ def _dump_engine_config(engine, cfg):
         # passes None (not callable, would dump as null) while the GUI passes
         # a function (skipped) -- a phantom key diff in the parity harness.
         if k in ('input_file', 'output_file', 'pcb_data',
-                 'progress_callback', 'cancel_check', 'vis_callback') or callable(v):
+                 'progress_callback', 'cancel_check') or callable(v):
             continue
         try:
             _json.dumps(v)
@@ -345,7 +345,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 mps_layer_swap: bool = False,
                 mps_segment_intersection: bool = False,
                 minimal_obstacle_cache: bool = False,
-                vis_callback=None,
                 schematic_dir: Optional[str] = None,
                 layer_costs: Optional[List[float]] = None,
                 # #498: {layer: mm} per-layer clearance. None (both fronts) ->
@@ -409,7 +408,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         debug_lines: Output debug geometry on User.2/3/8/9 layers
         minimal_obstacle_cache: If True, only build obstacle cache for nets being routed
                                (faster when re-routing a small number of nets)
-        vis_callback: Optional visualization callback (implements VisualizationCallback protocol)
         cancel_check: Optional callable returning True if routing should be cancelled
         progress_callback: Optional callable(current, total, net_name) for progress updates
         return_results: If True, return results data instead of writing to file
@@ -441,7 +439,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         import json as _json
         _dump = {}
         for _k, _v in sorted(_reconcile_kwargs.items()):
-            if callable(_v) or _k in ('vis_callback', 'cancel_check',
+            if callable(_v) or _k in ('cancel_check',
                                       'progress_callback'):
                 continue
             try:
@@ -460,7 +458,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             if return_results:
                 return 0, 0, 0.0, _empty_results_data()
             return 0, 0, 0.0
-    visualize = vis_callback is not None
 
     # Board-setup copper-to-edge rule (#338): KiCad enforces the sibling
     # .kicad_pro's min_copper_edge_clearance, so route to at least it. Done in
@@ -1244,7 +1241,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     base_start = time.time()
 
     # Use visualization-aware building if callback is provided
-    base_vis_data = None
     # Tap relocation (#424): zone-backed plane nets become base-map-excluded
     # and per-net cached so single-tap surgery is exact whole-net cache
     # recompute (ref-count-balanced by construction); deliberately NOT in
@@ -1272,8 +1268,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     from kicad_dru import install_layer_clearances
     install_layer_clearances(config, layer_clearances, input_file, pcb_data)
     # #568: arming is run-scoped and the flag is module-global, so reset it
-    # per call -- otherwise one visualize run would disarm rung-1 legality for
-    # every later run in the same process (the GUI's whole session).
+    # per call -- otherwise one unfrozen-base run would disarm rung-1 legality
+    # for every later run in the same process (the GUI's whole session).
     try:
         from obstacle_cache import set_rung_unsafe as _rearm
         _rearm(bool(getattr(pcb_data, '_via_rung_unsafe', False)))
@@ -1287,30 +1283,26 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # rules (caught by test_dru_layer_clearance_e2e: a reconciliation +3V3 via
     # 0.25mm inside the B.Cu rule against GND).
     _reconcile_kwargs['layer_clearances'] = dict(config.layer_clearances)
-    if visualize:
-        base_obstacles, base_vis_data = build_base_obstacle_map_with_vis(
-            pcb_data, config, base_map_exclusions,
-            net_clearances=net_clearances)
-        # Set bounds for visualization
-        base_vis_data.bounds = get_net_bounds(pcb_data, all_net_ids_to_route, padding=5.0)
-        # #568: this branch builds an UNFROZEN base -- rung-1 via legality
-        # would under-block base copper if caches small-stamped. Disarm the
-        # dual stamping for this run (see obstacle_cache._small_via_pair).
-        # set_rung_unsafe carries the same decision to the RAW map mirrors,
-        # which see only (obstacles, config) and cannot read this flag.
+    # #568: rung-1 via legality is only sound when base copper blocks EVERY
+    # rung, i.e. when the base is frozen into the static keep-out bitmap. The
+    # one remaining path that builds an UNFROZEN base is KICAD_NO_STATIC_BASE
+    # (the vis branch that used to share this hazard is gone with #569), so
+    # disarm the dual stamping there -- pcb_data for the cache path,
+    # set_rung_unsafe for the RAW map mirrors, which see only
+    # (obstacles, config) and cannot read the flag.
+    if env_knobs.NO_STATIC_BASE:
         pcb_data._via_rung_unsafe = True
         from obstacle_cache import set_rung_unsafe as _set_rung_unsafe
         _set_rung_unsafe(True)
-    else:
-        base_obstacles = build_base_obstacle_map(
-            pcb_data, config, base_map_exclusions,
-            net_clearances=net_clearances,
-            # #422: base holds only permanent copper/geometry (target + rippable
-            # nets live in the per-net caches on a CLONE); stamp it straight into
-            # the static keep-out bitmap so the working clone carries it as bits.
-            static_base=not env_knobs.NO_STATIC_BASE,
-            # #556: sub-phase progress so the GUI bar moves during the build
-            progress_callback=progress_callback)
+    base_obstacles = build_base_obstacle_map(
+        pcb_data, config, base_map_exclusions,
+        net_clearances=net_clearances,
+        # #422: base holds only permanent copper/geometry (target + rippable
+        # nets live in the per-net caches on a CLONE); stamp it straight into
+        # the static keep-out bitmap so the working clone carries it as bits.
+        static_base=not env_knobs.NO_STATIC_BASE,
+        # #556: sub-phase progress so the GUI bar moves during the build
+        progress_callback=progress_callback)
 
     base_elapsed = time.time() - base_start
     print(f"Base obstacle map built in {base_elapsed:.2f}s")
@@ -1324,10 +1316,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # originals otherwise alias NEW segments during sync (see route_diff, #195).
     _original_segments_keepalive = list(pcb_data.segments)
     original_segment_ids = set(id(s) for s in _original_segments_keepalive)
-
-    # Notify visualization callback that routing is starting
-    if visualize:
-        vis_callback.on_routing_start(total_routes, layers, grid_step)
 
     # Get unrouted nets for stub proximity costs
     # Use sorted list for deterministic iteration order
@@ -1504,7 +1492,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Route single-ended nets
     se_successful, se_failed, se_time, se_iterations, route_index, user_quit = route_single_ended_nets(
         state, single_ended_nets,
-        visualize=visualize, vis_callback=vis_callback, base_vis_data=base_vis_data,
         route_index_start=route_index,
         cancel_check=cancel_check, progress_callback=progress_callback
     )
@@ -1683,10 +1670,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Final progress update
     if progress_callback:
         progress_callback(total_routes, total_routes, "Routing complete")
-
-    # Notify visualization callback that all routing is complete
-    if visualize:
-        vis_callback.on_routing_complete(successful, failed, total_iterations)
 
     # Build summary data
     import json
@@ -3622,14 +3605,6 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--stats", action="store_true",
                         help="Collect and print A* search statistics for debugging heuristic efficiency")
 
-    # Visualization options
-    parser.add_argument("--visualize", "-V", action="store_true",
-                        help="Show real-time visualization of the routing (requires pygame)")
-    parser.add_argument("--auto", action="store_true",
-                        help="Auto-advance to next net without waiting (with --visualize)")
-    parser.add_argument("--display-time", type=float, default=0.0,
-                        help="Seconds to display completed route before advancing (with --visualize --auto)")
-
     from fab_tiers import (add_fab_tier_args, fab_tier_from_args, set_default_fab_tier,
                            enforce_fab_floors, count_copper_layers_in_file)
     add_fab_tier_args(parser)
@@ -3796,21 +3771,6 @@ For differential pair routing, use route_diff.py:
 
     print(f"Routing {len(net_names)} nets: {net_names[:5]}{'...' if len(net_names) > 5 else ''}")
 
-    # Create visualization callback if requested
-    vis_callback = None
-    if args.visualize:
-        try:
-            from pygame_visualizer.pygame_callback import create_pygame_callback
-            vis_callback = create_pygame_callback(
-                layers=args.layers,
-                auto_advance=args.auto,
-                display_time=args.display_time
-            )
-        except ImportError as e:
-            print(f"Warning: Could not import pygame visualizer: {e}")
-            print("Install pygame with: pip install pygame-ce")
-            print("Continuing without visualization...")
-
     # Cross-class clearance map: resolve {net name -> clearance} to {net_id -> clearance} against
     # this board's nets so the obstacle-map builders price each pre-placed obstacle at its own
     # net-class clearance (KiCad's max(classA, classB)). None/absent -> empty map -> prior
@@ -3925,7 +3885,6 @@ For differential pair routing, use route_diff.py:
                 mps_reverse_rounds=args.mps_reverse_rounds,
                 mps_layer_swap=args.mps_layer_swap,
                 mps_segment_intersection=args.mps_segment_intersection,
-                vis_callback=vis_callback,
                 schematic_dir=args.schematic_dir,
                 layer_costs=args.layer_costs,
                 add_teardrops=args.add_teardrops,

@@ -419,4 +419,4 @@ See `pcb_modification.py` for implementation details.
 
 ## Visualizing the Search
 
-The optional [PyGame visualizer](../pygame_visualizer/README.md) renders the A* search in real time — open/closed sets, per-layer coloring, and completed routes — using the same Rust engine and obstacle maps as batch routing, so what you watch is exactly what gets routed. Enable it with `route.py --visualize`; it is the quickest way to see why a route takes a particular path or where a search is getting stuck.
+The interactive PyGame visualizer was removed in #569: the debugging workflow it predated (grade with `check_drc`/`check_connected`, replay a recorded chain from its `redo_commands.sh` manifest, read the per-net JSON summary and blocker report, or step a board in the GUI plugin) covers the same questions without a second rendering path to keep in sync with the engine.

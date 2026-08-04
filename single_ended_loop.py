@@ -64,7 +64,6 @@ from memory_debug import get_process_memory_mb, estimate_track_proximity_cache_m
 from obstacle_map import (
     add_net_stubs_as_obstacles, add_net_vias_as_obstacles, add_net_pads_as_obstacles,
     add_same_net_via_clearance, add_same_net_pad_drill_via_clearance,
-    VisualizationData
 )
 from obstacle_costs import (
     add_stub_proximity_costs, merge_track_proximity_costs,
@@ -79,7 +78,7 @@ from connectivity import (
 )
 from net_queries import get_chip_pad_positions, calculate_route_length
 from pcb_modification import add_route_to_pcb_data
-from single_ended_routing import route_net_with_obstacles, route_net_with_visualization, route_multipoint_main
+from single_ended_routing import route_net_with_obstacles, route_multipoint_main
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache, record_frontier_blocking
 from rip_up_reroute import rip_up_net, restore_net
 from leg_rip import LEG_RIP_ENABLED, select_blocking_branch  # #510
@@ -91,35 +90,6 @@ from routing_context import (
     prepare_obstacles_inplace, restore_obstacles_inplace
 )
 from terminal_colors import RED, GREEN, RESET
-
-
-def _populate_vis_data_from_cache(vis_data, net_obstacles_cache, exclude_net_id: int):
-    """Populate vis_data with blocked cells/vias from other nets in the cache.
-
-    This ensures blocked cells are displayed even when routing all nets (--nets "*"),
-    where the base obstacle map excludes all nets being routed.
-
-    Args:
-        vis_data: VisualizationData to update (modified in place)
-        net_obstacles_cache: Dict mapping net_id to NetObstacleData
-        exclude_net_id: Net ID to exclude (the net currently being routed)
-    """
-    for other_net_id, obstacle_data in net_obstacles_cache.items():
-        if other_net_id == exclude_net_id:
-            continue  # Skip current net - it's being routed
-
-        # Add blocked cells from this net
-        for i in range(len(obstacle_data.blocked_cells)):
-            gx, gy, layer_idx = obstacle_data.blocked_cells[i]
-            # Ensure we have enough layers
-            while layer_idx >= len(vis_data.blocked_cells):
-                vis_data.blocked_cells.append(set())
-            vis_data.blocked_cells[layer_idx].add((gx, gy))
-
-        # Add blocked vias from this net
-        for i in range(len(obstacle_data.blocked_vias)):
-            gx, gy = obstacle_data.blocked_vias[i]
-            vis_data.blocked_vias.add((gx, gy))
 
 
 def _swap_blocking_net_ids(pcb_data, stub, dest_layer, config, moved_segs):
@@ -418,9 +388,6 @@ def _stub_swap_rescue(pcb_data, net_id, config, state, results,
 def route_single_ended_nets(
     state: RoutingState,
     single_ended_nets: List[Tuple[str, int]],
-    visualize: bool = False,
-    vis_callback: Any = None,
-    base_vis_data: Any = None,
     route_index_start: int = 0,
     cancel_check: Any = None,
     progress_callback: Any = None,
@@ -431,9 +398,6 @@ def route_single_ended_nets(
     Args:
         state: The routing state object containing all shared state
         single_ended_nets: List of (net_name, net_id) tuples to route
-        visualize: Whether to run in visualization mode
-        vis_callback: Visualization callback (if visualize=True)
-        base_vis_data: Base visualization data (if visualize=True)
         route_index_start: Starting route index (continues from diff pairs)
         cancel_check: Optional callable that returns True if routing should be cancelled
         progress_callback: Optional callable(current, total, net_name) for progress updates
@@ -670,114 +634,53 @@ def route_single_ended_nets(
 
         start_time = time.time()
 
-        # Build obstacles - use same approach for both visualization and non-visualization
-        # to ensure VisualRouter replicates GridRouter behavior exactly
-        vis_data = None
-        same_net_via_cells = None  # Track cells for in-place restore (only used when not visualizing)
-        if visualize:
-            # Clone the base vis data for visualization display
-            vis_data = VisualizationData(
-                blocked_cells=[set(s) for s in base_vis_data.blocked_cells],
-                blocked_vias=set(base_vis_data.blocked_vias),
-                bga_zones_grid=list(base_vis_data.bga_zones_grid),
-                bounds=base_vis_data.bounds
+        same_net_via_cells = None  # Track cells for the in-place restore
+        # Use in-place approach if working map is available (saves memory by not cloning)
+        if state.working_obstacles is not None and state.net_obstacles_cache:
+            unrouted_stubs, same_net_via_cells = prepare_obstacles_inplace(
+                state.working_obstacles, pcb_data, config, net_id,
+                all_unrouted_net_ids, routed_net_ids, track_proximity_cache, layer_map,
+                state.net_obstacles_cache,
+                state.ripped_route_layer_costs, state.ripped_route_via_positions
             )
-            # Use the SAME obstacle preparation as non-visualization path for consistency
-            if state.working_obstacles is not None and state.net_obstacles_cache:
-                unrouted_stubs, same_net_via_cells = prepare_obstacles_inplace(
-                    state.working_obstacles, pcb_data, config, net_id,
-                    all_unrouted_net_ids, routed_net_ids, track_proximity_cache, layer_map,
-                    state.net_obstacles_cache,
-                    state.ripped_route_layer_costs, state.ripped_route_via_positions
-                )
-                obstacles = state.working_obstacles  # Use same map as GridRouter would
-                # Update vis_data with obstacles from other nets (not the current one)
-                # This ensures blocked cells are shown even when routing all nets
-                _populate_vis_data_from_cache(vis_data, state.net_obstacles_cache, net_id)
-            else:
-                # Fallback: build obstacles the same way as non-visualization
-                obstacles, unrouted_stubs = build_single_ended_obstacles(
-                    base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
-                    all_unrouted_net_ids, net_id, gnd_net_id, track_proximity_cache, layer_map,
-                    net_obstacles_cache=state.net_obstacles_cache,
-                    ripped_route_layer_costs=state.ripped_route_layer_costs,
-                    ripped_route_via_positions=state.ripped_route_via_positions
-                )
+            obstacles = state.working_obstacles  # Use directly, no clone!
         else:
-            # Use in-place approach if working map is available (saves memory by not cloning)
-            if state.working_obstacles is not None and state.net_obstacles_cache:
-                unrouted_stubs, same_net_via_cells = prepare_obstacles_inplace(
-                    state.working_obstacles, pcb_data, config, net_id,
-                    all_unrouted_net_ids, routed_net_ids, track_proximity_cache, layer_map,
-                    state.net_obstacles_cache,
-                    state.ripped_route_layer_costs, state.ripped_route_via_positions
-                )
-                obstacles = state.working_obstacles  # Use directly, no clone!
-            else:
-                # Fallback to full rebuild (but use cache for unrouted nets)
-                obstacles, unrouted_stubs = build_single_ended_obstacles(
-                    base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
-                    all_unrouted_net_ids, net_id, gnd_net_id, track_proximity_cache, layer_map,
-                    net_obstacles_cache=state.net_obstacles_cache,
-                    ripped_route_layer_costs=state.ripped_route_layer_costs,
-                    ripped_route_via_positions=state.ripped_route_via_positions
-                )
+            # Fallback to full rebuild (but use cache for unrouted nets)
+            obstacles, unrouted_stubs = build_single_ended_obstacles(
+                base_obstacles, pcb_data, config, routed_net_ids, remaining_net_ids,
+                all_unrouted_net_ids, net_id, gnd_net_id, track_proximity_cache, layer_map,
+                net_obstacles_cache=state.net_obstacles_cache,
+                ripped_route_layer_costs=state.ripped_route_layer_costs,
+                ripped_route_via_positions=state.ripped_route_via_positions
+            )
 
         # Calculate stub length BEFORE routing (stubs are existing segments for this net)
         stub_length = calculate_stub_length(pcb_data, net_id)
 
         # Route the net using the prepared obstacles
-        if visualize:
-            # Get source/target grid coords for visualization
-            sources, targets, _ = get_net_endpoints(pcb_data, net_id, config)
-            sources_grid = [(s[0], s[1], s[2]) for s in sources] if sources else []
-            targets_grid = [(t[0], t[1], t[2]) for t in targets] if targets else []
-
-            # Notify visualizer that net routing is starting
-            vis_callback.on_net_start(net_name, route_index, net_id,
-                                       sources_grid, targets_grid, obstacles, vis_data)
-
-            # Route with visualization
-            result = route_net_with_visualization(pcb_data, net_id, config, obstacles, vis_callback)
-
-            # Notify visualizer that net routing is complete
-            if result is None:
-                # User quit during routing
-                user_quit = True
-                break
-
-            path = result.get('path') if result and not result.get('failed') else None
-            direction = result.get('direction', 'forward') if result else 'forward'
-            iterations = result.get('iterations', 0) if result else 0
-            success = result is not None and not result.get('failed')
-
-            if not vis_callback.on_net_complete(net_name, success, path, iterations, direction):
-                user_quit = True
-                break
+        # Bus attraction context, computed BEFORE the multipoint split:
+        # planned corridor first (#296 R9), routed-neighbor fallback,
+        # clustered-endpoint direction. Multipoint members use it for
+        # main-edge selection + attraction too (they used to route blind).
+        attraction_path, reverse_direction = bus_attraction_context(
+            net_id, bus_net_to_group, bus_corridors, bus_routed_paths)
+        # Off-lane surcharge (the stick): members with a corridor pay
+        # scaled step costs everywhere EXCEPT near the lane, where the
+        # attraction discount compensates -- defection costs real money.
+        cfg_route = bus_stick_config(config, attraction_path)
+        # Check for multi-point net (3+ pads, no existing segments)
+        multipoint_pads = get_multipoint_net_pads(pcb_data, net_id, config)
+        if multipoint_pads:
+            print(f"  Detected multi-point net with {len(multipoint_pads)} pads (Phase 1: main route only)")
+            result = route_multipoint_main(pcb_data, net_id, cfg_route, obstacles, multipoint_pads,
+                                           attraction_path=attraction_path, state=state)
+            # Track for Phase 3 completion after length matching
+            if result and not result.get('failed') and result.get('is_multipoint'):
+                state.pending_multipoint_nets[net_id] = result
         else:
-            # Bus attraction context, computed BEFORE the multipoint split:
-            # planned corridor first (#296 R9), routed-neighbor fallback,
-            # clustered-endpoint direction. Multipoint members use it for
-            # main-edge selection + attraction too (they used to route blind).
-            attraction_path, reverse_direction = bus_attraction_context(
-                net_id, bus_net_to_group, bus_corridors, bus_routed_paths)
-            # Off-lane surcharge (the stick): members with a corridor pay
-            # scaled step costs everywhere EXCEPT near the lane, where the
-            # attraction discount compensates -- defection costs real money.
-            cfg_route = bus_stick_config(config, attraction_path)
-            # Check for multi-point net (3+ pads, no existing segments)
-            multipoint_pads = get_multipoint_net_pads(pcb_data, net_id, config)
-            if multipoint_pads:
-                print(f"  Detected multi-point net with {len(multipoint_pads)} pads (Phase 1: main route only)")
-                result = route_multipoint_main(pcb_data, net_id, cfg_route, obstacles, multipoint_pads,
-                                               attraction_path=attraction_path, state=state)
-                # Track for Phase 3 completion after length matching
-                if result and not result.get('failed') and result.get('is_multipoint'):
-                    state.pending_multipoint_nets[net_id] = result
-            else:
-                result = route_net_with_obstacles(pcb_data, net_id, cfg_route, obstacles,
-                                                  attraction_path=attraction_path,
-                                                  reverse_direction=reverse_direction)
+            result = route_net_with_obstacles(pcb_data, net_id, cfg_route, obstacles,
+                                              attraction_path=attraction_path,
+                                              reverse_direction=reverse_direction)
 
         elapsed = time.time() - start_time
         total_time += elapsed
