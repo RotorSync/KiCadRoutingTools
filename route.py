@@ -515,6 +515,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     else:
         print("Using provided PCB data...")
 
+    # KICAD_DUP_TRAP=1: report the call site that re-appends the SAME copper
+    # object to pcb_data. Inert otherwise. Armed here so it covers the whole
+    # run, including the cleanup pipeline and the in-run plane finalize.
+    from dup_trap import install as _install_dup_trap
+    _install_dup_trap(pcb_data)
+
     # Canonicalise the STARTING copper order, BEFORE any decision reads it.
     # The GUI adds tracks to a live pcbnew board and the CLI writer emits them
     # from its own lists, so the two fronts hand the engine identical copper in
