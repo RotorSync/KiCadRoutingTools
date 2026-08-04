@@ -332,8 +332,56 @@ def _attempt_edge(pcb_data, net_id, gap, config, net_clearances):
                 print(f"    rescue rung rejected: route escaped the window "
                       f"bounds (fence leak) net={net_id}")
                 continue
+            _tie_bad = _tie_band_violations(
+                pcb_data, net_id, cfg, result.get('new_segments') or [])
+            if _tie_bad:
+                _s, _p, _d = _tie_bad[0]
+                print(f"    rescue rung rejected: {len(_tie_bad)} segment(s) "
+                      f"ride net-tie partner pad "
+                      f"{_p.component_ref}.{_p.pad_number} sub-clearance "
+                      f"beyond KiCad's waiver (worst {_d:.3f}mm)")
+                continue
             return result, cfg
     return None, None
+
+
+def _tie_band_violations(pcb_data, net_id, cfg, segments):
+    """Rescue copper riding a net-tie PARTNER pad's band beyond KiCad's waiver.
+
+    A Kelvin-shunt sense net can only exit its tab through the partner pad's
+    copper, and the net-tie corridor legally allows that passage -- but
+    KiCad's waiver (DRC_ENGINE::IsNetTieExclusion) is per ITEM: it forgives a
+    segment only when its contact with the partner lies on the tied net's OWN
+    pad. A rescue approach that then RUNS ALONGSIDE the partner pad
+    sub-clearance without touching the own pad ships real violations
+    (cynthion R1: kicad-cli clearance 0.011-0.039 actual vs 0.100 +
+    shorting_items; the R2/R59 baseline pad-segment DRC is the same class).
+    Reuses check_drc's exact geometry AND waiver so this gate matches the
+    grader; graded at the RUNG's own clearance, so the accepted neck-to-floor
+    residual class (#276) is not re-flagged. Checked against the FULL board
+    (the window crop may drop the footprint the waiver needs).
+
+    Returns [(seg, pad, dist)] offenders; empty = clean."""
+    try:
+        exempt = pcb_data.net_tie_exempt_pad_ids(net_id)
+    except Exception:
+        return []
+    if not exempt:
+        return []
+    from check_drc import check_pad_segment_overlap, _net_tie_span_waived
+    partners = [p for plist in pcb_data.pads_by_net.values() for p in plist
+                if id(p) in exempt and p.net_id != net_id]
+    if not partners:
+        return []
+    bad = []
+    for seg in segments:
+        for pad in partners:
+            viol, dist, _pt = check_pad_segment_overlap(
+                pad, seg, cfg.clearance, cfg.layers)
+            if viol and not _net_tie_span_waived(pcb_data, seg, net_id, pad,
+                                                 cfg.clearance):
+                bad.append((seg, pad, dist))
+    return bad
 
 
 def _result_escapes_window(result, window, cfg):
