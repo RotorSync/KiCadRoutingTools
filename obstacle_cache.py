@@ -271,7 +271,7 @@ def _small_via_pair(config, pcb_data):
     the SAME selection rule as the escalation retry (_via_rung_retry), so
     map and retry agree by construction. None when rust mode is off
     (KICAD_VIA_RUNG != 2) or no smaller rung exists."""
-    if os.environ.get('KICAD_VIA_RUNG', '1') != '2':
+    if os.environ.get('KICAD_VIA_RUNG', '2') != '2':
         return None
     # Safety interlock: rung-1 legality is only sound when BASE copper blocks
     # every rung (the frozen static bitmap). A flow that builds an UNFROZEN

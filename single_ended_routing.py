@@ -1938,7 +1938,7 @@ def _via_rung_retry(router, obstacles, config, sources, targets, pcb_data,
     route result tuple, or None-path result when even this fails.
     """
     import os as _os
-    _mode = _os.environ.get('KICAD_VIA_RUNG', '1')
+    _mode = _os.environ.get('KICAD_VIA_RUNG', '2')
     if _mode not in ('1', '2') or pcb_data is None:
         return None
     from fab_tiers import fab_floor_ladder
@@ -3048,7 +3048,7 @@ def _pour_launch_region_cells(pcb_data, net_id, pad_info, pad_components,
     KICAD_POUR_LAUNCH=1; {} when off or unavailable.
     """
     import os as _os
-    if _os.environ.get('KICAD_POUR_LAUNCH', '') != '1':
+    if _os.environ.get('KICAD_POUR_LAUNCH', '1') != '1':
         return {}
     # Same-invocation memo: Phase 1 and Phase 3 call this back-to-back with
     # the IDENTICAL pad_components object (main_result carries it), and every
@@ -3186,7 +3186,7 @@ def _pour_launch_pair_anchors(pcb_data, net_id, sources, targets,
     ([], []) when off, no zones, or unavailable.
     """
     import os as _os
-    if _os.environ.get('KICAD_POUR_LAUNCH', '') != '1':
+    if _os.environ.get('KICAD_POUR_LAUNCH', '1') != '1':
         return [], []
     try:
         from plane_fill_model import get_zone_model
@@ -4753,7 +4753,7 @@ def _trim_after_fill_via(path, coord, layer_names, pcb_data, net_id):
     Returns (possibly-truncated path, end_original override or None).
     """
     import os as _os
-    if _os.environ.get('KICAD_POUR_LAUNCH', '') != '1' or len(path) < 4:
+    if _os.environ.get('KICAD_POUR_LAUNCH', '1') != '1' or len(path) < 4:
         return path, None
     try:
         from plane_fill_model import get_fill_models

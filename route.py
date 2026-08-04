@@ -2590,7 +2590,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Gate: KICAD_PLANE_FINALIZE=1 (default OFF until #562 graduation).
     if (final_reconcile and not skip_routing and not _ckpt_stop
             and output_file and not return_results
-            and os.environ.get('KICAD_PLANE_FINALIZE', '') == '1'):
+            and os.environ.get('KICAD_PLANE_FINALIZE', '1') == '1'):
         try:
             from route_disconnected_planes import (
                 repair_planes as _rdp_engine, auto_detect_zones as _adz)
@@ -2663,7 +2663,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # existed because the reconcile's CLI sub-run wrote file-only
                 # copper ahead of the finalize -- that ordering is gone.
                 _live9 = None
-                if os.environ.get('KICAD_PLANE_FINALIZE_LIVE', '') == '1':
+                if os.environ.get('KICAD_PLANE_FINALIZE_LIVE', '1') == '1':
                     from kicad_parser import snap_pcb_data_to_iu_grid \
                         as _snap9
                     _snapped9 = _snap9(pcb_data)

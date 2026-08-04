@@ -1872,7 +1872,7 @@ def _rung_small_armed():
     map (conservative over-blocking near raw copper; never wrong), and the
     remove twins mirror the same cells so refcounts balance per rung."""
     import os as _os
-    return _os.environ.get('KICAD_VIA_RUNG', '1') == '2'
+    return _os.environ.get('KICAD_VIA_RUNG', '2') == '2'
 
 
 def _via_raw_block_cells(via, config, coord, num_layers, extra_clearance,
