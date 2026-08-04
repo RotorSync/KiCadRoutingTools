@@ -23,7 +23,7 @@ a `build_router.py --from-source` rebuild, and re-distributing prebuilt per-plat
 binaries via GitHub Releases — heavy overhead. When a feature seems to need a Rust
 change, surface that cost early and check for a Python-only approach first.
 
-**Important:** When making changes to the Rust router, bump the version in `rust_router/Cargo.toml` and update the version history in `rust_router/README.md`.
+**Important:** When making changes to the Rust router, bump the version in `rust_router/Cargo.toml` and update the version history in `rust_router/README.md`. The release triple is `rust_router/Cargo.toml` + `/VERSION` + `metadata.json` — keep them aligned. **As of now the crate is 0.20.0 but no 0.20.0 binaries are published**, so a plain `python3 build_router.py` downloads the 0.19.3 asset and `startup_checks` then rejects the mismatch: use `--from-source` when testing Rust-side behavior, and publish the binaries as part of the next release.
 
 ## Testing & Verification
 
@@ -113,8 +113,9 @@ Validate routed boards against the *real* spec, with the right checker — most
   (`(rule x (layer inner) (constraint clearance (min 0.15mm)))`); netclasses can't
   express it. **Every routing step** auto-reads the sibling `.kicad_dru`
   (`kicad_dru.install_layer_clearances`; engines without an `input_file`
-  discover it via `PCBData.source_path`): signal, diff pairs, plane
-  create/repair (taps, region joins, reconnects), BGA/QFN fanout (QFN swaps
+  discover it via `PCBData.source_path`): signal, diff pairs, the pour step,
+  the route step's in-run plane finalize (taps, region joins, reconnects),
+  BGA/QFN fanout (QFN swaps
   its single escape layer exactly; BGA floors its scalar at the largest rule
   on its escape layers — conservative, tighten-only), the oracle sub-routes
   (config clones carry the map), and nested reconciliation sub-runs (the
@@ -217,9 +218,16 @@ through there too.
 - `tests/gui_parity/test_cli_postpass_coverage.py` — no wx; asserts every CLI
   `main()` post-engine pass has a GUI counterpart, and blocks a new CLI-only
   post-pass (Class-2 drift). Register new passes there.
+- `tests/gui_parity/test_settings_roundtrip.py` — needs KiCad python; builds
+  the REAL headless dialog and round-trips the settings dict: save (the CLOSE
+  path), restore (the reopen path), restore from a LEGACY dict whose keys a
+  newer version dropped, and re-save key parity. **Run it whenever you add,
+  rename, or REMOVE a dialog control** — deleting one without updating
+  `settings_persistence` crashes on close and loses the user's settings
+  (that shipped once; see 31f359c). Seconds to run, no routing.
 - `tests/gui_parity/test_gui_engine_parity.py` — needs KiCad python; runs the
   plan through the GUI engine path and grades against the CLI chain
-  (`KICAD_DUMP_BATCH_KWARGS` diffs the 76-key param set).
+  (`KICAD_DUMP_BATCH_KWARGS` diffs the full batch_route param set, ~105 keys).
 
   **How to run it (it is NOT a special-session thing — just run it):**
 
@@ -283,7 +291,11 @@ through there too.
     fixed in `c99ffb4`) can pass this gate untouched — cover such params with a
     diff-pair board and `check_impedance.py`.
 
-  Siblings worth running the same way: `test_gui_livechain_rp2350.py`, and
+  Siblings worth running the same way: `test_gui_livechain_rp2350.py`
+  (**caveat**: its plan still carries `repair_planes` steps that the executor
+  now skips as #562 no-ops, while its CLI leg still shells
+  `route_disconnected_planes.py` — the two legs are no longer stage-aligned,
+  so reshape the plan before trusting its per-stage comparison), and
   `replay_plan_vs_run.py` — the latter is the *general* harness (a real headless
   `RoutingDialog` + real `PlanExecutor`, nothing mocked; it caught #493's
   one-ULP netclass clearance bug on its first run). See

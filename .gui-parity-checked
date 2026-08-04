@@ -1,3 +1,42 @@
+HEAD 2026-08-04 (2nd) parity audit a1cf6da..HEAD (planes-tab retirement,
+settings crash fix, #569 visualizer removal, the review-fix wave, the #562
+finalize recursion fix). Outcome: gaps FOUND AND CLOSED in-wave, listed
+below; gates re-run at HEAD and green.
+
+  Gates at HEAD:
+  * test_cli_postpass_coverage: 7 registered, 14 in CLI use, 0 failures.
+  * test_manifest_plan_parity: param->control 12 checked, 0 unresolved.
+  * test_settings_roundtrip (NEW this wave): save / restore / restore-from-
+    LEGACY-dict / re-save key parity all clean, 178 keys.
+  * test_gui_engine_parity (headless RoutingDialog, KiCad python): PARITY --
+    conn_full True both fronts, drc 0/0, kicad_unconnected 0/0. Copper sets
+    now DIFFER slightly (segments 1338 vs 1334, vias 140 vs 140, 12/8
+    one-cell tap-approach segments): the finalize's ORACLE leg is
+    CLI-file-only by design (kicad-cli needs a real file; the GUI defers it
+    to a post-apply staged save), so the legs are no longer byte-identical.
+    Grades are what this gate asserts; read the printed diff, not equality.
+
+  Class-2 gaps found and closed in this range:
+  * The #562 plane finalize was CLI-file-only -> now runs under
+    return_results too (board-delta merge + post-apply staged-save oracle
+    through the new shared core gui_utils.run_kicad_oracle_on_live_board).
+  * The planes-tab retirement deleted controls whose persistence entries
+    survived -> get_dialog_settings raised on CLOSE, losing the session's
+    settings; restore called a deleted _on_mode_changed. Both fixed and now
+    guarded by test_settings_roundtrip.
+  * The plan executor's final-verify guard still counted repair_planes as a
+    plane step, so a legacy pour->repair plan performed no verify at all.
+
+  Known-deliberate divergences unchanged: the CLI mains' kicad-oracle
+  recheck, end-of-run reconciliation nuances, .kicad_pro floor carryover,
+  the plan-parameter whitelist, and now the finalize's CLI-only oracle leg.
+
+  Carried, still open: GUI kwarg gaps net_name_patterns (batch_route) and
+  plane_net_layers (generate_bga_fanout); test_gui_livechain_rp2350's plan
+  still encodes the pre-#562 chain (its repair steps are now skipped no-ops
+  while its CLI leg still shells route_disconnected_planes, so its
+  per-stage comparison is not stage-aligned -- reshape before trusting it).
+
 HEAD 2026-08-04 parity audit 646401b..a1cf6da (merge of se-rip-arbitration,
 41 commits + 10 main-side). Outcome: one Class-2 gap FOUND AND CLOSED in the
 same wave -- route.py's #562 plane finalize (repair engine -> cleanup ->
