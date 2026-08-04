@@ -846,7 +846,8 @@ def generate_underpad_escape(footprint: Footprint,
                 segs.append((x1, y1, x2, y2, tr['width'] / 2.0, tr['net_id']))
         return {'vias': vias, 'resv': resv, 'pads': pads, 'segs': segs}
 
-    def _via_site_conflict(x, y, net_id, ctx, vr=None, vdr=None):
+    def _via_site_conflict(x, y, net_id, ctx, vr=None, vdr=None,
+                           skip_resv=False):
         """Reason a full-size OFF-CENTRE via cannot sit at (x, y), or None.
 
         Mirrors the channel engine's via_in_pad_conflict (#370 B4) but also
@@ -869,7 +870,7 @@ def generate_underpad_escape(footprint: Footprint,
                 return "drill hole-to-hole vs a via"
             if onid != net_id and d < vr + orr + clearance - 1e-6:
                 return "via ring vs a foreign via"
-        for (ox, oy, orr, odr, onid) in ctx['resv']:
+        for (ox, oy, orr, odr, onid) in ([] if skip_resv else ctx['resv']):
             d = math.hypot(ox - x, oy - y)
             if d < vdr + odr + HOLE_TO_HOLE_CLEARANCE - 1e-6:
                 return "drill hole-to-hole vs a reserved via site"
@@ -1775,18 +1776,35 @@ def generate_underpad_escape(footprint: Footprint,
         home = home_of(p)
         _anchors = [(p.global_x, p.global_y)] + ([_site] if _site else [])
         carve = _carve_foreign(_anchors, home, {p.net_id})
-        _cs = clamp_via_to_pad(via_size, via_drill, p, floors)[0]
+        _cs, _cd = clamp_via_to_pad(via_size, via_drill, p, floors)[:2]
         _ctx = _via_ctx(p.net_id, p.global_x, p.global_y)
         _memo = {}
 
-        def _via_ok(x, y, at_center, _cs=_cs, _nid=p.net_id, _c=_ctx, _m=_memo):
+        def _via_ok(x, y, at_center, _cs=_cs, _cd=_cd, _nid=p.net_id,
+                    _c=_ctx, _m=_memo):
             if locked_smd_pads and not via_site_ok(
                     x, y, (_cs if at_center else via_size) / 2.0):
                 return False
             if at_center:
-                # centre via-in-pads keep their mutual-reservation contract
-                # (Phase B keep-outs) -- clamped inside the pad by commit().
-                return True
+                # The centre's mutual-reservation contract (Phase B) only
+                # covers RESERVATIONS -- #567: a neighbour's COMMITTED escape
+                # run can lawfully pass within (clamped ring + clearance) of
+                # this pad centre (an earlier pass or an equal-depth sort tie
+                # routes it first; the SMD pad blocks only its own layer), and
+                # the old blanket True dropped the via straight through that
+                # copper. Check the pad-CLAMPED ring/drill against REAL copper
+                # (board incl. materialized earlier-pass results, this run's
+                # tracks/vias, pads) and skip only the resv list -- the
+                # contract's actual domain. Vetoed centres fall to the checked
+                # off-centre search or fail the ball honestly to the router.
+                key = ('c', round(x, 6), round(y, 6))
+                ok = _m.get(key)
+                if ok is None:
+                    ok = _via_site_conflict(x, y, _nid, _c, vr=_cs / 2.0,
+                                            vdr=(_cd or 0.0) / 2.0,
+                                            skip_resv=True) is None
+                    _m[key] = ok
+                return ok
             key = (round(x, 6), round(y, 6))
             ok = _m.get(key)
             if ok is None:
