@@ -201,9 +201,9 @@ def step_label(index, step):
 # _PARAM_CONTROL_ALIASES: param name -> the differently-named control attribute
 # that _set_control() targets (resolved on the step's owners in order).
 _PARAM_CONTROL_ALIASES = {
-    'rip_blocker_nets': 'rip_blocker_check',
-    'repair_pads': 'repair_pads',
-    'analysis_grid_step': 'analysis_grid',
+    # (rip_blocker_nets / repair_pads / analysis_grid_step had controls on
+    # the plane panels that #562 deleted -- the pour step does no routing and
+    # the repair step is gone. Their per-action blocks note them instead.)
     # #381 D3: route_diff's polarity-swap allowlist.
     'polarity_swap_nets': 'polarity_swap_nets_text',
     # #381 D5: route.py options that previously fell to "no control, ignored"
