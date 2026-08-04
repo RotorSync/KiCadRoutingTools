@@ -2832,6 +2832,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 install_layer_clearances(_ocfg, None, input_file, None)
                 _orc = oracle_reconnect(
                     output_file, sorted(set(_zn)), _ocfg,
+                    track_via_clearance=defaults.PLANE_TRACK_VIA_CLEARANCE,
                     hole_to_hole_clearance=config.hole_to_hole_clearance,
                     project_from=input_file)
                 try:
