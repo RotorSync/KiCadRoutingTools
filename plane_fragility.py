@@ -372,6 +372,29 @@ def _compute_cells_and_states(pcb_data: PCBData, config: GridRouteConfig,
     if not polys:
         polys = [(z.net_id, z.layer, z.polygon) for z in pcb_data.zones]
 
+    if os.environ.get('KICAD_FRAGILITY_DEBUG') == '1':
+        # The field is a raster of the exact fill, so a GUI/CLI cell-count
+        # difference is either the POLYGON or the GRID -- print both rather
+        # than guessing which. (A 795-cell gap between the fronts on
+        # splitflap_driver cost a long bisect that static file comparison
+        # could not settle: every saved board agreed, only the live one did
+        # not.)
+        def _a(p):
+            s = 0.0
+            for i in range(len(p)):
+                x1, y1 = p[i]
+                x2, y2 = p[(i + 1) % len(p)]
+                s += x1 * y2 - x2 * y1
+            return abs(s) / 2.0
+        print(f"  [frag-debug] grid_step={config.grid_step} depth={depth} "
+              f"layers={config.layers} polys={len(polys)}")
+        for _n, _l, _p in polys[:4]:
+            xs = [q[0] for q in _p]
+            ys = [q[1] for q in _p]
+            print(f"  [frag-debug]   net={_n} layer={_l} verts={len(_p)} "
+                  f"area={_a(_p):.4f} bbox=({min(xs):.4f},{min(ys):.4f})-"
+                  f"({max(xs):.4f},{max(ys):.4f})")
+
     states = []
     for znet, zlayer, zpoly in polys:
         li = layer_index.get(zlayer)

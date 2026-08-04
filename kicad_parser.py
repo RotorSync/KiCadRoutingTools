@@ -3370,6 +3370,32 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
     )
 
 
+def _nm_quantize_bounds(bounds):
+    """Snap board bounds to KiCad's own nanometre grid.
+
+    GUI/CLI PARITY (do not drop). pcbnew stores geometry as integer
+    nanometres, but this path converts to mm and then does float arithmetic
+    on it -- the Edge.Cuts stroke deflation below is `x1 - half_stroke`, so a
+    board edge at 223.57 with a 0.1 stroke yields 223.51999999999998 where
+    the TEXT parser, reading the centerline decimal straight out of the file,
+    yields 223.52.
+
+    That residue is not cosmetic. board_bounds lays out the routing grid and
+    the plane-fragility cost field, so an epsilon-narrower board shifts the
+    last column: measured as a 795-cell difference in the fragility field
+    (217841 GUI vs 217046 CLI) on splitflap_driver, which re-priced the A*
+    and left the two fronts with different GND copper -- on boards whose
+    copper, zones, pads and project rules were otherwise identical.
+
+    1e-6 mm IS KiCad's resolution, so rounding there discards only error.
+    Applied to the pcbnew path; the text parser's decimals are already exact
+    at this precision, which is what makes the two agree.
+    """
+    if not bounds:
+        return bounds
+    return tuple(round(v, 6) for v in bounds)
+
+
 def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                               keepout_layer: str = "User.2") -> PCBData:
     """Build PCBData directly from a pcbnew board object (no file I/O).
@@ -3597,7 +3623,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 except Exception:
                     continue
             if found_edge and bmax_x > bmin_x and bmax_y > bmin_y:
-                board_bounds = (bmin_x, bmin_y, bmax_x, bmax_y)
+                board_bounds = _nm_quantize_bounds(
+                    (bmin_x, bmin_y, bmax_x, bmax_y))
     except Exception:
         pass
     # Fallback to the whole-board edges bounding box (also handles boards
@@ -3607,9 +3634,10 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         try:
             bbox = board.GetBoardEdgesBoundingBox()
             if bbox.GetWidth() > 0 and bbox.GetHeight() > 0:
-                board_bounds = (to_mm(bbox.GetX()), to_mm(bbox.GetY()),
-                                to_mm(bbox.GetX() + bbox.GetWidth()),
-                                to_mm(bbox.GetY() + bbox.GetHeight()))
+                board_bounds = _nm_quantize_bounds(
+                    (to_mm(bbox.GetX()), to_mm(bbox.GetY()),
+                     to_mm(bbox.GetX() + bbox.GetWidth()),
+                     to_mm(bbox.GetY() + bbox.GetHeight())))
         except Exception:
             pass
 
@@ -4168,11 +4196,48 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
 
     # #424: exact-fill consumers must price the LIVE board's fill, not the
     # possibly-stale file at source_path (mid-plan, steps apply copper to the
-    # live board first). No save needed: an in-process ZONE_FILLER refill
-    # reads the truth straight off the board object at the moment a consumer
-    # asks for it.
+    # live board first).
+    #
+    # Via a TEMP SAVE, not an in-process refill of the board object. An
+    # in-process ZONE_FILLER sees the live COPPER but NOT the live
+    # CLEARANCES: pcbnew resolves zone clearance through project state fixed
+    # when the board was loaded, so a netclass the run itself lowered -- and
+    # the DRC write-back lowers Default to the routed floor on every step --
+    # is invisible to it. Measured directly: SetClearance(0.2 -> 0.15) leaves
+    # the fill bit-identical (6702 verts / 5288.29mm^2), and NET_SETTINGS.
+    # ClearAllCaches() does not change that; only a save+reload picks it up
+    # (6748 / 5332.01, exactly what the CLI's staged refill produces).
+    #
+    # That gap is not cosmetic. The fill feeds the plane-fragility cost
+    # field, so the GUI priced the A* off a pour filled at the PRE-routing
+    # clearance while the CLI used the routed one -- 795 divergent field
+    # cells on splitflap_driver, and different GND copper on boards whose
+    # copper, zones, pads and project rules were otherwise identical.
+    # Saving first costs a board write per fill (refill_islands memoizes on
+    # the board+project bytes) and removes BOTH staleness modes: the temp
+    # file carries the live copper AND re-resolves the live settings.
     def _live_fill(_board=board):
-        from kicad_exact_fill import live_fill_islands
+        import tempfile
+        from kicad_exact_fill import live_fill_islands, refill_islands
+        tmp = None
+        try:
+            import pcbnew as _pcbnew
+            fd, tmp = tempfile.mkstemp(suffix='.kicad_pcb')
+            os.close(fd)
+            _pcbnew.SaveBoard(tmp, _board)
+            islands = refill_islands(tmp, project_from=tmp)
+            if islands:
+                return islands
+        except Exception:
+            pass            # fall through to the in-process refill
+        finally:
+            if tmp:
+                for _p in (tmp, os.path.splitext(tmp)[0] + '.kicad_pro',
+                           os.path.splitext(tmp)[0] + '.kicad_prl'):
+                    try:
+                        os.unlink(_p)
+                    except OSError:
+                        pass
         return live_fill_islands(_board)
 
     return PCBData(

@@ -194,6 +194,23 @@ def try_terminal_restore(pcb_data: PCBData, config: GridRouteConfig,
               if not _copper_conflicts(pcb_data, config, own, [], [v])]
     if not kept_s and not kept_v:
         return None
+    # IDEMPOTENCE. The caller does NOT pop the registry on the 'stub' path
+    # (only 'full'/'full_open' go through restore_net, which pops), so a net
+    # that terminally fails again is re-offered the SAME saved payload and
+    # this would extend pcb_data with copper that is already on the board --
+    # measured on ulx3s as 4 stub restores of one net, and duplicate object
+    # entries in the BOARD ledger. A duplicate entry is never harmless: the
+    # write model holds the object once (so the ledger reports phantom
+    # board-only copper), obstacles get double-stamped (#208/#309), and
+    # gates that treat the list as a node set are defeated (#195).
+    # Same-net copper is exempt from _copper_conflicts via `own`, so the
+    # conflict check above cannot catch this -- identity is what matters.
+    _present_s = {id(s) for s in pcb_data.segments}
+    _present_v = {id(v) for v in pcb_data.vias}
+    kept_s = [s for s in kept_s if id(s) not in _present_s]
+    kept_v = [v for v in kept_v if id(v) not in _present_v]
+    if not kept_s and not kept_v:
+        return 'stub'   # already restored by an earlier terminal failure
     # Mirror rip_up_net's own cache maintenance (remove entry -> mutate
     # pcb_data -> recompute -> add entry): the restored stubs become map
     # obstacles for every later net this run, the cache entry keeps

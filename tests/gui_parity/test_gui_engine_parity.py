@@ -118,6 +118,48 @@ def _reexec_into_kicad():
     sys.exit(2)
 
 
+def stage_board(board, workdir):
+    """Copy the board into the workdir, ENSURING it has a sibling .kicad_pro.
+
+    A board with no project is the one input that makes these two fronts
+    legitimately disagree, and it is not a product bug -- it is the #441
+    hazard CLAUDE.md warns about, landing on a test fixture:
+
+      * the CLI has no project to read, so fix_project_for_output SEEDS a
+        minimal one and pins the fab floors into it (copper-to-edge 0.2);
+      * the GUI works on a live pcbnew board, which always carries KiCad's
+        own defaults (copper-to-edge 0.5), and its write-back only ever
+        LOOSENS, so it never tightens to the fab floor.
+
+    A 0.3mm difference in the copper-to-edge rule is not cosmetic: the plane
+    step insets the pour OUTLINE by it, which changes the exact fill, which
+    feeds the plane-fragility cost field, which re-prices the A* -- measured
+    on splitflap_driver as 12 cli-only / 8 gui-only GND segments and a
+    relocated via, with both boards still DRC- and connectivity-clean.
+    Give the same board a project and the copper sets are IDENTICAL.
+
+    Every real board (and every corpus board) carries a project, so grading
+    the project-less case measured the fixture, not the engines. pcbnew
+    authors the project itself -- KiCad's own defaults, nothing hardcoded
+    here.
+    """
+    dst = os.path.join(workdir, 'src_' + os.path.basename(board))
+    src_pro = os.path.splitext(board)[0] + '.kicad_pro'
+    if os.path.isfile(src_pro):
+        shutil.copy(board, dst)
+        shutil.copy(src_pro, os.path.splitext(dst)[0] + '.kicad_pro')
+        for ext in ('.kicad_dru',):
+            s = os.path.splitext(board)[0] + ext
+            if os.path.isfile(s):
+                shutil.copy(s, os.path.splitext(dst)[0] + ext)
+        return dst
+    import pcbnew
+    pcbnew.SaveBoard(dst, pcbnew.LoadBoard(board))
+    print(f"  staged {os.path.basename(board)} WITH a KiCad-authored "
+          f".kicad_pro (the source had none -- see stage_board)")
+    return dst
+
+
 def run_cli_leg(board, workdir):
     py = shutil.which('python3') or sys.executable
     steps = []
@@ -297,6 +339,7 @@ def main():
         shutil.rmtree(workdir)
     os.makedirs(workdir, exist_ok=True)
 
+    board = stage_board(board, workdir)
     cli_final = run_cli_leg(board, workdir)
     gui_final = run_gui_leg(board, workdir)
 

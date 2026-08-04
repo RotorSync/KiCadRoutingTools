@@ -23,6 +23,29 @@ from .fanout_gui import NetSelectionPanel
 from .gui_utils import StdoutRedirector
 
 
+def _live_board_edge_clearance():
+    """The LIVE board's declared copper-to-edge rule in mm, else 0.0.
+
+    The GUI counterpart of the CLI's
+    ``board_constraint(input_file, 'min_copper_edge_clearance')``: both
+    fronts must inset a pour by whatever the board declares, or they build
+    different pour outlines and every downstream consumer of the exact fill
+    (notably the plane-fragility cost field) diverges with them.
+
+    0.0 means "the board declares nothing", which the caller reads as
+    fall-back-to-PLANE_EDGE_CLEARANCE -- the same meaning board_constraint's
+    None carries on the CLI side.
+    """
+    try:
+        import pcbnew
+        board = pcbnew.GetBoard()
+        if board is None:
+            return 0.0
+        return (board.GetDesignSettings().m_CopperEdgeClearance or 0) / 1e6
+    except Exception:
+        return 0.0
+
+
 def parse_plane_mappings_result(value, copper_layers, net_names):
     """Parse a /recommend-plane-mappings RESULT line (issue #53).
 
@@ -972,18 +995,32 @@ class PlanesTab(wx.Panel):
                 debug_lines=config.get('debug_lines', False),
                 add_teardrops=config.get('add_teardrops', False),
                 verbose=config.get('verbose', False),
+                # Resolution ORDER must match route_planes.py main(): an
+                # explicit value wins, else the BOARD's own declared
+                # min_copper_edge_clearance, else PLANE_EDGE_CLEARANCE (0.5).
+                #
+                # The board lookup is the parity-critical middle term. The CLI
+                # reads it via board_constraint(input_file,
+                # 'min_copper_edge_clearance'); this front reads the same rule
+                # off the LIVE board. Skipping it made the GUI inset every pour
+                # at 0.5 while the CLI used whatever the board declared, and a
+                # different pour OUTLINE is not a cosmetic difference: it
+                # changes the exact fill, which feeds the plane-fragility cost
+                # field, which re-prices the A* -- measured as 12/8 divergent
+                # GND segments and a relocated via on splitflap_driver.
+                # (It went unnoticed because that fixture declares no rule and
+                # KiCad's default happens to BE 0.5.)
+                #
                 # PLANE_EDGE_CLEARANCE (0.5), NOT the generic BOARD_EDGE_CLEARANCE
-                # (0.0): route_planes.py defaults board_edge_clearance to
-                # defaults.PLANE_EDGE_CLEARANCE, keeping plane copper 0.5mm off
-                # the board edge. Using 0.0 let GUI plane pours run to the edge
-                # -- a CLI/GUI parity gap and a fab concern (#362).
+                # (0.0), is the final fallback: using 0.0 let GUI plane pours run
+                # to the edge -- a parity gap and a fab concern (#362).
                 # `or` (not a plain default): the shared Basic-tab
                 # board_edge_clearance is a ROUTING value that defaults to 0.0
                 # and gets merged into the plane config, overriding a plain
-                # default. Planes need PLANE_EDGE_CLEARANCE (0.5); fall back to it
-                # whenever the shared value is 0/unset, but honor an explicitly
-                # set positive edge clearance. (#362)
-                board_edge_clearance=(config.get('board_edge_clearance') or defaults.PLANE_EDGE_CLEARANCE),
+                # default. (#362)
+                board_edge_clearance=(config.get('board_edge_clearance')
+                                      or _live_board_edge_clearance()
+                                      or defaults.PLANE_EDGE_CLEARANCE),
                 all_layers=all_layers,
                 dry_run=True,  # Don't write to file, apply via pcbnew
                 # Re-route a ripped wide power net at its proper width.
