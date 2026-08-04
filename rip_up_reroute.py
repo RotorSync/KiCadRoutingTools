@@ -455,6 +455,10 @@ def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
                 refused_sink.add(net_id)
             return
         add_route_to_pcb_data(pcb_data, saved_result, trace_event='restore')
+        from plane_fragility import fragility_on_copper_change  # #466
+        fragility_on_copper_change(config, pcb_data,
+                                   saved_result.get('new_segments'),
+                                   saved_result.get('new_vias'))
         owner = saved_result.get('_owner_result')
         if owner is not None:
             # Re-grow the owning result so the restored copper ships with it.
@@ -495,6 +499,15 @@ def restore_net(net_id: int, saved_result: dict, ripped_net_ids: List[int],
     # Add back to pcb_data (tag as 'restore' for the route trace, #482)
     add_route_to_pcb_data(pcb_data, saved_result, debug_lines=config.debug_lines,
                           trace_event='restore')
+    # #466: a restore puts copper BACK, so the fragility field must go back
+    # up with it. The rip lowered the costs around the vacated corridor; if
+    # only the rip refreshes and the restore does not, the field drifts
+    # permanently optimistic -- the wrong direction for a guard whose whole
+    # job is to make plane-severing paths expensive.
+    from plane_fragility import fragility_on_copper_change
+    fragility_on_copper_change(config, pcb_data,
+                               saved_result.get('new_segments'),
+                               saved_result.get('new_vias'))
 
     # Add back to results list if it was there (and not already present).
     # #369 A2: restore the per-LEG dicts for a multi-leg multipoint pair --

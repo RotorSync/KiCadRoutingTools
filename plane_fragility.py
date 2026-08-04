@@ -116,8 +116,16 @@ def _erode_depth(mask: np.ndarray, depth: int) -> np.ndarray:
         cur = inner
         if not cur.any():
             break
-    else:
-        dist[cur] = depth  # deeper than the ramp: emitted as ~0-cost anyway
+    # Cells DEEPER than the ramp keep dist = 0 and are therefore NOT emitted
+    # (`emitted = mask & (dist > 0)`), i.e. the pour interior is free -- the
+    # field prices only the fragile EDGE band. Do not "complete" this with
+    # `dist[cur] = depth`: that emits the whole interior at
+    # frag = 1/depth, which at the 2.0mm default and a 0.1mm grid is
+    # 0.05 * 20000 = 1000 units/cell -- exactly 1.00x a normal move, so
+    # crossing any wide pour would cost DOUBLE. It also silently made
+    # KICAD_PLANE_FRAGILITY_DYNAMIC=0 stop being a true revert, since the
+    # static path shares this helper (measured: identical to the pre-#466
+    # static implementation, which had no such branch).
     return dist
 
 

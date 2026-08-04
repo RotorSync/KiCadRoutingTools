@@ -471,6 +471,10 @@ def run_reroute_loop(
                                 successful += 1
                                 total_iterations += retry_result['iterations']
                                 add_route_to_pcb_data(pcb_data, retry_result, debug_lines=config.debug_lines)
+                                from plane_fragility import fragility_on_copper_change  # #466
+                                fragility_on_copper_change(config, pcb_data,
+                                                           retry_result.get('new_segments'),
+                                                           retry_result.get('new_vias'))
                                 if ripped_net_id in remaining_net_ids:
                                     remaining_net_ids.remove(ripped_net_id)
                                 routed_net_ids.append(ripped_net_id)
@@ -885,6 +889,10 @@ def run_reroute_loop(
                                 rerouted_pairs.add(ripped_pair_name)
                                 apply_polarity_swap(pcb_data, retry_result, pad_swaps, ripped_pair_name, polarity_swapped_pairs)
                                 add_route_to_pcb_data(pcb_data, retry_result, debug_lines=config.debug_lines)
+                                from plane_fragility import fragility_on_copper_change  # #466
+                                fragility_on_copper_change(config, pcb_data,
+                                                           retry_result.get('new_segments'),
+                                                           retry_result.get('new_vias'))
                                 if ripped_pair.p_net_id in remaining_net_ids:
                                     remaining_net_ids.remove(ripped_pair.p_net_id)
                                 if ripped_pair.n_net_id in remaining_net_ids:
@@ -996,6 +1004,10 @@ def run_reroute_loop(
 
                             apply_polarity_swap(pcb_data, swap_result, pad_swaps, ripped_pair_name, polarity_swapped_pairs)
                             add_route_to_pcb_data(pcb_data, swap_result, debug_lines=config.debug_lines)
+                            from plane_fragility import fragility_on_copper_change  # #466
+                            fragility_on_copper_change(config, pcb_data,
+                                                       swap_result.get('new_segments'),
+                                                       swap_result.get('new_vias'))
                             if ripped_pair.p_net_id in remaining_net_ids:
                                 remaining_net_ids.remove(ripped_pair.p_net_id)
                             if ripped_pair.n_net_id in remaining_net_ids:

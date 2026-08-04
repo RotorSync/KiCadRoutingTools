@@ -221,6 +221,10 @@ def _tap_relocation_rescue(pcb_data, net_id, config, state, results,
             results.append(result)
             add_route_to_pcb_data(pcb_data, result,
                                   debug_lines=config.debug_lines)
+            from plane_fragility import fragility_on_copper_change  # #466
+            fragility_on_copper_change(config, pcb_data,
+                                       result.get('new_segments'),
+                                       result.get('new_vias'))
             if net_id in remaining_net_ids:
                 remaining_net_ids.remove(net_id)
             routed_net_ids.append(net_id)
@@ -372,6 +376,10 @@ def _stub_swap_rescue(pcb_data, net_id, config, state, results,
                 results.append(result)
                 add_route_to_pcb_data(pcb_data, result,
                                       debug_lines=config.debug_lines)
+                from plane_fragility import fragility_on_copper_change  # #466
+                fragility_on_copper_change(config, pcb_data,
+                                           result.get('new_segments'),
+                                           result.get('new_vias'))
                 if net_id in remaining_net_ids:
                     remaining_net_ids.remove(net_id)
                 routed_net_ids.append(net_id)
@@ -785,6 +793,10 @@ def route_single_ended_nets(
             total_iterations += result['iterations']
             # Record success (inline version to avoid circular import)
             add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
+            from plane_fragility import fragility_on_copper_change  # #466
+            fragility_on_copper_change(config, pcb_data,
+                                       result.get('new_segments'),
+                                       result.get('new_vias'))
             if net_id in remaining_net_ids:
                 remaining_net_ids.remove(net_id)
             routed_net_ids.append(net_id)
@@ -1222,6 +1234,10 @@ def route_single_ended_nets(
                             successful += 1
                             total_iterations += retry_result['iterations']
                             add_route_to_pcb_data(pcb_data, retry_result, debug_lines=config.debug_lines)
+                            from plane_fragility import fragility_on_copper_change  # #466
+                            fragility_on_copper_change(config, pcb_data,
+                                                       retry_result.get('new_segments'),
+                                                       retry_result.get('new_vias'))
                             if net_id in remaining_net_ids:
                                 remaining_net_ids.remove(net_id)
                             routed_net_ids.append(net_id)
@@ -1300,6 +1316,10 @@ def route_single_ended_nets(
                                         results.append(_pr)
                                         add_route_to_pcb_data(pcb_data, _pr,
                                                               debug_lines=config.debug_lines)
+                                        from plane_fragility import fragility_on_copper_change  # #466
+                                        fragility_on_copper_change(config, pcb_data,
+                                                                   _pr.get('new_segments'),
+                                                                   _pr.get('new_vias'))
                                         if _rid in remaining_net_ids:
                                             remaining_net_ids.remove(_rid)
                                         routed_net_ids.append(_rid)

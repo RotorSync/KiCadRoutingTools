@@ -548,6 +548,7 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
                                    track_width, via_size, via_drill,
                                    grid_step, track_via_clearance=None,
                                    hole_to_hole_clearance=None,
+                                   layer_clearances=None,
                                    progress_callback=None):
     """Staged-save kicad-oracle recheck against the LIVE pcbnew board.
 
@@ -588,6 +589,17 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
             clearance=clearance, track_width=track_width,
             via_size=via_size, via_drill=via_drill, grid_step=grid_step,
             board_edge_clearance=_edge_mm)
+        # #498: the temp save has no sibling .kicad_dru, so the oracle's own
+        # auto-read finds nothing -- install the map explicitly (caller's
+        # resolved map when given, else read the LIVE board's project file).
+        try:
+            from kicad_dru import install_layer_clearances
+            install_layer_clearances(
+                ocfg, layer_clearances,
+                (board.GetFileName() or None) if layer_clearances is None
+                else None, None)
+        except Exception:
+            pass
         with tempfile.NamedTemporaryFile(suffix='.kicad_pcb',
                                          delete=False) as f:
             tmp = f.name

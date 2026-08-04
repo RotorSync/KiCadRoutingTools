@@ -3469,7 +3469,8 @@ class RoutingDialog(wx.Dialog):
                     via_drill=_pfo.get('via_drill'),
                     grid_step=_pfo.get('grid_step'),
                     hole_to_hole_clearance=_pfo.get(
-                        'hole_to_hole_clearance'))
+                        'hole_to_hole_clearance'),
+                    layer_clearances=_pfo.get('layer_clearances'))
                 if _orc is not None:
                     board.BuildConnectivity()
                     _rf2 = refill_all_zones(board)

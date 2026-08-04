@@ -4248,12 +4248,17 @@ def _route_multipoint_taps_impl(
         _p3_island_cells[_cid] = {(p[0], p[1], p[2]): (p[3], p[4])
                                   for p in _pts}
     # POUR-LAUNCH ladder v3 (#544/#562): fill-region launch cells, keyed by
-    # the SAME pad_components id space the lookups below use. Sources union
-    # across routed_components as the tree grows (#545 F1), so a joined
-    # region's fill becomes launchable for every later edge -- the
-    # union-on-completion falls out of the existing routed-tree semantics.
+    # the SAME component-id space the lookups below use -- which in Phase 3
+    # is the FRESH labeling (_p3_comps), NOT Phase 1's pad_components.
+    # Component ids are union-find roots over graph point ids, so committing
+    # Phase-1 copper rewrites the whole id space; keying these cells with the
+    # stale map made them either invisible here (every lookup below goes
+    # through _p3_comps) or, on a numeric collision, attached to the WRONG
+    # island -- the df55059 class, one function over. Sources union across
+    # routed_components as the tree grows (#545 F1), so a joined region's
+    # fill becomes launchable for every later edge.
     _pl_cells = _pour_launch_region_cells(
-        pcb_data, net_id, pad_info, pad_components, layer_names, coord,
+        pcb_data, net_id, pad_info, _p3_comps, layer_names, coord,
         _p3_island_cells)
     _pl_added = 0
     for _cid, _cmap in _pl_cells.items():

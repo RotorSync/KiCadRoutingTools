@@ -725,6 +725,7 @@ def repair_planes(
     progress_callback=None,
     cancel_check=None,
     net_clearances: Optional[dict] = None,
+    layer_clearances: Optional[dict] = None,
     clamp_netclasses: bool = True,
     clearance_ceiling: Optional[float] = None,
     add_teardrops: bool = False,
@@ -876,8 +877,15 @@ def repair_planes(
     )
     # #498: repair copper (region joins, pad taps, reconnects) must obey the
     # board's per-layer .kicad_dru clearance rules like every routed copper.
+    # An explicit `layer_clearances` wins and stops the auto-read: route.py's
+    # in-run plane finalize (#562) MUST pass its own resolved map, because it
+    # calls this engine on the file it is still writing -- that output's
+    # .kicad_dru sibling does not exist until fix_project_for_output copies
+    # it after batch_route returns, so an auto-read here would find NOTHING
+    # and tap/join copper would route blind to the board's layer rules. Same
+    # reasoning as the reconciliation sub-run's forwarded map.
     from kicad_dru import install_layer_clearances
-    install_layer_clearances(config, None, input_file, None)
+    install_layer_clearances(config, layer_clearances, input_file, pcb_data)
 
     # Cross-class clearance (#434): the repair step's own copper (region joins,
     # pad taps) and its ripped-blocker reconnects were priced at the uniform

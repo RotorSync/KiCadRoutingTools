@@ -2868,6 +2868,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         hole_to_hole_clearance=config.hole_to_hole_clearance,
                         routing_layers=config.layers,
                         net_clearances=net_clearances,
+                        layer_clearances=dict(config.layer_clearances or {}),
                         pcb_data=pcb_data, return_results=True,
                         progress_callback=_pcb9)
                     _cursid9 = {id(s) for s in pcb_data.segments}
@@ -2923,6 +2924,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         hole_to_hole_clearance=config.hole_to_hole_clearance,
                         routing_layers=config.layers,
                         net_clearances=net_clearances,
+                        # #498: forward THIS run's resolved per-layer map --
+                        # the output file's .kicad_dru sibling does not exist
+                        # yet, so the engine's own auto-read would find none
+                        # and tap/join copper would route blind to the rules.
+                        layer_clearances=dict(config.layer_clearances or {}),
                         pcb_data=_live9,
                         progress_callback=_pcb9)
                 print(f"  [finalize timing] engine leg: "
@@ -2957,6 +2963,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     'via_drill': config.via_drill,
                     'grid_step': config.grid_step,
                     'hole_to_hole_clearance': config.hole_to_hole_clearance,
+                    # #498: the applier's temp save has no .kicad_dru sibling
+                    'layer_clearances': dict(config.layer_clearances or {}),
                 }
                 # Hands-off for the reconcile comes from the FILL-AWARE
                 # checker instead of the oracle verdict: zone nets the model
