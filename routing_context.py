@@ -555,6 +555,19 @@ def prepare_obstacles_inplace(
     if same_net_via_cells:
         same_net_via_arr = np.array(same_net_via_cells, dtype=np.int32)
         working_obstacles.add_blocked_vias_batch(same_net_via_arr)
+        # #568 MIRROR: these are same-net via-via and pad-drill hole-to-hole
+        # keep-outs (#70/#154). A rung-1 search consults ONLY the small map
+        # for dynamic copper, so without this mirror it could drop a small
+        # via inside its own net's h2h ring -- and hole-to-hole is
+        # net-agnostic at the fab, so that is a REAL drill violation, not a
+        # bookkeeping leak. The emission backstop cannot catch it either: it
+        # checks foreign copper only. Mirrored at FULL size (conservative).
+        try:
+            from obstacle_map import _rung_small_armed
+            if _rung_small_armed():
+                working_obstacles.add_blocked_vias_small_batch(same_net_via_arr)
+        except (AttributeError, ImportError):
+            pass
     else:
         same_net_via_arr = np.empty((0, 2), dtype=np.int32)
 
@@ -599,6 +612,13 @@ def restore_obstacles_inplace(
     # Remove same-net via clearance cells
     if len(same_net_via_cells) > 0:
         working_obstacles.remove_blocked_vias_batch(same_net_via_cells)
+        try:    # #568: mirror of the add-side small stamp (refcount balance)
+            from obstacle_map import _rung_small_armed
+            if _rung_small_armed():
+                working_obstacles.remove_blocked_vias_small_batch(
+                    same_net_via_cells)
+        except (AttributeError, ImportError):
+            pass
 
     # Re-add the net-tie corridor stamps lifted by prepare (see there).
     _lifted = _TIE_LIFTED.pop((id(working_obstacles), net_id), None)

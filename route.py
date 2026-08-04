@@ -1271,6 +1271,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # GUI inherits them with no wiring (see kicad_dru.install_layer_clearances).
     from kicad_dru import install_layer_clearances
     install_layer_clearances(config, layer_clearances, input_file, pcb_data)
+    # #568: arming is run-scoped and the flag is module-global, so reset it
+    # per call -- otherwise one visualize run would disarm rung-1 legality for
+    # every later run in the same process (the GUI's whole session).
+    try:
+        from obstacle_cache import set_rung_unsafe as _rearm
+        _rearm(bool(getattr(pcb_data, '_via_rung_unsafe', False)))
+    except Exception:
+        pass
     # Carry the RESOLVED map into the end-of-run reconciliation kwargs, exactly
     # like board_edge_clearance above: the reconciliation self-invocation reads
     # the OUTPUT file, whose sibling .kicad_dru does not exist yet (main()'s
@@ -1288,7 +1296,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # #568: this branch builds an UNFROZEN base -- rung-1 via legality
         # would under-block base copper if caches small-stamped. Disarm the
         # dual stamping for this run (see obstacle_cache._small_via_pair).
+        # set_rung_unsafe carries the same decision to the RAW map mirrors,
+        # which see only (obstacles, config) and cannot read this flag.
         pcb_data._via_rung_unsafe = True
+        from obstacle_cache import set_rung_unsafe as _set_rung_unsafe
+        _set_rung_unsafe(True)
     else:
         base_obstacles = build_base_obstacle_map(
             pcb_data, config, base_map_exclusions,

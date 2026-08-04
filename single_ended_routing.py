@@ -4123,7 +4123,14 @@ def route_multipoint_taps(
             global_offset, global_total, global_failed, ring_cells)
     finally:
         if ring_cells:
-            obstacles.remove_blocked_vias_batch(np.array(ring_cells, dtype=np.int32))
+            _rc = np.array(ring_cells, dtype=np.int32)
+            obstacles.remove_blocked_vias_batch(_rc)
+            try:    # #568: mirror of the ring's small stamp (refcount balance)
+                from obstacle_map import _rung_small_armed as _rsa
+                if _rsa() and hasattr(obstacles, 'remove_blocked_vias_small_batch'):
+                    obstacles.remove_blocked_vias_small_batch(_rc)
+            except (AttributeError, ImportError):
+                pass
 
 
 def _route_multipoint_taps_impl(
@@ -4195,6 +4202,12 @@ def _route_multipoint_taps_impl(
     # the via's own cell so reuse stays open.
     _vv_radius = (config.via_size + config.clearance) * coord.inv_step
 
+    try:        # #568: armed once per tap run (see the ring mirror below)
+        from obstacle_map import _rung_small_armed as _rsa
+        _small_rung_on = _rsa() and hasattr(obstacles, 'add_blocked_via_small')
+    except ImportError:
+        _small_rung_on = False
+
     def _register_inprogress_via(v):
         vgx, vgy = coord.to_grid(v.x, v.y)
         obstacles.add_free_via(vgx, vgy)
@@ -4212,6 +4225,13 @@ def _route_multipoint_taps_impl(
                 d = ex * ex + ey * ey
                 if 0 < d <= radius_sq:
                     obstacles.add_blocked_via(vgx + ex, vgy + ey)
+                    # #568 MIRROR: a rung-1 tap search trusts ONLY the small
+                    # map for dynamic copper, so without this it could drop a
+                    # small via inside the ring of a via this very net just
+                    # placed -- a real same-net hole-to-hole violation. The
+                    # wrapper's finally removes both maps' cells (#309).
+                    if _small_rung_on:
+                        obstacles.add_blocked_via_small(vgx + ex, vgy + ey)
                     # Ref-counted raw add: the wrapper removes these on exit so
                     # they can't leak into a persistent working map (#309).
                     if _ring_cells is not None:

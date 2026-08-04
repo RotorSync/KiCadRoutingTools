@@ -265,13 +265,34 @@ class NetObstacleData:
     blocked_vias_small: np.ndarray = field(default_factory=lambda: np.empty((0, 2), dtype=np.int32))
 
 
+# #568 run-scoped interlock. `_via_rung_unsafe` lives on pcb_data, but the
+# RAW map mirrors in obstacle_map get only (obstacles, config) -- they cannot
+# see it, so they used to arm the small map on the env var alone, defeating
+# the interlock exactly where it matters (an unfrozen base + raw-only small
+# stamps = rung-1 searches blind to base copper). Arming is a property of the
+# RUN, so both sides consult this one flag.
+_RUNG_UNSAFE = False
+
+
+def set_rung_unsafe(flag: bool) -> None:
+    """Disarm (or re-arm) #568 rung-1 legality for this run. Called by the
+    engine when it builds a base the rung-1 map cannot be trusted against."""
+    global _RUNG_UNSAFE
+    _RUNG_UNSAFE = bool(flag)
+
+
+def rung_small_armed() -> bool:
+    """True when rung-1 small-via legality may be stamped/trusted this run."""
+    return (os.environ.get('KICAD_VIA_RUNG', '2') == '2') and not _RUNG_UNSAFE
+
+
 def _small_via_pair(config, pcb_data):
     """#568: the fab-ladder (diameter, drill) the rung-1 legality map is
     stamped at -- the FIRST ladder entry smaller than the configured via,
     the SAME selection rule as the escalation retry (_via_rung_retry), so
     map and retry agree by construction. None when rust mode is off
     (KICAD_VIA_RUNG != 2) or no smaller rung exists."""
-    if os.environ.get('KICAD_VIA_RUNG', '2') != '2':
+    if not rung_small_armed():
         return None
     # Safety interlock: rung-1 legality is only sound when BASE copper blocks
     # every rung (the frozen static bitmap). A flow that builds an UNFROZEN
@@ -280,6 +301,7 @@ def _small_via_pair(config, pcb_data):
     # branch) mark the board; stamping then never arms, small stays empty,
     # and rung-1 queries fall back to full-size legality (safe everywhere).
     if getattr(pcb_data, '_via_rung_unsafe', False):
+        set_rung_unsafe(True)   # make the raw mirrors honor it too
         return None
     try:
         from fab_tiers import fab_floor_ladder

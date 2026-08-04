@@ -1870,9 +1870,16 @@ def _rung_small_armed():
     not be invisible to it -- a rung-1 search would treat their surroundings
     as small-legal. Raw adds mirror their FULL-size via cells into the small
     map (conservative over-blocking near raw copper; never wrong), and the
-    remove twins mirror the same cells so refcounts balance per rung."""
-    import os as _os
-    return _os.environ.get('KICAD_VIA_RUNG', '2') == '2'
+    remove twins mirror the same cells so refcounts balance per rung.
+
+    Delegates to obstacle_cache.rung_small_armed() so the raw mirrors honor
+    the SAME interlock the cache path does: arming on the env var alone let a
+    run with an unfrozen base (the vis branch, which marks itself unsafe)
+    stamp a small map containing ONLY raw copper, so rung-1 searches saw
+    neither the base nor the caches -- under-blocking, the exact failure the
+    interlock exists to prevent."""
+    from obstacle_cache import rung_small_armed
+    return rung_small_armed()
 
 
 def _via_raw_block_cells(via, config, coord, num_layers, extra_clearance,
