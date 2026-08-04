@@ -3340,9 +3340,27 @@ def create_plane(
         # KICAD_PLANE_NO_TAPS=0 is the kill switch restoring pour-time taps.
         import os as _os0
         if _os0.environ.get('KICAD_PLANE_NO_TAPS', '1') == '1':
-            _skip = [pd for pd in target_pads if pd['type'] == 'via_needed']
+            # EXPOSED/THERMAL PADS ARE EXEMPT (#487). A thermal via ARRAY is
+            # a pour/fab feature, not routing: it stamps a lattice of vias
+            # under a big exposed pad and draws no traces, and NOTHING else
+            # in the chain places one -- the route step's pour-launch welds
+            # and the finalize's tap escalation both give a pad a SINGLE
+            # via. Skipping them here silently turned off a default-ON
+            # feature (--thermal-vias) whose checkbox and help text still
+            # advertise it. So bare-pour mode defers ordinary tap pads only.
+            _therm = [pd for pd in target_pads
+                      if pd['type'] == 'via_needed' and thermal_vias
+                      and is_thermal_pad(pd['pad'], pcb_data)]
+            for _tp in _therm:
+                _tp['thermal_only'] = True   # array-or-defer, never a trace
+            _skip = [pd for pd in target_pads
+                     if pd['type'] == 'via_needed' and pd not in _therm]
             target_pads = [pd for pd in target_pads
-                           if pd['type'] != 'via_needed']
+                           if pd['type'] != 'via_needed'] + _therm
+            if _therm:
+                print(f"  NO-TAPS mode: {len(_therm)} exposed/thermal pad(s) "
+                      f"still get their via ARRAY (#487); ordinary tap pads "
+                      f"deferred to the route step")
             if _skip:
                 # Every skipped pad still seeds the split-layer Voronoi so its
                 # net's cell reserves the territory the signal pass will tap
@@ -3621,6 +3639,22 @@ def create_plane(
                     vias_placed += _placed
                     print(f"thermal via array: {_placed} via(s) over "
                           f"{pad.size_x:.1f}x{pad.size_y:.1f}mm pad")
+                    processed_pad_ids.add(current_pad_key)
+                    continue
+                if pad_info.get('thermal_only'):
+                    # Bare-pour mode (#562) exempted this pad ONLY so its
+                    # thermal ARRAY could be stamped. The array did not fit,
+                    # and falling through would place a single via and ROUTE
+                    # A TRACE to it -- exactly the routing bare-pour mode
+                    # exists to avoid. Defer it like every other tap pad;
+                    # the route step's pour-launch will connect it.
+                    _ds = getattr(pcb_data, '_deferred_bga_seeds', None)
+                    if _ds is None:
+                        _ds = pcb_data._deferred_bga_seeds = {}
+                    _ds.setdefault(net_id, []).append(
+                        (pad.global_x, pad.global_y))
+                    print("thermal array did not fit -- deferred to the "
+                          "route step (no trace drawn)")
                     processed_pad_ids.add(current_pad_key)
                     continue
                 # nothing fit: fall through to the normal single-via path
