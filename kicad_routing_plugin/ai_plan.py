@@ -138,19 +138,32 @@ def _append_final_plane_verify(steps):
     a route step, append ONE final route step with nets ["*"] -- on an intact
     board it skips every connected net and the finalize verifies the planes
     (fast no-op); when a late step did pinch a pour, the finalize heals it."""
-    plane_actions = {"route_planes", "repair_planes"}
+    # `repair_planes` is NOT a plane step any more -- the executor skips it
+    # as a no-op (#562). Counting it as one re-opened the very hole this
+    # guard exists to close: a LEGACY plan ending in `route -> repair_planes`
+    # set last_plane to that final index, so tail was empty, the guard
+    # returned early, and the trailing step did nothing -- leaving the plan
+    # with NO plane verify at all, where pre-#562 that step WAS the verify.
+    plane_actions = {"route_planes"}
     copper_actions = {"route", "route_diff", "fanout", "optimize_caps"}
+    inert_actions = {"repair_planes"}     # legacy, skipped at run time
     last_plane = None
     for i, s in enumerate(steps):
         if s["action"] in plane_actions:
             last_plane = i
     if last_plane is None:
         return
-    tail = steps[last_plane + 1:]
-    if not any(s["action"] in copper_actions for s in tail):
-        return
+    tail = [s for s in steps[last_plane + 1:]
+            if s["action"] not in inert_actions]
+    # Since #562 a pour ALONE connects nothing: the plane step places no
+    # taps, so plane pads are welded by the route step's pour-launch and
+    # completed by its finalize. So the rule is not merely "a route must run
+    # after a late copper step" -- it is "a route MUST run after the last
+    # pour", full stop. A legacy plan of pour -> repair_planes (where the
+    # repair used to be both the weld and the verify) otherwise pours and
+    # then does nothing at all.
     if tail and tail[-1]["action"] == "route":
-        return  # its finalize already verifies the planes
+        return  # its finalize welds and verifies the planes
     # Reuse the last route step's params so the verify routes at the chain's
     # own geometry (clearance/track/via/power widths).
     src_params = {}
@@ -159,6 +172,7 @@ def _append_final_plane_verify(steps):
             src_params = dict(s.get("params") or {})
             break
     steps.append({"action": "route", "nets": ["*"], "params": src_params})
+    return True
 
 
 def step_label(index, step):
