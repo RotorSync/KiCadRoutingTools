@@ -1,0 +1,183 @@
+# #568: via size as a query-time parameter (per-rung via legality) — UNAPPLIED PATCH
+#
+# Rust core (this patch, NOT yet compiled — verify with build_router.py after apply):
+#   obstacle_map.rs: blocked_vias_small refcount map (subset semantics; EMPTY =
+#     unpopulated = rung>=1 queries fall back to blocked_vias, so single-rung
+#     callers are byte-identical); add/remove single+batch mirrors; clone/init/
+#     freeze covered (static bitmap blocks all rungs — conservative);
+#     is_via_blocked_rung(gx, gy, rung).
+#   router.rs: RouterOptions.via_rung (default 0 = baseline), consulted at the
+#     via-transition test. New methods sit in existing #[pymethods] impls.
+#   Cargo.toml: 0.19.3 -> 0.20.0 (rides the already-pending 0.20.0 release).
+#
+# Python integration REQUIRED before this does anything (not in this patch —
+# the worktree's Python is frozen under a live A/B):
+#   1. obstacle_cache: NetObstacleData.blocked_vias_small; builders compute the
+#      via-block cell set a SECOND time at the small-rung reserve
+#      (fab_floor_ladder advanced dia/2 + clearance + track/2) and
+#      add/remove_net_obstacles_from_cache stamp/remove both maps.
+#   2. run_obstacle_audit: extend get_stats consumers + hard-set labels with
+#      blocked_vias_small (the leak audit must cover every rung map).
+#   3. _via_rung_retry: replace the free-via overlay + sampling with
+#      router.opts.via_rung = 1 for the retry (reset after), and register the
+#      small (dia, drill) in pcb_data._unblock_via_sizes for each via cell of
+#      the returned path so emission ships the small rung (#339 re-validates).
+#   4. README.md version history: 0.20.0 — per-rung via legality (#568).
+#   5. Remove the overlay's h2h site-validator (the rung map + stamps make it
+#      redundant) once both maps are stamped from the same geometry.
+#
+diff -ruN a/rust_router/Cargo.toml b/rust_router/Cargo.toml
+--- a/rust_router/Cargo.toml	2026-08-04 06:52:28
++++ b/rust_router/Cargo.toml	2026-08-04 06:52:28
+@@ -1,6 +1,6 @@
+ [package]
+ name = "grid_router"
+-version = "0.19.3"
++version = "0.20.0"
+ edition = "2021"
+ # Versioning convention: this Rust crate's major.minor is the base for the
+ # whole project. The top-level /VERSION file mirrors major.minor and bumps
+diff -ruN a/rust_router/src/obstacle_map.rs b/rust_router/src/obstacle_map.rs
+--- a/rust_router/src/obstacle_map.rs	2026-08-04 06:52:28
++++ b/rust_router/src/obstacle_map.rs	2026-08-04 06:52:28
+@@ -219,6 +219,12 @@
+     static_via_bitmap: BlockedBitmap,
+     /// Blocked via positions: packed (gx, gy) -> ref count
+     pub blocked_vias: FxHashMap<u64, u16>,
++    /// #568: via blocking at the SMALL fab rung (advanced via, e.g. 0.25/0.15).
++    /// Cells here are a SUBSET of what `blocked_vias` would hold at the small
++    /// reserve; populated only by callers that stamp both rungs. EMPTY means
++    /// "not populated" and every rung>=1 query falls back to `blocked_vias`
++    /// (conservative), so existing single-rung callers behave identically.
++    pub blocked_vias_small: FxHashMap<u64, u16>,
+     /// Stub proximity costs: (gx, gy) -> cost
+     pub stub_proximity: FxHashMap<u64, i32>,
+     /// Layer-specific proximity costs (for track proximity on same layer)
+@@ -270,6 +276,7 @@
+             static_blocked_bitmap: BlockedBitmap::new(num_layers),
+             static_via_bitmap: BlockedBitmap::new(1),
+             blocked_vias: FxHashMap::default(),
++            blocked_vias_small: FxHashMap::default(),
+             stub_proximity: FxHashMap::default(),
+             layer_proximity_costs: (0..num_layers).map(|_| FxHashMap::default()).collect(),
+             num_layers,
+@@ -327,6 +334,7 @@
+             static_blocked_bitmap: self.static_blocked_bitmap.clone(),
+             static_via_bitmap: self.static_via_bitmap.clone(),
+             blocked_vias: self.blocked_vias.clone(),
++            blocked_vias_small: self.blocked_vias_small.clone(),
+             stub_proximity: self.stub_proximity.clone(),
+             layer_proximity_costs: self.layer_proximity_costs.clone(),
+             num_layers: self.num_layers,
+@@ -354,6 +362,7 @@
+             static_blocked_bitmap: self.static_blocked_bitmap.clone(),
+             static_via_bitmap: self.static_via_bitmap.clone(),
+             blocked_vias: self.blocked_vias.clone(),
++            blocked_vias_small: self.blocked_vias_small.clone(),
+             stub_proximity: self.stub_proximity.clone(),
+             layer_proximity_costs: self.layer_proximity_costs.clone(),
+             num_layers: self.num_layers,
+@@ -413,6 +422,11 @@
+             let (gx, gy) = unpack_xy(key);
+             self.static_via_bitmap.set(gx, gy, 0);
+         }
++        // #568: the static via bitmap is consulted by EVERY rung, so freezing
++        // the full-size cells over-blocks the small rung exactly as the
++        // pre-rung code did -- conservative, never wrong. The small map's own
++        // (subset) cells are redundant once static; drop them.
++        self.blocked_vias_small.clear();
+     }
+ 
+     /// #422 diagnostic: (distinct_cells, cells_with_refcount>=2, max_refcount,
+@@ -506,6 +520,60 @@
+     pub fn add_blocked_via(&mut self, gx: i32, gy: i32) {
+         let key = pack_xy(gx, gy);
+         *self.blocked_vias.entry(key).or_insert(0) += 1;
++    }
++
++    /// #568: add/remove a SMALL-rung blocked via (refcounted, mirrors
++    /// blocked_vias). Callers stamping a net's via blocking at both rungs
++    /// use the same cell-set discipline as the full-size map so the
++    /// obstacle audit's working==base+caches invariant holds per rung.
++    pub fn add_blocked_via_small(&mut self, gx: i32, gy: i32) {
++        let key = pack_xy(gx, gy);
++        *self.blocked_vias_small.entry(key).or_insert(0) += 1;
++    }
++
++    pub fn remove_blocked_via_small(&mut self, gx: i32, gy: i32) {
++        let key = pack_xy(gx, gy);
++        if let Some(count) = self.blocked_vias_small.get_mut(&key) {
++            if *count > 1 { *count -= 1; } else { self.blocked_vias_small.remove(&key); }
++        }
++    }
++
++    /// Batch forms (shape: N x 2, columns gx, gy).
++    pub fn add_blocked_vias_small_batch(&mut self, vias: PyReadonlyArray2<i32>) {
++        let arr = vias.as_array();
++        for row in arr.rows() {
++            let key = pack_xy(row[0], row[1]);
++            *self.blocked_vias_small.entry(key).or_insert(0) += 1;
++        }
++    }
++
++    pub fn remove_blocked_vias_small_batch(&mut self, vias: PyReadonlyArray2<i32>) {
++        let arr = vias.as_array();
++        for row in arr.rows() {
++            let key = pack_xy(row[0], row[1]);
++            if let Some(count) = self.blocked_vias_small.get_mut(&key) {
++                if *count > 1 { *count -= 1; } else { self.blocked_vias_small.remove(&key); }
++            }
++        }
++    }
++
++    /// #568: rung-aware via legality. rung 0 = the configured via (exactly
++    /// is_via_blocked); rung >= 1 = the small fab via. An UNPOPULATED small
++    /// map falls back to rung 0 -- a small via is never legal where the
++    /// caller hasn't proven it.
++    pub fn is_via_blocked_rung(&self, gx: i32, gy: i32, rung: usize) -> bool {
++        if rung >= 1 && !self.blocked_vias_small.is_empty() {
++            let key = pack_xy(gx, gy);
++            if self.blocked_vias_small.contains_key(&key) { return true; }
++            if self.static_via_bitmap.test(gx, gy, 0) { return true; }
++            for (min_gx, min_gy, max_gx, max_gy) in &self.bga_zones {
++                if gx >= *min_gx && gx <= *max_gx && gy >= *min_gy && gy <= *max_gy {
++                    return !self.allowed_cells.contains(&key);
++                }
++            }
++            return false;
++        }
++        self.is_via_blocked(gx, gy)
+     }
+ 
+     /// Batch add blocked cells from numpy array (shape: N x 3, columns: gx, gy, layer)
+diff -ruN a/rust_router/src/router.rs b/rust_router/src/router.rs
+--- a/rust_router/src/router.rs	2026-08-04 06:52:28
++++ b/rust_router/src/router.rs	2026-08-04 06:52:28
+@@ -282,6 +282,10 @@
+ pub(crate) struct SearchOptions {
+     collinear_vias: bool,
+     via_exclusion_radius: i32,
++    /// #568: which via-legality rung the search uses (0 = configured via,
++    /// >=1 = small fab via when the map is populated). Set per search by
++    /// the Python escalation retry; default 0 keeps baseline behaviour.
++    pub via_rung: usize,
+     norm_start_dir: Option<(i32, i32)>,
+     norm_end_dir: Option<(f64, f64)>,
+     direction_steps: i32,
+@@ -308,6 +312,7 @@
+         Self {
+             collinear_vias,
+             via_exclusion_radius,
++            via_rung: 0,
+             norm_start_dir,
+             norm_end_dir,
+             direction_steps,
+@@ -888,7 +893,7 @@
+         // dropped a couple cells away beside a perfectly good via-in-pad.
+         let free_here = obstacles.is_free_via(current.gx, current.gy);
+         if can_place_via && (!via_too_close || free_here)
+-            && (!obstacles.is_via_blocked(current.gx, current.gy) || free_here) {
++            && (!obstacles.is_via_blocked_rung(current.gx, current.gy, self.opts.via_rung) || free_here) {
+             for layer in 0..obstacles.num_layers as u8 {
+                 if layer == current.layer {
+                     continue;
