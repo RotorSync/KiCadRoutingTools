@@ -1295,7 +1295,7 @@ class PlanesTab(wx.Panel):
 
     def _run_repair_planes(self, config):
         """Run disconnected plane repair."""
-        from route_disconnected_planes import route_planes as repair_planes
+        from route_disconnected_planes import repair_planes
 
         # Remember the routed floors so _apply_results_to_board can make the live
         # board's DRC constraints consistent with them (issue #160), mirroring

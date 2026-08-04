@@ -2593,7 +2593,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             and os.environ.get('KICAD_PLANE_FINALIZE', '') == '1'):
         try:
             from route_disconnected_planes import (
-                route_planes as _rdp_engine, auto_detect_zones as _adz)
+                repair_planes as _rdp_engine, auto_detect_zones as _adz)
             _zpairs = _adz(output_file)
             # Respect the caller's net filter: a net excluded by pattern is
             # excluded BY PLAN (same rule as the reconciliation above).
