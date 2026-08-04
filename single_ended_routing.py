@@ -596,7 +596,18 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
     moving the centreline, so connectivity is preserved; a graze the floor width
     still can't clear is left for the DRC report. Only segments touching a terminal
     point are considered (the A* body keep-outs already enforce clearance mid-route).
-    Returns the count necked.
+
+    Returns ``(necked, hard)``. `hard` lists terminal segments whose RAW
+    geometric centreline sits closer than floor/2 to foreign track/via copper:
+    even at the fab-floor width the copper physically OVERLAPS the foreign net
+    -- a shipped SHORT no neck can fix (ux pf8/pf9: a GND terminal bridge into
+    C61 slashed across SDRAM_A2's In1.Cu trunk; the neck took it to the 0.0889
+    floor and the crossing shipped). Callers at route-attempt boundaries treat
+    a non-empty `hard` as route failure -- an honest failure beats a shipped
+    short -- while clearance-only grazes stay in the neck regime. The hard test
+    uses RAW distances (no #436 class excess, no #326 pad-override adjustment):
+    those model CLEARANCE rules, and folding them in would reject legal copper
+    that merely violates clearance (which stays a visible DRC flag).
 
     `floor` defaults to the board's fab track-width minimum (issue #176): necking
     to the grid step (0.05 mm) used to emit sub-fab-floor copper."""
@@ -616,6 +627,7 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
                 return True
         return False
     necked = 0
+    hard = []
     for s in segments:
         if not touches(s):
             continue
@@ -632,11 +644,19 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
                                       net_clearances=nc, base_clearance=own_l))
         allowed_half = d - own_l - 1e-4  # 1e-4: stay just inside the rule
         if allowed_half < s.width / 2.0 - 1e-9:
+            # Hard test BEFORE necking, on the RAW track/via distance: a
+            # centreline within floor/2 of a foreign copper EDGE overlaps it
+            # at any emittable width -- a physical short, not a graze.
+            d_raw = _seg_foreign_seg_dist(pcb_data, net_id, s.start_x,
+                                          s.start_y, s.end_x, s.end_y, s.layer)
+            if d_raw < floor / 2.0 - 1e-6:
+                hard.append((s, d_raw))
+                continue
             new_w = max(floor, 2.0 * allowed_half)
             if new_w < s.width - 1e-9:
                 s.width = round(new_w, 4)
                 necked += 1
-    return necked
+    return necked, hard
 
 
 def _neck_route_terminal_grazes(segments, path, coord, start_original, end_original,
@@ -645,16 +665,23 @@ def _neck_route_terminal_grazes(segments, path, coord, start_original, end_origi
     terminal points from the path endpoints + original pad positions. Called AFTER
     _apply_neckdown_widths / uniform_width so the graze-neck is authoritative: those
     passes rebuild every width from the pad-distance taper and would otherwise restore
-    a grazing terminal to full/base width, undoing the neck (issue #212)."""
+    a grazing terminal to full/base width, undoing the neck (issue #212).
+
+    Returns the `hard` list from _neck_terminal_grazes: terminal copper that
+    physically OVERLAPS a foreign track/via even at the fab floor. Callers must
+    treat a non-empty return as edge/route FAILURE (shipped-short class, ux
+    pf9) -- the neck alone cannot fix a crossing."""
     if pcb_data is None or not path:
-        return
+        return []
     term_pts = [coord.to_float(path[0][0], path[0][1]),
                 coord.to_float(path[-1][0], path[-1][1])]
     if start_original:
         term_pts.append((start_original[0], start_original[1]))
     if end_original:
         term_pts.append((end_original[0], end_original[1]))
-    _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config)
+    _necked, _hard = _neck_terminal_grazes(segments, term_pts, pcb_data,
+                                           net_id, config)
+    return _hard
 
 
 def _merge_terminal_to_exact(path, term_idx, neighbor_idx, original, pts,
@@ -1680,50 +1707,34 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         for _s in new_segments:
             _s.width = uniform_width
 
-    # Terminal-bridge SHORT gate: the start/end bridges above are the only
-    # copper this function emits WITHOUT search validation -- straight
-    # geometry from the path's end cell to the anchor float. When the anchor
-    # cell itself is blocked (foreign copper under/near the pad), the A* ends
-    # at the nearest legal cell and the bridge slashes across whatever lies
-    # between (ux pf8: GND's rescue bridge into C61 crossed SDRAM_A2's
-    # In1.Cu trunk running 0.03mm from the pad centre -- a shipped SHORT,
-    # invisible to every check because bridges bypass the map). A bridge
-    # whose CENTERLINE overlaps foreign segment copper (dist < its own
-    # half-width) fails the route -- callers (rescue rungs, reroutes) fall
-    # through to their next option, and an honest failure beats a shipped
-    # short. Clearance-only grazes (0 <= overlap < clearance) stay in the
-    # #157 neck regime below, unchanged.
-    for _br, _bo in ((new_segments[0] if start_original and new_segments
-                      else None, 'start'),
-                     (new_segments[-1] if end_original and new_segments
-                      else None, 'end')):
-        if _br is None or _br.layer not in layer_names:
-            continue
-        _d = _seg_foreign_seg_dist(pcb_data, net_id, _br.start_x, _br.start_y,
-                                   _br.end_x, _br.end_y, _br.layer)
-        if _d < _br.width / 2 - 1e-3:
-            print(f"  {YELLOW}terminal bridge at the {_bo} anchor would "
-                  f"OVERLAP foreign copper on {_br.layer} "
-                  f"(edge dist {_d:.3f}mm < half-width) -- rejecting the "
-                  f"route rather than shipping a short{RESET}")
-            return {
-                'failed': True,
-                'iterations': total_iterations,
-                'blocked_cells_forward': [],
-                'blocked_cells_backward': [],
-                'iterations_forward': fwd_iters,
-                'iterations_backward': bwd_iters,
-            }
-
     # Neck any terminal-connection segment that grazes a foreign pad (#157): the
     # endpoint stub is laid geometrically with the endpoint region obstacle-exempt,
     # so a full-width terminal can sit sub-clearance to a neighbouring foreign pad.
+    # The returned `hard` list is the terminal-bridge SHORT gate (ux pf8/pf9):
+    # terminal copper whose centreline overlaps a foreign track/via even at the
+    # fab floor is a shipped short no neck can fix -- fail the route instead,
+    # so callers (rescue rungs, reroutes, rip ladders) fall to their next
+    # option. Clearance-only grazes stay in the neck regime.
     term_pts = [coord.to_float(path[0][0], path[0][1]), coord.to_float(path[-1][0], path[-1][1])]
     if start_original:
         term_pts.append((start_original[0], start_original[1]))
     if end_original:
         term_pts.append((end_original[0], end_original[1]))
-    _neck_terminal_grazes(new_segments, term_pts, pcb_data, net_id, config)
+    _necked157, _hard157 = _neck_terminal_grazes(new_segments, term_pts,
+                                                 pcb_data, net_id, config)
+    if _hard157:
+        _hs, _hd = _hard157[0]
+        print(f"  {YELLOW}terminal copper on {_hs.layer} would OVERLAP a "
+              f"foreign track/via (edge dist {_hd:.3f}mm < floor half-width) "
+              f"-- rejecting the route rather than shipping a short{RESET}")
+        return {
+            'failed': True,
+            'iterations': total_iterations,
+            'blocked_cells_forward': [],
+            'blocked_cells_backward': [],
+            'iterations_forward': fwd_iters,
+            'iterations_backward': bwd_iters,
+        }
 
     # Fab-floor via dropped inside a boxed source/target pad to unblock this route
     # (issue #189); connects the inner-layer path end to the pad by copper overlap.
@@ -3983,9 +3994,18 @@ def route_multipoint_main(
     # Re-neck terminal grazes AFTER width assignment (#212): the neckdown/uniform
     # passes above rebuild widths and would otherwise restore a grazing terminal leg
     # to base/power width, undoing the graze-neck applied during conversion.
-    _neck_route_terminal_grazes(segments, path, coord,
-                                _start_orig[:2], _end_orig[:2],
-                                pcb_data, net_id, config)
+    _hard_p1 = _neck_route_terminal_grazes(segments, path, coord,
+                                           _start_orig[:2], _end_orig[:2],
+                                           pcb_data, net_id, config)
+    if _hard_p1:
+        # Terminal-bridge SHORT gate (ux pf9): the main edge's terminal copper
+        # overlaps a foreign track/via at any width -- fail the edge so the
+        # rip/retry ladder finds another approach instead of shipping a short.
+        _hs, _hd = _hard_p1[0]
+        print(f"  {YELLOW}Phase 1 terminal copper on {_hs.layer} would OVERLAP "
+              f"a foreign track/via (edge dist {_hd:.3f}mm) -- failing the "
+              f"edge rather than shipping a short{RESET}")
+        return {'failed': True, 'iterations': total_iterations}
     # Fab-floor via dropped inside a boxed main-edge pad to unblock it (#189).
     vias = list(vias) + main_unblock_vias
 
@@ -4622,9 +4642,33 @@ def _route_multipoint_taps_impl(
         # Re-neck terminal grazes AFTER width assignment (#212): the neckdown/uniform
         # passes rebuild widths and would otherwise restore a grazing terminal leg to
         # base/power width, undoing the graze-neck applied during conversion.
-        _neck_route_terminal_grazes(segments, path, coord,
-                                    (tap_x, tap_y), (tgt_x, tgt_y),
-                                    pcb_data, net_id, config)
+        _hard_tap = _neck_route_terminal_grazes(segments, path, coord,
+                                                (tap_x, tap_y), (tgt_x, tgt_y),
+                                                pcb_data, net_id, config)
+        if _hard_tap:
+            # Terminal-bridge SHORT gate (ux pf9: GND's tap edge into C61 --
+            # the anchor cell was blocked, the A* ended a cell short, and the
+            # bridge slashed across SDRAM_A2's In1.Cu trunk; the #157 neck
+            # took it to the fab floor and the crossing SHIPPED). Terminal
+            # copper overlapping a foreign track/via at any width is a short
+            # no neck can fix: fail the edge like an unroutable one so the
+            # rip/retry ladder finds another approach. (A #189 unblock via
+            # already registered for this edge stays in the map -- a
+            # conservative over-block for later edges, never a short.)
+            _hs, _hd = _hard_tap[0]
+            print(f"      {YELLOW}terminal copper on {_hs.layer} would "
+                  f"OVERLAP a foreign track/via (edge dist {_hd:.3f}mm) -- "
+                  f"failing the MST edge rather than shipping a short{RESET}")
+            edge_key = (min(src_idx, tgt_idx), max(src_idx, tgt_idx))
+            failed_edges.add(edge_key)
+            blocked_cells = list(blocked_cells) + _via_conflict_extra
+            if blocked_cells:
+                failed_edge_blocking[edge_key] = (
+                    blocked_cells, (tgt_x, tgt_y),
+                    {'fwd': list(forward_blocked),
+                     'bwd': list(backward_blocked),
+                     'extra': list(_via_conflict_extra)})
+            continue
         # Any fab-floor via dropped INSIDE the boxed target pad to unblock this
         # edge (issue #189) -- it connects the inner-layer path end to the pad by
         # copper overlap, no extra trace needed.
@@ -4967,6 +5011,10 @@ def _path_to_segments_vias(
             term_pts.append((start_original[0], start_original[1]))
         if end_original:
             term_pts.append((end_original[0], end_original[1]))
+        # Neck-only here (hard overlaps deliberately not consumed): this
+        # converter cannot fail a route, and every caller re-runs the neck via
+        # _neck_route_terminal_grazes AFTER its width passes -- THAT call is
+        # the authoritative short gate.
         _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config)
 
     return segments, vias
