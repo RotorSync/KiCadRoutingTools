@@ -1,18 +1,37 @@
 # Power/Ground Plane Via Connections
 
-The `route_planes.py` script creates copper pour zones and places vias to connect SMD pads on other layers to the plane.
+The `route_planes.py` script creates copper pour zones (plus optional via features: area stitching and GND return vias).
+
+> **Since #562 the plane step does NO ROUTING.** `KICAD_PLANE_NO_TAPS`
+> defaults ON, so this tool places **no tap vias and draws no traces** for
+> pads that need to reach the plane. Every such pad is left for the **route
+> step**, which welds it into the pour with the full routing machinery
+> (pour-launch) and taps whatever the fill cannot reach in its **in-run
+> plane finalize**. Two consequences for readers:
+> * a bare pour "leaving pads unconnected" is expected — run `route.py`
+>   over ALL nets (plane nets included, passed in `--power-nets`) and grade
+>   after that, not after the pour;
+> * the tap/rip-up/re-route machinery documented further down is reachable
+>   only with `KICAD_PLANE_NO_TAPS=0` (legacy tap mode).
+>
+> Exposed/thermal pads are the one exemption: they still get their **via
+> array** here (#487), because that stamps vias without drawing traces and
+> nothing else in the chain places one. If the array cannot be fitted, the
+> pad is deferred to the route step rather than traced to.
 
 ## Overview
 
 When creating a ground or power plane on an inner or bottom layer, SMD pads on other layers need via connections to reach the plane. This tool automates:
 
 1. **Zone creation** - Creates a copper pour zone covering the board. Replaces an existing zone for the same net/layer with new parameters; coexists with other nets' pours on that layer (warning + explicit fill priority)
-2. **Pad classification** - Identifies which pads need vias vs direct zone connection
-3. **Via placement** - Places vias near pads, avoiding obstacles on all copper layers
-4. **Trace routing** - Routes traces from offset vias to pads using A* pathfinding
-5. **Blocker rip-up** - Optionally removes blocking nets to place more vias
-6. **Automatic re-routing** - Optionally re-routes ripped nets after via placement
-7. **Resistance analysis** - Calculates and displays plane resistance and max current capacity
+2. **Pad classification** - Identifies which pads need vias vs direct zone connection (the ones needing vias are handed to the route step; see the note above)
+3. **Thermal via arrays** (#487) - Exposed/thermal pads get a lattice of vias into the plane
+4. **Area via stitching / GND return vias** - Optional via features (`--stitch-vias`, `--add-gnd-vias`)
+5. **Resistance analysis** - Calculates and displays plane resistance and max current capacity
+
+**Legacy tap mode only** (`KICAD_PLANE_NO_TAPS=0`), documented below for
+completeness: via placement near pads, A* trace routing from offset vias to
+pads, blocker rip-up, and re-routing of ripped nets.
 
 ## Basic Usage
 
@@ -32,7 +51,8 @@ python route_planes.py input.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In
 # Create VCC plane on inner layer with larger vias
 python route_planes.py input.kicad_pcb --nets VCC --plane-layers In2.Cu --via-size 0.5 --via-drill 0.4
 
-# Rip up blocking nets and automatically re-route them
+# Legacy tap mode only (KICAD_PLANE_NO_TAPS=0): rip blockers to fit taps.
+# At defaults these flags do nothing -- the pour places no taps at all.
 python route_planes.py input.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu --rip-blocker-nets --reroute-ripped-nets
 
 # Preview what would be placed without writing
@@ -728,16 +748,18 @@ grades the board at it. Obstacle maps for each retry are built on a small window
 around the pad, so fine grids stay cheap on large boards. Per-pad outcomes are printed, and pads that still fail are listed in
 the summary. Use `--no-repair-pads` to only reconnect zone islands.
 
-`route_planes.py` itself applies the same fine-parameter retry to fine-pitch
-pads whose tap fails during the initial run (issue #104), so the repair pass
-typically only sees pads that survived that retry or boards routed by other
-tools.
+**At defaults `route_planes.py` taps nothing** (#562, see the note at the top),
+so it is the ROUTE step's in-run plane finalize that runs this repair —
+including the fine-parameter retry (#104) — at the route step's own
+parameters. The text above describes that engine; it applies wherever it
+runs. The standalone script is for boards routed outside the chain.
 
 ### Rip-Blocker Pad Repair (`--rip-blocker-nets`)
 
 Some plane-net pads can't take a via at all — a tiny outer-layer pad (e.g. a
 0.4mm USB-connector GND pin) amid congestion, where the plane is on an inner
-layer and the signal pass excluded the plane net. The human connects these with
+layer. (Under the #562 chain the route step routes the plane nets too, so
+this is rarer: the pad usually welds into the pour directly.) The human connects these with
 a short trace to an adjacent same-net pad (a connector GND pin to its shield
 pad). With `--rip-blocker-nets`, the repair does the same: when no via fits and
 no same-net via is within the close-reuse radius, it routes a trace to the
@@ -916,7 +938,7 @@ Increasing `--max-iterations` can help with complex routes. Reducing `--analysis
 ### Key Functions
 
 **route_disconnected_planes.py:**
-- `route_planes()` - Main orchestration: loads PCB, iterates over nets, writes output
+- `repair_planes()` (alias `route_planes` kept) - Main orchestration: loads PCB, iterates over nets, writes output
 - `auto_detect_zones()` - Scans PCB for existing zones and returns net/layer pairs
 
 **plane_region_connector.py:**

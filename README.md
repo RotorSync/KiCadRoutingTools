@@ -43,7 +43,7 @@ Fast, grid-based A\* routing with a native Rust core (~10× faster than pure Pyt
 
 **Power & planes** — see [Plane Routing](docs/route-plane.md) and [Power Nets](docs/power-nets.md)
 - [Wider power-net routing](docs/power-nets.md) with automatic neck-down at fine-pitch pads
-- Plane via connections and multi-net Voronoi plane layers with resistance / max-current reporting
+- Plane pours (pads are welded by the route step, #562) and multi-net Voronoi plane layers with resistance / max-current reporting
 - Disconnected-plane-region repair (region joins + pad taps) and GND return-via placement
 
 **Signal integrity**
@@ -163,18 +163,21 @@ All of these are also available inside KiCad without leaving the plugin - see [A
 # Optionally optimize an existing placement for routability (before routing)
 python place_optimize.py my_board.kicad_pcb --max-displacement 3
 
+# Pour the planes FIRST (#562): the fanout's plane-drop vias then land on
+# real fill, and the route step welds plane pads into it.
+python route_planes.py my_board.kicad_pcb poured.kicad_pcb --nets GND --plane-layers B.Cu
+
 # Fan out a BGA, then tidy decoupling caps off the new vias (issue #130)
-python bga_fanout.py my_board.kicad_pcb -c U1 -o fanned.kicad_pcb --clearance 0.1
+python bga_fanout.py poured.kicad_pcb -c U1 -o fanned.kicad_pcb --clearance 0.1
 python place_fanout_clearance.py fanned.kicad_pcb capclean.kicad_pcb --clearance 0.1
 
-# Route all nets
-python route.py my_board.kicad_pcb
-
 # Route differential pairs
-python route_diff.py my_board.kicad_pcb --nets "*lvds*"
+python route_diff.py capclean.kicad_pcb -o diffed.kicad_pcb --nets "*lvds*"
 
-# Create power planes
-python route_planes.py my_board.kicad_pcb --nets GND --plane-layers B.Cu
+# Route ALL remaining nets, plane nets included (their widths via --power-nets).
+# This step ends with the in-run plane finalize that completes the planes.
+python route.py diffed.kicad_pcb routed.kicad_pcb --nets "*" \
+    --power-nets GND --power-nets-widths 0.3
 ```
 
 ---
@@ -296,12 +299,12 @@ python package_pcm.py --binary-dir ./path/to/release/artifacts
 - QFN fanout with extension length configuration
 - Net selection for fanout operations
 
-**Planes Tab:**
+**Planes Tab** (pour creation only since #562 — plane repair runs inside
+every route, and the route step welds plane pads into the pour):
 - Net-to-layer assignment for power/ground planes
-- Create planes with via connections to SMD pads
-- Repair disconnected plane regions
-- GND return via placement near signal vias
-- Via size/drill, track width, clearance configuration
+- Create the pours (plus thermal via arrays under exposed pads)
+- Area via stitching and GND return via placement near signal vias
+- Via size/drill, zone clearance configuration
 
 **Log Tab:**
 - Real-time routing output display
@@ -366,7 +369,8 @@ python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets 
 # Route ALL nets on a component including power (use "*" pattern)
 python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*" --component U1
 
-# Route all nets except GND and VCC (exclusion patterns with ! prefix)
+# Exclusion-pattern SYNTAX demo (! prefix). NOTE: in the #562 chain you do
+# NOT exclude plane nets from the route step -- see the chain example below.
 python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*" "!GND" "!VCC"
 
 # Route differential pairs (use route_diff.py)
@@ -814,10 +818,13 @@ Every tool prints its full option list with `--help`, and **[docs/configuration.
 # Full option list for any tool
 python route.py --help
 
-# A typical chain: GND plane, then signals, then differential pairs
+# A typical chain (#562 pours-first): pour, then diff pairs, then ONE route
+# over ALL nets -- plane nets INCLUDED. The pour places no taps; the route
+# step welds plane pads into the fill and its in-run finalize completes them,
+# so do NOT exclude the plane nets here.
 python route_planes.py board.kicad_pcb board.kicad_pcb --nets GND --plane-layers B.Cu
-python route.py board.kicad_pcb -O --nets "*" "!GND"
 python route_diff.py board.kicad_pcb -O --nets "*_P" "*_N" --diff-pair-gap 0.15
+python route.py board.kicad_pcb -O --nets "*" --power-nets GND --power-nets-widths 0.3
 ```
 
 The shared option groups — geometry, power-net widths, algorithm/strategy, proximity penalties, length/time matching, post-route DRC settings, and debug layers — apply across the routing CLIs and are documented in full in [Configuration](docs/configuration.md).
