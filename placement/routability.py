@@ -436,3 +436,191 @@ def health(state, pcb_data, blocks: Dict[str, Sequence[str]],
         'needs a routing attempt: the blocker JSON (#409) only exists after '
         'one, so this cannot be computed pre-route')
     return out
+
+
+# --------------------------------------------------------------------------
+# run-6: the per-face lane ledger and part-pair channels
+# --------------------------------------------------------------------------
+# SKILL.md specified the lane ledger in prose across three sections and no
+# code existed ("the single highest-leverage productization target" per the
+# run-6 exploration). V1 scope, stated honestly:
+#   - supply counts lanes a face can pass at the routed pitch AND at the
+#     finest legal grid (the run-5 grid confound, productized);
+#   - lanes eaten by NEIGHBOR BODIES inside the escape band are charged
+#     per neighbor (`eaten_by`), via the same courtyard geometry the
+#     assembly channel uses;
+#   - supply-tap/via consumption is NOT modeled (v2; every consumer output
+#     says so rather than faking it).
+# Report-only: these numbers feed the placement fix loop's classification
+# ("deficit at the finest grid = floorplan/placement-shaped by
+# measurement"), never a gate by themselves.
+
+FINEST_LEGAL_GRID_MM = 0.025
+
+
+def _quantized_pitch(track_width: float, clearance: float,
+                     grid_step: float) -> float:
+    """One routed lane's pitch at a grid: track + clearance, rounded UP to
+    the grid (a router cannot place copper between grid points)."""
+    raw = track_width + clearance
+    if grid_step <= 0:
+        return raw
+    return math.ceil(raw / grid_step - 1e-9) * grid_step
+
+
+def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
+                     track_width: float, grid_step: float,
+                     escape_band_mm: Optional[float] = None,
+                     pcb_file: Optional[str] = None) -> List[Dict]:
+    """Per-face escape supply/demand for one part (SKILL's lane ledger, v1).
+
+    For each face (N/S/E/W of the part's pad extent):
+      demand        signal nets with a pad NEAREST this face and at least
+                    one pad on another part (they must escape somewhere,
+                    and this face is where their pad points).
+      supply        face length / lane pitch, minus lanes covered by
+                    NEIGHBOR bodies inside the escape band. Reported at
+                    the ROUTED grid and at the FINEST legal grid -- a
+                    deficit that survives the finest grid is a floorplan
+                    fact, not a parameter fact.
+      eaten_by      [(neighbor ref, lanes covered)], the fix targets.
+
+    Rail nets (fanout > DISPLACEMENT_MAX_FANOUT) are not demand: planes
+    feed them, not face escapes. Tap/via lane consumption is v2.
+    """
+    from placement.legality import (build_part_pads, footprint_side,
+                                    graded_parts_from_file, rect_gap)
+
+    fps = pcb_data.footprints or {}
+    fp = fps.get(ref)
+    if fp is None:
+        return []
+    parts = build_part_pads(fps, clearance)
+    pp = parts.get(ref)
+    if pp is None:
+        return []
+    ext = pp.extent(fp.x, fp.y, fp.rotation or 0.0)
+    if ext is None:
+        return []
+
+    net_owners: Dict[int, set] = {}
+    for r2, f2 in fps.items():
+        for pad in (f2.pads or []):
+            if pad.net_id:
+                net_owners.setdefault(pad.net_id, set()).add(r2)
+
+    faces = {'N': (ext[0], ext[1], ext[2], ext[1]),
+             'S': (ext[0], ext[3], ext[2], ext[3]),
+             'W': (ext[0], ext[1], ext[0], ext[3]),
+             'E': (ext[2], ext[1], ext[2], ext[3])}
+    demand: Dict[str, set] = {f: set() for f in faces}
+    for pad in (fp.pads or []):
+        nid = pad.net_id
+        if not nid:
+            continue
+        owners = net_owners.get(nid, set())
+        if len(owners) < 2:
+            continue                      # nowhere to escape to
+        if len(owners) > DISPLACEMENT_MAX_FANOUT:
+            continue                      # rail: plane-fed, not face-fed
+        d_edges = {'N': abs(pad.global_y - ext[1]),
+                   'S': abs(pad.global_y - ext[3]),
+                   'W': abs(pad.global_x - ext[0]),
+                   'E': abs(pad.global_x - ext[2])}
+        demand[min(d_edges, key=d_edges.get)].add(nid)
+
+    pitch_routed = _quantized_pitch(track_width, clearance, grid_step)
+    pitch_fine = _quantized_pitch(track_width, clearance,
+                                  FINEST_LEGAL_GRID_MM)
+    band = (escape_band_mm if escape_band_mm is not None
+            else max(1.0, 4 * pitch_routed))
+
+    own_side = footprint_side(fp)
+    neighbors = [g for g in graded_parts_from_file(pcb_data, pcb_file)
+                 if g.ref != ref and own_side in g.sides]
+
+    out = []
+    for fname, (x0, y0, x1, y1) in faces.items():
+        horiz = (y0 == y1)
+        length = (x1 - x0) if horiz else (y1 - y0)
+        if horiz:
+            band_rect = ((x0, y0 - band, x1, y0) if fname == 'N'
+                         else (x0, y0, x1, y0 + band))
+        else:
+            band_rect = ((x0 - band, y0, x0, y1) if fname == 'W'
+                         else (x0, y0, x1 + band, y1))
+        eaten = []
+        covered = 0.0
+        for g in neighbors:
+            rct = g.rect
+            if rect_gap(rct, band_rect) >= 0:
+                continue
+            if horiz:
+                span = (min(rct[2], x1) - max(rct[0], x0))
+            else:
+                span = (min(rct[3], y1) - max(rct[1], y0))
+            if span <= 0:
+                continue
+            lanes = span / pitch_routed
+            covered += span
+            eaten.append((g.ref, round(lanes, 2)))
+        eaten.sort(key=lambda t: -t[1])
+        usable = max(0.0, length - covered)
+        supply_routed = int(usable // pitch_routed)
+        supply_fine = int(usable // pitch_fine)
+        n_demand = len(demand[fname])
+        out.append({'face': fname,
+                    'length_mm': round(length, 3),
+                    'demand_nets': n_demand,
+                    'supply_routed_grid': supply_routed,
+                    'supply_finest_grid': supply_fine,
+                    'deficit_routed_grid': max(0, n_demand - supply_routed),
+                    'deficit_finest_grid': max(0, n_demand - supply_fine),
+                    'eaten_by': eaten[:8],
+                    'taps_not_modeled': True})
+    return out
+
+
+def pair_channel_widths(pcb_data, *, clearance: float,
+                        min_extent_mm: float = 3.5,
+                        radius_mm: float = 15.0,
+                        pcb_file: Optional[str] = None) -> List[Dict]:
+    """Measured channel width between ANCHOR-sized parts, plus what lives
+    in the channel -- the run-2 corridor law's inputs, measured instead of
+    declared (Corridor.width_mm has only ever been an intent input).
+
+    The corridor is for the PARTS (measured, r=+0.41..+0.90 on 8/8 boards):
+    each row reports the gap and the small parts whose bodies sit inside
+    the channel rectangle between the two anchors."""
+    from placement.legality import graded_parts_from_file, rect_gap
+
+    parts = graded_parts_from_file(pcb_data, pcb_file)
+    big = [g for g in parts
+           if max(g.rect[2] - g.rect[0], g.rect[3] - g.rect[1])
+           >= min_extent_mm]
+    big_refs = {g.ref for g in big}
+    small = [g for g in parts if g.ref not in big_refs]
+    rows = []
+    for i, a in enumerate(big):
+        for b in big[i + 1:]:
+            if not (a.sides & b.sides):
+                continue
+            gap = rect_gap(a.rect, b.rect)
+            if gap <= 0 or gap > radius_mm:
+                continue
+            chan = (max(min(a.rect[0], b.rect[0]),
+                        min(a.rect[2], b.rect[2])),
+                    max(min(a.rect[1], b.rect[1]),
+                        min(a.rect[3], b.rect[3])),
+                    min(max(a.rect[0], b.rect[0]),
+                        max(a.rect[2], b.rect[2])),
+                    min(max(a.rect[1], b.rect[1]),
+                        max(a.rect[3], b.rect[3])))
+            inside = [s.ref for s in small
+                      if (s.sides & a.sides)
+                      and rect_gap(s.rect, chan) < 0]
+            rows.append({'a': a.ref, 'b': b.ref,
+                         'channel_mm': round(gap, 3),
+                         'parts_in_channel': sorted(inside)[:12]})
+    rows.sort(key=lambda r: r['channel_mm'])
+    return rows
