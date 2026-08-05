@@ -1346,7 +1346,13 @@ def _generate_multinet_layer_zones(
 
         th_connected = 0
         th_fallback = 0
+        th_off_board = 0
         fallback_pad_refs: List[str] = []
+        # A pad outside the Edge.Cuts outline can never reach the fill (it is
+        # clipped to the outline) -- corridor-routing toward it is wasted and
+        # point-seeding it plants a Voronoi cell in dead space (#291 class).
+        from check_drc import make_off_board_test
+        _off_board_test = make_off_board_test(pcb_data.board_info)
         for nm_on_layer in nets_on_layer:
             nid = net_name_to_id.get(nm_on_layer)
             if nid is None:
@@ -1358,6 +1364,9 @@ def _generate_multinet_layer_zones(
                 if not pad_is_plated_through(pad):
                     continue
                 px, py = pad.global_x, pad.global_y
+                if _off_board_test is not None and _off_board_test(px, py):
+                    th_off_board += 1
+                    continue
                 # Already inside its own net's cell? Then the plane already covers it.
                 if _nearest_seed_net(px, py) == nid:
                     continue
@@ -1393,11 +1402,14 @@ def _generate_multinet_layer_zones(
                         seen.add(k)
                     th_fallback += 1
                     fallback_pad_refs.append(f"{pad.component_ref}.{pad.pad_number}")
-        if th_connected or th_fallback:
+        if th_connected or th_fallback or th_off_board:
             msg = f"  #107: routed corridors for {th_connected} orphaned TH pad(s)"
             if th_fallback:
                 msg += (f"; {th_fallback} could not be reached on the plane layer "
                         f"and fell back to point-seed ({', '.join(fallback_pad_refs)})")
+            if th_off_board:
+                msg += (f"; {th_off_board} off-board pad(s) skipped "
+                        f"(outside the outline, no seed)")
             print(msg)
 
     # #114: a net with no stitching vias gets no MST and therefore no Voronoi
@@ -1418,22 +1430,32 @@ def _generate_multinet_layer_zones(
                     seeds.append((px, py))
                     seen.add(k)
 
-    # PROTOTYPE (worktree): deferred under-BGA pads (KICAD_PLANE_DEFER_BGA)
-    # participate as point seeds so each rail's cell reserves its ball
-    # territory before the fanout drops the actual vias.
+    # Deferred under-BGA pads participate as point seeds so each rail's cell
+    # reserves its ball territory before the fanout drops the actual vias
+    # (pours run first, #562). ONLY nets assigned to THIS layer may receive
+    # seeds: setdefault() here used to CREATE Voronoi entries for foreign
+    # nets, carving their cells into a layer whose plane they don't own
+    # (dilemma: 17 +3V3 confetti zones on the GND layer).
     _dseeds = getattr(pcb_data, '_deferred_bga_seeds', None) \
         if 'pcb_data' in dir() else None
-    if _dseeds:
+    if _dseeds and augmented_vias_by_net:
+        _seeded_nets = 0
         for _nid, _pts in _dseeds.items():
-            _lst = augmented_vias_by_net.setdefault(_nid, [])
+            _lst = augmented_vias_by_net.get(_nid)
+            if _lst is None:
+                continue  # net's plane lives on another layer
             _seen = {(round(x, 3), round(y, 3)) for x, y in _lst}
+            _before = len(_lst)
             for _x, _y in _pts:
                 _k = (round(_x, 3), round(_y, 3))
                 if _k not in _seen:
                     _lst.append((_x, _y))
                     _seen.add(_k)
-        print(f"  Added deferred-BGA point seeds for "
-              f"{len(_dseeds)} net(s) to the Voronoi")
+            if len(_lst) > _before:
+                _seeded_nets += 1
+        if _seeded_nets:
+            print(f"  Added deferred-BGA point seeds for "
+                  f"{_seeded_nets} net(s) to the Voronoi")
 
     # Compute final Voronoi zones
     total_seeds = sum(len(vias) for vias in augmented_vias_by_net.values())
@@ -3051,15 +3073,32 @@ def create_plane(
             print(f"  {len(_therm)} exposed/thermal pad(s) get a via ARRAY "
                   f"(#487)")
         if _skip:
-            # Every deferred pad still seeds the split-layer Voronoi so its
-            # net's cell reserves the territory the route pass will tap into.
-            _dseeds = getattr(pcb_data, '_deferred_bga_seeds', None)
-            if _dseeds is None:
-                _dseeds = pcb_data._deferred_bga_seeds = {}
-            _dseeds.setdefault(net_id, []).extend(
-                (pd['pad'].global_x, pd['pad'].global_y) for pd in _skip)
+            # Of the deferred pads, ONLY those under a BGA seed the
+            # split-layer Voronoi: pours run before fanout (#562), so a
+            # rail's cell must reserve the ball territory the fanout will
+            # drop vias into -- there is no other way to guess it. Every
+            # other deferred SMD pad (diode, cap, switch) gets its via from
+            # the route step wherever the plane already is; seeding them
+            # shattered split planes into per-pad confetti (dilemma:
+            # 70 zones from 4 nets on 2 layers).
+            _bga_refs = getattr(pcb_data, '_bga_ref_cache', None)
+            if _bga_refs is None:
+                from kicad_parser import find_components_by_type
+                _bga_refs = pcb_data._bga_ref_cache = {
+                    fp.reference
+                    for fp in find_components_by_type(pcb_data, 'BGA')}
+            _bga_skip = [pd for pd in _skip
+                         if pd['pad'].component_ref in _bga_refs]
+            if _bga_skip:
+                _dseeds = getattr(pcb_data, '_deferred_bga_seeds', None)
+                if _dseeds is None:
+                    _dseeds = pcb_data._deferred_bga_seeds = {}
+                _dseeds.setdefault(net_id, []).extend(
+                    (pd['pad'].global_x, pd['pad'].global_y)
+                    for pd in _bga_skip)
             print(f"  {len(_skip)} pad(s) on '{net_name}' deferred to the "
-                  f"route step (positions kept as Voronoi seeds)")
+                  f"route step ({len(_bga_skip)} under-BGA position(s) kept "
+                  f"as Voronoi seeds)")
 
         # (KICAD_PLANE_DEFER_BGA prototype DELETED, review dead-code 9:
         # the unconditional #562 deferral above already removes every
@@ -3252,10 +3291,21 @@ def create_plane(
             else:
                 # No lattice site fits -- defer like any other plane pad.
                 # NEVER fall back to a single via + trace: that is routing.
-                _ds = getattr(pcb_data, '_deferred_bga_seeds', None)
-                if _ds is None:
-                    _ds = pcb_data._deferred_bga_seeds = {}
-                _ds.setdefault(net_id, []).append((pad.global_x, pad.global_y))
+                # Seed the Voronoi only for a BGA's pad (ball-territory
+                # reservation); a QFN/exposed paddle takes its tap from the
+                # route step wherever the plane lands.
+                _bga_refs = getattr(pcb_data, '_bga_ref_cache', None)
+                if _bga_refs is None:
+                    from kicad_parser import find_components_by_type
+                    _bga_refs = pcb_data._bga_ref_cache = {
+                        fp.reference
+                        for fp in find_components_by_type(pcb_data, 'BGA')}
+                if pad.component_ref in _bga_refs:
+                    _ds = getattr(pcb_data, '_deferred_bga_seeds', None)
+                    if _ds is None:
+                        _ds = pcb_data._deferred_bga_seeds = {}
+                    _ds.setdefault(net_id, []).append(
+                        (pad.global_x, pad.global_y))
                 print("thermal array did not fit -- deferred to the route step")
 
         # (The fine-pitch retry pass, issue #104, lived here. It is gone with
