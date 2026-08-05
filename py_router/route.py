@@ -2865,11 +2865,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 else:
                     _zpairs = [(n, _l) for n, _l in _zpairs
                                if n in set(_broken9)]
+            _finalize_rip9 = os.environ.get('KICAD_FINALIZE_RIP', '1') == '1'
             if _zpairs:
                 _zn = [n for n, _l in _zpairs]
                 _zl = [_l for _n, _l in _zpairs]
                 print(f"\nPlane finalize (#562): repairing "
-                      f"{len(set(_zn))} zone net(s) in-run: "
+                      f"{len(set(_zn))} zone net(s) in-run"
+                      f"{' (rip authority over blockers)' if _finalize_rip9 else ''}: "
                       f"{', '.join(sorted(set(_zn)))}")
                 import time as _time9
                 _t9 = _time9.time()
@@ -2935,6 +2937,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         # project rule, so a board declaring 0.6 got finalize
                         # copper at 0.5 -- real edge DRC.
                         board_edge_clearance=config.board_edge_clearance,
+                        # Rip authority (0804-wave finding): the absorbed
+                        # repair step ran with --rip-blocker-nets in 143/150
+                        # recorded chains, and dropping it left "unroutable
+                        # without rip authority" oracle links shipping open
+                        # (30 boards / 54 deferrals in the wave). The engine
+                        # already skips #521-protected nets as blockers and
+                        # custody-restores casualties; KICAD_FINALIZE_RIP=0
+                        # reverts for A/B.
+                        rip_blocker_nets=_finalize_rip9,
                         pcb_data=pcb_data, return_results=True,
                         progress_callback=_pcb9)
                     _cursid9 = {id(s) for s in pcb_data.segments}
@@ -2999,6 +3010,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         # -- output_file has no sibling .kicad_pro yet, and
                         # the engine default 0.5 masks the project read.
                         board_edge_clearance=config.board_edge_clearance,
+                        # Same rip-authority restoration as the GUI leg above.
+                        rip_blocker_nets=_finalize_rip9,
                         pcb_data=_live9,
                         progress_callback=_pcb9)
                 print(f"  [finalize timing] engine leg: "
