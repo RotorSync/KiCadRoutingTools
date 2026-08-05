@@ -169,6 +169,26 @@ Examples:
         if vectors:
             print(f"  rigid vectors (up to sign): {vectors}")
         report['vectors'] = vectors
+        # Run-7 A1: conflict-derived candidate vectors -- the source for
+        # boards with NO mounting-hole pattern (measured: both solver
+        # stages sat idle on rp2350 and recovery went negative). COARSE
+        # (part-size error, absorbed by legalize) and structurally no-op
+        # on healthy boards (no conflicts, no vectors); every application
+        # is still refereed by the stage gates. Kept SEPARATE from the
+        # pattern vectors in the report, and NOT fed to the emit guard's
+        # suspect test (damage hypotheses, not blessing evidence).
+        # FALLBACK ONLY: pattern vectors are precise evidence; feeding
+        # coarse derived vectors beside them measurably regressed the
+        # tigard exchange (risk-5 gate). Derive only when the pattern
+        # source is empty -- the exact gap this source exists to fill.
+        derived = ([] if vectors
+                   else reconstruct.conflict_offset_vectors(state))
+        if derived:
+            print("  conflict-derived vectors (coarse, gate-refereed): "
+                  + ", ".join(f"{d['v']} (support {d['support']})"
+                              for d in derived))
+            vectors = vectors + [d['v'] for d in derived]
+        report['vectors_derived'] = [list(d['v']) for d in derived]
 
     # F2: declared edge entries whose edge could not be named (implausible
     # pose) -- their objective term is the EDGE metric, not the net-anchor

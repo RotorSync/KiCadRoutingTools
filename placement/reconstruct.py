@@ -662,6 +662,77 @@ def _net_anchor_cost(state, ref: str, x: float, y: float,
     return cost
 
 
+def conflict_offset_vectors(state, *, cluster_tol: float = 1.5,
+                            min_support: int = 3,
+                            top_k: int = 3) -> List[Dict]:
+    """Candidate rigid-translate vectors from CONFLICT-PAIR offsets (run-7
+    A1: the vector source for boards with no mounting-hole pattern).
+
+    The geometry: a translate-displaced part lands ON or NEAR stationary
+    geometry (stacks, pad conflicts), and for every such pair the offset
+    a.pos - b.pos approximates the damage vector to within ~part size --
+    so the offsets of the damage's conflict pairs CLUSTER while a dense
+    design's own incidental conflicts scatter. Clusters with
+    ``min_support`` pairs (canonicalized up to sign, like rigid_vectors)
+    become candidate vectors, largest support first.
+
+    Design history, measured: the first A1 attempt fit block vectors from
+    net-anchor targets and was abandoned -- healthy boards read up to 60mm
+    of pure design slack (a part legitimately sits far from its net
+    centroid) and healthy-vs-damaged rp2350 were indistinguishable
+    (12.9 vs 12.0). Conflict offsets have the property that matters
+    instead: NO conflicts, NO vectors -- the healthy-board no-op guarantee
+    is structural, not a threshold.
+
+    The vectors are COARSE (part-size error), which the consumers absorb:
+    build_candidates offers +/-v poses whose residual mis-fit the
+    legalize/repair rungs clean, and the exchange lattice stays consistent
+    because the same vector list is used for the whole run.
+    """
+    ctx = state.legality_ctx
+    if ctx is None:
+        return []
+    refs = sorted(state.parts)
+    offsets = []
+    for i, a in enumerate(refs):
+        pa = state.parts[a]
+        for b in refs[i + 1:]:
+            pb = state.parts[b]
+            sf = ctx.pair_shortfall(a, b)
+            if not (sf.stack or sf.pad > legality.EPS
+                    or sf.hole > legality.EPS):
+                continue
+            offsets.append((pa.x - pb.x, pa.y - pb.y))
+    clusters: List[List[Tuple[float, float]]] = []
+    for (dx, dy) in offsets:
+        if math.hypot(dx, dy) < 2.0:
+            # small offsets are intra-pile NEIGHBOR pairs (two displaced
+            # parts conflicting each other at design-scale spacing), not
+            # displaced-onto-stationary evidence -- measured: they dominated
+            # the clusters at ~1mm and drowned the damage vector
+            continue
+        canon = (dx, dy) if (dy, dx) > (0, 0) else (-dx, -dy)
+        for cl in clusters:
+            cx = sum(p[0] for p in cl) / len(cl)
+            cy = sum(p[1] for p in cl) / len(cl)
+            if math.hypot(canon[0] - cx, canon[1] - cy) <= cluster_tol:
+                cl.append(canon)
+                break
+        else:
+            clusters.append([canon])
+    out = []
+    for cl in clusters:
+        if len(cl) < min_support:
+            continue
+        vx = sum(p[0] for p in cl) / len(cl)
+        vy = sum(p[1] for p in cl) / len(cl)
+        out.append({'v': (round(vx, 4), round(vy, 4)), 'support': len(cl)})
+    out.sort(key=lambda d: -d['support'])
+    return out[:top_k]
+
+
+
+
 def build_candidates(state, tiers: Tiers,
                      vectors: Sequence[Tuple[float, float]],
                      proposals: Dict[str, List[Tuple[float, float]]],
