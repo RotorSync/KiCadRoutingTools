@@ -324,7 +324,17 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
         if c['ref'] not in state.parts:
             notes.append(f"edge connector {c['ref']} is not on this board")
         elif c['ref'] in unplaced:
-            by_edge.setdefault(c.get('edge') or 'south', []).append(c)
+            if not c.get('edge'):
+                # Run-4 A: an entry with no edge used to default to SOUTH --
+                # an auto-declared receptacle whose true edge is underivable
+                # (implausible pose, run 3's J1) would have been seated on a
+                # wrong edge silently. No edge, no seat: say so and leave the
+                # part to the later stages / reconstruct.
+                notes.append(f"edge connector {c['ref']}: no edge declared; "
+                             f"stage 1 will not guess one (it used to default "
+                             f"to south) -- the centroid stage places it")
+                continue
+            by_edge.setdefault(c['edge'], []).append(c)
     for edge in sorted(by_edge):
         specs = sorted(by_edge[edge], key=lambda c: c['ref'])
         for k, c in enumerate(specs):

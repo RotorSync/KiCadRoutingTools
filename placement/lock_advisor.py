@@ -40,18 +40,15 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 CONFIDENCE_ORDER = {'high': 0, 'medium': 1, 'low': 2}
 
-# Lexical: substrings of footprint_name. Stock KiCad library naming.
-_CONNECTOR_FP = ('connector', 'usb', 'hdmi', 'rj45', 'jack', 'pinheader',
-                 'pinsocket', 'terminal', 'dsub', 'molex', 'jst', 'hirose',
-                 'microsd', 'sim', 'card', 'banana', 'header', 'socket')
-_MOUNT_FP = ('mountinghole', 'fiducial', 'testpoint')
-# Lexical: reference designator prefixes. IEEE-315 convention, NOT a property of
-# the file -- a board naming its connectors USB1/CON1 defeats this entirely.
-_CONN_PREFIX_MED = ('J', 'P', 'X', 'CN')
-_CONN_PREFIX_LOW = ('SW', 'TP', 'MH', 'H', 'FID')
+# The lexical tables live in part_class (run-4 A): the class question is
+# consumed by three tools (this advisor, emit-intent, reconstruct) and a
+# second copy would drift. The aliases keep this module's names stable.
+from placement.part_class import (  # noqa: E402
+    CONNECTOR_FP as _CONNECTOR_FP, MOUNT_FP as _MOUNT_FP,
+    CONN_PREFIX_MED as _CONN_PREFIX_MED, CONN_PREFIX_LOW as _CONN_PREFIX_LOW,
+    IFACE_PINS as _IFACE_PINS, SEAT_TOL_MM, classify_part, pose_plausible)
+
 _PREFIX_RE = re.compile(r'^([A-Za-z]+)')
-# USB/edge-connector pin functions KiCad writes only when the symbol carried one.
-_IFACE_PINS = {'VBUS', 'D+', 'D-', 'CC1', 'CC2', 'SBU1', 'SBU2', 'SHIELD'}
 
 HIGH_PIN_ADVISORY = 40   # place_optimize has no --max-target-pins guard
 
@@ -65,6 +62,12 @@ class LockFinding:
     evidence: Dict[str, object]
     already_locked: bool = False
     lock_source: Optional[str] = None      # 'kicad' | 'cli' | None
+    # Run-4 A: the pose-independent class and its pose verdict. A part class
+    # is what DETERMINES the position; pose_plausible says whether the
+    # current pose is consistent with it (None = ungraded/no outline).
+    part_class: Optional[str] = None
+    class_confidence: Optional[str] = None
+    pose_plausible: Optional[bool] = None
 
 
 @dataclass
@@ -252,7 +255,16 @@ def advise_locks(pcb_data, pcb_file: Optional[str] = None, *,
                            f"placements get destroyed. Consider --lock for a "
                            f"conservative first run.")})
 
-        if not rules:
+        # Run-4 A: classify (pose-independent) and grade the pose against
+        # the class. Only edge_receptacle makes a plausibility claim.
+        pc = classify_part(fp, ref)
+        plaus = pose_plausible(pc.name, out, clr, SEAT_TOL_MM)
+        if pc.name:
+            ev['part_class'] = pc.name
+            ev['class_confidence'] = pc.confidence
+            ev['pose_plausible'] = plaus
+
+        if not rules and not (pc.name == 'edge_receptacle' and plaus is False):
             continue
 
         conf = 'high' if ('mounting_hole_npth' in rules
@@ -270,6 +282,20 @@ def advise_locks(pcb_data, pcb_file: Optional[str] = None, *,
             else:
                 conf = 'low'
 
+        # Run-4 A: a lock is not a placement. An edge-RECEPTACLE whose pose
+        # is implausible (interior: the plug cannot reach it) is demoted out
+        # of the paste-ready list -- run 3's J1 carried three lexical
+        # connector signals at MEDIUM, and a medium-cutoff round trip would
+        # have frozen it 15.8 mm from its true edge slot.
+        if pc.name == 'edge_receptacle' and plaus is False:
+            conf = 'low'
+            reasons.append(
+                "[DEMOTED: edge-receptacle class in an IMPLAUSIBLE pose -- "
+                f"no overhang and {ev.get('edge_clearance_mm', '?')} mm off "
+                f"every edge (seat tol {SEAT_TOL_MM:g}). A lock is not a "
+                "placement: reconstruct/repair this part to an edge before "
+                "freezing it.]")
+
         locked = ref in kicad_locked
         src = 'kicad' if locked else None
         if not locked and lock_patterns:
@@ -279,7 +305,9 @@ def advise_locks(pcb_data, pcb_file: Optional[str] = None, *,
                     break
         adv.findings.append(LockFinding(
             ref=ref, confidence=conf, rules=tuple(rules), reasons=tuple(reasons),
-            evidence=ev, already_locked=locked, lock_source=src))
+            evidence=ev, already_locked=locked, lock_source=src,
+            part_class=pc.name, class_confidence=pc.confidence,
+            pose_plausible=plaus))
 
     adv.locked_refs = sorted(kicad_locked)
     adv.findings.sort(key=lambda f: (CONFIDENCE_ORDER[f.confidence], f.ref))
@@ -337,7 +365,10 @@ def to_json(adv: LockAdvice) -> Dict:
         'findings': [{'ref': f.ref, 'confidence': f.confidence,
                       'rules': list(f.rules), 'reasons': list(f.reasons),
                       'evidence': f.evidence, 'already_locked': f.already_locked,
-                      'lock_source': f.lock_source} for f in adv.findings],
+                      'lock_source': f.lock_source,
+                      'part_class': f.part_class,
+                      'class_confidence': f.class_confidence,
+                      'pose_plausible': f.pose_plausible} for f in adv.findings],
         'advisories': adv.advisories,
         'lock_patterns': adv.lock_patterns(),
         'lock_argv': (['--lock'] + adv.lock_patterns()) if adv.lock_patterns() else [],

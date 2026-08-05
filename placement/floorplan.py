@@ -810,6 +810,29 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
                     ref=ref, message=(f"{ref} sits nearest the {actual} edge "
                                       f"but is declared on the {edge} edge"),
                     measured={'edge': actual}, expected={'edge': edge})
+        # Run-4 A: the missing PROXIMITY conjunct. The rule used to grade only
+        # the overhang band and the nearest-edge identity, so a receptacle
+        # 15.8 mm INTERIOR passed ("nearest west, declared west" is satisfied
+        # anywhere on the board). For entries carrying the edge_receptacle
+        # class (or an explicit max_setback_mm), no overhang AND off-seat is
+        # a violation -- which is also what makes a misplaced edge part
+        # CHARGEABLE by place_seed --repair.
+        setback = c.get('max_setback_mm')
+        if setback is None and c.get('class') == 'edge_receptacle':
+            from .part_class import SEAT_TOL_MM
+            setback = SEAT_TOL_MM
+        if setback is not None and amount <= legality.EPS:
+            clr = ctx.gate.edge_clearance(part.rect)
+            if clr > float(setback) + legality.EPS:
+                yield Violation(
+                    rule='edge_connector', severity=ctx.sev('edge_connector'),
+                    ref=ref,
+                    message=(f"{ref} is an edge part seated {clr:.2f}mm from "
+                             f"the nearest edge with no overhang (seat "
+                             f"tolerance {float(setback):.2f}mm) -- the "
+                             f"mating face cannot reach the edge"),
+                    measured={'edge_clearance_mm': round(clr, 4)},
+                    expected={'max_setback_mm': float(setback)})
 
 
 def rule_decap_distance(ctx) -> Iterator[Violation]:
@@ -1065,7 +1088,8 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
 
 def emit_intent(pcb_data, pcb_file: str, *,
                 group_sources: Sequence[str] = ('kicad', 'sheet'),
-                zone_pad_mm: float = 1.0) -> Dict:
+                zone_pad_mm: float = 1.0,
+                declare_classes: bool = False) -> Dict:
     """A starter intent READ OFF the board, for a human or a model to edit.
 
     Everything here describes what the board already is. The envelope is
@@ -1157,13 +1181,58 @@ def emit_intent(pcb_data, pcb_file: str, *,
     # Parts already overhanging the outline are edge connectors by observation.
     # Recording them is what stops oob_count reporting them forever.
     conns = []
+    declared = set()
     for ref in sorted(parts):
         amt = state.edge_gate.rect_outside_amount(parts[ref].rect)
         if amt > legality.EPS:
-            conns.append({'ref': ref, 'edge': _nearest_edge(parts[ref].rect,
-                                                            bounds),
-                          'overhang_mm': {'min': 0.0,
-                                          'max': round(amt + 0.5, 3)}})
+            entry = {'ref': ref, 'edge': _nearest_edge(parts[ref].rect,
+                                                       bounds),
+                     'overhang_mm': {'min': 0.0,
+                                     'max': round(amt + 0.5, 3)}}
+            if declare_classes:
+                fp = (pcb_data.footprints or {}).get(ref)
+                if fp is not None:
+                    from .part_class import classify_part
+                    pc = classify_part(fp, ref)
+                    if pc.name in ('edge_receptacle', 'edge_actuator'):
+                        entry['class'] = pc.name
+                        entry['source'] = 'auto-class'
+            conns.append(entry)
+            declared.add(ref)
+
+    if declare_classes:
+        # Run-4 A: observation-only emission reproduces the failure it exists
+        # to prevent -- a MISPLACED edge part is exactly the one not
+        # overhanging, so it never got declared (run 3's J1). Classify
+        # pose-independently and declare edge-class parts too. `edge` is
+        # written ONLY when the current pose is plausible (overhanging or
+        # seated); an implausibly-posed receptacle gets a class-default band
+        # and NO edge -- naming one would be an invention, and the seeder
+        # deliberately skips edge-less entries.
+        from .part_class import classify_part, default_band, pose_plausible
+        for ref in sorted(parts):
+            if ref in declared:
+                continue
+            fp = (pcb_data.footprints or {}).get(ref)
+            if fp is None:
+                continue
+            pc = classify_part(fp, ref)
+            if pc.name != 'edge_receptacle':
+                # actuators make no claim unless they actually overhang
+                # (handled above); nothing else is an edge class.
+                continue
+            clr = state.edge_gate.edge_clearance(parts[ref].rect)
+            plaus = pose_plausible(pc.name, 0.0, clr)
+            entry = {'ref': ref, 'class': pc.name, 'source': 'auto-class',
+                     'overhang_mm': default_band(pc.name, fp)}
+            if plaus:
+                entry['edge'] = _nearest_edge(parts[ref].rect, bounds)
+            else:
+                entry['note'] = (
+                    f'edge-receptacle class in an implausible pose '
+                    f'({clr:.2f} mm from the nearest edge, no overhang): '
+                    f'no edge declared -- reconstruct/repair must derive it')
+            conns.append(entry)
 
     locked = sorted(extract_locked_refs_safe(pcb_file))
     leg = state.legality_metrics()

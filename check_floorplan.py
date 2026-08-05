@@ -67,6 +67,17 @@ def build_parser():
                    help='write a starter intent READ OFF this board and exit. '
                         'It grades clean by construction -- a baseline to '
                         'tighten, with the real block names filled in')
+    p.add_argument('--declare-classes', action='store_true',
+                   help='with --emit-intent: ALSO declare edge-class parts '
+                        '(part_class KB, run-4 A) that are not currently '
+                        'overhanging -- a USB receptacle parked interior gets '
+                        'an edge_connectors entry with a class-default band '
+                        'and NO edge (reconstruct derives it). DELIBERATELY '
+                        'breaks grades-clean-by-construction on a damaged '
+                        'board: an implausibly-posed receptacle then FAILS '
+                        'the proximity rule, which is the detection working. '
+                        'Default off to preserve the observation-only round '
+                        'trip')
     p.add_argument('--json', metavar='PATH',
                    help='write the full findings (every measurement) as JSON')
     p.add_argument('--group-by', default='auto', metavar='SOURCES',
@@ -122,7 +133,8 @@ def main(argv=None):
 
     if args.emit_intent:
         try:
-            doc = emit_intent(pcb, args.board, group_sources=sources or ())
+            doc = emit_intent(pcb, args.board, group_sources=sources or (),
+                              declare_classes=args.declare_classes)
         except UntrustworthyOutline as exc:
             print(f"ERROR: {args.board}: {exc}", file=sys.stderr)
             return UNPLACED_EXIT
