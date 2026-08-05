@@ -1941,214 +1941,23 @@ def _write_output_and_reroute(
     verify_written_file_parity(output_file, pcb_data, _ledger_scope,
                                label=' planes')
 
+    # RIPPED-NET REROUTE MACHINERY DELETED (#562). `all_ripped_net_ids`
+    # is contractually always empty now: the pour places only thermal
+    # arrays and cannot rip (the per-net `ripped_net_ids` list is
+    # initialized empty and nothing appends to it). The ~160-line block
+    # that lived here -- _verify_broken_ripped_nets + a batch_route
+    # self-invocation rerouting the broken subset -- was therefore
+    # unreachable. The variable itself stays: the GUI 10-tuple contract
+    # (#382 E5 / #508) includes ripped_net_ids, and the writer's
+    # exclude_net_ids param keeps its (empty) argument.
     if all_ripped_net_ids:
-        # Verify against the WRITTEN output which ripped nets are actually
-        # broken (issue #104 item 4: on KiCad 10 boards the writer's net
-        # filter only matches numeric-id net refs, so a "ripped" net can
-        # remain fully routed in the output). Only the broken subset needs
-        # the reroute; connected ones would just churn.
-        broken_ids = _verify_broken_ripped_nets(output_file, all_ripped_net_ids,
-                                                pcb_data)
-        broken_names = [pcb_data.nets[r].name for r in broken_ids
-                        if r in pcb_data.nets]
-
-        # #347 (same contract as repair_planes): a net this run
-        # ripped to place plane vias must not depend on a LATER chain step
-        # existing to reconnect it -- without this, manifests that stop after
-        # the plane step ship those nets OPEN with only a warning (orangecrab
-        # shipped 24 such nets). Handle the verified-broken subset in-run,
-        # unconditionally -- this used to be opt-in behind
-        # --reroute-ripped-nets, which no longer exists.
-        #
-        # ORDER MATTERS (DRC safety by construction, not by collision
-        # filtering): the #88 restore is a blind re-add of the net's ORIGINAL
-        # copper, so it must run BEFORE any reroute -- the only new copper on
-        # the board at that point is this run's plane copper, which
-        # restore_failed_reroute_nets already removes where it collides, and
-        # originals cannot collide with each other or with untouched input
-        # copper (the input board was legal). Rerouting FIRST and restoring
-        # after (the order the removed --reroute-ripped-nets flag asked for)
-        # stacked originals onto sibling reroutes that had claimed the
-        # vacated corridors -- the
-        # #141/eis hazard (measured on orangecrab: 60+ violations). After the
-        # restore, whatever is STILL broken (no original copper to restore,
-        # or a partial restore that did not reconnect) gets a FRESH
-        # batch_route against the written board; routing is obstacle-aware,
-        # so it cannot create collisions.
-        if broken_names:
-            print(f"\n{'='*60}")
-            print(f"Reconnecting {len(broken_names)} ripped net(s) "
-                  f"(restore originals, then reroute the remainder)...")
-            print(f"{'='*60}")
-            # 1) Restore the broken nets' original traces (#88), removing this
-            #    run's colliding plane copper so the restore reconnects rather
-            #    than shorts.
-            try:
-                from plane_io import restore_failed_reroute_nets
-                restored_ids, vias_removed, segs_removed = restore_failed_reroute_nets(
-                    input_file=input_file,
-                    output_file=output_file,
-                    broken_net_ids=broken_ids,
-                    # plane copper only: restored signal emissions are
-                    # not plane copper and must not be removed-on-collision
-                    plane_vias=[x for x in all_new_vias
-                                if not x.get('from_restore')],
-                    net_id_to_name=kicad_v10_names,
-                    via_size=via_size,
-                    clearance=clearance,
-                    plane_segments=[x for x in all_new_segments
-                                    if not x.get('from_restore')],
-                    # partial-restore emissions already in the output
-                    # must be stripped before the full-original restore
-                    partial_copper=(
-                        [x for x in all_new_segments if x.get('from_restore')],
-                        [x for x in all_new_vias if x.get('from_restore')]),
-                )
-                if restored_ids:
-                    names = [pcb_data.nets[r].name if r in pcb_data.nets
-                             else f"net_{r}" for r in restored_ids]
-                    print(f"Issue #88: RESTORED {len(restored_ids)} ripped net(s)' "
-                          f"original trace (removed {vias_removed} colliding plane "
-                          f"via(s), {segs_removed} colliding segment(s)):")
-                    print(f"  {', '.join(names)}")
-            except Exception as e:
-                print(f"  (ripped-net restore step skipped: {e})")
-
-            # 2) Reroute whatever the restore did not reconnect.
-            still_broken = _verify_broken_ripped_nets(output_file, broken_ids,
-                                                      pcb_data)
-            still_names = [pcb_data.nets[r].name for r in still_broken
-                           if r in pcb_data.nets]
-            if still_names:
-                print(f"\nRe-routing {len(still_names)} ripped net(s) the "
-                      f"restore could not reconnect...")
-                old_recursion_limit = sys.getrecursionlimit()
-                sys.setrecursionlimit(max(old_recursion_limit, 100000))
-                try:
-                    # The reroute must know about copper on EVERY board layer,
-                    # not just the plane step's layers: with the CLI's default
-                    # --layers F.Cu B.Cu on a 6-layer board, all_layers+planes
-                    # missed In3/In4 and batch_route dropped reroute vias onto
-                    # pre-existing In3 copper (orangecrab: 22 via-seg
-                    # violations). Route across the board's full copper stack.
-                    board_layers = list(getattr(pcb_data.board_info,
-                                                'copper_layers', None) or [])
-                    # dict.fromkeys, NOT list(set(...)): these are layer-name
-                    # STRINGS, and CPython randomizes string hashing per process,
-                    # so set order varies run to run. This list becomes the
-                    # router's `layers=`, and layer ORDER decides which layer is
-                    # tried first -- a non-deterministic order makes the same
-                    # board route differently in two processes. Same class as the
-                    # GUI net-order bug (2df22ca). Order-preserving dedupe is
-                    # deterministic and keeps the board's own layer order first.
-                    all_copper_layers = (board_layers if board_layers
-                                         else list(dict.fromkeys(all_layers + plane_layers)))
-                    # Issue #88.2: the reroute must use parameters compatible
-                    # with the original signal-routing run, or nets that only
-                    # routed with relaxed settings get silently dropped. In
-                    # particular BGA auto-exclusion zones (on by default in
-                    # batch_route) can re-block escapes the original run
-                    # permitted with --no-bga-zone.
-                    disable_bga = [] if no_bga_zone else None
-                    # #338: this self-invocation routes from OUTPUT_FILE, whose
-                    # sibling .kicad_pro may not exist yet, so batch_route's own
-                    # edge resolution would read nothing. Resolve the enforced
-                    # board-edge rule from the ORIGINAL input's project instead.
-                    try:
-                        from fix_kicad_drc_settings import effective_board_edge_clearance
-                        # #441: pin to the fab floor. Do NOT forward this function's
-                        # board_edge_clearance (the plane-zone inset); cli=0 reads the
-                        # project rule and floors it at the fab edge minimum, so this
-                        # self-invocation re-route never lays copper sub-fab when the
-                        # (possibly missing) sibling .kicad_pro declares a 0/sub-fab rule.
-                        _edge = effective_board_edge_clearance(input_file, 0.0)
-                    except Exception:
-                        _edge = 0.0
-                    # #434: same missing-sibling-.kicad_pro hazard for the
-                    # netclass map -- resolve it from the ORIGINAL input so the
-                    # blocker reroutes honor cross-class clearances.
-                    try:
-                        from list_nets import net_clearance_map_by_id
-                        _ncl = net_clearance_map_by_id(
-                            input_file,
-                            {nid: n.name for nid, n in pcb_data.nets.items()})
-                        # #439: cap at the ceiling only when clamping.
-                        if _ncl and clamp_netclasses and clearance_ceiling is not None:
-                            _ncl = {nid: min(c, clearance_ceiling)
-                                    for nid, c in _ncl.items()}
-                    except Exception:
-                        _ncl = None
-                    routed, failed, route_time = batch_route(
-                        input_file=output_file,
-                        output_file=output_file,
-                        net_names=still_names,
-                        net_clearances=_ncl,
-                        layers=all_copper_layers,
-                        track_width=track_width,
-                        clearance=clearance,
-                        via_size=via_size,
-                        via_drill=via_drill,
-                        grid_step=grid_step,
-                        hole_to_hole_clearance=hole_to_hole_clearance,
-                        board_edge_clearance=_edge,
-                        verbose=verbose,
-                        minimal_obstacle_cache=True,
-                        power_nets=power_nets,
-                        power_nets_widths=power_nets_widths,
-                        disable_bga_zones=disable_bga
-                    )
-                    print(f"\nRe-routing complete: {routed} routed, {failed} "
-                          f"failed in {route_time:.2f}s")
-                finally:
-                    sys.setrecursionlimit(old_recursion_limit)
-                final_broken = _verify_broken_ripped_nets(output_file,
-                                                          still_broken, pcb_data)
-                if final_broken:
-                    names = [pcb_data.nets[r].name if r in pcb_data.nets
-                             else f"net_{r}" for r in final_broken]
-                    print(f"WARNING: {len(final_broken)} ripped net(s) remain "
-                          f"disconnected (no original trace to restore, reroute "
-                          f"failed): {', '.join(names)}")
-        else:
-            print(f"Note: {len(all_ripped_net_ids)} net(s) were ripped during via placement "
-                  f"but remain fully connected in the output; no re-routing needed.")
+        print(f"WARNING: pour reported {len(all_ripped_net_ids)} ripped "
+              f"net(s), but the pour cannot rip since #562 -- a code "
+              f"path is filling ripped_net_ids again; restore the "
+              f"reroute machinery (deleted 2026-08-04) or fix the "
+              f"filler.")
 
     return True
-
-
-def _verify_broken_ripped_nets(output_file: str, ripped_net_ids: List[int],
-                               pcb_data: PCBData) -> List[int]:
-    """Which of the ripped nets are actually broken in the written output.
-
-    On verification failure (unparseable output etc.) every ripped net is
-    treated as broken -- rerouting a connected net is harmless churn, but
-    skipping a broken one ships it open.
-    """
-    try:
-        from check_connected import check_net_connectivity
-        out_pcb = parse_kicad_pcb(output_file)
-        segs_by_net: Dict[int, List] = {}
-        for s in out_pcb.segments:
-            segs_by_net.setdefault(s.net_id, []).append(s)
-        vias_by_net: Dict[int, List] = {}
-        for v in out_pcb.vias:
-            vias_by_net.setdefault(v.net_id, []).append(v)
-        zones_by_net: Dict[int, List] = {}
-        for z in out_pcb.zones:
-            zones_by_net.setdefault(z.net_id, []).append(z)
-        broken = []
-        for rid in ripped_net_ids:
-            result = check_net_connectivity(
-                rid,
-                segs_by_net.get(rid, []),
-                vias_by_net.get(rid, []),
-                out_pcb.pads_by_net.get(rid, []),
-                zones_by_net.get(rid, []))
-            if not result.get('connected', False):
-                broken.append(rid)
-        return broken
-    except Exception:
-        return list(ripped_net_ids)
 
 
 def _empty_plane_results(return_results: bool):
