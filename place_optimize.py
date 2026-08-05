@@ -280,6 +280,7 @@ Examples:
 
 
 if __name__ == "__main__":
+    import cli_banner; cli_banner.install()  # CMD/EXIT self-echo (run-3 B1)
     # main() already returns 0 from the --suggest-locks branch; that value was
     # dropped here, so the process exited 0 regardless of what main() decided
     # (the #551 family). Propagate it so a future refusal is visible to a caller.

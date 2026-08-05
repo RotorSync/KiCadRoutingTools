@@ -3075,6 +3075,15 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 if len(vlist) > limit:
                     print(f"  ... and {len(vlist) - limit} more "
                           f"(use --max-print 0 to show all)")
+
+            # Asserted listing total (run-3 B2): a truncated listing must say
+            # so machine-checkably. Consumers assert listed == total (or pass
+            # --max-print 0) before quoting specific items -- the run-3 orphan
+            # incident read 1 of 3 off a tail and shipped the wrong count.
+            listed = sum(min(len(vl), limit) for vl in by_type.values())
+            trunc = "" if listed == len(violations) else \
+                " TRUNCATED (use --max-print 0 to list all)"
+            print(f"\nLISTING: {listed} of {len(violations)} violation(s) shown{trunc}")
         else:
             print("NO DRC VIOLATIONS FOUND!")
 
@@ -3089,6 +3098,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
 
 
 if __name__ == "__main__":
+    import cli_banner; cli_banner.install()  # CMD/EXIT self-echo (run-3 B1)
     from console_encoding import enable_utf8_console
     enable_utf8_console()  # cp1252-safe non-ASCII prints (issue #152)
     parser = argparse.ArgumentParser(description='Check PCB for DRC violations (clearance errors)')
@@ -3173,6 +3183,12 @@ if __name__ == "__main__":
                   f"constraints and report hundreds of phantom annular/track/hole "
                   f"violations on a fine-pitch board (#295). Generate one with:\n"
                   f"    python3 fix_kicad_drc_settings.py {args.pcb}")
+    elif not args.quiet:
+        # Run-3 B3 (and run-2 T3): the graded clearance used to be echoed ONLY
+        # on the auto-derived branch, so an explicit -c left no trace in the
+        # log and board_score's graded_at parsed to null exactly when the
+        # caller was most explicit. Say it always, with its source.
+        print(f"Grading at clearance {args.clearance:.4g} mm (--clearance)")
 
     # Issue #326: per-netclass clearances -- KiCad grades every pair at the
     # max of the two items' netclass values, so read the board's classes

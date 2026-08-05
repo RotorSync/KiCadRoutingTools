@@ -287,4 +287,5 @@ def main():
 
 
 if __name__ == '__main__':
+    import cli_banner; cli_banner.install()  # CMD/EXIT self-echo (run-3 B1)
     main()

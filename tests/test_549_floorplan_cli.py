@@ -142,8 +142,12 @@ def test_json_output_is_byte_identical_across_hash_seeds():
     outs = []
     for seed in ('0', '12345'):
         p = os.path.join(_TMP, f'out{seed}.json')
+        # KRT_NO_BANNER: the B1 CMD echo would legitimately differ between
+        # these two runs (their --json paths differ) -- this test compares
+        # hash-seed determinism of the REPORT, not the banner.
         code, stdout, err = _run(BOARD, '--intent', _emit_once(), '-q',
-                                 '--json', p, env={'PYTHONHASHSEED': seed})
+                                 '--json', p, env={'PYTHONHASHSEED': seed,
+                                                   'KRT_NO_BANNER': '1'})
         assert code == 0, (seed, err)
         outs.append((open(p, 'rb').read(), stdout))
     assert outs[0][0] == outs[1][0], "--json differs across PYTHONHASHSEED"

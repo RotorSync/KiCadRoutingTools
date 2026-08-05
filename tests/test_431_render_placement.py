@@ -356,7 +356,12 @@ def test_ignore_nets_reproduces_place_optimize_exactly():
              SEED, placed, '--max-displacement', '1', '--ignore-nets', 'GND'],
             capture_output=True, text=True, cwd=ROOT, timeout=1800)
         assert opt.returncode == 0, opt.stderr[-600:]
-        q = json.loads(opt.stdout.split('JSON_SUMMARY:', 1)[1])
+        # Line-based parse (the documented convention): the B1 banner appends
+        # an EXIT= line after JSON_SUMMARY, so a whole-stdout split no longer
+        # yields bare JSON.
+        q = json.loads([l for l in opt.stdout.splitlines()
+                        if l.startswith('JSON_SUMMARY:')][0]
+                       .split('JSON_SUMMARY:', 1)[1])
 
         def rendered(*extra):
             r = _run(placed, '--json', '-o', os.path.join(d, 'r.png'),
