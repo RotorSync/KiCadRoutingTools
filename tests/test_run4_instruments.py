@@ -81,11 +81,12 @@ class TestB1Banner(unittest.TestCase):
         self.assertNotIn('EXIT=', r.stdout)
 
     def test_all_nine_instruments_carry_the_banner(self):
+        # converge.py is deliberately NOT wired: its stdout is a JSON API
+        # (record/status print documents callers json.loads() whole).
         for tool in ('check_drc.py', 'check_connected.py',
                      'check_orphan_stubs.py', 'check_floorplan.py',
                      'place_seed.py', 'place_reconstruct.py',
-                     'place_optimize.py', 'render_placement.py',
-                     'converge.py'):
+                     'place_optimize.py', 'render_placement.py'):
             with self.subTest(tool=tool):
                 r = _run(tool, '--help')
                 self.assertTrue(r.stdout.startswith('CMD: '),

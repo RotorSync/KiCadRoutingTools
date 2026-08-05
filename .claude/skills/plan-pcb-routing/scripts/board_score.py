@@ -564,7 +564,18 @@ def main():
                if v.get('count') is None and v.get('ran') is not False]
     blocking = None if unknown else sum(c for c in counts if c)
 
+    # board_sha binds this payload to the exact file it graded (run-3 B4:
+    # three ledger entries shipped embedding a PRIOR board's quality because
+    # nothing tied a score to its board). Same sha256-of-bytes as
+    # board_store.put, so converge record can compare them.
+    import hashlib
+    _h = hashlib.sha256()
+    with open(args.board, 'rb') as _f:
+        for chunk in iter(lambda: _f.read(1 << 20), b''):
+            _h.update(chunk)
+
     score = {'schema': 1, 'kind': 'board-score', 'board': os.path.abspath(args.board),
+             'board_sha': _h.hexdigest(),
              'label': args.label, 'blocking': blocking,
              'blocking_by': {k: v.get('count') for k, v in parts.items()},
              'advisory': {k: v.get('count') for k, v in advisory.items()},

@@ -257,6 +257,57 @@ def test_where_oracle_prints_the_join_work_list():
     print("  PASS: where --oracle prints KiCad's join list as pair specs")
 
 
+def test_record_warns_on_unbound_or_mismatched_score():
+    """Run-3 B4: three ledger entries shipped embedding a PRIOR board's
+    quality because --score was free JSON with no binding to --board.
+    board_score now embeds board_sha; record warns loudly on absence or
+    mismatch (a warning, not a refusal: baseline rows legitimately attach a
+    parent score to a rejected candidate -- but never silently)."""
+    if not os.path.isfile(BOARD):
+        print("  SKIP: fixture missing")
+        return
+    from board_store import sha256_file
+    with tempfile.TemporaryDirectory() as td:
+        led = os.path.join(td, 'l.jsonl')
+
+        def rec(score):
+            return _cv(['record', '--ledger', led, '--board', BOARD,
+                        '--lever', 'x', '--score', json.dumps(score),
+                        '--argv', sys.executable, '-c', "pass"])
+
+        r = rec({'blocking': 0, 'board_sha': sha256_file(BOARD)})
+        assert r.returncode == 0, r.stderr
+        assert 'record WARNING' not in r.stderr, r.stderr
+
+        r = rec({'blocking': 0})  # no board_sha (pre-B4 payload)
+        assert r.returncode == 0
+        assert 'no board_sha' in r.stderr, r.stderr
+
+        r = rec({'blocking': 0, 'board_sha': 'f' * 64})  # a different board
+        assert r.returncode == 0
+        assert 'DIFFERENT board' in r.stderr, r.stderr
+    print("  PASS: record binds score payloads to the recorded board")
+
+
+def test_board_score_emits_board_sha():
+    if not os.path.isfile(BOARD):
+        print("  SKIP: fixture missing")
+        return
+    from board_store import sha256_file
+    r = subprocess.run(
+        [sys.executable, '-X', 'utf8',
+         os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-routing',
+                      'scripts', 'board_score.py'), BOARD, '-q'],
+        capture_output=True, text=True, encoding='utf-8', errors='replace',
+        cwd=ROOT)
+    line = [l for l in r.stdout.splitlines() if l.startswith('SCORE_JSON=')]
+    assert line, r.stdout[:800] + r.stderr[:800]
+    doc = json.loads(line[0].split('=', 1)[1])
+    assert doc.get('board_sha') == sha256_file(BOARD), \
+        "board_score must bind its payload to the graded file"
+    print("  PASS: board_score embeds board_sha")
+
+
 if __name__ == '__main__':
     for k, v in sorted(globals().items()):
         if k.startswith('test_'):
