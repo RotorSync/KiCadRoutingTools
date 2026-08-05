@@ -779,3 +779,53 @@ Note: an earlier from-scratch constructive placer (`place.py` +
 `rust_placer/`) was removed after experiments showed hand placements beat it
 by ~500× in router effort; see git history and
 docs/placement-optimization.md for details.
+
+## Pad+drill legality layer, repair mode, and the reconstruct solver
+
+Added after two evaluation runs on the #411 swap corpus measured the failure
+modes directly (parts walked onto a locked connector's pad, parts left
+off-board, parts on NPTH holes, 48/92-part churn, `place_seed --force`
+re-seating 85/92 while leaving its zone targets unmoved):
+
+- **`legality.PartPads` / `LegalityContext` / `grade_pad_legality`** — the
+  pad+drill layer. Gate currency: rotation-inflated AABB pad rects (the
+  `_Cap.pad_rects` pattern; conservative — can falsely reject, never falsely
+  accept), NPTH drills inflated to `NPTH_TO_TRACK_CLEARANCE`, per-PAIR
+  baselines from SEED poses ("never worse than the board you were handed"; a
+  NEW different-net pad intersection is never admitted). Exact `check_drc`
+  geometry runs once per CLI for reports, so summaries carry no AABB phantoms.
+- **Quench integration (default ON)** — `candidate_valid`, the off-board
+  unfreeze branch and the swap phase all carry the pad gate; the halo term no
+  longer saturates on overlap (existing overlaps now have a repair gradient);
+  zero-net parts (mounting holes) are frozen by the quench unless
+  `--move-unconnected`; zero-pad footprints with a courtyard are static
+  obstacles; `--min-gain-per-mm` (default 0.1) is a displacement-scaled
+  acceptance threshold. `--courtyard-only` restores the old model bit-for-bit.
+- **`place_seed --repair`** — violation-driven minimal-move repair: only
+  violators move, worst first, escalating caps (0.5/1/2/5 mm), file-locked
+  non-must_lock violators are reported, never moved. Zones smaller than a
+  part's courtyard grade (and seat) on the anchor point — the spec-coordinate
+  pattern is satisfiable by construction now.
+- **`place_reconstruct.py`** (`placement/reconstruct.py`) — the structural
+  ("puzzle") solver: tier classification (frame -> anchors -> smalls),
+  corner-inset pattern fit (propose-only), rigid ±v vector detection, ONE
+  simultaneous candidate assignment as an Assignment-Problem-with-Conflicts
+  ILP (`scipy.optimize.milp`/HiGHS; breakout-weighted descent fallback), and
+  a minimal-move legalize sweep. Every stage is gated on the lexicographic
+  tuple (pad conflicts, hole shortfall, pad off-board, overlap, hpwl), so the
+  count gate cannot be satisfied by pushing parts off the board. Acceptance
+  measured on the swap corpus: bare-board PAD-PAD 68 -> 0 in one solve with
+  zero evacuation; on the correct control board it proposes nothing and moves
+  0 parts. Note: identical zero-net pattern parts (two M3 holes) are
+  interchangeable to a board-only solver — either corner assignment is
+  mechanically equivalent.
+- **`render_placement --legality`** (default ON) draws the defects the caption
+  used to only count: conflict rings/links, NPTH keepout circles, dashed-red
+  off-board pad extents; caption gains `pad-conflicts` / `hole-conflict`.
+
+Design lineage (see the session literature survey): Abacus/minimum-
+perturbation legalization (Spindler 2008; Brenner 2012; Kahng-Markov-Reda
+2004), conflict-directed repair scoping (FLOORIST, Moffitt 2006), assignment
+with conflicts (Oncan 2019), breakout weighting (Morris 1993), frame-first +
+largest-margin-first ordering (Wolfson 1988; Paikin & Tal 2015; regret-k,
+Ropke & Pisinger 2006).

@@ -313,6 +313,71 @@ def draw_courtyards(d, r, model, refs, *, side=None, color=None, dim=False,
             d.line([box[0], box[1], box[2], box[3]], fill=col, width=_w(r, 0.06))
 
 
+C_CONFLICT = (255, 64, 64)      # pad/hole legality conflicts
+C_HOLE = (255, 160, 64)         # NPTH keepout circles
+
+
+def draw_legality(d, r, model, *, side=None):
+    """The mess, DRAWN (the run-2 imaging finding: off-board parts and pad
+    conflicts were numbers in a caption, invisible in the picture the reads
+    were mandated on). Red rings + connecting line per conflicting pad pair,
+    orange circles at NPTH keepouts, dashed red extent for parts whose pad
+    copper leaves the board bbox."""
+    state = getattr(model, 'state', None)
+    if state is None or getattr(state, 'legality_ctx', None) is None:
+        return
+    ctx = state.legality_ctx
+    b = state.board
+    # NPTH keepout circles
+    for ref in sorted(ctx.parts):
+        p = state.parts.get(ref)
+        if p is None:
+            continue
+        for (cx, cy, rad) in ctx.parts[ref].hole_circles(p.x, p.y, p.rot):
+            x0, y0 = r.tf.pt(cx - rad, cy - rad)
+            x1, y1 = r.tf.pt(cx + rad, cy + rad)
+            d.ellipse([min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)],
+                      outline=C_HOLE, width=_w(r, 0.08))
+    # off-board pad extents (dashed red)
+    for ref in sorted(ctx.parts):
+        p = state.parts.get(ref)
+        if p is None:
+            continue
+        ext = ctx.parts[ref].extent(p.x, p.y, p.rot)
+        if ext is None:
+            continue
+        oob = (max(0.0, b[0] - ext[0]) + max(0.0, ext[2] - b[2])
+               + max(0.0, b[1] - ext[1]) + max(0.0, ext[3] - b[3]))
+        if oob > 1e-6:
+            box = _rect_pts(r, ext)
+            w = _w(r, 0.14)
+            on = off = max(4, w * 3)
+            _dash(d, (box[0], box[1]), (box[2], box[1]), on, off, C_CONFLICT, w)
+            _dash(d, (box[2], box[1]), (box[2], box[3]), on, off, C_CONFLICT, w)
+            _dash(d, (box[2], box[3]), (box[0], box[3]), on, off, C_CONFLICT, w)
+            _dash(d, (box[0], box[3]), (box[0], box[1]), on, off, C_CONFLICT, w)
+    # conflicting pairs: ring at the pair midpoint + connecting line
+    refs = sorted(ctx.parts)
+    for i, a in enumerate(refs):
+        pa = state.parts.get(a)
+        if pa is None:
+            continue
+        for bb in refs[i + 1:]:
+            pb = state.parts.get(bb)
+            if pb is None:
+                continue
+            sf = ctx.pair_shortfall(a, bb)
+            if sf.pad <= 1e-6 and sf.hole <= 1e-6:
+                continue
+            ax, ay = r.tf.pt(pa.x, pa.y)
+            bx, by = r.tf.pt(pb.x, pb.y)
+            d.line([ax, ay, bx, by], fill=C_CONFLICT, width=_w(r, 0.1))
+            mx, my = (ax + bx) / 2, (ay + by) / 2
+            rad = _w(r, 0.8, floor=6)
+            d.ellipse([mx - rad, my - rad, mx + rad, my + rad],
+                      outline=C_CONFLICT, width=_w(r, 0.12))
+
+
 def draw_ghosts(d, r, model, moves, *, width_mm=0.1):
     """Dashed rect at each part's seed pose -- the placement diff, drawn."""
     for m in moves:
@@ -471,6 +536,8 @@ def overlay_for(spec: PanelSpec):
             draw_airwires(d, r, m.airwires(blocked), color=C_AIR_BLOCK,
                           width_mm=0.07)
             draw_airwires(d, r, m.airwires(hot), color=C_AIR_FAIL, width_mm=0.09)
+        if o.get('legality', True):
+            draw_legality(d, r, m, side=spec.side)
         if spec.moves and o.get('ghosts', True):
             draw_ghosts(d, r, m, spec.moves)
         if spec.moves and o.get('arrows', True):
@@ -493,6 +560,10 @@ def caption(spec: PanelSpec, extra: Optional[Dict] = None) -> str:
             bits.append(f"{k} " + fmt.format(m[k]))
     if m.get('overlap_area') is not None:
         bits.append(f"overlap {m['overlap_area']:.2f}mm2")
+    if m.get('pad_conflict_pairs') is not None:
+        bits.append(f"pad-conflicts {m['pad_conflict_pairs']:.0f}")
+    if m.get('hole_shortfall'):
+        bits.append(f"hole-conflict {m['hole_shortfall']:.2f}mm")
     bits.append("oob n/a (no Edge.Cuts)" if spec.model.no_outline
                 else (f"oob {m['oob_count']:.0f}" if m.get('oob_count') is not None
                       else ''))
@@ -568,6 +639,9 @@ Examples:
     _bool_pair(p, 'ratsnest', True, 'draw airwires (default: on)')
     _bool_pair(p, 'pads', True, 'draw pads (default: on)')
     _bool_pair(p, 'ghosts', True, 'draw seed rects when --before is given')
+    _bool_pair(p, 'legality', True,
+               'draw the legality overlay: pad/hole conflict rings, NPTH '
+               'keepouts, off-board pad extents (default: on)')
     _bool_pair(p, 'arrows', True, 'draw displacement arrows when --before is given')
     _bool_pair(p, 'delta-first', True,
                'moved parts prominent, everything else faint (default: on)')
@@ -681,6 +755,7 @@ def main(argv=None):
     opts = {'borders': args.borders, 'labels': args.labels,
             'ratsnest': args.ratsnest, 'pads': args.pads,
             'ghosts': args.ghosts, 'arrows': args.arrows,
+            'legality': args.legality,
             'delta_first': args.delta_first, 'ratsnest_all': args.ratsnest_all}
 
     view = None

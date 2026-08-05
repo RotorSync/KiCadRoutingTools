@@ -678,3 +678,14 @@ this document already records for the decap case, now with a second instance.
 - [TI SNVA021](https://www.ti.com/lit/pdf/snva021) and [ADI AN-1119](https://www.analog.com/en/resources/app-notes/an-1119.html) — switching-regulator layout intent that lives in datasheets, not netlists
 - [HN: tscircuit autorouter discussion](https://news.ycombinator.com/item?id=43499992) and [JITX discussion](https://news.ycombinator.com/item?id=39771983) — autorouter/autoplacer trust culture
 - [Cypress benchmark suite](https://github.com/NVlabs/Cypress) — the only open PCB placement benchmark set (10 boards, 41–476 components)
+
+## Update: hard pad+drill legality (default on)
+
+The quench, seeder and portfolio now share a pad+drill legality layer
+(`placement/legality.py`: `PartPads`/`LegalityContext`/`grade_pad_legality`) —
+courtyard-only gating is history (`--courtyard-only` restores it for A/B).
+New repair entry points: `place_seed --repair` (violation-driven,
+minimal-move) and `place_reconstruct.py` (structural reconstruction with an
+exact assignment solve). Anti-churn: `--min-gain-per-mm`. Mounting holes are
+frozen by default (`--move-unconnected` frees them). Full design notes and
+measured acceptance numbers: `placement/README.md`.
