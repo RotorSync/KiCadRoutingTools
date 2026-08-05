@@ -396,6 +396,40 @@ def exact_clusters(pcb_data, net_id: int, islands,
                     union(pnode, ('i', ii))
                     break
 
+    # Pad <-> pad: copper-overlap union (the dual-pad / castellated class).
+    # Two same-net pads whose copper physically overlaps are one cluster
+    # even when neither touches a track or island on its OWN layers -- a
+    # via-in-pad footprint (0.9mm SMD pad + 0.3mm TH sibling 0.25mm away)
+    # otherwise yields one manufactured link per pad pair: dilemma graded
+    # 141 phantom links and the oracle welded every one (286s, ~420 junk
+    # segments) while kicad-cli's own connectivity reported the copper
+    # connected. Shape-accurate test (#346: bounding circles
+    # false-connect); the center-distance prefilter keeps it O(near
+    # pairs); NPTH pads have no copper to touch (#328).
+    from check_connected import _pads_copper_touch
+    from net_queries import expand_pad_layers as _epl
+    _cu_layers = pcb_data.board_info.copper_layers
+    _cupads = [p for p in pads
+               if getattr(p, 'pad_type', '') != 'np_thru_hole']
+
+    def _shares_cu(pi, pj):
+        if pad_is_plated_through(pi) or pad_is_plated_through(pj):
+            return True
+        return bool(set(_epl(pi.layers, _cu_layers))
+                    & set(_epl(pj.layers, _cu_layers)))
+
+    for i in range(len(_cupads)):
+        pi = _cupads[i]
+        _ri = max(pi.size_x, pi.size_y) / 2.0
+        for j in range(i + 1, len(_cupads)):
+            pj = _cupads[j]
+            _reach = _ri + max(pj.size_x, pj.size_y) / 2.0 + tolerance
+            if abs(pi.global_x - pj.global_x) > _reach \
+                    or abs(pi.global_y - pj.global_y) > _reach:
+                continue
+            if _shares_cu(pi, pj) and _pads_copper_touch(pi, pj, tolerance):
+                union(('p', id(pi)), ('p', id(pj)))
+
     # Every copper component gets a node even if it touched nothing.
     for r in set(comp_of_seg) | set(comp_of_via):
         parent.setdefault(('c', r), ('c', r))
