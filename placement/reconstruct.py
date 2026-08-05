@@ -233,28 +233,57 @@ def rigid_vectors(state, proposals: Dict[str, List[Tuple[float, float]]],
     -- R4's own letter ("two or more agree, up to sign"), which the code did
     not implement: every proposal x free-corner pairing minted a vector, and
     run 3's spurious cross-corner vector mis-moved J7 to 31.6 mm from home,
-    WORSE than its 15.8 mm input. Honest limit, stated: a symmetric
-    cross-pairing (two holes x two corners) still self-supports with 2 refs,
-    so the support rule thins accidental singletons and the post-assign
-    prune sweep (`prune_assignment`) remains the reliable layer."""
+    WORSE than its 15.8 mm input.
+
+    Run-5: the symmetric survivor of that rule is gone too. A symmetric
+    cross-pairing (two holes x two corners) self-supports with 2 refs: the
+    same refs mapped onto the same slots CROSSED mint a second, spurious
+    vector. Competing pairings of the SAME ref-set onto the SAME slot-set
+    are one assignment question, and only the minimal-mean-displacement
+    pairing is evidence (the F1 nearest-slot principle applied at the
+    vector layer); the crossed pairing ships each part ~2x farther. The
+    post-assign prune sweep (`prune_assignment`) remains the backstop."""
     support: Dict[Tuple[float, float], Set[str]] = {}
+    pairs: Dict[Tuple[float, float],
+                List[Tuple[str, Tuple[float, float], float]]] = {}
     order: List[Tuple[float, float]] = []
     for ref, cands in sorted(proposals.items()):
         p = state.parts[ref]
         for (px, py) in cands:
             v = (p.x - px, p.y - py)
-            if math.hypot(*v) < grid_tol:
+            d = math.hypot(*v)
+            if d < grid_tol:
                 continue
+            slot = (round(px, 4), round(py, 4))
             canon = v if (v[1], v[0]) > (0, 0) else (-v[0], -v[1])
             for w in order:
                 if math.hypot(canon[0] - w[0], canon[1] - w[1]) <= 2 * grid_tol:
                     support[w].add(ref)
+                    pairs[w].append((ref, slot, d))
                     break
             else:
                 key = (round(canon[0], 4), round(canon[1], 4))
                 order.append(key)
                 support[key] = {ref}
-    return [v for v in order if len(support[v]) >= 2]
+                pairs[key] = [(ref, slot, d)]
+    kept = [v for v in order if len(support[v]) >= 2]
+    groups: Dict[Tuple[frozenset, frozenset], List[Tuple[float, float]]] = {}
+    for v in kept:
+        gk = (frozenset(r for r, _s, _d in pairs[v]),
+              frozenset(s for _r, s, _d in pairs[v]))
+        groups.setdefault(gk, []).append(v)
+    out = []
+    for v in kept:
+        gk = (frozenset(r for r, _s, _d in pairs[v]),
+              frozenset(s for _r, s, _d in pairs[v]))
+        grp = groups[gk]
+        if len(grp) > 1:
+            best = min(grp, key=lambda w: (
+                sum(d for _r, _s, d in pairs[w]) / len(pairs[w]), w))
+            if v != best:
+                continue
+        out.append(v)
+    return out
 
 
 EDGE_PREF_WEIGHT = 10.0
@@ -327,6 +356,274 @@ def prune_assignment(state, old: Dict[str, Tuple[float, float, float]],
         notes.append(f"prune: reverted {len(pruned)} per-part mis-move(s) "
                      f"the global gate could not see: {', '.join(pruned)}")
     return pruned
+
+
+# --------------------------------------------------------------------------
+# exchange -- the joint +/-v lattice ILP (run-5 F4)
+# --------------------------------------------------------------------------
+
+EXCHANGE_LATTICE_TOL = 0.1
+# ^ how close current-minus-input must sit to an integer multiple of the
+# pattern vector for a part to be on the damage lattice (mm). Parts off the
+# lattice (seeded elsewhere, nudged by another tool) are stay-only.
+
+
+def _exchange_solve(state, v, exclude, edge_bands):
+    """One joint solve of the exchange ILP for pattern vector ``v``.
+
+    Every eligible part chooses an option k with pose = current + k*v,
+    where the options are the +/-1 V-LATTICE AROUND ITS INPUT POSE
+    (seed_x/seed_y): j_cur = round offset of current from input in v units;
+    k is offered iff j_cur + k is in {-1, 0, +1} and the target pad extent
+    stays on-board (banded). Rationale, all measured on the swap corpus:
+
+    - The damage hypothesis is "parts displaced by +/-v"; poses more than
+      one lattice step from the INPUT are not reachable by any such
+      hypothesis. Offering current-relative +/-2 instead let the solver
+      "improve" hpwl by relocating 13 never-displaced parts 31.6 mm out --
+      board-only metrics all improved while correct structure broke, and
+      no gate conjunct can see that. Input-anchoring makes every such move
+      structurally unreachable while still letting the solver UNWIND or
+      COMPLETE a part the ladder itself mis-moved (a part at input-v may
+      take +2: undo the mis-move and come home).
+    - Constraints are pairwise-absolute pad/hole legality on every option
+      combo (skipping stay-stay: the status quo stays feasible), so a
+      solution can only remove or keep existing conflicts, never add one.
+    - The objective is EXACT per-net bbox hpwl at the chosen poses
+      (linearized: per-net min/max vars over option-shifted pad bboxes)
+      plus MOVE_PENALTY_MM per moved part. A pairwise spring proxy was
+      measured WRONG here (valued the true exchange at -0.56 while real
+      hpwl gained 60): only the gate's own currency can price a joint
+      move.
+
+    Returns {ref: k} for the chosen non-stay options ({} = all-stay or no
+    solver).
+    """
+    try:
+        import numpy as np
+        from scipy.optimize import milp, LinearConstraint, Bounds
+    except ImportError:
+        return None
+    vx, vy = v
+    bands = edge_bands or {}
+    excl = exclude or set()
+    ctx = state.legality_ctx
+    m = state.clearance + 0.1
+
+    opts: Dict[str, List[int]] = {}
+    for r, p in sorted(state.parts.items()):
+        if r in excl or p.locked:
+            opts[r] = [0]
+            continue
+        dx0, dy0 = p.x - p.seed_x, p.y - p.seed_y
+        j_cur = None
+        for j in (-1, 0, 1):
+            if math.hypot(dx0 - j * vx, dy0 - j * vy) <= EXCHANGE_LATTICE_TOL:
+                j_cur = j
+                break
+        if j_cur is None:
+            opts[r] = [0]
+            continue
+        ss = [0]
+        pp = ctx.parts.get(r)
+        for k in (-2, -1, 1, 2):
+            if j_cur + k not in (-1, 0, 1):
+                continue
+            ext = (pp.extent(p.x + k * vx, p.y + k * vy, p.rot)
+                   if pp is not None else None)
+            if ext is None or (_bbox_outside(ext, state.board)
+                               <= bands.get(r, 0.0) + 1e-6):
+                ss.append(k)
+        opts[r] = ss
+
+    refs = sorted(opts)
+    ext_of = {}
+    for r in refs:
+        p = state.parts[r]
+        pp = ctx.parts.get(r)
+        for k in opts[r]:
+            ext_of[(r, k)] = (pp.extent(p.x + k * vx, p.y + k * vy, p.rot)
+                              if pp is not None else None)
+
+    def near(ea, eb):
+        return (ea is None or eb is None
+                or (ea[2] + m >= eb[0] and eb[2] + m >= ea[0]
+                    and ea[3] + m >= eb[1] and eb[3] + m >= ea[1]))
+
+    conflict = []
+    for i, a in enumerate(refs):
+        for b in refs[i + 1:]:
+            if len(opts[a]) == 1 and len(opts[b]) == 1:
+                continue
+            pa, pb = state.parts[a], state.parts[b]
+            for ka in opts[a]:
+                for kb in opts[b]:
+                    if ka == 0 and kb == 0:
+                        continue
+                    if not near(ext_of[(a, ka)], ext_of[(b, kb)]):
+                        continue
+                    if _pair_conflicts(
+                            state, a, (pa.x + ka * vx, pa.y + ka * vy),
+                            b, (pb.x + kb * vx, pb.y + kb * vy)):
+                        conflict.append((a, ka, b, kb))
+
+    xidx = {}
+    for r in refs:
+        for k in opts[r]:
+            xidx[(r, k)] = len(xidx)
+    nx = len(xidx)
+
+    nets: Dict[int, Dict[str, List[float]]] = {}
+    for r, p in state.parts.items():
+        for gx, gy, nid in p.pad_globals():
+            d = nets.setdefault(nid, {})
+            bb = d.get(r)
+            if bb is None:
+                d[r] = [gx, gy, gx, gy]
+            else:
+                bb[0] = min(bb[0], gx)
+                bb[1] = min(bb[1], gy)
+                bb[2] = max(bb[2], gx)
+                bb[3] = max(bb[3], gy)
+    net_ids = sorted(n for n, d in nets.items() if len(d) >= 2)
+
+    nv = nx + 4 * len(net_ids)
+    cost = np.zeros(nv)
+    lb = np.zeros(nv)
+    ub = np.ones(nv)
+    for kk in range(len(net_ids)):
+        for j, sgn in ((0, 1.0), (1, -1.0), (2, 1.0), (3, -1.0)):
+            i = nx + 4 * kk + j
+            cost[i] = sgn
+            lb[i] = -np.inf
+            ub[i] = np.inf
+    for (r, k), i in xidx.items():
+        if k != 0:
+            cost[i] += MOVE_PENALTY_MM
+
+    rows = []
+    rl = []
+    ru = []
+    for r in refs:
+        row = np.zeros(nv)
+        for k in opts[r]:
+            row[xidx[(r, k)]] = 1.0
+        rows.append(row)
+        rl.append(1.0)
+        ru.append(1.0)
+    for (a, ka, b, kb) in conflict:
+        row = np.zeros(nv)
+        row[xidx[(a, ka)]] = 1.0
+        row[xidx[(b, kb)]] = 1.0
+        rows.append(row)
+        rl.append(-np.inf)
+        ru.append(1.0)
+    for kk, nid in enumerate(net_ids):
+        iXmax, iXmin = nx + 4 * kk, nx + 4 * kk + 1
+        iYmax, iYmin = nx + 4 * kk + 2, nx + 4 * kk + 3
+        for r, bb in sorted(nets[nid].items()):
+            kx = [(xidx[(r, k)], k * vx) for k in opts.get(r, [0]) if k != 0]
+            ky = [(xidx[(r, k)], k * vy) for k in opts.get(r, [0]) if k != 0]
+            for (idx, bound, coefs, upper) in (
+                    (iXmax, bb[2], kx, True), (iXmin, bb[0], kx, False),
+                    (iYmax, bb[3], ky, True), (iYmin, bb[1], ky, False)):
+                row = np.zeros(nv)
+                row[idx] = 1.0
+                for i, c_ in coefs:
+                    row[i] = -c_
+                rows.append(row)
+                if upper:
+                    rl.append(bound)
+                    ru.append(np.inf)
+                else:
+                    rl.append(-np.inf)
+                    ru.append(bound)
+
+    A = np.vstack(rows)
+    integ = np.zeros(nv)
+    integ[:nx] = 1
+    res = milp(c=cost, constraints=LinearConstraint(A, rl, ru),
+               integrality=integ, bounds=Bounds(lb, ub))
+    if res.x is None:
+        return {}
+    return {r: k for (r, k), i in xidx.items() if res.x[i] > 0.5 and k != 0}
+
+
+def exchange_stage(state, vectors: Sequence[Tuple[float, float]],
+                   exclude: Optional[Set[str]] = None,
+                   edge_bands: Optional[Dict[str, float]] = None,
+                   notes: Optional[List[str]] = None,
+                   max_iter: int = 10):
+    """Gated joint +/-v group exchange along the pattern vectors.
+
+    The measured limit this removes (run-4 F4): a self-consistent displaced
+    ISLAND -- every member conflict-free where it sits, net-anchored to the
+    other members -- presents no per-part gradient, so the assign ILP's
+    static anchor proxy prices every member against stay and the
+    simultaneous exchange is invisible. Every local mechanism probed on the
+    swap corpus failed measurably (single-sign translate sets cascade to
+    nothing against the OPPOSITE group's squatters; seeded best-response
+    has a wrong attractor -- home parts chasing displaced partners beat
+    the true exchange 315 to 60 in raw hpwl; interlock 2-coloring floods).
+    Only the JOINT solve works: one ILP over the +/-1 input-lattice with
+    absolute pairwise legality rows and the exact bbox-hpwl objective
+    (see _exchange_solve).
+
+    Each vector iterates solve -> apply -> measure-gate -> until all-stay
+    or a gate rejection (exact snapshot restore). Healthy-board no-op by
+    construction: candidate vectors exist only where the corner-pattern
+    fit found displaced pattern parts (rigid_vectors is pattern-gated).
+
+    Returns (report, old_poses): old_poses maps each moved ref to its
+    pre-move pose, in prune_assignment's format.
+    """
+    report: Dict = {'attempts': 0, 'accepted': [], 'solver': True}
+    old: Dict[str, Tuple[float, float, float]] = {}
+    if not vectors:
+        return report, old
+    base = measure(state, edge_bands)
+    for (vx, vy) in vectors:
+        for _ in range(max_iter):
+            report['attempts'] += 1
+            sigma = _exchange_solve(state, (vx, vy), exclude, edge_bands)
+            if sigma is None:
+                report['solver'] = False
+                if notes is not None:
+                    notes.append('exchange: scipy.optimize.milp unavailable'
+                                 ' -- stage skipped')
+                return report, old
+            if not sigma:
+                break
+            groups: Dict[int, List[str]] = {}
+            for r, k in sigma.items():
+                groups.setdefault(k, []).append(r)
+            snap = {r: (state.parts[r].x, state.parts[r].y,
+                        state.parts[r].rot) for r in sigma}
+            for k, refs_ in sorted(groups.items()):
+                state.apply_group_move(sorted(refs_), k * vx, k * vy)
+            after = measure(state, edge_bands)
+            # STRICT improvement: an exchange the tuple cannot see is churn.
+            if after < base:
+                base = after
+                old.update(snap)
+                report['accepted'].append(
+                    {'v': [round(vx, 4), round(vy, 4)],
+                     'moves': {str(k): sorted(refs_)
+                               for k, refs_ in sorted(groups.items())},
+                     'gate': list(after)})
+                if notes is not None:
+                    notes.append(
+                        'exchange: '
+                        + ' / '.join(f'{len(refs_)} part(s) by {k:+d}v'
+                                     for k, refs_ in sorted(groups.items()))
+                        + f' along ({vx:.3f}, {vy:.3f})')
+            else:
+                # exact snapshot restore -- apply_group_move's `+= dx`
+                # would leave float residue on an inverse move
+                for r, (x, y, rot) in snap.items():
+                    state.apply_move(r, x, y, rot)
+                break
+    return report, old
 
 
 # --------------------------------------------------------------------------

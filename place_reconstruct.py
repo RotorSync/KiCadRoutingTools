@@ -41,7 +41,8 @@ Examples:
     p.add_argument("--intent", default=None, metavar="JSON",
                    help="Optional floorplan intent (edge connectors exempt "
                         "from off-board repair; zones constrain re-seating)")
-    p.add_argument("--stages", default="classify,fit,vector,assign,legalize",
+    p.add_argument("--stages",
+                   default="classify,fit,vector,assign,exchange,legalize",
                    help="Comma list of stages to run (default: all)")
     p.add_argument("--anchor-extent", default="auto",
                    help="Anchor tier threshold in mm, or 'auto' = "
@@ -189,8 +190,61 @@ Examples:
         print("Edge-preference refs (no declared edge; class outranks the "
               "netlist proxy): " + ", ".join(sorted(edge_pref)))
 
+    # Exchange exclusion set (run-5 F4). An edge-declared part is excluded
+    # only while SEATED (its pose is then mechanical). Unseated it is a
+    # displaced part like any other -- measured: J1 at its damaged pose was
+    # the squatter blocking the island's homecoming targets, and excluding
+    # it cascaded the whole group to nothing. SUSPECT entries (run-5 guard)
+    # are always eligible: their in-band overhang is exactly the damage
+    # under investigation, not a seat.
+    excl_x = set(tiers.locked) | set(tiers.zero_net)
+    if intent is not None:
+        for c in intent.edge_connectors:
+            ref = c['ref']
+            if ref not in state.parts:
+                continue
+            if 'SUSPECT' in (c.get('note') or ''):
+                continue
+            p_ = state.parts[ref]
+            em = reconstruct.edge_metric(
+                state, ref, p_.x, p_.y, edge_bands.get(ref, 2.0))
+            if em is not None and em <= 1e-6:
+                excl_x.add(ref)
+
+    xrep_all = {'attempts': 0, 'accepted': [], 'pruned': [], 'solver': True}
+
+    def run_exchange():
+        """The exchange fixpoint at the current state; returns moved refs."""
+        nonlocal base
+        xrep, xold = reconstruct.exchange_stage(
+            state, vectors, exclude=excl_x, edge_bands=edge_bands,
+            notes=notes)
+        xrep_all['attempts'] += xrep['attempts']
+        xrep_all['accepted'].extend(xrep['accepted'])
+        xrep_all['solver'] = xrep_all['solver'] and xrep.get('solver', True)
+        xpruned = []
+        if xold:
+            # Prune RUNS over the exchanged island, deliberately (the plan
+            # said exempt; measured logic says otherwise): reverting any
+            # single member alone breaks the island apart and worsens hpwl,
+            # so a genuinely self-consistent exchange survives the sweep --
+            # while a smuggled per-part mis-move (run-3 J7) does not.
+            xpruned = reconstruct.prune_assignment(
+                state, xold, notes, edge_bands=edge_bands,
+                exempt=set(edge_pref))
+            xrep_all['pruned'].extend(xpruned)
+            base = reconstruct.measure(state, edge_bands)
+            n_refs = len(set(xold) - set(xpruned))
+            print(f"  exchange: {n_refs} part(s) moved in "
+                  f"{len(xrep['accepted'])} joint move(s)"
+                  + (f" ({len(xpruned)} pruned back)" if xpruned else "")
+                  + f"; gate now pad_pairs={base[0]} hole={base[1]} "
+                  f"oob={base[2]} hpwl={base[3]} overlap={base[4]}")
+        return sorted(set(xold) - set(xpruned))
+
     moved = []
     all_pruned = []
+    xmoved_all = []
     if 'assign' in stages and (vectors or proposals):
         for rnd in range(max(1, args.assign_rounds)):
             cands, pattern = reconstruct.build_candidates(
@@ -210,6 +264,7 @@ Examples:
                     x, y = cands[ref][k]
                     state.apply_move(ref, x, y, state.parts[ref].rot)
             after = reconstruct.measure(state, edge_bands)
+            rmoved = []
             if after <= base:
                 # Run-4 F3(b): the gate is one board-wide tuple, so an
                 # accepted assignment can smuggle individual mis-moves past
@@ -231,8 +286,6 @@ Examples:
                       + (f" ({len(pruned)} pruned back)" if pruned else "")
                       + f"; gate now pad_pairs={after[0]} hole={after[1]} "
                       f"oob={after[2]} hpwl={after[3]} overlap={after[4]}")
-                if not rmoved:
-                    break     # a round that moved nothing: converged
             else:
                 for ref, (x, y, rot) in old.items():
                     state.apply_move(ref, x, y, rot)
@@ -240,10 +293,31 @@ Examples:
                              f"worsened {base} -> {after}")
                 print(f"  assign round {rnd + 1} REVERTED "
                       f"(gate {base} -> {after})")
-                break
+            # Run-5 F4: the exchange INTERLEAVES with the assign rounds --
+            # each accepted exchange re-prices the next round's anchors
+            # (and vice versa: a round's homecomings shrink the joint
+            # solve). Runs even after a REVERTED round: the round's
+            # rejection says nothing about the joint move's feasibility.
+            xmoved = run_exchange() if 'exchange' in stages else []
+            xmoved_all = sorted(set(xmoved_all) | set(xmoved))
+            if not rmoved and not xmoved:
+                break     # neither solver moved anything: converged
+    elif 'exchange' in stages and vectors:
+        xmoved_all = run_exchange()
     report['assign_pruned'] = sorted(set(all_pruned))
     report['assign_moved'] = sorted(moved)
     report['gate_after_assign'] = list(base)
+    if 'exchange' in stages:
+        report['exchange'] = {
+            'attempts': xrep_all['attempts'],
+            'accepted': xrep_all['accepted'],
+            'pruned': sorted(set(xrep_all['pruned'])),
+            'moved': xmoved_all,
+            'solver': xrep_all['solver']}
+        report['gate_after_exchange'] = list(base)
+        if not xrep_all['accepted']:
+            print(f"  exchange: no accepted joint move "
+                  f"({xrep_all['attempts']} attempt(s))")
     if edge_pref:
         report['edge_pref'] = sorted(edge_pref)
         report['edge_seated'] = {

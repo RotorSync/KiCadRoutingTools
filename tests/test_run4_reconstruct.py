@@ -251,7 +251,14 @@ class TestF2EdgeBands(unittest.TestCase):
             # budget; pre-existing structure) -- the seat itself must land.
             self.assertIn(r2.returncode, (0, 4),
                           r2.stdout[-800:] + r2.stderr[-400:])
-            self.assertIn(f'seated on the {want_edge} edge band', r2.stdout)
+            # Run-5: the exchange stage may have ALREADY homed J1 at its
+            # true seat (the whole island moves in one joint +/-v solve),
+            # in which case repair honestly reports zero violators instead
+            # of re-seating. Either path must end with J1 edge-seated --
+            # the geometric asserts below check that, whichever rung did it.
+            if f'seated on the {want_edge} edge band' not in r2.stdout:
+                self.assertIn('"repaired": 0', r2.stdout)
+                self.assertIn('"grade_errors": 0', r2.stdout)
             pcb = parse_kicad_pcb(out2)
             fp = pcb.footprints['J1']
             gate = BoardOutlineGate(pcb.board_info, 0.0)
