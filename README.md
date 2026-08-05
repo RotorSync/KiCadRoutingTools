@@ -476,9 +476,9 @@ python py_tools/check_orphan_stubs.py kicad_files/output.kicad_pcb
 # is modelled wrong - the usual cause is a QFN/QFP/BGA placed at a non-orthogonal
 # angle. The fanout tools run this automatically on their component first; run it
 # yourself before fanout (or board-wide) as a standalone check:
-python py_tools/check_pads.py kicad_files/board.kicad_pcb                 # whole board, per footprint
-python py_tools/check_pads.py kicad_files/board.kicad_pcb --component U23 # one footprint
-python py_tools/check_pads.py kicad_files/board.kicad_pcb --cross-footprint  # also across parts
+python py_router/check_pads.py kicad_files/board.kicad_pcb                 # whole board, per footprint
+python py_router/check_pads.py kicad_files/board.kicad_pcb --component U23 # one footprint
+python py_router/check_pads.py kicad_files/board.kicad_pcb --cross-footprint  # also across parts
 
 # Flag long non-orthonormal tracks. An on-grid router emits only 0/45/90-degree
 # segments; the only legitimate non-orthonormal segment is a short (<=1 grid cell)

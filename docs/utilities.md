@@ -295,7 +295,7 @@ it automatically on their component and warn).
 ### Usage
 
 ```bash
-python py_tools/check_pads.py board.kicad_pcb [OPTIONS]
+python py_router/check_pads.py board.kicad_pcb [OPTIONS]
 
 Options:
   --component, -c REF   Restrict the check to one footprint reference
@@ -314,13 +314,13 @@ pairs (0 = clean), so it gates a pipeline.
 
 ```bash
 # Whole board, checked per footprint
-python py_tools/check_pads.py board.kicad_pcb
+python py_router/check_pads.py board.kicad_pcb
 
 # One footprint (e.g. before fanning it out)
-python py_tools/check_pads.py board.kicad_pcb --component U23
+python py_router/check_pads.py board.kicad_pcb --component U23
 
 # Broader board-level short check across all footprints
-python py_tools/check_pads.py board.kicad_pcb --cross-footprint
+python py_router/check_pads.py board.kicad_pcb --cross-footprint
 ```
 
 ### Output
