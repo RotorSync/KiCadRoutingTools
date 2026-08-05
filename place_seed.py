@@ -155,6 +155,7 @@ Examples:
         print(f"Repair: {len(result['violators'])} violator(s), "
               f"{len(result['repaired'])} repaired "
               f"({len(result['moves'])} moved, max {max_move:.2f}mm), "
+              f"{len(result.get('unresolved') or [])} unresolved, "
               f"{len(result['unrepairable'])} unrepairable")
         summary = {'repaired': len(result['repaired']),
                    'unrepairable': len(result['unrepairable']),

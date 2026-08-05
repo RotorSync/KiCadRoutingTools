@@ -54,6 +54,10 @@ SEARCH_RADIUS_MM = 30.0
 SEARCH_STEP_MM = 1.0
 SEARCH_FINE_RADIUS_MM = 16.0
 SEARCH_FINE_STEP_MM = 0.25
+# Run-7 A3: a third, grid-step ring near the target -- the scar above says
+# 0.25 still steps over the last legal pocket on a packed board (the
+# 0.09mm window). Small radius keeps it affordable.
+SEARCH_XFINE_RADIUS_MM = 4.0
 FALLBACK_STEP_MM = 2.0
 TARGET_JITTER_MM = 1.5
 
@@ -138,9 +142,15 @@ def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
             state._inc_violation.clear()
             for rot in [part.rot] + [(part.rot + d) % 360
                                      for d in (90.0, 180.0, 270.0)]:
+                xfine = max(0.05, getattr(state, 'grid_step', 0.1) or 0.1)
                 for radius, step in ((SEARCH_RADIUS_MM, SEARCH_STEP_MM),
                                      (SEARCH_FINE_RADIUS_MM,
-                                      SEARCH_FINE_STEP_MM)):
+                                      SEARCH_FINE_STEP_MM),
+                                     (SEARCH_XFINE_RADIUS_MM, xfine)):
+                    if max_disp is not None and max_disp < step - 1e-9:
+                        # run-7 A3: a ring whose step exceeds the cap can
+                        # contribute nothing but used to burn a full sweep
+                        continue
                     for dx, dy in _offsets(radius, step):
                         if (max_disp is not None
                                 and math.hypot(dx, dy) > max_disp + 1e-9):
@@ -887,6 +897,7 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
                   if intent else {})
     repaired: List[str] = []
     failed: List[str] = []
+    zero_move: List[str] = []   # run-7 A2: honesty re-grade candidates
     moves: List[Dict] = []
     for ref in violators:
         part = state.parts[ref]
@@ -965,11 +976,44 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
             notes.append(f"{ref}: re-seated {d:.2f}mm from its pose "
                          f"(cap {placed_at})")
         else:
-            # already legal where it stands (violation was graded against
-            # something else -- e.g. the pair's other member already moved)
+            # Zero-move "repair": _try_place accepted the CURRENT pose.
+            # Legitimate when another mover already cleared the pair;
+            # run-6 measured the OTHER case looping forever ("5 repaired,
+            # 0 moved" every lap): the census charged a pad/body/grade
+            # violation while _try_place's courtyard test passed at the
+            # standing pose (metric mismatch). Classify honestly below.
             repaired.append(ref)
+            zero_move.append(ref)
+
+    # Run-7 A2: honesty re-grade. A violator counts as repaired only if the
+    # charged violation classes actually IMPROVED; zero-move violators on a
+    # board whose pad/body census did not move are UNRESOLVED, so the fix
+    # loop can see it stalled instead of believing "repaired" forever.
+    unresolved = []
+    if zero_move and state.legality_ctx is not None:
+        # Post-repair poses live on the STATE (pcb_data still holds the
+        # file's input poses), so the re-grade uses the state's own pair
+        # machinery in the gate currency.
+        ctx = state.legality_ctx
+        for ref in zero_move:
+            still = False
+            for other in sorted(state.parts):
+                if other == ref:
+                    continue
+                sf = ctx.pair_shortfall(ref, other)
+                if sf.stack or sf.pad > 1e-6 or sf.hole > 1e-6:
+                    still = True
+                    break
+            if still:
+                unresolved.append(ref)
+                repaired.remove(ref)
+                notes.append(
+                    f"{ref}: UNRESOLVED -- pose is courtyard-legal but the "
+                    f"charged pad/body violation persists (metric mismatch; "
+                    f"was reported 'repaired' before run-7 A2)")
     return {'moves': moves, 'repaired': repaired, 'unrepairable':
-            unrepairable + failed, 'violators': violators, 'notes': notes,
+            unrepairable + failed, 'unresolved': unresolved,
+            'violators': violators, 'notes': notes,
             'pad_report_before': {k: pads[k] for k in
                                   ('pad_conflicts', 'hole_conflicts',
                                    'oob_pad_count')},
