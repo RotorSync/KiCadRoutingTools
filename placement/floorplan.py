@@ -63,7 +63,7 @@ DEFAULT_ENVELOPE_TOLERANCE_MM = 0.5
 _TOP_LEVEL_KEYS = {
     'schema', 'kind', 'board', 'units', 'envelope', 'defaults', 'blocks',
     'keepouts', 'edge_connectors', 'decaps', 'must_lock', 'legality_budget',
-    'health', 'severity', 'context',
+    'health', 'severity', 'context', 'overlap_waivers',
 }
 _BLOCK_KEYS = {'name', 'group', 'refs', 'zone', 'side', 'exclusive',
                'tolerance_mm', 'note'}
@@ -136,6 +136,18 @@ class Intent:
     health: Dict[str, object]
     severity: Dict[str, str]
     source_path: str = ''
+    # Run-6: authored courtyard-overlap waivers, [{'pair': [a, b], 'reason'}].
+    # NEVER auto-emitted (a waiver derived from the board under repair would
+    # be the budget self-bless bug again); consumed by grade_body_overlap.
+    overlap_waivers: Tuple[Dict[str, object], ...] = ()
+
+    def waiver_pairs(self) -> Tuple[Tuple[str, str], ...]:
+        out = []
+        for w in self.overlap_waivers:
+            pair = w.get('pair') or ()
+            if len(pair) == 2:
+                out.append((str(pair[0]), str(pair[1])))
+        return tuple(out)
 
     def severity_of(self, rule: str, default: str = ERROR) -> str:
         return self.severity.get(rule, default)
@@ -318,6 +330,17 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
             f"legality_budget: unknown key(s) {', '.join(unknown_budget)}. "
             f"Known: overlap_area, oob_count, oob_amount")
 
+    waivers = raw.get('overlap_waivers') or []
+    if not isinstance(waivers, list):
+        raise IntentError("overlap_waivers: expected a list of "
+                          "{'pair': [refA, refB], 'reason': ...} objects")
+    for w in waivers:
+        if (not isinstance(w, dict) or not isinstance(w.get('pair'), list)
+                or len(w['pair']) != 2):
+            raise IntentError(
+                "overlap_waivers: each entry needs 'pair': [refA, refB] "
+                "(and should carry a 'reason')")
+
     return Intent(
         schema=schema, kind=kind, board=raw.get('board', '') or '',
         units=units, envelope=envelope,
@@ -330,6 +353,7 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
         health=raw.get('health') or {},
         severity={str(k): str(v) for k, v in severity.items()},
         source_path=source_path,
+        overlap_waivers=tuple(waivers),
     )
 
 
