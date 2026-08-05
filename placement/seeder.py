@@ -313,7 +313,9 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                      clearance: float = 0.25,
                      board_edge_clearance: float = 0.55,
                      grid_step: float = 0.1,
-                     seed_refs: Optional[Set[str]] = None) -> Dict:
+                     seed_refs: Optional[Set[str]] = None,
+                     anchors_first: bool = False,
+                     anchor_rounds: int = 1) -> Dict:
     """Compute a full placement for an unplaced board from its intent.
 
     Returns {'placements': [...], 'lock_refs': [...], 'unseated': [...],
@@ -622,8 +624,28 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # through to the generic stage, which reports honestly
 
     # ---- 3. the rest: connectivity centroid --------------------------------
+    # --anchors-first (run-4 C): the default queue is pin-count descending,
+    # which seeds a LARGE low-pin part (a connector shell, a big switch)
+    # late, after the smalls have claimed its space -- and "nothing in the
+    # placement code orders by size" was the skill's own measured complaint.
+    # The mode seeds the anchor tier (pad-extent >= the P75 threshold, the
+    # same tiering reconstruct uses) by DESCENDING EXTENT first; the smalls
+    # are already parked as non-obstacles by the existing `exclude` set, so
+    # anchors place against anchors only. Everything else is unchanged.
     center = ((bounds[0] + bounds[2]) / 2.0, (bounds[1] + bounds[3]) / 2.0)
-    for ref in _order(sorted(unplaced)):
+    queue = _order(sorted(unplaced))
+    if anchors_first and unplaced:
+        from placement.reconstruct import part_extent_mm
+        exts = sorted(part_extent_mm(state, r) for r in unplaced)
+        thr = max(3.5, exts[int(0.75 * (len(exts) - 1))]) if exts else 3.5
+        anchors = sorted((r for r in unplaced
+                          if part_extent_mm(state, r) >= thr),
+                         key=lambda r: -part_extent_mm(state, r))
+        notes.append(f"anchors-first: {len(anchors)} anchor(s) (extent >= "
+                     f"{thr:.2f}mm) seed before {len(unplaced) - len(anchors)}"
+                     f" small(s): {', '.join(anchors)}")
+        queue = anchors + [r for r in queue if r not in set(anchors)]
+    for ref in queue:
         target = _partner_centroid(state, ref, placed) or center
         jx, jy = _jitter()
         rot_before = state.parts[ref].rot
@@ -642,6 +664,49 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
         else:
             unseated.append(ref)
             notes.append(f"{ref}: no legal pose anywhere on the board")
+
+    # ---- 3b. anchor rounds (run-4 C): gated re-seat passes ------------------
+    # Round 1 seeded anchors against anchors only; now that the smalls
+    # exist, an anchor's partner centroid is truer, and a small seeded
+    # around a provisional anchor pose may sit better re-derived. Each
+    # round re-seats anchors (extent desc) then smalls at their partner
+    # centroids over the FULL placement, and is kept only if the
+    # reconstruct gate tuple does not worsen -- otherwise the whole round
+    # reverts. Stops early when a round moves nothing.
+    if anchors_first and anchor_rounds > 1 and placed:
+        from placement.reconstruct import measure, part_extent_mm
+        for rnd in range(2, max(2, anchor_rounds) + 1):
+            baseline = measure(state)
+            snapshot = {r: (state.parts[r].x, state.parts[r].y,
+                            state.parts[r].rot) for r in placed}
+            moved_n = 0
+            order2 = sorted(placed,
+                            key=lambda r: -part_extent_mm(state, r))
+            for ref in order2:
+                if state.parts[ref].locked:
+                    continue
+                target = _partner_centroid(state, ref, placed - {ref})
+                if target is None:
+                    continue
+                ox, oy = state.parts[ref].x, state.parts[ref].y
+                if _try_place(state, ref, target[0], target[1],
+                              set()) is not None:
+                    if math.hypot(state.parts[ref].x - ox,
+                                  state.parts[ref].y - oy) > 1e-6:
+                        moved_n += 1
+            after = measure(state)
+            if after <= baseline:
+                notes.append(f"anchor round {rnd}: {moved_n} part(s) "
+                             f"re-seated; gate {list(baseline)} -> "
+                             f"{list(after)}")
+                if moved_n == 0:
+                    break
+            else:
+                for r, (x, y, rot) in snapshot.items():
+                    state.apply_move(r, x, y, rot)
+                notes.append(f"anchor round {rnd} REVERTED: gate worsened "
+                             f"{list(baseline)} -> {list(after)}")
+                break
 
     placements = [{'reference': ref,
                    'new_x': state.parts[ref].x, 'new_y': state.parts[ref].y,

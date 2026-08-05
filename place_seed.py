@@ -63,6 +63,23 @@ Examples:
                    help="Re-seed a board that already looks placed. The "
                         "existing placement is DISCARDED; to explore around "
                         "it instead, use place_portfolio.py")
+    p.add_argument("--anchors-first", action="store_true",
+                   help="Seed the ANCHOR tier (pad-extent >= the P75 "
+                        "threshold, the same tiering reconstruct uses) by "
+                        "descending extent BEFORE any small part -- the "
+                        "default queue is pin-count descending, which seeds "
+                        "a large low-pin connector late, after the smalls "
+                        "claimed its space. The smalls are parked as "
+                        "non-obstacles either way (the existing exclude "
+                        "mechanism); this changes only WHO goes first "
+                        "(run-4 C)")
+    p.add_argument("--anchor-rounds", type=int, default=1,
+                   help="With --anchors-first: gated re-seat passes after "
+                        "the first full placement (default 1 = none). Each "
+                        "round re-seats anchors then smalls at their partner "
+                        "centroids over the FULL placement and keeps the "
+                        "round only if the legality/hpwl gate tuple does not "
+                        "worsen; stops early when a round moves nothing")
     p.add_argument("--repair", action="store_true",
                    help="Violation-driven minimal-move repair of a PLACED "
                         "board: only parts violating the intent or pad/hole "
@@ -194,7 +211,9 @@ Examples:
         pcb, args.input_file, intent, rng, group_sources=sources,
         clearance=args.clearance,
         board_edge_clearance=args.board_edge_clearance,
-        grid_step=args.grid_step, seed_refs=seed_refs)
+        grid_step=args.grid_step, seed_refs=seed_refs,
+        anchors_first=args.anchors_first,
+        anchor_rounds=args.anchor_rounds)
     for note in result['notes']:
         print(f"  NOTE: {note}")
     print(f"Seeded {len(result['placements'])} part(s); "
