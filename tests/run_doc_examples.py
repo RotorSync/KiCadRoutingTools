@@ -50,7 +50,7 @@ def gridrouteconfig_undocumented_fields():
     docs/api-routing-config.md, so a newly-added routing knob can't ship
     undocumented. Returns the list of dataclass fields missing from the doc's
     field tables (empty == parity)."""
-    src = open(os.path.join(REPO_ROOT, 'routing_config.py'), encoding='utf-8').read()
+    src = open(os.path.join(REPO_ROOT, 'py_router', 'routing_config.py'), encoding='utf-8').read()
     fields = [s.target.id
               for node in ast.walk(ast.parse(src))
               if isinstance(node, ast.ClassDef) and node.name == 'GridRouteConfig'
@@ -89,9 +89,16 @@ def main():
                 f.write(block)
                 path = f.name
             try:
+                # #522: examples import the engine flat; scripts run
+                # from a temp file at REPO_ROOT, so hand them the layout.
+                _env = dict(os.environ)
+                _env['PYTHONPATH'] = os.pathsep.join(
+                    [os.path.join(REPO_ROOT, 'py_router'),
+                     os.path.join(REPO_ROOT, 'py_tools'),
+                     _env.get('PYTHONPATH', '')]).rstrip(os.pathsep)
                 r = subprocess.run([sys.executable, '-X', 'utf8', path],
                                    capture_output=True, text=True,
-                                   timeout=300, cwd=REPO_ROOT)
+                                   timeout=300, cwd=REPO_ROOT, env=_env)
             finally:
                 os.unlink(path)
             ran += 1

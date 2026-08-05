@@ -36,6 +36,8 @@ import sys
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522
 
 failures = []
 
@@ -89,7 +91,7 @@ def test_no_set_derived_layer_lists():
 
 def test_check_drc_fallback_is_sorted():
     print("2. check_drc's segment-derived layer fallback is deterministic")
-    src = open(os.path.join(ROOT, 'check_drc.py'), encoding='utf-8').read()
+    src = open(os.path.join(ROOT, 'py_router', 'check_drc.py'), encoding='utf-8').read()
     if 'routing_layers = sorted(set(seg.layer' in src:
         print("  ok   uses sorted(set(...))")
     else:
@@ -105,7 +107,7 @@ def test_merge_memo_keepalive_and_bound():
         failures.append("_MERGE_MEMO is unbounded")
     else:
         print(f"  ok   bounded at {obstacle_costs._MERGE_MEMO_MAX}")
-    src = open(os.path.join(ROOT, 'obstacle_costs.py'), encoding='utf-8').read()
+    src = open(os.path.join(ROOT, 'py_router', 'obstacle_costs.py'), encoding='utf-8').read()
     # The stored tuple must carry the keyed object so its id() cannot be reused.
     if '_MERGE_MEMO[key] = (sig, all_costs, per_net_costs' in src:
         print("  ok   entry pins per_net_costs (and arrays) alive")

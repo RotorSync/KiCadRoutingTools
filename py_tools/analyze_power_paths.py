@@ -16,7 +16,9 @@ Usage:
         get_power_net_recommendations
     )
 """
+
 from __future__ import annotations
+import _path  # noqa: F401  (#522: makes ../py_router importable)
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Set, Optional, Tuple

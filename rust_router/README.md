@@ -174,7 +174,7 @@ else:
 Run the full 32-net benchmark from the parent directory:
 
 ```bash
-python route.py kicad_files/fanout_starting_point.kicad_pcb kicad_files/routed.kicad_pcb \
+python py_router/route.py kicad_files/fanout_starting_point.kicad_pcb kicad_files/routed.kicad_pcb \
   "Net-(U2A-DATA_23)" "Net-(U2A-DATA_20)" ...
 ```
 

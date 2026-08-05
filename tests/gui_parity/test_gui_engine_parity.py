@@ -65,6 +65,8 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.join(REPO, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(REPO, 'py_tools'))  # #522
 sys.path.insert(0, os.path.join(REPO, 'tests', 'gui_parity'))  # replay_plan_vs_run
 
 KICAD_PYTHONS = [
@@ -82,7 +84,7 @@ def _host_env():
     """Environment for the CLI subprocesses, with KiCad's python wiring removed.
 
     KiCad's bundled interpreter exports PYTHONUSERBASE (its own 3rdparty tree).
-    Once this gate re-execs into it, a plain `python3 route.py` child inherits
+    Once this gate re-execs into it, a plain `python3 py_router/route.py` child inherits
     that and resolves USER site-packages inside KiCad's tree instead of its own,
     so the host interpreter reports numpy/scipy/shapely missing and every CLI
     step fails -- which reads as "no wx/pcbnew in this session" when in fact both
@@ -164,21 +166,21 @@ def run_cli_leg(board, workdir):
     py = shutil.which('python3') or sys.executable
     steps = []
     s1 = os.path.join(workdir, 'cli_step1.kicad_pcb')
-    steps.append([py, '-X', 'utf8', os.path.join(REPO, 'route.py'), board, s1,
+    steps.append([py, '-X', 'utf8', os.path.join(REPO, 'py_router', 'route.py'), board, s1,
                   '--nets', '*', '!GND', '--clearance', '0.15',
                   '--track-width', '0.127', '--via-size', '0.45',
                   '--via-drill', '0.2', '--power-nets', '+3V3', '+12V',
                   '--power-nets-widths', '0.4', '0.4',
                   '--max-ripup', '10', '--max-iterations', '1000000'])
     s2 = os.path.join(workdir, 'cli_step2.kicad_pcb')
-    steps.append([py, '-X', 'utf8', os.path.join(REPO, 'route_planes.py'), s1, s2,
+    steps.append([py, '-X', 'utf8', os.path.join(REPO, 'py_router', 'route_planes.py'), s1, s2,
                   '--nets', 'GND', '--plane-layers', 'B.Cu',
                   '--clearance', '0.15', '--via-size', '0.45',
                   '--via-drill', '0.2'])
     # (No standalone repair step since #562: the final route step's in-run
     # plane finalize runs the repair engine + cleanup + kicad-oracle verify.)
     s4 = os.path.join(workdir, 'cli_final.kicad_pcb')
-    steps.append([py, '-X', 'utf8', os.path.join(REPO, 'route.py'), s2, s4,
+    steps.append([py, '-X', 'utf8', os.path.join(REPO, 'py_router', 'route.py'), s2, s4,
                   '--nets', 'GND', '--clearance', '0.127',
                   '--track-width', '0.127', '--via-size', '0.45',
                   '--via-drill', '0.2', '--max-ripup', '10',
@@ -246,13 +248,13 @@ def run_gui_leg(board_path, workdir):
 def grade(pcb, label):
     py = shutil.which('python3') or sys.executable
     conn = subprocess.run([py, '-X', 'utf8',
-                           os.path.join(REPO, 'check_connected.py'), pcb],
+                           os.path.join(REPO, 'py_router', 'check_connected.py'), pcb],
                           capture_output=True, text=True)
     conn_full = 'ALL NETS FULLY CONNECTED' in conn.stdout
     import re
     m = re.search(r'FOUND (\d+) ISSUES', conn.stdout)
     conn_issues = int(m.group(1)) if m else 0
-    drc = subprocess.run([py, '-X', 'utf8', os.path.join(REPO, 'check_drc.py'),
+    drc = subprocess.run([py, '-X', 'utf8', os.path.join(REPO, 'py_router', 'check_drc.py'),
                           pcb, '--clearance-margin', '0.1', '-c', '0.127'],
                          capture_output=True, text=True)
     m = re.search(r'FOUND (\d+) DRC', drc.stdout)

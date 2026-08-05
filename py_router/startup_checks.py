@@ -66,7 +66,7 @@ def check_python_dependencies():
 
 def get_cargo_version():
     """Read the version from Cargo.toml."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    script_dir = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
     cargo_path = os.path.join(script_dir, 'rust_router', 'Cargo.toml')
 
     if not os.path.exists(cargo_path):
@@ -95,7 +95,7 @@ def check_rust_library():
     Raises StartupCheckError with the build instructions when it is missing or
     stale. Returns the installed version string.
     """
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    script_dir = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
     rust_dir = os.path.join(script_dir, 'rust_router')
 
     # Add rust_router to path for import

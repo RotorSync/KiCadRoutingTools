@@ -17,6 +17,8 @@ default install paths); pass boards as arguments:
 
 Exit status: 0 = all boards match, 1 = differences found, 2 = error.
 """
+import _path  # noqa: F401  (#522: makes ../py_router importable)
+
 import os
 import sys
 

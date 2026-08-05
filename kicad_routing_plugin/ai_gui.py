@@ -34,6 +34,11 @@ ROOT_DIR = os.path.dirname(PLUGIN_DIR)
 if ROOT_DIR not in sys.path:      # top-level modules
     sys.path.insert(0, ROOT_DIR)
 
+# #522 layout: engine/tool modules live in py_router/ (flat-install safe)
+_ENGINE_DIR = os.path.join(ROOT_DIR, 'py_router')
+if os.path.isdir(_ENGINE_DIR) and _ENGINE_DIR not in sys.path:
+    sys.path.insert(0, _ENGINE_DIR)
+
 # "Default" combo entry = don't pass the model/effort flag at all.
 DEFAULT_CHOICE = "Default"
 

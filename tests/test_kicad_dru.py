@@ -6,6 +6,8 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # #522
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # #522
 from kicad_dru import (parse_dru_layer_clearances, read_board_layer_clearances)
 
 L4 = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]

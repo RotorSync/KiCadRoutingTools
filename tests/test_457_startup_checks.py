@@ -23,6 +23,8 @@ import sys
 import textwrap
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # #522
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # #522
 
 import startup_checks
 from startup_checks import (MIN_PYTHON, StartupCheckError, check_python_dependencies,
@@ -152,7 +154,7 @@ def _run_probe(module_name):
 
 
 def test_as_main_prints_and_exits_one():
-    """A user running `python3 route.py` must see exactly what they saw before."""
+    """A user running `python3 py_router/route.py` must see exactly what they saw before."""
     r = _run_probe('__main__')
     assert r.returncode == 1, f"expected exit 1, got {r.returncode}"
     assert 'SIMULATED: router missing' in r.stdout, \

@@ -18,6 +18,8 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.join(os.path.dirname(__file__), '..'), 'py_router'))  # #522
+sys.path.insert(0, os.path.join(os.path.join(os.path.dirname(__file__), '..'), 'py_tools'))  # #522
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tests/stress'))
 
 from redo_stress_test import seed_side_files  # noqa: E402

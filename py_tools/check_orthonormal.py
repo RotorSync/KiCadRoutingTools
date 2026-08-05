@@ -9,6 +9,8 @@ merged terminal that spanned many cells (it can cut straight across foreign
 copper -- see issues #157 / #159). This check finds them directly in the
 output, independent of DRC.
 """
+import _path  # noqa: F401  (#522: makes ../py_router importable)
+
 import argparse
 import math
 from kicad_parser import parse_kicad_pcb

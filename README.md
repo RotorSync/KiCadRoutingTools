@@ -161,22 +161,22 @@ All of these are also available inside KiCad without leaving the plugin - see [A
 
 ```bash
 # Optionally optimize an existing placement for routability (before routing)
-python place_optimize.py my_board.kicad_pcb --max-displacement 3
+python py_router/place_optimize.py my_board.kicad_pcb --max-displacement 3
 
 # Pour the planes FIRST (#562): the fanout's plane-drop vias then land on
 # real fill, and the route step welds plane pads into it.
-python route_planes.py my_board.kicad_pcb poured.kicad_pcb --nets GND --plane-layers B.Cu
+python py_router/route_planes.py my_board.kicad_pcb poured.kicad_pcb --nets GND --plane-layers B.Cu
 
 # Fan out a BGA, then tidy decoupling caps off the new vias (issue #130)
-python bga_fanout.py poured.kicad_pcb -c U1 -o fanned.kicad_pcb --clearance 0.1
-python place_fanout_clearance.py fanned.kicad_pcb capclean.kicad_pcb --clearance 0.1
+python py_router/bga_fanout.py poured.kicad_pcb -c U1 -o fanned.kicad_pcb --clearance 0.1
+python py_router/place_fanout_clearance.py fanned.kicad_pcb capclean.kicad_pcb --clearance 0.1
 
 # Route differential pairs
-python route_diff.py capclean.kicad_pcb -o diffed.kicad_pcb --nets "*lvds*"
+python py_router/route_diff.py capclean.kicad_pcb -o diffed.kicad_pcb --nets "*lvds*"
 
 # Route ALL remaining nets, plane nets included (their widths via --power-nets).
 # This step ends with the in-run plane finalize that completes the planes.
-python route.py diffed.kicad_pcb routed.kicad_pcb --nets "*" \
+python py_router/route.py diffed.kicad_pcb routed.kicad_pcb --nets "*" \
     --power-nets GND --power-nets-widths 0.3
 ```
 
@@ -346,71 +346,71 @@ All `--nets` options support fnmatch-style wildcards and exclusion patterns:
 
 ```bash
 # Route all nets (default) - outputs to input_routed.kicad_pcb
-python route.py kicad_files/input.kicad_pcb
+python py_router/route.py kicad_files/input.kicad_pcb
 
 # Route all nets, overwrite input file
-python route.py kicad_files/input.kicad_pcb --overwrite
+python py_router/route.py kicad_files/input.kicad_pcb --overwrite
 
 # Route all nets to a specific output file
-python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb
+python py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb
 
 # Route specific nets (using --nets option)
-python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "Net-(U2A-DATA_0)" "Net-(U2A-DATA_1)"
+python py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "Net-(U2A-DATA_0)" "Net-(U2A-DATA_1)"
 
 # Route with wildcard patterns
-python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "Net-(U2A-DATA_*)"
+python py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "Net-(U2A-DATA_*)"
 
 # Route all nets on a component (auto-excludes GND/VCC/VDD/unconnected)
-python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --component U1
+python py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --component U1
 
 # Route specific patterns on a component (no auto-exclusion)
-python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "/DDAT*" --component U1
+python py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "/DDAT*" --component U1
 
 # Route ALL nets on a component including power (use "*" pattern)
-python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*" --component U1
+python py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*" --component U1
 
 # Exclusion-pattern SYNTAX demo (! prefix). NOTE: in the #562 chain you do
 # NOT exclude plane nets from the route step -- see the chain example below.
-python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*" "!GND" "!VCC"
+python py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*" "!GND" "!VCC"
 
 # Route differential pairs (use route_diff.py)
-python route_diff.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*lvds*" --no-bga-zones
+python py_router/route_diff.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "*lvds*" --no-bga-zones
 
 # Route with wider tracks for power nets
-python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "Net*" \
+python py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets "Net*" \
   --power-nets "*GND*" "*VCC*" "+3.3V" --power-nets-widths 0.4 0.5 0.3 --track-width 0.2
 
 # Typical workflow: create GND plane first, then route all signals
-python route_planes.py kicad_files/flat_hierarchy.kicad_pcb --nets GND --plane-layers B.Cu
-python route.py kicad_files/flat_hierarchy_routed.kicad_pcb --overwrite
+python py_router/route_planes.py kicad_files/flat_hierarchy.kicad_pcb --nets GND --plane-layers B.Cu
+python py_router/route.py kicad_files/flat_hierarchy_routed.kicad_pcb --overwrite
 ```
 
 ### 3. Create Power/Ground Planes
 
 ```bash
 # Create GND zone on B.Cu with via connections to all GND pads (outputs to input_routed.kicad_pcb)
-python route_planes.py kicad_files/input.kicad_pcb --nets GND --plane-layers B.Cu
+python py_router/route_planes.py kicad_files/input.kicad_pcb --nets GND --plane-layers B.Cu
 
 # Create GND zone, overwrite input file
-python route_planes.py kicad_files/input.kicad_pcb --overwrite --nets GND --plane-layers B.Cu
+python py_router/route_planes.py kicad_files/input.kicad_pcb --overwrite --nets GND --plane-layers B.Cu
 
 # Create GND zone to specific output file
-python route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets GND --plane-layers B.Cu
+python py_router/route_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb --nets GND --plane-layers B.Cu
 
 # Create multiple planes at once (each net paired with corresponding plane layer)
-python route_planes.py kicad_files/input.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu
+python py_router/route_planes.py kicad_files/input.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu
 
 # Create VCC plane with larger vias
-python route_planes.py kicad_files/input.kicad_pcb --nets VCC --plane-layers In2.Cu --via-size 0.5 --via-drill 0.4
+python py_router/route_planes.py kicad_files/input.kicad_pcb --nets VCC --plane-layers In2.Cu --via-size 0.5 --via-drill 0.4
 
 # Pour planes (the pour places no taps: the route step welds plane pads)
-python route_planes.py kicad_files/input.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu
+python py_router/route_planes.py kicad_files/input.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu
 
 # Multiple nets sharing same layer via Voronoi partitioning (use | separator)
-python route_planes.py kicad_files/input.kicad_pcb --nets GND "VA19|VA11" --plane-layers In4.Cu In5.Cu
+python py_router/route_planes.py kicad_files/input.kicad_pcb --nets GND "VA19|VA11" --plane-layers In4.Cu In5.Cu
 
 # Dry run to see what would be placed
-python route_planes.py kicad_files/input.kicad_pcb --nets GND --plane-layers B.Cu --dry-run
+python py_router/route_planes.py kicad_files/input.kicad_pcb --nets GND --plane-layers B.Cu --dry-run
 ```
 
 ### 3b. Repair Disconnected Plane Regions
@@ -426,19 +426,19 @@ After creating power planes, regions may become split by vias and traces from ot
 
 ```bash
 # Auto-detect all zones in PCB and repair disconnected regions (outputs to input_routed.kicad_pcb)
-python repair_planes.py kicad_files/input.kicad_pcb
+python py_router/repair_planes.py kicad_files/input.kicad_pcb
 
 # Auto-detect all zones, overwrite input
-python repair_planes.py kicad_files/input.kicad_pcb --overwrite
+python py_router/repair_planes.py kicad_files/input.kicad_pcb --overwrite
 
 # Auto-detect all zones to specific output file
-python repair_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb
+python py_router/repair_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb
 
 # Specific nets and layers
-python repair_planes.py kicad_files/input.kicad_pcb --nets GND --plane-layers B.Cu
+python py_router/repair_planes.py kicad_files/input.kicad_pcb --nets GND --plane-layers B.Cu
 
 # Customize track width and clearance
-python repair_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
+python py_router/repair_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
     --track-width 0.5 --clearance 0.2
 ```
 
@@ -448,48 +448,48 @@ python repair_planes.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb
 # Check for DRC violations. With no -c, grades at the clearance the routing
 # steps wrote into the sibling .kicad_pro (the smallest clearance any step
 # actually used); falls back to 0.2mm if there's no project. Pass -c to override.
-python check_drc.py kicad_files/output.kicad_pcb
+python py_router/check_drc.py kicad_files/output.kicad_pcb
 
 # Cross-check with KiCad's own DRC engine (requires KiCad; --refill-zones avoids
 # bogus zone-clearance errors from stale pours - see tests/README.md for details)
 kicad-cli pcb drc --refill-zones --format json -o drc.json kicad_files/output.kicad_pcb
 
 # Check connectivity (detects unrouted nets, broken routes, and T-junctions)
-python check_connected.py kicad_files/output.kicad_pcb
+python py_router/check_connected.py kicad_files/output.kicad_pcb
 
 # Check connectivity for specific nets
-python check_connected.py kicad_files/output.kicad_pcb --nets "*DATA*"
+python py_router/check_connected.py kicad_files/output.kicad_pcb --nets "*DATA*"
 
 # Check connectivity for all nets on a component
-python check_connected.py kicad_files/output.kicad_pcb --component U1
+python py_router/check_connected.py kicad_files/output.kicad_pcb --component U1
 
 # Only check routed nets (skip unrouted net detection)
-python check_connected.py kicad_files/output.kicad_pcb --routed-only
+python py_router/check_connected.py kicad_files/output.kicad_pcb --routed-only
 
 # Check for orphan stubs (dead-end traces with no pad/via/trace at the loose end).
 # Connection is judged by actual copper extent (via radius, pad size, trace
 # half-width), so T-junction taps and copper-overlap joints are not miscounted.
-python check_orphan_stubs.py kicad_files/output.kicad_pcb
+python py_tools/check_orphan_stubs.py kicad_files/output.kicad_pcb
 
 # Pad-geometry sanity check: flags same-footprint, different-net pads whose copper
 # overlaps (a short). A non-zero result almost always means a pad's rotation/size
 # is modelled wrong - the usual cause is a QFN/QFP/BGA placed at a non-orthogonal
 # angle. The fanout tools run this automatically on their component first; run it
 # yourself before fanout (or board-wide) as a standalone check:
-python check_pads.py kicad_files/board.kicad_pcb                 # whole board, per footprint
-python check_pads.py kicad_files/board.kicad_pcb --component U23 # one footprint
-python check_pads.py kicad_files/board.kicad_pcb --cross-footprint  # also across parts
+python py_tools/check_pads.py kicad_files/board.kicad_pcb                 # whole board, per footprint
+python py_tools/check_pads.py kicad_files/board.kicad_pcb --component U23 # one footprint
+python py_tools/check_pads.py kicad_files/board.kicad_pcb --cross-footprint  # also across parts
 
 # Flag long non-orthonormal tracks. An on-grid router emits only 0/45/90-degree
 # segments; the only legitimate non-orthonormal segment is a short (<=1 grid cell)
 # terminal connector to an off-grid pad/ball. Anything longer is a routing defect
 # (it can cut diagonally across foreign copper). qfn_fanout escape stubs are
 # excluded automatically; bga_fanout's short stub-end jogs clear the 0.25mm default.
-python check_orthonormal.py kicad_files/output.kicad_pcb
+python py_tools/check_orthonormal.py kicad_files/output.kicad_pcb
 
 # Copper hygiene (read-only): dangling stubs, same-net soft joints, redundant
 # cycles, and removable / stacked / floating copper the routing left behind.
-python check_weird.py kicad_files/output.kicad_pcb
+python py_router/check_weird.py kicad_files/output.kicad_pcb
 ```
 
 See [Utilities](docs/utilities.md) for every checker and its options.
@@ -816,15 +816,15 @@ Every tool prints its full option list with `--help`, and **[docs/configuration.
 
 ```bash
 # Full option list for any tool
-python route.py --help
+python py_router/route.py --help
 
 # A typical chain (#562 pours-first): pour, then diff pairs, then ONE route
 # over ALL nets -- plane nets INCLUDED. The pour places no taps; the route
 # step welds plane pads into the fill and its in-run finalize completes them,
 # so do NOT exclude the plane nets here.
-python route_planes.py board.kicad_pcb board.kicad_pcb --nets GND --plane-layers B.Cu
-python route_diff.py board.kicad_pcb -O --nets "*_P" "*_N" --diff-pair-gap 0.15
-python route.py board.kicad_pcb -O --nets "*" --power-nets GND --power-nets-widths 0.3
+python py_router/route_planes.py board.kicad_pcb board.kicad_pcb --nets GND --plane-layers B.Cu
+python py_router/route_diff.py board.kicad_pcb -O --nets "*_P" "*_N" --diff-pair-gap 0.15
+python py_router/route.py board.kicad_pcb -O --nets "*" --power-nets GND --power-nets-widths 0.3
 ```
 
 The shared option groups — geometry, power-net widths, algorithm/strategy, proximity penalties, length/time matching, post-route DRC settings, and debug layers — apply across the routing CLIs and are documented in full in [Configuration](docs/configuration.md).

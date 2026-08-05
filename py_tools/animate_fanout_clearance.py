@@ -15,6 +15,8 @@ repair that place_fanout_clearance.py performs).
 Requires pygame (rendering) and Pillow (GIF encoding) -- both already used by
 this repo's tooling. No matplotlib / ffmpeg needed.
 """
+import _path  # noqa: F401  (#522: makes ../py_router importable)
+
 
 import argparse
 import colorsys

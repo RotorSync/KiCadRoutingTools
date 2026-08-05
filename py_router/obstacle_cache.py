@@ -22,7 +22,7 @@ from net_queries import expand_pad_layers
 # Import Rust router
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'rust_router')))
 import rust_alloc  # noqa: E402,F401  # issue #419: set MIMALLOC_PURGE_DELAY before grid_router loads
 
 # Over-blocking audit F3 A/B kill-switch: 1 restores the pre-fix cache stamps

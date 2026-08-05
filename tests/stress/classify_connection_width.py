@@ -30,6 +30,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / 'py_router'))  # #522
+sys.path.insert(0, str(REPO / 'py_tools'))  # #522
 sys.path.insert(0, str(REPO / "tests" / "stress"))
 
 RADIUS = 5.0   # mm of local copper context around the flagged position

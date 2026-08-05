@@ -26,6 +26,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.join(os.path.dirname(__file__), '..'), 'py_router'))  # #522
+sys.path.insert(0, os.path.join(os.path.join(os.path.dirname(__file__), '..'), 'py_tools'))  # #522
 
 from kicad_parser import PCBData, Segment, Via  # noqa: E402
 from pcb_modification import add_route_to_pcb_data  # noqa: E402

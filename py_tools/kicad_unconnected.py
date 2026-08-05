@@ -17,7 +17,9 @@ Prints ``KICAD_UNCONNECTED: <n>`` (or ``KICAD_UNCONNECTED: ERR <why>`` when
 kicad-cli is unavailable/fails -- graders treat that as "no oracle", never 0).
 Exit code is always 0; this is a grading tool, not a gate.
 """
+
 from __future__ import annotations
+import _path  # noqa: F401  (#522: makes ../py_router importable)
 
 import argparse
 import json

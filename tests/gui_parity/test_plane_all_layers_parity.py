@@ -80,6 +80,8 @@ def main():
     import wx
     import pcbnew
     sys.path.insert(0, REPO)
+    sys.path.insert(0, os.path.join(REPO, 'py_router'))  # #522
+    sys.path.insert(0, os.path.join(REPO, 'py_tools'))  # #522
 
     if not os.path.exists(BOARD):
         print(f"SKIP: {os.path.relpath(BOARD, REPO)} not found")

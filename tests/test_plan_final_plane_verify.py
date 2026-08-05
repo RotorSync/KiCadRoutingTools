@@ -25,6 +25,8 @@ import types
 
 sys.modules.setdefault('wx', types.ModuleType('wx'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.join(os.path.dirname(__file__), '..'), 'py_router'))  # #522
+sys.path.insert(0, os.path.join(os.path.join(os.path.dirname(__file__), '..'), 'py_tools'))  # #522
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..',
                                 'kicad_routing_plugin'))
 

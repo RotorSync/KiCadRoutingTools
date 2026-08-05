@@ -16,7 +16,7 @@ import sys
 import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SCRIPT = os.path.join(ROOT, "fix_kicad_drc_settings.py")
+SCRIPT = os.path.join(ROOT, 'py_router', 'fix_kicad_drc_settings.py')
 BOARD = os.path.join(ROOT, "kicad_files", "qfn_underpad_coupling.kicad_pcb")
 
 

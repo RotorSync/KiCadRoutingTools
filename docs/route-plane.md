@@ -33,22 +33,22 @@ When creating a ground or power plane on an inner or bottom layer, SMD pads on o
 
 ```bash
 # Create GND plane on bottom layer (outputs to input_routed.kicad_pcb)
-python route_planes.py input.kicad_pcb --nets GND --plane-layers B.Cu
+python py_router/route_planes.py input.kicad_pcb --nets GND --plane-layers B.Cu
 
 # Create GND plane, overwrite input file
-python route_planes.py input.kicad_pcb --overwrite --nets GND --plane-layers B.Cu
+python py_router/route_planes.py input.kicad_pcb --overwrite --nets GND --plane-layers B.Cu
 
 # Create GND plane to specific output file
-python route_planes.py input.kicad_pcb output.kicad_pcb --nets GND --plane-layers B.Cu
+python py_router/route_planes.py input.kicad_pcb output.kicad_pcb --nets GND --plane-layers B.Cu
 
 # Create multiple planes at once (each net paired with corresponding plane layer)
-python route_planes.py input.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu
+python py_router/route_planes.py input.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu
 
 # Create VCC plane on inner layer with larger vias
-python route_planes.py input.kicad_pcb --nets VCC --plane-layers In2.Cu --via-size 0.5 --via-drill 0.4
+python py_router/route_planes.py input.kicad_pcb --nets VCC --plane-layers In2.Cu --via-size 0.5 --via-drill 0.4
 
 # Preview what would be placed without writing
-python route_planes.py input.kicad_pcb --nets GND --plane-layers B.Cu --dry-run
+python py_router/route_planes.py input.kicad_pcb --nets GND --plane-layers B.Cu --dry-run
 ```
 
 ## Command-Line Options
@@ -275,7 +275,7 @@ standard step when GND planes are present.
 #### Example
 
 ```bash
-python route_planes.py input.kicad_pcb --nets GND --plane-layers B.Cu --add-gnd-vias --gnd-via-distance 2.0
+python py_router/route_planes.py input.kicad_pcb --nets GND --plane-layers B.Cu --add-gnd-vias --gnd-via-distance 2.0
 ```
 
 Output:
@@ -557,22 +557,22 @@ Key features:
 
 ```bash
 # Auto-detect all zones in PCB and repair disconnected regions (outputs to input_routed.kicad_pcb)
-python repair_planes.py input.kicad_pcb
+python py_router/repair_planes.py input.kicad_pcb
 
 # Auto-detect all zones, overwrite input
-python repair_planes.py input.kicad_pcb --overwrite
+python py_router/repair_planes.py input.kicad_pcb --overwrite
 
 # Auto-detect all zones to specific output file
-python repair_planes.py input.kicad_pcb output.kicad_pcb
+python py_router/repair_planes.py input.kicad_pcb output.kicad_pcb
 
 # Specific nets and layers
-python repair_planes.py input.kicad_pcb --nets GND --plane-layers B.Cu
+python py_router/repair_planes.py input.kicad_pcb --nets GND --plane-layers B.Cu
 
 # Customize track width and clearance
-python repair_planes.py input.kicad_pcb --max-track-width 1.0 --clearance 0.2
+python py_router/repair_planes.py input.kicad_pcb --max-track-width 1.0 --clearance 0.2
 
 # Increase iterations for difficult routes
-python repair_planes.py input.kicad_pcb --max-iterations 500000
+python py_router/repair_planes.py input.kicad_pcb --max-iterations 500000
 ```
 
 ### Command-Line Options
@@ -655,10 +655,10 @@ rip-up/restore safely). Pass `--power-nets`/`--power-nets-widths` so that
 follow-up pass routes power nets at their proper width. Example:
 
 ```bash
-python repair_planes.py step_planes.kicad_pcb out.kicad_pcb \
+python py_router/repair_planes.py step_planes.kicad_pcb out.kicad_pcb \
     --clearance 0.15 --via-size 0.5 --via-drill 0.3 --track-width 0.127 --grid-step 0.05 \
     --rip-blocker-nets
-python route.py out.kicad_pcb out_reconnected.kicad_pcb --nets '*'   # reconnects the ripped nets
+python py_router/route.py out.kicad_pcb out_reconnected.kicad_pcb --nets '*'   # reconnects the ripped nets
 ```
 
 In the plugin, plane repair is no longer a tab of its own: it runs inside

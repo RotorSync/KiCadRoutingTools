@@ -125,8 +125,8 @@ Both the live worker (`run_board.sh`) and the no-LLM replay
 `make_movie.py`, which is also what the GUI's "Routing Movie..." button runs):
 
 ```bash
-python3 make_movie.py runs_set1/myboard              # -> runs_set1/myboard/routing.mp4
-python3 make_movie.py step1.kicad_pcb step2.kicad_pcb -o out.mp4
+python3 py_router/make_movie.py runs_set1/myboard              # -> runs_set1/myboard/routing.mp4
+python3 py_router/make_movie.py step1.kicad_pcb step2.kicad_pcb -o out.mp4
 ```
 
 **For these to be created correctly:**
@@ -213,7 +213,7 @@ harmless.
    blows the cap, mark the step as OOM and move on.
 1a. PROJECT FILE TRAVELS WITH THE BOARD (#295): every board-mutating tool
    writes/updates a sibling `.kicad_pro` carrying the routed DRC floors. For a
-   board that never had one, `python3 fix_kicad_drc_settings.py <board>` seeds
+   board that never had one, `python3 py_router/fix_kicad_drc_settings.py <board>` seeds
    and fills a correct project file.
 1a'. NEVER `cp`/`mv`/alias BOARD FILES MID-CHAIN (zynq `final_board` lesson):
    only the recorded tools may create a `.kicad_pcb` in the run dir. A hand
@@ -352,7 +352,7 @@ harmless.
    Do not start signal routing while balls are dropped.
    DECOUPLING-CAP OPTIMIZE (issue #130): after EACH BGA/PGA fanout completes
    (escaped == requested) and BEFORE signal routing, run
-   `python3 place_fanout_clearance.py <fanned>.kicad_pcb <out>.kicad_pcb
+   `python3 py_router/place_fanout_clearance.py <fanned>.kicad_pcb <out>.kicad_pcb
    --clearance <floor>` (same clearance as the fanout). A foreign-net fanout via
    landing under a decoupling cap is a real PAD-VIA at the floor; this nudges
    those caps clear and pulls each pad toward its nearest same-net ball (so a

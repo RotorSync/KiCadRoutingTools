@@ -39,9 +39,11 @@ PLUGIN = REPO / "kicad_routing_plugin"
 # main') with no main() def, so scanning them saw nothing -- the fanout
 # post-passes (run_drc graze audit, fix_project_for_output) were a blind spot.
 # Point at the package __init__ where main() actually lives.
-CLI_MAINS = ["route.py", "route_diff.py", "route_planes.py",
-             "repair_planes.py",
-             "bga_fanout/__init__.py", "qfn_fanout/__init__.py"]
+# #522 layout: the CLI mains live under py_router/.
+CLI_MAINS = ["py_router/route.py", "py_router/route_diff.py",
+             "py_router/route_planes.py", "py_router/repair_planes.py",
+             "py_router/bga_fanout/__init__.py",
+             "py_router/qfn_fanout/__init__.py"]
 
 # Known post-engine passes -> GUI counterpart symbol(s). A pass is "covered" if
 # ANY listed symbol appears anywhere under kicad_routing_plugin/. Keep the RHS
@@ -181,7 +183,9 @@ def _main_calls(path):
 
 
 def _module_public_funcs(mod_name):
-    p = REPO / f"{mod_name}.py"
+    p = REPO / "py_router" / f"{mod_name}.py"     # #522 layout
+    if not p.exists():
+        p = REPO / "py_tools" / f"{mod_name}.py"
     if not p.exists():
         return set()
     tree = ast.parse(p.read_text())

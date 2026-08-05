@@ -55,6 +55,8 @@ def main():
     os.environ.setdefault('WXSUPPRESS_SIZER_FLAGS_CHECK', '1')
     import wx
     sys.path.insert(0, REPO)
+    sys.path.insert(0, os.path.join(REPO, 'py_router'))  # #522
+    sys.path.insert(0, os.path.join(REPO, 'py_tools'))  # #522
     sys.path.insert(0, os.path.dirname(REPO))
 
     app = wx.App(False)  # noqa: F841  (before any wx object)

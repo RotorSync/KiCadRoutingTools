@@ -76,6 +76,8 @@ import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.join(REPO, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(REPO, 'py_tools'))  # #522
 sys.path.insert(0, os.path.join(REPO, 'tests', 'gui_parity'))
 START_BOARD = os.path.join(REPO, 'kicad_files', 'rp2350_fpga_eensy_prePlane.kicad_pcb')
 
@@ -97,7 +99,7 @@ def _reexec_into_kicad():
 
 
 def _grade(pcb, clr=0.09):
-    r = subprocess.run(['python3', os.path.join(REPO, 'check_drc.py'), pcb,
+    r = subprocess.run(['python3', os.path.join(REPO, 'py_router', 'check_drc.py'), pcb,
                         '--clearance', str(clr), '--hole-to-hole-clearance', '0.2',
                         '--clearance-margin', '0.1'], capture_output=True, text=True)
     m = re.search(r'FOUND (\d+) DRC', r.stdout)

@@ -29,7 +29,9 @@ Usage:
 Exit code is 1 when any reference-plane crossing is found (so it can gate a
 build the way check_drc.py does), 0 otherwise. ``--exit-zero`` suppresses that.
 """
+
 from __future__ import annotations
+import _path  # noqa: F401  (#522: makes ../py_router importable)
 
 import argparse
 import json

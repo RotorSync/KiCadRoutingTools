@@ -29,6 +29,8 @@ import tempfile
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # #522
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # #522
 
 import env_knobs
 
@@ -55,7 +57,7 @@ def test_ledger_wiring():
         # >= 1 CALL beyond a bare import (the import line has no open paren
         # immediately after the name in this codebase's import style).
         check(f"{engine} calls verify_written_file_parity", n >= 1)
-    src = open(os.path.join(ROOT, 'route.py'), encoding='utf-8').read()
+    src = open(os.path.join(ROOT, 'py_router', 'route.py'), encoding='utf-8').read()
     check("route.py keeps the in-memory verify_board_file_parity call",
           'verify_board_file_parity(' in src)
 

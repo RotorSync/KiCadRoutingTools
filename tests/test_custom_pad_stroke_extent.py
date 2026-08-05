@@ -17,6 +17,8 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.join(os.path.dirname(__file__), '..'), 'py_router'))  # #522
+sys.path.insert(0, os.path.join(os.path.join(os.path.dirname(__file__), '..'), 'py_tools'))  # #522
 
 # The ottercast MK1 shape: ring centerline r=1.35 centred at local (1.35, 0),
 # stroke 0.4, UNFILLED -> copper is an annulus out to 1.35 + 0.2 = 1.55.

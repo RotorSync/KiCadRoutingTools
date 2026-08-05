@@ -68,7 +68,7 @@ from plane_pad_tap import clamp_tap_via_to_edge
 from terminal_colors import GREEN, RED, RESET
 
 # Import Rust router (startup_checks ensures it's available and up-to-date)
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rust_router'))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'rust_router')))
 import rust_alloc  # noqa: E402,F401  # issue #419: set MIMALLOC_PURGE_DELAY before grid_router loads
 from grid_router import GridObstacleMap, GridRouter
 

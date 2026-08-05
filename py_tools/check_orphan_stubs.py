@@ -17,7 +17,9 @@ Examples:
     python check_orphan_stubs.py board.kicad_pcb --net "+3.3V" --layer F.Cu
     python check_orphan_stubs.py original.kicad_pcb modified.kicad_pcb --compare
 """
+
 from __future__ import annotations
+import _path  # noqa: F401  (#522: makes ../py_router importable)
 
 import argparse
 import math

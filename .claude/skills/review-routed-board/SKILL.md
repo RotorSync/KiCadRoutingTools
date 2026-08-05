@@ -148,13 +148,13 @@ It is not a DRC violation and ships silent, so check it explicitly:
 
 ```bash
 # every routed signal net (plane nets are skipped automatically)
-python3 check_impedance.py board.kicad_pcb --verbose
+python3 py_tools/check_impedance.py board.kicad_pcb --verbose
 
 # narrow to the controlled-impedance nets when you know them
-python3 check_impedance.py board.kicad_pcb --nets "RF*" "/DDR*"
+python3 py_tools/check_impedance.py board.kicad_pcb --nets "RF*" "/DDR*"
 
 # if the route step declared a coplanar gap, AUDIT that promise
-python3 check_impedance.py board.kicad_pcb --coplanar-gap 0.2
+python3 py_tools/check_impedance.py board.kicad_pcb --coplanar-gap 0.2
 ```
 
 Boards routed by this tool need no `--coplanar-gap`: `--impedance` steps record

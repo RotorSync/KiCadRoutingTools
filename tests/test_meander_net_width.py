@@ -26,6 +26,8 @@ import sys
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT_DIR)
+sys.path.insert(0, os.path.join(ROOT_DIR, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT_DIR, 'py_tools'))  # #522
 sys.path.insert(0, os.path.join(ROOT_DIR, "rust_router"))
 
 from kicad_parser import PCBData, Segment, BoardInfo          # noqa: E402

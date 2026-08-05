@@ -31,18 +31,18 @@ Examples:
 
 ```bash
 # Manual group: all DQ0-7 and DQS0 nets matched together
-python route.py board.kicad_pcb --length-match-group "*DQ[0-7]" "*DQS0*"
+python py_router/route.py board.kicad_pcb --length-match-group "*DQ[0-7]" "*DQS0*"
 
 # Two separate groups
-python route.py board.kicad_pcb \
+python py_router/route.py board.kicad_pcb \
     --length-match-group "*DQ[0-7]" "*DQS0*" \
     --length-match-group "*DQ1[0-5]" "*DQ[8-9]" "*DQS1*"
 
 # Auto-detect DDR4 byte lanes
-python route.py board.kicad_pcb --length-match-group auto
+python py_router/route.py board.kicad_pcb --length-match-group auto
 
 # Match propagation time instead of length
-python route.py board.kicad_pcb --length-match-group auto \
+python py_router/route.py board.kicad_pcb --length-match-group auto \
     --time-matching --time-match-tolerance 1.0
 ```
 

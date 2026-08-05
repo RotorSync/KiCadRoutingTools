@@ -410,7 +410,7 @@ Report to user:
 Use `list_nets.py` to detect differential pairs and power/ground nets:
 
 ```bash
-python3 list_nets.py path/to/file.kicad_pcb --diff-pairs --power
+python3 py_router/list_nets.py path/to/file.kicad_pcb --diff-pairs --power
 ```
 
 ### Read the board's design rules and pass them to the CLI
@@ -421,7 +421,7 @@ board's own rule and can box pads in so nets fail with "no rippable blockers".
 Read the board's real rules and pass them explicitly:
 
 ```bash
-python3 list_nets.py path/to/file.kicad_pcb --design-rules
+python3 py_router/list_nets.py path/to/file.kicad_pcb --design-rules
 ```
 
 **KiCad has TWO tiers of rules, and DRC only enforces one of them — this matters
@@ -696,15 +696,15 @@ impedance too HIGH — the opposite error, equally wrong.
 ```bash
 # choose ONE gap G (the pour's clearance; near the fab floor, e.g. 0.2)
 # 1. route the impedance nets, declaring G
-python3 route.py in.kicad_pcb s2b.kicad_pcb --nets "RF*" \
+python3 py_router/route.py in.kicad_pcb s2b.kicad_pcb --nets "RF*" \
     --impedance 50 --coplanar-gap 0.2 --clearance 0.2
 
 # 2. pour GND on the SAME layer with a MATCHING zone clearance
-python3 route_planes.py s2b.kicad_pcb s5.kicad_pcb \
+python3 py_router/route_planes.py s2b.kicad_pcb s5.kicad_pcb \
     --nets GND GND --plane-layers F.Cu B.Cu --zone-clearance 0.2
 
 # 3. verify the declaration actually held
-python3 check_impedance.py s5.kicad_pcb --coplanar-gap 0.2 --nets "RF*"
+python3 py_tools/check_impedance.py s5.kicad_pcb --coplanar-gap 0.2 --nets "RF*"
 ```
 
 - `--coplanar-nets "<patterns>"` narrows the declaration to some nets in a call;
@@ -959,7 +959,7 @@ ball. Run it on the just-fanned board, **before** signal routing. Use the
 **same `--clearance`** you gave the fanout / your DRC floor — that's the only
 setting that matters (it reads each via's real size from the board).
 
-python3 place_fanout_clearance.py board_step1b.kicad_pcb board_step1c.kicad_pcb \
+python3 py_router/place_fanout_clearance.py board_step1b.kicad_pcb board_step1c.kicad_pcb \
     --clearance 0.1
 
 It prints `Moved N cap(s); resolved R/M ... K unresolved`. Any **unresolved**
@@ -1120,7 +1120,7 @@ for repairing a board OUTSIDE this chain (e.g. a hand-edited board).
 > (looser) netclass, and its writeback stamps that looser floor over tighter copper —
 > so KiCad grades correct sub-floor copper as phantom clearance violations (measured:
 > a dropped 0.09 floor became 0.10 → 160 phantom grazes on one corpus board). Use
-> **`python3 copy_board.py src.kicad_pcb dst.kicad_pcb`** — it copies the board plus every
+> **`python3 py_router/copy_board.py src.kicad_pcb dst.kicad_pcb`** — it copies the board plus every
 > sibling (`.kicad_pro`/`.kicad_prl`) and self-records into the redo manifest — or, if you
 > must use `cp`, copy the `.kicad_pro` too. The routing scripts also WARN when an input
 > board has no sibling `.kicad_pro` (#441).
@@ -1237,7 +1237,7 @@ internal pads, use `--no-bga-zone <component>` to disable the automatic exclusio
 and allow the router to enter the dense pin area:
 
 ```bash
-python3 route.py board.kicad_pcb \
+python3 py_router/route.py board.kicad_pcb \
     --nets "*" \
     --no-bga-zone U9 \
     --output board_routed.kicad_pcb
@@ -1363,7 +1363,7 @@ than taking the blunt default.
 Insert diff pair routing after fanout but before single-ended signals:
 
 ```bash
-python3 route_diff.py board.kicad_pcb \
+python3 py_router/route_diff.py board.kicad_pcb \
     --nets "*LVDS*" "*USB*" \
     --diff-pair-gap 0.15 \
     --layers F.Cu In1.Cu In2.Cu B.Cu \
@@ -1390,7 +1390,7 @@ Key options:
 Use `qfn_fanout.py` instead of `bga_fanout.py`:
 
 ```bash
-python3 qfn_fanout.py board.kicad_pcb \
+python3 py_router/qfn_fanout.py board.kicad_pcb \
     --component U1 \
     --output board_qfn.kicad_pcb
 ```
@@ -1413,7 +1413,7 @@ bullet under Step 1). All pads keep escaping (`failed` stays 0).
 Instead of routing power separately, use `--power-nets` with signal routing:
 
 ```bash
-python3 route.py board.kicad_pcb \
+python3 py_router/route.py board.kicad_pcb \
     --nets "*" \
     --power-nets "GND" "VCC" "+3.3V" \
     --power-nets-widths 0.5 0.4 0.4 \
@@ -1438,7 +1438,7 @@ field admits (e.g. 0.15–0.2) rather than the open-field ideal.
 For swappable signals (e.g., memory data lanes where any DQ can connect to any):
 
 ```bash
-python3 route.py board.kicad_pcb \
+python3 py_router/route.py board.kicad_pcb \
     --nets "*DQ*" \
     --swappable-nets "*DQ*" \
     --output board_routed.kicad_pcb
@@ -1452,7 +1452,7 @@ When routing performs polarity swaps (P↔N) or target swaps, the schematic can 
 out of sync with the PCB. Use `--schematic-dir` to automatically update:
 
 ```bash
-python3 route_diff.py board.kicad_pcb \
+python3 py_router/route_diff.py board.kicad_pcb \
     --nets "*LVDS*" \
     --swappable-nets "*LVDS*" \
     --schematic-dir /path/to/kicad/project \
@@ -1485,7 +1485,7 @@ When specific nets keep taking bad paths (or the user wants control over where a
 runs), the user can draw a polyline on `User.1` in KiCad and re-route those nets with:
 
 ```bash
-python3 route.py board.kicad_pcb --nets "SPI*" --guide-corridor --output board_routed.kicad_pcb
+python3 py_router/route.py board.kicad_pcb --nets "SPI*" --guide-corridor --output board_routed.kicad_pcb
 ```
 
 The route follows the line as waypoints, strictly best-effort — a guide never makes a route
@@ -1544,21 +1544,21 @@ When routing fails or behaves unexpectedly:
 
 ```bash
 # Verbose output with diagnostic info
-python3 route.py board.kicad_pcb --nets "*" --verbose --output board_debug.kicad_pcb
+python3 py_router/route.py board.kicad_pcb --nets "*" --verbose --output board_debug.kicad_pcb
 
 # Debug geometry on User layers (visible in KiCad)
-python3 route.py board.kicad_pcb --nets "*" --debug-lines --output board_debug.kicad_pcb
+python3 py_router/route.py board.kicad_pcb --nets "*" --debug-lines --output board_debug.kicad_pcb
 
 
 # A* search statistics
-python3 route.py board.kicad_pcb --nets "*" --stats --output board_debug.kicad_pcb
+python3 py_router/route.py board.kicad_pcb --nets "*" --stats --output board_debug.kicad_pcb
 ```
 
 ### Post-Routing Enhancements
 
 ```bash
 # Add teardrop settings to all pads (improves manufacturability)
-python3 route.py board.kicad_pcb --nets "*" --add-teardrops --output board_routed.kicad_pcb
+python3 py_router/route.py board.kicad_pcb --nets "*" --add-teardrops --output board_routed.kicad_pcb
 ```
 
 ### Advanced Routing Parameters
@@ -1586,7 +1586,7 @@ Manufacturing constraints (set to match your fab's requirements):
 For dense boards, use proximity penalties to spread out routes:
 
 ```bash
-python3 route.py board.kicad_pcb --nets "*" \
+python3 py_router/route.py board.kicad_pcb --nets "*" \
     --stub-proximity-radius 2.0 --stub-proximity-cost 0.2 \
     --bga-proximity-radius 7.0 --bga-proximity-cost 0.2 \
     --track-proximity-distance 2.0 --track-proximity-cost 0.1 \

@@ -33,7 +33,7 @@ import json
 import os
 import sys
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 STRESS = os.path.join(ROOT, 'tests', 'stress')
 for _p in (ROOT, STRESS):
     if _p not in sys.path:

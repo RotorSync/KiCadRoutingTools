@@ -21,7 +21,7 @@ print(f'Total footprints: {len(pcb.footprints)}')
 Also run `list_nets.py` to get differential pairs and power nets (these inform the analysis):
 
 ```bash
-python3 list_nets.py path/to/file.kicad_pcb --diff-pairs --power
+python3 py_router/list_nets.py path/to/file.kicad_pcb --diff-pairs --power
 ```
 
 Note: Differential pairs are handled separately by `route_diff.py`, which adds its own GND
@@ -493,7 +493,7 @@ which lowers the Default net class `diff_pair_gap` / `diff_pair_width` /
 diff-pair step the `.kicad_pro` net class reads ~0.1 mm, not the stock 0.25, and
 a later planner re-reading it won't resurrect the wide value. (To write it
 without routing — e.g. before the run — call it directly:
-`python3 fix_kicad_drc_settings.py board.kicad_pcb --diff-pair-gap 0.1 --diff-pair-width 0.1 --clearance 0.1`.)
+`python3 py_router/fix_kicad_drc_settings.py board.kicad_pcb --diff-pair-gap 0.1 --diff-pair-width 0.1 --clearance 0.1`.)
 
 | Interface | Target | Routed by | Pipeline step |
 |-----------|--------|-----------|---------------|

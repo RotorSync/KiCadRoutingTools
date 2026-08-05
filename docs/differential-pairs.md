@@ -50,24 +50,24 @@ Use `route_diff.py` for differential pair routing. All nets specified are treate
 
 ```bash
 # Route a specific diff pair
-python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds_rx1_11*" \
+python py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds_rx1_11*" \
     --stub-proximity-radius 4
 
 # Route with debug visualization
-python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds_rx1_11*" \
+python py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds_rx1_11*" \
     --stub-proximity-radius 4 --debug-lines
 
 # Route all LVDS nets with custom gap
-python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
+python py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
     --diff-pair-gap 0.1 \
     --diff-pair-centerline-setback 1.5
 
 # Keep diff pairs out of a keepout polygon drawn on a User layer (issue #27)
-python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
+python py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
     --keepout --keepout-layer User.2
 
 # 4+ layer board: pass EVERY copper layer (issue #116)
-python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
+python py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
     --layers F.Cu In1.Cu In2.Cu B.Cu
 ```
 
@@ -613,7 +613,7 @@ For swappable diff pairs (e.g., memory data lanes where any source can connect t
 ### Usage
 
 ```bash
-python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*rx*" \
+python py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "*rx*" \
     --swappable-nets "*rx*"
 ```
 
@@ -651,11 +651,11 @@ When enabled:
 
 ```bash
 # Enable intra-pair matching
-python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*DQS*" \
+python py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "*DQS*" \
     --diff-pair-intra-match
 
 # Combine with inter-pair matching
-python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*DQS*" "*CK*" \
+python py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "*DQS*" "*CK*" \
     --length-match-group auto \
     --diff-pair-intra-match
 ```
@@ -673,7 +673,7 @@ This is useful when differential pairs in a group are routed on different layers
 
 ```bash
 # Time match differential pairs
-python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*DQS*" \
+python py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "*DQS*" \
     --length-match-group auto \
     --time-matching \
     --time-match-tolerance 1.0

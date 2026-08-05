@@ -79,13 +79,13 @@ self-record whenever `REDO_MANIFEST` points somewhere, so your own CLI session
 becomes a plan too:
 
 ```bash
-python3 make_plan.py runs_set1/myboard --list       # a recorded run directory
+python3 py_router/make_plan.py runs_set1/myboard --list       # a recorded run directory
                                                     # -> myboard_plan.json
 
 export REDO_MANIFEST=$PWD/redo_commands.sh          # or record your own chain
-python3 bga_fanout.py board.kicad_pcb s1.kicad_pcb --component U1
-python3 route.py s1.kicad_pcb s2.kicad_pcb --nets '/SPI*'
-python3 make_plan.py .                              # -> plan JSON for the GUI
+python3 py_router/bga_fanout.py board.kicad_pcb s1.kicad_pcb --component U1
+python3 py_router/route.py s1.kicad_pcb s2.kicad_pcb --nets '/SPI*'
+python3 py_router/make_plan.py .                              # -> plan JSON for the GUI
 ```
 
 The conversion prunes superseded retries and dead-end branches (the same file
@@ -100,10 +100,10 @@ and plan executor — no window, no clicks, no Claude. It re-execs into KiCad's
 bundled python (which has `pcbnew` + `wx`) automatically:
 
 ```bash
-python3 run_plan.py board.kicad_pcb plan.json -o routed.kicad_pcb
-python3 run_plan.py board.kicad_pcb plan.json --list        # show the steps
-python3 run_plan.py board.kicad_pcb plan.json --steps 1,3-5 # run a subset
-python3 run_plan.py board.kicad_pcb plan.json --movie routing.mp4
+python3 py_router/run_plan.py board.kicad_pcb plan.json -o routed.kicad_pcb
+python3 py_router/run_plan.py board.kicad_pcb plan.json --list        # show the steps
+python3 py_router/run_plan.py board.kicad_pcb plan.json --steps 1,3-5 # run a subset
+python3 py_router/run_plan.py board.kicad_pcb plan.json --movie routing.mp4
 ```
 
 The input board is never modified — it is copied *with its `.kicad_pro`* (which

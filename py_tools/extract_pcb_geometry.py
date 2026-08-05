@@ -12,7 +12,9 @@ Examples:
     python extract_pcb_geometry.py board.kicad_pcb --summary
     python extract_pcb_geometry.py board.kicad_pcb --nets "*lvds*" --output lvds.json
 """
+
 from __future__ import annotations
+import _path  # noqa: F401  (#522: makes ../py_router importable)
 
 import sys
 import json

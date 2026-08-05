@@ -10,7 +10,7 @@ When this skill is invoked with a KiCad PCB file, find all differential pairs â€
 ## Step 1: Baseline Name-Based Detection
 
 ```bash
-python3 list_nets.py path/to/file.kicad_pcb --diff-pairs
+python3 py_router/list_nets.py path/to/file.kicad_pcb --diff-pairs
 ```
 
 This catches pairs following P/N naming conventions. Record the result as the baseline.

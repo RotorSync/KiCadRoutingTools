@@ -23,13 +23,15 @@ import tempfile
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522
 
 from bga_fanout.escape import edge_pair_escape_dir
 from bga_fanout.types import BGAGrid
 
 BOARD = os.path.join(ROOT, 'kicad_files', 'glasgow_revC.kicad_pcb')
 
-BASE_CMD = [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'bga_fanout.py'),
+BASE_CMD = [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'py_router', 'bga_fanout.py'),
             BOARD, '--component', 'U30',
             '--layers', 'F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu',
             '--nets', '*', '!GND', '!+3V3', '!+1V2',

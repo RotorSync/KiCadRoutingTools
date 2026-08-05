@@ -36,6 +36,10 @@ os.environ.setdefault('WXSUPPRESS_SIZER_FLAGS_CHECK', '1')
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
+# kicad_routing_plugin lives at the REPO root, one level up (#522 layout)
+_REPO_DIR = os.path.abspath(os.path.join(ROOT_DIR, '..'))
+if _REPO_DIR not in sys.path:
+    sys.path.insert(0, _REPO_DIR)
 
 # Where KiCad's bundled python (the one with pcbnew + wx) lives per platform.
 KICAD_PYTHONS = [

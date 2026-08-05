@@ -19,6 +19,8 @@ Usage:
     python3 check_cycles.py board.kicad_pcb [--net NAME | --nets PATTERN]
                                             [--all] [--verbose]
 """
+import _path  # noqa: F401  (#522: makes ../py_router importable)
+
 import argparse
 import math
 import fnmatch

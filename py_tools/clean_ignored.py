@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """List and optionally delete all git-ignored files in the repository."""
+import _path  # noqa: F401  (#522: makes ../py_router importable)
+
 
 import subprocess
 import os

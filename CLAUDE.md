@@ -51,7 +51,7 @@ Validate routed boards against the *real* spec, with the right checker — most
   project, resolves its floor from the STOCK (looser) netclass, and stamps that over
   tighter copper — so KiCad grades correct sub-floor copper as phantom clearance DRC
   (icepi_zero: a dropped 0.09 floor became 0.10 → 160 phantom grazes). Use
-  `python3 copy_board.py src.kicad_pcb dst.kicad_pcb` (copies `.kicad_pcb` + every
+  `python3 py_router/copy_board.py src.kicad_pcb dst.kicad_pcb` (copies `.kicad_pcb` + every
   sibling, self-records into the redo manifest), or copy the `.kicad_pro` too. The
   route scripts WARN when an input board has no sibling `.kicad_pro`.
 - **Routers can report false success.** A router's own "routed" tally may come from

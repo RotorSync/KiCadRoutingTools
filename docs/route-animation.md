@@ -24,17 +24,17 @@ Three pieces:
 
 ```bash
 # 1. Static image of any board (no trace needed)
-python3 route_render.py board.kicad_pcb -o board.png
+python3 py_router/route_render.py board.kicad_pcb -o board.png
 
 # 2. Record a trace while routing (default-OFF flag)
-KICAD_ROUTE_TRACE=1 python3 route.py in.kicad_pcb out.kicad_pcb
+KICAD_ROUTE_TRACE=1 python3 py_router/route.py in.kicad_pcb out.kicad_pcb
 #    -> writes out_routetrace.json next to the board
 
 # 3. Movie of that routing step
-python3 animate_route.py out_routetrace.json --board in.kicad_pcb -o routing.mp4
+python3 py_router/animate_route.py out_routetrace.json --board in.kicad_pcb -o routing.mp4
 
 # 4. Movie of a WHOLE run (fanout -> diff -> planes -> signal -> repair)
-python3 make_movie.py runs_set1/myboard            # -> runs_set1/myboard/routing.mp4
+python3 py_router/make_movie.py runs_set1/myboard            # -> runs_set1/myboard/routing.mp4
 ```
 
 ---
@@ -45,10 +45,10 @@ The stress harness renders one movie per run; this makes the same movie on
 demand, from any set of boards you already have.
 
 ```bash
-python3 make_movie.py RUNDIR                       # whole chain in a directory
-python3 make_movie.py step1.kicad_pcb step2.kicad_pcb step3.kicad_pcb
-python3 make_movie.py board.kicad_pcb              # one board draws its own copper
-python3 make_movie.py RUNDIR -o out.mp4 --size 1400 --fps 8 --png
+python3 py_router/make_movie.py RUNDIR                       # whole chain in a directory
+python3 py_router/make_movie.py step1.kicad_pcb step2.kicad_pcb step3.kicad_pcb
+python3 py_router/make_movie.py board.kicad_pcb              # one board draws its own copper
+python3 py_router/make_movie.py RUNDIR -o out.mp4 --size 1400 --fps 8 --png
 ```
 
 - **A directory** → its chain, ordered by `stepN` in the filename when present,
@@ -100,7 +100,7 @@ with per-layer transparency so overlaps blend at crossings.
 ## `route_render.py` — the renderer / viewer
 
 ```bash
-python3 route_render.py BOARD.kicad_pcb [-o OUT.png] [--size 1600]
+python3 py_router/route_render.py BOARD.kicad_pcb [-o OUT.png] [--size 1600]
     [--supersample 2] [--layer-alpha 150] [--no-pads] [--no-zones]
     [--layers F.Cu,B.Cu]
 ```
@@ -162,11 +162,11 @@ Two modes:
 
 ```bash
 # Single trace over one board
-python3 animate_route.py TRACE.json --board BOARD.kicad_pcb -o out.mp4
+python3 py_router/animate_route.py TRACE.json --board BOARD.kicad_pcb -o out.mp4
 
 # Whole run: every stepN_*.kicad_pcb board's copper delta in chain order,
 # with fine rip/restore animation spliced in for steps that recorded a trace
-python3 animate_route.py --run-dir RUNDIR -o out.mp4
+python3 py_router/animate_route.py --run-dir RUNDIR -o out.mp4
 ```
 
 Key options: `--size`, `--fps`, `--layer-alpha`, `--rip-hold` (frames to hold a

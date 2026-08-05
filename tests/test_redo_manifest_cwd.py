@@ -36,13 +36,13 @@ def run():
     # that reads the cp'd board -- exactly the #334/#345 shape.
     manifest = """\
 # cwd=/runs/eurorack_pmod
-python3 route_planes.py step2.kicad_pcb step4_planes.kicad_pcb
+python3 py_router/route_planes.py step2.kicad_pcb step4_planes.kicad_pcb
 # cwd=/runs/eurorack_pmod
 python3 route_disconnected_planes.py step4_planes.kicad_pcb step5_repair.kicad_pcb
 # cwd=/runs/eurorack_pmod
 # de-hole (#334): original session copied this file without recording it
 cp step5_repair.kicad_pcb final.kicad_pcb
-python3 route.py final.kicad_pcb step6.kicad_pcb
+python3 py_router/route.py final.kicad_pcb step6.kicad_pcb
 """
     with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
         f.write(manifest)

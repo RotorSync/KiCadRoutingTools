@@ -18,7 +18,7 @@ Power nets (GND, VCC, etc.) typically require wider tracks than signal nets to h
 
 ```bash
 # Route with wider tracks for power nets
-python route.py input.kicad_pcb output.kicad_pcb --nets "Net*" \
+python py_router/route.py input.kicad_pcb output.kicad_pcb --nets "Net*" \
   --power-nets "*GND*" "*VCC*" "+3.3V" \
   --power-nets-widths 0.4 0.5 0.35
 ```

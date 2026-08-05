@@ -22,7 +22,9 @@ Born from the 2026-07-21 ottercast pocket forensics: every residual
 failure traced to escape-stub tips boxed on all four layers by neighbors'
 destination traffic; this tool automates that diagnosis.
 """
+
 from __future__ import annotations
+import _path  # noqa: F401  (#522: makes ../py_router importable)
 
 import argparse
 import math

@@ -15,7 +15,9 @@ Exit code is the number of overlapping pairs (0 = clean), so it gates a pipeline
 
     python3 check_pads.py board.kicad_pcb [--tolerance 0.05] [--quiet]
 """
+
 from __future__ import annotations
+import _path  # noqa: F401  (#522: makes ../py_router importable)
 
 import argparse
 import math
