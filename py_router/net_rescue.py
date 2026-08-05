@@ -237,7 +237,7 @@ def _fence_window(obstacles, window, cfg):
 
 
 def _attempt_edge(pcb_data, net_id, gap, config, net_clearances,
-                  strict_endpoints: bool = False):
+                  strict_endpoints: bool = False, island_points=None):
     """Try to route one gap inside a scoped window. Returns (result, cfg_used)
     or (None, None). Routes through free space only - no rip-up.
 
@@ -343,7 +343,8 @@ def _attempt_edge(pcb_data, net_id, gap, config, net_clearances,
         # at, so the small-via rungs never even pointed at the pocket).
         from connectivity import get_net_endpoints_anchor_split
         src_over, tgt_over, split_err = get_net_endpoints_anchor_split(
-            window, net_id, cfg, (ax, ay), (bx, by))
+            window, net_id, cfg, (ax, ay), (bx, by),
+            island_points=island_points)
         if split_err:
             if strict_endpoints:
                 # #570: no anchors for THIS gap's sides -> nothing this
@@ -526,14 +527,25 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                 key = (round((pair[1] + pair[3]) / 2, 2),
                        round((pair[2] + pair[4]) / 2, 2))
                 if key not in failed_gaps:
-                    gaps.append((key, pair))
+                    gaps.append((key, pair, cid))
             if not gaps:
                 break
             gaps.sort(key=lambda g: g[1][0])
-            key, gap = gaps[0]
+            key, gap, gap_cid = gaps[0]
             attempts += 1
+            # The rescue KNOWS the partition -- hand the island's own points
+            # to the window split so the route is aimed island<->trunk by
+            # MEMBERSHIP. Proximity assignment put trunk cells on both sides
+            # of a short gap (dilemma M_COL4_L, 2.48mm): the route joined
+            # trunk-to-trunk, the verify below undid it, and the net shipped
+            # open despite a routable window.
+            _isl = {(round(x, 3), round(y, 3))
+                    for x, y in comp_points.get(gap_cid, [])}
+            _isl.update((round(p.global_x, 3), round(p.global_y, 3))
+                        for p in comp_pads.get(gap_cid, []))
             result, used_cfg = _attempt_edge(pcb_data, net_id, gap, config,
-                                             net_clearances)
+                                             net_clearances,
+                                             island_points=_isl)
             if result is None:
                 failed_gaps.add(key)
                 continue

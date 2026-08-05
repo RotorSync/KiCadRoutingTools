@@ -857,7 +857,8 @@ def drop_off_board_pads(pcb_data: PCBData, pads: List[Pad]) -> List[Pad]:
 def get_net_endpoints_anchor_split(pcb_data: PCBData, net_id: int,
                                    config: GridRouteConfig,
                                    anchor_a: Tuple[float, float],
-                                   anchor_b: Tuple[float, float]
+                                   anchor_b: Tuple[float, float],
+                                   island_points: Optional[set] = None
                                    ) -> Tuple[List, List, Optional[str]]:
     """Endpoint derivation for a KNOWN gap (the scoped net_rescue window).
 
@@ -874,8 +875,16 @@ def get_net_endpoints_anchor_split(pcb_data: PCBData, net_id: int,
     ends, board mm). Trunk fragments land together on the trunk side no
     matter where the crop cut them; the rescued island lands opposite.
     Rows are get_net_endpoints-shaped: (gx, gy, layer_idx, orig_x, orig_y).
-    A sloppy mid-gap assignment is tolerable -- net_rescue verifies the
-    component count actually dropped and undoes the copper otherwise.
+
+    island_points: when the caller knows the actual copper PARTITION (the
+    rescue's union-find components), pass the island side's points as a set
+    of (round(x,3), round(y,3)) -- assignment is then by MEMBERSHIP, never
+    proximity: island copper -> side B, everything else -> side A. Without
+    it, proximity mis-assigns whenever the gap is short and trunk copper
+    passes nearer anchor B than the island does (dilemma M_COL4_L: a
+    2.48mm gap put trunk cells on BOTH sides, the route joined
+    trunk-to-trunk 4.5mm from the gap, and the rescue's verify undid it
+    every retry -- the net shipped open though the window route existed).
     """
     from net_queries import expand_pad_layers
 
@@ -887,6 +896,10 @@ def get_net_endpoints_anchor_split(pcb_data: PCBData, net_id: int,
     side_b: List = []
 
     def _add(x, y, layer_idx, gx, gy):
+        if island_points is not None:
+            on_island = (round(x, 3), round(y, 3)) in island_points
+            (side_b if on_island else side_a).append((gx, gy, layer_idx, x, y))
+            return
         da = (x - ax) ** 2 + (y - ay) ** 2
         db = (x - bx) ** 2 + (y - by) ** 2
         (side_a if da <= db else side_b).append((gx, gy, layer_idx, x, y))
