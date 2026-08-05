@@ -770,9 +770,13 @@ class PairShortfall(NamedTuple):
     pad: float          # summed different-net pad clearance shortfall (mm)
     pad_overlap: bool   # any different-net pad rects INTERSECT (a short)
     hole: float         # summed pad-copper-into-hole-keepout penetration (mm)
+    stack: bool = False  # ANY-net cross-footprint pad rects INTERSECT --
+    #                      two different parts' copper in the same space is an
+    #                      assembly impossibility regardless of net (run-6:
+    #                      the C14-on-R14 class the same-net skip is blind to)
 
 
-ZERO_SHORTFALL = PairShortfall(0.0, False, 0.0)
+ZERO_SHORTFALL = PairShortfall(0.0, False, 0.0, False)
 
 
 class PartPads:
@@ -967,18 +971,25 @@ class LegalityContext:
             # Extent-level verdict only: charge the extent shortfall as pad
             # shortfall so the baseline comparison still constrains the pair.
             g = rect_gap(ea, eb)
-            return PairShortfall(max(0.0, self.clearance - g), g < 0.0, 0.0)
+            return PairShortfall(max(0.0, self.clearance - g), g < 0.0, 0.0,
+                                 g < 0.0)
         rects_a = pa.pad_rects(xa, ya, ra)
         rects_b = pb.pad_rects(xb, yb, rb)
         pad_short = 0.0
         overlap = False
+        stack = False
         for a0, a1, a2, a3, na, sa in rects_a:
             for b0, b1, b2, b3, nb, sb in rects_b:
-                if na == nb and na > 0:
-                    continue
                 if not _sides_interact(sa, sb):
                     continue
                 g = rect_gap((a0, a1, a2, a3), (b0, b1, b2, b3))
+                if g < 0.0:
+                    # any-net physical intersection: the assembly channel,
+                    # measured BEFORE the same-net skip below (which exists
+                    # for the SHORT semantics only)
+                    stack = True
+                if na == nb and na > 0:
+                    continue
                 if g < self.clearance - EPS:
                     pad_short += self.clearance - g
                     if g < 0.0:
@@ -990,7 +1001,7 @@ class LegalityContext:
         for cx, cy, r in pa.hole_circles(xa, ya, ra):
             for b0, b1, b2, b3, _nb, _sb in rects_b:
                 hole += _circle_rect_penetration(cx, cy, r, (b0, b1, b2, b3))
-        return PairShortfall(pad_short, overlap, hole)
+        return PairShortfall(pad_short, overlap, hole, stack)
 
     def seed_baseline(self, a: str, b: str) -> PairShortfall:
         key = (a, b) if a <= b else (b, a)
@@ -1020,6 +1031,11 @@ class LegalityContext:
             if cur.pad > base.pad + EPS:
                 return False
             if cur.pad_overlap and not base.pad_overlap:
+                return False
+            # run-6: a NEW any-net pad stack (two footprints' copper in the
+            # same space) is never admitted -- the same-net C14-on-R14 class
+            # the short conjunct above cannot see
+            if cur.stack and not base.stack:
                 return False
             if cur.hole > base.hole + EPS:
                 return False

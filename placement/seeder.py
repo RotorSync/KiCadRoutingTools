@@ -833,6 +833,26 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
         mover = min(free, key=lambda r: (state.parts[r].pin_count, r))
         _charge(mover, mm)
 
+    # Run-6: the ASSEMBLY census. Blocking body pairs (any-net cross-
+    # footprint pad intersections -- the shipped C14-on-R14 class that the
+    # different-net-only census above skips by design) charge the same
+    # mover rule, so the repair machinery can actually seat the squatter.
+    body = _leg.grade_body_overlap(pcb_data, clearance, pcb_file=pcb_file)
+    if body['blocking']:
+        print(f"  Assembly census: {body['blocking']} blocking body "
+              f"pair(s), all listed")
+    for bp in body['blocking_pairs']:
+        free = [r for r in (bp.a, bp.b)
+                if r in state.parts
+                and (not state.parts[r].locked or r in must_lock)]
+        if not free:
+            notes.append(f"body stack {bp.a}<->{bp.b} ({bp.area_mm2}mm2): "
+                         f"both file-locked -- not repairable here")
+            continue
+        mover = min(free, key=lambda r: (state.parts[r].pin_count, r))
+        # mm2 -> a strong mm-equivalent charge: a stack is never cosmetic
+        _charge(mover, max(1.0, bp.area_mm2))
+
     # Off-board census on PAD/HOLE extents at ZERO margin -- copper or drill
     # off the outline is a fab defect; a COURTYARD poking past the edge is
     # cosmetic and common on legitimate boards (tigard's own corner mounting

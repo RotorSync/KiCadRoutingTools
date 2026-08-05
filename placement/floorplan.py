@@ -1339,6 +1339,24 @@ def emit_intent(pcb_data, pcb_file: str, *,
 
     locked = sorted(extract_locked_refs_safe(pcb_file))
     leg = state.legality_metrics()
+    # Run-6: a board carrying a blocking BODY pair (two footprints' pad
+    # copper in the same space) must not bake its own overlap_area as the
+    # budget -- that is the exact self-bless cycle run 5 shipped through
+    # (the emitted 6.112 budget graded the C14-on-R14 board clean). The
+    # repaired board re-emits the honest number; meanwhile board_score's
+    # `assembly` component grades independently of any budget.
+    try:
+        from placement.legality import grade_body_overlap
+        _body_blocking = grade_body_overlap(
+            pcb_data, state.clearance, pcb_file=pcb_file)['blocking']
+    except Exception:
+        _body_blocking = 0
+    _suspects = any('SUSPECT' in (c.get('note') or '') for c in conns)
+    _budget = {}
+    if not _body_blocking:
+        _budget['overlap_area'] = _ceil4(float(leg['overlap_area']))
+    if not _suspects:
+        _budget['oob_count'] = int(leg['oob_count'])
     return {
         'schema': SCHEMA_VERSION,
         'kind': KIND,
@@ -1352,23 +1370,14 @@ def emit_intent(pcb_data, pcb_file: str, *,
         'edge_connectors': conns,
         'decaps': {},
         'must_lock': locked,
-        'legality_budget': (
-            # Rounded UP, not to nearest. round() can land up to 5e-5 BELOW the
-            # measured value, which is 50x legality.EPS -- so a budget written
-            # from a board would fail against that same board. An emitted
-            # intent that does not grade clean makes the round trip useless as
-            # a check that the rules are wired to real geometry (watchy:
-            # overlap 9.09724 was written as 9.0972 and instantly violated).
-            #
-            # Run-5 rebase rule: when the emit found SUSPECT overhangs, the
-            # oob census is damage-frozen and baking it mis-grades the
-            # REPAIRED board (run-4: baked 5 vs the human-equal 7). Bake no
-            # oob_count then; re-emit from the repaired board to get the
-            # honest number. Healthy boards (no suspects) bake as before.
-            {'overlap_area': _ceil4(float(leg['overlap_area'])),
-             'oob_count': int(leg['oob_count'])}
-            if not any('SUSPECT' in (c.get('note') or '') for c in conns)
-            else {'overlap_area': _ceil4(float(leg['overlap_area']))}),
+        # Budget values are rounded UP, not to nearest: round() can land up
+        # to 5e-5 BELOW the measured value, 50x legality.EPS, so a budget
+        # written from a board would fail against that same board (watchy:
+        # overlap 9.09724 was written as 9.0972 and instantly violated).
+        # Withholding rules (see _budget above): SUSPECT overhangs freeze
+        # the oob census (run-5); a blocking body pair freezes overlap_area
+        # (run-6). Healthy boards bake both, as before.
+        'legality_budget': _budget,
         'context': {
             'note': ('read-only, describing the board as it is. The outline is '
                      'not editable by this toolchain: size, cutouts and slots '

@@ -1155,6 +1155,7 @@ class QuenchState:
         short = 0.0
         overlaps = 0
         holes = 0.0
+        stacks = 0
         for i, a in enumerate(refs):
             for b in refs[i + 1:]:
                 sf = self.legality_ctx.pair_shortfall(a, b)
@@ -1163,10 +1164,16 @@ class QuenchState:
                     short += sf.pad
                 if sf.pad_overlap:
                     overlaps += 1
+                if sf.stack:
+                    stacks += 1
                 holes += sf.hole
         return {'pad_conflict_pairs': pairs,
                 'pad_shortfall': round(short, 4),
                 'pad_overlap_pairs': overlaps,
+                # run-6: ANY-net cross-footprint pad intersections -- the
+                # assembly (stacked-parts) channel, corpus-calibrated 0 on
+                # every healthy board in both exact and AABB currencies
+                'pad_intersection_pairs': stacks,
                 'hole_shortfall': round(holes, 4)}
 
     # ----- move application -------------------------------------------------

@@ -27,9 +27,11 @@ simultaneous assignment. The pipeline (place_reconstruct.py drives it):
                     placement), escalating displacement caps.
 
 Every stage is gated: it is APPLIED only if the lexicographic legality tuple
-(pad conflict pairs, hole shortfall, pad-extent off-board amount, courtyard
-overlap area, hpwl) does not worsen -- the run-2 lesson that a bare
-conflict-count gate is gameable by pushing parts off the board.
+(pad conflict pairs, hole shortfall, banded pad-oob, stack pairs, hpwl,
+courtyard overlap area -- see measure() for the run-4/run-6 ordering
+rationale) does not worsen -- the run-2 lesson that a bare conflict-count
+gate is gameable by pushing parts off the board, extended in run 6 with the
+assembly (stacked-parts) conjunct hpwl-gaming cannot see.
 """
 from __future__ import annotations
 
@@ -96,19 +98,25 @@ def pad_oob_amount(state, edge_bands=None) -> float:
 def measure(state, edge_bands=None) -> Tuple:
     """The lexicographic gate tuple. Smaller-or-equal is acceptable.
 
-    Order (run-4): pad conflicts, hole shortfall, banded pad-oob -- the HARD
-    fab-real facts -- then hpwl, then courtyard overlap as the LAST tiebreak.
-    overlap_area used to outrank hpwl, which vetoed a 44 mm hpwl homecoming
-    over +0.73 mm^2 of courtyard overlap; run 2 measured overlap_area
-    POSITIVELY correlated with distance-to-truth (r = +0.72, the same
-    anti-signal as crossings), and the skill's rule is gate on hpwl and
-    PAD-PAD, report overlap, never gate on it. Courtyards carry their own
-    margin; real collisions are the tuple's first component."""
+    Order (run-6): pad conflicts, hole shortfall, banded pad-oob, then
+    STACK PAIRS (any-net cross-footprint pad intersections -- the assembly
+    channel), then hpwl, then courtyard overlap as the LAST tiebreak.
+
+    Two measured lessons live in this order. Run 4 demoted the AGGREGATE
+    overlap_area below hpwl (it had vetoed a 44 mm hpwl homecoming over
+    +0.73 mm^2 of courtyard kiss; run 2 measured it POSITIVELY correlated
+    with distance-to-truth, r = +0.72 -- courtyards carry their own margin
+    and human boards have a nonzero floor). Run 5 then shipped two 0402s
+    STACKED because nothing above hpwl could see them: the stack-pair COUNT
+    is the non-gameable per-pair channel (corpus-calibrated ZERO on all 33
+    healthy boards, exact and AABB currencies), so it sits ABOVE hpwl where
+    the aggregate never can."""
     m = state.pad_legality_metrics() if state.legality_ctx is not None else {}
     leg = state.legality_metrics()
     return (m.get('pad_conflict_pairs', 0),
             round(m.get('hole_shortfall', 0.0), 4),
             round(pad_oob_amount(state, edge_bands), 4),
+            m.get('pad_intersection_pairs', 0),
             round(leg.get('hpwl', 0.0), 3),
             round(leg.get('overlap_area', 0.0), 4))
 
@@ -744,7 +752,11 @@ def _pair_conflicts(state, a: str, pos_a, b: str, pos_b) -> bool:
     pa, pb = state.parts[a], state.parts[b]
     cur = ctx.pair_shortfall(a, b, pose_a=(pos_a[0], pos_a[1], pa.rot),
                              pose_b=(pos_b[0], pos_b[1], pb.rot))
-    return cur.pad > legality.EPS or cur.hole > legality.EPS
+    # run-6: `stack` makes ANY-net pad intersection a conflict here too --
+    # without it the assign/exchange solvers could co-place two same-net
+    # parts in the same space (the shipped C14-on-R14 class: R14's
+    # homecoming landed on squatting C14 and no exclusion row existed).
+    return (cur.pad > legality.EPS or cur.hole > legality.EPS or cur.stack)
 
 
 def _interacting_pairs(state, candidates):

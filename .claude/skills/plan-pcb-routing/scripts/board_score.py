@@ -224,6 +224,31 @@ def score_connectivity(root: str, board: str) -> dict:
             'poured_nets': sorted(poured), 'broken_detail': detail}
 
 
+def score_assembly(root: str, board: str, intent: str, tmp: str) -> dict:
+    """Blocking BODY pairs (run-6): two footprints' pad copper in the same
+    space -- physically unbuildable, invisible to every copper checker (the
+    shipped C14-on-R14 stack). Runs check_assembly.py, which needs NO
+    intent to be meaningful (--intent only adds authored waivers), so this
+    component ALWAYS grades -- the floorplan path can be vacuous by
+    self-blessed budget; this one cannot."""
+    out = os.path.join(tmp, 'assembly.json')
+    args = [board, '--json', out]
+    if intent:
+        args += ['--intent', intent]
+    rc, text = run_tool(root, 'check_assembly.py', *args)
+    if rc not in (0, 4) or not os.path.exists(out):
+        return skipped(f'check_assembly rc {rc}: {text.strip()[-200:]}')
+    try:
+        with open(out, encoding='utf-8') as f:
+            doc = json.load(f)
+    except Exception as exc:
+        return skipped(f'check_assembly json unreadable: {exc}')
+    return {'ran': True, 'count': int(doc.get('blocking') or 0),
+            'advisory_pairs': int(doc.get('advisory') or 0),
+            'waived_pairs': int(doc.get('waived') or 0),
+            'pairs': doc.get('blocking_pairs') or []}
+
+
 def score_drc(root: str, board: str, clearance=None, sizes=None) -> tuple:
     """(drc, undersized, rule_pairs) -- physical clearance violations,
     sub-floor copper, and #549 track-rule-governed pairs (advisory).
@@ -540,6 +565,7 @@ def main():
         conn = score_connectivity(root, args.board)
         drc, undersized, rule_pairs = score_drc(root, args.board, args.clearance, sizes)
         floorplan = score_floorplan(root, args.board, args.intent, tmp)
+        assembly = score_assembly(root, args.board, args.intent, tmp)
         _imp_nets = ([g for tok in args.impedance_nets for g in tok.split(',') if g]
                      if args.impedance_nets else args.impedance_nets)
         imped = score_impedance(root, args.board, _imp_nets, tmp)
@@ -555,6 +581,7 @@ def main():
                         'poured_nets': conn.get('poured_nets', []),
                         'nets': conn.get('broken_detail', {})},
              'drc': drc, 'undersized': undersized, 'floorplan': floorplan,
+             'assembly': assembly,
              'impedance': imped, 'length': length, 'net_widths': net_widths}
 
     # #549 rule-governed pairs are ADVISORY: their gate is the repo's own

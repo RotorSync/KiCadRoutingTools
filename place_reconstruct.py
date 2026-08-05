@@ -12,7 +12,8 @@ pattern fit on mounting holes (propose-only), rigid +/-v vector detection, an
 EXACT simultaneous candidate assignment (small ILP via scipy.optimize.milp;
 breakout-descent fallback), then a violation-driven minimal-move legalize
 sweep. Every stage applies only if the legality gate tuple (pad conflicts,
-hole shortfall, pad off-board, courtyard overlap, hpwl) does not worsen.
+hole shortfall, banded pad-oob, stack pairs, hpwl, courtyard overlap) does
+not worsen -- see placement/reconstruct.measure() for the ordering rationale.
 
 Exit codes: 0 wrote a board that improved (or matched) every gate axis with
 no residual pad conflicts; 3 the board cannot be reconstructed here (no
@@ -152,7 +153,7 @@ Examples:
 
     base = reconstruct.measure(state, edge_bands)
     print(f"Gate before: pad_pairs={base[0]} hole={base[1]} oob={base[2]} "
-          f"hpwl={base[3]} overlap={base[4]}")
+          f"stacks={base[3]} hpwl={base[4]} overlap={base[5]}")
     report['gate_before'] = list(base)
 
     proposals = {}
@@ -239,7 +240,8 @@ Examples:
                   f"{len(xrep['accepted'])} joint move(s)"
                   + (f" ({len(xpruned)} pruned back)" if xpruned else "")
                   + f"; gate now pad_pairs={base[0]} hole={base[1]} "
-                  f"oob={base[2]} hpwl={base[3]} overlap={base[4]}")
+                  f"oob={base[2]} stacks={base[3]} hpwl={base[4]} "
+                  f"overlap={base[5]}")
         return sorted(set(xold) - set(xpruned))
 
     moved = []
@@ -285,7 +287,8 @@ Examples:
                       f"part(s) moved"
                       + (f" ({len(pruned)} pruned back)" if pruned else "")
                       + f"; gate now pad_pairs={after[0]} hole={after[1]} "
-                      f"oob={after[2]} hpwl={after[3]} overlap={after[4]}")
+                      f"oob={after[2]} stacks={after[3]} hpwl={after[4]} "
+                      f"overlap={after[5]}")
             else:
                 for ref, (x, y, rot) in old.items():
                     state.apply_move(ref, x, y, rot)
@@ -364,24 +367,42 @@ Examples:
         report['legalize'] = {'repaired': rep['repaired'],
                               'unrepairable': rep['unrepairable']}
 
-    final = grade_pad_legality(parse_kicad_pcb(args.output_file),
-                               args.clearance)
+    out_pcb = parse_kicad_pcb(args.output_file)
+    final = grade_pad_legality(out_pcb, args.clearance)
     report['final'] = {k: final[k] for k in
                        ('pad_conflicts', 'pad_shortfall', 'hole_conflicts',
                         'oob_pad_count', 'oob_pad_amount', 'exact')}
+    # Run-6: the assembly channel joins the final verdict -- run 5's output
+    # carried a two-part STACK the pad/hole channels cannot see, and this
+    # report (plus the exit code) was the last silent gate.
+    from placement.legality import grade_body_overlap
+    body = grade_body_overlap(out_pcb, args.clearance,
+                              intent_waivers=(intent.waiver_pairs()
+                                              if intent is not None else ()),
+                              pcb_file=args.output_file)
+    report['final']['body_blocking'] = body['blocking']
+    report['final']['body_advisory'] = body['advisory']
+    report['final']['body_pairs'] = [q._asdict() for q in body['pairs']
+                                     if not q.waived]
     report['output'] = args.output_file
     print(f"Final (exact): {final['pad_conflicts']} pad conflict pair(s), "
           f"{final['hole_conflicts']} hole conflict(s), "
-          f"{final['oob_pad_count']} part(s) with pad copper off-board")
+          f"{final['oob_pad_count']} part(s) with pad copper off-board, "
+          f"{body['blocking']} blocking body pair(s)")
+    for q in body['blocking_pairs']:
+        print(f"  BODY STACK: {q.a} <-> {q.b} {q.kind} {q.area_mm2}mm2 "
+              f"side {q.side} -- not physically buildable")
     if final['oob_pad_count']:
         print("  (off-board residue that no cap could repair: if it is a "
               "by-design overhang -- a card edge, a switch actuator -- "
               "declare it in an intent's edge_connectors; it is then exempt)")
     print("JSON_SUMMARY: " + json.dumps(report, sort_keys=True))
-    # Exit 4 = residual PAD/HOLE conflicts -- the defect classes this tool
-    # exists to remove. Off-board residue is reported (and by-design overhang
-    # is indistinguishable from defect without an intent), not an exit code.
-    return 4 if (final['pad_conflicts'] or final['hole_conflicts']) else 0
+    # Exit 4 = residual PAD/HOLE conflicts or a blocking BODY pair -- the
+    # defect classes this tool exists to remove. Off-board residue is
+    # reported (and by-design overhang is indistinguishable from defect
+    # without an intent), not an exit code.
+    return 4 if (final['pad_conflicts'] or final['hole_conflicts']
+                 or body['blocking']) else 0
 
 
 if __name__ == "__main__":
