@@ -76,7 +76,7 @@ list:
 |---|---|---|
 | mounting holes, NPTH, drill-outs | the enclosure's standoff pattern | `pad.pad_type == 'np_thru_hole'`, or 0 connected pins. **The quench provably cannot place these** — the advisor says so itself: *"0 connected pin(s) → invisible to the airwire cost, so only the halo term decides where it goes"* |
 | edge connectors, castellations, card edges | the mating standard / the outline | courtyard must intersect (castellated: be centred on) the outline. `check_floorplan`'s `edge_connectors` block already computes the edge and overhang |
-| enclosure-referenced parts (USB/barrel/RF jacks, buttons, LEDs, displays) | an aperture in the spec | no board-derivable test — **spec only** |
+| enclosure-referenced parts (USB/barrel/RF jacks, buttons, LEDs, displays) | an aperture in the spec | the EXACT position is spec-only, but the CLASS is board-derivable (run-4 `placement/part_class.py`): an `edge_receptacle`-class part (USB/HDMI/RJ45/card/jack by footprint name or CC1/CC2-style pinfunctions) with **no overhang AND edge clearance past the seat tolerance is implausibly posed** — the plug cannot reach it. NOT a bare distance threshold: run 3's displaced USB-C sat only 2.45 mm from a *different* edge, so "far from every edge" misses a swapped part. `check_floorplan --emit-intent --declare-classes` declares these automatically; the advisor DEMOTES an implausibly-posed receptacle out of the lock list (a lock is not a placement) |
 | fiducials, test points | a fab or test-fixture rule | usually spec; sometimes a symmetric pattern (see R2) |
 
 **R2 — Ask whether the board itself determines the position. Often it does, and then it
@@ -238,16 +238,30 @@ wrong placement optimises a board that cannot pass DRC however well it routes.
 **The whole ladder is now tooling, in escalation order** (each stage is
 report-only with `--dry-run`, and each does nothing on a healthy board —
 measured: `place_reconstruct` on the correct control board proposed nothing
-and moved 0 parts):
+and moved 0 parts). **The ladder ESCALATES, it never COMPOSES**: each rung
+consumes the PREVIOUS rung's gated output or the unmodified input, never a
+partial repair — `--repair` legalizes in place and smears the ±v
+structure the reconstruct's pattern fit needs (run 3 ran repair as a
+dry-run test, judged it insufficient, and correctly handed reconstruct the
+UNSMEARED board). Declare the edge classes FIRST (`--declare-classes`) so
+the reconstruct sees the bands:
 
 ```bash
 python3 -X utf8 check_drc.py board.kicad_pcb --clearance <floor>   # measure (R0)
+python3 -X utf8 check_floorplan.py board.kicad_pcb \
+    --emit-intent auto.json --declare-classes   # part-class auto-declaration:
+                                       # edge parts get bands; an implausibly-
+                                       # posed receptacle gets NO edge (derive)
 python3 -X utf8 place_seed.py board.kicad_pcb r.kicad_pcb \
-    --intent fp.json --repair          # local violations, minimal-move
+    --intent auto.json --repair        # local violations, minimal-move; seats
+                                       # DECLARED-edge parts on their bands
 python3 -X utf8 place_reconstruct.py board.kicad_pcb r.kicad_pcb \
-    [--intent fp.json]                 # structural damage (R1-R5 productized:
-                                       # tiers, pattern fit, ±v, exact ILP
-                                       # assignment, legalize sweep)
+    --intent auto.json [--assign-rounds 2]  # structural damage (R1-R5
+                                       # productized: tiers, pattern fit, ±v,
+                                       # exact ILP, prune sweep, legalize).
+                                       # Round 2 peels a displaced ISLAND's
+                                       # boundary once round 1 made the anchor
+                                       # centroids truer (measured: +7 members)
 python3 -X utf8 place_optimize.py r.kicad_pcb out.kicad_pcb ...    # 0c residue
 ```
 
@@ -549,6 +563,13 @@ moves whose gain does not pay for their motion. `--courtyard-only` restores
 the old model for A/B. The JSON_SUMMARY carries `pad_conflicts_before/after` —
 if `after > before`, that is a bug report, not a result.
 
+**The legality gates protect LEGALITY, not STRUCTURE.** Measured, run 3:
+both rejected quenches held every hard invariant green (pad conflicts 0→0,
+holes 0, oob unchanged, NPTH frozen) while eroding a recovered placement
+from 26 parts home to 15 — and the ONLY board-only signal that caught it
+was the hpwl acceptance rule, twice. A quench result whose hpwl worsened is
+discarded no matter how green its legality block reads.
+
 **Acceptance rule — apply it, do not skip it.** It is a CONJUNCTION, and all
 three parts are required:
 
@@ -843,7 +864,7 @@ quoting any number. The headline pairings:
 | a `place_route_loop` round | `make_movie.py WORKDIR --camera auto` | per-round `failures` and `iterations` from the loop's own output. A round that moved a lot and changed neither is noise |
 | a run that TRIED more than it kept | `make_film.py --from-loop-dir WORKDIR` | the same per-round numbers, for the **rejected** rounds too — the badged beats are the ones whose `failures` did not improve, and seeing where the search went is the point |
 | routing failed after placement | `--summary-json <route log>` on the render | the `failed_nets` and `blockers` in that same summary — the render colours exactly those, so the picture and the diagnosis are the same data |
-| board looks wrong / empty | `render_placement.py board -o state.png` | exit code. **3 means the board is unplaced or already routed** — read the message rather than reaching for an override |
+| board looks wrong / empty | `render_placement.py board -o state.png --json` | the `unplaced` key in its JSON. The renderer deliberately WARNS where the placement CLIs refuse (seeing an unplaced board is the point of a renderer), so **it always exits 0** — the old "exit 3" advice here pointed at a code that never fires |
 | **any board you are about to call done** | `scripts/board_score.py board --intent I --json wk/score.json` | `blocking` — it must be **0**. `ungraded` lists what nothing examined; that is *unexamined*, not clean. This is the one number not produced by the thing being graded |
 
 ### Which flag, at which step — the trigger table
@@ -859,11 +880,11 @@ question you actually have, is the same as not producing it. Each row is a
 | any route step failed | `render_placement board --summary-json <route log> --focus` | do the failures share one pocket (→ placement) or scatter (→ parameters)? **`--focus` emits nothing without `--summary-json`** |
 | a `--group-by` decision is live | `render_placement --zoom-group <name> --group-by sheet` | which parts does this block actually pull in? |
 | chasing one bus, pair or clock | `render_placement --ratsnest-nets '*USB*'` | route.py `--nets` glob syntax, exclusions included. On a pose/order decision: TWO renders, one per pose, and READ them (image case 5) |
-| a claim about ONE spot (an intrusion, an edge row, a wedge, a stop claim) | `route_render.py BOARD --view x0,y0,x1,y1` (or the same flag on `render_placement`) | the question-scoped crop, self-describing: rect label, ref designators cross-marked at their JSON origins, mm ruler on the edges (`--refs`/`--ruler` default ON for crops). READ it (image case 6). Numbers still decide magnitudes |
+| a claim about ONE spot (an intrusion, an edge row, a wedge, a stop claim) | `route_render.py BOARD --view x0,y0,x1,y1` | the question-scoped crop, self-describing: rect label, ref designators cross-marked at their JSON origins, mm ruler on the edges (`--refs`/`--ruler` default ON for crops — **route_render.py flags; `render_placement --view` crops too but has NEITHER**, so use route_render for self-describing crops). READ it (image case 6). Numbers still decide magnitudes |
 | `check_drc` failed | re-run with `--render wk/drcN/` | one panel per violation cluster: red rings, ref labels + mm ruler for JSON matching, count/types/rect caption. READ them (image case 7): one cluster = local fix, board-wide = grading floor (9.1b) |
 | every placement render | add `--ignore-nets <same as place_optimize>` | **must match** or `crossings`/`hpwl` will not reproduce the optimizer's `JSON_SUMMARY`, and you will chase a phantom disagreement |
 | every placement render | add `--clearance <the board's real floor>` | halo and overlap are otherwise graded at the wrong gap |
-| every render, always | add `--json` | the re-measurement channel. A tool's own report never satisfies its own gate. **It is a bare FLAG on `render_placement`**, not a path: it prints a `JSON_SUMMARY:`-prefixed line into stdout among the progress text, so grep that prefix and strip it. Only `board_score.py --json <path>` takes a file |
+| every render, always | add `--json-out wk/renderN.json` | the re-measurement channel, to a FILE (run-4 G1; the bare `--json` flag still prints the `JSON_SUMMARY:` stdout line). The document carries an `instrument` block (board/before/clearance/ignore_nets/size) so a before/after series is PROVABLY same-instrument — run 3's watcher could not verify 632-vs-412 crossings on one board because neither JSON said which `--ignore-nets` produced it — and a `checklist` block naming refs per mandate-8 question, channel-labelled (pad_copper vs courtyard: they legitimately differ and run 3 lost time to exactly that unlabelled disagreement) |
 | with `--focus` | `-o` names a **DIRECTORY** | `render_placement --focus -o wk/x.png` writes `wk/x.png/<board>.png` and `wk/x.png/<board>_focus1.png`. Give it a directory name, and read the panel paths back out of the `panels` array |
 | once, before choosing a budget | `route.py --list-groups --group-by auto` | whether the board decomposes at all. The budget is **100 per board** either way (9.2) |
 | after each accepted placement | `check_floorplan --intent I --health` | will this floorplan *fight* the router? Block displacement and bus-corridor crossings |
@@ -873,6 +894,32 @@ question you actually have, is the same as not producing it. Each row is a
 **Not evidence:** `--size` and `--supersample` change how the picture looks, not
 what is true — measure instead. `--ratsnest-all` is the deliberate hairball, for
 showing a human, never for reading.
+
+**Worked render recipes (run-4 G2 — copy these, so the same-instrument habit
+is copied rather than remembered).** The `--clearance`/`--ignore-nets` values
+are the board's routed floor and the plane-net set (run 3's pair was
+`--clearance 0.09 --ignore-nets GND +3V3`); a series whose flags differ is
+not a series, and the JSON's `instrument` block is what proves it:
+
+```bash
+# per-side (any board with back-side parts; sibling FILES x_F.png/x_B.png)
+python3 -X utf8 render_placement.py board.kicad_pcb --per-side \
+    --clearance 0.09 --ignore-nets GND +3V3 \
+    --json-out wk/r_state.json -o wk/r_state.png
+
+# mandate-5 POSE PAIR: two renders, one per candidate pose, read side by side
+python3 -X utf8 render_placement.py cand_rot0.kicad_pcb \
+    --ratsnest-nets 'QSPI_*' --clearance 0.09 --ignore-nets GND +3V3 \
+    --json-out wk/pose0.json -o wk/pose0.png
+python3 -X utf8 render_placement.py cand_rot180.kicad_pcb \
+    --ratsnest-nets 'QSPI_*' --clearance 0.09 --ignore-nets GND +3V3 \
+    --json-out wk/pose180.json -o wk/pose180.png
+
+# one block, framed (block names exactly as route.py --group takes them)
+python3 -X utf8 render_placement.py board.kicad_pcb \
+    --zoom-group sheet:58d913ec --clearance 0.09 --ignore-nets GND +3V3 \
+    --json-out wk/blk.json -o wk/blk.png
+```
 
 ### LOOK at the render — you, not just the user
 
@@ -922,12 +969,17 @@ the ledger entry must name the panels read (see 9.4).
    nudge, a retract) *or board-wide* (a grading-floor or class problem,
    9.1b)?
 8. **After EVERY placement tool step — accepted, rejected, or probed** —
-   `render_placement` the output (the legality overlay is default-ON: red
-   rings per pad/hole conflict, orange NPTH keepout circles, dashed-red
-   extents on off-board copper) and read it against a fixed checklist, all
-   four answered in writing: *(a) any part off the outline? (b) any
-   part-on-part overlap? (c) any part on a hole or a locked part? (d) did
-   more parts move than the step claimed?* A run once read ONE image across
+   `render_placement` the output with `--json-out` (the legality overlay is
+   default-ON: red rings per pad/hole conflict, orange NPTH keepout
+   circles, dashed-red extents on off-board copper) and read it against a
+   fixed checklist, all four answered in writing: *(a) any part off the
+   outline? (b) any part-on-part overlap? (c) any part on a hole or a
+   locked part? (d) did more parts move than the step claimed?* **QUOTE
+   the JSON's `checklist.a`..`d` blocks as the four answers** (run-4 G5:
+   they name the refs, channel-labelled, and `d` compares `--expect-moved
+   N` against the measured move count) AND say what you saw in the pixels
+   — the numbers stay the verdict; the eyes catch what no metric
+   models. A run once read ONE image across
    an entire placement campaign and missed off-board parts a render plainly
    showed; the checklist, not the glance, is what catches them. The caption's
    `pad-conflicts` / `hole-conflict` numbers pair with what you see — the
@@ -1052,7 +1104,11 @@ only in `check_floorplan`'s `outline` block.
   different instruments read three different lossy ways; the instrument was
   right every time. **An oracle LISTING gets the same rule**: never `head`/
   `tail` it — consume the whole list and assert the lines you consumed equal
-  the count the instrument itself printed. Run 7's close-out shipped "5
+  the count the instrument itself printed. `check_drc` now prints a
+  machine-checkable `LISTING: M of T violation(s) shown` line (run-4 B2):
+  quote a specific item only when `M == T`, else re-run `--max-print 0`
+  first — run 3's orphan incident read 1 of 3 off a tail and shipped the
+  wrong count into a ledger entry. Run 7's close-out shipped "5
   opens" off a `tail -5` of a list whose sixth line (SWDIO) sat above the
   window; the oracle had printed 6, and the wrong number reached the final
   report and the promotion decision before the watcher caught it.

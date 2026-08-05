@@ -165,3 +165,14 @@ measurement and a written finding about the requirement.
 order, on the same inputs, tag each `mode=inline`, and **say in the report that
 verification was single-agent**. A run must never look like a fan-out happened
 when it did not.
+
+
+## Pre-registration rule: arm falsifiers in BOTH directions (run-4 B12)
+
+A watcher pre-registering predictions must give, per prediction, the
+number/band that would CONFIRM it and the one that would REFUTE it — in
+both directions. Run 3's prereg armed a placement-erosion falsifier only
+upward ("home rises >= 3"), so the actual 26->15 DOWNWARD erosion on the
+rejected quenches never tripped it and was caught only by the close-out
+grading. This applies to regressions and to improvement claims alike: an
+improvement band without a floor is a prediction that cannot lose.
