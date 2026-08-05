@@ -106,10 +106,16 @@ def krt_dir() -> str:
 
 
 def run_tool(root: str, tool: str, *args) -> tuple:
-    """(returncode, combined output). -X utf8 for the Ω/µ the tools print."""
+    """(returncode, combined output). -X utf8 for the Ω/µ the tools print.
+
+    KRT_NO_BANNER: the child instruments self-echo CMD/EXIT (run-4 B1) --
+    inside a COMPOSED run those lines would land mid-document and read as
+    the outer gate's exit (measured: a blocking-153 score log carrying an
+    inner checker's EXIT=0). The outer invocation is the evidence unit."""
     cmd = [sys.executable, '-X', 'utf8', os.path.join(root, tool)] + [str(a) for a in args]
+    env = dict(os.environ, KRT_NO_BANNER='1')
     p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                       encoding='utf-8', errors='replace')
+                       encoding='utf-8', errors='replace', env=env)
     return p.returncode, p.stdout
 
 
