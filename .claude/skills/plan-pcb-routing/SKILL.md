@@ -4183,6 +4183,58 @@ cost a commit. The score is the record; the lever text is a caption of it.
 systemic, 32 completion"* is a fact about how the budget was spent, and a run that
 cannot state it was not keeping a ledger.
 
+#### 9.4b — Boundary verification: BLOCKING, at every accepted iteration and at close
+
+The ledger records what the operator SAYS happened; nothing above checks it
+until the close-out audit, and by then the errors have compounded. Run 4's
+audit found exactly this: 6 of 8 entries batch-written after the fact (the
+per-step timestamps said so), and one `[read:]` tag claiming a pixel read
+that never happened. Both were honest-looking entries a contemporaneous
+check would have bounced in seconds.
+
+**The rule: after every ACCEPTED iteration's ledger entry, and at close-out,
+an independent subagent verifies the entry against its artifacts BEFORE the
+next step may start. A FAIL blocks; remediate (fix the entry, re-read the
+artifact, or re-run the step) and re-verify.**
+
+What the boundary verifier receives — and it must be ONLY this, never the
+raw board (it verifies the RECORD, not the routing):
+
+- the ledger entry (the JSONL line just written),
+- the score JSON it attaches (`--score` payload),
+- the render JSON(s) the entry's `[read: ...]` tags name,
+- the operator's one-paragraph claim of what the iteration did.
+
+What it checks, each with the artifact that decides:
+
+1. **board_sha binding** — the score payload's `board_sha` matches the
+   entry's `result_sha`; a stale attachment (run 4 had two, deliberate but
+   warned) must be lever-explained in the entry itself.
+2. **`[read:]` truthfulness** — every panel the entry claims was read exists
+   in the named render JSON, and every checklist value the claim quotes
+   matches that JSON. An entry whose claim quotes numbers appearing in no
+   attached artifact FAILS (run 4's e4: the tag implied a read that lived
+   only in the journal).
+3. **Contemporaneity** — the entry's timestamp is AFTER its artifacts'
+   mtimes and BEFORE any later step's artifacts. Batch-written history
+   shows up as a cluster of entries stamped within seconds; that is a FAIL
+   on every entry in the cluster except the last (run-2's defect, recurred
+   run 4; "record between steps or disclose in the entry, no third option").
+4. **Claims-vs-artifacts** — every number in the operator's claim traces to
+   a field in the entry, the score, or a named render JSON. "Fixed 4 nets"
+   with no names in the lever text is a FAIL (the whack-a-mole rule above).
+
+Reply format is the watcher's: one line,
+`VERDICT=PASS` or `VERDICT=FAIL:check=<1-4>;finding=<one line>;evidence=<path#pointer>`.
+
+Cadence discipline: REJECTED iterations do not get a boundary verification
+(their entries record a road not taken; the close-out audit samples them),
+and the verifier is bounded to the slices above — handing it the whole work
+dir invites it to re-litigate routing decisions, which is the convergence
+loop's job, not the record-keeper's. The close-out boundary verification
+additionally walks the WHOLE ledger for checks 3 and 4 (monotone t-stamps
+end to end; the final entry's stop condition quoted against its score).
+
 #### 9.5 — Stop conditions. Only these four. Say which one fired, every time.
 
 1. **`blocking == 0`, the repo's own spec checker passes, and every verifier lens
