@@ -68,9 +68,19 @@ CONN_PREFIX_LOW = ('SW', 'TP', 'MH', 'H', 'FID')
 ACTUATOR_PREFIX = ('SW',)
 
 # USB/edge pin functions KiCad writes only when the symbol carried one.
-# CC1/CC2/SBU are USB-C receptacle pins specifically -- a very strong,
-# house-library-proof receptacle signal.
+# CC1/CC2/SBU/SHIELD are RECEPTACLE pins specifically (a plug's mechanical
+# side); D+/D-/VBUS also live on SILICON -- the corpus census measured a
+# QFN-76 USB PHY, a Cypress QFN-56, two VSSOP-10 muxes and a SOT-666 ESD
+# array all classifying as receptacles through them -- so classification
+# uses only the mechanical set. (The lock advisor's broader IFACE_PINS
+# advisory keeps D+/D-/VBUS: near-a-connector is still lock-relevant.)
 IFACE_PINS = {'VBUS', 'D+', 'D-', 'CC1', 'CC2', 'SBU1', 'SBU2', 'SHIELD'}
+RECEPTACLE_PINS = {'CC1', 'CC2', 'SBU1', 'SBU2', 'SHIELD'}
+# IC package families: a footprint whose name says chip package is never an
+# edge receptacle, whatever its pin functions say.
+IC_PACKAGE_FP = ('qfn', 'dfn', 'sot', 'soic', 'ssop', 'tssop', 'vssop',
+                 'msop', 'qfp', 'bga', 'csp', 'wlp', 'lga', 'to-', 'sod',
+                 'dip-', 'pga')
 
 _PREFIX_RE = re.compile(r'^([A-Za-z]+)')
 
@@ -112,20 +122,23 @@ def classify_part(fp, ref: str) -> PartClass:
         return PartClass('testpoint', 'medium', ('footprint name/prefix',))
 
     pins = {str(getattr(p, 'pinfunction', '') or '').upper() for p in pads}
-    iface = pins & IFACE_PINS
-    fp_recep = any(k in name for k in EDGE_RECEPTACLE_FP)
+    recep_pins = pins & RECEPTACLE_PINS
+    is_ic_pkg = any(k in name for k in IC_PACKAGE_FP)
+    fp_recep = any(k in name for k in EDGE_RECEPTACLE_FP) and not is_ic_pkg
     fp_act = any(k in name for k in EDGE_ACTUATOR_FP)
 
-    if fp_recep or iface:
+    if (fp_recep or recep_pins) and not is_ic_pkg:
         ev = []
         if fp_recep:
             ev.append('footprint name matches the edge-receptacle table')
-        if iface:
-            ev.append(f"interface pin functions ({', '.join(sorted(iface))[:40]})")
-        # Two independent channels (or the receptacle-specific CC pins) =
-        # high; a name alone = medium. Prefix alone NEVER makes a receptacle.
-        strong = (fp_recep and (iface or pref in CONN_PREFIX_MED)) or \
-                 bool(iface & {'CC1', 'CC2', 'SBU1', 'SBU2'})
+        if recep_pins:
+            ev.append('receptacle pin functions '
+                      f"({', '.join(sorted(recep_pins))[:40]})")
+        # Two independent channels (or the receptacle-specific CC/SBU pins)
+        # = high; a name alone = medium. Prefix alone NEVER makes a
+        # receptacle, and neither do D+/D-/VBUS (silicon carries them too).
+        strong = (fp_recep and (recep_pins or pref in CONN_PREFIX_MED)) or \
+                 bool(recep_pins & {'CC1', 'CC2', 'SBU1', 'SBU2'})
         return PartClass('edge_receptacle', 'high' if strong else 'medium',
                          tuple(ev))
     if fp_act or pref in ACTUATOR_PREFIX:
