@@ -180,3 +180,22 @@ HEAD 2026-07-30 parity audit 191abc4..d73b1d6 (3 commits). Outcome: no gaps.
     test_uuidless_and_via_terminals.py + tests/test_terminal_anchor_fixes.py
     pass; set1 three-wave replay graded (see #545 closing comment; residual
     connection_width churn tracked as #547).
+
+2026-08-05 addendum -- #522 reorg landed (89914ce, main):
+  * 104 engine modules + bga_fanout/qfn_fanout/placement -> py_router/;
+    11 leaf tools + _path.py -> py_tools/; kicad_routing_plugin adds
+    _ENGINE_DIR (isdir-guarded, flat-install safe). No engine logic
+    changed; the audit surface is the layout itself.
+  * Parity evidence at the merge: test_gui_engine_parity on landed main
+    VERDICT: PARITY, copper sets IDENTICAL (segments 1335=1335, vias
+    140=140, DRC 0/0); test_manifest_plan_parity 12 params 0 unresolved;
+    test_cli_postpass_coverage 7/14/0 with the run_drc acknowledgment.
+  * Behavioral inertness proven beyond the gates: ulx3s 0801-manifest
+    replay old-layout vs new-layout COPPER-IDENTICAL (15506 segs, 1292
+    vias, same geometry hash); graduation-chain trio rerun (ulx3s 4/16,
+    butterstick 4/6, cynthion 32/5) IDENTICAL counts across both layouts.
+  * Three bugs caught BY the A/B, all fixed on the branch pre-land:
+    check_pads.py py_tools misclassification (bga/qfn lazy import -- no
+    gate runs a fanout step; ea992d9), its stale _path bootstrap
+    (3c4fc48), and the #562 rename breaking every recorded manifest's
+    repair step (relocate_moved_scripts rename table, 89914ce).
