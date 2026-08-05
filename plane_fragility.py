@@ -292,7 +292,20 @@ class FragilityField:
     def publish(self):
         rows = [st.rows for st in self.states if st.rows is not None]
         if rows:
-            self.cache[PLANE_FRAGILITY_CACHE_KEY] = np.vstack(rows)
+            out = np.vstack(rows)
+            # Same max-cost dedup the STATIC field applies (review DRC-7):
+            # overlapping same-layer pours emit the shared cells once per
+            # zone, and the initial registration lexsorts to per-cell max --
+            # a refresh that just vstacks re-introduces the duplicates, so a
+            # cost consumer that sums rows double-charges overlap cells
+            # relative to the static field.
+            order = np.lexsort((out[:, 3], out[:, 2], out[:, 1], out[:, 0]))
+            out = out[order]
+            keep = np.ones(len(out), dtype=bool)
+            same = ((np.diff(out[:, 0]) == 0) & (np.diff(out[:, 1]) == 0)
+                    & (np.diff(out[:, 2]) == 0))
+            keep[:-1][same] = False   # lexsort put max cost last per cell
+            self.cache[PLANE_FRAGILITY_CACHE_KEY] = out[keep]
         else:
             self.cache.pop(PLANE_FRAGILITY_CACHE_KEY, None)
 

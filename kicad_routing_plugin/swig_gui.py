@@ -2343,7 +2343,8 @@ class RoutingDialog(wx.Dialog):
                     ('cap_max_passes', 30),
                     ('underpad_escape', False),
                     ('allow_via_in_pad', False),
-                    ('plane_drop', True)):   # #424 drops: default ON
+                    ('plane_drop', True),    # #424 drops: default ON
+                    ('plane_net_layers_ctrl', '')):  # future-pour decl, empty
                 _ctl = _fctl(_name)
                 if _ctl is not None:
                     try:

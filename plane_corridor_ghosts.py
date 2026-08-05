@@ -36,7 +36,6 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from grid_router import GridObstacleMap  # noqa: F401 (typing/documentation)
 from routing_config import GridCoord, GridRouteConfig
 
 

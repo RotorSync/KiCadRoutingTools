@@ -145,7 +145,6 @@ def _append_final_plane_verify(steps):
     # returned early, and the trailing step did nothing -- leaving the plan
     # with NO plane verify at all, where pre-#562 that step WAS the verify.
     plane_actions = {"route_planes"}
-    copper_actions = {"route", "route_diff", "fanout", "optimize_caps"}
     inert_actions = {"repair_planes"}     # legacy, skipped at run time
     last_plane = None
     for i, s in enumerate(steps):
@@ -162,8 +161,29 @@ def _append_final_plane_verify(steps):
     # pour", full stop. A legacy plan of pour -> repair_planes (where the
     # repair used to be both the weld and the verify) otherwise pours and
     # then does nothing at all.
+    #
+    # AND the trailing route's net scope must COVER the pour nets (review
+    # finding F1): the finalize filters its zone-net scope by the route's
+    # nets, so a plan ending in a SCOPED route (`nets: ["SDRAM_*"]`) after a
+    # GND pour welds nothing on GND and ships every GND pad disconnected
+    # while the run reports success for its own scope. Trusting any trailing
+    # route step was this guard's blind spot -- check the coverage.
     if tail and tail[-1]["action"] == "route":
-        return  # its finalize welds and verifies the planes
+        _pour_nets = set()
+        for s in steps:
+            if s["action"] in plane_actions:
+                for a in (s.get("assignments") or []):
+                    if isinstance(a, dict):
+                        _pour_nets.update(a.get("nets") or [])
+        _route_nets = tail[-1].get("nets", ["*"])
+        try:
+            from net_queries import matches_net_filter as _mnf
+            _covered = all(_mnf(n, _route_nets) for n in _pour_nets)
+        except Exception:
+            _covered = "*" in _route_nets
+        if _covered:
+            return  # its finalize welds and verifies the planes
+        # Fall through: append the verify step (nets ["*"] covers the pours).
     # Reuse the last route step's params so the verify routes at the chain's
     # own geometry (clearance/track/via/power widths).
     src_params = {}
@@ -234,6 +254,9 @@ _PARAM_CONTROL_ALIASES = {
     'coplanar_nets': 'coplanar_nets_ctrl',
     # #489 section 9: one shared checkbox drives teardrops on every step.
     'add_teardrops': 'add_teardrops_check',
+    # Review parity finding 5: bga_fanout's future-pour declaration
+    # (NET:LAYER[,...] specs). List param -> space-joined into the text ctrl.
+    'plane_net_layers': 'plane_net_layers_ctrl',
 }
 # _PARAM_SPECIAL: params handled by _apply_special() (composite / inverted /
 # panel-backed controls that a plain SetValue can't fill).
@@ -242,7 +265,9 @@ _PARAM_SPECIAL = {'layers', 'no_bga_zone', 'no_bga_zones', 'power_nets',
                   # #381 D5:
                   'impedance', 'length_match_groups', 'swappable_nets',
                   # #486:
-                  'coplanar_nets'}
+                  'coplanar_nets',
+                  # review parity finding 5:
+                  'plane_net_layers'}
 
 # #439: geometry-floor param -> its Basic-tab override checkbox attribute. A plan
 # step that names one of these is the GUI equivalent of the CLI passing that flag,
@@ -405,6 +430,15 @@ def apply_step_params(step, dialog):
             if ctl is None:
                 return False
             ctl.SetValue(_join_nets(value) if isinstance(value, (list, tuple))
+                         else str(value or ''))
+            return True
+        if name == 'plane_net_layers':
+            # Review parity finding 5: NET:LAYER[,...] spec list -> the
+            # space-separated fanout text control (specs contain no spaces).
+            ctl = getattr(dialog, 'plane_net_layers_ctrl', None)
+            if ctl is None:
+                return False
+            ctl.SetValue(' '.join(value) if isinstance(value, (list, tuple))
                          else str(value or ''))
             return True
         if name == 'power_nets_widths' and isinstance(value, (list, tuple)):

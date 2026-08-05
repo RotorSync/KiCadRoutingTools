@@ -4216,7 +4216,17 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
     # Saving first costs a board write per fill (refill_islands memoizes on
     # the board+project bytes) and removes BOTH staleness modes: the temp
     # file carries the live copper AND re-resolves the live settings.
-    def _live_fill(_board=board):
+    # Memo (review DRC-4): a fresh mkstemp path every call defeated
+    # refill_islands' own (path, mtime, size) memo, so EVERY consumer of the
+    # provider (fragility registration, each oracle round) paid SaveBoard +
+    # a full pcbnew-subprocess refill. SaveBoard's serialization of an
+    # unchanged board is byte-stable, so memoize here on the saved BYTES:
+    # unchanged board -> hash hit -> cached islands, changed board -> miss.
+    _live_fill_memo = {}
+
+    def _live_fill(_board=board, _memo=_live_fill_memo):
+        import copy as _copy
+        import hashlib
         import tempfile
         from kicad_exact_fill import live_fill_islands, refill_islands
         tmp = None
@@ -4225,11 +4235,29 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             fd, tmp = tempfile.mkstemp(suffix='.kicad_pcb')
             os.close(fd)
             _pcbnew.SaveBoard(tmp, _board)
+            with open(tmp, 'rb') as _fh:
+                _key = hashlib.sha256(_fh.read()).digest()
+            if _key in _memo:
+                # Deep copy on hit: a caller mutating its polygons must not
+                # poison later consumers (same contract as refill_islands'
+                # own memo).
+                return _copy.deepcopy(_memo[_key])
             islands = refill_islands(tmp, project_from=tmp)
             if islands:
+                _memo.clear()          # one board state at a time
+                _memo[_key] = _copy.deepcopy(islands)
                 return islands
-        except Exception:
-            pass            # fall through to the in-process refill
+        except Exception as _e:
+            # LOUD fallback (review DRC-4): the in-process filler below sees
+            # live copper but STALE clearances -- silently returning it
+            # reintroduces the exact divergence this temp save exists to
+            # fix. The consumer keeps working either way; the operator must
+            # know which fill truth they got.
+            print(f"WARNING: live-board staged refill failed "
+                  f"({type(_e).__name__}: {_e}); falling back to the "
+                  f"in-process fill, which resolves clearances from the "
+                  f"project state at board LOAD time -- a netclass this run "
+                  f"lowered is invisible to it (GUI/CLI fill divergence).")
         finally:
             if tmp:
                 for _p in (tmp, os.path.splitext(tmp)[0] + '.kicad_pro',

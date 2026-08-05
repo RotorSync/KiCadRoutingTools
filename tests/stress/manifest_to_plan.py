@@ -88,6 +88,12 @@ LIST_FLAGS = {
     # #486: route.py's coplanar-waveguide net allowlist (nargs='+' globs).
     # LIST, not FLAG_PARAMS -- as a scalar flag only the FIRST pattern survived.
     '--coplanar-nets': 'coplanar_nets',
+    # bga_fanout's future-pour declaration (NET:LAYER[,LAYER...] specs,
+    # nargs='+'). Review parity finding 5: a recorded manifest carrying the
+    # flag used to convert to a plan that silently dropped it. The GUI/plan
+    # side accepts the same raw spec strings (fanout_gui parses them like
+    # the CLI main does).
+    '--plane-net-layers': 'plane_net_layers',
     '--nets': None,  # handled per action
     '--pairs': None,
     '--plane-layers': None,

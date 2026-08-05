@@ -44,9 +44,9 @@ exit_on_error_if_main(__name__)
 
 from kicad_parser import parse_kicad_pcb, PCBData, Segment, Via, KICAD_10_MIN_VERSION, pad_is_plated_through
 from kicad_writer import generate_segment_sexpr, generate_gr_line_sexpr, generate_via_sexpr
-from routing_config import GridRouteConfig, GridCoord
-from plane_io import extract_zones, ZoneInfo
-from plane_region_connector import route_disconnected_regions, build_base_obstacles, add_route_to_obstacles
+from routing_config import GridRouteConfig
+from plane_io import extract_zones
+from plane_region_connector import route_disconnected_regions, build_base_obstacles
 import plane_pad_tap
 from plane_pad_tap import (find_unconnected_plane_pads, tap_pad_with_escalation,
                            SharedViaMaps)

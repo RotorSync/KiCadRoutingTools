@@ -40,8 +40,7 @@ from kicad_writer import (generate_zone_sexpr, generate_gr_line_sexpr,
                           zone_overlap_priorities)
 from routing_config import GridRouteConfig, GridCoord
 from routing_utils import point_in_pad_rect, pad_rect_halfspan
-from route import batch_route, _dump_engine_config
-from obstacle_cache import ViaPlacementObstacleData
+from route import _dump_engine_config
 from connectivity import compute_mst_segments
 
 # Import from new refactored modules
@@ -63,7 +62,6 @@ from plane_obstacle_builder import (
 )
 from plane_zone_geometry import (
     compute_zone_boundaries,
-    find_polygon_groups,
     sample_route_for_voronoi
 )
 from plane_pad_tap import clamp_tap_via_to_edge
@@ -84,48 +82,6 @@ from plane_resistance import (
     note_resistance_result
 )
 import routing_defaults as defaults
-
-
-class ViaSpatialIndex:
-    """Grid-based spatial index for fast nearest-via queries."""
-
-    def __init__(self, bucket_size: float):
-        self.bucket_size = bucket_size
-        self._buckets: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
-
-    def _key(self, x: float, y: float) -> Tuple[int, int]:
-        return (int(x // self.bucket_size), int(y // self.bucket_size))
-
-    def add(self, x: float, y: float):
-        key = self._key(x, y)
-        if key not in self._buckets:
-            self._buckets[key] = []
-        self._buckets[key].append((x, y))
-
-    def add_all(self, vias: List[Tuple[float, float]]):
-        for x, y in vias:
-            self.add(x, y)
-
-    def find_nearest(self, x: float, y: float, max_radius: float) -> Optional[Tuple[float, float]]:
-        """Find nearest via within max_radius of (x, y)."""
-        best_via = None
-        best_dist_sq = max_radius * max_radius
-        # Check all buckets within radius
-        r_buckets = int(max_radius / self.bucket_size) + 1
-        cx, cy = self._key(x, y)
-        for bx in range(cx - r_buckets, cx + r_buckets + 1):
-            for by in range(cy - r_buckets, cy + r_buckets + 1):
-                bucket = self._buckets.get((bx, by))
-                if bucket is None:
-                    continue
-                for vx, vy in bucket:
-                    dx = vx - x
-                    dy = vy - y
-                    dist_sq = dx * dx + dy * dy
-                    if dist_sq <= best_dist_sq:
-                        best_dist_sq = dist_sq
-                        best_via = (vx, vy)
-        return best_via
 
 
 def find_via_position(
@@ -831,7 +787,6 @@ def _block_route_as_obstacle(obstacles: GridObstacleMap, route_path: List[Tuple[
             if ex * ex + ey * ey <= radius_sq:
                 circle_offsets.append((ex, ey))
     circle_offsets_arr = np.array(circle_offsets, dtype=np.int32)  # shape (K, 2)
-    num_offsets = len(circle_offsets)
 
     # Collect all center points along all segments using Bresenham
     centers = []
@@ -1610,7 +1565,6 @@ def _geometric_plane_verification(
     net_ids: List[int],
     net_names: List[str],
     plane_layers: List[str],
-    ripped_net_ids: List[int],
 ) -> Dict[int, Dict]:
     """Geometric truth check of plane connectivity (issues #89 and #107).
 
@@ -1647,7 +1601,6 @@ def _geometric_plane_verification(
     for z in out_pcb.zones:
         zones_by_net.setdefault(z.net_id, []).append(z)
 
-    ripped_set = set(ripped_net_ids or [])
     results: Dict[int, Dict] = {}
     for net_id, net_name, plane_layer in zip(net_ids, net_names, plane_layers):
         if net_id in results:
@@ -1802,7 +1755,7 @@ def _finalize_plane_copper(all_new_segments, all_new_vias, pcb_data, clearance,
     resulting all_new_segments.
 
     This is the copper-finalizing half of the plane write path, factored out so
-    the file-writer (_write_output_and_reroute) and the dry-run/GUI path
+    the file-writer (_write_plane_output) and the dry-run/GUI path
     (create_plane, which never enters the writer) run the SAME steps and thus
     emit the SAME copper -- the CLI and GUI front-ends must produce identical
     output for identical inputs. The steps, in order:
@@ -1878,7 +1831,7 @@ def _finalize_plane_copper(all_new_segments, all_new_vias, pcb_data, clearance,
     return all_new_segments
 
 
-def _write_output_and_reroute(
+def _write_plane_output(
     input_file: str,
     output_file: str,
     all_zone_sexprs: List[str],
@@ -1888,25 +1841,14 @@ def _write_output_and_reroute(
     all_ripped_net_ids: List[int],
     zones_to_replace: List[Tuple[int, str]],
     pcb_data: PCBData,
-    all_layers: List[str],
-    plane_layers: List[str],
-    track_width: float,
-    clearance: float,
-    via_size: float,
-    via_drill: float,
-    grid_step: float,
-    hole_to_hole_clearance: float,
-    verbose: bool,
-    power_nets: Optional[List[str]] = None,
-    power_nets_widths: Optional[List[float]] = None,
     add_teardrops: bool = False,
-    no_bga_zone: bool = False,
-    clamp_netclasses: bool = True,
-    clearance_ceiling: Optional[float] = None,
     removed_input_segments: Optional[List] = None
 ) -> bool:
     """
-    Write output file and optionally reroute ripped nets.
+    Write the plane output file. (Renamed from _write_output_and_reroute
+    and trimmed from 21 params to 11, review dead-code 6: the "reroute"
+    half was the unreachable ripped-net machinery deleted in c126987, and
+    14 of the params fed only it.)
 
     removed_input_segments (#508 finding 2): input-board Segment objects the
     finalize passes deleted from pcb_data -- the writer must strip their text
@@ -2854,7 +2796,6 @@ def create_plane(
 
     # Track failed pads per net for retry passes
     # Each entry is (net_id, net_name, plane_layer, pad_info)
-    failed_pad_infos: List[Tuple[int, str, str, Dict]] = []
 
     # Step 2: Check for existing zones on each target layer.
     # Combine zones from the input file with zones already present in the
@@ -3051,7 +2992,6 @@ def create_plane(
     all_zone_data = []  # Zone data dicts for pcbnew (when return_results=True)
     all_debug_lines = []  # Debug lines for inter-region routes (User.4)
     total_vias_placed = 0
-    total_vias_reused = 0
     total_traces_added = 0
     total_failed_pads = 0
     total_pads_needing_vias = 0
@@ -3081,40 +3021,13 @@ def create_plane(
         print(f"Processing net '{net_name}' on layer {plane_layer}")
         print(f"{'='*60}")
 
-        # PROTOTYPE (worktree): register THIS net's upcoming zone in
-        # pcb_data.zones so LATER nets' perforation-aware tap checks (and
-        # their fill models) can see it -- without this, a single multi-net
-        # create_plane call is invisible to the tap-reuse trigger (its own
-        # zones only exist as write-time sexprs). Gated under the same env
-        # as the trigger; the output writer text-splices and never
-        # serializes pcb_data.zones, so this cannot duplicate output.
-        import os as _os
-        if _os.environ.get('KICAD_PLANE_TAP_PREFER_REUSE', '') == '1':
-            # Register the PREVIOUS net's zone (deferred one iteration):
-            # registering before THIS net's own pad analysis made
-            # identify_target_pads classify its pads as already_connected ->
-            # taps silently skipped (measured -6.1 pts on a BGA chain).
-            # Later nets still see every earlier pour.
-            _pend = getattr(pcb_data, '_pending_inrun_zone', None)
-            if _pend is not None:
-                from kicad_parser import Zone as _Zone
-                # PRIVATE registry -- never pcb_data.zones: a synthetic
-                # board-rect outline there poisons every same-step fill
-                # consumer (cleanup/reconcile/stitching saw a full-board
-                # GND 'zone'; measured -6.1 pts).
-                if not hasattr(pcb_data, '_inrun_zones'):
-                    pcb_data._inrun_zones = []
-                pcb_data._inrun_zones.append(_Zone(**_pend))
-                print(f"  (registered in-run zone {_pend['net_name']}/"
-                      f"{_pend['layer']} for perforation checks)")
-                pcb_data._pending_inrun_zone = None
-            if should_create_zone:
-                _bb = pcb_data.board_info.board_bounds
-                if _bb:
-                    pcb_data._pending_inrun_zone = dict(
-                        net_id=net_id, net_name=net_name, layer=plane_layer,
-                        polygon=[(_bb[0], _bb[1]), (_bb[2], _bb[1]),
-                                 (_bb[2], _bb[3]), (_bb[0], _bb[3])])
+        # (KICAD_PLANE_TAP_PREFER_REUSE prototype DELETED, review
+        # dead-code 9: it wrote pcb_data._inrun_zones /
+        # _pending_inrun_zone, whose only consumer -- the
+        # perforation-aware tap-reuse trigger -- died with the tap
+        # machinery (8c72da7). experiments/README.md records the
+        # experiment as REFUTED; even with the env var set the block
+        # was a pure no-op.)
 
         # Step 5: Identify target pads for this net
         if progress_callback:
@@ -3148,42 +3061,14 @@ def create_plane(
             print(f"  {len(_skip)} pad(s) on '{net_name}' deferred to the "
                   f"route step (positions kept as Voronoi seeds)")
 
-        # PROTOTYPE (worktree): defer under-BGA pads to the fanout stage
-        # (KICAD_PLANE_DEFER_BGA=1). The plane step pours and taps the OPEN
-        # board; every via-needed pad inside a BGA courtyard is left for
-        # bga_fanout, which decides via/track/pour-direct against the REAL
-        # pour this step just created. Ownership split: planes = the board,
-        # fanout = the ball field.
-        import os as _os
-        if _os.environ.get('KICAD_PLANE_DEFER_BGA', '') == '1':
-            from kicad_parser import find_components_by_type as _fcbt
-            _courts = []
-            for _fp in _fcbt(pcb_data, 'BGA'):
-                _xs = [q.global_x for q in _fp.pads]
-                _ys = [q.global_y for q in _fp.pads]
-                _courts.append((min(_xs) - 0.5, min(_ys) - 0.5,
-                                max(_xs) + 0.5, max(_ys) + 0.5))
-            def _in_court(pd):
-                x, y = pd['pad'].global_x, pd['pad'].global_y
-                return any(cx0 <= x <= cx1 and cy0 <= y <= cy1
-                           for cx0, cy0, cx1, cy1 in _courts)
-            _defer = [pd for pd in target_pads
-                      if pd['type'] == 'via_needed' and _in_court(pd)]
-            if _defer:
-                target_pads = [pd for pd in target_pads if pd not in _defer]
-                # Virtual Voronoi seeds: the pour must still reserve each
-                # deferred ball's territory on split layers even though its
-                # via arrives later (fanout stage) -- record positions for
-                # the zone-boundary seeding below (#114-style point seeds).
-                _dseeds = getattr(pcb_data, '_deferred_bga_seeds', None)
-                if _dseeds is None:
-                    _dseeds = pcb_data._deferred_bga_seeds = {}
-                _dseeds.setdefault(net_id, []).extend(
-                    (pd['pad'].global_x, pd['pad'].global_y) for pd in _defer)
-                print(f"  Deferred {len(_defer)} under-BGA pad(s) on "
-                      f"'{net_name}' to the fanout stage "
-                      f"(KICAD_PLANE_DEFER_BGA; positions kept as Voronoi "
-                      f"seeds)")
+        # (KICAD_PLANE_DEFER_BGA prototype DELETED, review dead-code 9:
+        # the unconditional #562 deferral above already removes every
+        # non-thermal via_needed pad, so this block could only defer
+        # thermal-array pads inside BGA courtyards -- a behavior nobody
+        # designed. _deferred_bga_seeds' reader at the Voronoi seeding
+        # keeps working; nothing fills it now, which is correct: the
+        # #562 deferral keeps the pads in target_pads as classified,
+        # so their positions still seed the partition directly.)
 
         pads_through_hole = sum(1 for p in target_pads if p['type'] == 'through_hole')
         pads_direct = sum(1 for p in target_pads if p['type'] == 'direct')
@@ -3291,29 +3176,15 @@ def create_plane(
         new_vias = []
         new_segments = []
         vias_placed = 0
-        vias_reused = 0
-        pads_strapped = 0
         traces_added = 0
         failed_pads = 0
         ripped_net_ids: List[int] = []  # Nets ripped for this net
 
-        # Track all available vias (existing + newly placed) for reuse
-        available_vias = list(existing_net_vias)
-        # Also include vias placed earlier for THIS net (not other nets!)
-        for placed_via in all_new_vias:
-            if placed_via['net_id'] == net_id:
-                available_vias.append((placed_via['x'], placed_via['y']))
-        # Build spatial index for fast nearest-via queries
-        # Bucket size is a spatial-index tuning constant, not a search limit:
-        # the pour places only thermal arrays now, so there is no user-facing
-        # search radius left to key it off (#562).
-        via_index = ViaSpatialIndex(
-            bucket_size=defaults.PLANE_MAX_SEARCH_RADIUS)
-        via_index.add_all(available_vias)
-
-        # Cache for incremental obstacle updates during rip-up
-        # Computed lazily when we first encounter each blocker net
-        via_obstacle_cache: Dict[int, ViaPlacementObstacleData] = {}
+        # (available_vias / ViaSpatialIndex / via_obstacle_cache
+        # scaffolding DELETED, review dead-code 3: all were add-only
+        # since the tap machinery went -- nearest-via reuse was a tap
+        # feature, and the rip-up obstacle cache fed the deleted
+        # rip loop.)
 
         # Build list of pads needing vias for this net
         pads_needing_vias = [p for p in target_pads if p['needs_via']]
@@ -3332,26 +3203,12 @@ def create_plane(
                 all_debug_lines.append(generate_gr_line_sexpr((x2, y2), (x1, y2), 0.05, "User.9"))
                 all_debug_lines.append(generate_gr_line_sexpr((x1, y2), (x1, y1), 0.05, "User.9"))
 
-        # Pre-build base pending pads list (other power net pads) once per net
-        # This avoids rebuilding the same list for every pad in the inner loop
-        base_pending_pads = []
-        for other_net_id in net_ids:
-            if other_net_id == net_id:
-                continue
-            other_pads = pcb_data.pads_by_net.get(other_net_id, [])
-            for op in other_pads:
-                base_pending_pads.append({'pad': op, 'needs_via': False})
-
-        # Track ripped net pads incrementally
-        ripped_pending_pads = []
-        last_ripped_count = 0
+        # (base_pending_pads / ripped_pending_pads scaffolding
+        # DELETED, review dead-code 3: built per net at O(other
+        # nets' pads) and never read since the tap loop went.)
 
         if pads_needing_vias:
             print(f"\nConnecting {len(pads_needing_vias)} pads to {plane_layer} plane:")
-
-        # Index into failed_pad_infos where this net's failures start (for
-        # the fine-pitch retry pass below).
-        net_failed_start = len(failed_pad_infos)
 
         # THERMAL VIA ARRAYS ONLY (#487). The plane step does no routing:
         # it places no tap vias and draws no traces, so every other pad that
@@ -3383,8 +3240,6 @@ def create_plane(
                 new_vias.append({'x': _ax, 'y': _ay, 'size': via_size,
                                  'drill': via_drill,
                                  'layers': ['F.Cu', 'B.Cu'], 'net_id': net_id})
-                available_vias.append((_ax, _ay))
-                via_index.add(_ax, _ay)
                 block_via_position(obstacles, _ax, _ay, coord,
                                    hole_to_hole_clearance, via_drill,
                                    via_size, config.clearance)
@@ -3483,9 +3338,6 @@ def create_plane(
             suffix = " (replaced existing)" if was_replaced else ""
             print(f"  Zone created on {plane_layer}{suffix}")
         print(f"  New vias placed: {vias_placed}")
-        print(f"  Existing vias reused: {vias_reused}")
-        if pads_strapped > 0:
-            print(f"  Pads strapped to adjacent same-net pads (no via, #349): {pads_strapped}")
         print(f"  Traces added: {traces_added}")
         if failed_pads > 0:
             print(f"  Failed pads: {failed_pads}")
@@ -3512,7 +3364,6 @@ def create_plane(
         all_new_vias.extend(new_vias)
         all_new_segments.extend(new_segments)
         total_vias_placed += vias_placed
-        total_vias_reused += vias_reused
         total_traces_added += traces_added
         total_failed_pads += failed_pads
         for rid in ripped_net_ids:
@@ -3633,7 +3484,6 @@ def create_plane(
         print(f"{'='*60}")
         print(f"  Nets processed: {len(net_names)}")
         print(f"  Total new vias placed: {total_vias_placed}")
-        print(f"  Total existing vias reused: {total_vias_reused}")
         print(f"  Total traces added: {total_traces_added}")
         if total_failed_pads > 0:
             print(f"  Total failed pads: {total_failed_pads}")
@@ -3655,7 +3505,7 @@ def create_plane(
     # GUI (dry_run=True, return_results) and the CLI (writes the file) emit
     # identical copper for identical inputs: neck grazes -> graze prune /
     # dead-end sweep -> close soft joints (#334 + follow-up). Previously this
-    # lived inside _write_output_and_reroute and the GUI path never ran it.
+    # lived inside _write_plane_output (then _write_output_and_reroute) and the GUI path never ran it.
     if progress_callback:
         progress_callback(0, 0, "Cleaning up plane tap copper...")
     # #508 finding 2: input-board copper the finalize passes delete from
@@ -3739,7 +3589,7 @@ def create_plane(
             _dups = {k: n for k, n in _C((v.get('net_id'), round(v['x'], 3), round(v['y'], 3))
                                           for v in all_new_vias).items() if n > 1}
             print(f"\n  WRITE-DEBUG: duplicate new_vias: {_dups}")
-        _write_output_and_reroute(
+        _write_plane_output(
             input_file=input_file,
             output_file=output_file,
             all_zone_sexprs=all_zone_sexprs,
@@ -3749,21 +3599,7 @@ def create_plane(
             all_ripped_net_ids=all_ripped_net_ids,
             zones_to_replace=zones_to_replace,
             pcb_data=pcb_data,
-            all_layers=all_layers,
-            plane_layers=plane_layers,
-            track_width=track_width,
-            clearance=clearance,
-            via_size=via_size,
-            via_drill=via_drill,
-            grid_step=grid_step,
-            hole_to_hole_clearance=hole_to_hole_clearance,
-            verbose=verbose,
-            power_nets=power_nets,
-            power_nets_widths=power_nets_widths,
             add_teardrops=add_teardrops,
-            no_bga_zone=no_bga_zone,
-            clamp_netclasses=clamp_netclasses,
-            clearance_ceiling=clearance_ceiling,
             removed_input_segments=_finalize_strips
         )
 
@@ -3774,7 +3610,7 @@ def create_plane(
         # other net's cell (#107). Re-parse the written output and report how
         # many pads are actually connected so the summary matches geometry.
         geo_results = _geometric_plane_verification(
-            output_file, net_ids, net_names, plane_layers, all_ripped_net_ids)
+            output_file, net_ids, net_names, plane_layers)
         if geo_results:
             geo_failed = sum(info['failed'] for info in geo_results.values())
             if geo_failed != total_failed_pads:
@@ -3802,108 +3638,19 @@ def create_plane(
         # batch_route routes against the live in-memory board; the new copper
         # is merged into the emit lists (the applier deletes the ripped nets'
         # originals first, then applies these).
+        # GUI-SIDE RIPPED-NET RECONNECT DELETED (review dead-code 1).
+        # This was the return_results mirror of the ~191-line CLI
+        # reroute block c126987 removed, unreachable by the same proof:
+        # the pour cannot rip since #562, so all_ripped_net_ids is
+        # contractually empty. Same tripwire as the CLI side -- if a
+        # future code path fills the list again, say so loudly instead
+        # of silently resurrecting nothing.
         if all_ripped_net_ids:
-            _broken = []
-            try:
-                from check_connected import check_net_connectivity
-                _segs_by, _vias_by, _zones_by = {}, {}, {}
-                for _s in pcb_data.segments:
-                    _segs_by.setdefault(_s.net_id, []).append(_s)
-                for _v in pcb_data.vias:
-                    _vias_by.setdefault(_v.net_id, []).append(_v)
-                for _z in getattr(pcb_data, 'zones', None) or []:
-                    _zones_by.setdefault(_z.net_id, []).append(_z)
-                for _rid in all_ripped_net_ids:
-                    _res = check_net_connectivity(
-                        _rid, _segs_by.get(_rid, []), _vias_by.get(_rid, []),
-                        pcb_data.pads_by_net.get(_rid, []), _zones_by.get(_rid, []))
-                    if not _res.get('connected', False):
-                        _broken.append(_rid)
-            except Exception:
-                _broken = list(all_ripped_net_ids)
-            _cnames = [pcb_data.nets[n].name for n in _broken if n in pcb_data.nets]
-            if _cnames:
-                print(f"\nReconnecting {len(_cnames)} net(s) this run ripped "
-                      f"for plane vias (in-memory): {', '.join(_cnames)}")
-                if progress_callback:
-                    progress_callback(0, 0, f"Reconnecting {len(_cnames)} ripped net(s)...")
-                try:
-                    from route import batch_route
-                    _board_layers = list(getattr(pcb_data.board_info,
-                                                 'copper_layers', None) or [])
-                    _ok, _fail, _t, _rdata = batch_route(
-                        input_file, "", _cnames,
-                        # Order-preserving dedupe -- see the all_copper_layers
-                        # note above: list(set(...)) over layer-name strings is
-                        # process-order-dependent and this feeds `layers=`.
-                        layers=_board_layers or list(dict.fromkeys(all_layers + plane_layers)),
-                        track_width=track_width, clearance=clearance,
-                        via_size=via_size, via_drill=via_drill,
-                        grid_step=grid_step,
-                        hole_to_hole_clearance=hole_to_hole_clearance,
-                        power_nets=power_nets,
-                        power_nets_widths=power_nets_widths,
-                        disable_bga_zones=([] if no_bga_zone else None),
-                        net_clearances=net_clearances,  # #434 cross-class
-                        # #527: forward progress/cancel -- a multi-net
-                        # reconnect used to run minutes behind one static
-                        # "Reconnecting..." message.
-                        progress_callback=(
-                            (lambda c, t, m: progress_callback(
-                                c, t, f"Reconnect: {m}"))
-                            if progress_callback else None),
-                        cancel_check=cancel_check,
-                        return_results=True, pcb_data=pcb_data)
-
-                    def _sd(_s):
-                        return {'start': (_s.start_x, _s.start_y),
-                                'end': (_s.end_x, _s.end_y),
-                                'width': _s.width, 'layer': _s.layer,
-                                'net_id': _s.net_id}
-
-                    def _vd(_v):
-                        return {'x': _v.x, 'y': _v.y, 'size': _v.size,
-                                'drill': _v.drill, 'layers': _v.layers,
-                                'net_id': _v.net_id}
-                    for _r in _rdata.get('results', []):
-                        all_new_segments.extend(
-                            _sd(_s) for _s in (_r.get('new_segments') or []))
-                        all_new_vias.extend(
-                            _vd(_v) for _v in (_r.get('new_vias') or []))
-                    all_new_vias.extend(
-                        _vd(_v) for _v in (_rdata.get('all_swap_vias') or []))
-                    all_new_segments.extend(
-                        _sd(_s) for _s in (_rdata.get('all_swap_segments') or []))
-                    # #484 H3: target/pad swaps and segment layer mods from
-                    # the reroute can touch NON-ripped nets' copper (a target
-                    # swap exchanges stubs between two nets), which the
-                    # applier's whole-net delete does not cover -- forward
-                    # them so the GUI can apply_swaps_to_board.
-                    for _key in ('single_ended_target_swap_info',
-                                 'all_segment_modifications', 'pad_swaps'):
-                        if _rdata.get(_key):
-                            reconnect_swap_data.setdefault(_key, []).extend(
-                                _rdata[_key])
-                    # #508 finding 1 (unmirrored twin of #463/03d10b7): the
-                    # inner batch_route's cleanup DELETES copper from pcb_data
-                    # and reports it in segments_to_remove/vias_to_remove;
-                    # dropping that channel ships copper the board no longer
-                    # has. Consume it: purge matching write-list emissions and
-                    # forward the rest to the GUI strip channel.
-                    from plane_write_reconcile import consume_inner_strips
-                    _fs: list = []
-                    _fv: list = []
-                    consume_inner_strips(_rdata, all_new_segments,
-                                         all_new_vias, pcb_data,
-                                         _fs, _fv, "reconnect")
-                    reconnect_strips.extend(_fs)
-                    reconnect_strips.extend(_fv)
-                    if _fail:
-                        print(f"  {_fail} ripped net(s) could NOT be reconnected "
-                              f"-- their board copper is deleted by the applier "
-                              f"and they need the routing tab")
-                except Exception as _e:
-                    print(f"  in-memory ripped-net reconnect failed: {_e}")
+            print(f"WARNING: pour reported {len(all_ripped_net_ids)} "
+                  f"ripped net(s), but the pour cannot rip since #562 "
+                  f"-- a code path is filling ripped_net_ids again; "
+                  f"restore the reconnect machinery (deleted "
+                  f"2026-08-04) or fix the filler.")
         # #508 finding 1, second mechanism (the #463 class itself): a partial
         # restore's kept-set was emitted (from_restore dicts) BEFORE the
         # reconnect ran, and the reconnect may have re-routed that same net,

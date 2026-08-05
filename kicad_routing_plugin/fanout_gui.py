@@ -873,6 +873,24 @@ class BGAOptionsPanel(wx.ScrolledWindow):
             "field (#360/#424). On by default; matches the CLI --plane-drop.")
         options_sizer.Add(self.plane_drop, 0, wx.LEFT | wx.BOTTOM, 5)
 
+        # Future-pour declaration (review parity finding 5: --plane-net-layers
+        # was CLI-only, so a manifest-converted plan silently dropped it).
+        # Named after the engine param so the plan executor's generic loop
+        # fills it; empty = None, same as the CLI omitting the flag.
+        pnl_row = wx.BoxSizer(wx.HORIZONTAL)
+        pnl_row.Add(wx.StaticText(self, label="Plane net layers:"), 0,
+                    wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        self.plane_net_layers_ctrl = wx.TextCtrl(self, value="")
+        self.plane_net_layers_ctrl.SetToolTip(
+            "Declare the FUTURE plane plan for the plane-drop decision: for "
+            "each plane net, the layer(s) it will be poured on, "
+            "space-separated NET:LAYER[,LAYER...] specs, e.g. "
+            "'GND:In1.Cu,In4.Cu P3.3V:In2.Cu'. Empty = none declared "
+            "(matches the CLI --plane-net-layers).")
+        pnl_row.Add(self.plane_net_layers_ctrl, 1)
+        options_sizer.Add(pnl_row, 0,
+                          wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
         self.optimize_caps = wx.CheckBox(self, label="Optimize decoupling cap placement")
         self.optimize_caps.SetValue(False)
         self.optimize_caps.SetToolTip(
@@ -985,6 +1003,10 @@ class BGAOptionsPanel(wx.ScrolledWindow):
             'escape_method': self.get_escape_method(),
             # #424 plane-ball drops; checkbox bool -> engine 'auto'/'off'.
             'plane_drop': self.plane_drop.GetValue(),
+            # Future-pour declaration: raw NET:LAYER[,LAYER...] spec strings
+            # (space separated), parsed at the call site like the CLI main.
+            'plane_net_layers': self.plane_net_layers_ctrl.GetValue().split()
+                                or None,
             'optimize_caps': self.optimize_caps.GetValue(),
             # Decoupling-cap placement (advanced) knobs (#130)
             'cap_capture_radius': self.cap_capture_radius.GetValue(),
@@ -1359,6 +1381,13 @@ class FanoutTab(wx.Panel):
                 # #424 plane-ball drops -- checkbox bool -> engine token, same
                 # default (on/'auto') as the CLI's --plane-drop.
                 plane_drop=('auto' if config.get('plane_drop', True) else 'off'),
+                # Same NET:LAYER[,...] spec parse as bga_fanout's main()
+                # (review parity finding 5: this kwarg was CLI-only).
+                plane_net_layers=(
+                    {spec.split(':', 1)[0]: spec.split(':', 1)[1].split(',')
+                     for spec in config['plane_net_layers']
+                     if ':' in spec}
+                    if config.get('plane_net_layers') else None),
                 grid_step=shared.get('grid_step', defaults.GRID_STEP),
                 # Shared Basic-tab per-layer costs (issue #288), same values the
                 # route/diff tabs use; None when the control is empty/invalid.

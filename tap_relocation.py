@@ -40,7 +40,6 @@ net. Env-gated overall by KICAD_TAP_RELOCATION=1.
 from __future__ import annotations
 
 import math
-import os
 
 import env_knobs
 from typing import List, Optional, Set, Tuple

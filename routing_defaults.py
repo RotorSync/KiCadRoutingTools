@@ -26,10 +26,10 @@ DIAGONAL_MARGIN = 0.25  # mm
 # rejected for sub-resolution noise. This is a placement tolerance, NOT the
 # DRC grading margin (check_drc --clearance-margin): placement must demand
 # (nearly) full clearance or it ships real grazes (#339).
-PLACEMENT_QUANTIZATION_MARGIN = 0.005  # mm
 
 # Clearance slack the #189/#339 via-in-pad UNBLOCK refit tolerates before it
-# shrinks/rejects a rescue via. The tight PLACEMENT_QUANTIZATION_MARGIN stranded
+# shrinks/rejects a rescue via. A tight quantization margin (a removed
+# constant) stranded
 # pads (ulx3s -11, butterstick -7) because a via grazing by a few tens of um was
 # shrunk/rejected until the unblock failed. Tolerate up to this much sub-clearance
 # at PLACEMENT and let the post-route via-nudge (nudge_grazing_vias) move the
@@ -87,7 +87,6 @@ TIME_MATCHING = False  # If True, match propagation time instead of length
 TIME_MATCH_TOLERANCE = 1.0  # ps
 
 # GND via placement for single-ended routing
-ADD_GND_VIAS = False  # If True, add GND vias near signal vias
 # Net to pin GND return vias to. "" = AUTO (#489 §5): resolve the ground net per
 # signal from its OWN ground domain. On a single-ground board that is the same net
 # the old literal "GND" default resolved to; on a split-ground board it stops
@@ -204,7 +203,6 @@ PLANE_ZONE_CLEARANCE = 0.2  # mm - zone fill clearance from other copper
 PLANE_MIN_THICKNESS = 0.1  # mm - minimum zone copper thickness
 PLANE_EDGE_CLEARANCE = 0.5  # mm - zone clearance from board edge
 PLANE_MAX_SEARCH_RADIUS = 10.0  # mm - max radius to search for via position
-PLANE_MAX_VIA_REUSE_RADIUS = 1.0  # mm - max radius to reuse existing via
 # #487: an SMD plane-net pad at least this wide in BOTH axes is a thermal/
 # exposed pad and gets a via ARRAY instead of one shared via. ON by default
 # (Andy 2026-07-29); --no-thermal-vias / the planes-tab checkbox disable it.

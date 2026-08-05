@@ -176,15 +176,19 @@ def try_terminal_restore(pcb_data: PCBData, config: GridRouteConfig,
                     return 'full_open'
         except Exception as _e:
             # Grading must never turn a restorable net into a strip, so a
-            # grader failure still restores the copper. But it silently
-            # reinstates the very over-claim this block exists to prevent
-            # ('full' == "restored AND connected"), so it is announced rather
-            # than swallowed: an unexplained 'full' is exactly the kind of
-            # false success that costs a debugging session downstream.
+            # grader failure still restores the copper -- but as
+            # 'full_open', not 'full' (review finding F5): 'full' counts a
+            # SUCCESS and bypasses the coverage gate, so a systematic
+            # grader failure (an import error in check_connected) would
+            # silently reinstate the run-7 E2 over-claim across every
+            # terminal restore of the run. 'full_open' restores the same
+            # copper, counts the net failed, and keeps it in the disturbed
+            # set -- pessimistic and honest.
             print(f"  WARNING: rip-restore connectivity grading failed for net "
-                  f"{net_id} ({type(_e).__name__}: {_e}); claiming 'full' "
-                  f"WITHOUT a connectivity check -- treat this net's restore "
-                  f"as unverified")
+                  f"{net_id} ({type(_e).__name__}: {_e}); restoring the copper "
+                  f"as 'full_open' (counted FAILED, unverified) rather than "
+                  f"claiming an unchecked success")
+            return 'full_open'
         return 'full'
 
     stub_segs, stub_vias = _stub_subset(pcb_data, net_id, segments, vias)

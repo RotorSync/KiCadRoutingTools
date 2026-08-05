@@ -2808,9 +2808,25 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 _zpairs = _adz(output_file)
             # Respect the caller's net filter: a net excluded by pattern is
             # excluded BY PLAN (same rule as the reconciliation above).
+            # But say so LOUDLY. Since #562 a pour ALONE connects nothing --
+            # a plane net outside this route's scope gets no weld, no
+            # finalize, no oracle, and if no LATER route step covers it,
+            # every one of its pads ships disconnected while this step
+            # reports success for its own scope (review finding F1: a
+            # scoped retry chain `route.py --nets 'SDRAM_*'` after a pour
+            # is a realistic shape that hits this).
             if net_names:
                 from net_queries import matches_net_filter as _mnf9
+                _excluded9 = sorted({n for n, _l in _zpairs
+                                     if not _mnf9(n, net_names)})
                 _zpairs = [(n, l) for n, l in _zpairs if _mnf9(n, net_names)]
+                if _excluded9:
+                    print(f"{RED}  Plane finalize: zone net(s) "
+                          f"{', '.join(_excluded9)} are OUTSIDE this route's "
+                          f"--nets scope -- excluded from the finalize BY "
+                          f"PLAN. Since #562 a pour alone connects nothing: "
+                          f"unless a later route step covers these nets, "
+                          f"their pads ship disconnected.{RESET}")
             # PRE-GATE for the MODEL-BASED legs (engine taps/joins +
             # cleanup): run them only for zone nets the fill-aware checker
             # says are incomplete on THIS run's board (pcb_data == file
@@ -2912,6 +2928,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         routing_layers=config.layers,
                         net_clearances=net_clearances,
                         layer_clearances=dict(config.layer_clearances or {}),
+                        # #338 (review DRC-1): forward THIS run's RESOLVED
+                        # copper-to-edge floor. The engine's own re-resolve
+                        # cannot work here: its PLANE_EDGE_CLEARANCE default
+                        # (0.5) reads as an explicit override and masks the
+                        # project rule, so a board declaring 0.6 got finalize
+                        # copper at 0.5 -- real edge DRC.
+                        board_edge_clearance=config.board_edge_clearance,
                         pcb_data=pcb_data, return_results=True,
                         progress_callback=_pcb9)
                     _cursid9 = {id(s) for s in pcb_data.segments}
@@ -2972,6 +2995,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         # yet, so the engine's own auto-read would find none
                         # and tap/join copper would route blind to the rules.
                         layer_clearances=dict(config.layer_clearances or {}),
+                        # #338 (review DRC-1): same reason for the edge floor
+                        # -- output_file has no sibling .kicad_pro yet, and
+                        # the engine default 0.5 masks the project read.
+                        board_edge_clearance=config.board_edge_clearance,
                         pcb_data=_live9,
                         progress_callback=_pcb9)
                 print(f"  [finalize timing] engine leg: "
@@ -3118,42 +3145,99 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                       f"{_time9.time() - _t9:.1f}s")
                 if _gui9:
                     # The staged file is a throwaway: hand the oracle's copper
-                    # back through the SAME channels the engine leg uses, so
-                    # the applier lands it and the reconcile's identity-based
-                    # de-dup keeps working. Removals go first (the #508
-                    # finding-15 ordering) and any removal naming copper THIS
-                    # run emitted is dropped from the write-list instead of
-                    # riding the remove channel -- a key-based remove would
-                    # no-op on a not-yet-added object and the withdrawn copper
-                    # would ship.
+                    # back through the SAME channels the engine leg uses.
+                    # Removals need GEOMETRY-key matching, not id(): the
+                    # oracle PARSED the staged temp file, so its
+                    # removed_segments/removed_vias are parse products whose
+                    # id() can never equal a write-list object's -- an
+                    # identity de-dup here is dead code by construction
+                    # (found by two independent reviewers; the withdrawn
+                    # copper then rode the remove channel, no-op'd against
+                    # the not-yet-populated live board because the applier
+                    # REMOVES FIRST and adds after, and shipped anyway).
+                    # Three channels are handled, all by geometry key:
+                    #   1. removal names copper THIS run emitted (results'
+                    #      new_segments/new_vias AND the swap channels) ->
+                    #      drop it from the write-list;
+                    #   2. removal names pre-existing board copper -> ride
+                    #      segments_to_remove/vias_to_remove for the applier;
+                    #   3. EITHER WAY, mirror the removal into pcb_data so
+                    #      the final reconciliation routes against the same
+                    #      board the applier will produce (the CLI reconcile
+                    #      re-parses the oracle-edited file and gets this
+                    #      for free).
                     _os9 = list(_orc.get('new_segments') or [])
                     _ov9 = list(_orc.get('new_vias') or [])
                     _ors9 = list(_orc.get('removed_segments') or [])
                     _orv9 = list(_orc.get('removed_vias') or [])
-                    _oours_s9 = {id(s)
-                                 for _r in results_data.get('results', [])
-                                 for s in (_r.get('new_segments') or [])}
-                    _oours_v9 = {id(v)
-                                 for _r in results_data.get('results', [])
-                                 for v in (_r.get('new_vias') or [])}
-                    _odrop_s9 = {id(s) for s in _ors9 if id(s) in _oours_s9}
-                    _odrop_v9 = {id(v) for v in _orv9 if id(v) in _oours_v9}
-                    if _odrop_s9 or _odrop_v9:
-                        for _r in results_data.get('results', []):
-                            if _odrop_s9:
-                                _r['new_segments'] = [
-                                    s for s in (_r.get('new_segments') or [])
-                                    if id(s) not in _odrop_s9]
-                            if _odrop_v9:
-                                _r['new_vias'] = [
-                                    v for v in (_r.get('new_vias') or [])
-                                    if id(v) not in _odrop_v9]
-                    if _ors9 or _orv9:
+
+                    def _skey9(s):
+                        a = (round(s.start_x, 4), round(s.start_y, 4))
+                        b = (round(s.end_x, 4), round(s.end_y, 4))
+                        return (s.net_id, s.layer, min(a, b), max(a, b))
+
+                    def _vkey9(v):
+                        return (v.net_id, round(v.x, 4), round(v.y, 4))
+
+                    _rm_skeys9 = {_skey9(s) for s in _ors9}
+                    _rm_vkeys9 = {_vkey9(v) for v in _orv9}
+                    _matched_skeys9, _matched_vkeys9 = set(), set()
+                    if _rm_skeys9 or _rm_vkeys9:
+                        _lists9 = [(_r, 'new_segments', 'new_vias')
+                                   for _r in results_data.get('results', [])]
+                        for _r, _sk, _vk in _lists9:
+                            if _rm_skeys9 and _r.get(_sk):
+                                _keep = [s for s in _r[_sk]
+                                         if _skey9(s) not in _rm_skeys9]
+                                if len(_keep) != len(_r[_sk]):
+                                    _matched_skeys9.update(
+                                        _skey9(s) for s in _r[_sk]
+                                        if _skey9(s) in _rm_skeys9)
+                                    _r[_sk] = _keep
+                            if _rm_vkeys9 and _r.get(_vk):
+                                _keep = [v for v in _r[_vk]
+                                         if _vkey9(v) not in _rm_vkeys9]
+                                if len(_keep) != len(_r[_vk]):
+                                    _matched_vkeys9.update(
+                                        _vkey9(v) for v in _r[_vk]
+                                        if _vkey9(v) in _rm_vkeys9)
+                                    _r[_vk] = _keep
+                        # Swap channels are this-run copper too (the #284
+                        # withdrawn-copper class): a removal naming a swap
+                        # via/segment must not ship it either.
+                        if _rm_skeys9 and all_swap_segments:
+                            _matched_skeys9.update(
+                                _skey9(s) for s in all_swap_segments
+                                if _skey9(s) in _rm_skeys9)
+                            all_swap_segments[:] = [
+                                s for s in all_swap_segments
+                                if _skey9(s) not in _rm_skeys9]
+                        if _rm_vkeys9 and all_swap_vias:
+                            _matched_vkeys9.update(
+                                _vkey9(v) for v in all_swap_vias
+                                if _vkey9(v) in _rm_vkeys9)
+                            all_swap_vias[:] = [
+                                v for v in all_swap_vias
+                                if _vkey9(v) not in _rm_vkeys9]
+                        # Channel 3: mirror EVERY removal into pcb_data.
+                        pcb_data.segments[:] = [
+                            s for s in pcb_data.segments
+                            if _skey9(s) not in _rm_skeys9]
+                        pcb_data.vias[:] = [
+                            v for v in pcb_data.vias
+                            if _vkey9(v) not in _rm_vkeys9]
+                    # Channel 2: only removals NOT matched to this-run copper
+                    # ride the remove channels (the applier removes them from
+                    # the live board before adding).
+                    _ride_s9 = [s for s in _ors9
+                                if _skey9(s) not in _matched_skeys9]
+                    _ride_v9 = [v for v in _orv9
+                                if _vkey9(v) not in _matched_vkeys9]
+                    if _ride_s9 or _ride_v9:
                         results_data.setdefault(
-                            'segments_to_remove', []).extend(
-                                s for s in _ors9 if id(s) not in _odrop_s9)
-                        results_data.setdefault('vias_to_remove', []).extend(
-                            v for v in _orv9 if id(v) not in _odrop_v9)
+                            'segments_to_remove', []).extend(_ride_s9)
+                        results_data.setdefault(
+                            'vias_to_remove', []).extend(_ride_v9)
                     if _os9 or _ov9:
                         results_data.setdefault('results', []).append({
                             'net_name': '(plane finalize oracle)',
@@ -3166,7 +3250,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         pcb_data.vias.extend(_ov9)
                     print(f"  Plane finalize oracle (GUI): +{len(_os9)} "
                           f"seg(s) +{len(_ov9)} via(s), -{len(_ors9)} seg(s) "
-                          f"-{len(_orv9)} via(s) merged into results")
+                          f"-{len(_orv9)} via(s) merged into results "
+                          f"({len(_ors9) - len(_ride_s9)} seg / "
+                          f"{len(_orv9) - len(_ride_v9)} via removal(s) "
+                          f"matched this run's own copper)")
                 try:
                     import json as _json9
                     print('JSON_ORACLE: ' + _json9.dumps(
@@ -3215,7 +3302,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     if _orc.get('available'):
                         _zone_complete9 = set(_zna)
         except Exception as _e:
-            print(f"{RED}  plane finalize pass failed: {_e}{RESET}")
+            # The failure must name its blast radius: JSON_SUMMARY was
+            # already printed BEFORE the finalize, so a grader reading it
+            # sees the pre-finalize tally -- nets the raster model
+            # over-credits (castor class) ship open with no failure record
+            # unless the operator sees THIS line. (Review finding F3.)
+            _unverified9 = sorted({n for n, _l in (locals().get('_zpairs_all')
+                                                   or [])})
+            print(f"{RED}  plane finalize pass FAILED: {_e}\n"
+                  f"  Zone net(s) left UNVERIFIED by the kicad-oracle: "
+                  f"{', '.join(_unverified9) if _unverified9 else '(none in scope)'} "
+                  f"-- the printed JSON_SUMMARY predates the finalize and "
+                  f"may over-credit these nets; re-verify with "
+                  f"check_connected/check_drc before trusting this board."
+                  f"{RESET}")
         finally:
             _finalize_depth(-1)
             # Drop the GUI oracle's staging files (locals() guard: the names
@@ -3331,9 +3431,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # committed lives in pcb_data, not in any file) and merge
                 # the sub-run's results into ours. An inner strip that
                 # targets copper THIS run emitted must instead drop it from
-                # our write-lists (the GUI applier adds before it removes,
-                # so a strip of a not-yet-added segment would no-op and the
-                # deleted copper would ship).
+                # our write-lists (the GUI applier REMOVES FIRST and adds
+                # after -- swig_gui runs the remove channels before the add
+                # loop -- so a strip of a not-yet-added segment would no-op
+                # against the live board and the deleted copper would ship).
                 #
                 # SNAP FIRST. The CLI branch below reconciles against the
                 # WRITTEN file, whose coordinates are 100% on KiCad's integer-nm

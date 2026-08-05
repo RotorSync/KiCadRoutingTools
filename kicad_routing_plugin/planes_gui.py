@@ -1495,6 +1495,18 @@ class PlanesTab(wx.Panel):
                     pcbnew.ZONE_CONNECTION_THERMAL
                     if zone_data.get('thermal_relief')
                     else pcbnew.ZONE_CONNECTION_FULL)
+                # PARITY (review finding 4): the CLI writer stamps every zone
+                # with (thermal_gap 0.2)(thermal_bridge_width 0.2)
+                # (kicad_writer.generate_zone_sexpr defaults). A fresh
+                # pcbnew.ZONE carries KiCad's 0.5/0.5 defaults, so with
+                # thermal relief on, GUI pours got 0.5mm spokes/gaps vs the
+                # CLI's 0.2 -- different fill geometry and spoke ampacity.
+                # Keep these two numbers in lockstep with kicad_writer.
+                try:
+                    zone.SetThermalReliefGap(mm_to_iu(0.2))
+                    zone.SetThermalReliefSpokeWidth(mm_to_iu(0.2))
+                except Exception:
+                    pass    # ancient pcbnew without the setters
                 # Hatch the outline so the zone is visible immediately;
                 # the actual copper fill is computed below via ZONE_FILLER.
                 try:
