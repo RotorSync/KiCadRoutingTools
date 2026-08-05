@@ -670,6 +670,29 @@ def _custom_pad_board_extent(pad_text: str, abs_rotation_deg: float,
     return ext_x, ext_y
 
 
+def _adaptive_circle_n(r: float, eps: float = 0.001, lo: int = 16,
+                       hi: int = 64) -> int:
+    """Vertex count for an INSCRIBED polygon of radius ``r`` with radial
+    (sagitta) error <= ``eps`` mm, clamped to [lo, hi].
+
+    Run-4 B6: clearance grading happens against these polygons, so their
+    error budget must sit BELOW the smallest shortfall worth flagging. Run
+    3's tigard shipped a 0.0884mm-vs-0.09 graze (1.6um short) against a
+    r=0.5 solder-jumper circle primitive whose fixed 32-gon carried 2.4um
+    of sagitta -- the inscribed polygon under-reached the true copper by
+    more than the defect, so check_drc graded it clean while kicad-cli
+    (exact arcs) flagged it. eps=1um keeps that class visible at
+    --clearance-margin 0; the cap bounds the 266-custom-pad boards.
+    """
+    if r <= eps:
+        return lo
+    try:
+        n = int(math.ceil(math.pi / math.acos(1.0 - eps / r)))
+    except ValueError:  # numeric edge: eps/r ~ 0
+        return hi
+    return max(lo, min(hi, n))
+
+
 def _custom_pad_global_polygons(pad_text: str, global_x: float, global_y: float,
                                 pad_abs_rotation_deg: float):
     """Real copper outline(s) of a custom pad in GLOBAL board mm (issue #188).
@@ -803,14 +826,23 @@ def _custom_pad_global_polygons(pad_text: str, global_x: float, global_y: float,
                 filled = not re.search(r'\(fill\s+(?:no|none)\b', block)
                 r_in = 0.0 if filled else max(0.0, r_mid - hw)
                 if R > 0:
-                    N = 32
+                    # Adaptive tessellation for PRIMITIVE circles (run-4 B6).
+                    # The fixed inscribed 32-gon had a ~2.4um radial error at
+                    # r=0.5 -- larger than the 1.6um by which a solder-jumper
+                    # pad's real copper undercut the 0.09 floor on run 3's
+                    # tigard board, so check_drc graded a graze clean that
+                    # kicad-cli (exact arcs) flagged. Stay INSCRIBED (never
+                    # exceed real copper), 1um sagitta, capped at 64 vertices
+                    # for the 266-custom-pad boards (sofle_pico caution).
+                    N = _adaptive_circle_n(R)
                     outer = [(c[0] + R * math.cos(2 * math.pi * k / N),
                               c[1] + R * math.sin(2 * math.pi * k / N))
                              for k in range(N)]
                     if r_in > 0.05:
-                        inner = [(c[0] + r_in * math.cos(-2 * math.pi * k / N),
-                                  c[1] + r_in * math.sin(-2 * math.pi * k / N))
-                                 for k in range(N)]
+                        Ni = _adaptive_circle_n(r_in)
+                        inner = [(c[0] + r_in * math.cos(-2 * math.pi * k / Ni),
+                                  c[1] + r_in * math.sin(-2 * math.pi * k / Ni))
+                                 for k in range(Ni)]
                         local = outer + [outer[0], inner[0]] + inner[1:] + [inner[0]]
                     else:
                         local = outer
@@ -824,13 +856,16 @@ def _custom_pad_global_polygons(pad_text: str, global_x: float, global_y: float,
                 local = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
         elif kind == 'arc':
             # 3-point arc stroke: linearize the centerline, offset into a band.
+            # chord_eps: pad-primitive arcs get the same 1um chord tolerance
+            # as primitive circles (run-4 B6) -- the default 16 segments has
+            # millimetre-scale radius-dependent error on large arcs.
             am = re.search(_PTS_ARC_RE, block)
             if am:
                 s = (float(am.group(1)), float(am.group(2)))
                 a_mid = (float(am.group(3)), float(am.group(4)))
                 e = (float(am.group(5)), float(am.group(6)))
                 cpts = [s]
-                for _p1, p2 in _arc_to_segments(s, a_mid, e):
+                for _p1, p2 in _arc_to_segments(s, a_mid, e, chord_eps=0.001):
                     cpts.append(p2)
                 local = _stroke_band(cpts, max(_width(block) / 2.0, 1e-3))
         elif kind == 'line':
@@ -1138,7 +1173,8 @@ def extract_stackup(content: str) -> List[StackupLayer]:
 
 
 def _arc_to_segments(start: Tuple[float, float], mid: Tuple[float, float],
-                     end: Tuple[float, float], num_segments: int = 16
+                     end: Tuple[float, float], num_segments: int = 16,
+                     chord_eps: float = 0.005
                      ) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
     """Convert a 3-point arc to a polyline of straight segments.
 
@@ -1185,13 +1221,14 @@ def _arc_to_segments(start: Tuple[float, float], mid: Tuple[float, float],
         # CW direction, sweep is negative
         sweep = end_ccw - 2 * math.pi
 
-    # Adaptive resolution: cap the chord sag at ~5um so a large-radius,
-    # wide-sweep arc (nebula_watch's ~350deg, r~20mm watch outline) doesn't
-    # under-reach its true extremes -- 16 fixed segments left the board
-    # outline 57um short of the real bounding box. Small arcs keep the old
-    # cost; the count is capped to stay bounded on huge radii.
+    # Adaptive resolution: cap the chord sag at chord_eps (default ~5um) so a
+    # large-radius, wide-sweep arc (nebula_watch's ~350deg, r~20mm watch
+    # outline) doesn't under-reach its true extremes -- 16 fixed segments left
+    # the board outline 57um short of the real bounding box. Small arcs keep
+    # the old cost; the count is capped to stay bounded on huge radii. Pad
+    # PRIMITIVE arcs pass 0.001 (run-4 B6: clearance-grade geometry).
     if radius > 0:
-        max_step = 2.0 * math.acos(max(-1.0, min(1.0, 1.0 - 0.005 / radius)))
+        max_step = 2.0 * math.acos(max(-1.0, min(1.0, 1.0 - chord_eps / radius)))
         if max_step > 0:
             num_segments = max(num_segments,
                                min(512, int(math.ceil(abs(sweep) / max_step))))
