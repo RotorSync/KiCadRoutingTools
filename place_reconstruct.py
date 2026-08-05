@@ -135,6 +135,12 @@ Examples:
         for c in intent.edge_connectors:
             if c['ref'] not in state.parts:
                 continue
+            # EVERY banded entry keeps its allowance, suspect or not: with
+            # banded_pad_oob ABOVE hpwl in the gate tuple, charging a
+            # suspect's observed overhang would hand the ILP a strict tuple
+            # improvement for pulling a healthy edge part (a false-positive
+            # suspect) inboard off its correct seat. The exchange stage does
+            # not need oob pressure -- it accepts on the hpwl homecoming.
             band = c.get('overhang_mm') or {}
             edge_bands[c['ref']] = float(band.get('max') or 2.0)
     if edge_bands:
@@ -169,7 +175,14 @@ Examples:
     edge_pref = {}
     if intent is not None:
         for c in intent.edge_connectors:
+            # Receptacles ONLY (run-5): the edge metric is the right
+            # objective for a part whose class says the mating face must
+            # reach the edge. An edge-less ACTUATOR entry (a suspect
+            # overhang, run-5 suspect-and-derive) makes no seat claim --
+            # its true home may be interior, and pinning it to an edge
+            # would re-manufacture the damage; the exchange stage owns it.
             if (c['ref'] in state.parts and not c.get('edge')
+                    and c.get('class') == 'edge_receptacle'
                     and not state.parts[c['ref']].locked):
                 edge_pref[c['ref']] = edge_bands.get(c['ref'], 2.0)
     if edge_pref:

@@ -168,8 +168,13 @@ class TestDeclareClasses(unittest.TestCase):
             # J1's pose is implausible: class-default band, NO edge invented
             self.assertEqual(by_ref['J1'].get('class'), 'edge_receptacle')
             self.assertNotIn('edge', by_ref['J1'])
-            # SW1 overhangs by design: observed band, edge present
-            self.assertIn('edge', by_ref['SW1'])
+            # SW1's overhang READS as by-design but the board's own pattern
+            # vectors say a displaced pose lands there: run-5 suspect-and-
+            # derive withholds the edge (run 4 blessed it, and the blessed
+            # wrong overhang was the user-named recurrence). Class-only.
+            self.assertEqual(by_ref['SW1'].get('class'), 'edge_actuator')
+            self.assertNotIn('edge', by_ref['SW1'])
+            self.assertIn('SUSPECT', by_ref['SW1'].get('note') or '')
 
     def test_damaged_board_fails_the_proximity_rule(self):
         """--declare-classes deliberately breaks grades-clean-by-construction
