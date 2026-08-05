@@ -1,3 +1,13 @@
+ADDENDUM 2026-08-04 (post review-fix wave 3829d36): all five review
+agents' confirmed findings fixed (geometry-key oracle removal merge with
+pcb_data mirroring, scoped-route pour warning + plan-guard net coverage,
+finalize edge-floor forwarding, _live_fill bytes-memo + loud fallback, GUI
+zone thermal_gap/spoke 0.2 parity, plane_net_layers Claude-settable, ~430
+lines dead code removed incl. the GUI-side reconnect mirror). Gates re-run
+at 3829d36: engine parity copper sets IDENTICAL (1335/1335, 140/140, drc
+0/0), settings roundtrip 178 keys (the new fanout plane_net_layers_ctrl),
+manifest parity 457 manifests / 0 mismatches, postpass coverage clean.
+
 HEAD 2026-08-04 (3rd) parity audit through c126987 (the #562 cleanup +
 copper-parity wave: in-run GUI finalize oracle, rename to repair_planes,
 dead reroute deletion, rp2350 reshape, no-.kicad_pro banner). Outcome:
