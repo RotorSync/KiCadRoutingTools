@@ -431,7 +431,8 @@ def build_parser():
     r.add_argument('--ledger', required=True)
     r.add_argument('--board', required=True)
     r.add_argument('--store', default=None)
-    r.add_argument('--kind', choices=('completion', 'systemic'), default='completion')
+    r.add_argument('--kind', choices=('completion', 'placement', 'systemic'),
+                   default='completion')
     r.add_argument('--lever', default=None)
     r.add_argument('--score', default=None, help='JSON')
     r.add_argument('--rejected', action='store_true')

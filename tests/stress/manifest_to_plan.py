@@ -49,6 +49,12 @@ REFUSED_TOOLS = {
     'place_route_loop.py': (
         'routes and moves footprints in a loop; the plan format has no placement '
         'step. Run it on the CLI'),
+    'place_seed.py': (
+        'seeds/repairs a placement from an intent; the plan format has no '
+        'placement step. Run it BEFORE the plan'),
+    'place_reconstruct.py': (
+        'reconstructs a damaged placement; the plan format has no placement '
+        'step. Run it BEFORE the plan and start the plan from its output'),
     'render_placement.py': (
         'renders a PNG; it changes no board and has nothing to replay'),
 }
