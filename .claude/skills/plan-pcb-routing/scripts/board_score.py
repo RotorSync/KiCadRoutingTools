@@ -613,6 +613,21 @@ def main():
 
 
 if __name__ == '__main__':
+    # CMD/EXIT self-echo (run-5 c1). Guarded: this script lives four levels
+    # under the repo root, and the banner must never be the reason a grade
+    # fails. Children already run with KRT_NO_BANNER (cc42e33), so a
+    # composed run prints exactly ONE banner pair -- this one.
+    try:
+        import os as _os
+        import sys as _sys
+        _root = _os.path.dirname(_os.path.dirname(_os.path.dirname(
+            _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))))
+        if _root not in _sys.path:
+            _sys.path.insert(0, _root)
+        import cli_banner
+        cli_banner.install()
+    except Exception:
+        pass
     try:
         sys.exit(main())
     except SystemExit:

@@ -141,3 +141,31 @@ class TestB3GradedAtAlways(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestRun5RemainingBanners(unittest.TestCase):
+    """Run-5 c1: the three instruments run-4's audit found bannerless.
+    Composition rule: a composed board_score run prints exactly ONE
+    CMD/EXIT pair (children run with KRT_NO_BANNER)."""
+
+    def test_board_score_composed_single_pair(self):
+        with tempfile.TemporaryDirectory() as td:
+            board = _write_tiny(td)
+            r = _run(os.path.join('.claude', 'skills', 'plan-pcb-routing',
+                                  'scripts', 'board_score.py'), board, '-q')
+            self.assertTrue(r.stdout.startswith('CMD: '), r.stdout[:120])
+            self.assertEqual(
+                len(re.findall(r'^CMD: ', r.stdout, re.M)), 1)
+            self.assertEqual(
+                len(re.findall(r'^EXIT=\d+\s*$', r.stdout, re.M)), 1)
+            m = re.search(r'^EXIT=(\d+)\s*$', r.stdout, re.M)
+            self.assertEqual(int(m.group(1)), r.returncode)
+
+    def test_kicad_unconnected_and_drc_compare_carry_banner(self):
+        for tool in ('kicad_unconnected.py',
+                     os.path.join('tests', 'stress', 'kicad_drc_compare.py')):
+            with self.subTest(tool=tool):
+                r = _run(tool, '--help')
+                self.assertTrue(r.stdout.startswith('CMD: '),
+                                f'{tool}: {r.stdout[:120]!r}')
+                self.assertIn('EXIT=', r.stdout)
