@@ -409,3 +409,93 @@ if __name__ == '__main__':
         print(f"--- {t.__name__}")
         t()
     print("ALL PASS")
+
+
+# --- run-4 G additions: file JSON, instrument echo, checklist, -o siblings --
+
+def test_per_side_png_target_writes_sibling_files():
+    """Run-4 G4: `-o wk/x.png --per-side` used to os.makedirs('wk/x.png') --
+    a DIRECTORY literally named x.png -- which make_film globbed as a card
+    and died reading. A .png target now yields stem-suffixed sibling FILES."""
+    d = tempfile.mkdtemp()
+    try:
+        f = os.path.join(d, 'x.png')
+        r = _run(ULX, '-o', f, '--per-side', '--size', '320',
+                 '--supersample', '1')
+        assert r.returncode == 0, r.stderr[-600:]
+        assert not os.path.isdir(f), "-o file target must not become a dir"
+        sibs = sorted(os.listdir(d))
+        assert 'x_F.png' in sibs and 'x_B.png' in sibs, sibs
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_json_out_writes_a_file_with_instrument_and_checklist():
+    """Run-4 G1/G2/G5: --json-out writes the document to a FILE (no more
+    grep-and-strip), the instrument block makes a before/after series
+    provably same-instrument, and the checklist carries mandate 8's four
+    answers with refs, channel-labelled."""
+    import json as _json
+    d = tempfile.mkdtemp()
+    try:
+        js = os.path.join(d, 'r.json')
+        r = _run(PLACED, '--before', SEED, '-o', os.path.join(d, 'r.png'),
+                 '--json-out', js, '--size', '320', '--supersample', '1',
+                 '--ignore-nets', 'GND', '--expect-moved', '22')
+        assert r.returncode == 0, r.stderr[-600:]
+        doc = _json.load(open(js, encoding='utf-8'))
+        inst = doc['instrument']
+        assert inst['ignore_nets'] == ['GND']
+        assert inst['board'].endswith('interf_u_unrouted_placed.kicad_pcb')
+        assert inst['before'].endswith('interf_u_unrouted.kicad_pcb')
+        assert inst['size'] == 320
+        cl = doc['checklist']
+        assert set(cl) == {'a_off_outline', 'b_overlap_pairs',
+                           'c_hole_conflicts', 'c_locked_refs', 'd_moved'}
+        assert cl['d_moved'] == {'moved': 22, 'expected': 22, 'match': True}
+        assert doc['moved_refs'] and all(
+            set(m) == {'reference', 'dist'} for m in doc['moved_refs'])
+        # channels are labelled -- the run-3 confusion was an unlabelled
+        # two-channel disagreement
+        assert set(cl['a_off_outline']) == {'pad_copper', 'courtyard'}
+        # and the stdout line still exists for back-compat
+        assert any(l.startswith('JSON_SUMMARY:')
+                   for l in r.stdout.splitlines())
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_expect_moved_mismatch_is_reported_not_fatal():
+    import json as _json
+    d = tempfile.mkdtemp()
+    try:
+        js = os.path.join(d, 'r.json')
+        r = _run(PLACED, '--before', SEED, '-o', os.path.join(d, 'r.png'),
+                 '--json-out', js, '--size', '320', '--supersample', '1',
+                 '--expect-moved', '3')
+        assert r.returncode == 0
+        cl = _json.load(open(js, encoding='utf-8'))['checklist']
+        assert cl['d_moved']['match'] is False
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_focus_without_summary_json_warns():
+    d = tempfile.mkdtemp()
+    try:
+        r = _run(PLACED, '-o', os.path.join(d, 'r.png'), '--focus',
+                 '--size', '320', '--supersample', '1')
+        assert r.returncode == 0
+        assert '--focus emits nothing without --summary-json' in r.stderr
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_legality_findings_cached_once_per_model():
+    m = _model()
+    a = RP.legality_findings(m)
+    assert RP.legality_findings(m) is a, "findings must be computed once"
+    for key in ('oob_refs_pad_copper', 'oob_refs_courtyard',
+                'pad_conflict_pairs_refs', 'hole_conflict_pairs_refs',
+                'locked_refs'):
+        assert key in a

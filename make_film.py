@@ -159,7 +159,10 @@ def shots_from_ledger(ledger_path, store_root=None, work=None,
 def _cards_in(d):
     out = []
     for p in sorted(glob.glob(os.path.join(d, '*'))):
-        if os.path.splitext(p)[1].lower() in CARD_EXT:
+        # isfile: a DIRECTORY named like an image (render_placement's old
+        # --per-side `-o x.png` layout) passed the extension filter and died
+        # at Image.open with PermissionError (run-3, the film build).
+        if os.path.isfile(p) and os.path.splitext(p)[1].lower() in CARD_EXT:
             out.append(p)
     return out
 
@@ -202,6 +205,8 @@ def parse_positional(items, reject_globs):
         matches = sorted(glob.glob(spec)) or [spec]
         for p in matches:
             ext = os.path.splitext(p)[1].lower()
+            if ext in CARD_EXT and os.path.isdir(p):
+                continue  # a directory named like an image is not a card
             if ext in CARD_EXT:
                 shots.append(card_shot(p, caption or None))
             elif ext in BOARD_EXT:

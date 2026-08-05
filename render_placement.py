@@ -18,7 +18,6 @@ which fails the day someone inlines a courtyard transform.
     python3 render_placement.py BOARD.kicad_pcb [-o OUT.png|OUTDIR] [options]
     python3 render_placement.py BOARD --before SEED --arrows -o delta.png
     python3 render_placement.py BOARD --zoom-group sheet:1a2b --per-side -o dir/
-    python3 render_placement.py --per-round WORKDIR -o dir/
 
 Known limits, stated because the artifact should not oversell (the issue's own
 list): a dense board does not fit one readable frame, which is why delta-first
@@ -191,6 +190,76 @@ class PlacementModel:
         return pts
 
 
+def legality_findings(model) -> Dict[str, object]:
+    """Named legality findings, computed ONCE per model (run-4 G).
+
+    Two run-3 problems, one cause: the metrics were COUNTS with no ref lists
+    (the operator hand-computed WHICH parts were off-board to answer the
+    mandate-8 checklist), and `draw_legality` re-derived the same O(n^2)
+    pair sweep per panel (8 focus panels = 8 full sweeps). The findings are
+    computed here once, cached on the model, consumed by both the overlay
+    and the JSON.
+
+    Channels are labelled because run 3 lost time to an UNLABELLED
+    two-channel disagreement: `oob_refs_pad_copper` measures each part's PAD
+    extent against the board bbox (what the dashed-red overlay draws);
+    `oob_refs_courtyard` measures the courtyard rect against the outline
+    gate (what `oob_count` in the metrics counts). They legitimately differ
+    -- an NPTH mounting hole has no pad copper, a courtyard overhang may
+    carry no copper.
+    """
+    cached = getattr(model, '_legality_findings', None)
+    if cached is not None:
+        return cached
+    out = {'oob_refs_pad_copper': [], 'oob_refs_courtyard': [],
+           'pad_conflict_pairs_refs': [], 'hole_conflict_pairs_refs': [],
+           'locked_refs': sorted(r for r, p in model.parts().items()
+                                 if getattr(p, 'locked', False))}
+    state = getattr(model, 'state', None)
+    ctx = getattr(state, 'legality_ctx', None) if state is not None else None
+    if ctx is not None:
+        b = state.board
+        for ref in sorted(ctx.parts):
+            p = state.parts.get(ref)
+            if p is None:
+                continue
+            ext = ctx.parts[ref].extent(p.x, p.y, p.rot)
+            if ext is None:
+                continue
+            oob = (max(0.0, b[0] - ext[0]) + max(0.0, ext[2] - b[2])
+                   + max(0.0, b[1] - ext[1]) + max(0.0, ext[3] - b[3]))
+            if oob > 1e-6:
+                out['oob_refs_pad_copper'].append([ref, round(oob, 4)])
+        refs = sorted(ctx.parts)
+        for i, a in enumerate(refs):
+            pa = state.parts.get(a)
+            if pa is None:
+                continue
+            for bb in refs[i + 1:]:
+                pb = state.parts.get(bb)
+                if pb is None:
+                    continue
+                sf = ctx.pair_shortfall(a, bb)
+                if sf.pad > 1e-6:
+                    out['pad_conflict_pairs_refs'].append(
+                        [a, bb, round(sf.pad, 4)])
+                if sf.hole > 1e-6:
+                    out['hole_conflict_pairs_refs'].append(
+                        [a, bb, round(sf.hole, 4)])
+    if state is not None and not getattr(model, 'no_outline', False):
+        gate = getattr(state, 'edge_gate', None)
+        if gate is not None:
+            for ref, p in sorted(model.parts().items()):
+                try:
+                    amt = gate.rect_outside_amount(p.rect())
+                except Exception:
+                    continue
+                if amt > 1e-6:
+                    out['oob_refs_courtyard'].append([ref, round(amt, 4)])
+    model._legality_findings = out
+    return out
+
+
 def moved_parts(before_pcb, after_pcb, tol: float = 1e-4) -> List[Dict]:
     """Refs whose position changed, with both poses. Sorted (#457)."""
     out = []
@@ -327,7 +396,6 @@ def draw_legality(d, r, model, *, side=None):
     if state is None or getattr(state, 'legality_ctx', None) is None:
         return
     ctx = state.legality_ctx
-    b = state.board
     # NPTH keepout circles
     for ref in sorted(ctx.parts):
         p = state.parts.get(ref)
@@ -338,44 +406,38 @@ def draw_legality(d, r, model, *, side=None):
             x1, y1 = r.tf.pt(cx + rad, cy + rad)
             d.ellipse([min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)],
                       outline=C_HOLE, width=_w(r, 0.08))
+    # Findings are computed ONCE per model and shared with the JSON (run-4 G):
+    # this used to re-run the O(n^2) pair sweep per panel.
+    fnd = legality_findings(model)
     # off-board pad extents (dashed red)
-    for ref in sorted(ctx.parts):
+    for ref, _amt in fnd['oob_refs_pad_copper']:
         p = state.parts.get(ref)
         if p is None:
             continue
         ext = ctx.parts[ref].extent(p.x, p.y, p.rot)
         if ext is None:
             continue
-        oob = (max(0.0, b[0] - ext[0]) + max(0.0, ext[2] - b[2])
-               + max(0.0, b[1] - ext[1]) + max(0.0, ext[3] - b[3]))
-        if oob > 1e-6:
-            box = _rect_pts(r, ext)
-            w = _w(r, 0.14)
-            on = off = max(4, w * 3)
-            _dash(d, (box[0], box[1]), (box[2], box[1]), on, off, C_CONFLICT, w)
-            _dash(d, (box[2], box[1]), (box[2], box[3]), on, off, C_CONFLICT, w)
-            _dash(d, (box[2], box[3]), (box[0], box[3]), on, off, C_CONFLICT, w)
-            _dash(d, (box[0], box[3]), (box[0], box[1]), on, off, C_CONFLICT, w)
+        box = _rect_pts(r, ext)
+        w = _w(r, 0.14)
+        on = off = max(4, w * 3)
+        _dash(d, (box[0], box[1]), (box[2], box[1]), on, off, C_CONFLICT, w)
+        _dash(d, (box[2], box[1]), (box[2], box[3]), on, off, C_CONFLICT, w)
+        _dash(d, (box[2], box[3]), (box[0], box[3]), on, off, C_CONFLICT, w)
+        _dash(d, (box[0], box[3]), (box[0], box[1]), on, off, C_CONFLICT, w)
     # conflicting pairs: ring at the pair midpoint + connecting line
-    refs = sorted(ctx.parts)
-    for i, a in enumerate(refs):
+    for a, bb, _mm in (fnd['pad_conflict_pairs_refs']
+                       + fnd['hole_conflict_pairs_refs']):
         pa = state.parts.get(a)
-        if pa is None:
+        pb = state.parts.get(bb)
+        if pa is None or pb is None:
             continue
-        for bb in refs[i + 1:]:
-            pb = state.parts.get(bb)
-            if pb is None:
-                continue
-            sf = ctx.pair_shortfall(a, bb)
-            if sf.pad <= 1e-6 and sf.hole <= 1e-6:
-                continue
-            ax, ay = r.tf.pt(pa.x, pa.y)
-            bx, by = r.tf.pt(pb.x, pb.y)
-            d.line([ax, ay, bx, by], fill=C_CONFLICT, width=_w(r, 0.1))
-            mx, my = (ax + bx) / 2, (ay + by) / 2
-            rad = _w(r, 0.8, floor=6)
-            d.ellipse([mx - rad, my - rad, mx + rad, my + rad],
-                      outline=C_CONFLICT, width=_w(r, 0.12))
+        ax, ay = r.tf.pt(pa.x, pa.y)
+        bx, by = r.tf.pt(pb.x, pb.y)
+        d.line([ax, ay, bx, by], fill=C_CONFLICT, width=_w(r, 0.1))
+        mx, my = (ax + bx) / 2, (ay + by) / 2
+        rad = _w(r, 0.8, floor=6)
+        d.ellipse([mx - rad, my - rad, mx + rad, my + rad],
+                  outline=C_CONFLICT, width=_w(r, 0.12))
 
 
 def draw_ghosts(d, r, model, moves, *, width_mm=0.1):
@@ -672,6 +734,16 @@ Examples:
     p.add_argument('--supersample', type=int, default=2)
     p.add_argument('--json', action='store_true',
                    help='print a JSON_SUMMARY line with per-panel views + metrics')
+    p.add_argument('--json-out', metavar='PATH', default=None,
+                   help='ALSO write the summary document to a file (implies '
+                        '--json). A separate flag rather than an optional '
+                        'argument on --json, so `--json BOARD` can never '
+                        'swallow the positional (run-4 G1)')
+    p.add_argument('--expect-moved', type=int, default=None, metavar='N',
+                   help='the number of parts the step claims it moved; the '
+                        "JSON checklist then carries d={moved, expected, "
+                        "match} -- mandate 8's question (d), quotable instead "
+                        'of recalled (run-4 G5)')
     p.add_argument('--quiet', action='store_true')
     return p
 
@@ -807,6 +879,13 @@ def main(argv=None):
                                 moves=moves, hot_nets=failed,
                                 blocker_nets=blockers, pick_nets=pick,
                                 label=tag, opts=opts))
+    if args.focus and not args.summary_json:
+        # Run-4 G7: --focus derives its clusters from the summary's failed
+        # nets; without --summary-json it silently emitted one panel and
+        # nothing said why.
+        print("  WARNING: --focus emits nothing without --summary-json "
+              "(the failed-net clusters come from the route summary)",
+              file=sys.stderr)
     if args.focus and failed:
         pts = model.net_points(model.net_ids_for(failed))
         for i, cl in enumerate(cluster_points(pts, args.focus_gap)[:args.max_focus]):
@@ -824,29 +903,36 @@ def main(argv=None):
                  'vias': route_metrics.get('vias')}
 
     out = args.output or (os.path.splitext(args.board)[0] + '_placement.png')
-    # `-o` is documented as "PNG path (one panel) or directory", but directory
-    # handling used to be gated on len(panels) > 1 -- so a single-panel run with
-    # `-o out/` fell through to img.save('out/') and died with PIL's "unknown
-    # file extension". That hit the plain one-panel render and --focus (which
-    # usually finds one cluster), i.e. two of the four situations the skill tells
-    # a caller to render in. A directory target is a directory at any count.
-    as_dir = (len(panels) > 1
-              or (bool(args.output)
-                  and (args.output.endswith(('/', os.sep))
-                       or os.path.isdir(args.output))))
+    # `-o` semantics (run-4 G4). A directory target is one that LOOKS like a
+    # directory: trailing separator, an existing directory, or no extension.
+    # `-o wk/x.png --per-side` used to os.makedirs('wk/x.png') -- a DIRECTORY
+    # literally named x.png -- which make_film then globbed as a card and
+    # died on (PermissionError reading a directory), and which no reader
+    # expects. Multi-panel runs against a `.png` target now write stem-
+    # suffixed SIBLING FILES (x_F.png, x_B.png, x_focus1.png), named from
+    # the -o stem rather than the board stem.
+    looks_like_dir = bool(args.output) and (
+        args.output.endswith(('/', os.sep))
+        or os.path.isdir(args.output)
+        or not os.path.splitext(args.output)[1])
+    as_dir = looks_like_dir
+    multi_file = len(panels) > 1 and not as_dir
     if as_dir:
         os.makedirs(out, exist_ok=True)
     written = []
+    stem, ext = os.path.splitext(out)
     for i, spec in enumerate(panels):
         img = render_panel(spec, size=args.size, supersample=args.supersample,
                            extra=extra)
+        suffix_bits = []
+        if spec.side:
+            suffix_bits.append(spec.side)
+        if 'focus' in spec.label:
+            suffix_bits.append(f"focus{i}")
         if as_dir:
-            bits = [tag]
-            if spec.side:
-                bits.append(spec.side)
-            if 'focus' in spec.label:
-                bits.append(f"focus{i}")
-            path = os.path.join(out, "_".join(bits) + ".png")
+            path = os.path.join(out, "_".join([tag] + suffix_bits) + ".png")
+        elif multi_file:
+            path = stem + "".join("_" + s for s in suffix_bits) + (ext or '.png')
         else:
             path = out
         img.save(path)
@@ -854,15 +940,54 @@ def main(argv=None):
         if not args.quiet:
             print(f"  wrote {path}  ({img.size[0]}x{img.size[1]})")
 
-    if args.json:
-        print("JSON_SUMMARY: " + json.dumps({
+    if args.json or args.json_out:
+        fnd = legality_findings(model)
+        doc = {
             'panels': [{'label': s.label, 'side': s.side, 'view': s.view,
                         'path': w} for s, w in zip(panels, written)],
             'moved': len(moves),
+            # moved_refs makes a wrong --before self-evident, and it is what
+            # audits the two pixel-invisible move classes (sub-5px arrows are
+            # dropped; a rotation-only ghost draws exactly atop the part).
+            'moved_refs': [{'reference': m['reference'],
+                            'dist': round(m['dist'], 4)} for m in moves],
             'failed_nets': sorted(failed), 'blocker_nets': sorted(blockers),
             'metrics': dict(model.metrics),
+            # The instrument block (run-4 G2): two renders of the SAME board
+            # differing only in --ignore-nets read 632 vs 412 crossings in
+            # run 3, and neither JSON said which was which. A before/after
+            # series is provably same-instrument only if the instrument
+            # settings ride in the document.
+            'instrument': {
+                'board': os.path.abspath(args.board),
+                'before': os.path.abspath(args.before) if args.before else None,
+                'summary_json': (os.path.abspath(args.summary_json)
+                                 if args.summary_json else None),
+                'clearance': args.clearance,
+                'ignore_nets': sorted(args.ignore_nets or []),
+                'ratsnest_nets': sorted(args.ratsnest_nets or []),
+                'size': args.size, 'supersample': args.supersample,
+            },
+            # Mandate 8's four questions, quotable (run-4 G5). Channels are
+            # labelled; see legality_findings.
+            'checklist': {
+                'a_off_outline': {
+                    'pad_copper': fnd['oob_refs_pad_copper'],
+                    'courtyard': fnd['oob_refs_courtyard']},
+                'b_overlap_pairs': fnd['pad_conflict_pairs_refs'],
+                'c_hole_conflicts': fnd['hole_conflict_pairs_refs'],
+                'c_locked_refs': fnd['locked_refs'],
+                'd_moved': {'moved': len(moves),
+                            'expected': args.expect_moved,
+                            'match': (None if args.expect_moved is None
+                                      else len(moves) == args.expect_moved)},
+            },
             'unplaced': state.unplaced, 'no_outline': model.no_outline,
-        }, sort_keys=True, default=str))
+        }
+        if args.json_out:
+            with open(args.json_out, 'w', encoding='utf-8') as f:
+                json.dump(doc, f, indent=2, sort_keys=True, default=str)
+        print("JSON_SUMMARY: " + json.dumps(doc, sort_keys=True, default=str))
     return 0
 
 
