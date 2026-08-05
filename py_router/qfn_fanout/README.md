@@ -20,17 +20,17 @@ Creates escape routing for QFN (Quad Flat No-leads) and QFP (Quad Flat Package) 
 
 ```bash
 # Basic fanout
-python qfn_fanout.py kicad_files/input.kicad_pcb --component U1 --output kicad_files/output.kicad_pcb
+python py_router/qfn_fanout.py kicad_files/input.kicad_pcb --component U1 --output kicad_files/output.kicad_pcb
 
 # With net filter (include pattern)
-python qfn_fanout.py kicad_files/input.kicad_pcb --component U1 --output kicad_files/output.kicad_pcb --nets "*DATA*"
+python py_router/qfn_fanout.py kicad_files/input.kicad_pcb --component U1 --output kicad_files/output.kicad_pcb --nets "*DATA*"
 
 # With exclusion pattern (all nets except GND and VCC)
-python qfn_fanout.py kicad_files/input.kicad_pcb --component U1 --output kicad_files/output.kicad_pcb \
+python py_router/qfn_fanout.py kicad_files/input.kicad_pcb --component U1 --output kicad_files/output.kicad_pcb \
     --nets "*" "!GND" "!VCC"
 
 # Specify layer and track width
-python qfn_fanout.py kicad_files/input.kicad_pcb --component U1 --output kicad_files/output.kicad_pcb \
+python py_router/qfn_fanout.py kicad_files/input.kicad_pcb --component U1 --output kicad_files/output.kicad_pcb \
     --layer F.Cu --width 0.15
 ```
 
@@ -102,7 +102,7 @@ gains permission to overlap its own pad. Name and behaviour match the
 "Allow via-in-pad" option elsewhere in the tools. Example:
 
 ```bash
-python3 qfn_fanout.py board.kicad_pcb --component U1 --nets 'DP1*' \
+python3 py_router/qfn_fanout.py board.kicad_pcb --component U1 --nets 'DP1*' \
     --escape-method underpad --allow-via-in-pad \
     --via-size 0.45 --via-drill 0.2 --clearance 0.15 --grid-step 0.05
 ```
@@ -126,7 +126,7 @@ so pair this with `--allow-via-in-pad`; the via then sits centred on the pad
 and no stub is emitted at all. Example:
 
 ```bash
-python3 qfn_fanout.py board.kicad_pcb --component U1 --nets 'INT*' \
+python3 py_router/qfn_fanout.py board.kicad_pcb --component U1 --nets 'INT*' \
     --escape-method underpad --allow-via-in-pad \
     --via-size 0.45 --via-drill 0.2 --clearance 0.15 --grid-step 0.05
 ```

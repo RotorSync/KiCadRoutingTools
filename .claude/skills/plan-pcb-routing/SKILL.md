@@ -903,7 +903,7 @@ The default-on plane-fragility field
 later routing step for cutting the fill where it is narrow — signals cross the
 planes mid-pour instead of severing them at necks.
 
-python3 -X utf8 route_planes.py board.kicad_pcb board_step1.kicad_pcb \
+python3 -X utf8 py_router/route_planes.py board.kicad_pcb board_step1.kicad_pcb \
     --nets GND VCC \
     --plane-layers B.Cu F.Cu \
     2>&1 | tee /tmp/step1_pour.txt
@@ -937,7 +937,7 @@ On a 4+ layer board also pass every copper layer with `--layers` (default is
 F.Cu B.Cu only) so inner balls can escape — drop `--layers` only for true
 2-layer boards.
 
-python3 -X utf8 bga_fanout.py board_step1.kicad_pcb \
+python3 -X utf8 py_router/bga_fanout.py board_step1.kicad_pcb \
     --component U9 \
     --nets "*" "!GND" "!VCC" \
     --layers F.Cu In1.Cu In2.Cu B.Cu \
@@ -981,7 +981,7 @@ that would sever them. Pairs may peel far-apart terminal pads off the coupled
 chain and report them in `single_ended_followup_nets`; the Step 2 route finishes
 those, so do NOT exclude the pair nets there.
 
-python3 -X utf8 route_diff.py board_step1c.kicad_pcb board_diff.kicad_pcb \
+python3 -X utf8 py_router/route_diff.py board_step1c.kicad_pcb board_diff.kicad_pcb \
     --nets <pair globs, e.g. '/usb/*'> \
     --track-width 0.1 --diff-pair-gap 0.1 --clearance <floor> \
     [--impedance 90] \
@@ -999,7 +999,7 @@ stackup (run `/recommend-stackup` first if the board has KiCad's default). Route
 RF feed on an outer layer over the GND plane; recommend a `User.2` keepout +
 `--keepout` around any antenna region (user draws it).
 
-python3 -X utf8 route.py board_diff.kicad_pcb board_step2b.kicad_pcb \
+python3 -X utf8 py_router/route.py board_diff.kicad_pcb board_step2b.kicad_pcb \
     --nets RF --impedance 50 --layers F.Cu \
     --clearance <floor> --no-bga-zone \
     2>&1 | tee /tmp/step2b_impedance.txt
@@ -1048,7 +1048,7 @@ plane-drop vias (#424), so this retry is rare.)
 > capacity problem (rip-up, clearance, layers), not a budget problem.
 > (`KICAD_DYNAMIC_ITERATIONS=0` restores the legacy static caps for A/B.)
 
-python3 -X utf8 route.py board_step1c.kicad_pcb board_step2.kicad_pcb \
+python3 -X utf8 py_router/route.py board_step1c.kicad_pcb board_step2.kicad_pcb \
     --nets "*" \
     --no-bga-zone \
     --max-ripup 5 \
@@ -1090,7 +1090,7 @@ using the same parameters as Step 2.)
 > board (I2C/UART/GPIO only), drop `--add-gnd-vias`. Let me know if you'd
 > like that.
 
-python3 -X utf8 route_planes.py board_step2.kicad_pcb board_step4.kicad_pcb \
+python3 -X utf8 py_router/route_planes.py board_step2.kicad_pcb board_step4.kicad_pcb \
     --nets GND VCC \
     --plane-layers B.Cu F.Cu \
     --add-gnd-vias --gnd-via-distance 2.0 \
@@ -1137,9 +1137,9 @@ clearance any step used, including auto-stepped fine-pitch taps), NOT a hardcode
 violations (#111/#226). A bare invocation is correct; pass `--clearance <floor>`
 (from Step 4's `--design-rules` output) only to override:
 
-python3 -X utf8 check_drc.py board_final.kicad_pcb 2>&1 | tee /tmp/step6_drc.txt
-python3 -X utf8 check_connected.py board_final.kicad_pcb 2>&1 | tee /tmp/step6_connectivity.txt
-python3 -X utf8 check_orphan_stubs.py board_final.kicad_pcb 2>&1 | tee /tmp/step6_orphans.txt
+python3 -X utf8 py_router/check_drc.py board_final.kicad_pcb 2>&1 | tee /tmp/step6_drc.txt
+python3 -X utf8 py_router/check_connected.py board_final.kicad_pcb 2>&1 | tee /tmp/step6_connectivity.txt
+python3 -X utf8 py_tools/check_orphan_stubs.py board_final.kicad_pcb 2>&1 | tee /tmp/step6_orphans.txt
 ```
 
 **Coverage gate (mandatory — close the loop on Step 5b).** `check_connected.py`
@@ -1160,17 +1160,17 @@ If you prefer not to use a VCC plane, route VCC with wide traces instead:
 
 ```
 ### Step 1 (Alternative): Pour GND only
-python3 -X utf8 route_planes.py board.kicad_pcb board_step1.kicad_pcb \
+python3 -X utf8 py_router/route_planes.py board.kicad_pcb board_step1.kicad_pcb \
     --nets GND --plane-layers B.Cu
 
 ### Step 1b (Alternative): Fanout U9 Including VCC
-python3 -X utf8 bga_fanout.py board_step1.kicad_pcb \
+python3 -X utf8 py_router/bga_fanout.py board_step1.kicad_pcb \
     --component U9 \
     --nets "*" "!GND" \
     --output board_step1b.kicad_pcb
 
 ### Step 2 (Alternative): Route ALL Nets, VCC as Wide Traces
-python3 -X utf8 route.py board_step1b.kicad_pcb board_step2.kicad_pcb \
+python3 -X utf8 py_router/route.py board_step1b.kicad_pcb board_step2.kicad_pcb \
     --nets "*" \
     --power-nets GND VCC --power-nets-widths 0.3 0.5
 ```
@@ -1327,7 +1327,7 @@ passes) that makes each plane-reserved layer expensive, so signals prefer the
 signal layers and leave the inner layers clean for the pour:
 ```bash
 # GND plane on In1.Cu, power plane on In2.Cu -> penalize In1/In2 for signals:
-route.py ... --layers F.Cu In1.Cu In2.Cu B.Cu --layer-costs 1.0 3.0 3.0 1.0
+py_router/route.py ... --layers F.Cu In1.Cu In2.Cu B.Cu --layer-costs 1.0 3.0 3.0 1.0
 ```
 - **~3× is the sweet spot on boards where F/B alone can carry the signals.**
   Any value ≥2× keeps signals off the planes and doesn't hurt completion; ≥5×
@@ -1608,7 +1608,7 @@ python3 py_router/route.py board.kicad_pcb --nets "*" \
 10. **Rip-up and reroute is automatic** - When a route fails, the router automatically rips up blocking nets and retries (up to `--max-ripup` blockers)
 11. **Component shortcut** - Use `--component U1` to route all signal nets on a component (auto-excludes GND/VCC/unconnected)
 12. **Use --no-bga-zone for difficult boards** - Even when fanout is complete, use `--no-bga-zone` during routing to allow the router to find alternative paths through the dense pin area. This is especially important for 2-layer boards where routing channels are limited.
-13. **Windows UTF-8 encoding** - On Windows, use `python3 -X utf8` to avoid Unicode encoding errors when scripts print special characters (like Ω for resistance). Example: `python3 -X utf8 route_planes.py ...`
+13. **Windows UTF-8 encoding** - On Windows, use `python3 -X utf8` to avoid Unicode encoding errors when scripts print special characters (like Ω for resistance). Example: `python3 -X utf8 py_router/route_planes.py ...`
 14. **BGA/PGA power pins and planes** - When using power planes, BGA/PGA power pins (GND, VCC) connect most efficiently via direct vias to the plane rather than fanout routing. Create planes first, then fanout only signal nets (this is the Step 1 -> 1b order). Through-hole PGA pads automatically connect to planes on that layer; SMD BGA pads need vias placed by `route_planes.py`. This approach:
     - Reduces routing congestion (power pins don't consume escape channels)
     - Provides lower impedance power connections
@@ -1634,10 +1634,10 @@ After generating the plan:
 Always capture command output to `/tmp` files for later analysis:
 
 ```bash
-python3 -X utf8 route.py input.kicad_pcb output.kicad_pcb --nets "*" 2>&1 | tee /tmp/route_output.txt
-python3 -X utf8 route_planes.py input.kicad_pcb output.kicad_pcb --nets GND --plane-layers B.Cu 2>&1 | tee /tmp/planes_output.txt
-python3 -X utf8 check_connected.py output.kicad_pcb 2>&1 | tee /tmp/connectivity.txt
-python3 -X utf8 check_drc.py output.kicad_pcb --clearance <floor> --hole-to-hole-clearance <floor> 2>&1 | tee /tmp/drc.txt
+python3 -X utf8 py_router/route.py input.kicad_pcb output.kicad_pcb --nets "*" 2>&1 | tee /tmp/route_output.txt
+python3 -X utf8 py_router/route_planes.py input.kicad_pcb output.kicad_pcb --nets GND --plane-layers B.Cu 2>&1 | tee /tmp/planes_output.txt
+python3 -X utf8 py_router/check_connected.py output.kicad_pcb 2>&1 | tee /tmp/connectivity.txt
+python3 -X utf8 py_router/check_drc.py output.kicad_pcb --clearance <floor> --hole-to-hole-clearance <floor> 2>&1 | tee /tmp/drc.txt
 ```
 
 (`<floor>` = the manufacturing floor from `list_nets.py --design-rules`, not the
@@ -1771,7 +1771,7 @@ After running routing commands:
 | Routes near BGA boundary failing | BGA exclusion zone too aggressive | Use `--no-bga-zone` |
 
 ```bash
-python3 -X utf8 route.py board_prev.kicad_pcb board_routed.kicad_pcb \
+python3 -X utf8 py_router/route.py board_prev.kicad_pcb board_routed.kicad_pcb \
     --nets "*" \
     --no-bga-zone \
     --max-ripup 5 \
@@ -1804,7 +1804,7 @@ measure per-layer copper length and via count against a reference):
 diagonal runs instead of detouring on F.Cu (order matches `--layers`: F.Cu first,
 B.Cu second):
 ```bash
-python3 -X utf8 route.py board_fanout.kicad_pcb board_signal.kicad_pcb \
+python3 -X utf8 py_router/route.py board_fanout.kicad_pcb board_signal.kicad_pcb \
     --nets "*" \
     --track-width 0.127 --clearance 0.1 \
     --layer-costs 1.0 1.5 \
@@ -1879,7 +1879,7 @@ hunt for.
    failed nets — a victim is blocked by the *successful* wide tracks already in its
    channel, so thinning only the failures leaves the channel full):
    ```bash
-   python3 -X utf8 route.py board_fanout.kicad_pcb board_signal.kicad_pcb \
+   python3 -X utf8 py_router/route.py board_fanout.kicad_pcb board_signal.kicad_pcb \
        --nets "*" \
        --track-width <fab floor, e.g. 0.127 or 0.0889> --clearance <floor, e.g. 0.1> \
        --via-size <floor via, e.g. 0.30> --via-drill <floor drill, e.g. 0.15> \

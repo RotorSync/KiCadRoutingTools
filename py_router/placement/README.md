@@ -3,7 +3,7 @@
 Perturbative placement optimization for KiCad PCB files. Starts from an
 existing (hand- or AI-made) placement and improves it for routability —
 it does not place boards from scratch. Background research and experiment
-results: [docs/placement-optimization.md](../docs/placement-optimization.md).
+results: [docs/placement-optimization.md](../../docs/placement-optimization.md).
 
 Two command-line tools sit on top of this module:
 
@@ -18,7 +18,7 @@ board-edge margin. Locked footprints never move.
 
 ```bash
 # Conservative polish (recommended starting point)
-python place_optimize.py input.kicad_pcb optimized.kicad_pcb \
+python py_router/place_optimize.py input.kicad_pcb optimized.kicad_pcb \
     --max-displacement 3 --length-weight 0.3 --crossing-penalty 30 \
     --halo-coef 0.15 --halo-weight 2 --edge-halo 2 \
     --ignore-nets GND "+3.3V" \
@@ -56,7 +56,7 @@ they do in `place_optimize.py`, and `--verbose` surfaces each accepted quench
 move plus the per-pass `swap-capped=N` count.
 
 ```bash
-python place_route_loop.py input.kicad_pcb repaired.kicad_pcb \
+python py_router/place_route_loop.py input.kicad_pcb repaired.kicad_pcb \
     --route-args '--nets "/*" "Net-*" --track-width 0.2 --clearance 0.2 ...' \
     --ignore-nets GND "+3.3V" --lock "J*" --swap-max-displacement 2
 ```
@@ -83,7 +83,7 @@ matters is `--clearance`, which must match the fanout / DRC floor:
 
 ```bash
 # after: bga_fanout.py board.kicad_pcb -o fanned.kicad_pcb --clearance 0.1 ...
-python place_fanout_clearance.py fanned.kicad_pcb capclean.kicad_pcb --clearance 0.1
+python py_router/place_fanout_clearance.py fanned.kicad_pcb capclean.kicad_pcb --clearance 0.1
 ```
 
 | Option | Default | Description |
@@ -115,12 +115,12 @@ ring, cap pads are coloured by net, and a faint ghost rectangle marks each
 cap's seed position. It accepts all of `place_fanout_clearance.py`'s repair
 options plus `--size`, `--fps`, and `--sub-frames` (motion smoothness).
 
-![Decoupling caps gliding off foreign-net fanout vias on the glasgow revC BGA](../docs/fanout-cap-placement.gif)
+![Decoupling caps gliding off foreign-net fanout vias on the glasgow revC BGA](../../docs/fanout-cap-placement.gif)
 
 ```bash
 # after: bga_fanout.py board.kicad_pcb -o fanned.kicad_pcb --escape-method underpad \
 #            --via-size 0.3 --via-drill 0.2 --track-width 0.1 --clearance 0.1
-python animate_fanout_clearance.py fanned.kicad_pcb capmove.gif --clearance 0.1
+python py_tools/animate_fanout_clearance.py fanned.kicad_pcb capmove.gif --clearance 0.1
 ```
 
 This is a read-only visualization tool: the `on_move` hook defaults to `None`,

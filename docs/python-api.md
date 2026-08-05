@@ -18,7 +18,11 @@ complete signatures and runnable examples:
 | [Impedance](api-impedance.md) | `impedance` | Microstrip/stripline impedance formulas, width-for-impedance solving, propagation delay |
 
 All examples run from the repository root against boards shipped in
-`kicad_files/`.
+`kicad_files/`, with the engine directory on the import path (the modules
+live in `py_router/` since #522), e.g.
+`PYTHONPATH=py_router python3 my_example.py` — or run your script from
+inside `py_router/`. The verification harness
+(`python3 tests/run_doc_examples.py`) sets this up automatically.
 
 ## Conventions
 

@@ -51,7 +51,7 @@ Warn when a target is unachievable with manufacturable geometry (e.g. 50Ω micro
    --layers F.Cu In1.Cu In2.Cu B.Cu
    --impedance 50                      # route.py, single-ended
    --impedance 100                     # route_diff.py, differential
-   route_planes.py --nets GND --plane-layers In1.Cu
+   py_router/route_planes.py --nets GND --plane-layers In1.Cu
    ```
 3. Optionally, the KiCad `(stackup ...)` s-expression block for the user to apply via Board Setup → Physical Stackup. **Do not modify the board file directly** — stackup is a fab-facing decision the user must own.
 4. If the stackup was changed, remind the user to re-run any impedance-based routing, since previously computed widths are now stale.

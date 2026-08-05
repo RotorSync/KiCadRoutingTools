@@ -580,7 +580,7 @@ Before:        After:
   o o o          o── o── o──
 ```
 
-See [bga_fanout/README.md](../bga_fanout/README.md) for detailed documentation.
+See [bga_fanout/README.md](../py_router/bga_fanout/README.md) for detailed documentation.
 
 ## QFN/QFP Fanout Generator (`qfn_fanout.py`)
 
@@ -714,17 +714,17 @@ Runs a complete integration test: fanout generation followed by routing and veri
 
 ```bash
 # Run all stages
-python test_fanout_and_route.py --all
+python tests/test_fanout_and_route.py --all
 
 # Quick mode (reduced scope)
-python test_fanout_and_route.py --all --quick
+python tests/test_fanout_and_route.py --all --quick
 
 # Run specific stages only
-python test_fanout_and_route.py --fanout --ftdi
-python test_fanout_and_route.py --ram --planes
+python tests/test_fanout_and_route.py --fanout --ftdi
+python tests/test_fanout_and_route.py --ram --planes
 
 # Run only checks (no routing)
-python test_fanout_and_route.py --onlychecks --ftdi --lvds --ram
+python tests/test_fanout_and_route.py --onlychecks --ftdi --lvds --ram
 ```
 
 #### Options

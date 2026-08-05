@@ -63,13 +63,13 @@ From the impedance, derive the routing flags:
 
 ```bash
 # USB is polarity-critical: no --polarity-swap-nets (swaps denied by default)
-python3 -X utf8 route_diff.py board.kicad_pcb board_usb.kicad_pcb \
+python3 -X utf8 py_router/route_diff.py board.kicad_pcb board_usb.kicad_pcb \
     --nets "USB_DP" "USB_DM" \
     --impedance 90 --diff-pair-intra-match \
     2>&1 | tee /tmp/route_usb.txt
 
 # FPGA generic-I/O pairs CAN swap (pin functions reassigned in gateware)
-python3 -X utf8 route_diff.py board.kicad_pcb board_lvds.kicad_pcb \
+python3 -X utf8 py_router/route_diff.py board.kicad_pcb board_lvds.kicad_pcb \
     --nets "lvds_*" --impedance 100 \
     --polarity-swap-nets "lvds_*" \
     2>&1 | tee /tmp/route_lvds.txt

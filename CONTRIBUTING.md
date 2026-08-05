@@ -54,8 +54,8 @@ This is where contributions become valuable. Whatever routed, verify it —
 the two checks are independent and **both** are required:
 
 ```bash
-python3 check_drc.py your_board_routed.kicad_pcb        # clearances / shorts
-python3 check_connected.py your_board_routed.kicad_pcb  # every pad actually reached
+python3 py_router/check_drc.py your_board_routed.kicad_pcb        # clearances / shorts
+python3 py_router/check_connected.py your_board_routed.kicad_pcb  # every pad actually reached
 ```
 
 - A DRC-clean board can still be disconnected (floating copper has no

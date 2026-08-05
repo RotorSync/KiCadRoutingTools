@@ -25,21 +25,21 @@ Creates escape routing for BGA (Ball Grid Array) packages in KiCad PCB files.
 
 ```bash
 # Basic fanout
-python bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_files/output.kicad_pcb
+python py_router/bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_files/output.kicad_pcb
 
 # With net filter (include pattern)
-python bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_files/output.kicad_pcb --nets "*DATA*"
+python py_router/bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_files/output.kicad_pcb --nets "*DATA*"
 
 # With exclusion pattern (all nets except GND and VCC)
-python bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_files/output.kicad_pcb \
+python py_router/bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_files/output.kicad_pcb \
     --nets "*" "!GND" "!VCC"
 
 # Differential pairs
-python bga_fanout.py kicad_files/input.kicad_pcb --component IC1 --output kicad_files/output.kicad_pcb \
+python py_router/bga_fanout.py kicad_files/input.kicad_pcb --component IC1 --output kicad_files/output.kicad_pcb \
     --nets "*lvds*" --diff-pairs "*lvds*" --primary-escape vertical
 
 # Specify layers
-python bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_files/output.kicad_pcb \
+python py_router/bga_fanout.py kicad_files/input.kicad_pcb --component U3 --output kicad_files/output.kicad_pcb \
     --layers F.Cu In1.Cu In2.Cu In3.Cu B.Cu
 ```
 
@@ -176,7 +176,7 @@ recorded-manifest A/B switch).
 
 ```bash
 # Dense BGA that the channel router can't fully escape (diff pairs escaped coupled)
-python bga_fanout.py board.kicad_pcb -c U1 -o out.kicad_pcb \
+python py_router/bga_fanout.py board.kicad_pcb -c U1 -o out.kicad_pcb \
     --layers F.Cu In1.Cu In2.Cu B.Cu --diff-pairs "*" \
     --escape-method underpad --via-size 0.35 --track-width 0.12 --clearance 0.1
 ```
@@ -191,7 +191,7 @@ to nudge those caps clear and pull each pad toward its nearest same-net ball
 (so a power/GND via dropped there later shares the via):
 
 ```bash
-python place_fanout_clearance.py out.kicad_pcb capclean.kicad_pcb --clearance 0.1
+python py_router/place_fanout_clearance.py out.kicad_pcb capclean.kicad_pcb --clearance 0.1
 ```
 
 Use the same `--clearance` as the fanout. It only moves 2-pad caps near a BGA,

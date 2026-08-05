@@ -440,7 +440,7 @@ rip-up cannot re-route the impedance nets at the wrong width, and counted as
 ```bash
 # Step 2b: impedance-controlled single-ended nets (e.g. the antenna feed), on an
 # outer layer over the GND pour created in Step 1c; short/direct is the router default.
-python3 -X utf8 route.py board_diff.kicad_pcb board_imp.kicad_pcb \
+python3 -X utf8 py_router/route.py board_diff.kicad_pcb board_imp.kicad_pcb \
     --nets RF --impedance 50 --layers F.Cu --clearance <floor> ...
 ```
 
@@ -449,7 +449,7 @@ just add `--impedance` — **and ride the fab floor for the gap and clearance,
 keeping the two EQUAL:**
 
 ```bash
-python3 -X utf8 route_diff.py board.kicad_pcb board_diff.kicad_pcb \
+python3 -X utf8 py_router/route_diff.py board.kicad_pcb board_diff.kicad_pcb \
     --nets "*USB*" "*LVDS*" --impedance 90 \
     --diff-pair-gap 0.1 --clearance 0.1 \
     --layers F.Cu In1.Cu In2.Cu B.Cu

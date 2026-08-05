@@ -294,8 +294,8 @@ python package_pcm.py --binary-dir ./path/to/release/artifacts
 
 **Fanout Tab:**
 - BGA fanout with exit margin, escape direction, differential pair support
-- Under-pad escape option for dense, fully-populated BGAs the channel router can't escape (issue #122) — see [BGA Fanout](bga_fanout/README.md#escape-methods)
-- "Optimize decoupling cap placement" option (off by default) — after fanout, nudges decoupling caps off foreign-net fanout vias and toward same-net balls (issue #130) — see [Placement](placement/README.md#place_fanout_clearancepy--decoupling-cap-clearance-repair-issue-130)
+- Under-pad escape option for dense, fully-populated BGAs the channel router can't escape (issue #122) — see [BGA Fanout](py_router/bga_fanout/README.md#escape-methods)
+- "Optimize decoupling cap placement" option (off by default) — after fanout, nudges decoupling caps off foreign-net fanout vias and toward same-net balls (issue #130) — see [Placement](py_router/placement/README.md#place_fanout_clearancepy--decoupling-cap-clearance-repair-issue-130)
 - QFN fanout with extension length configuration
 - Net selection for fanout operations
 
@@ -560,12 +560,12 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 | [Guide Corridor](docs/configuration.md#guide-corridor-options-preferred-route) | User-layer guide paths, waypoints, best-effort following |
 | [Power/Ground Planes](docs/route-plane.md) | Copper zones with automatic via placement |
 | [Utilities](docs/utilities.md) | DRC checker, connectivity checker, fanout generators, layer switcher, DRC-settings fixer |
-| [BGA Fanout](bga_fanout/README.md) | BGA escape routing generator |
-| [QFN Fanout](qfn_fanout/README.md) | QFN/QFP escape routing generator |
+| [BGA Fanout](py_router/bga_fanout/README.md) | BGA escape routing generator |
+| [QFN Fanout](py_router/qfn_fanout/README.md) | QFN/QFP escape routing generator |
 | [Rust Router](rust_router/README.md) | Building and using the Rust A* module |
 | [Power Net Analysis](docs/power-nets.md) | Power net detection, AI analysis, track width guidelines |
 | [Claude Skills](docs/claude-skills.md) | All nine AI skills: routing plans, power/high-speed/diff-pair analysis, stackup, plane mappings, failure diagnosis, board review |
-| [Placement](placement/README.md) | Placement optimization for routability |
+| [Placement](py_router/placement/README.md) | Placement optimization for routability |
 | [Integration Tests](tests/README.md) | Test scripts and performance benchmarks |
 | [Release Pipeline](docs/release-pipeline.md) | How to tag a release and submit it to the KiCad PCM (maintainers) |
 
@@ -573,88 +573,73 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 
 ```
 KiCadRoutingTools/
-├── place_optimize.py         # Main CLI - placement optimization (quench)
-├── place_route_loop.py       # Main CLI - router-in-the-loop placement repair
-├── route.py                  # Main CLI - single-ended routing
-├── route_diff.py             # Main CLI - differential pair routing
-├── route_planes.py           # Main CLI - power/ground plane via connections
-├── repair_planes.py  # CLI - repair disconnected plane regions
-├── plane_io.py               # Plane I/O utilities (zone extraction, output writing)
-├── plane_obstacle_builder.py # Obstacle map building for plane via placement
-├── plane_blocker_detection.py # Blocker detection and rip-up for plane vias
-├── plane_zone_geometry.py    # Voronoi zone computation for multi-net layers
-├── plane_resistance.py       # Plane resistance and current capacity calculations
-├── plane_region_connector.py # Detect and route between disconnected plane regions
-├── routing_config.py         # GridRouteConfig, GridCoord, DiffPair classes
-├── routing_defaults.py       # Default routing parameter values
-├── routing_exceptions.py     # Routing exception classes
-├── routing_state.py          # RoutingState class - tracks routing progress
-├── routing_context.py        # Helper functions for obstacle building
-├── routing_common.py         # Shared utilities for route.py and route_diff.py
-├── routing_utils.py          # Shared utilities (pos_key, etc.)
-├── obstacle_map.py           # Obstacle map building functions
-├── obstacle_cache.py         # Net obstacle caching for incremental builds
-├── obstacle_costs.py         # Stub/track proximity cost calculations
-├── bresenham_utils.py        # Bresenham line-walking utilities for grid operations
+├── py_router/                # Routing engine + CLI entry points (~100 modules)
+│   ├── place_optimize.py         # Main CLI - placement optimization (quench)
+│   ├── place_route_loop.py       # Main CLI - router-in-the-loop placement repair
+│   ├── route.py                  # Main CLI - single-ended routing (ends with the in-run plane finalize, #562)
+│   ├── route_diff.py             # Main CLI - differential pair routing
+│   ├── route_planes.py           # Main CLI - power/ground plane pours
+│   ├── repair_planes.py          # Standalone utility - repair disconnected plane regions (the chain step is absorbed into route.py's finalize, #562)
+│   ├── plane_io.py               # Plane I/O utilities (zone extraction, output writing)
+│   ├── plane_obstacle_builder.py # Obstacle map building for plane via placement
+│   ├── plane_blocker_detection.py # Blocker detection and rip-up for plane vias
+│   ├── plane_zone_geometry.py    # Voronoi zone computation for multi-net layers
+│   ├── plane_resistance.py       # Plane resistance and current capacity calculations
+│   ├── plane_region_connector.py # Detect and route between disconnected plane regions
+│   ├── routing_config.py         # GridRouteConfig, GridCoord, DiffPair classes
+│   ├── routing_defaults.py       # Default routing parameter values
+│   ├── routing_state.py          # RoutingState class - tracks routing progress
+│   ├── routing_common.py         # Shared utilities for route.py and route_diff.py
+│   ├── obstacle_map.py           # Obstacle map building functions
+│   ├── obstacle_cache.py         # Net obstacle caching for incremental builds
+│   ├── diff_pair_loop.py         # Differential pair routing loop
+│   ├── single_ended_loop.py      # Single-ended routing loop
+│   ├── reroute_loop.py           # Reroute queue processing
+│   ├── diff_pair_routing.py      # Diff pair A* routing implementation
+│   ├── single_ended_routing.py   # Single-ended A* routing implementation
+│   ├── net_ordering.py           # MPS, inside-out, and original ordering
+│   ├── rip_up_reroute.py         # Rip-up and reroute logic
+│   ├── length_matching.py        # Length matching with trombone meanders
+│   ├── kicad_parser.py           # KiCad .kicad_pcb file parser
+│   ├── kicad_writer.py           # KiCad S-expression generator
+│   ├── output_writer.py          # Route output and swap application
+│   ├── pcb_modification.py       # Add/remove routes from PCB data
+│   ├── impedance.py              # Impedance calculation (microstrip/stripline formulas)
+│   ├── check_drc.py              # DRC violation checker
+│   ├── check_connected.py        # Connectivity checker (with T-junction detection)
+│   ├── check_pads.py             # Pad-geometry sanity checker
+│   ├── check_weird.py            # Copper hygiene checker
+│   ├── fix_kicad_drc_settings.py # Make .kicad_pro DRC constraints consistent with the routed floors
+│   ├── copy_board.py             # Copy a board WITH its sibling .kicad_pro/.kicad_dru
+│   ├── list_nets.py              # List nets on a component
+│   ├── startup_checks.py         # Startup checks (Python deps, Rust library version)
+│   ├── bga_fanout.py             # BGA fanout CLI wrapper
+│   ├── bga_fanout/               # BGA fanout package (escape, reroute, layer balance, under-pad escape, ...)
+│   ├── qfn_fanout.py             # QFN/QFP fanout CLI wrapper
+│   ├── qfn_fanout/               # QFN/QFP fanout package (layout, geometry, types)
+│   ├── placement/                # Component placement package
+│   │   ├── quench.py             # Placement optimizer
+│   │   ├── fanout_clearance.py   # Fanout clearance evaluation
+│   │   ├── parser.py             # Courtyard boundary extraction
+│   │   ├── writer.py             # Footprint position modification
+│   │   ├── groups.py             # Group-move support
+│   │   ├── legality.py           # Placement legality checks
+│   │   └── utility.py            # Shared placement utilities
+│   └── ...                       # plus the rest of the engine modules — see Module Overview below
 │
-├── diff_pair_loop.py         # Differential pair routing loop
-├── single_ended_loop.py      # Single-ended routing loop
-├── reroute_loop.py           # Reroute queue processing
-├── phase3_routing.py         # Phase 3 multi-point tap routing
-├── diff_pair_routing.py      # Diff pair A* routing implementation
-├── single_ended_routing.py   # Single-ended A* routing implementation
-│
-├── net_ordering.py           # MPS, inside-out, and original ordering
-├── net_queries.py            # Net queries (diff pairs, MPS, endpoints)
-├── connectivity.py           # Stub endpoints, connected groups
-├── layer_swap_optimization.py # Upfront layer swap optimization
-├── layer_swap_fallback.py    # Fallback layer swap on failure
-├── stub_layer_switching.py   # Stub layer swap utilities
-├── mps_layer_swap.py         # MPS-aware layer swap for crossing conflicts
-├── polarity_swap.py          # P/N polarity swap handling
-├── target_swap.py            # Target assignment optimization
-├── rip_up_reroute.py         # Rip-up and reroute logic
-├── blocking_analysis.py      # Analyze blocking nets
-├── length_matching.py        # Length matching with trombone meanders
-│
-├── kicad_parser.py           # KiCad .kicad_pcb file parser
-├── kicad_writer.py           # KiCad S-expression generator
-├── output_writer.py          # Route output and swap application
-├── pcb_modification.py       # Add/remove routes from PCB data
-├── schematic_updater.py      # Update .kicad_sch files with pad swaps
-├── chip_boundary.py          # Chip boundary detection
-├── geometry_utils.py         # Shared geometry calculations
-├── impedance.py              # Impedance calculation (microstrip/stripline formulas)
-├── memory_debug.py           # Memory usage statistics
-│
-├── check_drc.py              # DRC violation checker
-├── check_connected.py        # Connectivity checker (with T-junction detection)
-├── check_orphan_stubs.py     # Orphan stub detector
-├── check_cycles.py           # Redundant-loop (cycle) + overlapping-via checker
-├── fix_kicad_drc_settings.py # Make .kicad_pro DRC constraints consistent with the routed floors (clearance, track/via/drill, hole, edge; courtyard/mask/footprint noise)
-├── bga_fanout.py             # BGA fanout CLI wrapper
-├── bga_fanout/               # BGA fanout package
-│   ├── __init__.py           # Main fanout logic and public API
-│   ├── types.py              # Track, BGAGrid, FanoutRoute, Channel, DiffPairPads
-│   ├── escape.py             # Escape channel finding and assignment
-│   ├── reroute.py            # Collision resolution and rerouting
-│   ├── layer_balance.py      # Layer rebalancing for even distribution
-│   ├── layer_assignment.py   # Layer assignment for collision avoidance
-│   ├── tracks.py             # Track generation and collision detection
-│   ├── geometry.py           # 45° stub and jog calculations
-│   ├── collision.py          # Low-level collision detection utilities
-│   ├── grid.py               # BGA grid analysis
-│   ├── diff_pair.py          # Differential pair detection
-│   └── constants.py          # Configuration constants
-├── qfn_fanout.py             # QFN/QFP fanout CLI wrapper
-├── qfn_fanout/               # QFN/QFP fanout package
-│   ├── __init__.py           # Main fanout logic and public API
-│   ├── layout.py             # Layout analysis functions
-│   ├── geometry.py           # Stub position calculations
-│   └── types.py              # QFNLayout, PadInfo, FanoutStub
-├── list_nets.py              # List nets on a component
-├── build_router.py           # Rust module build script (--clean to remove artifacts)
-├── startup_checks.py         # Startup checks (Python deps, Rust library version)
+├── py_tools/                 # Leaf diagnostic / analysis tools
+│   ├── check_impedance.py        # Verify impedance-controlled widths/gaps
+│   ├── check_orphan_stubs.py     # Orphan stub detector
+│   ├── check_cycles.py           # Redundant-loop (cycle) + overlapping-via checker
+│   ├── check_orthonormal.py      # Long non-orthonormal track detector
+│   ├── net_forensics.py          # Per-net copper forensics
+│   ├── kicad_unconnected.py      # Unconnected-item listing
+│   ├── validate_pcb_data.py      # PCBData validation
+│   ├── extract_pcb_geometry.py   # Geometry extraction
+│   ├── clean_ignored.py          # Remove ignored copper
+│   ├── analyze_power_paths.py    # Power-path analysis (backs /analyze-power-nets)
+│   ├── animate_fanout_clearance.py # Animate cap-placement repair
+│   └── _path.py                  # sys.path bootstrap so the tools import py_router
 │
 ├── tests/                    # Integration tests
 │   ├── test_fanout_and_route.py  # Full integration test (fanout + route)
@@ -663,6 +648,7 @@ KiCadRoutingTools/
 │   ├── test_interf_u.py          # 2-layer board with non-rectangular outline test
 │   ├── test_sonde_u.py           # Wide track routing test
 │   ├── run_utils.py              # Shared test utilities
+│   ├── gui_parity/               # CLI/GUI parity gates — see tests/gui_parity/README.md
 │   └── stress/                   # Real-world-board stress-test harness (run_queue.sh) — see tests/README.md
 │
 ├── rust_router/              # Rust A* implementation
@@ -672,20 +658,18 @@ KiCadRoutingTools/
 │   ├── differential_gui.py   # Differential pair routing tab
 │   ├── fanout_gui.py         # BGA/QFN fanout tab and net selection panel
 │   ├── planes_gui.py         # Power/ground planes tab
-│   ├── ai_gui.py         # AI tab (spawns claude headless, streams transcript)
-│   ├── ai_plan.py        # AI tab routing-plan orchestration
+│   ├── ai_gui.py             # AI tab (spawns the agent CLI headless, streams transcript)
+│   ├── ai_plan.py            # AI tab routing-plan orchestration
+│   ├── ai_backend.py         # Agent CLI backend selection (Claude Code / opencode)
+│   ├── movie_recorder.py     # Routing-movie capture for the GUI
 │   ├── board_swaps.py        # Shared board pad/net swap helpers
 │   ├── deps_check.py         # Plugin dependency checks
 │   ├── about_tab.py          # About tab with version info
 │   ├── gui_utils.py          # Shared GUI utilities
 │   └── settings_persistence.py  # Save/restore dialog settings between sessions
-├── placement/               # Component placement
-│   ├── quench.py            # Placement optimizer
-│   ├── fanout_clearance.py  # Fanout clearance evaluation
-│   ├── parser.py            # Courtyard boundary extraction
-│   ├── writer.py            # Footprint position modification
-│   └── utility.py           # Shared placement utilities
+├── build_router.py           # Rust module build script (--clean to remove artifacts)
 ├── install_plugin.py         # Plugin installer script
+├── kicad_files/              # Example and test boards
 ├── docs/                     # Documentation
 └── .claude/skills/           # Claude Code skills
     ├── analyze-power-nets/   # AI-powered power net analysis skill
@@ -701,9 +685,9 @@ KiCadRoutingTools/
 
 ## Module Overview
 
-One-line summaries below; the [Python API documentation](docs/python-api.md)
-has full per-module references (signatures, dataclass fields, gotchas) with
-runnable examples.
+One-line summaries below (all of these modules live in `py_router/`); the
+[Python API documentation](docs/python-api.md) has full per-module references
+(signatures, dataclass fields, gotchas) with runnable examples.
 
 ### Core Routing
 
@@ -750,7 +734,7 @@ Key functions in `net_queries.py`:
 - `compute_mps_net_ordering(pcb, net_ids)` - MPS algorithm for optimal net ordering
 - `find_differential_pairs(pcb, patterns)` - Detect P/N pairs from net names (suffix-style aware: `+`/`-` nets only pair with each other, never with `_P`/`_N` nets sharing the same base name)
 
-Key functions in `analyze_power_paths.py` (used by `/analyze-power-nets` skill):
+Key functions in `py_tools/analyze_power_paths.py` (used by `/analyze-power-nets` skill):
 - `analyze_pcb(filepath)` - Load PCB and extract components for analysis
 - `get_components_needing_analysis(components)` - Get components requiring AI classification
 - `classify_component(components, ref, role, current_ma, notes)` - Set component classification
@@ -807,7 +791,7 @@ Every tool prints its full option list with `--help`, and **[docs/configuration.
 | `route_diff.py` | Differential-pair routing | [Differential Pairs](docs/differential-pairs.md) |
 | `route_planes.py` | Power/ground plane via connections | [Plane Routing](docs/route-plane.md) |
 | `repair_planes.py` | Plane region repair + pad taps | [Plane Routing](docs/route-plane.md) |
-| `bga_fanout.py` / `qfn_fanout.py` | BGA / QFN escape fanout | [BGA](bga_fanout/README.md) · [QFN](qfn_fanout/README.md) · [Utilities](docs/utilities.md) |
+| `bga_fanout.py` / `qfn_fanout.py` | BGA / QFN escape fanout | [BGA](py_router/bga_fanout/README.md) · [QFN](py_router/qfn_fanout/README.md) · [Utilities](docs/utilities.md) |
 | `place_fanout_clearance.py` | Move decoupling caps off fanout vias | [Utilities](docs/utilities.md) |
 | `place_optimize.py` | Placement for routability | [Placement Optimization](docs/placement-optimization.md) |
 | `check_*.py` | DRC / connectivity / hygiene / pad checks | [Utilities](docs/utilities.md) |
