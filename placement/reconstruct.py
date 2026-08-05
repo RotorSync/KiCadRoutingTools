@@ -699,8 +699,13 @@ def conflict_offset_vectors(state, *, cluster_tol: float = 1.5,
         for b in refs[i + 1:]:
             pb = state.parts[b]
             sf = ctx.pair_shortfall(a, b)
-            if not (sf.stack or sf.pad > legality.EPS
-                    or sf.hole > legality.EPS):
+            # STACK/HOLE pairs only -- these are clearance-independent
+            # (physical intersection), so the no-op guarantee holds at ANY
+            # grading clearance. Clearance-SHORTFALL pairs are excluded:
+            # packed healthy designs read shortfalls at a too-strict
+            # clearance (measured: the corpus sweep at the 0.25 default
+            # minted a vector on a healthy board and moved it).
+            if not (sf.stack or sf.hole > legality.EPS):
                 continue
             offsets.append((pa.x - pb.x, pa.y - pb.y))
     clusters: List[List[Tuple[float, float]]] = []
