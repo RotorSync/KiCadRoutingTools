@@ -444,8 +444,8 @@ def generate_underpad_escape(footprint: Footprint,
     bounds = (grid.min_x - pad, grid.min_y - pad, grid.max_x + pad, grid.max_y + pad)
     occ = _Occ(bounds, res, layers)
 
-    # #563 PROTOTYPE (worktree): pour-preserving escape costs.
-    # KICAD_FANOUT_POUR_PRESERVE=<mm-equiv> (0/unset = off). For every zone
+    # Pour-preserving escape costs (#563, measured-and-declined, kept for A/B;
+    # KICAD_FANOUT_POUR_PRESERVE=<mm-equiv> arms, 0/unset = off). For every zone
     # whose layer is an escape layer, rasterize the PRE-escape fill inside
     # this occupancy window and charge escapes a fragility-style ramp: full
     # cost at fill boundaries/straits, zero deeper than ~1mm into the fill.
@@ -1872,7 +1872,7 @@ def generate_underpad_escape(footprint: Footprint,
         # way). The fill models must see THIS call's fresh copper (materialized
         # into pcb_data by the drop pass), so drop any stale per-board cache.
         _pour_models: Dict[Tuple[int, str], list] = {}
-        # DECLARED future pours (--plane-net-layers, worktree prototype): for a
+        # DECLARED future pours (--plane-net-layers): for a
         # declared (net, layer) with the layer on this BALL side, build a
         # SYNTHETIC board-rect zone and fill-model it against the copper that
         # exists NOW -- a predictor of whether the future pour will reach each
@@ -1947,7 +1947,7 @@ def generate_underpad_escape(footprint: Footprint,
                 n_pour += 1
                 r['pour'] += 1
                 continue
-            # TRACK-CONNECT (worktree prototype): a through-barrel here
+            # TRACK-CONNECT (env-gated, KICAD_FANOUT_TRACK_CONNECT=1 arms): a through-barrel here
             # perforates EVERY foreign pour whose fill covers this (x,y) --
             # the mechanism that shreds middle-layer rail planes. When it
             # would, and an already-placed same-net drop via sits within

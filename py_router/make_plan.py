@@ -5,17 +5,17 @@ A plan JSON is what the GUI's AI tab loads (Load... next to "Parsed result")
 and what ``run_plan.py`` executes headless. Every stress run writes one; this
 makes the same file on demand from any recorded manifest:
 
-    python3 make_plan.py runs_set1/myboard                 # a run directory
-    python3 make_plan.py runs_set1/myboard/redo_commands.sh -o plan.json
-    python3 make_plan.py runs_set1/myboard --list          # just show the steps
+    python3 py_router/make_plan.py runs_set1/myboard                 # a run directory
+    python3 py_router/make_plan.py runs_set1/myboard/redo_commands.sh -o plan.json
+    python3 py_router/make_plan.py runs_set1/myboard --list          # just show the steps
 
 **Recording your own chain.** The board-mutating tools self-record whenever
 ``REDO_MANIFEST`` points somewhere, so a hand-run chain becomes a plan too:
 
     export REDO_MANIFEST=$PWD/redo_commands.sh
-    python3 bga_fanout.py board.kicad_pcb s1.kicad_pcb --component U1
-    python3 route.py s1.kicad_pcb s2.kicad_pcb --nets '/SPI*'
-    python3 make_plan.py .            # -> plan.json, ready to Load in the GUI
+    python3 py_router/bga_fanout.py board.kicad_pcb s1.kicad_pcb --component U1
+    python3 py_router/route.py s1.kicad_pcb s2.kicad_pcb --nets '/SPI*'
+    python3 py_router/make_plan.py .            # -> plan.json, ready to Load in the GUI
 
 The conversion prunes superseded retries and dead-end branches (the same file
 dependency chain a replay runs), drops check/grade commands, and carries every
@@ -134,7 +134,7 @@ def main():
     shown = out if rel.startswith('..') else rel
     print("Load it in the GUI (AI tab -> Load... -> Run Selected Steps), "
           "or run it headless:")
-    print(f"  python3 run_plan.py <board>.kicad_pcb {shown} -o routed.kicad_pcb")
+    print(f"  python3 py_router/run_plan.py <board>.kicad_pcb {shown} -o routed.kicad_pcb")
     return 0
 
 

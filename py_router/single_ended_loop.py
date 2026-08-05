@@ -984,7 +984,8 @@ def route_single_ended_nets(
                         if already_tried:
                             continue
 
-                        # PROTOTYPE (worktree): pad-weighted net-positive VALUE
+                        # Env-gated experiment, measured neutral/negative (see
+                        # #480/#517 study); kept for A/B: pad-weighted net-positive VALUE
                         # GATE on the SE rip ladder. The victims' connected pads
                         # are a bird in hand; the attacker's pads are a bird in
                         # the bush (its retry may still fail, and queued victim
@@ -1171,7 +1172,8 @@ def route_single_ended_nets(
                             # Invalidate blocking analysis cache since we added segments
                             invalidate_obstacle_cache(obstacle_cache, net_id)
 
-                            # PROTOTYPE (worktree): frame arbitration on the
+                            # Env-gated experiment, measured neutral/negative
+                            # (see #480/#517 study); kept for A/B: frame arbitration on the
                             # SE ladder (#85 semantics brought from phase 3).
                             # Modes (env):
                             #   KICAD_SE_RIP_PROBE=1  probe victims, commit none

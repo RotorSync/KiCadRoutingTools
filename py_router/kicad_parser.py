@@ -5208,7 +5208,7 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) < 2:
-        print("Usage: python kicad_parser.py <input.kicad_pcb> [output.json]")
+        print("Usage: python py_router/kicad_parser.py <input.kicad_pcb> [output.json]")
         sys.exit(1)
 
     input_file = sys.argv[1]

@@ -17,10 +17,10 @@ are historical records, not runnable chains.
 
 Usage:
     # Auto-detect all zones in PCB:
-    python repair_planes.py input.kicad_pcb output.kicad_pcb
+    python py_router/repair_planes.py input.kicad_pcb output.kicad_pcb
 
     # Specific nets and layers:
-    python repair_planes.py input.kicad_pcb output.kicad_pcb \\
+    python py_router/repair_planes.py input.kicad_pcb output.kicad_pcb \\
         --nets GND --plane-layers B.Cu
 """
 from __future__ import annotations
@@ -1063,9 +1063,10 @@ def repair_planes(
     # which handles rip-up/restore safely. We still rip blockers for pad repair and
     # leave them UNROUTED (stripped) for that route.py pass to reconnect.
     if reroute_ripped_nets:
-        print("Note: --reroute-ripped-nets is deprecated and now a no-op. Ripped nets "
-              "are left unrouted; run route.py afterward to reconnect them (it does "
-              "rip-up/restore safely).")
+        print("Note: --reroute-ripped-nets is deprecated and now a no-op. Ripped "
+              "blocker nets are now reconnected in-run (restore-first, an "
+              "end-of-run reconnect pass, and custody restore on failure); no "
+              "separate route.py pass is needed.")
         reroute_ripped_nets = False
 
     # Plane nets are never ripped to clear a blocker (--rip-blocker-nets); only
@@ -3034,18 +3035,18 @@ def main():
         epilog="""
 Examples:
     # Auto-detect all zones in PCB:
-    python repair_planes.py input.kicad_pcb output.kicad_pcb
+    python py_router/repair_planes.py input.kicad_pcb output.kicad_pcb
 
     # Only process specific layers (all nets on those layers):
-    python repair_planes.py input.kicad_pcb output.kicad_pcb \\
+    python py_router/repair_planes.py input.kicad_pcb output.kicad_pcb \\
         --plane-layers B.Cu In1.Cu
 
     # Only process specific nets (on all layers they have zones):
-    python repair_planes.py input.kicad_pcb output.kicad_pcb \\
+    python py_router/repair_planes.py input.kicad_pcb output.kicad_pcb \\
         --nets GND +3.3V
 
     # Specific net/layer pairs (counts must match):
-    python repair_planes.py input.kicad_pcb output.kicad_pcb \\
+    python py_router/repair_planes.py input.kicad_pcb output.kicad_pcb \\
         --nets GND +3.3V --plane-layers B.Cu In1.Cu \\
         --max-track-width 1.0
 """
@@ -3134,9 +3135,10 @@ Examples:
     parser.add_argument("--max-rip-nets", type=int, default=defaults.PLANE_MAX_RIP_NETS,
                         help="Maximum number of blocker nets to rip per pad (default: 3)")
     parser.add_argument("--reroute-ripped-nets", action="store_true",
-                        help="DEPRECATED / no-op (issue #141 reverted): ripped nets are always "
-                             "left unrouted now -- run route.py afterward to reconnect them "
-                             "(it handles rip-up/restore safely). Accepted for compatibility.")
+                        help="DEPRECATED / no-op (issue #141 reverted): ripped blocker nets are now "
+                             "reconnected in-run (restore-first, an end-of-run reconnect pass, and "
+                             "custody restore on failure); no separate route.py pass is needed. "
+                             "Accepted for compatibility.")
     parser.add_argument("--power-nets", nargs="+", default=None,
                         help="Power net names that need wider tracks when re-routing ripped nets.")
     parser.add_argument("--power-nets-widths", nargs="+", type=float, default=None,

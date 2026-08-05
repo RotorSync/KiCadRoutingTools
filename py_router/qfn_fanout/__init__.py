@@ -501,7 +501,7 @@ def generate_qfn_fanout(footprint: Footprint,
     if _ov:
         print(f"  WARNING: {footprint.reference} has {len(_ov)} overlapping "
               f"different-net pad pair(s) - pad geometry looks wrong, fanout "
-              f"stubs may cross pads. Run: python3 check_pads.py <board> "
+              f"stubs may cross pads. Run: python3 py_router/check_pads.py <board> "
               f"--component {footprint.reference}")
 
     print(f"QFN/QFP Layout Analysis for {footprint.reference}:")

@@ -331,7 +331,9 @@ def run_reroute_loop(
                             if already_tried:
                                 continue
 
-                            # PROTOTYPE (worktree): churn gate v2 -- allow each
+                            # Env-gated experiment, measured neutral/negative
+                            # (see #480/#517 study); kept for A/B.
+                            # Churn gate v2 -- allow each
                             # net ONE committed rip; refuse rip sets containing
                             # a net already ripped >= K times (measured: 55/82
                             # ripped nets churn repeatedly and #134 refusals ~=
@@ -782,7 +784,9 @@ def run_reroute_loop(
                             if already_tried:
                                 continue
 
-                            # PROTOTYPE (worktree): churn gate v2 -- allow each
+                            # Env-gated experiment, measured neutral/negative
+                            # (see #480/#517 study); kept for A/B.
+                            # Churn gate v2 -- allow each
                             # net ONE committed rip; refuse rip sets containing
                             # a net already ripped >= K times (measured: 55/82
                             # ripped nets churn repeatedly and #134 refusals ~=

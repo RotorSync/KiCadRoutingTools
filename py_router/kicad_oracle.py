@@ -11,9 +11,11 @@ reported unconnected pair's EXACT endpoints (position + layer), and routes
 precisely those missing links with the plane-join router -- repeating until
 KiCad reports the processed nets complete or a round makes no progress.
 
-CLI-only by design: it shells out to kicad-cli (auto-detected; skipped with
-a note when absent). The GUI runs inside pcbnew where real fills are native
--- a future GUI equivalent should use them directly.
+Shells out to kicad-cli (auto-detected; skipped with a note when absent).
+Both fronts use it: the CLI runs it on the written file, and the GUI stages
+its live board to a temp file (batch_route's stage_board_fn in-run;
+gui_utils.run_kicad_oracle_on_live_board post-run) -- kicad-cli's exact fill
+needs a real file either way.
 """
 import env_knobs
 import json

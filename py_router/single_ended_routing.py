@@ -994,20 +994,20 @@ DYNAMIC_ITERATIONS_CEILING = 10_000_000
 
 
 def _dynamic_iterations(config: 'GridRouteConfig') -> Tuple[int, dict]:
-    """#529 (opt-in via KICAD_DYNAMIC_ITERATIONS): (effective_base, kwargs)
-    for a FULL search. With the knob on, the base is CLAMPED to 200k — a
-    chain's --max-iterations 1000000 was only ever papering over the static
-    cap, and the giant-heap 1M searches are where the time goes — and the
-    search may then earn +1x base tranches while its closest approach
-    (best_h, tracked in the Rust core) keeps improving, up to a flat 1e7
-    ceiling.
-    Scope: probe-scale budgets never extend — fast-fail retry configs clone
-    the config with max_iterations = (2x) max_probe_iterations (5k default)
-    precisely to give up early, so any base at or below 10k keeps its static
-    cap. Oracle, plane, and pose (diff-pair centerline) searches don't go
-    through this helper at all.
-    The kwarg is only passed when the knob is on, so default runs are
-    byte-identical and predate-0.19.2 grid_router binaries keep working."""
+    """#529 dynamic iterations (DEFAULT ON; KICAD_DYNAMIC_ITERATIONS=0 reverts to
+    static caps): (effective_base, kwargs) for a FULL search. The base is
+    min(config.max_iterations, KICAD_DYNAMIC_ITERATIONS_CLAMP) -- CLAMP defaults
+    to 1e7, i.e. no clamping (corpus: -29 incomplete nets over 150 boards); set
+    CLAMP=200000 as the deliberate speed-over-completion dial. The search may then
+    earn +1x base tranches while its closest approach (best_h, tracked in the Rust
+    core) keeps improving, up to a flat 1e7 ceiling.
+    Scope: probe-scale budgets never extend -- fast-fail retry configs clone the
+    config with max_iterations = (2x) max_probe_iterations (5k default) precisely
+    to give up early, so any base at or below 10k keeps its static cap. Oracle,
+    plane, and pose (diff-pair centerline) searches don't go through this helper
+    at all.
+    With the knob OFF no kwarg is passed, so such runs are byte-identical to the
+    pre-#529 caps and predate-0.19.2 grid_router binaries keep working."""
     if not env_knobs.DYNAMIC_ITERATIONS or config.max_iterations <= 10_000:
         return config.max_iterations, {}
     base = min(config.max_iterations, env_knobs.DYNAMIC_ITERATIONS_CLAMP)
@@ -2813,8 +2813,8 @@ def _pour_launch_region_cells(pcb_data, net_id, pad_info, pad_components,
     Returns {component_id: {(gx, gy, layer_idx): (fx, fy)}} for the caller
     to merge into its island-cell map (Phase 1's _island_cells AND Phase
     3's _p3_island_cells -- v2 only fed Phase 1, so the straggler edges
-    Phase 3 routes never saw fill targets at all). Gated by
-    KICAD_POUR_LAUNCH=1; {} when off or unavailable.
+    Phase 3 routes never saw fill targets at all). Default ON;
+    KICAD_POUR_LAUNCH=0 disables; {} when off or unavailable.
     """
     import os as _os
     if _os.environ.get('KICAD_POUR_LAUNCH', '1') != '1':
@@ -2951,8 +2951,8 @@ def _pour_launch_pair_anchors(pcb_data, net_id, sources, targets,
     short region-to-region joint connecting the pads through their pours.
 
     Returns (extra_source_rows, extra_target_rows) in the get_net_endpoints
-    row shape (gx, gy, layer_idx, fx, fy). Gated by KICAD_POUR_LAUNCH=1;
-    ([], []) when off, no zones, or unavailable.
+    row shape (gx, gy, layer_idx, fx, fy). Default ON; KICAD_POUR_LAUNCH=0
+    disables; ([], []) when off, no zones, or unavailable.
     """
     import os as _os
     if _os.environ.get('KICAD_POUR_LAUNCH', '1') != '1':
@@ -4587,7 +4587,8 @@ def _trim_after_fill_via(path, coord, layer_names, pcb_data, net_id):
     cluster). Truncate the path just after that via and weld the end to the
     via's own float point.
 
-    Only fires under KICAD_POUR_LAUNCH=1 and only when the path's end cell
+    Only fires with pour-launch enabled (default ON; KICAD_POUR_LAUNCH=0
+    disables) and only when the path's end cell
     resolves to a fill region of this net (i.e. this IS a pour-launch weld);
     the trim keeps the via pair itself, and the same-region requirement
     keeps completion honest (piercing an unrelated island is not arrival).

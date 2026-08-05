@@ -2323,7 +2323,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
     if _ov:
         print(f"  WARNING: {footprint.reference} has {len(_ov)} overlapping "
               f"different-net pad pair(s) - pad geometry looks wrong, fanout "
-              f"may be placed across pads. Run: python3 check_pads.py <board> "
+              f"may be placed across pads. Run: python3 py_router/check_pads.py <board> "
               f"--component {footprint.reference}")
 
     print(f"BGA Grid Analysis for {footprint.reference}:")
@@ -3283,7 +3283,7 @@ def main():
                              'underpad and keep whichever escapes more (issue #288).')
     parser.add_argument('--plane-net-layers', nargs='+', default=None,
                         metavar='NET:LAYER[,LAYER...]',
-                        help="Declare the FUTURE plane plan (worktree prototype): "
+                        help="Declare the FUTURE plane plan: "
                              "for each plane net, the layer(s) it will be poured "
                              "on, e.g. GND:In1.Cu,In4.Cu P3.3V:In2.Cu. Balls whose "
                              "OWN layer is declared get a synthetic-fill reach "
@@ -3386,7 +3386,7 @@ def main():
               "pitch reads half the real pad spacing, so the escape budget is "
               "impossible and the run takes minutes to hours.")
         print("  Use qfn_fanout, which handles these:")
-        print(f"    python3 qfn_fanout.py <board> --component "
+        print(f"    python3 py_router/qfn_fanout.py <board> --component "
               f"{footprint.reference} --escape-method underpad "
               f"--allow-via-in-pad ...")
         print("  Set KICAD_ALLOW_STAGGERED_BGA=1 to run anyway.")

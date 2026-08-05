@@ -4,7 +4,7 @@ Batch PCB Router using Rust-accelerated A* - Routes single-ended nets sequential
 For differential pair routing, use route_diff.py instead.
 
 Usage:
-    python route.py input.kicad_pcb output.kicad_pcb --nets "Net-(U2A-*)"
+    python py_router/route.py input.kicad_pcb output.kicad_pcb --nets "Net-(U2A-*)"
 
 Requires the Rust router module. Build it with:
     python3 build_router.py
@@ -414,7 +414,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     Every run ends with the in-run PLANE FINALIZE (#562, gate
     KICAD_PLANE_FINALIZE=1 default ON): for zone nets in this run's net
-    scope it runs the repair engine (taps + region joins), the shared
+    scope it runs the repair engine (taps + region joins; rip authority
+    gated by KICAD_FINALIZE_RIP=1, default ON), the shared
     cleanup pipeline, and the kicad-cli oracle verify, then folds stubborn
     oracle links into the final reconciliation as custody. The standalone
     repair step no longer exists in the chain; a pour is only welded by a
@@ -452,6 +453,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         cancel_check: Optional callable returning True if routing should be cancelled
         progress_callback: Optional callable(current, total, net_name) for progress updates
         return_results: If True, return results data instead of writing to file
+        stage_board_fn: Optional zero-arg callable returning a path to a staged
+            copy of the CURRENT board (the GUI passes a live-board saver). The
+            in-run plane finalize's kicad-cli oracle runs on this file instead of
+            input_file; None = CLI behavior (post-write oracle on the output).
 
     Returns:
         If return_results=False: (successful_count, failed_count, total_time)
@@ -3592,11 +3597,11 @@ Wildcard patterns supported:
   "Net-(*CLK*)"       - matches any net containing CLK
 
 Examples:
-  python route.py fanout_starting_point.kicad_pcb routed.kicad_pcb "Net-(U2A-DATA_*)"
-  python route.py input.kicad_pcb output.kicad_pcb "Net-(U2A-DATA_*)" --ordering mps
+  python py_router/route.py fanout_starting_point.kicad_pcb routed.kicad_pcb "Net-(U2A-DATA_*)"
+  python py_router/route.py input.kicad_pcb output.kicad_pcb "Net-(U2A-DATA_*)" --ordering mps
 
 For differential pair routing, use route_diff.py:
-  python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*"
+  python py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*"
 """
     )
     parser.add_argument("input_file", help="Input KiCad PCB file")

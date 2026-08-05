@@ -1,8 +1,11 @@
 """
 Single-pad plane tap placement with fine-pitch parameter escalation.
 
-Shared by route_planes.py (fine-pitch retry of failed taps, issue #104) and
-repair_planes.py (per-pad repair pass, issue #99).
+Shared by repair_planes.py (per-pad repair pass, issue #99 -- run in-run by
+route.py's #562 plane finalize) and the route-side rungs (#189 via-in-pad
+unblock, net_rescue, phase-3 inflight copper). route_planes.py's fine-pitch
+tap retry (#104) was deleted with the tap loop (#562); only
+clamp_tap_via_to_edge is still imported there.
 
 A "tap" is a stitching via near a pad plus an optional short trace from the
 via to the pad on the pad's layer. The default route_planes parameters

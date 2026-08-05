@@ -2996,7 +2996,7 @@ if __name__ == "__main__":
                   f"Opening it in KiCad will auto-create a project with DEFAULT "
                   f"constraints and report hundreds of phantom annular/track/hole "
                   f"violations on a fine-pitch board (#295). Generate one with:\n"
-                  f"    python3 fix_kicad_drc_settings.py {args.pcb}")
+                  f"    python3 py_router/fix_kicad_drc_settings.py {args.pcb}")
 
     # Issue #326: per-netclass clearances -- KiCad grades every pair at the
     # max of the two items' netclass values, so read the board's classes

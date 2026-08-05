@@ -685,7 +685,7 @@ def warn_if_missing_project_floor(input_pcb) -> bool:
           f"!!   - CLI and GUI runs will route DIFFERENT copper from this same board\n"
           f"!!\n"
           f"!! If this board was copied or renamed, bring its .kicad_pro along:\n"
-          f"!!   python3 copy_board.py src.kicad_pcb dst.kicad_pcb\n"
+          f"!!   python3 py_router/copy_board.py src.kicad_pcb dst.kicad_pcb\n"
           f"!! (Ignore only if this is a pristine board that has never been routed.)\n"
           f"{bar}{RESET}")
     return True

@@ -375,7 +375,7 @@ class CreatePlanesOptionsPanel(wx.Panel):
             "lattice (EMI/SI practice). Applies to the selected plane nets "
             "that own 2+ plane layers; every site is checked against the "
             "predicted zone fill and the same clearance/hole-to-hole/edge "
-            "rules as pad-tap vias.")
+            "checks as any routed via.")
         stitch_sizer.Add(self.stitch_vias, 0, wx.ALL, 5)
 
         self.stitch_edge_fence = wx.CheckBox(

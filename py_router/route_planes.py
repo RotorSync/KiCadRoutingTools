@@ -11,7 +11,7 @@ cannot reach. Run route.py over all nets (plane nets included) after this
 and grade THAT board, not the bare pour.
 
 Usage:
-    python route_planes.py input.kicad_pcb output.kicad_pcb --nets GND --plane-layers B.Cu
+    python py_router/route_planes.py input.kicad_pcb output.kicad_pcb --nets GND --plane-layers B.Cu
 """
 from __future__ import annotations
 
@@ -2025,7 +2025,7 @@ def _resolve_zone_clearance_impl(zone_clearance, clearance, min_thickness,
               f"{needed:.3f}); keeping it -- pass a smaller --zone-clearance "
               f"or expect isolated plane islands there")
         return zc
-    print(f"  Zone clearance escalated {zc:g} -> {needed:.3f}mm so the pour "
+    print(f"  Zone clearance tightened {zc:g} -> {needed:.3f}mm so the pour "
           f"threads the densest BGA lattice (gap {tightest:.3f}mm, min "
           f"width {min_thickness:g}; fab floor {floor:g})")
     return round(needed, 4)
@@ -2715,7 +2715,9 @@ def create_plane(
 ) -> Union[Tuple[int, int, int],
            Tuple[int, int, int, list, list, list, int, list]]:
     """
-    Create copper plane zones and place vias to connect target pads for multiple nets.
+    Create copper pour zones for multiple nets (#562 bare pour), plus optional via
+    features (thermal arrays #487, stitch vias #485); per-pad tap vias are deferred
+    to the route step.
 
     Args:
         net_names: List of net names to process (e.g., ['GND', 'VCC'])
@@ -2752,7 +2754,8 @@ def create_plane(
         return_results=True (GUI): the 10-tuple
             (total_vias_placed, total_traces_added, total_pads_needing_vias,
              new_vias, new_segments, new_zones, total_failed_pads,
-             ripped_net_ids).
+             ripped_net_ids, reconnect_swap_data (#484 H3),
+             reconnect_strips (#508)).
         Every early/error exit returns the caller-appropriate shape via
         _empty_plane_results (never a short tuple).
     """
@@ -2857,7 +2860,8 @@ def create_plane(
                                  None)
             if same_net_zone:
                 print(f"Note: zone for '{net_name}' already exists on {plane_layer} - "
-                      f"keeping it and only placing stitching vias")
+                      f"keeping it (no new zone; thermal-array/--stitch-vias features "
+                      f"still apply; pads are welded by the route step)")
                 should_create_zones.append(False)
             else:
                 should_create_zones.append(True)
@@ -3121,7 +3125,7 @@ def create_plane(
         print(f"  SMD pads on {plane_layer} (no via needed): {pads_direct}")
         if pads_already_connected:
             print(f"  SMD pads already routed to plane (no via needed): {pads_already_connected}")
-        print(f"  SMD pads on other layers (via needed): {pads_need_via}")
+        print(f"  SMD pads kept for thermal via arrays (via needed): {pads_need_via}")
         if pads_off_board:
             print(f"  {RED}Pads OUTSIDE the board outline (unreachable, skipped, #291): "
                   f"{pads_off_board}{RESET}")
@@ -3247,7 +3251,7 @@ def create_plane(
         # nets' pads) and never read since the tap loop went.)
 
         if pads_needing_vias:
-            print(f"\nConnecting {len(pads_needing_vias)} pads to {plane_layer} plane:")
+            print(f"\nPlacing thermal via arrays under {len(pads_needing_vias)} exposed pad(s) on {plane_layer}:")
 
         # THERMAL VIA ARRAYS ONLY (#487). The plane step does no routing:
         # it places no tap vias and draws no traces, so every other pad that
@@ -3666,10 +3670,11 @@ def create_plane(
             if geo_failed != total_failed_pads:
                 print(f"\n  {geo_failed} pad(s) are not connected to their "
                       f"plane by the pour alone -- EXPECTED (#562): the plane "
-                      f"step places no taps, so these are welded by the route "
-                      f"step's pour-launch and completed by its in-run plane "
-                      f"finalize. Grade the board AFTER the route step, not "
-                      f"here (see per-net breakdown above).")
+                      f"step places no taps. They are welded during the route "
+                      f"step's normal routing (pour-launch); its in-run "
+                      f"finalize then verifies against KiCad's exact fill and "
+                      f"repairs any residue. Grade the board AFTER the route "
+                      f"step, not here (see per-net breakdown above).")
 
     if progress_callback:
         progress_callback(1, 1, "Plane creation complete")
@@ -3734,15 +3739,17 @@ def main():
     from redo_record import record_invocation
     record_invocation()  # stress-test redo manifest (#132); no-op unless REDO_MANIFEST set
     parser = argparse.ArgumentParser(
-        description="Create copper zones with via stitching to net pads",
+        description="Create copper pour zones (#562 bare pour: no per-pad taps -- "
+                    "pads are welded by the route step). Optional thermal via arrays, "
+                    "area via stitching, and board-edge via fence.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
     # Single net:
-    python route_planes.py input.kicad_pcb output.kicad_pcb --nets GND --plane-layers B.Cu
+    python py_router/route_planes.py input.kicad_pcb output.kicad_pcb --nets GND --plane-layers B.Cu
 
     # Multiple nets (each net paired with corresponding plane layer):
-    python route_planes.py input.kicad_pcb output.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu
+    python py_router/route_planes.py input.kicad_pcb output.kicad_pcb --nets GND +3.3V --plane-layers In1.Cu In2.Cu
 
 """
     )
@@ -3836,8 +3843,9 @@ Examples:
     # Debug options
     parser.add_argument("--dry-run", action="store_true", help="Analyze without writing output")
     parser.add_argument("--skip-existing-zones", action="store_true",
-                        help="Keep an existing same-net zone (don't recreate) and only place stitching vias; "
-                             "tolerate other-net zones on the same layer (e.g. a GND island under an RF feed)")
+                        help="Keep an existing same-net zone (don't recreate); "
+                             "tolerate other-net zones on the same layer (e.g. a GND island under an RF feed). "
+                             "Optional via features (--stitch-vias, thermal arrays) still run")
     parser.add_argument("--verbose", "-v", action="store_true", help="Print detailed DEBUG messages")
     parser.add_argument("--debug-lines", action="store_true", help="Output MST routes on User.1, User.2, etc. per net")
     parser.add_argument("--add-teardrops", action="store_true",
@@ -3852,7 +3860,7 @@ Examples:
              "island taps), validated against KiCad's own exact fill (one "
              "pcbnew refill; a site off the net's main filled cluster is "
              "rejected rather than anchoring an isolated island), and the "
-             "same obstacle/hole-to-hole/edge checks pad-tap vias use.")
+             "same obstacle/hole-to-hole/edge checks as any routed via.")
     parser.add_argument("--stitch-pitch", type=float, default=defaults.STITCH_PITCH,
         help=f"Lattice pitch for --stitch-vias in mm (default: {defaults.STITCH_PITCH})")
     parser.add_argument("--stitch-max-freq", type=float, default=None,

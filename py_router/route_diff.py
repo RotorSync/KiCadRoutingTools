@@ -2,7 +2,7 @@
 Batch Differential Pair PCB Router using Rust-accelerated A* - Routes differential pairs.
 
 Usage:
-    python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*"
+    python py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*"
 
 All nets matching the patterns are treated as differential pairs (P/N pairs).
 Nets with _P/_N, P/N, or +/- suffixes will be paired and routed together.
@@ -10,9 +10,9 @@ Nets only pair within the same suffix convention (e.g. CLK+ pairs with CLK-,
 never with an unrelated CLK_N).
 
 Requires the Rust router module. Build it with:
-    cd rust_router && cargo build --release
-    cp target/release/grid_router.dll grid_router.pyd  # Windows
-    cp target/release/libgrid_router.so grid_router.so  # Linux
+    python3 build_router.py
+(never bare `cargo build` -- build_router.py also places the library and
+verifies the version; see CLAUDE.md).
 """
 from __future__ import annotations
 
@@ -1553,8 +1553,8 @@ All nets matching the patterns are treated as differential pairs.
 Nets with _P/_N, P/N, or +/- suffixes will be paired and routed together.
 
 Examples:
-  python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*"
-  python route_diff.py input.kicad_pcb output.kicad_pcb --nets "Net-(U1*DQS*)" "Net-(U1*CK_*)"
+  python py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*"
+  python py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "Net-(U1*DQS*)" "Net-(U1*CK_*)"
 """
     )
     parser.add_argument("input_file", help="Input KiCad PCB file")
