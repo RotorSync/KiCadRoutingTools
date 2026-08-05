@@ -213,6 +213,7 @@ def legality_findings(model) -> Dict[str, object]:
         return cached
     out = {'oob_refs_pad_copper': [], 'oob_refs_courtyard': [],
            'pad_conflict_pairs_refs': [], 'hole_conflict_pairs_refs': [],
+           'body_overlap_pairs_refs': [],
            'locked_refs': sorted(r for r, p in model.parts().items()
                                  if getattr(p, 'locked', False))}
     state = getattr(model, 'state', None)
@@ -246,6 +247,11 @@ def legality_findings(model) -> Dict[str, object]:
                 if sf.hole > 1e-6:
                     out['hole_conflict_pairs_refs'].append(
                         [a, bb, round(sf.hole, 4)])
+                # run-6: any-net cross-footprint pad STACKS (the assembly
+                # channel; the shipped C14-on-R14 class) -- what the
+                # checklist's b_body_overlap_pairs key reports
+                if sf.stack:
+                    out['body_overlap_pairs_refs'].append([a, bb])
     if state is not None and not getattr(model, 'no_outline', False):
         gate = getattr(state, 'edge_gate', None)
         if gate is not None:
@@ -438,6 +444,28 @@ def draw_legality(d, r, model, *, side=None):
         rad = _w(r, 0.8, floor=6)
         d.ellipse([mx - rad, my - rad, mx + rad, my + rad],
                   outline=C_CONFLICT, width=_w(r, 0.12))
+    # run-6: BODY STACKS (any-net pad intersection -- the assembly channel).
+    # Both courtyards in fail-red, FILLED intersection of the pad extents:
+    # run 5's C14-on-R14 was drawn as two ordinary dim rectangles and read
+    # as clean; a stack must be unmissable in the picture the mandate-8
+    # reads are performed on.
+    for a, bb in fnd['body_overlap_pairs_refs']:
+        pa = state.parts.get(a)
+        pb = state.parts.get(bb)
+        if pa is None or pb is None:
+            continue
+        for ref in (a, bb):
+            rect = model.rect(ref)
+            if rect is not None:
+                d.rectangle(_rect_pts(r, rect), outline=C_CONFLICT,
+                            width=_w(r, 0.16))
+        ea = ctx.parts[a].extent(pa.x, pa.y, pa.rot)
+        eb = ctx.parts[bb].extent(pb.x, pb.y, pb.rot)
+        if ea is not None and eb is not None:
+            ix = (max(ea[0], eb[0]), max(ea[1], eb[1]),
+                  min(ea[2], eb[2]), min(ea[3], eb[3]))
+            if ix[2] > ix[0] and ix[3] > ix[1]:
+                d.rectangle(_rect_pts(r, ix), fill=C_CONFLICT)
 
 
 def draw_ghosts(d, r, model, moves, *, width_mm=0.1):
@@ -622,6 +650,11 @@ def caption(spec: PanelSpec, extra: Optional[Dict] = None) -> str:
             bits.append(f"{k} " + fmt.format(m[k]))
     if m.get('overlap_area') is not None:
         bits.append(f"overlap {m['overlap_area']:.2f}mm2")
+    if m.get('pad_intersection_pairs'):
+        # run-6: a stack is never cosmetic -- name it in the caption (the
+        # run-5 caption printed the aggregate scalar next to a zero-pair
+        # checklist and the stack read as noise)
+        bits.append(f"BODY-STACKS {m['pad_intersection_pairs']:.0f}")
     if m.get('pad_conflict_pairs') is not None:
         bits.append(f"pad-conflicts {m['pad_conflict_pairs']:.0f}")
     if m.get('hole_shortfall'):
@@ -695,7 +728,13 @@ Examples:
     p.add_argument('--max-focus', type=int, default=6)
     p.add_argument('--zoom-pad', type=float, default=2.0, metavar='MM')
     p.add_argument('--per-side', action='store_true',
-                   help='emit an F and a B panel instead of one flattened view')
+                   help='force an F and a B panel (run-6: boards with '
+                        'back-side parts get per-side panels by DEFAULT; '
+                        'this flag only matters with --flat semantics)')
+    p.add_argument('--flat', action='store_true',
+                   help='one flattened panel even when the board has '
+                        'back-side parts (the pre-run-6 default; a B part '
+                        'draws over an F part with no distinction)')
     _bool_pair(p, 'borders', True, 'draw component courtyards (default: on)')
     _bool_pair(p, 'labels', True, 'draw component references (default: on)')
     _bool_pair(p, 'ratsnest', True, 'draw airwires (default: on)')
@@ -864,14 +903,21 @@ def main(argv=None):
         # frame follows the PARTS rather than the outline.
         view = union_view([model.rect(r) for r in model.parts()], 5.0)
 
-    sides = ('F', 'B') if args.per_side else (None,)
-    if args.per_side:
-        back = sum(1 for fp in pcb.footprints.values()
-                   if (fp.layer or '').startswith('B'))
-        if back == 0 and 'B.Cu' not in pcb.board_info.copper_layers:
-            sides = (None,)
-            if not args.quiet:
-                print("  (no back-side footprints and no B.Cu: skipping the B panel)")
+    # Run-6: per-side panels are the DEFAULT whenever the board actually
+    # carries back-side footprints. The flattened single panel draws a
+    # B-side part on top of an F-side part with no distinction, and that is
+    # exactly how run 5's JP1(B)-under-SW1(F) -- correct, identical on the
+    # human board -- read as an overlap to the human eye. --per-side keeps
+    # forcing panels; --flat restores the old single view.
+    back = sum(1 for fp in pcb.footprints.values()
+               if (fp.layer or '').startswith('B'))
+    want_sides = args.per_side or (back > 0 and not args.flat)
+    sides = ('F', 'B') if want_sides else (None,)
+    if args.per_side and back == 0 \
+            and 'B.Cu' not in pcb.board_info.copper_layers:
+        sides = (None,)
+        if not args.quiet:
+            print("  (no back-side footprints and no B.Cu: skipping the B panel)")
 
     panels = []
     for side in sides:
@@ -974,7 +1020,14 @@ def main(argv=None):
                 'a_off_outline': {
                     'pad_copper': fnd['oob_refs_pad_copper'],
                     'courtyard': fnd['oob_refs_courtyard']},
-                'b_overlap_pairs': fnd['pad_conflict_pairs_refs'],
+                # run-6 key honesty: the old 'b_overlap_pairs' NAME carried
+                # the PAD-CLEARANCE channel, and a reader auditing overlap
+                # with b_overlap_pairs=[] concluded there was none while two
+                # parts sat stacked (the shipped C14-on-R14). The clearance
+                # channel now lives under its true name; b_body_overlap_pairs
+                # reports what the old name promised.
+                'b_pad_clearance_pairs': fnd['pad_conflict_pairs_refs'],
+                'b_body_overlap_pairs': fnd['body_overlap_pairs_refs'],
                 'c_hole_conflicts': fnd['hole_conflict_pairs_refs'],
                 'c_locked_refs': fnd['locked_refs'],
                 'd_moved': {'moved': len(moves),

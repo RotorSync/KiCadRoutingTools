@@ -450,7 +450,10 @@ def test_json_out_writes_a_file_with_instrument_and_checklist():
         assert inst['before'].endswith('interf_u_unrouted.kicad_pcb')
         assert inst['size'] == 320
         cl = doc['checklist']
-        assert set(cl) == {'a_off_outline', 'b_overlap_pairs',
+        # run-6: 'b_overlap_pairs' was renamed to its honest channel name
+        # (it carried pad CLEARANCE pairs) and the body channel was added.
+        assert set(cl) == {'a_off_outline', 'b_pad_clearance_pairs',
+                           'b_body_overlap_pairs',
                            'c_hole_conflicts', 'c_locked_refs', 'd_moved'}
         assert cl['d_moved'] == {'moved': 22, 'expected': 22, 'match': True}
         assert doc['moved_refs'] and all(

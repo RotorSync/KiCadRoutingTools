@@ -70,3 +70,27 @@ class TestCheckAssemblyCLI(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestRenderBodyChannel(unittest.TestCase):
+    def test_render_checklist_names_the_stack(self):
+        """The render JSON's b_body_overlap_pairs must name the stacked
+        pair (run 5's render said b_overlap_pairs=[] while C14 sat on R14
+        -- the key carried the wrong channel)."""
+        if not os.path.exists(FINAL5):
+            self.skipTest('run-5 deliverable not present')
+        env = dict(os.environ, PYTHONPATH=ROOT, PYTHONIOENCODING='utf-8',
+                   KRT_NO_BANNER='1')
+        with tempfile.TemporaryDirectory() as td:
+            jp = os.path.join(td, 'r.json')
+            r = subprocess.run(
+                [sys.executable, '-X', 'utf8',
+                 os.path.join(ROOT, 'render_placement.py'), FINAL5,
+                 '--json-out', jp, '-o', os.path.join(td, 'r.png'),
+                 '--size', '320', '--supersample', '1'],
+                capture_output=True, text=True, env=env, cwd=ROOT)
+            self.assertEqual(r.returncode, 0, r.stderr[-400:])
+            doc = json.load(open(jp, encoding='utf-8'))
+            cl = doc['checklist']
+            self.assertIn(['C14', 'R14'], cl['b_body_overlap_pairs'])
+            self.assertIn('b_pad_clearance_pairs', cl)
