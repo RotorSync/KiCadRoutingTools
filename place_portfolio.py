@@ -362,17 +362,25 @@ def main():
     from placement.floorplan import UntrustworthyOutline
     baseline_overlap = baseline.metrics.get('overlap_area', 0.0)
     baseline_oob = baseline.metrics.get('oob_count', 0)
+    baseline_pad_pairs = baseline.metrics.get('pad_conflict_pairs', 0) or 0
+    baseline_hole = baseline.metrics.get('hole_shortfall', 0.0) or 0.0
     try:
         for c in cands:
             portfolio.score_candidate(
                 c, free=free, baseline_overlap=baseline_overlap,
-                baseline_oob=baseline_oob, clearance=args.clearance,
+                baseline_oob=baseline_oob,
+                baseline_pad_pairs=baseline_pad_pairs,
+                baseline_hole_shortfall=baseline_hole,
+                clearance=args.clearance,
                 board_edge_clearance=args.board_edge_clearance,
                 grid_step=args.grid_step, ignore_nets=args.ignore_nets,
                 intent=intent, group_sources=sources)
         portfolio.score_candidate(
             baseline, free=free, baseline_overlap=baseline_overlap,
-            baseline_oob=baseline_oob, clearance=args.clearance,
+            baseline_oob=baseline_oob,
+            baseline_pad_pairs=baseline_pad_pairs,
+            baseline_hole_shortfall=baseline_hole,
+            clearance=args.clearance,
             board_edge_clearance=args.board_edge_clearance,
             grid_step=args.grid_step, ignore_nets=args.ignore_nets,
             intent=intent, group_sources=sources)

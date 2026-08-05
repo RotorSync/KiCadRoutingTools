@@ -100,6 +100,22 @@ Examples:
                              "(default: none, i.e. per-part moves only)")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Print each accepted move")
+    parser.add_argument("--courtyard-only", action="store_true",
+                        help="Disable the pad+drill legality layer and gate on "
+                             "courtyard rects only (the pre-layer behavior). "
+                             "Escape hatch for A/B comparison; the layer is ON "
+                             "by default because a quench that walks copper "
+                             "into a neighbor's clearance is a defect")
+    parser.add_argument("--min-gain-per-mm", type=float, default=0.1,
+                        help="A move must improve the objective by at least "
+                             "this much per mm of displacement (anti-churn; "
+                             "0 restores the accept-any-improvement behavior; "
+                             "default: 0.1)")
+    parser.add_argument("--move-unconnected", action="store_true",
+                        help="Allow parts with no connected pins (mounting "
+                             "holes, fiducials) to move. They are frozen by "
+                             "default: the airwire cost cannot see them, so "
+                             "only halo/edge terms decide where they go")
     add_board_state_args(parser)
     add_lock_advisor_args(parser)
     add_tidiness_args(parser)
@@ -164,6 +180,18 @@ Examples:
     if sources:
         print(describe(blocks))
 
+    # Exact pad/hole legality of the INPUT (file poses): the before half of
+    # the report pair. Gate-currency tallies live inside the quench; this is
+    # the phantom-free number an auditor compares.
+    from placement.legality import grade_pad_legality
+    legality_before = None
+    if not args.courtyard_only:
+        legality_before = grade_pad_legality(pcb_data, args.clearance)
+        print(f"Pad legality before: {legality_before['pad_conflicts']} "
+              f"conflict pair(s), {legality_before['hole_conflicts']} hole "
+              f"conflict(s), {legality_before['oob_pad_count']} part(s) with "
+              f"pad copper off-board")
+
     ratsnest = {}
     placements = quench(
         pcb_data,
@@ -193,6 +221,9 @@ Examples:
         metrics_out=ratsnest,
         groups=blocks,
         verbose=args.verbose,
+        pad_legality=not args.courtyard_only,
+        min_gain_per_mm=args.min_gain_per_mm,
+        move_unconnected=args.move_unconnected,
     )
 
     print(f"{len(placements)} parts moved")
@@ -225,6 +256,26 @@ Examples:
         'cost_after': after.get('total'),
     }
     summary.update(ratsnest.get('legality', {}))
+    # After half of the exact report pair, graded on the WRITTEN file so it
+    # covers exactly what the next step will read. WARN on any worsened
+    # category -- the in-run gates should make this impossible; a warning here
+    # means a gate has a hole and is worth a bug report.
+    if legality_before is not None:
+        legality_after = grade_pad_legality(parse_kicad_pcb(args.output_file),
+                                            args.clearance)
+        print(f"Pad legality after: {legality_after['pad_conflicts']} "
+              f"conflict pair(s), {legality_after['hole_conflicts']} hole "
+              f"conflict(s), {legality_after['oob_pad_count']} part(s) with "
+              f"pad copper off-board")
+        for key in ('pad_conflicts', 'hole_conflicts', 'oob_pad_count'):
+            summary[f'{key}_before'] = legality_before[key]
+            summary[f'{key}_after'] = legality_after[key]
+            if legality_after[key] > legality_before[key]:
+                print(f"WARNING: {key} WORSENED "
+                      f"{legality_before[key]} -> {legality_after[key]} -- "
+                      f"the legality gate should have prevented this")
+        summary['pad_shortfall_before'] = legality_before['pad_shortfall']
+        summary['pad_shortfall_after'] = legality_after['pad_shortfall']
     print("JSON_SUMMARY: " + json.dumps(summary))
 
 

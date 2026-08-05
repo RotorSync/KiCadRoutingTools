@@ -452,3 +452,445 @@ def placement_out_of_board(parts: Sequence[GradedPart], board_info,
             amount += amt
             area += gate.out_of_board_area(p.rect)
     return OutOfBoard(count=count, amount=amount, area=area)
+
+
+# --- pad + drill legality layer ----------------------------------------------
+# The courtyard model above cannot see pad copper or drill holes: a part with
+# no drawn courtyard falls back to its pad bbox with zero margin, the swap
+# phase exchanges nets under identical courtyards, and an NPTH mounting hole
+# is invisible on its own side. This layer adds the missing geometry in the
+# GATE currency (rotation-inflated axis-aligned pad rects, the proven
+# fanout_clearance._Cap pattern): conservative -- it can falsely reject, never
+# falsely accept. Exact pad geometry (check_drc) is used only by
+# `grade_pad_legality` for REPORTS, so summaries carry no AABB phantoms.
+#
+# Baseline semantics: engines gate moves per-PAIR against the SEED poses
+# ("never worse than the board you were handed"), so pre-existing violations
+# on dense or by-design-overhanging boards do not freeze the optimizer, while
+# a NEW different-net pad intersection (a short) is never admitted.
+
+class PairShortfall(NamedTuple):
+    """Pad/hole interference between two parts, in the AABB gate currency."""
+    pad: float          # summed different-net pad clearance shortfall (mm)
+    pad_overlap: bool   # any different-net pad rects INTERSECT (a short)
+    hole: float         # summed pad-copper-into-hole-keepout penetration (mm)
+
+
+ZERO_SHORTFALL = PairShortfall(0.0, False, 0.0)
+
+
+class PartPads:
+    """Pose-owning pad/hole model for one footprint.
+
+    Offsets are captured in a seed-relative frame and re-derived per DELTA
+    rotation (the `_Cap.pad_rects` pattern) because parser `pad.global_x` is
+    stale after an in-memory footprint move -- this class owns the pose->pad
+    transform. Half-extents fold `rect_rotation` into an axis-aligned bbox,
+    exact for the axis-aligned pads that dominate placement and conservative
+    for the rest.
+    """
+
+    __slots__ = ('ref', 'side', 'has_tht', 'seed_rot', 'pads_local',
+                 'holes_local', 'n_pads', '_pad_cache', '_hole_cache',
+                 '_ext_cache')
+
+    def __init__(self, fp, clearance: float):
+        # Local imports: check_drc pulls the whole DRC stack (see the
+        # BoardOutlineGate note); kicad_parser is cheap but keeps the module's
+        # import surface unchanged for existing consumers.
+        from check_drc import _pad_has_no_copper
+        from kicad_parser import pad_drill_circles
+        import routing_defaults as defaults
+
+        self.ref = fp.reference
+        self.side = footprint_side(fp)
+        self.has_tht = footprint_has_through_pads(fp)
+        self.seed_rot = (fp.rotation or 0.0) % 360
+        self.pads_local = []    # (off_x, off_y, half_x, half_y, net_id, pside)
+        self.holes_local = []   # (off_x, off_y, radius) -- NPTH keepouts, inflated
+        npth_grow = max(0.0, defaults.NPTH_TO_TRACK_CLEARANCE - clearance)
+        for p in fp.pads:
+            if _pad_has_no_copper(p):
+                # Copper-less drilled pad (NPTH mounting hole): the DRILL still
+                # removes copper closer than the NPTH-to-track floor. Inflation
+                # matches fanout_clearance's foreign-pad keepouts.
+                if (p.drill or 0) > 0:
+                    for hx, hy, hd in pad_drill_circles(p):
+                        self.holes_local.append(
+                            (hx - fp.x, hy - fp.y, hd / 2.0 + npth_grow))
+                continue
+            copper = [l for l in p.layers if str(l).endswith('.Cu')]
+            if not copper:
+                continue    # paste/mask-only aperture
+            through = (p.drill or 0) > 0
+            pside = None if through else (
+                'B' if any(str(l).startswith('B') for l in copper) else 'F')
+            tilt = math.radians(getattr(p, 'rect_rotation', 0.0) or 0.0)
+            c, s = abs(math.cos(tilt)), abs(math.sin(tilt))
+            hx, hy = p.size_x / 2.0, p.size_y / 2.0
+            self.pads_local.append((p.global_x - fp.x, p.global_y - fp.y,
+                                    hx * c + hy * s, hx * s + hy * c,
+                                    p.net_id, pside))
+        self.n_pads = len(self.pads_local)
+        self._pad_cache: Dict[float, list] = {}
+        self._hole_cache: Dict[float, list] = {}
+        self._ext_cache: Dict[float, Tuple[float, float, float, float]] = {}
+
+    def _delta_key(self, rot: float) -> float:
+        return round(((rot or 0.0) - self.seed_rot) % 360, 3)
+
+    def _rotated(self, rot: float):
+        key = self._delta_key(rot)
+        cache = self._pad_cache.get(key)
+        if cache is None:
+            rad = math.radians(-key)
+            c, s = math.cos(rad), math.sin(rad)
+            swap = round(key) % 180 == 90
+            cache = []
+            for ox, oy, hx, hy, net, pside in self.pads_local:
+                rx = ox * c - oy * s
+                ry = ox * s + oy * c
+                HX, HY = (hy, hx) if swap else (hx, hy)
+                cache.append((rx, ry, HX, HY, net, pside))
+            self._pad_cache[key] = cache
+        return cache
+
+    def pad_rects(self, x: float, y: float, rot: float):
+        """[(x0, y0, x1, y1, net_id, pside)] at the given pose."""
+        out = []
+        for ox, oy, HX, HY, net, pside in self._rotated(rot):
+            cx, cy = x + ox, y + oy
+            out.append((cx - HX, cy - HY, cx + HX, cy + HY, net, pside))
+        return out
+
+    def hole_circles(self, x: float, y: float, rot: float):
+        """[(cx, cy, radius)] NPTH keepout circles at the given pose."""
+        key = self._delta_key(rot)
+        cache = self._hole_cache.get(key)
+        if cache is None:
+            rad = math.radians(-key)
+            c, s = math.cos(rad), math.sin(rad)
+            cache = [(ox * c - oy * s, ox * s + oy * c, r)
+                     for ox, oy, r in self.holes_local]
+            self._hole_cache[key] = cache
+        return [(x + ox, y + oy, r) for ox, oy, r in cache]
+
+    def extent_local(self, rot: float):
+        """Bbox over pads and holes at delta-rot, in the part frame (cached).
+        None when the part has neither copper pads nor holes."""
+        key = self._delta_key(rot)
+        ext = self._ext_cache.get(key)
+        if ext is None:
+            xs0, ys0, xs1, ys1 = [], [], [], []
+            for ox, oy, HX, HY, _n, _s in self._rotated(rot):
+                xs0.append(ox - HX); ys0.append(oy - HY)
+                xs1.append(ox + HX); ys1.append(oy + HY)
+            for cx, cy, r in self.hole_circles(0.0, 0.0, rot):
+                xs0.append(cx - r); ys0.append(cy - r)
+                xs1.append(cx + r); ys1.append(cy + r)
+            if not xs0:
+                ext = ()
+            else:
+                ext = (min(xs0), min(ys0), max(xs1), max(ys1))
+            self._ext_cache[key] = ext
+        return ext or None
+
+    def extent(self, x: float, y: float, rot: float):
+        e = self.extent_local(rot)
+        if e is None:
+            return None
+        return (x + e[0], y + e[1], x + e[2], y + e[3])
+
+
+def build_part_pads(footprints: Dict[str, object],
+                    clearance: float) -> Dict[str, 'PartPads']:
+    """PartPads for every footprint that has any pad (copper or NPTH)."""
+    out = {}
+    for ref, fp in footprints.items():
+        if not getattr(fp, 'pads', None):
+            continue
+        pp = PartPads(fp, clearance)
+        if pp.n_pads or pp.holes_local:
+            out[ref] = pp
+    return out
+
+
+def _sides_interact(a, b) -> bool:
+    """Do two pad sides share copper? None = through (both sides)."""
+    return a is None or b is None or a == b
+
+
+def _circle_rect_penetration(cx, cy, r, rect) -> float:
+    """How deep a circle penetrates a rect's keepout (0 when clear)."""
+    dx = max(rect[0] - cx, 0.0, cx - rect[2])
+    dy = max(rect[1] - cy, 0.0, cy - rect[3])
+    return max(0.0, r - math.hypot(dx, dy))
+
+
+# Above this many pad-pair tests the per-pad loop is skipped and the pair is
+# gated on extents + its seed baseline alone (BGA-vs-BGA); the exact report
+# still surfaces anything a candidate loop misses.
+PAIR_TEST_CAP = 4096
+
+
+class LegalityContext:
+    """Pad/hole legality for one engine run.
+
+    The engine supplies `pose_of(ref) -> (x, y, rot)` for CURRENT poses and
+    `seed_of(ref) -> (x, y, rot)` for the input board's poses; baselines are
+    computed lazily from seeds and never invalidated (seeds are constant for
+    the run, unlike incumbents).
+    """
+
+    def __init__(self, part_pads: Dict[str, PartPads],
+                 gate: Optional[BoardOutlineGate], clearance: float,
+                 pose_of, seed_of):
+        self.parts = part_pads
+        self.gate = gate
+        self.clearance = clearance
+        self.pose_of = pose_of
+        self.seed_of = seed_of
+        self._baselines: Dict[Tuple[str, str], PairShortfall] = {}
+
+    # -- pair measurement ------------------------------------------------------
+    def pair_shortfall(self, a: str, b: str, pose_a=None,
+                       pose_b=None) -> PairShortfall:
+        pa = self.parts.get(a)
+        pb = self.parts.get(b)
+        if pa is None or pb is None:
+            return ZERO_SHORTFALL
+        xa, ya, ra = pose_a if pose_a is not None else self.pose_of(a)
+        xb, yb, rb = pose_b if pose_b is not None else self.pose_of(b)
+        ea = pa.extent(xa, ya, ra)
+        eb = pb.extent(xb, yb, rb)
+        if ea is None or eb is None:
+            return ZERO_SHORTFALL
+        if rect_gap(ea, eb) >= self.clearance - EPS:
+            return ZERO_SHORTFALL
+        if pa.n_pads * pb.n_pads > PAIR_TEST_CAP:
+            # Extent-level verdict only: charge the extent shortfall as pad
+            # shortfall so the baseline comparison still constrains the pair.
+            g = rect_gap(ea, eb)
+            return PairShortfall(max(0.0, self.clearance - g), g < 0.0, 0.0)
+        rects_a = pa.pad_rects(xa, ya, ra)
+        rects_b = pb.pad_rects(xb, yb, rb)
+        pad_short = 0.0
+        overlap = False
+        for a0, a1, a2, a3, na, sa in rects_a:
+            for b0, b1, b2, b3, nb, sb in rects_b:
+                if na == nb and na > 0:
+                    continue
+                if not _sides_interact(sa, sb):
+                    continue
+                g = rect_gap((a0, a1, a2, a3), (b0, b1, b2, b3))
+                if g < self.clearance - EPS:
+                    pad_short += self.clearance - g
+                    if g < 0.0:
+                        overlap = True
+        hole = 0.0
+        for cx, cy, r in pb.hole_circles(xb, yb, rb):
+            for a0, a1, a2, a3, _na, _sa in rects_a:
+                hole += _circle_rect_penetration(cx, cy, r, (a0, a1, a2, a3))
+        for cx, cy, r in pa.hole_circles(xa, ya, ra):
+            for b0, b1, b2, b3, _nb, _sb in rects_b:
+                hole += _circle_rect_penetration(cx, cy, r, (b0, b1, b2, b3))
+        return PairShortfall(pad_short, overlap, hole)
+
+    def seed_baseline(self, a: str, b: str) -> PairShortfall:
+        key = (a, b) if a <= b else (b, a)
+        base = self._baselines.get(key)
+        if base is None:
+            base = self.pair_shortfall(key[0], key[1],
+                                       pose_a=self.seed_of(key[0]),
+                                       pose_b=self.seed_of(key[1]))
+            self._baselines[key] = base
+        return base
+
+    # -- the gate --------------------------------------------------------------
+    def pads_ok(self, ref: str, x: float, y: float, rot: float,
+                neighbors: Iterable[str], exclude=None) -> bool:
+        """May `ref` take this pose? Per neighbor: no worse than the SEED
+        baseline, and a NEW different-net pad intersection is never admitted."""
+        if ref not in self.parts:
+            return True
+        pose = (x, y, rot)
+        for nb in neighbors:
+            if nb == ref or (exclude is not None and nb in exclude):
+                continue
+            cur = self.pair_shortfall(ref, nb, pose_a=pose)
+            if cur is ZERO_SHORTFALL:
+                continue
+            base = self.seed_baseline(ref, nb)
+            if cur.pad > base.pad + EPS:
+                return False
+            if cur.pad_overlap and not base.pad_overlap:
+                return False
+            if cur.hole > base.hole + EPS:
+                return False
+        return True
+
+    def pad_oob_amount(self, ref: str, x: float, y: float, rot: float,
+                       exact: bool = True, edges=None) -> float:
+        """Board-boundary violation of the part's PAD extent (catches pads off
+        the board even when a bad courtyard rect is inside)."""
+        pp = self.parts.get(ref)
+        if pp is None or self.gate is None:
+            return 0.0
+        ext = pp.extent(x, y, rot)
+        if ext is None:
+            return 0.0
+        return self.gate.rect_outside_amount(ext, exact=exact, edges=edges)
+
+
+def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
+                       edge_margin: Optional[float] = None,
+                       worst_n: int = 10) -> Dict[str, object]:
+    """Board-level pad/hole legality audit at the FILE's own poses.
+
+    AABB broad phase over all cross-footprint pad pairs; with `exact` (the
+    default) every AABB hit is re-verified with check_drc's exact pad geometry
+    so the report carries no bbox phantoms on round/rotated pads. Returns::
+
+        {'pad_conflicts': int, 'pad_shortfall': mm, 'hole_conflicts': int,
+         'oob_pad_count': int, 'oob_pad_amount': mm,
+         'worst': [(refA, refB, mm), ...], 'exact': bool}
+
+    Consumers: place_optimize / place_seed JSON summaries, the render
+    legality overlay, and the reconstruct gate.
+    """
+    fps = pcb_data.footprints
+    pads_by_ref = {ref: [p for p in fp.pads] for ref, fp in fps.items()}
+    parts = build_part_pads(fps, clearance)
+    routing_layers = list(getattr(pcb_data.board_info, 'copper_layers', []) or [])
+    check_exact = None
+    if exact:
+        try:
+            from check_drc import check_pad_pad_overlap
+            check_exact = check_pad_pad_overlap
+        except Exception:
+            check_exact = None
+
+    # cell hash over pad rects at file poses
+    cell = 4.0
+    grid: Dict[Tuple[int, int], set] = {}
+    entries = {}
+    for ref, pp in parts.items():
+        fp = fps[ref]
+        rects = pp.pad_rects(fp.x, fp.y, fp.rotation or 0.0)
+        holes = pp.hole_circles(fp.x, fp.y, fp.rotation or 0.0)
+        entries[ref] = (rects, holes)
+        ext = pp.extent(fp.x, fp.y, fp.rotation or 0.0)
+        if ext is None:
+            continue
+        for gx in range(int(ext[0] // cell), int(ext[2] // cell) + 1):
+            for gy in range(int(ext[1] // cell), int(ext[3] // cell) + 1):
+                grid.setdefault((gx, gy), set()).add(ref)
+
+    def near_refs(ref):
+        fp = fps[ref]
+        pp = parts[ref]
+        ext = pp.extent(fp.x, fp.y, fp.rotation or 0.0)
+        if ext is None:
+            return ()
+        out = set()
+        m = clearance + 0.5
+        for gx in range(int((ext[0] - m) // cell), int((ext[2] + m) // cell) + 1):
+            for gy in range(int((ext[1] - m) // cell), int((ext[3] + m) // cell) + 1):
+                out |= grid.get((gx, gy), set())
+        out.discard(ref)
+        return out
+
+    pad_conflicts = 0
+    pad_shortfall = 0.0
+    hole_conflicts = 0
+    worst: List[Tuple[str, str, float]] = []
+    seen_pairs = set()
+    for ref in sorted(parts):
+        rects_a, holes_a = entries[ref]
+        for other in near_refs(ref):
+            key = (ref, other) if ref <= other else (other, ref)
+            if key in seen_pairs:
+                continue
+            seen_pairs.add(key)
+            rects_b, holes_b = entries[other]
+            pair_mm = 0.0
+            pair_hit = False
+            for ai, (a0, a1, a2, a3, na, sa) in enumerate(rects_a):
+                for bi, (b0, b1, b2, b3, nb, sb) in enumerate(rects_b):
+                    if na == nb and na > 0:
+                        continue
+                    if not _sides_interact(sa, sb):
+                        continue
+                    g = rect_gap((a0, a1, a2, a3), (b0, b1, b2, b3))
+                    if g >= clearance - EPS:
+                        continue
+                    if check_exact is not None:
+                        pa = _pad_with_copper(pads_by_ref[ref], ai, clearance)
+                        pb = _pad_with_copper(pads_by_ref[other], bi, clearance)
+                        if pa is not None and pb is not None:
+                            hit, over, _pt = check_exact(pa, pb, clearance,
+                                                         routing_layers,
+                                                         clearance_margin=0.0)
+                            if not hit:
+                                continue
+                            pair_mm += over
+                            pair_hit = True
+                            continue
+                    pair_mm += clearance - g
+                    pair_hit = True
+            if pair_hit:
+                pad_conflicts += 1
+                pad_shortfall += pair_mm
+                worst.append((key[0], key[1], round(pair_mm, 4)))
+            hole_pen = 0.0
+            for cx, cy, r in holes_b:
+                for a0, a1, a2, a3, _na, _sa in rects_a:
+                    hole_pen += _circle_rect_penetration(cx, cy, r,
+                                                         (a0, a1, a2, a3))
+            for cx, cy, r in holes_a:
+                for b0, b1, b2, b3, _nb, _sb in rects_b:
+                    hole_pen += _circle_rect_penetration(cx, cy, r,
+                                                         (b0, b1, b2, b3))
+            if hole_pen > EPS:
+                hole_conflicts += 1
+
+    oob_count = 0
+    oob_amount = 0.0
+    board_info = getattr(pcb_data, 'board_info', None)
+    if board_info is not None and getattr(board_info, 'board_bounds', None):
+        gate = BoardOutlineGate(board_info,
+                                edge_margin if edge_margin is not None
+                                else clearance)
+        for ref, pp in parts.items():
+            fp = fps[ref]
+            ext = pp.extent(fp.x, fp.y, fp.rotation or 0.0)
+            if ext is None:
+                continue
+            amt = gate.rect_outside_amount(ext)
+            if amt > EPS:
+                oob_count += 1
+                oob_amount += amt
+    worst.sort(key=lambda t: -t[2])
+    return {'pad_conflicts': pad_conflicts,
+            'pad_shortfall': round(pad_shortfall, 4),
+            'hole_conflicts': hole_conflicts,
+            'oob_pad_count': oob_count,
+            'oob_pad_amount': round(oob_amount, 4),
+            'worst': worst[:worst_n],
+            'exact': check_exact is not None}
+
+
+def _pad_with_copper(pads, copper_index: int, clearance: float):
+    """The Nth COPPER pad of a footprint's pad list (grade_pad_legality's
+    PartPads indices count copper pads only, in construction order)."""
+    from check_drc import _pad_has_no_copper
+    n = -1
+    for p in pads:
+        if _pad_has_no_copper(p):
+            continue
+        if not any(str(l).endswith('.Cu') for l in p.layers):
+            continue
+        n += 1
+        if n == copper_index:
+            return p
+    return None

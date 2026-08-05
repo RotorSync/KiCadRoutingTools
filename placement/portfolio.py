@@ -493,7 +493,12 @@ def _quench_metrics(m: Dict) -> Dict:
             'length': round(after.get('length', 0.0), 3),
             'overlap_area': round(leg.get('overlap_area', 0.0), 4),
             'oob_count': leg.get('oob_count', 0),
-            'oob_amount': round(leg.get('oob_amount', 0.0), 4)}
+            'oob_amount': round(leg.get('oob_amount', 0.0), 4),
+            # Pad+drill layer tallies (AABB gate currency; absent -> 0 when
+            # the layer is off, keeping old-metric candidates comparable).
+            'pad_conflict_pairs': leg.get('pad_conflict_pairs', 0),
+            'pad_shortfall': leg.get('pad_shortfall', 0.0),
+            'hole_shortfall': leg.get('hole_shortfall', 0.0)}
 
 
 # --------------------------------------------------------------------------
@@ -502,6 +507,8 @@ def _quench_metrics(m: Dict) -> Dict:
 
 def score_candidate(cand: Candidate, *, free: Sequence[str],
                     baseline_overlap: float, baseline_oob: int = 0,
+                    baseline_pad_pairs: int = 0,
+                    baseline_hole_shortfall: float = 0.0,
                     clearance: float, board_edge_clearance: float,
                     grid_step: float, ignore_nets: Optional[Sequence[str]],
                     intent=None, group_sources: Sequence[str] = ()) -> None:
@@ -539,6 +546,15 @@ def score_candidate(cand: Candidate, *, free: Sequence[str],
     if oob > baseline_oob:
         reasons.append(f"{oob} part(s) out of board vs the baseline's "
                        f"{baseline_oob}")
+    # Pad+drill layer gates, same baseline-relative shape as the two above.
+    pad_pairs = cand.metrics.get('pad_conflict_pairs', 0) or 0
+    if pad_pairs > baseline_pad_pairs:
+        reasons.append(f"{pad_pairs} pad-clearance conflict pair(s) vs the "
+                       f"baseline's {baseline_pad_pairs}")
+    hole_sf = cand.metrics.get('hole_shortfall', 0.0) or 0.0
+    if hole_sf > baseline_hole_shortfall + EPS:
+        reasons.append(f"pad-copper-in-hole-keepout {hole_sf:.4f}mm vs the "
+                       f"baseline's {baseline_hole_shortfall:.4f}mm")
 
     health_penalty = 0
     if intent is not None:

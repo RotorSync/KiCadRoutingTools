@@ -636,6 +636,22 @@ def rule_envelope(ctx) -> Iterator[Violation]:
             expected={'envelope': list(env), 'tolerance_mm': tol})
 
 
+def zone_fits_courtyard(zone_rect, part_rect, tol: float) -> bool:
+    """Can this zone geometrically contain this part's courtyard at ANY
+    90-degree rotation? False means the zone is a spec-COORDINATE (a tight
+    rect around where the part belongs), and containment must be graded on
+    the part's anchor point instead -- a courtyard-containment demand against
+    a zone smaller than the courtyard is unsatisfiable by construction (the
+    run-2 R3 failure: place_seed could never seat H1/H3 in their 0.4mm
+    zones)."""
+    zw = zone_rect[2] - zone_rect[0] + 2 * tol
+    zh = zone_rect[3] - zone_rect[1] + 2 * tol
+    w = part_rect[2] - part_rect[0]
+    h = part_rect[3] - part_rect[1]
+    return (w <= zw + 1e-9 and h <= zh + 1e-9) or \
+           (h <= zw + 1e-9 and w <= zh + 1e-9)
+
+
 def rule_zone_containment(ctx) -> Iterator[Violation]:
     for z in ctx.intent.blocks:
         if z.rect is None:
@@ -644,6 +660,25 @@ def rule_zone_containment(ctx) -> Iterator[Violation]:
         for ref in ctx.blocks.get(z.name, ()):
             part = ctx.parts.get(ref)
             if part is None:
+                continue
+            if not zone_fits_courtyard(z.rect, part.rect, tol):
+                # Spec-coordinate zone: grade the part's CENTER against it.
+                cx = (part.rect[0] + part.rect[2]) / 2.0
+                cy = (part.rect[1] + part.rect[3]) / 2.0
+                out, axis = _rect_escape(z.rect, (cx, cy, cx, cy))
+                if out > tol:
+                    yield Violation(
+                        rule='zone_containment',
+                        severity=ctx.sev('zone_containment'), ref=ref,
+                        block=z.name,
+                        message=(f"{ref} sits {out:.2f}mm past the {axis} "
+                                 f"edge of block {z.name!r} (zone smaller "
+                                 f"than the courtyard: graded on the part "
+                                 f"center)"),
+                        measured={'rect': [round(v, 4) for v in part.rect],
+                                  'outside_mm': round(out, 4), 'axis': axis,
+                                  'anchor_graded': True},
+                        expected={'zone': list(z.rect), 'tolerance_mm': tol})
                 continue
             out, axis = _rect_escape(z.rect, part.rect)
             if out > tol:
