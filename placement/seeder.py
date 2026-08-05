@@ -218,6 +218,59 @@ def _edge_correct(state, ref: str, edge: str, x: float, y: float,
     return x, y
 
 
+def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
+               notes: List[str], target=None) -> bool:
+    """Seat a DECLARED edge part on its edge band, minimal-move (run-4 B-6).
+
+    Repair could never do this: `_try_place._ok` demands full containment,
+    and an edge seat overhangs by design -- so declared edge refs were
+    exempt-only and a misplaced one was simply unrepairable here. Reuses the
+    stage-1 geometry (`_edge_pose` + `_edge_correct`); the along-edge
+    position starts at the part's CURRENT projection (minimal move) and
+    slides outward until the seat is pad/hole-conflict-free against every
+    other part. Board-only; the band comes from the intent."""
+    part = state.parts[ref]
+    edge = entry['edge']
+    band = entry.get('overhang_mm') or {}
+    lo = float(band.get('min', 0.0))
+    hi = band.get('max')
+    overhang = (lo + float(hi)) / 2.0 if hi is not None else max(lo, 0.5)
+    x0, y0, x1, y1 = state.board
+
+    # Along-edge start: the declared zone center when one exists (the R2
+    # spec-coordinate pattern -- a DERIVED home outranks minimal-move), else
+    # the part's current projection (minimal move).
+    ax, ay = target if target is not None else (part.x, part.y)
+    if edge in ('north', 'south'):
+        cur = (ax - x0) / max(1e-9, (x1 - x0))
+    else:
+        cur = (ay - y0) / max(1e-9, (y1 - y0))
+    cur = min(0.95, max(0.05, cur))
+
+    ctx = state.legality_ctx
+
+    def conflict_free(px, py):
+        if ctx is None:
+            return True
+        for other in ctx.parts:
+            if other == ref or other not in state.parts:
+                continue
+            sf = ctx.pair_shortfall(ref, other, pose_a=(px, py, part.rot))
+            if sf.pad > 1e-6 or sf.hole > 1e-6:
+                return False
+        return True
+
+    for df in (0.0, 0.05, -0.05, 0.1, -0.1, 0.15, -0.15,
+               0.2, -0.2, 0.3, -0.3, 0.4, -0.4):
+        frac = min(0.95, max(0.05, cur + df))
+        x, y = _edge_pose(part, state.board, edge, frac, overhang)
+        x, y = _edge_correct(state, ref, edge, x, y, overhang)
+        if conflict_free(x, y):
+            state.apply_move(ref, round(x, 3), round(y, 3), part.rot)
+            return True
+    return False
+
+
 def _partner_centroid(state, ref: str, placed: Set[str],
                       max_fanout: int = 20) -> Optional[Tuple[float, float]]:
     """Centroid of already-placed partners on shared nets: ONE vote per
@@ -745,6 +798,8 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
                  if r not in unrepairable]
 
     # ---- seat violators, worst first, escalating cap -----------------------
+    edge_entry = ({c['ref']: c for c in intent.edge_connectors}
+                  if intent else {})
     repaired: List[str] = []
     failed: List[str] = []
     moves: List[Dict] = []
@@ -752,6 +807,42 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
         part = state.parts[ref]
         was_locked = part.locked
         part.locked = False     # must_lock refs are seeder-owned (see above)
+
+        # Run-4 F2/B-6: a DECLARED edge part charged by the proximity rule
+        # cannot be seated by _try_place (its _ok demands full containment,
+        # and an edge seat overhangs by design). Seat it on its declared
+        # edge band instead -- or refuse honestly when no edge is declared
+        # (an implausibly-posed receptacle: reconstruct derives the edge).
+        ec = edge_entry.get(ref)
+        if ec is not None:
+            part.locked = was_locked
+            if not ec.get('edge'):
+                failed.append(ref)
+                notes.append(
+                    f"{ref}: declared edge part misplaced, but no edge is "
+                    f"declared (implausible pose, none derivable here) -- "
+                    f"place_reconstruct derives edge slots; repair will not "
+                    f"guess one")
+                continue
+            zt = ref_zone.get(ref)
+            tgt = None
+            if zt is not None and zt.rect is not None:
+                tgt = ((zt.rect[0] + zt.rect[2]) / 2.0,
+                       (zt.rect[1] + zt.rect[3]) / 2.0)
+            ok = _seat_edge(state, ref, ec, must_lock, notes, target=tgt)
+            if ok:
+                d = math.hypot(part.x - part.seed_x, part.y - part.seed_y)
+                moves.append({'reference': ref, 'new_x': part.x,
+                              'new_y': part.y, 'new_rotation': part.rot})
+                repaired.append(ref)
+                notes.append(f"{ref}: seated on the {ec['edge']} edge band "
+                             f"({d:.2f}mm from its input pose)")
+            else:
+                failed.append(ref)
+                notes.append(f"{ref}: no conflict-free seat found on the "
+                             f"declared {ec['edge']} edge band")
+            continue
+
         z = ref_zone.get(ref)
         rect = z.rect if z is not None else None
         tol = intent.zone_tolerance(z) if (intent and z is not None) else 0.5

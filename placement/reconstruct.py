@@ -70,30 +70,47 @@ def _bbox_outside(ext, b) -> float:
             + max(0.0, b[1] - ext[1]) + max(0.0, ext[3] - b[3]))
 
 
-def pad_oob_amount(state) -> float:
-    """Summed pad/hole-extent off-board amount over all parts (zero margin)."""
+def pad_oob_amount(state, edge_bands=None) -> float:
+    """Summed pad/hole-extent off-board amount over all parts (zero margin).
+
+    Run-4 F2: a ref declared in ``edge_bands`` ({ref: band_max_mm}, from the
+    intent's edge_connectors) charges only the EXCESS past its band -- its
+    declared overhang is by design, and without the allowance the gate tuple
+    itself would revert a correct edge-homecoming (the move RAISES board-wide
+    oob exactly by the legitimate overhang)."""
     oob = 0.0
     if state.legality_ctx is None:
         return oob
+    bands = edge_bands or {}
     for ref, pp in state.legality_ctx.parts.items():
         p = state.parts.get(ref)
         if p is None:
             continue
         ext = pp.extent(p.x, p.y, p.rot)
         if ext is not None:
-            oob += _bbox_outside(ext, state.board)
+            amt = _bbox_outside(ext, state.board)
+            oob += max(0.0, amt - bands.get(ref, 0.0))
     return oob
 
 
-def measure(state) -> Tuple:
-    """The lexicographic gate tuple. Smaller-or-equal is acceptable."""
+def measure(state, edge_bands=None) -> Tuple:
+    """The lexicographic gate tuple. Smaller-or-equal is acceptable.
+
+    Order (run-4): pad conflicts, hole shortfall, banded pad-oob -- the HARD
+    fab-real facts -- then hpwl, then courtyard overlap as the LAST tiebreak.
+    overlap_area used to outrank hpwl, which vetoed a 44 mm hpwl homecoming
+    over +0.73 mm^2 of courtyard overlap; run 2 measured overlap_area
+    POSITIVELY correlated with distance-to-truth (r = +0.72, the same
+    anti-signal as crossings), and the skill's rule is gate on hpwl and
+    PAD-PAD, report overlap, never gate on it. Courtyards carry their own
+    margin; real collisions are the tuple's first component."""
     m = state.pad_legality_metrics() if state.legality_ctx is not None else {}
     leg = state.legality_metrics()
     return (m.get('pad_conflict_pairs', 0),
             round(m.get('hole_shortfall', 0.0), 4),
-            round(pad_oob_amount(state), 4),
-            round(leg.get('overlap_area', 0.0), 4),
-            round(leg.get('hpwl', 0.0), 3))
+            round(pad_oob_amount(state, edge_bands), 4),
+            round(leg.get('hpwl', 0.0), 3),
+            round(leg.get('overlap_area', 0.0), 4))
 
 
 # --------------------------------------------------------------------------
@@ -101,13 +118,15 @@ def measure(state) -> Tuple:
 # --------------------------------------------------------------------------
 
 class Tiers:
-    __slots__ = ('locked', 'zero_net', 'anchors', 'smalls', 'threshold')
+    __slots__ = ('locked', 'zero_net', 'anchors', 'smalls', 'threshold',
+                 'edge')
 
     def as_dict(self):
         return {'locked': sorted(self.locked),
                 'zero_net': sorted(self.zero_net),
                 'anchors': sorted(self.anchors),
                 'smalls': sorted(self.smalls),
+                'edge': sorted(self.edge),
                 'anchor_extent_mm': self.threshold}
 
 
@@ -141,6 +160,7 @@ def classify(state, intent=None, anchor_extent='auto') -> Tiers:
     t.threshold = round(thr, 3)
     edge_refs = ({c['ref'] for c in intent.edge_connectors}
                  if intent is not None else set())
+    t.edge = edge_refs & set(state.parts)   # run-4 F2: kept, not discarded
     t.anchors = {r for r in free
                  if part_extent_mm(state, r) >= thr or r in edge_refs}
     t.smalls = {r for r in free if r not in t.anchors}
@@ -237,8 +257,37 @@ def rigid_vectors(state, proposals: Dict[str, List[Tuple[float, float]]],
     return [v for v in order if len(support[v]) >= 2]
 
 
+EDGE_PREF_WEIGHT = 10.0
+# ^ run-4 F2: mm-equiv charged per mm an edge-class part's pose sits from an
+# edge, INSIDE the joint solve. Offering a displaced receptacle its band
+# candidate is not enough (measured: J1's candidate was offered and never
+# taken -- the net-anchor proxy pulls toward its partners, themselves
+# misplaced), and seating it AFTER the solve fails too (measured: the seat
+# collided with squatters the joint solve would have co-moved: 5 pad pairs,
+# overlap +70). R1's letter -- an edge part's position is not a netlist
+# question -- so for declared edge-less receptacles the edge metric REPLACES
+# the net-anchor cost in the objective, and the exclusion rows resolve the
+# squatters in the same solve. Generic: the weight scales a geometric metric,
+# no board constants.
+
+
+def edge_metric(state, ref: str, x: float, y: float,
+                band: float) -> Optional[float]:
+    """How far a pose is from being edge-seated, courtyard channel: 0 for an
+    in-band overhang, else the courtyard edge clearance; None = past the
+    band (illegal as a seat)."""
+    p = state.parts[ref]
+    rect = p.rect(x, y, p.rot)
+    over = state.edge_gate.rect_outside_amount(rect)
+    if over > 1e-6:
+        return 0.0 if over <= band + 1e-6 else None
+    return state.edge_gate.edge_clearance(rect)
+
+
 def prune_assignment(state, old: Dict[str, Tuple[float, float, float]],
-                     notes: Optional[List[str]] = None) -> List[str]:
+                     notes: Optional[List[str]] = None,
+                     edge_bands: Optional[Dict[str, float]] = None,
+                     exempt: Optional[Set[str]] = None) -> List[str]:
     """Per-part revert sweep after an ACCEPTED assignment (run-4 F3b).
 
     The stage gate is one board-wide lexicographic tuple, so an assignment
@@ -259,13 +308,18 @@ def prune_assignment(state, old: Dict[str, Tuple[float, float, float]],
         return math.hypot(p.x - x, p.y - y)
 
     for ref, (x, y, rot) in sorted(old.items(), key=moved_dist, reverse=True):
+        if exempt and ref in exempt:
+            # F2: an edge-class seat is hpwl-worse BY DESIGN (the netlist
+            # proxy is what its class overrules) -- pruning it back would
+            # undo the seat one stage later.
+            continue
         p = state.parts[ref]
         if math.hypot(p.x - x, p.y - y) < 1e-9 and abs(p.rot - rot) < 1e-9:
             continue
-        base = measure(state)
+        base = measure(state, edge_bands)
         cur = (p.x, p.y, p.rot)
         state.apply_move(ref, x, y, rot)
-        if measure(state) < base:
+        if measure(state, edge_bands) < base:
             pruned.append(ref)
         else:
             state.apply_move(ref, *cur)
@@ -305,13 +359,23 @@ def _net_anchor_cost(state, ref: str, x: float, y: float,
 
 def build_candidates(state, tiers: Tiers,
                      vectors: Sequence[Tuple[float, float]],
-                     proposals: Dict[str, List[Tuple[float, float]]]
+                     proposals: Dict[str, List[Tuple[float, float]]],
+                     edge_bands: Optional[Dict[str, float]] = None
                      ) -> Dict[str, List[Tuple[float, float]]]:
     """Per-part candidate positions: stay (always index 0), +/-each vector
     (kept only when the pad extent stays on-board), and any pattern-proposed
-    slots. Locked parts get only stay."""
+    slots. Locked parts get only stay.
+
+    Run-4 F2: the anti-evacuation cull compares each candidate's off-board
+    amount against the part's CURRENT pose -- and a DISPLACED edge part sits
+    interior (cur_oob = 0), so its true home, which overhangs BY DESIGN, was
+    culled unconditionally (run 3's J1 was never offered its edge slot).
+    Refs declared in ``edge_bands`` ({ref: band_max_mm}) may overhang up to
+    their band; 'stay' stays index 0 -- a declaration never forces a move.
+    """
     out: Dict[str, List[Tuple[float, float]]] = {}
     pattern: Dict[str, Set[Tuple[float, float]]] = {}
+    bands = edge_bands or {}
     for ref in sorted(state.parts):
         p = state.parts[ref]
         cands = [(p.x, p.y)]
@@ -337,8 +401,10 @@ def build_candidates(state, tiers: Tiers,
                                    if e0 is not None else 0.0)
                     # Never offer a candidate whose pad copper leaves the
                     # board MORE than the part already does (S1: the
-                    # conflict gate must not be satisfiable by evacuation).
-                    if _bbox_outside(ext, state.board) > cur_oob + 1e-6:
+                    # conflict gate must not be satisfiable by evacuation)
+                    # -- except up to a declared edge band (run-4 F2).
+                    allow = max(cur_oob, bands.get(ref, 0.0))
+                    if _bbox_outside(ext, state.board) > allow + 1e-6:
                         continue
             kept.append((x, y))
         out[ref] = kept
@@ -349,18 +415,25 @@ def solve_assignment(state, candidates: Dict[str, List[Tuple[float, float]]],
                      tiers: Tiers,
                      move_penalty: float = MOVE_PENALTY_MM,
                      notes: Optional[List[str]] = None,
-                     pattern: Optional[Dict[str, Set]] = None) -> Dict[str, int]:
+                     pattern: Optional[Dict[str, Set]] = None,
+                     edge_pref: Optional[Dict[str, float]] = None
+                     ) -> Dict[str, int]:
     """Choose one candidate per part. Exact ILP when scipy.optimize.milp is
     available; breakout-weighted min-conflicts descent otherwise. Returns
-    {ref: chosen index}."""
+    {ref: chosen index}.
+
+    ``edge_pref`` ({ref: band_max_mm}): declared edge-class refs whose edge
+    could not be named -- their objective term is the EDGE metric instead of
+    the net-anchor proxy (see EDGE_PREF_WEIGHT)."""
     try:
         return _solve_ilp(state, candidates, tiers, move_penalty, notes,
-                          pattern or {})
+                          pattern or {}, edge_pref or {})
     except ImportError:
         if notes is not None:
             notes.append('scipy.optimize.milp unavailable -- using the '
                          'breakout-descent fallback')
-        return _solve_breakout(state, candidates, tiers, notes)
+        return _solve_breakout(state, candidates, tiers, notes,
+                               edge_pref=edge_pref or {})
 
 
 def _pair_conflicts(state, a: str, pos_a, b: str, pos_b) -> bool:
@@ -404,11 +477,13 @@ def _interacting_pairs(state, candidates):
                 yield a, b
 
 
-def _solve_ilp(state, candidates, tiers, move_penalty, notes, pattern):
+def _solve_ilp(state, candidates, tiers, move_penalty, notes, pattern,
+               edge_pref=None):
     import numpy as np
     from scipy.optimize import milp, LinearConstraint, Bounds
     from scipy.sparse import lil_matrix
 
+    edge_pref = edge_pref or {}
     refs = sorted(candidates)
     var_of: Dict[Tuple[str, int], int] = {}
     costs: List[float] = []
@@ -417,7 +492,12 @@ def _solve_ilp(state, candidates, tiers, move_penalty, notes, pattern):
         p = state.parts[ref]
         for k, (x, y) in enumerate(candidates[ref]):
             var_of[(ref, k)] = len(costs)
-            c = _net_anchor_cost(state, ref, x, y, fixed)
+            if ref in edge_pref:
+                # F2: class outranks the netlist proxy for edge parts (R1).
+                m = edge_metric(state, ref, x, y, edge_pref[ref])
+                c = EDGE_PREF_WEIGHT * (m if m is not None else 100.0)
+            else:
+                c = _net_anchor_cost(state, ref, x, y, fixed)
             # F1 nearest-slot tiebreak (see DIST_TIEBREAK_PER_MM). Applies to
             # every candidate; the stay pose charges 0 by construction.
             c += DIST_TIEBREAK_PER_MM * math.hypot(x - p.x, y - p.y)
@@ -486,7 +566,8 @@ def _solve_ilp(state, candidates, tiers, move_penalty, notes, pattern):
     return choice
 
 
-def _solve_breakout(state, candidates, tiers, notes, max_sweeps: int = 60):
+def _solve_breakout(state, candidates, tiers, notes, max_sweeps: int = 60,
+                    edge_pref=None):
     """Min-conflicts coordinate descent with breakout constraint weighting
     (Morris 1993): at a local minimum every currently-conflicting pair's
     weight is incremented, so chronic squatters eventually move first.
@@ -516,8 +597,13 @@ def _solve_breakout(state, candidates, tiers, notes, max_sweeps: int = 60):
                                (x, y), other, oxy):
                 w += weights.get((a, b), 1.0)
         p = state.parts[ref]
-        return (w, _net_anchor_cost(state, ref, x, y,
-                                    tiers.locked | tiers.zero_net)
+        if edge_pref and ref in edge_pref:
+            m = edge_metric(state, ref, x, y, edge_pref[ref])
+            base_cost = EDGE_PREF_WEIGHT * (m if m is not None else 100.0)
+        else:
+            base_cost = _net_anchor_cost(state, ref, x, y,
+                                         tiers.locked | tiers.zero_net)
+        return (w, base_cost
                 # F1 nearest-slot tiebreak, mirrored from _solve_ilp
                 + DIST_TIEBREAK_PER_MM * math.hypot(x - p.x, y - p.y)
                 + (MOVE_PENALTY_MM if k else 0.0))

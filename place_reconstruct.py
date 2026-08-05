@@ -50,6 +50,16 @@ Examples:
                    help="Assignment objective: flat cost (mm-equivalent) per "
                         "moved part -- the fewest-parts-moved term "
                         "(default: 0.75)")
+    p.add_argument("--assign-rounds", type=int, default=1,
+                   help="Gated assign+prune passes (default 1). Round 1's "
+                        "homecomings make the net-anchor centroids TRUER, so "
+                        "a second round can justify moves the first could "
+                        "not: a self-consistent displaced ISLAND (members "
+                        "conflict-free where they sit, anchored to each "
+                        "other) presents no per-member gradient until its "
+                        "boundary partners are home (run-4 F2/F4). Each "
+                        "round is gated and pruned; the loop stops early "
+                        "when a round moves nothing")
     p.add_argument("--max-move", type=float, default=5.0,
                    help="Legalize-stage displacement cap ladder tops out here "
                         "(default: 5.0)")
@@ -116,9 +126,26 @@ Examples:
           f"zero-net (frame), {len(tiers.anchors)} anchors "
           f"(extent >= {tiers.threshold}mm), {len(tiers.smalls)} smalls")
 
-    base = reconstruct.measure(state)
+    # Run-4 F2: declared edge parts may overhang up to their band -- in the
+    # candidate cull AND in the gate tuple (both sites, or the gate reverts
+    # the homecoming the cull just allowed). Printed up front so the declared
+    # set is part of the run's record.
+    edge_bands = {}
+    if intent is not None:
+        for c in intent.edge_connectors:
+            if c['ref'] not in state.parts:
+                continue
+            band = c.get('overhang_mm') or {}
+            edge_bands[c['ref']] = float(band.get('max') or 2.0)
+    if edge_bands:
+        print("Declared edge parts (band max mm): "
+              + ", ".join(f"{r} ({m:g})"
+                          for r, m in sorted(edge_bands.items())))
+    report['edge_bands'] = {r: m for r, m in sorted(edge_bands.items())}
+
+    base = reconstruct.measure(state, edge_bands)
     print(f"Gate before: pad_pairs={base[0]} hole={base[1]} oob={base[2]} "
-          f"overlap={base[3]} hpwl={base[4]}")
+          f"hpwl={base[3]} overlap={base[4]}")
     report['gate_before'] = list(base)
 
     proposals = {}
@@ -135,45 +162,80 @@ Examples:
             print(f"  rigid vectors (up to sign): {vectors}")
         report['vectors'] = vectors
 
+    # F2: declared edge entries whose edge could not be named (implausible
+    # pose) -- their objective term is the EDGE metric, not the net-anchor
+    # proxy (R1: an edge part's position is not a netlist question; the
+    # proxy would anchor them to their possibly-misplaced partners).
+    edge_pref = {}
+    if intent is not None:
+        for c in intent.edge_connectors:
+            if (c['ref'] in state.parts and not c.get('edge')
+                    and not state.parts[c['ref']].locked):
+                edge_pref[c['ref']] = edge_bands.get(c['ref'], 2.0)
+    if edge_pref:
+        print("Edge-preference refs (no declared edge; class outranks the "
+              "netlist proxy): " + ", ".join(sorted(edge_pref)))
+
     moved = []
+    all_pruned = []
     if 'assign' in stages and (vectors or proposals):
-        cands, pattern = reconstruct.build_candidates(state, tiers, vectors,
-                                                      proposals)
-        n_multi = sum(1 for c in cands.values() if len(c) > 1)
-        print(f"  assign: {n_multi} part(s) with a real candidate set")
-        choice = reconstruct.solve_assignment(state, cands, tiers,
-                                              args.move_penalty, notes,
-                                              pattern=pattern)
-        old = {r: (state.parts[r].x, state.parts[r].y, state.parts[r].rot)
-               for r in choice}
-        for ref, k in sorted(choice.items()):
-            if k > 0:
-                x, y = cands[ref][k]
-                state.apply_move(ref, x, y, state.parts[ref].rot)
-        after = reconstruct.measure(state)
-        if after <= base:
-            # Run-4 F3(b): the gate is one board-wide tuple, so an accepted
-            # assignment can smuggle individual mis-moves past it (run 3's
-            # spurious vector carried J7 WORSE than its input inside a
-            # hugely-improving set). Per-part revert sweep, gated on strict
-            # tuple improvement -- monotone, board-only.
-            pruned = reconstruct.prune_assignment(state, old, notes)
-            after = reconstruct.measure(state)
-            base = after
-            moved = [r for r, k in choice.items()
-                     if k > 0 and r not in set(pruned)]
-            report['assign_pruned'] = sorted(pruned)
-            print(f"  assign APPLIED: {len(moved)} part(s) moved"
-                  + (f" ({len(pruned)} pruned back)" if pruned else "")
-                  + f"; gate now pad_pairs={after[0]} hole={after[1]} "
-                  f"oob={after[2]} overlap={after[3]} hpwl={after[4]}")
-        else:
-            for ref, (x, y, rot) in old.items():
-                state.apply_move(ref, x, y, rot)
-            notes.append(f"assign REVERTED: gate worsened {base} -> {after}")
-            print(f"  assign REVERTED (gate {base} -> {after})")
+        for rnd in range(max(1, args.assign_rounds)):
+            cands, pattern = reconstruct.build_candidates(
+                state, tiers, vectors, proposals, edge_bands=edge_bands)
+            n_multi = sum(1 for c in cands.values() if len(c) > 1)
+            if rnd == 0:
+                print(f"  assign: {n_multi} part(s) with a real candidate set")
+            choice = reconstruct.solve_assignment(state, cands, tiers,
+                                                  args.move_penalty, notes,
+                                                  pattern=pattern,
+                                                  edge_pref=edge_pref)
+            old = {r: (state.parts[r].x, state.parts[r].y,
+                       state.parts[r].rot)
+                   for r in choice}
+            for ref, k in sorted(choice.items()):
+                if k > 0:
+                    x, y = cands[ref][k]
+                    state.apply_move(ref, x, y, state.parts[ref].rot)
+            after = reconstruct.measure(state, edge_bands)
+            if after <= base:
+                # Run-4 F3(b): the gate is one board-wide tuple, so an
+                # accepted assignment can smuggle individual mis-moves past
+                # it (run 3's spurious vector carried J7 WORSE than its
+                # input inside a hugely-improving set). Per-part revert
+                # sweep, gated on strict tuple improvement -- monotone,
+                # board-only.
+                pruned = reconstruct.prune_assignment(state, old, notes,
+                                                      edge_bands=edge_bands,
+                                                      exempt=set(edge_pref))
+                all_pruned.extend(pruned)
+                after = reconstruct.measure(state, edge_bands)
+                base = after
+                rmoved = [r for r, k in choice.items()
+                          if k > 0 and r not in set(pruned)]
+                moved = sorted(set(moved) | set(rmoved))
+                print(f"  assign round {rnd + 1} APPLIED: {len(rmoved)} "
+                      f"part(s) moved"
+                      + (f" ({len(pruned)} pruned back)" if pruned else "")
+                      + f"; gate now pad_pairs={after[0]} hole={after[1]} "
+                      f"oob={after[2]} hpwl={after[3]} overlap={after[4]}")
+                if not rmoved:
+                    break     # a round that moved nothing: converged
+            else:
+                for ref, (x, y, rot) in old.items():
+                    state.apply_move(ref, x, y, rot)
+                notes.append(f"assign round {rnd + 1} REVERTED: gate "
+                             f"worsened {base} -> {after}")
+                print(f"  assign round {rnd + 1} REVERTED "
+                      f"(gate {base} -> {after})")
+                break
+    report['assign_pruned'] = sorted(set(all_pruned))
     report['assign_moved'] = sorted(moved)
     report['gate_after_assign'] = list(base)
+    if edge_pref:
+        report['edge_pref'] = sorted(edge_pref)
+        report['edge_seated'] = {
+            r: [state.parts[r].x, state.parts[r].y]
+            for r in sorted(edge_pref) if r in set(moved)}
 
     placements = [{'reference': r, 'new_x': pt.x, 'new_y': pt.y,
                    'new_rotation': pt.rot}

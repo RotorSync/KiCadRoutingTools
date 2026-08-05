@@ -160,3 +160,201 @@ class TestF5FullCensus(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestF2EdgeBands(unittest.TestCase):
+    """The two-site fix: the cull offers band candidates AND the gate does
+    not revert the homecoming. Board-only: J1's final pose is checked for
+    EDGE CONTACT (within its declared band), never against ground truth."""
+
+    def _auto_intent(self, td):
+        env = dict(os.environ, PYTHONPATH=ROOT, PYTHONIOENCODING='utf-8')
+        intent = os.path.join(td, 'auto.json')
+        r = subprocess.run(
+            [sys.executable, '-X', 'utf8',
+             os.path.join(ROOT, 'check_floorplan.py'), SWAP,
+             '--emit-intent', intent, '--declare-classes'],
+            capture_output=True, text=True, env=env, cwd=ROOT)
+        assert r.returncode == 0, r.stdout[-400:] + r.stderr[-400:]
+        return intent
+
+    def test_ladder_seats_the_displaced_receptacle(self):
+        """The full ladder, board-only end to end. The assign stage alone
+        cannot seat J1 -- its home is inside a self-consistent displaced
+        ISLAND whose members anchor each other (the static net-anchor proxy
+        prices everyone against stay, so a simultaneous +/-v exchange is
+        invisible: the measured F4 limit). The ladder's answer: reconstruct
+        DECLARES and detects; the edge+home are then DERIVED from the
+        tool's own candidate set (R2 propose-gate: the unique in-band
+        edge-metric winner) and declared; repair seats it on the band at
+        the derived position. Zero hand scripts, zero ground truth."""
+        if not os.path.exists(SWAP):
+            self.skipTest('swap corpus board not present')
+        import math as _m
+        from kicad_parser import parse_kicad_pcb
+        from placement.legality import BoardOutlineGate, build_part_pads
+        from pose_score import make_state
+        with tempfile.TemporaryDirectory() as td:
+            intent = self._auto_intent(td)
+            out = os.path.join(td, 'r.kicad_pcb')
+            r = run_reconstruct(SWAP, out, '--intent', intent,
+                                '--assign-rounds', '2')
+            self.assertEqual(r.returncode, 0, r.stdout[-900:] + r.stderr[-400:])
+            doc = _summary(r.stdout)
+            self.assertIn('J1', doc.get('edge_bands', {}))
+            self.assertIn('J1', doc.get('edge_pref', []),
+                          'J1 must be flagged edge-less/implausible')
+            band = doc['edge_bands']['J1']
+            vectors = doc['vectors']
+
+            # Derive J1's home from the TOOL's own candidate set: the unique
+            # in-band edge-metric winner among stay +/- each vector.
+            from placement import reconstruct as R
+            from pose_score import make_state
+            st = make_state(parse_kicad_pcb(out), out, clearance=0.09)
+            p = st.parts['J1']
+            cands = [(p.x, p.y)]
+            for (vx, vy) in vectors:
+                cands += [(p.x + vx, p.y + vy), (p.x - vx, p.y - vy)]
+            scored = sorted(
+                (m, x, y) for (x, y) in cands
+                for m in [R.edge_metric(st, 'J1', x, y, band)]
+                if m is not None)
+            self.assertGreaterEqual(scored[1][0] - scored[0][0], 0.5,
+                                    'the winner must be unique (mechanical '
+                                    'claim needs separation)')
+            hx, hy = scored[0][1], scored[0][2]
+
+            # Declare the derived edge; repair seats J1 on the band. Its
+            # EXACT derived home is still occupied by the island core (U1/
+            # U2/C2/C4 anchor each other and no local move can exchange
+            # them -- the measured F4 limit, run-5 backlog: a group-exchange
+            # candidate in the ILP), so the honest contract is: J1 ends ON
+            # the derived edge, in-band, conflict-free.
+            doc_i = json.load(open(intent, encoding='utf-8'))
+            x0 = doc_i['envelope']['rect'][0]
+            want_edge = 'west' if abs(hx - x0) < 10 else 'east'
+            for c in doc_i['edge_connectors']:
+                if c['ref'] == 'J1':
+                    c['edge'] = want_edge
+                    c.pop('note', None)
+            i2 = os.path.join(td, 'i2.json')
+            json.dump(doc_i, open(i2, 'w', encoding='utf-8'), indent=1)
+            env = dict(os.environ, PYTHONPATH=ROOT, PYTHONIOENCODING='utf-8')
+            out2 = os.path.join(td, 'r2.kicad_pcb')
+            r2 = subprocess.run(
+                [sys.executable, '-X', 'utf8',
+                 os.path.join(ROOT, 'place_seed.py'), out, out2,
+                 '--intent', i2, '--repair', '--clearance', '0.09'],
+                capture_output=True, text=True, env=env, cwd=ROOT)
+            # rc 4 = residual grade errors (the damaged-board-baked legality
+            # budget; pre-existing structure) -- the seat itself must land.
+            self.assertIn(r2.returncode, (0, 4),
+                          r2.stdout[-800:] + r2.stderr[-400:])
+            self.assertIn(f'seated on the {want_edge} edge band', r2.stdout)
+            pcb = parse_kicad_pcb(out2)
+            fp = pcb.footprints['J1']
+            gate = BoardOutlineGate(pcb.board_info, 0.0)
+            pp = build_part_pads(pcb.footprints, 0.09)['J1']
+            ext = pp.extent(fp.x, fp.y, fp.rotation or 0.0)
+            self.assertLessEqual(gate.rect_outside_amount(ext), band + 1e-3,
+                                 'pad copper must stay inside the band')
+            # Edge contact is a COURTYARD-channel fact (the shell face
+            # reaches the edge; the pad field sits ~2mm behind it) --
+            # measuring the pad channel here was this test's own channel
+            # mix-up, the exact confusion the labels exist to prevent.
+            st2 = make_state(pcb, out2, clearance=0.09)
+            crect = st2.parts['J1'].rect()
+            cover = st2.edge_gate.rect_outside_amount(crect)
+            cclr = st2.edge_gate.edge_clearance(crect)
+            self.assertTrue(cover > 1e-6 or cclr <= 0.6,
+                            f'J1 courtyard must reach the edge '
+                            f'(over={cover}, clr={cclr})')
+            # the derivation itself must have pointed at the true edge side
+            self.assertLess(abs(hx - x0), 10,
+                            'the unique in-band winner is on the west side')
+
+    def test_band_guard_per_ref(self):
+        """The S1 anti-evacuation guard, band-aware: every UNdeclared ref's
+        pad oob <= its input oob; every declared ref's <= its band max."""
+        if not os.path.exists(SWAP):
+            self.skipTest('swap corpus board not present')
+        from kicad_parser import parse_kicad_pcb
+        from placement.legality import BoardOutlineGate, build_part_pads
+        with tempfile.TemporaryDirectory() as td:
+            intent = self._auto_intent(td)
+            out = os.path.join(td, 'r.kicad_pcb')
+            r = run_reconstruct(SWAP, out, '--intent', intent)
+            self.assertEqual(r.returncode, 0)
+            doc = _summary(r.stdout)
+            bands = doc.get('edge_bands', {})
+            before = parse_kicad_pcb(SWAP)
+            after = parse_kicad_pcb(out)
+            gate = BoardOutlineGate(after.board_info, 0.0)
+            pads_b = build_part_pads(before.footprints, 0.09)
+            pads_a = build_part_pads(after.footprints, 0.09)
+
+            def oob(pcb, pads, ref):
+                fp = pcb.footprints[ref]
+                ext = pads[ref].extent(fp.x, fp.y, fp.rotation or 0.0)
+                return 0.0 if ext is None else gate.rect_outside_amount(ext)
+
+            for ref in sorted(after.footprints):
+                if ref not in pads_a or ref not in pads_b:
+                    continue
+                a = oob(after, pads_a, ref)
+                if ref in bands:
+                    self.assertLessEqual(a, bands[ref] + 1e-3, ref)
+                else:
+                    self.assertLessEqual(a, oob(before, pads_b, ref) + 1e-6,
+                                         ref)
+
+
+class TestRepairEdgeSeating(unittest.TestCase):
+    def test_repair_seats_a_declared_edge_part_on_its_band(self):
+        """Synthetic: a 'USB' part parked 6mm interior, intent declares it on
+        the west edge. --repair must charge it (proximity rule) and seat it
+        ON the band -- _try_place could never (full containment)."""
+        board = (
+            '(kicad_pcb (version 20221018) (generator pcbnew)\n'
+            '  (layers (0 "F.Cu" signal) (31 "B.Cu" signal)'
+            ' (44 "Edge.Cuts" user))\n'
+            '  (net 0 "") (net 1 "A") (net 2 "B")\n'
+            '  (gr_rect (start 30 30) (end 70 70) (stroke (width 0.1)'
+            ' (type default)) (layer "Edge.Cuts"))\n'
+            '  (footprint "t:USB_C_Recept" (layer "F.Cu") (at 40 50)\n'
+            '    (property "Reference" "J1" (at 0 0) (layer "F.SilkS"))\n'
+            '    (pad "1" smd rect (at -2 0) (size 1 1) (layers "F.Cu")'
+            ' (net 1 "A"))\n'
+            '    (pad "2" smd rect (at 2 0) (size 1 1) (layers "F.Cu")'
+            ' (net 2 "B")))\n'
+            '  (footprint "t:R" (layer "F.Cu") (at 60 50)\n'
+            '    (property "Reference" "R1" (at 0 0) (layer "F.SilkS"))\n'
+            '    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu")'
+            ' (net 1 "A"))\n'
+            '    (pad "2" smd rect (at 2 0) (size 1 1) (layers "F.Cu")'
+            ' (net 2 "B")))\n'
+            ')\n')
+        intent = json.dumps({
+            'schema': 1, 'kind': 'floorplan-intent',
+            'edge_connectors': [{'ref': 'J1', 'edge': 'west',
+                                 'class': 'edge_receptacle',
+                                 'overhang_mm': {'min': 0.0, 'max': 1.0}}]})
+        env = dict(os.environ, PYTHONPATH=ROOT, PYTHONIOENCODING='utf-8')
+        with tempfile.TemporaryDirectory() as td:
+            bp = os.path.join(td, 'b.kicad_pcb')
+            ip = os.path.join(td, 'i.json')
+            open(bp, 'w', encoding='utf-8').write(board)
+            open(ip, 'w', encoding='utf-8').write(intent)
+            out = os.path.join(td, 'o.kicad_pcb')
+            r = subprocess.run(
+                [sys.executable, '-X', 'utf8',
+                 os.path.join(ROOT, 'place_seed.py'), bp, out,
+                 '--intent', ip, '--repair', '--clearance', '0.2'],
+                capture_output=True, text=True, env=env, cwd=ROOT)
+            self.assertEqual(r.returncode, 0, r.stdout[-800:] + r.stderr[-400:])
+            self.assertIn('seated on the west edge band', r.stdout)
+            from kicad_parser import parse_kicad_pcb
+            pcb = parse_kicad_pcb(out)
+            j1 = pcb.footprints['J1']
+            self.assertLess(j1.x, 34.0, 'J1 must end at the west edge')
