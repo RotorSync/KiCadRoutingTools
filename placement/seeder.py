@@ -698,7 +698,12 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
                 _charge(v.ref, float((v.measured or {}).get('outside_mm', 1.0)
                                      or 1.0))
 
-    pads = _leg.grade_pad_legality(pcb_data, clearance)
+    # worst_n=0: the FULL pair census (run-4 F5). The default cap of 10
+    # bounded one repair pass at 10 pair-movers on a 20-pair board -- the
+    # summary said 20 conflicts while only 10 got charged.
+    pads = _leg.grade_pad_legality(pcb_data, clearance, worst_n=0)
+    print(f"  Repair census: {pads['pad_conflicts']} conflict pair(s), "
+          f"all listed")
     for (ra, rb, mm) in pads['worst']:
         free = [r for r in (ra, rb)
                 if r in state.parts

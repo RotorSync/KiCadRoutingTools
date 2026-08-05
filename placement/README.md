@@ -816,9 +816,20 @@ re-seating 85/92 while leaving its zone targets unmoved):
   count gate cannot be satisfied by pushing parts off the board. Acceptance
   measured on the swap corpus: bare-board PAD-PAD 68 -> 0 in one solve with
   zero evacuation; on the correct control board it proposes nothing and moves
-  0 parts. Note: identical zero-net pattern parts (two M3 holes) are
-  interchangeable to a board-only solver — either corner assignment is
-  mechanically equivalent.
+  0 parts. Zero-net pattern parts (two M3 holes) carry no net-anchor cost, so
+  slot assignments used to be exactly degenerate and the solver picked
+  arbitrarily — run 3 shipped the two repaired holes CROSSED, ~40 mm from
+  home each, "mechanically equivalent" and recovery-visible (worth ~0.16 of
+  recovery on that board). Run-4 F1 deliberately REVERSES the earlier
+  position that this was acceptable: a scale-free nearest-slot tiebreak
+  (`DIST_TIEBREAK_PER_MM`) now makes each pattern part take the slot nearest
+  its current pose — equivalent to the board is not equivalent to recovery,
+  and nearest is the minimal-perturbation choice. The assign stage also
+  requires ≥2 distinct supporting refs per rigid vector (R4's own "two or
+  more agree" letter) and runs a per-part revert sweep (`prune_assignment`)
+  after acceptance, because the board-wide gate tuple cannot see an
+  individual mis-move smuggled inside a hugely-improving set (run 3's J7:
+  31.6 mm from home, worse than its 15.8 mm input).
 - **`render_placement --legality`** (default ON) draws the defects the caption
   used to only count: conflict rings/links, NPTH keepout circles, dashed-red
   off-board pad extents; caption gains `pad-conflicts` / `hole-conflict`.

@@ -876,7 +876,9 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
             'hole_conflicts': hole_conflicts,
             'oob_pad_count': oob_count,
             'oob_pad_amount': round(oob_amount, 4),
-            'worst': worst[:worst_n],
+            # worst_n <= 0 = list ALL (run-4 F5: the repair rung's census
+            # was silently capped at 10 movers on a 20-pair board).
+            'worst': worst[:worst_n] if worst_n and worst_n > 0 else worst,
             'exact': check_exact is not None}
 
 

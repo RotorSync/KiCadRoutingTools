@@ -152,11 +152,21 @@ Examples:
                 state.apply_move(ref, x, y, state.parts[ref].rot)
         after = reconstruct.measure(state)
         if after <= base:
+            # Run-4 F3(b): the gate is one board-wide tuple, so an accepted
+            # assignment can smuggle individual mis-moves past it (run 3's
+            # spurious vector carried J7 WORSE than its input inside a
+            # hugely-improving set). Per-part revert sweep, gated on strict
+            # tuple improvement -- monotone, board-only.
+            pruned = reconstruct.prune_assignment(state, old, notes)
+            after = reconstruct.measure(state)
             base = after
-            moved = [r for r, k in choice.items() if k > 0]
-            print(f"  assign APPLIED: {len(moved)} part(s) moved; gate now "
-                  f"pad_pairs={after[0]} hole={after[1]} oob={after[2]} "
-                  f"overlap={after[3]} hpwl={after[4]}")
+            moved = [r for r, k in choice.items()
+                     if k > 0 and r not in set(pruned)]
+            report['assign_pruned'] = sorted(pruned)
+            print(f"  assign APPLIED: {len(moved)} part(s) moved"
+                  + (f" ({len(pruned)} pruned back)" if pruned else "")
+                  + f"; gate now pad_pairs={after[0]} hole={after[1]} "
+                  f"oob={after[2]} overlap={after[3]} hpwl={after[4]}")
         else:
             for ref, (x, y, rot) in old.items():
                 state.apply_move(ref, x, y, rot)

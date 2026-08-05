@@ -43,6 +43,19 @@ MOVE_PENALTY_MM = 0.75   # ILP objective: flat cost per moved part (mm-equiv)
 PATTERN_BONUS_MM = 2.0   # pattern-proposed slots are EVIDENCE: taking one is
                          # rewarded, not charged (a conflict-free displaced
                          # mounting hole has no other reason to go home)
+DIST_TIEBREAK_PER_MM = 0.02
+# ^ run-4 F1: nearest-slot tiebreak, scale-free (per mm of displacement).
+# Zero-net pattern parts have NO net-anchor cost -- _net_anchor_cost's loop
+# body never runs -- so two mounting holes and two free corners were exactly
+# cost-degenerate and HiGHS picked arbitrarily: run 3 shipped H1/H3 at each
+# other's corners, ~40 mm from home each, mechanically equivalent and
+# recovery-visible (worth ~0.16 of recovery on that board). Nearest-slot is
+# the minimal-perturbation choice; the weight stays far below
+# PATTERN_BONUS_MM and MOVE_PENALTY_MM at real move scales (0.32 mm-equiv
+# for a 15.8 mm move), so it can only break ties, never fight the evidence.
+# This deliberately REVERSES placement/README.md's earlier position that
+# hole-slot degeneracy is acceptable: equivalent to the board is not
+# equivalent to recovery.
 
 
 # --------------------------------------------------------------------------
@@ -194,8 +207,18 @@ def fit_corner_insets(state, tiers: Tiers) -> Dict[str, List[Tuple[float, float]
 def rigid_vectors(state, proposals: Dict[str, List[Tuple[float, float]]],
                   grid_tol: float = GRID_TOL) -> List[Tuple[float, float]]:
     """Candidate group vectors from the pattern proposals: current - proposed,
-    deduped up to SIGN (a swap displaces two groups by +v and -v)."""
-    vecs: List[Tuple[float, float]] = []
+    deduped up to SIGN (a swap displaces two groups by +v and -v).
+
+    Run-4 F3(a): a vector is kept only with support from >= 2 DISTINCT refs
+    -- R4's own letter ("two or more agree, up to sign"), which the code did
+    not implement: every proposal x free-corner pairing minted a vector, and
+    run 3's spurious cross-corner vector mis-moved J7 to 31.6 mm from home,
+    WORSE than its 15.8 mm input. Honest limit, stated: a symmetric
+    cross-pairing (two holes x two corners) still self-supports with 2 refs,
+    so the support rule thins accidental singletons and the post-assign
+    prune sweep (`prune_assignment`) remains the reliable layer."""
+    support: Dict[Tuple[float, float], Set[str]] = {}
+    order: List[Tuple[float, float]] = []
     for ref, cands in sorted(proposals.items()):
         p = state.parts[ref]
         for (px, py) in cands:
@@ -203,10 +226,53 @@ def rigid_vectors(state, proposals: Dict[str, List[Tuple[float, float]]],
             if math.hypot(*v) < grid_tol:
                 continue
             canon = v if (v[1], v[0]) > (0, 0) else (-v[0], -v[1])
-            if not any(math.hypot(canon[0] - w[0], canon[1] - w[1]) <= 2 * grid_tol
-                       for w in vecs):
-                vecs.append((round(canon[0], 4), round(canon[1], 4)))
-    return vecs
+            for w in order:
+                if math.hypot(canon[0] - w[0], canon[1] - w[1]) <= 2 * grid_tol:
+                    support[w].add(ref)
+                    break
+            else:
+                key = (round(canon[0], 4), round(canon[1], 4))
+                order.append(key)
+                support[key] = {ref}
+    return [v for v in order if len(support[v]) >= 2]
+
+
+def prune_assignment(state, old: Dict[str, Tuple[float, float, float]],
+                     notes: Optional[List[str]] = None) -> List[str]:
+    """Per-part revert sweep after an ACCEPTED assignment (run-4 F3b).
+
+    The stage gate is one board-wide lexicographic tuple, so an assignment
+    that repairs the frame can smuggle individual mis-moves past it -- run
+    3's spurious vector carried J7 to 31.6 mm from home (worse than its
+    input) inside a hugely-improving move set, and the global gate cannot
+    see per-part worsening. Walk the moved parts by DESCENDING displacement,
+    tentatively restore each input pose, and keep the revert iff the gate
+    tuple STRICTLY improves. Board-only, monotone by construction: the
+    sweep can only improve the tuple, and a revert that would reintroduce a
+    conflict is rejected by the same tuple.
+    """
+    pruned: List[str] = []
+
+    def moved_dist(item):
+        ref, (x, y, _r) = item
+        p = state.parts[ref]
+        return math.hypot(p.x - x, p.y - y)
+
+    for ref, (x, y, rot) in sorted(old.items(), key=moved_dist, reverse=True):
+        p = state.parts[ref]
+        if math.hypot(p.x - x, p.y - y) < 1e-9 and abs(p.rot - rot) < 1e-9:
+            continue
+        base = measure(state)
+        cur = (p.x, p.y, p.rot)
+        state.apply_move(ref, x, y, rot)
+        if measure(state) < base:
+            pruned.append(ref)
+        else:
+            state.apply_move(ref, *cur)
+    if notes is not None and pruned:
+        notes.append(f"prune: reverted {len(pruned)} per-part mis-move(s) "
+                     f"the global gate could not see: {', '.join(pruned)}")
+    return pruned
 
 
 # --------------------------------------------------------------------------
@@ -348,9 +414,13 @@ def _solve_ilp(state, candidates, tiers, move_penalty, notes, pattern):
     costs: List[float] = []
     fixed = tiers.locked | tiers.zero_net
     for ref in refs:
+        p = state.parts[ref]
         for k, (x, y) in enumerate(candidates[ref]):
             var_of[(ref, k)] = len(costs)
             c = _net_anchor_cost(state, ref, x, y, fixed)
+            # F1 nearest-slot tiebreak (see DIST_TIEBREAK_PER_MM). Applies to
+            # every candidate; the stay pose charges 0 by construction.
+            c += DIST_TIEBREAK_PER_MM * math.hypot(x - p.x, y - p.y)
             if (x, y) in pattern.get(ref, ()):
                 c -= PATTERN_BONUS_MM       # evidence, not a cost
             elif k > 0:
@@ -445,8 +515,11 @@ def _solve_breakout(state, candidates, tiers, notes, max_sweeps: int = 60):
             if _pair_conflicts(state, ref,
                                (x, y), other, oxy):
                 w += weights.get((a, b), 1.0)
+        p = state.parts[ref]
         return (w, _net_anchor_cost(state, ref, x, y,
                                     tiers.locked | tiers.zero_net)
+                # F1 nearest-slot tiebreak, mirrored from _solve_ilp
+                + DIST_TIEBREAK_PER_MM * math.hypot(x - p.x, y - p.y)
                 + (MOVE_PENALTY_MM if k else 0.0))
 
     for sweep in range(max_sweeps):
