@@ -48,21 +48,33 @@ continuous lattice; it is the right tool for a *rough* placement and the wrong o
 placed**, not handed to an optimizer — and computing it usually also collapses the search
 space for everything else.
 
-**First, one command Step 0 has never had, on the board with ZERO copper:**
+**First, TWO commands Step 0 runs on the board with ZERO copper — both conjuncts,
+always (the R2 rule, applied to the gate itself):**
 
 ```bash
 python3 -X utf8 check_drc.py board.kicad_pcb --clearance <floor>   # NOT piped
 echo "EXIT=$?"
+python3 -X utf8 check_assembly.py board.kicad_pcb --clearance <floor>
+echo "EXIT=$?"
 ```
 
-A copper-free board has no routing, so **every violation this returns is a placement
-defect that no router can ever remove**, and it lands straight in `board_score`'s
-`blocking`. Measured on one board: **68 PAD-PAD violations** with zero copper, against
-**0** for the same 92 parts correctly placed. Every other Step 0 instrument called that
-board fine — `--suggest-locks` exited 0 with advice, `check_floorplan --health` returned
-`pass: true, violations: 0`, and `render_placement`'s `overlap_area` is *courtyard*
-overlap, a soft number with no DRC meaning. `check_drc` on the bare board is the only
-instrument in Step 0 that measures the thing that reaches `blocking`.
+A copper-free board has no routing, so **every violation these return is a placement
+defect that no router can ever remove**. `check_drc` measures copper clearances (68
+PAD-PAD on one damaged board vs 0 placed correctly); `check_assembly` measures
+BUILDABILITY — its blocking channel is cross-footprint pad INTERSECTION, which the
+clearance channel is structurally blind to when the pads share a net (run 5 SHIPPED
+two 0402s stacked, C14 on R14, both pads +3V3: `check_drc` 0, every gate green, KiCad's
+own courtyard check gagged by the project writeback). Both land in `board_score`'s
+`blocking` (`drc` and `assembly`). The channel calibration that makes `check_assembly`
+gateable: its blocking count reads **0 on all 33 healthy in-repo boards** in both exact
+and AABB currencies.
+
+**Do not gate on the AGGREGATE `overlap_area`** — it has a legitimate nonzero floor on
+human boards (tigard's own layout carries 5.375 mm² of mount-hole-under-shell courtyard
+kisses) and run 2 measured it positively correlated with distance-to-truth. The
+per-pair blocking COUNT is the gateable quantity; courtyard/fab pairs are ADVISORY
+(`check_assembly` labels each with its waiver class), fix targets for the placement
+loop below, never a gate alone.
 
 **Then reconstruct, in this order. Each rung has an applicability test — run the test,
 and when it fails, say so and fall through to the next rung.** None of these invents
@@ -264,6 +276,56 @@ python3 -X utf8 place_reconstruct.py board.kicad_pcb r.kicad_pcb \
                                        # centroids truer (measured: +7 members)
 python3 -X utf8 place_optimize.py r.kicad_pcb out.kicad_pcb ...    # 0c residue
 ```
+
+### Step 0a-1: the placement FIX LOOP — measure, fix, VERIFY, repeat until clean
+
+**Routing may not start while a placement mistake is on the record.** The ladder
+above is one pass; this loop is what makes the placement phase END only when the
+instruments and an independent verifier agree it is clean. Run 5 shipped a stacked
+part because the phase ended when the operator believed it was done; the user's
+run-6 directive is the loop below, and it is BLOCKING.
+
+Each lap:
+
+1. **Measure** — three instruments, JSONs kept as evidence:
+
+   ```bash
+   python3 -X utf8 check_drc.py board.kicad_pcb --clearance <floor>
+   python3 -X utf8 check_assembly.py board.kicad_pcb --clearance <floor> \
+       --baseline <the ORIGINAL input board> --json wk/assembly_lapN.json
+   python3 -X utf8 check_channels.py board.kicad_pcb --clearance <floor> \
+       --track-width <w> --grid-step <g> --json wk/channels_lapN.json
+   ```
+
+   `--baseline` is load-bearing: dense healthy boards ship hundreds of by-design
+   courtyard kisses (corpus: 235), so the loop's advisory fix-list is the pairs
+   NEW relative to the input, never a shipped design's own geometry.
+
+2. **Fix iteration** — one ladder invocation targeting the NAMED findings: blocking
+   body pairs and pad/hole conflicts go to `place_reconstruct` (full stages if
+   structure moved, `--stages legalize` for local residue — the repair census
+   charges body pairs since run 6); NEW advisory pairs and channel intruders go to
+   the quench with the ledger's `eaten_by`/pair refs as targets and everything else
+   locked. One lap = one ledger entry, recorded before the next begins.
+
+3. **VERIFY, blocking** — a 9.4b boundary verification with **check 5,
+   assembly-clean** (below). The verifier receives the fresh `check_assembly` and
+   render JSONs; FAIL blocks the next step. The phase may not proceed to routing —
+   and a routing failure later classified placement-shaped RE-ENTERS this loop —
+   until the verifier passes.
+
+4. **Repeat** until: `check_assembly` blocking == 0 AND no undispositioned
+   NEW-vs-baseline advisory pair AND bare `check_drc` == 0 — or a lap reports a
+   finding **measured-unfixable** (locked pair, no legal slot), which stops the loop
+   with the named pairs and reasons, never with "done". Cap: 5 laps (each is
+   verifier-gated, so a lying lap cannot advance; a 6th lap means the fix tool is
+   the problem — file it, do not iterate past it).
+
+A face in **deficit at the finest legal grid** in the channels JSON is a
+floorplan/placement fact no routing parameter can fix — it classifies later
+routing failures as placement-shaped BY MEASUREMENT (9.3d's first mechanical
+input) and its `eaten_by` refs are the lap's quench targets. A deficit only at
+the routed grid means: try the finer grid before moving anything.
 
 ### If the board is UNPLACED
 
@@ -582,8 +644,13 @@ three parts are required:
    **r(overlap_area) = +0.723** — *lower crossings goes with a WORSE placement*. One
    candidate reached **233 crossings, better than the human original's 276**, while
    sitting 18.7 mm out of position. `hpwl` behaves (its minimum is at the truth) and is
-   what actually does the work in this rule. **Gate on `hpwl` and on PAD-PAD DRC; report
-   `crossings` and `overlap_area` and never gate on them.**
+   what actually does the work in this rule. **Gate on `hpwl`, on PAD-PAD DRC, and on
+   `check_assembly`'s blocking pairs; report `crossings` and the aggregate
+   `overlap_area` and never gate on those two.** (Run 6 measured why the blocking-pair
+   COUNT belongs with the gates while the aggregate area never can: hpwl is gameable by
+   body-STACKING exactly as PAD-PAD was gameable by evacuation — two parts moved into
+   the same space lower hpwl — and the run-5 board shipped that way. The per-pair count
+   is 0-calibrated on every healthy corpus board; the aggregate has a nonzero floor.)
 2. `check_floorplan --intent` must still **pass**. It did not, once: the quench
    walked a crystal 1.40 mm out of its declared zone while both metrics improved.
    **But an intent emitted from the board under repair INVERTS this rule.**
@@ -4223,9 +4290,16 @@ What it checks, each with the artifact that decides:
 4. **Claims-vs-artifacts** — every number in the operator's claim traces to
    a field in the entry, the score, or a named render JSON. "Fixed 4 nets"
    with no names in the lever text is a FAIL (the whack-a-mole rule above).
+5. **Assembly-clean** (run 6; placement-phase and fix-loop boundaries) —
+   the verifier additionally receives the fresh `check_assembly` JSON and
+   the render JSON, and FAILS unless `blocking == 0`, the checklist's
+   `b_body_overlap_pairs` is empty, and every NEW-vs-baseline advisory
+   pair is either fixed or dispositioned in the entry. A claim of
+   "placement done" with no attached `check_assembly` JSON is itself a
+   FAIL — the run-5 lesson is that the phase ended on belief.
 
 Reply format is the watcher's: one line,
-`VERDICT=PASS` or `VERDICT=FAIL:check=<1-4>;finding=<one line>;evidence=<path#pointer>`.
+`VERDICT=PASS` or `VERDICT=FAIL:check=<1-5>;finding=<one line>;evidence=<path#pointer>`.
 
 Cadence discipline: REJECTED iterations do not get a boundary verification
 (their entries record a road not taken; the close-out audit samples them),

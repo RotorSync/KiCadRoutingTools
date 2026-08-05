@@ -212,3 +212,13 @@ Rules of engagement, mirrored from 9.4b:
   re-worded into a caveat.
 - When the `Agent` tool is unavailable, run the same checks yourself,
   tag `mode=inline`, and say so in the report — same as the lens rule.
+
+## Check 5 addendum (run-6): assembly-clean at placement boundaries
+
+At any placement-phase or fix-loop boundary the verifier's input set grows
+by the fresh `check_assembly --json` output (and the render JSON's
+`checklist.b_body_overlap_pairs`). FAIL unless: `blocking == 0`;
+`b_body_overlap_pairs` is `[]`; every `new_advisory_pairs` entry (the
+--baseline delta -- the loop currency) is fixed or dispositioned in the
+ledger entry. An operator claim of "placement done" with no check_assembly
+JSON attached is a FAIL by itself. The verdict line's check id is 5.
