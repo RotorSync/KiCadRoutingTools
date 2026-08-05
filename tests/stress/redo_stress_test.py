@@ -198,18 +198,28 @@ def relocate_moved_scripts(argv):
     exists at root, rewrite it to its new home when exactly one exists. Runs
     AFTER user --remap rules so an explicit remap always wins. Old manifests
     replay transparently; new recordings carry the new paths and pass
-    through untouched."""
+    through untouched. RENAMES covers scripts whose basename changed too
+    (route_disconnected_planes.py -> repair_planes.py, #562): applied only
+    when the recorded path is dead, so an explicit --remap or a repo that
+    still has the old name wins."""
     import os as _os
+    RENAMES = {'route_disconnected_planes.py': 'repair_planes.py'}
     out = []
     for a in argv:
         if (a.endswith('.py') and not _os.path.exists(a)
                 and _os.path.sep in a):
             d, b = _os.path.split(a)
-            for sub in ('py_router', 'py_tools'):
-                cand = _os.path.join(d, sub, b)
-                if _os.path.exists(cand):
-                    a = cand
-                    break
+            for name in (b, RENAMES.get(b)):
+                if name is None:
+                    continue
+                for sub in ('', 'py_router', 'py_tools'):
+                    cand = _os.path.join(d, sub, name) if sub else _os.path.join(d, name)
+                    if _os.path.exists(cand):
+                        a = cand
+                        break
+                else:
+                    continue
+                break
         out.append(a)
     return out
 
