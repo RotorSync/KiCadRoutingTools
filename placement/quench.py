@@ -45,7 +45,8 @@ from placement.parser import (courtyard_for_side, extract_courtyard_sides,
                               extract_locked_refs, warn_missing_courtyards)
 from placement.utility import compute_footprint_bbox_local, snap_to_grid
 from placement import legality
-from placement.legality import (BoardOutlineGate, footprint_has_through_pads,
+from placement.legality import (CONTAINER_RATIO, BoardOutlineGate,
+                                footprint_has_through_pads,
                                 footprint_side, pair_min_gap, rect_gap,
                                 rotate_local_bounds, sides_occupied)
 
@@ -382,6 +383,26 @@ class QuenchState:
                                     if n not in ignore]
         warn_missing_courtyards(no_courtyard, 'quench')
 
+        # Run-6 CONTAINER exemption: a courtyard covering most of the board
+        # is a FRAME (a module-outline footprint hosting the whole design),
+        # not a body -- measured on rp2350_fpga_eensy: U8's courtyard is
+        # 1.13x the board area and the courtyard-hard gate refused EVERY
+        # pose on the board (13 unrepairable, 0.00mm moved), while the next
+        # largest ratio anywhere in the 33-board corpus is 0.29 (a
+        # connector). Pairs with a container member skip the courtyard
+        # channels; the PAD layer (pads_ok) still applies in full -- the
+        # module's pads are real obstacles.
+        barea = max(1e-9, (bounds[2] - bounds[0]) * (bounds[3] - bounds[1]))
+        self.container_refs = set()
+        for ref, p in self.parts.items():
+            r = p.rect()
+            if (r[2] - r[0]) * (r[3] - r[1]) >= CONTAINER_RATIO * barea:
+                self.container_refs.add(ref)
+        if self.container_refs:
+            print(f"  container footprint(s) (courtyard >= "
+                  f"{CONTAINER_RATIO:.0%} of the board -- frame, not body): "
+                  f"{', '.join(sorted(self.container_refs))}")
+
         # --- pad + drill legality (gate currency; see placement/legality.py).
         # pose_of/seed_of read the live _Part records, so the context follows
         # every apply_move with no invalidation; baselines key off SEED poses.
@@ -684,6 +705,9 @@ class QuenchState:
         them already; rects_a / rects_b carry the far-side rects when the caller
         has them (defaulting to the parts' live poses).
         """
+        if (part_a.ref in self.container_refs
+                or part_b.ref in self.container_refs):
+            return 0.0    # run-6: container = frame, not body
         required = part_a.halo + part_b.halo
         if not (part_a.has_tht or part_b.has_tht):
             # Fast path (nearly every pair): plain SMD parts interact only when
@@ -823,9 +847,12 @@ class QuenchState:
         clr = self.clearance
         rect = rects[0]
         tht = part.has_tht
+        skip_containers = (ref in self.container_refs)
         for other_ref, other in others:
             if other_ref == ref or (exclude and other_ref in exclude):
                 continue
+            if skip_containers or other_ref in self.container_refs:
+                continue    # run-6: container = frame, not body
             if tht or other.has_tht:
                 gap = part.gap_to(other, rects)
                 if gap is None:
@@ -886,9 +913,12 @@ class QuenchState:
                 others = self.parts.items()
             clr = self.clearance
             tht = part.has_tht
+            skip_containers = (ref in self.container_refs)
             for other_ref, other in others:
                 if other_ref == ref or (exclude and other_ref in exclude):
                     continue
+                if skip_containers or other_ref in self.container_refs:
+                    continue    # run-6: container = frame, not body
                 if tht or other.has_tht:
                     # Either part reaches the far side: fall through to the
                     # shared-side rule, which needs both parts' rect pairs.

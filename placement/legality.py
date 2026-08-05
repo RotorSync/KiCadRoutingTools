@@ -36,6 +36,14 @@ from typing import Dict, Iterable, List, NamedTuple, Optional, Sequence, Tuple
 
 EPS = 1e-6
 
+# Run-6: a courtyard covering at least this fraction of the board bbox is a
+# CONTAINER (a module-outline footprint hosting the design -- a frame, not a
+# body). Calibration: rp2350_fpga_eensy U8 = 1.13x board area; the largest
+# non-container anywhere in the 33-board corpus = 0.29 (sonde_u J1). Pairs
+# with a container member are exempt from the courtyard channels everywhere;
+# the pad layer applies in full.
+CONTAINER_RATIO = 0.5
+
 BOTH_SIDES = frozenset(('F', 'B'))
 
 
@@ -608,7 +616,17 @@ def grade_body_overlap(pcb_data, clearance: float,
         except Exception:
             return None
 
+    _containers: set = set()
+    bb = getattr(getattr(pcb_data, 'board_info', None), 'board_bounds', None)
+    if bb:
+        _barea = max(1e-9, (bb[2] - bb[0]) * (bb[3] - bb[1]))
+        for g in graded_parts_from_file(pcb_data, pcb_file):
+            if rect_area(g.rect) >= CONTAINER_RATIO * _barea:
+                _containers.add(g.ref)
+
     def _waiver_for(a: str, b: str) -> str:
+        if a in _containers or b in _containers:
+            return 'container_class'
         ca, cb = _class_of(a), _class_of(b)
         if ca in _MARKER or cb in _MARKER:
             return 'marker_class'
