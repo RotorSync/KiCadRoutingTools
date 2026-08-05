@@ -3025,8 +3025,8 @@ def create_plane(
         # dead-code 9: it wrote pcb_data._inrun_zones /
         # _pending_inrun_zone, whose only consumer -- the
         # perforation-aware tap-reuse trigger -- died with the tap
-        # machinery (8c72da7). experiments/README.md records the
-        # experiment as REFUTED; even with the env var set the block
+        # machinery (8c72da7). The experiment was recorded as REFUTED;
+        # even with the env var set the block
         # was a pure no-op.)
 
         # Step 5: Identify target pads for this net
