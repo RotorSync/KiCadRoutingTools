@@ -236,9 +236,19 @@ def _fence_window(obstacles, window, cfg):
                                     track_expand, via_expand)
 
 
-def _attempt_edge(pcb_data, net_id, gap, config, net_clearances):
+def _attempt_edge(pcb_data, net_id, gap, config, net_clearances,
+                  strict_endpoints: bool = False):
     """Try to route one gap inside a scoped window. Returns (result, cfg_used)
-    or (None, None). Routes through free space only - no rip-up."""
+    or (None, None). Routes through free space only - no rip-up.
+
+    strict_endpoints (#570): when the anchor split cannot resolve the gap's
+    two sides, FAIL instead of falling back to the window's largest-two
+    fragments. The fallback serves the rescue's own gap analysis (its gaps
+    come from net-endpoint structure, so the fragments ARE the gap), but a
+    caller welding a SPECIFIC pair of points (the oracle's exact-fill strap)
+    must not accept a route between two unrelated fragments: ecp5 GND
+    'welded' a 0.35mm In1 pinch with a 0.14mm F.Cu segment 7mm away, claimed
+    the link fixed every round, and the identical debris re-stacked forever."""
     from obstacle_map import build_base_obstacle_map
     from plane_pad_tap import make_local_window
     from routing_config import GridCoord
@@ -335,6 +345,10 @@ def _attempt_edge(pcb_data, net_id, gap, config, net_clearances):
         src_over, tgt_over, split_err = get_net_endpoints_anchor_split(
             window, net_id, cfg, (ax, ay), (bx, by))
         if split_err:
+            if strict_endpoints:
+                # #570: no anchors for THIS gap's sides -> nothing this
+                # window can honestly route. Do not weld a random pair.
+                continue
             src_over = tgt_over = None
         result = route_net_with_obstacles(window, net_id, cfg, obstacles, bounds=bounds,
                                           sources_override=src_over,

@@ -847,6 +847,23 @@ def _exact_fill_endpoints(pcb_data, net_id, net_name, A, B, exact_map,
     return src, tgt, (pa[0], pa[1]), (pb[0], pb[1]), layer
 
 
+def _copper_in_corridor(segs, vias, x0, y0, x1, y1, pad: float = 3.0) -> bool:
+    """#570 guard: True iff every emitted seg/via lies inside the link's
+    corridor box (inflated by `pad` mm). An escalated weld whose copper lands
+    outside the corridor did not weld THIS link -- it routed something else
+    (the ecp5 false-claim class) and must not be credited."""
+    bx0, bx1 = min(x0, x1) - pad, max(x0, x1) + pad
+    by0, by1 = min(y0, y1) - pad, max(y0, y1) + pad
+    for s in segs:
+        if not (bx0 <= s.start_x <= bx1 and by0 <= s.start_y <= by1
+                and bx0 <= s.end_x <= bx1 and by0 <= s.end_y <= by1):
+            return False
+    for v in vias:
+        if not (bx0 <= v.x <= bx1 and by0 <= v.y <= by1):
+            return False
+    return True
+
+
 def oracle_reconnect(board_file: str, net_names, config,
                      track_via_clearance: float,
                      hole_to_hole_clearance: float,
@@ -1213,8 +1230,18 @@ def oracle_reconnect(board_file: str, net_names, config,
                     _gap2 = (math.hypot(_pb[0] - _pa[0], _pb[1] - _pa[1]),
                              _pa[0], _pa[1], _pb[0], _pb[1])
                     _esc2, _esc2_cfg = _attempt_edge(
-                        pcb_data, net_id, _gap2, config, None)
+                        pcb_data, net_id, _gap2, config, None,
+                        strict_endpoints=True)
                 except Exception:
+                    _esc2 = None
+                if _esc2 and not _esc2.get('failed') \
+                        and not _copper_in_corridor(
+                            _esc2.get('new_segments') or [],
+                            _esc2.get('new_vias') or [],
+                            _pa[0], _pa[1], _pb[0], _pb[1]):
+                    print(f"    {net_name}: exact-fill strap REJECTED "
+                          f"(emitted copper outside the link corridor -- "
+                          f"#570 false-claim guard)")
                     _esc2 = None
                 if _esc2 and not _esc2.get('failed'):
                     _e2segs = _esc2.get('new_segments') or []
@@ -1446,10 +1473,19 @@ def oracle_reconnect(board_file: str, net_names, config,
                     from net_rescue import _attempt_edge
                     _gap = (math.hypot(bx - ax, by - ay), ax, ay, bx, by)
                     _esc, _esc_cfg = _attempt_edge(
-                        pcb_data, net_id, _gap, config, None)
+                        pcb_data, net_id, _gap, config, None,
+                        strict_endpoints=True)
                 except Exception as _ee:
                     if verbose:
                         print(f"    (weld escalation unavailable: {_ee})")
+                    _esc = None
+                if _esc and not _esc.get('failed') \
+                        and not _copper_in_corridor(
+                            _esc.get('new_segments') or [],
+                            _esc.get('new_vias') or [], ax, ay, bx, by):
+                    print(f"    {net_name}: weld escalation REJECTED "
+                          f"(emitted copper outside the link corridor -- "
+                          f"#570 false-claim guard)")
                     _esc = None
                 if _esc and not _esc.get('failed'):
                     _esegs = _esc.get('new_segments') or []
