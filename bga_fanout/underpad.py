@@ -361,6 +361,13 @@ def generate_underpad_escape(footprint: Footprint,
             if p.net_id:
                 board_net_counts[p.net_id] += 1
 
+    # #565 (landed at #562 graduation): net names that own a copper pour.
+    # Zone ownership is the honest plane signal in a pours-first chain --
+    # every plane net owns a zone by fanout time.
+    _zone_net_names = {pcb_data.nets[z.net_id].name
+                       for z in (getattr(pcb_data, 'zones', None) or [])
+                       if z.net_id in pcb_data.nets}
+
     def is_plane(p):
         # A high-pin-count net is only treated as a plane (skip its fanout, keep
         # its via as an all-layer obstacle) when the caller ALSO excluded it from
@@ -369,6 +376,18 @@ def generate_underpad_escape(footprint: Footprint,
         # rail the caller still wants fanned (e.g. +1V0/+1V8) must have its
         # inner-core balls escaped, not silently skipped as a phantom plane
         # (issue #218). With no net filter, fall back to the pad-count heuristic.
+        #
+        # #565 additive OR: an EXCLUDED net that owns a copper pour gets
+        # plane semantics regardless of ball count -- the plane-drop side
+        # has had this OR since #424; this escape-skip side didn't, so a
+        # small (<plane_min_pads) excluded rail WITH a pour was escaped as
+        # signals. Flips nothing existing: filter-included nets and
+        # no-filter runs keep the pad-count rule (see #565 for why the
+        # pad-count leg must NOT be demoted -- mixed-order chains and
+        # unfiltered runs depend on it).
+        if (net_filter_fn is not None and not net_filter_fn(p.net_name)
+                and p.net_name in _zone_net_names):
+            return True
         if fp_net_counts[p.net_name] < plane_min_pads:
             return False
         if net_filter_fn is None:
