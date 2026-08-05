@@ -352,9 +352,11 @@ class CreatePlanesOptionsPanel(wx.Panel):
         sizer.Add(zone_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
 
         # (No Blocker Handling box: the pour step does no routing (#562
-        # pours-first, KICAD_PLANE_NO_TAPS default ON), so there are no tap
-        # corridors to rip. The CLI keeps --rip-blocker-nets for the rare
-        # GND-via unblock outside this chain.)
+        # pours-first -- unconditional, the tap machinery is deleted, there
+        # is no kill switch), so there are no tap corridors to rip.
+        # route_planes.py has no --rip-blocker-nets anymore either; only the
+        # standalone repair_planes.py utility keeps it, for boards routed
+        # outside the chain.)
 
         # Area via stitching (#485). Controls named after the engine params
         # (stitch_vias / stitch_pitch) so AI plans can set them.

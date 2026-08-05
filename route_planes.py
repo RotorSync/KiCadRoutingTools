@@ -1,8 +1,14 @@
 """
-Copper Plane Generator - Creates filled zones with via stitching to net pads.
+Copper Plane Generator - Creates copper pour zones (the #562 "bare pour").
 
-Creates a solid copper zone on a specified layer, places vias near target pads,
-and routes short traces to connect vias to pads when direct placement is blocked.
+Creates a solid copper zone on a specified layer, plus optional via
+features: thermal via arrays under exposed pads (#487), area stitching
+vias (--stitch-vias), and GND return vias (--add-gnd-vias). It places NO
+per-pad tap vias and draws NO traces (#562): every pad that needs a via to
+reach the plane is deferred to the route step, whose pour-launch welds it
+into the fill and whose in-run plane finalize taps whatever the fill
+cannot reach. Run route.py over all nets (plane nets included) after this
+and grade THAT board, not the bare pour.
 
 Usage:
     python route_planes.py input.kicad_pcb output.kicad_pcb --nets GND --plane-layers B.Cu
@@ -2779,7 +2785,7 @@ def create_plane(
     Returns:
         return_results=False (CLI): the 3-tuple
             (total_vias_placed, total_traces_added, total_pads_needing_vias).
-        return_results=True (GUI): the 8-tuple
+        return_results=True (GUI): the 10-tuple
             (total_vias_placed, total_traces_added, total_pads_needing_vias,
              new_vias, new_segments, new_zones, total_failed_pads,
              ripped_net_ids).

@@ -1108,9 +1108,9 @@ are **gone from the chain**: `route.py` finishes every run with the same
 plane-repair engine (pad taps + region joins), the plane-copper cleanup,
 and the KiCad-oracle exact-fill verify — and any oracle links its own
 router can't route join the run's final reconciliation WITH rip authority,
-so the old rip-then-reconnect two-step happens inside one invocation. If
-Step 3 ripped nets, reconnect them with a follow-up `route.py` pass naming
-them at Step 2's parameters. `repair_planes.py` still exists
+so the old rip-then-reconnect two-step happens inside one invocation.
+(Step 3 cannot rip — see its own note — so there is nothing to reconnect
+after it.) `repair_planes.py` still exists
 for repairing a board OUTSIDE this chain (e.g. a hand-edited board).
 
 > **Never `cp` a board without its `.kicad_pro`.** A bare `cp a.kicad_pcb

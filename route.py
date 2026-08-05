@@ -7,9 +7,9 @@ Usage:
     python route.py input.kicad_pcb output.kicad_pcb --nets "Net-(U2A-*)"
 
 Requires the Rust router module. Build it with:
-    cd rust_router && cargo build --release
-    cp target/release/grid_router.dll grid_router.pyd  # Windows
-    cp target/release/libgrid_router.so grid_router.so  # Linux
+    python3 build_router.py
+(never bare `cargo build` -- build_router.py also places the library and
+verifies the version; see CLAUDE.md).
 """
 from __future__ import annotations
 
@@ -412,6 +412,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     For differential pair routing, use route_diff.py instead.
 
+    Every run ends with the in-run PLANE FINALIZE (#562, gate
+    KICAD_PLANE_FINALIZE=1 default ON): for zone nets in this run's net
+    scope it runs the repair engine (taps + region joins), the shared
+    cleanup pipeline, and the kicad-cli oracle verify, then folds stubborn
+    oracle links into the final reconciliation as custody. The standalone
+    repair step no longer exists in the chain; a pour is only welded by a
+    route step whose --nets cover the plane nets.
+
     Args:
         input_file: Path to input KiCad PCB file
         output_file: Path to output KiCad PCB file
@@ -425,10 +433,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             - "mps": Use Maximum Planar Subset algorithm to minimize crossing conflicts (default)
             - "inside_out": Sort BGA nets by distance from BGA center
             - "original": Keep nets in original order
-        track_width: Track width in mm (default: 0.1)
-        clearance: Clearance between tracks in mm (default: 0.1)
-        via_size: Via outer diameter in mm (default: 0.3)
-        via_drill: Via drill size in mm (default: 0.2)
+        track_width: Track width in mm (default: defaults.TRACK_WIDTH, 0.3)
+        clearance: Clearance between tracks in mm (default: defaults.CLEARANCE, 0.25)
+        via_size: Via outer diameter in mm (default: defaults.VIA_SIZE, 0.5)
+        via_drill: Via drill size in mm (default: defaults.VIA_DRILL, 0.3)
         grid_step: Grid resolution in mm (default: 0.1)
         via_cost: Penalty for placing a via in 0.1mm grid steps (default: 50 = 5mm; mm-equivalent at any grid_step)
         max_iterations: Max A* iterations before giving up (default: 200000)
@@ -437,7 +445,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         stub_proximity_cost: Cost penalty near stubs in mm equivalent (default: 0.2)
         bga_proximity_radius: Radius around BGA edges to penalize in mm (default: 7.0)
         bga_proximity_cost: Cost penalty near BGA edges in mm equivalent (default: 0.2)
-        debug_lines: Output debug geometry on User.2/3/8/9 layers
+        debug_lines: Output debug geometry on User.3 (connectors), User.4
+                     (stub dirs), User.8 (simplified), User.9 (raw A*)
         minimal_obstacle_cache: If True, only build obstacle cache for nets being routed
                                (faster when re-routing a small number of nets)
         cancel_check: Optional callable returning True if routing should be cancelled

@@ -9,7 +9,7 @@ landscape. All sources are linked in the [references](#references-and-further-re
 reason that has nothing to do with optimization power, while perturbative
 refinement of a human (or AI) seed placement is precisely the formulation that
 works — and most of the machinery it needs already exists in this project
-(`placement/engine.py`, `rust_placer`, and the router itself).
+(the `placement/` package — quench.py / groups.py / legality.py — `rust_placer`, and the router itself).
 
 ## Why from-scratch autoplacement fails
 
@@ -128,7 +128,7 @@ This is the strongest finding across all research threads:
 
 ## What to optimize
 
-The existing scorer in `placement/engine.py` / `rust_placer` — **airwire
+The existing scorer in the `placement/` package / `rust_placer` — **airwire
 length + crossing penalty** — is already the right objective family.
 
 **Crossings are the key PCB-specific signal.** Cypress's central technical

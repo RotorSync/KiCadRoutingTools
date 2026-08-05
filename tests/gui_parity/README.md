@@ -252,11 +252,18 @@ the pass + its GUI counterpart here.
 
 The copper-identity harness measures overlap %, which diverges even when both
 fronts grade clean (rip-up routing is chaotic; #362). The invariant that
-matters is GRADE parity. This gate chains the rp2350 PLANE sub-chain (create →
-repair → reconnect route → repair2) on ONE live board -- as the Claude-tab plan
-executor does, in-memory across steps -- and asserts every stage grades 0 DRC
-like the CLI. It caught the swig_gui route-apply width-rounding bug (0.0762 →
-0.076 fab-floor violations, #362) that per-step isolation on file inputs missed.
+matters is GRADE parity. This gate chains the rp2350 PLANE sub-chain in its
+#562 shape — pour → ONE route step carrying the plane nets in its net list,
+whose in-run finalize is the weld/repair/oracle — on ONE live board, as the
+Claude-tab plan executor does, in-memory across steps, and asserts every
+stage grades 0 DRC like the CLI. (It was reshaped 2026-08-04: the old
+create → repair → reconnect → repair2 plan had rotted into comparing
+different chains, because the executor skips `repair_planes` steps as #562
+no-ops while the CLI leg still shelled the old repair script.) The fixture
+is staged WITH a pcbnew-authored .kicad_pro — a project-less board makes
+the fronts legitimately diverge. It caught the swig_gui route-apply
+width-rounding bug (0.0762 → 0.076 fab-floor violations, #362) that
+per-step isolation on file inputs missed.
 
     python3 tests/gui_parity/test_gui_livechain_rp2350.py
 
