@@ -3068,6 +3068,15 @@ def generate_plane_drops(footprint: Footprint,
         if verbose:
             print(f"  Plane drops skipped: grid analysis failed ({e})")
         return [], [], {}
+    if grid is None:
+        # Run-6: analyze_bga_grid returns None (not raises) for perimeter
+        # packages -- a QFN's corner gap fails the dominant-pitch vote --
+        # and the None then crashed generate_underpad_escape at
+        # underpad grid.pitch_x. Same advisory as the escape path.
+        print(f"  Plane drops skipped: {footprint.reference} has no BGA "
+              f"grid (perimeter package?). For a QFN/QFP use "
+              f"qfn_fanout.py --component {footprint.reference}")
+        return [], [], {}
     from bga_fanout.underpad import generate_underpad_escape
     net_filter_fn = None
     if net_filter:
