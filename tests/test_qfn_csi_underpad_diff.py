@@ -70,7 +70,7 @@ def main():
     routed = os.path.join(d, "routed.kicad_pcb")
     try:
         # 1) Under-pad escape the QFN's CSI pairs to the inner layer.
-        rc, txt = _run(["qfn_fanout.py", BOARD, "-o", fanned,
+        rc, txt = _run(["py_router/qfn_fanout.py", BOARD, "-o", fanned,
                         "--component", "U1", "--nets", "CSI_*",
                         "--escape-method", "underpad", "--layer", "In1.Cu",
                         "--width", "0.127", "--via-size", "0.5",
@@ -85,7 +85,7 @@ def main():
                          f"{fan.get('failed')}, expected 4/0")
 
         # 2) Coupled-route both pairs from the In1 stubs to J1.
-        rc, txt = _run(["route_diff.py", fanned, routed,
+        rc, txt = _run(["py_router/route_diff.py", fanned, routed,
                         "--nets", "CSI_D0*", "CSI_CLK*",
                         "--layers", "F.Cu", "In1.Cu",
                         "--track-width", "0.127", "--diff-pair-gap", "0.18",
@@ -107,7 +107,7 @@ def main():
                   "firing (escape geometry changed?) -- still a pass.")
 
         # 3) Fully connected (guards the floating-pad and in-pad-landing fixes).
-        rc, txt = _run(["check_connected.py", routed], args.verbose)
+        rc, txt = _run(["py_router/check_connected.py", routed], args.verbose)
         if "ALL NETS FULLY CONNECTED" not in txt:
             detail = "\n".join(
                 f"      {ln}" for ln in txt.strip().splitlines()
@@ -116,7 +116,7 @@ def main():
                          "(floating QFN pad or false J1 disconnect?)\n" + detail)
 
         # 4) DRC-clean at the routed clearance.
-        rc, txt = _run(["check_drc.py", routed, "-c", CLEARANCE], args.verbose)
+        rc, txt = _run(["py_router/check_drc.py", routed, "-c", CLEARANCE], args.verbose)
         if "NO DRC VIOLATIONS FOUND" not in txt:
             m = re.search(r"FOUND (\d+) DRC VIOLATIONS", txt)
             detail = "\n".join(f"      {ln}" for ln in txt.splitlines()

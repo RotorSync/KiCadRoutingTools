@@ -53,7 +53,7 @@ def main():
         return 1
 
     def _drc_clean(board):
-        txt = _run(["check_drc.py", board, "--clearance", CLEARANCE,
+        txt = _run(["py_router/check_drc.py", board, "--clearance", CLEARANCE,
                     "--nets", *NETS, "--clearance-margin", "0.1"], args.verbose)
         return "NO DRC VIOLATIONS" in txt
 
@@ -71,7 +71,7 @@ def main():
         # its source pads and WRITE output. On total failure it writes nothing, so
         # the whole downstream chain FileNotFoundErrors -- which is the bug.
         diff_out = _tmp("esp_prog_diff_")
-        txt = _run(["route_diff.py", BOARD, diff_out, "--nets", *NETS, *DIFF_GEOM], args.verbose)
+        txt = _run(["py_router/route_diff.py", BOARD, diff_out, "--nets", *NETS, *DIFF_GEOM], args.verbose)
         coupled = '"routed_diff_pairs": ["/D"]' in txt and '"failed": 0' in txt
         if not coupled:
             fails.append("route_diff did not coupled-route /D_P//D_N "
@@ -86,8 +86,8 @@ def main():
         # DRC-clean -- the coupled route is usable end to end.
         if coupled and os.path.exists(diff_out) and os.path.getsize(diff_out) > 0:
             final_out = _tmp("esp_prog_final_")
-            _run(["route.py", diff_out, final_out, "--nets", *NETS, *SE_GEOM], args.verbose)
-            conn = _run(["check_connected.py", final_out, "--nets", *NETS], args.verbose)
+            _run(["py_router/route.py", diff_out, final_out, "--nets", *NETS, *SE_GEOM], args.verbose)
+            conn = _run(["py_router/check_connected.py", final_out, "--nets", *NETS], args.verbose)
             if "ALL NETS FULLY CONNECTED" not in conn:
                 fails.append("/D_P//D_N not fully connected after single-ended follow-up")
             if not _drc_clean(final_out):

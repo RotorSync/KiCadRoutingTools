@@ -46,7 +46,7 @@ def main():
     os.remove(out)  # route_diff must (re)create it
     try:
         r = subprocess.run(
-            [sys.executable, "route_diff.py", BOARD, "--nets", *NETS, *GEOM, "--output", out],
+            [sys.executable, "py_router/route_diff.py", BOARD, "--nets", *NETS, *GEOM, "--output", out],
             cwd=ROOT_DIR, capture_output=True, text=True)
         txt = r.stdout + r.stderr
         if args.verbose:
@@ -83,7 +83,7 @@ def main():
         if os.path.exists(rp):
             os.remove(rp)
         r2 = subprocess.run(
-            [sys.executable, "route.py", BOARD, rp, "--nets", "Net-(U4-LNA_IN{slash}RF)",
+            [sys.executable, "py_router/route.py", BOARD, rp, "--nets", "Net-(U4-LNA_IN{slash}RF)",
              "--clearance", "5.0", "--track-width", "0.1", "--via-size", "0.5",
              "--via-drill", "0.3", "--no-bga-zone", "--no-fix-drc-settings"],
             cwd=ROOT_DIR, capture_output=True, text=True)

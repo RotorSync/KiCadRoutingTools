@@ -86,7 +86,7 @@ def _write_board(text):
 
 def _route(board_path):
     out = tempfile.mktemp(suffix=".kicad_pcb")
-    cmd = [sys.executable, "route.py", board_path,
+    cmd = [sys.executable, "py_router/route.py", board_path,
            "--output", out,
            "--nets", "/MULTI",
            "--layers", "F.Cu", "B.Cu",

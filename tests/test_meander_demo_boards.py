@@ -180,10 +180,10 @@ def min_riser_pitch(board, net_name, run_dir, min_len=0.2):
 
 def _grade(board, nets_arg=None):
     scope = ["--nets"] + nets_arg if nets_arg else []
-    drc = _run(["check_drc.py", board] + scope)
+    drc = _run(["py_router/check_drc.py", board] + scope)
     if "NO DRC VIOLATIONS" not in drc:
         _fail(f"DRC violations on {board}:\n{drc[-1500:]}")
-    conn = _run(["check_connected.py", board] + scope)
+    conn = _run(["py_router/check_connected.py", board] + scope)
     if "FULLY CONNECTED" not in conn:
         _fail(f"connectivity failure on {board}:\n{conn[-1500:]}")
 
@@ -197,7 +197,7 @@ def test_synth_demo(tmp, spacing=None, expect_pitch=None):
     write_synth_board(src)
     sp = ["--meander-spacing", str(spacing)] if spacing else []
 
-    dp_out = _run(["route_diff.py", src, mid,
+    dp_out = _run(["py_router/route_diff.py", src, mid,
                    "DP_A_P", "DP_A_N", "DP_B_P", "DP_B_N", "DP_C_P", "DP_C_N",
                    "--track-width", "0.2", "--clearance", "0.15", "--diff-pair-gap", "0.15",
                    "--length-match-group", "DP_A_*", "DP_B_*", "DP_C_*"] + sp)
@@ -205,7 +205,7 @@ def test_synth_demo(tmp, spacing=None, expect_pitch=None):
     if s.get("successful") != 3 or s.get("failed"):
         _fail(f"[{tag}] expected 3/3 pairs routed, got {s.get('successful')}/{s.get('failed')}")
 
-    se_out = _run(["route.py", mid, out, "--nets", "SE1", "SE2", "SE3", "SE4",
+    se_out = _run(["py_router/route.py", mid, out, "--nets", "SE1", "SE2", "SE3", "SE4",
                    "--track-width", "0.2", "--clearance", "0.15",
                    "--length-match-group", "SE[1-3]"] + sp)
     s = _json_summary(se_out)
@@ -248,7 +248,7 @@ def test_lvds_intra_pair(tmp):
     meanders on one leg of a coupled pair, at the board's own 0.2 netclass)."""
     src = os.path.join(REPO, "kicad_files", "lvds_converter_dualclk.kicad_pcb")
     out = os.path.join(tmp, "lvds_intra.kicad_pcb")
-    log = _run(["route_diff.py", src, out,
+    log = _run(["py_router/route_diff.py", src, out,
                 "--diff-pair-gap", "0.25", "--track-width", "0.2", "--clearance", "0.2",
                 "--diff-pair-intra-match"])
     m = re.search(r"intra-pair: (\d+) bumps added, new P=[\d.]+mm, new delta=([\d.]+)mm", log)
@@ -277,13 +277,13 @@ def test_protected_nets(tmp):
     s3 = os.path.join(tmp, "prot_s3.kicad_pcb")
     s4 = os.path.join(tmp, "prot_s4.kicad_pcb")
     write_synth_board(src)
-    _run(["route_diff.py", src, s1,
+    _run(["py_router/route_diff.py", src, s1,
           "DP_A_P", "DP_A_N", "DP_B_P", "DP_B_N", "DP_C_P", "DP_C_N",
           "--track-width", "0.2", "--clearance", "0.15", "--diff-pair-gap", "0.15",
           "--length-match-group", "DP_A_*", "DP_B_*", "DP_C_*"])
     # SE1 stays unrouted here: the attack step below needs a real routing
     # target or the run no-ops before the rip expansion.
-    _run(["route.py", s1, s2, "--nets", "SE2", "SE3",
+    _run(["py_router/route.py", s1, s2, "--nets", "SE2", "SE3",
           "--track-width", "0.2", "--clearance", "0.15", "--length-match-group", "SE*"])
 
     from protected_nets import read_protected_nets, pro_path_for_board
@@ -297,7 +297,7 @@ def test_protected_nets(tmp):
     # Attack step: route the fresh SE1 with a glob rip over everything.
     # Protected nets must survive with their meandered lengths intact.
     before = {n: _net_len(s2, n) for n in ("SE2", "SE3", "DP_B_P", "DP_C_P")}
-    out = _run(["route.py", s2, s3, "--nets", "SE1", "--rip-existing-nets", "*",
+    out = _run(["py_router/route.py", s2, s3, "--nets", "SE1", "--rip-existing-nets", "*",
                 "--track-width", "0.2", "--clearance", "0.15"])
     if "PROTECTED net(s) excluded" not in out:
         _fail("glob rip printed no protected-nets exclusion")
@@ -312,7 +312,7 @@ def test_protected_nets(tmp):
     # (whether it is actually ripped depends on congestion, so assert the
     # policy decision -- the eligibility print -- not the rip). SE4 is the
     # fresh routing target (SE1 was consumed by the attack step above).
-    out = _run(["route.py", s3, s4, "--nets", "SE4", "--rip-existing-nets", "SE3",
+    out = _run(["py_router/route.py", s3, s4, "--nets", "SE4", "--rip-existing-nets", "SE3",
                 "--track-width", "0.2", "--clearance", "0.15"])
     if "eligible for rip-up" not in out or "SE3" not in out.split("eligible for rip-up")[1][:80]:
         _fail("exact-name override did not make SE3 rip-eligible:\n" + out[-1200:])
@@ -328,7 +328,7 @@ def test_power_trace_ampacity(tmp):
     src = os.path.join(tmp, "amp.kicad_pcb")
     out = os.path.join(tmp, "amp_out.kicad_pcb")
     write_synth_board(src)
-    log = _run(["route.py", src, out, "--nets", "SE1", "SE2",
+    log = _run(["py_router/route.py", src, out, "--nets", "SE1", "SE2",
                 "--power-nets", "SE1", "--power-nets-widths", "0.8",
                 "--track-width", "0.2", "--clearance", "0.15"])
     if "Power trace ampacity" not in log:
@@ -350,7 +350,7 @@ def test_locked_nets(tmp):
     s1 = os.path.join(tmp, "lock_s1.kicad_pcb")
     s2 = os.path.join(tmp, "lock_s2.kicad_pcb")
     write_synth_board(src)
-    _run(["route.py", src, s1, "--nets", "SE2", "SE3",
+    _run(["py_router/route.py", src, s1, "--nets", "SE2", "SE3",
           "--track-width", "0.2", "--clearance", "0.15"])
     # Lock SE2's copper the way KiCad writes it (token between layer and net).
     txt = open(s1).read()
@@ -360,7 +360,7 @@ def test_locked_nets(tmp):
     open(s1, "w").write(locked)
 
     before = _net_len(s1, "SE2")
-    out = _run(["route.py", s1, s2, "--nets", "SE1", "--rip-existing-nets", "SE2",
+    out = _run(["py_router/route.py", s1, s2, "--nets", "SE1", "--rip-existing-nets", "SE2",
                 "--track-width", "0.2", "--clearance", "0.15"])
     if "PROTECTED net(s) excluded" not in out or "locked" not in out:
         _fail("locked net was not excluded from an exact-name rip:\n" + out[-1200:])
@@ -380,7 +380,7 @@ def test_impedance_redo(tmp):
     s1b = os.path.join(tmp, "imp_s1_stripped.kicad_pcb")
     s2 = os.path.join(tmp, "imp_s2.kicad_pcb")
     write_synth_board(src)
-    out = _run(["route.py", src, s1, "--nets", "SE2",
+    out = _run(["py_router/route.py", src, s1, "--nets", "SE2",
                 "--track-width", "0.15", "--clearance", "0.15", "--impedance", "60"])
     pcb = parse_kicad_pcb(s1)
     nid = {n.name: i for i, n in pcb.nets.items()}["SE2"]
@@ -403,7 +403,7 @@ def test_impedance_redo(tmp):
     open(s1b, "w").write(content)
     import shutil
     shutil.copy(pro_path_for_board(s1), pro_path_for_board(s1b))
-    out = _run(["route.py", s1b, s2, "--nets", "SE2",
+    out = _run(["py_router/route.py", s1b, s2, "--nets", "SE2",
                 "--track-width", "0.15", "--clearance", "0.15"])
     if "Reapplying stored 60 ohm" not in out:
         _fail("redo step did not reapply the stored impedance spec:\n" + out[-1200:])
@@ -425,7 +425,7 @@ def test_impedance_redo(tmp):
     # has no pour, so auditing SE3 at ITS recorded gap -- no --coplanar-gap
     # flag passed -- must flag the broken promise (exit 1).
     s3 = os.path.join(tmp, "imp_s3.kicad_pcb")
-    _run(["route.py", s2, s3, "--nets", "SE3", "--track-width", "0.15",
+    _run(["py_router/route.py", s2, s3, "--nets", "SE3", "--track-width", "0.15",
           "--clearance", "0.15", "--impedance", "60", "--coplanar-gap", "0.3"])
     r = subprocess.run([sys.executable, "check_impedance.py", s3, "--nets", "SE3"],
                        capture_output=True, text=True, cwd=REPO)

@@ -28,7 +28,7 @@ CLEARANCE = "0.1"
 
 
 def run_route(out):
-    cmd = [sys.executable, "route.py", BOARD,
+    cmd = [sys.executable, "py_router/route.py", BOARD,
            "--output", out,
            "--nets", "/IO_Banks/IO_Buffer_B/*",
            "--layers", "F.Cu", "In1.Cu", "In2.Cu", "B.Cu",
@@ -39,7 +39,7 @@ def run_route(out):
 
 
 def run_drc(out):
-    cmd = [sys.executable, "check_drc.py", out, "-c", CLEARANCE]
+    cmd = [sys.executable, "py_router/check_drc.py", out, "-c", CLEARANCE]
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
     return r.stdout + r.stderr
 

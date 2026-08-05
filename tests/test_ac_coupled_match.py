@@ -65,7 +65,7 @@ def _detect(footprints, pairs):
 
 
 def _run_route(out, extra):
-    cmd = [sys.executable, "route_diff.py", BOARD, out, "--nets", *NETS] + GEOM + extra
+    cmd = [sys.executable, "py_router/route_diff.py", BOARD, out, "--nets", *NETS] + GEOM + extra
     r = subprocess.run(cmd, cwd=ROOT_DIR, capture_output=True, text=True)
     m = re.search(r"JSON_SUMMARY:\s*(\{.*\})", r.stdout)
     summary = json.loads(m.group(1)) if m else None

@@ -47,7 +47,7 @@ def route(pair, extra, verbose):
     """Route *pair* coupled; return (routed_ok, {layer: mm}) for the pair's nets.
     Fresh temp paths each call so a stale .kicad_pro can't carry DRC floors over."""
     out = tempfile.mktemp(suffix=".kicad_pcb", prefix=f"dlc_{pair}_")
-    cmd = [sys.executable, "route_diff.py", BOARD, out, "--nets", f"*{pair}*"] + extra + GEOM
+    cmd = [sys.executable, "py_router/route_diff.py", BOARD, out, "--nets", f"*{pair}*"] + extra + GEOM
     r = subprocess.run(cmd, cwd=ROOT_DIR, capture_output=True, text=True)
     txt = r.stdout + r.stderr
     if verbose:

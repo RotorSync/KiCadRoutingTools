@@ -69,6 +69,14 @@ def run_cmd(args, audit=True, ledger=False, tap_verify=False,
         env["KICAD_OBSTACLE_LEDGER"] = "1"
     if tap_verify:
         env["TAP_MAP_VERIFY"] = "1"
+    # #522 reorg: the CLI scripts moved from the repo root into py_router/
+    # (py_tools/ for the utilities). Resolve the bare script name the
+    # recipes use against its current home so the test survives moves.
+    for sub in ("py_router", "py_tools"):
+        cand = os.path.join(ROOT_DIR, sub, args[0])
+        if os.path.exists(cand):
+            args = [cand] + list(args[1:])
+            break
     if fragility_off:
         # The stage-1 churn recipe's last routing failure is cost-surface
         # sensitive: with the #424 plane-fragility field priced from the

@@ -88,7 +88,7 @@ def make_board_with_keepout(polys):
 
 def run_route(board_in, board_out, nets, keepout=False, verbose=False, geom=None):
     """Run route.py; return (ok, combined_output)."""
-    cmd = [sys.executable, "route.py", board_in, board_out] + (geom or GEOM) + ["--nets"] + nets
+    cmd = [sys.executable, "py_router/route.py", board_in, board_out] + (geom or GEOM) + ["--nets"] + nets
     if keepout:
         cmd.append("--keepout")
     if verbose:
@@ -99,7 +99,7 @@ def run_route(board_in, board_out, nets, keepout=False, verbose=False, geom=None
 
 def is_connected(board, nets):
     """True if check_connected reports all given nets fully connected."""
-    cmd = [sys.executable, "check_connected.py", board, "--nets"] + nets
+    cmd = [sys.executable, "py_router/check_connected.py", board, "--nets"] + nets
     r = subprocess.run(cmd, cwd=ROOT_DIR, capture_output=True, text=True)
     return "ALL NETS FULLY CONNECTED" in (r.stdout + r.stderr)
 
@@ -111,7 +111,7 @@ def drc_counts(board, clearance=CLEARANCE):
     copper to overlap); real_violations counts everything else.
     """
     import re
-    cmd = [sys.executable, "check_drc.py", board, "--clearance", str(clearance)]
+    cmd = [sys.executable, "py_router/check_drc.py", board, "--clearance", str(clearance)]
     r = subprocess.run(cmd, cwd=ROOT_DIR, capture_output=True, text=True)
     out = r.stdout + r.stderr
     if "NO DRC VIOLATIONS" in out:

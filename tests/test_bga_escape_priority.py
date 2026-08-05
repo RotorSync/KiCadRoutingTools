@@ -36,7 +36,7 @@ ULX_BOARD = os.path.expanduser(
 
 def run_fanout(board, args):
     out = tempfile.mktemp(suffix=".kicad_pcb")
-    cmd = [sys.executable, "bga_fanout.py", board, "--output", out] + args
+    cmd = [sys.executable, "py_router/bga_fanout.py", board, "--output", out] + args
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
     txt = r.stdout + r.stderr
     if os.path.exists(out):
