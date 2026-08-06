@@ -1728,6 +1728,37 @@ Rules of the loop:
   `check_drc` at the routed clearance (plus the kicad oracle for final
   boards) — never accept a retry that trades new DRC for completion.
 
+### End every chain on route.py, then close with per-net retries
+
+**A chain's LAST board is what ships, and only `route.py` finalizes planes.**
+Since #562 a pour alone connects nothing and `route_diff.py` runs no plane
+finalize: a chain that ends on a bare `route_planes.py` re-pour or on a diff
+step writes a final board no weld/oracle pass ever verified. That is a PLAN
+ERROR, not a tuning choice (set5-0805 evidence: dilemma and ghoul ended on a
+bare re-pour and both shipped disconnected; core1106 simply stopped after a
+failed retry). If you re-pour or re-run diffs late, ALWAYS follow with a
+`route.py` step whose `--nets` covers the plane nets (even `--nets GND`
+suffices — its in-run finalize welds and verifies against KiCad's fill).
+
+**Then run the adaptive loop that actually produced the clean waves:** after
+the last route step, grade connectivity; for EACH open net run a TARGETED
+retry — a fresh scoped `route.py` on the written board, escalating ONE lever
+per attempt, keeping the prior board file so a regression can be discarded:
+1. plain scoped: `route.py <board> --output <next> --nets '<the-net>'` at the
+   same geometry;
+2. add `--rip-existing-nets <blocker names>` using EXACTLY the nets the
+   failed log printed ("the blocking copper belongs to pre-existing
+   net(s) '...'"). NEVER broad authority — `--rip-existing-nets '*'`
+   measured net-WORSE (5 opens → 6, it trades casualties for closures);
+3. step `--track-width` down one notch (e.g. 0.0889 → 0.0762) — the classic
+   close for a pocketed escape.
+Re-grade the WHOLE board after every attempt (`check_connected.py` +
+`check_drc.py`); keep the new board only if the target closed and nothing
+else opened, else continue from the previous board. Measured (set5): this
+loop closed sechzig completely and 4/5 of ecp5's opens with zero casualties,
+and the 0801 wave's clean boards were produced by exactly this loop — not by
+stronger single-shot routing.
+
 ### Diagnose and Retry
 
 **Soft-cost retry levers (measured on 12-board challenging-chain A/B; these
