@@ -2712,10 +2712,6 @@ def create_plane(
     stitch_fence_pitch: Optional[float] = None,
     stitch_inset: Optional[float] = None,
     stitch_max_freq: Optional[float] = None,
-    # #549 B: glob patterns naming nets whose committed-copper corridors via
-    # placement should prefer to keep clear. None -> AUTO (the board's
-    # protected/impedance records); ['none'] -> off.
-    corridor_nets: Optional[List[str]] = None,
     # Run-6 A5 pour gate: a bare pad (>=2-pad net with zero copper) at pour
     # time has its escape channel consumed by the tap-via carpet, permanently.
     # CLI refuses (exit 3) unless --allow-bare-pads; the GUI path warns only.
@@ -3032,11 +3028,6 @@ def create_plane(
     from kicad_dru import install_layer_clearances
     install_layer_clearances(config, None, input_file, pcb_data)
     # #549 B: soft via-site preference around path-critical nets' committed
-    # copper (auto: the board's protected/impedance records).
-    from plane_corridor_ghosts import seed_corridor_ghosts
-    corridor_seeds = seed_corridor_ghosts(pcb_data, corridor_nets,
-                                          via_size, clearance,
-                                          input_file=input_file)
     # Cross-class clearance (#434, mirrors batch_route/repair): auto-read the
     # board's non-Default netclasses from the INPUT's sibling .kicad_pro when
     # no map was passed, so tap tracks/vias and blocker reroutes honor KiCad's
@@ -3931,12 +3922,6 @@ Examples:
              "same obstacle/hole-to-hole/edge checks as any routed via.")
     parser.add_argument("--stitch-pitch", type=float, default=defaults.STITCH_PITCH,
         help=f"Lattice pitch for --stitch-vias in mm (default: {defaults.STITCH_PITCH})")
-    parser.add_argument("--corridor-nets", nargs="+", metavar="PATTERN", default=None,
-                        help="#549: net-name globs whose committed-copper corridors via "
-                             "placement should prefer to keep clear (soft preference, "
-                             "never excludes the only viable site). Default: AUTO -- the "
-                             "board's protected nets and impedance declarations. Pass "
-                             "'none' to disable.")
     parser.add_argument("--allow-bare-pads", action="store_true",
                         help="Pour even when nets with >=2 pads carry ZERO copper. Default "
                              "REFUSES (exit 3): the tap-via carpet permanently seals a bare "
@@ -4100,7 +4085,6 @@ Examples:
     create_plane(
         input_file=args.input_file,
         output_file=args.output_file,
-        corridor_nets=args.corridor_nets,
         allow_bare_pads=args.allow_bare_pads,
         ripup_blocker_select=args.ripup_blocker_select,
         net_names=net_names,

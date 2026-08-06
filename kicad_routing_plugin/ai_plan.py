@@ -247,10 +247,6 @@ _PARAM_CONTROL_ALIASES = {
     # #521 run-6: nets protected from rip-up for the run (both route tabs
     # name their TextCtrl protect_nets_ctrl).
     'protect_nets': 'protect_nets_ctrl',
-    # (#549 corridor_nets and the run-6 rip_blocker_exclude/allow guards also
-    # had controls in the Blocker Handling box that #562 deleted; their
-    # per-action block notes them, same as rip_blocker_nets above. The
-    # standalone repair_planes.py CLI still honors all three.)
     'ordering': 'ordering_strategy',
     'direction': 'direction_choice',
     'time_matching': 'time_matching_check',
@@ -341,10 +337,8 @@ def apply_step_params(step, dialog):
         # prints an explanatory note instead of letting the generic loop emit
         # a bare "no control, ignored".
         "route_planes": {"add_gnd_vias", "gnd_via_distance", "gnd_via_net",
-                         "rip_blocker_nets", "corridor_nets",
-                         "rip_blocker_exclude", "rip_blocker_allow"},
-        "repair_planes": {"rip_blocker_nets", "corridor_nets",
-                          "rip_blocker_exclude", "rip_blocker_allow"},
+                         "rip_blocker_nets"},
+        "repair_planes": {"rip_blocker_nets"},
         # #381 D7: QFN width/clearance are set by the fanout action block onto
         # the QFN panel's own controls; skip them in the generic loop (which has
         # no same-named control on the fanout owners) to avoid a spurious
@@ -674,12 +668,6 @@ def apply_step_params(step, dialog):
         if "rip_blocker_nets" in params:
             notes.append("rip_blocker_nets ignored (#562: the pour step does "
                          "no routing, so there are no tap corridors to rip)")
-        for _gone in ("corridor_nets", "rip_blocker_exclude",
-                      "rip_blocker_allow"):
-            if _gone in params:
-                notes.append(f"{_gone} ignored (#562: the pour step does no "
-                             f"routing; the standalone repair_planes.py CLI "
-                             f"still honors it)")
     elif action == "repair_planes":
         # Obsolete since #562: plane repair runs inside every route step's
         # finalize. Legacy plans keep loading; the step is skipped at run

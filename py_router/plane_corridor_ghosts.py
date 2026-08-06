@@ -62,14 +62,8 @@ def softblock_mode() -> Optional[str]:
 class CorridorGhosts:
     """Registry of ripped-net corridor ghosts for one plane-repair run."""
 
-    def __init__(self, mode: str, site_margin: float = 0.2):
+    def __init__(self, mode: str):
         self.mode = mode
-        # Extra daylight around ghost copper in the via-site preference test
-        # (run-6 #549 B: the default 0.2 preserves #517 exactly; the SEEDED
-        # committed-copper registry passes clearance + via_size/2 so a pour
-        # tap prefers to leave a strap's worth of room beside a protected
-        # net's corridor).
-        self.site_margin = site_margin
         # net_id -> (segments, vias): the net's copper NOT currently on the
         # board (whole net right after a full rip; only the dropped pieces
         # after a partial/failure-path restore; absent once reconnected).
@@ -171,71 +165,15 @@ class CorridorGhosts:
             if nid in excl:
                 continue
             for s in segs:
-                thr = r_extra + s.width / 2.0 + self.site_margin
+                thr = r_extra + s.width / 2.0 + 0.2
                 if _pt_seg_dist_sq(x, y, s.start_x, s.start_y,
                                    s.end_x, s.end_y) < thr * thr:
                     return False
             for v in vias:
-                thr = r_extra + v.size / 2.0 + self.site_margin
+                thr = r_extra + v.size / 2.0 + 0.2
                 if (x - v.x) ** 2 + (y - v.y) ** 2 < thr * thr:
                     return False
         return True
-
-
-def seed_corridor_ghosts(pcb_data, patterns: Optional[List[str]],
-                         via_size: float, clearance: float,
-                         input_file: Optional[str] = None
-                         ) -> Optional[CorridorGhosts]:
-    """#549 B: a SEPARATE ghost registry seeded from COMMITTED copper, so pour
-    tap/stitch via placement prefers not to seal the corridors of nets whose
-    path matters (run 5: pour taps sealed the SCLK/SD3 wrap corridors --
-    10,903/10,939 static frontier cells -- making every post-pour improvement
-    impossible).
-
-    patterns:
-      * None  -> AUTO: the union of the board's protected nets
-        (protected_nets.protection_map -- matched groups, routed diff pairs,
-        --protect-nets, locked copper) and its declared impedance nets,
-        exactly how route_disconnected_planes learns protection today;
-      * ['none'] -> disabled (returns None);
-      * else  -> glob patterns over net names (net_queries matcher).
-
-    The registry is consumed ONLY through via_site_clear (a soft preference at
-    find_via_position / tap ghost hooks) -- never merge_into_routing_map, no
-    custody events: committed copper is already a hard obstacle, this only
-    asks vias to keep a strap's worth of daylight (site_margin = clearance +
-    via_size/2: the via map already hard-blocks via/2 + w/2 + clearance, one
-    extra via-radius leaves room for a reroute without collapsing the
-    preferred set on dense boards). Returns None when nothing matches.
-    """
-    if patterns is not None and [p.lower() for p in patterns] == ['none']:
-        return None
-    if patterns is None:
-        from protected_nets import protection_map, read_impedance_for_pcb_data
-        names = set(protection_map(pcb_data, input_file))
-        names |= set(read_impedance_for_pcb_data(pcb_data, input_file))
-        if not names:
-            return None
-        matched = {nid for nid, n in pcb_data.nets.items()
-                   if n.name and n.name in names}
-    else:
-        from net_queries import matches_net_filter
-        matched = {nid for nid, n in pcb_data.nets.items()
-                   if n.name and matches_net_filter(n.name, patterns)}
-    if not matched:
-        return None
-    ghosts = CorridorGhosts('soft', site_margin=clearance + via_size / 2.0)
-    for nid in sorted(matched):
-        segs = [s for s in pcb_data.segments if s.net_id == nid]
-        vias = [v for v in pcb_data.vias if v.net_id == nid]
-        if segs or vias:
-            ghosts.set_net(nid, segs, vias)
-    if not ghosts.net_ids():
-        return None
-    print(f"  Corridor seeds (#549): via placement prefers daylight around "
-          f"{len(ghosts.net_ids())} net(s)' committed copper "
-          f"(margin {ghosts.site_margin:g}mm)")
-    return ghosts
 
 
 def _pt_seg_dist_sq(px, py, x1, y1, x2, y2):

@@ -130,11 +130,6 @@ LIST_FLAGS = {
     # route to TextCtrls via ai_plan's alias table.
     '--rip-existing-nets': 'rip_existing_nets',
     '--protect-nets': 'protect_nets',
-    # #549: plane scripts' corridor-seed allowlist.
-    '--corridor-nets': 'corridor_nets',
-    # Run-6 blocker guards (plane scripts).
-    '--rip-blocker-exclude': 'rip_blocker_exclude',
-    '--rip-blocker-allow': 'rip_blocker_allow',
     # bga_fanout's future-pour declaration (NET:LAYER[,LAYER...] specs,
     # nargs='+'). Review parity finding 5: a recorded manifest carrying the
     # flag used to convert to a plan that silently dropped it. The GUI/plan
@@ -368,8 +363,7 @@ def parse_command(argv):
         step['nets'] = [str(n) for n in nets] or ['*']
     for k in ('--power-nets', '--power-nets-widths', '--layer-costs',
               '--layers', '--polarity-swap-nets', '--coplanar-nets',
-              '--rip-existing-nets', '--protect-nets', '--corridor-nets',
-              '--rip-blocker-exclude', '--rip-blocker-allow'):
+              '--rip-existing-nets', '--protect-nets'):
         if k in lists:
             step['params'][LIST_FLAGS[k]] = lists[k]
     return step

@@ -944,7 +944,6 @@ def try_tap_pad(
     plane_oracle=None,
     corridor_ghosts=None,
     ghost_exclude_ids=(),
-    corridor_seeds=None,
 ) -> TapResult:
     """Attempt to connect one pad to the plane with the given parameters.
 
@@ -1156,21 +1155,14 @@ def try_tap_pad(
             return any(point_in_polygon(x, y, poly) for poly in _net_zone_polys)
 
     ghost_pref = None
-    _prefs = []
     if corridor_ghosts is not None:
         # #517 arm 2: soft preference for via sites OUTSIDE vacated ripped
         # corridors (never excludes -- find_via_position's contract).
         _gx_ids = ghost_exclude_ids
-        _prefs.append(lambda x, y: corridor_ghosts.via_site_clear(
-            x, y, via_size, exclude_net_ids=_gx_ids))
-    if corridor_seeds is not None:
-        # #549 B: soft preference for daylight around path-critical nets'
-        # COMMITTED copper; this tap's own net never repels itself.
-        _prefs.append(lambda x, y: corridor_seeds.via_site_clear(
-            x, y, via_size, exclude_net_ids={net_id}))
-    if _prefs:
-        def ghost_pref(x, y, _ps=tuple(_prefs)):
-            return all(p(x, y) for p in _ps)
+
+        def ghost_pref(x, y):
+            return corridor_ghosts.via_site_clear(x, y, via_size,
+                                                  exclude_net_ids=_gx_ids)
 
     failed_positions: Set[Tuple[int, int]] = set()
     via_pos = find_via_position(
@@ -1265,7 +1257,6 @@ def tap_pad_with_escalation(
     plane_oracle=None,
     corridor_ghosts=None,
     ghost_exclude_ids=(),
-    corridor_seeds=None,
 ) -> TapResult:
     """Tap a pad, escalating to scoped fine parameters for fine-pitch pads.
 
@@ -1288,7 +1279,7 @@ def tap_pad_with_escalation(
             distant_trace_radius=distant_trace_radius, disable_reuse=disable_reuse,
             shared_via_maps=shared_via_maps, pour_trace_only=pour_trace_only,
             plane_oracle=plane_oracle, corridor_ghosts=corridor_ghosts,
-            ghost_exclude_ids=ghost_exclude_ids, corridor_seeds=corridor_seeds)
+            ghost_exclude_ids=ghost_exclude_ids)
         if result.success:
             result.params_label = 'default'
             result.clearance_used = config.clearance
@@ -1344,8 +1335,7 @@ def tap_pad_with_escalation(
                 distant_trace_radius=distant_trace_radius, disable_reuse=disable_reuse,
                 shared_via_maps=shared_via_maps, pour_trace_only=pour_trace_only,
                 plane_oracle=plane_oracle, corridor_ghosts=corridor_ghosts,
-                ghost_exclude_ids=ghost_exclude_ids,
-                corridor_seeds=corridor_seeds)
+                ghost_exclude_ids=ghost_exclude_ids)
             if result.success:
                 result.params_label = 'fine'
                 result.clearance_used = fine_config.clearance
