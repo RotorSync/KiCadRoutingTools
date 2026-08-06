@@ -762,6 +762,15 @@ def stamp_locked(board_file: str, refs: Sequence[str]) -> int:
 
 
 REPAIR_CAPS_MM = (0.5, 1.0, 2.0, 5.0)
+# A repair move must be PROPORTIONATE to the violation it clears. The cap
+# ladder escalates 0.5 -> 5.0mm hunting any legal seat, and on a board damaged
+# by ~1.2mm it relocated parts 4.3-5.8mm: those few parts carried the whole of
+# that run's negative recovery (excluding three of them took it from -0.296 to
+# -0.058). A seat further than this multiple of the charged violation is not a
+# repair, it is a different placement -- so it is refused and reported, and the
+# floor keeps a sub-millimetre violation fixable by a sensible move.
+DISPROPORTION_RATIO = 8.0
+DISPROPORTION_FLOOR_MM = 1.0
 
 
 def repair_placement(pcb_data, pcb_file: str, intent, *,
@@ -810,6 +819,14 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
 
     # ---- violator census ---------------------------------------------------
     weight: Dict[str, float] = {}
+    # The OTHER member of each conflicting pair, kept as a fallback rather than
+    # charged. Run-7 shipped a pair whose preferred mover had no legal seat
+    # anywhere while its partner had one, and the partner was never tried: the
+    # pair was reported unrepairable. Charging both instead is churn -- measured
+    # on a corpus board with one genuine 0.04mm pair, it moved a second part
+    # 0.50mm for no change in the graded result. So: try the partner only when
+    # the preferred mover FAILS.
+    partner_of: Dict[str, List[str]] = {}
 
     def _charge(ref, amt):
         if ref in state.parts:
@@ -834,14 +851,21 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
           f"all listed")
     for (ra, rb, mm) in pads['worst']:
         free = [r for r in (ra, rb)
-                if r in state.parts
-                and (not state.parts[r].locked or r in must_lock)]
+                if r in state.parts and not state.parts[r].locked]
         if not free:
             notes.append(f"pad conflict {ra}<->{rb} ({mm}mm): both file-locked"
                          f" -- not repairable here")
             continue
-        mover = min(free, key=lambda r: (state.parts[r].pin_count, r))
-        _charge(mover, mm)
+        # Charge the PREFERRED mover fully and its partner partially, instead
+        # of charging one and forgetting the other. Run-7 shipped a pair whose
+        # chosen mover had no legal seat anywhere while the other member had
+        # one available -- the partner was never tried, and the pair was
+        # reported unrepairable. Both are candidates now; the weights keep the
+        # preferred one first in the worst-first order.
+        ordered = sorted(free, key=lambda r: (state.parts[r].pin_count, r))
+        _charge(ordered[0], mm)
+        for partner in ordered[1:]:
+            partner_of.setdefault(ordered[0], []).append(partner)
 
     # Run-6: the ASSEMBLY census. Blocking body pairs (any-net cross-
     # footprint pad intersections -- the shipped C14-on-R14 class that the
@@ -853,15 +877,16 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
               f"pair(s), all listed")
     for bp in body['blocking_pairs']:
         free = [r for r in (bp.a, bp.b)
-                if r in state.parts
-                and (not state.parts[r].locked or r in must_lock)]
+                if r in state.parts and not state.parts[r].locked]
         if not free:
             notes.append(f"body stack {bp.a}<->{bp.b} ({bp.area_mm2}mm2): "
                          f"both file-locked -- not repairable here")
             continue
-        mover = min(free, key=lambda r: (state.parts[r].pin_count, r))
+        ordered = sorted(free, key=lambda r: (state.parts[r].pin_count, r))
         # mm2 -> a strong mm-equivalent charge: a stack is never cosmetic
-        _charge(mover, max(1.0, bp.area_mm2))
+        _charge(ordered[0], max(1.0, bp.area_mm2))
+        for partner in ordered[1:]:
+            partner_of.setdefault(ordered[0], []).append(partner)
 
     # Off-board census on PAD/HOLE extents at ZERO margin -- copper or drill
     # off the outline is a fab defect; a COURTYARD poking past the edge is
@@ -981,11 +1006,56 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
                 placed_at = 'zone'
         part.locked = was_locked
         if placed_at is None:
+            # Before giving up on the pair, try its OTHER member -- the mover
+            # rule picked this one, but "preferred" is not "the only one that
+            # can move".
+            seated_partner = None
+            for partner in partner_of.get(ref, []):
+                if partner not in state.parts or state.parts[partner].locked:
+                    continue
+                pp = state.parts[partner]
+                pox, poy, porot = pp.x, pp.y, pp.rot
+                for cap in caps:
+                    if _try_place(state, partner, pox, poy, set(),
+                                  max_disp=cap) is not None:
+                        pd = math.hypot(pp.x - pox, pp.y - poy)
+                        if pd > 1e-9:
+                            seated_partner = (partner, pd)
+                        break
+                if seated_partner:
+                    break
+                state.apply_move(partner, pox, poy, porot)
+            if seated_partner:
+                pname, pd = seated_partner
+                pp = state.parts[pname]
+                moves.append({'reference': pname, 'new_x': pp.x,
+                              'new_y': pp.y, 'new_rotation': pp.rot})
+                repaired.append(pname)
+                notes.append(
+                    f"{ref}: no legal pose within any cap {tuple(caps)}mm -- "
+                    f"seated its pair partner {pname} instead "
+                    f"({pd:.2f}mm from its pose)")
+                continue
             failed.append(ref)
             notes.append(f"{ref}: no legal pose within any cap "
-                         f"{tuple(caps)}mm of its current pose")
+                         f"{tuple(caps)}mm of its current pose"
+                         + (f" (partner{'s' if len(partner_of.get(ref, [])) > 1 else ''} "
+                            f"{', '.join(partner_of.get(ref, []))} tried too)"
+                            if partner_of.get(ref) else ''))
             continue
         d = math.hypot(part.x - ox, part.y - oy)
+        budget = max(DISPROPORTION_FLOOR_MM,
+                     DISPROPORTION_RATIO * weight.get(ref, 0.0))
+        if d > budget:
+            state.apply_move(ref, ox, oy, orot)
+            failed.append(ref)
+            notes.append(
+                f"{ref}: the only legal seat is {d:.2f}mm away, which is "
+                f"disproportionate to the {weight.get(ref, 0.0):.2f}mm "
+                f"violation it clears (budget {budget:.2f}mm) -- left in "
+                f"place. A move this size is a different placement, not a "
+                f"repair; reconstruct or re-arrange instead.")
+            continue
         if d > 1e-9 or part.rot != orot:
             moves.append({'reference': ref, 'new_x': part.x, 'new_y': part.y,
                           'new_rotation': part.rot})
