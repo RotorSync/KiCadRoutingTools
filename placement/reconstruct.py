@@ -998,29 +998,58 @@ def _solve_ilp(state, candidates, tiers, move_penalty, notes, pattern,
             rows.append((idx, 0.0, 1.0))
     # pairwise exclusions between conflicting candidate poses
     n_excl = 0
+    # Stay-stay rows are kept SEPARATE. Forbidding the status quo is what makes
+    # the solve strong -- two parts that already conflict are not allowed to
+    # both sit still, so the solver has to fix them. But when neither has an
+    # alternative pose, that same row makes the whole ILP infeasible, the
+    # solver falls back to a descent, and the simultaneous assignment is lost
+    # for every OTHER part too (measured on two run-7 boards: "ILP status 2
+    # Infeasible" on every lap).
+    #
+    # So: solve with them, and only if that is infeasible solve again without
+    # them, before giving up on the ILP entirely. Strongest formulation first,
+    # the status quo as the fallback, the descent as the last resort.
+    stay_rows = []
     for a, b in _interacting_pairs(state, candidates):
         for ka, pos_a in enumerate(candidates[a]):
             for kb, pos_b in enumerate(candidates[b]):
-                if _pair_conflicts(state, a, pos_a, b, pos_b):
-                    rows.append(([var_of[(a, ka)], var_of[(b, kb)]],
-                                 0.0, 1.0))
+                if not _pair_conflicts(state, a, pos_a, b, pos_b):
+                    continue
+                row = ([var_of[(a, ka)], var_of[(b, kb)]], 0.0, 1.0)
+                if ka == 0 and kb == 0:
+                    stay_rows.append(row)
+                else:
+                    rows.append(row)
                     n_excl += 1
+    rows.extend(stay_rows)
     if notes is not None:
         notes.append(f'ILP: {n} binaries, {len(rows)} rows '
                      f'({n_excl} exclusions)')
 
-    A = lil_matrix((len(rows), n))
-    lb = np.zeros(len(rows))
-    ub = np.zeros(len(rows))
-    for i, (idx, lo, hi) in enumerate(rows):
-        for j in idx:
-            A[i, j] = 1.0
-        lb[i] = lo
-        ub[i] = hi
-    res = milp(c=np.asarray(costs),
-               constraints=LinearConstraint(A.tocsr(), lb, ub),
-               integrality=np.ones(n),
-               bounds=Bounds(0, 1))
+    def _solve(active_rows):
+        A = lil_matrix((len(active_rows), n))
+        lb = np.zeros(len(active_rows))
+        ub = np.zeros(len(active_rows))
+        for i, (idx, lo, hi) in enumerate(active_rows):
+            for j in idx:
+                A[i, j] = 1.0
+            lb[i] = lo
+            ub[i] = hi
+        return milp(c=np.asarray(costs),
+                    constraints=LinearConstraint(A.tocsr(), lb, ub),
+                    integrality=np.ones(n), bounds=Bounds(0, 1))
+
+    res = _solve(rows)
+    if (res.status != 0 or res.x is None) and stay_rows:
+        # Relax only the status-quo rows and try again: a board whose own
+        # pre-existing conflict has no alternative pose should still get its
+        # simultaneous assignment for everything else.
+        relaxed = [r for r in rows if r not in stay_rows]
+        if notes is not None:
+            notes.append(f'ILP infeasible with {len(stay_rows)} status-quo '
+                         f'row(s); retrying with the pre-existing conflicts '
+                         f'priced but not forbidden')
+        res = _solve(relaxed)
     if res.status != 0 or res.x is None:
         # Infeasible (exclusions + one-per-part cannot all hold): fall back.
         if notes is not None:
