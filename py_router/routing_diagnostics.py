@@ -441,8 +441,49 @@ def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
         pass
     if rip_existing_names:
         names = [n for n in names if n not in rip_existing_names]
+    # PROTECTED walls get their OWN sentence (2026-08-06, ecp5 /PF37-): the
+    # decisive wall can be a #521-protected pair CROSSING the corridor a few
+    # mm out -- beyond the 1mm rippable ring and behind the nearer stamps the
+    # frontier stalls on, so the hint named six rippable red herrings while
+    # omitting the one net that mattered. Scan wider (3mm) for protected
+    # copper and say it plainly: the router will never rip it; the fixes are
+    # plan-level. Protected names are PROSE-ONLY -- never in the returned
+    # names, so no authority machinery ever receives them (a47f244).
+    prot_txt = ""
+    try:
+        from protected_nets import protection_map
+        _pmap = protection_map(pcb_data,
+                               getattr(pcb_data, 'source_path', None))
+        if _pmap and anchors:
+            from geometry_utils import point_to_segment_distance
+            _pnames = []
+            _pids = {i for i, n in pcb_data.nets.items() if n.name in _pmap}
+            for s2 in pcb_data.segments:
+                if s2.net_id not in _pids:
+                    continue
+                nm2 = pcb_data.nets[s2.net_id].name
+                if nm2 in _pnames:
+                    continue
+                for ax, ay in anchors:
+                    if point_to_segment_distance(
+                            ax, ay, s2.start_x, s2.start_y,
+                            s2.end_x, s2.end_y) <= 3.0:
+                        _pnames.append(nm2)
+                        break
+            if _pnames:
+                _pq = ", ".join(f"'{n}' ({_pmap[n]})" for n in _pnames)
+                prot_txt = (f"\nHint: the box also includes PROTECTED "
+                            f"net(s) {_pq} within 3mm of the failing "
+                            f"endpoint(s). The router will NEVER rip these "
+                            f"(#521). If one is the decisive wall, the "
+                            f"fixes are plan-level: reorder so this net "
+                            f"routes BEFORE them, or override deliberately "
+                            f"by naming the net EXACTLY (no glob) in "
+                            f"--rip-existing-nets.")
+    except Exception:
+        prot_txt = ""
     if not names:
-        return _ret("", [])
+        return _ret(prot_txt.lstrip("\n") if prot_txt else "", [])
     quoted = " ".join(f"'{n}'" for n in names)
     return _ret(f"Hint: the blocking copper belongs to pre-existing net(s) {quoted} "
             f"(committed by an earlier run/step), which this run is not allowed "
@@ -450,7 +491,7 @@ def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
             f"re-route them in this run (issue #103) -- the decisive blocker "
             f"may be any of them, so start with the full set (each ripped net "
             f"is re-routed and the run reports honestly if one cannot be), "
-            f"then bisect if you want a minimal rip.", names)
+            f"then bisect if you want a minimal rip." + prot_txt, names)
 
 
 def static_boxin_hint(result, config, pcb_data=None) -> str:
