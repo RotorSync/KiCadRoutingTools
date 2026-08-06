@@ -1,3 +1,124 @@
+HEAD 2026-08-06 parity audit 89914ce..4c8b79d (27 commits: #570 false-weld
+rejection, fc5ee0e finalize-with-rip-authority, #572 forced links + lap
+authority, the bounded reconcile progress-loop, terminal geometry
+escalation, rip candidacy for pre-existing nets, and the #577/#578 ports).
+Outcome: ONE carried gap DECIDED AND CLOSED (net_name_patterns), TWO
+BROKEN GATES repaired (both #522 path debris that had been hiding their own
+findings), and -- found BY the repaired gate -- one real product bug: every
+headless board-item removal corrupted pcbnew's SWIG type registry, so any
+run that ripped copper applied HALF its changes and reported success.
+
+  Audit surface for the range -- unusually narrow, and worth stating because
+  it is WHY one gap accounts for the whole wave:
+  * The CLI mains did not change at all: 0 new argparse flags, 0 entry-point
+    signature changes (batch_route / batch_route_diff_pairs / create_plane /
+    generate_*_fanout), 0 new post-passes. Everything landed INSIDE
+    batch_route and the shared engine modules, which both fronts call.
+  * The only plugin-side diffs in the range ARE parity work already:
+    the castellated-landing retract twin (gui_utils), the GND-via
+    board_edge_clearance fix (planes_gui), and the impedance SpinCtrl reset
+    (swig_gui -- a float into an int control raised TypeError, which the plan
+    executor CATCHES, so every reset BELOW that line was silently abandoned
+    and each step inherited the previous step's controls).
+  * New env knobs KICAD_FINALIZE_RIP, KICAD_RIP_PREEXISTING and
+    KICAD_TERMINAL_ESCALATION are read inside batch_route / env_knobs /
+    net_rescue = shared, both fronts inherit (the #529 precedent: env-knob
+    surface only, no flag, no control). KICAD_CKPT_PREFINALIZE and
+    KICAD_FINALIZE_ONLY are debug re-entry knobs gated on
+    `not return_results` BY CONSTRUCTION -- Class-2: no GUI counterpart.
+
+  Gap CLOSED: net_name_patterns (batch_route), carried "still open" here for
+  three audits and annotated on the placement branch as by-design.
+  * That annotation was WRONG, and its own rationale is the reason: the GUI
+    "has no raw globs because ai_plan resolves a plan's globs to exact names
+    BEFORE the call." The engine uses net_name_patterns ONLY as the #521
+    protection-override list and falls back to the expanded net_names when it
+    is None. For an INTERACTIVE selection that fallback is right (checking a
+    net IS naming it exactly). For a PLAN step it is the bug: a step recorded
+    as --nets '*' handed the engine "every net, exactly named" = protection
+    override for every protected net -- exactly the glob-override hole #521
+    closed on the CLI in 81d1dda. A plan replay could rip a matched group its
+    CLI leg would have protected.
+  * Wired (f4dd84b): _build_routing_config supplies
+    config['net_name_patterns'] from dialog._plan_net_globs, the batch_route
+    call site passes it, apply_step_selection sets it per route step and
+    CLEARS it on every other step, reset_params_to_defaults clears it too.
+  * Verified LIVE, not assumed (the standing "a wiring fix can be INERT"
+    lesson): real headless dialog + real plan executor + a NON-DEFAULT value
+    -- interactive None, plan globs ['GND*','!GND_EARTH'] reach the config
+    verbatim, cleared by the next non-route step and by the params reset
+    (4/4). Cherry-picked onto placement as ba9b2e2, where the stale
+    CLI_ONLY_OK exemption was removed with the reversal recorded in place.
+
+  TWO GATES WERE BROKEN, each concealing its own result. Both are #522
+  fallout, and the #522 addendum below re-ran only three gates at the merge:
+  * test_engine_kwarg_parity pointed its fanout PAIRS at pre-#522 paths
+    (bga_fanout/__init__.py), so it died with FileNotFoundError BEFORE
+    printing its failure list. That is precisely why net_name_patterns kept
+    being "carried" rather than decided -- the gate that names it never got
+    that far. Repointed at py_router/; stage_board_fn added to GUI_ONLY_OK.
+  * test_gui_livechain_rp2350's CLI leg shelled route_planes.py / route.py
+    from the repo root: rc=2, no output, every stage graded -1, and the gate
+    blamed "the CLI file chain introduced DRC" for a chain that never ran
+    (42c8e4d).
+
+  Gates at HEAD:
+  * test_gui_engine_parity: PARITY, copper sets IDENTICAL (segments
+    1335/1335, vias 140/140, drc 0/0, kicad_unconnected 0/0). Re-run AFTER
+    the wiring change, which makes the gate's own plan pass ['*','!GND']
+    where it passed None -- behavior-neutral here (splitflap has no
+    protected nets), which is the point of re-running it.
+  * test_engine_kwarg_parity: OK. Class 1 clean on all five pairs; Class 2
+    live under KiCad python (no dead controls).
+  * test_settings_roundtrip: 178 keys, save / restore / legacy / re-save.
+  * test_manifest_plan_parity: 20173 flag-checks, 603 manifests, 0
+    mismatches; param->control 12 checked, 0 unresolved.
+  * test_cli_postpass_coverage: 8 registered, 15 in active CLI use, 0
+    failures (run_drc stays the acknowledged report-only CLI-only pass).
+  * test_geometry_floor_leak: 0 problems.
+  * test_gui_livechain_rp2350: PASS -- GUI and CLI both 0 DRC at both
+    stages (create, route). First green since #522, and it took a SECOND
+    fix beyond the CLI-leg path: a real product bug, not a harness one.
+    Its GUI leg had been dying inside the apply and grading the resulting
+    EMPTY board as 0 DRC, which is how a broken leg looked healthy.
+    - Root cause (4c8b79d): pcbnew's BOARD.Remove() is RemoveNative() plus
+      `if not IsActionRunning(): item.thisown = 1`, and PCB_TRACK/PCB_VIA
+      have no SWIG destructor. Freeing that newly-"owned" proxy corrupts
+      the pcbnew type registry PROCESS-WIDE -- BOARD.Tracks() then returns a
+      bare SwigPyObject, and even a fresh LoadBoard() in the same process
+      comes back broken. INSIDE KiCad IsActionRunning() is true and
+      Remove() == RemoveNative(), so it is invisible there; headless it is
+      fatal, and headless includes the SHIPPED py_router/run_plan.py, not
+      just the gates.
+    - The damage was partial and silent: _apply_results_to_board strips
+      flagged segments in one loop, then calls GetTracks() again for the
+      vias -- so the segments came off, the second call raised inside a wx
+      CallAfter, and the board kept HALF the change while the step still
+      reported "done". Any GUI/headless run that RIPS copper was exposed.
+    - Six sites in the plugin already used RemoveNative; five did not
+      (swig_gui x3, differential_gui x2, fanout_gui x1). All uniform now.
+      In-KiCad behavior is unchanged by construction.
+    - Method note worth reusing: the gate costs ~15 min per cycle, so this
+      was reduced to a 2-second repro -- same board and driver, three
+      PRE-ROUTED nets with force_reroute so the rip path runs. The crash
+      needs segments_to_remove AND vias_to_remove to be non-empty, which is
+      why a plain route step never showed it.
+    - Correction to this entry as first written: it claimed the driver
+      "does not patch pcbnew.GetBoard". It does (headless_plan.py:148).
+      That diagnosis was wrong and the real one is above.
+
+  Carried gaps: NONE outstanding. net_name_patterns is closed above, and
+  plane_net_layers (generate_bga_fanout) now reports 19/19 kwargs, so both
+  entries carried since 2026-08-04 are cleared -- and rp2350, carried as
+  caveated or unrun since 2026-08-04, is green. Known blind spot unchanged:
+  the engine-parity plan is signal+plane only, so it exercises no diff-pair
+  or impedance parameters (cover those with a diff-pair board and
+  check_impedance.py).
+
+(Audited and fixed on main; the three fixes are on placement as
+ba9b2e2 / bcbeb9d / 9fc294b. Ported here for the record -- the SHAs
+named inside are main's.)
+
 MERGE 2026-08-06 (main -> placement, PR #573 follow-on) -- GATES NOW RUN.
 Resolved #562-shaped conflicts on the GUI side by taking main's deletions (the
 planes tab's Blocker Handling box, RepairPlanesOptionsPanel, _run_repair_planes)
