@@ -265,11 +265,117 @@ def _component_points(segs, vias, comp_of_seg, comp_of_via, root,
     return pts
 
 
+def _pad_cluster_rung(pcb_data, net_id, x, y, layer, comps, tol):
+    """Pad rung of _cluster_points (see its docstring for the motivation).
+
+    Returns (root, pts): a comps root when the containing pad's copper
+    reaches tracked copper (weld anywhere on that component), else
+    (None, pad-group extent points) when the point sits on a bare pad
+    group, else (None, []) when no pad contains the point.
+    """
+    from check_drc import point_to_pad_distance
+    from check_connected import _pads_copper_touch
+    comp_of_seg, comp_of_via, segs, vias, _ = comps
+
+    def _pad_on_layer(p):
+        if p.drill > 0 or '*.Cu' in p.layers:
+            return True
+        return layer is None or layer in p.layers
+
+    pads = [p for p in pcb_data.pads_by_net.get(net_id, [])
+            if p.pad_type != 'np_thru_hole' and _pad_on_layer(p)]
+    hit = None
+    for p in pads:
+        if point_to_pad_distance(x, y, p) <= tol:
+            hit = p
+            break
+    if hit is None:
+        return None, []
+
+    def _share_layer(a, b):
+        if a.drill > 0 or b.drill > 0:
+            return True
+        la, lb = set(a.layers), set(b.layers)
+        return bool(la & lb) or '*.Cu' in la or '*.Cu' in lb
+
+    # Overlap group: the hit pad plus same-net pads its copper touches
+    # (transitive, but these groups are tiny -- dual-pad footprints).
+    # Cheap bounding-circle prefilter before the exact perimeter test.
+    group, stack, seen = [hit], [hit], {id(hit)}
+    while stack:
+        base = stack.pop()
+        b_r = math.hypot(base.size_x, base.size_y) / 2
+        for p in pads:
+            if id(p) in seen or not _share_layer(base, p):
+                continue
+            reach = b_r + math.hypot(p.size_x, p.size_y) / 2 + tol
+            if math.hypot(p.global_x - base.global_x,
+                          p.global_y - base.global_y) > reach:
+                continue
+            if _pads_copper_touch(base, p, tol):
+                seen.add(id(p))
+                group.append(p)
+                stack.append(p)
+
+    # Does the pad group reach TRACKED copper (a seg endpoint or via barrel
+    # on/at the pad)? Then the pad is part of that component and any of its
+    # points is a valid attachment.
+    for p in group:
+        p_r = math.hypot(p.size_x, p.size_y) / 2
+        for i, s in enumerate(segs):
+            if comp_of_seg[i] is None:
+                continue
+            if p.drill <= 0 and '*.Cu' not in p.layers \
+                    and s.layer not in p.layers:
+                continue
+            reach = p_r + s.width / 2 + tol
+            for ex, ey in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
+                if abs(ex - p.global_x) <= reach \
+                        and abs(ey - p.global_y) <= reach \
+                        and point_to_pad_distance(ex, ey, p) \
+                        <= s.width / 2 + tol:
+                    return comp_of_seg[i], []
+        for j, v in enumerate(vias):
+            if comp_of_via[j] is None:
+                continue
+            if point_to_pad_distance(v.x, v.y, p) <= v.size / 2 + tol:
+                return comp_of_via[j], []
+
+    # Bare pad group (no tracked copper): its centers stand in for its
+    # copper extent -- still better than the single reported nib.
+    pts = []
+    for p in group:
+        if p.drill > 0 or '*.Cu' in p.layers:
+            pts.append((p.global_x, p.global_y))  # spans all layers
+        else:
+            cu = [l for l in p.layers if l.endswith('.Cu')]
+            pl = layer if (layer is not None and layer in p.layers) \
+                else (cu[0] if cu else None)
+            pts.append((p.global_x, p.global_y, pl) if pl
+                       else (p.global_x, p.global_y))
+    return None, pts
+
+
 def _cluster_points(pcb_data, net_id, x, y, layer, comps, tol=0.06):
     """Expand a reported endpoint to its WHOLE copper cluster: any copper
     of the island is an equally good attachment, and the reported nib is
-    often the worst (boxed into the very pocket that caused the gap). Falls
-    back to the single point when no track/via contains it (bare fill)."""
+    often the worst (boxed into the very pocket that caused the gap).
+
+    Pad-aware (2026-08-05, dilemma-class boards): a reported endpoint can
+    land on a bare PAD with no track/via within tol -- dual-pad footprints
+    and via-in-pad twins where KiCad's ratsnest anchors on the pad copper
+    itself. The a0907dd exact_clusters pad-union fixed link GENERATION for
+    these; this rung fixes weld ATTACHMENT quality: previously such a point
+    fell through to the bare single-point fallback (root=None), so the weld
+    attached at the worst nib instead of anywhere on the cluster. Pads are
+    checked shape-accurately (check_drc.point_to_pad_distance <= tol, the
+    same geometry check_connected._pads_copper_touch applies to degenerate
+    points). A containing pad resolves to a comps component when it -- or
+    an overlapping same-net sibling pad (_pads_copper_touch) -- reaches
+    tracked copper; a bare pad group instead contributes its pads' centers
+    as the copper extent (still root=None: pads carry no comps label).
+
+    Falls back to the single point when nothing contains it (bare fill)."""
     comp_of_seg, comp_of_via, segs, vias, _ = comps
     root = None
     for i, s in enumerate(segs):
@@ -287,6 +393,14 @@ def _cluster_points(pcb_data, net_id, x, y, layer, comps, tol=0.06):
             if math.hypot(x - v.x, y - v.y) <= v.size / 2 + tol:
                 root = comp_of_via[j]
                 break
+    if root is None:
+        try:
+            root, _pad_pts = _pad_cluster_rung(
+                pcb_data, net_id, x, y, layer, comps, tol)
+        except Exception:
+            root, _pad_pts = None, []
+        if root is None and _pad_pts:
+            return _pad_pts, None
     if root is None:
         return [(x, y, layer)] if layer else [(x, y)], None
     return (_component_points(segs, vias, comp_of_seg, comp_of_via, root)

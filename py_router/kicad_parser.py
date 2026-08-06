@@ -3219,6 +3219,24 @@ def extract_zones(content: str, name_to_id: Dict[str, int] = None) -> List[Zone]
         polygon = [(float(m.group(1)), float(m.group(2)))
                    for m in re.finditer(xy_pattern, pts_content)]
 
+        # Drop CONSECUTIVE coincident vertices: pcbnew never sees them --
+        # SHAPE_LINE_CHAIN::Append (aAllowDuplication=false, integer-nm
+        # compare) silently skips a point equal to the previously appended
+        # one on load, so an outline written with a redundant duplicate
+        # vertex (route_planes rewrites can emit these) loads with fewer
+        # points than the file text and parser-parity flags a phantom
+        # vertex-count mismatch. Mirror pcbnew exactly: consecutive-only,
+        # on the nm grid; collinear runs and a last==first closing vertex
+        # are KEPT (pcbnew keeps both).
+        deduped = []
+        prev_key = None
+        for pt in polygon:
+            key = (round(pt[0] * 1e6), round(pt[1] * 1e6))
+            if key != prev_key:
+                deduped.append(pt)
+                prev_key = key
+        polygon = deduped
+
         if not polygon:
             continue
 
