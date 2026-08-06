@@ -20,7 +20,7 @@ board-edge margin. Locked footprints never move.
 
 ```bash
 # Conservative polish (recommended starting point)
-python py_router/place_optimize.py input.kicad_pcb optimized.kicad_pcb \
+python py_placer/place_optimize.py input.kicad_pcb optimized.kicad_pcb \
     --max-displacement 3 --length-weight 0.3 --crossing-penalty 30 \
     --halo-coef 0.15 --halo-weight 2 --edge-halo 2 \
     --ignore-nets GND "+3.3V" \
@@ -58,7 +58,7 @@ they do in `place_optimize.py`, and `--verbose` surfaces each accepted quench
 move plus the per-pass `swap-capped=N` count.
 
 ```bash
-python py_router/place_route_loop.py input.kicad_pcb repaired.kicad_pcb \
+python py_placer/place_route_loop.py input.kicad_pcb repaired.kicad_pcb \
     --route-args '--nets "/*" "Net-*" --track-width 0.2 --clearance 0.2 ...' \
     --ignore-nets GND "+3.3V" --lock "J*" --swap-max-displacement 2
 ```
@@ -79,7 +79,7 @@ routing**, pruned to a diverse slate, probe-routed at the top, and presented
 as per-candidate renders plus `portfolio.json`.
 
 ```bash
-python place_portfolio.py board.kicad_pcb --out-dir pf --seed 0 \
+python py_placer/place_portfolio.py board.kicad_pcb --out-dir pf --seed 0 \
     --intent floorplan.json --ignore-nets GND VCC
 ```
 
@@ -126,8 +126,8 @@ parts, and the result is **graded against the same intent it was built
 from** — a seed that fails its own intent exits 4, deliberately.
 
 ```bash
-python place_seed.py unplaced.kicad_pcb seed.kicad_pcb --intent floorplan.json
-python place_seed.py unplaced.kicad_pcb seed3.kicad_pcb --intent floorplan.json --seed 3
+python py_placer/place_seed.py unplaced.kicad_pcb seed.kicad_pcb --intent floorplan.json
+python py_placer/place_seed.py unplaced.kicad_pcb seed3.kicad_pcb --intent floorplan.json --seed 3
 ```
 
 Rotations: the input rotation is tried in full first and kept when it fits; a
@@ -164,7 +164,7 @@ matters is `--clearance`, which must match the fanout / DRC floor:
 
 ```bash
 # after: bga_fanout.py board.kicad_pcb -o fanned.kicad_pcb --clearance 0.1 ...
-python py_router/place_fanout_clearance.py fanned.kicad_pcb capclean.kicad_pcb --clearance 0.1
+python py_placer/place_fanout_clearance.py fanned.kicad_pcb capclean.kicad_pcb --clearance 0.1
 ```
 
 | Option | Default | Description |
@@ -287,7 +287,7 @@ put parts that belong together on a shared axis, and turn a part toward the net
 it exists to serve. **Both default to 0 (off).**
 
 ```bash
-python3 place_optimize.py board.kicad_pcb out.kicad_pcb --max-displacement 3 \
+python3 py_placer/place_optimize.py board.kicad_pcb out.kicad_pcb --max-displacement 3 \
     --align-weight 5 --orient-weight 1
 ```
 
@@ -522,11 +522,11 @@ they went there.
 it, exit non-zero with the number that broke.
 
 ```bash
-python3 check_floorplan.py board.kicad_pcb --emit-intent floorplan.json   # start here
-python3 check_floorplan.py board.kicad_pcb --intent floorplan.json        # 0 clean, 4 violations
+python3 py_tools/check_floorplan.py board.kicad_pcb --emit-intent floorplan.json   # start here
+python3 py_tools/check_floorplan.py board.kicad_pcb --intent floorplan.json        # 0 clean, 4 violations
 ```
 
-Full reference: [docs/floorplan-intent.md](../docs/floorplan-intent.md). The
+Full reference: [docs/floorplan-intent.md](../../docs/floorplan-intent.md). The
 parts worth knowing from here:
 
 - **The board outline is not editable by this toolchain.** `envelope` is READ
@@ -581,19 +581,19 @@ did not inspect freezes parts you never looked at, which is the auto-lock
 failure merely deferred.
 
 ```bash
-python3 place_optimize.py board.kicad_pcb --suggest-locks     --suggest-locks-json /tmp/locks.json     # writes NO board
+python3 py_placer/place_optimize.py board.kicad_pcb --suggest-locks     --suggest-locks-json /tmp/locks.json     # writes NO board
 # review the reasons, then:
-python3 place_optimize.py board.kicad_pcb out.kicad_pcb --lock H1 J1 J2 ...
+python3 py_placer/place_optimize.py board.kicad_pcb out.kicad_pcb --lock H1 J1 J2 ...
 # confirm you covered them -- unlocked_high must be 0:
-python3 place_optimize.py board.kicad_pcb --suggest-locks --lock H1 J1 J2 ...
+python3 py_placer/place_optimize.py board.kicad_pcb --suggest-locks --lock H1 J1 J2 ...
 ```
 
 ## Reviewing a placement: render it (#431)
 
 ```bash
-python3 render_placement.py placed.kicad_pcb --before seed.kicad_pcb -o delta.png
-python3 render_placement.py board.kicad_pcb --list-groups --group-by sheet
-python3 render_placement.py board.kicad_pcb --zoom-group sheet:58d913ec --per-side -o out/
+python3 py_tools/render_placement.py placed.kicad_pcb --before seed.kicad_pcb -o delta.png
+python3 py_tools/render_placement.py board.kicad_pcb --list-groups --group-by sheet
+python3 py_tools/render_placement.py board.kicad_pcb --zoom-group sheet:58d913ec --per-side -o out/
 ```
 
 **The render is triage, not a verdict.** The verdict is the caption's numbers.
@@ -610,7 +610,7 @@ displacement arrows, so "what moved and how far" is the picture rather than a
 diff of two files. 22 parts here; `C4` travelled 95.65 mm.
 
 ```bash
-python3 render_placement.py placed.kicad_pcb --before seed.kicad_pcb -o delta.png
+python3 py_tools/render_placement.py placed.kicad_pcb --before seed.kicad_pcb -o delta.png
 ```
 
 ![placement delta](../docs/placement-delta.png)
@@ -623,7 +623,7 @@ brightness on both**, because they are physically on both and a hole cannot move
 on one side only.
 
 ```bash
-python3 render_placement.py board.kicad_pcb --before seed.kicad_pcb --per-side -o out/
+python3 py_tools/render_placement.py board.kicad_pcb --before seed.kicad_pcb --per-side -o out/
 ```
 
 | front | back |
@@ -634,8 +634,8 @@ python3 render_placement.py board.kicad_pcb --before seed.kicad_pcb --per-side -
 `route.py --group` — `--list-groups` prints them with their part and net counts.
 
 ```bash
-python3 render_placement.py board.kicad_pcb --list-groups --group-by sheet
-python3 render_placement.py board.kicad_pcb --zoom-group 58d913ec --group-by sheet -o blk.png
+python3 py_tools/render_placement.py board.kicad_pcb --list-groups --group-by sheet
+python3 py_tools/render_placement.py board.kicad_pcb --zoom-group 58d913ec --group-by sheet -o blk.png
 ```
 
 ![group zoom](../docs/placement-group-zoom.png)
@@ -676,7 +676,7 @@ nets that moved" and "every net on the board" this is the case that actually
 comes up.
 
 ```bash
-python3 render_placement.py board.kicad_pcb --before seed.kicad_pcb     --ratsnest-nets '/CLK*' '/DATA*' '!*_N' -o clk.png
+python3 py_tools/render_placement.py board.kicad_pcb --before seed.kicad_pcb     --ratsnest-nets '/CLK*' '/DATA*' '!*_N' -o clk.png
 ```
 
 ![named nets](../docs/placement-ratsnest-nets.png)

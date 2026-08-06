@@ -16,6 +16,9 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # placement split
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # placement split
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # placement split
 FINAL5 = os.path.join(ROOT, 'wk', 'run5', 'final5.kicad_pcb')
 HUMAN = os.path.join(ROOT, 'wk', 'run2', 'original', 'tigard_v10.kicad_pcb')
 

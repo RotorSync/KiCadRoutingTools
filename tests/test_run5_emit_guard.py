@@ -30,7 +30,7 @@ def emit(board, out, *extra):
                KRT_NO_BANNER='1')
     return subprocess.run(
         [sys.executable, '-X', 'utf8',
-         os.path.join(ROOT, 'check_floorplan.py'), board,
+         os.path.join(ROOT, 'py_tools', 'check_floorplan.py'), board,
          '--emit-intent', out, *extra],
         capture_output=True, text=True, env=env, cwd=ROOT)
 
@@ -126,7 +126,7 @@ class TestEdgePrefReceptaclesOnly(unittest.TestCase):
             self.assertEqual(r0.returncode, 0)
             r = subprocess.run(
                 [sys.executable, '-X', 'utf8',
-                 os.path.join(ROOT, 'place_reconstruct.py'), SWAP,
+                 os.path.join(ROOT, 'py_placer', 'place_reconstruct.py'), SWAP,
                  os.path.join(td, 'r.kicad_pcb'), '--clearance', '0.09',
                  '--intent', ip, '--dry-run'],
                 capture_output=True, text=True, env=env, cwd=ROOT)

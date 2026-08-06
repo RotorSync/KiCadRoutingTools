@@ -15,6 +15,9 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 for p in (REPO,):
     if p not in sys.path:
         sys.path.insert(0, p)
+        sys.path.insert(0, os.path.join(p, 'py_router'))  # placement split
+        sys.path.insert(0, os.path.join(p, 'py_tools'))  # placement split
+        sys.path.insert(0, os.path.join(p, 'py_placer'))  # placement split
 
 BOARD = os.path.join(REPO, "kicad_files", "splitflap_driver.kicad_pcb")
 
@@ -64,7 +67,7 @@ with tempfile.TemporaryDirectory() as d:
     with open(intent_path, 'w', encoding='utf-8') as f:
         json.dump(emit_intent(pcb, BOARD), f)
 
-    seed_py = os.path.join(REPO, 'place_seed.py')
+    seed_py = os.path.join(REPO, 'py_placer', 'place_seed.py')
     out_a = os.path.join(d, 'a.kicad_pcb')
     r = run([seed_py, pile, out_a, '--intent', intent_path])
     check("seed run exits 0", r.returncode == 0,

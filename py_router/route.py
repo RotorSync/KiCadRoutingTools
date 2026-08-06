@@ -4761,6 +4761,7 @@ For differential pair routing, use route_diff.py:
 
     if args.list_groups:
         from group_routing import block_net_names
+        import _placer_path  # noqa: F401  (placement lives in py_placer/)
         from placement.groups import (GroupError, derive_groups, parse_sources,
                                       short_name)
         try:
@@ -4850,6 +4851,7 @@ For differential pair routing, use route_diff.py:
     if args.group:
         from group_routing import (GroupRoutingError, block_net_names,
                                    block_refs, describe_scope, resolved_name)
+        import _placer_path  # noqa: F401  (placement lives in py_placer/)
         from placement.groups import GroupError, parse_sources
         try:
             _srcs = parse_sources(args.group_by)

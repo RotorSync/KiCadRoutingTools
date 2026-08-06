@@ -20,7 +20,7 @@ def run_reconstruct(board, out, *extra):
     env = dict(os.environ, PYTHONPATH=ROOT)
     return subprocess.run(
         [sys.executable, '-X', 'utf8',
-         os.path.join(ROOT, 'place_reconstruct.py'), board, out,
+         os.path.join(ROOT, 'py_placer', 'place_reconstruct.py'), board, out,
          '--clearance', '0.09', *extra],
         capture_output=True, text=True, env=env, cwd=ROOT)
 
@@ -56,6 +56,9 @@ class TestReconstructSwap(unittest.TestCase):
             r = run_reconstruct(CONTROL, out)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             sys.path.insert(0, ROOT)
+            sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # placement split
+            sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # placement split
+            sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # placement split
             from kicad_parser import parse_kicad_pcb
             a = parse_kicad_pcb(CONTROL)
             b = parse_kicad_pcb(out)

@@ -27,6 +27,7 @@ never why it helped. The caption strip carries the verdict, and a render without
 it invites exactly the wrong review heuristic.
 """
 from __future__ import annotations
+import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 
 import argparse
 import json

@@ -59,7 +59,7 @@ def render(board, control, out_png):
     if os.path.exists(out_png):
         return True
     r = subprocess.run(
-        [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'render_placement.py'),
+        [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'py_tools', 'render_placement.py'),
          board, '--before', control, '-o', out_png, '--ratsnest-all'],
         capture_output=True, text=True, cwd=ROOT, timeout=900)
     return r.returncode == 0 and os.path.exists(out_png)

@@ -26,6 +26,7 @@ would actually route at rather than at a guessed round number.
 
 Exit codes: 0 PASSABLE, 1 CAGED, 2 usage/geometry error.
 """
+import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 import argparse
 import json
 import os
@@ -87,8 +88,7 @@ def main(argv=None):
     p.add_argument('--json', action='store_true')
     args = p.parse_args(argv)
 
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from kicad_parser import parse_kicad_pcb
+    from kicad_parser import parse_kicad_pcb  # _path put py_router on sys.path
     from placement import reachability
 
     pcb = parse_kicad_pcb(args.board)

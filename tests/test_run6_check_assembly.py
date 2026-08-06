@@ -19,7 +19,7 @@ def _run(*argv):
                KRT_NO_BANNER='1')
     return subprocess.run(
         [sys.executable, '-X', 'utf8',
-         os.path.join(ROOT, 'check_assembly.py'), *argv],
+         os.path.join(ROOT, 'py_tools', 'check_assembly.py'), *argv],
         capture_output=True, text=True, env=env, cwd=ROOT)
 
 
@@ -85,7 +85,7 @@ class TestRenderBodyChannel(unittest.TestCase):
             jp = os.path.join(td, 'r.json')
             r = subprocess.run(
                 [sys.executable, '-X', 'utf8',
-                 os.path.join(ROOT, 'render_placement.py'), FINAL5,
+                 os.path.join(ROOT, 'py_tools', 'render_placement.py'), FINAL5,
                  '--json-out', jp, '-o', os.path.join(td, 'r.png'),
                  '--size', '320', '--supersample', '1'],
                 capture_output=True, text=True, env=env, cwd=ROOT)

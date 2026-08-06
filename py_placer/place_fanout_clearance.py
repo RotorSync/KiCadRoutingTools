@@ -14,6 +14,7 @@ Usage:
 
 Pipeline: bga_fanout.py -> place_fanout_clearance.py -> (gnd/power vias, route)
 """
+import _path  # noqa: F401  (py_placer -> py_router/py_tools on sys.path)
 
 import os
 

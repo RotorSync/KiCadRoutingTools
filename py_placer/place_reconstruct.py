@@ -20,6 +20,7 @@ no residual pad conflicts; 3 the board cannot be reconstructed here (no
 outline / carries copper); 4 residual violations remain (board still written
 for inspection).
 """
+import _path  # noqa: F401  (py_placer -> py_router/py_tools on sys.path)
 import argparse
 import json
 import math

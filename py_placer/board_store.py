@@ -21,6 +21,7 @@ replayable, so every step back was a reconstruction.
 Nothing here knows what a board IS. It stores bytes with their siblings and
 records what produced them.
 """
+import _path  # noqa: F401  (py_placer -> py_router/py_tools on sys.path)
 import hashlib
 import json
 import os

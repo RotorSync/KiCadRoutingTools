@@ -8,6 +8,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 
+sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # placement split
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # placement split
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # placement split
 class TestConflictOffsetVectors(unittest.TestCase):
     def test_healthy_board_mints_nothing(self):
         """The no-op guarantee is STRUCTURAL: no conflicts, no vectors."""

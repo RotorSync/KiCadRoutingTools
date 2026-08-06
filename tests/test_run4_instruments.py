@@ -41,14 +41,27 @@ TINY_VIOLATING_BOARD = (
     ')\n')
 
 
+# #522 + the placement split spread the instruments over three dirs.
+_TOOL_DIRS = ('py_router', 'py_tools', 'py_placer', '')
+
+
+def _tool(tool):
+    for d in _TOOL_DIRS:
+        p = os.path.join(ROOT, d, tool) if d else os.path.join(ROOT, tool)
+        if os.path.isfile(p):
+            return p
+    raise AssertionError(f'{tool} not found in {_TOOL_DIRS}')
+
+
 def _run(tool, *argv, env=None):
     e = dict(os.environ)
     e.setdefault('PYTHONIOENCODING', 'utf-8')
-    e['PYTHONPATH'] = ROOT
+    e['PYTHONPATH'] = os.pathsep.join(
+        [ROOT] + [os.path.join(ROOT, d) for d in _TOOL_DIRS if d])
     if env:
         e.update(env)
     return subprocess.run(
-        [sys.executable, '-X', 'utf8', os.path.join(ROOT, tool)] + list(argv),
+        [sys.executable, '-X', 'utf8', _tool(tool)] + list(argv),
         capture_output=True, text=True, env=e, cwd=ROOT)
 
 

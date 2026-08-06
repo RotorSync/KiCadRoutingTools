@@ -29,7 +29,7 @@ def check(name, ok, detail=""):
 def run(out_dir, *extra, hashseed="0"):
     env = dict(os.environ, PYTHONHASHSEED=hashseed, PYTHONIOENCODING='utf-8')
     argv = [sys.executable, '-X', 'utf8',
-            os.path.join(REPO, 'place_portfolio.py'), BOARD,
+            os.path.join(REPO, 'py_placer', 'place_portfolio.py'), BOARD,
             '--out-dir', out_dir, '--seed', '0', '--candidates', '3',
             '--keep', '2', '--route-top', '0', '--no-render'] + list(extra)
     r = subprocess.run(argv, capture_output=True, text=True, encoding='utf-8',
@@ -77,7 +77,7 @@ with tempfile.TemporaryDirectory() as d:
     # 2. a different --seed actually changes the perturbation
     r = subprocess.run(
         [sys.executable, '-X', 'utf8',
-         os.path.join(REPO, 'place_portfolio.py'), BOARD,
+         os.path.join(REPO, 'py_placer', 'place_portfolio.py'), BOARD,
          '--out-dir', dirs['seed1'], '--seed', '1', '--candidates', '3',
          '--keep', '2', '--route-top', '0', '--no-render'],
         capture_output=True, text=True, encoding='utf-8', errors='replace',

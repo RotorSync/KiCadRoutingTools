@@ -134,7 +134,7 @@ promoted from the run-7 endgame, where hand-authored copper verified only
 against its target pads shipped 42 shorts.
 
 ```bash
-python check_join.py BOARD NET x,y,layer x,y,layer ... [via:x,y ...]
+python py_tools/check_join.py BOARD NET x,y,layer x,y,layer ... [via:x,y ...]
 ```
 
 Consecutive same-layer points become track segments; a layer change must
@@ -156,7 +156,7 @@ ranked a seed family first that probed 53 full-board failures while a
 crossings-middle seed probed 39).
 
 ```bash
-python compare_seeds.py board.kicad_pcb --intent floorplan.json \
+python py_placer/compare_seeds.py board.kicad_pcb --intent floorplan.json \
     --seeds 0 1 2 --out-dir seedcmp --ignore-nets GND VCC
 ```
 
@@ -179,7 +179,7 @@ placement-invariant). Requires KiCad python for the refill; exits 3 when
 unavailable rather than guessing from drawn outlines.
 
 ```bash
-python plane_score.py board.kicad_pcb --plane-nets GND 3V3:F.Cu
+python py_placer/plane_score.py board.kicad_pcb --plane-nets GND 3V3:F.Cu
 ```
 
 ## Connectivity Checker (`check_connected.py`)

@@ -20,6 +20,9 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # placement split
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_placer'))  # placement split
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # placement split
 
 from PIL import ImageChops  # noqa: E402
 
@@ -39,7 +42,7 @@ def _model(board=PLACED):
 
 def _run(*args):
     return subprocess.run([sys.executable, '-X', 'utf8',
-                           os.path.join(ROOT, 'render_placement.py')] + list(args),
+                           os.path.join(ROOT, 'py_tools', 'render_placement.py')] + list(args),
                           capture_output=True, text=True, cwd=ROOT, timeout=1800)
 
 
@@ -182,7 +185,7 @@ def test_rendering_is_reproducible_in_this_environment():
             p = os.path.join(d, f'r{seed}.png')
             r = subprocess.run(
                 [sys.executable, '-X', 'utf8',
-                 os.path.join(ROOT, 'render_placement.py'), PLACED,
+                 os.path.join(ROOT, 'py_tools', 'render_placement.py'), PLACED,
                  '-o', p, '--size', '300', '--supersample', '1', '--quiet'],
                 capture_output=True, text=True, cwd=ROOT, env=env, timeout=1800)
             assert r.returncode == 0, r.stderr[-400:]
@@ -352,7 +355,7 @@ def test_ignore_nets_reproduces_place_optimize_exactly():
     try:
         placed = os.path.join(d, 'p.kicad_pcb')
         opt = subprocess.run(
-            [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'place_optimize.py'),
+            [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'py_placer', 'place_optimize.py'),
              SEED, placed, '--max-displacement', '1', '--ignore-nets', 'GND'],
             capture_output=True, text=True, cwd=ROOT, timeout=1800)
         assert opt.returncode == 0, opt.stderr[-600:]

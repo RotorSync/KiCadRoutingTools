@@ -11,11 +11,11 @@ be; it measures the board and exits non-zero with the number that broke.
 
 ```bash
 # start from what the board already is, then edit it down
-python3 check_floorplan.py board.kicad_pcb --emit-intent floorplan.json
+python3 py_tools/check_floorplan.py board.kicad_pcb --emit-intent floorplan.json
 
 # grade
-python3 check_floorplan.py board.kicad_pcb --intent floorplan.json
-python3 check_floorplan.py board.kicad_pcb --intent floorplan.json --json findings.json
+python3 py_tools/check_floorplan.py board.kicad_pcb --intent floorplan.json
+python3 py_tools/check_floorplan.py board.kicad_pcb --intent floorplan.json --json findings.json
 ```
 
 The intent is also a GENERATOR input, not only a grader's: `place_seed.py`

@@ -15,7 +15,7 @@ a good board makes it worse.
 
 ```bash
 # Is the board even placed? (report-only, writes nothing, exits 3 if not)
-python3 -X utf8 place_optimize.py board.kicad_pcb --suggest-locks
+python3 -X utf8 py_placer/place_optimize.py board.kicad_pcb --suggest-locks
 ```
 
 ### Decision table — when to run placement
@@ -52,9 +52,9 @@ space for everything else.
 always (the R2 rule, applied to the gate itself):**
 
 ```bash
-python3 -X utf8 check_drc.py board.kicad_pcb --clearance <floor>   # NOT piped
+python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor>   # NOT piped
 echo "EXIT=$?"
-python3 -X utf8 check_assembly.py board.kicad_pcb --clearance <floor>
+python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb --clearance <floor>
 echo "EXIT=$?"
 ```
 
@@ -148,13 +148,13 @@ construction. The tools that apply a derived position on a placed board are:
 ```bash
 # violation-driven minimal-move repair: ONLY violators move, worst first,
 # escalating displacement cap; everything clean freezes
-python3 -X utf8 place_seed.py board.kicad_pcb repaired.kicad_pcb \
+python3 -X utf8 py_placer/place_seed.py board.kicad_pcb repaired.kicad_pcb \
     --intent floorplan.json --repair [--dry-run]
 
 # structural reconstruction (swapped regions, dragged selections): pattern
 # fit -> rigid ±v vectors -> ONE simultaneous candidate assignment (exact
 # ILP) -> minimal-move legalize. Propose-only stages, each gated.
-python3 -X utf8 place_reconstruct.py board.kicad_pcb repaired.kicad_pcb \
+python3 -X utf8 py_placer/place_reconstruct.py board.kicad_pcb repaired.kicad_pcb \
     [--intent floorplan.json] [--dry-run]
 ```
 
@@ -259,22 +259,22 @@ UNSMEARED board). Declare the edge classes FIRST (`--declare-classes`) so
 the reconstruct sees the bands:
 
 ```bash
-python3 -X utf8 check_drc.py board.kicad_pcb --clearance <floor>   # measure (R0)
-python3 -X utf8 check_floorplan.py board.kicad_pcb \
+python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor>   # measure (R0)
+python3 -X utf8 py_tools/check_floorplan.py board.kicad_pcb \
     --emit-intent auto.json --declare-classes   # part-class auto-declaration:
                                        # edge parts get bands; an implausibly-
                                        # posed receptacle gets NO edge (derive)
-python3 -X utf8 place_seed.py board.kicad_pcb r.kicad_pcb \
+python3 -X utf8 py_placer/place_seed.py board.kicad_pcb r.kicad_pcb \
     --intent auto.json --repair        # local violations, minimal-move; seats
                                        # DECLARED-edge parts on their bands
-python3 -X utf8 place_reconstruct.py board.kicad_pcb r.kicad_pcb \
+python3 -X utf8 py_placer/place_reconstruct.py board.kicad_pcb r.kicad_pcb \
     --intent auto.json [--assign-rounds 2]  # structural damage (R1-R5
                                        # productized: tiers, pattern fit, ±v,
                                        # exact ILP, prune sweep, legalize).
                                        # Round 2 peels a displaced ISLAND's
                                        # boundary once round 1 made the anchor
                                        # centroids truer (measured: +7 members)
-python3 -X utf8 place_optimize.py r.kicad_pcb out.kicad_pcb ...    # 0c residue
+python3 -X utf8 py_placer/place_optimize.py r.kicad_pcb out.kicad_pcb ...    # 0c residue
 ```
 
 ### Step 0a-1: the placement FIX LOOP — measure, fix, VERIFY, repeat until clean
@@ -290,10 +290,10 @@ Each lap:
 1. **Measure** — three instruments, JSONs kept as evidence:
 
    ```bash
-   python3 -X utf8 check_drc.py board.kicad_pcb --clearance <floor>
-   python3 -X utf8 check_assembly.py board.kicad_pcb --clearance <floor> \
+   python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor>
+   python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb --clearance <floor> \
        --baseline <the ORIGINAL input board> --json wk/assembly_lapN.json
-   python3 -X utf8 check_channels.py board.kicad_pcb --clearance <floor> \
+   python3 -X utf8 py_tools/check_channels.py board.kicad_pcb --clearance <floor> \
        --track-width <w> --grid-step <g> --json wk/channels_lapN.json
    ```
 
@@ -363,7 +363,7 @@ order:
    the intent with the Step 0e machinery, then generate the seed from it:
 
    ```bash
-   python3 -X utf8 place_seed.py board.kicad_pcb seed.kicad_pcb \
+   python3 -X utf8 py_placer/place_seed.py board.kicad_pcb seed.kicad_pcb \
        --intent floorplan.json [--seed N]
    ```
 
@@ -393,7 +393,7 @@ order:
    command now:
 
    ```bash
-   python3 -X utf8 compare_seeds.py board.kicad_pcb --intent floorplan.json \
+   python3 -X utf8 py_placer/compare_seeds.py board.kicad_pcb --intent floorplan.json \
        --seeds 0 1 2 --out-dir wk/seedcmp --ignore-nets <the Step 5 plane nets>
    ```
 
@@ -443,7 +443,7 @@ cp board.kicad_pro seed.kicad_pro && cp board.kicad_dru seed.kicad_dru
 ```
 
 ```bash
-python3 -X utf8 render_placement.py board.kicad_pcb -o /tmp/state.png
+python3 -X utf8 py_tools/render_placement.py board.kicad_pcb -o /tmp/state.png
 ```
 
 Do not pass `--allow-unplaced` to "make it work". On a pile of parts every
@@ -505,7 +505,7 @@ have confirmed the part is where the mechanics say.
 Not just the first — `place_optimize`, `place_route_loop` and every retry:
 
 ```bash
-python3 -X utf8 place_optimize.py board.kicad_pcb placed.kicad_pcb \
+python3 -X utf8 py_placer/place_optimize.py board.kicad_pcb placed.kicad_pcb \
     --lock 'J*' 'H*' 'U1' --max-displacement 2
 ```
 
@@ -625,7 +625,7 @@ automatically, deliberately: a wrong auto-lock silently freezes a part that
 needed to move, and that failure is invisible.
 
 ```bash
-python3 -X utf8 place_optimize.py board.kicad_pcb --suggest-locks \
+python3 -X utf8 py_placer/place_optimize.py board.kicad_pcb --suggest-locks \
     --suggest-locks-json /tmp/lock_advice.json
 ```
 
@@ -639,7 +639,7 @@ reference prefix) miss house libraries entirely, so treat a *quiet* result as
 ### Step 0c: repair the placement, with those locks
 
 ```bash
-python3 -X utf8 place_optimize.py board.kicad_pcb board_placed.kicad_pcb \
+python3 -X utf8 py_placer/place_optimize.py board.kicad_pcb board_placed.kicad_pcb \
     --max-displacement 3 --length-weight 0.3 --crossing-penalty 30 \
     --halo-coef 0.15 --halo-weight 2 --edge-halo 2 \
     --ignore-nets GND VCC \
@@ -729,7 +729,7 @@ When routing has already failed on congestion, use the loop instead — it consu
 exactly the failed and blocker nets the router reported:
 
 ```bash
-python3 -X utf8 place_route_loop.py board.kicad_pcb board_repaired.kicad_pcb \
+python3 -X utf8 py_placer/place_route_loop.py board.kicad_pcb board_repaired.kicad_pcb \
     --route-args '--nets "*" "!GND" "!VCC" --clearance <floor> --max-ripup 10' \
     --max-displacement 3 --max-target-pins 40 --ratsnest-screen 20 \
     --lock <refs from 0b> --ignore-nets GND VCC
@@ -747,7 +747,7 @@ the seed as constants, ratcheting the search space smaller. When the right
 question is "what are the placement OPTIONS", generate a slate:
 
 ```bash
-python3 -X utf8 place_portfolio.py board.kicad_pcb --out-dir pf --seed 0 \
+python3 -X utf8 py_placer/place_portfolio.py board.kicad_pcb --out-dir pf --seed 0 \
     --intent floorplan.json --ignore-nets <the Step 5 plane nets> \
     --lock <the 0a/0b locks>
 ```
@@ -813,7 +813,7 @@ same input reproduces the whole portfolio byte for byte.
 ### Step 0d: see it before trusting it
 
 ```bash
-python3 -X utf8 render_placement.py board_placed.kicad_pcb \
+python3 -X utf8 py_tools/render_placement.py board_placed.kicad_pcb \
     --before board.kicad_pcb -o /tmp/placement_delta.png
 ```
 
@@ -833,8 +833,8 @@ wirelength**. Declaring where parts belong is what makes the rest checkable.
 
 ```bash
 # read a starter intent OFF the board, then edit it down
-python3 -X utf8 check_floorplan.py board.kicad_pcb --emit-intent /tmp/intent.json
-python3 -X utf8 check_floorplan.py board.kicad_pcb --intent /tmp/intent.json --health
+python3 -X utf8 py_tools/check_floorplan.py board.kicad_pcb --emit-intent /tmp/intent.json
+python3 -X utf8 py_tools/check_floorplan.py board.kicad_pcb --intent /tmp/intent.json --health
 ```
 
 Exit **0** clean, **4** violations, **3** the board is not in a state it can
@@ -924,8 +924,8 @@ failing, and from arithmetic on the wrong two edges. A router failing is
 evidence about the **router**; only a measurement is evidence about the board.
 
 ```bash
-python3 -X utf8 check_reachability.py board.kicad_pcb --pad U3.23
-python3 -X utf8 check_reachability.py board.kicad_pcb --net GND --at 142.5,88.1 --json
+python3 -X utf8 py_tools/check_reachability.py board.kicad_pcb --pad U3.23
+python3 -X utf8 py_tools/check_reachability.py board.kicad_pcb --net GND --at 142.5,88.1 --json
 ```
 
 It measures the widest track that can actually reach the rest of the net —
@@ -963,7 +963,7 @@ Go one level finer on a dense part: the **per-face lane ledger**. This is a
 tool now — do not compute it by hand:
 
 ```bash
-python3 -X utf8 check_floorplan.py board.kicad_pcb --intent fp.json --health
+python3 -X utf8 py_tools/check_floorplan.py board.kicad_pcb --intent fp.json --health
 ```
 
 Every `--health` run reports it, with no declaration needed, for every
@@ -1068,20 +1068,20 @@ not a series, and the JSON's `instrument` block is what proves it:
 
 ```bash
 # per-side (any board with back-side parts; sibling FILES x_F.png/x_B.png)
-python3 -X utf8 render_placement.py board.kicad_pcb --per-side \
+python3 -X utf8 py_tools/render_placement.py board.kicad_pcb --per-side \
     --clearance 0.09 --ignore-nets GND +3V3 \
     --json-out wk/r_state.json -o wk/r_state.png
 
 # mandate-5 POSE PAIR: two renders, one per candidate pose, read side by side
-python3 -X utf8 render_placement.py cand_rot0.kicad_pcb \
+python3 -X utf8 py_tools/render_placement.py cand_rot0.kicad_pcb \
     --ratsnest-nets 'QSPI_*' --clearance 0.09 --ignore-nets GND +3V3 \
     --json-out wk/pose0.json -o wk/pose0.png
-python3 -X utf8 render_placement.py cand_rot180.kicad_pcb \
+python3 -X utf8 py_tools/render_placement.py cand_rot180.kicad_pcb \
     --ratsnest-nets 'QSPI_*' --clearance 0.09 --ignore-nets GND +3V3 \
     --json-out wk/pose180.json -o wk/pose180.png
 
 # one block, framed (block names exactly as route.py --group takes them)
-python3 -X utf8 render_placement.py board.kicad_pcb \
+python3 -X utf8 py_tools/render_placement.py board.kicad_pcb \
     --zoom-group sheet:58d913ec --clearance 0.09 --ignore-nets GND +3V3 \
     --json-out wk/blk.json -o wk/blk.png
 ```
@@ -1179,7 +1179,7 @@ already wrote, in order. They are cumulative, which is exactly what the animator
 wants:
 
 ```bash
-python3 -X utf8 make_movie.py placed.kicad_pcb r3.kicad_pcb r4.kicad_pcb r5.kicad_pcb \
+python3 -X utf8 py_router/make_movie.py placed.kicad_pcb r3.kicad_pcb r4.kicad_pcb r5.kicad_pcb \
     -o wk/routing.gif --size 1600 --fps 12 --chunks 30 --end-hold 12
 ```
 
@@ -1208,7 +1208,7 @@ convergence, and the ledger already holds its frame list — **the accepted boar
 in order**:
 
 ```bash
-python3 -X utf8 make_movie.py \
+python3 -X utf8 py_router/make_movie.py \
     wk/iter00.kicad_pcb wk/iter01.kicad_pcb wk/iter04.kicad_pcb wk/iter07.kicad_pcb \
     -o wk/convergence.gif --size 1600 --fps 12 --chunks 30 --end-hold 12
 ```
@@ -1227,13 +1227,13 @@ were the *input* to each decision are spliced in as cards where they were made.
 
 ```bash
 # a place_route_loop run: every round it wrote, kept AND dropped
-python3 -X utf8 make_film.py --from-loop-dir wk/ -o wk/film.gif --size 1200
+python3 -X utf8 py_tools/make_film.py --from-loop-dir wk/ -o wk/film.gif --size 1200
 
 # a converge.py run: beats captioned with the lever_argv that produced them
-python3 -X utf8 make_film.py --from-ledger wk/ledger.jsonl -o wk/film.gif
+python3 -X utf8 py_tools/make_film.py --from-ledger wk/ledger.jsonl -o wk/film.gif
 
 # a hand chain: name the dead ends, point it at the renders
-python3 -X utf8 make_film.py wk/seed.kicad_pcb wk/placed.kicad_pcb \
+python3 -X utf8 py_tools/make_film.py wk/seed.kicad_pcb wk/placed.kicad_pcb \
     'wk/r*.kicad_pcb' --reject 'r4[bcd]*' --cards-from wk/ \
     -o wk/film.gif --size 1200 --fps 8
 ```
@@ -1556,8 +1556,8 @@ fraction.
 **G2. List before deciding.** Both are report-only, exit 0, write nothing:
 
 ```bash
-python3 -X utf8 route.py board.kicad_pcb --list-groups --group-by auto
-python3 -X utf8 render_placement.py board.kicad_pcb --list-groups --group-by sheet
+python3 -X utf8 py_router/route.py board.kicad_pcb --list-groups --group-by auto
+python3 -X utf8 py_tools/render_placement.py board.kicad_pcb --list-groups --group-by sheet
 ```
 
 **G3. Choose on the measured evidence, in this order.**
@@ -1584,7 +1584,7 @@ undoing those strips copper board-wide (rp2350: 170 segments vs 75).
 not "it helped". And if a round's `groups` pulled a large block in, the run moved
 far more than you targeted.
 
-- Always list first: `python3 route.py board.kicad_pcb --list-groups --group-by auto`
+- Always list first: `python3 py_router/route.py board.kicad_pcb --list-groups --group-by auto`
   (prints parts and touching/internal net counts, exits 0, routes nothing).
 - Which source: `kicad` groups exist on **0 of 27** in-repo boards; `sheet` is the
   workhorse (**12 of 22**); `netprefix` is weakest; `decap` is strong but **0%
@@ -3003,7 +3003,7 @@ ball. Run it on the just-fanned board, **before** signal routing. Use the
 **same `--clearance`** you gave the fanout / your DRC floor — that's the only
 setting that matters (it reads each via's real size from the board).
 
-python3 py_router/place_fanout_clearance.py board_step1b.kicad_pcb board_step1c.kicad_pcb \
+python3 py_placer/place_fanout_clearance.py board_step1b.kicad_pcb board_step1c.kicad_pcb \
     --clearance 0.1
 
 It prints `Moved N cap(s); resolved R/M ... K unresolved`. Any **unresolved**
@@ -3235,7 +3235,7 @@ that cannot fail is not a gate. Run it unpiped and capture `$?` on the next line
 or read `${PIPESTATUS[0]}`, or `set -o pipefail`:
 
 ```bash
-python3 -X utf8 scripts/board_score.py board.kicad_pcb --json wk/score.json
+python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/board_score.py board.kicad_pcb --json wk/score.json
 echo "EXIT board_score = $?"          # <- the number the gate turns on
 ```
 
@@ -4096,7 +4096,7 @@ suspect — not the checker.
 this, and a hand-rolled fill has a trap the tool does not:
 
 ```bash
-python3 -X utf8 kicad_unconnected.py board.kicad_pcb --items
+python3 -X utf8 py_tools/kicad_unconnected.py board.kicad_pcb --items
 ```
 
 For the ENDGAME — the last few opens after the all-nets route — add `--pairs-json` (or run
@@ -4174,7 +4174,7 @@ Record `"kind": "completion" | "placement" | "systemic"` in every ledger entry.
 The final report states all three counts.
 
 ```bash
-python3 -X utf8 route.py board.kicad_pcb --list-groups --group-by auto
+python3 -X utf8 py_router/route.py board.kicad_pcb --list-groups --group-by auto
 ```
 
 **The per-group budget needs groups that are separately convergeable — not just
@@ -4417,13 +4417,13 @@ document is readable by a person and by nothing else, so every one of them is
 unreachable from it.
 
 ```bash
-python3 -X utf8 converge.py record --ledger wk/ledger.jsonl \
+python3 -X utf8 py_placer/converge.py record --ledger wk/ledger.jsonl \
     --board wk/iter03.kicad_pcb --kind completion \
     --lever 'rip lever: --rip-existing-nets QSPI_SD2 + --grid-step 0.025' \
     --score "$(cat wk/score_iter03.json)" \
-    --argv python3 -X utf8 route.py wk/iter02.kicad_pcb wk/iter03.kicad_pcb --nets QSPI_SD1 ...
+    --argv python3 -X utf8 py_router/route.py wk/iter02.kicad_pcb wk/iter03.kicad_pcb --nets QSPI_SD1 ...
 
-python3 -X utf8 converge.py status --ledger wk/ledger.jsonl      # EVERY iteration
+python3 -X utf8 py_placer/converge.py status --ledger wk/ledger.jsonl      # EVERY iteration
 ```
 
 `status` is the alarm for 9.2's failure mode: it splits the budget into completion

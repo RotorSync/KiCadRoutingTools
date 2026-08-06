@@ -13,6 +13,9 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 for p in (REPO,):
     if p not in sys.path:
         sys.path.insert(0, p)
+        sys.path.insert(0, os.path.join(p, 'py_router'))  # placement split
+        sys.path.insert(0, os.path.join(p, 'py_tools'))  # placement split
+        sys.path.insert(0, os.path.join(p, 'py_placer'))  # placement split
 
 BOARD = os.path.join(REPO, "kicad_files", "splitflap_driver.kicad_pcb")
 
@@ -41,7 +44,7 @@ with tempfile.TemporaryDirectory() as d:
     out = os.path.join(d, 'pf')
 
     # ---- 1. the main run: renders on, static ranking only ------------------
-    r = run([os.path.join(REPO, 'place_portfolio.py'), BOARD,
+    r = run([os.path.join(REPO, 'py_placer', 'place_portfolio.py'), BOARD,
              '--out-dir', out, '--seed', '0', '--candidates', '4',
              '--keep', '2', '--route-top', '0'])
     check("portfolio run exits 0", r.returncode == 0,
@@ -93,7 +96,7 @@ with tempfile.TemporaryDirectory() as d:
 
     # ---- 3. candidate 0 == place_optimize with the same knobs --------------
     opt_out = os.path.join(d, 'opt.kicad_pcb')
-    r = run([os.path.join(REPO, 'place_optimize.py'), BOARD, opt_out,
+    r = run([os.path.join(REPO, 'py_placer', 'place_optimize.py'), BOARD, opt_out,
              '--max-displacement', '3', '--length-weight', '0.3',
              '--crossing-penalty', '30', '--halo-coef', '0.15'])
     line = next(l for l in r.stdout.splitlines()
@@ -118,7 +121,7 @@ with tempfile.TemporaryDirectory() as d:
     write_placed_output(BOARD, pile, [
         {'reference': ref, 'new_x': cx, 'new_y': cy, 'new_rotation': 0}
         for ref, fp in sorted(pcb.footprints.items()) if fp.pads])
-    r = run([os.path.join(REPO, 'place_portfolio.py'), pile,
+    r = run([os.path.join(REPO, 'py_placer', 'place_portfolio.py'), pile,
              '--out-dir', os.path.join(d, 'pf_pile'), '--no-render'])
     check("unplaced board refused with exit 3", r.returncode == 3,
           f"rc={r.returncode}")
@@ -130,7 +133,7 @@ with tempfile.TemporaryDirectory() as d:
     intent_doc['must_lock'] = ['ZZNOSUCHREF*']
     with open(bad_intent, 'w', encoding='utf-8') as f:
         json.dump(intent_doc, f)
-    r = run([os.path.join(REPO, 'place_portfolio.py'), BOARD,
+    r = run([os.path.join(REPO, 'py_placer', 'place_portfolio.py'), BOARD,
              '--out-dir', os.path.join(d, 'pf_bad'), '--seed', '0',
              '--candidates', '2', '--keep', '1', '--route-top', '0',
              '--no-render', '--intent', bad_intent])

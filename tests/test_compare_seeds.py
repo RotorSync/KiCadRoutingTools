@@ -19,6 +19,9 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # placement split
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # placement split
+sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # placement split
 
 BOARD = os.path.join(ROOT, 'kicad_files', 'splitflap_driver.kicad_pcb')
 
@@ -53,7 +56,7 @@ def test_end_to_end_ranked_table_from_relative_paths():
         # probe subprocess (cwd=ROOT) would silently miss them.
         r = subprocess.run(
             [sys.executable, '-X', 'utf8',
-             os.path.join(ROOT, 'compare_seeds.py'),
+             os.path.join(ROOT, 'py_placer', 'compare_seeds.py'),
              os.path.relpath(pile, d),
              '--intent', os.path.relpath(intent_path, d),
              '--seeds', '0', '1',
@@ -94,7 +97,7 @@ def test_end_to_end_ranked_table_from_relative_paths():
 def test_duplicate_seeds_refused():
     r = subprocess.run(
         [sys.executable, '-X', 'utf8',
-         os.path.join(ROOT, 'compare_seeds.py'), BOARD,
+         os.path.join(ROOT, 'py_placer', 'compare_seeds.py'), BOARD,
          '--intent', 'x.json', '--seeds', '1', '1', '--out-dir', 'y'],
         capture_output=True, text=True, encoding='utf-8', errors='replace',
         cwd=ROOT)

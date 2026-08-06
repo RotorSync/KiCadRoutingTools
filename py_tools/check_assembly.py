@@ -17,6 +17,7 @@ targets the pairs OUR moves introduced, never a shipped design's own).
 
 Exit codes: 0 = no blocking pair, 2 = usage/load error, 4 = blocking > 0.
 """
+import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 
 import argparse
 import json

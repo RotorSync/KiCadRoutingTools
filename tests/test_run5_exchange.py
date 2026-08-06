@@ -15,6 +15,9 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # placement split
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # placement split
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # placement split
 SWAP = os.path.join(ROOT, 'wk', 'b2', 'tigard__swap', 'd0',
                     'perturbed.kicad_pcb')
 HEALTHY = os.path.join(ROOT, 'kicad_files', 'tigard.kicad_pcb')

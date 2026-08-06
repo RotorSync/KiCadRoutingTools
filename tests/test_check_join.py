@@ -75,7 +75,7 @@ def _board(d):
 
 def _run(args):
     return subprocess.run([sys.executable, '-X', 'utf8',
-                           os.path.join(ROOT, 'check_join.py')] + args,
+                           os.path.join(ROOT, 'py_tools', 'check_join.py')] + args,
                           capture_output=True, text=True, encoding='utf-8',
                           errors='replace', cwd=ROOT)
 

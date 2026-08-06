@@ -28,6 +28,9 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # placement split
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # placement split
+sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # placement split
 from route_summary import merge_summaries, merge_route_summaries  # noqa: E402
 
 

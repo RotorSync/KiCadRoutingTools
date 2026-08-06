@@ -23,6 +23,9 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # placement split
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # placement split
+sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # placement split
 
 from placement.portfolio import Candidate, rule1_check, select_best  # noqa: E402
 
@@ -67,7 +70,7 @@ def test_full_probe_flag_and_labels_exist():
     p = place_portfolio.build_parser()
     a = p.parse_args([BOARD, '--out-dir', 'x', '--full-probe'])
     assert a.full_probe is True
-    src = open(os.path.join(ROOT, 'place_portfolio.py'), encoding='utf-8').read()
+    src = open(os.path.join(ROOT, 'py_placer', 'place_portfolio.py'), encoding='utf-8').read()
     assert "probe_kind" in src and "'full'" in src, (
         "probe rows must be labeled window vs full")
     assert "ranking_full" in src
@@ -82,7 +85,7 @@ def test_end_to_end_annotation_reaches_portfolio_json():
         out = os.path.join(d, 'pf')
         r = subprocess.run(
             [sys.executable, '-X', 'utf8',
-             os.path.join(ROOT, 'place_portfolio.py'), BOARD,
+             os.path.join(ROOT, 'py_placer', 'place_portfolio.py'), BOARD,
              '--out-dir', out, '--seed', '0', '--candidates', '3',
              '--keep', '1', '--route-top', '0', '--no-render'],
             capture_output=True, text=True, encoding='utf-8',

@@ -162,7 +162,7 @@ All of these are also available inside KiCad without leaving the plugin - see [A
 
 ```bash
 # Optionally optimize an existing placement for routability (before routing)
-python py_router/place_optimize.py my_board.kicad_pcb --max-displacement 3
+python py_placer/place_optimize.py my_board.kicad_pcb --max-displacement 3
 
 # Pour the planes FIRST (#562): the fanout's plane-drop vias then land on
 # real fill, and the route step welds plane pads into it.
@@ -170,7 +170,7 @@ python py_router/route_planes.py my_board.kicad_pcb poured.kicad_pcb --nets GND 
 
 # Fan out a BGA, then tidy decoupling caps off the new vias (issue #130)
 python py_router/bga_fanout.py poured.kicad_pcb -c U1 -o fanned.kicad_pcb --clearance 0.1
-python py_router/place_fanout_clearance.py fanned.kicad_pcb capclean.kicad_pcb --clearance 0.1
+python py_placer/place_fanout_clearance.py fanned.kicad_pcb capclean.kicad_pcb --clearance 0.1
 
 # Route differential pairs
 python py_router/route_diff.py capclean.kicad_pcb -o diffed.kicad_pcb --nets "*lvds*"
@@ -296,7 +296,7 @@ python package_pcm.py --binary-dir ./path/to/release/artifacts
 **Fanout Tab:**
 - BGA fanout with exit margin, escape direction, differential pair support
 - Under-pad escape option for dense, fully-populated BGAs the channel router can't escape (issue #122) — see [BGA Fanout](py_router/bga_fanout/README.md#escape-methods)
-- "Optimize decoupling cap placement" option (off by default) — after fanout, nudges decoupling caps off foreign-net fanout vias and toward same-net balls (issue #130) — see [Placement](py_router/placement/README.md#place_fanout_clearancepy--decoupling-cap-clearance-repair-issue-130)
+- "Optimize decoupling cap placement" option (off by default) — after fanout, nudges decoupling caps off foreign-net fanout vias and toward same-net balls (issue #130) — see [Placement](py_placer/placement/README.md#place_fanout_clearancepy--decoupling-cap-clearance-repair-issue-130)
 - QFN fanout with extension length configuration
 - Net selection for fanout operations
 
@@ -376,19 +376,19 @@ python py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_p
 
 # Route one placement BLOCK -- a schematic sheet, a KiCad group, an IC and its decaps
 # (see "Placement blocks" below for what --group-by can infer, and --list-groups)
-python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
+python py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
   --group-by sheet --list-groups                      # what blocks exist?
-python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
+python py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
   --group sheet:558c3023 --group-by sheet --group-scope internal
 
 # PREVIEW any routing run: route it, report what it WOULD add, write no board
-python route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
+python py_router/route.py kicad_files/input.kicad_pcb kicad_files/output.kicad_pcb \
   --group sheet:558c3023 --group-by sheet --preview --preview-png preview.png
 
 # UNDO: strip the scoped nets' copper back to unrouted (needs an explicit scope;
 # defaults to --group-scope internal, since a block's "touching" nets include
 # GND/VCC and undoing those would strip their copper across the whole board)
-python route.py kicad_files/input.kicad_pcb kicad_files/undone.kicad_pcb \
+python py_router/route.py kicad_files/input.kicad_pcb kicad_files/undone.kicad_pcb \
   --group sheet:558c3023 --group-by sheet --undo
 
 # Route differential pairs (use route_diff.py)
@@ -466,14 +466,14 @@ Placement deltas are invisible in a board file; render them instead.
 
 ```bash
 # what moved, and did it help? (ghosts at the seed poses, arrows, metrics caption)
-python3 render_placement.py placed.kicad_pcb --before seed.kicad_pcb -o delta.png
+python3 py_tools/render_placement.py placed.kicad_pcb --before seed.kicad_pcb -o delta.png
 
 # zoom to one placement block; same block names as route.py --group
-python3 render_placement.py board.kicad_pcb --list-groups --group-by sheet
-python3 render_placement.py board.kicad_pcb --zoom-group sheet:58d913ec --per-side -o out/
+python3 py_tools/render_placement.py board.kicad_pcb --list-groups --group-by sheet
+python3 py_tools/render_placement.py board.kicad_pcb --zoom-group sheet:58d913ec --per-side -o out/
 
 # which parts should NOT be moved -- advice only, locks nothing, writes no board
-python3 place_optimize.py board.kicad_pcb --suggest-locks
+python3 py_placer/place_optimize.py board.kicad_pcb --suggest-locks
 ```
 
 Toggles for `--borders` / `--labels` / `--ratsnest` / `--arrows` / `--ghosts`;
@@ -604,7 +604,7 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 | [Rust Router](rust_router/README.md) | Building and using the Rust A* module |
 | [Power Net Analysis](docs/power-nets.md) | Power net detection, AI analysis, track width guidelines |
 | [Claude Skills](docs/claude-skills.md) | All nine AI skills: routing plans, power/high-speed/diff-pair analysis, stackup, plane mappings, failure diagnosis, board review |
-| [Placement](py_router/placement/README.md) | Placement optimization for routability |
+| [Placement](py_placer/placement/README.md) | Placement optimization for routability |
 | [Integration Tests](tests/README.md) | Test scripts and performance benchmarks |
 | [Release Pipeline](docs/release-pipeline.md) | How to tag a release and submit it to the KiCad PCM (maintainers) |
 

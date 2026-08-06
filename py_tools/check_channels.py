@@ -13,6 +13,7 @@ measured descriptive, not prescriptive -- these numbers inform the loop,
 they do not gate by themselves. V1 limitation, stated: supply-tap/via lane
 consumption is not modeled.
 """
+import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 
 import argparse
 import json

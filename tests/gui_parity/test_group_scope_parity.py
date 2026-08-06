@@ -31,6 +31,7 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, REPO)
 
+sys.path.insert(0, os.path.join(REPO, 'py_placer'))  # placement split
 KICAD_PYTHONS = [
     "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3",
     "/usr/bin/python3",
@@ -64,6 +65,8 @@ def _reexec_into_kicad():
 
 def _load_ai_plan():
     sys.path.insert(0, os.path.join(REPO, 'kicad_routing_plugin'))
+    sys.path.insert(0, os.path.join(REPO, 'py_router'))  # placement split
+    sys.path.insert(0, os.path.join(REPO, 'py_tools'))  # placement split
     spec = importlib.util.spec_from_file_location(
         'ai_plan_under_test', os.path.join(REPO, 'kicad_routing_plugin', 'ai_plan.py'))
     mod = importlib.util.module_from_spec(spec)

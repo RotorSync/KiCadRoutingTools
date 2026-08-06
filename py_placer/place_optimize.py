@@ -15,6 +15,7 @@ footprints never move.
 
 See docs/placement-optimization.md for the background research.
 """
+import _path  # noqa: F401  (py_placer -> py_router/py_tools on sys.path)
 
 import json
 import os

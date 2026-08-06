@@ -198,7 +198,7 @@ harmless.
    from your working dir. Tee every command's output to a log file in your run dir.
    MEMORY CAP (mandatory): prefix EVERY routing/fanout/plane/check command with
    the watchdog wrapper, e.g.
-   `bash <TOOLS_REPO>/tests/stress/run_limited.sh python3 -X utf8 .../route.py ... 2>&1 | tee step.log`
+   `bash <TOOLS_REPO>/tests/stress/run_limited.sh python3 -X utf8 py_router/route.py ... 2>&1 | tee step.log`
    It kills the job at ~4 GB RSS (exit 137, `MEMORY_LIMIT_EXCEEDED` on stderr).
    Separately, the board-mutating tools self-record their invocations to
    `<run-dir>/redo_commands.sh` (run_board.sh sets `REDO_MANIFEST`) so the whole
@@ -352,7 +352,7 @@ harmless.
    Do not start signal routing while balls are dropped.
    DECOUPLING-CAP OPTIMIZE (issue #130): after EACH BGA/PGA fanout completes
    (escaped == requested) and BEFORE signal routing, run
-   `python3 py_router/place_fanout_clearance.py <fanned>.kicad_pcb <out>.kicad_pcb
+   `python3 py_placer/place_fanout_clearance.py <fanned>.kicad_pcb <out>.kicad_pcb
    --clearance <floor>` (same clearance as the fanout). A foreign-net fanout via
    landing under a decoupling cap is a real PAD-VIA at the floor; this nudges
    those caps clear and pulls each pad toward its nearest same-net ball (so a

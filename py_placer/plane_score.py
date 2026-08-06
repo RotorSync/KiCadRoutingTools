@@ -24,6 +24,7 @@ KiCad python exists for the refill (the score is then honestly unavailable,
 never guessed from drawn outlines).
 """
 from __future__ import annotations
+import _path  # noqa: F401  (py_placer -> py_router/py_tools on sys.path)
 
 import math
 import os

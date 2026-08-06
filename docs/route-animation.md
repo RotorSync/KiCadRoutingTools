@@ -219,9 +219,9 @@ the chain; the sidecar's `parent` is what makes the set a chain at all, since
 round N follows the last accepted board rather than N-1.
 
 ```bash
-python3 make_movie.py WORKDIR --camera auto -o placement.mp4
-python3 place_route_loop.py board.kicad_pcb out.kicad_pcb --route-args '...' --movie
-KICAD_MOVIE_CAMERA=auto python3 make_movie.py WORKDIR     # env knob, same effect
+python3 py_router/make_movie.py WORKDIR --camera auto -o placement.mp4
+python3 py_placer/place_route_loop.py board.kicad_pcb out.kicad_pcb --route-args '...' --movie
+KICAD_MOVIE_CAMERA=auto python3 py_router/make_movie.py WORKDIR     # env knob, same effect
 ```
 
 The camera is **off by default**, everywhere. Every GUI movie is a routing

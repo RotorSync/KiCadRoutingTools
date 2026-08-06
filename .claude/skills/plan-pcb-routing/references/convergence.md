@@ -113,11 +113,11 @@ addressing: `record` stores the board by SHA, which is what makes stepping back
 exact after three iterations have overwritten the same path.
 
 ```bash
-python3 -X utf8 converge.py record --ledger wk/ledger.jsonl \
+python3 -X utf8 py_placer/converge.py record --ledger wk/ledger.jsonl \
     --board wk/iter03.kicad_pcb --kind completion \
     --lever 'rip lever: --rip-existing-nets QSPI_SD2 + --grid-step 0.025' \
     --score "$(cat wk/score_iter03.json)" \
-    --argv python3 -X utf8 route.py wk/iter02.kicad_pcb wk/iter03.kicad_pcb --nets QSPI_SD1
+    --argv python3 -X utf8 py_router/route.py wk/iter02.kicad_pcb wk/iter03.kicad_pcb --nets QSPI_SD1
 
 # `--argv` is a REMAINDER: everything after it is the command. Do NOT write
 # `--argv -- python3 ...` -- the bare `--` lands inside the captured argv and
@@ -200,7 +200,7 @@ for. `place_route_loop` renders its own per-round movie by default; this is the
 film of the whole convergence:
 
 ```bash
-python3 -X utf8 make_movie.py \
+python3 -X utf8 py_router/make_movie.py \
     wk/iter00.kicad_pcb wk/iter01.kicad_pcb wk/iter04.kicad_pcb wk/iter07.kicad_pcb \
     -o wk/convergence.gif --size 1600 --fps 12 --chunks 30 --end-hold 12
 ```

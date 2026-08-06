@@ -26,6 +26,7 @@ Usage:
       [quench options]
 """
 from __future__ import annotations
+import _path  # noqa: F401  (py_placer -> py_router/py_tools on sys.path)
 
 import argparse
 import json
@@ -50,7 +51,8 @@ from placement.writer import write_placed_output
 # repo root, and the failure surfaced as the misleading "produced no
 # JSON_SUMMARY" instead of "no such file" (#458).
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_ROUTE_PY = os.path.join(_SCRIPT_DIR, 'route.py')
+# route.py is in the SIBLING py_router/ since the placement split.
+_ROUTE_PY = os.path.join(os.path.dirname(_SCRIPT_DIR), 'py_router', 'route.py')
 
 # The one-or-two-summary reduction now lives in route_summary.py, so route.py
 # --json-out and this loop cannot drift apart on what "the tally" means.

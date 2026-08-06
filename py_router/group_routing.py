@@ -39,6 +39,7 @@ def resolved_name(pcb_data, group_name: str, sources) -> Optional[str]:
     matched: `--group U3 --undo` can resolve to `decap:U3` and start deleting
     copper without ever naming the block it picked.
     """
+    import _placer_path  # noqa: F401  (placement lives in py_placer/)
     from placement.groups import derive_groups, short_name
     blocks = derive_groups(pcb_data, sources)
     if group_name in blocks:
@@ -53,6 +54,7 @@ def resolved_name(pcb_data, group_name: str, sources) -> Optional[str]:
 
 def block_refs(pcb_data, group_name: str, sources) -> List[str]:
     """The footprints of `group_name`, or a helpful error naming what exists."""
+    import _placer_path  # noqa: F401  (placement lives in py_placer/)
     from placement.groups import derive_groups, short_name
     blocks = derive_groups(pcb_data, sources)
     if group_name in blocks:

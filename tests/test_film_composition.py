@@ -20,6 +20,9 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # placement split
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # placement split
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # placement split
 BOARD = os.path.join(ROOT, 'kicad_files', 'splitflap_driver.kicad_pcb')
 
 
@@ -188,7 +191,7 @@ def test_the_cli_runs_end_to_end():
         _variant(BOARD, bad, dx=-3.0, n=3)
         out = os.path.join(td, 'film.gif')
         r = subprocess.run(
-            [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'make_film.py'),
+            [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'py_tools', 'make_film.py'),
              BOARD, good, bad, '--reject', 'b.kicad_pcb', '-o', out,
              '--size', '400'],
             capture_output=True, text=True, encoding='utf-8', errors='replace',
@@ -198,7 +201,7 @@ def test_the_cli_runs_end_to_end():
         assert '1 attempts' in r.stderr, r.stderr[-400:]
 
         r = subprocess.run(
-            [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'make_film.py'),
+            [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'py_tools', 'make_film.py'),
              '-o', out], capture_output=True, text=True, cwd=ROOT)
         assert r.returncode == 2, "no boards is a clean refusal, not a crash"
     print("  PASS: the CLI films a chain and refuses an empty one")

@@ -43,6 +43,7 @@ VERBS
         Iterations spent, split completion vs systemic. A budget going to the
         instrument rather than the board is the failure this makes visible.
 """
+import _path  # noqa: F401  (py_placer -> py_router/py_tools on sys.path)
 import argparse
 import json
 import os
@@ -50,8 +51,10 @@ import subprocess
 import sys
 import tempfile
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
-_ROUTE_PY = os.path.join(ROOT, 'route.py')
+# ROOT is the REPO root (this script lives in py_placer/), because the
+# subprocesses below run with cwd=ROOT and their paths are repo-relative.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_ROUTE_PY = os.path.join(ROOT, 'py_router', 'route.py')
 
 
 # --------------------------------------------------------------------- tier 3
@@ -270,7 +273,7 @@ def cmd_where(a):
         print("where: no nets given (pass --nets, or --oracle to derive them)")
         return 2
     argv = [sys.executable, '-X', 'utf8',
-            os.path.join(ROOT, 'net_forensics.py'), a.board,
+            os.path.join(ROOT, 'py_tools', 'net_forensics.py'), a.board,
             '--nets'] + nets + ['--radius', str(a.radius)]
     return subprocess.run(argv, cwd=ROOT).returncode
 

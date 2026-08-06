@@ -184,6 +184,9 @@ def test_routing_only_stays_the_default_path():
     step would silently route an unplaced board.
     """
     sys.path.insert(0, os.path.join(ROOT, 'kicad_routing_plugin'))
+    sys.path.insert(0, os.path.join(os.path.join(ROOT, 'kicad_routing_plugin'), 'py_placer'))  # placement split
+    sys.path.insert(0, os.path.join(os.path.join(ROOT, 'kicad_routing_plugin'), 'py_router'))  # placement split
+    sys.path.insert(0, os.path.join(os.path.join(ROOT, 'kicad_routing_plugin'), 'py_tools'))  # placement split
     import importlib.util
     spec = importlib.util.spec_from_file_location(
         '_ai_plan_probe', os.path.join(ROOT, 'kicad_routing_plugin', 'ai_plan.py'))

@@ -10,6 +10,9 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # placement split
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # placement split
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # placement split
 TIGARD = os.path.join(ROOT, 'kicad_files', 'tigard.kicad_pcb')
 
 
@@ -21,7 +24,7 @@ class TestLaneLedger(unittest.TestCase):
             jp = os.path.join(td, 'c.json')
             r = subprocess.run(
                 [sys.executable, '-X', 'utf8',
-                 os.path.join(ROOT, 'check_channels.py'), TIGARD,
+                 os.path.join(ROOT, 'py_tools', 'check_channels.py'), TIGARD,
                  '--clearance', '0.09', '--track-width', '0.127',
                  '--grid-step', '0.05', '--json', jp],
                 capture_output=True, text=True, env=env, cwd=ROOT)

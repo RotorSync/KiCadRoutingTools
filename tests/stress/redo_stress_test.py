@@ -193,8 +193,8 @@ def parse_manifest(path):
 
 def relocate_moved_scripts(argv):
     """#522 default remap: recorded manifests bake repo-root script paths
-    (…/KiCadRoutingTools/route.py), but the scripts live in py_router/ or
-    py_tools/ now. For any argv token that is a repo .py path that no longer
+    (…/KiCadRoutingTools/route.py), but the scripts live in py_router/,
+    py_tools/ or py_placer/ (the placement split) now. For any argv token that is a repo .py path that no longer
     exists at root, rewrite it to its new home when exactly one exists. Runs
     AFTER user --remap rules so an explicit remap always wins. Old manifests
     replay transparently; new recordings carry the new paths and pass
@@ -212,7 +212,7 @@ def relocate_moved_scripts(argv):
             for name in (b, RENAMES.get(b)):
                 if name is None:
                     continue
-                for sub in ('', 'py_router', 'py_tools'):
+                for sub in ('', 'py_router', 'py_tools', 'py_placer'):
                     cand = _os.path.join(d, sub, name) if sub else _os.path.join(d, name)
                     if _os.path.exists(cand):
                         a = cand

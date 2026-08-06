@@ -28,6 +28,9 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # placement split
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # placement split
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_placer'))  # placement split
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 SIBLINGS = ('.kicad_pro', '.kicad_dru')
@@ -73,7 +76,7 @@ def test_place_optimize_carries_siblings():
         out = os.path.join(tmp, 'optimized.kicad_pcb')
         r = subprocess.run(
             [sys.executable, '-X', 'utf8',
-             os.path.join(ROOT, 'place_optimize.py'), board, out,
+             os.path.join(ROOT, 'py_placer', 'place_optimize.py'), board, out,
              '--max-displacement', '0.5', '--max-passes', '1'],
             capture_output=True, text=True, encoding='utf-8',
             errors='replace', cwd=ROOT, timeout=900)
@@ -88,7 +91,7 @@ def test_place_optimize_propagates_its_exit_code():
         board = _stage(tmp, 'interf_u_unrouted.kicad_pcb')
         r = subprocess.run(
             [sys.executable, '-X', 'utf8',
-             os.path.join(ROOT, 'place_optimize.py'), board, '--suggest-locks'],
+             os.path.join(ROOT, 'py_placer', 'place_optimize.py'), board, '--suggest-locks'],
             capture_output=True, text=True, encoding='utf-8',
             errors='replace', cwd=ROOT, timeout=600)
         assert r.returncode == 0, f"--suggest-locks exited {r.returncode}"
@@ -106,7 +109,7 @@ def test_route_loop_round0_copy_carries_siblings():
     read here rather than executed. A behavioural version of this test would
     cost minutes per run and assert the same line.
     """
-    src = os.path.join(ROOT, 'place_route_loop.py')
+    src = os.path.join(ROOT, 'py_placer', 'place_route_loop.py')
     with open(src, encoding='utf-8') as fh:
         text = fh.read()
     m = re.search(r"cur_file\s*=\s*os\.path\.join\(work,\s*'loop_round0\.kicad_pcb'\)"
@@ -127,7 +130,7 @@ def test_route_loop_round0_copy_carries_siblings():
 
 def test_route_loop_emits_a_json_summary():
     """The verdict must be machine-readable, not a text `Final:` line."""
-    src = os.path.join(ROOT, 'place_route_loop.py')
+    src = os.path.join(ROOT, 'py_placer', 'place_route_loop.py')
     with open(src, encoding='utf-8') as fh:
         text = fh.read()
     assert 'print("JSON_SUMMARY: "' in text, (

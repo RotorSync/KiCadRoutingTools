@@ -407,7 +407,7 @@ def check_refused_tools():
         f.write("#!/bin/sh\n"
                 "python3 bga_fanout.py b.kicad_pcb -o s1.kicad_pcb "
                 "--component U1 --clearance 0.1\n"
-                "python3 place_optimize.py s1.kicad_pcb s2.kicad_pcb "
+                "python3 py_placer/place_optimize.py s1.kicad_pcb s2.kicad_pcb "
                 "--max-displacement 3\n"
                 "python3 route.py s2.kicad_pcb s3.kicad_pcb --nets '*' "
                 "--clearance 0.1\n")

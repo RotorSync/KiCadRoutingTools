@@ -32,6 +32,9 @@ import time
 _here = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(_here, '..', '..'))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # placement split
+sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # placement split
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # placement split
 
 BOARDS_DIR = os.path.join(ROOT, 'kicad_files')
 # The manufacturing floor each board is actually routed and graded at, from
@@ -76,7 +79,7 @@ def suggest_locks(board, work):
     """
     js = os.path.join(work, 'lock_advice.json')
     rc, out = _run([sys.executable, '-X', 'utf8',
-                    os.path.join(ROOT, 'place_optimize.py'), board,
+                    os.path.join(ROOT, 'py_placer', 'place_optimize.py'), board,
                     '--suggest-locks', '--suggest-locks-json', js],
                    os.path.join(work, 'locks.log'))
     tally = _json_summary(out)
@@ -110,7 +113,7 @@ def quench_arm(board, out_board, work, label, max_disp, locks,
     """
     step = max(0.5, round(max_disp / 6.0, 3))
     argv = [sys.executable, '-X', 'utf8',
-            os.path.join(ROOT, 'place_optimize.py'), board, out_board,
+            os.path.join(ROOT, 'py_placer', 'place_optimize.py'), board, out_board,
             '--max-displacement', str(max_disp),
             '--step', str(step), '--max-passes', str(max_passes),
             # The guidance weights the skill's Step 0c command uses.
@@ -199,7 +202,7 @@ def loop_arm(board, out_board, work, label, cfg, nets, clearance, applied,
     excl = ' '.join(f'"!{n}"' for n in IGNORE_NETS)
     route_args = f'--nets "*" {excl} --clearance {clearance}'
     argv = [sys.executable, '-X', 'utf8',
-            os.path.join(ROOT, 'place_route_loop.py'), board, out_board,
+            os.path.join(ROOT, 'py_placer', 'place_route_loop.py'), board, out_board,
             '--route-args', route_args,
             '--work-dir', os.path.join(work, label.replace('@', '_')),
             '--rounds', str(rounds),
@@ -231,7 +234,7 @@ def loop_arm(board, out_board, work, label, cfg, nets, clearance, applied,
 def grade_floorplan(board, intent, work, label):
     """Step 0e -- an INDEPENDENT check: not produced by the thing being graded."""
     rc, out = _run([sys.executable, '-X', 'utf8',
-                    os.path.join(ROOT, 'check_floorplan.py'), board,
+                    os.path.join(ROOT, 'py_tools', 'check_floorplan.py'), board,
                     '--intent', intent, '--health', '--exit-zero', '-q'],
                    os.path.join(work, f'{label}_floorplan.log'))
     return _json_summary(out)

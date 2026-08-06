@@ -26,7 +26,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TOOL = os.path.join(ROOT, 'check_floorplan.py')
+TOOL = os.path.join(ROOT, 'py_tools', 'check_floorplan.py')
 BOARD = os.path.join(ROOT, 'kicad_files', 'ulx3s.kicad_pcb')
 
 VIOLATIONS_EXIT = 4
@@ -40,6 +40,13 @@ ROUND_BOARD = (
     '  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))\n'
     '  (gr_circle (center 50 50) (end 70 50) (stroke (width 0.1)'
     ' (type default)) (layer "Edge.Cuts"))\n  (net 0 "")\n)\n')
+
+# No Edge.Cuts geometry at all -> board_bounds is None and there is nothing to
+# contain anything against. This is the case the exit-3 guard exists for.
+NO_EDGE_BOARD = (
+    '(kicad_pcb (version 20221018) (generator pcbnew)\n'
+    '  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))\n'
+    '  (net 0 "")\n)\n')
 
 
 def _run(*argv, env=None):
@@ -121,18 +128,39 @@ def test_argparse_failures_all_exit_2():
     print(f"  PASS: {len(cases)} malformed invocations all exit 2")
 
 
-def test_a_board_with_no_usable_outline_exits_3_not_0():
-    """#550: a round board parses its ring but reports board_bounds None. Every
-    containment check would silently degrade to a bounding box that does not
-    exist, so a clean report would mean 'stopped checking'."""
+def test_a_round_board_now_grades_normally():
+    """#550, FIXED SIDE: a round board's gr_circle IS its outline.
+
+    This test used to assert the opposite -- that a round board reports
+    board_bounds None and must exit 3 rather than silently grade against a
+    bounding box that does not exist. `extract_board_bounds` then learned to
+    read gr_circle/gr_curve (#550, 8bc8ea8), so the ring now yields real bounds
+    and the degrade-to-nothing hazard is gone for this shape. The guard itself
+    still matters, so it moved to the genuinely-outline-less board below.
+    """
     p = os.path.join(_TMP, 'round.kicad_pcb')
     open(p, 'w', encoding='utf-8').write(ROUND_BOARD)
+    code, _out, err = _run(p, '--emit-intent', os.path.join(_TMP, 'x.json'))
+    assert code == 0, (code, err)
+    sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # placement split
+    from kicad_parser import parse_kicad_pcb
+    b = parse_kicad_pcb(p).board_info.board_bounds
+    assert b == (30.0, 30.0, 70.0, 70.0), b
+    print(f"  PASS: round board grades; gr_circle bounds {b} (#550)")
+
+
+def test_a_board_with_no_usable_outline_exits_3_not_0():
+    """A board with NO Edge.Cuts geometry has no bounding box at all. Every
+    containment check would silently degrade to a box that does not exist, so a
+    clean report would mean 'stopped checking' -- exit 3, never 0."""
+    p = os.path.join(_TMP, 'no_edge.kicad_pcb')
+    open(p, 'w', encoding='utf-8').write(NO_EDGE_BOARD)
     for argv in ((p, '--emit-intent', os.path.join(_TMP, 'x.json')),
                  (p, '--intent', _emit_once())):
         code, _out, err = _run(*argv)
-        assert code == STATE_EXIT, (argv[1], code)
-        assert '550' in err, err
-    print("  PASS: emit and grade both exit 3, citing #550")
+        assert code == STATE_EXIT, (argv[1], code, err)
+        assert 'Edge.Cuts' in err, err
+    print("  PASS: emit and grade both exit 3 on a board with no outline")
 
 
 def test_json_output_is_byte_identical_across_hash_seeds():
@@ -270,13 +298,13 @@ def test_a_placement_run_leaves_the_board_outline_untouched():
 
     r = subprocess.run(
         [sys.executable, '-X', 'utf8',
-         os.path.join(ROOT, 'place_optimize.py'), work, out,
+         os.path.join(ROOT, 'py_placer', 'place_optimize.py'), work, out,
          '--max-displacement', '2', '--align-weight', '5',
          '--orient-weight', '1'],
         capture_output=True, text=True, cwd=ROOT)
     assert r.returncode == 0, r.stderr[-800:]
 
-    sys.path.insert(0, ROOT)
+    sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # placement split
     from kicad_parser import parse_kicad_pcb
     a = parse_kicad_pcb(work).board_info
     b = parse_kicad_pcb(out).board_info

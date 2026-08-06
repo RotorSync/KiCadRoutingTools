@@ -14,6 +14,9 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # placement split
+sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # placement split
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # placement split
 
 SWAP = os.path.join(ROOT, 'wk', 'b2', 'tigard__swap', 'd0',
                     'perturbed.kicad_pcb')
@@ -29,7 +32,7 @@ def run_reconstruct(board, out, *extra):
     env = dict(os.environ, PYTHONPATH=ROOT, PYTHONIOENCODING='utf-8')
     return subprocess.run(
         [sys.executable, '-X', 'utf8',
-         os.path.join(ROOT, 'place_reconstruct.py'), board, out,
+         os.path.join(ROOT, 'py_placer', 'place_reconstruct.py'), board, out,
          '--clearance', '0.09', *extra],
         capture_output=True, text=True, env=env, cwd=ROOT)
 
@@ -150,7 +153,7 @@ class TestF5FullCensus(unittest.TestCase):
                 f.write('{"schema": 1, "kind": "floorplan-intent"}\n')
             r = subprocess.run(
                 [sys.executable, '-X', 'utf8',
-                 os.path.join(ROOT, 'place_seed.py'), SWAP,
+                 os.path.join(ROOT, 'py_placer', 'place_seed.py'), SWAP,
                  os.path.join(td, 'o.kicad_pcb'), '--intent', intent,
                  '--repair', '--dry-run', '--clearance', '0.09'],
                 capture_output=True, text=True, env=env, cwd=ROOT)
@@ -172,7 +175,7 @@ class TestF2EdgeBands(unittest.TestCase):
         intent = os.path.join(td, 'auto.json')
         r = subprocess.run(
             [sys.executable, '-X', 'utf8',
-             os.path.join(ROOT, 'check_floorplan.py'), SWAP,
+             os.path.join(ROOT, 'py_tools', 'check_floorplan.py'), SWAP,
              '--emit-intent', intent, '--declare-classes'],
             capture_output=True, text=True, env=env, cwd=ROOT)
         assert r.returncode == 0, r.stdout[-400:] + r.stderr[-400:]
@@ -244,7 +247,7 @@ class TestF2EdgeBands(unittest.TestCase):
             out2 = os.path.join(td, 'r2.kicad_pcb')
             r2 = subprocess.run(
                 [sys.executable, '-X', 'utf8',
-                 os.path.join(ROOT, 'place_seed.py'), out, out2,
+                 os.path.join(ROOT, 'py_placer', 'place_seed.py'), out, out2,
                  '--intent', i2, '--repair', '--clearance', '0.09'],
                 capture_output=True, text=True, env=env, cwd=ROOT)
             # rc 4 = residual grade errors (the damaged-board-baked legality
@@ -356,7 +359,7 @@ class TestRepairEdgeSeating(unittest.TestCase):
             out = os.path.join(td, 'o.kicad_pcb')
             r = subprocess.run(
                 [sys.executable, '-X', 'utf8',
-                 os.path.join(ROOT, 'place_seed.py'), bp, out,
+                 os.path.join(ROOT, 'py_placer', 'place_seed.py'), bp, out,
                  '--intent', ip, '--repair', '--clearance', '0.2'],
                 capture_output=True, text=True, env=env, cwd=ROOT)
             self.assertEqual(r.returncode, 0, r.stdout[-800:] + r.stderr[-400:])

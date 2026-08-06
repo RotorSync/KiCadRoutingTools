@@ -17,6 +17,9 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # placement split
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # placement split
+sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # placement split
 
 # Two boards with different outlines/part mixes (generalization gate 3).
 # interf_u's pile is a PRE-EXISTING hard case (the plain seed also fails it
@@ -56,7 +59,7 @@ class TestAnchorsFirst(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             pile, ip = _pile(board, td)
             out = os.path.join(td, 'out.kicad_pcb')
-            r = _run([os.path.join(ROOT, 'place_seed.py'), pile, out,
+            r = _run([os.path.join(ROOT, 'py_placer', 'place_seed.py'), pile, out,
                       '--intent', ip, '--anchors-first', *extra])
             self.assertEqual(r.returncode, 0,
                              r.stdout[-900:] + r.stderr[-400:])

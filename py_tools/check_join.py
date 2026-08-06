@@ -21,6 +21,7 @@ Track width and via geometry default from the board's own Default netclass.
 
 Exit 0 clean, 1 violations, 2 usage errors.
 """
+import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 import argparse
 import json
 import math

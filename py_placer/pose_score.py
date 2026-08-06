@@ -25,6 +25,7 @@ minutes: you want to spend them on two candidates, not forty.
     for p in poses[:2]:
         ...route the affected nets from p and compare...
 """
+import _path  # noqa: F401  (py_placer -> py_router/py_tools on sys.path)
 from typing import Dict, List, Optional, Sequence
 
 ROTATIONS: Sequence[float] = (0.0, 90.0, 180.0, 270.0)

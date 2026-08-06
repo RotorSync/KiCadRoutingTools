@@ -19,6 +19,9 @@ for p in (REPO,):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+        sys.path.insert(0, os.path.join(p, 'py_placer'))  # placement split
+        sys.path.insert(0, os.path.join(p, 'py_router'))  # placement split
+        sys.path.insert(0, os.path.join(p, 'py_tools'))  # placement split
 BOARD = os.path.join(REPO, "kicad_files", "splitflap_driver.kicad_pcb")
 
 passed = failed = 0

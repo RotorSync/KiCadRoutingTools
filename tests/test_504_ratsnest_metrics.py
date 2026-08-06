@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # #522
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # #522
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'py_placer'))  # placement split
 
 from kicad_parser import parse_kicad_pcb
 from place_route_loop import _ratsnest_screen, better
@@ -157,7 +158,7 @@ def test_place_optimize_emits_a_parseable_json_summary():
     import tempfile
     fd, out = tempfile.mkstemp(suffix='.kicad_pcb')
     os.close(fd)
-    r = subprocess.run([sys.executable, os.path.join(ROOT, 'py_router', 'place_optimize.py'),
+    r = subprocess.run([sys.executable, os.path.join(ROOT, 'py_placer', 'place_optimize.py'),
                         BOARD, out, '--max-displacement', '2', '--step', '1',
                         '--max-passes', '1'],
                        capture_output=True, text=True, cwd=ROOT)

@@ -38,6 +38,7 @@ broken", and that distinction is the entire product. (`check_drc.py` uses 1 for
 its violations; this diverges knowingly.)
 """
 from __future__ import annotations
+import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 
 import argparse
 import json

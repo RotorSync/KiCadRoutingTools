@@ -20,6 +20,9 @@ for p in (ROOT, _TESTS):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+        sys.path.insert(0, os.path.join(p, 'py_placer'))  # placement split
+        sys.path.insert(0, os.path.join(p, 'py_router'))  # placement split
+        sys.path.insert(0, os.path.join(p, 'py_tools'))  # placement split
 from kicad_parser import local_to_global  # noqa: E402
 from placement.pair_order import (pair_metrics, pair_inversions,  # noqa: E402
                                   ref_inversions, inversions_delta)

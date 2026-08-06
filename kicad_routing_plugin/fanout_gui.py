@@ -18,6 +18,13 @@ if ROOT_DIR not in sys.path:
 _ENGINE_DIR = os.path.join(ROOT_DIR, 'py_router')
 if os.path.isdir(_ENGINE_DIR) and _ENGINE_DIR not in sys.path:
     sys.path.insert(0, _ENGINE_DIR)
+# py_placer/ holds the placement package (placement.groups / .fanout_clearance
+# are imported from here) and py_tools/ the instruments. Same exists() guard so
+# a FLAT installed layout (PCM zip) keeps working.
+for _sib in ('py_placer', 'py_tools'):
+    _d = os.path.join(ROOT_DIR, _sib)
+    if os.path.isdir(_d) and _d not in sys.path:
+        sys.path.append(_d)
 
 import routing_defaults as defaults
 from kicad_parser import mm_to_iu

@@ -22,13 +22,15 @@ not in a state placement may touch (unplaced, or already carries copper);
 
 See docs/placement-optimization.md (Portfolio section) for the background.
 """
+import _path  # noqa: F401  (py_placer -> py_router/py_tools on sys.path)
 import argparse
 import json
 import os
 import subprocess
 import sys
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+# REPO root (this script lives in py_placer/): subprocesses run with cwd=ROOT.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _parse_strategies(text):
@@ -236,7 +238,7 @@ def _replay_argv(args, index):
     if '--no-render' not in argv:
         argv.append('--no-render')
     return ([sys.executable, '-X', 'utf8',
-             os.path.join(ROOT, 'place_portfolio.py')]
+             os.path.join(ROOT, 'py_placer', 'place_portfolio.py')]
             + argv + ['--only', str(index)])
 
 
@@ -276,7 +278,7 @@ def _probe(board, nets, args):
 
 def _render(board, before, out_png, ignore_nets):
     argv = [sys.executable, '-X', 'utf8',
-            os.path.join(ROOT, 'render_placement.py'), board,
+            os.path.join(ROOT, 'py_tools', 'render_placement.py'), board,
             '--before', before, '-o', out_png]
     if ignore_nets:
         argv += ['--ignore-nets'] + list(ignore_nets)

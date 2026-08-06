@@ -22,6 +22,7 @@ counts routed-but-OPEN nets). Output: a ranked table, seeds.json in
 Exit 0 when at least one seed was probed; 4 when every seed failed its
 intent gate (nothing rankable); 2 for usage errors.
 """
+import _path  # noqa: F401  (py_placer -> py_router/py_tools on sys.path)
 import argparse
 import json
 import os
@@ -29,7 +30,8 @@ import shlex
 import subprocess
 import sys
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+# REPO root (this script lives in py_placer/): subprocesses run with cwd=ROOT.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _split_forwarded(tokens):
@@ -91,7 +93,7 @@ Examples:
 
 def _run_place_seed(args, seed, out_board):
     argv = [sys.executable, '-X', 'utf8',
-            os.path.join(ROOT, 'place_seed.py'), args.input_file, out_board,
+            os.path.join(ROOT, 'py_placer', 'place_seed.py'), args.input_file, out_board,
             '--intent', args.intent, '--seed', str(seed)]
     if args.ignore_nets:
         argv += ['--ignore-nets'] + list(args.ignore_nets)

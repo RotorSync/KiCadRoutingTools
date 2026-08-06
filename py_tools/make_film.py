@@ -39,6 +39,7 @@ looks like the board redrawing itself between beats.
     python3 make_film.py seed.kicad_pcb \\
         'delta.png=what moved, and by how much' placed.kicad_pcb -o film.gif
 """
+import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 import argparse
 import fnmatch
 import glob

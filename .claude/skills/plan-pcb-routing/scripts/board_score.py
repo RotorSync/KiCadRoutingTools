@@ -91,18 +91,40 @@ def krt_dir() -> str:
     """
     env = os.environ.get('PCB_KICADROUTINGTOOLS', '').strip().strip('"')
     if env:
-        if not os.path.isfile(os.path.join(env, 'check_drc.py')):
+        if not _is_clone(env):
             raise SystemExit(f"PCB_KICADROUTINGTOOLS={env!r} has no check_drc.py "
                              f"-- not a KiCadRoutingTools clone")
         return env
     # <krt>/.claude/skills/plan-pcb-routing/scripts/board_score.py -> four up
     here = os.path.dirname(os.path.abspath(__file__))
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(here))))
-    if os.path.isfile(os.path.join(root, 'check_drc.py')):
+    if _is_clone(root):
         return root
     raise SystemExit(
         "Cannot locate KiCadRoutingTools. Set PCB_KICADROUTINGTOOLS to the clone, "
         "or run this script from inside one.")
+
+
+_TOOL_DIRS = ('', 'py_router', 'py_tools', 'py_placer')
+
+
+def _is_clone(root: str) -> bool:
+    """A KiCadRoutingTools clone in EITHER layout (flat, or #522 py_router/)."""
+    return any(os.path.isfile(os.path.join(root, d, 'check_drc.py'))
+               for d in _TOOL_DIRS)
+
+
+def _tool_path(root: str, tool: str) -> str:
+    """Absolute path to `tool`, wherever the #522/placement-split layout put it.
+
+    Falls back to the flat join so the error message a missing tool produces
+    still names the place the caller expected it.
+    """
+    for d in _TOOL_DIRS:
+        p = os.path.join(root, d, tool)
+        if os.path.isfile(p):
+            return p
+    return os.path.join(root, tool)
 
 
 def run_tool(root: str, tool: str, *args) -> tuple:
@@ -112,7 +134,7 @@ def run_tool(root: str, tool: str, *args) -> tuple:
     inside a COMPOSED run those lines would land mid-document and read as
     the outer gate's exit (measured: a blocking-153 score log carrying an
     inner checker's EXIT=0). The outer invocation is the evidence unit."""
-    cmd = [sys.executable, '-X', 'utf8', os.path.join(root, tool)] + [str(a) for a in args]
+    cmd = [sys.executable, '-X', 'utf8', _tool_path(root, tool)] + [str(a) for a in args]
     env = dict(os.environ, KRT_NO_BANNER='1')
     p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                        encoding='utf-8', errors='replace', env=env)
@@ -552,8 +574,13 @@ def main():
         print(f"board not found: {args.board}", file=sys.stderr)
         return 3
     root = krt_dir()
-    if root not in sys.path:
-        sys.path.insert(0, root)
+    # In-process imports (kicad_parser, net_queries) come from the engine dir;
+    # #522 + the placement split spread them over py_router/ and py_tools/, so
+    # add every layout dir. The flat entry keeps an older clone working.
+    for _d in _TOOL_DIRS:
+        _p = os.path.join(root, _d) if _d else root
+        if os.path.isdir(_p) and _p not in sys.path:
+            sys.path.insert(0, _p)
     sizes = {'--min-track-width': args.min_track_width,
              '--min-via-diameter': args.min_via_diameter,
              '--min-via-drill': args.min_via_drill,
@@ -649,8 +676,12 @@ if __name__ == '__main__':
         import sys as _sys
         _root = _os.path.dirname(_os.path.dirname(_os.path.dirname(
             _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))))
-        if _root not in _sys.path:
-            _sys.path.insert(0, _root)
+        # cli_banner moved into py_router/ with the placement split; keep the
+        # flat root too so an older clone still banners.
+        for _d in ('py_router', ''):
+            _p = _os.path.join(_root, _d) if _d else _root
+            if _os.path.isdir(_p) and _p not in _sys.path:
+                _sys.path.insert(0, _p)
         import cli_banner
         cli_banner.install()
     except Exception:
