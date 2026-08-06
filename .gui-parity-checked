@@ -1,4 +1,11 @@
-HEAD 2026-08-06 parity audit 89914ce..4c8b79d (27 commits: #570 false-weld
+6113245 2026-08-06 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+check_release_version.check_gui_parity reads `marker.read_text().split()[0]`
+and diffs it against HEAD. Every entry until now opened with the word "HEAD"
+(or "ADDENDUM"), which git resolves happily -- so `git diff HEAD..HEAD` was
+empty and the release parity gate passed UNCONDITIONALLY, for every release
+that has ever run it. Keep a real SHA first or the gate is decorative.
+
+2026-08-06 parity audit 89914ce..4c8b79d (27 commits: #570 false-weld
 rejection, fc5ee0e finalize-with-rip-authority, #572 forced links + lap
 authority, the bounded reconcile progress-loop, terminal geometry
 escalation, rip candidacy for pre-existing nets, and the #577/#578 ports).
