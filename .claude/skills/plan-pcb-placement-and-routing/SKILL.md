@@ -25,6 +25,38 @@ that only exist when they meet.
    Classify first.
 </non_negotiable>
 
+## How to run this skill
+
+Ask the driver for one stage at a time. That is not a style preference here: the
+two halves have DIFFERENT accept rules -- placement accepts a lap when the named
+finding it aimed at is gone, routing accepts an iteration when `blocking`
+strictly decreased -- so an executor holding both skills at once carries two
+contradictory definitions of "better". The driver never emits both.
+
+```bash
+D=.claude/skills/plan-pcb-placement-and-routing/scripts/loop_driver.py
+python3 -X utf8 $D --list
+python3 -X utf8 $D --stage L1 --board board.kicad_pcb --ledger wk/ledger.jsonl
+```
+
+Its guards are the three this skill exists to enforce:
+
+| stage | refuses without | because |
+|---|---|---|
+| `L2` route | a placement close-out | routing cannot start on a placement nobody proved, and a board with a blocking pair fails for a reason routing cannot fix |
+| `L3` classify | a routing score | a retry without a classification is a guess |
+| `L4` re-enter | a measured `--shape` | the three shapes re-enter at three different points, and the cost of guessing is asymmetric |
+
+**Inline or delegated is a CONTEXT decision, not a correctness one.** The guards
+are identical either way. Pass `--delegate` on `L1` when a half's own output
+would crowd out the other -- a few hundred parts, long repair sweeps, many
+renders. The driver then emits a prompt for a **teammate**, not a plain
+subagent: each half spawns its own verification subagents at its close-out, and
+a subagent cannot spawn one.
+
+State crosses the boundary on DISK, in the converge ledger, never in a head.
+That is what makes a re-entry able to say what was already tried.
+
 ## The sequence
 
 1. **Place.** Follow `/plan-pcb-placement` to its close-out. It ends with a
