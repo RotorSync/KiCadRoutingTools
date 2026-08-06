@@ -23,7 +23,28 @@ for inspection).
 import argparse
 import json
 import math
+import os
 import sys
+
+# Sibling files a staged board carries with it (the .kicad_pro is the DRC floor
+# a later step reads; #441).
+_SIBLING_EXTS = ('.kicad_pro', '.kicad_dru', '.kicad_prl')
+
+
+def _promote_staged(staged: str, final: str) -> None:
+    """Move a completed staged board (and its siblings) onto the output path.
+
+    One rename per file, after every stage that can still move copper or parts
+    has finished -- so a killed run leaves the staging files behind rather than
+    a half-finished board at the name the caller will hand to the next step.
+    """
+    staged_base = os.path.splitext(staged)[0]
+    final_base = os.path.splitext(final)[0]
+    os.replace(staged, final)
+    for ext in _SIBLING_EXTS:
+        src = staged_base + ext
+        if os.path.isfile(src):
+            os.replace(src, final_base + ext)
 
 
 def main():
@@ -356,36 +377,68 @@ Examples:
     for n in notes:
         print(f"  NOTE: {n}")
 
-    if args.dry_run:
-        report['dry_run'] = True
-        report['would_move'] = sorted(p_['reference'] for p_ in placements)
-        print("JSON_SUMMARY: " + json.dumps(report, sort_keys=True))
-        return 0
-
-    write_placed_output(args.input_file, args.output_file, placements)
-    copy_siblings(args.input_file, args.output_file)
-
-    if 'legalize' in stages:
-        pcb2 = parse_kicad_pcb(args.output_file)
+    def _run_legalize(board_path):
+        """Legalize `board_path` IN PLACE; returns the seeder's report."""
+        pcb2 = parse_kicad_pcb(board_path)
         caps = [c for c in seeder.REPAIR_CAPS_MM if c <= args.max_move]
         if not caps or caps[-1] < args.max_move:
             caps = list(caps) + [args.max_move]
         rep = seeder.repair_placement(
-            pcb2, args.output_file, intent, group_sources=(),
+            pcb2, board_path, intent, group_sources=(),
             clearance=args.clearance,
             board_edge_clearance=args.board_edge_clearance,
             grid_step=args.grid_step, caps=caps)
         for n in rep['notes']:
             print(f"  NOTE: {n}")
         if rep['moves']:
-            tmp = args.output_file + '.legalize'
-            write_placed_output(args.output_file, tmp, rep['moves'])
-            import os
-            os.replace(tmp, args.output_file)
+            tmp = board_path + '.legalize'
+            write_placed_output(board_path, tmp, rep['moves'])
+            os.replace(tmp, board_path)
         print(f"  legalize: {len(rep['repaired'])} repaired, "
               f"{len(rep['unrepairable'])} unrepairable")
+        return rep
+
+    if args.dry_run:
+        report['dry_run'] = True
+        report['would_move'] = sorted(p_['reference'] for p_ in placements)
+        # Run-7 A11: --dry-run used to return HERE, so `--stages legalize
+        # --dry-run` reported nothing about the stage it was asked to preview,
+        # and a worker recorded "legalize: no-op" for a stage that repaired 7
+        # parts when it really ran. A preview that silently skips the stage is
+        # worse than no preview. Stage it in a temp dir instead and report what
+        # legalize WOULD do; the caller's output path is still never written.
+        if 'legalize' in stages:
+            import tempfile
+            with tempfile.TemporaryDirectory() as _td:
+                _preview = os.path.join(
+                    _td, os.path.basename(args.output_file) or 'preview.kicad_pcb')
+                write_placed_output(args.input_file, _preview, placements)
+                copy_siblings(args.input_file, _preview)
+                _rep = _run_legalize(_preview)
+                report['legalize'] = {
+                    'preview': True,
+                    'repaired': _rep['repaired'],
+                    'unrepairable': _rep['unrepairable'],
+                    'would_move': sorted(m['reference'] for m in _rep['moves']),
+                }
+        print("JSON_SUMMARY: " + json.dumps(report, sort_keys=True))
+        return 0
+
+    # Run-7 A11: the output used to be written BEFORE legalize ran, so a run
+    # killed in between left a board at the caller's chosen path that looks
+    # like a finished result and is not one (the caps sweep can move parts for
+    # minutes). Stage it beside the target and promote once, so the output path
+    # only ever holds a complete board.
+    staged = args.output_file + '.staging.kicad_pcb'
+    write_placed_output(args.input_file, staged, placements)
+    copy_siblings(args.input_file, staged)
+
+    if 'legalize' in stages:
+        rep = _run_legalize(staged)
         report['legalize'] = {'repaired': rep['repaired'],
                               'unrepairable': rep['unrepairable']}
+
+    _promote_staged(staged, args.output_file)
 
     out_pcb = parse_kicad_pcb(args.output_file)
     final = grade_pad_legality(out_pcb, args.clearance)
