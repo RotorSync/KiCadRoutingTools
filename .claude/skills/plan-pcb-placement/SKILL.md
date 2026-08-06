@@ -30,6 +30,35 @@ that only exist when they meet.
 6. Placement invalidates every downstream routed board. Never run it mid-chain.
 </non_negotiable>
 
+## How to run this skill
+
+Do not read this file end to end and improvise the order. Ask the driver for
+one stage at a time; it prints that stage's instructions and nothing else, and
+it REFUSES to print a later stage until you hand it the evidence the earlier
+one was supposed to produce.
+
+```bash
+D=.claude/skills/plan-pcb-placement/scripts/placement_driver.py
+python3 -X utf8 $D --list                                  # the eight stages
+python3 -X utf8 $D --stage P0 --board board.kicad_pcb      # always start here
+```
+
+Each emission carries exactly one of three tags:
+
+| tag | what to do with it |
+|---|---|
+| `<stage_instructions>` | act on these yourself |
+| `<subagent_prompt>` | copy VERBATIM into a subagent. Do NOT read it as your own instructions |
+| `<error>` | you skipped evidence. Go produce it; do not improvise around the guard |
+
+An `<error>` is not a malfunction. It means a gate is holding, and the gate is
+there because prose gates get skimmed. Produce what it asks for and re-run the
+same stage.
+
+The rest of this file is the reference the stages point into: the doctrine
+behind each rung, with the measurements that decided it. Read the part a stage
+names, when it names it.
+
 The instruments this skill decides with, all report-only until you accept:
 
 ```bash
