@@ -37,9 +37,13 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # for _gitver when run as a script
-sys.path.insert(0, os.path.join(str(Path(__file__).resolve().parent)), 'py_router'))  # #522/py_placer layout
-sys.path.insert(0, os.path.join(str(Path(__file__).resolve().parent)), 'py_placer'))  # #522/py_placer layout
-sys.path.insert(0, os.path.join(str(Path(__file__).resolve().parent)), 'py_tools'))  # #522/py_placer layout
+# #522/py_placer layout. The engine dirs hang off the REPO ROOT, which is
+# parent.parent.parent (tests/stress/ -> repo), not parent -- and the join
+# must close before insert's second argument, or the module is a SyntaxError
+# and every importer of it dies, gates included.
+_ENGINE_ROOT = Path(__file__).resolve().parent.parent.parent
+for _d in ('py_router', 'py_placer', 'py_tools'):
+    sys.path.insert(0, os.path.join(str(_ENGINE_ROOT), _d))
 from _gitver import write_git_version, format_version
 
 REPO = Path(__file__).resolve().parent.parent.parent  # tests/stress/ -> repo root
