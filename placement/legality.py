@@ -503,6 +503,27 @@ class BodyOverlapPair(NamedTuple):
     side: str            # the shared side it occurs on ('F'/'B'; worst side)
     waived: bool
     waiver: str          # 'mount_hole_class' | 'intent_declared' | ''
+    # Run-7 filed a report saying this channel false-positives on SAME-NET
+    # contact, because DRC exempts it. Re-measured: the disputed pair really
+    # was same-net (a 0402's whole pad, 0.83mm2, inside a connector pad on the
+    # same GND) -- and it is still a defect. DRC exempts same-net because DRC
+    # grades electrical clearance; this channel grades whether two parts can
+    # both be built, and two parts cannot occupy the same copper whatever the
+    # net. That is precisely the case the channel was created for: the pair of
+    # stacked 0402s it was calibrated on were same-net too. Finding REFUTED,
+    # policy unchanged.
+    #
+    # What the report DID expose is that a pair says nothing about which pads
+    # touched, so a reader had to re-derive it to judge. `shorts` names up to
+    # three DIFFERENT-net pad intersections when they exist -- those are a
+    # short on top of the assembly defect, and they should never have to be
+    # re-derived. Empty is the common case and means every verified
+    # intersection was same-net.
+    shorts: Tuple[str, ...] = ()      # e.g. ('C1.1:+3V3 <-> U1.8:/USB_P',)
+    # Either member carries KiCad's own (locked yes). A locked part's pose is
+    # a decision somebody made; copper landing on it is never dispositionable
+    # by a placement search (run-8 E6).
+    locked_ref: str = ''
 
 
 def body_overlap_pairs(parts: Sequence[GradedPart]) -> List[BodyOverlapPair]:
@@ -690,6 +711,23 @@ def grade_body_overlap(pcb_data, clearance: float,
         check_exact = None
     cell = 4.0
     grid: Dict[Tuple[int, int], set] = {}
+    # KiCad's own (locked yes) stamps, for the E6 channel below. Best-effort:
+    # the file is optional here, and a missing or unreadable one simply means
+    # no pair is marked locked.
+    locked_refs = set()
+    if pcb_file:
+        try:
+            from .parser import extract_locked_refs
+            locked_refs = set(extract_locked_refs(pcb_file) or ())
+        except Exception:
+            locked_refs = set()
+
+    def _pad_label(pads, idx):
+        try:
+            return pads[idx].pad_number or '?'
+        except Exception:
+            return '?'
+
     entries = {}
     for ref, pp in parts.items():
         fp = fps[ref]
@@ -721,6 +759,7 @@ def grade_body_overlap(pcb_data, clearance: float,
             seen.add(key)
             area = 0.0
             side = ''
+            shorts = []
             for ai, (a0, a1, a2, a3, na, sa) in enumerate(entries[ref]):
                 for bi, (b0, b1, b2, b3, nb, sb) in enumerate(entries[other]):
                     if not _sides_interact(sa, sb):
@@ -750,11 +789,22 @@ def grade_body_overlap(pcb_data, clearance: float,
                     if ov > area:
                         area = ov
                         side = sa if sa in ('F', 'B') else ''
+                    # Different-net copper touching is a SHORT on top of the
+                    # assembly defect. Record one example per pair so a reader
+                    # cannot mistake the pair for exempt same-net contact.
+                    if na and nb and na != nb and len(shorts) < 3:
+                        pa_num = _pad_label(pads_by_ref[ref], ai)
+                        pb_num = _pad_label(pads_by_ref[other], bi)
+                        shorts.append(f'{ref}.{pa_num}:{na} <-> '
+                                      f'{other}.{pb_num}:{nb}')
             if area > EPS:
+                locked_ref = ' '.join(sorted(
+                    r for r in (key[0], key[1]) if r in locked_refs))
                 pairs.append(BodyOverlapPair(
                     a=key[0], b=key[1], kind='pad_intersection',
                     area_mm2=round(area, 4), side=side,
-                    waived=False, waiver=''))
+                    waived=False, waiver='',
+                    shorts=tuple(shorts), locked_ref=locked_ref))
 
     pairs.sort(key=lambda p: (p.waived, -p.area_mm2, p.a, p.b))
     blocking = [p for p in pairs if p.kind == 'pad_intersection']
@@ -765,7 +815,16 @@ def grade_body_overlap(pcb_data, clearance: float,
             'waived': sum(1 for p in pairs if p.waived),
             'pairs': pairs,
             'blocking_pairs': blocking,
-            'advisory_pairs': advisory}
+            'advisory_pairs': advisory,
+            # E6: pairs where copper lands on a part KiCad marks (locked yes),
+            # of ANY channel including waived ones. A locked pose is a decision
+            # somebody made -- a mounting hole against an enclosure, a
+            # connector against a panel cut-out -- so a placement search may
+            # not resolve the contact by moving the other part somewhere it
+            # likes better, and a waiver class chosen for unlocked parts does
+            # not apply. Measured on a wrong-basin placement: fires there,
+            # silent on the truth board and on every healthy corpus board.
+            'locked_contact_pairs': [p for p in pairs if p.locked_ref]}
 
 
 # --- pad + drill legality layer ----------------------------------------------
