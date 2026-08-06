@@ -358,6 +358,91 @@ def effective_board_edge_clearance(pcb_path: str, cli_value: float,
     return max(base, fab_edge_floor(pcb_path)) if fab_floor else base
 
 
+# Rules that describe what the FAB can make, as opposed to how the board is
+# graded. Lowering a clearance is a grading decision with a measured rationale
+# (stock netclass clearances are aspirational, and keeping them manufactures
+# phantom violations on correctly-routed copper). Lowering one of these is a
+# different claim: that the board can be manufactured at the new number.
+_FLOOR_EPS = 1e-9
+
+FAB_FLOOR_KEYS = (
+    ("min_track_width", "track width"),
+    ("min_via_diameter", "via diameter"),
+    ("min_via_annular_width", "via annular ring"),
+    ("min_via_drill", "via drill"),
+    ("min_through_hole_diameter", "hole diameter"),
+)
+
+
+def _fab_floor_disclosure(output_pcb: str, rules_before: dict, proj: dict):
+    """Say out loud when the writeback relaxed a MANUFACTURING floor.
+
+    Run-7 finding: two routed boards shipped with their project's
+    min_track_width rewritten 0.2 -> 0.0889 and min_via_diameter 0.5 -> 0.25,
+    and on one of them 5629 of 5933 segments and 371 of 712 vias sat below the
+    board's ORIGINAL declared floors -- while check_drc, board_score and
+    KiCad's own DRC all read clean, because every one of them grades against
+    the rewritten project.
+
+    The relaxation is not simply a bug: both boards carried KiCad's STOCK
+    defaults (0.2 / 0.5 / 0.1), which is exactly the aspirational case the
+    clamp exists for, and the routed copper sat at the repo's fab track floor
+    rather than below it. The defect is that the tool cannot tell a stock
+    default from a deliberate fab constraint -- and when it is the latter, a
+    silent rewrite ships a board the fab cannot make, with every instrument
+    green. A third board whose author had set 0.127 was never ratcheted,
+    because its routing stayed above it; that is luck, not protection.
+
+    So: keep the relaxation (removing it re-manufactures phantom DRC), and
+    make it impossible to miss. Counts, not adjectives.
+    """
+    rules_after = ((proj.get("board") or {}).get("design_settings")
+                   or {}).get("rules") or {}
+    relaxed = []
+    for key, label in FAB_FLOOR_KEYS:
+        was, now = rules_before.get(key), rules_after.get(key)
+        if isinstance(was, (int, float)) and isinstance(now, (int, float)) \
+                and now < was - _FLOOR_EPS:
+            relaxed.append((key, label, float(was), float(now)))
+    if not relaxed:
+        return []
+
+    census = {}
+    try:
+        from kicad_parser import parse_kicad_pcb
+        pcb = parse_kicad_pcb(output_pcb)
+        for key, _label, was, _now in relaxed:
+            if key == "min_track_width":
+                objs = [s.width for s in pcb.segments if s.width]
+            elif key == "min_via_diameter":
+                objs = [v.size for v in pcb.vias if v.size]
+            elif key == "min_via_drill":
+                objs = [v.drill for v in pcb.vias if v.drill]
+            elif key == "min_via_annular_width":
+                objs = [(v.size - v.drill) / 2.0 for v in pcb.vias
+                        if v.size and v.drill and v.size > v.drill]
+            else:
+                objs = []
+            if objs:
+                census[key] = (sum(1 for o in objs if o < was - _FLOOR_EPS), len(objs))
+    except Exception:                                   # disclosure is best-effort
+        pass
+
+    lines = ["  FAB FLOOR RELAXED -- the output project now declares a smaller "
+             "minimum than the input did:"]
+    for key, label, was, now in relaxed:
+        under, total = census.get(key, (None, None))
+        tail = (f"; {under} of {total} object(s) on this board are below the "
+                f"ORIGINAL {was:g}mm" if under is not None else "")
+        lines.append(f"    {label}: {was:g} -> {now:g} mm{tail}")
+    lines.append("    Every checker (check_drc, board_score, KiCad's own DRC) "
+                 "grades against the NEW value, so this copper will read clean. "
+                 "Confirm your fab supports it; if the original number was a "
+                 "real process limit, re-route at that floor rather than "
+                 "shipping this project.")
+    return lines
+
+
 def scan_board_minima(pcb_path: str):
     """Smallest track width / via diameter / via drill / via annular ring / hole
     diameter actually present on the board. These are floors KiCad's min-size
@@ -791,6 +876,12 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
 
     with open(out_pro) as f:
         proj = json.load(f)
+    # The board's DECLARED manufacturing floors, before this function lowers
+    # them to whatever was routed. Kept so the relaxation can be disclosed
+    # (see _fab_floor_disclosure): a clearance clamp is a grading decision, a
+    # track/via floor is a statement about what the fab can make.
+    _rules_before = dict(((proj.get("board") or {}).get("design_settings")
+                          or {}).get("rules") or {})
     # `minima` lets a caller that ALREADY has the board in memory supply these
     # instead of us re-parsing the file. The GUI does: scan_board_minima ->
     # parse_kicad_pcb allocates thousands of GC-tracked objects, and the GUI
@@ -839,6 +930,8 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
     if verbose:
         print(f"  DRC settings: updated {len(changes)} value(s) in {out_pro} "
               f"to match the routed floors (close+reopen in KiCad if it is open)")
+    for line in _fab_floor_disclosure(output_pcb, _rules_before, proj):
+        print(line)
     return out_pro
 
 
