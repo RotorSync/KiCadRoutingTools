@@ -2819,12 +2819,6 @@ def create_plane(
         net_ids.append(net_id)
         print(f"Found net '{net_name}' with ID {net_id}")
 
-    # (The run-6 blocker guard that used to sit here is GONE with #562: the
-    # pour places no taps and cannot rip, so there is no blocker ladder to
-    # guard. It computed _never_rip_ids, which nothing read, and referenced a
-    # rip_blocker_nets parameter #562 had already removed -- a NameError on
-    # every pour. The guard still runs, and matters, in repair_planes.py.)
-
     # Track failed pads per net for retry passes
     # Each entry is (net_id, net_name, plane_layer, pad_info)
 
@@ -2975,7 +2969,6 @@ def create_plane(
     # joins and blocker reroutes must obey them like every other routed copper.
     from kicad_dru import install_layer_clearances
     install_layer_clearances(config, None, input_file, pcb_data)
-    # #549 B: soft via-site preference around path-critical nets' committed
     # Cross-class clearance (#434, mirrors batch_route/repair): auto-read the
     # board's non-Default netclasses from the INPUT's sibling .kicad_pro when
     # no map was passed, so tap tracks/vias and blocker reroutes honor KiCad's
@@ -3742,29 +3735,6 @@ def create_plane(
     return (total_vias_placed, total_traces_added, total_pads_needing_vias)
 
 
-
-def _resolve_min_thickness(args):
-    """The pour's minimum web, from the BOARD when the caller did not say.
-
-    Run-7 finding: the flag defaulted to a fixed 0.1mm while the repo's own
-    connection-width grader reads the board's min_track_width. On a board whose
-    author set a wider floor, the pour emitted ribbons the grader then called
-    too thin -- a violation the pour created against a rule it never read.
-    """
-    if getattr(args, 'min_thickness', None) is not None:
-        return args.min_thickness
-    try:
-        from list_nets import board_constraint
-        v = board_constraint(args.input_file, 'min_track_width')
-        if v and v > 0:
-            print(f"  min-thickness: {v}mm, from the board's own "
-                  f"min_track_width")
-            return float(v)
-    except Exception:
-        pass
-    return defaults.PLANE_MIN_THICKNESS
-
-
 def main():
     from redo_record import record_invocation
     record_invocation()  # stress-test redo manifest (#132); no-op unless REDO_MANIFEST set
@@ -3810,12 +3780,7 @@ Examples:
 
     # Zone options
     parser.add_argument("--zone-clearance", type=float, default=None, help="Zone (pour) clearance from other copper in mm. Default: follow --clearance, auto-stepping down to the fab floor if the pour cannot thread the densest BGA via lattice")
-    parser.add_argument("--min-thickness", type=float, default=None,
-                        help="Minimum zone copper thickness in mm. "
-                             "Unset resolves from the BOARD's own "
-                             "min_track_width, so a pour never emits a "
-                             "ribbon the board itself calls too thin; "
-                             f"falls back to {defaults.PLANE_MIN_THICKNESS} when the board declares none.")
+    parser.add_argument("--min-thickness", type=float, default=defaults.PLANE_MIN_THICKNESS, help="Minimum zone copper thickness in mm (default: 0.1)")
     parser.add_argument("--thermal-vias", action=argparse.BooleanOptionalAction,
                         default=defaults.THERMAL_VIAS,
                         help="Via ARRAY over exposed/thermal pads (SMD plane-net pads wider than "
@@ -4064,7 +4029,7 @@ Examples:
         track_width=args.track_width,
         clearance=args.clearance,
         zone_clearance=args.zone_clearance,
-        min_thickness=_resolve_min_thickness(args),
+        min_thickness=args.min_thickness,
         thermal_relief=args.thermal_relief,
         thermal_vias=args.thermal_vias,
         stitch_vias=args.stitch_vias,
