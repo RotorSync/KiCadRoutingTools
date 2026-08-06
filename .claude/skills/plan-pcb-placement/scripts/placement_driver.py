@@ -73,9 +73,9 @@ Run BOTH, on the board with its copper removed. Neither alone is enough: the
 first cannot see two parts stacked on the same net, the second is the channel
 that can.
 
-  python3 -X utf8 check_drc.py {a.board} --clearance <the board's own floor>
+  python3 -X utf8 py_router/check_drc.py {a.board} --clearance <the board's own floor>
   echo "EXIT=$?"
-  python3 -X utf8 check_assembly.py {a.board} --json wk/assembly0.json
+  python3 -X utf8 py_tools/check_assembly.py {a.board} --json wk/assembly0.json
   echo "EXIT=$?"
 
 Read the floor off the board (its .kicad_pro netclass or .kicad_dru), never a
@@ -123,7 +123,7 @@ Walk the ladder in order and say which rung applies:
    placement (P4/P5).
 2. No seeder, but an intent exists or the spec states placement facts ->
    author the intent (P6), then seed from it:
-       python3 -X utf8 place_seed.py {a.board} seed.kicad_pcb --intent fp.json
+       python3 -X utf8 py_placer/place_seed.py {a.board} seed.kicad_pcb --intent fp.json
    The seeder grades its own output against the same intent; exit 4 means the
    seed does not satisfy the intent it was built from, and says which rule broke.
 3. Neither -> say so and STOP. This toolchain does not invent a placement, and
@@ -154,7 +154,7 @@ moves them is destroying information.
 
 Run the lock advisor and act on it:
 
-  python3 -X utf8 place_optimize.py {a.board} --suggest-locks --json wk/locks.json
+  python3 -X utf8 py_placer/place_optimize.py {a.board} --suggest-locks --json wk/locks.json
 
 The gate for leaving this stage is `unlocked_high == 0`, or every remaining
 finding dispositioned IN WRITING with the reason.
@@ -205,8 +205,8 @@ R2  Does the BOARD determine a position? A family whose pattern is
     conflict removed by pushing a part off the board reads as an improvement.
     If it does not improve, REVERT: the determinant was not on the board.
 R3  Apply with the repair tools, never the from-scratch seeder:
-      python3 -X utf8 place_seed.py {a.board} r.kicad_pcb --intent fp.json --repair
-      python3 -X utf8 place_reconstruct.py {a.board} r.kicad_pcb [--intent fp.json]
+      python3 -X utf8 py_placer/place_seed.py {a.board} r.kicad_pcb --intent fp.json --repair
+      python3 -X utf8 py_placer/place_reconstruct.py {a.board} r.kicad_pcb [--intent fp.json]
     Both take --dry-run and report what they WOULD do.
 R4  Test for a rigid displacement. Offsets of +v and -v are AGREEMENT, not
     disagreement -- an exchange displaces its two groups by opposite vectors,
@@ -239,9 +239,9 @@ broken at the cap is NAMED with its measurement, not carried silently.
 
 MEASURE (all four, every lap, on the copper-free board):
 
-  python3 -X utf8 check_drc.py {a.board} --clearance <floor> --clearance-margin 0
-  python3 -X utf8 check_assembly.py {a.board} --baseline {a.before}
-  python3 -X utf8 check_channels.py {a.board} --baseline {a.before} --gate
+  python3 -X utf8 py_router/check_drc.py {a.board} --clearance <floor> --clearance-margin 0
+  python3 -X utf8 py_tools/check_assembly.py {a.board} --baseline {a.before}
+  python3 -X utf8 py_tools/check_channels.py {a.board} --baseline {a.before} --gate
   python3 -X utf8 check_rigid_consistency.py {a.before} {a.board}
 
 The last three are DELTAS against the board you started from, deliberately.
@@ -268,7 +268,7 @@ VERIFY: re-run all four. A lap is ACCEPTED only if the finding it aimed at is
 gone and nothing above it got worse.
 
 Then record it, before starting the next lap:
-  python3 -X utf8 converge.py record --ledger wk/ledger.jsonl \\
+  python3 -X utf8 py_placer/converge.py record --ledger wk/ledger.jsonl \\
       --board {a.board} --kind placement --lever "<what you changed and why>" \\
       --argv <the real command that produced this board>
 
@@ -283,7 +283,7 @@ def p5(a):
     return f'''<stage_instructions stage="P5" name="options" of="7">
 Use this when the question is "which arrangement", not "is this one legal".
 
-  python3 -X utf8 place_portfolio.py {a.board} wk/slate/ --count <K> [--full-probe]
+  python3 -X utf8 py_placer/place_portfolio.py {a.board} wk/slate/ --count <K> [--full-probe]
 
 Rank rules, in this order:
   1. HARD gates first: legality and the declared intent. A candidate that fails
@@ -305,11 +305,11 @@ def p6(a):
     return f'''<stage_instructions stage="P6" name="declare the intent" of="7">
 An intent turns "it looks right" into something gradable.
 
-  python3 -X utf8 check_floorplan.py {a.board} --emit-intent wk/intent.json
+  python3 -X utf8 py_tools/check_floorplan.py {a.board} --emit-intent wk/intent.json
   # then EDIT it down: the emit describes the board as it is, including its
   # damage. Keep what the SPEC requires; delete what is merely observed.
 
-  python3 -X utf8 check_floorplan.py {a.board} --intent wk/intent.json --health
+  python3 -X utf8 py_tools/check_floorplan.py {a.board} --intent wk/intent.json --health
 
 Two traps, both measured:
   - An emitted intent records the board's own geometry as a requirement. On a

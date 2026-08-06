@@ -70,11 +70,11 @@ names, when it names it.
 The instruments this skill decides with, all report-only until you accept:
 
 ```bash
-python3 -X utf8 check_drc.py board.kicad_pcb --clearance <floor>   # on the COPPER-FREE board
-python3 -X utf8 check_assembly.py board.kicad_pcb [--baseline before.kicad_pcb]
-python3 -X utf8 check_channels.py board.kicad_pcb [--baseline before.kicad_pcb --gate]
+python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor>   # on the COPPER-FREE board
+python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb [--baseline before.kicad_pcb]
+python3 -X utf8 py_tools/check_channels.py board.kicad_pcb [--baseline before.kicad_pcb --gate]
 python3 -X utf8 check_rigid_consistency.py before.kicad_pcb after.kicad_pcb
-python3 -X utf8 check_floorplan.py board.kicad_pcb --intent fp.json [--health]
+python3 -X utf8 py_tools/check_floorplan.py board.kicad_pcb --intent fp.json [--health]
 ```
 
 Shared doctrine lives with the routing skill and applies here unchanged --
@@ -100,7 +100,7 @@ is never an answer is not looking.
 
 ```bash
 # Is the board even placed? (report-only, writes nothing, exits 3 if not)
-python3 -X utf8 place_optimize.py board.kicad_pcb --suggest-locks
+python3 -X utf8 py_placer/place_optimize.py board.kicad_pcb --suggest-locks
 ```
 
 ### Decision table — when to run placement
@@ -137,9 +137,9 @@ space for everything else.
 always (the R2 rule, applied to the gate itself):**
 
 ```bash
-python3 -X utf8 check_drc.py board.kicad_pcb --clearance <floor>   # NOT piped
+python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor>   # NOT piped
 echo "EXIT=$?"
-python3 -X utf8 check_assembly.py board.kicad_pcb --clearance <floor>
+python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb --clearance <floor>
 echo "EXIT=$?"
 ```
 
@@ -233,13 +233,13 @@ construction. The tools that apply a derived position on a placed board are:
 ```bash
 # violation-driven minimal-move repair: ONLY violators move, worst first,
 # escalating displacement cap; everything clean freezes
-python3 -X utf8 place_seed.py board.kicad_pcb repaired.kicad_pcb \
+python3 -X utf8 py_placer/place_seed.py board.kicad_pcb repaired.kicad_pcb \
     --intent floorplan.json --repair [--dry-run]
 
 # structural reconstruction (swapped regions, dragged selections): pattern
 # fit -> rigid ±v vectors -> ONE simultaneous candidate assignment (exact
 # ILP) -> minimal-move legalize. Propose-only stages, each gated.
-python3 -X utf8 place_reconstruct.py board.kicad_pcb repaired.kicad_pcb \
+python3 -X utf8 py_placer/place_reconstruct.py board.kicad_pcb repaired.kicad_pcb \
     [--intent floorplan.json] [--dry-run]
 ```
 
@@ -344,22 +344,22 @@ UNSMEARED board). Declare the edge classes FIRST (`--declare-classes`) so
 the reconstruct sees the bands:
 
 ```bash
-python3 -X utf8 check_drc.py board.kicad_pcb --clearance <floor>   # measure (R0)
-python3 -X utf8 check_floorplan.py board.kicad_pcb \
+python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor>   # measure (R0)
+python3 -X utf8 py_tools/check_floorplan.py board.kicad_pcb \
     --emit-intent auto.json --declare-classes   # part-class auto-declaration:
                                        # edge parts get bands; an implausibly-
                                        # posed receptacle gets NO edge (derive)
-python3 -X utf8 place_seed.py board.kicad_pcb r.kicad_pcb \
+python3 -X utf8 py_placer/place_seed.py board.kicad_pcb r.kicad_pcb \
     --intent auto.json --repair        # local violations, minimal-move; seats
                                        # DECLARED-edge parts on their bands
-python3 -X utf8 place_reconstruct.py board.kicad_pcb r.kicad_pcb \
+python3 -X utf8 py_placer/place_reconstruct.py board.kicad_pcb r.kicad_pcb \
     --intent auto.json [--assign-rounds 2]  # structural damage (R1-R5
                                        # productized: tiers, pattern fit, ±v,
                                        # exact ILP, prune sweep, legalize).
                                        # Round 2 peels a displaced ISLAND's
                                        # boundary once round 1 made the anchor
                                        # centroids truer (measured: +7 members)
-python3 -X utf8 place_optimize.py r.kicad_pcb out.kicad_pcb ...    # 0c residue
+python3 -X utf8 py_placer/place_optimize.py r.kicad_pcb out.kicad_pcb ...    # 0c residue
 ```
 
 ### Step 0a-1: the placement FIX LOOP — measure, fix, VERIFY, repeat until clean
@@ -375,10 +375,10 @@ Each lap:
 1. **Measure** — three instruments, JSONs kept as evidence:
 
    ```bash
-   python3 -X utf8 check_drc.py board.kicad_pcb --clearance <floor>
-   python3 -X utf8 check_assembly.py board.kicad_pcb --clearance <floor> \
+   python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor>
+   python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb --clearance <floor> \
        --baseline <the ORIGINAL input board> --json wk/assembly_lapN.json
-   python3 -X utf8 check_channels.py board.kicad_pcb --clearance <floor> \
+   python3 -X utf8 py_tools/check_channels.py board.kicad_pcb --clearance <floor> \
        --track-width <w> --grid-step <g> --json wk/channels_lapN.json
    ```
 
@@ -448,7 +448,7 @@ order:
    the intent with the Step 0e machinery, then generate the seed from it:
 
    ```bash
-   python3 -X utf8 place_seed.py board.kicad_pcb seed.kicad_pcb \
+   python3 -X utf8 py_placer/place_seed.py board.kicad_pcb seed.kicad_pcb \
        --intent floorplan.json [--seed N]
    ```
 
@@ -478,7 +478,7 @@ order:
    command now:
 
    ```bash
-   python3 -X utf8 compare_seeds.py board.kicad_pcb --intent floorplan.json \
+   python3 -X utf8 py_placer/compare_seeds.py board.kicad_pcb --intent floorplan.json \
        --seeds 0 1 2 --out-dir wk/seedcmp --ignore-nets <the Step 5 plane nets>
    ```
 
@@ -528,7 +528,7 @@ cp board.kicad_pro seed.kicad_pro && cp board.kicad_dru seed.kicad_dru
 ```
 
 ```bash
-python3 -X utf8 render_placement.py board.kicad_pcb -o /tmp/state.png
+python3 -X utf8 py_tools/render_placement.py board.kicad_pcb -o /tmp/state.png
 ```
 
 Do not pass `--allow-unplaced` to "make it work". On a pile of parts every
@@ -590,7 +590,7 @@ have confirmed the part is where the mechanics say.
 Not just the first — `place_optimize`, `place_route_loop` and every retry:
 
 ```bash
-python3 -X utf8 place_optimize.py board.kicad_pcb placed.kicad_pcb \
+python3 -X utf8 py_placer/place_optimize.py board.kicad_pcb placed.kicad_pcb \
     --lock 'J*' 'H*' 'U1' --max-displacement 2
 ```
 
@@ -710,7 +710,7 @@ automatically, deliberately: a wrong auto-lock silently freezes a part that
 needed to move, and that failure is invisible.
 
 ```bash
-python3 -X utf8 place_optimize.py board.kicad_pcb --suggest-locks \
+python3 -X utf8 py_placer/place_optimize.py board.kicad_pcb --suggest-locks \
     --suggest-locks-json /tmp/lock_advice.json
 ```
 
@@ -724,7 +724,7 @@ reference prefix) miss house libraries entirely, so treat a *quiet* result as
 ### Step 0c: repair the placement, with those locks
 
 ```bash
-python3 -X utf8 place_optimize.py board.kicad_pcb board_placed.kicad_pcb \
+python3 -X utf8 py_placer/place_optimize.py board.kicad_pcb board_placed.kicad_pcb \
     --max-displacement 3 --length-weight 0.3 --crossing-penalty 30 \
     --halo-coef 0.15 --halo-weight 2 --edge-halo 2 \
     --ignore-nets GND VCC \
@@ -814,7 +814,7 @@ When routing has already failed on congestion, use the loop instead — it consu
 exactly the failed and blocker nets the router reported:
 
 ```bash
-python3 -X utf8 place_route_loop.py board.kicad_pcb board_repaired.kicad_pcb \
+python3 -X utf8 py_placer/place_route_loop.py board.kicad_pcb board_repaired.kicad_pcb \
     --route-args '--nets "*" "!GND" "!VCC" --clearance <floor> --max-ripup 10' \
     --max-displacement 3 --max-target-pins 40 --ratsnest-screen 20 \
     --lock <refs from 0b> --ignore-nets GND VCC
@@ -832,7 +832,7 @@ the seed as constants, ratcheting the search space smaller. When the right
 question is "what are the placement OPTIONS", generate a slate:
 
 ```bash
-python3 -X utf8 place_portfolio.py board.kicad_pcb --out-dir pf --seed 0 \
+python3 -X utf8 py_placer/place_portfolio.py board.kicad_pcb --out-dir pf --seed 0 \
     --intent floorplan.json --ignore-nets <the Step 5 plane nets> \
     --lock <the 0a/0b locks>
 ```
@@ -898,7 +898,7 @@ same input reproduces the whole portfolio byte for byte.
 ### Step 0d: see it before trusting it
 
 ```bash
-python3 -X utf8 render_placement.py board_placed.kicad_pcb \
+python3 -X utf8 py_tools/render_placement.py board_placed.kicad_pcb \
     --before board.kicad_pcb -o /tmp/placement_delta.png
 ```
 
@@ -918,8 +918,8 @@ wirelength**. Declaring where parts belong is what makes the rest checkable.
 
 ```bash
 # read a starter intent OFF the board, then edit it down
-python3 -X utf8 check_floorplan.py board.kicad_pcb --emit-intent /tmp/intent.json
-python3 -X utf8 check_floorplan.py board.kicad_pcb --intent /tmp/intent.json --health
+python3 -X utf8 py_tools/check_floorplan.py board.kicad_pcb --emit-intent /tmp/intent.json
+python3 -X utf8 py_tools/check_floorplan.py board.kicad_pcb --intent /tmp/intent.json --health
 ```
 
 Exit **0** clean, **4** violations, **3** the board is not in a state it can
@@ -1009,8 +1009,8 @@ failing, and from arithmetic on the wrong two edges. A router failing is
 evidence about the **router**; only a measurement is evidence about the board.
 
 ```bash
-python3 -X utf8 check_reachability.py board.kicad_pcb --pad U3.23
-python3 -X utf8 check_reachability.py board.kicad_pcb --net GND --at 142.5,88.1 --json
+python3 -X utf8 py_tools/check_reachability.py board.kicad_pcb --pad U3.23
+python3 -X utf8 py_tools/check_reachability.py board.kicad_pcb --net GND --at 142.5,88.1 --json
 ```
 
 It measures the widest track that can actually reach the rest of the net —
@@ -1048,7 +1048,7 @@ Go one level finer on a dense part: the **per-face lane ledger**. This is a
 tool now — do not compute it by hand:
 
 ```bash
-python3 -X utf8 check_floorplan.py board.kicad_pcb --intent fp.json --health
+python3 -X utf8 py_tools/check_floorplan.py board.kicad_pcb --intent fp.json --health
 ```
 
 Every `--health` run reports it, with no declaration needed, for every

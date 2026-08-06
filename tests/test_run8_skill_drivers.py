@@ -50,6 +50,54 @@ ROUTING_SKILL = os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-routing',
 
 
 
+LOOP_DRIVER = os.path.join(ROOT, '.claude', 'skills',
+                           'plan-pcb-placement-and-routing', 'scripts',
+                           'loop_driver.py')
+LOOP_SKILL = os.path.join(ROOT, '.claude', 'skills',
+                          'plan-pcb-placement-and-routing', 'SKILL.md')
+
+
+def run_loop(args):
+    p = subprocess.run([sys.executable, '-X', 'utf8', LOOP_DRIVER] + args,
+                       capture_output=True, text=True, encoding='utf-8',
+                       errors='replace', cwd=ROOT)
+    return p.returncode, (p.stdout or '') + (p.stderr or '')
+
+
+def test_loop_driver():
+    """The loop BETWEEN the halves -- the one that was prose until run 8."""
+    check('the loop driver ships with its skill', os.path.isfile(LOOP_DRIVER))
+    code, out = run_loop(['--self-test'])
+    check('its self-test passes', code == 0 and out.strip().endswith('OK'),
+          out[-400:])
+
+    code, out = run_loop(['--stage', 'L2', '--board', 'b.kicad_pcb'])
+    check('routing refuses to start without a placement close-out', code == 4)
+    check('...and says how to produce one', 'check_assembly' in out, out[:300])
+
+    code, out = run_loop(['--stage', 'L4', '--board', 'b.kicad_pcb'])
+    check('a re-entry refuses without a measured shape', code == 4)
+    check('...and names the asymmetry that makes it matter',
+          'wastes' in out or 'throws away' in out or 'no parameter can fix' in out,
+          out[:400])
+
+    code, out = run_loop(['--stage', 'L4', '--board', 'b.kicad_pcb',
+                          '--shape', 'placement'])
+    check('a placement-shaped re-entry marks routed boards stale',
+          code == 0 and 'stale' in out, out[:300])
+
+    code, out = run_loop(['--stage', 'L1', '--board', 'b.kicad_pcb',
+                          '--delegate'])
+    check('delegation dispatches a TEAMMATE, not a plain subagent',
+          'TEAMMATE' in out and 'cannot spawn' in out, out[:400])
+
+    text = open(LOOP_SKILL, encoding='utf-8').read()
+    check('the combined skill points at its driver',
+          'loop_driver.py' in text and '--stage L1' in text)
+    check('...and says delegation is a context decision, not correctness',
+          'CONTEXT decision' in text)
+
+
 def main():
     check('the driver ships with the skill', os.path.isfile(DRIVER))
 
@@ -92,6 +140,9 @@ def main():
     check('it says an error means a gate is holding',
           'not a malfunction' in text)
 
+
+    print('the loop driver')
+    test_loop_driver()
 
     print()
     if FAILURES:
