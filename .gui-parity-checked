@@ -1,12 +1,30 @@
-MERGE 2026-08-06 (main -> placement, PR #573 follow-on): this merge is NOT
-yet parity-audited. It resolved #562-shaped conflicts on the GUI side by
-taking main's deletions (the planes tab's Blocker Handling box,
-RepairPlanesOptionsPanel, _run_repair_planes) and retiring placement's
-corridor_nets / rip_blocker_exclude / rip_blocker_allow plan aliases into
-ai_plan's per-action ignored sets. The placement family (place_*, check_*,
-render_placement) also moved to py_placer/ + py_tools/. Gates to re-run
-before trusting parity: test_settings_roundtrip (controls were deleted),
-test_manifest_plan_parity, test_cli_postpass_coverage, test_gui_engine_parity.
+MERGE 2026-08-06 (main -> placement, PR #573 follow-on) -- GATES NOW RUN.
+Resolved #562-shaped conflicts on the GUI side by taking main's deletions (the
+planes tab's Blocker Handling box, RepairPlanesOptionsPanel, _run_repair_planes)
+and retiring placement's corridor_nets / rip_blocker_exclude / rip_blocker_allow
+plan aliases into ai_plan's per-action ignored sets (#575). The placement family
+also moved to py_placer/ + py_tools/.
+
+  * test_settings_roundtrip: PASS -- 181 keys, save / restore / legacy-dict /
+    re-save parity all clean. This was the gate at risk: #562 deleted dialog
+    controls, and a control removed without its settings_persistence key
+    crashes the dialog on close.
+  * test_gui_engine_parity: PARITY, copper sets IDENTICAL (segments 1335/1335,
+    vias 140/140, drc 0/0, kicad_unconnected 0/0) -- unchanged from main's
+    recorded baseline.
+    It CAUGHT a real regression first: planes_gui still passed
+    rip_blocker_exclude/rip_blocker_allow to create_plane after I removed those
+    params (TypeError, the GUI pour step died and copper sets diverged by 227
+    segments). Fixed; re-run is identical. Textbook Class-1 CLI/GUI drift --
+    an engine signature changed on the CLI side without its GUI call site.
+  * test_manifest_plan_parity: PASS (20308 flag-checks / 603 manifests / 0
+    mismatch, 0 unresolved params).
+  * test_cli_postpass_coverage: PASS (0 failures).
+  * Engine kwarg parity: OK. Fixed two PRE-EXISTING gate defects while here --
+    it pointed at bga_fanout/ and qfn_fanout/ at the repo root, which #522 had
+    moved (FileNotFoundError before it reached the fanout pair), and lacked
+    stage_board_fn (#562 GUI oracle staging) in GUI_ONLY_OK plus json_out /
+    net_name_patterns in CLI_ONLY_OK.
 
 ADDENDUM 2026-08-04 (post review-fix wave 3829d36): all five review
 agents' confirmed findings fixed (geometry-key oracle removal merge with

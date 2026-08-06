@@ -971,8 +971,10 @@ class PlanesTab(wx.Panel):
                 input_file=self.board_filename,
                 output_file="",
                 corridor_nets=config.get('corridor_nets'),
-                rip_blocker_exclude=config.get('rip_blocker_exclude'),
-                rip_blocker_allow=config.get('rip_blocker_allow'),
+                # (rip_blocker_exclude / rip_blocker_allow are NOT passed: #562
+                # removed them from create_plane along with the pour's blocker
+                # ladder -- the pour places no taps and cannot rip. They remain
+                # live on the standalone repair_planes.py CLI. See #575.)
                 net_names=expanded_nets,
                 plane_layers=expanded_layers,
                 via_size=config.get('via_size', defaults.VIA_SIZE),
