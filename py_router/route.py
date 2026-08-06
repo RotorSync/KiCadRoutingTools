@@ -1075,8 +1075,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # oracle_links by the CALLER (the lap loop's landed-export), so re-laps
     # skip them the normal way.
     _assume_open572 = {l[0] for l in (oracle_links or []) if l and l[0]}
+    # fragment_gate (#549 A-2): a zone-less net whose copper KiCad holds in
+    # pieces must not be skipped as "Already fully connected". route_diff
+    # deliberately keeps the default (a fragmented net entering the diff
+    # engine is a separate behavior question).
     net_ids, _already_routed = filter_already_routed(
-        pcb_data, net_ids, config, assume_open=_assume_open572)
+        pcb_data, net_ids, config, assume_open=_assume_open572,
+        fragment_gate=True)
     # #515: --rip-existing-nets only rips copper that BLOCKS a net being
     # routed; a net dropped here as already-connected never routes, so naming
     # it in both --nets and --rip-existing-nets is a no-op. Warn instead of

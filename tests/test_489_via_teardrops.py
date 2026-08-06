@@ -160,7 +160,8 @@ def run():
     import re as _re
     for rel in ("py_router/route.py", "py_router/route_diff.py", "py_router/route_planes.py",
                 "py_router/repair_planes.py",
-                "bga_fanout/__init__.py", "qfn_fanout/__init__.py"):
+                "py_router/bga_fanout/__init__.py",
+                "py_router/qfn_fanout/__init__.py"):
         src = open(os.path.join(ROOT_DIR, rel), encoding="utf-8").read()
         check("--add-teardrops" in src,
               f"{rel} must offer --add-teardrops (#489 §9)")

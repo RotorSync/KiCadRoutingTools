@@ -52,7 +52,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def test_ledger_wiring():
     for engine in ('route.py', 'route_diff.py', 'route_planes.py',
                    'repair_planes.py'):
-        src = open(os.path.join(ROOT, engine), encoding='utf-8').read()
+        src = open(os.path.join(ROOT, 'py_router', engine),
+                   encoding='utf-8').read()
         n = src.count('verify_written_file_parity(')
         # >= 1 CALL beyond a bare import (the import line has no open paren
         # immediately after the name in this codebase's import style).

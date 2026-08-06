@@ -100,7 +100,8 @@ def main():
     check("env override honoured (documented)",
           'KICAD_ALLOW_STAGGERED_BGA' in open(
               os.path.join(os.path.dirname(os.path.dirname(
-                  os.path.abspath(__file__))), 'bga_fanout', '__init__.py')).read(),
+                  os.path.abspath(__file__))), 'py_router',
+                  'bga_fanout', '__init__.py')).read(),
           True)
 
     print()

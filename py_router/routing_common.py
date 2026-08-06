@@ -309,7 +309,8 @@ def filter_already_routed(
     pcb_data: PCBData,
     net_ids: List[Tuple[str, int]],
     config: GridRouteConfig,
-    assume_open: Optional[Set[str]] = None
+    assume_open: Optional[Set[str]] = None,
+    fragment_gate: bool = False,
 ) -> Tuple[List[Tuple[str, int]], List[Tuple[str, str]]]:
     """
     Filter out nets that are already fully connected.
@@ -330,6 +331,13 @@ def filter_already_routed(
             -- the model accepts pad<->zone kisses the exact fill denies
             (the ~0.10% residual FP class), which false-cleared oracle-punted
             custody nets as "Already fully connected".
+        fragment_gate: #549 A-2 -- a ZONE-LESS net whose pads grade connected
+            but whose copper is multiple strict fragments within one outline
+            is NOT already routed: a plain --nets call must route the joins
+            (run 6's VCC3V3 sat in 7 KiCad islands while this filter said
+            "Already fully connected"). Zone-owning nets keep today's exact
+            behavior (their truth channel is the oracle reconciliation and
+            route_planes).
 
     Returns:
         Tuple of (nets_to_route, already_routed) where:
@@ -397,6 +405,22 @@ def filter_already_routed(
         # (net_break_within_outlines); skipping here keeps the router from
         # burning iterations on impossible edges and reporting phantom fails.
         _broken, _ = net_break_within_outlines(pcb_data, result)
+        if not _broken and fragment_gate and not net_zones and net_segments:
+            # #549 A-2 fragment gate: pads connected != copper whole.
+            from check_connected import net_copper_fragments
+            frag = net_copper_fragments(net_id, net_segments, net_vias,
+                                        net_pads, net_zones,
+                                        pcb_data=pcb_data)
+            n = _max_fragments_within_one_outline(
+                pcb_data, frag['fragment_anchors'])
+            if n > 1:
+                print(f"  {net_name}: pads grade connected, but its copper "
+                      f"is {n} separate track fragment(s)"
+                      + (f" ({frag['padless_fragments']} pad-less)"
+                         if frag['padless_fragments'] else "")
+                      + " -- routing to join them (#549)")
+                nets_to_route.append((net_name, net_id))
+                continue
         if not _broken:
             already_routed.append(
                 (net_name, "Already fully connected" if result['connected']

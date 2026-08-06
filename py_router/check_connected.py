@@ -354,8 +354,9 @@ def net_copper_fragments(net_id, segments, vias, pads, zones=None,
     UnionFind replay. A fragment = a connected component owning >=1 track
     segment (graphic=False) or via; pads ride along (a pad-only component is
     not a fragment -- that is `unrouted`'s domain). Consumers: the
-    filter_already_routed fragment gate and route.py's summary sweep, which
-    is how a plain --nets call finally SEES a net KiCad holds in pieces.
+    filter_already_routed fragment gate (#549 A-2, ported to main as #578)
+    and route.py's summary sweep -- which is how a plain --nets call finally
+    SEES a net KiCad holds in pieces.
 
     Returns {'fragments': int, 'padless_fragments': int,
              'fragment_anchors': [(x, y)], 'zone_blob_fallback': bool}.

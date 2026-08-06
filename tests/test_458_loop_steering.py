@@ -494,7 +494,7 @@ def test_route_py_is_invoked_by_absolute_path_in_utf8_mode():
     assert os.path.isabs(cmd[3]), cmd
     assert cmd[3] == os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        'route.py'), cmd
+        'py_router', 'route.py'), cmd
 
 
 def test_nonzero_exit_raises_and_names_the_real_error():

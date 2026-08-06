@@ -20,7 +20,8 @@ import sys
 
 _TESTS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(_TESTS)
-for p in (ROOT, _TESTS, os.path.join(ROOT, 'rust_router')):
+for p in (ROOT, _TESTS, os.path.join(ROOT, 'py_router'),      # #522 layout
+          os.path.join(ROOT, 'py_tools'), os.path.join(ROOT, 'rust_router')):
     if p not in sys.path:
         sys.path.insert(0, p)
 
