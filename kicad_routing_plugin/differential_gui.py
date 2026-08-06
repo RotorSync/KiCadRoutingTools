@@ -1222,7 +1222,7 @@ class DifferentialTab(wx.Panel):
                 key = (frozenset((a, b)), board.GetLayerName(track.GetLayer()),
                        track.GetNetCode())
                 if key in remove_keys:
-                    board.Remove(track)
+                    board.RemoveNative(track)
                     tracks_removed += 1
 
         # Remove original-board VIAS the pipeline flagged (#508 finding 11:
@@ -1239,7 +1239,7 @@ class DifferentialTab(wx.Panel):
                       round(pcbnew.ToMM(track.GetPosition().y), POSITION_DECIMALS),
                       track.GetNetCode())
                 if vk in via_keys:
-                    board.Remove(track)
+                    board.RemoveNative(track)
                     tracks_removed += 1
 
         # Add segments from routing results

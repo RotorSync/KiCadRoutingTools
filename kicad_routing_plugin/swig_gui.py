@@ -3353,7 +3353,7 @@ class RoutingDialog(wx.Dialog):
             except Exception:
                 continue
         for d in to_remove:
-            board.Remove(d)
+            board.RemoveNative(d)
         return len(to_remove)
 
     def _apply_results_to_board(self, results_data, successful, failed, total_time, config):
@@ -3399,6 +3399,19 @@ class RoutingDialog(wx.Dialog):
         # mirroring the CLI writer's strip so the GUI output matches. Match each
         # flagged segment to an existing board track by its unordered endpoint
         # pair, layer, and net, then delete it.
+        #
+        # RemoveNative, NEVER Remove -- here and at every board-item removal in
+        # this plugin. pcbnew's Remove() is RemoveNative() plus
+        # `if not IsActionRunning(): item.thisown = 1`, and PCB_TRACK/PCB_VIA
+        # have no SWIG destructor, so the moment Python frees that "owned"
+        # proxy the pcbnew type registry is corrupted PROCESS-WIDE: BOARD's own
+        # Tracks() starts returning a bare SwigPyObject and every later call
+        # dies with "'swig_runtime_data5.SwigPyObject' object is not iterable".
+        # Inside KiCad IsActionRunning() is true and the two are identical, so
+        # this cost nothing there and was invisible; headless (run_plan.py, the
+        # parity gates) it killed the apply as soon as a run ripped copper --
+        # the segments came off, then the vias' GetTracks() call blew up and
+        # the board kept HALF the change. Found via the rp2350 live-chain gate.
         tracks_removed = 0
         segs_to_remove = results_data.get('segments_to_remove') or []
         if segs_to_remove:
@@ -3417,7 +3430,7 @@ class RoutingDialog(wx.Dialog):
                 key = (frozenset((a, b)), board.GetLayerName(track.GetLayer()),
                        track.GetNetCode())
                 if key in remove_keys:
-                    board.Remove(track)
+                    board.RemoveNative(track)
                     tracks_removed += 1
 
         # Remove stale input VIAS of ripped/re-routed nets (#284), mirroring the
@@ -3435,7 +3448,7 @@ class RoutingDialog(wx.Dialog):
                       round(pcbnew.ToMM(track.GetPosition().y), POSITION_DECIMALS),
                       track.GetNetCode())
                 if vk in via_keys:
-                    board.Remove(track)
+                    board.RemoveNative(track)
                     tracks_removed += 1
 
         # Add segments from routing results

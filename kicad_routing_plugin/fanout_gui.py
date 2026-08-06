@@ -1786,7 +1786,7 @@ class FanoutTab(wx.Panel):
                                 moved_attrs = _pcbnew_via_protection_attrs(track)
                             except Exception:
                                 moved_attrs = None
-                        board.Remove(track)
+                        board.RemoveNative(track)
                         break
                 nv = pcbnew.PCB_VIA(board)
                 nv.SetPosition(pcbnew.VECTOR2I(
