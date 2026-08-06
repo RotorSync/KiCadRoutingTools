@@ -198,7 +198,6 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 # Net-name globs to PROTECT for this run (reason 'user', #521):
                 # rip machinery skips matches, and they persist to the output
                 # .kicad_pro so later steps honor them without the flag.
-                protect_nets: Optional[List[str]] = None,
                 cancel_check=None,
                 progress_callback=None) -> Tuple[int, int, float]:
     """
@@ -307,10 +306,6 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         pcb_data = parse_kicad_pcb(input_file, keepout_layer=keepout_layer)
     else:
         print("Using provided PCB data...")
-
-    if protect_nets:
-        from protected_nets import stash_user_protection
-        stash_user_protection(pcb_data, protect_nets)
 
     # Route trace (#482, KICAD_ROUTE_TRACE=1): record diff-pair copper as it is
     # committed/ripped/restored for animating the run. Default-off; gated on a
@@ -1763,11 +1758,6 @@ Examples:
                         choices=list(defaults.RIPUP_BLOCKER_SELECT_CHOICES),
                         default=defaults.RIPUP_BLOCKER_SELECT,
                         help="""Blocker SELECTION algorithm for the rip-up ladder (see route.py --help / docs/rip-up-reroute.md)""")
-    parser.add_argument("--protect-nets", nargs="+", metavar="PATTERN", default=None,
-                        help="Net names or glob patterns to PROTECT for this run (#521): "
-                             "the rip ladder skips them, and they persist to the output "
-                             ".kicad_pro so later chain steps honor them without the flag. "
-                             "Override later by naming a net EXACTLY (no glob) in a rip set.")
     parser.add_argument("--max-setback-angle", type=float, default=45.0,
                         help="Maximum angle (degrees) for setback position search (default: 45.0)")
     parser.add_argument("--routing-clearance-margin", type=float, default=1.0,
@@ -2041,7 +2031,6 @@ Examples:
                 verbose=args.verbose,
                 polarity_swap_nets=args.polarity_swap_nets,
                 max_rip_up_count=args.max_ripup,
-                protect_nets=args.protect_nets,
                 ripup_blocker_select=args.ripup_blocker_select,
                 max_setback_angle=args.max_setback_angle,
                 enable_layer_switch=not args.no_stub_layer_swap,

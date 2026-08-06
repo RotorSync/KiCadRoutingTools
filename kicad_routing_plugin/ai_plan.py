@@ -244,9 +244,6 @@ _PARAM_CONTROL_ALIASES = {
     # (so a plan-replayed #284-class rip-existing / ordering / keepout chain
     # silently routed at the reset defaults instead of the recorded values).
     'rip_existing_nets': 'rip_existing_nets_ctrl',
-    # #521 run-6: nets protected from rip-up for the run (both route tabs
-    # name their TextCtrl protect_nets_ctrl).
-    'protect_nets': 'protect_nets_ctrl',
     'ordering': 'ordering_strategy',
     'direction': 'direction_choice',
     'time_matching': 'time_matching_check',

@@ -292,7 +292,6 @@ PARAM_RANGES = {
     'stub_proximity_radius': {'min': 0.0, 'max': 10.0, 'inc': 0.5, 'digits': 1},
     'stub_proximity_cost': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
     'neckdown_length': {'min': 0.0, 'max': 50.0, 'inc': 0.5, 'digits': 1},
-    'track_width_floor': {'min': 0.0, 'max': 5.0, 'inc': 0.01, 'digits': 3},
     'neckdown_taper_length': {'min': 0.0, 'max': 5.0, 'inc': 0.1, 'digits': 1},
     'coplanar_gap': {'min': 0.0, 'max': 5.0, 'inc': 0.05, 'digits': 3},
     'via_proximity_cost': {'min': 0.0, 'max': 100.0, 'inc': 1.0, 'digits': 1},

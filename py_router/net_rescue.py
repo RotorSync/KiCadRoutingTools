@@ -176,25 +176,6 @@ def _rescue_rungs(config, fine_grid, pcb_data, net_id):
     rescue_track = min(nominal_w, fab_track,
                        (config.netclass_width_floors or {}).get(
                            net_id, nominal_w))
-    # ...but never go under the board's OWN declared minimum either. The rescue
-    # is the single largest producer of sub-spec copper in the chain: it re-routes
-    # a failed net at the FAB floor and reports it `recovered`, with
-    # `failed_single` empty, so a run reads as fully routed while carrying track
-    # narrower than the board's spec allows. Measured on a board whose spec sets a
-    # HARD 0.15mm minimum and explicitly forbids the 0.10 fab minimum: 155 of 785
-    # segments came out at 0.127 with --track-width 0.16 passed, and the only
-    # symptom was one green "rescued a gap" line per net.
-    #
-    # `min(nominal_w, ...)` on the floor too, so this still "never widens a
-    # sub-floor choice": a net whose nominal is already below the floor keeps its
-    # own width rather than being pushed up by it.
-    #
-    # MERGE NOTE (this commit): --track-width-floor is an EXPLICIT user
-    # declaration, so it outranks the class-derived narrowing above -- a
-    # designer who passes it has said the class width is not acceptable.
-    # Default 0.0 leaves the class rule exactly as main wrote it.
-    if config.track_width_floor:
-        rescue_track = max(rescue_track, min(nominal_w, config.track_width_floor))
     power_widths = dict(config.power_net_widths)
     power_widths.pop(net_id, None)  # this net necks down; other nets are obstacles
     floor_clearance = config.clearance

@@ -185,60 +185,35 @@ def locked_net_names(pcb_data) -> Set[str]:
             if i in pcb_data.nets and pcb_data.nets[i].name}
 
 
+def cached_protection_map(pcb_data, input_file: Optional[str] = None) -> Dict[str, str]:
+    """protection_map(), memoized per pcb_data for the in-run rip ladders.
+
+    The phase-3 tap ladder and the blocking analyser consult protection on
+    every candidate, and protection_map re-reads the sibling .kicad_pro each
+    time. The map cannot change mid-run (the .pro is read-only to the engine
+    and locked copper does not move), so one resolve per board is correct.
+    """
+    m = getattr(pcb_data, '_protection_map_memo', None)
+    if m is None:
+        m = protection_map(pcb_data, input_file)
+        try:
+            pcb_data._protection_map_memo = m
+        except Exception:
+            pass
+    return m
+
+
 def protection_map(pcb_data, input_file: Optional[str] = None) -> Dict[str, str]:
-    """Full protection map for a board: the .kicad_pro list, THIS run's
-    --protect-nets matches (stashed on pcb_data by batch_route as
-    `_user_protected_nets`, reason 'user' -- exact-name overridable like the
-    .pro reasons), plus nets with KiCad-locked copper. 'locked' wins where
-    several apply -- unlike the other reasons it has NO exact-name override
-    (locked means never)."""
+    """Full protection map for a board: the .kicad_pro list plus nets with
+    KiCad-locked copper. 'locked' wins where both apply -- unlike the .pro
+    reasons it has NO exact-name override (locked means never)."""
     m = read_for_pcb_data(pcb_data, input_file)
-    m.update(getattr(pcb_data, '_user_protected_nets', None) or {})
     m.update({n: 'locked' for n in locked_net_names(pcb_data)})
     return m
 
 
-def cached_protection_map(pcb_data, input_file: Optional[str] = None) -> Dict[str, str]:
-    """protection_map, cached on pcb_data for the in-run rip ladders (they can
-    consult it hundreds of times in a cascade). Safe to cache for a run: the
-    .kicad_pro does not change mid-run, KiCad-locked copper is parsed state,
-    and --protect-nets is stashed once before routing starts."""
-    cache = getattr(pcb_data, '_protection_map_cache', None)
-    if cache is None:
-        cache = protection_map(pcb_data, input_file)
-        pcb_data._protection_map_cache = cache
-    return cache
 
 
-def stash_user_protection(pcb_data, patterns: Optional[List[str]]) -> Dict[str, str]:
-    """Resolve --protect-nets patterns against the board ONCE and stash the
-    matches on pcb_data, where protection_map() overlays them for every
-    consumer of this run (the rip-existing filter, the in-run phase-3 ladder,
-    the seam re-ask). Also notes them as candidates so the caller's existing
-    persist site writes them to the output .kicad_pro -- from the next step on
-    they are protected without the flag. Shared by batch_route,
-    batch_route_diff_pairs and the GUI call sites (CLAUDE.md parity rule).
-    Returns the resolved {name: 'user'} map."""
-    if not patterns:
-        return {}
-    from net_queries import matches_net_filter
-    user_prot = {n.name: 'user' for n in pcb_data.nets.values()
-                 if n.name and matches_net_filter(n.name, patterns)}
-    if user_prot:
-        pcb_data._user_protected_nets = dict(
-            getattr(pcb_data, '_user_protected_nets', None) or {},
-            **user_prot)
-        # The in-run ladders read a per-run cache; drop any stale one so
-        # this call's protections are in it.
-        if hasattr(pcb_data, '_protection_map_cache'):
-            del pcb_data._protection_map_cache
-        note_protection_candidates(user_prot)
-        print(f"  --protect-nets: {len(user_prot)} net(s) protected for "
-              f"this run ({', '.join(sorted(user_prot)[:6])}"
-              f"{'...' if len(user_prot) > 6 else ''})")
-    else:
-        print(f"  --protect-nets matched no nets: {patterns}")
-    return user_prot
 
 
 def exact_names(patterns: Optional[Iterable[str]]) -> Set[str]:

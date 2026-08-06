@@ -602,18 +602,6 @@ class DifferentialTab(wx.Panel):
         polarity_row.Add(self.polarity_swap_nets_text, 1, wx.ALIGN_CENTER_VERTICAL)
         options_sizer.Add(polarity_row, 0, wx.EXPAND | wx.ALL, 5)
 
-        # Protect nets (#521): mirrors route_diff.py --protect-nets.
-        protect_row = wx.BoxSizer(wx.HORIZONTAL)
-        protect_row.Add(wx.StaticText(self, label="Protect nets:"),
-                        0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
-        self.protect_nets_ctrl = wx.TextCtrl(self, value="", size=(180, -1))
-        self.protect_nets_ctrl.SetToolTip(
-            "Net-name patterns to PROTECT this run: rip-up skips them and the "
-            "protection persists to the project for later steps. Override later "
-            "by naming a net exactly (no glob) in a rip field.")
-        protect_row.Add(self.protect_nets_ctrl, 1, wx.ALIGN_CENTER_VERTICAL)
-        options_sizer.Add(protect_row, 0, wx.EXPAND | wx.ALL, 5)
-
         self.gnd_via_check = wx.CheckBox(self, label="Add GND vias")
         self.gnd_via_check.SetValue(True)
         self.gnd_via_check.SetToolTip("Add GND vias near differential pair signal vias")
@@ -997,7 +985,6 @@ class DifferentialTab(wx.Panel):
                 diff_chamfer_extra=config.get('diff_chamfer_extra', 1.5),
                 diff_pair_centerline_setback=config.get('diff_pair_centerline_setback'),
                 polarity_swap_nets=config.get('polarity_swap_nets'),
-                protect_nets=config.get('protect_nets'),
                 gnd_via_enabled=config.get('gnd_via_enabled', True),
                 diff_pair_intra_match=config.get('diff_pair_intra_match', False),
                 ac_couple_match=config.get('ac_couple_match', False),
@@ -1412,14 +1399,6 @@ class DifferentialTab(wx.Panel):
         patterns = [t for t in _split_net_list(text.replace(',', ' ')) if t]
         return patterns or None
 
-    def get_protect_nets(self):
-        """Parse the protect-nets field (#521), same splitting rules as the
-        polarity allowlist; empty field -> None."""
-        from .swig_gui import _split_net_list
-        text = self.protect_nets_ctrl.GetValue()
-        patterns = [t for t in _split_net_list(text.replace(',', ' ')) if t]
-        return patterns or None
-
     def get_config(self):
         """Get the differential pair configuration."""
         setback = self.centerline_setback.GetValue()
@@ -1438,7 +1417,6 @@ class DifferentialTab(wx.Panel):
             'diff_chamfer_extra': self.chamfer_extra.GetValue(),
             'diff_pair_centerline_setback': setback if setback > 0 else None,  # 0 = auto
             'polarity_swap_nets': self.get_polarity_swap_nets(),
-            'protect_nets': self.get_protect_nets(),
             'gnd_via_enabled': self.gnd_via_check.GetValue(),
             'diff_pair_intra_match': self.intra_match_check.GetValue(),
             'ac_couple_match': self.ac_couple_check.GetValue(),

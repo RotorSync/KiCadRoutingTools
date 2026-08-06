@@ -164,7 +164,6 @@ class GridRouteConfig:
     # copper under it (measured: 155 of 785 segments at 0.127mm against a 0.15mm
     # HARD requirement, with --track-width 0.16 passed). With this set the ladder
     # stops here and the net FAILS honestly instead of going under.
-    track_width_floor: float = 0.0
     max_turn_angle: float = 180.0  # Max cumulative turn angle (degrees) before reset, to prevent U-turns
     # Power-tap neck-down (issue #72): when a wide power-net tap edge fails,
     # retry it at the layer's default track width. The narrow neck extends

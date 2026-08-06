@@ -9,7 +9,6 @@ alphabetically, which puts every consumer BEFORE its producer:
     test_493_interpreter_independence.py   27  <  test_fanout_and_route.py  91
     test_506_507_plan_movie_tools.py       37  <  test_fanout_and_route.py  91
     test_dru_layer_clearance_e2e.py        83  <  test_fanout_and_route.py  91
-    test_fanout_track_width_floor.py       93  <  test_interf_u.py         109
 
 So on a clean tree those tests could never pass, in any order. They had each
 grown their own `if not os.path.exists(...): print("SKIP"); return`, which turns

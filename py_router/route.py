@@ -311,7 +311,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 power_tap_neckdown: bool = True,
                 neckdown_length: float = 2.5,
                 neckdown_taper_length: float = 0.5,
-                track_width_floor: float = 0.0,
                 json_out: Optional[str] = None,
                 clearance: float = defaults.CLEARANCE,
                 via_size: float = defaults.VIA_SIZE,
@@ -401,7 +400,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # flat USB pair) that no match group ever writes (#521 covers
                 # pairs and matched groups only; test-board run 5 journal
                 # [10]: "the only guard is discipline").
-                protect_nets: Optional[List[str]] = None,
                 force_reroute: bool = False,
                 # The RAW --nets patterns as the operator typed them, BEFORE
                 # main()'s expand_net_patterns. #521's protection override is
@@ -602,16 +600,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # swap phase had already consumed the un-canonical order.
     from kicad_parser import canonicalize_pcb_data_order
     canonicalize_pcb_data_order(pcb_data)
-
-    # --protect-nets: resolve the patterns against the board's nets ONCE and
-    # stash the matches on pcb_data, where protection_map() overlays them for
-    # every consumer in this run (the rip-existing filter, --force-reroute,
-    # the in-run phase-3 ladder, the seam re-ask). Also note them as
-    # candidates so main()'s existing persist writes them to the output
-    # .kicad_pro -- from the next step on they are protected without the flag.
-    if protect_nets:
-        from protected_nets import stash_user_protection
-        stash_user_protection(pcb_data, protect_nets)
 
     # Cross-class clearance: when no map was passed (net_clearances is None -- e.g.
     # the plane routers reroute ripped nets by calling batch_route directly), AUTO-
@@ -885,7 +873,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     config_kwargs['power_tap_neckdown'] = power_tap_neckdown
     config_kwargs['neckdown_length'] = neckdown_length
     config_kwargs['neckdown_taper_length'] = neckdown_taper_length
-    config_kwargs['track_width_floor'] = track_width_floor
     if direction_order is not None:
         config_kwargs['direction_order'] = direction_order
     if layer_widths:
@@ -4362,15 +4349,6 @@ For differential pair routing, use route_diff.py:
                              "(e.g. on a board routed by a previous run). Use '*' to allow "
                              "any non-plane net. Without this flag, committed tracks are "
                              "never ripped.")
-    parser.add_argument("--protect-nets", nargs="+", default=None,
-                        metavar="PATTERN",
-                        help="Net name patterns to PROTECT for this run and persist to "
-                             "the output .kicad_pro (reason 'user', like a routed diff "
-                             "pair's record): no rip glob, in-run rip ladder or seam "
-                             "re-ask may touch them. Override by naming a net EXACTLY "
-                             "(no glob) in --nets/--rip-existing-nets. The guard for "
-                             "single-ended constrained copper (a committed bus wrap, a "
-                             "flat USB pair) that no match group ever records.")
     parser.add_argument("--force-reroute", action="store_true",
                         help="Rip and re-route from scratch every net selected by "
                              "--nets, even if already fully connected (#515's "
@@ -4439,15 +4417,6 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--no-power-tap-neckdown", action="store_true",
                         help="Disable neck-down retry of failed power-net tap edges (issue #72): by default a "
                              "wide tap that cannot fit is re-routed at the layer's default width near the pad")
-    parser.add_argument("--track-width-floor", type=float, default=0.0,
-                        help="HARD floor (mm) the neck-down may not cross. --track-width is a "
-                             "REQUEST: when a wide route will not fit, the router silently retries "
-                             "the WHOLE net at the layer/default width and still reports it routed, "
-                             "so a board whose spec sets a minimum above the fab floor can ship "
-                             "copper under it. With this set the net FAILS instead of going under. "
-                             "Distinct from check_drc.py's identically-named GRADING flag: this one "
-                             "constrains what gets routed, that one what gets graded (default: 0 = "
-                             "no floor beyond the --fab-tier minimum)")
     parser.add_argument("--capabilities", action="store_true",
                         help="Print this clone's module and flag inventory as JSON and "
                              "exit. A consumer that pins a KRT clone can only check that "
@@ -5023,7 +4992,6 @@ For differential pair routing, use route_diff.py:
                 ordering_strategy=args.ordering,
                 disable_bga_zones=args.no_bga_zones,
                 rip_existing_nets=args.rip_existing_nets,
-                protect_nets=args.protect_nets,
                 force_reroute=args.force_reroute,
                 # RAW patterns (pre-expansion): the #521 protection override
                 # must see what the operator TYPED, not the expanded names.
@@ -5039,7 +5007,6 @@ For differential pair routing, use route_diff.py:
                 power_tap_neckdown=not args.no_power_tap_neckdown,
                 neckdown_length=args.neckdown_length,
                 neckdown_taper_length=args.neckdown_taper_length,
-                track_width_floor=args.track_width_floor,
                 json_out=args.json_out,
                 clearance=args.clearance,
                 net_clearances=_net_clearances_map,

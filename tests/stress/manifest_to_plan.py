@@ -108,9 +108,6 @@ FLAG_PARAMS = {
     '--extension': 'extension',
     '--max-track-width': 'max_track_width',
     '--min-track-width': 'min_track_width',
-    # route.py's ROUTING floor (distinct from route_disconnected_planes'
-    # --min-track-width above, which is the region-join width band).
-    '--track-width-floor': 'track_width_floor',
     '--analysis-grid-step': 'analysis_grid_step',
 }
 LIST_FLAGS = {
@@ -129,7 +126,6 @@ LIST_FLAGS = {
     # #284/#521: rip-existing and protect allowlists (nargs='+' globs). Both
     # route to TextCtrls via ai_plan's alias table.
     '--rip-existing-nets': 'rip_existing_nets',
-    '--protect-nets': 'protect_nets',
     # bga_fanout's future-pour declaration (NET:LAYER[,LAYER...] specs,
     # nargs='+'). Review parity finding 5: a recorded manifest carrying the
     # flag used to convert to a plan that silently dropped it. The GUI/plan
