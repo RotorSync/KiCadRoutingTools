@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The placement driver is the workflow; the skill file is its reference.
+"""The drivers ARE the workflow; the skill files are their reference.
 
 A skill document is read all at once, which is how a 4,900-line one produced
 executors that skimmed the gate and improvised the ladder. The driver is the
@@ -40,6 +40,48 @@ def run(args):
                        capture_output=True, text=True, encoding='utf-8',
                        errors='replace', cwd=ROOT)
     return p.returncode, (p.stdout or '') + (p.stderr or '')
+
+
+ROUTING_DRIVER = os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-routing',
+                              'scripts', 'routing_driver.py')
+ROUTING_SKILL = os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-routing',
+                             'SKILL.md')
+
+
+def run_routing(args):
+    p = subprocess.run([sys.executable, '-X', 'utf8', ROUTING_DRIVER] + args,
+                       capture_output=True, text=True, encoding='utf-8',
+                       errors='replace', cwd=ROOT)
+    return p.returncode, (p.stdout or '') + (p.stderr or '')
+
+
+def test_routing_driver():
+    """The routing chain is COMPUTED from the board, not recited."""
+    check('the routing driver ships with its skill',
+          os.path.isfile(ROUTING_DRIVER))
+    code, out = run_routing(['--self-test'])
+    check('its self-test passes', code == 0 and out.strip().endswith('OK'),
+          out[-400:])
+
+    board = os.path.join(ROOT, 'kicad_files', 'splitflap_driver.kicad_pcb')
+    code, out = run_routing(['--plan', '--board', board])
+    check('it computes a chain for a real board', code == 0, out[-300:])
+    check('...and says which stages this board does NOT need',
+          'Not in this chain' in out, out[-300:])
+    check('a 2-layer board with no fine-pitch part gets no fanout stage',
+          'R2   fanout' not in out, out[-500:])
+    check('...but still routes and verifies',
+          'R5' in out and 'R9' in out)
+
+    code, out = run_routing(['--stage', 'R5', '--board', board])
+    check('a routing stage refuses without the coverage partition', code == 4,
+          out[:200])
+    check('...and says why a partition matters',
+          'routed by two stages' in out or 'partition' in out, out[:400])
+
+    text = open(ROUTING_SKILL, encoding='utf-8').read()
+    check('the routing skill points at its driver',
+          'routing_driver.py' in text and '--plan' in text)
 
 
 def main():
@@ -83,6 +125,9 @@ def main():
           'Do NOT read it as your own instructions' in text)
     check('it says an error means a gate is holding',
           'not a malfunction' in text)
+
+    print('the routing driver')
+    test_routing_driver()
 
     print()
     if FAILURES:

@@ -7,6 +7,35 @@ description: Analyzes a KiCad PCB file and creates a comprehensive placement-and
 
 When this skill is invoked with a KiCad PCB file, perform a comprehensive analysis and present a routing plan to the user.
 
+## How to run this skill
+
+Do not read this file end to end and improvise the order. Ask the driver what
+THIS board needs, then work one stage at a time:
+
+```bash
+D=.claude/skills/plan-pcb-routing/scripts/routing_driver.py
+python3 -X utf8 $D --plan  --board board.kicad_pcb   # the chain, computed from the board
+python3 -X utf8 $D --stage A1 --board board.kicad_pcb
+```
+
+The chain is computed, not recited. A board with no fine-pitch parts is never
+shown the fanout stages; a board with no plane nets is never shown pours or
+plane repair. What you are shown is what you run -- "skip if not applicable"
+notes are exactly what gets misread.
+
+| tag | what to do with it |
+|---|---|
+| `<stage_instructions>` | act on these yourself |
+| `<subagent_prompt>` | copy VERBATIM into a subagent. Do NOT read it as your own instructions |
+| `<error>` | you skipped evidence. Go produce it; do not improvise around the guard |
+
+An `<error>` means a gate is holding, not that something broke. Every routing
+stage refuses without the net-coverage partition, because a net routed by two
+stages -- or by none -- is the failure hardest to see afterwards.
+
+The rest of this file is the reference the stages point into. Read the part a
+stage names, when it names it.
+
 ## Step 0: Placement gate (usually SKIPPED)
 
 Routing-only is this skill's default and fully supported path. Before planning
