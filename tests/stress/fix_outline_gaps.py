@@ -28,6 +28,9 @@ import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'py_router'))  # #522/py_placer layout
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'py_placer'))  # #522/py_placer layout
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'py_tools'))  # #522/py_placer layout
 
 _NUM = r'(-?[\d.]+)'
 

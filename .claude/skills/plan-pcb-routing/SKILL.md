@@ -1,24 +1,28 @@
 ---
 name: plan-pcb-routing
-description: Analyzes a KiCad PCB file and creates a comprehensive placement-and-routing plan. Routing-only is the default and fully supported path. Detects unplaced boards and advises which parts to lock before any placement repair, can declare a floorplan intent and grade the board against it, examines components for fanout needs (BGA/QFN/QFP/PGA), identifies differential pairs, categorizes power/ground nets, and presents a step-by-step workflow with explanations. Pairs every render with the JSON key that confirms or contradicts it, reads the renders itself rather than only showing them, and classifies routing failures as floorplan-, placement- or parameter-shaped so the two halves form one loop. Never changes the board outline.
+description: Analyzes a KiCad PCB file and creates a comprehensive placement-and-routing plan. Routing-only is the usual path, reached by MEASURING that the placement is fit rather than by assuming it. Detects unplaced boards and advises which parts to lock before any placement repair, can declare a floorplan intent and grade the board against it, examines components for fanout needs (BGA/QFN/QFP/PGA), identifies differential pairs, categorizes power/ground nets, and presents a step-by-step workflow with explanations. Pairs every render with the JSON key that confirms or contradicts it, reads the renders itself rather than only showing them, and classifies routing failures as floorplan-, placement- or parameter-shaped so the two halves form one loop. Never changes the board outline.
 ---
 
 # Plan PCB Routing
 
 When this skill is invoked with a KiCad PCB file, perform a comprehensive analysis and present a routing plan to the user.
 
-## Step 0: Placement gate (usually SKIPPED — read the decision table)
+## How to run this skill
 
-Before planning any routing, decide whether the board should be **placed** or
-**re-placed** at all. Most of the time the answer is no, and running placement on
-a good board makes it worse.
+Do not read this file end to end and improvise the order. Work ONE STAGE AT A
+TIME, and let the board decide which stages exist at all: a board with no
+fine-pitch parts never runs the fanout stages, a board with no plane nets never
+runs the pours. Derive that from the board before you start --
 
 ```bash
 # Is the board even placed? (report-only, writes nothing, exits 3 if not)
 python3 -X utf8 py_placer/place_optimize.py board.kicad_pcb --suggest-locks
 ```
 
-### Decision table — when to run placement
+-- then take the applicable stages in order. **Decide each stage in or out
+before you begin, and say which**: "skip if not applicable" read mid-chain is
+exactly what gets misread, and a stage silently skipped is indistinguishable
+from one that ran clean.
 
 | board state | run placement? | tool |
 |---|---|---|
@@ -70,7 +74,7 @@ gateable: its blocking count reads **0 on all 33 healthy in-repo boards** in bot
 and AABB currencies.
 
 **Do not gate on the AGGREGATE `overlap_area`** — it has a legitimate nonzero floor on
-human boards (tigard's own layout carries 5.375 mm² of mount-hole-under-shell courtyard
+human boards (one corpus layout carries 5.375 mm² of mount-hole-under-shell courtyard
 kisses) and run 2 measured it positively correlated with distance-to-truth. The
 per-pair blocking COUNT is the gateable quantity; courtyard/fab pairs are ADVISORY
 (`check_assembly` labels each with its waiver class), fix targets for the placement
@@ -104,11 +108,11 @@ spec and no reference board.
 **Do not turn that into a detector.** Written as one it is unsafe, and both failure modes
 were measured over this repo's 33 in-repo boards:
 
-- **False positive.** `flat_hierarchy` has six holes: four at a `(3.81, 3.81)` corner
+- **False positive.** One corpus board has six holes: four at a `(3.81, 3.81)` corner
   inset and two elsewhere. A "hole off its siblings' pattern" rule flags those two, and
   they are a perfectly ordinary **mid-edge mounting pattern**. Reconstructing that board
   would damage a correct one.
-- **False negative, on the board the rule was derived from.** tigard's four holes sit at
+- **False negative, on the board the rule was derived from.** Its four holes sit at
   one 3 mm inset, but its outline is `30.0 – 75.99764`, so nearest-corner insets come out
   as `3.000` and `2.998` and a naive comparison reports *four distinct patterns* and
   stays silent. Sub-µm outline asymmetry is normal, not exceptional.
@@ -855,7 +859,7 @@ advisor flagged; `edge_connectors` for anything that is *meant* to overhang
 (this is what stops `oob_count` reporting a card edge as a defect forever);
 `keepouts` for mounting holes and antenna clearances; `decaps.max_distance_mm`;
 and `blocks` with a `zone` **only where the parts really are one contiguous
-area**. Schematic sheets usually are not — on ulx3s all ten sheet bounding
+area**. Schematic sheets usually are not — on one corpus board all ten sheet bounding
 boxes overlap each other, so `--emit-intent` claims a zone for only 4 of 10 and
 says why for the rest.
 
@@ -934,59 +938,60 @@ widest-path — and returns one of two verdicts that mean different things:
 
 | verdict | what it licenses |
 |---|---|
-| **PASSABLE** at track *t* | a route EXISTS at *t*. If the router failed, the finding is about the ROUTER: grid, ordering, ripup budget, layer pin. Do not touch placement on this evidence. |
-| **CAGED** at track *t* | no route exists at ANY grid. This one IS geometry, and placement or the spec is the fix. |
+| `<stage_instructions>` | act on these yourself |
+| `<subagent_prompt>` | copy VERBATIM into a subagent. Do NOT read it as your own instructions |
+| `<error>` | you skipped evidence. Go produce it; do not improvise around the guard |
 
-Exit code 0 PASSABLE, 1 CAGED, 2 usage/"nothing to reach". Clearances come from
-the board's netclasses, so **quote the clearance with the verdict** — the same
-copper is passable at 0.10 mm and caged at 0.20 mm, and a verdict without its
-clearance is not a verdict.
+An `<error>` means a gate is holding, not that something broke. Every routing
+stage refuses without the net-coverage partition, because a net routed by two
+stages -- or by none -- is the failure hardest to see afterwards.
 
-Two ways to misread it, both seen:
+The references, and when to open them. Read the one a stage names, when it
+names it -- not all of them, and not up front:
 
-- **`BOTTLENECK >= …mm` with "bounded by the VIEW"** is not a measurement of
-  the board. Nothing was in the way inside the window; the number is the size
-  of the question you asked.
-- **A margin inside one raster step is not resolved.** The default step is
-  0.01 mm. Run 8's decisive case was a **6.4 µm** throat; halve `--step` until
-  the verdict stops moving before believing a margin under ~20 µm.
+| file | read when |
+|---|---|
+| `references/evidence-map.md` | you are about to quote a number from any instrument, and need to know which key answers which question |
+| `references/convergence.md` | you are in the convergence loop and need its budget, ledger schema or stop conditions |
+| `references/verifier-prompts.md` | you are dispatching a verification subagent. Quote it whole; it is written FOR the subagent, not for you |
 
-### Before routing a dense escape: is the channel even wide enough?
+The rest of this file is doctrine: the measurement behind each rule, for when
+a stage's instruction is not enough or you need to know why a rule exists
+before overriding it.
 
-If a board fans a bus out to an edge, measure the corridor before blaming the
-router: `escapes x trace pitch / channel width`. It is the difference between
-*"the router failed"* and *"this was never routable"*, and a router you cannot
-tell those apart on measures nothing. A spec may set its own gate — one asks for
-≤75%, and the as-built channel measured 5.60mm against 2.40mm of escape, 42.9%.
+The rest of this file is the reference the stages point into. Read the part a
+stage names, when it names it.
 
-Go one level finer on a dense part: the **per-face lane ledger**. This is a
-tool now — do not compute it by hand:
+## Step 0: Placement gate — measure first, then decide
+
+Before planning copper, answer one question, and answer it by MEASURING:
+**is this board's placement fit to route?**
+
+Routing-only is this skill's normal path, but "normal" is the outcome of the
+check, not a reason to skip it. A board whose placement is wrong cannot be
+rescued by any router, and the check costs two commands.
+
+| board state | do this |
+|---|---|
+| placed, and BOTH checks below come back clean | go to Step 1. This is the common outcome -- and it is an outcome, not an assumption |
+| board already carries copper | **nothing** -- placement moves footprints, not tracks; the placement tools exit 3 |
+| unplaced, or placed WRONG (a copper-free `check_drc` returns violations, or a mechanically-fixed part sits where mechanics forbid) | **stop and invoke `/plan-pcb-placement`**, then start this skill again from its output |
+| routing FAILED and the diagnosis is congestion/blockers | invoke `/plan-pcb-placement-and-routing`, which owns the loop |
+| routing FAILED and the diagnosis is parameters (grid, ripup budget, layer costs) | fix the parameters here; placement is not the lever |
+
+Test the "placed WRONG" row rather than eyeballing it -- it takes seconds and
+it is the one instrument in this step that measures what reaches `blocking`:
 
 ```bash
 python3 -X utf8 py_tools/check_floorplan.py board.kicad_pcb --intent fp.json --health
 ```
 
-Every `--health` run reports it, with no declaration needed, for every
-fine-pitch part on the board (`placement/escape.py`; `health_escape_deficit_parts`
-and `health_escape_worst_deficit` reach `JSON_SUMMARY`). It counts lanes
-SUPPLIED (face span ÷ (track+clearance) **read from the board's own netclass**,
-minus span eaten by neighbours) against lanes DEMANDED (nets that must escape
-through that face). A face in deficit is the **binding constraint**: reordering
-nets only chooses WHICH nets strand there, never how many (run 5 spent multiple
-ordering experiments proving this on a face whose ledger would have said it in
-seconds).
+Every violation a copper-free board returns is a placement defect no router can
+remove. Both conjuncts, always: `check_drc` cannot see two parts stacked on the
+same net, and `check_assembly` is the channel that can.
 
-Read **`blockers` first** — it names the neighbouring parts whose bodies ate the
-lanes, which is the move to make. `U9 west: supply 6 < demand 14 … 15.35mm of
-that face is taken by SD1` is an instruction; "west face is short" is not.
-Interior pads are reported separately and are a **fanout** question, not a lane
-one — they need a via, not a channel.
-
-Two caveats before calling a deficit structural: recompute the supply at the
-finest legal grid (run 5's v2 bulk ran at 0.05 mm and a lane count at that
-pitch understated supply a 0.025 mm pass could reach), and remember the ledger
-does not model **supply taps** — a via field feeding the part eats lanes exactly
-like signals do, so subtract those by hand before trusting a marginal pass.
+**Placement invalidates every downstream routed board.** If placement runs, this
+skill starts again from the placed board -- never mid-chain.
 
 ### THE BOARD OUTLINE IS NOT YOURS TO CHANGE
 
@@ -1568,7 +1573,7 @@ python3 -X utf8 py_tools/render_placement.py board.kicad_pcb --list-groups --gro
    workhorse **for scoping and framing**. **Not for movement**: sheet blocks of
    16–83 parts moved on no board tried. Also not for zones — a sheet is a
    *functional* grouping, so its members scatter and its bounding box overlaps
-   its neighbours' (all 10 of ulx3s's do).
+   its neighbours' (on one corpus board all 10 do).
 3. `decap` — the only source that measurably *moves* anything. **0% internal by
    construction** (a cap bridges VCC and GND, both board-spanning), so it is
    meaningless as a routing scope.
@@ -2462,9 +2467,12 @@ Report to user when presenting the plan:
 - If high-speed nets found: "**GND Return Vias:** This board has [tier] signals ([examples]).
   GND return vias are included in Step N with `--gnd-via-distance [X]mm`. Let me know if
   you'd like to skip this step."
-- If no high-speed nets found: "**GND Return Vias:** No high-speed signals detected (only
-  low-frequency I2C/UART/GPIO). GND return vias are included in the plan but are optional
-  for this board. Want me to remove the step?"
+- If no high-speed nets found: "**GND Return Vias:** The high-speed scan found
+  no nets that need them (only low-frequency I2C/UART/GPIO). The step is
+  included; it is cheap and harmless here. Want me to remove it?"
+  Say what the SCAN found, not that the vias are "optional" -- optional invites
+  dropping them on a board where the scan simply was not run, and a missing
+  return path is not visible in any DRC.
 
 `/find-high-speed-nets` ALSO reports **controlled-impedance nets** (its Step 4.5):
 RF/antenna feeds (radio/PA/LNA -> SMA/U.FL/chip-antenna = **50 ohm single-ended**,
@@ -2648,7 +2656,7 @@ Based on the analysis, generate a step-by-step plan. The general order is:
 
 ### Routing Order Rationale
 
-0. **Placement (conditional -- normally SKIPPED).** Run it ONLY for a rough /
+0. **Placement (conditional -- decided by Step 0's measurement).** Run it for a rough /
    imported / generated placement, when routing has already FAILED and
    `/diagnose-routing-failures` blames congestion rather than parameters, or
    when the user wants placement OPTIONS / a converged run's failures were
@@ -3474,7 +3482,7 @@ than taking the blunt default.
 
 ### Differential Pairs Present
 
-Insert diff pair routing after fanout but before single-ended signals:
+Insert diff pair routing after the pour and fanout, before single-ended signals:
 
 ```bash
 python3 py_router/route_diff.py board.kicad_pcb \
@@ -3689,7 +3697,7 @@ For difficult boards, consider tuning these parameters:
 
 | Parameter | Default | Effect |
 |-----------|---------|--------|
-| `--max-ripup 3` | 3 | Max blocking nets to rip up and retry |
+| `--max-ripup 3` | 3 | Max blocking nets to rip up and retry (the code's default; see note 15 -- deeper measured WORSE) |
 | `--max-iterations 200000` | 200000 | A* base budget per route (self-extends to 1e7 while progressing — #529; don't tune) |
 | `--heuristic-weight 1.9` | 1.9 | **INADMISSIBLE** — returns a path up to ~1.9× the optimal *length*, not merely "may miss tight routes". Set **1.0** on any net whose requirement IS its length (Step 2c); the far larger node count an admissible search expands is covered by #529's self-budgeting (don't pass `--max-iterations`) |
 | `--via-cost 50` | 50 | Higher = fewer vias, longer paths; lower (10-25) for BGA escape |
@@ -3734,7 +3742,7 @@ python3 py_router/route.py board.kicad_pcb --nets "*" \
 14. **BGA/PGA power pins and planes** - When using power planes, BGA/PGA power pins (GND, VCC) connect most efficiently via direct vias to the plane rather than fanout routing. Create planes first, then fanout only signal nets (this is the Step 1 -> 1b order). Through-hole PGA pads automatically connect to planes on that layer; SMD BGA pads need vias placed by `route_planes.py`. This approach:
     - Reduces routing congestion (power pins don't consume escape channels)
     - Provides lower impedance power connections
-15. **Rip-up depth: MORE IS NOT BETTER (measured).** On a 6-board chain A/B, `--max-ripup 5` beat 10 (+0.78 pts completion, 13 fewer connectivity items, 3 boards better / 0 worse) and 20 was worse than 10 — each extra rip level risks a permanent casualty (a ripped victim whose corridor gets taken cannot be restored), and the gains from deep ripping don't materialize because victims can almost always reroute anyway. The optimum sits in 3-5 and wobbles by board (measured: one board monotone-better all the way down to 3, another best at 5) -- use 5 as the default, try 3 as a free retry variant (deterministic: keep whichever grades better), and escalate ABOVE 5 only as a last resort on a specific failing net, never as the opening move. Do NOT add `--max-iterations` — the router self-budgets (#529 dynamic iterations, default on, up to a 1e7 ceiling while a search progresses); see the note in the routing-step section.
+15. **Rip-up depth: MORE IS NOT BETTER (measured).** On a 6-board chain A/B, `--max-ripup 5` beat 10 (+0.78 pts completion, 13 fewer connectivity items, 3 boards better / 0 worse) and 20 was worse than 10 — each extra rip level risks a permanent casualty (a ripped victim whose corridor gets taken cannot be restored), and the gains from deep ripping don't materialize because victims can almost always reroute anyway. The optimum sits in 3-5 and wobbles by board (measured: one board monotone-better all the way down to 3, another best at 5) -- the code's default is 3 (routing_defaults.MAX_RIPUP) and 5 is the upper end of the useful band -- try the other of the two as a free retry variant (deterministic: keep whichever grades better), and escalate ABOVE 5 only as a last resort on a specific failing net, never as the opening move. Do NOT add `--max-iterations` — the router self-budgets (#529 dynamic iterations, default on, up to a 1e7 ceiling while a search progresses); see the note in the routing-step section.
 16. **Guide corridors and keepouts are user-drawn** - Never draw `User.1` guide polylines or `User.2` keepout polygons yourself; suggest in words where they should go and let the user draw them, then add `--guide-corridor` / `--keepout` to the plan. Exception: a polygon the SPEC itself cites with coordinates is transcription, not authoring — draw exactly that (see the Keepout Zones carve-out).
 17. **Companion skills** - Defer to `/identify-diff-pairs` (datasheet-based pair detection), `/recommend-stackup` (before impedance/time-matching work), `/diagnose-routing-failures` (after failures), and `/review-routed-board` (final verification) rather than duplicating their logic inline.
 

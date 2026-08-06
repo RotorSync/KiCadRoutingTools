@@ -37,6 +37,9 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # for _gitver when run as a script
+sys.path.insert(0, os.path.join(str(Path(__file__).resolve().parent)), 'py_router'))  # #522/py_placer layout
+sys.path.insert(0, os.path.join(str(Path(__file__).resolve().parent)), 'py_placer'))  # #522/py_placer layout
+sys.path.insert(0, os.path.join(str(Path(__file__).resolve().parent)), 'py_tools'))  # #522/py_placer layout
 from _gitver import write_git_version, format_version
 
 REPO = Path(__file__).resolve().parent.parent.parent  # tests/stress/ -> repo root

@@ -20,6 +20,9 @@ import sys
 _here = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(_here, '..', '..'))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # #522/py_placer layout
+sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # #522/py_placer layout
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522/py_placer layout
 
 # Frame order tells the story: ground truth, the damage, then each repair.
 ARM_ORDER = ['control', 'none', 'quench@3mm', 'quench@dose',

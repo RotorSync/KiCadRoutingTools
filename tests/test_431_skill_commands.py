@@ -10,10 +10,16 @@ the doc-vs-code gate: `run_doc_examples.gridrouteconfig_undocumented_fields` and
 `tests/gui_parity/test_cli_postpass_coverage.py`.
 
 Explicitly NOT testable, and worth saying rather than pretending: whether Claude
-*decides correctly* not to run placement on a good board. The mitigations for
-that are design, not assertion -- the default-off framing in the order
-rationale, the decision table, and the board-state gates that refuse the worst
-case outright.
+*decides correctly* what to do with a given placement. The mitigations are
+design, not assertion -- a MANDATORY copper-free measurement whose two outcomes
+are both legitimate, the decision table it feeds, the driver that refuses to
+emit a repair stage without that measurement, and the board-state gates that
+refuse the worst case outright.
+
+Note the design change (run 8): this file used to assert the skill said
+placement was "normally SKIPPED". That was the wrong invariant. A default of
+SKIP is satisfied most cheaply by skipping, and the thing being skipped is the
+check that catches stacked parts.
 """
 
 import importlib.util
@@ -26,8 +32,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Files that instruct Claude or a human to run these tools.
+# The skill was split into three (run-8 S2): placement, routing, and the thin
+# combined one that sequences them. A flag can now live in any of them, and the
+# whole point of this gate is that NO skill file drifts from the real parsers --
+# so every one is a source, and the assertions below say which file must carry
+# which rule.
+def _all_skill_text():
+    """Every skill file as one string: a rule may live in any of the three."""
+    out = []
+    for rel in SOURCES:
+        path = os.path.join(ROOT, rel)
+        if os.path.isfile(path):
+            out.append(open(path, encoding='utf-8').read())
+    return '\n'.join(out)
+
+
 SOURCES = [
     '.claude/skills/plan-pcb-routing/SKILL.md',
+    '.claude/skills/plan-pcb-placement/SKILL.md',
+    '.claude/skills/plan-pcb-placement-and-routing/SKILL.md',
     # The skill's reference pages carry command blocks too (#549). Without them
     # every block moved out of SKILL.md becomes flag-unchecked, which is the
     # quiet way this gate stops gating.
@@ -149,7 +172,7 @@ def test_every_documented_flag_exists():
 def test_the_placement_tools_are_actually_mentioned():
     """Guards the reverse failure: the gate passing because the skill stopped
     mentioning placement at all."""
-    skill = open(os.path.join(ROOT, SOURCES[0]), encoding='utf-8').read()
+    skill = _all_skill_text()
     for token in ('place_optimize.py', 'render_placement.py', '--suggest-locks',
                   'Step 0'):
         assert token in skill, f"{token} missing from the skill"
@@ -160,15 +183,35 @@ def test_exit_code_contract_is_documented():
     docs do not, the instruction silently becomes wrong."""
     from placement.placement_state import UNPLACED_EXIT
     assert UNPLACED_EXIT == 3
-    skill = open(os.path.join(ROOT, SOURCES[0]), encoding='utf-8').read()
+    skill = _all_skill_text()
     assert 'exit 3' in skill or 'exits 3' in skill, \
         "the skill must state the exit-3 contract it tells Claude to rely on"
 
 
-def test_skill_says_placement_is_off_by_default():
-    """The single most important thing for a model to get right here."""
-    skill = open(os.path.join(ROOT, SOURCES[0]), encoding='utf-8').read()
-    assert 'normally SKIPPED' in skill or 'do not run it' in skill
+def test_skill_decides_placement_by_measurement_not_by_default():
+    """The single most important thing for a model to get right here.
+
+    This used to assert the skill said placement was "normally SKIPPED", and
+    that was the wrong invariant to pin. A default of SKIP is what lets an
+    executor route a board whose parts are stacked on each other: the cheapest
+    way to satisfy "usually skip" is to skip, and the check that would have
+    caught the damage is the thing being skipped.
+
+    The rule is measure-then-decide. The measurement is two commands on the
+    copper-free board, it is never optional, and BOTH outcomes are legitimate:
+    clean means route (a verdict, not an assumption), dirty means fix. The
+    reason not to optimise a clean placement survives -- as a consequence of
+    the measurement rather than as a reason to skip it.
+    """
+    skill = _all_skill_text()
+    # The gate is a measurement, and it is mandatory.
+    assert 'measure first, then decide' in skill.lower()
+    assert 'never optional' in skill.lower() or 'NEVER skip the assessment' in skill
+    # Both instruments, because neither alone sees a same-net stack.
+    assert 'check_drc' in skill and 'check_assembly' in skill
+    assert 'copper-free' in skill.lower() or 'COPPER-FREE' in skill
+    # The measured reason a CLEAN placement is left alone must survive.
+    assert 'WORSE by a polish pass' in skill or 'makes it worse' in skill
     assert 'decision table' in skill.lower()
     # and that the render is not mistaken for the verdict (#431 limit 3)
     assert 'triage, not a verdict' in skill
@@ -203,7 +246,7 @@ def test_routing_only_stays_the_default_path():
             f"un-placed board")
 
     # And the skill's own plan TEMPLATE must not grow one either.
-    skill = open(os.path.join(ROOT, SOURCES[0]), encoding='utf-8').read()
+    skill = _all_skill_text()
     fences = re.findall(r'```[^\n]*\n(.*?)```', skill, re.S)
     template = max((f for f in fences if '"action"' in f or 'Step-by-Step' in f),
                    key=len, default='')
@@ -219,7 +262,7 @@ def test_skill_states_the_board_outline_is_not_editable():
     """#549. True today only by construction -- no writer emits an Edge.Cuts
     primitive -- and stated nowhere, so nothing stops a future change or a
     confident model from resizing a board to make parts fit."""
-    skill = open(os.path.join(ROOT, SOURCES[0]), encoding='utf-8').read()
+    skill = _all_skill_text()
     low = skill.lower()
     # AND, not OR. Written as `or` first, this passed with either phrase
     # deleted -- both were present, so neither was actually pinned.
@@ -265,7 +308,7 @@ def test_the_score_is_the_gate_and_the_router_is_not_the_judge():
     was the router's own tally. Two claims have to stay in the skill or that
     recurs: the score exists and is the gate, and place_route_loop's ACCEPTED
     is not a verdict."""
-    skill = open(os.path.join(ROOT, SOURCES[0]), encoding='utf-8').read()
+    skill = _all_skill_text()
     low = skill.lower()
 
     assert 'board_score.py' in skill, \
@@ -348,7 +391,7 @@ TESTS = [
     test_routing_only_stays_the_default_path,
     test_skill_states_the_board_outline_is_not_editable,
     test_verdict_lines_do_not_collide_with_the_gui_result_contract,
-    test_skill_says_placement_is_off_by_default,
+    test_skill_decides_placement_by_measurement_not_by_default,
 ]
 
 

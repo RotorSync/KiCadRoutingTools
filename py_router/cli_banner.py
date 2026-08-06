@@ -59,6 +59,19 @@ def install() -> None:
     if _installed or os.environ.get('KRT_NO_BANNER'):
         return
     _installed = True
+    # Line-buffer the log (run-7 A11). Redirected to a file, stdout is
+    # BLOCK-buffered, so a run that is killed -- a timeout, a stall, a closed
+    # session -- loses whatever sits in the 8KB buffer. One run-7 board's
+    # legalize log ended at 200 bytes that way, and the stage was read as a
+    # silent no-op when it had in fact repaired 7 parts. These are minute-scale
+    # tools whose logs are the evidence; a syscall per line is the right trade.
+    # A tty is already line-buffered, so this only changes the redirected case.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            if not _stream.isatty():
+                _stream.reconfigure(line_buffering=True)
+        except Exception:      # non-reconfigurable wrapper: keep the banner
+            pass
     print(f"CMD: {command_line()}", flush=True)
 
     state = {'rc': 0}

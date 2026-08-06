@@ -8,6 +8,9 @@ import os
 STRESS = Path(os.environ.get("STRESS_DIR", str(Path.home() / "Documents/kicad_stress_test")))
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, os.path.join(str(Path(__file__).resolve().parents[2]), 'py_router'))  # #522/py_placer layout
+sys.path.insert(0, os.path.join(str(Path(__file__).resolve().parents[2]), 'py_placer'))  # #522/py_placer layout
+sys.path.insert(0, os.path.join(str(Path(__file__).resolve().parents[2]), 'py_tools'))  # #522/py_placer layout
 from kicad_parser import parse_kicad_pcb  # noqa: E402
 
 SRC = STRESS / "sources/github_set1"

@@ -424,6 +424,9 @@ def plan_steps_from_manifest(manifest, keep_files=False):
     # skipped intermediate (e.g. place_fanout_clearance) BROKE the chain and
     # silently dropped legitimate upstream steps (e.g. the whole bga_fanout).
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'py_router'))  # #522/py_placer layout
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'py_placer'))  # #522/py_placer layout
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'py_tools'))  # #522/py_placer layout
     from redo_stress_test import parse_manifest, compute_prune_keep, is_check_cmd
 
     cmds = parse_manifest(manifest)

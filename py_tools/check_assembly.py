@@ -15,7 +15,8 @@ to the baseline board (dense real boards ship hundreds of by-design
 courtyard kisses -- the corpus measured 235 -- so the placement fix loop
 targets the pairs OUR moves introduced, never a shipped design's own).
 
-Exit codes: 0 = no blocking pair, 2 = usage/load error, 4 = blocking > 0.
+Exit codes: 0 = clean, 2 = usage/load error, 4 = a blocking pair OR copper
+landing on a KiCad-locked part (see LOCKED-PART CONTACT).
 """
 import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 
@@ -92,10 +93,27 @@ def main():
             star = '  <-- NEW vs baseline'
         print(f"    {q.a} <-> {q.b}  {q.kind}  {q.area_mm2}mm2 "
               f"side {q.side}  {label}{star}")
+        # Different-net pads touching is a short on top of the overlap. Say so
+        # here rather than making a reader re-derive it from the board.
+        for sh in getattr(q, 'shorts', ()) or ():
+            print(f"        SHORT: {sh}")
+
+    locked_contact = g.get('locked_contact_pairs') or []
+    if locked_contact:
+        print(f"  LOCKED-PART CONTACT ({len(locked_contact)}): copper lands on "
+              f"a part KiCad marks (locked yes)")
+        for q in locked_contact:
+            print(f"    {q.a} <-> {q.b}  {q.kind}  {q.area_mm2}mm2  "
+                  f"locked: {q.locked_ref}"
+                  + ('  [' + q.waiver + ']' if q.waived else ''))
+        print("    A locked pose is a decision somebody made (an enclosure "
+              "standoff, a panel cut-out). A placement search may not settle "
+              "this by moving the other part somewhere it likes better, and a "
+              "waiver class chosen for unlocked parts does not apply here.")
     print(f"  pad/hole/oob echo: {leg['pad_conflicts']} pad pair(s), "
           f"{leg['hole_conflicts']} hole conflict(s), "
           f"{leg['oob_pad_count']} part(s) with pad copper off-board")
-    verdict = ('NOT BUILDABLE' if g['blocking']
+    verdict = ('NOT BUILDABLE' if (g['blocking'] or locked_contact)
                else 'buildable (blocking 0)')
     print(f"  VERDICT: {verdict}")
 
@@ -113,6 +131,7 @@ def main():
             'hole_conflicts': leg['hole_conflicts'],
             'oob_pad_count': leg['oob_pad_count'],
             'oob_pad_amount': leg['oob_pad_amount'],
+            'locked_contact_pairs': [q._asdict() for q in locked_contact],
         }
         if new_advisory is not None:
             doc['baseline'] = args.baseline
@@ -121,7 +140,7 @@ def main():
             json.dump(doc, f, indent=1, sort_keys=True)
         print(f"  JSON -> {args.json}")
 
-    return 4 if g['blocking'] else 0
+    return 4 if (g['blocking'] or locked_contact) else 0
 
 
 if __name__ == "__main__":

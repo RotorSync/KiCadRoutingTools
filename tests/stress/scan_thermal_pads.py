@@ -13,6 +13,9 @@ import sys
 import time
 
 sys.path.insert(0, '/Users/andy/Documents/KiCadRoutingTools')
+sys.path.insert(0, os.path.join('/Users/andy/Documents/KiCadRoutingTools', 'py_router'))  # #522/py_placer layout
+sys.path.insert(0, os.path.join('/Users/andy/Documents/KiCadRoutingTools', 'py_placer'))  # #522/py_placer layout
+sys.path.insert(0, os.path.join('/Users/andy/Documents/KiCadRoutingTools', 'py_tools'))  # #522/py_placer layout
 from kicad_parser import parse_kicad_pcb
 from route_planes import is_thermal_pad
 import routing_defaults as d

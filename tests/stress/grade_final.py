@@ -139,6 +139,7 @@ def main():
     # reported all 12 as ours. baseline = the pristine unrouted input (first
     # .kicad_pcb token of the recorded chain), resolved by ab_replay's helper.
     sys.path.insert(0, HERE)
+    sys.path.insert(0, os.path.join(HERE, 'py_placer'))  # #522/py_placer layout
     base = None
     try:
         from ab_replay_grade import manifest_baseline

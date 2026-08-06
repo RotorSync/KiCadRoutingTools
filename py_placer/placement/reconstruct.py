@@ -79,28 +79,89 @@ def pad_oob_amount(state, edge_bands=None) -> float:
     intent's edge_connectors) charges only the EXCESS past its band -- its
     declared overhang is by design, and without the allowance the gate tuple
     itself would revert a correct edge-homecoming (the move RAISES board-wide
-    oob exactly by the legitimate overhang)."""
+    oob exactly by the legitimate overhang).
+
+    Run-7 finding: this used to measure against the board's BOUNDING RECTANGLE
+    while every other instrument used the real Edge.Cuts outline. On a
+    non-rectangular board the two disagree completely -- a candidate that swept
+    nine parts into a notch measured `oob 0.0` here and 14.29mm everywhere
+    else, so the gate accepted an evacuation it was built to reject. The
+    legality context already owns the outline-aware measurement (rings,
+    cutouts, notches); use it, and keep the bbox form only as the fallback for
+    a state that has no context.
+    """
     oob = 0.0
     if state.legality_ctx is None:
         return oob
     bands = edge_bands or {}
-    for ref, pp in state.legality_ctx.parts.items():
+    ctx = state.legality_ctx
+    outline_aware = getattr(ctx, 'gate', None) is not None
+    for ref, pp in ctx.parts.items():
         p = state.parts.get(ref)
         if p is None:
             continue
-        ext = pp.extent(p.x, p.y, p.rot)
-        if ext is not None:
+        if outline_aware:
+            amt = ctx.pad_oob_amount(ref, p.x, p.y, p.rot, exact=True)
+        else:
+            ext = pp.extent(p.x, p.y, p.rot)
+            if ext is None:
+                continue
             amt = _bbox_outside(ext, state.board)
-            oob += max(0.0, amt - bands.get(ref, 0.0))
+        oob += max(0.0, amt - bands.get(ref, 0.0))
     return oob
+
+
+def _cross_group_contact(state, groups, snap):
+    """First (a, b) newly in contact across two DIFFERENT move groups, or None.
+
+    `groups` maps a multiplier k to the refs moved by k*v, so refs in
+    different groups moved by different vectors. `snap` holds their poses
+    before the move, used to skip pairs that already conflicted.
+    """
+    ctx = state.legality_ctx
+    if ctx is None or len(groups) < 2:
+        return None
+    keys = sorted(groups)
+    for i, ka in enumerate(keys):
+        for kb in keys[i + 1:]:
+            for a in sorted(groups[ka]):
+                for b in sorted(groups[kb]):
+                    sf = ctx.pair_shortfall(a, b)
+                    if not (sf.stack or sf.pad > legality.EPS or sf.hole > legality.EPS):
+                        continue
+                    # Was it already touching before this move? Restore the
+                    # two poses, re-ask, put them back.
+                    keep = {r: (state.parts[r].x, state.parts[r].y,
+                                state.parts[r].rot) for r in (a, b)}
+                    for r in (a, b):
+                        if r in snap:
+                            state.apply_move(r, *snap[r])
+                    before = ctx.pair_shortfall(a, b)
+                    for r, pose in keep.items():
+                        state.apply_move(r, *pose)
+                    if not (before.stack or before.pad > legality.EPS
+                            or before.hole > legality.EPS):
+                        return (a, b)
+    return None
 
 
 def measure(state, edge_bands=None) -> Tuple:
     """The lexicographic gate tuple. Smaller-or-equal is acceptable.
 
-    Order (run-6): pad conflicts, hole shortfall, banded pad-oob, then
-    STACK PAIRS (any-net cross-footprint pad intersections -- the assembly
-    channel), then hpwl, then courtyard overlap as the LAST tiebreak.
+    Order (run-8): LOCKED CONTACTS first, then pad conflicts, hole shortfall,
+    banded pad-oob, then STACK PAIRS (any-net cross-footprint pad
+    intersections -- the assembly channel), then hpwl, then courtyard overlap
+    as the LAST tiebreak.
+
+    Locked contacts lead because they are the one term nothing below may buy.
+    A locked pose is a decision made outside this toolchain -- a standoff
+    against an enclosure, a connector against a panel cut-out -- so a candidate
+    that lands copper on one has not found a trade-off, it has broken a
+    premise. Placing it first makes it a hard conjunct in the machinery that
+    already exists: any candidate that creates one is strictly worse and is
+    rejected, whatever it wins on hpwl. On a healthy board the term is 0 and
+    the order below it is unchanged (measured: the corpus sweep does not
+    move).
 
     Two measured lessons live in this order. Run 4 demoted the AGGREGATE
     overlap_area below hpwl (it had vetoed a 44 mm hpwl homecoming over
@@ -113,7 +174,8 @@ def measure(state, edge_bands=None) -> Tuple:
     the aggregate never can."""
     m = state.pad_legality_metrics() if state.legality_ctx is not None else {}
     leg = state.legality_metrics()
-    return (m.get('pad_conflict_pairs', 0),
+    return (m.get('locked_contact_pairs', 0),
+            m.get('pad_conflict_pairs', 0),
             round(m.get('hole_shortfall', 0.0), 4),
             round(pad_oob_amount(state, edge_bands), 4),
             m.get('pad_intersection_pairs', 0),
@@ -156,6 +218,17 @@ def classify(state, intent=None, anchor_extent='auto') -> Tiers:
     everything else is a small."""
     t = Tiers()
     t.locked = {r for r, p in state.parts.items() if p.locked}
+    # A ref the intent declares must_lock belongs in the frame too. This used
+    # to read the file's stamps only, so the three placement tools disagreed
+    # about the same word: the grader demanded the stamp, the seeder treated it
+    # as permission to move, and reconstruct did not look. A hand-written
+    # must_lock is a statement that the ref's pose is a decision, which is
+    # exactly what the frame tier means.
+    if intent is not None and getattr(intent, 'must_lock', None):
+        import fnmatch as _fn
+        refs_all = sorted(state.parts)
+        for pat in intent.must_lock:
+            t.locked |= set(_fn.filter(refs_all, pat))
     t.zero_net = {r for r, p in state.parts.items()
                   if p.pin_count == 0 and r not in t.locked}
     free = [r for r in state.parts if r not in t.locked | t.zero_net]
@@ -202,25 +275,42 @@ def fit_corner_insets(state, tiers: Tiers) -> Dict[str, List[Tuple[float, float]
     from collections import defaultdict
     groups = defaultdict(list)
     for ref, corner, ix, iy in holes:
-        if abs(ix - iy) <= 2 * GRID_TOL:
-            groups[round((ix + iy) / 2 / GRID_TOL)].append(
-                (ref, corner, (ix + iy) / 2))
+        # PER-AXIS conformance (run-8 A1). This used to demand ix ~= iy, i.e.
+        # a SQUARE inset, so an ordinary asymmetric pattern -- a hole 7.62mm
+        # in from one edge and 1.27mm from the other, which is just an
+        # imperial layout -- never conformed and the fit found nothing at all.
+        # Group on the inset PAIR instead: the two axes have to agree across
+        # holes, not with each other.
+        groups[(round(ix / GRID_TOL), round(iy / GRID_TOL))].append(
+            (ref, corner, (ix, iy)))
     proposals: Dict[str, List[Tuple[float, float]]] = {}
     for _key, members in sorted(groups.items(), key=lambda kv: -len(kv[1])):
         distinct = {m[1] for m in members}
         if len(members) < 2 or len(distinct) != len(members):
             continue
-        inset = sum(m[2] for m in members) / len(members)
+        inset_x = sum(m[2][0] for m in members) / len(members)
+        inset_y = sum(m[2][1] for m in members) / len(members)
         survivors = {m[0] for m in members}
         free_corners = [c for c in corners if c not in distinct]
-        for ref, _c, _ix, _iy in holes:
-            if ref in survivors or ref in tiers.locked:
+        for ref, _c, ix, iy in holes:
+            if ref in tiers.locked:
+                continue
+            # AT-HOME survivors are not proposals (run-8 A1). A hole already
+            # sitting on the fitted pattern has nothing to be moved to, and
+            # offering it every free corner is how a correct hole gets
+            # swapped into a wrong one -- the degeneracy that cost a earlier
+            # run ~0.16 of recovery. Its conformance is still what
+            # over-determines the fit; it just is not a candidate.
+            if ref in survivors:
+                continue
+            if (abs(ix - inset_x) <= GRID_TOL
+                    and abs(iy - inset_y) <= GRID_TOL):
                 continue
             cand = []
             for c in free_corners:
                 cx, cy = corners[c]
-                px = cx + inset if cx == b[0] else cx - inset
-                py = cy + inset if cy == b[1] else cy - inset
+                px = cx + inset_x if cx == b[0] else cx - inset_x
+                py = cy + inset_y if cy == b[1] else cy - inset_y
                 cand.append((round(px, 4), round(py, 4)))
             if cand:
                 proposals[ref] = cand
@@ -610,8 +700,22 @@ def exchange_stage(state, vectors: Sequence[Tuple[float, float]],
             for k, refs_ in sorted(groups.items()):
                 state.apply_group_move(sorted(refs_), k * vx, k * vy)
             after = measure(state, edge_bands)
+            # E7, in the one place the engine KNOWS the applied vectors.
+            # Members displaced by the same k*v keep their relative geometry
+            # exactly, so they cannot newly touch each other; a new contact
+            # between two members of DIFFERENT groups means this assignment is
+            # not a rigid restore but a search result that happens to fit.
+            # Checked only across groups, and only for pairs that were clear
+            # before -- a conflict the input already had is not this move's.
+            cross_group_hit = _cross_group_contact(state, groups, snap)
+            if cross_group_hit and notes is not None:
+                notes.append(
+                    f'exchange: REJECTED an assignment along '
+                    f'({vx:.3f}, {vy:.3f}) -- it puts {cross_group_hit[0]} '
+                    f'and {cross_group_hit[1]} in contact although they moved '
+                    f'by different vectors, which a rigid restore cannot do')
             # STRICT improvement: an exchange the tuple cannot see is churn.
-            if after < base:
+            if after < base and not cross_group_hit:
                 base = after
                 old.update(snap)
                 report['accepted'].append(
@@ -736,6 +840,86 @@ def conflict_offset_vectors(state, *, cluster_tol: float = 1.5,
     return out[:top_k]
 
 
+
+
+
+def airwire_cluster_vectors(state, *, cluster_tol: float = 1.5,
+                            min_support: int = 3, top_k: int = 3,
+                            min_airwire_mm: float = 8.0,
+                            max_net_pads: int = 4) -> List[Dict]:
+    """REFUTED (run-8 E5). Kept, unwired, as the record of a measurement.
+
+    The proposal, endorsed after run 7: a third vector source for the case the
+    other two cannot see -- a translate that produced no conflicts and left no
+    hole pattern to fit. On a small net a displaced pad's airwire to its
+    partners is stretched by roughly the damage vector, so those stretch
+    vectors should CLUSTER on the damage while a healthy design's long
+    airwires point in unrelated directions.
+
+    They do not. Measured over the 33 in-repo boards and two recorded
+    perturbed ones, at the endorsed filters (nets of 2-4 pads, airwires over
+    8mm, three agreeing within 1.5mm):
+
+        healthy boards firing          6 of 33, with support up to 112
+        a board translated by (4.5, -2.4), |v| = 5.1
+                                       top cluster (6.7, 21.4), support 28
+                                       -- not the damage, and not close
+
+    The reason is the same one that killed the first A1 design (net-anchor
+    least squares, which read up to 60mm of pure design slack on healthy
+    boards): a long airwire is ORDINARY LAYOUT. A net legitimately spanning
+    the board produces exactly the signal this looks for, in quantity, and no
+    threshold separates it from damage because there is no separation to find.
+    Restricting to small nets narrows the population without changing its
+    nature.
+
+    What the two SHIPPED sources have and this does not is a structural no-op
+    guarantee. A hole-pattern fit needs a hole pattern; conflict offsets need
+    conflicts. Both are silent on a healthy board by construction rather than
+    by threshold. Connectivity has no such property.
+
+    Left in the tree, not called: tests/test_run8_airwire_refuted.py pins these
+    numbers so a future attempt starts from the measurement instead of
+    repeating it, and so a change that alters the behaviour is visible.
+    """
+    parts = state.parts
+    pads_by_net: Dict[int, List[Tuple[str, float, float]]] = {}
+    for ref in sorted(parts):
+        for nid in sorted(getattr(parts[ref], 'nets', ()) or ()):
+            pads_by_net.setdefault(nid, []).append(
+                (ref, parts[ref].x, parts[ref].y))
+    stretches = []
+    for nid, members in sorted(pads_by_net.items()):
+        if nid <= 0 or not (2 <= len(members) <= max_net_pads):
+            continue
+        for i, (ra, ax, ay) in enumerate(members):
+            for (rb, bx, by) in members[i + 1:]:
+                if ra == rb:
+                    continue
+                dx, dy = ax - bx, ay - by
+                if math.hypot(dx, dy) < min_airwire_mm:
+                    continue
+                stretches.append((dx, dy))
+    clusters: List[List[Tuple[float, float]]] = []
+    for (dx, dy) in stretches:
+        canon = (dx, dy) if (dy, dx) > (0, 0) else (-dx, -dy)
+        for cl in clusters:
+            cx = sum(p[0] for p in cl) / len(cl)
+            cy = sum(p[1] for p in cl) / len(cl)
+            if math.hypot(canon[0] - cx, canon[1] - cy) <= cluster_tol:
+                cl.append(canon)
+                break
+        else:
+            clusters.append([canon])
+    out = []
+    for cl in clusters:
+        if len(cl) < min_support:
+            continue
+        vx = sum(p[0] for p in cl) / len(cl)
+        vy = sum(p[1] for p in cl) / len(cl)
+        out.append({'v': (round(vx, 4), round(vy, 4)), 'support': len(cl)})
+    out.sort(key=lambda d: -d['support'])
+    return out[:top_k]
 
 
 def build_candidates(state, tiers: Tiers,
@@ -911,29 +1095,58 @@ def _solve_ilp(state, candidates, tiers, move_penalty, notes, pattern,
             rows.append((idx, 0.0, 1.0))
     # pairwise exclusions between conflicting candidate poses
     n_excl = 0
+    # Stay-stay rows are kept SEPARATE. Forbidding the status quo is what makes
+    # the solve strong -- two parts that already conflict are not allowed to
+    # both sit still, so the solver has to fix them. But when neither has an
+    # alternative pose, that same row makes the whole ILP infeasible, the
+    # solver falls back to a descent, and the simultaneous assignment is lost
+    # for every OTHER part too (measured on two run-7 boards: "ILP status 2
+    # Infeasible" on every lap).
+    #
+    # So: solve with them, and only if that is infeasible solve again without
+    # them, before giving up on the ILP entirely. Strongest formulation first,
+    # the status quo as the fallback, the descent as the last resort.
+    stay_rows = []
     for a, b in _interacting_pairs(state, candidates):
         for ka, pos_a in enumerate(candidates[a]):
             for kb, pos_b in enumerate(candidates[b]):
-                if _pair_conflicts(state, a, pos_a, b, pos_b):
-                    rows.append(([var_of[(a, ka)], var_of[(b, kb)]],
-                                 0.0, 1.0))
+                if not _pair_conflicts(state, a, pos_a, b, pos_b):
+                    continue
+                row = ([var_of[(a, ka)], var_of[(b, kb)]], 0.0, 1.0)
+                if ka == 0 and kb == 0:
+                    stay_rows.append(row)
+                else:
+                    rows.append(row)
                     n_excl += 1
+    rows.extend(stay_rows)
     if notes is not None:
         notes.append(f'ILP: {n} binaries, {len(rows)} rows '
                      f'({n_excl} exclusions)')
 
-    A = lil_matrix((len(rows), n))
-    lb = np.zeros(len(rows))
-    ub = np.zeros(len(rows))
-    for i, (idx, lo, hi) in enumerate(rows):
-        for j in idx:
-            A[i, j] = 1.0
-        lb[i] = lo
-        ub[i] = hi
-    res = milp(c=np.asarray(costs),
-               constraints=LinearConstraint(A.tocsr(), lb, ub),
-               integrality=np.ones(n),
-               bounds=Bounds(0, 1))
+    def _solve(active_rows):
+        A = lil_matrix((len(active_rows), n))
+        lb = np.zeros(len(active_rows))
+        ub = np.zeros(len(active_rows))
+        for i, (idx, lo, hi) in enumerate(active_rows):
+            for j in idx:
+                A[i, j] = 1.0
+            lb[i] = lo
+            ub[i] = hi
+        return milp(c=np.asarray(costs),
+                    constraints=LinearConstraint(A.tocsr(), lb, ub),
+                    integrality=np.ones(n), bounds=Bounds(0, 1))
+
+    res = _solve(rows)
+    if (res.status != 0 or res.x is None) and stay_rows:
+        # Relax only the status-quo rows and try again: a board whose own
+        # pre-existing conflict has no alternative pose should still get its
+        # simultaneous assignment for everything else.
+        relaxed = [r for r in rows if r not in stay_rows]
+        if notes is not None:
+            notes.append(f'ILP infeasible with {len(stay_rows)} status-quo '
+                         f'row(s); retrying with the pre-existing conflicts '
+                         f'priced but not forbidden')
+        res = _solve(relaxed)
     if res.status != 0 or res.x is None:
         # Infeasible (exclusions + one-per-part cannot all hold): fall back.
         if notes is not None:

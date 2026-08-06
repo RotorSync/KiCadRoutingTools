@@ -184,6 +184,36 @@ def _pad_bounding_radius(pad) -> float:
     return math.hypot(pad.size_x, pad.size_y) / 2
 
 
+def _pad_credit_disc(pad):
+    """(cx, cy, reach): the disc inside which a track counts as landing on this
+    pad's copper.
+
+    Run-7 finding, and the reason this is not just `min(size)/4` about the
+    anchor: a CUSTOM pad is stored as a symmetric box around its anchor big
+    enough to enclose the real primitives, and the anchor is frequently a
+    corner of them rather than their centre. One MOSFET tab measured 4.57 x
+    5.01mm of real copper modelled as a 9.13 x 10.01mm box whose centre sat
+    3.4mm away from it -- so a 2.28mm credit disc sat in empty space, and any
+    track passing near it was unioned onto the pad. Two islands of that net
+    each "reached" the phantom disc, and the net graded CONNECTED while its
+    copper was in two pieces. The router then skipped it as already routed.
+
+    When the real primitive polygons are available, use their bbox. They are
+    the actual copper.
+    """
+    polys = getattr(pad, 'polygons', None)
+    if polys:
+        xs = [pt[0] for poly in polys for pt in poly]
+        ys = [pt[1] for poly in polys for pt in poly]
+        if xs and ys:
+            w, h = max(xs) - min(xs), max(ys) - min(ys)
+            return ((max(xs) + min(xs)) / 2.0, (max(ys) + min(ys)) / 2.0,
+                    (min(w, h) / 4.0) if (w > 0 and h > 0) else 0.05)
+    if pad.size_x and pad.size_y:
+        return pad.global_x, pad.global_y, min(pad.size_x, pad.size_y) / 4.0
+    return pad.global_x, pad.global_y, 0.05
+
+
 def _pads_copper_touch(pi: Pad, pj: Pad, tolerance: float = 0.05) -> bool:
     """Shape-accurate test that two pads' copper physically touches/overlaps
     (edge-to-edge gap <= tolerance).
@@ -1009,11 +1039,7 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     if pad_repr_id and segments:
         for pad_idx in pad_repr_id:
             pad = pads[pad_idx]
-            if pad.size_x and pad.size_y:
-                reach_pad = min(pad.size_x, pad.size_y) / 4
-            else:
-                reach_pad = 0.05
-            px, py = pad.global_x, pad.global_y
+            px, py, reach_pad = _pad_credit_disc(pad)
             for layer in pad_copper_layers[pad_idx]:
                 for seg, seg_start_id in seg_index.query_near(
                         px, py, layer, radius=max_seg_width / 2 + reach_pad):
