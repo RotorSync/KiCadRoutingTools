@@ -289,8 +289,10 @@ def rung_small_armed() -> bool:
 def _small_via_pair(config, pcb_data):
     """#568: the fab-ladder (diameter, drill) the rung-1 legality map is
     stamped at -- the FIRST ladder entry smaller than the configured via,
-    the SAME selection rule as the escalation retry (_via_rung_retry), so
-    map and retry agree by construction. None when rust mode is off
+    the SAME selection rule as the boxed-endpoint rung search
+    (single_ended_routing._rung_search_pair; the mid-retry _via_rung_retry
+    was removed 2026-08-05), so map and search agree by construction. None
+    when rust mode is off
     (KICAD_VIA_RUNG != 2) or no smaller rung exists."""
     if not rung_small_armed():
         return None
