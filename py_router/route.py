@@ -370,6 +370,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # auto-read the sibling .kicad_dru; explicit dict (tests) wins.
                 layer_clearances: Optional[Dict[str, float]] = None,
                 final_reconcile: bool = True,
+                rip_preexisting: Optional[bool] = None,
                 add_teardrops: bool = False,
                 collect_stats: bool = False,
                 cancel_check=None,
@@ -1330,7 +1331,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     #     multi-class boards when nothing gets ripped).
     # Engine-side (batch_route internals), so CLI and GUI inherit it with no
     # new flag or control; KICAD_RIP_PREEXISTING=0 is the kill switch.
-    if os.environ.get('KICAD_RIP_PREEXISTING', '1') != '0':
+    # rip_preexisting=False comes from the RECONCILE SUB-RUN: candidacy is
+    # only legal in a run whose victims a reconcile can catch, and the
+    # sub-run has none (final_reconcile=False, the recursion guard) -- its
+    # unrecoverable victims were term3_ecp5's +1V1//PF37+//PE26+ opens.
+    # The sub-run falls back to hinted #103 authority only (explicitly
+    # ripped nets join its routing scope as first-class targets).
+    if (rip_preexisting
+            if rip_preexisting is not None
+            else os.environ.get('KICAD_RIP_PREEXISTING', '1') != '0'):
         from net_queries import split_net_patterns, net_pattern_matches
         _pe_to_route = set(all_net_ids_to_route)
         _pe_zone_nids = {z.net_id for z in pcb_data.zones}
@@ -1824,6 +1833,38 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         state, single_ended_nets, net_clearances=net_clearances,
         progress_callback=progress_callback, cancel_check=cancel_check)
 
+    # Terminal geometry escalation ("better than shipping opens",
+    # 2026-08-05): whole-net retry with track width + via size marching down
+    # together toward the fab floor for every net the rescue still left
+    # failed or open. Runs immediately after the rescue and BEFORE the
+    # cleanup pipeline, deliberately: cleanup must operate on the FINAL
+    # copper, so escalation copper is itself swept (stub gaps closed, dead
+    # ends trimmed) like all other copper. Replaces the removed mid-retry
+    # via rung (see single_ended_routing). KICAD_TERMINAL_ESCALATION=0
+    # disables. Engine-side, so the GUI inherits it.
+    from net_rescue import terminal_geometry_escalation
+    # Candidacy scope: the run's own nets PLUS its pre-existing RIP VICTIMS.
+    # A victim outside single_ended_nets whose reroute/restore landed
+    # imperfectly ships open with nobody to catch it -- the escalation's
+    # sweep re-derives openness authoritatively, so healthy victims cost
+    # one connectivity check and are skipped. This also covers the final
+    # reconciliation: it recurses into batch_route, so ITS victims meet
+    # ITS escalation the same way (the "opens emerged after the escalation"
+    # class from the term_ecp5 study -- victims were invisible, not late).
+    _esc_scope = list(single_ended_nets)
+    _esc_seen = {n for n, _i in _esc_scope}
+    for _vn in (getattr(pcb_data, '_preexisting_rips', None) or {}):
+        if _vn in _esc_seen:
+            continue
+        _vid = next((i for i, nn in pcb_data.nets.items() if nn.name == _vn),
+                    None)
+        if _vid is not None:
+            _esc_scope.append((_vn, _vid))
+    terminal_escalation_summary = None if _ckpt_stop else \
+        terminal_geometry_escalation(
+            state, _esc_scope, net_clearances=net_clearances,
+            progress_callback=progress_callback, cancel_check=cancel_check)
+
     # Main-pass pre-existing rips (0805): pull every RIPPED pre-existing net
     # into the stale-strip scope -- a rerouted victim's ORIGINAL input copper
     # must not ship next to its reroute (#220/#300 class) -- and report each
@@ -1832,6 +1873,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # never disturbed.
     _pe_ripped_reg = getattr(pcb_data, '_preexisting_rips', None) or {}
     _pe_outcomes: Dict[str, str] = {}
+    _victim_retry_names: List[str] = []
     if _pe_ripped_reg:
         sweep_scope_ids |= set(_pe_ripped_reg)
         # No silent casualties: a pre-existing victim whose reroute landed
@@ -1924,6 +1966,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             print(f"  '{_rname}'"
                   + (f" (was blocking '{_blocked_for}')" if _blocked_for else "")
                   + f": {_out_pe}")
+            # Unrecovered victims become FIRST-CLASS reconcile targets.
+            # Restore is collision-gated (a taken corridor makes it
+            # illegal), so the only legal recovery is a REROUTE with full
+            # router power -- the final reconciliation. Without this
+            # wiring a victim with no result and no legal restore was
+            # NOBODY'S responsibility and shipped open with an honest log
+            # line (term2_ecp5: +1V1, /PF37+, /PE26+ all ended this way).
+            if _r_pe is None or not _pe_connected(_rid):
+                _victim_retry_names.append(_rname)
 
     # Final progress update
     if progress_callback:
@@ -2709,6 +2760,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # #331/#371 rescue pass outcome (key absent when nothing was rescued,
         # so pre-rescue JSON_SUMMARY consumers/diffs are unaffected).
         summary['rescue'] = rescue_summary
+    if terminal_escalation_summary:
+        # Terminal geometry escalation outcome per net: "recovered at WxS/D"
+        # or "unrecovered" (key absent when nothing was attempted).
+        summary['terminal_escalations'] = terminal_escalation_summary['nets']
     if _pe_outcomes:
         # Main-pass pre-existing rips (0805): {victim net: outcome}. Key
         # absent when no pre-existing net was ripped.
@@ -3573,7 +3628,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     if (final_reconcile and not skip_routing and not _ckpt_stop
             and (output_file or return_results)
-            and (failed_single or failed_multipoint or _custody_nets9)):
+            and (failed_single or failed_multipoint or _custody_nets9
+                 or _victim_retry_names or open_single)):
         # #562 order swap: stubborn-oracle-link plane nets (custody) merge
         # into THIS sub-run instead of a second self-invocation -- one
         # parse/base-build serves both, and signal retries now run against
@@ -3581,7 +3637,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         _rec_names = list(dict.fromkeys(
             n for n in (failed_single
                         + [m['net_name'] for m in failed_multipoint]
-                        + _custody_nets9)
+                        + _custody_nets9
+                        + _victim_retry_names
+                        # open_single: a KEPT result whose pads are still
+                        # disconnected (non-multipoint). The bucket CLAUDE.md
+                        # warns contributes to NEITHER failure term -- and it
+                        # never fed the reconcile either, so such a net got
+                        # no retry at all (found in the 2026-08-05 victim
+                        # audit; same nobody's-responsibility shape).
+                        + open_single)
             if n not in _zone_complete9))
         print(f"\nFinal reconciliation: retrying {len(_rec_names)} "
               f"incomplete/custody net(s) against the finished board: "
@@ -3592,7 +3656,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # THIS run; a forwarded flag would re-strip the retried nets'
             # partial copper (and thrash on a second failure).
             _rk.update(final_reconcile=False, skip_routing=False,
-                       force_reroute=False)
+                       force_reroute=False, rip_preexisting=False)
             # #527 follow-up: the inner run forwards the SAME progress
             # callback, so its routing/rescue/cleanup messages were pixel-
             # identical to the first pass's and the GUI looked like it ran
