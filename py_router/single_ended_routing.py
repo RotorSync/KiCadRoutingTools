@@ -1394,6 +1394,70 @@ def _augment_all_blocked_pad_side(cells, pad, config, obstacles):
     return cells
 
 
+def route_oracle_links(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
+                       obstacles: GridObstacleMap, links,
+                       attraction_path=None) -> Optional[dict]:
+    """Route the plane-finalize oracle's EXACT remaining links (#572, fix
+    direction 2). `links` are remaining_links-shaped endpoint pairs
+    ((ax, ay, layer, kind), (bx, by, layer, kind)) whose coordinates are
+    KiCad's own exact-fill nearest-approach anchors: (ax,ay) sits on cluster
+    A's copper (pad/track) or fill ('zone'), likewise (bx,by), so copper
+    welded to those floats joins the true clusters. Endpoint derivation is
+    deliberately NOT used: the fill-model zone credit merges the two
+    clusters into one component, which made every net-level retry of an
+    oracle-punted link vacuously "succeed" with zero copper (measured on
+    ghoul GND). Each link routes point-to-point via sources/targets
+    overrides; a failure is returned VERBATIM (its blocked_cells_* feed the
+    caller's frontier analysis, so the standard rip ladder aims at the real
+    wall and retries re-enter here) -- which is why this lives in the main
+    loop rather than the oracle's own (authority-less) link router.
+
+    Returns a merged result dict over all links, or a failed result on the
+    first link that cannot route. A 0-copper "success" is refused as failed:
+    on an exact-fill-OPEN link it is the #572 false-weld fingerprint."""
+    coord = GridCoord(config.grid_step)
+    layer_idx = {name: i for i, name in enumerate(config.layers)}
+    merged = None
+    for link in links:
+        (ax, ay, al, _ak), (bx, by, bl, _bk) = link
+        la = layer_idx.get(al)
+        lb = layer_idx.get(bl)
+        if la is None or lb is None:
+            print(f"    forced link endpoint layer not in the routing stack "
+                  f"({al} / {bl}) -- link unroutable here")
+            return {'failed': True, 'iterations': 0}
+        gax, gay = coord.to_grid(ax, ay)
+        gbx, gby = coord.to_grid(bx, by)
+        print(f"    forced oracle link: ({ax:.3f},{ay:.3f})[{al}] <-> "
+              f"({bx:.3f},{by:.3f})[{bl}]")
+        result = route_net_with_obstacles(
+            pcb_data, net_id, config, obstacles,
+            attraction_path=attraction_path,
+            sources_override=[(gax, gay, la, ax, ay)],
+            targets_override=[(gbx, gby, lb, bx, by)])
+        if not result or result.get('failed'):
+            if merged and merged.get('new_segments'):
+                print(f"    ({len(merged['new_segments'])} segment(s) from "
+                      f"earlier forced link(s) discarded with this failure; "
+                      f"a retry re-routes every link)")
+            return result if result else {'failed': True, 'iterations': 0}
+        if not (result.get('new_segments') or result.get('new_vias')):
+            print(f"    forced link claimed success with ZERO copper -- "
+                  f"refused (#572 false-weld fingerprint)")
+            result['failed'] = True
+            return result
+        if merged is None:
+            merged = result
+        else:
+            merged['new_segments'].extend(result.get('new_segments') or [])
+            merged['new_vias'].extend(result.get('new_vias') or [])
+            merged['iterations'] = (merged.get('iterations', 0)
+                                    + result.get('iterations', 0))
+            if result.get('path'):
+                merged['path'] = (merged.get('path') or []) + result['path']
+    return merged
+
+
 def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                               obstacles: GridObstacleMap,
                               attraction_path: Optional[List[Tuple[int, int, int]]] = None,

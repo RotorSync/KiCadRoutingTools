@@ -17,7 +17,8 @@ import sys
 
 _TESTS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(_TESTS)
-for p in (ROOT, _TESTS):
+for p in (ROOT, os.path.join(ROOT, 'py_router'),  # #522 layout
+          os.path.join(ROOT, 'py_tools'), _TESTS):
     if p not in sys.path:
         sys.path.insert(0, p)
 
@@ -106,7 +107,8 @@ def test_text_parser_reads_pad_prop_castellated():
 def test_pcbnew_path_has_the_parity_twin():
     """No pcbnew here; assert the build path READS the property (source
     inspection, the repo's accepted style for the SWIG-only path)."""
-    src = open(os.path.join(ROOT, 'kicad_parser.py'), encoding='utf-8').read()
+    src = open(os.path.join(ROOT, 'py_router', 'kicad_parser.py'),
+               encoding='utf-8').read()
     build = src[src.index('def build_pcb_data_from_board'):]
     assert 'PAD_PROP_CASTELLATED' in build, \
         "build_pcb_data_from_board must read the castellated property"

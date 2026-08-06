@@ -653,6 +653,24 @@ def main():
         print(f"Pruning to file-dependency chain: running {len(prune_keep)} of "
               f"{len(cmds)} command(s), dropping {len(dropped)} superseded/dead-end "
               f"non-check command(s). Final board: {info['final_board']}")
+        # #572 item 3 (pour-terminated chains): a chain whose FINAL board
+        # comes from route_planes.py ships a re-pour nobody welds -- the
+        # #562 contract puts the weld/oracle in a route step's finalize, so
+        # a trailing bare pour can split the fill (ghoul: two fragments
+        # meeting at one point, graded 2 GND components) with every in-run
+        # verification passing. Warn loudly; the fix is re-recording the
+        # chain to end on a route.py step whose --nets cover the plane nets.
+        if info.get("final_index") is not None:
+            _final_tool = next(
+                (os.path.basename(a) for a in cmds[info["final_index"]][1]
+                 if a.endswith(".py")), "")
+            if _final_tool == "route_planes.py":
+                print("WARNING: this chain's final board is produced by a "
+                      "bare route_planes.py pour (#572/#562): no later route "
+                      "step welds the re-poured fill, so it can ship split "
+                      "(a single-point zone kiss grades as disconnected). "
+                      "Re-record the chain to end on route.py with the "
+                      "plane nets in --nets.")
         warn_contamination(cmds)
         for i in dropped:
             _ins, out = board_io(cmds[i][1])

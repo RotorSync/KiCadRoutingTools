@@ -16,7 +16,9 @@ from obstacle_costs import compute_track_proximity_for_net
 from connectivity import get_net_endpoints, calculate_stub_length, get_multipoint_net_pads
 from net_queries import calculate_route_length
 from pcb_modification import add_route_to_pcb_data
-from single_ended_routing import route_net_with_obstacles, route_multipoint_main, route_multipoint_taps
+from single_ended_routing import (route_net_with_obstacles,
+                                  route_multipoint_main, route_multipoint_taps,
+                                  route_oracle_links)
 from diff_pair_routing import (route_diff_pair_with_obstacles, get_diff_pair_endpoints,
                                _route_direct_coupled_middle)
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache, record_frontier_blocking
@@ -167,9 +169,21 @@ def run_reroute_loop(
             _attr, _rev = bus_attraction_context(
                 ripped_net_id, getattr(state, 'bus_net_to_group', None),
                 getattr(state, 'bus_corridors', None), routed_net_paths)
+            # #572: a ripped forced-link net re-routes its EXACT oracle links
+            # -- derived endpoints are model-blind to the exact-fill gap, so
+            # a plain reroute here would reconnect arbitrary fragments and
+            # silently drop the strap the net exists in this run to lay.
+            _olinks_rr = (getattr(state, 'oracle_links_by_net', None)
+                          or {}).get(ripped_net_id)
             # Check for multi-point net (3+ pads, no existing segments since they were ripped)
             multipoint_pads = get_multipoint_net_pads(pcb_data, ripped_net_id, config)
-            if multipoint_pads:
+            if _olinks_rr:
+                print(f"  Re-routing {len(_olinks_rr)} exact-fill oracle "
+                      f"link(s) (#572 forced edges)")
+                result = route_oracle_links(pcb_data, ripped_net_id, config,
+                                            obstacles, _olinks_rr,
+                                            attraction_path=_attr)
+            elif multipoint_pads:
                 print(f"  Multi-point net with {len(multipoint_pads)} pads - routing main + taps")
                 result = route_multipoint_main(pcb_data, ripped_net_id, config, obstacles, multipoint_pads,
                                                attraction_path=_attr, state=state)
@@ -440,9 +454,18 @@ def run_reroute_loop(
                             _attr, _rev = bus_attraction_context(
                                 ripped_net_id, getattr(state, 'bus_net_to_group', None),
                                 getattr(state, 'bus_corridors', None), routed_net_paths)
+                            # #572: forced-link nets retry their EXACT links
+                            # (see the initial reroute above).
+                            _olinks_rt = (getattr(state, 'oracle_links_by_net',
+                                                  None) or {}).get(ripped_net_id)
                             # Check for multi-point net in retry as well
                             retry_multipoint_pads = get_multipoint_net_pads(pcb_data, ripped_net_id, config)
-                            if retry_multipoint_pads:
+                            if _olinks_rt:
+                                retry_result = route_oracle_links(
+                                    pcb_data, ripped_net_id, config,
+                                    retry_obstacles, _olinks_rt,
+                                    attraction_path=_attr)
+                            elif retry_multipoint_pads:
                                 retry_result = route_multipoint_main(pcb_data, ripped_net_id, config, retry_obstacles, retry_multipoint_pads,
                                                                      attraction_path=_attr, state=state)
                                 if retry_result and not retry_result.get('failed') and retry_result.get('is_multipoint'):

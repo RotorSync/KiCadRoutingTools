@@ -427,7 +427,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # NOTE: it must save the LIVE board, not re-read input_file --
                 # the GUI's input_file is the ORIGINAL on disk and does not
                 # carry copper earlier chain steps applied in-session.
-                stage_board_fn=None) -> Tuple[int, int, float]:
+                stage_board_fn=None,
+                # #572: exact-fill links the plane-finalize oracle left
+                # "unroutable without rip authority", forwarded by the outer
+                # run into its final-reconciliation sub-run --
+                # remaining_links-shaped entries [net_name,
+                # [ax, ay, layer, kind], [bx, by, layer, kind]]. Nets named
+                # here bypass the model-credit already-routed skip and route
+                # their EXACT links as endpoint overrides with the full rip
+                # ladder behind them (fix direction 2). INTERNAL: set only
+                # by the finalize custody handoff; deliberately no CLI flag.
+                oracle_links: Optional[List] = None) -> Tuple[int, int, float]:
     """
     Route single-ended nets using the Rust router.
 
@@ -495,8 +505,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # json_out joins them: the sub-run must not write the parent's file. The
     # OUTERMOST call owns it, and writes the MERGED tally after reconciliation.
     for _k in ('input_file', 'output_file', 'net_names', 'pcb_data',
-               'net_name_patterns', 'json_out'):
+               'net_name_patterns', 'json_out',
+               # #572: links describe ONE board state; only the finalize
+               # custody handoff may set them on a sub-run, never blanket
+               # forwarding.
+               'oracle_links'):
         _reconcile_kwargs.pop(_k, None)
+    # #572 lap-authority channel: cleared at ENTRY so an early return can
+    # never leave a previous invocation's hints for the caller to harvest.
+    batch_route._forced_link_hints = {}
+    batch_route._forced_link_landed = []
     if json_out:
         _SUMMARY_SINK.clear()
         _RECONCILE_RAISED[0] = False
@@ -1051,8 +1069,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # pieces must not be skipped as "Already fully connected". route_diff
     # deliberately keeps the default (a fragmented net entering the diff
     # engine is a separate behavior question).
-    net_ids, _already_routed = filter_already_routed(pcb_data, net_ids, config,
-                                                     fragment_gate=True)
+    # #572: custody nets carry an exact-fill OPEN verdict from the outer
+    # run's oracle -- the model-credit skip below must not clear them.
+    # ANY net with links present bypasses: the punt measured OPEN on this
+    # exact board, and no geometric heuristic may overrule it (a strapped-
+    # copper check was tried and false-positived on eis -- the exact-fill
+    # anchor coincided with a pre-existing track endpoint, which is a KISS,
+    # not a weld). Nets whose links a previous lap welded are pruned from
+    # oracle_links by the CALLER (the lap loop's landed-export), so re-laps
+    # skip them the normal way.
+    _assume_open572 = {l[0] for l in (oracle_links or []) if l and l[0]}
+    net_ids, _already_routed = filter_already_routed(
+        pcb_data, net_ids, config, fragment_gate=True,
+        assume_open=_assume_open572)
     # #515: --rip-existing-nets only rips copper that BLOCKS a net being
     # routed; a net dropped here as already-connected never routes, so naming
     # it in both --nets and --rip-existing-nets is a no-op. Warn instead of
@@ -1650,6 +1679,27 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     routed_results = state.routed_results
     track_proximity_cache = state.track_proximity_cache
     layer_map = state.layer_map
+
+    # #572: exact oracle links -> per-net-id forced edges for the SE loop
+    # (and its rip/retry/reroute paths). Malformed entries are dropped, not
+    # fatal -- the net then routes the normal (derivation) way.
+    if oracle_links:
+        _name_to_id572 = {n.name: i for i, n in pcb_data.nets.items()}
+        for _ol in oracle_links:
+            try:
+                _onm, _oa, _ob = _ol[0], tuple(_ol[1]), tuple(_ol[2])
+            except (TypeError, ValueError, IndexError):
+                continue
+            _onid = _name_to_id572.get(_onm)
+            if _onid is not None and len(_oa) >= 4 and len(_ob) >= 4:
+                state.oracle_links_by_net.setdefault(_onid, []).append(
+                    (_oa, _ob))
+        if state.oracle_links_by_net:
+            print(f"  Oracle forced links (#572): "
+                  f"{sum(len(v) for v in state.oracle_links_by_net.values())}"
+                  f" exact-fill link(s) on "
+                  f"{', '.join(sorted(pcb_data.nets[i].name for i in state.oracle_links_by_net))}"
+                  f" -- routing the oracle's own endpoints, not derived ones")
 
     # #540 item 2: price the outer pass's vacated corridors in every search
     # of this batch. The entries ride the existing ripped-route avoidance
@@ -3289,6 +3339,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # file; GUI (return_results) re-invokes on the in-memory board and
     # merges the sub-run's results (claude-tab/stress parity gap closure).
     _custody_nets9 = []
+    _custody_links9 = []
     _zone_complete9 = set()
     # PLANE FINALIZE (#562): the pours-first chain's repair step, absorbed.
     # Measured (3-board arch chains): the standalone repair step's entire
@@ -3872,6 +3923,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     # +3V3 and broke it).
                     _custody_nets9 = (sorted({l[0] for l in _rl9})
                                       if _rl9 else list(_zna))
+                    # #572: keep the EXACT links -- the reconcile routes
+                    # them as forced edges; net-level retry alone is
+                    # structurally blind to them (the fill-model zone
+                    # credit both skips the net as "Already fully
+                    # connected" and, past the skip, derives no missing
+                    # edge -- a 0-copper vacuous success, measured on
+                    # ghoul GND).
+                    _custody_links9 = list(_rl9 or [])
                     # Zone nets KiCad verified COMPLETE are hands-off for
                     # the reconcile: the main run's failure buckets are
                     # STALE after the finalize fixes nets.
@@ -3941,6 +4000,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # partial copper (and thrash on a second failure).
             _rk.update(final_reconcile=False, skip_routing=False,
                        force_reroute=False, rip_preexisting=False)
+            # #572 (fix direction 2): hand the oracle's EXACT unroutable
+            # links to the sub-run as forced edges. Without them the
+            # sub-run's model-credited connectivity both skips the custody
+            # net ("Already fully connected") and, past the skip, derives no
+            # missing edge (0-copper vacuous success) -- the link ships open
+            # while every retry claims success. With them the sub-run routes
+            # the exact endpoints, and a blocked link feeds the standard
+            # frontier analysis -> rip ladder -> retries.
+            if _custody_links9:
+                _rk['oracle_links'] = _custody_links9
             # #527 follow-up: the inner run forwards the SAME progress
             # callback, so its routing/rescue/cleanup messages were pixel-
             # identical to the first pass's and the GUI looked like it ran
@@ -3977,7 +4046,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # told not to touch it (ottercast: 52 dogbone stubs became a
             # 757-segment GND web). Explicit --rip-existing-nets from the
             # operator is honored as given; only the escalation filters.
-            if _hinted and net_names:
+            def _filter_rip_hints103(_names):
                 # GUARD-based, not scope-based (2026-08-06): the old filter
                 # dropped every blocker outside --nets, which killed legit
                 # authority over ordinary SIGNAL blockers (ecp5 /PF37-: a
@@ -3989,6 +4058,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # cap so the sub-run's first-class reroute of the ripped
                 # blocker is near-certain. Protected/locked names are
                 # dropped later by the sub-run's own filter_rippable_names.
+                # (Shared by the initial #103 escalation and the #572
+                # lap-authority harvest below.)
+                if not (_names and net_names):
+                    return list(_names or [])
                 from net_queries import (matches_net_filter as _mnf,
                                          split_net_patterns as _snp)
                 # PROTECTED names are dropped here UNCONDITIONALLY: the
@@ -4008,7 +4081,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 for z in (getattr(pcb_data, 'zones', None)
                                           or [])}
                 _keep103 = []
-                for _bn in _hinted:
+                for _bn in _names:
                     if _bn in _prot103:
                         continue                       # protected: NEVER
                     if _mnf(_bn, net_names):
@@ -4027,7 +4100,50 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     if _bsegs > 30 or _bvias > 6:
                         continue                       # reroute not certain
                     _keep103.append(_bn)
-                _hinted = _keep103
+                return _keep103
+
+            _hinted = _filter_rip_hints103(_hinted)
+
+            def _harvest_lap_authority572():
+                """#572 lap authority: forced-link failures INSIDE the
+                sub-run hint pre-existing blockers the outer history can
+                never name (custody plane nets never enter the outer SE
+                loop, so the #103 escalation above has no hint source for
+                them -- measured on eis/ddr5: the exact link fails against
+                a pre-existing signal wall with the authority hint printed,
+                and dies unheard). The sub-run exports those hints via the
+                in-process channel; guard-filter them identically and grant
+                --rip-existing-nets for ONE more lap. Returns True when new
+                authority was granted (the lap loop re-laps on it).
+
+                Also prunes links of LANDED nets from the next lap's
+                oracle_links: a welded net must neither re-bypass the
+                model-credit skip nor re-route (duplicate) its strap."""
+                _landed = set(getattr(batch_route, '_forced_link_landed',
+                                      None) or [])
+                if _landed and _rk.get('oracle_links'):
+                    _kept572 = [l for l in _rk['oracle_links']
+                                if l and l[0] not in _landed]
+                    if len(_kept572) != len(_rk['oracle_links']):
+                        _rk['oracle_links'] = _kept572
+                _flh = dict(getattr(batch_route, '_forced_link_hints',
+                                    None) or {})
+                if not _flh or '*' in (_rk.get('rip_existing_nets') or []):
+                    return False
+                _have = set(_rk.get('rip_existing_nets') or [])
+                _fresh = [n for names in _flh.values() for n in names
+                          if n not in _have]
+                _fresh = _filter_rip_hints103(
+                    list(dict.fromkeys(_fresh)))[:_RIP_ESCALATION_CAP]
+                if not _fresh:
+                    return False
+                _rk['rip_existing_nets'] = list(dict.fromkeys(
+                    list(_have) + _fresh))
+                print(f"  Reconciliation lap authority (#572): rip "
+                      f"authority over forced-link blockers "
+                      f"{', '.join(_fresh)} -- one more lap")
+                return True
+
             if _hinted and '*' not in (rip_existing_nets or []):
                 _hinted = _hinted[:_RIP_ESCALATION_CAP]
                 _rk['rip_existing_nets'] = list(dict.fromkeys(
@@ -4174,7 +4290,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         _rsnap.segments = _r.get('new_segments') or []
                         _rsnap.vias = _r.get('new_vias') or []
                         snap_pcb_data_to_iu_grid(_rsnap)
-                    if not (_lrok and _lrfail):
+                    # #572: same lap-authority rule as the CLI leg below.
+                    _granted572 = bool(_lrfail) and _harvest_lap_authority572()
+                    if not (_lrfail and (_lrok or _granted572)):
                         break
                     print(f"  Reconciliation progress-loop: lap "
                           f"{_lap10 + 1} recovered {_lrok} with "
@@ -4199,7 +4317,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _rok += _lrok
                     _rfail = _lrfail
                     _rt += _lrt
-                    if not (_lrok and _lrfail):
+                    # #572: fresh forced-link blocker hints justify a lap
+                    # even without recoveries -- lap N failed against a
+                    # named pre-existing wall this authority now opens.
+                    _granted572 = bool(_lrfail) and _harvest_lap_authority572()
+                    if not (_lrfail and (_lrok or _granted572)):
                         break
                     print(f"  Reconciliation progress-loop: lap "
                           f"{_lap10 + 1} recovered {_lrok} with {_lrfail} "
@@ -4247,6 +4369,40 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # "0 hits" is only meaningful once this confirms they were still armed.
     from dup_trap import verify as _verify_dup_trap
     _verify_dup_trap(pcb_data)
+
+    # #572 lap-authority channel: export the pre-existing-blocker hints of
+    # forced-link nets THIS run still failed, so the caller's reconcile lap
+    # loop can guard-filter them into --rip-existing-nets and re-lap. An
+    # in-process function attribute (same lifetime discipline as the
+    # finalize depth global); {} whenever this run had no oracle links or
+    # every forced-link net landed.
+    try:
+        _flh_out = {}
+        _fll_out = []
+        if oracle_links and state.oracle_links_by_net:
+            for _fnid in state.oracle_links_by_net:
+                _fnm = (pcb_data.nets[_fnid].name
+                        if _fnid in pcb_data.nets else None)
+                if _fnid in (state.routed_results or {}):
+                    # Landed: the caller prunes this net's links so the
+                    # next lap neither re-bypasses the skip nor re-routes
+                    # (duplicates) the strap.
+                    if _fnm:
+                        _fll_out.append(_fnm)
+                    continue
+                _fnames = []
+                for _ev in (state.net_history.get(_fnid) or []):
+                    if _ev.get('event') == 'preexisting_blockers':
+                        for _bn in (_ev.get('details') or {}).get('blockers') or []:
+                            if _bn not in _fnames:
+                                _fnames.append(_bn)
+                if _fnm and _fnames:
+                    _flh_out[_fnm] = _fnames
+        batch_route._forced_link_hints = _flh_out
+        batch_route._forced_link_landed = _fll_out
+    except Exception:
+        batch_route._forced_link_hints = {}
+        batch_route._forced_link_landed = []
 
     if return_results:
         return successful, failed, total_time, results_data

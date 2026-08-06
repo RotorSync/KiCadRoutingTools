@@ -39,6 +39,8 @@ os.environ.setdefault('WXSUPPRESS_SIZER_FLAGS_CHECK', '1')
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.dirname(REPO))
+sys.path.insert(0, os.path.join(REPO, 'py_router'))  # #522 layout
+sys.path.insert(0, os.path.join(REPO, 'py_tools'))
 
 KICAD_PYTHONS = [
     "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3",

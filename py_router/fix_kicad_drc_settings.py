@@ -97,7 +97,7 @@ _SEV_RANK = {"error": 2, "warning": 1, "ignore": 0}
 # DRC-enforced minimum"), so lowering them prevents no violation and instead
 # destroys the board's declared geometry spec. Measured: a QFN fanout laying
 # 0.15mm escape stubs rewrote USB_FS_DIFF's track_width from 0.8 to 0.15 -- a
-# HARD spec figure overwritten by a local escape's stub
+# HARD spec figure (test-board HW-TB-PCB13) overwritten by a local escape's stub
 # width, on nets the fanout never routed.
 #
 # The diff-pair fields stay: #439 added them for planner READBACK (a stock 0.25
@@ -476,7 +476,7 @@ def compute_targets(clearance=None, hole_clearance=None, hole_to_hole=None,
     # drill says nothing about it. Sourcing the class field from the pad-inclusive
     # minimum let one 0.25mm pad drill rewrite every class's via_drill from 0.3 to
     # 0.25, i.e. BELOW the board's own HARD via spec, on a board whose smallest
-    # placed via drill was 0.3.
+    # placed via drill was 0.3 (test-board, HW-TB-PCB08).
     vdr = _floor(via_drill, minima.get("min_via_drill"))
     if vdr is not None:
         targets["min_via_drill"] = vdr

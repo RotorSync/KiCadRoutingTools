@@ -310,6 +310,7 @@ def filter_already_routed(
     net_ids: List[Tuple[str, int]],
     config: GridRouteConfig,
     fragment_gate: bool = False,
+    assume_open: Optional[Set[str]] = None
 ) -> Tuple[List[Tuple[str, int]], List[Tuple[str, str]]]:
     """
     Filter out nets that are already fully connected.
@@ -331,6 +332,12 @@ def filter_already_routed(
             "Already fully connected"). Zone-owning nets keep today's exact
             behavior (their truth channel is the oracle reconciliation and
             route_planes).
+        assume_open: Net names carrying an exact-fill OPEN verdict (#572):
+            the plane-finalize oracle proved these disconnected with KiCad's
+            own fill, so the fill-MODEL zone credit below must not skip them
+            -- the model accepts pad<->zone kisses the exact fill denies
+            (the ~0.10% residual FP class), which false-cleared oracle-punted
+            custody nets as "Already fully connected".
 
     Returns:
         Tuple of (nets_to_route, already_routed) where:
@@ -363,6 +370,11 @@ def filter_already_routed(
     nets_to_route = []
 
     for net_name, net_id in net_ids:
+        if assume_open and net_name in assume_open:
+            print(f"  {net_name}: exact-fill verdict OPEN -- bypassing the "
+                  f"model-credit already-routed skip (#572)")
+            nets_to_route.append((net_name, net_id))
+            continue
         net_segments = segments_by_net.get(net_id, [])
         net_vias = vias_by_net.get(net_id, [])
         net_pads = pcb_data.pads_by_net.get(net_id, [])

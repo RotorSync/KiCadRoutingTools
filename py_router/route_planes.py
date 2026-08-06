@@ -4110,8 +4110,8 @@ Examples:
             # outline. Without it this config carried the 0.0 default, the map had
             # no edge keep-out at all, and add_gnd_vias -- which checks track and
             # via-to-via clearance but never the outline -- placed a GND via
-            # 1.40mm BEYOND the board edge, i.e. copper that is milled away at
-            # depanelization.
+            # 1.40mm BEYOND the board edge (test-board: (124.20, 82.40) against a
+            # y=81.0 edge), i.e. copper that is milled away at depanelization.
             #
             # NOT args.board_edge_clearance: that one is the plane-zone INSET
             # (see the note at the DRC writeback below), not the enforced
