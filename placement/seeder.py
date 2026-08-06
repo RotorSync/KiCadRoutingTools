@@ -884,11 +884,28 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
         if amt > 1e-6:
             _charge(ref, amt)
 
-    unrepairable = [r for r in sorted(weight)
-                    if state.parts[r].locked and r not in must_lock]
+    # A file-locked part is never this tool's to move (run-7 finding).
+    #
+    # `must_lock` used to be an exemption here: a ref inside it was treated as
+    # "seeder-owned", its lock lifted in memory, and it was repaired like any
+    # other violator. That is safe while must_lock is a hand-written
+    # REQUIREMENT ("these refs must end up locked"), and catastrophic once
+    # check_floorplan --emit-intent started filling must_lock with the board's
+    # OWN file-locked set: auto-intent + --repair then resolved to "unlock
+    # exactly the parts the user locked, and move them". Measured on two run-7
+    # boards, one of which walked a locked part 31mm.
+    #
+    # Seeder-ownership is a SEEDING concept -- when place_seed builds a
+    # placement from an intent it owns every pose it creates, including the
+    # locks it stamps on its own output. Repair edits a board somebody else
+    # placed, so the file's locks outrank the intent. must_lock keeps its
+    # grading meaning (floorplan's rule_must_lock still demands the stamp).
+    unrepairable = [r for r in sorted(weight) if state.parts[r].locked]
     for r in unrepairable:
-        notes.append(f"{r} violates but is (locked yes) in the file and not "
-                     f"in must_lock -- not this tool's to move")
+        why = ("in must_lock, which grades the lock rather than licensing a "
+               "move" if r in must_lock else "not in must_lock")
+        notes.append(f"{r} violates but is (locked yes) in the file "
+                     f"({why}) -- not this tool's to move")
     violators = [r for r in sorted(weight, key=lambda r: -weight[r])
                  if r not in unrepairable]
 
@@ -901,8 +918,8 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
     moves: List[Dict] = []
     for ref in violators:
         part = state.parts[ref]
-        was_locked = part.locked
-        part.locked = False     # must_lock refs are seeder-owned (see above)
+        was_locked = part.locked      # always False here: locked refs are
+                                      # already in `unrepairable` (see above)
 
         # Run-4 F2/B-6: a DECLARED edge part charged by the proximity rule
         # cannot be seated by _try_place (its _ok demands full containment,

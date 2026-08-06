@@ -172,6 +172,17 @@ def classify(state, intent=None, anchor_extent='auto') -> Tiers:
     everything else is a small."""
     t = Tiers()
     t.locked = {r for r, p in state.parts.items() if p.locked}
+    # A ref the intent declares must_lock belongs in the frame too. This used
+    # to read the file's stamps only, so the three placement tools disagreed
+    # about the same word: the grader demanded the stamp, the seeder treated it
+    # as permission to move, and reconstruct did not look. A hand-written
+    # must_lock is a statement that the ref's pose is a decision, which is
+    # exactly what the frame tier means.
+    if intent is not None and getattr(intent, 'must_lock', None):
+        import fnmatch as _fn
+        refs_all = sorted(state.parts)
+        for pat in intent.must_lock:
+            t.locked |= set(_fn.filter(refs_all, pat))
     t.zero_net = {r for r, p in state.parts.items()
                   if p.pin_count == 0 and r not in t.locked}
     free = [r for r in state.parts if r not in t.locked | t.zero_net]

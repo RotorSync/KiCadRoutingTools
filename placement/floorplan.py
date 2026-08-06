@@ -1382,7 +1382,16 @@ def emit_intent(pcb_data, pcb_file: str, *,
         'keepouts': [],
         'edge_connectors': conns,
         'decaps': {},
-        'must_lock': locked,
+        # must_lock is a REQUIREMENT ("these refs must end up locked"), and an
+        # emitted intent describes a board rather than making demands of it.
+        # Filling it with the board's own locked set (as this did) closed a
+        # loop with the tools that read must_lock: place_seed --repair treated
+        # a must_lock ref as seeder-owned and lifted its lock, so
+        # "--emit-intent then --repair" resolved to "unlock exactly the parts
+        # the user locked, and move them" -- measured on two run-7 boards.
+        # The observation is still worth recording; it belongs in `context`,
+        # which nothing acts on.
+        'must_lock': [],
         # Budget values are rounded UP, not to nearest: round() can land up
         # to 5e-5 BELOW the measured value, 50x legality.EPS, so a budget
         # written from a board would fail against that same board (watchy:
@@ -1399,6 +1408,12 @@ def emit_intent(pcb_data, pcb_file: str, *,
                         for ring in (pcb_data.board_info.board_cutouts or [])],
             'edge_contours': len(
                 getattr(pcb_data.board_info, 'board_edge_contours', None) or []),
+            # What the board already declares locked. An OBSERVATION: the
+            # placement tools read the file's own (locked yes) stamps and will
+            # not move these regardless of what any intent says. Promote a ref
+            # to `must_lock` by hand if you want the lock GRADED as a
+            # requirement.
+            'file_locked': locked,
         },
     }
 
