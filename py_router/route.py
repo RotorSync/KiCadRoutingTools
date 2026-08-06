@@ -3722,8 +3722,56 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # 757-segment GND web). Explicit --rip-existing-nets from the
             # operator is honored as given; only the escalation filters.
             if _hinted and net_names:
-                from net_queries import matches_net_filter as _mnf
-                _hinted = [_bn for _bn in _hinted if _mnf(_bn, net_names)]
+                # GUARD-based, not scope-based (2026-08-06): the old filter
+                # dropped every blocker outside --nets, which killed legit
+                # authority over ordinary SIGNAL blockers (ecp5 /PF37-: a
+                # fresh run on the final board closes it via candidacy, but
+                # the sub-run -- candidacy off, hints scope-filtered --
+                # could not). The ottercast hazard is specifically nets the
+                # caller NEGATED ('!GND' stubs -> 757-seg web) and
+                # plane/zone-backed nets; keep excluding those, plus a size
+                # cap so the sub-run's first-class reroute of the ripped
+                # blocker is near-certain. Protected/locked names are
+                # dropped later by the sub-run's own filter_rippable_names.
+                from net_queries import (matches_net_filter as _mnf,
+                                         split_net_patterns as _snp)
+                # PROTECTED names are dropped here UNCONDITIONALLY: the
+                # #521 override door ("an exact name overrides") exists for
+                # DELIBERATE operator naming, and #103 hints are machine-
+                # generated exact names -- without this check a hinted
+                # protected blocker (ecp5: /HR_CK_N, a protected pair leg
+                # AND a historical blocker in the same window) would ride
+                # the override door. Locked copper already has no override
+                # anywhere.
+                from protected_nets import protection_map as _pm103
+                _prot103 = _pm103(pcb_data, input_file)
+                _all_names103 = {n.name for n in pcb_data.nets.values()}
+                _, _neg103 = _snp(net_names, _all_names103)
+                from net_queries import net_pattern_matches as _npm103
+                _zone_ids103 = {z.net_id
+                                for z in (getattr(pcb_data, 'zones', None)
+                                          or [])}
+                _keep103 = []
+                for _bn in _hinted:
+                    if _bn in _prot103:
+                        continue                       # protected: NEVER
+                    if _mnf(_bn, net_names):
+                        _keep103.append(_bn)          # in scope: as before
+                        continue
+                    if any(_npm103(_bn, _p) for _p in _neg103):
+                        continue                       # negated BY PLAN
+                    _bid = next((i for i, nn in pcb_data.nets.items()
+                                 if nn.name == _bn), None)
+                    if _bid is None or _bid in _zone_ids103:
+                        continue                       # plane/zone-backed
+                    _bsegs = sum(1 for s in pcb_data.segments
+                                 if s.net_id == _bid)
+                    _bvias = sum(1 for v in pcb_data.vias
+                                 if v.net_id == _bid)
+                    if _bsegs > 30 or _bvias > 6:
+                        continue                       # reroute not certain
+                    _keep103.append(_bn)
+                _hinted = _keep103
             if _hinted and '*' not in (rip_existing_nets or []):
                 _hinted = _hinted[:_RIP_ESCALATION_CAP]
                 _rk['rip_existing_nets'] = list(dict.fromkeys(
