@@ -49,7 +49,7 @@ a clean-looking report.
 
 **2. `legality`** — given `view.log`'s JSON, both side panels.
 > Did legality regress? Compare `overlap_area` and `oob_count`/`oob_amount`
-> against the seed's. Absolute zero is NOT the test — `watchy` legitimately
+> against the seed's. Absolute zero is NOT the test -- a shipped corpus board legitimately
 > ships 81 of 82 parts in courtyard violation. **Never use `oob_area`**: it is
 > measured against a bounding-box inset, so a part inside a cutout scores 0.0.
 > You may not conclude that a specific pair collides — that is `check_drc`'s job.

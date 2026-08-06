@@ -26,8 +26,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Files that instruct Claude or a human to run these tools.
+# The skill was split into three (run-8 S2): placement, routing, and the thin
+# combined one that sequences them. A flag can now live in any of them, and the
+# whole point of this gate is that NO skill file drifts from the real parsers --
+# so every one is a source, and the assertions below say which file must carry
+# which rule.
+def _all_skill_text():
+    """Every skill file as one string: a rule may live in any of the three."""
+    out = []
+    for rel in SOURCES:
+        path = os.path.join(ROOT, rel)
+        if os.path.isfile(path):
+            out.append(open(path, encoding='utf-8').read())
+    return '\n'.join(out)
+
+
 SOURCES = [
     '.claude/skills/plan-pcb-routing/SKILL.md',
+    '.claude/skills/plan-pcb-placement/SKILL.md',
+    '.claude/skills/plan-pcb-placement-and-routing/SKILL.md',
     # The skill's reference pages carry command blocks too (#549). Without them
     # every block moved out of SKILL.md becomes flag-unchecked, which is the
     # quiet way this gate stops gating.
@@ -149,7 +166,7 @@ def test_every_documented_flag_exists():
 def test_the_placement_tools_are_actually_mentioned():
     """Guards the reverse failure: the gate passing because the skill stopped
     mentioning placement at all."""
-    skill = open(os.path.join(ROOT, SOURCES[0]), encoding='utf-8').read()
+    skill = _all_skill_text()
     for token in ('place_optimize.py', 'render_placement.py', '--suggest-locks',
                   'Step 0'):
         assert token in skill, f"{token} missing from the skill"
@@ -160,14 +177,14 @@ def test_exit_code_contract_is_documented():
     docs do not, the instruction silently becomes wrong."""
     from placement.placement_state import UNPLACED_EXIT
     assert UNPLACED_EXIT == 3
-    skill = open(os.path.join(ROOT, SOURCES[0]), encoding='utf-8').read()
+    skill = _all_skill_text()
     assert 'exit 3' in skill or 'exits 3' in skill, \
         "the skill must state the exit-3 contract it tells Claude to rely on"
 
 
 def test_skill_says_placement_is_off_by_default():
     """The single most important thing for a model to get right here."""
-    skill = open(os.path.join(ROOT, SOURCES[0]), encoding='utf-8').read()
+    skill = _all_skill_text()
     assert 'normally SKIPPED' in skill or 'do not run it' in skill
     assert 'decision table' in skill.lower()
     # and that the render is not mistaken for the verdict (#431 limit 3)
@@ -200,7 +217,7 @@ def test_routing_only_stays_the_default_path():
             f"un-placed board")
 
     # And the skill's own plan TEMPLATE must not grow one either.
-    skill = open(os.path.join(ROOT, SOURCES[0]), encoding='utf-8').read()
+    skill = _all_skill_text()
     fences = re.findall(r'```[^\n]*\n(.*?)```', skill, re.S)
     template = max((f for f in fences if '"action"' in f or 'Step-by-Step' in f),
                    key=len, default='')
@@ -216,7 +233,7 @@ def test_skill_states_the_board_outline_is_not_editable():
     """#549. True today only by construction -- no writer emits an Edge.Cuts
     primitive -- and stated nowhere, so nothing stops a future change or a
     confident model from resizing a board to make parts fit."""
-    skill = open(os.path.join(ROOT, SOURCES[0]), encoding='utf-8').read()
+    skill = _all_skill_text()
     low = skill.lower()
     # AND, not OR. Written as `or` first, this passed with either phrase
     # deleted -- both were present, so neither was actually pinned.
@@ -262,7 +279,7 @@ def test_the_score_is_the_gate_and_the_router_is_not_the_judge():
     was the router's own tally. Two claims have to stay in the skill or that
     recurs: the score exists and is the gate, and place_route_loop's ACCEPTED
     is not a verdict."""
-    skill = open(os.path.join(ROOT, SOURCES[0]), encoding='utf-8').read()
+    skill = _all_skill_text()
     low = skill.lower()
 
     assert 'board_score.py' in skill, \
