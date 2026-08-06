@@ -17,7 +17,6 @@ reconciliation raised, so it needs neither a regex nor a marker string).
 `place_route_loop.py` uses the second, because it only ever sees a log file.
 Both were the same 110 lines in two places until they were not.
 """
-import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 import json
 import re
 from typing import Dict, List, Optional

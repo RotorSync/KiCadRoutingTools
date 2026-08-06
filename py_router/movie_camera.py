@@ -30,7 +30,6 @@ Two things this deliberately does NOT do:
   the camera vibrates for a hundred frames saying nothing.
 """
 from __future__ import annotations
-import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 
 import math
 import os
