@@ -49,6 +49,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 _ROUTE_PY = os.path.join(ROOT, 'route.py')
@@ -323,6 +324,52 @@ def cmd_record(a):
                   f"deliberate (baseline row on a rejected candidate), say "
                   f"so in --lever.", file=sys.stderr)
     lg = Ledger(a.ledger)
+    # Three run-7 ledger defects, each caught only by a human re-reading the
+    # file afterwards. None is a refusal: every one has a legitimate shape, and
+    # a ledger that refuses entries is a ledger people stop writing.
+    #
+    # (1) The accept flag and the prose disagreeing. Run-7 recorded a rung whose
+    #     --lever text says REJECTED while the entry carried accepted=true, so a
+    #     reader counting accepted iterations counted a rejection.
+    _lever_txt = (a.lever or '').lower()
+    _says_reject = any(w in _lever_txt for w in ('reject', 'rolled back',
+                                                 'rolled-back', 'reverted'))
+    if _says_reject and not a.rejected:
+        print("record WARNING: --lever reads as a REJECTION but the entry is "
+              "recorded accepted (no --rejected). A reader counting accepted "
+              "iterations will count this one. Pass --rejected, or say in the "
+              "lever why an entry describing a rejection is the accepted "
+              "state.", file=sys.stderr)
+    elif a.rejected and _lever_txt and not _says_reject:
+        print("record WARNING: entry is --rejected but the lever text never "
+              "says so -- a later reader has only the flag. Name the rejection "
+              "and the gate that refused it in --lever.", file=sys.stderr)
+    # (2) The lever naming a CHECKER instead of the transform. A checker does
+    #     not change a board, so an entry whose argv is a checker records no
+    #     lever at all -- the board moved for a reason the ledger did not keep.
+    if a.argv:
+        _exe = os.path.basename(str(a.argv[0])).lower()
+        if _exe.endswith('.py'):
+            _exe = _exe[:-3]
+        _stem = _exe.split()[0]
+        if _stem.startswith('check_') or _stem in ('board_score', 'list_nets',
+                                                   'kicad_drc_compare'):
+            print(f"record WARNING: --argv names '{_stem}', which measures a "
+                  f"board rather than changing one. The ledger's lever is meant "
+                  f"to be the TRANSFORM that produced this board; record that "
+                  f"command and put the measurement in --score.",
+                  file=sys.stderr)
+    # (3) Back-fill. An entry timestamped before the one it follows means the
+    #     record was written after the fact, so its ordering is a reconstruction.
+    _prior = lg.entries()
+    if _prior:
+        _last_t = _prior[-1].get('t')
+        if isinstance(_last_t, (int, float)) and time.time() < _last_t - 1.0:
+            print(f"record WARNING: this entry's clock is BEHIND the previous "
+                  f"entry's (t {time.time():.0f} < {_last_t:.0f}). The ledger's "
+                  f"order is meant to be the order things happened; a "
+                  f"back-filled entry cannot support that claim.",
+                  file=sys.stderr)
     prev = lg.last_accepted()
     entry = {'iteration': len(lg.entries()), 'kind': a.kind,
              'parent_sha': (prev or {}).get('result_sha'),

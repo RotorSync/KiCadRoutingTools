@@ -52,6 +52,15 @@ import re
 # (#347); read by main() for the JSON_SUMMARY. None = no reconnect ran.
 LAST_RIPPED_RECONNECT: Optional[Dict] = None
 
+# Casualty nets that ship STILL OPEN -- ripped to clear a corridor, not
+# reconnected, and not restorable. Run-7 finding A10: this state reached a red
+# log line and nothing else. The JSON_SUMMARY carried counts without names, and
+# main() returned None so the process exited 0 -- a chain step that silently
+# consumed two nets was caught only because a later board_score happened to be
+# read by a human. Names here, and an exit code from main().
+LAST_RIPPED_STILL_OPEN: List[str] = []
+LAST_RIPPED_CUSTODY: Optional[Dict] = None
+
 
 def plane_tap_launch_layers(pad, zone_layers, routing_layers) -> List[str]:
     """Copper layers a last-resort plane tap may launch from, in
@@ -2029,8 +2038,18 @@ def route_planes(
                 print(f"  custody: {_cust['restored']} restored, "
                       f"{_cust['refused']} refused, {_cust['errored']} errored "
                       f"of {len(_casualties)} casualty net(s)")
+                global LAST_RIPPED_CUSTODY
+                LAST_RIPPED_CUSTODY = dict(_cust,
+                                           casualties=len(_casualties))
             if _still_open:
                 _report_unrouted_ripped_nets(pcb_data, _still_open)
+            # A10: the still-open set is the run's real damage. Publish the
+            # NAMES so the summary, the exit code and the ledger can all carry
+            # it -- a count in a log line is not a verdict channel.
+            global LAST_RIPPED_STILL_OPEN
+            LAST_RIPPED_STILL_OPEN = [
+                (pcb_data.nets[_cid].name if _cid in pcb_data.nets
+                 else f"net_{_cid}") for _cid in _still_open]
             if corridor_ghosts is not None:
                 # #517 arm 2: custody-defined lifetime -- a casualty that is
                 # connected again (reconnected, or custody-restored) has real
@@ -3587,10 +3606,25 @@ Examples:
     }
     if LAST_RIPPED_RECONNECT is not None:
         _summary["ripped_reconnect"] = LAST_RIPPED_RECONNECT
+    if LAST_RIPPED_CUSTODY is not None:
+        _summary["ripped_custody"] = LAST_RIPPED_CUSTODY
+    # A10: nets this step ripped and could neither reconnect nor restore. They
+    # ship OPEN, so they belong in the summary by name and in the exit code.
+    _summary["ripped_still_open"] = list(LAST_RIPPED_STILL_OPEN)
     print("JSON_SUMMARY: " + _json.dumps(_summary))
+
+    if LAST_RIPPED_STILL_OPEN:
+        print(f"{RED}RIP CASUALTIES SHIP OPEN ({len(LAST_RIPPED_STILL_OPEN)}): "
+              f"{', '.join(LAST_RIPPED_STILL_OPEN)}{RESET}")
+        print("  These nets were ripped to clear a plane corridor and are not "
+              "connected on the written board. Reconnect them (the chain's "
+              "reconnect step) or re-run without --rip-blocker-nets; do not "
+              "read this run as clean.")
+        return 4
+    return 0
 
 
 if __name__ == "__main__":
     from console_encoding import enable_utf8_console
     enable_utf8_console()  # cp1252-safe non-ASCII prints (issue #152)
-    main()
+    sys.exit(main())

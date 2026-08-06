@@ -19,6 +19,26 @@ from geometry_utils import (
     segment_to_segment_distance as _seg_seg_dist_coords,
 )
 from net_queries import expand_pad_layers
+
+
+# A grading tolerance is a FRACTION of the clearance (--clearance-margin), which
+# collapses to exactly 0.0 when the caller grades at margin 0 -- the honest
+# setting, and the one the perturbed-corpus runs grade at. At 0.0 the comparison
+# `overlap > tolerance` then fires on double-precision residue: two pads at
+# exactly their required distance compute an overlap of ~1e-16mm through the
+# hypot/sqrt path and get reported as a violation that no geometry contains
+# (measured, run 7: three phantom flags on a board whose real count was 0).
+#
+# So the fraction gets an absolute floor. 1e-9mm is a picometre: three orders of
+# magnitude below KiCad's own 1nm file resolution, so it can never hide real
+# geometry, and many orders above the residue it exists to absorb.
+FP_EPS_MM = 1e-9
+
+
+def _grade_tol(clearance: float, clearance_margin: float) -> float:
+    """The fractional grading tolerance, floored above float residue."""
+    return max(clearance * clearance_margin, FP_EPS_MM)
+
 import routing_defaults as defaults
 
 
@@ -332,7 +352,7 @@ def check_segment_overlap(seg1: Segment, seg2: Segment, clearance: float, cleara
     overlap = required_dist - actual_dist
 
     # Use clearance-based tolerance (5% of clearance by default)
-    tolerance = clearance * clearance_margin
+    tolerance = _grade_tol(clearance, clearance_margin)
     if overlap > tolerance:
         return True, overlap, pt1, pt2
     return False, 0.0, None, None
@@ -355,7 +375,7 @@ def check_via_segment_overlap(via: Via, seg: Segment, clearance: float, clearanc
                                             seg.end_x, seg.end_y)
     overlap = required_dist - actual_dist
 
-    tolerance = clearance * clearance_margin
+    tolerance = _grade_tol(clearance, clearance_margin)
     if overlap > tolerance:
         return True, overlap
     return False, 0.0
@@ -372,7 +392,7 @@ def check_via_via_overlap(via1: Via, via2: Via, clearance: float, clearance_marg
     actual_dist = math.sqrt((via1.x - via2.x)**2 + (via1.y - via2.y)**2)
     overlap = required_dist - actual_dist
 
-    tolerance = clearance * clearance_margin
+    tolerance = _grade_tol(clearance, clearance_margin)
     if overlap > tolerance:
         return True, overlap
     return False, 0.0
@@ -770,7 +790,7 @@ def check_pad_pad_overlap(pad1: Pad, pad2: Pad, clearance: float,
             best_pt = (px, py)
 
     overlap = clearance - best
-    if overlap > clearance * clearance_margin:
+    if overlap > _grade_tol(clearance, clearance_margin):
         return True, overlap, best_pt
     return False, 0.0, None
 
@@ -875,7 +895,7 @@ def check_pad_segment_overlap(pad: Pad, seg: Segment, clearance: float,
             seg.start_x, seg.start_y, seg.end_x, seg.end_y, pad_polys)
         required_dist = seg.width / 2 + clearance
         overlap = required_dist - dist_to_pad
-        if overlap > clearance * clearance_margin:
+        if overlap > _grade_tol(clearance, clearance_margin):
             return True, overlap, closest_pt
         return False, 0.0, None
 
@@ -913,7 +933,7 @@ def check_pad_segment_overlap(pad: Pad, seg: Segment, clearance: float,
     required_dist = seg.width / 2 + clearance
     overlap = required_dist - dist_to_pad
 
-    tolerance = clearance * clearance_margin
+    tolerance = _grade_tol(clearance, clearance_margin)
     if overlap > tolerance:
         return True, overlap, closest_pt
 
@@ -951,7 +971,7 @@ def check_pad_via_overlap(pad: Pad, via: Via, clearance: float,
     required_dist = via.size / 2 + clearance
     overlap = required_dist - dist_to_pad
 
-    tolerance = clearance * clearance_margin
+    tolerance = _grade_tol(clearance, clearance_margin)
     if overlap > tolerance:
         return True, overlap
 
@@ -975,7 +995,7 @@ def check_via_drill_overlap(via1: Via, via2: Via, hole_to_hole_clearance: float,
     actual_dist = math.sqrt((via1.x - via2.x)**2 + (via1.y - via2.y)**2)
     overlap = required_dist - actual_dist
 
-    tolerance = hole_to_hole_clearance * clearance_margin
+    tolerance = _grade_tol(hole_to_hole_clearance, clearance_margin)
     if overlap > tolerance:
         return True, overlap
     return False, 0.0
@@ -1011,7 +1031,7 @@ def check_pad_drill_via_overlap(pad: Pad, via: Via, hole_to_hole_clearance: floa
         actual_dist = math.sqrt((pad.global_x - via.x)**2 + (pad.global_y - via.y)**2)
     overlap = required_dist - actual_dist
 
-    tolerance = hole_to_hole_clearance * clearance_margin
+    tolerance = _grade_tol(hole_to_hole_clearance, clearance_margin)
     if overlap > tolerance:
         return True, overlap
     return False, 0.0
@@ -1033,7 +1053,7 @@ def check_segment_board_edge(seg: Segment, board_bounds: Tuple[float, float, flo
     min_x, min_y, max_x, max_y = board_bounds
     half_width = seg.width / 2
     required_clearance = clearance + half_width
-    tolerance = clearance * clearance_margin
+    tolerance = _grade_tol(clearance, clearance_margin)
 
     # Report the WORST overlap over all endpoints x edges (not the first match,
     # so a strict margin=0 result can derive any margined verdict exactly).
@@ -1065,7 +1085,7 @@ def check_via_board_edge(via: Via, board_bounds: Tuple[float, float, float, floa
     min_x, min_y, max_x, max_y = board_bounds
     half_size = via.size / 2
     required_clearance = clearance + half_size
-    tolerance = clearance * clearance_margin
+    tolerance = _grade_tol(clearance, clearance_margin)
 
     x, y = via.x, via.y
 
@@ -1213,7 +1233,7 @@ def check_segment_board_edge_poly(seg: Segment, rings, outer, cutouts,
                                    ) -> Tuple[bool, float, str]:
     """Board-edge clearance for a track measured against the real Edge.Cuts."""
     required = clearance + seg.width / 2
-    tolerance = clearance * clearance_margin
+    tolerance = _grade_tol(clearance, clearance_margin)
     # A track endpoint off-board / inside a cutout is a definite violation.
     for x, y in [(seg.start_x, seg.start_y), (seg.end_x, seg.end_y)]:
         if not _point_on_board(x, y, outer, cutouts):
@@ -1232,7 +1252,7 @@ def check_via_board_edge_poly(via: Via, rings, outer, cutouts,
                               ) -> Tuple[bool, float, str]:
     """Board-edge clearance for a via measured against the real Edge.Cuts."""
     required = clearance + via.size / 2
-    tolerance = clearance * clearance_margin
+    tolerance = _grade_tol(clearance, clearance_margin)
     if not _point_on_board(via.x, via.y, outer, cutouts):
         dist = _point_to_rings_distance(via.x, via.y, rings)
         return True, required + dist, "off-board"
@@ -1250,7 +1270,7 @@ def check_pad_board_edge(pad: Pad, rings, outer, cutouts,
     """Board-edge clearance for a pad (issue #236). Measures the pad copper edge
     (sampled perimeter, or the bbox-rectangle distance when no outline exists)
     to the real Edge.Cuts. Returns (has_violation, overlap_mm, edge)."""
-    tolerance = clearance * clearance_margin
+    tolerance = _grade_tol(clearance, clearance_margin)
     if rings:
         best = float('inf')
         off_board = False
@@ -2430,7 +2450,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             # net-independently, exempting only copper that touches the pad.
             dist = _np_capsule_to_tracks(h1x, h1y, h2x, h2y, *_seg_arrays[:7])
             overlap = (hr + sw / 2.0 + req_clr) - dist
-            tolerance = req_clr * clearance_margin
+            tolerance = _grade_tol(req_clr, clearance_margin)
             viol = overlap > tolerance
             if copper_exempt is None:
                 # NPTH: no copper to connect to; keep the own-net track skip.
@@ -2504,7 +2524,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     continue
                 dist = point_to_segment_distance(via.x, via.y, h1x, h1y, h2x, h2y)
                 overlap = (hr + via.size / 2.0 + kicad_req) - dist
-                if overlap <= kicad_req * clearance_margin:
+                if overlap <= _grade_tol(kicad_req, clearance_margin):
                     continue
                 hole_net = pcb_data.nets.get(hnet, None)
                 via_net = pcb_data.nets.get(via.net_id, None)
@@ -2637,7 +2657,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             # Derived from the STRICT result already computed above (identical
             # distances, only the tolerance differs) -- re-running the check at
             # the margin doubled the full outline-ring scan per segment.
-            if s_edge == "off-board" or s_overlap > effective_board_edge_clearance * clearance_margin:
+            if s_edge == "off-board" or s_overlap > _grade_tol(effective_board_edge_clearance, clearance_margin):
                 violations.append({
                     'type': 'segment-board-edge', 'net1': net_str, 'edge': s_edge,
                     'layer': seg.layer, 'overlap_mm': s_overlap,
@@ -2673,7 +2693,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     via, board_bounds, effective_board_edge_clearance, 0.0)
             has_violation = s_viol and (
                 s_edge == "off-board"
-                or s_overlap > effective_board_edge_clearance * clearance_margin)
+                or s_overlap > _grade_tol(effective_board_edge_clearance, clearance_margin))
             if s_viol:
                 net_name = pcb_data.nets.get(via.net_id, None)
                 net_str = net_name.name if net_name else f"net_{via.net_id}"
@@ -2766,7 +2786,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                                np.where(_blen2 > 0, _blen2, 1.0),
                                np.array([s.width for s in pcb_data.segments], dtype=np.float64))
             _esw = _seg_arrays[7]
-            _edge_tol = effective_board_edge_clearance * clearance_margin
+            _edge_tol = _grade_tol(effective_board_edge_clearance, clearance_margin)
 
             for (_h1x, _h1y), (_h2x, _h2y), _hr, _slot_ref in _slot_caps:
                 _d = _np_capsule_to_tracks(_h1x, _h1y, _h2x, _h2y, *_seg_arrays[:7])

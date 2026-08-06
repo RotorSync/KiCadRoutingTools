@@ -93,6 +93,19 @@ def run_kicad_drc(board: str):
         # demoted to WARNING by the run-6 project writeback and must still
         # reach this comparator. Non-error items of every OTHER class are
         # dropped below, so the copper channels keep error-only semantics.
+        if not (os.path.isfile(KICAD_CLI) or shutil.which(KICAD_CLI)):
+            # Run-7 A19: on a machine where kicad-cli is not on PATH this fell
+            # through to the macOS bundle default and died with a bare
+            # FileNotFoundError naming a path the user has never heard of. The
+            # oracle is the instrument that catches check_drc's own false
+            # negatives, so a run that cannot start it must say what to set.
+            return None, (
+                f"kicad-cli not found at '{KICAD_CLI}'. Set KICAD_CLI to the "
+                f"binary, e.g. KICAD_CLI='C:/Program Files/KiCad/<ver>/bin/"
+                f"kicad-cli.exe' (Windows), /usr/bin/kicad-cli (Linux), or "
+                f"/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli "
+                f"(macOS) -- or put it on PATH. The KiCad oracle is skipped "
+                f"without it, so check_drc's result is UNCORROBORATED.")
         r = subprocess.run(
             [KICAD_CLI, "pcb", "drc", "--format", "json", "--severity-all",
              "--refill-zones", "--output", out_json, board],
