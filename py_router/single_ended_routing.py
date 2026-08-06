@@ -1359,34 +1359,6 @@ def _augment_all_blocked_pad_side(cells, pad, config, obstacles):
     return cells
 
 
-def oracle_link_strapped(pcb_data: PCBData, net_id: int, link,
-                         tol: float = 0.05) -> bool:
-    """True when a #572 forced link's zone-side endpoint(s) already have
-    same-net segment copper terminating on them -- the fingerprint of a strap
-    routed by an earlier reconciliation lap (the forced-link router welds its
-    copper to the link's exact endpoint floats). The model-credit bypass
-    keeps the net in the route list across laps, so only the link itself can
-    say "done"; without this check lap 2 re-routes (duplicates) the strap
-    lap 1 just laid. Pad/track endpoints always have copper at their
-    location, so only 'zone' endpoints carry signal; a link with no zone
-    endpoint is never skipped (a duplicate same-net strap is bounded by the
-    lap cap; shipping open copper is not)."""
-    zone_pts = [(e[0], e[1]) for e in link
-                if len(e) >= 4 and e[3] == 'zone']
-    if not zone_pts:
-        return False
-    for zx, zy in zone_pts:
-        for seg in pcb_data.segments:
-            if seg.net_id != net_id:
-                continue
-            if (abs(seg.start_x - zx) <= tol and abs(seg.start_y - zy) <= tol) \
-                    or (abs(seg.end_x - zx) <= tol and abs(seg.end_y - zy) <= tol):
-                break
-        else:
-            return False
-    return True
-
-
 def route_oracle_links(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                        obstacles: GridObstacleMap, links,
                        attraction_path=None) -> Optional[dict]:

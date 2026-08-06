@@ -18,7 +18,7 @@ from net_queries import calculate_route_length
 from pcb_modification import add_route_to_pcb_data
 from single_ended_routing import (route_net_with_obstacles,
                                   route_multipoint_main, route_multipoint_taps,
-                                  route_oracle_links, oracle_link_strapped)
+                                  route_oracle_links)
 from diff_pair_routing import (route_diff_pair_with_obstacles, get_diff_pair_endpoints,
                                _route_direct_coupled_middle)
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache, record_frontier_blocking
@@ -175,10 +175,6 @@ def run_reroute_loop(
             # silently drop the strap the net exists in this run to lay.
             _olinks_rr = (getattr(state, 'oracle_links_by_net', None)
                           or {}).get(ripped_net_id)
-            if _olinks_rr:
-                _olinks_rr = [l for l in _olinks_rr
-                              if not oracle_link_strapped(
-                                  pcb_data, ripped_net_id, l)]
             # Check for multi-point net (3+ pads, no existing segments since they were ripped)
             multipoint_pads = get_multipoint_net_pads(pcb_data, ripped_net_id, config)
             if _olinks_rr:
@@ -461,10 +457,6 @@ def run_reroute_loop(
                             # (see the initial reroute above).
                             _olinks_rt = (getattr(state, 'oracle_links_by_net',
                                                   None) or {}).get(ripped_net_id)
-                            if _olinks_rt:
-                                _olinks_rt = [l for l in _olinks_rt
-                                              if not oracle_link_strapped(
-                                                  pcb_data, ripped_net_id, l)]
                             # Check for multi-point net in retry as well
                             retry_multipoint_pads = get_multipoint_net_pads(pcb_data, ripped_net_id, config)
                             if _olinks_rt:

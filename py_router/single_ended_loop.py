@@ -79,8 +79,7 @@ from connectivity import (
 from net_queries import get_chip_pad_positions, calculate_route_length
 from pcb_modification import add_route_to_pcb_data
 from single_ended_routing import (route_net_with_obstacles,
-                                  route_multipoint_main, route_oracle_links,
-                                  oracle_link_strapped)
+                                  route_multipoint_main, route_oracle_links)
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache, record_frontier_blocking
 from rip_up_reroute import rip_up_net, restore_net
 from leg_rip import LEG_RIP_ENABLED, select_blocking_branch  # #510
@@ -673,11 +672,12 @@ def route_single_ended_nets(
         # #572: oracle forced links outrank endpoint derivation -- the
         # model's zone credit merges the exact-fill clusters, so both the
         # multipoint and plain derivations "see" no gap and succeed with
-        # zero copper. Links a previous lap already strapped are dropped.
+        # zero copper. No strapped-copper pre-filter here: the exact-fill
+        # anchor can coincide with pre-existing copper that KISSES the
+        # other cluster without welding it (eis), so geometry cannot
+        # overrule the punt; welded nets are pruned from oracle_links by
+        # the reconcile lap loop instead.
         _olinks = (getattr(state, 'oracle_links_by_net', None) or {}).get(net_id)
-        if _olinks:
-            _olinks = [l for l in _olinks
-                       if not oracle_link_strapped(pcb_data, net_id, l)]
         # Check for multi-point net (3+ pads, no existing segments)
         multipoint_pads = get_multipoint_net_pads(pcb_data, net_id, config)
         if _olinks:
@@ -1136,15 +1136,10 @@ def route_single_ended_nets(
                         # #572: a forced-link net retries its EXACT links
                         # against the post-rip board (same reason as the
                         # initial attempt: derivation is model-blind to the
-                        # gap). Re-filter strapped links -- an earlier link
-                        # of a multi-link net may have landed before the
-                        # failing one aborted the attempt.
+                        # gap; a failed attempt's partial link copper was
+                        # discarded with it, so all links re-route).
                         _olinks_r = (getattr(state, 'oracle_links_by_net', None)
                                      or {}).get(net_id)
-                        if _olinks_r:
-                            _olinks_r = [l for l in _olinks_r
-                                         if not oracle_link_strapped(
-                                             pcb_data, net_id, l)]
                         # Check for multi-point net in retry as well
                         retry_multipoint_pads = get_multipoint_net_pads(pcb_data, net_id, config)
                         if _olinks_r:

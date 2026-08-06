@@ -489,6 +489,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                # forwarding.
                'oracle_links'):
         _reconcile_kwargs.pop(_k, None)
+    # #572 lap-authority channel: cleared at ENTRY so an early return can
+    # never leave a previous invocation's hints for the caller to harvest.
+    batch_route._forced_link_hints = {}
+    batch_route._forced_link_landed = []
     if env_knobs.DUMP_BATCH_KWARGS:
         # Parameter-parity probe: dump THIS call's full parameter set so the
         # CLI front (argparse->main) and the GUI front (plan setters->tab
@@ -1023,27 +1027,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # #572: custody nets carry an exact-fill OPEN verdict from the outer
     # run's oracle -- the model-credit skip below must not clear them.
-    # Links a previous reconciliation lap already strapped (copper
-    # terminating on the link's zone-side floats) no longer force the
-    # bypass, so a re-lapped sub-run skips the net instead of vacuously
-    # re-counting it.
-    _assume_open572 = set()
-    if oracle_links:
-        from single_ended_routing import oracle_link_strapped as _ols572
-        _nm2id572 = {n.name: i for i, n in pcb_data.nets.items()}
-        for _l in oracle_links:
-            try:
-                _lnm, _lnid = _l[0], _nm2id572.get(_l[0])
-            except (TypeError, IndexError):
-                continue
-            if _lnid is None:
-                continue
-            try:
-                _strapped = _ols572(pcb_data, _lnid, (_l[1], _l[2]))
-            except (TypeError, IndexError):
-                _strapped = False
-            if not _strapped:
-                _assume_open572.add(_lnm)
+    # ANY net with links present bypasses: the punt measured OPEN on this
+    # exact board, and no geometric heuristic may overrule it (a strapped-
+    # copper check was tried and false-positived on eis -- the exact-fill
+    # anchor coincided with a pre-existing track endpoint, which is a KISS,
+    # not a weld). Nets whose links a previous lap welded are pruned from
+    # oracle_links by the CALLER (the lap loop's landed-export), so re-laps
+    # skip them the normal way.
+    _assume_open572 = {l[0] for l in (oracle_links or []) if l and l[0]}
     net_ids, _already_routed = filter_already_routed(
         pcb_data, net_ids, config, assume_open=_assume_open572)
     # #515: --rip-existing-nets only rips copper that BLOCKS a net being
@@ -3832,7 +3823,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # told not to touch it (ottercast: 52 dogbone stubs became a
             # 757-segment GND web). Explicit --rip-existing-nets from the
             # operator is honored as given; only the escalation filters.
-            if _hinted and net_names:
+            def _filter_rip_hints103(_names):
                 # GUARD-based, not scope-based (2026-08-06): the old filter
                 # dropped every blocker outside --nets, which killed legit
                 # authority over ordinary SIGNAL blockers (ecp5 /PF37-: a
@@ -3844,6 +3835,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # cap so the sub-run's first-class reroute of the ripped
                 # blocker is near-certain. Protected/locked names are
                 # dropped later by the sub-run's own filter_rippable_names.
+                # (Shared by the initial #103 escalation and the #572
+                # lap-authority harvest below.)
+                if not (_names and net_names):
+                    return list(_names or [])
                 from net_queries import (matches_net_filter as _mnf,
                                          split_net_patterns as _snp)
                 # PROTECTED names are dropped here UNCONDITIONALLY: the
@@ -3863,7 +3858,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 for z in (getattr(pcb_data, 'zones', None)
                                           or [])}
                 _keep103 = []
-                for _bn in _hinted:
+                for _bn in _names:
                     if _bn in _prot103:
                         continue                       # protected: NEVER
                     if _mnf(_bn, net_names):
@@ -3882,7 +3877,50 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     if _bsegs > 30 or _bvias > 6:
                         continue                       # reroute not certain
                     _keep103.append(_bn)
-                _hinted = _keep103
+                return _keep103
+
+            _hinted = _filter_rip_hints103(_hinted)
+
+            def _harvest_lap_authority572():
+                """#572 lap authority: forced-link failures INSIDE the
+                sub-run hint pre-existing blockers the outer history can
+                never name (custody plane nets never enter the outer SE
+                loop, so the #103 escalation above has no hint source for
+                them -- measured on eis/ddr5: the exact link fails against
+                a pre-existing signal wall with the authority hint printed,
+                and dies unheard). The sub-run exports those hints via the
+                in-process channel; guard-filter them identically and grant
+                --rip-existing-nets for ONE more lap. Returns True when new
+                authority was granted (the lap loop re-laps on it).
+
+                Also prunes links of LANDED nets from the next lap's
+                oracle_links: a welded net must neither re-bypass the
+                model-credit skip nor re-route (duplicate) its strap."""
+                _landed = set(getattr(batch_route, '_forced_link_landed',
+                                      None) or [])
+                if _landed and _rk.get('oracle_links'):
+                    _kept572 = [l for l in _rk['oracle_links']
+                                if l and l[0] not in _landed]
+                    if len(_kept572) != len(_rk['oracle_links']):
+                        _rk['oracle_links'] = _kept572
+                _flh = dict(getattr(batch_route, '_forced_link_hints',
+                                    None) or {})
+                if not _flh or '*' in (_rk.get('rip_existing_nets') or []):
+                    return False
+                _have = set(_rk.get('rip_existing_nets') or [])
+                _fresh = [n for names in _flh.values() for n in names
+                          if n not in _have]
+                _fresh = _filter_rip_hints103(
+                    list(dict.fromkeys(_fresh)))[:_RIP_ESCALATION_CAP]
+                if not _fresh:
+                    return False
+                _rk['rip_existing_nets'] = list(dict.fromkeys(
+                    list(_have) + _fresh))
+                print(f"  Reconciliation lap authority (#572): rip "
+                      f"authority over forced-link blockers "
+                      f"{', '.join(_fresh)} -- one more lap")
+                return True
+
             if _hinted and '*' not in (rip_existing_nets or []):
                 _hinted = _hinted[:_RIP_ESCALATION_CAP]
                 _rk['rip_existing_nets'] = list(dict.fromkeys(
@@ -4029,7 +4067,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         _rsnap.segments = _r.get('new_segments') or []
                         _rsnap.vias = _r.get('new_vias') or []
                         snap_pcb_data_to_iu_grid(_rsnap)
-                    if not (_lrok and _lrfail):
+                    # #572: same lap-authority rule as the CLI leg below.
+                    _granted572 = bool(_lrfail) and _harvest_lap_authority572()
+                    if not (_lrfail and (_lrok or _granted572)):
                         break
                     print(f"  Reconciliation progress-loop: lap "
                           f"{_lap10 + 1} recovered {_lrok} with "
@@ -4054,7 +4094,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _rok += _lrok
                     _rfail = _lrfail
                     _rt += _lrt
-                    if not (_lrok and _lrfail):
+                    # #572: fresh forced-link blocker hints justify a lap
+                    # even without recoveries -- lap N failed against a
+                    # named pre-existing wall this authority now opens.
+                    _granted572 = bool(_lrfail) and _harvest_lap_authority572()
+                    if not (_lrfail and (_lrok or _granted572)):
                         break
                     print(f"  Reconciliation progress-loop: lap "
                           f"{_lap10 + 1} recovered {_lrok} with {_lrfail} "
@@ -4091,6 +4135,40 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # "0 hits" is only meaningful once this confirms they were still armed.
     from dup_trap import verify as _verify_dup_trap
     _verify_dup_trap(pcb_data)
+
+    # #572 lap-authority channel: export the pre-existing-blocker hints of
+    # forced-link nets THIS run still failed, so the caller's reconcile lap
+    # loop can guard-filter them into --rip-existing-nets and re-lap. An
+    # in-process function attribute (same lifetime discipline as the
+    # finalize depth global); {} whenever this run had no oracle links or
+    # every forced-link net landed.
+    try:
+        _flh_out = {}
+        _fll_out = []
+        if oracle_links and state.oracle_links_by_net:
+            for _fnid in state.oracle_links_by_net:
+                _fnm = (pcb_data.nets[_fnid].name
+                        if _fnid in pcb_data.nets else None)
+                if _fnid in (state.routed_results or {}):
+                    # Landed: the caller prunes this net's links so the
+                    # next lap neither re-bypasses the skip nor re-routes
+                    # (duplicates) the strap.
+                    if _fnm:
+                        _fll_out.append(_fnm)
+                    continue
+                _fnames = []
+                for _ev in (state.net_history.get(_fnid) or []):
+                    if _ev.get('event') == 'preexisting_blockers':
+                        for _bn in (_ev.get('details') or {}).get('blockers') or []:
+                            if _bn not in _fnames:
+                                _fnames.append(_bn)
+                if _fnm and _fnames:
+                    _flh_out[_fnm] = _fnames
+        batch_route._forced_link_hints = _flh_out
+        batch_route._forced_link_landed = _fll_out
+    except Exception:
+        batch_route._forced_link_hints = {}
+        batch_route._forced_link_landed = []
 
     if return_results:
         return successful, failed, total_time, results_data
