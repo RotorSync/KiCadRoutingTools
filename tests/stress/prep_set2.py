@@ -177,22 +177,29 @@ def main():
             if d.GetLayer() == pcbnew.Edge_Cuts:
                 fp_edge_items.append((fp, d))
 
+    # RemoveNative, never Remove: outside a running KiCad action plugin
+    # pcbnew's Remove() sets item.thisown=1 on PCB_TRACK/PCB_VIA, which have no
+    # SWIG destructor, and freeing one corrupts the pcbnew type registry
+    # PROCESS-WIDE. This script loops over boards and rebinds `tracks` each
+    # iteration, so the previous board's proxies are freed at the top of the
+    # next one -- the first board WITH copper poisons every board after it
+    # ("'swig_runtime_data5.SwigPyObject' object has no attribute 'GetTracks'").
     for t in tracks:
-        board.Remove(t)
+        board.RemoveNative(t)
 
     removed_zones = kept_zones = 0
     for z in zones:
         if z.GetIsRuleArea():
             kept_zones += 1
             continue
-        board.Remove(z)
+        board.RemoveNative(z)
         removed_zones += 1
 
     if outline_paths:
         for d in board_edge_drawings:
-            board.Remove(d)
+            board.RemoveNative(d)
         for fp, d in fp_edge_items:
-            fp.Remove(d)
+            fp.RemoveNative(d)
         for pts in outline_paths:
             n = len(pts)
             for k in range(n):
@@ -209,7 +216,7 @@ def main():
         lid = d.GetLayer()
         if lid == pcbnew.Edge_Cuts or lid in copper_ids:
             continue
-        board.Remove(d)
+        board.RemoveNative(d)
         removed_gfx += 1
 
     for lid in copper_ids:
