@@ -190,7 +190,11 @@ claude_recs = [
 ]
 md, turns, cmds = extract_narrative.build(claude_recs, board="b1")
 check("narrative claude: narration kept", "Routing signal nets now." in md)
-check("narrative claude: routing cmd kept", "py_router/route.py" in md and cmds == 1)
+# NOT "py_router/route.py": the narrative's _routing_cmd slices from the TOOL
+# BASENAME (any leading path is dropped by design), so the md carries
+# "route.py ..." regardless of where the tool lives. The #522 sweep (8b5b692)
+# rewrote this assertion as if it were a file path and broke it.
+check("narrative claude: routing cmd kept", "route.py" in md and cmds == 1)
 check("narrative claude: check_drc dropped", "check_drc" not in md)
 
 oc_recs = [
@@ -208,7 +212,7 @@ oc_recs = [
 ]
 md, turns, cmds = extract_narrative.build(oc_recs, board="b2")
 check("narrative opencode: narration kept", "Fanning out the BGA." in md)
-check("narrative opencode: routing cmd kept", "py_router/bga_fanout.py" in md and cmds == 1)
+check("narrative opencode: routing cmd kept", "bga_fanout.py" in md and cmds == 1)
 check("narrative opencode: list_nets dropped", "list_nets" not in md)
 check("narrative opencode: ms timestamps parsed", "UTC" in md)
 

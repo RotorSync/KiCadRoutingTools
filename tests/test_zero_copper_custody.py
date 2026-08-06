@@ -116,8 +116,16 @@ def main():
     x_segs = [s for r in results_data['results']
               for s in (r.get('new_segments') or []) if s.net_id == X]
     check("X has new copper", bool(x_segs))
-    check("VICTIM was ripped by the ladder", 'Ripped VICTIM' in out
-          or 'Ripping up VICTIM' in out)
+    # e2ffa29: PRE-EXISTING nets join rip candidacy, and the ladder now
+    # picks WALL (auto-candidate, the dominant blocker) over the
+    # operator-listed VICTIM. The invariant this test guards is the
+    # CUSTODY, not which victim the ladder picks: whoever was ripped must
+    # ship with copper or a loud, owned failure record -- asserted for
+    # WALL below alongside the original VICTIM checks.
+    _victim_ripped = ('Ripped VICTIM' in out or 'Ripping up VICTIM' in out)
+    _wall_ripped = "PRE-EXISTING rip: 'WALL'" in out
+    check("a victim was ripped for X's corridor",
+          _victim_ripped or _wall_ripped)
 
     # 1. Casualty custody consumed on the route.py front.
     check("casualties-only reconcile ran",
@@ -137,6 +145,23 @@ def main():
                           for e in summary.get('failed_multipoint', []))
     check("VICTIM not silently dropped (copper OR owned failure)",
           victim_has_copper or victim_reported)
+    if _wall_ripped:
+        # The zero-copper custody invariant for the auto-candidate victim:
+        # its outcome is disclosed in preexisting_rips AND accounted by the
+        # casualty reconcile -- never a silent zero (the class this test
+        # exists for).
+        _pre = summary.get('preexisting_rips') or {}
+        check("ripped WALL's outcome disclosed in preexisting_rips",
+              'WALL' in _pre)
+        check("casualty_reconcile accounts the ripped WALL",
+              'WALL' in ((summary.get('casualty_reconcile') or {})
+                         .get('unrecovered', [])
+                         + (summary.get('casualty_reconcile') or {})
+                         .get('restored', [])
+                         + (summary.get('casualty_reconcile') or {})
+                         .get('rerouted', [])
+                         + (summary.get('casualty_reconcile') or {})
+                         .get('partial', [])))
     if not victim_has_copper:
         check("coverage gate fired for VICTIM", 'COVERAGE GATE: VICTIM' in out)
         check("VICTIM in failed_multipoint (feeds reconciliation)",

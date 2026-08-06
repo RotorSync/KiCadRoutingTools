@@ -46,6 +46,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 from kicad_parser import BoardInfo
 from synth import make_net, make_pad, make_pcb, make_seg
 
+# This test pins the pad-pair ACCOUNTING shapes (tallies, pad_pairs_open
+# entries, multipoint pair math), which need deterministic PARTIAL results
+# to exercise. e2ffa29's pre-existing rip candidacy recovers these synthetic
+# boards fully (the WALL becomes a rip candidate and every net routes), so
+# the fixtures stop producing partials at all -- candidacy behavior itself
+# is covered by test_409_blockers_json / test_zero_copper_custody. Use the
+# documented kill switch to keep the accounting fixtures partial.
+os.environ['KICAD_RIP_PREEXISTING'] = '0'
+
 BLOCKER, X, WALL = 1, 2, 3
 M = 1
 Y = 1

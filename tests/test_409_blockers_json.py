@@ -123,8 +123,13 @@ def scenario_a():
     check("entry stage is single_ended", entry.get('stage') == 'single_ended')
 
     blocked_by = entry.get('blocked_by') or []
-    check("blocked_by attributes BLOCKER only",
-          [b.get('net') for b in blocked_by] == ['BLOCKER'])
+    _names = [b.get('net') for b in blocked_by]
+    # e2ffa29: PRE-EXISTING nets join rip candidacy, so frontier analysis
+    # now attributes the (dominant) pre-existing WALL alongside this-run
+    # BLOCKER -- attribution is truthful rather than scoped to this-run
+    # copper. The routed net itself must still never appear.
+    check("blocked_by attributes BLOCKER (wall may now be named too)",
+          'BLOCKER' in _names and 'X' not in _names)
     b0 = blocked_by[0] if blocked_by else {}
     check("blocked_by entry has exactly the documented keys",
           set(b0.keys()) == BLOCKED_BY_KEYS)
@@ -143,10 +148,21 @@ def scenario_b():
     print("Scenario B: staleness (default rip-up)")
     summary, results_data, out = _route(_board())
 
-    check("X routed after ripping BLOCKER",
+    check("X routed after ripping the wall",
           'X' in summary.get('routed_single', []))
-    check("BLOCKER in failed_single",
-          'BLOCKER' in summary.get('failed_single', []))
+    # e2ffa29: the ladder now rips the PRE-EXISTING WALL (candidacy) instead
+    # of this-run BLOCKER, so BOTH in-scope nets land routed and the wall's
+    # unpaid cost is DISCLOSED -- the invariant this scenario guards is
+    # "no silent drops", not which victim the ladder picks. (The old
+    # contract had BLOCKER carrying the rip and landing in failed_single.)
+    check("BLOCKER routed too (the wall carried the rip)",
+          'BLOCKER' in summary.get('routed_single', []))
+    _pre = summary.get('preexisting_rips') or {}
+    check("WALL rip disclosed in preexisting_rips",
+          'WALL' in _pre and 'NOT RECOVERED' in str(_pre.get('WALL', '')))
+    check("WALL accounted by casualty_reconcile",
+          'WALL' in ((summary.get('casualty_reconcile') or {})
+                     .get('unrecovered') or []))
     # The staleness invariant: X failed transiently (its analysis recorded
     # BLOCKER) but ultimately routed, so it must NOT appear in 'blockers'.
     # (The key itself may be absent -- BLOCKER's own failure has no
