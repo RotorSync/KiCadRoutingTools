@@ -771,8 +771,14 @@ def apply_step_selection(step, dialog, all_steps=None):
     notes = []
     action = step["action"]
     plane_nets = _plan_plane_nets(all_steps, dialog)
+    # The step's RAW globs, for batch_route's net_name_patterns (#521 override
+    # semantics). Cleared for EVERY step first: the names below are expanded
+    # before selection, so a stale glob list from an earlier route step would
+    # silently grant protection-override to nets this step never named.
+    dialog._plan_net_globs = None
     if action == "route":
         globs = step.get("nets") or ["*"]
+        dialog._plan_net_globs = list(globs)
         names = _match_net_names(dialog.pcb_data, globs)
         # Drop wildcard-selected plane nets only from route steps that run
         # BEFORE the first plane step (routing a whole rail as tracks there

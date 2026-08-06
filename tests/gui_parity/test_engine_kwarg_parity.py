@@ -88,14 +88,12 @@ CLI_ONLY_OK = {
     # harness to scrape. The GUI consumes results in-memory (return_results=
     # True) and has no summary-file output, so there is nothing to point at.
     "json_out": "CLI writes a JSON summary file; the GUI consumes results in-memory",
-    # #521 override source. The CLI must forward the RAW --nets globs because
-    # its own expansion turns a glob into exact names, which would make any
-    # glob-selected protected net look 'exactly named' and thus rippable. The
-    # GUI has no raw globs to forward: its net panel is keyed by REAL net
-    # names, and ai_plan resolves a plan's globs to those names BEFORE the
-    # engine call -- so a GUI selection is always exact, which is already the
-    # semantics #521's override intends.
-    "net_name_patterns": "GUI selects exact net names (globs resolved pre-call), so raw patterns don't exist there",
+    # (net_name_patterns was exempted here as "the GUI has no raw globs".
+    # REVERSED: ai_plan resolving a plan's globs to exact names BEFORE the
+    # call is not the reason the exemption is safe, it is the reason it was
+    # NOT -- the engine then reads every glob-matched protected net as
+    # 'exactly named' and rips it. The GUI now forwards the step's raw globs
+    # (dialog._plan_net_globs), so no exemption is needed.)
 }
 
 # Kwargs only the GUI passes: the in-memory/live-board plumbing that has no CLI

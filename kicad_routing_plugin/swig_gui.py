@@ -2418,6 +2418,10 @@ class RoutingDialog(wx.Dialog):
         self.rip_existing_nets_ctrl.SetValue("")
         self.force_reroute.SetValue(False)  # match creation default + CLI (store_true)
         self.layer_costs_ctrl.SetValue("")
+        # Not a control: the plan step's raw net globs (see
+        # _build_routing_config's net_name_patterns). Reset with the params so
+        # an interactive run after a plan cannot inherit a step's globs.
+        self._plan_net_globs = None
 
         # Reset advanced parameters
         self.impedance_check.SetValue(False)
@@ -2837,6 +2841,17 @@ class RoutingDialog(wx.Dialog):
         # Parse layer costs
         config['layer_costs'] = self._selected_layer_costs()
 
+        # RAW net patterns, CLI parity with route.py's net_name_patterns=
+        # all_patterns. The engine uses them ONLY as #521 protection-override
+        # patterns, and falls back to the expanded net_names when this is None
+        # -- which is right for an INTERACTIVE selection (checking a net IS
+        # naming it exactly) but WRONG for a plan step, whose '*'-globs the
+        # plan executor expands to literal names before selecting them: the
+        # fallback would then read every glob-matched protected net as
+        # exactly-named and rip it, the exact hole #521 closed on the CLI.
+        # Set by ai_plan.apply_step_selection per step; None = interactive.
+        config['net_name_patterns'] = getattr(self, '_plan_net_globs', None)
+
         return config
 
     def _on_tabbed_view_changed(self, notebook):
@@ -3238,6 +3253,11 @@ class RoutingDialog(wx.Dialog):
                     disable_bga_zones=config.get('no_bga_zones'),
                     rip_existing_nets=config.get('rip_existing_nets'),
                     force_reroute=config.get('force_reroute', False),
+                    # RAW patterns (pre-expansion), like the CLI main: the #521
+                    # protection override must see what was TYPED/PLANNED, not
+                    # the expanded names. None (interactive) = the engine's
+                    # net_names fallback, which is the same semantic there.
+                    net_name_patterns=config.get('net_name_patterns'),
                     layer_costs=config.get('layer_costs', []),
                     length_match_groups=config.get('length_match_groups'),
                     length_match_tolerance=config.get('length_match_tolerance', 0.1),
