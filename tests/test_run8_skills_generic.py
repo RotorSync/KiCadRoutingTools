@@ -115,7 +115,10 @@ def main():
     for label, needle, where in [
             ('outline prohibition', 'OUTLINE IS NOT YOURS TO CHANGE',
              ptext + rtext),
-            ('placement off by default', 'usually SKIPPED', ptext + rtext),
+            ('the placement gate is a measurement, not a default',
+             'measure first, then decide', ptext + rtext),
+            ('a clean placement is left alone, as a CONSEQUENCE of measuring',
+             'WORSE by a polish pass', ptext),
             ('locks are never the tool\'s to move', 'locked yes', ptext),
             ('crossings is not a gate', 'crossings', ptext),
             ('placement invalidates downstream boards', 'invalidates',

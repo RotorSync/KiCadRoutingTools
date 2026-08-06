@@ -10,10 +10,16 @@ the doc-vs-code gate: `run_doc_examples.gridrouteconfig_undocumented_fields` and
 `tests/gui_parity/test_cli_postpass_coverage.py`.
 
 Explicitly NOT testable, and worth saying rather than pretending: whether Claude
-*decides correctly* not to run placement on a good board. The mitigations for
-that are design, not assertion -- the default-off framing in the order
-rationale, the decision table, and the board-state gates that refuse the worst
-case outright.
+*decides correctly* what to do with a given placement. The mitigations are
+design, not assertion -- a MANDATORY copper-free measurement whose two outcomes
+are both legitimate, the decision table it feeds, the driver that refuses to
+emit a repair stage without that measurement, and the board-state gates that
+refuse the worst case outright.
+
+Note the design change (run 8): this file used to assert the skill said
+placement was "normally SKIPPED". That was the wrong invariant. A default of
+SKIP is satisfied most cheaply by skipping, and the thing being skipped is the
+check that catches stacked parts.
 """
 
 import importlib.util
@@ -182,10 +188,30 @@ def test_exit_code_contract_is_documented():
         "the skill must state the exit-3 contract it tells Claude to rely on"
 
 
-def test_skill_says_placement_is_off_by_default():
-    """The single most important thing for a model to get right here."""
+def test_skill_decides_placement_by_measurement_not_by_default():
+    """The single most important thing for a model to get right here.
+
+    This used to assert the skill said placement was "normally SKIPPED", and
+    that was the wrong invariant to pin. A default of SKIP is what lets an
+    executor route a board whose parts are stacked on each other: the cheapest
+    way to satisfy "usually skip" is to skip, and the check that would have
+    caught the damage is the thing being skipped.
+
+    The rule is measure-then-decide. The measurement is two commands on the
+    copper-free board, it is never optional, and BOTH outcomes are legitimate:
+    clean means route (a verdict, not an assumption), dirty means fix. The
+    reason not to optimise a clean placement survives -- as a consequence of
+    the measurement rather than as a reason to skip it.
+    """
     skill = _all_skill_text()
-    assert 'normally SKIPPED' in skill or 'do not run it' in skill
+    # The gate is a measurement, and it is mandatory.
+    assert 'measure first, then decide' in skill.lower()
+    assert 'never optional' in skill.lower() or 'NEVER skip the assessment' in skill
+    # Both instruments, because neither alone sees a same-net stack.
+    assert 'check_drc' in skill and 'check_assembly' in skill
+    assert 'copper-free' in skill.lower() or 'COPPER-FREE' in skill
+    # The measured reason a CLEAN placement is left alone must survive.
+    assert 'WORSE by a polish pass' in skill or 'makes it worse' in skill
     assert 'decision table' in skill.lower()
     # and that the render is not mistaken for the verdict (#431 limit 3)
     assert 'triage, not a verdict' in skill
@@ -362,7 +388,7 @@ TESTS = [
     test_routing_only_stays_the_default_path,
     test_skill_states_the_board_outline_is_not_editable,
     test_verdict_lines_do_not_collide_with_the_gui_result_contract,
-    test_skill_says_placement_is_off_by_default,
+    test_skill_decides_placement_by_measurement_not_by_default,
 ]
 
 

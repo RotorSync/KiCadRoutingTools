@@ -175,6 +175,11 @@ The clearance floor comes off the board (its .kicad_pro netclass, its
 .kicad_dru rules), never from a round number. Grading at a floor the board was
 not routed to manufactures violations that are not there.
 
+Before any of this is worth doing, the placement must have been MEASURED fit
+(the copper-free check_drc + check_assembly pair). If that has not happened on
+this board, stop and do it: no routing parameter recovers a placement defect,
+and every instrument from here on looks at copper.
+
 Next: --stage A2 --board {a.board}   (or --plan for the whole computed chain)
 </stage_instructions>'''
 

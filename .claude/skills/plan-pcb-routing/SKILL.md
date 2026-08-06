@@ -1,6 +1,6 @@
 ---
 name: plan-pcb-routing
-description: Analyzes a KiCad PCB file and creates a comprehensive placement-and-routing plan. Routing-only is the default and fully supported path. Detects unplaced boards and advises which parts to lock before any placement repair, can declare a floorplan intent and grade the board against it, examines components for fanout needs (BGA/QFN/QFP/PGA), identifies differential pairs, categorizes power/ground nets, and presents a step-by-step workflow with explanations. Pairs every render with the JSON key that confirms or contradicts it, reads the renders itself rather than only showing them, and classifies routing failures as floorplan-, placement- or parameter-shaped so the two halves form one loop. Never changes the board outline.
+description: Analyzes a KiCad PCB file and creates a comprehensive placement-and-routing plan. Routing-only is the usual path, reached by MEASURING that the placement is fit rather than by assuming it. Detects unplaced boards and advises which parts to lock before any placement repair, can declare a floorplan intent and grade the board against it, examines components for fanout needs (BGA/QFN/QFP/PGA), identifies differential pairs, categorizes power/ground nets, and presents a step-by-step workflow with explanations. Pairs every render with the JSON key that confirms or contradicts it, reads the renders itself rather than only showing them, and classifies routing failures as floorplan-, placement- or parameter-shaped so the two halves form one loop. Never changes the board outline.
 ---
 
 # Plan PCB Routing
@@ -49,14 +49,18 @@ before overriding it.
 The rest of this file is the reference the stages point into. Read the part a
 stage names, when it names it.
 
-## Step 0: Placement gate (usually SKIPPED)
+## Step 0: Placement gate — measure first, then decide
 
-Routing-only is this skill's default and fully supported path. Before planning
-copper, ask one question: **is this board's placement fit to route?**
+Before planning copper, answer one question, and answer it by MEASURING:
+**is this board's placement fit to route?**
+
+Routing-only is this skill's normal path, but "normal" is the outcome of the
+check, not a reason to skip it. A board whose placement is wrong cannot be
+rescued by any router, and the check costs two commands.
 
 | board state | do this |
 |---|---|
-| placed, routing not yet attempted | **nothing** -- go to Step 1. This is the common case |
+| placed, and BOTH checks below come back clean | go to Step 1. This is the common outcome -- and it is an outcome, not an assumption |
 | board already carries copper | **nothing** -- placement moves footprints, not tracks; the placement tools exit 3 |
 | unplaced, or placed WRONG (a copper-free `check_drc` returns violations, or a mechanically-fixed part sits where mechanics forbid) | **stop and invoke `/plan-pcb-placement`**, then start this skill again from its output |
 | routing FAILED and the diagnosis is congestion/blockers | invoke `/plan-pcb-placement-and-routing`, which owns the loop |
@@ -1731,14 +1735,15 @@ Based on the analysis, generate a step-by-step plan. The general order is:
 
 ### Routing Order Rationale
 
-0. **Placement (conditional -- normally SKIPPED).** Run it ONLY for a rough /
+0. **Placement (conditional -- decided by Step 0's measurement).** Run it for a rough /
    imported / generated placement, when routing has already FAILED and
    `/diagnose-routing-failures` blames congestion rather than parameters, or
    when the user wants placement OPTIONS / a converged run's failures were
    floorplan-shaped (then it is `place_portfolio.py`, Step 0c-bis — a slate,
    not a nudge; and an unplaced board with an intent gets `place_seed.py`
-   first, per the Step 0 ladder). See Step 0's decision table; the default is
-   **do not run it**. Run the lock advisor first and pass its `--lock` list.
+   first, per the Step 0 ladder). See Step 0's decision table -- the
+   copper-free measurement decides, not a default. Run the lock advisor first
+   and pass its `--lock` list.
    A placement step claims NO nets (see the Step 5b carve-out) and
    invalidates every downstream routed board.
 1. **Pour the planes FIRST — on the EMPTY board, before the fanout.** A bare

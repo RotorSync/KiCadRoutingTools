@@ -1,6 +1,6 @@
 ---
 name: plan-pcb-placement
-description: Analyses a KiCad PCB's PLACEMENT and produces a placement plan. Decides whether the board should be placed or re-placed at all (usually not), detects an unplaced board, separates the parts whose position is a mechanical fact from the ones a search may move, reconstructs a damaged placement (pattern fit, rigid vectors, exact assignment, minimal-move legalize), repairs local violations, offers a slate of arrangements, and grades the result against a declared floorplan intent. Never changes the board outline, and never routes.
+description: Analyses a KiCad PCB's PLACEMENT and produces a placement plan. Measures whether the board should be placed or re-placed at all and decides from that measurement, detects an unplaced board, separates the parts whose position is a mechanical fact from the ones a search may move, reconstructs a damaged placement (pattern fit, rigid vectors, exact assignment, minimal-move legalize), repairs local violations, offers a slate of arrangements, and grades the result against a declared floorplan intent. Never changes the board outline, and never routes.
 ---
 
 # Plan PCB Placement
@@ -15,9 +15,17 @@ placement at all, fixing it when it is wrong, and proving the fix.
 that only exist when they meet.
 
 <non_negotiable>
-1. Placement is OFF by default. Read the decision table below; on most boards
-   the answer is do not run it. A careful hand placement is made WORSE by a
-   polish pass (measured).
+1. NEVER skip the assessment. It is two commands on the copper-free board and
+   it decides everything below. Skipping it is how a board with parts stacked
+   on each other reaches routing.
+   What the assessment decides:
+     no placement at all              -> place it (P1)
+     placed, and the measurement is DIRTY  -> fix it (P2/P3/P4)
+     placed, and the measurement is CLEAN  -> STOP. Do not run an optimizer
+       over a placement that already passes: a careful hand placement is made
+       WORSE by a polish pass (measured), and the default weights caused two
+       new routing failures.
+   "Clean" is a measured verdict, never an impression of the board.
 2. THE BOARD OUTLINE IS NOT YOURS TO CHANGE. Size, cutouts and slots are
    mechanical decisions the user owns.
 3. A part the file marks `(locked yes)` is never yours to move, whatever an
@@ -78,7 +86,7 @@ read it when the step below points at it:
 | `.claude/skills/plan-pcb-routing/references/verifier-prompts.md` | you are dispatching a verification subagent |
 | `.claude/skills/plan-pcb-routing/references/convergence.md` | you are running a fix loop and need its stop conditions |
 
-## Step 0: Placement gate (usually SKIPPED — read the decision table)
+## Step 0: Placement gate — measure first, then decide
 
 Before planning any routing, decide whether the board should be **placed** or
 **re-placed** at all. Most of the time the answer is no, and running placement on

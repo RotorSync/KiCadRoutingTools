@@ -63,8 +63,11 @@ def err(text):
 def p0(a):
     """Decide whether to touch the placement at all."""
     return f'''<stage_instructions stage="P0" name="gate" of="7">
-Decide whether this board's placement should be touched. On most boards the
-answer is no, and running a placement pass on a good board makes it worse.
+MEASURE this board's placement, then decide. Do not decide first.
+
+The measurement is two commands and it is never optional. Skipping it is how a
+board with two parts stacked on each other reaches routing -- every other
+instrument in the chain looks at copper, and there is no copper yet.
 
 Run BOTH, on the board with its copper removed. Neither alone is enough: the
 first cannot see two parts stacked on the same net, the second is the channel
@@ -81,10 +84,15 @@ round number you chose.
 Every violation a COPPER-FREE board returns is a placement defect that no
 router can remove.
 
-Then classify, and say which row you are in:
+Then classify by what you MEASURED, and say which row you are in:
 
-  both clean                  -> placement is DONE. Do not run a pass. Hand the
-                                 board to /plan-pcb-routing and stop here.
+  both clean                  -> the placement is fit. Do not run a pass over
+                                 it: an optimizer on a placement that already
+                                 passes makes it worse (measured -- the default
+                                 weights caused two new routing failures). Hand
+                                 the board to /plan-pcb-routing and stop here.
+                                 This is a verdict you reached, not a default
+                                 you assumed.
   board carries copper        -> STOP. Placement moves footprints, not tracks;
                                  the tools exit 3. Re-run from the unrouted board.
   unplaced                    -> P1
