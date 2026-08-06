@@ -1327,7 +1327,9 @@ class QuenchState:
         overlaps = 0
         holes = 0.0
         stacks = 0
+        locked_contacts = 0
         for i, a in enumerate(refs):
+            a_locked = self.parts[a].locked
             for b in refs[i + 1:]:
                 sf = self.legality_ctx.pair_shortfall(a, b)
                 if sf.pad > legality.EPS:
@@ -1338,6 +1340,14 @@ class QuenchState:
                 if sf.stack:
                     stacks += 1
                 holes += sf.hole
+                # E6, riding along in the loop that is already walking every
+                # pair: copper touching a part KiCad marks (locked yes). A
+                # locked pose is a decision made outside this toolchain, so a
+                # search may not settle the contact by moving the other part.
+                if (a_locked or self.parts[b].locked) and (
+                        sf.stack or sf.hole > legality.EPS
+                        or sf.pad > legality.EPS):
+                    locked_contacts += 1
         return {'pad_conflict_pairs': pairs,
                 'pad_shortfall': round(short, 4),
                 'pad_overlap_pairs': overlaps,
@@ -1345,6 +1355,7 @@ class QuenchState:
                 # assembly (stacked-parts) channel, corpus-calibrated 0 on
                 # every healthy board in both exact and AABB currencies
                 'pad_intersection_pairs': stacks,
+                'locked_contact_pairs': locked_contacts,
                 'hole_shortfall': round(holes, 4)}
 
     # ----- move application -------------------------------------------------

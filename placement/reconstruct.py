@@ -111,12 +111,57 @@ def pad_oob_amount(state, edge_bands=None) -> float:
     return oob
 
 
+def _cross_group_contact(state, groups, snap):
+    """First (a, b) newly in contact across two DIFFERENT move groups, or None.
+
+    `groups` maps a multiplier k to the refs moved by k*v, so refs in
+    different groups moved by different vectors. `snap` holds their poses
+    before the move, used to skip pairs that already conflicted.
+    """
+    ctx = state.legality_ctx
+    if ctx is None or len(groups) < 2:
+        return None
+    keys = sorted(groups)
+    for i, ka in enumerate(keys):
+        for kb in keys[i + 1:]:
+            for a in sorted(groups[ka]):
+                for b in sorted(groups[kb]):
+                    sf = ctx.pair_shortfall(a, b)
+                    if not (sf.stack or sf.pad > legality.EPS or sf.hole > legality.EPS):
+                        continue
+                    # Was it already touching before this move? Restore the
+                    # two poses, re-ask, put them back.
+                    keep = {r: (state.parts[r].x, state.parts[r].y,
+                                state.parts[r].rot) for r in (a, b)}
+                    for r in (a, b):
+                        if r in snap:
+                            state.apply_move(r, *snap[r])
+                    before = ctx.pair_shortfall(a, b)
+                    for r, pose in keep.items():
+                        state.apply_move(r, *pose)
+                    if not (before.stack or before.pad > legality.EPS
+                            or before.hole > legality.EPS):
+                        return (a, b)
+    return None
+
+
 def measure(state, edge_bands=None) -> Tuple:
     """The lexicographic gate tuple. Smaller-or-equal is acceptable.
 
-    Order (run-6): pad conflicts, hole shortfall, banded pad-oob, then
-    STACK PAIRS (any-net cross-footprint pad intersections -- the assembly
-    channel), then hpwl, then courtyard overlap as the LAST tiebreak.
+    Order (run-8): LOCKED CONTACTS first, then pad conflicts, hole shortfall,
+    banded pad-oob, then STACK PAIRS (any-net cross-footprint pad
+    intersections -- the assembly channel), then hpwl, then courtyard overlap
+    as the LAST tiebreak.
+
+    Locked contacts lead because they are the one term nothing below may buy.
+    A locked pose is a decision made outside this toolchain -- a standoff
+    against an enclosure, a connector against a panel cut-out -- so a candidate
+    that lands copper on one has not found a trade-off, it has broken a
+    premise. Placing it first makes it a hard conjunct in the machinery that
+    already exists: any candidate that creates one is strictly worse and is
+    rejected, whatever it wins on hpwl. On a healthy board the term is 0 and
+    the order below it is unchanged (measured: the corpus sweep does not
+    move).
 
     Two measured lessons live in this order. Run 4 demoted the AGGREGATE
     overlap_area below hpwl (it had vetoed a 44 mm hpwl homecoming over
@@ -129,7 +174,8 @@ def measure(state, edge_bands=None) -> Tuple:
     the aggregate never can."""
     m = state.pad_legality_metrics() if state.legality_ctx is not None else {}
     leg = state.legality_metrics()
-    return (m.get('pad_conflict_pairs', 0),
+    return (m.get('locked_contact_pairs', 0),
+            m.get('pad_conflict_pairs', 0),
             round(m.get('hole_shortfall', 0.0), 4),
             round(pad_oob_amount(state, edge_bands), 4),
             m.get('pad_intersection_pairs', 0),
@@ -637,8 +683,22 @@ def exchange_stage(state, vectors: Sequence[Tuple[float, float]],
             for k, refs_ in sorted(groups.items()):
                 state.apply_group_move(sorted(refs_), k * vx, k * vy)
             after = measure(state, edge_bands)
+            # E7, in the one place the engine KNOWS the applied vectors.
+            # Members displaced by the same k*v keep their relative geometry
+            # exactly, so they cannot newly touch each other; a new contact
+            # between two members of DIFFERENT groups means this assignment is
+            # not a rigid restore but a search result that happens to fit.
+            # Checked only across groups, and only for pairs that were clear
+            # before -- a conflict the input already had is not this move's.
+            cross_group_hit = _cross_group_contact(state, groups, snap)
+            if cross_group_hit and notes is not None:
+                notes.append(
+                    f'exchange: REJECTED an assignment along '
+                    f'({vx:.3f}, {vy:.3f}) -- it puts {cross_group_hit[0]} '
+                    f'and {cross_group_hit[1]} in contact although they moved '
+                    f'by different vectors, which a rigid restore cannot do')
             # STRICT improvement: an exchange the tuple cannot see is churn.
-            if after < base:
+            if after < base and not cross_group_hit:
                 base = after
                 old.update(snap)
                 report['accepted'].append(
