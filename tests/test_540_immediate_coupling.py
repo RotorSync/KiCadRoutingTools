@@ -26,8 +26,10 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522
 
-import route_disconnected_planes as rdp
+import repair_planes as rdp
 
 
 class _Net:

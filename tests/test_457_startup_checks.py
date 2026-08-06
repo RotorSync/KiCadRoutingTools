@@ -3,7 +3,7 @@ Tests for startup_checks raising rather than exiting (issue #457 item 3).
 
 `startup_checks` called `sys.exit(1)` when numpy/scipy/shapely were missing or the
 Rust router was absent or stale, and route.py / route_diff.py / route_planes.py /
-route_disconnected_planes.py all call it at MODULE scope. A `SystemExit` raised
+repair_planes.py all call it at MODULE scope. A `SystemExit` raised
 during pytest collection escapes as an INTERNALERROR rather than a per-file
 collect error, so on a checkout with no built router the 8 test files that import
 a routing module at module level took the whole ~200-test suite down with them.
@@ -23,6 +23,8 @@ import sys
 import textwrap
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # #522
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # #522
 
 import startup_checks
 from startup_checks import (MIN_PYTHON, StartupCheckError, check_python_dependencies,
@@ -152,7 +154,7 @@ def _run_probe(module_name):
 
 
 def test_as_main_prints_and_exits_one():
-    """A user running `python3 route.py` must see exactly what they saw before."""
+    """A user running `python3 py_router/route.py` must see exactly what they saw before."""
     r = _run_probe('__main__')
     assert r.returncode == 1, f"expected exit 1, got {r.returncode}"
     assert 'SIMULATED: router missing' in r.stdout, \
@@ -176,7 +178,7 @@ def test_routing_clis_use_the_guard_at_module_scope():
     ABOVE their heavy imports so a missing dep is reported before numpy or
     grid_router fails with something cryptic."""
     for name in ('route.py', 'route_diff.py', 'route_planes.py',
-                 'route_disconnected_planes.py'):
+                 'repair_planes.py'):
         src = open(os.path.join(ROOT, name), encoding='utf-8').read()
         assert 'exit_on_error_if_main(__name__)' in src, \
             f"{name} does not use the import-safe guard"

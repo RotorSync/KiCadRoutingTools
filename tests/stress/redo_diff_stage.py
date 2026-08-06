@@ -41,7 +41,7 @@ import sys
 # repo root = two levels up from this file (tests/stress/redo_diff_stage.py)
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 REDO = os.path.join(REPO, "tests", "stress", "redo_stress_test.py")
-CHECK_DRC = os.path.join(REPO, "check_drc.py")
+CHECK_DRC = os.path.join(REPO, 'py_router', 'check_drc.py')
 DEFAULT_ROOT = os.path.expanduser("~/Documents/kicad_stress_test")
 DEFAULT_OUT = os.path.expanduser("~/Documents/diff2")
 

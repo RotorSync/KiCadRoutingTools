@@ -9,7 +9,7 @@ and nothing knew the pads were one cluster (castor_pollux U9/U13 +3.3VA pads
 - create_plane (route_planes.py): before drilling, strap to an adjacent
   already-connected same-net pad within PLANE_PAD_STRAP_RADIUS (verified on
   castor_pollux: 10 straps, 128 -> 118 vias, DRC/connectivity identical).
-- the plane repair pass (route_disconnected_planes) now enables the
+- the plane repair pass (repair_planes) now enables the
   trace-to-connected-copper step (#180) at strap scale even without
   --rip-blocker-nets.
 
@@ -25,6 +25,8 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522
 
 from kicad_parser import Pad, Via, PCBData, BoardInfo
 from routing_config import GridRouteConfig

@@ -25,6 +25,8 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522
 
 
 def test_route_verdict_counts_open_single():
@@ -103,7 +105,7 @@ def test_end_to_end_key_present_and_clean():
         js = os.path.join(td, 's.json')
         out = os.path.join(td, 's.kicad_pcb')
         r = subprocess.run([sys.executable, '-X', 'utf8',
-                            os.path.join(ROOT, 'route.py'), board, out,
+                            os.path.join(ROOT, 'py_router', 'route.py'), board, out,
                             '--nets', 'GND', '--json-out', js],
                            capture_output=True, text=True, encoding='utf-8',
                            errors='replace', cwd=ROOT)

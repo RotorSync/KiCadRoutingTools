@@ -25,6 +25,8 @@ import sys
 TESTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROOT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, ROOT_DIR)
+sys.path.insert(0, os.path.join(ROOT_DIR, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT_DIR, 'py_tools'))  # #522
 
 from kicad_parser import parse_kicad_pcb
 from geometry_utils import segment_to_segment_distance_seg, point_to_segment_distance_seg

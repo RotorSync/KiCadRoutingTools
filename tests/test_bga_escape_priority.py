@@ -27,6 +27,8 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522
 IU_BOARD = os.path.join(ROOT, "kicad_files", "interf_u_unrouted_placed.kicad_pcb")
 ULX_BOARD = os.path.expanduser(
     "~/Documents/kicad_stress_test/boards_unrouted_set2/ulx3s.kicad_pcb")
@@ -34,7 +36,7 @@ ULX_BOARD = os.path.expanduser(
 
 def run_fanout(board, args):
     out = tempfile.mktemp(suffix=".kicad_pcb")
-    cmd = [sys.executable, "bga_fanout.py", board, "--output", out] + args
+    cmd = [sys.executable, "py_router/bga_fanout.py", board, "--output", out] + args
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
     txt = r.stdout + r.stderr
     if os.path.exists(out):

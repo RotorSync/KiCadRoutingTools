@@ -54,27 +54,25 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.join(REPO, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(REPO, 'py_tools'))  # #522
 PLUG = os.path.join(REPO, "kicad_routing_plugin")
 
 # (CLI module, GUI module, CLI-side function name, GUI-side call name).
-# The names differ when the GUI imports the engine under an alias
-# (planes_gui: `from route_disconnected_planes import route_planes as
-# repair_planes`).
+# The names differ when the GUI imports the engine under an alias.
 PAIRS = [
-    ("route.py",            "kicad_routing_plugin/swig_gui.py",
+    ("py_router/route.py",            "kicad_routing_plugin/swig_gui.py",
      "batch_route", "batch_route"),
-    ("route_diff.py",       "kicad_routing_plugin/differential_gui.py",
+    ("py_router/route_diff.py",       "kicad_routing_plugin/differential_gui.py",
      "batch_route_diff_pairs", "batch_route_diff_pairs"),
-    ("route_planes.py",     "kicad_routing_plugin/planes_gui.py",
+    ("py_router/route_planes.py",     "kicad_routing_plugin/planes_gui.py",
      "create_plane", "create_plane"),
-    # The #511 engine-coverage sweep: these three call sites were never gated,
-    # and the first one was hiding a real Class-1 gap (ripup_blocker_select
-    # supplied in config but never forwarded to the repair engine).
-    ("route_disconnected_planes.py", "kicad_routing_plugin/planes_gui.py",
-     "route_planes", "repair_planes"),
-    ("bga_fanout/__init__.py", "kicad_routing_plugin/fanout_gui.py",
+    # (No repair pair since #562: plane repair moved INSIDE batch_route's
+    # finalize, so route.py<->swig_gui's batch_route pair covers it and the
+    # planes tab no longer calls the repair engine at all.)
+    ("py_router/bga_fanout/__init__.py", "kicad_routing_plugin/fanout_gui.py",
      "generate_bga_fanout", "generate_bga_fanout"),
-    ("qfn_fanout/__init__.py", "kicad_routing_plugin/fanout_gui.py",
+    ("py_router/qfn_fanout/__init__.py", "kicad_routing_plugin/fanout_gui.py",
      "generate_qfn_fanout", "generate_qfn_fanout"),
 ]
 
@@ -90,6 +88,18 @@ CLI_ONLY_OK = {
     # path is warn-only by engine design (return_results=True), so the
     # opt-out flag has no GUI meaning.
     "allow_bare_pads": "pour gate refuses only on the CLI; GUI path is warn-only by design (run-6 A5)",
+    # --json-out writes the merged JSON_SUMMARY to a FILE for the stress
+    # harness to scrape. The GUI consumes results in-memory (return_results=
+    # True) and has no summary-file output, so there is nothing to point at.
+    "json_out": "CLI writes a JSON summary file; the GUI consumes results in-memory",
+    # #521 override source. The CLI must forward the RAW --nets globs because
+    # its own expansion turns a glob into exact names, which would make any
+    # glob-selected protected net look 'exactly named' and thus rippable. The
+    # GUI has no raw globs to forward: its net panel is keyed by REAL net
+    # names, and ai_plan resolves a plan's globs to those names BEFORE the
+    # engine call -- so a GUI selection is always exact, which is already the
+    # semantics #521's override intends.
+    "net_name_patterns": "GUI selects exact net names (globs resolved pre-call), so raw patterns don't exist there",
 }
 
 # Kwargs only the GUI passes: the in-memory/live-board plumbing that has no CLI
@@ -97,6 +107,11 @@ CLI_ONLY_OK = {
 GUI_ONLY_OK = {
     "input_file", "output_file", "net_names", "pcb_data", "return_results",
     "progress_callback", "cancel_check", "net_clearances",
+    # #562: the in-run finalize's ORACLE leg needs a board staged on disk to
+    # verify against KiCad's fill. The CLI already has one (output_file); the
+    # GUI hands back a SaveBoard of the LIVE board via this callback. Live-board
+    # plumbing with no CLI equivalent, exactly like pcb_data above.
+    "stage_board_fn",
 }
 
 # ---------------------------------------------------------------------------
@@ -266,11 +281,6 @@ def check_class2():
              {"config": {**d.get_routing_config(), **d.get_config()}}),
             ("create_plane", "kicad_routing_plugin/planes_gui.py",
              {"config": {**p.create_options.get_config(), **p.get_shared_params()}}),
-            # The #511 engine-coverage sweep additions. Repair supplies come
-            # from the REAL assembly method (_build_mode_config), so the gate
-            # cannot drift from what _on_action_clicked hands the engine.
-            ("repair_planes", "kicad_routing_plugin/planes_gui.py",
-             {"config": {**p._build_mode_config(1), "assignments": []}}),
             ("generate_bga_fanout", "kicad_routing_plugin/fanout_gui.py",
              {"config": f.bga_options.get_config(), "shared": f.get_shared_params()}),
             ("generate_qfn_fanout", "kicad_routing_plugin/fanout_gui.py",
@@ -278,7 +288,6 @@ def check_class2():
         ]
         probes = (dlg, d, p, f,
                   getattr(p, "create_options", None),
-                  getattr(p, "repair_options", None),
                   getattr(f, "bga_options", None),
                   getattr(f, "qfn_options", None))
         failures = []
@@ -314,7 +323,6 @@ def check_class2():
                       f"drop from KNOWN_DEAD_DIFF_KEYS: {revived}")
         failures += check_coplanar_case(dlg)
         failures += check_delegation_case(dlg)
-        failures += check_repair_case(dlg)
         return failures
     finally:
         dlg.Destroy()
@@ -402,49 +410,6 @@ def check_delegation_case(dlg):
         print(f"  call site reads:        {key:24} {'OK' if ok else 'FAIL (no kwarg reads this key)'}")
         if not ok:
             out.append(f"#511 case: differential_gui call site no longer reads config['{key}']")
-    return out
-
-
-def check_repair_case(dlg):
-    """The plane-repair twins of the #511 case, at NON-DEFAULT values.
-
-    Covers the three formerly-dead paths the engine-coverage sweep fixed:
-    the two Create-panel knobs repair borrows (max_search_radius, the
-    override-gated zone_clearance -- both read at the repair call site but
-    never supplied before _build_mode_config) and the shared rip-up blocker
-    dropdown (supplied but never FORWARDED -- #424's create-side fix had
-    missed the repair call, so it stayed on 'count').
-    """
-    print("\n#511 REPAIR CASE (create-panel knobs + blocker select reach repair)")
-    out = []
-    p = dlg.planes_tab
-    co = p.create_options
-    co.max_search_radius.SetValue(9.0)
-    msr = co.max_search_radius.GetValue()  # post-clamp actual
-    co.zone_clearance_check.SetValue(True)
-    co.zone_clearance.SetValue(0.33)
-    zc = co.zone_clearance.GetValue()
-    sel = 1 if dlg.ripup_blocker_select.GetCount() > 1 else 0
-    dlg.ripup_blocker_select.SetSelection(sel)
-    blocker = dlg.ripup_blocker_select.GetString(sel)
-    cfg = p._build_mode_config(1)
-    for key, want in (("max_search_radius", msr), ("zone_clearance", zc),
-                      ("ripup_blocker_select", blocker), ("mode", "repair")):
-        got = cfg.get(key, "<ABSENT>")
-        ok = got == want
-        print(f"  control -> repair config: {key:22} = {got!r} (want {want!r})  "
-              f"{'OK' if ok else 'FAIL'}")
-        if not ok:
-            out.append(f"repair case: config {key}={got!r}, expected {want!r} "
-                       f"-- the control does not reach the repair engine")
-    _, names, keys, _ = _widest(_calls(
-        os.path.join(REPO, "kicad_routing_plugin/planes_gui.py"), "repair_planes"))
-    read = {k for _recv, k in keys.values()}
-    for key in ("max_search_radius", "zone_clearance", "ripup_blocker_select"):
-        ok = key in read and (key in names)
-        print(f"  call site forwards:       {key:22} {'OK' if ok else 'FAIL'}")
-        if not ok:
-            out.append(f"repair case: planes_gui repair call does not read/forward '{key}'")
     return out
 
 

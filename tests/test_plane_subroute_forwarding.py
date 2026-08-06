@@ -27,7 +27,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # clearances. route.py itself is excluded (it IS batch_route's home; its
 # internal recursion forwards **kwargs wholesale).
 ENGINE_FILES = [
-    'route_disconnected_planes.py',
+    'repair_planes.py',
     'route_planes.py',
 ]
 

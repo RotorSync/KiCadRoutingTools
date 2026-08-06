@@ -28,6 +28,8 @@ from types import SimpleNamespace
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522
 
 from kicad_parser import BoardInfo, Net, Pad, PCBData, Segment  # noqa: E402
 from rip_restore import try_terminal_restore  # noqa: E402

@@ -18,6 +18,8 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.join(os.path.dirname(__file__), '..'), 'py_router'))  # #522
+sys.path.insert(0, os.path.join(os.path.join(os.path.dirname(__file__), '..'), 'py_tools'))  # #522
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tests/stress'))
 
 from redo_stress_test import seed_side_files  # noqa: E402
@@ -37,7 +39,7 @@ def main():
         open(os.path.join(src, "0.25"), "w").write("decoy")
 
         cmds = [
-            (src, ["route.py", "a.kicad_pcb", "b.kicad_pcb",
+            (src, ["py_router/route.py", "a.kicad_pcb", "b.kicad_pcb",
                    "--net-clearances", "net_clearances_1v8.json",
                    "--clearance", "0.25", "--nets", "+3.3V",
                    "--routetrace", "trace.json"]),

@@ -25,6 +25,8 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522
 
 from kicad_parser import Segment, Via  # noqa: E402
 
@@ -92,7 +94,7 @@ def test_end_to_end_clean_run_has_no_stacked_key():
         # route.py emits it, while the --json-out file flag does not exist on
         # every branch. Same data, one interface older.
         r = subprocess.run([sys.executable, '-X', 'utf8',
-                            os.path.join(ROOT, 'route.py'), board, out,
+                            os.path.join(ROOT, 'py_router', 'route.py'), board, out,
                             '--nets', 'GND'],
                            capture_output=True, text=True, encoding='utf-8',
                            errors='replace', cwd=ROOT)

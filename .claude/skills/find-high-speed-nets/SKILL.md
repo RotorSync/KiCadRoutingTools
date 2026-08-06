@@ -21,7 +21,7 @@ print(f'Total footprints: {len(pcb.footprints)}')
 Also run `list_nets.py` to get differential pairs and power nets (these inform the analysis):
 
 ```bash
-python3 list_nets.py path/to/file.kicad_pcb --diff-pairs --power
+python3 py_router/list_nets.py path/to/file.kicad_pcb --diff-pairs --power
 ```
 
 Note: Differential pairs are handled separately by `route_diff.py`, which adds its own GND
@@ -432,13 +432,15 @@ diff-pair step and before the general single-ended signal route** (a "Step 2b").
 Like diff pairs, they are highly constrained (fixed width, want a short/direct path
 over a clean ground reference) so they must claim their channel before the bulk
 signals fill the area. They must then be **excluded from the general signal route**
-(`"*" "!GND" "!VCC" "!RF"`) so a later rip-up cannot re-route them at the wrong
-width, and counted as "claimed by the impedance step" in the coverage ledger.
+(`"*" "!RF"` — the plane nets stay IN that route since #562: their pads weld
+into the pour and the route step's in-run finalize completes them) so a later
+rip-up cannot re-route the impedance nets at the wrong width, and counted as
+"claimed by the impedance step" in the coverage ledger.
 
 ```bash
 # Step 2b: impedance-controlled single-ended nets (e.g. the antenna feed), on an
-# outer layer over the GND plane created later; short/direct is the router default.
-python3 -X utf8 route.py board_diff.kicad_pcb board_imp.kicad_pcb \
+# outer layer over the GND pour created in Step 1c; short/direct is the router default.
+python3 -X utf8 py_router/route.py board_diff.kicad_pcb board_imp.kicad_pcb \
     --nets RF --impedance 50 --layers F.Cu --clearance <floor> ...
 ```
 
@@ -447,7 +449,7 @@ just add `--impedance` — **and ride the fab floor for the gap and clearance,
 keeping the two EQUAL:**
 
 ```bash
-python3 -X utf8 route_diff.py board.kicad_pcb board_diff.kicad_pcb \
+python3 -X utf8 py_router/route_diff.py board.kicad_pcb board_diff.kicad_pcb \
     --nets "*USB*" "*LVDS*" --impedance 90 \
     --diff-pair-gap 0.1 --clearance 0.1 \
     --layers F.Cu In1.Cu In2.Cu B.Cu
@@ -491,7 +493,7 @@ which lowers the Default net class `diff_pair_gap` / `diff_pair_width` /
 diff-pair step the `.kicad_pro` net class reads ~0.1 mm, not the stock 0.25, and
 a later planner re-reading it won't resurrect the wide value. (To write it
 without routing — e.g. before the run — call it directly:
-`python3 fix_kicad_drc_settings.py board.kicad_pcb --diff-pair-gap 0.1 --diff-pair-width 0.1 --clearance 0.1`.)
+`python3 py_router/fix_kicad_drc_settings.py board.kicad_pcb --diff-pair-gap 0.1 --diff-pair-width 0.1 --clearance 0.1`.)
 
 | Interface | Target | Routed by | Pipeline step |
 |-----------|--------|-----------|---------------|

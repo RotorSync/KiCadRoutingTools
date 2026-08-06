@@ -79,13 +79,13 @@ self-record whenever `REDO_MANIFEST` points somewhere, so your own CLI session
 becomes a plan too:
 
 ```bash
-python3 make_plan.py runs_set1/myboard --list       # a recorded run directory
+python3 py_router/make_plan.py runs_set1/myboard --list       # a recorded run directory
                                                     # -> myboard_plan.json
 
 export REDO_MANIFEST=$PWD/redo_commands.sh          # or record your own chain
-python3 bga_fanout.py board.kicad_pcb s1.kicad_pcb --component U1
-python3 route.py s1.kicad_pcb s2.kicad_pcb --nets '/SPI*'
-python3 make_plan.py .                              # -> plan JSON for the GUI
+python3 py_router/bga_fanout.py board.kicad_pcb s1.kicad_pcb --component U1
+python3 py_router/route.py s1.kicad_pcb s2.kicad_pcb --nets '/SPI*'
+python3 py_router/make_plan.py .                              # -> plan JSON for the GUI
 ```
 
 The conversion prunes superseded retries and dead-end branches (the same file
@@ -100,10 +100,10 @@ and plan executor — no window, no clicks, no Claude. It re-execs into KiCad's
 bundled python (which has `pcbnew` + `wx`) automatically:
 
 ```bash
-python3 run_plan.py board.kicad_pcb plan.json -o routed.kicad_pcb
-python3 run_plan.py board.kicad_pcb plan.json --list        # show the steps
-python3 run_plan.py board.kicad_pcb plan.json --steps 1,3-5 # run a subset
-python3 run_plan.py board.kicad_pcb plan.json --movie routing.mp4
+python3 py_router/run_plan.py board.kicad_pcb plan.json -o routed.kicad_pcb
+python3 py_router/run_plan.py board.kicad_pcb plan.json --list        # show the steps
+python3 py_router/run_plan.py board.kicad_pcb plan.json --steps 1,3-5 # run a subset
+python3 py_router/run_plan.py board.kicad_pcb plan.json --movie routing.mp4
 ```
 
 The input board is never modified — it is copied *with its `.kicad_pro`* (which
@@ -130,7 +130,7 @@ what runs here is what the buttons run.
 
 ### /plan-pcb-routing
 
-The orchestrator. Analyzes the board structure, identifies components needing fanout (BGA/QFN/QFP/PGA, with actual pad-depth analysis for hollow-center packages), detects differential pairs and DDR length-matching groups, categorizes power/ground nets, and assesses signal speeds. Produces a numbered plan — planes first, then fanout, diff pairs, signals, GND return vias, plane repair, verification — with each command explained, then runs it on approval. Defers to the other six skills at the appropriate points rather than duplicating their logic.
+The orchestrator. Analyzes the board structure, identifies components needing fanout (BGA/QFN/QFP/PGA, with actual pad-depth analysis for hollow-center packages), detects differential pairs and DDR length-matching groups, categorizes power/ground nets, and assesses signal speeds. Produces a numbered plan — pours first, then fanout (+cap clearance), diff pairs, impedance nets, one route step over ALL nets whose in-run plane finalize does the repair, optional GND return vias/stitching, verification — with each command explained, then runs it on approval. Defers to the other six skills at the appropriate points rather than duplicating their logic.
 
 Note: guide corridors (`User.1` polylines) and keepout zones (`User.2` polygons) are **user-drawn** — the skill suggests in words where they would help, but never draws the geometry itself.
 

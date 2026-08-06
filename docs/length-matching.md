@@ -31,18 +31,18 @@ Examples:
 
 ```bash
 # Manual group: all DQ0-7 and DQS0 nets matched together
-python route.py board.kicad_pcb --length-match-group "*DQ[0-7]" "*DQS0*"
+python py_router/route.py board.kicad_pcb --length-match-group "*DQ[0-7]" "*DQS0*"
 
 # Two separate groups
-python route.py board.kicad_pcb \
+python py_router/route.py board.kicad_pcb \
     --length-match-group "*DQ[0-7]" "*DQS0*" \
     --length-match-group "*DQ1[0-5]" "*DQ[8-9]" "*DQS1*"
 
 # Auto-detect DDR4 byte lanes
-python route.py board.kicad_pcb --length-match-group auto
+python py_router/route.py board.kicad_pcb --length-match-group auto
 
 # Match propagation time instead of length
-python route.py board.kicad_pcb --length-match-group auto \
+python py_router/route.py board.kicad_pcb --length-match-group auto \
     --time-matching --time-match-tolerance 1.0
 ```
 
@@ -129,7 +129,7 @@ To size the meanders, the required extra delay is converted to extra length usin
 Matching is a per-step feature but chains are multi-step: a later retry that runs `--rip-existing-nets` over matched nets would rip the meanders and reroute at natural length, silently voiding the group. To prevent that, **every matched group member and every routed diff-pair member is recorded as a *protected net*** in the sibling `.kicad_pro` (under `kicad_routing_tools.protected_nets`, next to the DRC-floor writeback — so the list flows down the chain automatically and `copy_board.py` carries it):
 
 - `route.py --rip-existing-nets` **excludes protected nets from collateral rips** (a printed line lists the exclusions);
-- `route_disconnected_planes.py --rip-blocker-nets` never selects a protected net as a blocker to rip;
+- `repair_planes.py --rip-blocker-nets` never selects a protected net as a blocker to rip;
 - **override**: naming a net *exactly* (no glob) in `--nets` or `--rip-existing-nets` is the deliberate signal and lifts its protection for that step. There is no flag; edit the `.kicad_pro` to remove entries permanently.
 - **KiCad-locked copper**: a net with any `(locked yes)` segment or via is never rip-eligible, **with no override** — locked means never. This is read straight from the board (both parse paths), not from the `.kicad_pro`.
 

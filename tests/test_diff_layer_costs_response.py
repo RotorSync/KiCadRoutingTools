@@ -21,6 +21,8 @@ from collections import defaultdict
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, ROOT_DIR)
+sys.path.insert(0, os.path.join(ROOT_DIR, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT_DIR, 'py_tools'))  # #522
 
 from kicad_parser import parse_kicad_pcb  # noqa: E402
 
@@ -45,7 +47,7 @@ def route(pair, extra, verbose):
     """Route *pair* coupled; return (routed_ok, {layer: mm}) for the pair's nets.
     Fresh temp paths each call so a stale .kicad_pro can't carry DRC floors over."""
     out = tempfile.mktemp(suffix=".kicad_pcb", prefix=f"dlc_{pair}_")
-    cmd = [sys.executable, "route_diff.py", BOARD, out, "--nets", f"*{pair}*"] + extra + GEOM
+    cmd = [sys.executable, "py_router/route_diff.py", BOARD, out, "--nets", f"*{pair}*"] + extra + GEOM
     r = subprocess.run(cmd, cwd=ROOT_DIR, capture_output=True, text=True)
     txt = r.stdout + r.stderr
     if verbose:

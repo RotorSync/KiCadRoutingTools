@@ -63,10 +63,10 @@ silently drops. Audit every commit since the last-confirmed SHA:
 ```bash
 LAST=$(awk '{print $1}' .gui-parity-checked)
 git log --oneline $LAST..HEAD
-git diff $LAST..HEAD -- route.py route_diff.py route_planes.py \
-    route_disconnected_planes.py bga_fanout.py place_fanout_clearance.py \
-    placement/ single_ended_routing.py layer_swap_optimization.py \
-    stub_layer_switching.py obstacle_map.py kicad_parser.py
+git diff $LAST..HEAD -- py_router/route.py py_router/route_diff.py py_router/route_planes.py \
+    py_router/repair_planes.py py_router/bga_fanout.py py_router/place_fanout_clearance.py \
+    py_router/placement/ py_router/single_ended_routing.py py_router/layer_swap_optimization.py \
+    py_router/stub_layer_switching.py py_router/obstacle_map.py py_router/kicad_parser.py
 ```
 
 For each new engine parameter / results key / writer arg / changed default,

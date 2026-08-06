@@ -29,6 +29,8 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # #522
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # #522
 
 from check_drc import board_edge_geometry, make_off_board_test, run_drc  # noqa: E402
 from kicad_parser import parse_kicad_pcb  # noqa: E402

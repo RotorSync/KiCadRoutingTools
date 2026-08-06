@@ -31,6 +31,8 @@ import sys
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, ROOT_DIR)
+sys.path.insert(0, os.path.join(ROOT_DIR, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT_DIR, 'py_tools'))  # #522
 
 from kicad_parser import Pad
 from diff_pair_routing import _pad_obstacle_segments

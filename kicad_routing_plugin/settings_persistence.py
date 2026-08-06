@@ -193,6 +193,7 @@ def get_dialog_settings(dialog):
         'fanout_bga_no_inner_top': dialog.fanout_tab.bga_options.no_inner_top.GetValue(),
         'fanout_bga_escape_method': dialog.fanout_tab.bga_options.get_escape_method(),
         'fanout_bga_plane_drop': dialog.fanout_tab.bga_options.plane_drop.GetValue(),
+        'fanout_bga_plane_net_layers': dialog.fanout_tab.bga_options.plane_net_layers_ctrl.GetValue(),
         'fanout_bga_optimize_caps': dialog.fanout_tab.bga_options.optimize_caps.GetValue(),
         'fanout_bga_cap_capture_radius': dialog.fanout_tab.bga_options.cap_capture_radius.GetValue(),
         'fanout_bga_cap_near_margin': dialog.fanout_tab.bga_options.cap_near_margin.GetValue(),
@@ -212,7 +213,6 @@ def get_dialog_settings(dialog):
 
         # Planes tab settings
         'planes_net_panel_checked': list(dialog.planes_tab.net_panel.get_selected_nets()),
-        'planes_mode': dialog.planes_tab.mode_selector.GetSelection(),
         'planes_assignments': dialog.planes_tab.assignment_panel.get_assignments(),
         'planes_hide': dialog.planes_tab.net_panel.hide_check.GetValue() if dialog.planes_tab.net_panel.hide_check else False,
         'planes_filter': dialog.planes_tab.net_panel.filter_ctrl.GetValue(),
@@ -221,11 +221,6 @@ def get_dialog_settings(dialog):
         'planes_zone_clearance': dialog.planes_tab.create_options.zone_clearance.GetValue(),
         'planes_thermal_relief': dialog.planes_tab.create_options.thermal_relief.GetValue(),
         'planes_thermal_vias': dialog.planes_tab.create_options.thermal_vias.GetValue(),
-        'planes_max_search_radius': dialog.planes_tab.create_options.max_search_radius.GetValue(),
-        'planes_rip_blocker_check': dialog.planes_tab.create_options.rip_blocker_check.GetValue(),
-        'planes_corridor_nets': dialog.planes_tab.create_options.corridor_nets_ctrl.GetValue(),
-        'planes_rip_blocker_exclude': dialog.planes_tab.create_options.rip_blocker_exclude_ctrl.GetValue(),
-        'planes_rip_blocker_allow': dialog.planes_tab.create_options.rip_blocker_allow_ctrl.GetValue(),
         'planes_add_gnd_vias': dialog.planes_tab.create_options.add_gnd_vias_check.GetValue(),
         'planes_gnd_via_distance': dialog.planes_tab.create_options.gnd_via_distance.GetValue(),
         'planes_stitch_vias': dialog.planes_tab.create_options.stitch_vias.GetValue(),
@@ -236,11 +231,6 @@ def get_dialog_settings(dialog):
         'planes_stitch_max_freq': dialog.planes_tab.create_options.stitch_max_freq.GetValue(),
         'planes_gnd_via_net': dialog.planes_tab.create_options.gnd_via_net.GetValue(),
         # Repair mode options
-        'planes_repair_max_track_width': dialog.planes_tab.repair_options.max_track_width.GetValue(),
-        'planes_repair_min_track_width': dialog.planes_tab.repair_options.min_track_width.GetValue(),
-        'planes_repair_analysis_grid': dialog.planes_tab.repair_options.analysis_grid.GetValue(),
-        'planes_repair_pads': dialog.planes_tab.repair_options.repair_pads.GetValue(),
-        'planes_repair_rip_blocker_check': dialog.planes_tab.repair_options.rip_blocker_check.GetValue(),
 
         # AI tab settings (issue #40; backend selection #503). Model/effort
         # entries are stored per backend so switching backends doesn't lose
@@ -632,6 +622,9 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab.bga_options.set_escape_method(settings['fanout_bga_escape_method'])
     if 'fanout_bga_plane_drop' in settings:
         dialog.fanout_tab.bga_options.plane_drop.SetValue(bool(settings['fanout_bga_plane_drop']))
+    if 'fanout_bga_plane_net_layers' in settings:
+        dialog.fanout_tab.bga_options.plane_net_layers_ctrl.SetValue(
+            str(settings['fanout_bga_plane_net_layers']))
     elif 'fanout_bga_underpad' in settings:
         # Migrate the pre-dropdown checkbox (#288): checked meant under-pad,
         # unchecked meant the default engine (now 'auto').
@@ -669,10 +662,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab.qfn_options.allow_via_in_pad.SetValue(settings['fanout_qfn_allow_via_in_pad'])
 
     # Restore planes tab settings
-    if 'planes_mode' in settings:
-        dialog.planes_tab.mode_selector.SetSelection(settings['planes_mode'])
-        # Trigger mode change to show/hide appropriate options
-        dialog.planes_tab._on_mode_changed(None)
+    # (No mode restore since #562: the tab is pour-creation only, so a
+    # legacy 'planes_mode' key is simply ignored.)
     if 'planes_assignments' in settings:
         dialog.planes_tab.assignment_panel.set_assignments(settings['planes_assignments'])
     if 'planes_hide' in settings and dialog.planes_tab.net_panel.hide_check:
@@ -693,16 +684,6 @@ def restore_dialog_settings(dialog, settings):
         dialog.planes_tab.create_options.thermal_relief.SetValue(settings['planes_thermal_relief'])
     if 'planes_thermal_vias' in settings:
         dialog.planes_tab.create_options.thermal_vias.SetValue(settings['planes_thermal_vias'])
-    if 'planes_max_search_radius' in settings:
-        dialog.planes_tab.create_options.max_search_radius.SetValue(settings['planes_max_search_radius'])
-    if 'planes_rip_blocker_check' in settings:
-        dialog.planes_tab.create_options.rip_blocker_check.SetValue(settings['planes_rip_blocker_check'])
-    if 'planes_corridor_nets' in settings:
-        dialog.planes_tab.create_options.corridor_nets_ctrl.SetValue(settings['planes_corridor_nets'])
-    if 'planes_rip_blocker_exclude' in settings:
-        dialog.planes_tab.create_options.rip_blocker_exclude_ctrl.SetValue(settings['planes_rip_blocker_exclude'])
-    if 'planes_rip_blocker_allow' in settings:
-        dialog.planes_tab.create_options.rip_blocker_allow_ctrl.SetValue(settings['planes_rip_blocker_allow'])
     if 'planes_add_gnd_vias' in settings:
         dialog.planes_tab.create_options.add_gnd_vias_check.SetValue(settings['planes_add_gnd_vias'])
     if 'planes_gnd_via_distance' in settings:
@@ -722,16 +703,6 @@ def restore_dialog_settings(dialog, settings):
     if 'planes_gnd_via_net' in settings:
         dialog.planes_tab.create_options.gnd_via_net.SetValue(settings['planes_gnd_via_net'])
     # Repair mode options
-    if 'planes_repair_max_track_width' in settings:
-        dialog.planes_tab.repair_options.max_track_width.SetValue(settings['planes_repair_max_track_width'])
-    if 'planes_repair_min_track_width' in settings:
-        dialog.planes_tab.repair_options.min_track_width.SetValue(settings['planes_repair_min_track_width'])
-    if 'planes_repair_analysis_grid' in settings:
-        dialog.planes_tab.repair_options.analysis_grid.SetValue(settings['planes_repair_analysis_grid'])
-    if 'planes_repair_pads' in settings:
-        dialog.planes_tab.repair_options.repair_pads.SetValue(settings['planes_repair_pads'])
-    if 'planes_repair_rip_blocker_check' in settings:
-        dialog.planes_tab.repair_options.rip_blocker_check.SetValue(settings['planes_repair_rip_blocker_check'])
 
     # Restore AI tab backend/model/effort (issue #40; #503). Per-backend
     # model/effort entries first, then the backend selection LAST so its

@@ -125,8 +125,8 @@ Both the live worker (`run_board.sh`) and the no-LLM replay
 `make_movie.py`, which is also what the GUI's "Routing Movie..." button runs):
 
 ```bash
-python3 make_movie.py runs_set1/myboard              # -> runs_set1/myboard/routing.mp4
-python3 make_movie.py step1.kicad_pcb step2.kicad_pcb -o out.mp4
+python3 py_router/make_movie.py runs_set1/myboard              # -> runs_set1/myboard/routing.mp4
+python3 py_router/make_movie.py step1.kicad_pcb step2.kicad_pcb -o out.mp4
 ```
 
 **For these to be created correctly:**
@@ -138,7 +138,7 @@ python3 make_movie.py step1.kicad_pcb step2.kicad_pcb -o out.mp4
   last in order. (mp4 needs `pip install imageio imageio-ffmpeg`.)
 - **Route tracing is ON by default** (`KICAD_ROUTE_TRACE=1`, exported by
   `run_board.sh`, set by `redo_stress_test.py`). Each `route.py`, `route_diff.py`,
-  `route_planes.py`, and `route_disconnected_planes.py` step then drops a sibling
+  `route_planes.py`, and `repair_planes.py` step then drops a sibling
   `<output>_routetrace.json` recording every segment/via committed, ripped, and
   restored — which the movie splices in for fine animation. Set
   `KICAD_ROUTE_TRACE=0` in the environment to skip tracing (leaner/faster runs;
@@ -209,11 +209,11 @@ harmless.
    per-job watchdog still backstops any board that spikes. Keep an eye on RAM.
    If a step is killed by the cap, that is an important finding: record it in
    `issues` (with the step and board), then try ONE cheaper variant (e.g.
-   default `--max-iterations`, no retry round, or fewer nets); if that also
+   a coarser `--grid-step`, no retry round, or fewer nets); if that also
    blows the cap, mark the step as OOM and move on.
 1a. PROJECT FILE TRAVELS WITH THE BOARD (#295): every board-mutating tool
    writes/updates a sibling `.kicad_pro` carrying the routed DRC floors. For a
-   board that never had one, `python3 fix_kicad_drc_settings.py <board>` seeds
+   board that never had one, `python3 py_router/fix_kicad_drc_settings.py <board>` seeds
    and fills a correct project file.
 1a'. NEVER `cp`/`mv`/alias BOARD FILES MID-CHAIN (zynq `final_board` lesson):
    only the recorded tools may create a `.kicad_pcb` in the run dir. A hand
@@ -269,31 +269,25 @@ harmless.
      balls the standard via can't dog-bone/via-in-pad, pass the smaller
      `fine-pitch escape via` that `--design-rules` prints (e.g. 0.30/0.15, JLC
      advanced) as `--via-size`/`--via-drill` to THAT part's bga_fanout/route_diff
-     AND to route_disconnected_planes (its per-pad repair connects the fine-pitch
-     plane balls). Keep the standard via for general route.py and the bulk
-     route_planes pour (#99/#122).
-   - PLANE REPAIR (Step 5): run route_disconnected_planes with the SAME signal
-     params as Step 3 (clearance/via/track-width/grid + `--power-nets`/
-     `--power-nets-widths` + `--no-bga-zone` if used) AND `--rip-blocker-nets`, so
-     a plane-net pad blocked by a signal trace (e.g. a connector GND pin) is
-     connected by tracing to an adjacent same-net pad, ripping the blocker out of
-     the way (#112). The ripped blockers are LEFT UNROUTED here -- this step no
-     longer re-routes them (its in-step restore-on-failure shorted nets; #141
-     reverted, `--reroute-ripped-nets` is a deprecated no-op).
-   - RECONNECT (Step 5c): after plane repair, run a final route.py pass (same
-     signal params + `--power-nets`/`--power-nets-widths`) to reconnect the nets
-     Step 5 ripped. route.py routes against the live obstacle map with safe
-     rip-up/restore, so it reconnects them without shorts.
-   - FINAL PLANE VERIFY (Step 5d, mandatory whenever ANY route/route_diff/
-     fanout step runs after the plane steps): end the chain with one more
-     route_disconnected_planes pass (same params as Step 5). A late signal
-     route can pinch part of a pour off -- ch32v203's In1.Cu GND shipped
-     severed behind an all-green chain (the set6 wave's only incomplete net);
-     the final verify healed it in ~5s. Fill-aware, so on an intact plane it
-     is a fast near-no-op (it may add one small strap where the conservative
-     model over-splits -- harmless same-net copper). The GUI plan executor
-     appends this step automatically (ai_plan._append_final_plane_verify);
-     recorded CLI chains must include it explicitly.
+     (the route step's in-run finalize taps fine-pitch plane balls at the
+     ROUTE step's via, so if it reports them unconnected, re-run that step
+     with the smaller via). Keep the standard via for general route.py and
+     the bulk route_planes pour (#99/#122).
+   - PLANE FINALIZE (there is NO repair step since #562): every `route.py`
+     run ends with an in-run plane finalize -- the same repair engine (pad
+     taps + region joins), the plane-copper cleanup, and a KiCad-oracle
+     completion verify, at the route step's own parameters, with stubborn
+     nets joining that run's final reconciliation. So the old Step 5
+     (repair_planes), Step 5c (reconnect the nets it ripped) and
+     Step 5d (final plane verify) are all GONE from recorded chains: just
+     make sure a route step runs LAST, and its finalize does all three.
+     `KICAD_PLANE_FINALIZE=0` is the kill switch. The standalone
+     `repair_planes.py` (engine now `repair_planes`, alias kept)
+     is only for repairing a board routed OUTSIDE this chain.
+     The GUI plan executor enforces the same rule -- it appends a final
+     `route` step when copper-modifying steps follow the last plane step
+     (ai_plan._append_final_plane_verify), and it SKIPS any legacy
+     `repair_planes` step as a no-op.
    - TRACK WIDTH: the net-class `track_width` is a MINIMUM (keep it for the signal
      baseline); real boards widen power/high-current nets to many distinct widths
      (2-4mm buses) — widen those explicitly via `--power-nets`.
@@ -305,15 +299,21 @@ harmless.
    comparable. Skip schematic sync. Skip teardrops.
 4. Plane strategy per skill: GND (+ main power rail if 4+ layers) as planes.
    2-layer boards: GND plane on B.Cu. 4+ layer: planes on inner layers.
-   Always exclude plane nets from fanout/routing with `"!GND"`-style patterns
-   (match the board's actual net names, e.g. "!/GND", "!AGND" — check the
-   power listing first).
-   NET-COVERAGE INVARIANT (mandatory, plan-pcb-routing Step 5b): every net you
-   exclude from the signal route with `!X` MUST be poured by the plane step's
-   `--nets`. The exclusion set and the plane-net set must be IDENTICAL — diff
-   them before routing. A net in neither (excluded from routing, not poured)
-   silently gets ZERO copper and the run "completes" with it fully unrouted
-   (this dropped ottercast_audio's GNDA 0/23). Secondary grounds (AGND/GNDA/
+   Exclude plane nets from FANOUT with `"!GND"`-style patterns (match the
+   board's actual net names, e.g. "!/GND", "!AGND" — check the power listing
+   first); that exclusion is also what marks those balls for plane-drop vias.
+   Do NOT exclude them from the ROUTE step (#562): the route step takes
+   `--nets "*"` INCLUDING the plane nets — their pads weld into the pour via
+   pour-launch and the run's in-run plane finalize taps whatever the fill
+   cannot reach. Pass every poured net in `--power-nets` with a width, which
+   is where the finalize's welds and taps get their size.
+   NET-COVERAGE INVARIANT (mandatory, plan-pcb-routing Step 5b): the route
+   step's `!X` exclusion set must equal the Step-2b impedance nets, and every
+   poured net must appear in `--power-nets`. A net excluded from routing and
+   not poured silently gets ZERO copper and the run "completes" with it fully
+   unrouted (this dropped ottercast_audio's GNDA 0/23); since #562 the twin
+   failure is a poured net MISSING from the route step, which strands every
+   one of its pads because nothing welds them to the pour. Secondary grounds (AGND/GNDA/
    DGND tied to GND through one 0Ω/ferrite — find the tie in the power listing)
    get their OWN pour region (Voronoi-share an inner layer is fine), NOT merged
    into GND and NOT left out. COVERAGE GATE at the end: `check_connected.py`'s
@@ -352,7 +352,7 @@ harmless.
    Do not start signal routing while balls are dropped.
    DECOUPLING-CAP OPTIMIZE (issue #130): after EACH BGA/PGA fanout completes
    (escaped == requested) and BEFORE signal routing, run
-   `python3 place_fanout_clearance.py <fanned>.kicad_pcb <out>.kicad_pcb
+   `python3 py_router/place_fanout_clearance.py <fanned>.kicad_pcb <out>.kicad_pcb
    --clearance <floor>` (same clearance as the fanout). A foreign-net fanout via
    landing under a decoupling cap is a real PAD-VIA at the floor; this nudges
    those caps clear and pulls each pad toward its nearest same-net ball (so a
@@ -382,7 +382,7 @@ harmless.
    flagging anything genuinely sub-manufacturable.
    GRADE AT THE HOLE-TO-HOLE YOU ROUTED AT. The drill hole-to-hole minimum is
    only met if the via placers were *given* it: pass `--hole-to-hole-clearance
-   <floor>` to route.py / route_planes.py / route_disconnected_planes.py, then
+   <floor>` to route.py / route_planes.py / repair_planes.py, then
    grade at that SAME value. Grading at a hole-to-hole the routing never enforced
    invents phantom VIA-VIA-SAME-NET / VIA-DRILL-HOLE violations — the routed vias
    were never asked to meet it (a board routed without the flag shows 0 at its
@@ -448,8 +448,11 @@ harmless.
 9. Routing params: start with skill defaults. For boards with fine-pitch
    (<0.65mm) components, consider `--grid-step 0.05` and/or smaller clearance
    (record what you chose and why). For dense/2-layer boards use the skill's
-   difficult-board params (`--max-ripup 10 --max-iterations 1000000
-   --no-bga-zone`).
+   difficult-board params (`--max-ripup 5 --no-bga-zone`). Do NOT pass
+   `--max-iterations`: #529 dynamic iterations is default ON and self-extends
+   a progressing search to a 1e7 ceiling, so a fixed budget only caps it.
+   `--max-ripup` above 5 is measured WORSE (each extra rip level risks a
+   victim whose corridor is taken while it is out).
 10. One retry round allowed: if routing fails some nets, re-run the failed nets
    per the skill's "Diagnose and Retry" table (use the same output->input
    chaining). Record both attempts. If the failures are CONGESTION (rippable
@@ -488,7 +491,7 @@ harmless.
     per command: if a single tool invocation passes 3 h — even with its log
     still growing — kill it, record the elapsed time + command as a runtime
     finding, and continue with the previous step's output. Aggressive params
-    (--max-iterations 1000000 with --max-ripup 10 at fine grids) can grind
+    (deep --max-ripup at fine grids) can grind
     for hours; a board that's still making progress is fine, but one that
     cycles 1M-iteration A* exhaustions with no net newly connected (issue #211:
     ulx3s) is wedged, not slow. NEVER end your turn while
@@ -576,6 +579,16 @@ LLM. Manifests reference tools by **absolute repo path**, so a replay always run
 whatever is checked out — this is how you A/B an engine change. DRC is always
 graded at each board's own routed `--clearance` (parsed from the manifest); never
 grade stricter or you manufacture phantom grazes.
+
+**When the CLI drops a flag, migrate the corpus — do not add a compatibility
+shim.** Manifests are replayed verbatim, so a removed flag kills the chain in
+argparse. `python3 tests/stress/migrate_manifests.py [ROOT] [--apply]` rewrites
+them in place (dry-run by default, idempotent, surgical: it excises only the
+flag and leaves every other byte alone, because the corpus is NOT under version
+control). It is scoped per script — the #562 pass touched only `route_planes.py`
+lines (54 of 459 chains, 63 `--rip-blocker-nets`) and deliberately left
+`repair_planes.py` lines alone, since that engine still has those
+flags. Extend its table when a future flag goes.
 
 - **One board:** `python3 tests/stress/redo_stress_test.py
   runs_set1/<board>/redo_commands.sh --workdir <fresh-dir> --continue-on-error`.

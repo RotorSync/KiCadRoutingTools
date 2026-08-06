@@ -80,6 +80,9 @@ The top-level container returned by both entry points.
 | `keepout_zones` | `List[GuidePath]` | User-drawn keepout polygons from `keepout_layer` |
 | `kicad_version` | `int` | File format version (e.g. `20241229` = KiCad 9) |
 | `net_id_to_name` | `Dict[int, str]` | Net ID → name map (needed when writing KiCad 10 files) |
+| `groups` | `List` | KiCad groups (#459) — kept so writers can preserve group membership |
+| `source_path` | `str` | Absolute path this data came from (`""` = in-memory). Lets engines with no `input_file` discover sibling project files, e.g. the `.kicad_dru` per-layer clearance rules (#498) |
+| `exact_fill_provider` | `Optional[Callable]` | Zero-arg callable returning `{(net_name, layer): [island_polygon, ...]}` — KiCad-truth fill for exact-fill consumers (#424). `None` (file-parsed boards) = refill `source_path`; `build_pcb_data_from_board` sets it to a staged-save refill of the live board (live copper AND live clearances) |
 
 ### `PCBData.get_via_barrel_length`
 

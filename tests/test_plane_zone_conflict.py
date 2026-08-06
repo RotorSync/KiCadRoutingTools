@@ -26,6 +26,8 @@ import sys
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, ROOT_DIR)
+sys.path.insert(0, os.path.join(ROOT_DIR, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT_DIR, 'py_tools'))  # #522
 sys.path.insert(0, os.path.join(ROOT_DIR, "rust_router"))
 
 from plane_io import (ZoneInfo, check_existing_zones,  # noqa: E402
@@ -152,7 +154,7 @@ def run():
         if os.path.exists(out):
             os.unlink(out)
         proc = subprocess.run(
-            [sys.executable, os.path.join(ROOT_DIR, "route_planes.py"), BOARD, out,
+            [sys.executable, os.path.join(ROOT_DIR, 'py_router', 'route_planes.py'), BOARD, out,
              "--nets", "NOSUCHNET", "--plane-layers", "B.Cu"],
             capture_output=True, text=True, cwd=ROOT_DIR, timeout=600)
         combined = proc.stdout + proc.stderr

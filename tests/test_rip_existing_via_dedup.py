@@ -24,6 +24,8 @@ import sys
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # #522
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # #522
 
 from route import compute_stale_input_vias, compute_stale_input_segments
 from kicad_writer import remove_vias_from_content, remove_segments_from_content

@@ -172,7 +172,7 @@ parity; closing it to ~98% is the order-canonicalization follow-up.
 ### Plane engines + diff_engine_kwargs.py (the #362 sweep)
 
 The dump now also covers the PLANE engines: `create_plane` (route_planes.py)
-and the repair `route_planes` (route_disconnected_planes.py) each write a line
+and the repair `route_planes` (repair_planes.py) each write a line
 via `route._dump_engine_config` in CONTINUE mode, INCLUDING `all_layers` /
 `plane_layers` (layer content/order is a live divergence class). So one
 `KICAD_DUMP_BATCH_KWARGS_CONTINUE=1` run of a whole plan captures every engine
@@ -232,7 +232,7 @@ The converter gate above covers the plan->params translation; this one covers
 the OTHER drift axis: a CLI `main()` running a finalization pass AFTER its
 shared engine call that the GUI must separately replicate (Class 2). That is
 how the set11 GUI board shipped 35 plane shorts the CLI board didn't have --
-route_disconnected_planes.main() ran clean_plane_copper and the planes tab
+repair_planes.main() ran clean_plane_copper and the planes tab
 never did.
 
 Static, no wx/pcbnew. It AST-scans each CLI main() for post-engine passes,
@@ -252,11 +252,18 @@ the pass + its GUI counterpart here.
 
 The copper-identity harness measures overlap %, which diverges even when both
 fronts grade clean (rip-up routing is chaotic; #362). The invariant that
-matters is GRADE parity. This gate chains the rp2350 PLANE sub-chain (create →
-repair → reconnect route → repair2) on ONE live board -- as the Claude-tab plan
-executor does, in-memory across steps -- and asserts every stage grades 0 DRC
-like the CLI. It caught the swig_gui route-apply width-rounding bug (0.0762 →
-0.076 fab-floor violations, #362) that per-step isolation on file inputs missed.
+matters is GRADE parity. This gate chains the rp2350 PLANE sub-chain in its
+#562 shape — pour → ONE route step carrying the plane nets in its net list,
+whose in-run finalize is the weld/repair/oracle — on ONE live board, as the
+Claude-tab plan executor does, in-memory across steps, and asserts every
+stage grades 0 DRC like the CLI. (It was reshaped 2026-08-04: the old
+create → repair → reconnect → repair2 plan had rotted into comparing
+different chains, because the executor skips `repair_planes` steps as #562
+no-ops while the CLI leg still shelled the old repair script.) The fixture
+is staged WITH a pcbnew-authored .kicad_pro — a project-less board makes
+the fronts legitimately diverge. It caught the swig_gui route-apply
+width-rounding bug (0.0762 → 0.076 fab-floor violations, #362) that
+per-step isolation on file inputs missed.
 
     python3 tests/gui_parity/test_gui_livechain_rp2350.py
 
@@ -268,9 +275,12 @@ skip cleanly without KiCad python). Run any directly:
 - `test_footprint_position_sync.py` -- `_sync_pcb_data_from_board` refreshes
   footprint/pad positions after optimize_caps (matched by iteration ORDER, not
   pad number -- U6 has 11 pads numbered "61"); a no-op sync moves ZERO pads.
-- `test_plane_rip_blocker_panel.py` -- the plan executor sets `rip_blocker_nets`
-  on the CORRECT plane options panel per action (repair vs create), not the
-  first panel sharing the control name.
+- `test_settings_roundtrip.py` -- save/restore of the dialog's settings dict
+  against the REAL headless dialog: the close path (`get_dialog_settings`),
+  the reopen path (`restore_dialog_settings`), restore from a LEGACY dict
+  carrying keys a newer version dropped, and re-save key parity. Deleting or
+  renaming a control without updating persistence crashes on CLOSE and loses
+  the user's settings -- this gate is what catches that.
 - `test_plane_all_layers_parity.py` -- GUI create passes `all_layers` =
   outer+pour (the route_planes default), not all 6 copper layers (mocks
   create_plane to capture the kwarg).

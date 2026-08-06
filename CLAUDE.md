@@ -23,7 +23,7 @@ a `build_router.py --from-source` rebuild, and re-distributing prebuilt per-plat
 binaries via GitHub Releases — heavy overhead. When a feature seems to need a Rust
 change, surface that cost early and check for a Python-only approach first.
 
-**Important:** When making changes to the Rust router, bump the version in `rust_router/Cargo.toml` and update the version history in `rust_router/README.md`.
+**Important:** When making changes to the Rust router, bump the version in `rust_router/Cargo.toml` and update the version history in `rust_router/README.md`. The release triple is `rust_router/Cargo.toml` + `/VERSION` + `metadata.json` — keep them aligned. **As of now the crate is 0.20.0 but no 0.20.0 binaries are published**, so a plain `python3 build_router.py` downloads the 0.19.3 asset and `startup_checks` then rejects the mismatch: use `--from-source` when testing Rust-side behavior, and publish the binaries as part of the next release.
 
 ## Testing & Verification
 
@@ -51,7 +51,7 @@ Validate routed boards against the *real* spec, with the right checker — most
   project, resolves its floor from the STOCK (looser) netclass, and stamps that over
   tighter copper — so KiCad grades correct sub-floor copper as phantom clearance DRC
   (icepi_zero: a dropped 0.09 floor became 0.10 → 160 phantom grazes). Use
-  `python3 copy_board.py src.kicad_pcb dst.kicad_pcb` (copies `.kicad_pcb` + every
+  `python3 py_router/copy_board.py src.kicad_pcb dst.kicad_pcb` (copies `.kicad_pcb` + every
   sibling, self-records into the redo manifest), or copy the `.kicad_pro` too. The
   route scripts WARN when an input board has no sibling `.kicad_pro`.
 - **Routers can report false success.** A router's own "routed" tally may come from
@@ -113,8 +113,9 @@ Validate routed boards against the *real* spec, with the right checker — most
   (`(rule x (layer inner) (constraint clearance (min 0.15mm)))`); netclasses can't
   express it. **Every routing step** auto-reads the sibling `.kicad_dru`
   (`kicad_dru.install_layer_clearances`; engines without an `input_file`
-  discover it via `PCBData.source_path`): signal, diff pairs, plane
-  create/repair (taps, region joins, reconnects), BGA/QFN fanout (QFN swaps
+  discover it via `PCBData.source_path`): signal, diff pairs, the pour step,
+  the route step's in-run plane finalize (taps, region joins, reconnects),
+  BGA/QFN fanout (QFN swaps
   its single escape layer exactly; BGA floors its scalar at the largest rule
   on its escape layers — conservative, tighten-only), the oracle sub-routes
   (config clones carry the map), and nested reconciliation sub-runs (the
@@ -185,7 +186,9 @@ There are two front-ends to the same routing engine, and a fix to one is
 **not** automatically a fix to the other:
 
 - **CLI scripts** — `route.py`, `route_diff.py`, `route_planes.py`,
-  `route_disconnected_planes.py`, `bga_fanout.py`, etc. Their `main()`
+  `repair_planes.py` (renamed from `route_disconnected_planes.py`; the CLI
+  remains a standalone utility only — the chain step is absorbed into
+  route.py's finalize, #562), `bga_fanout.py`, etc. Their `main()`
   parses args and calls the shared engine functions (`batch_route`,
   `batch_route_diff_pairs`, `create_plane`, `generate_bga_fanout`, ...).
 - **GUI plugin** — `kicad_routing_plugin/` (`swig_gui.py`,
@@ -228,8 +231,8 @@ picked up by both for free. The gaps appear at the edges:
 - **A post-pass added to a CLI `main()`** (running *after* the shared engine
   call — cleanup, oracle recheck, DRC-floor writeback) is invisible to the
   GUI unless separately replicated (the set11 plane-shorts bug:
-  `route_disconnected_planes.main()` ran `clean_plane_copper`, the planes tab
-  didn't). Prefer putting the pass INSIDE the shared engine function; when it
+  `repair_planes.main()` (then `route_disconnected_planes`) ran
+  `clean_plane_copper`, the planes tab didn't). Prefer putting the pass INSIDE the shared engine function; when it
   must operate on the written file, refactor a **board-level core** and call
   it from both fronts (as `compute_plane_copper_cleanup` now backs both
   `clean_plane_copper` and `planes_gui._run_plane_copper_cleanup`).
@@ -246,9 +249,16 @@ through there too.
 - `tests/gui_parity/test_cli_postpass_coverage.py` — no wx; asserts every CLI
   `main()` post-engine pass has a GUI counterpart, and blocks a new CLI-only
   post-pass (Class-2 drift). Register new passes there.
+- `tests/gui_parity/test_settings_roundtrip.py` — needs KiCad python; builds
+  the REAL headless dialog and round-trips the settings dict: save (the CLOSE
+  path), restore (the reopen path), restore from a LEGACY dict whose keys a
+  newer version dropped, and re-save key parity. **Run it whenever you add,
+  rename, or REMOVE a dialog control** — deleting one without updating
+  `settings_persistence` crashes on close and loses the user's settings
+  (that shipped once; see 31f359c). Seconds to run, no routing.
 - `tests/gui_parity/test_gui_engine_parity.py` — needs KiCad python; runs the
   plan through the GUI engine path and grades against the CLI chain
-  (`KICAD_DUMP_BATCH_KWARGS` diffs the 76-key param set).
+  (`KICAD_DUMP_BATCH_KWARGS` diffs the full batch_route param set, ~105 keys).
 
   **How to run it (it is NOT a special-session thing — just run it):**
 
@@ -312,7 +322,14 @@ through there too.
     fixed in `c99ffb4`) can pass this gate untouched — cover such params with a
     diff-pair board and `check_impedance.py`.
 
-  Siblings worth running the same way: `test_gui_livechain_rp2350.py`, and
+  Siblings worth running the same way: `test_gui_livechain_rp2350.py`
+  (reshaped to the #562 chain — pour → ONE route step carrying the plane
+  nets in its `--nets`, whose in-run finalize is the weld/repair/oracle;
+  both legs stage-aligned again and PASS. Two teachings baked into it: the
+  plane nets must ride in the route step's net list or the finalize excludes
+  the pours BY PLAN, and it stages its project-less fixture with a
+  pcbnew-authored `.kicad_pro` — a project-less board makes the two fronts
+  legitimately diverge), and
   `replay_plan_vs_run.py` — the latter is the *general* harness (a real headless
   `RoutingDialog` + real `PlanExecutor`, nothing mocked; it caught #493's
   one-ULP netclass clearance bug on its first run). See

@@ -33,6 +33,7 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 | `clearance` | `0.1` | Copper-to-copper clearance |
 | `via_size` | `0.3` | Via outer diameter |
 | `via_drill` | `0.2` | Via hole diameter |
+| `via_rung` | `0` | #568 per-search via legality rung. `0` = the configured via size (normal). `1` = judge via placement at the SMALLER fab-ladder rung, used only on a `dataclasses.replace()` clone for one escalation retry when a route is blocked purely by via legality. There is no CLI flag or GUI control: the engine sets it, and `KICAD_VIA_RUNG` (`2` = default rust per-rung map, `1` = python overlay, `0` = off) is a kill switch. |
 | `grid_step` | `0.1` | Routing grid resolution |
 | `layers` | `['F.Cu', 'B.Cu']` | Copper layers available to the router |
 

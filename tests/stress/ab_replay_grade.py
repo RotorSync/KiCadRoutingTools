@@ -227,7 +227,7 @@ def grade(pcb, clearance, baseline=None):
     # (#347 A/B). The manifest clearance stays as the fallback for finals
     # shipped without a .kicad_pro (the daisho gap, #217).
     pro = Path(pcb).with_suffix(".kicad_pro")
-    drc_args = [sys.executable, "-X", "utf8", str(REPO / "check_drc.py"), pcb, "--quiet"]
+    drc_args = [sys.executable, "-X", "utf8", str(REPO / 'py_router' / 'check_drc.py'), pcb, "--quiet"]
     # Auto-grade only when the .kicad_pro actually RECORDS a clearance: a
     # stock/minimal project copied through the chain has none, and check_drc
     # would silently fall back to 0.2 -- manufacturing phantom sub-clearance
@@ -237,6 +237,7 @@ def grade(pcb, clearance, baseline=None):
         try:
             import json as _json
             sys.path.insert(0, str(REPO))
+            sys.path.insert(0, str(REPO / 'py_router'))  # #522
             from fix_kicad_drc_settings import project_copper_clearance
             with open(pro) as _f:
                 _recorded = project_copper_clearance(_json.load(_f))
@@ -248,7 +249,7 @@ def grade(pcb, clearance, baseline=None):
     # NOT --quiet: the "Checking N routed nets" total (needed for completion %)
     # only prints in non-quiet mode; the unrouted/connectivity-issue counts print
     # either way.
-    conn = subprocess.run([sys.executable, "-X", "utf8", str(REPO / "check_connected.py"), pcb],
+    conn = subprocess.run([sys.executable, "-X", "utf8", str(REPO / 'py_router' / 'check_connected.py'), pcb],
                           capture_output=True, text=True)
     ctext = conn.stdout + conn.stderr
     total, incomplete, pct = _completion(ctext)

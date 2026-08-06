@@ -191,6 +191,39 @@ def parse_manifest(path):
     return cmds
 
 
+def relocate_moved_scripts(argv):
+    """#522 default remap: recorded manifests bake repo-root script paths
+    (…/KiCadRoutingTools/route.py), but the scripts live in py_router/ or
+    py_tools/ now. For any argv token that is a repo .py path that no longer
+    exists at root, rewrite it to its new home when exactly one exists. Runs
+    AFTER user --remap rules so an explicit remap always wins. Old manifests
+    replay transparently; new recordings carry the new paths and pass
+    through untouched. RENAMES covers scripts whose basename changed too
+    (route_disconnected_planes.py -> repair_planes.py, #562): applied only
+    when the recorded path is dead, so an explicit --remap or a repo that
+    still has the old name wins."""
+    import os as _os
+    RENAMES = {'route_disconnected_planes.py': 'repair_planes.py'}
+    out = []
+    for a in argv:
+        if (a.endswith('.py') and not _os.path.exists(a)
+                and _os.path.sep in a):
+            d, b = _os.path.split(a)
+            for name in (b, RENAMES.get(b)):
+                if name is None:
+                    continue
+                for sub in ('', 'py_router', 'py_tools'):
+                    cand = _os.path.join(d, sub, name) if sub else _os.path.join(d, name)
+                    if _os.path.exists(cand):
+                        a = cand
+                        break
+                else:
+                    continue
+                break
+        out.append(a)
+    return out
+
+
 def apply_remaps(argv, remaps):
     out = []
     for a in argv:
@@ -650,7 +683,7 @@ def main():
         if prune_keep is not None and (i - 1) not in prune_keep:
             print(f"[{i}/{len(cmds)}] prune: {' '.join(map(shlex.quote, argv[:3]))} ...")
             continue
-        argv = apply_remaps(argv, remaps)
+        argv = relocate_moved_scripts(apply_remaps(argv, remaps))
         # --workdir forces every command into one directory (chains relative outputs
         # correctly); otherwise use the command's recorded cwd, remapped.
         if args.workdir:
@@ -782,7 +815,7 @@ def main():
         print(f"\nParser-parity validation of final board: {fb_path}")
         try:
             vp = subprocess.run(
-                [sys.executable, str(REPO / "validate_pcb_data.py"), fb_path],
+                [sys.executable, str(REPO / 'py_tools' / 'validate_pcb_data.py'), fb_path],
                 capture_output=True, text=True, timeout=900)
             lines = [l for l in vp.stdout.splitlines()
                      if 'assert' not in l and l.strip()]

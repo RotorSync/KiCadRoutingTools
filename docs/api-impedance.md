@@ -97,15 +97,15 @@ Because the pour does not exist when `route.py` runs, the gap is a
 
 ```bash
 # 1. route, declaring the intended gap (narrower trace than microstrip)
-python3 route.py board.kicad_pcb routed.kicad_pcb \
+python3 py_router/route.py board.kicad_pcb routed.kicad_pcb \
     --impedance 50 --coplanar-gap 0.2 --coplanar-nets "RF_*"
 
 # 2. pour the plane with a MATCHING zone clearance
-python3 route_planes.py routed.kicad_pcb poured.kicad_pcb \
+python3 py_router/route_planes.py routed.kicad_pcb poured.kicad_pcb \
     --nets GND GND --plane-layers F.Cu B.Cu --zone-clearance 0.2
 
 # 3. verify the declaration actually held
-python3 check_impedance.py poured.kicad_pcb --coplanar-gap 0.2
+python3 py_tools/check_impedance.py poured.kicad_pcb --coplanar-gap 0.2
 ```
 
 Omitting `--coplanar-nets` treats every net in the call as coplanar.
@@ -305,8 +305,8 @@ because two of them were silently wrong on real boards.
 Post-route verification lives in `check_impedance.py`:
 
 ```bash
-python3 check_impedance.py routed.kicad_pcb            # reference-plane + side-gap audit
-python3 check_impedance.py routed.kicad_pcb --json report.json
+python3 py_tools/check_impedance.py routed.kicad_pcb            # reference-plane + side-gap audit
+python3 py_tools/check_impedance.py routed.kicad_pcb --json report.json
 ```
 
 It reports, per net: length over a reference-plane void, plane-split crossings,

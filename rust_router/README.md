@@ -2,7 +2,17 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.19.3**
+**Current Version: 0.20.0**
+
+> **Release note:** prebuilt 0.20.0 binaries are NOT published yet, while
+> `/VERSION` and `metadata.json` still name the 0.19.3 PCM release. Until a
+> v0.20.0 release exists, a user WITHOUT a Rust toolchain cannot install
+> HEAD: `build_router.py` fetches the latest published asset (0.19.3),
+> `startup_checks` rejects any binary whose version differs from
+> `Cargo.toml`, and the #568 `via_rung=` kwarg does not exist on a 0.19.x
+> `.so` anyway. Publishing the 0.20.0 per-platform binaries and realigning
+> `/VERSION` + `metadata.json` is a required release step, not optional
+> polish.
 
 ## Features
 
@@ -164,7 +174,7 @@ else:
 Run the full 32-net benchmark from the parent directory:
 
 ```bash
-python route.py kicad_files/fanout_starting_point.kicad_pcb kicad_files/routed.kicad_pcb \
+python py_router/route.py kicad_files/fanout_starting_point.kicad_pcb kicad_files/routed.kicad_pcb \
   "Net-(U2A-DATA_23)" "Net-(U2A-DATA_20)" ...
 ```
 
@@ -289,7 +299,6 @@ src/
 ├── types.rs         # Shared types: GridState, OpenEntry, PoseState, constants
 ├── obstacle_map.rs  # GridObstacleMap implementation
 ├── router.rs        # GridRouter A* implementation
-├── visual_router.rs # VisualRouter for debugging/visualization
 ├── dubins.rs        # Dubins path calculator for orientation heuristic
 └── pose_router.rs   # PoseRouter for orientation-aware routing
 ```
@@ -306,6 +315,15 @@ src/
 
 ## Version History
 
+- **0.20.0**: Removed `VisualRouter`/`SearchSnapshot` and `visual_router.rs` with the pygame visualizer (#569) -- the debugging workflow it served is covered by grading, manifest replay and the GUI. **#568 per-rung via legality** — `blocked_vias_small`, a second
+  refcounted via-block map at the small fab-rung reserve (subset semantics:
+  EMPTY = unpopulated, rung>=1 queries fall back to `blocked_vias`, so
+  single-rung callers are byte-identical). `is_via_blocked_rung(gx, gy, rung)`;
+  add/remove single+batch mirrors; clone/clone_fresh copy it; freeze clears it
+  (the static bitmap blocks every rung — conservative). `route_multi` /
+  `route_with_frontier` accept `via_rung=0` per search. `get_stats` appends the
+  small-map count as the 8th element (positional consumers unaffected) so the
+  #309 refcount balance audit covers the new map.
 - **0.19.3**: **#529 plateau grace** — `route_multi` / `route_with_frontier`
   accept `grace_tranches=0`: up to N consecutive quantum-failing tranches
   are tolerated before extension is denied, with the progress reference

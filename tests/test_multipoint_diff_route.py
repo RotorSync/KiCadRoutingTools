@@ -57,6 +57,8 @@ import tempfile
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, ROOT_DIR)
+sys.path.insert(0, os.path.join(ROOT_DIR, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT_DIR, 'py_tools'))  # #522
 
 BOARD = os.path.join(ROOT_DIR, "kicad_files", "lvds_converter_dualclk.kicad_pcb")
 GND_BOARD = os.path.join(ROOT_DIR, "kicad_files", "lvds_converter_dualclk_gnd.kicad_pcb")
@@ -98,7 +100,7 @@ SCENARIOS = [
 
 def route(board, nets, out, extra_args=()):
     """Route the given nets on *board*; return (summary_dict_or_None, output_text)."""
-    cmd = [sys.executable, "route_diff.py", board, out, "--nets"] + nets + GEOM + list(extra_args)
+    cmd = [sys.executable, "py_router/route_diff.py", board, out, "--nets"] + nets + GEOM + list(extra_args)
     r = subprocess.run(cmd, cwd=ROOT_DIR, capture_output=True, text=True)
     txt = r.stdout + r.stderr
     m = re.search(r"JSON_SUMMARY: (\{.*\})", txt)
@@ -112,7 +114,7 @@ def single_ended_followup(board, nets):
     cause clearance errors, so this mirrors GEOM's width/clearance/layers."""
     fd, out = tempfile.mkstemp(suffix=".kicad_pcb", prefix="mpdiff_se_")
     os.close(fd)
-    cmd = ([sys.executable, "route.py", board, out, "--nets"] + nets +
+    cmd = ([sys.executable, "py_router/route.py", board, out, "--nets"] + nets +
            ["--track-width", "0.2", "--clearance", CLEARANCE, "--layers", "F.Cu", "B.Cu"])
     subprocess.run(cmd, cwd=ROOT_DIR, capture_output=True, text=True)
     return out
@@ -121,14 +123,14 @@ def single_ended_followup(board, nets):
 def is_connected(board, nets):
     """True if check_connected reports ALL the pair nets fully connected
     (for multi-point pairs this requires every terminal to be reached)."""
-    cmd = [sys.executable, "check_connected.py", board, "--nets"] + nets
+    cmd = [sys.executable, "py_router/check_connected.py", board, "--nets"] + nets
     r = subprocess.run(cmd, cwd=ROOT_DIR, capture_output=True, text=True)
     return "ALL NETS FULLY CONNECTED" in (r.stdout + r.stderr)
 
 
 def drc_clean(board, nets):
     """True if the routed nets have no DRC violations (scoped to themselves)."""
-    cmd = [sys.executable, "check_drc.py", board, "--clearance", CLEARANCE,
+    cmd = [sys.executable, "py_router/check_drc.py", board, "--clearance", CLEARANCE,
            "--nets"] + nets
     r = subprocess.run(cmd, cwd=ROOT_DIR, capture_output=True, text=True)
     return "NO DRC VIOLATIONS" in (r.stdout + r.stderr)

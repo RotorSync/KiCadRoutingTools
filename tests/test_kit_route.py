@@ -8,7 +8,7 @@ into the tracked ``kicad_files/`` tree.  This keeps two problems from biting
 (issue #426):
 
   * The chain writes a sibling ``<output>.kicad_pro`` DRC-floor for every
-    stage (route.py / route_planes.py / route_disconnected_planes.py).  If
+    stage (route.py / route_planes.py / repair_planes.py).  If
     those land on committed paths the run dirties the repo, and -- worse --
     a *re-run* reads the previously written ``.kicad_pro`` back in and
     silently re-routes to that stale clearance floor (the DRC-floor carryover
@@ -105,23 +105,23 @@ def main():
     try:
         # Route some nets from pads (no fanout needed)
         if not args.planes_only:
-            run(f'python3 route.py {src_pcb} {out} '+target+" "+options, unbuffered)
+            run(f'python3 py_router/route.py {src_pcb} {out} '+target+" "+options, unbuffered)
 
         # Route some power nets with vias to planes
-        run(f'python3 route_planes.py {out} {out_plane} --nets +3.3V GND +3.3V GND --plane-layers F.Cu In1.Cu In2.Cu B.Cu \
-        --max-via-reuse-radius 3 --rip-blocker-nets --reroute-ripped-nets '+base_options, unbuffered)
+        run(f'python3 py_router/route_planes.py {out} {out_plane} --nets +3.3V GND +3.3V GND --plane-layers F.Cu In1.Cu In2.Cu B.Cu '
+            +base_options, unbuffered)
 
         # Connect broken plane regions
-        run(f'python3 route_disconnected_planes.py {out_plane} {out_conn} --analysis-grid-step 0.1 '+base_options)
+        run(f'python3 py_router/repair_planes.py {out_plane} {out_conn} --analysis-grid-step 0.1 '+base_options)
 
         # Check for DRC errors
-        run(f'python3 check_drc.py {out_conn} --clearance 0.2 --hole-to-hole-clearance 0.3', unbuffered)
+        run(f'python3 py_router/check_drc.py {out_conn} --clearance 0.2 --hole-to-hole-clearance 0.3', unbuffered)
 
         # Check for connectivity
-        run(f'python3 check_connected.py {out_conn} '+target, unbuffered)
+        run(f'python3 py_router/check_connected.py {out_conn} '+target, unbuffered)
 
         # Check for orphan stub segments
-        run(f'python3 check_orphan_stubs.py {out_conn} ')
+        run(f'python3 py_tools/check_orphan_stubs.py {out_conn} ')
 
         print("\n=== Test completed ===")
     finally:

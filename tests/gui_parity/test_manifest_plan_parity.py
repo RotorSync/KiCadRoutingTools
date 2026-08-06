@@ -271,9 +271,13 @@ _ACTION_BLOCK_HANDLED = {
 
 # Params that MUST resolve to a GUI control (the D5 fallback list + D3 polarity
 # + D7 QFN width/clearance).
+# (corridor_nets / rip_blocker_exclude / rip_blocker_allow are NOT here: #562
+# deleted the planes tab's Blocker Handling box that owned their controls, so
+# like rip_blocker_nets they resolve to an ai_plan per-action note instead of a
+# control. They remain live flags on the standalone repair_planes.py CLI, which
+# is why the converter still carries them.)
 _MUST_RESOLVE = {
-    'rip_existing_nets', 'protect_nets', 'corridor_nets',
-    'rip_blocker_exclude', 'rip_blocker_allow',
+    'rip_existing_nets', 'protect_nets',
     'impedance', 'ordering', 'direction', 'time_matching',
     'keepout', 'guide_corridor', 'length_match_groups', 'swappable_nets',
     'polarity_swap_nets', 'qfn_track_width', 'qfn_clearance',

@@ -12,9 +12,9 @@ When this skill is invoked with a board file, run a full post-route review and p
 Run all three checkers, capturing output:
 
 ```bash
-python3 -X utf8 check_drc.py board.kicad_pcb 2>&1 | tee /tmp/review_drc.txt
-python3 -X utf8 check_connected.py board.kicad_pcb 2>&1 | tee /tmp/review_connectivity.txt
-python3 -X utf8 check_orphan_stubs.py board.kicad_pcb 2>&1 | tee /tmp/review_orphans.txt
+python3 -X utf8 py_router/check_drc.py board.kicad_pcb 2>&1 | tee /tmp/review_drc.txt
+python3 -X utf8 py_router/check_connected.py board.kicad_pcb 2>&1 | tee /tmp/review_connectivity.txt
+python3 -X utf8 py_tools/check_orphan_stubs.py board.kicad_pcb 2>&1 | tee /tmp/review_orphans.txt
 ```
 
 `check_drc.py` auto-grades at the clearance the routing steps wrote into the sibling
@@ -148,13 +148,13 @@ It is not a DRC violation and ships silent, so check it explicitly:
 
 ```bash
 # every routed signal net (plane nets are skipped automatically)
-python3 check_impedance.py board.kicad_pcb --verbose
+python3 py_tools/check_impedance.py board.kicad_pcb --verbose
 
 # narrow to the controlled-impedance nets when you know them
-python3 check_impedance.py board.kicad_pcb --nets "RF*" "/DDR*"
+python3 py_tools/check_impedance.py board.kicad_pcb --nets "RF*" "/DDR*"
 
 # if the route step declared a coplanar gap, AUDIT that promise
-python3 check_impedance.py board.kicad_pcb --coplanar-gap 0.2
+python3 py_tools/check_impedance.py board.kicad_pcb --coplanar-gap 0.2
 ```
 
 Boards routed by this tool need no `--coplanar-gap`: `--impedance` steps record

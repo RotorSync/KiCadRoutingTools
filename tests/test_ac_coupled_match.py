@@ -29,6 +29,8 @@ from types import SimpleNamespace
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, ROOT_DIR)
+sys.path.insert(0, os.path.join(ROOT_DIR, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT_DIR, 'py_tools'))  # #522
 sys.path.insert(0, os.path.join(ROOT_DIR, "rust_router"))
 
 from kicad_parser import Segment                       # noqa: E402
@@ -63,7 +65,7 @@ def _detect(footprints, pairs):
 
 
 def _run_route(out, extra):
-    cmd = [sys.executable, "route_diff.py", BOARD, out, "--nets", *NETS] + GEOM + extra
+    cmd = [sys.executable, "py_router/route_diff.py", BOARD, out, "--nets", *NETS] + GEOM + extra
     r = subprocess.run(cmd, cwd=ROOT_DIR, capture_output=True, text=True)
     m = re.search(r"JSON_SUMMARY:\s*(\{.*\})", r.stdout)
     summary = json.loads(m.group(1)) if m else None

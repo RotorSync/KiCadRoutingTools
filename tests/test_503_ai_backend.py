@@ -12,6 +12,8 @@ import types
 
 sys.modules.setdefault('wx', types.ModuleType('wx'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.join(os.path.dirname(__file__), '..'), 'py_router'))  # #522
+sys.path.insert(0, os.path.join(os.path.join(os.path.dirname(__file__), '..'), 'py_tools'))  # #522
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..',
                                 'kicad_routing_plugin'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'stress'))
@@ -99,7 +101,7 @@ check("claude init event formatted", t and "model: opus" in t and "skills discov
 t = state.feed({"type": "assistant", "message": {"content": [
     {"type": "text", "text": "Looking at the board."},
     {"type": "tool_use", "name": "Bash",
-     "input": {"description": "run DRC", "command": "python3 check_drc.py b"}}]}})
+     "input": {"description": "run DRC", "command": "python3 py_router/check_drc.py b"}}]}})
 check("claude assistant event formatted",
       t and "Looking at the board." in t and "Bash: run DRC" in t)
 t = state.feed({"type": "user", "message": {"content": [
@@ -135,7 +137,7 @@ check("opencode step events silent",
 t = state.feed({"type": "tool_use", "part": {
     "type": "tool", "tool": "bash",
     "state": {"status": "completed",
-              "input": {"command": "python3 check_drc.py b",
+              "input": {"command": "python3 py_router/check_drc.py b",
                         "description": "run DRC"}}}})
 check("opencode tool event formatted", t and "bash: run DRC" in t)
 t = state.feed({"type": "tool_use", "part": {
@@ -188,7 +190,7 @@ claude_recs = [
 ]
 md, turns, cmds = extract_narrative.build(claude_recs, board="b1")
 check("narrative claude: narration kept", "Routing signal nets now." in md)
-check("narrative claude: routing cmd kept", "route.py" in md and cmds == 1)
+check("narrative claude: routing cmd kept", "py_router/route.py" in md and cmds == 1)
 check("narrative claude: check_drc dropped", "check_drc" not in md)
 
 oc_recs = [
@@ -206,7 +208,7 @@ oc_recs = [
 ]
 md, turns, cmds = extract_narrative.build(oc_recs, board="b2")
 check("narrative opencode: narration kept", "Fanning out the BGA." in md)
-check("narrative opencode: routing cmd kept", "bga_fanout.py" in md and cmds == 1)
+check("narrative opencode: routing cmd kept", "py_router/bga_fanout.py" in md and cmds == 1)
 check("narrative opencode: list_nets dropped", "list_nets" not in md)
 check("narrative opencode: ms timestamps parsed", "UTC" in md)
 

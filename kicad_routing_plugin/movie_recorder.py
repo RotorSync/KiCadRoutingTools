@@ -38,6 +38,11 @@ ROOT_DIR = os.path.dirname(PLUGIN_DIR)
 if ROOT_DIR not in sys.path:      # make_movie lives at the repo/plugin root
     sys.path.insert(0, ROOT_DIR)
 
+# #522 layout: engine/tool modules live in py_router/ (flat-install safe)
+_ENGINE_DIR = os.path.join(ROOT_DIR, 'py_router')
+if os.path.isdir(_ENGINE_DIR) and _ENGINE_DIR not in sys.path:
+    sys.path.insert(0, _ENGINE_DIR)
+
 GREEN = '\033[92m'
 YELLOW = '\033[93m'
 RESET = '\033[0m'

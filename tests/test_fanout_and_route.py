@@ -56,83 +56,83 @@ def main():
 
     if fanout and not onlychecks:
         # Fan out QFN
-        run('python3 qfn_fanout.py kicad_files/haasoscope_pro_max_test.kicad_pcb --output kicad_files/qfn_fanned_out.kicad_pcb --component U2 --nets "Net-(U2*)"', unbuffered)
+        run('python3 py_router/qfn_fanout.py kicad_files/haasoscope_pro_max_test.kicad_pcb --output kicad_files/qfn_fanned_out.kicad_pcb --component U2 --nets "Net-(U2*)"', unbuffered)
 
         # Fan out FTDI nets, first DATA nets, then others (to test "--check-for-previous")
-        run(f'python3 bga_fanout.py kicad_files/qfn_fanned_out.kicad_pcb --component U3 --output kicad_files/fanout_starting_point.kicad_pcb --nets "*U2A*DATA*" --primary-escape horizontal --force-escape-direction {LAYERS_4} --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2', unbuffered)
-        run(f'python3 bga_fanout.py kicad_files/fanout_starting_point.kicad_pcb --component U3 --output kicad_files/fanout_output1.kicad_pcb --nets "*U2A*" --primary-escape horizontal --check-for-previous --force-escape-direction {LAYERS_4} --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2', unbuffered)
+        run(f'python3 py_router/bga_fanout.py kicad_files/qfn_fanned_out.kicad_pcb --component U3 --output kicad_files/fanout_starting_point.kicad_pcb --nets "*U2A*DATA*" --primary-escape horizontal --force-escape-direction {LAYERS_4} --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2', unbuffered)
+        run(f'python3 py_router/bga_fanout.py kicad_files/fanout_starting_point.kicad_pcb --component U3 --output kicad_files/fanout_output1.kicad_pcb --nets "*U2A*" --primary-escape horizontal --check-for-previous --force-escape-direction {LAYERS_4} --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2', unbuffered)
 
         # Fan out LVDS from ADC
-        run(f"python3 bga_fanout.py kicad_files/fanout_output1.kicad_pcb --component IC1 --output kicad_files/fanout_output2.kicad_pcb --nets '*lvds_rx*' --diff-pairs '*lvds_rx*' --primary-escape vertical {LAYERS_5} --no-inner-top-layer --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2", unbuffered)
+        run(f"python3 py_router/bga_fanout.py kicad_files/fanout_output1.kicad_pcb --component IC1 --output kicad_files/fanout_output2.kicad_pcb --nets '*lvds_rx*' --diff-pairs '*lvds_rx*' --primary-escape vertical {LAYERS_5} --no-inner-top-layer --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2", unbuffered)
 
         # Fan out LVDS on FPGA
-        run(f"python3 bga_fanout.py kicad_files/fanout_output2.kicad_pcb --component U3 --output kicad_files/fanout_output3.kicad_pcb --nets '*lvds_rx*' --diff-pairs '*lvds_rx*' --primary-escape vertical {LAYERS_5} --no-inner-top-layer --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2", unbuffered)
+        run(f"python3 py_router/bga_fanout.py kicad_files/fanout_output2.kicad_pcb --component U3 --output kicad_files/fanout_output3.kicad_pcb --nets '*lvds_rx*' --diff-pairs '*lvds_rx*' --primary-escape vertical {LAYERS_5} --no-inner-top-layer --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2", unbuffered)
 
         # Fan out DDR on FPGA
-        run(f'python3 bga_fanout.py kicad_files/fanout_output3.kicad_pcb --component U3 --output kicad_files/fanout_output4.kicad_pcb --nets "Net-(U1*DQS*)" "Net-(U1*CK*)" --diff-pairs "Net-(U1*DQS*)" "Net-(U1*CK*)" --primary-escape horizontal {LAYERS_4} --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2', unbuffered)
-        run(f'python3 bga_fanout.py kicad_files/fanout_output4.kicad_pcb --component U3 --output kicad_files/fanout_output5.kicad_pcb --nets "*U1A*" "*U1B*" --check-for-previous --primary-escape horizontal {LAYERS_4} --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2', unbuffered)
+        run(f'python3 py_router/bga_fanout.py kicad_files/fanout_output3.kicad_pcb --component U3 --output kicad_files/fanout_output4.kicad_pcb --nets "Net-(U1*DQS*)" "Net-(U1*CK*)" --diff-pairs "Net-(U1*DQS*)" "Net-(U1*CK*)" --primary-escape horizontal {LAYERS_4} --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2', unbuffered)
+        run(f'python3 py_router/bga_fanout.py kicad_files/fanout_output4.kicad_pcb --component U3 --output kicad_files/fanout_output5.kicad_pcb --nets "*U1A*" "*U1B*" --check-for-previous --primary-escape horizontal {LAYERS_4} --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2', unbuffered)
 
         # Fan out DDR on DDR chip
-        run(f'python3 bga_fanout.py kicad_files/fanout_output5.kicad_pcb --component U1 --output kicad_files/fanout_output6.kicad_pcb --nets "Net-(U1*DQS*)" "Net-(U1*CK*)" --diff-pairs "Net-(U1*DQS*)" "Net-(U1*CK*)" --primary-escape horizontal --no-inner-top-layer {LAYERS_4} --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2', unbuffered)
-        run(f"python3 bga_fanout.py kicad_files/fanout_output6.kicad_pcb --component U1 --output kicad_files/fanout_output7.kicad_pcb --nets '*U1A*' --check-for-previous --primary-escape horizontal {LAYERS_5} --no-inner-top-layer --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2", unbuffered)
-        run(f"python3 bga_fanout.py kicad_files/fanout_output7.kicad_pcb --component U1 --output kicad_files/fanout_output.kicad_pcb --nets '*U1B*' --check-for-previous {LAYERS_5} --no-inner-top-layer --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2", unbuffered)
+        run(f'python3 py_router/bga_fanout.py kicad_files/fanout_output5.kicad_pcb --component U1 --output kicad_files/fanout_output6.kicad_pcb --nets "Net-(U1*DQS*)" "Net-(U1*CK*)" --diff-pairs "Net-(U1*DQS*)" "Net-(U1*CK*)" --primary-escape horizontal --no-inner-top-layer {LAYERS_4} --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2', unbuffered)
+        run(f"python3 py_router/bga_fanout.py kicad_files/fanout_output6.kicad_pcb --component U1 --output kicad_files/fanout_output7.kicad_pcb --nets '*U1A*' --check-for-previous --primary-escape horizontal {LAYERS_5} --no-inner-top-layer --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2", unbuffered)
+        run(f"python3 py_router/bga_fanout.py kicad_files/fanout_output7.kicad_pcb --component U1 --output kicad_files/fanout_output.kicad_pcb --nets '*U1B*' --check-for-previous {LAYERS_5} --no-inner-top-layer --track-width 0.1 --clearance 0.1 --via-size 0.3 --via-drill 0.2", unbuffered)
 
     if ftdi and not onlychecks:
         # Route the FTDI tracks
         ftdi_opts = f"--swappable-nets 'Net-(U2A-DATA_*)' --proximity-heuristic-factor 0.02 --impedance 50 --track-proximity-cost 0.2 --direction-preference-cost 0 {GEOMETRY} {LAYERS_4}"
         if quick:
-            run(f"python3 route.py kicad_files/fanout_output.kicad_pcb kicad_files/routed_output.kicad_pcb --nets 'Net-(U2A-DATA_11*)' {ftdi_opts}", unbuffered)
+            run(f"python3 py_router/route.py kicad_files/fanout_output.kicad_pcb kicad_files/routed_output.kicad_pcb --nets 'Net-(U2A-DATA_11*)' {ftdi_opts}", unbuffered)
         else:
-            run(f"python3 route.py kicad_files/fanout_output.kicad_pcb kicad_files/routed_output.kicad_pcb --nets 'Net-(U2A-*)' --mps-layer-swap {ftdi_opts}", unbuffered)
+            run(f"python3 py_router/route.py kicad_files/fanout_output.kicad_pcb kicad_files/routed_output.kicad_pcb --nets 'Net-(U2A-*)' --mps-layer-swap {ftdi_opts}", unbuffered)
 
     if lvds and not onlychecks:
         # Route LVDS diff pairs
         lvds_opts = f"--impedance 100 --proximity-heuristic-factor 0.0 {GEOMETRY} {LAYERS_5}"
         if quick:
             # Quick test: route just a few rx1_1* pairs
-            run(f"python3 route_diff.py kicad_files/routed_output.kicad_pcb kicad_files/test_diffpair.kicad_pcb --nets '*lvds_rx1_1*' --swappable-nets '*lvds_rx1_1*' {lvds_opts}", unbuffered)
+            run(f"python3 py_router/route_diff.py kicad_files/routed_output.kicad_pcb kicad_files/test_diffpair.kicad_pcb --nets '*lvds_rx1_1*' --swappable-nets '*lvds_rx1_1*' {lvds_opts}", unbuffered)
         else:
             # Full test: route all 56 LVDS pairs in two batches - those on bottom and then those on top
-            run(f"python3 route_diff.py kicad_files/routed_output.kicad_pcb kicad_files/routed_output_diff12.kicad_pcb --nets '*lvds_rx1_*' '*lvds_rx2_*' '*lvds_rx*clkin1*' '*lvds_rx*clkin2*' --swappable-nets '*lvds_rx1_*' '*lvds_rx2_*' {lvds_opts}", unbuffered)
-            run(f"python3 route_diff.py kicad_files/routed_output_diff12.kicad_pcb kicad_files/test_diffpair.kicad_pcb --nets '*lvds_rx3_*' '*lvds_rx4_*' '*lvds_rx*clkin3*' '*lvds_rx*clkin4*' --swappable-nets '*lvds_rx3_*' '*lvds_rx4_*' {lvds_opts}", unbuffered)
+            run(f"python3 py_router/route_diff.py kicad_files/routed_output.kicad_pcb kicad_files/routed_output_diff12.kicad_pcb --nets '*lvds_rx1_*' '*lvds_rx2_*' '*lvds_rx*clkin1*' '*lvds_rx*clkin2*' --swappable-nets '*lvds_rx1_*' '*lvds_rx2_*' {lvds_opts}", unbuffered)
+            run(f"python3 py_router/route_diff.py kicad_files/routed_output_diff12.kicad_pcb kicad_files/test_diffpair.kicad_pcb --nets '*lvds_rx3_*' '*lvds_rx4_*' '*lvds_rx*clkin3*' '*lvds_rx*clkin4*' --swappable-nets '*lvds_rx3_*' '*lvds_rx4_*' {lvds_opts}", unbuffered)
 
     if ram and not onlychecks:
         # Route RAM
         ram_opts = f"--bga-proximity-radius 1 --stub-proximity-radius 1 --proximity-heuristic-factor 0.02 {GEOMETRY} {LAYERS_5}"
         # DDR diff pairs (DQS, CK)
-        run(f"python3 route_diff.py kicad_files/test_diffpair.kicad_pcb kicad_files/test_diffpair_ramdiff.kicad_pcb --nets 'Net-(U1*DQS*)' 'Net-(U1*CK_*)' --length-match-group 'Net-(U1*DQS*)' 'Net-(U1*CK_*)' --time-matching --mps-layer-swap --diff-pair-intra-match --heuristic-weight 1.5 {ram_opts}", unbuffered)
+        run(f"python3 py_router/route_diff.py kicad_files/test_diffpair.kicad_pcb kicad_files/test_diffpair_ramdiff.kicad_pcb --nets 'Net-(U1*DQS*)' 'Net-(U1*CK_*)' --length-match-group 'Net-(U1*DQS*)' 'Net-(U1*CK_*)' --time-matching --mps-layer-swap --diff-pair-intra-match --heuristic-weight 1.5 {ram_opts}", unbuffered)
         # DDR single-ended (DQ, CA, etc.)
         ram_se_opts = f"--swappable-nets 'Net-(U1*DQ*)' --length-match-group auto --time-matching --max-iterations 1000000 --no-bga-zones U1 {ram_opts}"
         if quick:
-            run(f"python3 route.py kicad_files/test_diffpair_ramdiff.kicad_pcb kicad_files/test_diffpair_ram.kicad_pcb --nets 'Net-(U1B-CA*)' {ram_se_opts}", unbuffered)
+            run(f"python3 py_router/route.py kicad_files/test_diffpair_ramdiff.kicad_pcb kicad_files/test_diffpair_ram.kicad_pcb --nets 'Net-(U1B-CA*)' {ram_se_opts}", unbuffered)
         else:
-            run(f"python3 route.py kicad_files/test_diffpair_ramdiff.kicad_pcb kicad_files/test_diffpair_ram.kicad_pcb --nets 'Net-(U1*)' {ram_se_opts}", unbuffered)
+            run(f"python3 py_router/route.py kicad_files/test_diffpair_ramdiff.kicad_pcb kicad_files/test_diffpair_ram.kicad_pcb --nets 'Net-(U1*)' {ram_se_opts}", unbuffered)
 
     if planes and not onlychecks:
         # Add and route GND plane
-        run(f"python3 route_planes.py kicad_files/test_diffpair_ram.kicad_pcb kicad_files/test_diffpair_ram_planes.kicad_pcb --nets GND '/fpga_adc/VA19|/fpga_adc/VA11|/fpga_adc/VLVDS|/fpga_adc/VD11' --plane-layers In4.Cu In5.Cu --rip-blocker-nets --reroute-ripped-nets {GEOMETRY}", unbuffered)
+        run(f"python3 py_router/route_planes.py kicad_files/test_diffpair_ram.kicad_pcb kicad_files/test_diffpair_ram_planes.kicad_pcb --nets GND '/fpga_adc/VA19|/fpga_adc/VA11|/fpga_adc/VLVDS|/fpga_adc/VD11' --plane-layers In4.Cu In5.Cu {GEOMETRY}", unbuffered)
 
     if checks or onlychecks:
 
         if ftdi:
             # Check for FTDI errors and connections
-            run('python3 check_drc.py kicad_files/routed_output.kicad_pcb --clearance 0.1 --nets "Net-(U2A-*)"', unbuffered)
-            if not quick: run('python3 check_connected.py kicad_files/routed_output.kicad_pcb --nets "Net-(U2A-*)"', unbuffered)
+            run('python3 py_router/check_drc.py kicad_files/routed_output.kicad_pcb --clearance 0.1 --nets "Net-(U2A-*)"', unbuffered)
+            if not quick: run('python3 py_router/check_connected.py kicad_files/routed_output.kicad_pcb --nets "Net-(U2A-*)"', unbuffered)
 
         if lvds:
             # Check LVDS routing for errors and connectivity
-            run('python3 check_drc.py kicad_files/test_diffpair.kicad_pcb --clearance 0.1 --nets "*lvds*" --clearance-margin 0.1', unbuffered)
-            if not quick: run('python3 check_connected.py kicad_files/test_diffpair.kicad_pcb --nets "*lvds*"', unbuffered)
+            run('python3 py_router/check_drc.py kicad_files/test_diffpair.kicad_pcb --clearance 0.1 --nets "*lvds*" --clearance-margin 0.1', unbuffered)
+            if not quick: run('python3 py_router/check_connected.py kicad_files/test_diffpair.kicad_pcb --nets "*lvds*"', unbuffered)
 
         if ram:
             # Check for RAM errors and connections
-            run('python3 check_drc.py kicad_files/test_diffpair_ram.kicad_pcb --clearance 0.1 --nets "Net-(U1*)"', unbuffered)
-            if not quick: run('python3 check_connected.py kicad_files/test_diffpair_ram.kicad_pcb --nets "Net-(U1*)"', unbuffered)
+            run('python3 py_router/check_drc.py kicad_files/test_diffpair_ram.kicad_pcb --clearance 0.1 --nets "Net-(U1*)"', unbuffered)
+            if not quick: run('python3 py_router/check_connected.py kicad_files/test_diffpair_ram.kicad_pcb --nets "Net-(U1*)"', unbuffered)
 
         if planes:
             # Check for plane errors and connections
-            run('python3 check_drc.py kicad_files/test_diffpair_ram_planes.kicad_pcb --clearance 0.1 --clearance-margin 0.1', unbuffered)
-            if not quick: run('python3 check_connected.py kicad_files/test_diffpair_ram_planes.kicad_pcb', unbuffered)
+            run('python3 py_router/check_drc.py kicad_files/test_diffpair_ram_planes.kicad_pcb --clearance 0.1 --clearance-margin 0.1', unbuffered)
+            if not quick: run('python3 py_router/check_connected.py kicad_files/test_diffpair_ram_planes.kicad_pcb', unbuffered)
 
 
     print("\n=== All tests completed ===")

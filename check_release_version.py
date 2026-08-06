@@ -38,15 +38,10 @@ def fail(msg: str) -> None:
 # the release gate; a commit touching only docs / tests / .gui-parity-checked
 # itself does not. Keep in sync with CLAUDE.md's parity rule-of-thumb.
 PARITY_SURFACES = (
-    "route.py", "route_diff.py", "route_planes.py",
-    "route_disconnected_planes.py", "bga_fanout.py", "place_fanout_clearance.py",
-    "placement/", "single_ended_routing.py", "single_ended_loop.py",
-    "diff_pair_routing.py", "diff_pair_loop.py", "layer_swap_optimization.py",
-    "layer_swap_fallback.py", "mps_layer_swap.py", "stub_layer_switching.py",
-    "phase3_routing.py", "reroute_loop.py", "obstacle_map.py", "obstacle_cache.py",
-    "obstacle_costs.py", "routing_context.py", "pcb_modification.py",
-    "kicad_parser.py", "output_writer.py", "kicad_writer.py", "plane_io.py",
-    "kicad_routing_plugin/", "settings_persistence.py",
+    # #522 layout: the engine lives in py_router/ -- the whole dir is a
+    # parity surface (it IS the engine), plus the GUI package.
+    "py_router/",
+    "kicad_routing_plugin/",
 )
 
 

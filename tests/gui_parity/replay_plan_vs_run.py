@@ -508,7 +508,7 @@ def grade_board(board, clearance, baseline):
         out['grade_core_err'] = str(e)[:150]
         try:
             o = subprocess.run([sys.executable, '-X', 'utf8',
-                                os.path.join(REPO, 'check_drc.py'), board,
+                                os.path.join(REPO, 'py_router', 'check_drc.py'), board,
                                 '-c', str(clearance)],
                                capture_output=True, text=True, timeout=1800).stdout
             m = re.search(r'FOUND (\d+) DRC', o)
@@ -518,7 +518,7 @@ def grade_board(board, clearance, baseline):
             out['drc_err'] = str(e2)[:100]
     try:
         o = subprocess.run([sys.executable, '-X', 'utf8',
-                            os.path.join(REPO, 'check_connected.py'), board],
+                            os.path.join(REPO, 'py_router', 'check_connected.py'), board],
                            capture_output=True, text=True, timeout=1800).stdout
         out['fully_connected'] = 'ALL NETS FULLY CONNECTED' in o
         m = re.search(r'(\d+)\s+net\(?s?\)?\s+.*not fully connected', o, re.I)

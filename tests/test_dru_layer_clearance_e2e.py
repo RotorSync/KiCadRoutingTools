@@ -22,6 +22,8 @@ import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.join(REPO, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(REPO, 'py_tools'))  # #522
 
 BOARD = os.path.join(REPO, "kicad_files", "splitflap_driver.kicad_pcb")
 RULE = 0.5
@@ -50,7 +52,7 @@ def route(workdir, with_dru, out_name):
             os.remove(dru)
     out = os.path.join(workdir, out_name)
     r = subprocess.run(
-        [sys.executable, os.path.join(REPO, "route.py"), src, out,
+        [sys.executable, os.path.join(REPO, 'py_router', 'route.py'), src, out,
          "--nets", *NETS, "--layers", "F.Cu", "B.Cu",
          "--clearance", "0.2", "--track-width", "0.2"],
         capture_output=True, text=True, timeout=1200)
@@ -59,7 +61,7 @@ def route(workdir, with_dru, out_name):
 
 def drc_violations(board, clearance):
     r = subprocess.run(
-        [sys.executable, os.path.join(REPO, "check_drc.py"), board,
+        [sys.executable, os.path.join(REPO, 'py_router', 'check_drc.py'), board,
          "--clearance", str(clearance), "--no-size-checks", "--quiet"],
         capture_output=True, text=True, timeout=600)
     import re
@@ -108,7 +110,7 @@ with tempfile.TemporaryDirectory() as d:
     # --- 4. PLANE step obeys the rule (taps/joins on the ruled layer) ---
     plane_out = os.path.join(d, "out_plane.kicad_pcb")
     rp = subprocess.run(
-        [sys.executable, os.path.join(REPO, "route_planes.py"),
+        [sys.executable, os.path.join(REPO, 'py_router', 'route_planes.py'),
          os.path.join(d, "in_dru.kicad_pcb"), "--output", plane_out,
          "--nets", "GND", "--plane-layers", "B.Cu",
          "--clearance", "0.2", "--track-width", "0.25",
@@ -141,7 +143,7 @@ with tempfile.TemporaryDirectory() as d2:
     open(os.path.join(d2, "fan.kicad_dru"), "w").write(
         '(version 1)\n(rule t (layer "F.Cu") (constraint clearance (min 0.22mm)))\n')
     rq = subprocess.run(
-        [sys.executable, os.path.join(REPO, "qfn_fanout.py"), fsrc,
+        [sys.executable, os.path.join(REPO, 'py_router', 'qfn_fanout.py'), fsrc,
          "--component", "U2", "--width", "0.1", "--clearance", "0.1",
          "--output", os.path.join(d2, "qfn_out.kicad_pcb")],
         capture_output=True, text=True, timeout=900)

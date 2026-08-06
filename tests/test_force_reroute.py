@@ -25,13 +25,15 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522
 
 BOARD = os.path.join(ROOT, 'kicad_files', 'splitflap_driver.kicad_pcb')
 NET = '/LED_A'
 
 
 def run_route(args, expect_ok=True):
-    cmd = [sys.executable, os.path.join(ROOT, 'route.py')] + args
+    cmd = [sys.executable, os.path.join(ROOT, 'py_router', 'route.py')] + args
     r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
     if expect_ok and r.returncode != 0:
         sys.stderr.write(r.stdout[-3000:] + r.stderr[-3000:])

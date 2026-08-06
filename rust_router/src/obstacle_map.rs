@@ -219,6 +219,12 @@ pub struct GridObstacleMap {
     static_via_bitmap: BlockedBitmap,
     /// Blocked via positions: packed (gx, gy) -> ref count
     pub blocked_vias: FxHashMap<u64, u16>,
+    /// #568: via blocking at the SMALL fab rung (advanced via, e.g. 0.25/0.15).
+    /// Cells here are a SUBSET of what `blocked_vias` would hold at the small
+    /// reserve; populated only by callers that stamp both rungs. EMPTY means
+    /// "not populated" and every rung>=1 query falls back to `blocked_vias`
+    /// (conservative), so existing single-rung callers behave identically.
+    pub blocked_vias_small: FxHashMap<u64, u16>,
     /// Stub proximity costs: (gx, gy) -> cost
     pub stub_proximity: FxHashMap<u64, i32>,
     /// Layer-specific proximity costs (for track proximity on same layer)
@@ -270,6 +276,7 @@ impl GridObstacleMap {
             static_blocked_bitmap: BlockedBitmap::new(num_layers),
             static_via_bitmap: BlockedBitmap::new(1),
             blocked_vias: FxHashMap::default(),
+            blocked_vias_small: FxHashMap::default(),
             stub_proximity: FxHashMap::default(),
             layer_proximity_costs: (0..num_layers).map(|_| FxHashMap::default()).collect(),
             num_layers,
@@ -327,6 +334,7 @@ impl GridObstacleMap {
             static_blocked_bitmap: self.static_blocked_bitmap.clone(),
             static_via_bitmap: self.static_via_bitmap.clone(),
             blocked_vias: self.blocked_vias.clone(),
+            blocked_vias_small: self.blocked_vias_small.clone(),
             stub_proximity: self.stub_proximity.clone(),
             layer_proximity_costs: self.layer_proximity_costs.clone(),
             num_layers: self.num_layers,
@@ -354,6 +362,7 @@ impl GridObstacleMap {
             static_blocked_bitmap: self.static_blocked_bitmap.clone(),
             static_via_bitmap: self.static_via_bitmap.clone(),
             blocked_vias: self.blocked_vias.clone(),
+            blocked_vias_small: self.blocked_vias_small.clone(),
             stub_proximity: self.stub_proximity.clone(),
             layer_proximity_costs: self.layer_proximity_costs.clone(),
             num_layers: self.num_layers,
@@ -373,9 +382,12 @@ impl GridObstacleMap {
     /// Get memory statistics for this obstacle map
     /// Returns (blocked_cells_count, blocked_vias_count, stub_proximity_count,
     ///          layer_proximity_count, cross_layer_count, source_target_count, free_vias_count)
-    pub fn get_stats(&self) -> (usize, usize, usize, usize, usize, usize, usize) {
+    pub fn get_stats(&self) -> (usize, usize, usize, usize, usize, usize, usize, usize) {
         let blocked_cells_count: usize = self.blocked_cells.iter().map(|m| m.len()).sum();
         let blocked_vias_count = self.blocked_vias.len();
+        // #568: small-rung via map appended LAST so positional consumers of the
+        // legacy 7-tuple (audit labels, dump harnesses) stay index-compatible.
+        let blocked_vias_small_count = self.blocked_vias_small.len();
         let stub_proximity_count = self.stub_proximity.len();
         let layer_proximity_count: usize = self.layer_proximity_costs.iter().map(|m| m.len()).sum();
         let cross_layer_count = self.cross_layer_tracks.len();
@@ -383,7 +395,8 @@ impl GridObstacleMap {
         let free_vias_count = self.free_via_positions.len();
 
         (blocked_cells_count, blocked_vias_count, stub_proximity_count,
-         layer_proximity_count, cross_layer_count, source_target_count, free_vias_count)
+         layer_proximity_count, cross_layer_count, source_target_count, free_vias_count,
+         blocked_vias_small_count)
     }
 
     /// #422: Promote ALL current dynamic blocked cells/vias into the permanent
@@ -413,6 +426,11 @@ impl GridObstacleMap {
             let (gx, gy) = unpack_xy(key);
             self.static_via_bitmap.set(gx, gy, 0);
         }
+        // #568: the static via bitmap is consulted by EVERY rung, so freezing
+        // the full-size cells over-blocks the small rung exactly as the
+        // pre-rung code did -- conservative, never wrong. The small map's own
+        // (subset) cells are redundant once static; drop them.
+        self.blocked_vias_small.clear();
     }
 
     /// #422 diagnostic: (distinct_cells, cells_with_refcount>=2, max_refcount,
@@ -506,6 +524,60 @@ impl GridObstacleMap {
     pub fn add_blocked_via(&mut self, gx: i32, gy: i32) {
         let key = pack_xy(gx, gy);
         *self.blocked_vias.entry(key).or_insert(0) += 1;
+    }
+
+    /// #568: add/remove a SMALL-rung blocked via (refcounted, mirrors
+    /// blocked_vias). Callers stamping a net's via blocking at both rungs
+    /// use the same cell-set discipline as the full-size map so the
+    /// obstacle audit's working==base+caches invariant holds per rung.
+    pub fn add_blocked_via_small(&mut self, gx: i32, gy: i32) {
+        let key = pack_xy(gx, gy);
+        *self.blocked_vias_small.entry(key).or_insert(0) += 1;
+    }
+
+    pub fn remove_blocked_via_small(&mut self, gx: i32, gy: i32) {
+        let key = pack_xy(gx, gy);
+        if let Some(count) = self.blocked_vias_small.get_mut(&key) {
+            if *count > 1 { *count -= 1; } else { self.blocked_vias_small.remove(&key); }
+        }
+    }
+
+    /// Batch forms (shape: N x 2, columns gx, gy).
+    pub fn add_blocked_vias_small_batch(&mut self, vias: PyReadonlyArray2<i32>) {
+        let arr = vias.as_array();
+        for row in arr.rows() {
+            let key = pack_xy(row[0], row[1]);
+            *self.blocked_vias_small.entry(key).or_insert(0) += 1;
+        }
+    }
+
+    pub fn remove_blocked_vias_small_batch(&mut self, vias: PyReadonlyArray2<i32>) {
+        let arr = vias.as_array();
+        for row in arr.rows() {
+            let key = pack_xy(row[0], row[1]);
+            if let Some(count) = self.blocked_vias_small.get_mut(&key) {
+                if *count > 1 { *count -= 1; } else { self.blocked_vias_small.remove(&key); }
+            }
+        }
+    }
+
+    /// #568: rung-aware via legality. rung 0 = the configured via (exactly
+    /// is_via_blocked); rung >= 1 = the small fab via. An UNPOPULATED small
+    /// map falls back to rung 0 -- a small via is never legal where the
+    /// caller hasn't proven it.
+    pub fn is_via_blocked_rung(&self, gx: i32, gy: i32, rung: usize) -> bool {
+        if rung >= 1 && !self.blocked_vias_small.is_empty() {
+            let key = pack_xy(gx, gy);
+            if self.blocked_vias_small.contains_key(&key) { return true; }
+            if self.static_via_bitmap.test(gx, gy, 0) { return true; }
+            for (min_gx, min_gy, max_gx, max_gy) in &self.bga_zones {
+                if gx >= *min_gx && gx <= *max_gx && gy >= *min_gy && gy <= *max_gy {
+                    return !self.allowed_cells.contains(&key);
+                }
+            }
+            return false;
+        }
+        self.is_via_blocked(gx, gy)
     }
 
     /// Batch add blocked cells from numpy array (shape: N x 3, columns: gx, gy, layer)

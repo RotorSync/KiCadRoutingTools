@@ -16,6 +16,11 @@ PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(PLUGIN_DIR)
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
+# #522 layout: the engine modules live in py_router/ under the repo root.
+# The exists() guard keeps a FLAT installed layout (PCM zip) working too.
+_ENGINE_DIR = os.path.join(ROOT_DIR, 'py_router')
+if os.path.isdir(_ENGINE_DIR) and _ENGINE_DIR not in sys.path:
+    sys.path.insert(0, _ENGINE_DIR)
 
 import routing_defaults as defaults
 from kicad_parser import POSITION_DECIMALS
@@ -708,7 +713,7 @@ class RoutingDialog(wx.Dialog):
         return self._fab_floored('board_edge_clearance', val)
 
     def _effective_plane_edge_clearance(self):
-        """Plane-zone edge inset (mirrors route_planes.py / route_disconnected_planes.py):
+        """Plane-zone edge inset (mirrors route_planes.py / repair_planes.py):
         the board's DECLARED copper-edge rule if it has one, else PLANE_EDGE_CLEARANCE
         (0.5 -- plane pours want more edge margin than signal traces); pinned up to the
         fab copper-to-edge floor. NOT the signal _effective_board_edge_clearance, which
@@ -1705,7 +1710,7 @@ class RoutingDialog(wx.Dialog):
             edge_clearance = self._effective_plane_edge_clearance()
             # Power nets/widths from the route tab, so plane rip-up re-routes a
             # ripped wide power net at its proper width, not the signal default
-            # (matches the CLI passing --power-nets to route_disconnected_planes).
+            # (matches the CLI passing --power-nets to repair_planes).
             power_nets = _split_net_list(self.power_nets_ctrl.GetValue()) or None
             try:
                 power_widths = [float(w) for w in self.power_widths_ctrl.GetValue().split()] or None
@@ -1959,13 +1964,8 @@ class RoutingDialog(wx.Dialog):
         if event.GetSelection() == 0 and getattr(self, 'differential_tab', None):
             self.net_panel.refresh()
 
-        # Check if switching to Planes tab (index 4)
-        if event.GetSelection() == 4:
-            # Validate max_track_width >= track_width
-            track_width = self._effective_track_width()
-            max_width = self.planes_tab.repair_options.max_track_width.GetValue()
-            if max_width < track_width:
-                self.planes_tab.repair_options.max_track_width.SetValue(track_width)
+        # (Planes tab needs no cross-validation since #562: its repair
+        # panel is gone -- the route step's finalize owns repair widths.)
 
     def _on_update_schematic_changed(self, event):
         """Handle update schematic checkbox change."""
@@ -2324,25 +2324,12 @@ class RoutingDialog(wx.Dialog):
                 _po.gnd_via_distance.SetValue(defaults.GND_VIA_DISTANCE)
             if hasattr(_po, 'gnd_via_net'):
                 _po.gnd_via_net.SetValue(defaults.GND_VIA_NET)
-            if hasattr(_po, 'rip_blocker_check'):
-                _po.rip_blocker_check.SetValue(False)
             if hasattr(_po, 'via_in_pad_check'):
                 # Default ON = same_net_pad_clearance -1.0 (CLI parity, big plane
                 # connectivity win; see CreatePlanesOptionsPanel #362).
                 _po.via_in_pad_check.SetValue(True)
                 if hasattr(_po, 'same_net_pad_clearance'):
                     _po.same_net_pad_clearance.Enable(False)
-            _ro = self.planes_tab.repair_options
-            if hasattr(_ro, 'rip_blocker_check'):
-                _ro.rip_blocker_check.SetValue(False)
-            if hasattr(_ro, 'repair_pads'):
-                _ro.repair_pads.SetValue(True)
-            if hasattr(_ro, 'max_track_width'):
-                _ro.max_track_width.SetValue(defaults.REPAIR_MAX_TRACK_WIDTH)
-            if hasattr(_ro, 'min_track_width'):
-                _ro.min_track_width.SetValue(defaults.REPAIR_MIN_TRACK_WIDTH)
-            if hasattr(_ro, 'analysis_grid'):
-                _ro.analysis_grid.SetValue(defaults.REPAIR_ANALYSIS_GRID_STEP)
         except Exception:
             pass
         try:
@@ -2374,7 +2361,8 @@ class RoutingDialog(wx.Dialog):
                     ('cap_max_passes', 30),
                     ('underpad_escape', False),
                     ('allow_via_in_pad', False),
-                    ('plane_drop', True)):   # #424 drops: default ON
+                    ('plane_drop', True),    # #424 drops: default ON
+                    ('plane_net_layers_ctrl', '')):  # future-pour decl, empty
                 _ctl = _fctl(_name)
                 if _ctl is not None:
                     try:
@@ -2589,8 +2577,6 @@ class RoutingDialog(wx.Dialog):
         self.fanout_tab._on_type_changed(None)
 
         # Reset planes tab
-        self.planes_tab.mode_selector.SetSelection(0)
-        self.planes_tab._on_mode_changed(None)
         self.planes_tab.assignment_panel.clear_assignments()
 
         # Reset transparency to default
@@ -2962,9 +2948,6 @@ class RoutingDialog(wx.Dialog):
             )
             return False
 
-        self.planes_tab.mode_selector.SetSelection(0)  # Create Planes
-        self.planes_tab._on_mode_changed(None)  # show create options panel
-
         existing = self.planes_tab.assignment_panel.get_assignments()
         existing_keys = {(tuple(nets), tuple(layers)) for nets, layers in existing}
         for net, layer in to_offer:
@@ -3172,6 +3155,29 @@ class RoutingDialog(wx.Dialog):
                 except Exception as e:
                     print(f"Warning: could not read keepout zones from board: {e}")
 
+            def _stage_live_board():
+                """Temp-save the LIVE board for the finalize's oracle leg.
+
+                Returns a path the engine owns and deletes, or None so the
+                engine falls back to the post-apply oracle. Never raises: the
+                oracle leg is an earner, never a blocker.
+                """
+                try:
+                    import tempfile
+                    import pcbnew
+                    _b = pcbnew.GetBoard()
+                    if _b is None:
+                        return None
+                    with tempfile.NamedTemporaryFile(
+                            suffix='.kicad_pcb', delete=False) as _f:
+                        _p = _f.name
+                    pcbnew.SaveBoard(_p, _b)
+                    return _p
+                except Exception as e:
+                    print(f"(could not stage the live board for the "
+                          f"plane-finalize oracle: {e})")
+                    return None
+
             def run_batch(net_names, track_width, clearance, via_size, via_drill):
                 """Run batch_route with given parameters."""
                 return batch_route(
@@ -3267,6 +3273,13 @@ class RoutingDialog(wx.Dialog):
                     return_results=True,
                     pcb_data=self.pcb_data,
                     net_clearances=net_clearances,
+                    # #562 parity: let the plane finalize run its ORACLE leg
+                    # IN-RUN, at the CLI's own sequence point, by handing it a
+                    # save of the LIVE board to stage onto. Saving the live
+                    # board (not re-reading self.board_filename) is the whole
+                    # point -- the file on disk lacks copper that earlier
+                    # chain steps applied in this session.
+                    stage_board_fn=_stage_live_board,
                 )
 
             # Standard routing with a single set of parameters for all selected nets
@@ -3501,6 +3514,39 @@ class RoutingDialog(wx.Dialog):
         _rf = refill_all_zones(board)
         if _rf:
             print(f"Refilled {_rf} zone(s) around the new copper")
+
+        # Plane-finalize ORACLE leg (#562) -- FALLBACK PATH ONLY.
+        # Normally the finalize runs the oracle IN-RUN (stage_board_fn above),
+        # at the CLI's own sequence point, so its copper lands before the
+        # final reconciliation and its unroutable links feed custody. The
+        # engine posts 'plane_finalize_oracle' only when it could NOT stage a
+        # board (no callback, or the save failed); then the copper is already
+        # on the live board and the staged-save oracle runs here instead (the
+        # planes-tab pattern, shared core in gui_utils). Post-apply means the
+        # reconcile has already run, so this path earns completion but cannot
+        # feed custody. Refill afterwards: routed links change the fill.
+        _pfo = results_data.get('plane_finalize_oracle') or None
+        if _pfo and _pfo.get('nets'):
+            try:
+                from .gui_utils import run_kicad_oracle_on_live_board
+                _orc = run_kicad_oracle_on_live_board(
+                    board, _pfo['nets'],
+                    clearance=_pfo.get('clearance'),
+                    track_width=_pfo.get('track_width'),
+                    via_size=_pfo.get('via_size'),
+                    via_drill=_pfo.get('via_drill'),
+                    grid_step=_pfo.get('grid_step'),
+                    hole_to_hole_clearance=_pfo.get(
+                        'hole_to_hole_clearance'),
+                    layer_clearances=_pfo.get('layer_clearances'))
+                if _orc is not None:
+                    board.BuildConnectivity()
+                    _rf2 = refill_all_zones(board)
+                    if _rf2:
+                        print(f"Refilled {_rf2} zone(s) after the "
+                              f"plane-finalize oracle")
+            except Exception as e:
+                print(f"(plane-finalize oracle skipped: {e})")
 
         # Make the live board's DRC constraints consistent with what we just
         # routed to (issue #160), the GUI counterpart of the CLI's

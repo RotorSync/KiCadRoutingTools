@@ -33,6 +33,8 @@ from collections import defaultdict, Counter
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522
 
 from kicad_parser import parse_kicad_pcb
 from net_queries import extract_diff_pair_base
@@ -148,7 +150,7 @@ def count_segment_crossings(pcb):
 
 def main():
     out = os.path.join(tempfile.mkdtemp(), 'glasgow_fan.kicad_pcb')
-    cmd = [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'bga_fanout.py'),
+    cmd = [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'py_router', 'bga_fanout.py'),
            BOARD, '--output', out, '--component', COMP, '--layers', *LAYERS,
            '--nets', '*', '!GND', '!+3V3', '!+1V2',
            '--diff-pairs', '*_P', '*_N',

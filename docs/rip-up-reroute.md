@@ -10,7 +10,7 @@ Implementation: `rip_up_reroute.py` (rip/restore), `blocking_analysis.py` (who i
 |--------|---------|-------------|
 | `--max-ripup` | 3 | Maximum number of blockers ripped up at once for one failing net |
 | `--ripup-abandon-metric` | `stranded` | How a multipoint tap rip-up decides keep-retry vs abandon (see [Abandon metrics](#abandon-metrics)) |
-| `--ripup-blocker-select` | `count` | Which blocker the rip-up ladder targets first (see [Blocker selection algorithms](#blocker-selection-algorithms)). Also on `route_diff.py`, `route_planes.py`, `route_disconnected_planes.py`. Env override (route.py): `KICAD_RIPUP_BLOCKER_SELECT` |
+| `--ripup-blocker-select` | `count` | Which blocker the rip-up ladder targets first (see [Blocker selection algorithms](#blocker-selection-algorithms)). Also on `route_diff.py`, `route_planes.py`, `repair_planes.py`. Env override (route.py): `KICAD_RIPUP_BLOCKER_SELECT` |
 | `--ripped-route-avoidance-radius` | 1.0 | Soft-penalty radius around a ripped net's former corridor (mm) |
 | `--ripped-route-avoidance-cost` | 0.1 | Soft-penalty cost in the former corridor (0 disables) |
 
@@ -117,5 +117,5 @@ Every rip-up event is recorded in the per-net history (`record_net_event()` in `
 
 ## Tuning
 
-- `--max-ripup 3` (default) resolves most single-blocker and double-blocker situations. Raise it on dense boards where failures persist — the cost is time, not correctness, since failed combinations are always rolled back.
+- `--max-ripup 3` (default) resolves most single-blocker and double-blocker situations. Raise it on dense boards where failures persist — the cost is NOT purely time: measured on a 6-board chain A/B, `--max-ripup 5` beat 10 and 20 was worse than 10, because each extra rip level risks a permanent casualty -- a ripped victim whose corridor is taken while it is out cannot be restored (see `terminal_restores` in JSON_SUMMARY: `full_open` and `stub` ship broken). Treat 3-5 as the working range and escalate only on a specific failing net.
 - Setting `--ripped-route-avoidance-cost 0` disables corridor avoidance; the triggering net will then happily occupy the freed corridor, making the ripped net's reroute more likely to fail and cascade.

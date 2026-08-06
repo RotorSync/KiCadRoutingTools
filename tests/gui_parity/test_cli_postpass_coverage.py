@@ -8,7 +8,7 @@ both for free (Class 1). The drift happens when a CLI `main()` runs an extra
 pass AFTER its engine call -- clean_plane_copper, oracle_reconnect,
 fix_project_for_output, ... -- that the GUI must separately replicate (Class 2).
 That is exactly how the set11 GUI board shipped 35 plane shorts the CLI board
-didn't have: route_disconnected_planes.main() ran clean_plane_copper on its
+didn't have: repair_planes.main() ran clean_plane_copper on its
 output file and the planes tab never did.
 
 This lint has no gate-able runtime; it is a STATIC guard:
@@ -39,9 +39,11 @@ PLUGIN = REPO / "kicad_routing_plugin"
 # main') with no main() def, so scanning them saw nothing -- the fanout
 # post-passes (run_drc graze audit, fix_project_for_output) were a blind spot.
 # Point at the package __init__ where main() actually lives.
-CLI_MAINS = ["route.py", "route_diff.py", "route_planes.py",
-             "route_disconnected_planes.py",
-             "bga_fanout/__init__.py", "qfn_fanout/__init__.py"]
+# #522 layout: the CLI mains live under py_router/.
+CLI_MAINS = ["py_router/route.py", "py_router/route_diff.py",
+             "py_router/route_planes.py", "py_router/repair_planes.py",
+             "py_router/bga_fanout/__init__.py",
+             "py_router/qfn_fanout/__init__.py"]
 
 # Known post-engine passes -> GUI counterpart symbol(s). A pass is "covered" if
 # ANY listed symbol appears anywhere under kicad_routing_plugin/. Keep the RHS
@@ -49,8 +51,17 @@ CLI_MAINS = ["route.py", "route_diff.py", "route_planes.py",
 REGISTRY = {
     # plane dead-end / graze cleanup (this session's fix)
     'clean_plane_copper': ['_run_plane_copper_cleanup', 'compute_plane_copper_cleanup'],
-    # KiCad-oracle recheck after plane repair
-    'oracle_reconnect': ['_run_kicad_oracle_after_apply', 'oracle_reconnect'],
+    # KiCad-oracle recheck after plane repair AND route.py's plane-finalize
+    # oracle leg (#562): the GUI staged-save core is
+    # gui_utils.run_kicad_oracle_on_live_board (planes tab delegates; the
+    # signal tab consumes results_data['plane_finalize_oracle'] after apply).
+    'oracle_reconnect': ['_run_kicad_oracle_after_apply', 'oracle_reconnect',
+                         'run_kicad_oracle_on_live_board'],
+    # Plane finalize (#562): repair_planes runs INSIDE batch_route (Class 1)
+    # for both fronts -- under return_results it merges its board delta into
+    # results_data and posts the oracle spec; the plugin-side evidence is
+    # swig_gui's plane_finalize_oracle consumption.
+    'repair_planes': ['plane_finalize_oracle'],
     # DRC-floor / project-file writeback after routing
     'fix_project_for_output': ['_write_drc_floors', 'update_live_drc_floors'],
     # #521: protected-nets record in the sibling .kicad_pro after routing.
@@ -176,7 +187,9 @@ def _main_calls(path):
 
 
 def _module_public_funcs(mod_name):
-    p = REPO / f"{mod_name}.py"
+    p = REPO / "py_router" / f"{mod_name}.py"     # #522 layout
+    if not p.exists():
+        p = REPO / "py_tools" / f"{mod_name}.py"
     if not p.exists():
         return set()
     tree = ast.parse(p.read_text())

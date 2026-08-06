@@ -15,6 +15,11 @@ PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(PLUGIN_DIR)
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
+# #522 layout: the engine modules live in py_router/ under the repo root.
+# The exists() guard keeps a FLAT installed layout (PCM zip) working too.
+_ENGINE_DIR = os.path.join(ROOT_DIR, 'py_router')
+if os.path.isdir(_ENGINE_DIR) and _ENGINE_DIR not in sys.path:
+    sys.path.insert(0, _ENGINE_DIR)
 
 
 def _get_selected_net_names(board):

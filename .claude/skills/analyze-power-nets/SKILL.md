@@ -176,9 +176,10 @@ When analyzing a board like kit-dev-coldfire-xilinx_5213:
    pour, not a routed track (86–100% of 4/6/8-layer boards pour power) —
    `/recommend-plane-mappings` and `/plan-pcb-routing` decide which rails get
    poured on which layers. Still pass ALL power nets in `--power-nets` with
-   these widths: poured rails are excluded from signal routing anyway, and any
-   track segments the chain DOES draw for them (taps, necks, small rails not
-   worth a pour) then come out at the right ampacity width. Never turn this
+   these widths — and since #562 this matters MORE, not less: poured rails
+   now ride the route step too (`--nets "*"`), so these widths size their
+   pour-launch welds, the in-run finalize's taps, and any track segments the
+   chain draws for small rails not worth a pour. Never turn this
    skill's width table into a reason to route a many-pad rail as tracks
    instead of pouring it.
 1. **Do not rely on component reference prefixes** for ICs, connectors, or transistors - always look up the actual part

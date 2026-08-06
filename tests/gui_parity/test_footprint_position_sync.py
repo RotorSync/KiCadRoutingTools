@@ -44,6 +44,8 @@ def main():
 
     import pcbnew
     sys.path.insert(0, REPO)
+    sys.path.insert(0, os.path.join(REPO, 'py_router'))  # #522
+    sys.path.insert(0, os.path.join(REPO, 'py_tools'))  # #522
     sys.path.insert(0, os.path.join(REPO, 'kicad_routing_plugin'))
     from kicad_parser import build_pcb_data_from_board
     from gui_utils import sync_footprint_positions_from_board

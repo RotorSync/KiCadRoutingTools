@@ -9,7 +9,7 @@ Implementation: `bus_detection.py` (detection and ordering), `single_ended_loop.
 Without bus routing, each net in a data bus is routed independently and the results can fan out along unrelated paths. With `--bus`, nets whose endpoints cluster together are detected as a group, routed middle-out, and each net is *attracted* toward its neighbor's path — producing clean parallel traces that follow a common corridor.
 
 ```bash
-python route.py board.kicad_pcb --nets "DATA*" --bus
+python py_router/route.py board.kicad_pcb --nets "DATA*" --bus
 ```
 
 ## Command-Line Options

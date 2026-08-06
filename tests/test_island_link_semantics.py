@@ -26,6 +26,8 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.join(os.path.dirname(__file__), '..'), 'py_router'))  # #522
+sys.path.insert(0, os.path.join(os.path.join(os.path.dirname(__file__), '..'), 'py_tools'))  # #522
 
 from kicad_parser import parse_kicad_pcb  # noqa: E402
 from check_connected import check_net_connectivity  # noqa: E402

@@ -33,6 +33,8 @@ import sys
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.join(os.path.dirname(__file__), '..'), 'py_router'))  # #522
+sys.path.insert(0, os.path.join(os.path.join(os.path.dirname(__file__), '..'), 'py_tools'))  # #522
 
 from kicad_writer import (  # noqa: E402
     zone_overlap_priorities, generate_zone_sexpr, _polygons_overlap)

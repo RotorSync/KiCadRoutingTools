@@ -22,7 +22,7 @@ from collections import Counter, defaultdict
 _here = os.path.dirname(os.path.abspath(__file__))
 for _cand in (os.path.abspath(os.path.join(_here, "..", "..")),
               os.path.expanduser("~/Documents/KiCadRoutingTools")):
-    if os.path.exists(os.path.join(_cand, "kicad_parser.py")):
+    if os.path.exists(os.path.join(_cand, "py_router/kicad_parser.py")):
         sys.path.insert(0, _cand)
         break
 from kicad_parser import parse_kicad_pcb

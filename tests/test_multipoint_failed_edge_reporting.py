@@ -29,7 +29,7 @@ BOARD = os.path.join(ROOT, "kicad_files", "glasgow_revC.kicad_pcb")
 
 def run_route():
     out = tempfile.mktemp(suffix=".kicad_pcb")
-    cmd = [sys.executable, "route.py", BOARD,
+    cmd = [sys.executable, "py_router/route.py", BOARD,
            "--output", out,
            "--nets", "/IO_Banks/*",
            "--layers", "F.Cu", "In1.Cu", "In2.Cu", "B.Cu",

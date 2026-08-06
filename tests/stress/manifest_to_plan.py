@@ -24,7 +24,10 @@ TOOL_ACTIONS = {
     'route.py': 'route',
     'route_diff.py': 'route_diff',
     'route_planes.py': 'route_planes',
+    # BOTH names: recorded manifests carry the historical spelling forever;
+    # the module (CLI remains a standalone utility) is repair_planes.py now.
     'route_disconnected_planes.py': 'repair_planes',
+    'repair_planes.py': 'repair_planes',
     'bga_fanout.py': 'fanout',
     'qfn_fanout.py': 'fanout',
 }
@@ -132,6 +135,12 @@ LIST_FLAGS = {
     # Run-6 blocker guards (plane scripts).
     '--rip-blocker-exclude': 'rip_blocker_exclude',
     '--rip-blocker-allow': 'rip_blocker_allow',
+    # bga_fanout's future-pour declaration (NET:LAYER[,LAYER...] specs,
+    # nargs='+'). Review parity finding 5: a recorded manifest carrying the
+    # flag used to convert to a plan that silently dropped it. The GUI/plan
+    # side accepts the same raw spec strings (fanout_gui parses them like
+    # the CLI main does).
+    '--plane-net-layers': 'plane_net_layers',
     '--nets': None,  # handled per action
     '--pairs': None,
     '--plane-layers': None,

@@ -39,47 +39,29 @@ PLAN_RESULT_SCHEMA = (
     '{"action": "route_planes", "assignments": [{"nets": ["<exact net name>", ...], '
     '"layer": "<copper layer e.g. In1.Cu>"}], '
     '"params": {"add_gnd_vias": true|false, "gnd_via_distance": <mm>, '
-    '"gnd_via_net": "<net name>", "rip_blocker_nets": true|false, '
+    '"gnd_via_net": "<net name>", '
     '"stitch_vias": true|false, "stitch_pitch": <mm, default 20>, '
     '"stitch_max_freq": <MHz, derives pitch as lambda/20 from the stackup>, '
     '"stitch_edge_fence": true|false, "stitch_fence_pitch": <mm>, '
     '"stitch_inset": <mm>}} | '
-    '{"action": "repair_planes", '
-    '"assignments": [{"nets": ["<exact net name>", ...], "layer": "<copper layer>"}], '
-    '"params": {"via_size": <mm>, "via_drill": <mm>, "max_track_width": <mm>, '
-    '"grid_step": <mm>, "analysis_grid_step": <mm>, "repair_pads": true|false, '
-    '"rip_blocker_nets": true|false}} '
     ']} '
     'In any step, params MAY additionally include ANY option shown on that '
     'tab or the shared options panel, keyed by its snake_case field name '
     '(e.g. max_iterations, max_ripup, ripup_abandon_metric, grid_step, board_edge_clearance, '
     'hole_to_hole_clearance, via_cost, heuristic_weight, turn_cost, '
     'ordering_strategy) - unknown names are ignored with a note. '
-    'List steps in execution order: fanout first, then route_diff, then route, '
-    'then route_planes, then repair_planes - signals route before planes because '
-    'plane stitching vias can adapt around tracks, but a via placed early can '
-    'block a diff pair. repair_planes connects disconnected plane regions and taps '
-    'plane pads the pour missed. Give it the SAME "assignments" as the route_planes '
-    'step (same nets and layers). Include exactly one repair_planes step whenever '
-    'there is a route_planes step. Set its rip_blocker_nets true so a plane pad '
-    'blocked by a signal trace (e.g. a connector GND pin) is connected by ripping '
-    'the blocker out of the way; the ripped blocker is then left UNROUTED. So '
-    'whenever rip_blocker_nets is set, add ONE more route step AFTER repair_planes '
-    'with nets ["*"] to reconnect the ripped blockers - do NOT exclude the plane '
-    'nets there: the router skips nets the pour already connects and track-patches '
-    'any pad the plane steps left disconnected. route handles rip-up/restore '
-    'safely against the live obstacle map and reuses the '
-    'route step\'s power_nets/power_nets_widths. '
-    'The route step\'s "nets" globs support "!" exclusions; a route step that '
-    'runs BEFORE the route_planes step MUST exclude every net a route_planes '
-    'step will handle, e.g. ["*", "!GND", "!VCC"] - the final post-repair '
-    'route step must NOT repeat those exclusions. '
-    'Whenever any route/route_diff step runs AFTER the plane steps, END the '
-    'plan with one more repair_planes step (same assignments as the earlier '
-    'plane step): a late signal route can pinch part of a pour off, and the '
-    'final repair re-verifies and heals it (fill-aware, fast no-op when the '
-    'planes are intact). The executor appends this step automatically when '
-    'it is missing. '
+    'List steps in execution order (#562 pours-first chain): fanout first '
+    '(exclude the plane nets there - the exclusion marks them for plane-drop '
+    'vias), then route_planes (the bare pour - no routing happens in it), '
+    'then route_diff, then ONE route step with nets ["*"] INCLUDING the '
+    'plane nets: pour-launch welds their pads into the pours and the run '
+    'finishes with the in-run plane finalize (taps + region joins + cleanup '
+    '+ KiCad-oracle verify). There is NO repair step - plane repair is a '
+    'default part of every route step. Put the plane nets in the route '
+    'step\'s power_nets with widths so finalize copper is sized right. '
+    'A route_planes step placed AFTER routing (GND return vias / stitching '
+    'via add_gnd_vias or stitch_vias) replaces the same-net zone in place '
+    'and its vias adapt around the finished signals. '
     'Use only these actions; omit any parameter you have no recommendation for; '
     'all params are optional.'
 )
@@ -148,36 +130,69 @@ def _insert_cap_optimization(steps):
 
 
 def _append_final_plane_verify(steps):
-    """Late-pinch guard (#479 wave finding): a route/route_diff/fanout step
-    that runs AFTER the last plane step can sever plane fill -- a signal
-    trace laid late pinches an island off the pour, and nothing re-checks
-    (ch32v203's In1.Cu GND shipped severed behind an all-green chain; same
-    mechanism on ch32v203_ev +3.3V). Whenever copper-modifying steps follow
-    the last plane step, append ONE final repair_planes verify step with the
-    same assignments: fill-aware, so on an intact plane it is a fast no-op,
-    and when a late route did pinch the pour it re-joins the regions."""
-    plane_actions = {"route_planes", "repair_planes"}
-    copper_actions = {"route", "route_diff", "fanout", "optimize_caps"}
+    """Late-pinch guard (#479 wave finding): copper-modifying steps that run
+    AFTER the last plane step can sever plane fill. Since #562 every route
+    step ENDS with the in-run plane finalize (taps + region joins + cleanup +
+    kicad-oracle verify), so the guard is simply: make sure a route step runs
+    last. When copper actions follow the last plane step and none of them is
+    a route step, append ONE final route step with nets ["*"] -- on an intact
+    board it skips every connected net and the finalize verifies the planes
+    (fast no-op); when a late step did pinch a pour, the finalize heals it."""
+    # `repair_planes` is NOT a plane step any more -- the executor skips it
+    # as a no-op (#562). Counting it as one re-opened the very hole this
+    # guard exists to close: a LEGACY plan ending in `route -> repair_planes`
+    # set last_plane to that final index, so tail was empty, the guard
+    # returned early, and the trailing step did nothing -- leaving the plan
+    # with NO plane verify at all, where pre-#562 that step WAS the verify.
+    plane_actions = {"route_planes"}
+    inert_actions = {"repair_planes"}     # legacy, skipped at run time
     last_plane = None
     for i, s in enumerate(steps):
         if s["action"] in plane_actions:
             last_plane = i
     if last_plane is None:
         return
-    if not any(s["action"] in copper_actions for s in steps[last_plane + 1:]):
-        return
-    # Clone assignments/params from the last repair_planes when there is one
-    # (its params are tuned for repair); else from the route_planes step.
-    src = steps[last_plane]
+    tail = [s for s in steps[last_plane + 1:]
+            if s["action"] not in inert_actions]
+    # Since #562 a pour ALONE connects nothing: the plane step places no
+    # taps, so plane pads are welded by the route step's pour-launch and
+    # completed by its finalize. So the rule is not merely "a route must run
+    # after a late copper step" -- it is "a route MUST run after the last
+    # pour", full stop. A legacy plan of pour -> repair_planes (where the
+    # repair used to be both the weld and the verify) otherwise pours and
+    # then does nothing at all.
+    #
+    # AND the trailing route's net scope must COVER the pour nets (review
+    # finding F1): the finalize filters its zone-net scope by the route's
+    # nets, so a plan ending in a SCOPED route (`nets: ["SDRAM_*"]`) after a
+    # GND pour welds nothing on GND and ships every GND pad disconnected
+    # while the run reports success for its own scope. Trusting any trailing
+    # route step was this guard's blind spot -- check the coverage.
+    if tail and tail[-1]["action"] == "route":
+        _pour_nets = set()
+        for s in steps:
+            if s["action"] in plane_actions:
+                for a in (s.get("assignments") or []):
+                    if isinstance(a, dict):
+                        _pour_nets.update(a.get("nets") or [])
+        _route_nets = tail[-1].get("nets", ["*"])
+        try:
+            from net_queries import matches_net_filter as _mnf
+            _covered = all(_mnf(n, _route_nets) for n in _pour_nets)
+        except Exception:
+            _covered = "*" in _route_nets
+        if _covered:
+            return  # its finalize welds and verifies the planes
+        # Fall through: append the verify step (nets ["*"] covers the pours).
+    # Reuse the last route step's params so the verify routes at the chain's
+    # own geometry (clearance/track/via/power widths).
+    src_params = {}
     for s in reversed(steps):
-        if s["action"] == "repair_planes":
-            src = s
+        if s["action"] == "route":
+            src_params = dict(s.get("params") or {})
             break
-    steps.append({
-        "action": "repair_planes",
-        "assignments": [dict(a) for a in (src.get("assignments") or [])],
-        "params": dict(src.get("params") or {}),
-    })
+    steps.append({"action": "route", "nets": ["*"], "params": src_params})
+    return True
 
 
 def step_label(index, step):
@@ -205,7 +220,8 @@ def step_label(index, step):
                 parts.append(f"{'|'.join(a.get('nets', []))}->{a.get('layer')}")
         return f"{index}. Planes: {', '.join(parts)}"
     if action == "repair_planes":
-        return f"{index}. Repair planes (connect regions + tap pads)"
+        return (f"{index}. Repair planes (obsolete step, skipped -- repair "
+                f"runs inside every route step since #562)")
     return f"{index}. {action}"
 
 
@@ -219,9 +235,9 @@ def step_label(index, step):
 # _PARAM_CONTROL_ALIASES: param name -> the differently-named control attribute
 # that _set_control() targets (resolved on the step's owners in order).
 _PARAM_CONTROL_ALIASES = {
-    'rip_blocker_nets': 'rip_blocker_check',
-    'repair_pads': 'repair_pads',
-    'analysis_grid_step': 'analysis_grid',
+    # (rip_blocker_nets / repair_pads / analysis_grid_step had controls on
+    # the plane panels that #562 deleted -- the pour step does no routing and
+    # the repair step is gone. Their per-action blocks note them instead.)
     # #381 D3: route_diff's polarity-swap allowlist.
     'polarity_swap_nets': 'polarity_swap_nets_text',
     # #381 D5: route.py options that previously fell to "no control, ignored"
@@ -231,11 +247,10 @@ _PARAM_CONTROL_ALIASES = {
     # #521 run-6: nets protected from rip-up for the run (both route tabs
     # name their TextCtrl protect_nets_ctrl).
     'protect_nets': 'protect_nets_ctrl',
-    # #549: plane via placement's corridor-seed allowlist (planes tab).
-    'corridor_nets': 'corridor_nets_ctrl',
-    # Run-6 blocker guards (planes tabs).
-    'rip_blocker_exclude': 'rip_blocker_exclude_ctrl',
-    'rip_blocker_allow': 'rip_blocker_allow_ctrl',
+    # (#549 corridor_nets and the run-6 rip_blocker_exclude/allow guards also
+    # had controls in the Blocker Handling box that #562 deleted; their
+    # per-action block notes them, same as rip_blocker_nets above. The
+    # standalone repair_planes.py CLI still honors all three.)
     'ordering': 'ordering_strategy',
     'direction': 'direction_choice',
     'time_matching': 'time_matching_check',
@@ -246,6 +261,9 @@ _PARAM_CONTROL_ALIASES = {
     'coplanar_nets': 'coplanar_nets_ctrl',
     # #489 section 9: one shared checkbox drives teardrops on every step.
     'add_teardrops': 'add_teardrops_check',
+    # Review parity finding 5: bga_fanout's future-pour declaration
+    # (NET:LAYER[,...] specs). List param -> space-joined into the text ctrl.
+    'plane_net_layers': 'plane_net_layers_ctrl',
 }
 # _PARAM_SPECIAL: params handled by _apply_special() (composite / inverted /
 # panel-backed controls that a plain SetValue can't fill).
@@ -254,7 +272,9 @@ _PARAM_SPECIAL = {'layers', 'no_bga_zone', 'no_bga_zones', 'power_nets',
                   # #381 D5:
                   'impedance', 'length_match_groups', 'swappable_nets',
                   # #486:
-                  'coplanar_nets'}
+                  'coplanar_nets',
+                  # review parity finding 5:
+                  'plane_net_layers'}
 
 # #439: geometry-floor param -> its Basic-tab override checkbox attribute. A plan
 # step that names one of these is the GUI equivalent of the CLI passing that flag,
@@ -296,6 +316,16 @@ def apply_step_params(step, dialog):
     notes = []
     action = step["action"]
     params = step.get("params") or {}
+    if action == "repair_planes":
+        # Obsolete step (#562): the executor skips it, so applying its params
+        # is not merely pointless -- the generic loop below calls
+        # _enable_geometry_override, TICKING the Basic-tab override
+        # checkboxes (via size/drill, ...) for a step that then does nothing.
+        # Those overrides persist into the NEXT step and silently change its
+        # geometry. Apply nothing.
+        return ["repair_planes params ignored (#562: the step is a skipped "
+                "no-op; applying them would leak geometry overrides into "
+                "the next step)"]
     # ANY GUI parameter (Andy): a plan step's params may name any control
     # on the step's tab or the shared options panels; resolve by attribute
     # name and coerce by control type. Composite fields with special
@@ -306,17 +336,15 @@ def apply_step_params(step, dialog):
                   "power_nets", "power_nets_widths", "layer_costs"},
         "route_diff": {"diff_pair_width", "diff_pair_gap", "impedance",
                        "layer_costs"},
-        # rip_blocker_nets is handled by the explicit per-action blocks below,
-        # which target the CORRECT options panel. The generic loop resolves it
-        # to the control name 'rip_blocker_check', which exists on BOTH
-        # create_options and repair_options, and picks the FIRST owner
-        # (create_options) -- so for a repair_planes step it would wrongly flip
-        # the create panel's checkbox (and, absent the explicit block, leave the
-        # repair panel's at its reset default of False, silently dropping
-        # --rip-blocker-nets). Skip it in the generic loop for both plane actions.
+        # rip_blocker_nets: the control is GONE (#562, the pour step does no
+        # routing, and the repair step is obsolete); the per-action block
+        # prints an explanatory note instead of letting the generic loop emit
+        # a bare "no control, ignored".
         "route_planes": {"add_gnd_vias", "gnd_via_distance", "gnd_via_net",
-                         "rip_blocker_nets"},
-        "repair_planes": {"rip_blocker_nets"},
+                         "rip_blocker_nets", "corridor_nets",
+                         "rip_blocker_exclude", "rip_blocker_allow"},
+        "repair_planes": {"rip_blocker_nets", "corridor_nets",
+                          "rip_blocker_exclude", "rip_blocker_allow"},
         # #381 D7: QFN width/clearance are set by the fanout action block onto
         # the QFN panel's own controls; skip them in the generic loop (which has
         # no same-named control on the fanout owners) to avoid a spurious
@@ -336,7 +364,7 @@ def apply_step_params(step, dialog):
             t = getattr(d, "planes_tab", None)
             subs = []
             if t is not None:
-                for sub in ("create_options", "repair_options"):
+                for sub in ("create_options",):
                     s = getattr(t, sub, None)
                     if s is not None:
                         subs.append(s)
@@ -411,6 +439,15 @@ def apply_step_params(step, dialog):
             if ctl is None:
                 return False
             ctl.SetValue(_join_nets(value) if isinstance(value, (list, tuple))
+                         else str(value or ''))
+            return True
+        if name == 'plane_net_layers':
+            # Review parity finding 5: NET:LAYER[,...] spec list -> the
+            # space-separated fanout text control (specs contain no spaces).
+            ctl = getattr(dialog, 'plane_net_layers_ctrl', None)
+            if ctl is None:
+                return False
+            ctl.SetValue(' '.join(value) if isinstance(value, (list, tuple))
                          else str(value or ''))
             return True
         if name == 'power_nets_widths' and isinstance(value, (list, tuple)):
@@ -635,44 +672,20 @@ def apply_step_params(step, dialog):
         if "gnd_via_net" in params:
             opts.gnd_via_net.SetValue(str(params["gnd_via_net"]))
         if "rip_blocker_nets" in params:
-            opts.rip_blocker_check.SetValue(bool(params["rip_blocker_nets"]))
+            notes.append("rip_blocker_nets ignored (#562: the pour step does "
+                         "no routing, so there are no tap corridors to rip)")
+        for _gone in ("corridor_nets", "rip_blocker_exclude",
+                      "rip_blocker_allow"):
+            if _gone in params:
+                notes.append(f"{_gone} ignored (#562: the pour step does no "
+                             f"routing; the standalone repair_planes.py CLI "
+                             f"still honors it)")
     elif action == "repair_planes":
-        # via size/drill and the routing grid step come from the shared Basic-tab
-        # controls (same as route); the repair-specific knobs live on the Repair
-        # options panel.
-        for name in ("via_size", "via_drill", "grid_step"):
-            if name in params:
-                try:
-                    getattr(dialog, name).SetValue(float(params[name]))
-                    # #439: via_size/via_drill are override-gated (grid_step is not).
-                    _enable_geometry_override(dialog, name)
-                except (TypeError, ValueError):
-                    notes.append(f"ignored non-numeric {name}={params[name]!r}")
-        # Same handling as the create action above: the control lives on the
-        # Create panel, but repair-mode config borrows it since the #511
-        # engine-coverage sweep (PlanesTab._build_mode_config), matching the
-        # CLI's route_disconnected_planes.py --zone-clearance. Before that,
-        # a repair step's zone_clearance had NO path to the engine at all.
-        if "zone_clearance" in params and params["zone_clearance"] is not None:
-            _pop = getattr(dialog.planes_tab, "create_options", None)
-            if _pop is not None and hasattr(_pop, "zone_clearance_check"):
-                _pop.zone_clearance_check.SetValue(True)
-                if hasattr(_pop, "zone_clearance"):
-                    _pop.zone_clearance.Enable(True)
-        opts = dialog.planes_tab.repair_options
-        _repair_ctrls = {"max_track_width": opts.max_track_width,
-                         "min_track_width": opts.min_track_width,
-                         "analysis_grid_step": opts.analysis_grid}
-        for name, ctrl in _repair_ctrls.items():
-            if name in params:
-                try:
-                    ctrl.SetValue(float(params[name]))
-                except (TypeError, ValueError):
-                    notes.append(f"ignored non-numeric {name}={params[name]!r}")
-        if "repair_pads" in params:
-            opts.repair_pads.SetValue(bool(params["repair_pads"]))
-        if "rip_blocker_nets" in params:
-            opts.rip_blocker_check.SetValue(bool(params["rip_blocker_nets"]))
+        # Obsolete since #562: plane repair runs inside every route step's
+        # finalize. Legacy plans keep loading; the step is skipped at run
+        # time (see _action_trigger) and its params are ignored here.
+        notes.append("repair_planes step is obsolete (#562) -- skipped; "
+                     "plane repair runs inside every route step's finalize")
     elif action == "fanout":
         kind = (step.get("kind") or "bga").lower()
         if kind == "bga":
@@ -827,38 +840,12 @@ def apply_step_selection(step, dialog, all_steps=None):
         tab.net_panel.set_selected_nets(names)
     elif action == "route_planes":
         tab = dialog.planes_tab
-        tab.mode_selector.SetSelection(0)  # Create Planes
-        tab._on_mode_changed(None)
         assignments = _plane_assignments_from_step(step, dialog, notes, "route_planes")
         if not assignments:
             notes.append("route_planes: no valid assignments")
         tab.assignment_panel.set_assignments(assignments)
     elif action == "repair_planes":
-        # Repair runs on the same planes tab in Repair mode. The GUI repair
-        # requires net->layer assignments (unlike the CLI, which auto-detects the
-        # poured zones). Use the step's own assignments if given; otherwise keep
-        # the ones the preceding route_planes step left in the panel.
-        tab = dialog.planes_tab
-        tab.mode_selector.SetSelection(1)  # Repair Disconnected
-        tab._on_mode_changed(None)
-        if step.get("assignments"):
-            # Quiet the layerless case (an older converter / LLM emitting
-            # {'layer': ''}): only warn about genuinely UNKNOWN nets, not the
-            # missing layer, since the panel still holds the preceding
-            # route_planes step's real net->layer assignments and the repair
-            # inherits those.
-            layerless = all(not (a.get("layer") or a.get("layers"))
-                            for a in step["assignments"] if isinstance(a, dict))
-            sink = [] if layerless else notes
-            assignments = _plane_assignments_from_step(step, dialog, sink, "repair_planes")
-            if assignments:
-                tab.assignment_panel.set_assignments(assignments)
-            elif layerless and tab.assignment_panel.get_assignments():
-                notes.append("repair_planes: inheriting the route_planes step's "
-                             "net->layer assignments (none specified on the repair step)")
-        if not tab.assignment_panel.get_assignments():
-            notes.append("repair_planes: no assignments (add a route_planes step first, "
-                         "or include assignments on the repair step)")
+        pass  # obsolete step (#562), skipped at run time -- nothing to set up
     return notes
 
 
@@ -1089,10 +1076,14 @@ class PlanExecutor:
                               lambda: False),
             "route_planes": (lambda: d.planes_tab._on_action(None),
                              lambda: not d.planes_tab.action_btn.IsEnabled()),
-            # Same planes tab + action button; apply_step_selection has already
-            # switched it to Repair mode, so _on_action runs the repair.
-            "repair_planes": (lambda: d.planes_tab._on_action(None),
-                              lambda: not d.planes_tab.action_btn.IsEnabled()),
+            # Obsolete (#562): plane repair runs inside every route step's
+            # finalize. Legacy plans' repair steps complete instantly as
+            # no-ops (synchronous like optimize_caps; the start-grace period
+            # in _poll_until_idle covers it).
+            "repair_planes": (lambda: self.log(
+                                  "repair_planes step skipped (#562: repair "
+                                  "runs inside every route step's finalize)"),
+                              lambda: False),
         }[action]
 
     # -- sequencing ----------------------------------------------------------

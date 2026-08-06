@@ -129,7 +129,7 @@ Order: [C, D, A, B]
 ### Usage
 
 ```bash
-python route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps
+python py_router/route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps
 ```
 
 ### Segment Intersection Method
@@ -144,10 +144,10 @@ This method is more accurate for non-BGA boards where nets route directly betwee
 
 ```bash
 # Force segment intersection method
-python route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps --mps-segment-intersection
+python py_router/route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps --mps-segment-intersection
 
 # Auto-detection (default): uses segment intersection when no nets on BGAs
-python route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps
+python py_router/route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps
 ```
 
 ### Reverse Round Order
@@ -155,7 +155,7 @@ python route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps
 By default, MPS routes the least-conflicting groups first (fewest active conflicts). The `--mps-reverse-rounds` flag reverses this, routing the most-conflicting groups first:
 
 ```bash
-python route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps --mps-reverse-rounds
+python py_router/route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps --mps-reverse-rounds
 ```
 
 This can sometimes improve results when:
@@ -168,7 +168,7 @@ This can sometimes improve results when:
 When MPS detects crossing conflicts (nets placed in Round 2+), the `--mps-layer-swap` flag enables automatic layer swaps to eliminate same-layer crossings:
 
 ```bash
-python route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps --mps-layer-swap
+python py_router/route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering mps --mps-layer-swap
 ```
 
 #### How It Works
@@ -290,7 +290,7 @@ BGA Pad Array:
 ### Usage
 
 ```bash
-python route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering inside_out
+python py_router/route.py input.kicad_pcb output.kicad_pcb "Net-*" --ordering inside_out
 ```
 
 ## Original Ordering
@@ -306,7 +306,7 @@ Keeps nets in the order they were specified on the command line.
 ### Usage
 
 ```bash
-python route.py input.kicad_pcb output.kicad_pcb "Net-A" "Net-B" "Net-C" --ordering original
+python py_router/route.py input.kicad_pcb output.kicad_pcb "Net-A" "Net-B" "Net-C" --ordering original
 ```
 
 ## Strategy Comparison
@@ -326,7 +326,7 @@ Net ordering (which net routes first) combines with direction order (which endpo
 
 ```bash
 # MPS ordering + backward direction
-python route.py input.kicad_pcb output.kicad_pcb "Net-*" \
+python py_router/route.py input.kicad_pcb output.kicad_pcb "Net-*" \
     --ordering mps \
     --direction backward
 ```

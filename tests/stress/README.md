@@ -75,7 +75,7 @@ picks parameters afresh each time — so two runs of the same board aren't
 identical, which makes it impossible to cleanly A/B an engine change.
 
 To fix this, each board-mutating tool (`route.py`, `route_diff.py`,
-`route_planes.py`, `route_disconnected_planes.py`, `bga_fanout.py`) **self-records**
+`route_planes.py`, `repair_planes.py`, `bga_fanout.py`) **self-records**
 its invocation (fully quoted argv + cwd) to a manifest via
 `redo_record.record_invocation()` at the top of `main()`. Recording is gated on
 the `REDO_MANIFEST` env var (a no-op when unset); `run_board.sh` sets it to
@@ -361,7 +361,7 @@ corpus works around them so routing results aren't confounded:
    (obstacle_map.py) allocates O(grid_cells × outline_vertices) float64
    broadcast arrays — a 432-vertex keyboard outline on a 222×90 mm board
    wants ~7 GB and OOMs the machine (route.py and
-   route_disconnected_planes.py affected; route_planes.py has a frugal
+   repair_planes.py affected; route_planes.py has a frugal
    board-edge path and is fine). Workaround: strip_routing.py
    Douglas-Peucker-simplifies regenerated outlines to ≤0.025 mm tolerance,
    keeping vertex counts low. Fix candidate: chunk the broadcast, or port

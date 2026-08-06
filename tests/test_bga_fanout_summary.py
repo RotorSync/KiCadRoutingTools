@@ -18,7 +18,7 @@ BOARD = os.path.join(ROOT, "kicad_files", "interf_u_unrouted_placed.kicad_pcb")
 
 def run_fanout():
     out = tempfile.mktemp(suffix=".kicad_pcb")
-    cmd = [sys.executable, "bga_fanout.py", BOARD, "--component", "U9",
+    cmd = [sys.executable, "py_router/bga_fanout.py", BOARD, "--component", "U9",
            "--nets", "*", "!GND", "!VCC",
            "--layers", "F.Cu", "In1.Cu", "In2.Cu", "B.Cu",
            "--track-width", "0.2", "--clearance", "0.2",

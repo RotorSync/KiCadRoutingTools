@@ -28,6 +28,8 @@ from types import SimpleNamespace
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522
 sys.path.insert(0, os.path.join(ROOT, "rust_router"))
 
 NUMERIC_BOARD = """(kicad_pcb (version 20241229) (generator "test")
@@ -178,7 +180,7 @@ def test_escape_via_routes_directly():
     out = os.path.join(tmp, "routed.kicad_pcb")
     with open(board, "w") as f:
         f.write(ESCAPE_BOARD)
-    r = subprocess.run([sys.executable, os.path.join(ROOT, "route.py"),
+    r = subprocess.run([sys.executable, os.path.join(ROOT, 'py_router', 'route.py'),
                         board, out, "--nets", "SIG",
                         "--layers", "In1.Cu", "In2.Cu"],
                        capture_output=True, text=True, cwd=ROOT)

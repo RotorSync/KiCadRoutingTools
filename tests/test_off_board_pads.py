@@ -12,7 +12,7 @@ are now dropped from every routing endpoint set:
 - connectivity.get_net_endpoints / get_multipoint_net_pads: single-ended and
   multipoint routing (route.py, GUI, rip/reroute loops)
 - plane_obstacle_builder.identify_target_pads: route_planes.py taps
-- plane_pad_tap.find_unconnected_plane_pads: route_disconnected_planes.py
+- plane_pad_tap.find_unconnected_plane_pads: repair_planes.py
 
     python3 tests/test_off_board_pads.py
 """
@@ -21,6 +21,8 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # #522
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # #522
 
 from kicad_parser import parse_kicad_pcb
 from check_drc import make_off_board_test
