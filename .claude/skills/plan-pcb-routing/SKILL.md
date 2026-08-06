@@ -1961,7 +1961,8 @@ places vias itself, so this is about choosing its options, not via positions):
   already exist (pour-first Step 1c order): it prints `N pour-covered (no via
   needed)` and skips those vias (measured: 104 of 127 GND balls on a 285-ball
   BGA, ~100 via barrels kept out of the escape field;
-  `KICAD_FANOUT_POUR_DIRECT=0` reverts). To benefit, POUR BEFORE FANOUT and
+  `KICAD_FANOUT_POUR_DIRECT=0` reverts). To benefit, POUR BEFORE FANOUT (the
+canonical order; see the Routing Order Rationale) and
   put rail pours on the layers that carry the rail balls (the outer layer for
   a surface flood). This generalizes beyond BGAs: **choose each outer-layer
   flood net by same-layer SMD pad count** — every SMD pad of the flood net on
@@ -1991,17 +1992,19 @@ places vias itself, so this is about choosing its options, not via positions):
 method, after the signal escape each SMD ball on a plane net — a net excluded
 from the fanout with ≥ 6 balls on the part, or an excluded net that already
 owns a copper zone — gets a via immediately: a dog-bone via in a free
-inter-ball gap, else a via-in-pad tap. The Step 1c pour — run right after
-fanout, BEFORE any routing — picks these vias up at fill while the pour is
-still intact, which kills the tap-behind-the-ball-wall failure class (#360)
+inter-ball gap, else a via-in-pad tap. The bare pour — run BEFORE the
+fanout, on the empty board — is still intact when the fanout drops these vias
+into it, so its fill picks them up, which kills the tap-behind-the-ball-wall failure class (#360)
 and, with the default-on plane-fragility field, keeps the plane whole through
 signal routing (measured: pour-first + fragility served 63/70 balls by fill
 alone; pour-last served 0/70 — every ball needed repair welds). Consequences
 for the plan:
 - Keep excluding plane nets from `--nets` — the exclusion is exactly what
   marks them for drops.
-- Pour the planes in Step 1c, immediately after fanout (see the Routing Order
-  Rationale); the plane nets then grade fully connected from that point on.
+- Pour the planes BEFORE the fanout (see the Routing Order Rationale: a
+  fanout's escape stubs are signal copper, and the pour step refuses to pour
+  over a partially-routed board carrying bare pads). The plane nets then grade
+  fully connected from that point on.
 - The later plane steps rarely need `--rip-blocker-nets` or per-pad repair
   under a dropped BGA; prefer the no-rip form there first.
 - `--plane-drop off` disables the pass; `KICAD_FANOUT_PLANE_DROP=0/1`
@@ -3484,7 +3487,7 @@ than taking the blunt default.
 
 ### Differential Pairs Present
 
-Insert diff pair routing after fanout but before single-ended signals:
+Insert diff pair routing after the pour and fanout, before single-ended signals:
 
 ```bash
 python3 route_diff.py board.kicad_pcb \
@@ -3701,7 +3704,7 @@ For difficult boards, consider tuning these parameters:
 
 | Parameter | Default | Effect |
 |-----------|---------|--------|
-| `--max-ripup 3` | 3 | Max blocking nets to rip up and retry |
+| `--max-ripup 3` | 3 | Max blocking nets to rip up and retry (the code's default; see note 15 -- deeper measured WORSE) |
 | `--max-iterations 200000` | 200000 | A* base budget per route (self-extends to 1e7 while progressing — #529; don't tune) |
 | `--heuristic-weight 1.9` | 1.9 | **INADMISSIBLE** — returns a path up to ~1.9× the optimal *length*, not merely "may miss tight routes". Set **1.0** on any net whose requirement IS its length (Step 2c); the far larger node count an admissible search expands is covered by #529's self-budgeting (don't pass `--max-iterations`) |
 | `--via-cost 50` | 50 | Higher = fewer vias, longer paths; lower (10-25) for BGA escape |
@@ -3732,7 +3735,7 @@ python3 route.py board.kicad_pcb --nets "*" \
 0. **Net-coverage invariant (Step 5b)** - Every routable net must be claimed by exactly one stage; a net excluded from one stage (`!X`) MUST appear in a later stage's selection. Reconcile the route-exclusion set against the plane `--nets` set before routing (symmetric difference empty), and confirm `check_connected.py`'s unrouted list is empty at the end. This is the guard against a net (e.g. a secondary ground like GNDA) being silently dropped by every stage.
 1. **Always check for GND connections** - If a component has GND pads but GND isn't being fanned out, the plane vias will handle it
 2. **Fanout ALL non-plane nets** - Use `--nets "*" "!GND" "!VCC"` to fan out all nets except those handled by planes. Do NOT use `"/*"` alone as it misses nets with non-hierarchical names like `Net-(U9-Pad1)`. Unconnected nets are automatically filtered out.
-3. **Order matters** - Fanout (with plane-ball drops), then the Step 1c bare pour (#424: planes FIRST, so the fill picks up the drop vias while intact and the fragility field steers every later route), then diff pairs, then signals (always excluding plane nets with `"!GND" "!VCC"` exclusions), then the plane FINALIZE pass (`--add-gnd-vias`/`--stitch-*` — return/stitching vias adapt around the finished signals, the old #56 concern lives here), then repair
+3. **Order matters** - The bare pour FIRST, on the empty board, then the fanout with its plane-ball drops (#424: planes first, so the fill picks up the drop vias while intact and the fragility field steers every later route), then diff pairs, then signals (always excluding plane nets with `"!GND" "!VCC"` exclusions), then the plane FINALIZE pass (`--add-gnd-vias`/`--stitch-*` — return/stitching vias adapt around the finished signals, the old #56 concern lives here), then repair
 4. **Verify at the end** - Always run DRC, connectivity, and orphan stub checks
 5. **Consider the analyze-power-nets skill** - For complex boards where power net identification isn't obvious, use that skill first to analyze component datasheets
 6. **Consider the find-high-speed-nets skill** - For accurate GND return via distance recommendations based on actual component datasheet speeds and rise times, run `/find-high-speed-nets` before planning. The lightweight inline analysis (Step 4) uses net name patterns only.
@@ -3746,7 +3749,7 @@ python3 route.py board.kicad_pcb --nets "*" \
 14. **BGA/PGA power pins and planes** - When using power planes, BGA/PGA power pins (GND, VCC) connect most efficiently via direct vias to the plane rather than fanout routing. Create planes first, then fanout only signal nets. Through-hole PGA pads automatically connect to planes on that layer; SMD BGA pads need vias placed by `route_planes.py`. This approach:
     - Reduces routing congestion (power pins don't consume escape channels)
     - Provides lower impedance power connections
-15. **Rip-up depth: MORE IS NOT BETTER (measured).** On a 6-board chain A/B, `--max-ripup 5` beat 10 (+0.78 pts completion, 13 fewer connectivity items, 3 boards better / 0 worse) and 20 was worse than 10 — each extra rip level risks a permanent casualty (a ripped victim whose corridor gets taken cannot be restored), and the gains from deep ripping don't materialize because victims can almost always reroute anyway. The optimum sits in 3-5 and wobbles by board (measured: one board monotone-better all the way down to 3, another best at 5) -- use 5 as the default, try 3 as a free retry variant (deterministic: keep whichever grades better), and escalate ABOVE 5 only as a last resort on a specific failing net, never as the opening move. Do NOT add `--max-iterations` — the router self-budgets (#529 dynamic iterations, default on, up to a 1e7 ceiling while a search progresses); see the note in the routing-step section.
+15. **Rip-up depth: MORE IS NOT BETTER (measured).** On a 6-board chain A/B, `--max-ripup 5` beat 10 (+0.78 pts completion, 13 fewer connectivity items, 3 boards better / 0 worse) and 20 was worse than 10 — each extra rip level risks a permanent casualty (a ripped victim whose corridor gets taken cannot be restored), and the gains from deep ripping don't materialize because victims can almost always reroute anyway. The optimum sits in 3-5 and wobbles by board (measured: one board monotone-better all the way down to 3, another best at 5) -- the code's default is 3 (routing_defaults.MAX_RIPUP) and 5 is the upper end of the useful band -- try the other of the two as a free retry variant (deterministic: keep whichever grades better), and escalate ABOVE 5 only as a last resort on a specific failing net, never as the opening move. Do NOT add `--max-iterations` — the router self-budgets (#529 dynamic iterations, default on, up to a 1e7 ceiling while a search progresses); see the note in the routing-step section.
 16. **Guide corridors and keepouts are user-drawn** - Never draw `User.1` guide polylines or `User.2` keepout polygons yourself; suggest in words where they should go and let the user draw them, then add `--guide-corridor` / `--keepout` to the plan. Exception: a polygon the SPEC itself cites with coordinates is transcription, not authoring — draw exactly that (see the Keepout Zones carve-out).
 17. **Companion skills** - Defer to `/identify-diff-pairs` (datasheet-based pair detection), `/recommend-stackup` (before impedance/time-matching work), `/diagnose-routing-failures` (after failures), and `/review-routed-board` (final verification) rather than duplicating their logic inline.
 

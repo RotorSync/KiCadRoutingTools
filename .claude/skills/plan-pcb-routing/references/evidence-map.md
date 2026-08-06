@@ -40,7 +40,7 @@ The `JSON_SUMMARY` goes to **stdout only**; `tee` is what makes it citable.
 | key | decision |
 |---|---|
 | `parts_moved` | `0` → nothing happened. Do not render a delta or claim improvement; widen `--max-displacement` or narrow `--lock` |
-| `crossings_before` / `crossings_after` | **Discard gate.** Any increase → route from the original board |
+| `crossings_before` / `crossings_after` | **Report only -- NEVER a gate** (run-6: crossings correlates POSITIVELY with distance-to-truth, r = +0.78, so gating on it rejects correct homecomings). Gate on hpwl + PAD-PAD + the assembly channel. Any increase → route from the original board |
 | `hpwl_before` / `hpwl_after` | **Discard gate.** Same |
 | `overlap_area` | Courtyard overlap of the output. Must not increase. **Absolute zero is the wrong test** — `watchy` ships 81 of 82 parts in courtyard violation and is a legitimately placed board |
 | `oob_count` | Parts leaving the outline. Must not increase, and every one should be in the intent's `edge_connectors` |
@@ -195,7 +195,7 @@ on this page describes what a step *claims*; this describes what the board *is*.
 | key | decision |
 |---|---|
 | `blocking` | **must reach 0 before the board is deliverable.** `unrouted + broken + drc + undersized + floorplan + impedance + length` |
-| `blocking_by.<component>` | names the lever. The largest entry is where the next iteration goes |
+| `blocking_by.<component>` | names WHERE the blocking sits. **The largest entry is NOT automatically the lever** -- that rule wrecked a run. Choose by the connectivity-first ladder (unrouted -> broken -> widths -> floorplan -> drc); an entry's size ranks within a rung, never across rungs |
 | `quality` = `{vias, copper_mm, segments}` | tie-break **only** at `blocking == 0`. Comparing it earlier lets a router trade a disconnected net for a lower via count |
 | `ungraded` | components nothing examined (no `--intent`, no `--impedance-nets`, no `--length-groups`). **Report as unexamined, never as clean** |
 | `unknown` | a component that was asked for and could not run. `blocking` is `null`, not 0 — the loop must not stop here |

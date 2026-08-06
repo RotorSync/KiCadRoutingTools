@@ -57,8 +57,11 @@ a clean-looking report.
 **3. `delta`** — given `place.log`'s JSON, `locks.json`, the loop sidecars'
 `moved[]`, and the delta render.
 > Did the numbers improve, and did anything move that should not have?
-> `crossings_after <= crossings_before` AND `hpwl_after <= hpwl_before`, or the
-> result is discarded. Then intersect `moved[].reference` with the advisor's
+> `hpwl_after <= hpwl_before` AND PAD-PAD conflicts did not rise AND the
+> assembly channel's blocking pairs did not rise, or the result is
+> discarded. `crossings` is REPORTED, never gated: it correlates POSITIVELY
+> with distance-to-truth (r = +0.78), so a verifier failing a placement on
+> it rejects exactly the correct homecomings. Then intersect `moved[].reference` with the advisor's
 > high-confidence findings and with `locked_refs`: any overlap is a FAIL.
 > **Do not judge by how much moved** — "lots moved, looks broken" and "barely
 > moved, looks safe" are both wrong.
