@@ -1,10 +1,12 @@
-HEAD 2026-08-06 parity audit 89914ce..42c8e4d (27 commits: #570 false-weld
+HEAD 2026-08-06 parity audit 89914ce..4c8b79d (27 commits: #570 false-weld
 rejection, fc5ee0e finalize-with-rip-authority, #572 forced links + lap
 authority, the bounded reconcile progress-loop, terminal geometry
 escalation, rip candidacy for pre-existing nets, and the #577/#578 ports).
-Outcome: ONE carried gap DECIDED AND CLOSED (net_name_patterns), plus TWO
-BROKEN GATES repaired -- both #522 path debris that had been hiding their
-own findings.
+Outcome: ONE carried gap DECIDED AND CLOSED (net_name_patterns), TWO
+BROKEN GATES repaired (both #522 path debris that had been hiding their own
+findings), and -- found BY the repaired gate -- one real product bug: every
+headless board-item removal corrupted pcbnew's SWIG type registry, so any
+run that ripped copper applied HALF its changes and reported success.
 
   Audit surface for the range -- unusually narrow, and worth stating because
   it is WHY one gap accounts for the whole wave:
@@ -74,28 +76,44 @@ own findings.
   * test_cli_postpass_coverage: 8 registered, 15 in active CLI use, 0
     failures (run_drc stays the acknowledged report-only CLI-only pass).
   * test_geometry_floor_leak: 0 problems.
-  * test_gui_livechain_rp2350: STILL RED after the CLI-leg fix, for a
-    SECOND and pre-existing reason -- OPEN, and the one thing this audit
-    did not close. Its GUI leg is vacuous headless: the single-ended apply
-    path reads pcbnew.GetBoard(), which outside KiCad returns a dangling
-    proxy whose GetTracks() raises "'swig_runtime_data5.SwigPyObject' object
-    is not iterable", so no copper reaches the board and the 0-DRC grade is
-    an empty board's. Confirmed pre-existing by re-running the gate with the
-    plugin checked out at f4dd84b~1: byte-identical traceback. This is a
-    HARNESS defect, not a product one -- GetBoard() IS the live board inside
-    KiCad. Four sibling harnesses (test_geometry_floor_leak,
-    test_movie_recorder, test_plane_all_layers_parity, probe_effective_
-    floors) already patch pcbnew.GetBoard to the staged board and this
-    driver does not; that is the fix when someone picks it up. Note the
-    marker's 2026-08-04 "reshaped and PASSES" claim has not been true since
-    #522 -- nobody re-ran it.
+  * test_gui_livechain_rp2350: PASS -- GUI and CLI both 0 DRC at both
+    stages (create, route). First green since #522, and it took a SECOND
+    fix beyond the CLI-leg path: a real product bug, not a harness one.
+    Its GUI leg had been dying inside the apply and grading the resulting
+    EMPTY board as 0 DRC, which is how a broken leg looked healthy.
+    - Root cause (4c8b79d): pcbnew's BOARD.Remove() is RemoveNative() plus
+      `if not IsActionRunning(): item.thisown = 1`, and PCB_TRACK/PCB_VIA
+      have no SWIG destructor. Freeing that newly-"owned" proxy corrupts
+      the pcbnew type registry PROCESS-WIDE -- BOARD.Tracks() then returns a
+      bare SwigPyObject, and even a fresh LoadBoard() in the same process
+      comes back broken. INSIDE KiCad IsActionRunning() is true and
+      Remove() == RemoveNative(), so it is invisible there; headless it is
+      fatal, and headless includes the SHIPPED py_router/run_plan.py, not
+      just the gates.
+    - The damage was partial and silent: _apply_results_to_board strips
+      flagged segments in one loop, then calls GetTracks() again for the
+      vias -- so the segments came off, the second call raised inside a wx
+      CallAfter, and the board kept HALF the change while the step still
+      reported "done". Any GUI/headless run that RIPS copper was exposed.
+    - Six sites in the plugin already used RemoveNative; five did not
+      (swig_gui x3, differential_gui x2, fanout_gui x1). All uniform now.
+      In-KiCad behavior is unchanged by construction.
+    - Method note worth reusing: the gate costs ~15 min per cycle, so this
+      was reduced to a 2-second repro -- same board and driver, three
+      PRE-ROUTED nets with force_reroute so the rip path runs. The crash
+      needs segments_to_remove AND vias_to_remove to be non-empty, which is
+      why a plain route step never showed it.
+    - Correction to this entry as first written: it claimed the driver
+      "does not patch pcbnew.GetBoard". It does (headless_plan.py:148).
+      That diagnosis was wrong and the real one is above.
 
   Carried gaps: NONE outstanding. net_name_patterns is closed above, and
   plane_net_layers (generate_bga_fanout) now reports 19/19 kwargs, so both
-  entries carried since 2026-08-04 are cleared. Known blind spots unchanged:
+  entries carried since 2026-08-04 are cleared -- and rp2350, carried as
+  caveated or unrun since 2026-08-04, is green. Known blind spot unchanged:
   the engine-parity plan is signal+plane only, so it exercises no diff-pair
   or impedance parameters (cover those with a diff-pair board and
-  check_impedance.py), and rp2350's GUI leg is above.
+  check_impedance.py).
 
 ADDENDUM 2026-08-04 (post review-fix wave 3829d36): all five review
 agents' confirmed findings fixed (geometry-key oracle removal merge with
