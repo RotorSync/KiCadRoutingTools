@@ -237,7 +237,18 @@ def main(argv=None):
 
     deltas = [(k, expected.get(k, '(new row)'), v)
               for k, v in sorted(current.items()) if expected.get(k) != v]
-    gone = [k for k in sorted(expected) if k not in current]
+    # A row the baseline has and this run did not produce is only MISSING when
+    # this run was supposed to produce it. Sweeping one tool, or a board
+    # subset, is a legitimate narrower question -- reporting the rest as
+    # missing would train people to ignore the verdict line.
+    swept_tools, swept_boards = set(tools), {r['board'] for r in rows}
+    gone = [k for k in sorted(expected) if k not in current
+            and k.rsplit(':', 1)[-1] in swept_tools
+            and k.rsplit(':', 1)[0] in swept_boards]
+    skipped = len(expected) - len(current) - len(gone)
+    if skipped > 0:
+        print(f'  ({skipped} baseline row(s) outside this run\'s scope, not '
+              f'compared)')
     for key, was, now in deltas:
         print(f'  CHANGED {key}: {was}  ->  {now}')
     for key in gone:

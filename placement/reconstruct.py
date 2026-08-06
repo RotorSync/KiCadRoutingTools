@@ -79,19 +79,35 @@ def pad_oob_amount(state, edge_bands=None) -> float:
     intent's edge_connectors) charges only the EXCESS past its band -- its
     declared overhang is by design, and without the allowance the gate tuple
     itself would revert a correct edge-homecoming (the move RAISES board-wide
-    oob exactly by the legitimate overhang)."""
+    oob exactly by the legitimate overhang).
+
+    Run-7 finding: this used to measure against the board's BOUNDING RECTANGLE
+    while every other instrument used the real Edge.Cuts outline. On a
+    non-rectangular board the two disagree completely -- a candidate that swept
+    nine parts into a notch measured `oob 0.0` here and 14.29mm everywhere
+    else, so the gate accepted an evacuation it was built to reject. The
+    legality context already owns the outline-aware measurement (rings,
+    cutouts, notches); use it, and keep the bbox form only as the fallback for
+    a state that has no context.
+    """
     oob = 0.0
     if state.legality_ctx is None:
         return oob
     bands = edge_bands or {}
-    for ref, pp in state.legality_ctx.parts.items():
+    ctx = state.legality_ctx
+    outline_aware = getattr(ctx, 'gate', None) is not None
+    for ref, pp in ctx.parts.items():
         p = state.parts.get(ref)
         if p is None:
             continue
-        ext = pp.extent(p.x, p.y, p.rot)
-        if ext is not None:
+        if outline_aware:
+            amt = ctx.pad_oob_amount(ref, p.x, p.y, p.rot, exact=True)
+        else:
+            ext = pp.extent(p.x, p.y, p.rot)
+            if ext is None:
+                continue
             amt = _bbox_outside(ext, state.board)
-            oob += max(0.0, amt - bands.get(ref, 0.0))
+        oob += max(0.0, amt - bands.get(ref, 0.0))
     return oob
 
 
