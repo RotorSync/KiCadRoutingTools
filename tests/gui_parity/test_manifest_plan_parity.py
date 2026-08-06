@@ -50,7 +50,6 @@ BOOL_FLAGS = {
     '--no-bga-zones': 'no_bga_zone', '--no-bga-zone': 'no_bga_zone',
     '--no-gnd-vias': 'no_gnd_vias', '--rip-blocker-nets': 'rip_blocker_nets',
     '--keep-input-copper': 'keep_input_copper',
-    '--allow-bare-pads': 'allow_bare_pads',
 }
 # nargs='+' glob-list flags: every pattern must survive into the plan param
 # (as a list, or a single scalar for one pattern). #521 --protect-nets and the

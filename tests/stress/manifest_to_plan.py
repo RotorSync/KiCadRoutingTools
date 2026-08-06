@@ -142,9 +142,6 @@ LIST_FLAGS = {
 }
 BOOL_FLAGS = {
     '--rip-blocker-nets': 'rip_blocker_nets',
-    # Run-6 A5 pour gate opt-out (GUI path is warn-only; the plan executor
-    # notes-and-ignores the param, which matches that semantic).
-    '--allow-bare-pads': 'allow_bare_pads',
     '--add-gnd-vias': 'add_gnd_vias',
     # #485: route_planes area via stitching toggles (planes-tab checkboxes
     # stitch_vias / stitch_edge_fence, applied by the plan executor's

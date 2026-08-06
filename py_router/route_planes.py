@@ -2712,10 +2712,6 @@ def create_plane(
     stitch_fence_pitch: Optional[float] = None,
     stitch_inset: Optional[float] = None,
     stitch_max_freq: Optional[float] = None,
-    # Run-6 A5 pour gate: a bare pad (>=2-pad net with zero copper) at pour
-    # time has its escape channel consumed by the tap-via carpet, permanently.
-    # CLI refuses (exit 3) unless --allow-bare-pads; the GUI path warns only.
-    allow_bare_pads: bool = False,
 ) -> Union[Tuple[int, int, int],
            Tuple[int, int, int, list, list, list, int, list]]:
     """
@@ -2822,54 +2818,6 @@ def create_plane(
             return _empty_plane_results(return_results)
         net_ids.append(net_id)
         print(f"Found net '{net_name}' with ID {net_id}")
-
-    # Run-6 A5 POUR GATE: every unrouted pad's escape channel is consumed by
-    # the tap-via carpet, which is not rippable copper -- measured, 5 bare
-    # QFN rail pads at a LATE pour never closed across five post-pour repair
-    # attempts (6-9 oracle joins oscillating). A bare pad at pour time is a
-    # blocking defect: connect it first (step back to the pre-pour board),
-    # or pass --allow-bare-pads to proceed deliberately.
-    # EXEMPT: the #424 pour-FIRST Step 1c call on a board with no signal
-    # copper at all -- taps placed before any signal routes exist are
-    # ordinary obstacles the router sees from the start; the hazard is
-    # specific to pouring over a PARTIALLY-routed board.
-    from check_connected import bare_pad_nets
-    _plane_ids = set(net_ids)
-    _has_signal_copper = (any(s.net_id not in _plane_ids
-                              for s in pcb_data.segments)
-                         or any(v.net_id not in _plane_ids
-                                for v in pcb_data.vias))
-    _bare = (bare_pad_nets(pcb_data, exclude_net_ids=_plane_ids)
-             if _has_signal_copper else {})
-    if not _has_signal_copper:
-        print("  (pour gate: no signal copper on the board yet -- pour-first "
-              "Step 1c, bare pads expected and safe)")
-    if _bare:
-        print(f"\n{'!'*60}")
-        print(f"POUR GATE: {len(_bare)} net(s) carry BARE (unconnected) pads "
-              f"-- the pour's tap-via carpet will permanently seal their "
-              f"escape channels:")
-        for _bnid, _bpads in sorted(_bare.items(),
-                                    key=lambda kv: -len(kv[1]))[:12]:
-            _bn = pcb_data.nets[_bnid].name
-            _bp = ', '.join(f"{p.component_ref}.{p.pad_number}"
-                            for p in _bpads[:6])
-            print(f"  {_bn}: {len(_bpads)} pad(s) ({_bp}"
-                  f"{', ...' if len(_bpads) > 6 else ''})")
-        if len(_bare) > 12:
-            print(f"  ... and {len(_bare) - 12} more net(s)")
-        if allow_bare_pads:
-            print("  --allow-bare-pads given: pouring anyway (deliberate).")
-        elif return_results:
-            print("  WARNING (GUI path): pouring anyway -- route these nets "
-                  "before pouring, or their pads may become unreachable.")
-        else:
-            print("  Refusing to pour. Route these nets first (the pour is a "
-                  "one-way door for bare pads), or re-run with "
-                  "--allow-bare-pads to proceed deliberately.")
-            print(f"{'!'*60}\n")
-            sys.exit(3)
-        print(f"{'!'*60}\n")
 
     # (The run-6 blocker guard that used to sit here is GONE with #562: the
     # pour places no taps and cannot rip, so there is no blocker ladder to
@@ -3922,11 +3870,6 @@ Examples:
              "same obstacle/hole-to-hole/edge checks as any routed via.")
     parser.add_argument("--stitch-pitch", type=float, default=defaults.STITCH_PITCH,
         help=f"Lattice pitch for --stitch-vias in mm (default: {defaults.STITCH_PITCH})")
-    parser.add_argument("--allow-bare-pads", action="store_true",
-                        help="Pour even when nets with >=2 pads carry ZERO copper. Default "
-                             "REFUSES (exit 3): the tap-via carpet permanently seals a bare "
-                             "pad's escape channel, and no post-pour repair can rip a via "
-                             "field (run-6 A5). Route those nets first instead.")
     parser.add_argument("--stitch-max-freq", type=float, default=None,
         help="Maximum frequency of interest in MHz: derives the stitching "
              "pitch as lambda/20 using the largest dielectric epsilon_r in "
@@ -4085,7 +4028,6 @@ Examples:
     create_plane(
         input_file=args.input_file,
         output_file=args.output_file,
-        allow_bare_pads=args.allow_bare_pads,
         ripup_blocker_select=args.ripup_blocker_select,
         net_names=net_names,
         plane_layers=plane_layers,

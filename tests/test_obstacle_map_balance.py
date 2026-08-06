@@ -155,12 +155,8 @@ def main():
     kit_plane = os.path.join(tmp, "kit_plane.kicad_pcb")
     rc, log = run_cmd(["py_router/route_planes.py", kit_out, kit_plane,
                        "--nets", "+3.3V", "GND", "+3.3V", "GND",
-                       # --max-via-reuse-radius / --rip-blocker-nets were
-                       # removed from route_planes.py by #562 (the pour step
-                       # does no routing); --allow-bare-pads survives.
-                       "--plane-layers", "F.Cu", "In1.Cu", "In2.Cu", "B.Cu",
-                       # deliberate partial-board pour (run-6 A5 gate opt-out)
-                       "--allow-bare-pads"] + kit_geom)
+                       "--plane-layers", "F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+                      + kit_geom)
     check("route_planes: run completed", rc == 0, f"rc={rc}")
     # NO rip-churn assertion here any more, and re-tuning cannot bring one
     # back: since #562 the pour step neither taps nor rips (every via-needed
