@@ -407,7 +407,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # NOTE: it must save the LIVE board, not re-read input_file --
                 # the GUI's input_file is the ORIGINAL on disk and does not
                 # carry copper earlier chain steps applied in-session.
-                stage_board_fn=None) -> Tuple[int, int, float]:
+                stage_board_fn=None,
+                # #572: exact-fill links the plane-finalize oracle left
+                # "unroutable without rip authority", forwarded by the outer
+                # run into its final-reconciliation sub-run --
+                # remaining_links-shaped entries [net_name,
+                # [ax, ay, layer, kind], [bx, by, layer, kind]]. Nets named
+                # here bypass the model-credit already-routed skip and route
+                # their EXACT links as endpoint overrides with the full rip
+                # ladder behind them (fix direction 2). INTERNAL: set only
+                # by the finalize custody handoff; deliberately no CLI flag.
+                oracle_links: Optional[List] = None) -> Tuple[int, int, float]:
     """
     Route single-ended nets using the Rust router.
 
@@ -473,7 +483,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # net_name_patterns must not forward either: the reconcile sub-run scopes
     # by exact retried-net names, which are then the correct override source.
     for _k in ('input_file', 'output_file', 'net_names', 'pcb_data',
-               'net_name_patterns'):
+               'net_name_patterns',
+               # #572: links describe ONE board state; only the finalize
+               # custody handoff may set them on a sub-run, never blanket
+               # forwarding.
+               'oracle_links'):
         _reconcile_kwargs.pop(_k, None)
     if env_knobs.DUMP_BATCH_KWARGS:
         # Parameter-parity probe: dump THIS call's full parameter set so the
@@ -1007,7 +1021,31 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"{sum(len(v) for _, v in force_ripped.values())} via(s) from "
                   f"{len(force_ripped)} net(s) for a from-scratch re-route")
 
-    net_ids, _already_routed = filter_already_routed(pcb_data, net_ids, config)
+    # #572: custody nets carry an exact-fill OPEN verdict from the outer
+    # run's oracle -- the model-credit skip below must not clear them.
+    # Links a previous reconciliation lap already strapped (copper
+    # terminating on the link's zone-side floats) no longer force the
+    # bypass, so a re-lapped sub-run skips the net instead of vacuously
+    # re-counting it.
+    _assume_open572 = set()
+    if oracle_links:
+        from single_ended_routing import oracle_link_strapped as _ols572
+        _nm2id572 = {n.name: i for i, n in pcb_data.nets.items()}
+        for _l in oracle_links:
+            try:
+                _lnm, _lnid = _l[0], _nm2id572.get(_l[0])
+            except (TypeError, IndexError):
+                continue
+            if _lnid is None:
+                continue
+            try:
+                _strapped = _ols572(pcb_data, _lnid, (_l[1], _l[2]))
+            except (TypeError, IndexError):
+                _strapped = False
+            if not _strapped:
+                _assume_open572.add(_lnm)
+    net_ids, _already_routed = filter_already_routed(
+        pcb_data, net_ids, config, assume_open=_assume_open572)
     # #515: --rip-existing-nets only rips copper that BLOCKS a net being
     # routed; a net dropped here as already-connected never routes, so naming
     # it in both --nets and --rip-existing-nets is a no-op. Warn instead of
@@ -1595,6 +1633,27 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     routed_results = state.routed_results
     track_proximity_cache = state.track_proximity_cache
     layer_map = state.layer_map
+
+    # #572: exact oracle links -> per-net-id forced edges for the SE loop
+    # (and its rip/retry/reroute paths). Malformed entries are dropped, not
+    # fatal -- the net then routes the normal (derivation) way.
+    if oracle_links:
+        _name_to_id572 = {n.name: i for i, n in pcb_data.nets.items()}
+        for _ol in oracle_links:
+            try:
+                _onm, _oa, _ob = _ol[0], tuple(_ol[1]), tuple(_ol[2])
+            except (TypeError, ValueError, IndexError):
+                continue
+            _onid = _name_to_id572.get(_onm)
+            if _onid is not None and len(_oa) >= 4 and len(_ob) >= 4:
+                state.oracle_links_by_net.setdefault(_onid, []).append(
+                    (_oa, _ob))
+        if state.oracle_links_by_net:
+            print(f"  Oracle forced links (#572): "
+                  f"{sum(len(v) for v in state.oracle_links_by_net.values())}"
+                  f" exact-fill link(s) on "
+                  f"{', '.join(sorted(pcb_data.nets[i].name for i in state.oracle_links_by_net))}"
+                  f" -- routing the oracle's own endpoints, not derived ones")
 
     # #540 item 2: price the outer pass's vacated corridors in every search
     # of this batch. The entries ride the existing ripped-route avoidance
@@ -3066,6 +3125,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # file; GUI (return_results) re-invokes on the in-memory board and
     # merges the sub-run's results (claude-tab/stress parity gap closure).
     _custody_nets9 = []
+    _custody_links9 = []
     _zone_complete9 = set()
     # PLANE FINALIZE (#562): the pours-first chain's repair step, absorbed.
     # Measured (3-board arch chains): the standalone repair step's entire
@@ -3649,6 +3709,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     # +3V3 and broke it).
                     _custody_nets9 = (sorted({l[0] for l in _rl9})
                                       if _rl9 else list(_zna))
+                    # #572: keep the EXACT links -- the reconcile routes
+                    # them as forced edges; net-level retry alone is
+                    # structurally blind to them (the fill-model zone
+                    # credit both skips the net as "Already fully
+                    # connected" and, past the skip, derives no missing
+                    # edge -- a 0-copper vacuous success, measured on
+                    # ghoul GND).
+                    _custody_links9 = list(_rl9 or [])
                     # Zone nets KiCad verified COMPLETE are hands-off for
                     # the reconcile: the main run's failure buckets are
                     # STALE after the finalize fixes nets.
@@ -3718,6 +3786,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # partial copper (and thrash on a second failure).
             _rk.update(final_reconcile=False, skip_routing=False,
                        force_reroute=False, rip_preexisting=False)
+            # #572 (fix direction 2): hand the oracle's EXACT unroutable
+            # links to the sub-run as forced edges. Without them the
+            # sub-run's model-credited connectivity both skips the custody
+            # net ("Already fully connected") and, past the skip, derives no
+            # missing edge (0-copper vacuous success) -- the link ships open
+            # while every retry claims success. With them the sub-run routes
+            # the exact endpoints, and a blocked link feeds the standard
+            # frontier analysis -> rip ladder -> retries.
+            if _custody_links9:
+                _rk['oracle_links'] = _custody_links9
             # #527 follow-up: the inner run forwards the SAME progress
             # callback, so its routing/rescue/cleanup messages were pixel-
             # identical to the first pass's and the GUI looked like it ran

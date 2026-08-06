@@ -78,7 +78,9 @@ from connectivity import (
 )
 from net_queries import get_chip_pad_positions, calculate_route_length
 from pcb_modification import add_route_to_pcb_data
-from single_ended_routing import route_net_with_obstacles, route_multipoint_main
+from single_ended_routing import (route_net_with_obstacles,
+                                  route_multipoint_main, route_oracle_links,
+                                  oracle_link_strapped)
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache, record_frontier_blocking
 from rip_up_reroute import rip_up_net, restore_net
 from leg_rip import LEG_RIP_ENABLED, select_blocking_branch  # #510
@@ -668,9 +670,23 @@ def route_single_ended_nets(
         # scaled step costs everywhere EXCEPT near the lane, where the
         # attraction discount compensates -- defection costs real money.
         cfg_route = bus_stick_config(config, attraction_path)
+        # #572: oracle forced links outrank endpoint derivation -- the
+        # model's zone credit merges the exact-fill clusters, so both the
+        # multipoint and plain derivations "see" no gap and succeed with
+        # zero copper. Links a previous lap already strapped are dropped.
+        _olinks = (getattr(state, 'oracle_links_by_net', None) or {}).get(net_id)
+        if _olinks:
+            _olinks = [l for l in _olinks
+                       if not oracle_link_strapped(pcb_data, net_id, l)]
         # Check for multi-point net (3+ pads, no existing segments)
         multipoint_pads = get_multipoint_net_pads(pcb_data, net_id, config)
-        if multipoint_pads:
+        if _olinks:
+            print(f"  Routing {len(_olinks)} exact-fill oracle link(s) "
+                  f"(#572 forced edges)")
+            result = route_oracle_links(pcb_data, net_id, cfg_route, obstacles,
+                                        _olinks,
+                                        attraction_path=attraction_path)
+        elif multipoint_pads:
             print(f"  Detected multi-point net with {len(multipoint_pads)} pads (Phase 1: main route only)")
             result = route_multipoint_main(pcb_data, net_id, cfg_route, obstacles, multipoint_pads,
                                            attraction_path=attraction_path, state=state)
@@ -1117,9 +1133,26 @@ def route_single_ended_nets(
                         retry_attraction_path, retry_reverse_direction = bus_attraction_context(
                             net_id, bus_net_to_group, bus_corridors, bus_routed_paths)
                         retry_cfg = bus_stick_config(config, retry_attraction_path)
+                        # #572: a forced-link net retries its EXACT links
+                        # against the post-rip board (same reason as the
+                        # initial attempt: derivation is model-blind to the
+                        # gap). Re-filter strapped links -- an earlier link
+                        # of a multi-link net may have landed before the
+                        # failing one aborted the attempt.
+                        _olinks_r = (getattr(state, 'oracle_links_by_net', None)
+                                     or {}).get(net_id)
+                        if _olinks_r:
+                            _olinks_r = [l for l in _olinks_r
+                                         if not oracle_link_strapped(
+                                             pcb_data, net_id, l)]
                         # Check for multi-point net in retry as well
                         retry_multipoint_pads = get_multipoint_net_pads(pcb_data, net_id, config)
-                        if retry_multipoint_pads:
+                        if _olinks_r:
+                            retry_result = route_oracle_links(
+                                pcb_data, net_id, retry_cfg, retry_obstacles,
+                                _olinks_r,
+                                attraction_path=retry_attraction_path)
+                        elif retry_multipoint_pads:
                             retry_result = route_multipoint_main(pcb_data, net_id, retry_cfg, retry_obstacles, retry_multipoint_pads,
                                                                  attraction_path=retry_attraction_path, state=state)
                             # Track for Phase 3 completion after length matching

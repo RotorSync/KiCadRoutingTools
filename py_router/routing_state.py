@@ -96,6 +96,16 @@ class RoutingState:
     # re-routes after being ripped, so its ancestry is always freshly set then.
     rip_ancestry: Dict[int, Any] = field(default_factory=dict)
 
+    # #572: exact-fill links the plane-finalize oracle left unroutable,
+    # forced into this (reconcile sub-)run -- net_id ->
+    # [((ax, ay, layer, kind), (bx, by, layer, kind)), ...]. A net listed
+    # here routes its EXACT links as endpoint overrides instead of derived
+    # endpoints: the fill-model zone credit both false-cleared such nets in
+    # filter_already_routed and made their multipoint derivation vacuous
+    # (one merged component -> 0-segment "success"), so only the oracle's
+    # own endpoints can aim the route at the real gap.
+    oracle_links_by_net: Dict[int, List[Tuple]] = field(default_factory=dict)
+
     # Tracking sets
     polarity_swapped_pairs: Set[str] = field(default_factory=set)
     # Pairs where a polarity swap was WANTED but the per-pair policy forbade
