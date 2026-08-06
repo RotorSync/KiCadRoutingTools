@@ -4765,6 +4765,21 @@ For differential pair routing, use route_diff.py:
                 add_teardrops=args.add_teardrops,
                 collect_stats=args.stats)
 
+    # Castellated landings (run-6 fix 1.7): pull track ends that landed inside
+    # a castellated pad's edge-clearance zone back to the pad's inner reach.
+    # No-op on boards without pad_prop_castellated pads or an edge rule.
+    if not args.skip_routing and args.output_file \
+            and os.path.isfile(args.output_file):
+        try:
+            from fix_kicad_drc_settings import effective_board_edge_clearance
+            from pcb_modification import retract_castellated_landings
+            _edge = effective_board_edge_clearance(
+                args.input_file, args.board_edge_clearance or 0.0)
+            if _edge > 0:
+                retract_castellated_landings(args.output_file, _edge)
+        except Exception as e:
+            print(f"  (skipped castellated-landing retract: {e})")
+
     # Make the written project's KiCad DRC constraints consistent with the
     # clearances/sizes we just routed to, so a manual DRC only flags genuine
     # problems instead of stock-default noise (issue #160). Only edits the

@@ -4076,6 +4076,7 @@ Examples:
         from obstacle_map import build_base_obstacle_map
         from add_gnd_vias import add_gnd_vias_to_existing_board
         from kicad_writer import add_tracks_and_vias_to_pcb
+        from fix_kicad_drc_settings import effective_board_edge_clearance
 
         print(f"\nAdding GND return vias near signal vias...")
 
@@ -4096,7 +4097,21 @@ Examples:
             layers=list(pcb_data.board_info.copper_layers),
             # Thread the fab hole-to-hole minimum through so GND-via placement
             # enforces the real drill spacing (issue #125), not the 0.2mm default.
-            hole_to_hole_clearance=args.hole_to_hole_clearance
+            hole_to_hole_clearance=args.hole_to_hole_clearance,
+            # Copper-to-EDGE, so build_base_obstacle_map populates the static
+            # off-board keep-out (#422) and a return via cannot land outside the
+            # outline. Without it this config carried the 0.0 default, the map had
+            # no edge keep-out at all, and add_gnd_vias -- which checks track and
+            # via-to-via clearance but never the outline -- placed a GND via
+            # 1.40mm BEYOND the board edge (test-board: (124.20, 82.40) against a
+            # y=81.0 edge), i.e. copper that is milled away at depanelization.
+            #
+            # NOT args.board_edge_clearance: that one is the plane-zone INSET
+            # (see the note at the DRC writeback below), not the enforced
+            # copper-to-edge rule. cli=0 reads the board's own
+            # min_copper_edge_clearance, floored at the fab minimum -- the same
+            # idiom the zone-inset resolution above uses.
+            board_edge_clearance=effective_board_edge_clearance(args.input_file, 0.0),
         )
         from kicad_dru import install_layer_clearances
         install_layer_clearances(gnd_config, None, None, pcb_data)  # #498
@@ -4145,6 +4160,16 @@ Examples:
                                                 args.clearance, args.grid_step)
         if _snapped or _removed:
             print(f"Plane cleanup: closed {_snapped} stub gap(s), trimmed {_removed} dead-end segment(s)")
+        # Castellated landings (run-6 fix 1.7): tap/join copper that landed in
+        # a castellated pad's edge-clearance zone is pulled to its inner reach.
+        try:
+            from fix_kicad_drc_settings import effective_board_edge_clearance
+            from pcb_modification import retract_castellated_landings
+            _edge = effective_board_edge_clearance(args.input_file, 0.0)
+            if _edge > 0:
+                retract_castellated_landings(args.output_file, _edge)
+        except Exception as e:
+            print(f"  (skipped castellated-landing retract: {e})")
 
     # NO KiCad-oracle recheck here (#217): the plane this step just poured has NOT
     # yet been stitched -- tying pads/islands into the pour is route_disconnected_

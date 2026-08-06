@@ -3320,6 +3320,17 @@ Examples:
                                                 args.clearance, args.grid_step)
         if _snapped or _removed:
             print(f"Plane cleanup: closed {_snapped} stub gap(s), trimmed {_removed} dead-end segment(s)")
+        # Castellated landings (run-6 fix 1.7): reconnect/tap copper that
+        # landed in a castellated pad's edge-clearance zone is pulled back to
+        # the pad's inner reach.
+        try:
+            from fix_kicad_drc_settings import effective_board_edge_clearance
+            from pcb_modification import retract_castellated_landings
+            _edge = effective_board_edge_clearance(args.input_file, 0.0)
+            if _edge > 0:
+                retract_castellated_landings(args.output_file, _edge)
+        except Exception as e:
+            print(f"  (skipped castellated-landing retract: {e})")
 
     # KiCad-oracle recheck (#217): our fill model over-credits, so gaps
     # KiCad's REAL fill produces can survive every model-based pass (castor

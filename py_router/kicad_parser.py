@@ -218,6 +218,11 @@ class Pad:
     # size_x x size_y bounding box, so the finger channels (and the empty side of
     # an off-anchor pad) stay routable. None for ordinary rect/circle/roundrect
     # pads, which the bounding box models exactly.
+    castellated: bool = False  # KiCad (property pad_prop_castellated): a
+    # deliberate half-hole pad ON the board edge (run-6 fix 1.7). Consumers:
+    # the castellated-landing retract post-pass pulls track endpoints that
+    # land in the edge-clearance zone of such a pad back to its inner reach.
+    # Set by BOTH parse paths (text + pcbnew).
 
 
 @dataclass
@@ -2544,7 +2549,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
                 local_clearance=local_clearance,
                 polygons=pad_polygons,
                 hole_x=pad_hole_x,
-                hole_y=pad_hole_y
+                hole_y=pad_hole_y,
+                castellated='pad_prop_castellated' in pad_text
             )
 
             footprint.pads.append(pad)
@@ -3985,6 +3991,14 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             if local_clearance == 0.0:
                 local_clearance = fp_clearance
 
+            # Castellated half-hole property (run-6 fix 1.7), parity with the
+            # text parser's pad_prop_castellated.
+            try:
+                pad_castellated = bool(pad.GetProperty() ==
+                                       pcbnew.PAD_PROP_CASTELLATED)
+            except Exception:
+                pad_castellated = False
+
             pad_obj = Pad(
                 component_ref=reference,
                 pad_number=pad_num,
@@ -4010,7 +4024,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 local_clearance=local_clearance,
                 polygons=pad_polygons,
                 hole_x=pcb_hole_x,
-                hole_y=pcb_hole_y
+                hole_y=pcb_hole_y,
+                castellated=pad_castellated
             )
 
             footprint.pads.append(pad_obj)

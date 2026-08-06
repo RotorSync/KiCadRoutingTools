@@ -2414,7 +2414,12 @@ class RoutingDialog(wx.Dialog):
 
         # Reset advanced parameters
         self.impedance_check.SetValue(False)
-        self.impedance_value.SetValue(50.0)
+        # int, not 50.0: impedance_value is a wx.SpinCtrl (integer), and on
+        # wxPython 4.2 a float raises TypeError. The plan executor CATCHES that
+        # and logs "per-step reset skipped", so a hardcoded float silently
+        # abandoned every reset from this line onward -- every control below
+        # kept the previous step's value. Use the control's own default.
+        self.impedance_value.SetValue(defaults.IMPEDANCE_DEFAULT)
         self.coplanar_gap.SetValue(defaults.COPLANAR_GAP)
         self.coplanar_nets_ctrl.SetValue("")
         self.max_iterations.SetValue(defaults.MAX_ITERATIONS)
@@ -3637,6 +3642,18 @@ class RoutingDialog(wx.Dialog):
         # Refresh net list to hide newly connected nets (don't sync from visible since we just cleared)
         self.net_panel.refresh(sync_from_visible=False)
         self._update_status_bar()
+
+        # Castellated landings (run-6 fix 1.7, GUI twin of route.py's
+        # retract_castellated_landings): the effective edge rule is the larger
+        # of the config value and the live board's own m_CopperEdgeClearance.
+        from .gui_utils import apply_castellated_landing_retract
+        try:
+            _live_edge = (board.GetDesignSettings().m_CopperEdgeClearance
+                          or 0) / 1e6
+        except Exception:
+            _live_edge = 0.0
+        apply_castellated_landing_retract(
+            board, max(config.get('board_edge_clearance') or 0.0, _live_edge))
 
         # Per-step live DRC floors (GUI twin of the CLI's per-step
         # fix_project_for_output): a DRC pressed right after this step must

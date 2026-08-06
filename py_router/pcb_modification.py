@@ -1191,6 +1191,161 @@ def clean_plane_copper(output_file: str, plane_net_names, clearance: float = 0.1
     return delta.snapped, len(delta.segments_to_remove)
 
 
+class CastellationRetractDelta(NamedTuple):
+    """Endpoint moves for castellated landings, as a board-independent DELTA so
+    the CLI (file rewrite) and GUI (live pcbnew board) apply the SAME retract.
+
+    moves: List[(segment, end, new_x, new_y)] -- `end` is 'start' or 'end';
+           the named endpoint of `segment` moves to (new_x, new_y).
+    """
+    moves: list
+
+    @property
+    def is_empty(self):
+        return not self.moves
+
+
+def compute_castellated_landing_retract(pcb, board_edge_clearance: float,
+                                        margin: float = 0.02
+                                        ) -> "CastellationRetractDelta":
+    """Board-level core of the castellated-landing retract (run-6 fix 1.7).
+
+    A castellated pad's copper deliberately straddles the outline, so the
+    router's landing on its center sits ON the board edge -- and while the PAD
+    is the fab's business (pad_prop_castellated), the TRACK is graded
+    SEGMENT-BOARD-EDGE. Run 5 hand-trimmed those landings (two boards, values
+    like y60.52/y80.48) every convergence lap. This computes the same trim:
+    for each segment endpoint that lies inside a same-net castellated pad and
+    closer to the outline than `board_edge_clearance + width/2 + margin`, pull
+    the endpoint back ALONG the segment to the first point that clears -- capped
+    at the pad's inner reach, so the landing always stays on pad copper and
+    connectivity is preserved by the pad itself.
+
+    Deliberately skipped: endpoints that coincide with other same-net copper
+    endpoints (a joint inside the pad -- moving one side would open the joint),
+    and pads with residual rect tilt (the axis-aligned containment test would
+    lie). Measured against the real Edge.Cuts rings (check_drc's geometry),
+    falling back to the bbox when the board has no usable outline.
+    """
+    from check_drc import board_edge_geometry, _point_to_rings_distance
+    pads = [p for fp in pcb.footprints.values() for p in fp.pads
+            if getattr(p, 'castellated', False) and abs(getattr(p, 'rect_rotation', 0.0)) < 1e-6]
+    if not pads:
+        return CastellationRetractDelta([])
+    rings, _outer, _cutouts = board_edge_geometry(pcb.board_info)
+    if not rings:
+        b = getattr(pcb.board_info, 'board_bounds', None)
+        if not b:
+            return CastellationRetractDelta([])
+        rings = [[(b[0], b[1]), (b[2], b[1]), (b[2], b[3]), (b[0], b[3])]]
+
+    by_net: Dict[int, list] = {}
+    for p in pads:
+        by_net.setdefault(p.net_id, []).append(p)
+
+    # Joint map: how many same-net copper endpoints (segment ends, via centers)
+    # sit at each rounded position.
+    joints: Dict[tuple, int] = {}
+    for s in pcb.segments:
+        for x, y in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
+            k = (s.net_id, round(x, 3), round(y, 3))
+            joints[k] = joints.get(k, 0) + 1
+    for v in pcb.vias:
+        k = (v.net_id, round(v.x, 3), round(v.y, 3))
+        joints[k] = joints.get(k, 0) + 1
+
+    def _pad_covers(pad, layer):
+        return any(l == layer or l == '*.Cu' for l in pad.layers)
+
+    def _inside(pad, x, y, eps=1e-6):
+        return (abs(x - pad.global_x) <= pad.size_x / 2 + eps and
+                abs(y - pad.global_y) <= pad.size_y / 2 + eps)
+
+    moves = []
+    for s in pcb.segments:
+        cands = by_net.get(s.net_id)
+        if not cands:
+            continue
+        for end, (x, y), (ox, oy) in (
+                ('start', (s.start_x, s.start_y), (s.end_x, s.end_y)),
+                ('end', (s.end_x, s.end_y), (s.start_x, s.start_y))):
+            pad = next((p for p in cands
+                        if _pad_covers(p, s.layer) and _inside(p, x, y)), None)
+            if pad is None:
+                continue
+            required = board_edge_clearance + s.width / 2 + margin
+            if _point_to_rings_distance(x, y, rings) >= required:
+                continue
+            if joints.get((s.net_id, round(x, 3), round(y, 3)), 0) > 1:
+                continue  # a joint: moving only this side would open it
+            length = math.hypot(ox - x, oy - y)
+            if length < 1e-6:
+                continue
+            ux, uy = (ox - x) / length, (oy - y) / length
+            # Exit distance of the pullback ray from the pad rect: the landing
+            # must stay on pad copper.
+            t_cap = length
+            for delta, u, half in ((pad.global_x - x, ux, pad.size_x / 2),
+                                   (pad.global_y - y, uy, pad.size_y / 2)):
+                if abs(u) > 1e-9:
+                    t_exit = (delta + math.copysign(half, u)) / u
+                    t_cap = min(t_cap, max(0.0, t_exit))
+            best = None
+            t = 0.0
+            while t <= t_cap + 1e-9:
+                nx, ny = x + ux * t, y + uy * t
+                if _point_to_rings_distance(nx, ny, rings) >= required:
+                    best = (nx, ny)
+                    break
+                t += 0.01
+            if best is None:
+                # best effort: the pad's inner reach, if it actually helps
+                nx, ny = x + ux * t_cap, y + uy * t_cap
+                if _point_to_rings_distance(nx, ny, rings) > \
+                        _point_to_rings_distance(x, y, rings) + 1e-9:
+                    best = (nx, ny)
+            if best is not None:
+                moves.append((s, end, round(best[0], 4), round(best[1], 4)))
+    return CastellationRetractDelta(moves)
+
+
+def retract_castellated_landings(output_file: str,
+                                 board_edge_clearance: float) -> int:
+    """FILE front for the castellated-landing retract: parse the routed OUTPUT
+    FILE, compute the endpoint moves via compute_castellated_landing_retract
+    (the shared board-level core), and rewrite the file (each moved segment is
+    stripped and re-emitted with the retracted endpoint). Returns the number of
+    landings retracted. The GUI applies the SAME delta to the live pcbnew board
+    (gui_utils.apply_castellated_landing_retract), so the two cannot drift."""
+    from kicad_parser import parse_kicad_pcb, is_kicad_10
+    from kicad_writer import remove_segments_from_content, generate_segment_sexpr
+
+    pcb = parse_kicad_pcb(output_file)
+    delta = compute_castellated_landing_retract(pcb, board_edge_clearance)
+    if delta.is_empty:
+        return 0
+    with open(output_file, 'r', encoding='utf-8') as f:
+        content = f.read()
+    n2n = getattr(pcb, 'net_id_to_name', {}) or {}
+    v10 = is_kicad_10(content)
+    content, _ = remove_segments_from_content(
+        content, [m[0] for m in delta.moves], n2n if v10 else None)
+    sexprs = []
+    for s, end, nx, ny in delta.moves:
+        sx, sy = (nx, ny) if end == 'start' else (s.start_x, s.start_y)
+        ex, ey = (nx, ny) if end == 'end' else (s.end_x, s.end_y)
+        sexprs.append(generate_segment_sexpr(
+            (sx, sy), (ex, ey), s.width, s.layer, s.net_id,
+            n2n.get(s.net_id) if v10 else None))
+    lp = content.rfind(')')
+    content = content[:lp] + '\n'.join(sexprs) + '\n' + content[lp:]
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write(content)
+    print(f"  Castellated landings: {len(delta.moves)} track end(s) retracted "
+          f"inside the edge-clearance zone (pad_prop_castellated)")
+    return len(delta.moves)
+
+
 def _rk3(x, y):
     """Endpoint-coincidence key at the soft-joint rounding (1um)."""
     return (round(x, 3), round(y, 3))

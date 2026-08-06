@@ -73,6 +73,10 @@ REGISTRY = {
     'persist_impedance_specs': ['_write_drc_floors', 'update_live_drc_floors'],
     # GND return vias near signal vias
     'add_gnd_vias_to_existing_board': ['add_gnd_vias_to_existing_board'],
+    # run-6 fix 1.7: castellated-landing retract (route.py + both plane
+    # mains); GUI twin applies the shared compute core to the live board.
+    'retract_castellated_landings': ['apply_castellated_landing_retract',
+                                     'compute_castellated_landing_retract'],
 }
 # NOTE (deliberately NOT registered): move_copper_graphics_to_silkscreen runs
 # inside the shared plane WRITER (plane_io), not a main() -- so this gate, which

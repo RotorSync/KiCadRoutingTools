@@ -86,6 +86,26 @@ WARNING_CATS = ["starved_thermal"]
 # Severity rank for "only loosen" comparisons (higher = stricter).
 _SEV_RANK = {"error": 2, "warning": 1, "ignore": 0}
 
+# Fields the NON-Default net-class clamp may lower. #439's whole rationale is
+# that a stock class would "storm KiCad's per-net-class DRC" on copper routed at
+# the real floor -- and KiCad enforces exactly ONE of these per class:
+# ``clearance``. ``track_width`` / ``via_diameter`` / ``via_drill`` are DRAW
+# DEFAULTS, not DRC floors (docs/api-routing-config.md: "only clearance is a
+# DRC-enforced minimum"), so lowering them prevents no violation and instead
+# destroys the board's declared geometry spec. Measured: a QFN fanout laying
+# 0.15mm escape stubs rewrote USB_FS_DIFF's track_width from 0.8 to 0.15 -- a
+# HARD spec figure (test-board HW-TB-PCB13) overwritten by a local escape's stub
+# width, on nets the fanout never routed.
+#
+# The diff-pair fields stay: #439 added them for planner READBACK (a stock 0.25
+# gap misleads a planner about the ~0.1mm pairs route_diff actually places),
+# which is a real reason that does not apply to the scalar widths.
+#
+# The DEFAULT class is unaffected by this set -- it is the board's routed floor
+# and route.py deliberately reads its track/via back as "the board's own" values.
+_NONDEFAULT_CLAMP_FIELDS = frozenset({
+    "clearance", "diff_pair_gap", "diff_pair_via_gap", "diff_pair_width"})
+
 # A complete KiCad "Default" net class. KiCad only honours a net class it
 # considers well-formed; a sparse {name, clearance, ...} stub is silently
 # dropped and the board falls back to the stock 0.2 mm default (issue #160
@@ -446,6 +466,17 @@ def compute_targets(clearance=None, hole_clearance=None, hole_to_hole=None,
     dr = _floor(via_drill, minima.get("min_through_hole_diameter"))
     if dr is not None:
         targets["min_through_hole_diameter"] = dr
+    # VIA-only drill floor, kept SEPARATE from min_through_hole_diameter above.
+    # That one is KiCad's board constraint and correctly spans every hole on the
+    # board, PADS INCLUDED. The net-class ``via_drill`` field is a different
+    # quantity -- the size KiCad draws a NEW VIA at -- and a through-hole pad's
+    # drill says nothing about it. Sourcing the class field from the pad-inclusive
+    # minimum let one 0.25mm pad drill rewrite every class's via_drill from 0.3 to
+    # 0.25, i.e. BELOW the board's own HARD via spec, on a board whose smallest
+    # placed via drill was 0.3 (test-board, HW-TB-PCB08).
+    vdr = _floor(via_drill, minima.get("min_via_drill"))
+    if vdr is not None:
+        targets["min_via_drill"] = vdr
     if "min_via_annular_width" in minima:
         targets["min_via_annular_width"] = minima["min_via_annular_width"]
     return targets
@@ -544,7 +575,9 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
     nc_map = {"clearance": targets.get("min_clearance"),
               "track_width": targets.get("min_track_width"),
               "via_diameter": targets.get("min_via_diameter"),
-              "via_drill": targets.get("min_through_hole_diameter"),
+              # VIA-only floor, not min_through_hole_diameter (which spans pads).
+              # See the note where min_via_drill is derived.
+              "via_drill": targets.get("min_via_drill"),
               "diff_pair_gap": diff_pair_gap,
               "diff_pair_via_gap": diff_pair_gap,
               "diff_pair_width": diff_pair_width}
@@ -577,7 +610,7 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
                 continue
             cname = cls.get("name", "?")
             for field, target in nc_map.items():
-                if target is None:
+                if target is None or field not in _NONDEFAULT_CLAMP_FIELDS:
                     continue
                 target = round(float(target), 6)
                 cur = cls.get(field)
@@ -902,7 +935,10 @@ def apply_targets_to_board(board, targets: dict, sev_plan: dict,
     nc_map = {"SetClearance": targets.get("min_clearance"),
               "SetTrackWidth": targets.get("min_track_width"),
               "SetViaDiameter": targets.get("min_via_diameter"),
-              "SetViaDrill": targets.get("min_through_hole_diameter")}
+              # VIA-only floor (parity with apply_targets_to_project): the board
+              # constraint min_through_hole_diameter spans PADS, and a pad drill
+              # must not rewrite the class's new-via drill size.
+              "SetViaDrill": targets.get("min_via_drill")}
     default_nc = None
     for getter in ("GetDefaultNetclass",):           # KiCad 8+: NET_SETTINGS
         ns = getattr(bds, "m_NetSettings", None)
@@ -947,10 +983,13 @@ def apply_targets_to_board(board, targets: dict, sev_plan: dict,
     # Best-effort across KiCad versions (the non-Default enumeration API varies),
     # guarded so an unknown shape simply no-ops. Skipped when the flag is off.
     if clamp_nondefault_netclasses:
+        # Parity with apply_targets_to_project's _NONDEFAULT_CLAMP_FIELDS: only
+        # `clearance` is DRC-enforced per class, so only it (plus the diff-pair
+        # readback defaults) may be lowered here. SetTrackWidth / SetViaDiameter
+        # / SetViaDrill are deliberately ABSENT -- they are draw defaults, and
+        # lowering them overwrote a board's declared per-class geometry with a
+        # local escape's stub width. Keep this list and the CLI one in step.
         nd_map = {"SetClearance": targets.get("min_clearance"),
-                  "SetTrackWidth": targets.get("min_track_width"),
-                  "SetViaDiameter": targets.get("min_via_diameter"),
-                  "SetViaDrill": targets.get("min_through_hole_diameter"),
                   # #439 parity with apply_targets_to_project's non-Default clamp:
                   # lower the diff-pair draw defaults on non-Default classes too.
                   "SetDiffPairGap": diff_pair_gap,
