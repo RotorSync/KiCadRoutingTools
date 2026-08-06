@@ -33,6 +33,19 @@ An `<error>` means a gate is holding, not that something broke. Every routing
 stage refuses without the net-coverage partition, because a net routed by two
 stages -- or by none -- is the failure hardest to see afterwards.
 
+The references, and when to open them. Read the one a stage names, when it
+names it -- not all of them, and not up front:
+
+| file | read when |
+|---|---|
+| `references/evidence-map.md` | you are about to quote a number from any instrument, and need to know which key answers which question |
+| `references/convergence.md` | you are in the convergence loop and need its budget, ledger schema or stop conditions |
+| `references/verifier-prompts.md` | you are dispatching a verification subagent. Quote it whole; it is written FOR the subagent, not for you |
+
+The rest of this file is doctrine: the measurement behind each rule, for when
+a stage's instruction is not enough or you need to know why a rule exists
+before overriding it.
+
 The rest of this file is the reference the stages point into. Read the part a
 stage names, when it names it.
 
