@@ -239,6 +239,12 @@ class GridRouteConfig:
     # be SMALLER than the global track_width (a narrower class), floored at the fab
     # minimum by the caller. Lower priority than a manual power_net_widths override.
     net_track_widths: Dict[int, float] = field(default_factory=dict)  # net_id -> width in mm
+    # Netclass-declared widths as ESCALATION FLOORS only (2026-08-06): loaded
+    # even when an explicit --track-width suppresses net_track_widths, so the
+    # rescue/terminal ladders may march to min(nominal, fab_track, netclass
+    # width) -- designer-sanctioned geometry -- without changing nominal
+    # routing. Clamped at the advanced-tier floor at load.
+    netclass_width_floors: Dict[int, float] = field(default_factory=dict)
     # Layer cost weights - prefer certain layers over others (1.0 = normal, 1.5 = 50% more expensive)
     layer_costs: List[float] = field(default_factory=list)  # Per-layer cost multipliers
     # Debug options

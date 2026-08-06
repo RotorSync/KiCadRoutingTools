@@ -169,7 +169,13 @@ def _rescue_rungs(config, fine_grid, pcb_data, net_id):
 
     fab_clear, fab_track = fab_floor_clearance_track(pcb_data)
     nominal_w = config.get_net_track_width(net_id, config.layers[0])
-    rescue_track = min(nominal_w, fab_track)  # never widen a sub-floor choice
+    # Floor rule (2026-08-06): min(nominal, fab_track, netclass width) --
+    # a class-declared width is designer intent and may sit below the
+    # standard fab floor (advanced-clamped at load; ecp5 /PF37- routes at
+    # its class 0.0762 where 0.0889 is sealed).
+    rescue_track = min(nominal_w, fab_track,
+                       (config.netclass_width_floors or {}).get(
+                           net_id, nominal_w))
     power_widths = dict(config.power_net_widths)
     power_widths.pop(net_id, None)  # this net necks down; other nets are obstacles
     floor_clearance = config.clearance
@@ -664,7 +670,8 @@ def _escalation_ladder(config, pcb_data, net_id):
 
     _fab_clear, fab_track = fab_floor_clearance_track(pcb_data)
     w0 = config.get_net_track_width(net_id, config.layers[0])
-    w_floor = min(w0, fab_track)
+    w_floor = min(w0, fab_track,
+                  (config.netclass_width_floors or {}).get(net_id, w0))
     width_travel = w0 - w_floor > 1e-9
 
     n_layers = len(pcb_data.board_info.copper_layers) or 2

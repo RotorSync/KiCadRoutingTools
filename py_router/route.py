@@ -594,15 +594,41 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # --track-width is honored verbatim for all nets (this stays empty). Floored at
     # the fab track minimum; a manual --power-nets-widths override still wins.
     net_track_widths = {}
-    if track_width_from_class and input_file and os.path.isfile(input_file):
+    netclass_width_floors = {}
+    if input_file and os.path.isfile(input_file):
         try:
             from list_nets import net_track_width_map_by_id, fab_floors
-            _twfloor = fab_floors(len(getattr(pcb_data.board_info, 'copper_layers', None)
-                                      or []) or 4).get('track_width', 0.0)
-            net_track_widths = {nid: max(w, _twfloor) for nid, w in
-                                net_track_width_map_by_id(
-                                    input_file,
-                                    {nid: n.name for nid, n in pcb_data.nets.items()}).items()}
+            from fab_tiers import fab_floors as _tier_floors, \
+                warn_fab_escalation as _wfe435
+            _ncl = len(getattr(pcb_data.board_info, 'copper_layers', None)
+                       or []) or 4
+            _twfloor = fab_floors(_ncl).get('track_width', 0.0)
+            # Clamp at the ADVANCED-tier floor, not the standard one
+            # (2026-08-06): a netclass width is DESIGNER INTENT and may
+            # legitimately sit between the two tiers (ecp5 /PF37- at
+            # 0.0762 vs standard 0.0889 -- the GUI honored it and routed;
+            # the old standard-floor clamp silently widened it CLI-side, a
+            # cross-front divergence AND the reason no in-run ladder could
+            # reach the width that closes the net). Escalation floor rule:
+            # min(nominal, fab_track, netclass width), never below the
+            # advanced tier; dipping below standard prints the same fab
+            # warning the via rungs use.
+            _adv_tw = _tier_floors(_ncl, tier='advanced') \
+                .get('track_width', _twfloor)
+            net_track_widths = {}
+            for nid, w in net_track_width_map_by_id(
+                    input_file,
+                    {nid: n.name for nid, n in pcb_data.nets.items()}
+            ).items():
+                w2 = max(w, _adv_tw)
+                if w2 < _twfloor - 1e-9:
+                    _wfe435(f"netclass width net_{nid}")
+                netclass_width_floors[nid] = w2
+            # Nominal per-net widths only when no explicit --track-width
+            # (the operator's flag wins for ROUTING); the floors above are
+            # for the escalation ladders regardless.
+            if track_width_from_class:
+                net_track_widths = dict(netclass_width_floors)
             if net_track_widths:
                 print(f"Auto-read netclass track widths for {len(net_track_widths)} "
                       f"non-Default net(s) (#435 single-ended companion).")
@@ -866,6 +892,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # class width; a manual --power-nets-widths override below still wins.
     if net_track_widths:
         config.net_track_widths = dict(net_track_widths)
+    if netclass_width_floors:
+        config.netclass_width_floors = dict(netclass_width_floors)
 
     # Identify power nets and set up per-net widths
     if power_nets and power_nets_widths:
