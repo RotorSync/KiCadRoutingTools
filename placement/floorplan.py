@@ -1291,6 +1291,13 @@ def emit_intent(pcb_data, pcb_file: str, *,
             why = _suspect(ref)
             if why is not None:
                 entry = {'ref': ref,
+                         # Run-8 A3: machine-readable, not only prose. A
+                         # consumer that has to grep a note for the word
+                         # SUSPECT will eventually not, and an emitted intent
+                         # is read by tools as often as by people. The note
+                         # stays for the human.
+                         'suspect': True,
+                         'suspect_reason': why,
                          'note': (f'overhang observed but SUSPECT ({why}): '
                                   f'edge withheld -- the derivation/exchange '
                                   f'rungs decide (run-5 suspect-and-derive)')}

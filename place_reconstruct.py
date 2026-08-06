@@ -164,6 +164,13 @@ Examples:
             # improvement for pulling a healthy edge part (a false-positive
             # suspect) inboard off its correct seat. The exchange stage does
             # not need oob pressure -- it accepts on the hpwl homecoming.
+            #
+            # Run-8 A3 proposed the opposite (exclude suspects so the oob term
+            # charges the damage) and it is REFUTED by the reason above, which
+            # was measured. The suspect bit is machine-readable now so a
+            # consumer CAN act on it; this consumer deliberately does not, and
+            # the real fix for the blindness that motivated A3 was making the
+            # oob term follow the board OUTLINE instead of its bounding box.
             band = c.get('overhang_mm') or {}
             edge_bands[c['ref']] = float(band.get('max') or 2.0)
     if edge_bands:
