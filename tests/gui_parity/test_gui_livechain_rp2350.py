@@ -129,7 +129,10 @@ def _cli_chain(work):
     layers = ['F.Cu', 'In1.Cu', 'In2.Cu', 'In3.Cu', 'In4.Cu', 'B.Cu']
     planes = os.path.join(work, 'cli_planes.kicad_pcb')
     final = os.path.join(work, 'cli_final.kicad_pcb')
-    R = lambda s: os.path.join(REPO, s)
+    # py_router/, not the repo root (#522 reorg): the CLI scripts moved, and
+    # this leg silently became "python3 <missing file>" -> rc=2 -> no output ->
+    # every CLI stage graded -1 and the gate FAILED on the CLI leg alone.
+    R = lambda s: os.path.join(REPO, 'py_router', s)
     # Mirrors the GUI stages below: the #562 chain -- a bare pour, then ONE
     # route step covering the reconnect nets AND the plane nets, whose in-run
     # finalize is the weld/repair/oracle (route_disconnected_planes.py is no
