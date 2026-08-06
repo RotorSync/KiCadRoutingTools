@@ -1065,10 +1065,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"{sum(len(v) for _, v in force_ripped.values())} via(s) from "
                   f"{len(force_ripped)} net(s) for a from-scratch re-route")
 
-    # fragment_gate (#549 A-2): a zone-less net whose copper KiCad holds in
-    # pieces must not be skipped as "Already fully connected". route_diff
-    # deliberately keeps the default (a fragmented net entering the diff
-    # engine is a separate behavior question).
     # #572: custody nets carry an exact-fill OPEN verdict from the outer
     # run's oracle -- the model-credit skip below must not clear them.
     # ANY net with links present bypasses: the punt measured OPEN on this
@@ -1080,8 +1076,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # skip them the normal way.
     _assume_open572 = {l[0] for l in (oracle_links or []) if l and l[0]}
     net_ids, _already_routed = filter_already_routed(
-        pcb_data, net_ids, config, fragment_gate=True,
-        assume_open=_assume_open572)
+        pcb_data, net_ids, config, assume_open=_assume_open572)
     # #515: --rip-existing-nets only rips copper that BLOCKS a net being
     # routed; a net dropped here as already-connected never routes, so naming
     # it in both --nets and --rip-existing-nets is a no-op. Warn instead of
@@ -2755,9 +2750,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # The grading verdict above is pad-oriented: a zone-less net can grade
     # "connected" while its copper sits in several KiCad islands (run 6's
     # VCC3V3: 25/27 reported, 7 islands real). Census every such net with the
-    # strict-fragment model and report splits honestly -- the entries feed the
-    # end-of-run reconciliation, whose filter_already_routed(fragment_gate)
-    # retry now SEES the fragments and routes the joins.
+    # strict-fragment model and report splits honestly. DISCLOSURE ONLY since
+    # the #549 A-2 fragment gate was removed for main parity (#578): these
+    # entries name the splits, they no longer re-queue the net for routing.
     fragmented_nets = []
     _frag_already = {m['net_id'] for m in failed_multipoint}
     for _nid, _res in sorted(routed_results.items()):
@@ -2798,8 +2793,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # Strictly ADDITIVE: it can only add failure disclosure (kicad-cli's
     # threaded connectivity is nondeterministic, so it never reclassifies a
     # failure as success). Entries land in failed_multipoint BEFORE the
-    # reconcile gate reads it, so oracle-open nets are retried automatically
-    # -- and the retry's fragment_gate now actually sees the splits.
+    # reconcile gate reads it, so oracle-open nets are retried automatically.
     # KICAD_ORACLE_SUMMARY=0 disables; the GUI path (return_results) skips
     # (in-memory board, file fidelity unavailable) with disclosure.
     oracle_open: Dict[str, int] = {}

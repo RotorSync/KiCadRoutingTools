@@ -4052,7 +4052,9 @@ iteration.** When a tally and the oracle diverge, that divergence is itself a
 `--kind systemic` finding — file it, don't average it. (route.py now runs the
 oracle itself at end of run — `oracle_check`/`oracle_open` in JSON_SUMMARY —
 and a `fragmented_nets` key names pad-connected nets whose copper is several
-KiCad islands; both feed its own reconciliation. `oracle_check: unavailable`
+KiCad islands. `oracle_open` feeds its own reconciliation; `fragmented_nets` is
+DISCLOSURE ONLY -- it names the splits, nothing re-queues them, so a fragmented
+net there is YOUR next action (route it by name). `oracle_check: unavailable`
 means the run had no kicad-cli and you are on in-process grading alone.)
 
 **The divergence is a MODE, not an event.** After the model's success channel
