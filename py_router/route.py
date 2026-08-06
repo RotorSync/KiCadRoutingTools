@@ -1307,6 +1307,99 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         if relocatable_plane_ids:
             print(f"Tap relocation armed: {len(relocatable_plane_ids)} plane "
                   f"net(s) cached for single-tap surgery")
+    # Main-pass rip candidacy for PRE-EXISTING nets (0805, design intent):
+    # a blocker routed by an EARLIER chain step used to be visible only as a
+    # text hint ("the blocking copper belongs to pre-existing net(s) ...")
+    # while the run died with 'no rippable blockers found' -- even when the
+    # blocker was one cell of an ordinary unprotected signal net. Plain
+    # pre-existing nets are fair game: register them exactly like
+    # --rip-existing-nets matches (base-map exclusion + per-net cache +
+    # routed_results entry, #103), so every rip ladder (SE loop, reroute
+    # loop, diff loop, Phase 3) can name and rip them, WITH the same custody
+    # -- a ripped victim is queued for reroute this run and its original
+    # copper is restored if the reroute fails. Guards:
+    #   - never #521-protected or KiCad-locked (filter_rippable_names; the
+    #     override stays "exact name in --nets/--rip-existing-nets"),
+    #   - never '!'-negated in the caller's --nets patterns,
+    #   - never plane/zone-backed nets (planes belong to route_planes),
+    #   - small nets only (<= 30 segments and <= 6 vias): rip surgery,
+    #     not bulldozing a bus,
+    #   - never a net whose CLASS clearance would RAISE the cross-class
+    #     routing floor (set_net_clearances computes the floor over the
+    #     base-map exclusions; auto-candidates must not change routing on
+    #     multi-class boards when nothing gets ripped).
+    # Engine-side (batch_route internals), so CLI and GUI inherit it with no
+    # new flag or control; KICAD_RIP_PREEXISTING=0 is the kill switch.
+    if os.environ.get('KICAD_RIP_PREEXISTING', '1') != '0':
+        from net_queries import split_net_patterns, net_pattern_matches
+        _pe_to_route = set(all_net_ids_to_route)
+        _pe_zone_nids = {z.net_id for z in pcb_data.zones}
+        _pe_seen = set(existing_rippable)
+        _pe_seg_count: Dict[int, int] = {}
+        for _s in pcb_data.segments:
+            _pe_seg_count[_s.net_id] = _pe_seg_count.get(_s.net_id, 0) + 1
+        _pe_via_count: Dict[int, int] = {}
+        for _v in pcb_data.vias:
+            _pe_via_count[_v.net_id] = _pe_via_count.get(_v.net_id, 0) + 1
+        _pe_caller_pats = list(net_name_patterns if net_name_patterns is not None
+                               else (net_names or []))
+        _pe_auto: List[int] = []
+        for _nid in sorted(_pe_seg_count):
+            if (_nid == 0 or _nid in _pe_to_route or _nid in _pe_seen
+                    or _nid in _pe_zone_nids):
+                continue
+            _pe_net = pcb_data.nets.get(_nid)
+            if not _pe_net or not _pe_net.name:
+                continue
+            if _pe_seg_count[_nid] > 30 or _pe_via_count.get(_nid, 0) > 6:
+                continue
+            # '!'-negated in the caller's --nets = an explicit hands-off
+            # (split_net_patterns keeps active-low literals like '!RESET'
+            # selectable by name, so those don't read as negations here).
+            _, _pe_exc = split_net_patterns(_pe_caller_pats, {_pe_net.name})
+            if any(net_pattern_matches(_pe_net.name, _p) for _p in _pe_exc):
+                continue
+            _pe_auto.append(_nid)
+        if _pe_auto:
+            from protected_nets import protection_map, filter_rippable_names
+            _pe_prot = protection_map(pcb_data, input_file)
+            if _pe_prot:
+                _pe_keep = set(filter_rippable_names(
+                    [pcb_data.nets[n].name for n in _pe_auto], _pe_prot,
+                    override_patterns=list(rip_existing_nets or []) + _pe_caller_pats,
+                    context="pre-existing rip candidacy"))
+                _pe_auto = [n for n in _pe_auto
+                            if pcb_data.nets[n].name in _pe_keep]
+        if _pe_auto and net_clearances:
+            _pe_floor0_ids = (all_net_ids_to_route + existing_rippable
+                              + relocatable_plane_ids)
+            _pe_floor0 = max([config.clearance]
+                             + [net_clearances[n] for n in _pe_floor0_ids
+                                if n in net_clearances])
+            _pe_auto = [n for n in _pe_auto
+                        if net_clearances.get(n, 0.0) <= _pe_floor0 + 1e-12]
+        if _pe_auto:
+            print(f"{len(_pe_auto)} unprotected pre-existing net(s) registered "
+                  f"as main-pass rip candidates (<=30 seg/<=6 via, "
+                  f"custody-backed; KICAD_RIP_PREEXISTING=0 disables)")
+            # #513 item 5 parity with --rip-existing-nets: a ripped victim
+            # re-routes at THIS invocation's width resolution -- preserve its
+            # routed width so a wide power stub cannot reroute thin. (Silent
+            # per-net: with board-wide candidacy the per-net print would be
+            # noise; an explicit --power-nets entry still wins.)
+            from routing_common import dominant_net_widths as _pe_dnw
+            _pe_widths = _pe_dnw(pcb_data.segments)
+            for _nid in _pe_auto:
+                _w_in = _pe_widths.get(_nid, 0.0)
+                if _w_in <= 0 or _nid in (getattr(config, 'power_net_widths',
+                                                  None) or {}):
+                    continue
+                _w_now = config.get_net_track_width(_nid, config.layers[0])
+                if _w_in > _w_now + 1e-6:
+                    if config.net_track_widths is None:
+                        config.net_track_widths = {}
+                    config.net_track_widths[_nid] = _w_in
+            existing_rippable.extend(_pe_auto)
     base_map_exclusions = all_net_ids_to_route + existing_rippable + relocatable_plane_ids
     # Cross-class clearance: install the per-net class map + routing-side floor on
     # config so BOTH the base map and every incremental in-run obstacle stamper
@@ -1522,13 +1615,26 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # pcb_data, so an empty path is fine), filter_rippable_blockers requires
     # routed_results membership, and rip_up_net removes exactly the
     # 'new_segments'/'new_vias' listed - the net's own file copper here.
+    # One bucketing pass, not a per-net scan: main-pass pre-existing rip
+    # candidacy can register hundreds of nets, and the old per-net list
+    # comprehensions were O(nets x segments).
+    _reg_segs: Dict[int, list] = {}
+    _reg_vias: Dict[int, list] = {}
+    if existing_rippable:
+        _reg_set = set(existing_rippable)
+        for _s in pcb_data.segments:
+            if _s.net_id in _reg_set:
+                _reg_segs.setdefault(_s.net_id, []).append(_s)
+        for _v in pcb_data.vias:
+            if _v.net_id in _reg_set:
+                _reg_vias.setdefault(_v.net_id, []).append(_v)
     for nid in existing_rippable:
         state.routed_net_ids.append(nid)
         state.routed_net_paths[nid] = []
         state.routed_results[nid] = {
             'net_id': nid,
-            'new_segments': [s for s in pcb_data.segments if s.net_id == nid],
-            'new_vias': [v for v in pcb_data.vias if v.net_id == nid],
+            'new_segments': _reg_segs.get(nid, []),
+            'new_vias': _reg_vias.get(nid, []),
             'iterations': 0,
             'is_existing_route': True,
         }
@@ -1717,6 +1823,107 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     rescue_summary = None if _ckpt_stop else rescue_failed_nets(
         state, single_ended_nets, net_clearances=net_clearances,
         progress_callback=progress_callback, cancel_check=cancel_check)
+
+    # Main-pass pre-existing rips (0805): pull every RIPPED pre-existing net
+    # into the stale-strip scope -- a rerouted victim's ORIGINAL input copper
+    # must not ship next to its reroute (#220/#300 class) -- and report each
+    # rip's outcome on one line. Never-ripped auto-candidates deliberately
+    # stay OUT of the sweep scope: cleanup must not touch nets this run
+    # never disturbed.
+    _pe_ripped_reg = getattr(pcb_data, '_preexisting_rips', None) or {}
+    _pe_outcomes: Dict[str, str] = {}
+    if _pe_ripped_reg:
+        sweep_scope_ids |= set(_pe_ripped_reg)
+        # No silent casualties: a pre-existing victim whose reroute landed
+        # only PARTIALLY (pads still disconnected) is a casualty the
+        # zero-copper custody cannot see -- the kept partial result masks it
+        # (sechzig /DRAM_VDD: VDDQ ripped it, VDD rerouted 1/16 pad pairs,
+        # and the run would have shipped 15 open pads). Restore-first: when
+        # the ORIGINAL copper can go back collision-free, rip the partial
+        # reroute and restore the original; when the attacker took the
+        # corridor, keep the partial and report honestly (the reconciliation
+        # still gets a shot at it).
+        from check_connected import check_net_connectivity as _pe_cnc
+
+        def _pe_connected(_rid: int) -> bool:
+            _r = _pe_cnc(
+                _rid,
+                [s for s in pcb_data.segments if s.net_id == _rid],
+                [v for v in pcb_data.vias if v.net_id == _rid],
+                pcb_data.pads_by_net.get(_rid, []),
+                [z for z in pcb_data.zones if z.net_id == _rid])
+            return bool(_r.get('connected'))
+        if not _ckpt_stop:
+            from rip_up_reroute import (rip_up_net as _pe_rip,
+                                        restore_net as _pe_restore,
+                                        _saved_route_collides as _pe_collides)
+            for _rid in sorted(_pe_ripped_reg):
+                _r_pe = routed_results.get(_rid)
+                if _r_pe is None or _r_pe.get('is_existing_route'):
+                    continue  # zero-copper custody / already-restored classes
+                _orig_pe = (getattr(pcb_data, '_rip_saved', None)
+                            or {}).get(_rid)
+                if not _orig_pe or not (_orig_pe[0]
+                                        or {}).get('is_existing_route'):
+                    continue  # original payload not recoverable (re-rip chain)
+                if _pe_connected(_rid):
+                    continue  # reroute genuinely landed
+                if _pe_collides(_orig_pe[0], pcb_data, [_rid],
+                                config.clearance):
+                    continue  # corridor taken; keep partial, report below
+                _, _, _wir_par = _pe_rip(
+                    _rid, pcb_data, routed_net_ids, routed_net_paths,
+                    routed_results, state.diff_pair_by_net_id,
+                    remaining_net_ids, results, config,
+                    track_proximity_cache, state.working_obstacles,
+                    state.net_obstacles_cache,
+                    state.ripped_route_layer_costs,
+                    state.ripped_route_via_positions, layer_map)
+                if _wir_par:
+                    successful -= 1
+                _pe_restore(
+                    _rid, _orig_pe[0], list(_orig_pe[1]), _orig_pe[2],
+                    pcb_data, routed_net_ids, routed_net_paths,
+                    routed_results, state.diff_pair_by_net_id,
+                    remaining_net_ids, results, config,
+                    track_proximity_cache, layer_map,
+                    state.working_obstacles, state.net_obstacles_cache,
+                    state.ripped_route_layer_costs,
+                    state.ripped_route_via_positions,
+                    refused_sink=state.collision_refused_net_ids)
+                print(f"  Pre-existing victim '{_pe_ripped_reg[_rid]}': "
+                      f"partial reroute left pads disconnected -- original "
+                      f"copper restored (no silent casualties)")
+        print(f"\nPre-existing rip outcome(s) ({len(_pe_ripped_reg)} net(s)):")
+        for _rid in sorted(_pe_ripped_reg):
+            _rname = _pe_ripped_reg[_rid]
+            _blocked_for = None
+            for _ev in reversed(state.net_history.get(_rid, []) or []):
+                if _ev.get('event') == 'ripped_by':
+                    _blocked_for = (_ev.get('details')
+                                    or {}).get('ripping_net_name')
+                    break
+            _r_pe = routed_results.get(_rid)
+            if _r_pe is None:
+                _out_pe = ('NOT RECOVERED (still open; see '
+                           'terminal_restores/reconciliation)')
+            elif _r_pe.get('is_existing_route'):
+                _out_pe = 'original copper restored'
+            elif not _pe_connected(_rid):
+                # Live connectivity, deliberately NOT failed_pads_info: the
+                # end-of-run sweep has not attached that yet, and a phase-3
+                # victim reroute's own tally is a main-edge proxy that can
+                # read "routed" while pads stay open (sechzig /DRAM_VDD).
+                _out_pe = ('rerouted PARTIAL (pads still disconnected; '
+                           'original corridor taken -- reconciliation '
+                           'retries it)')
+            else:
+                _out_pe = 'rerouted'
+            _pe_outcomes[_rname] = _out_pe + (
+                f" [was blocking '{_blocked_for}']" if _blocked_for else "")
+            print(f"  '{_rname}'"
+                  + (f" (was blocking '{_blocked_for}')" if _blocked_for else "")
+                  + f": {_out_pe}")
 
     # Final progress update
     if progress_callback:
@@ -2502,6 +2709,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # #331/#371 rescue pass outcome (key absent when nothing was rescued,
         # so pre-rescue JSON_SUMMARY consumers/diffs are unaffected).
         summary['rescue'] = rescue_summary
+    if _pe_outcomes:
+        # Main-pass pre-existing rips (0805): {victim net: outcome}. Key
+        # absent when no pre-existing net was ripped.
+        summary['preexisting_rips'] = _pe_outcomes
     if casualty_summary and casualty_summary.get('attempted'):
         # T5 custody: casualties-only reconcile tally (additive; key absent
         # when no rip casualty occurred -- the common case).
@@ -2533,16 +2744,32 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         _final_failed_ids = list(dict.fromkeys(
             failed_single_ids + [m['net_id'] for m in failed_multipoint]))
         for _nid in _final_failed_ids:
-            _fb = state.frontier_blocking.get(_nid)
-            if not _fb or not _fb.get('blocked_by'):
-                continue
             _name = (pcb_data.nets[_nid].name if _nid in pcb_data.nets
                      else f"Net {_nid}")
-            _rec = {'net': _name, 'stage': _fb['stage'],
-                    'blocked_by': _fb['blocked_by']}
-            if _fb.get('more'):
-                _rec['more'] = _fb['more']
-            blockers_report.append(_rec)
+            _fb = state.frontier_blocking.get(_nid)
+            if _fb and _fb.get('blocked_by'):
+                _rec = {'net': _name, 'stage': _fb['stage'],
+                        'blocked_by': _fb['blocked_by']}
+                if _fb.get('more'):
+                    _rec['more'] = _fb['more']
+                blockers_report.append(_rec)
+            # Boxed-in failures ('no rippable blockers found') name their
+            # PRE-EXISTING blockers only in prose (#301/#103 hint), so retry
+            # tooling had to regex the log. Serialize the recorded hint
+            # events in the same schema: last event wins (matches the
+            # frontier_blocking last-wins convention); entries are minimal
+            # (the hint records names, not cell counts) and carry
+            # "preexisting": true as the marker. Report-only.
+            _pre103 = None
+            for _ev in (state.net_history.get(_nid) or []):
+                if _ev.get('event') == 'preexisting_blockers':
+                    _pre103 = ((_ev.get('details') or {}).get('blockers')
+                               or _pre103)
+            if _pre103:
+                blockers_report.append({
+                    'net': _name, 'stage': 'preexisting',
+                    'blocked_by': [{'net': _bn, 'preexisting': True}
+                                   for _bn in _pre103]})
         if blockers_report:
             summary['blockers'] = blockers_report
     except Exception:

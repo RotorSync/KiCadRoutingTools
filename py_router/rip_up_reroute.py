@@ -99,6 +99,26 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
 
     saved_result = routed_results[net_id]
 
+    # Main-pass pre-existing rip (0805): this victim's copper was committed by
+    # an EARLIER run/step (is_existing_route registration, #103 / auto
+    # candidacy). Disclose the rip loudly and register it on pcb_data so
+    # route.py can (a) pull the net into the #220 stale-strip scope -- a
+    # rerouted victim's original input copper must not ship next to its
+    # reroute -- and (b) print the per-net outcome at end of run.
+    def _note_preexisting_rip(partial_branch: bool) -> None:
+        _net_pe = pcb_data.nets.get(net_id)
+        _nm_pe = _net_pe.name if _net_pe and _net_pe.name else f"Net {net_id}"
+        _reg_pe = getattr(pcb_data, '_preexisting_rips', None)
+        if _reg_pe is None:
+            _reg_pe = {}
+            pcb_data._preexisting_rips = _reg_pe
+        _reg_pe[net_id] = _nm_pe
+        print(f"      PRE-EXISTING rip: '{_nm_pe}' (earlier-step copper"
+              f"{', blocking branch only' if partial_branch else ''}) removed "
+              f"-- queued for reroute this run; original restored if the "
+              f"reroute fails")
+    _preexist_rip = bool(saved_result.get('is_existing_route'))
+
     # ---- #510 partial (leg-level) rip -------------------------------------
     # Remove ONLY the blocking branch. The net keeps its other legs, stays in the
     # write-list, and is re-queued so the multipoint router reconnects the
@@ -177,6 +197,8 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
             if ripped_route_via_positions is not None:
                 ripped_route_via_positions[net_id] = _vp
         partial['_owner_result'] = saved_result
+        if _preexist_rip:
+            _note_preexisting_rip(True)
         return partial, [net_id], False
 
     ripped_net_ids = []
@@ -269,6 +291,8 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
     for _rid in ripped_net_ids:
         _reg[_rid] = (saved_result, ripped_net_ids, was_in_results)
 
+    if _preexist_rip:
+        _note_preexisting_rip(False)
     return saved_result, ripped_net_ids, was_in_results
 
 
