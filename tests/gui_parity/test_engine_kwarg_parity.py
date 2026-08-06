@@ -70,9 +70,9 @@ PAIRS = [
     # (No repair pair since #562: plane repair moved INSIDE batch_route's
     # finalize, so route.py<->swig_gui's batch_route pair covers it and the
     # planes tab no longer calls the repair engine at all.)
-    ("bga_fanout/__init__.py", "kicad_routing_plugin/fanout_gui.py",
+    ("py_router/bga_fanout/__init__.py", "kicad_routing_plugin/fanout_gui.py",
      "generate_bga_fanout", "generate_bga_fanout"),
-    ("qfn_fanout/__init__.py", "kicad_routing_plugin/fanout_gui.py",
+    ("py_router/qfn_fanout/__init__.py", "kicad_routing_plugin/fanout_gui.py",
      "generate_qfn_fanout", "generate_qfn_fanout"),
 ]
 
@@ -90,6 +90,12 @@ CLI_ONLY_OK = {
 GUI_ONLY_OK = {
     "input_file", "output_file", "net_names", "pcb_data", "return_results",
     "progress_callback", "cancel_check", "net_clearances",
+    # The #562 finalize's oracle leg needs a real FILE for kicad-cli's exact
+    # fill. The CLI already has one (output_file); under return_results the GUI
+    # hands the engine a SaveBoard of the live board through this callback. An
+    # engine callback the GUI supplies internally -- not a dialog parameter,
+    # deliberately not Claude-settable, and by construction CLI-side absent.
+    "stage_board_fn",
 }
 
 # ---------------------------------------------------------------------------
