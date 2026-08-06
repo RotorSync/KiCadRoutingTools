@@ -23,7 +23,7 @@ a `build_router.py --from-source` rebuild, and re-distributing prebuilt per-plat
 binaries via GitHub Releases — heavy overhead. When a feature seems to need a Rust
 change, surface that cost early and check for a Python-only approach first.
 
-**Important:** When making changes to the Rust router, bump the version in `rust_router/Cargo.toml` and update the version history in `rust_router/README.md`. The release triple is `rust_router/Cargo.toml` + `/VERSION` + `metadata.json` — keep them aligned. **As of now the crate is 0.20.0 but no 0.20.0 binaries are published**, so a plain `python3 build_router.py` downloads the 0.19.3 asset and `startup_checks` then rejects the mismatch: use `--from-source` when testing Rust-side behavior, and publish the binaries as part of the next release.
+**Important:** When making changes to the Rust router, bump the version in `rust_router/Cargo.toml` and update the version history in `rust_router/README.md`. The release triple is `rust_router/Cargo.toml` + `/VERSION` + `metadata.json` — keep them aligned. **The crate is 0.20.0 and the 0.20.0 binaries ARE published** (v0.20.0), so a plain `python3 build_router.py` fetches a matching asset and `startup_checks` is satisfied; `--from-source` is only needed while testing local Rust changes. When you next bump `Cargo.toml` ahead of a release, that gap reopens — a plain build then downloads the older published asset and `startup_checks` rejects the mismatch — so use `--from-source` until the matching binaries ship.
 
 ## Testing & Verification
 
