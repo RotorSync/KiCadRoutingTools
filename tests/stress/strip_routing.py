@@ -108,8 +108,15 @@ for f in files:
                 fp_edge_items.append((fp, d))
 
     # 3. Remove tracks and vias
+    # RemoveNative, never Remove: outside a running KiCad action plugin
+    # pcbnew's Remove() sets item.thisown=1 on PCB_TRACK/PCB_VIA, which have no
+    # SWIG destructor, and freeing one corrupts the pcbnew type registry
+    # PROCESS-WIDE. This script loops over boards and rebinds `tracks` each
+    # iteration, so the previous board's proxies are freed at the top of the
+    # next one -- the first board WITH copper poisons every board after it
+    # ("'swig_runtime_data5.SwigPyObject' object has no attribute 'GetTracks'").
     for t in tracks:
-        board.Remove(t)
+        board.RemoveNative(t)
 
     # 4. Remove copper zones (pours), keep rule areas (keepouts)
     removed_zones = kept_zones = 0
@@ -117,16 +124,16 @@ for f in files:
         if z.GetIsRuleArea():
             kept_zones += 1
             continue
-        board.Remove(z)
+        board.RemoveNative(z)
         removed_zones += 1
 
     # 5. Replace Edge.Cuts with chained line segments (kicad_parser cannot
     # chain arc/line mixes or footprint-embedded outlines reliably).
     if outline_paths:
         for d in board_edge_drawings:
-            board.Remove(d)
+            board.RemoveNative(d)
         for fp, d in fp_edge_items:
-            fp.Remove(d)
+            fp.RemoveNative(d)
         for pts in outline_paths:
             n = len(pts)
             for k in range(n):
@@ -146,7 +153,7 @@ for f in files:
         lid = d.GetLayer()
         if lid == pcbnew.Edge_Cuts or lid in copper_ids:
             continue
-        board.Remove(d)
+        board.RemoveNative(d)
         removed_gfx += 1
 
     # 6. Set all enabled copper layers to signal type
