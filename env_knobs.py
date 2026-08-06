@@ -96,6 +96,9 @@ def refresh() -> None:
     # plane-ball drop pass OFF, '1'/'auto' forces it ON -- the manifest-replay
     # A/B switch for #424 D2 (recorded chains carry no flag either way).
     g['FANOUT_PLANE_DROP'] = _s('KICAD_FANOUT_PLANE_DROP', '')
+    # '0' reverts the surface-pour direct connect (plane-drop balls whose own-
+    # layer same-net pour provably fills to the pad get NO via). Default ON.
+    g['FANOUT_POUR_DIRECT'] = _s('KICAD_FANOUT_POUR_DIRECT', '1') != '0'
     g['STOP_CLEANUP'] = _opt_in('KICAD_STOP_CLEANUP')
     g['TAP_RELOCATION'] = _opt_in('KICAD_TAP_RELOCATION')  # phase-3 tap pocket moves
     g['PLANE_PARTIAL_RESTORE'] = _s('KICAD_PLANE_PARTIAL_RESTORE') == '1'

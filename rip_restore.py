@@ -182,8 +182,17 @@ def try_terminal_restore(pcb_data: PCBData, config: GridRouteConfig,
                 _broken, _dp = net_break_within_outlines(pcb_data, _r)
                 if _broken and _dp:
                     return 'full_open'
-        except Exception:
-            pass  # grading must never turn a restorable net into a strip
+        except Exception as _e:
+            # Grading must never turn a restorable net into a strip, so a
+            # grader failure still restores the copper. But it silently
+            # reinstates the very over-claim this block exists to prevent
+            # ('full' == "restored AND connected"), so it is announced rather
+            # than swallowed: an unexplained 'full' is exactly the kind of
+            # false success that costs a debugging session downstream.
+            print(f"  WARNING: rip-restore connectivity grading failed for net "
+                  f"{net_id} ({type(_e).__name__}: {_e}); claiming 'full' "
+                  f"WITHOUT a connectivity check -- treat this net's restore "
+                  f"as unverified")
         return 'full'
 
     stub_segs, stub_vias = _stub_subset(pcb_data, net_id, segments, vias)

@@ -51,10 +51,15 @@ REFUSED_TOOLS = {
         'step. Run it on the CLI'),
     'place_seed.py': (
         'seeds/repairs a placement from an intent; the plan format has no '
-        'placement step. Run it BEFORE the plan'),
+        'placement step. Run it BEFORE the plan and start the plan from the '
+        'seeded board'),
     'place_reconstruct.py': (
         'reconstructs a damaged placement; the plan format has no placement '
         'step. Run it BEFORE the plan and start the plan from its output'),
+    'place_portfolio.py': (
+        'generates a SLATE of placements to choose between; the plan format has '
+        'no placement step, and picking one is a decision, not a replayable '
+        'step. Run it on the CLI and start the plan from the adopted board'),
     'render_placement.py': (
         'renders a PNG; it changes no board and has nothing to replay'),
 }

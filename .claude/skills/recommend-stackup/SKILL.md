@@ -30,7 +30,7 @@ Report the verdict explicitly: "stackup appears to be KiCad's default — impeda
 
 ## Step 3: Recommend and Validate
 
-Propose: layer assignment (e.g. 4-layer: F.Cu signal / In1.Cu GND plane / In2.Cu power plane / B.Cu signal), dielectric thicknesses and ε_r per the fab's standard stackup, and copper weights.
+Propose: layer assignment (e.g. 4-layer: F.Cu signal / In1.Cu GND plane / In2.Cu power-or-routable / B.Cu signal), dielectric thicknesses and ε_r per the fab's standard stackup, and copper weights. For impedance, what matters is the solid GND reference ADJACENT to each impedance-carrying layer — the other inner layer need not be a solid plane (on dense/BGA boards `/recommend-plane-mappings` will usually keep it split or routable; making BOTH inners solid planes is a minority human practice and starves dense boards of routing layers).
 
 Validate with the project's own formulas so the recommendation matches what the router will compute:
 

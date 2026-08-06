@@ -16,7 +16,19 @@ grep "JSON_SUMMARY" /tmp/route_output.txt | sed 's/.*JSON_SUMMARY: //' | python3
 ```
 
 Key fields:
-- `failed_single`: failed single-ended net names
+- `failed_single`: failed single-ended net names — nets with NO result at all
+- `open_single`: nets that KEPT a result whose copper still leaves pads
+  disconnected (non-multipoint only; a multipoint shortfall is already the pad
+  deficit). **Always read this alongside `failed_single`** — a board can ship
+  open copper with `failed_single: []`, so a run is only clean when both are
+  empty. These nets also appear by name in `failed_multipoint`.
+- `terminal_restores`: `{net: outcome}` for rip victims restored at terminal
+  failure. `full` is the only success; `full_open` restored copper that never
+  covered every pad, and `stub` kept only the escape stubs — both ship broken
+  and are worth reporting as failures with a distinct cause (the reroute failed
+  and the pre-rip copper could not be fully put back).
+- `stacked_copper`: same-net duplicate copper KiCad's DRC will never flag. Not a
+  routing failure, but if present, say so — it is invisible to every other check.
 - `failed_multipoint`: nets with unconnected pads, including pad coordinates
 - `blockers`: per still-failed net, the run's LAST frontier blocking analysis
   (#409): `{net, stage, blocked_by: [{net, blocked_count, unique_cells,
@@ -103,7 +115,7 @@ Work through the failure modes most-targeted-first. Do not jump straight to glob
 | Failed nets have source and target stubs on conflicting layers; rip-up histories show repeated mutual ripping | Same-layer crossing conflicts | `--mps-layer-swap`, or revisit `--layer-costs` |
 | "Re-route FAILED: no path found" for ripped nets | Search space exhausted | NOT a budget problem: the router self-budgets (#529, default on — auto-extends to 1e7 iterations while progressing), so do not suggest raising `--max-iterations`. A "dynamic iterations (#529): search extended to N" line followed by failure means genuine progress ran out — escalate capacity: `--max-ripup`, clearance/track toward fab floor, or layers. (`KICAD_DYNAMIC_ITERATIONS=0` restores legacy static caps for A/B only) |
 | Many multipoint pads failed on the same fine-pitch component | Grid too coarse for the pad geometry | `--grid-step 0.05`, and check `--track-width`/`--clearance` against the pad pitch |
-| Failures spread across the board, blockers vary | Genuine capacity problem | Escalate in order: `--max-ripup 10` → reduce `--clearance`/`--track-width` toward fab minimums → add routing layers |
+| Failures spread across the board, blockers vary | Genuine capacity problem | Escalate in order: reduce `--clearance`/`--track-width` toward fab minimums → add routing layers. Do NOT raise `--max-ripup` past ~5 (measured worse: deep rip chains strand their victims) |
 
 ## Step 4: Output the Retry Command
 
@@ -113,7 +125,7 @@ Produce one command that retries **only the failed nets** with the targeted fixe
 python3 -X utf8 route.py board_routed.kicad_pcb board_retry.kicad_pcb \
     --nets "SDA" "Net-(U1-Pad8)" \
     --no-bga-zone U9 \
-    --max-ripup 10 \
+    --max-ripup 5 \
     2>&1 | tee /tmp/route_retry.txt
 ```
 

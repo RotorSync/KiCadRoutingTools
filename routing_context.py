@@ -673,6 +673,12 @@ def record_diff_pair_success(
     diff_pair_by_net_id[pair.p_net_id] = (pair_name, pair)
     diff_pair_by_net_id[pair.n_net_id] = (pair_name, pair)
 
+    # #466: refresh the dynamic fragility field (no-op unless armed)
+    from plane_fragility import fragility_on_copper_change
+    fragility_on_copper_change(config, pcb_data,
+                               result.get('new_segments'),
+                               result.get('new_vias'))
+
 
 def record_single_ended_success(
     pcb_data,
@@ -718,6 +724,13 @@ def record_single_ended_success(
     # Compute and cache track proximity costs
     track_proximity_cache[net_id] = compute_track_proximity_for_net(
         pcb_data, net_id, config, layer_map)
+
+    # #466: the committed copper may have narrowed a pour -- refresh the
+    # dynamic fragility field's dirty window (no-op unless armed).
+    from plane_fragility import fragility_on_copper_change
+    fragility_on_copper_change(config, pcb_data,
+                               result.get('new_segments'),
+                               result.get('new_vias'))
 
 
 def restore_ripped_net(
@@ -776,6 +789,11 @@ def restore_ripped_net(
         return
 
     add_route_to_pcb_data(pcb_data, ripped_saved, debug_lines=config.debug_lines)
+    # #466: restored copper re-narrows the pour it had freed
+    from plane_fragility import fragility_on_copper_change
+    fragility_on_copper_change(config, pcb_data,
+                               ripped_saved.get('new_segments'),
+                               ripped_saved.get('new_vias'))
 
     for rid in ripped_ids:
         if rid not in routed_net_ids:

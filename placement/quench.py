@@ -35,7 +35,7 @@ untouched, since max(1, 1) = 1.
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Tuple, Set, Optional
+from typing import Dict, List, NamedTuple, Sequence, Tuple, Set, Optional
 
 import numpy as np
 
@@ -131,6 +131,84 @@ def _count_crossings_np(a: np.ndarray, b: np.ndarray,
     wa = net_w[a[:, 4].astype(np.intp)]
     wb = net_w[b[:, 4].astype(np.intp)]
     return count, float(np.sum(np.maximum(wa[:, None], wb[None, :])[hits]))
+
+
+class _CorridorBox(NamedTuple):
+    """A corridor frozen into the form the chord kernel wants.
+
+    `skip` is a dense net-id-indexed bool: the corridor's OWN nets (a bus inside
+    its own lane is the point, not a cost), plus the ignored and high-fanout nets
+    `foreign_crossings` drops for the same reason it drops them there.
+    """
+    ax: float
+    ay: float
+    ux: float
+    uy: float
+    length: float
+    half_w: float
+    skip: np.ndarray
+
+
+def _corridor_cut_np(a: np.ndarray, boxes) -> float:
+    """Total length of `a`'s airwires lying INSIDE the corridor rectangles.
+
+    Why a chord and not the crossing count `foreign_crossings` uses: a count is
+    piecewise constant in pose, so its gradient is zero almost everywhere and a
+    greedy descent gets no direction from it -- a part can slide halfway out of a
+    corridor and the count never moves until it pops out entirely. The chord is
+    piecewise linear in pose, and it prices obliqueness for free (a wire crossing
+    a width-w lane at angle theta cuts w/sin(theta), so cutting a lane
+    diagonally costs more than crossing it square, which is exactly the physical
+    truth on a plane).
+
+    What it is a bound on: on a 2-layer board the bus owns the top layer inside
+    its own lane, so a foreign net crossing the lane runs underneath for the
+    shared span, and the chord is the geometric lower bound on reference-plane
+    copper that span removes.
+
+    Exact, not sampled: each segment is rotated into the corridor's own frame
+    (an isometry, so lengths carry over unchanged) where the rectangle is
+    axis-aligned, and clipped with Liang-Barsky. Vectorised over airwires, one
+    pass per corridor -- boards declare a handful of corridors, not thousands.
+    """
+    if len(a) == 0 or not boxes:
+        return 0.0
+    x1, y1, x2, y2 = a[:, 0], a[:, 1], a[:, 2], a[:, 3]
+    nets = a[:, 4].astype(np.intp)
+    seg_len = np.hypot(x2 - x1, y2 - y1)
+    total = 0.0
+    for box in boxes:
+        live = ~box.skip[np.clip(nets, 0, len(box.skip) - 1)]
+        # A net id beyond the lookup was never in net_airwires, so it cannot be
+        # one of this corridor's own nets: clip-and-test would read the wrong
+        # slot, so drop those explicitly rather than trusting the clamp.
+        live &= (nets >= 0) & (nets < len(box.skip))
+        if not live.any():
+            continue
+        dx1, dy1 = x1[live] - box.ax, y1[live] - box.ay
+        dx2, dy2 = x2[live] - box.ax, y2[live] - box.ay
+        # Corridor frame: u along the axis, v along the normal (-uy, ux).
+        u1 = dx1 * box.ux + dy1 * box.uy
+        v1 = -dx1 * box.uy + dy1 * box.ux
+        u2 = dx2 * box.ux + dy2 * box.uy
+        v2 = -dx2 * box.uy + dy2 * box.ux
+        du, dv = u2 - u1, v2 - v1
+        t0 = np.zeros(len(u1))
+        t1 = np.ones(len(u1))
+        alive = np.ones(len(u1), dtype=bool)
+        h = box.half_w
+        for p, q in ((-du, u1), (du, box.length - u1),
+                     (-dv, v1 + h), (dv, h - v1)):
+            par = np.abs(p) < 1e-12          # parallel to this edge
+            alive &= ~(par & (q < 0.0))      # ...and outside it: no chord
+            with np.errstate(divide='ignore', invalid='ignore'):
+                r = np.where(par, 0.0, q / np.where(par, 1.0, p))
+            enter = (~par) & (p < 0.0)
+            t0 = np.where(enter, np.maximum(t0, r), t0)
+            t1 = np.where((~par) & (p > 0.0), np.minimum(t1, r), t1)
+        frac = np.where(alive, np.maximum(t1 - t0, 0.0), 0.0)
+        total += float(np.sum(frac * seg_len[live]))
+    return total
 
 
 def _count_crossings_within(a: np.ndarray,
@@ -323,7 +401,13 @@ class QuenchState:
                  # holes from an intent and must not find them pre-locked
                  # (measured: the freeze-in-state broke test_place_seed's
                  # declared-edge H5 seat).
-                 move_unconnected: bool = True):
+                 move_unconnected: bool = True,
+                 # --- corridor cut. Appended for the same reason as #548's
+                 # four, and OFF by default: at weight 0.0 no corridor is ever
+                 # built and the objective is bit-identical.
+                 corridor_weight: float = 0.0,
+                 corridor_specs: Optional[Sequence[Dict]] = None,
+                 corridor_max_fanout: int = 20):
         bounds = pcb_data.board_info.board_bounds
         if bounds is None:
             raise ValueError("No board boundary (Edge.Cuts) found")
@@ -486,6 +570,53 @@ class QuenchState:
         # None when this part is the net's only owner. Cleared beside
         # _inc_violation on every move.
         self._anchors: Dict[Tuple[str, int], Optional[Tuple[float, float]]] = {}
+
+        # --- corridor cut, OFF unless a weight was asked for -----------------
+        self.corridor_weight = float(corridor_weight)
+        self._corridor_boxes: List[_CorridorBox] = []
+        if self.corridor_weight > 0.0 and corridor_specs:
+            self._corridor_boxes = self._freeze_corridors(
+                pcb_data, corridor_specs, ignore, corridor_max_fanout)
+
+    def _freeze_corridors(self, pcb_data, specs, ignore_net_ids, max_fanout):
+        """Corridor rectangles, built ONCE and never rebuilt.
+
+        This is the load-bearing property of the whole term, so it is enforced
+        structurally rather than by discipline: `_cluster_ends` derives a
+        corridor's endpoints from LIVE pad positions, so a corridor recomputed
+        after a move would make the objective non-stationary -- the cost of a
+        pose would depend on when it was evaluated, `apply_move`'s accepted gain
+        would not match the recomputed total, and a greedy descent could cycle.
+        Freezing at construction makes that impossible rather than merely
+        avoided. It also makes the model independent of the poses it scores,
+        which is what lets `check_floorplan --health` re-derive corridors from
+        the FINAL placement and act as an honest check on the result.
+        """
+        from .routability import corridors_from_intent
+        boxes: List[_CorridorBox] = []
+        size = max(max(self.net_airwires, default=-1),
+                   max(pcb_data.nets, default=-1)) + 1
+        base = np.zeros(max(size, 1), dtype=bool)
+        for nid in ignore_net_ids:
+            if 0 <= nid < len(base):
+                base[nid] = True
+        if max_fanout:
+            for nid, refs in self.net_refs.items():
+                if len(refs) > max_fanout and 0 <= nid < len(base):
+                    base[nid] = True
+        for cor in corridors_from_intent(self, pcb_data, specs):
+            n = cor.length_mm
+            if n < 1e-9 or cor.width_mm <= 0.0:
+                continue
+            skip = base.copy()
+            for nid in cor.net_ids:
+                if 0 <= nid < len(skip):
+                    skip[nid] = True
+            boxes.append(_CorridorBox(
+                ax=cor.a[0], ay=cor.a[1],
+                ux=(cor.b[0] - cor.a[0]) / n, uy=(cor.b[1] - cor.a[1]) / n,
+                length=n, half_w=cor.width_mm / 2.0, skip=skip))
+        return boxes
 
     def _build_peers(self, span: float) -> Dict[str, List[str]]:
         """{ref: sorted peer refs} -- same footprint_name, SEED centres within
@@ -1074,8 +1205,16 @@ class QuenchState:
         length = self._weighted_length(own_arr)
         n_out, w_out = _count_crossings_np(own_arr, other_airwires, self._net_w)
         n_in, w_in = _count_crossings_within(own_arr, self._net_w)
-        return (self.length_weight * length
-                + self.crossing_penalty * (w_out + w_in)), n_out + n_in
+        cost = (self.length_weight * length
+                + self.crossing_penalty * (w_out + w_in))
+        if self._corridor_boxes:
+            # Only the SUBSET's chords: `other_airwires` is fixed across the
+            # candidate poses this cost ranks, so its cut is a constant that
+            # cancels in the argmin -- the same reason its length is not summed
+            # here either.
+            cost += self.corridor_weight * _corridor_cut_np(
+                own_arr, self._corridor_boxes)
+        return cost, n_out + n_in
 
     # ----- full cost (for reporting) ---------------------------------------
 
@@ -1108,12 +1247,14 @@ class QuenchState:
                 # 2 the evaluators need and which cancels between candidates.
                 if near and rb in near:
                     align += self._align_pair_penalty(pa, rect_a, pb, pb.rect())
+        cut = (_corridor_cut_np(all_aw, self._corridor_boxes)
+               if self._corridor_boxes else 0.0)
         total = (self.length_weight * length
                  + self.crossing_penalty * w_crossings + halo + edge
-                 + align + orient)
+                 + align + orient + self.corridor_weight * cut)
         return {'total': total, 'length': length, 'crossings': crossings,
                 'halo': halo, 'edge': edge, 'hpwl': self.hpwl(),
-                'align': align, 'orient': orient}
+                'align': align, 'orient': orient, 'corridor_cut': cut}
 
     def hpwl(self):
         """Half-perimeter wirelength: sum over nets of the pad bbox's width plus
@@ -1489,13 +1630,25 @@ def quench(pcb_data: PCBData, pcb_file: str,
            verbose: bool = False,
            pad_legality: bool = True,
            min_gain_per_mm: float = 0.1,
-           move_unconnected: bool = False) -> List[Dict]:
+           move_unconnected: bool = False,
+           corridor_weight: float = 0.0,
+           corridor_specs: Optional[Sequence[Dict]] = None) -> List[Dict]:
     """Greedy quench: iterate over parts, accept only cost-reducing moves.
 
     align_weight / align_radius / align_span, orient_weight: the #548 tidiness
     terms, BOTH OFF by default. See QuenchState for what they measure and why
     they default to zero -- at 0.0 they return before touching any geometry and
     the output is bit-identical to a build without them.
+
+    corridor_weight / corridor_specs: price the LENGTH each foreign airwire cuts
+    through a declared bus corridor, rather than merely counting that it does.
+    Off by default -- at 0.0 no corridor is built at all -- and NOT ADOPTED:
+    measured on three boards it improved the re-derived corridor signal on one
+    of them. The corridors must be frozen at construction (an unfrozen corridor
+    makes the objective non-stationary), but a corridor is DEFINED by its bus's
+    pads, so moving parts moves the corridor and the minimised gain does not
+    survive re-derivation. Read `check_floorplan --health`'s `cut_mm` as a
+    diagnostic instead. See docs/placement-optimization.md.
 
     net_weights: optional {net_id: weight} priority multipliers. A weighted
     net's airwire length is scaled by its weight and every crossing it takes
@@ -1564,7 +1717,9 @@ def quench(pcb_data: PCBData, pcb_file: str,
                         align_weight=align_weight, align_radius=align_radius,
                         align_span=align_span, orient_weight=orient_weight,
                         pad_legality=pad_legality,
-                        move_unconnected=move_unconnected)
+                        move_unconnected=move_unconnected,
+                        corridor_weight=corridor_weight,
+                        corridor_specs=corridor_specs)
     state.build_neighbor_lists(max_displacement + grid_step)
 
     before = state.total_cost()
