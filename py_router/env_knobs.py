@@ -72,6 +72,10 @@ def refresh() -> None:
     g['IMPEDANCE_NECKDOWN'] = (_s('KICAD_IMPEDANCE_NECKDOWN', '1').strip().lower()
                                not in ('0', 'false', 'no', 'off'))
     g['NET_RESCUE'] = _s('KICAD_NET_RESCUE', '1') != '0'
+    # Terminal geometry escalation ("better than shipping opens", 2026-08-05):
+    # post-rescue whole-net retry with track width + via size marching down
+    # together toward the fab floor. =0 disables for A/B debugging.
+    g['TERMINAL_ESCALATION'] = _s('KICAD_TERMINAL_ESCALATION', '1') != '0'
     # #529 dynamic iterations, DEFAULT ON (=0 reverts to static caps): full
     # searches run at min(base, CLAMP) and earn +1x base tranches while the
     # heuristic keeps approaching, up to a flat 1e7 ceiling. CLAMP defaults

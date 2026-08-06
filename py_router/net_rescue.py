@@ -641,3 +641,312 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
               f"{len(summary['unchanged'])} unchanged "
               f"({summary['time']:.1f}s)")
     return summary if summary['attempted'] else None
+
+
+# ---------------------------------------------------------------------------
+# Terminal geometry escalation ("better than shipping opens", 2026-08-05)
+# ---------------------------------------------------------------------------
+
+def _escalation_ladder(config, pcb_data, net_id):
+    """The terminal escalation rungs for one net: 2-3 whole-net retry configs
+    whose track width AND via size march down TOGETHER from the net's current
+    geometry to the fab-tier floor (fab_floor_clearance_track for the track,
+    fab_floor_ladder for the via -- the same fab-floor resolution and
+    standard->advanced escalation policy the rescue rungs use, including
+    warn_fab_escalation). Clearance is deliberately NEVER reduced: that is
+    the DRC floor's job, and reducing it here would change grading.
+
+    Returns [] when the net's geometry is already at the floor (nothing to
+    march) -- callers skip such nets silently.
+    """
+    from plane_pad_tap import fab_floor_clearance_track
+    from fab_tiers import fab_floor_ladder, warn_fab_escalation
+
+    _fab_clear, fab_track = fab_floor_clearance_track(pcb_data)
+    w0 = config.get_net_track_width(net_id, config.layers[0])
+    w_floor = min(w0, fab_track)
+    width_travel = w0 - w_floor > 1e-9
+
+    n_layers = len(pcb_data.board_info.copper_layers) or 2
+    ladder = fab_floor_ladder(n_layers)
+    via_rungs = [(f['via_diameter'], f['via_drill']) for f in ladder
+                 if f['via_diameter'] < config.via_size - 1e-9]
+    if not width_travel and not via_rungs:
+        return []  # already at the floor: nothing to march
+
+    m = len(via_rungs)
+    n = 3 if (width_travel and m) else (2 if width_travel else m)
+    max_iters = max(config.max_iterations, defaults.RESCUE_MAX_ITERATIONS)
+    # The marched width must actually APPLY to this net: clear every per-net
+    # width override that outranks track_width in get_net_track_width (other
+    # nets keep theirs -- they are priced as obstacles at their own widths).
+    power_widths = dict(config.power_net_widths)
+    power_widths.pop(net_id, None)
+    net_layer_widths = dict(config.net_layer_widths or {})
+    net_layer_widths.pop(net_id, None)
+    net_track_widths = dict(config.net_track_widths or {})
+    net_track_widths.pop(net_id, None)
+    coplanar_ids = set(config.coplanar_net_ids or set())
+    coplanar_ids.discard(net_id)
+
+    rungs = []
+    prev_key = None
+    for k in range(1, n + 1):
+        w = w0 + (w_floor - w0) * k / n if width_travel else w0
+        if m:
+            v_dia, v_drill = via_rungs[min(m - 1, (k * m - 1) // n)]
+        else:
+            v_dia, v_drill = config.via_size, config.via_drill
+        key = (round(w, 6), round(v_dia, 6), round(v_drill, 6))
+        if key == prev_key:
+            continue  # discrete via ladder can repeat a rung; dedupe
+        prev_key = key
+        if m and v_dia < ladder[0]['via_diameter'] - 1e-9:
+            warn_fab_escalation(f"terminal escalation net_{net_id}")
+        rungs.append(replace(config, track_width=w, layer_widths={},
+                             power_net_widths=power_widths,
+                             net_layer_widths=net_layer_widths,
+                             net_track_widths=net_track_widths,
+                             coplanar_net_ids=coplanar_ids,
+                             via_size=v_dia, via_drill=v_drill,
+                             bga_exclusion_zones=[],
+                             max_iterations=max_iters))
+    return rungs
+
+
+def _attempt_net_at_geometry(pcb_data, net_id, cfg, net_clearances,
+                             cancel_check=None):
+    """One escalation rung: a BOARD-GLOBAL obstacle map rebuilt at the rung's
+    geometry (a smaller width/via gains nothing on the run's shared map --
+    its inflation is baked at the run geometry, the #371 lesson), then the
+    net's gaps are closed one edge at a time, whole-net. NO rip authority:
+    copper is only ever ADDED for this net, so no casualties are possible.
+
+    Returns (edge_results, fully_connected). The copper of edge_results is
+    already committed to pcb_data; a caller rejecting the rung must undo it
+    (remove_route_from_pcb_data, reverse order) so a failed rung leaves the
+    board untouched.
+    """
+    from obstacle_map import (build_base_obstacle_map,
+                              add_same_net_via_clearance,
+                              add_same_net_pad_drill_via_clearance)
+    from pcb_modification import add_route_to_pcb_data, remove_route_from_pcb_data
+    from routing_context import _add_free_via_positions
+    from single_ended_routing import route_net_with_obstacles
+    from connectivity import get_net_endpoints_anchor_split
+
+    obstacles = build_base_obstacle_map(pcb_data, cfg, [net_id],
+                                        net_clearances=net_clearances)
+    # Same-net barrels are free transitions, at h2h distance (the rescue's
+    # #470 + custody-h2h pairing; every seeding site carries both).
+    _add_free_via_positions(obstacles, pcb_data, [net_id], cfg)
+    add_same_net_via_clearance(obstacles, pcb_data, net_id, cfg)
+    add_same_net_pad_drill_via_clearance(obstacles, pcb_data, net_id, cfg)
+
+    edge_results = []
+    failed_gaps = set()
+    attempts = 0
+    num, comp_points, comp_pads = _net_component_info(pcb_data, net_id)
+    while attempts < defaults.RESCUE_MAX_EDGES_PER_NET and num > 1:
+        if cancel_check and cancel_check():
+            break
+        main = _main_component(comp_pads)
+        gaps = []
+        for cid, pts in comp_points.items():
+            if cid == main or cid not in comp_pads:
+                continue
+            pair = _closest_pair(comp_points[main], pts)
+            if pair is None:
+                continue
+            key = (round((pair[1] + pair[3]) / 2, 2),
+                   round((pair[2] + pair[4]) / 2, 2))
+            if key not in failed_gaps:
+                gaps.append((key, pair, cid))
+        if not gaps:
+            break
+        gaps.sort(key=lambda g: g[1][0])
+        key, gap, gap_cid = gaps[0]
+        attempts += 1
+        _d, ax, ay, bx, by = gap
+        # Aim island<->trunk by MEMBERSHIP (the rescue's split); board-global
+        # there is no window crop, so on split failure fall back to the
+        # standard largest-two-groups derivation instead of giving up.
+        _isl = {(round(x, 3), round(y, 3))
+                for x, y in comp_points.get(gap_cid, [])}
+        _isl.update((round(p.global_x, 3), round(p.global_y, 3))
+                    for p in comp_pads.get(gap_cid, []))
+        src_over, tgt_over, split_err = get_net_endpoints_anchor_split(
+            pcb_data, net_id, cfg, (ax, ay), (bx, by), island_points=_isl)
+        if split_err:
+            src_over = tgt_over = None
+        result = route_net_with_obstacles(pcb_data, net_id, cfg, obstacles,
+                                          sources_override=src_over,
+                                          targets_override=tgt_over)
+        if not result or result.get('failed'):
+            failed_gaps.add(key)
+            continue
+        add_route_to_pcb_data(pcb_data, result, debug_lines=cfg.debug_lines)
+        num_after, comp_points, comp_pads = _net_component_info(pcb_data,
+                                                                net_id)
+        if num_after >= num:
+            # The route joined nothing new (authoritative check) - undo.
+            remove_route_from_pcb_data(pcb_data, result)
+            num, comp_points, comp_pads = _net_component_info(pcb_data, net_id)
+            failed_gaps.add(key)
+            continue
+        num = num_after
+        edge_results.append(result)
+    return edge_results, num <= 1
+
+
+def terminal_geometry_escalation(state, single_ended_nets, net_clearances=None,
+                                 progress_callback=None, cancel_check=None):
+    """Post-rescue terminal geometry escalation ("better than shipping
+    opens", Andy's design, 2026-08-05).
+
+    After the #331/#371 rescue pass has had its shot, every net this run
+    would still ship failed or open -- failed_single (no result at all),
+    open_single (kept result, pads disconnected) and multipoint nets with
+    unconnected pads; membership re-derived here per net with the
+    authoritative zone-aware check, since the summary buckets are only
+    computed after cleanup -- gets a WHOLE-NET retry with track width and
+    via size marching DOWN TOGETHER toward the fab-tier floor
+    (_escalation_ladder). Clearance is never reduced.
+
+    A rung is accepted only when the net grades FULLY connected afterward
+    (the same authoritative check); an accepted net's copper merges through
+    the normal result channels exactly as a rescue-recovered net's does. A
+    rejected rung is undone completely, so the worst case is "nothing
+    changes". No rip authority: only this net's copper is ever added.
+
+    This pass replaces the removed mid-retry via rung
+    (single_ended_routing._via_rung_retry: 459 firings / ~2 wins on the
+    wave4 set5 logs) at the only point that mechanism ever paid.
+
+    Returns {'attempted', 'nets': {net_name: "recovered at WxS/D" |
+    "unrecovered"}, 'time'} or None when nothing was attempted (or
+    KICAD_TERMINAL_ESCALATION=0).
+    """
+    if not env_knobs.TERMINAL_ESCALATION:
+        return None
+    from pcb_modification import remove_route_from_pcb_data
+
+    pcb_data = state.pcb_data
+    config = state.config
+    routed_results = state.routed_results
+
+    # Sweep this run's scope for nets still shipping disconnected pads.
+    candidates = []
+    for net_name, net_id in sorted(set(single_ended_nets)):
+        if cancel_check and cancel_check():
+            break
+        if net_id not in pcb_data.nets:
+            continue
+        if len(pcb_data.pads_by_net.get(net_id, [])) < 2:
+            continue
+        num0, _pts, _pads = _net_component_info(pcb_data, net_id)
+        if num0 <= 1:
+            continue  # authoritative check says connected (zones included)
+        rungs = _escalation_ladder(config, pcb_data, net_id)
+        if not rungs:
+            continue  # geometry already at the floor: nothing to march
+        candidates.append((net_name, net_id, num0, rungs))
+    if not candidates:
+        return None
+
+    print(f"\nTerminal geometry escalation (better than shipping opens): "
+          f"{len(candidates)} candidate net(s)")
+    outcomes: Dict[str, str] = {}
+    summary = {'attempted': 0, 'nets': outcomes, 'time': 0.0}
+    pass_start = time.time()
+
+    for _idx, (net_name, net_id, num0, rungs) in enumerate(candidates):
+        if cancel_check and cancel_check():
+            print("  Terminal escalation cancelled")
+            break
+        if progress_callback:
+            progress_callback(_idx + 1, len(candidates),
+                              f"Terminal escalation: {net_name}")
+        summary['attempted'] += 1
+        net_start = time.time()
+        accepted_cfg = None
+        edge_results = []
+        n_rungs = len(rungs)
+        for k, cfg in enumerate(rungs, 1):
+            if cancel_check and cancel_check():
+                break
+            print(f"  terminal escalation: {net_name} at track "
+                  f"{cfg.track_width:.4g} via {cfg.via_size:.4g}/"
+                  f"{cfg.via_drill:.4g} (rung {k}/{n_rungs})")
+            edges, fully = _attempt_net_at_geometry(
+                pcb_data, net_id, cfg, net_clearances, cancel_check)
+            if fully:
+                accepted_cfg = cfg
+                edge_results = edges
+                break
+            # Rejected rung: undo completely so nothing changes.
+            for r in reversed(edges):
+                remove_route_from_pcb_data(pcb_data, r)
+
+        elapsed = time.time() - net_start
+        if accepted_cfg is None:
+            outcomes[net_name] = 'unrecovered'
+            record_net_event(state, net_id, "terminal_escalation_failed",
+                             {"components": num0, "rungs": n_rungs,
+                              "time_s": round(elapsed, 2)})
+            print(f"    {RED}terminal escalation: {net_name} unrecovered"
+                  f"{RESET} ({elapsed:.1f}s)")
+            continue
+
+        geom = (f"{accepted_cfg.track_width:.4g}x"
+                f"{accepted_cfg.via_size:.4g}/{accepted_cfg.via_drill:.4g}")
+        merged = {
+            'net_name': net_name,
+            'net_id': net_id,
+            'new_segments': [s for r in edge_results
+                             for s in r['new_segments']],
+            'new_vias': [v for r in edge_results
+                         for v in r.get('new_vias', [])],
+            'iterations': sum(r.get('iterations', 0) for r in edge_results),
+            'is_terminal_escalation': True,
+        }
+        prev = routed_results.get(net_id)
+        if prev is None:
+            # Was failed_single: the merged result IS the net's result now
+            # (same channels as a rescue-recovered failed net).
+            state.results.append(merged)
+            routed_results[net_id] = merged
+            if net_id in state.remaining_net_ids:
+                state.remaining_net_ids.remove(net_id)
+            if net_id not in state.routed_net_ids:
+                state.routed_net_ids.append(net_id)
+        else:
+            # Kept-but-open / partial multipoint: fold the copper INTO the
+            # net's AUTHORITATIVE result (a separate entry is dropped by the
+            # #87 superseded-result filter -- the rescue's partial-branch
+            # lesson). Fully connected now, so the pad debt clears.
+            prev['new_segments'] = (list(prev.get('new_segments') or [])
+                                    + list(merged['new_segments']))
+            prev['new_vias'] = (list(prev.get('new_vias') or [])
+                                + list(merged['new_vias']))
+            prev_failed = prev.get('failed_pads_info') or []
+            if prev_failed:
+                prev['failed_pads_info'] = []
+                if 'tap_pads_connected' in prev:
+                    prev['tap_pads_connected'] = (
+                        prev.get('tap_pads_connected', 0) + len(prev_failed))
+        record_net_event(state, net_id, "terminal_escalation_succeeded",
+                         {"geometry": geom, "edges_routed": len(edge_results),
+                          "components_before": num0,
+                          "time_s": round(elapsed, 2)})
+        outcomes[net_name] = f"recovered at {geom}"
+        print(f"    {GREEN}terminal escalation: {net_name} recovered at "
+              f"{geom}{RESET} ({num0} -> 1 parts, {elapsed:.1f}s)")
+
+    summary['time'] = round(time.time() - pass_start, 2)
+    if summary['attempted']:
+        _rec = sum(1 for v in outcomes.values() if v != 'unrecovered')
+        print(f"Terminal escalation: {_rec} recovered, "
+              f"{summary['attempted'] - _rec} unrecovered "
+              f"({summary['time']:.1f}s)")
+    return summary if summary['attempted'] else None
