@@ -825,6 +825,86 @@ def conflict_offset_vectors(state, *, cluster_tol: float = 1.5,
 
 
 
+
+def airwire_cluster_vectors(state, *, cluster_tol: float = 1.5,
+                            min_support: int = 3, top_k: int = 3,
+                            min_airwire_mm: float = 8.0,
+                            max_net_pads: int = 4) -> List[Dict]:
+    """REFUTED (run-8 E5). Kept, unwired, as the record of a measurement.
+
+    The proposal, endorsed after run 7: a third vector source for the case the
+    other two cannot see -- a translate that produced no conflicts and left no
+    hole pattern to fit. On a small net a displaced pad's airwire to its
+    partners is stretched by roughly the damage vector, so those stretch
+    vectors should CLUSTER on the damage while a healthy design's long
+    airwires point in unrelated directions.
+
+    They do not. Measured over the 33 in-repo boards and two recorded
+    perturbed ones, at the endorsed filters (nets of 2-4 pads, airwires over
+    8mm, three agreeing within 1.5mm):
+
+        healthy boards firing          6 of 33, with support up to 112
+        a board translated by (4.5, -2.4), |v| = 5.1
+                                       top cluster (6.7, 21.4), support 28
+                                       -- not the damage, and not close
+
+    The reason is the same one that killed the first A1 design (net-anchor
+    least squares, which read up to 60mm of pure design slack on healthy
+    boards): a long airwire is ORDINARY LAYOUT. A net legitimately spanning
+    the board produces exactly the signal this looks for, in quantity, and no
+    threshold separates it from damage because there is no separation to find.
+    Restricting to small nets narrows the population without changing its
+    nature.
+
+    What the two SHIPPED sources have and this does not is a structural no-op
+    guarantee. A hole-pattern fit needs a hole pattern; conflict offsets need
+    conflicts. Both are silent on a healthy board by construction rather than
+    by threshold. Connectivity has no such property.
+
+    Left in the tree, not called: tests/test_run8_airwire_refuted.py pins these
+    numbers so a future attempt starts from the measurement instead of
+    repeating it, and so a change that alters the behaviour is visible.
+    """
+    parts = state.parts
+    pads_by_net: Dict[int, List[Tuple[str, float, float]]] = {}
+    for ref in sorted(parts):
+        for nid in sorted(getattr(parts[ref], 'nets', ()) or ()):
+            pads_by_net.setdefault(nid, []).append(
+                (ref, parts[ref].x, parts[ref].y))
+    stretches = []
+    for nid, members in sorted(pads_by_net.items()):
+        if nid <= 0 or not (2 <= len(members) <= max_net_pads):
+            continue
+        for i, (ra, ax, ay) in enumerate(members):
+            for (rb, bx, by) in members[i + 1:]:
+                if ra == rb:
+                    continue
+                dx, dy = ax - bx, ay - by
+                if math.hypot(dx, dy) < min_airwire_mm:
+                    continue
+                stretches.append((dx, dy))
+    clusters: List[List[Tuple[float, float]]] = []
+    for (dx, dy) in stretches:
+        canon = (dx, dy) if (dy, dx) > (0, 0) else (-dx, -dy)
+        for cl in clusters:
+            cx = sum(p[0] for p in cl) / len(cl)
+            cy = sum(p[1] for p in cl) / len(cl)
+            if math.hypot(canon[0] - cx, canon[1] - cy) <= cluster_tol:
+                cl.append(canon)
+                break
+        else:
+            clusters.append([canon])
+    out = []
+    for cl in clusters:
+        if len(cl) < min_support:
+            continue
+        vx = sum(p[0] for p in cl) / len(cl)
+        vy = sum(p[1] for p in cl) / len(cl)
+        out.append({'v': (round(vx, 4), round(vy, 4)), 'support': len(cl)})
+    out.sort(key=lambda d: -d['support'])
+    return out[:top_k]
+
+
 def build_candidates(state, tiers: Tiers,
                      vectors: Sequence[Tuple[float, float]],
                      proposals: Dict[str, List[Tuple[float, float]]],
