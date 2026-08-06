@@ -962,10 +962,33 @@ def main():
         if not qfn_components:
             qfn_components = find_components_by_type(pcb_data, 'QFP')
         if qfn_components:
-            args.component = qfn_components[0].reference
+            # Run-6 ranking: file order picked J1 (a rect-pad USB-C the
+            # geometric fallback classifies QFN) over the real 64-pin QFN.
+            # Drop connector/marker classes (part_class KB), prefer
+            # name-evidenced QFN/QFP footprints, then most pads. Fully
+            # generic; prints its reasoning.
+            def _rank(fp):
+                name_hit = any(t in (fp.footprint_name or '').upper()
+                               for t in ('QFN', 'QFP', 'DFN', 'MLF'))
+                return (1 if name_hit else 0, len(fp.pads or []))
+            ranked = list(qfn_components)
+            try:
+                from placement.part_class import classify_part
+                keep = [fp for fp in ranked
+                        if classify_part(fp, fp.reference).name
+                        not in ('edge_receptacle', 'edge_actuator',
+                                'mount_hole', 'fiducial', 'testpoint')]
+                if keep:
+                    ranked = keep
+            except Exception:
+                pass
+            ranked.sort(key=_rank, reverse=True)
+            args.component = ranked[0].reference
             print(f"Auto-detected QFN/QFP component: {args.component}")
-            if len(qfn_components) > 1:
-                print(f"  (Other QFN/QFPs found: {[fp.reference for fp in qfn_components[1:]]})")
+            if len(ranked) > 1:
+                print(f"  (Ranked over: "
+                      f"{[fp.reference for fp in ranked[1:]]}; name-evidence "
+                      f"then pad count; connector/marker classes dropped)")
         else:
             print("Error: No QFN/QFP components found in PCB")
             print(f"Available components: {list(pcb_data.footprints.keys())[:20]}...")

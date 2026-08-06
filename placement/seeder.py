@@ -54,6 +54,10 @@ SEARCH_RADIUS_MM = 30.0
 SEARCH_STEP_MM = 1.0
 SEARCH_FINE_RADIUS_MM = 16.0
 SEARCH_FINE_STEP_MM = 0.25
+# Run-7 A3: a third, grid-step ring near the target -- the scar above says
+# 0.25 still steps over the last legal pocket on a packed board (the
+# 0.09mm window). Small radius keeps it affordable.
+SEARCH_XFINE_RADIUS_MM = 4.0
 FALLBACK_STEP_MM = 2.0
 TARGET_JITTER_MM = 1.5
 
@@ -64,7 +68,9 @@ def _rect_inside(rect, outer, tol: float) -> bool:
 
 
 def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
-               constraint=None, tol: float = 0.5) -> bool:
+               constraint=None, tol: float = 0.5,
+               max_disp: Optional[float] = None,
+               info: Optional[Dict] = None) -> Optional[float]:
     """Nearest FULLY-CONTAINED legal pose to (tx, ty); applies the move and
     returns True.
 
@@ -106,6 +112,27 @@ def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
             return False
         return state.candidate_valid(ref, x, y, rot, exclude=exclude)
 
+    # A zone smaller than the courtyard cannot contain it at any rotation --
+    # the spec-COORDINATE pattern. Containment then relaxes to anchor-point-
+    # in-zone, which makes such zones satisfiable by construction; the grader
+    # (floorplan.rule_zone_containment) applies the same relaxation.
+    anchor_zone = False
+    if constraint is not None:
+        from placement.floorplan import zone_fits_courtyard
+        anchor_zone = not any(
+            zone_fits_courtyard(constraint, part.rect(0.0, 0.0, r), tol)
+            for r in (part.rot % 360, (part.rot + 90) % 360))
+        if anchor_zone and info is not None:
+            info['anchor_zone'] = True
+
+    def _in_zone(x, y, rot):
+        if constraint is None:
+            return True
+        if anchor_zone:
+            return (constraint[0] - tol <= x <= constraint[2] + tol
+                    and constraint[1] - tol <= y <= constraint[3] + tol)
+        return _rect_inside(part.rect(x, y, rot), constraint, tol)
+
     full = state.clearance
     try:
         for clr in (full, full / 2.0, min(0.02, full)):
@@ -115,19 +142,29 @@ def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
             state._inc_violation.clear()
             for rot in [part.rot] + [(part.rot + d) % 360
                                      for d in (90.0, 180.0, 270.0)]:
+                xfine = max(0.05, getattr(state, 'grid_step', 0.1) or 0.1)
                 for radius, step in ((SEARCH_RADIUS_MM, SEARCH_STEP_MM),
                                      (SEARCH_FINE_RADIUS_MM,
-                                      SEARCH_FINE_STEP_MM)):
+                                      SEARCH_FINE_STEP_MM),
+                                     (SEARCH_XFINE_RADIUS_MM, xfine)):
+                    if max_disp is not None and max_disp < step - 1e-9:
+                        # run-7 A3: a ring whose step exceeds the cap can
+                        # contribute nothing but used to burn a full sweep
+                        continue
                     for dx, dy in _offsets(radius, step):
+                        if (max_disp is not None
+                                and math.hypot(dx, dy) > max_disp + 1e-9):
+                            continue
                         x, y = round(tx + dx, 3), round(ty + dy, 3)
-                        if constraint is not None and not _rect_inside(
-                                part.rect(x, y, rot), constraint, tol):
+                        if not _in_zone(x, y, rot):
                             continue
                         if _ok(x, y, rot):
                             state.apply_move(ref, x, y, rot)
                             return clr
                 if constraint is not None:
                     continue    # a zone-constrained part stays in its zone
+                if max_disp is not None:
+                    continue    # a capped repair never sweeps the whole board
                 u = state.usable
                 grid = []
                 nx = max(1, int((u[2] - u[0]) / FALLBACK_STEP_MM))
@@ -191,6 +228,59 @@ def _edge_correct(state, ref: str, edge: str, x: float, y: float,
     return x, y
 
 
+def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
+               notes: List[str], target=None) -> bool:
+    """Seat a DECLARED edge part on its edge band, minimal-move (run-4 B-6).
+
+    Repair could never do this: `_try_place._ok` demands full containment,
+    and an edge seat overhangs by design -- so declared edge refs were
+    exempt-only and a misplaced one was simply unrepairable here. Reuses the
+    stage-1 geometry (`_edge_pose` + `_edge_correct`); the along-edge
+    position starts at the part's CURRENT projection (minimal move) and
+    slides outward until the seat is pad/hole-conflict-free against every
+    other part. Board-only; the band comes from the intent."""
+    part = state.parts[ref]
+    edge = entry['edge']
+    band = entry.get('overhang_mm') or {}
+    lo = float(band.get('min', 0.0))
+    hi = band.get('max')
+    overhang = (lo + float(hi)) / 2.0 if hi is not None else max(lo, 0.5)
+    x0, y0, x1, y1 = state.board
+
+    # Along-edge start: the declared zone center when one exists (the R2
+    # spec-coordinate pattern -- a DERIVED home outranks minimal-move), else
+    # the part's current projection (minimal move).
+    ax, ay = target if target is not None else (part.x, part.y)
+    if edge in ('north', 'south'):
+        cur = (ax - x0) / max(1e-9, (x1 - x0))
+    else:
+        cur = (ay - y0) / max(1e-9, (y1 - y0))
+    cur = min(0.95, max(0.05, cur))
+
+    ctx = state.legality_ctx
+
+    def conflict_free(px, py):
+        if ctx is None:
+            return True
+        for other in ctx.parts:
+            if other == ref or other not in state.parts:
+                continue
+            sf = ctx.pair_shortfall(ref, other, pose_a=(px, py, part.rot))
+            if sf.pad > 1e-6 or sf.hole > 1e-6:
+                return False
+        return True
+
+    for df in (0.0, 0.05, -0.05, 0.1, -0.1, 0.15, -0.15,
+               0.2, -0.2, 0.3, -0.3, 0.4, -0.4):
+        frac = min(0.95, max(0.05, cur + df))
+        x, y = _edge_pose(part, state.board, edge, frac, overhang)
+        x, y = _edge_correct(state, ref, edge, x, y, overhang)
+        if conflict_free(x, y):
+            state.apply_move(ref, round(x, 3), round(y, 3), part.rot)
+            return True
+    return False
+
+
 def _partner_centroid(state, ref: str, placed: Set[str],
                       max_fanout: int = 20) -> Optional[Tuple[float, float]]:
     """Centroid of already-placed partners on shared nets: ONE vote per
@@ -233,7 +323,9 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                      clearance: float = 0.25,
                      board_edge_clearance: float = 0.55,
                      grid_step: float = 0.1,
-                     seed_refs: Optional[Set[str]] = None) -> Dict:
+                     seed_refs: Optional[Set[str]] = None,
+                     anchors_first: bool = False,
+                     anchor_rounds: int = 1) -> Dict:
     """Compute a full placement for an unplaced board from its intent.
 
     Returns {'placements': [...], 'lock_refs': [...], 'unseated': [...],
@@ -297,7 +389,17 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
         if c['ref'] not in state.parts:
             notes.append(f"edge connector {c['ref']} is not on this board")
         elif c['ref'] in unplaced:
-            by_edge.setdefault(c.get('edge') or 'south', []).append(c)
+            if not c.get('edge'):
+                # Run-4 A: an entry with no edge used to default to SOUTH --
+                # an auto-declared receptacle whose true edge is underivable
+                # (implausible pose, run 3's J1) would have been seated on a
+                # wrong edge silently. No edge, no seat: say so and leave the
+                # part to the later stages / reconstruct.
+                notes.append(f"edge connector {c['ref']}: no edge declared; "
+                             f"stage 1 will not guess one (it used to default "
+                             f"to south) -- the centroid stage places it")
+                continue
+            by_edge.setdefault(c['edge'], []).append(c)
     for edge in sorted(by_edge):
         specs = sorted(by_edge[edge], key=lambda c: c['ref'])
         for k, c in enumerate(specs):
@@ -313,6 +415,63 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             state.apply_move(ref, round(x, 3), round(y, 3), part.rot)
             placed.add(ref)
             unplaced.discard(ref)
+
+    # ---- 1.5 must_lock parts seat FIRST, in place when possible ------------
+    # Under --force, previously-good must_lock parts used to be re-derived at
+    # connectivity centroids with everything else. They are the spec-fixed
+    # parts: seat them before anything else, targeted at their CURRENT pose
+    # (the nearest-first ring keeps a legal current pose at 0mm), constrained
+    # to their declared zone when they have one; fall back to the zone center
+    # when the current pose is nowhere near the zone.
+    ref_zone: Dict[str, object] = {}
+    for z in intent.blocks:
+        if z.rect is None:
+            continue
+        for r in blocks.get(z.name, ()):
+            ref_zone.setdefault(r, z)
+    for ref in _order(lock_refs):
+        part = state.parts[ref]
+        z = ref_zone.get(ref)
+        rect = z.rect if z is not None else None
+        tol = intent.zone_tolerance(z) if z is not None else 0.5
+        info: Dict = {}
+        clr = _try_place(state, ref, part.x, part.y, unplaced - {ref},
+                         constraint=rect, tol=tol, info=info)
+        if clr is None and z is not None:
+            zx = (z.rect[0] + z.rect[2]) / 2.0
+            zy = (z.rect[1] + z.rect[3]) / 2.0
+            clr = _try_place(state, ref, zx, zy, unplaced - {ref},
+                             constraint=rect, tol=tol, info=info)
+        if clr is not None:
+            placed.add(ref)
+            unplaced.discard(ref)
+            if info.get('anchor_zone'):
+                notes.append(f"{ref}: zone smaller than the courtyard -- "
+                             f"seated by anchor point (spec-coordinate zone)")
+        # An unseated must_lock ref falls through to the ordinary stages and,
+        # failing there too, lands in `unseated` with its own note.
+
+    # A part locked IN THE FILE that violates its declared zone is a
+    # contradiction this tool must not resolve by force: the file lock is the
+    # user's. Say it precisely instead of failing the grade mysteriously.
+    for ref in sorted(set(ref_zone) - unplaced - set(lock_refs)):
+        if ref not in state.parts or not state.parts[ref].locked:
+            continue
+        z = ref_zone[ref]
+        part = state.parts[ref]
+        tol = intent.zone_tolerance(z)
+        from placement.floorplan import zone_fits_courtyard, _rect_escape
+        r = part.rect()
+        if zone_fits_courtyard(z.rect, r, tol):
+            out, _axis = _rect_escape(z.rect, r)
+        else:
+            cx, cy = (r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0
+            out, _axis = _rect_escape(z.rect, (cx, cy, cx, cy))
+        if out > tol:
+            notes.append(
+                f"{ref} is (locked yes) IN THE FILE at a pose violating its "
+                f"declared zone {z.name!r} by {out:.2f}mm -- the file lock is "
+                f"not this tool's to override; unlock it or fix the zone")
 
     # Decap-governed caps are claimed by stage 2.5, never zone-packed: a
     # zone is a REGION and the decap rule is a distance to a specific pin --
@@ -344,11 +503,15 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
         for ref in members:
             jx, jy = (0.0, 0.0) if len(members) == 1 else _jitter()
             rot_before = state.parts[ref].rot
+            zinfo: Dict = {}
             clr = _try_place(state, ref, cx + jx, cy + jy, unplaced - {ref},
-                             constraint=z.rect, tol=tol)
+                             constraint=z.rect, tol=tol, info=zinfo)
             if clr is not None:
                 placed.add(ref)
                 unplaced.discard(ref)
+                if zinfo.get('anchor_zone'):
+                    notes.append(f"{ref}: zone {name!r} smaller than the "
+                                 f"courtyard -- seated by anchor point")
                 if state.parts[ref].rot != rot_before:
                     notes.append(f"{ref}: rotated {rot_before:g} -> "
                                  f"{state.parts[ref].rot:g} (no contained "
@@ -471,8 +634,28 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # through to the generic stage, which reports honestly
 
     # ---- 3. the rest: connectivity centroid --------------------------------
+    # --anchors-first (run-4 C): the default queue is pin-count descending,
+    # which seeds a LARGE low-pin part (a connector shell, a big switch)
+    # late, after the smalls have claimed its space -- and "nothing in the
+    # placement code orders by size" was the skill's own measured complaint.
+    # The mode seeds the anchor tier (pad-extent >= the P75 threshold, the
+    # same tiering reconstruct uses) by DESCENDING EXTENT first; the smalls
+    # are already parked as non-obstacles by the existing `exclude` set, so
+    # anchors place against anchors only. Everything else is unchanged.
     center = ((bounds[0] + bounds[2]) / 2.0, (bounds[1] + bounds[3]) / 2.0)
-    for ref in _order(sorted(unplaced)):
+    queue = _order(sorted(unplaced))
+    if anchors_first and unplaced:
+        from placement.reconstruct import part_extent_mm
+        exts = sorted(part_extent_mm(state, r) for r in unplaced)
+        thr = max(3.5, exts[int(0.75 * (len(exts) - 1))]) if exts else 3.5
+        anchors = sorted((r for r in unplaced
+                          if part_extent_mm(state, r) >= thr),
+                         key=lambda r: -part_extent_mm(state, r))
+        notes.append(f"anchors-first: {len(anchors)} anchor(s) (extent >= "
+                     f"{thr:.2f}mm) seed before {len(unplaced) - len(anchors)}"
+                     f" small(s): {', '.join(anchors)}")
+        queue = anchors + [r for r in queue if r not in set(anchors)]
+    for ref in queue:
         target = _partner_centroid(state, ref, placed) or center
         jx, jy = _jitter()
         rot_before = state.parts[ref].rot
@@ -491,6 +674,49 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
         else:
             unseated.append(ref)
             notes.append(f"{ref}: no legal pose anywhere on the board")
+
+    # ---- 3b. anchor rounds (run-4 C): gated re-seat passes ------------------
+    # Round 1 seeded anchors against anchors only; now that the smalls
+    # exist, an anchor's partner centroid is truer, and a small seeded
+    # around a provisional anchor pose may sit better re-derived. Each
+    # round re-seats anchors (extent desc) then smalls at their partner
+    # centroids over the FULL placement, and is kept only if the
+    # reconstruct gate tuple does not worsen -- otherwise the whole round
+    # reverts. Stops early when a round moves nothing.
+    if anchors_first and anchor_rounds > 1 and placed:
+        from placement.reconstruct import measure, part_extent_mm
+        for rnd in range(2, max(2, anchor_rounds) + 1):
+            baseline = measure(state)
+            snapshot = {r: (state.parts[r].x, state.parts[r].y,
+                            state.parts[r].rot) for r in placed}
+            moved_n = 0
+            order2 = sorted(placed,
+                            key=lambda r: -part_extent_mm(state, r))
+            for ref in order2:
+                if state.parts[ref].locked:
+                    continue
+                target = _partner_centroid(state, ref, placed - {ref})
+                if target is None:
+                    continue
+                ox, oy = state.parts[ref].x, state.parts[ref].y
+                if _try_place(state, ref, target[0], target[1],
+                              set()) is not None:
+                    if math.hypot(state.parts[ref].x - ox,
+                                  state.parts[ref].y - oy) > 1e-6:
+                        moved_n += 1
+            after = measure(state)
+            if after <= baseline:
+                notes.append(f"anchor round {rnd}: {moved_n} part(s) "
+                             f"re-seated; gate {list(baseline)} -> "
+                             f"{list(after)}")
+                if moved_n == 0:
+                    break
+            else:
+                for r, (x, y, rot) in snapshot.items():
+                    state.apply_move(r, x, y, rot)
+                notes.append(f"anchor round {rnd} REVERTED: gate worsened "
+                             f"{list(baseline)} -> {list(after)}")
+                break
 
     placements = [{'reference': ref,
                    'new_x': state.parts[ref].x, 'new_y': state.parts[ref].y,
@@ -533,3 +759,262 @@ def stamp_locked(board_file: str, refs: Sequence[str]) -> int:
     with open(board_file, 'w', encoding='utf-8') as f:
         f.write(content)
     return count
+
+
+REPAIR_CAPS_MM = (0.5, 1.0, 2.0, 5.0)
+
+
+def repair_placement(pcb_data, pcb_file: str, intent, *,
+                     group_sources: Sequence[str] = (),
+                     clearance: float = 0.25,
+                     board_edge_clearance: float = 0.55,
+                     grid_step: float = 0.1,
+                     caps: Sequence[float] = REPAIR_CAPS_MM) -> Dict:
+    """Violation-driven minimal-move repair of a PLACED board (#place_seed
+    --repair). Everything clean freezes; only violators move, worst first,
+    each seated by the seeder's own search targeted at its CURRENT pose with
+    an escalating displacement cap. The opposite contract of --force (which
+    re-derives everything).
+
+    Violators: intent grade errors with a ref (zone/edge/decap...), pad/hole
+    legality conflicts (the movable member of each pair), and parts off the
+    board outline -- except refs the intent declares as edge connectors,
+    whose overhang is by design.
+
+    A must_lock ref is seeder-owned: its file lock is lifted in-memory for
+    seating (the stamp in the file survives the positional rewrite, so no
+    re-stamping is needed). A file-locked ref OUTSIDE must_lock is not this
+    tool's to move: reported in `unrepairable`.
+    """
+    import pose_score
+    from placement import floorplan, legality as _leg
+
+    state = pose_score.make_state(
+        pcb_data, pcb_file, clearance=clearance,
+        board_edge_clearance=board_edge_clearance, grid_step=grid_step)
+    refs_all = sorted(pcb_data.footprints)
+    notes: List[str] = []
+    must_lock = {r for pat in intent.must_lock
+                 for r in fnmatch.filter(refs_all, pat)} if intent else set()
+    edge_refs = {c['ref'] for c in intent.edge_connectors} if intent else set()
+
+    blocks, _probs = floorplan.resolve_blocks(intent, pcb_data, group_sources) \
+        if intent else ({}, [])
+    ref_zone: Dict[str, object] = {}
+    if intent:
+        for z in intent.blocks:
+            if z.rect is None:
+                continue
+            for r in blocks.get(z.name, ()):
+                ref_zone.setdefault(r, z)
+
+    # ---- violator census ---------------------------------------------------
+    weight: Dict[str, float] = {}
+
+    def _charge(ref, amt):
+        if ref in state.parts:
+            weight[ref] = weight.get(ref, 0.0) + amt
+
+    graded = None
+    if intent is not None:
+        graded = floorplan.grade(intent, pcb_data, pcb_file,
+                                 group_sources=group_sources,
+                                 clearance=clearance,
+                                 board_edge_clearance=board_edge_clearance)
+        for v in graded.errors:
+            if v.ref:
+                _charge(v.ref, float((v.measured or {}).get('outside_mm', 1.0)
+                                     or 1.0))
+
+    # worst_n=0: the FULL pair census (run-4 F5). The default cap of 10
+    # bounded one repair pass at 10 pair-movers on a 20-pair board -- the
+    # summary said 20 conflicts while only 10 got charged.
+    pads = _leg.grade_pad_legality(pcb_data, clearance, worst_n=0)
+    print(f"  Repair census: {pads['pad_conflicts']} conflict pair(s), "
+          f"all listed")
+    for (ra, rb, mm) in pads['worst']:
+        free = [r for r in (ra, rb)
+                if r in state.parts
+                and (not state.parts[r].locked or r in must_lock)]
+        if not free:
+            notes.append(f"pad conflict {ra}<->{rb} ({mm}mm): both file-locked"
+                         f" -- not repairable here")
+            continue
+        mover = min(free, key=lambda r: (state.parts[r].pin_count, r))
+        _charge(mover, mm)
+
+    # Run-6: the ASSEMBLY census. Blocking body pairs (any-net cross-
+    # footprint pad intersections -- the shipped C14-on-R14 class that the
+    # different-net-only census above skips by design) charge the same
+    # mover rule, so the repair machinery can actually seat the squatter.
+    body = _leg.grade_body_overlap(pcb_data, clearance, pcb_file=pcb_file)
+    if body['blocking']:
+        print(f"  Assembly census: {body['blocking']} blocking body "
+              f"pair(s), all listed")
+    for bp in body['blocking_pairs']:
+        free = [r for r in (bp.a, bp.b)
+                if r in state.parts
+                and (not state.parts[r].locked or r in must_lock)]
+        if not free:
+            notes.append(f"body stack {bp.a}<->{bp.b} ({bp.area_mm2}mm2): "
+                         f"both file-locked -- not repairable here")
+            continue
+        mover = min(free, key=lambda r: (state.parts[r].pin_count, r))
+        # mm2 -> a strong mm-equivalent charge: a stack is never cosmetic
+        _charge(mover, max(1.0, bp.area_mm2))
+
+    # Off-board census on PAD/HOLE extents at ZERO margin -- copper or drill
+    # off the outline is a fab defect; a COURTYARD poking past the edge is
+    # cosmetic and common on legitimate boards (tigard's own corner mounting
+    # holes overhang by courtyard; the human original grades oob 7). The
+    # margined courtyard test flagged and "repaired" exactly those.
+    zero_gate = _leg.BoardOutlineGate(pcb_data.board_info, 0.0)
+    part_pads = _leg.build_part_pads(pcb_data.footprints, clearance)
+    for ref, part in state.parts.items():
+        if ref in edge_refs:
+            continue    # declared overhang is by design
+        pp = part_pads.get(ref)
+        if pp is None:
+            continue
+        fp = pcb_data.footprints[ref]
+        ext = pp.extent(fp.x, fp.y, fp.rotation or 0.0)
+        if ext is None:
+            continue
+        amt = zero_gate.rect_outside_amount(ext)
+        if amt > 1e-6:
+            _charge(ref, amt)
+
+    unrepairable = [r for r in sorted(weight)
+                    if state.parts[r].locked and r not in must_lock]
+    for r in unrepairable:
+        notes.append(f"{r} violates but is (locked yes) in the file and not "
+                     f"in must_lock -- not this tool's to move")
+    violators = [r for r in sorted(weight, key=lambda r: -weight[r])
+                 if r not in unrepairable]
+
+    # ---- seat violators, worst first, escalating cap -----------------------
+    edge_entry = ({c['ref']: c for c in intent.edge_connectors}
+                  if intent else {})
+    repaired: List[str] = []
+    failed: List[str] = []
+    zero_move: List[str] = []   # run-7 A2: honesty re-grade candidates
+    moves: List[Dict] = []
+    for ref in violators:
+        part = state.parts[ref]
+        was_locked = part.locked
+        part.locked = False     # must_lock refs are seeder-owned (see above)
+
+        # Run-4 F2/B-6: a DECLARED edge part charged by the proximity rule
+        # cannot be seated by _try_place (its _ok demands full containment,
+        # and an edge seat overhangs by design). Seat it on its declared
+        # edge band instead -- or refuse honestly when no edge is declared
+        # (an implausibly-posed receptacle: reconstruct derives the edge).
+        ec = edge_entry.get(ref)
+        if ec is not None:
+            part.locked = was_locked
+            if not ec.get('edge'):
+                failed.append(ref)
+                notes.append(
+                    f"{ref}: declared edge part misplaced, but no edge is "
+                    f"declared (implausible pose, none derivable here) -- "
+                    f"place_reconstruct derives edge slots; repair will not "
+                    f"guess one")
+                continue
+            zt = ref_zone.get(ref)
+            tgt = None
+            if zt is not None and zt.rect is not None:
+                tgt = ((zt.rect[0] + zt.rect[2]) / 2.0,
+                       (zt.rect[1] + zt.rect[3]) / 2.0)
+            ok = _seat_edge(state, ref, ec, must_lock, notes, target=tgt)
+            if ok:
+                d = math.hypot(part.x - part.seed_x, part.y - part.seed_y)
+                moves.append({'reference': ref, 'new_x': part.x,
+                              'new_y': part.y, 'new_rotation': part.rot})
+                repaired.append(ref)
+                notes.append(f"{ref}: seated on the {ec['edge']} edge band "
+                             f"({d:.2f}mm from its input pose)")
+            else:
+                failed.append(ref)
+                notes.append(f"{ref}: no conflict-free seat found on the "
+                             f"declared {ec['edge']} edge band")
+            continue
+
+        z = ref_zone.get(ref)
+        rect = z.rect if z is not None else None
+        tol = intent.zone_tolerance(z) if (intent and z is not None) else 0.5
+        ox, oy, orot = part.x, part.y, part.rot
+        placed_at = None
+        for cap in caps:
+            info: Dict = {}
+            clr = _try_place(state, ref, ox, oy, set(), constraint=rect,
+                             tol=tol, max_disp=cap, info=info)
+            if clr is not None:
+                placed_at = cap
+                if info.get('anchor_zone'):
+                    notes.append(f"{ref}: spec-coordinate zone -- seated by "
+                                 f"anchor point")
+                break
+        if placed_at is None and z is not None:
+            # current pose may be far from the zone: target the zone center
+            zx = (z.rect[0] + z.rect[2]) / 2.0
+            zy = (z.rect[1] + z.rect[3]) / 2.0
+            clr = _try_place(state, ref, zx, zy, set(), constraint=rect,
+                             tol=tol)
+            if clr is not None:
+                placed_at = 'zone'
+        part.locked = was_locked
+        if placed_at is None:
+            failed.append(ref)
+            notes.append(f"{ref}: no legal pose within any cap "
+                         f"{tuple(caps)}mm of its current pose")
+            continue
+        d = math.hypot(part.x - ox, part.y - oy)
+        if d > 1e-9 or part.rot != orot:
+            moves.append({'reference': ref, 'new_x': part.x, 'new_y': part.y,
+                          'new_rotation': part.rot})
+            repaired.append(ref)
+            notes.append(f"{ref}: re-seated {d:.2f}mm from its pose "
+                         f"(cap {placed_at})")
+        else:
+            # Zero-move "repair": _try_place accepted the CURRENT pose.
+            # Legitimate when another mover already cleared the pair;
+            # run-6 measured the OTHER case looping forever ("5 repaired,
+            # 0 moved" every lap): the census charged a pad/body/grade
+            # violation while _try_place's courtyard test passed at the
+            # standing pose (metric mismatch). Classify honestly below.
+            repaired.append(ref)
+            zero_move.append(ref)
+
+    # Run-7 A2: honesty re-grade. A violator counts as repaired only if the
+    # charged violation classes actually IMPROVED; zero-move violators on a
+    # board whose pad/body census did not move are UNRESOLVED, so the fix
+    # loop can see it stalled instead of believing "repaired" forever.
+    unresolved = []
+    if zero_move and state.legality_ctx is not None:
+        # Post-repair poses live on the STATE (pcb_data still holds the
+        # file's input poses), so the re-grade uses the state's own pair
+        # machinery in the gate currency.
+        ctx = state.legality_ctx
+        for ref in zero_move:
+            still = False
+            for other in sorted(state.parts):
+                if other == ref:
+                    continue
+                sf = ctx.pair_shortfall(ref, other)
+                if sf.stack or sf.pad > 1e-6 or sf.hole > 1e-6:
+                    still = True
+                    break
+            if still:
+                unresolved.append(ref)
+                repaired.remove(ref)
+                notes.append(
+                    f"{ref}: UNRESOLVED -- pose is courtyard-legal but the "
+                    f"charged pad/body violation persists (metric mismatch; "
+                    f"was reported 'repaired' before run-7 A2)")
+    return {'moves': moves, 'repaired': repaired, 'unrepairable':
+            unrepairable + failed, 'unresolved': unresolved,
+            'violators': violators, 'notes': notes,
+            'pad_report_before': {k: pads[k] for k in
+                                  ('pad_conflicts', 'hole_conflicts',
+                                   'oob_pad_count')},
+            'grade_errors_before': len(graded.errors) if graded else None}

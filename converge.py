@@ -300,6 +300,28 @@ def cmd_record(a):
         return 2
     store = BoardStore(a.store or os.path.join(os.path.dirname(a.ledger), 'boards'))
     sha = store.put(a.board)
+    # Run-3 B4: three ledger entries shipped carrying a PRIOR board's score
+    # because --score is free JSON with no binding to --board. board_score
+    # now embeds board_sha; warn LOUDLY when it is absent or names a
+    # different board than the one being recorded. A warning rather than a
+    # refusal: baseline rows legitimately attach a parent score to a
+    # rejected candidate -- but never silently.
+    if a.score:
+        try:
+            _payload_sha = json.loads(a.score).get('board_sha')
+        except Exception:
+            _payload_sha = None
+        if _payload_sha is None:
+            print("record WARNING: score payload carries no board_sha "
+                  "(pre-B4 board_score, or hand-built JSON) -- the ledger "
+                  "cannot verify it grades THIS board.", file=sys.stderr)
+        elif _payload_sha != sha:
+            print(f"record WARNING: score payload grades a DIFFERENT board "
+                  f"(payload board_sha {_payload_sha[:12]}... != recorded "
+                  f"board {sha[:12]}...). Run-3 shipped three stale-payload "
+                  f"entries exactly this way; if this attachment is "
+                  f"deliberate (baseline row on a rejected candidate), say "
+                  f"so in --lever.", file=sys.stderr)
     lg = Ledger(a.ledger)
     prev = lg.last_accepted()
     entry = {'iteration': len(lg.entries()), 'kind': a.kind,
@@ -431,7 +453,8 @@ def build_parser():
     r.add_argument('--ledger', required=True)
     r.add_argument('--board', required=True)
     r.add_argument('--store', default=None)
-    r.add_argument('--kind', choices=('completion', 'systemic'), default='completion')
+    r.add_argument('--kind', choices=('completion', 'placement', 'systemic'),
+                   default='completion')
     r.add_argument('--lever', default=None)
     r.add_argument('--score', default=None, help='JSON')
     r.add_argument('--rejected', action='store_true')
@@ -470,4 +493,7 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
+    # NO cli_banner here (deliberate): converge's stdout is a JSON API --
+    # `record` and `status` print documents that callers json.loads() whole
+    # (tests/test_converge.py does). The other instruments' stdout is a log.
     sys.exit(main())

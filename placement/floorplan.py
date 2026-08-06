@@ -63,7 +63,7 @@ DEFAULT_ENVELOPE_TOLERANCE_MM = 0.5
 _TOP_LEVEL_KEYS = {
     'schema', 'kind', 'board', 'units', 'envelope', 'defaults', 'blocks',
     'keepouts', 'edge_connectors', 'decaps', 'must_lock', 'legality_budget',
-    'health', 'severity', 'context',
+    'health', 'severity', 'context', 'overlap_waivers',
 }
 _BLOCK_KEYS = {'name', 'group', 'refs', 'zone', 'side', 'exclusive',
                'tolerance_mm', 'note'}
@@ -136,6 +136,18 @@ class Intent:
     health: Dict[str, object]
     severity: Dict[str, str]
     source_path: str = ''
+    # Run-6: authored courtyard-overlap waivers, [{'pair': [a, b], 'reason'}].
+    # NEVER auto-emitted (a waiver derived from the board under repair would
+    # be the budget self-bless bug again); consumed by grade_body_overlap.
+    overlap_waivers: Tuple[Dict[str, object], ...] = ()
+
+    def waiver_pairs(self) -> Tuple[Tuple[str, str], ...]:
+        out = []
+        for w in self.overlap_waivers:
+            pair = w.get('pair') or ()
+            if len(pair) == 2:
+                out.append((str(pair[0]), str(pair[1])))
+        return tuple(out)
 
     def severity_of(self, rule: str, default: str = ERROR) -> str:
         return self.severity.get(rule, default)
@@ -318,6 +330,17 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
             f"legality_budget: unknown key(s) {', '.join(unknown_budget)}. "
             f"Known: overlap_area, oob_count, oob_amount")
 
+    waivers = raw.get('overlap_waivers') or []
+    if not isinstance(waivers, list):
+        raise IntentError("overlap_waivers: expected a list of "
+                          "{'pair': [refA, refB], 'reason': ...} objects")
+    for w in waivers:
+        if (not isinstance(w, dict) or not isinstance(w.get('pair'), list)
+                or len(w['pair']) != 2):
+            raise IntentError(
+                "overlap_waivers: each entry needs 'pair': [refA, refB] "
+                "(and should carry a 'reason')")
+
     return Intent(
         schema=schema, kind=kind, board=raw.get('board', '') or '',
         units=units, envelope=envelope,
@@ -330,6 +353,7 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
         health=raw.get('health') or {},
         severity={str(k): str(v) for k, v in severity.items()},
         source_path=source_path,
+        overlap_waivers=tuple(waivers),
     )
 
 
@@ -636,6 +660,22 @@ def rule_envelope(ctx) -> Iterator[Violation]:
             expected={'envelope': list(env), 'tolerance_mm': tol})
 
 
+def zone_fits_courtyard(zone_rect, part_rect, tol: float) -> bool:
+    """Can this zone geometrically contain this part's courtyard at ANY
+    90-degree rotation? False means the zone is a spec-COORDINATE (a tight
+    rect around where the part belongs), and containment must be graded on
+    the part's anchor point instead -- a courtyard-containment demand against
+    a zone smaller than the courtyard is unsatisfiable by construction (the
+    run-2 R3 failure: place_seed could never seat H1/H3 in their 0.4mm
+    zones)."""
+    zw = zone_rect[2] - zone_rect[0] + 2 * tol
+    zh = zone_rect[3] - zone_rect[1] + 2 * tol
+    w = part_rect[2] - part_rect[0]
+    h = part_rect[3] - part_rect[1]
+    return (w <= zw + 1e-9 and h <= zh + 1e-9) or \
+           (h <= zw + 1e-9 and w <= zh + 1e-9)
+
+
 def rule_zone_containment(ctx) -> Iterator[Violation]:
     for z in ctx.intent.blocks:
         if z.rect is None:
@@ -644,6 +684,25 @@ def rule_zone_containment(ctx) -> Iterator[Violation]:
         for ref in ctx.blocks.get(z.name, ()):
             part = ctx.parts.get(ref)
             if part is None:
+                continue
+            if not zone_fits_courtyard(z.rect, part.rect, tol):
+                # Spec-coordinate zone: grade the part's CENTER against it.
+                cx = (part.rect[0] + part.rect[2]) / 2.0
+                cy = (part.rect[1] + part.rect[3]) / 2.0
+                out, axis = _rect_escape(z.rect, (cx, cy, cx, cy))
+                if out > tol:
+                    yield Violation(
+                        rule='zone_containment',
+                        severity=ctx.sev('zone_containment'), ref=ref,
+                        block=z.name,
+                        message=(f"{ref} sits {out:.2f}mm past the {axis} "
+                                 f"edge of block {z.name!r} (zone smaller "
+                                 f"than the courtyard: graded on the part "
+                                 f"center)"),
+                        measured={'rect': [round(v, 4) for v in part.rect],
+                                  'outside_mm': round(out, 4), 'axis': axis,
+                                  'anchor_graded': True},
+                        expected={'zone': list(z.rect), 'tolerance_mm': tol})
                 continue
             out, axis = _rect_escape(z.rect, part.rect)
             if out > tol:
@@ -775,6 +834,29 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
                     ref=ref, message=(f"{ref} sits nearest the {actual} edge "
                                       f"but is declared on the {edge} edge"),
                     measured={'edge': actual}, expected={'edge': edge})
+        # Run-4 A: the missing PROXIMITY conjunct. The rule used to grade only
+        # the overhang band and the nearest-edge identity, so a receptacle
+        # 15.8 mm INTERIOR passed ("nearest west, declared west" is satisfied
+        # anywhere on the board). For entries carrying the edge_receptacle
+        # class (or an explicit max_setback_mm), no overhang AND off-seat is
+        # a violation -- which is also what makes a misplaced edge part
+        # CHARGEABLE by place_seed --repair.
+        setback = c.get('max_setback_mm')
+        if setback is None and c.get('class') == 'edge_receptacle':
+            from .part_class import SEAT_TOL_MM
+            setback = SEAT_TOL_MM
+        if setback is not None and amount <= legality.EPS:
+            clr = ctx.gate.edge_clearance(part.rect)
+            if clr > float(setback) + legality.EPS:
+                yield Violation(
+                    rule='edge_connector', severity=ctx.sev('edge_connector'),
+                    ref=ref,
+                    message=(f"{ref} is an edge part seated {clr:.2f}mm from "
+                             f"the nearest edge with no overhang (seat "
+                             f"tolerance {float(setback):.2f}mm) -- the "
+                             f"mating face cannot reach the edge"),
+                    measured={'edge_clearance_mm': round(clr, 4)},
+                    expected={'max_setback_mm': float(setback)})
 
 
 def rule_decap_distance(ctx) -> Iterator[Violation]:
@@ -1043,7 +1125,8 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
 
 def emit_intent(pcb_data, pcb_file: str, *,
                 group_sources: Sequence[str] = ('kicad', 'sheet'),
-                zone_pad_mm: float = 1.0) -> Dict:
+                zone_pad_mm: float = 1.0,
+                declare_classes: bool = False) -> Dict:
     """A starter intent READ OFF the board, for a human or a model to edit.
 
     Everything here describes what the board already is. The envelope is
@@ -1134,17 +1217,159 @@ def emit_intent(pcb_data, pcb_file: str, *,
 
     # Parts already overhanging the outline are edge connectors by observation.
     # Recording them is what stops oob_count reporting them forever.
+    #
+    # Run-5 SUSPECT-AND-DERIVE: an observation entry can bless a DAMAGED pose
+    # -- tigard SW1 was a displaced part whose wrong-place overhang two runs
+    # rationalized as by-design because the INPUT had it overhanging. Before
+    # blessing, compute a suspect bit from two board-only signals:
+    #   S1  the part participates in a pad-legality conflict pair;
+    #   S2  rigid pattern vectors exist on this board (fit survivors
+    #       over-determine them -- healthy boards yield none, which is the
+    #       no-op guarantee) AND some +/-v pose of this part sits fully
+    #       on-board (its overhang has a displacement explanation).
+    # Suspect -> class-only entry (class-default band, NO edge, note): the
+    # derivation/exchange rungs decide, nothing is blessed. Healthy-board
+    # entries are byte-identical to before. mount_hole-class parts get no
+    # observation entry at all (their overhang is either damage or a
+    # courtyard artifact; the pattern fit owns their positions).
+    suspect_pairs: set = set()
+    if state.legality_ctx is not None:
+        from . import legality as _leg
+        try:
+            g = _leg.grade_pad_legality(pcb_data, state.clearance, worst_n=0)
+            for (ra, rb, _mm) in g.get('worst', ()):
+                suspect_pairs.add(ra)
+                suspect_pairs.add(rb)
+        except Exception:
+            pass
+    pattern_vectors = []
+    try:
+        from . import reconstruct as _rec
+        _tiers = _rec.classify(state, None, 'auto')
+        _props = _rec.fit_corner_insets(state, _tiers)
+        pattern_vectors = _rec.rigid_vectors(state, _props)
+    except Exception:
+        pattern_vectors = []
+
+    def _suspect(ref) -> Optional[str]:
+        if ref in suspect_pairs:
+            return 'participates in a pad-legality conflict'
+        if pattern_vectors and state.legality_ctx is not None:
+            pp = state.legality_ctx.parts.get(ref)
+            p = state.parts.get(ref)
+            if pp is not None and p is not None:
+                for (vx, vy) in pattern_vectors:
+                    for sx, sy in ((vx, vy), (-vx, -vy)):
+                        ext = pp.extent(p.x + sx, p.y + sy, p.rot)
+                        if ext is None:
+                            continue
+                        b = state.board
+                        oob = (max(0.0, b[0] - ext[0]) + max(0.0, ext[2] - b[2])
+                               + max(0.0, b[1] - ext[1]) + max(0.0, ext[3] - b[3]))
+                        if oob <= legality.EPS:
+                            return (f'rigid pattern vectors exist and the '
+                                    f'+/-v pose ({p.x + sx:.2f},{p.y + sy:.2f}) '
+                                    f'sits fully on-board')
+        return None
+
     conns = []
+    declared = set()
     for ref in sorted(parts):
         amt = state.edge_gate.rect_outside_amount(parts[ref].rect)
         if amt > legality.EPS:
-            conns.append({'ref': ref, 'edge': _nearest_edge(parts[ref].rect,
-                                                            bounds),
-                          'overhang_mm': {'min': 0.0,
-                                          'max': round(amt + 0.5, 3)}})
+            fp = (pcb_data.footprints or {}).get(ref)
+            pc = None
+            if fp is not None:
+                from .part_class import classify_part, default_band
+                pc = classify_part(fp, ref)
+            if pc is not None and pc.name == 'mount_hole':
+                # Run-5: never bless a mounting hole's overhang -- the
+                # pattern fit owns hole positions, and an observation entry
+                # here records damage as an allowance (run-4's H1 west 4.75).
+                declared.add(ref)
+                continue
+            why = _suspect(ref)
+            if why is not None:
+                entry = {'ref': ref,
+                         'note': (f'overhang observed but SUSPECT ({why}): '
+                                  f'edge withheld -- the derivation/exchange '
+                                  f'rungs decide (run-5 suspect-and-derive)')}
+                if pc is not None and pc.name in ('edge_receptacle',
+                                                  'edge_actuator'):
+                    entry['class'] = pc.name
+                    entry['source'] = 'auto-class'
+                    entry['overhang_mm'] = default_band(pc.name, fp)
+                else:
+                    entry['overhang_mm'] = {'min': 0.0,
+                                            'max': round(amt + 0.5, 3)}
+                conns.append(entry)
+                declared.add(ref)
+                continue
+            entry = {'ref': ref, 'edge': _nearest_edge(parts[ref].rect,
+                                                       bounds),
+                     'overhang_mm': {'min': 0.0,
+                                     'max': round(amt + 0.5, 3)}}
+            if declare_classes and pc is not None \
+                    and pc.name in ('edge_receptacle', 'edge_actuator'):
+                entry['class'] = pc.name
+                entry['source'] = 'auto-class'
+            conns.append(entry)
+            declared.add(ref)
+
+    if declare_classes:
+        # Run-4 A: observation-only emission reproduces the failure it exists
+        # to prevent -- a MISPLACED edge part is exactly the one not
+        # overhanging, so it never got declared (run 3's J1). Classify
+        # pose-independently and declare edge-class parts too. `edge` is
+        # written ONLY when the current pose is plausible (overhanging or
+        # seated); an implausibly-posed receptacle gets a class-default band
+        # and NO edge -- naming one would be an invention, and the seeder
+        # deliberately skips edge-less entries.
+        from .part_class import classify_part, default_band, pose_plausible
+        for ref in sorted(parts):
+            if ref in declared:
+                continue
+            fp = (pcb_data.footprints or {}).get(ref)
+            if fp is None:
+                continue
+            pc = classify_part(fp, ref)
+            if pc.name != 'edge_receptacle':
+                # actuators make no claim unless they actually overhang
+                # (handled above); nothing else is an edge class.
+                continue
+            clr = state.edge_gate.edge_clearance(parts[ref].rect)
+            plaus = pose_plausible(pc.name, 0.0, clr)
+            entry = {'ref': ref, 'class': pc.name, 'source': 'auto-class',
+                     'overhang_mm': default_band(pc.name, fp)}
+            if plaus:
+                entry['edge'] = _nearest_edge(parts[ref].rect, bounds)
+            else:
+                entry['note'] = (
+                    f'edge-receptacle class in an implausible pose '
+                    f'({clr:.2f} mm from the nearest edge, no overhang): '
+                    f'no edge declared -- reconstruct/repair must derive it')
+            conns.append(entry)
 
     locked = sorted(extract_locked_refs_safe(pcb_file))
     leg = state.legality_metrics()
+    # Run-6: a board carrying a blocking BODY pair (two footprints' pad
+    # copper in the same space) must not bake its own overlap_area as the
+    # budget -- that is the exact self-bless cycle run 5 shipped through
+    # (the emitted 6.112 budget graded the C14-on-R14 board clean). The
+    # repaired board re-emits the honest number; meanwhile board_score's
+    # `assembly` component grades independently of any budget.
+    try:
+        from placement.legality import grade_body_overlap
+        _body_blocking = grade_body_overlap(
+            pcb_data, state.clearance, pcb_file=pcb_file)['blocking']
+    except Exception:
+        _body_blocking = 0
+    _suspects = any('SUSPECT' in (c.get('note') or '') for c in conns)
+    _budget = {}
+    if not _body_blocking:
+        _budget['overlap_area'] = _ceil4(float(leg['overlap_area']))
+    if not _suspects:
+        _budget['oob_count'] = int(leg['oob_count'])
     return {
         'schema': SCHEMA_VERSION,
         'kind': KIND,
@@ -1158,16 +1383,14 @@ def emit_intent(pcb_data, pcb_file: str, *,
         'edge_connectors': conns,
         'decaps': {},
         'must_lock': locked,
-        'legality_budget': {
-            # Rounded UP, not to nearest. round() can land up to 5e-5 BELOW the
-            # measured value, which is 50x legality.EPS -- so a budget written
-            # from a board would fail against that same board. An emitted
-            # intent that does not grade clean makes the round trip useless as
-            # a check that the rules are wired to real geometry (watchy:
-            # overlap 9.09724 was written as 9.0972 and instantly violated).
-            'overlap_area': _ceil4(float(leg['overlap_area'])),
-            'oob_count': int(leg['oob_count']),
-        },
+        # Budget values are rounded UP, not to nearest: round() can land up
+        # to 5e-5 BELOW the measured value, 50x legality.EPS, so a budget
+        # written from a board would fail against that same board (watchy:
+        # overlap 9.09724 was written as 9.0972 and instantly violated).
+        # Withholding rules (see _budget above): SUSPECT overhangs freeze
+        # the oob census (run-5); a blocking body pair freezes overlap_area
+        # (run-6). Healthy boards bake both, as before.
+        'legality_budget': _budget,
         'context': {
             'note': ('read-only, describing the board as it is. The outline is '
                      'not editable by this toolchain: size, cutouts and slots '

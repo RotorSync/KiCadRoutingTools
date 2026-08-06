@@ -68,7 +68,38 @@ Examples:
                    help="Re-seed a board that already looks placed. The "
                         "existing placement is DISCARDED; to explore around "
                         "it instead, use place_portfolio.py")
+    p.add_argument("--anchors-first", action="store_true",
+                   help="Seed the ANCHOR tier (pad-extent >= the P75 "
+                        "threshold, the same tiering reconstruct uses) by "
+                        "descending extent BEFORE any small part -- the "
+                        "default queue is pin-count descending, which seeds "
+                        "a large low-pin connector late, after the smalls "
+                        "claimed its space. The smalls are parked as "
+                        "non-obstacles either way (the existing exclude "
+                        "mechanism); this changes only WHO goes first "
+                        "(run-4 C)")
+    p.add_argument("--anchor-rounds", type=int, default=1,
+                   help="With --anchors-first: gated re-seat passes after "
+                        "the first full placement (default 1 = none). Each "
+                        "round re-seats anchors then smalls at their partner "
+                        "centroids over the FULL placement and keeps the "
+                        "round only if the legality/hpwl gate tuple does not "
+                        "worsen; stops early when a round moves nothing")
+    p.add_argument("--repair", action="store_true",
+                   help="Violation-driven minimal-move repair of a PLACED "
+                        "board: only parts violating the intent or pad/hole "
+                        "legality move, worst first, each seated nearest its "
+                        "current pose with an escalating displacement cap. "
+                        "The opposite contract of --force")
+    p.add_argument("--dry-run", action="store_true",
+                   help="With --repair: print the move list and grades, "
+                        "write nothing")
     args = p.parse_args()
+    if args.repair and args.force:
+        p.error("--repair and --force are mutually exclusive (repair moves "
+                "only violators; force re-derives everything)")
+    if args.dry_run and not args.repair:
+        p.error("--dry-run only applies to --repair")
 
     try:
         from redo_record import record_invocation
@@ -107,6 +138,59 @@ Examples:
               f"{st.vias} via(s); seeding moves footprints and would strand "
               f"every track. Seed the unrouted board.", file=sys.stderr)
         return UNPLACED_EXIT
+    if args.repair:
+        if st.unplaced:
+            print("place_seed: --repair needs a PLACED board (this one is "
+                  "unplaced -- seed it instead).", file=sys.stderr)
+            return UNPLACED_EXIT
+        result = seeder.repair_placement(
+            pcb, args.input_file, intent, group_sources=sources,
+            clearance=args.clearance,
+            board_edge_clearance=args.board_edge_clearance,
+            grid_step=args.grid_step)
+        for note in result['notes']:
+            print(f"  NOTE: {note}")
+        max_move = 0.0
+        for mv in result['moves']:
+            fp = pcb.footprints.get(mv['reference'])
+            if fp is not None:
+                import math as _math
+                max_move = max(max_move, _math.hypot(mv['new_x'] - fp.x,
+                                                     mv['new_y'] - fp.y))
+        print(f"Repair: {len(result['violators'])} violator(s), "
+              f"{len(result['repaired'])} repaired "
+              f"({len(result['moves'])} moved, max {max_move:.2f}mm), "
+              f"{len(result.get('unresolved') or [])} unresolved, "
+              f"{len(result['unrepairable'])} unrepairable")
+        summary = {'repaired': len(result['repaired']),
+                   'unrepairable': len(result['unrepairable']),
+                   'moved_refs': [m['reference'] for m in result['moves']],
+                   'max_move_mm': round(max_move, 3),
+                   'dry_run': args.dry_run,
+                   'output': None if args.dry_run else args.output_file}
+        summary.update({f'{k}_before': v
+                        for k, v in result['pad_report_before'].items()})
+        if not args.dry_run:
+            write_placed_output(args.input_file, args.output_file,
+                                result['moves'])
+            copy_siblings(args.input_file, args.output_file)
+            from placement.legality import grade_pad_legality
+            pcb_out = parse_kicad_pcb(args.output_file)
+            pads_after = grade_pad_legality(pcb_out, args.clearance)
+            graded = floorplan.grade(intent, pcb_out, args.output_file,
+                                     group_sources=sources,
+                                     clearance=args.clearance,
+                                     board_edge_clearance=args.board_edge_clearance)
+            for v in graded.errors[:10]:
+                print(f"  GRADE ERROR [{v.rule}] {v.message}")
+            summary['grade_errors'] = len(graded.errors)
+            summary['pad_conflicts_after'] = pads_after['pad_conflicts']
+            summary['hole_conflicts_after'] = pads_after['hole_conflicts']
+            print("JSON_SUMMARY: " + json.dumps(summary, sort_keys=True))
+            return 4 if (result['unrepairable'] or graded.errors) else 0
+        print("JSON_SUMMARY: " + json.dumps(summary, sort_keys=True))
+        return 4 if result['unrepairable'] else 0
+
     if not st.unplaced and not st.partially_unplaced and not args.force:
         # PARTIALLY unplaced boards (a stacked pile beside real placements --
         # a netlist re-import, or a seeder that pinned only the spec-fixed
@@ -133,7 +217,9 @@ Examples:
         pcb, args.input_file, intent, rng, group_sources=sources,
         clearance=args.clearance,
         board_edge_clearance=args.board_edge_clearance,
-        grid_step=args.grid_step, seed_refs=seed_refs)
+        grid_step=args.grid_step, seed_refs=seed_refs,
+        anchors_first=args.anchors_first,
+        anchor_rounds=args.anchor_rounds)
     for note in result['notes']:
         print(f"  NOTE: {note}")
     print(f"Seeded {len(result['placements'])} part(s); "
@@ -256,4 +342,5 @@ Examples:
 
 
 if __name__ == "__main__":
+    import cli_banner; cli_banner.install()  # CMD/EXIT self-echo (run-3 B1)
     sys.exit(main())

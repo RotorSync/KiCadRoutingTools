@@ -41,6 +41,7 @@ Bbox = Tuple[float, float, float, float]
 _FP_ELEMENT_GAP = r'(?:(?!\(fp_|\(pad\b|\(layers?\b)[\s\S])*?'
 
 _CRTYD_LAYER = r'\(layer\s+"([FB])\.CrtYd"\)'
+_FAB_LAYER = r'\(layer\s+"([FB])\.Fab"\)'
 _NUM = r'([\d.eE+-]+)'
 
 
@@ -74,8 +75,15 @@ def extract_locked_refs(pcb_file: str) -> Set[str]:
     return locked
 
 
-def _courtyard_points_by_side(fp_text: str) -> Dict[str, list]:
-    """Local-frame courtyard points of one footprint, keyed by 'F' / 'B'."""
+def _courtyard_points_by_side(fp_text: str,
+                              _CRTYD_LAYER: str = _CRTYD_LAYER
+                              ) -> Dict[str, list]:
+    """Local-frame outline points of one footprint, keyed by 'F' / 'B'.
+
+    Defaults to the courtyard layers; pass a different single-group layer
+    regex (e.g. `_FAB_LAYER`) to read another outline layer with the same
+    geometry rules (run-6: the fab BODY channel). The parameter shadows the
+    module constant so the regex sites below stay untouched."""
     pts: Dict[str, list] = {}
 
     def add(side, *xy_pairs):
@@ -152,6 +160,24 @@ def extract_courtyard_sides(pcb_file: str) -> Dict[str, Dict[str, Bbox]]:
         if '.CrtYd"' not in fp_text:
             continue
         by_side = _courtyard_points_by_side(fp_text)
+        if by_side:
+            result[ref] = {side: _bbox(pts) for side, pts in by_side.items()}
+    return result
+
+
+def extract_fab_sides(pcb_file: str) -> Dict[str, Dict[str, Bbox]]:
+    """Per-side F/B.Fab BODY-outline bboxes, `extract_courtyard_sides`'s
+    sibling (run-6). The fab outline is the drawn component BODY with no
+    courtyard margin, so a cross-footprint fab intersection is two parts
+    physically colliding -- the discriminating channel between a real stack
+    and a legitimate shell-overhang courtyard kiss."""
+    with open(pcb_file, 'r', encoding='utf-8') as f:
+        content = f.read()
+    result: Dict[str, Dict[str, Bbox]] = {}
+    for ref, fp_text in _footprint_blocks(content):
+        if '.Fab"' not in fp_text:
+            continue
+        by_side = _courtyard_points_by_side(fp_text, _FAB_LAYER)
         if by_side:
             result[ref] = {side: _bbox(pts) for side, pts in by_side.items()}
     return result

@@ -130,10 +130,14 @@ class Ledger:
         return None
 
     def counts(self) -> Dict[str, int]:
-        """completion vs systemic, which is the question 'am I converging on the
-        board or on the tooling?' -- a run once spent nine of eleven iterations
-        on the instrument and finished with five nets carrying no copper."""
-        out = {'total': 0, 'completion': 0, 'systemic': 0, 'accepted': 0}
+        """completion vs placement vs systemic -- 'am I converging on the
+        board, its placement, or the tooling?'. A run once spent nine of
+        eleven iterations on the instrument and finished with five nets
+        carrying no copper; two later runs filed PLACEMENT repairs (which
+        connect nothing and tune no instrument) as systemic for want of a
+        kind, and the systemic-share warning cried wolf on both."""
+        out = {'total': 0, 'completion': 0, 'placement': 0, 'systemic': 0,
+               'accepted': 0}
         for e in self.entries():
             out['total'] += 1
             out[e.get('kind', 'completion')] = out.get(e.get('kind', 'completion'), 0) + 1

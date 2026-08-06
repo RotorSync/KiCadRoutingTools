@@ -410,6 +410,12 @@ def generate_underpad_escape(footprint: Footprint,
     # single-track channels and F.Cu corridors cleanly (coarser leaves a few
     # sub-clearance corridor clips), scaled to the array so big/fine boards stay
     # fast.
+    if grid is None:
+        # Run-6 defensive entry guard: a None grid (perimeter package) used
+        # to crash on grid.pitch_x below; fail the escape cleanly instead.
+        print("  ERROR: underpad escape aborted - no BGA grid (perimeter "
+              "package? use qfn_fanout.py)")
+        return [], [], [p.net_name for p in signal_pads]
     if res is None:
         res = min(grid.pitch_x, grid.pitch_y) / 32.0
     if res <= 0:

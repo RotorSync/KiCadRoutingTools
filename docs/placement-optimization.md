@@ -663,11 +663,13 @@ is implemented, the rest are documented targets.
    by the snap diagonal, or the by-construction claim is false at exactly the
    outer ring where a re-seat wants to look.
 
-3. **The #411 undo-a-known-good-placement harness.** The grading
-   instrument this document keeps needing: take a board a human placed and
-   routed clean, scramble it in controlled ways, and measure which score
-   terms recover the ranking. Move-set and weight work should wait for it —
-   without the harness every new term is calibrated on anecdotes.
+3. **The #411 undo-a-known-good-placement harness — BUILT.** See "What the
+   #411 harness measured" below. `placement/perturb.py` manufactures the bad
+   seed, `placement/recovery.py` grades it against the original, and
+   `tests/stress/perturb_batch.py` walks the skill's Step 0 ladder over the
+   result. The first two batches are in; the headline is that no arm in the
+   toolbox recovers a displaced floorplan, and that this is a missing objective
+   term rather than a tuning problem.
 
 4. **Per-component best-location heatmap** (the #118 ask): for a chosen
    part, render the board as a heatmap of the candidate score over
@@ -680,6 +682,82 @@ is implemented, the rest are documented targets.
    ≠ crystal ≠ series termination). The seeder hardcodes a version of this;
    making it a declared table would let a repo tune class behavior without
    engine edits.
+
+## What the #411 harness measured
+
+*(First results, August 2026. Boards: `tigard`, `splitflap_driver` and
+`glasgow_revC` — the last two are stress set-1 members. Ground truth is each
+board's own shipped placement; `recovery = 1 − d_after/d_applied_dose` in
+pad-space RMS, so 1.0 is a full recovery, 0 inert, negative worse than the
+perturbed board. Scoreboard: `$STRESS_DIR/perturb/scoreboard.jsonl`,
+append-only, keyed by `code_version`.)*
+
+**Nothing recovers. Every proxy says otherwise.**
+
+| arm | recovery (3–6 cells) | median | crossings improved | routing failures improved |
+|---|---|---|---|---|
+| `place_optimize --max-displacement 3` (Step 0c's command) | −0.062 … +0.023 | −0.005 | 6/6 | — |
+| `place_optimize` at a cap matched to the dose | −0.215 … +0.301 | −0.087 | 6/6 | — |
+| `place_route_loop` shipped | −0.001 … +0.029 | +0.001 | 3/3 | 3/3 |
+| `place_route_loop --target-nets` | −0.107 … +0.047 | +0.001 | 3/3 | 3/3 |
+| `place_route_loop` cap matched, pin gate lifted, blocks on | −0.689 … +0.161 | −0.052 | 3/3 | 3/3 |
+
+`R_pose(recovery ≥ 0.5)` is **None for every arm at every dose tested.**
+
+Two findings follow, and they are different in kind.
+
+**The quench optimises away from the answer.** Crossings fell in 6 of 6 cells
+(median −18.5% at the prescribed cap, −33.1% at a capable one) while
+displacement-to-original improved in 1 of 6. Three arms *beat the human
+placement* on crossings while sitting further from it than the perturbed board
+they started from — tigard/swap 267 vs 276, splitflap/translate 55 vs 123,
+glasgow/translate 563 vs 785. Overlap falls in every cell too, so without a
+pose metric this reads as success on every legality and crossing number
+available. This is the document's own "proxies propose, the router disposes",
+measured against ground truth instead of argued from anecdote — and the cause is
+structural: **the objective has no displacement-from-seed term, so nothing pulls
+a part back**, and on a wrong floorplan the crossing gradient points away.
+
+**The loop compensates rather than recovers, and that is not a defect.**
+`loop@allon` took tigard from 13 routing failures to 2 — the best-routing board
+in the experiment — at a recovery of −0.052; on glasgow it took 19 → 11 while
+moving parts 69% further out. The loop makes a wrong floorplan routable *in
+place*. Nothing in its objective rewards placement fidelity, so `compensated` is
+a first-class verdict here, not a shortfall.
+
+That also settles #411's own stated prediction — *"at block scale
+`--max-target-pins 40` recovers none of them, because the part that needs to
+move is never a passive"* — as **right about the outcome, wrong about the
+mechanism**. Lifting the gate improved routing enormously (13→12 becomes 13→2)
+and left recovery at −0.052. Removing a filter on *which* parts may move cannot
+produce recovery when no term rewards moving them back.
+
+Three smaller results worth keeping:
+
+- **A loop cannot see a floorplan that is wrong but still routable.** A scoped
+  route of a perturbed board returned `failures=0`, so the loop printed "No
+  failures left - stopping" at `rounds_run=0` and returned its input byte for
+  byte. Its move candidates come only from failed and blocking nets, so the pin
+  gate was never even consulted. `--target-nets` is the documented answer and it
+  works: on both smaller boards the targeted arm beat the shipped one on the
+  router's own terms (tigard 13→8 vs 13→12; splitflap 10→5 vs 10→9).
+- **A rigid block translate barely moves on a packed board.** Feasible doses
+  before a member leaves the outline: 1.40 mm for coldfire's 21-part sheet
+  block, 5.10 mm for glasgow's 67-part anchor unit — far below #411's proposed
+  5/10/20/40/80 ladder, because a shipped board has nowhere to translate into.
+  `swap`, which exchanges two units and changes no net area, reaches 14–66 mm.
+  The block-scale ladder is a per-(board, unit) property, not a constant.
+- **Cost goes as `(cap/step)²`, so a bigger cap is not a slower run.**
+  `loop@allon` searched a 7.9× larger radius and ran **4.6× faster** than
+  `loop@shipped` (185 s vs 846 s) because `--step` scaled with the cap. Step 0c
+  prescribes `--max-displacement` and never mentions `--step`.
+
+**What this says about Step 0c's acceptance rule.** It accepts on
+`crossings_after ≤ crossings_before` and `hpwl_after ≤ hpwl_before`. On
+splitflap/swap both improve while the board is 91% un-recovered, so the rule
+green-lights every run above. Two numbers produced by the optimizer cannot
+adjudicate a property the optimizer has no term for — which is the same lesson
+this document already records for the decap case, now with a second instance.
 
 ## References and further reading
 
@@ -738,3 +816,14 @@ is implemented, the rest are documented targets.
 - [TI SNVA021](https://www.ti.com/lit/pdf/snva021) and [ADI AN-1119](https://www.analog.com/en/resources/app-notes/an-1119.html) — switching-regulator layout intent that lives in datasheets, not netlists
 - [HN: tscircuit autorouter discussion](https://news.ycombinator.com/item?id=43499992) and [JITX discussion](https://news.ycombinator.com/item?id=39771983) — autorouter/autoplacer trust culture
 - [Cypress benchmark suite](https://github.com/NVlabs/Cypress) — the only open PCB placement benchmark set (10 boards, 41–476 components)
+
+## Update: hard pad+drill legality (default on)
+
+The quench, seeder and portfolio now share a pad+drill legality layer
+(`placement/legality.py`: `PartPads`/`LegalityContext`/`grade_pad_legality`) —
+courtyard-only gating is history (`--courtyard-only` restores it for A/B).
+New repair entry points: `place_seed --repair` (violation-driven,
+minimal-move) and `place_reconstruct.py` (structural reconstruction with an
+exact assignment solve). Anti-churn: `--min-gain-per-mm`. Mounting holes are
+frozen by default (`--move-unconnected` frees them). Full design notes and
+measured acceptance numbers: `placement/README.md`.

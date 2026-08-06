@@ -30,7 +30,10 @@ board actually uses:
   * Default net-class **differential-pair gap / width** (``--diff-pair-gap`` /
     ``--diff-pair-width``) -- lowered to the routed values so the net class stops
     advertising the stock-wide 0.25 mm gap a planner would read back and re-use
-  * non-routing severities (courtyard, solder-mask, footprint/library) -> ignore
+  * non-routing severities (courtyard shapes, solder-mask, footprint/library)
+    -> ignore, EXCEPT ``courtyards_overlap`` -> warning (run-6: ignore gagged
+    KiCad on the one check that catches a stacked part; warning keeps a routed
+    board's exit green while the pair stays visible in the report)
 
 **Only loosen, never tighten.** Every constraint is set to ``min(current, target)``
 -- it is only *lowered* toward the real fab floor, never raised. So this can
@@ -485,13 +488,24 @@ def compute_targets(clearance=None, hole_clearance=None, hole_to_hole=None,
 def severity_plan(keep_courtyards=False, keep_mask=False, keep_footprint=False,
                   keep_thermal=False, extra_ignore=()):
     """Desired severity per DRC category: {category -> 'ignore' | 'warning'}.
-    Applied with only-loosen semantics by the apply_* functions."""
+    Applied with only-loosen semantics by the apply_* functions.
+
+    Run-6: `courtyards_overlap` demotes to WARNING, never ignore. The old
+    ignore GAGGED KiCad on the one check that catches a stacked part (run 5
+    shipped C14-on-R14 with a project file whose severities silenced
+    kicad-cli's own courtyards_overlap error). Warning keeps a routed
+    board's exit green (the routing checks stay the gate) while the pair
+    remains VISIBLE to any reader of the report; check_assembly is the
+    blocking arbiter with its class waivers. The other courtyard-shape
+    categories (malformed etc.) stay ignore -- library noise, not
+    placement facts."""
     plan = {}
     for cat in extra_ignore:
         plan[cat] = "ignore"
     if not keep_courtyards:
         for cat in COURTYARD_CATS:
             plan[cat] = "ignore"
+        plan["courtyards_overlap"] = "warning"
     if not keep_mask:
         for cat in MASK_CATS:
             plan[cat] = "ignore"

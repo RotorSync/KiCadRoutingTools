@@ -106,10 +106,16 @@ def krt_dir() -> str:
 
 
 def run_tool(root: str, tool: str, *args) -> tuple:
-    """(returncode, combined output). -X utf8 for the Ω/µ the tools print."""
+    """(returncode, combined output). -X utf8 for the Ω/µ the tools print.
+
+    KRT_NO_BANNER: the child instruments self-echo CMD/EXIT (run-4 B1) --
+    inside a COMPOSED run those lines would land mid-document and read as
+    the outer gate's exit (measured: a blocking-153 score log carrying an
+    inner checker's EXIT=0). The outer invocation is the evidence unit."""
     cmd = [sys.executable, '-X', 'utf8', os.path.join(root, tool)] + [str(a) for a in args]
+    env = dict(os.environ, KRT_NO_BANNER='1')
     p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                       encoding='utf-8', errors='replace')
+                       encoding='utf-8', errors='replace', env=env)
     return p.returncode, p.stdout
 
 
@@ -216,6 +222,31 @@ def score_connectivity(root: str, board: str) -> dict:
             'components_per_broken_net': comps, 'nets': sorted(set(nets)),
             'unrouted_net_names': sorted(set(unrouted_names)),
             'poured_nets': sorted(poured), 'broken_detail': detail}
+
+
+def score_assembly(root: str, board: str, intent: str, tmp: str) -> dict:
+    """Blocking BODY pairs (run-6): two footprints' pad copper in the same
+    space -- physically unbuildable, invisible to every copper checker (the
+    shipped C14-on-R14 stack). Runs check_assembly.py, which needs NO
+    intent to be meaningful (--intent only adds authored waivers), so this
+    component ALWAYS grades -- the floorplan path can be vacuous by
+    self-blessed budget; this one cannot."""
+    out = os.path.join(tmp, 'assembly.json')
+    args = [board, '--json', out]
+    if intent:
+        args += ['--intent', intent]
+    rc, text = run_tool(root, 'check_assembly.py', *args)
+    if rc not in (0, 4) or not os.path.exists(out):
+        return skipped(f'check_assembly rc {rc}: {text.strip()[-200:]}')
+    try:
+        with open(out, encoding='utf-8') as f:
+            doc = json.load(f)
+    except Exception as exc:
+        return skipped(f'check_assembly json unreadable: {exc}')
+    return {'ran': True, 'count': int(doc.get('blocking') or 0),
+            'advisory_pairs': int(doc.get('advisory') or 0),
+            'waived_pairs': int(doc.get('waived') or 0),
+            'pairs': doc.get('blocking_pairs') or []}
 
 
 def score_drc(root: str, board: str, clearance=None, sizes=None) -> tuple:
@@ -534,6 +565,7 @@ def main():
         conn = score_connectivity(root, args.board)
         drc, undersized, rule_pairs = score_drc(root, args.board, args.clearance, sizes)
         floorplan = score_floorplan(root, args.board, args.intent, tmp)
+        assembly = score_assembly(root, args.board, args.intent, tmp)
         _imp_nets = ([g for tok in args.impedance_nets for g in tok.split(',') if g]
                      if args.impedance_nets else args.impedance_nets)
         imped = score_impedance(root, args.board, _imp_nets, tmp)
@@ -549,6 +581,7 @@ def main():
                         'poured_nets': conn.get('poured_nets', []),
                         'nets': conn.get('broken_detail', {})},
              'drc': drc, 'undersized': undersized, 'floorplan': floorplan,
+             'assembly': assembly,
              'impedance': imped, 'length': length, 'net_widths': net_widths}
 
     # #549 rule-governed pairs are ADVISORY: their gate is the repo's own
@@ -564,7 +597,18 @@ def main():
                if v.get('count') is None and v.get('ran') is not False]
     blocking = None if unknown else sum(c for c in counts if c)
 
+    # board_sha binds this payload to the exact file it graded (run-3 B4:
+    # three ledger entries shipped embedding a PRIOR board's quality because
+    # nothing tied a score to its board). Same sha256-of-bytes as
+    # board_store.put, so converge record can compare them.
+    import hashlib
+    _h = hashlib.sha256()
+    with open(args.board, 'rb') as _f:
+        for chunk in iter(lambda: _f.read(1 << 20), b''):
+            _h.update(chunk)
+
     score = {'schema': 1, 'kind': 'board-score', 'board': os.path.abspath(args.board),
+             'board_sha': _h.hexdigest(),
              'label': args.label, 'blocking': blocking,
              'blocking_by': {k: v.get('count') for k, v in parts.items()},
              'advisory': {k: v.get('count') for k, v in advisory.items()},
@@ -596,6 +640,21 @@ def main():
 
 
 if __name__ == '__main__':
+    # CMD/EXIT self-echo (run-5 c1). Guarded: this script lives four levels
+    # under the repo root, and the banner must never be the reason a grade
+    # fails. Children already run with KRT_NO_BANNER (cc42e33), so a
+    # composed run prints exactly ONE banner pair -- this one.
+    try:
+        import os as _os
+        import sys as _sys
+        _root = _os.path.dirname(_os.path.dirname(_os.path.dirname(
+            _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))))
+        if _root not in _sys.path:
+            _sys.path.insert(0, _root)
+        import cli_banner
+        cli_banner.install()
+    except Exception:
+        pass
     try:
         sys.exit(main())
     except SystemExit:

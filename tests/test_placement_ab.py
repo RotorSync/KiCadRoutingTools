@@ -97,11 +97,17 @@ ROWS = [
         'quench_on': {'corridor_weight': 20.0},
         'signal': 'health_bus_foreign_crossings',
         'guard': ('crossings', 'hpwl'),
-        'expect': 'regress',
+        'expect': 'improve',
         'rejected': True,
-        'why': ('MEASURED: bus_foreign_crossings 32 -> 33 and one more intent '
-                'violation, though crossings and hpwl both improved slightly. '
-                'Same frozen-vs-re-derived divergence as corridor-ulx3s.'),
+        'why': ('MEASURED: bus_foreign_crossings 32 -> 31 with both guards '
+                'improved (crossings 1063 -> 1042, hpwl 2117.9 -> 2113.7). '
+                'RE-PINNED at the placement-branch merge: the pad+drill '
+                'legality layer (default on) changed the quench trajectory on '
+                'this board and flipped the original regress mark '
+                '(32 -> 33, one more intent violation). The term stays '
+                'rejected -- 2 of 3 boards still disagree and the '
+                'frozen-vs-re-derived divergence stands; this row is the '
+                'change detector doing its job.'),
     },
     {
         'name': 'corridor-coldfire',

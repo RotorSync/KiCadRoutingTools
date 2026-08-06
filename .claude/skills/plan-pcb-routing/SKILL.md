@@ -26,6 +26,7 @@ python3 -X utf8 place_optimize.py board.kicad_pcb --suggest-locks
 | careful hand placement, routing not yet attempted | **NO** | — |
 | routing already completed clean | **NO** — *unless* a spec clause placement could fix is still violated; see the last row of 9.3d | — |
 | board already carries copper (the tools exit 3) | **NO** — placement moves footprints, not tracks | — |
+| **placed, but placed WRONG** — `check_drc` on the **copper-free** board returns violations, or a mechanically-fixed part sits where mechanics forbid (an edge connector clear of every outline edge, a hole away from the pattern its siblings define) | yes, and **the quench is the wrong tool** | **Step 0a-0 first: RECONSTRUCT** — `place_seed --repair` for local violations, `place_reconstruct.py` for structural damage. Only then `place_optimize` on the residue |
 | rough / imported / auto-generated placement | yes | `place_optimize.py --max-displacement 3` |
 | placed, and the user wants placement OPTIONS — or a converged run's remaining failures were classified **floorplan-shaped** | yes — generate a SLATE, not a nudge | `place_portfolio.py` (Step 0c-bis) |
 | routing FAILED and `/diagnose-routing-failures` blames **congestion / blockers** | yes | `place_route_loop.py` |
@@ -38,6 +39,293 @@ best, and the default weights *caused 2 new routing failures*.
 
 **Placement invalidates every downstream routed board.** Never run it mid-chain;
 re-run the whole chain from the placed board.
+
+### Step 0a-0: RECONSTRUCT before you optimise — the mechanical parts are arithmetic
+
+**Run this before Step 0a, and it takes seconds.** The quench is a local search over a
+continuous lattice; it is the right tool for a *rough* placement and the wrong one for a
+*wrong* placement. Anything whose position is a mechanical fact should be **computed and
+placed**, not handed to an optimizer — and computing it usually also collapses the search
+space for everything else.
+
+**First, TWO commands Step 0 runs on the board with ZERO copper — both conjuncts,
+always (the R2 rule, applied to the gate itself):**
+
+```bash
+python3 -X utf8 check_drc.py board.kicad_pcb --clearance <floor>   # NOT piped
+echo "EXIT=$?"
+python3 -X utf8 check_assembly.py board.kicad_pcb --clearance <floor>
+echo "EXIT=$?"
+```
+
+A copper-free board has no routing, so **every violation these return is a placement
+defect that no router can ever remove**. `check_drc` measures copper clearances (68
+PAD-PAD on one damaged board vs 0 placed correctly); `check_assembly` measures
+BUILDABILITY — its blocking channel is cross-footprint pad INTERSECTION, which the
+clearance channel is structurally blind to when the pads share a net (run 5 SHIPPED
+two 0402s stacked, C14 on R14, both pads +3V3: `check_drc` 0, every gate green, KiCad's
+own courtyard check gagged by the project writeback). Both land in `board_score`'s
+`blocking` (`drc` and `assembly`). The channel calibration that makes `check_assembly`
+gateable: its blocking count reads **0 on all 33 healthy in-repo boards** in both exact
+and AABB currencies.
+
+**Do not gate on the AGGREGATE `overlap_area`** — it has a legitimate nonzero floor on
+human boards (tigard's own layout carries 5.375 mm² of mount-hole-under-shell courtyard
+kisses) and run 2 measured it positively correlated with distance-to-truth. The
+per-pair blocking COUNT is the gateable quantity; courtyard/fab pairs are ADVISORY
+(`check_assembly` labels each with its waiver class), fix targets for the placement
+loop below, never a gate alone.
+
+**Then reconstruct, in this order. Each rung has an applicability test — run the test,
+and when it fails, say so and fall through to the next rung.** None of these invents
+geometry: every one either reads a determinant off the board or reads it from the spec.
+
+**R1 — Separate the parts whose position is NOT a netlist question.** For each, name what
+determines it. This is Step 0a's table, used as a *placement* list rather than a lock
+list:
+
+| class | what determines the position | detection test on ANY board |
+|---|---|---|
+| mounting holes, NPTH, drill-outs | the enclosure's standoff pattern | `pad.pad_type == 'np_thru_hole'`, or 0 connected pins. **The quench provably cannot place these** — the advisor says so itself: *"0 connected pin(s) → invisible to the airwire cost, so only the halo term decides where it goes"* |
+| edge connectors, castellations, card edges | the mating standard / the outline | courtyard must intersect (castellated: be centred on) the outline. `check_floorplan`'s `edge_connectors` block already computes the edge and overhang |
+| enclosure-referenced parts (USB/barrel/RF jacks, buttons, LEDs, displays) | an aperture in the spec | the EXACT position is spec-only, but the CLASS is board-derivable (run-4 `placement/part_class.py`): an `edge_receptacle`-class part (USB/HDMI/RJ45/card/jack by footprint name or CC1/CC2-style pinfunctions) with **no overhang AND edge clearance past the seat tolerance is implausibly posed** — the plug cannot reach it. NOT a bare distance threshold: run 3's displaced USB-C sat only 2.45 mm from a *different* edge, so "far from every edge" misses a swapped part. `check_floorplan --emit-intent --declare-classes` declares these automatically; the advisor DEMOTES an implausibly-posed receptacle out of the lock list (a lock is not a placement) |
+| fiducials, test points | a fab or test-fixture rule | usually spec; sometimes a symmetric pattern (see R2) |
+
+**R2 — Ask whether the board itself determines the position. Often it does, and then it
+is arithmetic rather than search. But PROPOSE, never trigger.**
+
+The idea: a part may belong to a family whose pattern is over-determined by its surviving
+members, so you can fit the pattern to the survivors and predict the rest. Worked, on one
+board: a rectangular outline `30–76` with two mounting holes still at `(73,33)` and
+`(73,73)` over-determines a **3.00 mm corner inset**, which predicts the two displaced
+holes at `(33,33)` and `(33,73)` — **2 µm from where the human had put them**, with no
+spec and no reference board.
+
+**Do not turn that into a detector.** Written as one it is unsafe, and both failure modes
+were measured over this repo's 33 in-repo boards:
+
+- **False positive.** `flat_hierarchy` has six holes: four at a `(3.81, 3.81)` corner
+  inset and two elsewhere. A "hole off its siblings' pattern" rule flags those two, and
+  they are a perfectly ordinary **mid-edge mounting pattern**. Reconstructing that board
+  would damage a correct one.
+- **False negative, on the board the rule was derived from.** tigard's four holes sit at
+  one 3 mm inset, but its outline is `30.0 – 75.99764`, so nearest-corner insets come out
+  as `3.000` and `2.998` and a naive comparison reports *four distinct patterns* and
+  stays silent. Sub-µm outline asymmetry is normal, not exceptional.
+
+So the safe shape is: **the pattern fit PROPOSES a position; the bare-board `check_drc`
+DECIDES.** Apply a proposal only when
+
+- the fit is over-determined (≥ 2 survivors for a translation, ≥ 3 for anything with a
+  rotation or a scale), **and**
+- the residual on the survivors collapses to a grid step when compared with a tolerance,
+  **not** to exact equality, **and**
+- **applying it measurably improves the copper-free `check_drc` count AND does not
+  increase the out-of-board amount.** The count alone is the one Step 0 instrument with
+  a measured false-positive rate of **0 on 31 of 31** in-repo boards — and it is also
+  **gameable by evacuation**: a conflict removed by pushing the part off the board
+  reads as an improvement (measured, run 2: a wrong corner assignment reached PAD-PAD
+  **0** while `oob_amount` went 9.6 → **146.6 mm**, and the count-only gate would have
+  chosen it; the oob conjunct rejected it on board-only numbers). Both conjuncts, always.
+- One insensitivity to know: NPTH mounting holes have **no copper**, so a proposal that
+  moves only them cannot change the PAD-PAD count at all — gate the hole moves together
+  with the R4 descent they enable (R2+R4 as a unit), not alone.
+
+If the count does not improve, **revert the proposal**: the determinant was not on the
+board. Then go to the spec, and **if there is no spec, say so and stop reconstructing.**
+A predicted position that no instrument confirms is an invention, and inventing
+mechanical geometry is what this skill forbids everywhere else.
+
+**R3 — Apply the positions you derived, with the REPAIR tools, not the seeder.**
+Two measured facts govern this rung (run 2, both lock configurations tried):
+`place_seed --force` on a placed board **re-seats everything not file-locked at
+connectivity centroids** (85 of 92 parts) while leaving the two zone-targeted
+parts **exactly where they were** — `must_lock` locks are stamped on the OUTPUT,
+so on a re-run they freeze the part at the wrong position the zone exists to
+fix, and a zone smaller than the part's courtyard used to be unsatisfiable by
+construction. The tools that apply a derived position on a placed board are:
+
+```bash
+# violation-driven minimal-move repair: ONLY violators move, worst first,
+# escalating displacement cap; everything clean freezes
+python3 -X utf8 place_seed.py board.kicad_pcb repaired.kicad_pcb \
+    --intent floorplan.json --repair [--dry-run]
+
+# structural reconstruction (swapped regions, dragged selections): pattern
+# fit -> rigid ±v vectors -> ONE simultaneous candidate assignment (exact
+# ILP) -> minimal-move legalize. Propose-only stages, each gated.
+python3 -X utf8 place_reconstruct.py board.kicad_pcb repaired.kicad_pcb \
+    [--intent floorplan.json] [--dry-run]
+```
+
+Zone semantics that make the spec-coordinate pattern work: a zone that cannot
+contain the part's courtyard at any rotation is graded (and seated) on the
+part's **anchor point** instead — declared automatically, noted in the output.
+`place_seed --force` remains the **unplaced-board** tool; reaching for it on a
+placed board is the measured mistake, not the procedure. Lock the refs after
+they are placed (`--repair` keeps existing stamps; the seeder stamps
+`must_lock` on its output), so the lock is applied to a position you verified
+rather than to one you inherited.
+
+**R4 — Then test for a rigid displacement, because R2/R3 just gave you the vector.**
+When parts moved as a block (a bad merge, a re-imported netlist, a dragged selection),
+every member moved by the **same** vector, and the offset between where a known part *is*
+and where R2/R3 says it *must be* is a candidate for it. The test, on any board:
+
+- compute that offset for **every** part whose correct position you established;
+- **if two or more agree to within a grid step — UP TO SIGN — it is a real group
+  vector.** Offsets of `+v` and `−v` are agreement, not disagreement: an EXCHANGE
+  (two regions swapped) displaces its two groups by opposite vectors, and that ± pair
+  is exactly the swap's signature (run 2's holes read `−v` and `+v` and the rung's
+  old letter — "disagree → stop" — would have refused the very case its own measured
+  example succeeded on). Offsets that disagree in *magnitude* still mean there is no
+  single rigid displacement — then **this rung does not apply, stop here** and hand
+  the board to Step 0c;
+- when it does apply, the remaining parts no longer live on a continuous plane. Each has
+  a small discrete candidate set — `{0, +v, −v, …}` — and you can choose per part by
+  coordinate descent, with **pad-clearance conflict as the hard term and `hpwl` to break
+  its ties**. Neither alone works: conflict alone has many zero-cost arrangements, and
+  `hpwl` alone is what the quench already minimises.
+
+Measured on a 92-part board: two mounting holes collapsed the problem to a **three-way
+choice per part**; that descent took PAD-PAD DRC to **0**, `overlap_area` 142 → 13, and
+put **25 %** of the displaced parts within 2 mm of home. Every quench and loop arm on the
+same board, across seven caps, left PAD-PAD at 25–51 and **0.00 %** of parts home.
+
+**R5 — Anchor the LARGE parts next, and size the gaps between them from what has to
+live there.** After the mechanically-fixed parts, the big parts are what set the
+floorplan: everything else is assigned to one of them. **Nothing in the placement code
+orders by size** — the quench sweeps its parts in reference order and moves whatever the
+cost function likes — so this ordering is yours to impose, by placing/locking the anchors
+before you run it.
+
+**The gap between two adjacent anchors has to fit two things, and only one of them is
+what you would guess:**
+
+```
+gap  >=  (small parts that belong in the corridor: sum of their extents, plus clearance)
+       +  cut_nets x (track_width + clearance) / copper_layers        # the routing
+```
+
+**Measured, and the second term is almost never binding.** Across the in-repo boards the
+routing demand between adjacent large parts comes out at 0.4–1.6 mm while the gaps humans
+actually left are 2.9–9.8 mm — 2 to 6× more. **The corridor is for the PARTS.** Scored
+against the gap a human chose, per board (gaps scale with board size, so the comparison
+is within a board, never pooled across them):
+
+| predictor | what it is | correlation with the human's gap |
+|---|---|---|
+| **small parts in the corridor** | count, or summed extent | **positive on 8 of 8 distinct boards, r = +0.41 … +0.90** |
+| routing cut | nets crossing ÷ layers | ~0, and often negative (−0.48 … +0.08) |
+| **the quench's own whitespace term** | `halo_base + halo_coef·sqrt(pin_count)` | **no consistent sign — 5 boards negative, 3 positive** |
+
+So **do not expect `--halo-coef` to reserve the corridor**: it is a function of pin count,
+which is not the quantity that decides. The assignment you need already exists — `route.py
+--list-groups --group-by decap` names which small parts belong to which IC — so the
+corridor between two anchors is *their* small parts, and its width is a number you can
+compute before placing anything.
+
+**Two run-2 measurements bound what this law is FOR.** (1) The corridor law is
+descriptive, not yet prescriptive: an A/B that widened the two deficit
+corridors against an identical no-widening control produced **no completion
+benefit** (both arms routed to `blocking 0`) and only a marginal quality edge
+(−10 vias on one board/one seed — not causal evidence). What converted that
+board was the reconstruction and this rung's ORDERING principle, not the
+corridor arithmetic. (2) **Moving an anchor to satisfy a corridor can enter
+another anchor's ESCAPE FACE**: the widened J6 landed in the QFN's AD-bus face
+and cost 6 of 30 fanout escapes. After ANY anchor move, re-run the per-face
+lane ledger (the escape-channel section above) for every neighbouring
+fine-pitch part before accepting it.
+
+**When this rung does not apply:** a board with no clear size hierarchy (all parts
+similar), or one where the large parts are already mechanically fixed by R1–R3 and there
+is no freedom left. Say which, and go to Step 0c.
+
+**Hand the residue to Step 0c, not the original mess.** The rungs are complementary and
+the measured split is stark: reconstruction fixes the hard, blocking-relevant metrics and
+is indifferent to the soft ones (it left `crossings` at 392); the quench fixes the soft
+ones (`crossings` 412 → 227) and never touches the hard ones. Running only the quench on a
+wrong placement optimises a board that cannot pass DRC however well it routes.
+
+**The whole ladder is now tooling, in escalation order** (each stage is
+report-only with `--dry-run`, and each does nothing on a healthy board —
+measured: `place_reconstruct` on the correct control board proposed nothing
+and moved 0 parts). **The ladder ESCALATES, it never COMPOSES**: each rung
+consumes the PREVIOUS rung's gated output or the unmodified input, never a
+partial repair — `--repair` legalizes in place and smears the ±v
+structure the reconstruct's pattern fit needs (run 3 ran repair as a
+dry-run test, judged it insufficient, and correctly handed reconstruct the
+UNSMEARED board). Declare the edge classes FIRST (`--declare-classes`) so
+the reconstruct sees the bands:
+
+```bash
+python3 -X utf8 check_drc.py board.kicad_pcb --clearance <floor>   # measure (R0)
+python3 -X utf8 check_floorplan.py board.kicad_pcb \
+    --emit-intent auto.json --declare-classes   # part-class auto-declaration:
+                                       # edge parts get bands; an implausibly-
+                                       # posed receptacle gets NO edge (derive)
+python3 -X utf8 place_seed.py board.kicad_pcb r.kicad_pcb \
+    --intent auto.json --repair        # local violations, minimal-move; seats
+                                       # DECLARED-edge parts on their bands
+python3 -X utf8 place_reconstruct.py board.kicad_pcb r.kicad_pcb \
+    --intent auto.json [--assign-rounds 2]  # structural damage (R1-R5
+                                       # productized: tiers, pattern fit, ±v,
+                                       # exact ILP, prune sweep, legalize).
+                                       # Round 2 peels a displaced ISLAND's
+                                       # boundary once round 1 made the anchor
+                                       # centroids truer (measured: +7 members)
+python3 -X utf8 place_optimize.py r.kicad_pcb out.kicad_pcb ...    # 0c residue
+```
+
+### Step 0a-1: the placement FIX LOOP — measure, fix, VERIFY, repeat until clean
+
+**Routing may not start while a placement mistake is on the record.** The ladder
+above is one pass; this loop is what makes the placement phase END only when the
+instruments and an independent verifier agree it is clean. Run 5 shipped a stacked
+part because the phase ended when the operator believed it was done; the user's
+run-6 directive is the loop below, and it is BLOCKING.
+
+Each lap:
+
+1. **Measure** — three instruments, JSONs kept as evidence:
+
+   ```bash
+   python3 -X utf8 check_drc.py board.kicad_pcb --clearance <floor>
+   python3 -X utf8 check_assembly.py board.kicad_pcb --clearance <floor> \
+       --baseline <the ORIGINAL input board> --json wk/assembly_lapN.json
+   python3 -X utf8 check_channels.py board.kicad_pcb --clearance <floor> \
+       --track-width <w> --grid-step <g> --json wk/channels_lapN.json
+   ```
+
+   `--baseline` is load-bearing: dense healthy boards ship hundreds of by-design
+   courtyard kisses (corpus: 235), so the loop's advisory fix-list is the pairs
+   NEW relative to the input, never a shipped design's own geometry.
+
+2. **Fix iteration** — one ladder invocation targeting the NAMED findings: blocking
+   body pairs and pad/hole conflicts go to `place_reconstruct` (full stages if
+   structure moved, `--stages legalize` for local residue — the repair census
+   charges body pairs since run 6); NEW advisory pairs and channel intruders go to
+   the quench with the ledger's `eaten_by`/pair refs as targets and everything else
+   locked. One lap = one ledger entry, recorded before the next begins.
+
+3. **VERIFY, blocking** — a 9.4b boundary verification with **check 5,
+   assembly-clean** (below). The verifier receives the fresh `check_assembly` and
+   render JSONs; FAIL blocks the next step. The phase may not proceed to routing —
+   and a routing failure later classified placement-shaped RE-ENTERS this loop —
+   until the verifier passes.
+
+4. **Repeat** until: `check_assembly` blocking == 0 AND no undispositioned
+   NEW-vs-baseline advisory pair AND bare `check_drc` == 0 — or a lap reports a
+   finding **measured-unfixable** (locked pair, no legal slot), which stops the loop
+   with the named pairs and reasons, never with "done". Cap: 5 laps (each is
+   verifier-gated, so a lying lap cannot advance; a 6th lap means the fix tool is
+   the problem — file it, do not iterate past it).
+
+A face in **deficit at the finest legal grid** in the channels JSON is a
+floorplan/placement fact no routing parameter can fix — it classifies later
+routing failures as placement-shaped BY MEASUREMENT (9.3d's first mechanical
+input) and its `eaten_by` refs are the lap's quench targets. A deficit only at
+the routed grid means: try the finer grid before moving anything.
 
 ### If the board is UNPLACED
 
@@ -195,7 +483,25 @@ bulk cap by almost nothing. When a part fits no row above, ask which CLASS
 governs it — and which rule and grading signal that class implies — before
 treating it as free for the optimizer to trade.
 
-**2. Lock every one of them, and pass the locks to EVERY placement invocation.**
+**2. CHECK EACH ONE IS ALREADY THERE, and move it if it is not — a lock is not a
+placement.** This step has exactly one verb in most runs, `--lock`, and `--lock` means
+*freeze it where it currently sits*. On a correctly-placed board that is the same as
+correct. **On a misplaced board both branches are wrong**: lock the list and you pin the
+error at exactly the parts whose position is a mechanical fact; leave it unlocked and you
+hand a connector to an optimizer that has no idea where a connector belongs. Measured on
+one board: of the 13 refs the advisor printed, **8 were displaced**, including a USB-C
+receptacle, two headers, a JST connector and two mounting holes — each 15.8 mm from its
+mating position, and nothing in the advisor's output hinted at it. Its two HIGH
+*geometric* reasons (`courtyard leaves the board outline`) were **products of the
+misplacement being reported as evidence for preserving it**, and on the correct board the
+same advisor rated two other connectors HIGH that it demoted to name-only MEDIUM on the
+damaged one — it loses true signals as well as manufacturing false ones.
+
+So the order is **place it, then lock it** (Step 0a-0 above computes the position;
+`place_seed.py --intent … --force` applies it), and the lock is only meaningful once you
+have confirmed the part is where the mechanics say.
+
+**Then pass the locks to EVERY placement invocation.**
 Not just the first — `place_optimize`, `place_route_loop` and every retry:
 
 ```bash
@@ -215,14 +521,21 @@ A lock you forgot to re-pass is silent. A `must_lock` the grader checks is not:
 
 ```jsonc
 {
+  "schema": 1,                          // REQUIRED -- the loader refuses without it
+  "kind": "floorplan-intent",           // REQUIRED
   "must_lock": ["J1", "J2", "H1", "H2", "H3", "H4"],   // cite the requirement id here
   "blocks": [
     { "name": "pico-header-north",                      // and here
       "refs": ["J1"],
-      "zone": {"x": 100.2, "y": 60.1, "w": 0.4, "h": 0.4} }
+      "zone": [100.0, 59.9, 100.4, 60.3] }   // [x0, y0, x1, y1] -- NOT {x,y,w,h}
   ]
 }
 ```
+
+A zone tighter than the part's courtyard is the spec-COORDINATE pattern: the
+grader and the seeder both fall back to anchor-point-in-zone for it (noted in
+their output), so a 0.4 mm zone around a mounting hole is satisfiable. Zones
+meant to CONTAIN a group must still be at least courtyard-sized.
 
 `edge_connectors` constrains **which edge** and `overhang_mm` — it cannot pin an
 XY. Anything with an *exact* position needs a `blocks` zone a few hundred microns
@@ -343,13 +656,58 @@ skill's defaults are priors, not clauses. `--ignore-nets`
 must equal the Step 5 plane-net set — a plane-routed rail's airwire is a fiction
 the optimizer would otherwise chase across the board.
 
+**The quench now enforces pad+drill legality by default.** Historically it was
+courtyard-rects-only and DRC-blind — measured twice: it walked a diode into a
+LOCKED connector's mounting pad at exactly the clearance floor, and dropped
+another part onto the first one's *exact vacated coordinates* — and runs had to
+revert those moves by hand. The current engine gates every move (swaps
+included) on a pad/hole layer that never worsens any pair beyond the input
+board and never admits a new different-net pad intersection; NPTH mounting
+holes are modelled and **frozen by default** (no connected pins → the airwire
+cost cannot see them; `--move-unconnected` frees them deliberately); a
+displacement-scaled acceptance (`--min-gain-per-mm`, default 0.1) suppresses
+moves whose gain does not pay for their motion. `--courtyard-only` restores
+the old model for A/B. The JSON_SUMMARY carries `pad_conflicts_before/after` —
+if `after > before`, that is a bug report, not a result.
+
+**The legality gates protect LEGALITY, not STRUCTURE.** Measured, run 3:
+both rejected quenches held every hard invariant green (pad conflicts 0→0,
+holes 0, oob unchanged, NPTH frozen) while eroding a recovered placement
+from 26 parts home to 15 — and the ONLY board-only signal that caught it
+was the hpwl acceptance rule, twice. A quench result whose hpwl worsened is
+discarded no matter how green its legality block reads.
+
 **Acceptance rule — apply it, do not skip it.** It is a CONJUNCTION, and all
 three parts are required:
 
 1. Read the `JSON_SUMMARY:` line from 0c. If `crossings_after > crossings_before`
-   or `hpwl_after > hpwl_before`, **discard the result.**
+   or `hpwl_after > hpwl_before`, **discard the result.** **And add a third term the
+   quench has no objective for: `check_drc` PAD-PAD must not rise.** Rule 1 as written is
+   built entirely out of the quench's own cost function, so it can only measure whether
+   the quench succeeded at being a quench. Measured across 29 candidates on one board,
+   against distance-to-the-correct-placement: **r(crossings) = +0.780** and
+   **r(overlap_area) = +0.723** — *lower crossings goes with a WORSE placement*. One
+   candidate reached **233 crossings, better than the human original's 276**, while
+   sitting 18.7 mm out of position. `hpwl` behaves (its minimum is at the truth) and is
+   what actually does the work in this rule. **Gate on `hpwl`, on PAD-PAD DRC, and on
+   `check_assembly`'s blocking pairs; report `crossings` and the aggregate
+   `overlap_area` and never gate on those two.** (Run 6 measured why the blocking-pair
+   COUNT belongs with the gates while the aggregate area never can: hpwl is gameable by
+   body-STACKING exactly as PAD-PAD was gameable by evacuation — two parts moved into
+   the same space lower hpwl — and the run-5 board shipped that way. The per-pair count
+   is 0-calibrated on every healthy corpus board; the aggregate has a nonzero floor.)
 2. `check_floorplan --intent` must still **pass**. It did not, once: the quench
    walked a crystal 1.40 mm out of its declared zone while both metrics improved.
+   **But an intent emitted from the board under repair INVERTS this rule.**
+   `--emit-intent` records the board as it is, so on a misplaced board it writes the
+   damage down as the requirement: a displaced connector's position becomes its declared
+   edge, and the measured `overlap_area` becomes the `legality_budget`. Measured, one
+   emitted intent: it **failed the correct board** (`H1 sits nearest the north edge but
+   is declared on the west edge`; `oob 7 exceeds the declared budget 5`) and **passed the
+   142 mm² pile-up** with zero violations — so rule 2 would have vetoed the repair and
+   blessed the defect. Before trusting rule 2, check the intent was authored or verified
+   against something other than the board you are repairing; if it was not, say so and
+   fall back to rules 1 and 3.
 3. Any repo-local requirement gate must still pass.
 
 **Two numbers produced by the optimizer cannot adjudicate a requirement the
@@ -671,7 +1029,7 @@ quoting any number. The headline pairings:
 | a `place_route_loop` round | `make_movie.py WORKDIR --camera auto` | per-round `failures` and `iterations` from the loop's own output. A round that moved a lot and changed neither is noise |
 | a run that TRIED more than it kept | `make_film.py --from-loop-dir WORKDIR` | the same per-round numbers, for the **rejected** rounds too — the badged beats are the ones whose `failures` did not improve, and seeing where the search went is the point |
 | routing failed after placement | `--summary-json <route log>` on the render | the `failed_nets` and `blockers` in that same summary — the render colours exactly those, so the picture and the diagnosis are the same data |
-| board looks wrong / empty | `render_placement.py board -o state.png` | exit code. **3 means the board is unplaced or already routed** — read the message rather than reaching for an override |
+| board looks wrong / empty | `render_placement.py board -o state.png --json` | the `unplaced` key in its JSON. The renderer deliberately WARNS where the placement CLIs refuse (seeing an unplaced board is the point of a renderer), so **it always exits 0** — the old "exit 3" advice here pointed at a code that never fires |
 | **any board you are about to call done** | `scripts/board_score.py board --intent I --json wk/score.json` | `blocking` — it must be **0**. `ungraded` lists what nothing examined; that is *unexamined*, not clean. This is the one number not produced by the thing being graded |
 
 ### Which flag, at which step — the trigger table
@@ -687,11 +1045,11 @@ question you actually have, is the same as not producing it. Each row is a
 | any route step failed | `render_placement board --summary-json <route log> --focus` | do the failures share one pocket (→ placement) or scatter (→ parameters)? **`--focus` emits nothing without `--summary-json`** |
 | a `--group-by` decision is live | `render_placement --zoom-group <name> --group-by sheet` | which parts does this block actually pull in? |
 | chasing one bus, pair or clock | `render_placement --ratsnest-nets '*USB*'` | route.py `--nets` glob syntax, exclusions included. On a pose/order decision: TWO renders, one per pose, and READ them (image case 5) |
-| a claim about ONE spot (an intrusion, an edge row, a wedge, a stop claim) | `route_render.py BOARD --view x0,y0,x1,y1` (or the same flag on `render_placement`) | the question-scoped crop, self-describing: rect label, ref designators cross-marked at their JSON origins, mm ruler on the edges (`--refs`/`--ruler` default ON for crops). READ it (image case 6). Numbers still decide magnitudes |
+| a claim about ONE spot (an intrusion, an edge row, a wedge, a stop claim) | `route_render.py BOARD --view x0,y0,x1,y1` | the question-scoped crop, self-describing: rect label, ref designators cross-marked at their JSON origins, mm ruler on the edges (`--refs`/`--ruler` default ON for crops — **route_render.py flags; `render_placement --view` crops too but has NEITHER**, so use route_render for self-describing crops). READ it (image case 6). Numbers still decide magnitudes |
 | `check_drc` failed | re-run with `--render wk/drcN/` | one panel per violation cluster: red rings, ref labels + mm ruler for JSON matching, count/types/rect caption. READ them (image case 7): one cluster = local fix, board-wide = grading floor (9.1b) |
 | every placement render | add `--ignore-nets <same as place_optimize>` | **must match** or `crossings`/`hpwl` will not reproduce the optimizer's `JSON_SUMMARY`, and you will chase a phantom disagreement |
 | every placement render | add `--clearance <the board's real floor>` | halo and overlap are otherwise graded at the wrong gap |
-| every render, always | add `--json` | the re-measurement channel. A tool's own report never satisfies its own gate. **It is a bare FLAG on `render_placement`**, not a path: it prints a `JSON_SUMMARY:`-prefixed line into stdout among the progress text, so grep that prefix and strip it. Only `board_score.py --json <path>` takes a file |
+| every render, always | add `--json-out wk/renderN.json` | the re-measurement channel, to a FILE (run-4 G1; the bare `--json` flag still prints the `JSON_SUMMARY:` stdout line). The document carries an `instrument` block (board/before/clearance/ignore_nets/size) so a before/after series is PROVABLY same-instrument — run 3's watcher could not verify 632-vs-412 crossings on one board because neither JSON said which `--ignore-nets` produced it — and a `checklist` block naming refs per mandate-8 question, channel-labelled (pad_copper vs courtyard: they legitimately differ and run 3 lost time to exactly that unlabelled disagreement) |
 | with `--focus` | `-o` names a **DIRECTORY** | `render_placement --focus -o wk/x.png` writes `wk/x.png/<board>.png` and `wk/x.png/<board>_focus1.png`. Give it a directory name, and read the panel paths back out of the `panels` array |
 | once, before choosing a budget | `route.py --list-groups --group-by auto` | whether the board decomposes at all. The budget is **100 per board** either way (9.2) |
 | after each accepted placement | `check_floorplan --intent I --health` | will this floorplan *fight* the router? Block displacement and bus-corridor crossings |
@@ -702,6 +1060,32 @@ question you actually have, is the same as not producing it. Each row is a
 what is true — measure instead. `--ratsnest-all` is the deliberate hairball, for
 showing a human, never for reading.
 
+**Worked render recipes (run-4 G2 — copy these, so the same-instrument habit
+is copied rather than remembered).** The `--clearance`/`--ignore-nets` values
+are the board's routed floor and the plane-net set (run 3's pair was
+`--clearance 0.09 --ignore-nets GND +3V3`); a series whose flags differ is
+not a series, and the JSON's `instrument` block is what proves it:
+
+```bash
+# per-side (any board with back-side parts; sibling FILES x_F.png/x_B.png)
+python3 -X utf8 render_placement.py board.kicad_pcb --per-side \
+    --clearance 0.09 --ignore-nets GND +3V3 \
+    --json-out wk/r_state.json -o wk/r_state.png
+
+# mandate-5 POSE PAIR: two renders, one per candidate pose, read side by side
+python3 -X utf8 render_placement.py cand_rot0.kicad_pcb \
+    --ratsnest-nets 'QSPI_*' --clearance 0.09 --ignore-nets GND +3V3 \
+    --json-out wk/pose0.json -o wk/pose0.png
+python3 -X utf8 render_placement.py cand_rot180.kicad_pcb \
+    --ratsnest-nets 'QSPI_*' --clearance 0.09 --ignore-nets GND +3V3 \
+    --json-out wk/pose180.json -o wk/pose180.png
+
+# one block, framed (block names exactly as route.py --group takes them)
+python3 -X utf8 render_placement.py board.kicad_pcb \
+    --zoom-group sheet:58d913ec --clearance 0.09 --ignore-nets GND +3V3 \
+    --json-out wk/blk.json -o wk/blk.png
+```
+
 ### LOOK at the render — you, not just the user
 
 Renders are for **intent**; numbers are for **legality**. A render answers *"is
@@ -710,7 +1094,7 @@ orientation, which pocket the failures sit in. It never answers *"is this
 legal?"*: clearance, overlap, off-board, connectivity and DRC all come from
 numbers. **Do not adjudicate clearance from pixels.**
 
-**`Read` the PNG yourself, and say what you saw, in exactly these seven cases.
+**`Read` the PNG yourself, and say what you saw, in exactly these eight cases.
 These are MANDATES tied to triggers, not permissions** — run 5 had this list as
 four permissions and read **zero** images across the whole run: the placement
 delta was produced and never opened, the R10-in-the-corridor fact that a crop
@@ -758,6 +1142,22 @@ the ledger entry must name the panels read (see 9.4).
    caption). One question: *is this one cluster* (a local fix — a rip, a
    nudge, a retract) *or board-wide* (a grading-floor or class problem,
    9.1b)?
+8. **After EVERY placement tool step — accepted, rejected, or probed** —
+   `render_placement` the output with `--json-out` (the legality overlay is
+   default-ON: red rings per pad/hole conflict, orange NPTH keepout
+   circles, dashed-red extents on off-board copper) and read it against a
+   fixed checklist, all four answered in writing: *(a) any part off the
+   outline? (b) any part-on-part overlap? (c) any part on a hole or a
+   locked part? (d) did more parts move than the step claimed?* **QUOTE
+   the JSON's `checklist.a`..`d` blocks as the four answers** (run-4 G5:
+   they name the refs, channel-labelled, and `d` compares `--expect-moved
+   N` against the measured move count) AND say what you saw in the pixels
+   — the numbers stay the verdict; the eyes catch what no metric
+   models. A run once read ONE image across
+   an entire placement campaign and missed off-board parts a render plainly
+   showed; the checklist, not the glance, is what catches them. The caption's
+   `pad-conflicts` / `hole-conflict` numbers pair with what you see — the
+   numbers stay the verdict.
 
 **Show without reading:** the movie, `--ratsnest-all` hairballs, full panel
 dumps. Those are for the human. Budget **≤3 images read per turn**, crops
@@ -878,7 +1278,11 @@ only in `check_floorplan`'s `outline` block.
   different instruments read three different lossy ways; the instrument was
   right every time. **An oracle LISTING gets the same rule**: never `head`/
   `tail` it — consume the whole list and assert the lines you consumed equal
-  the count the instrument itself printed. Run 7's close-out shipped "5
+  the count the instrument itself printed. `check_drc` now prints a
+  machine-checkable `LISTING: M of T violation(s) shown` line (run-4 B2):
+  quote a specific item only when `M == T`, else re-run `--max-print 0`
+  first — run 3's orphan incident read 1 of 3 off a tail and shipped the
+  wrong count into a ledger entry. Run 7's close-out shipped "5
   opens" off a `tail -5` of a list whose sixth line (SWDIO) sat above the
   window; the oracle had printed 6, and the wrong number reached the final
   report and the promotion decision before the watcher caught it.
@@ -2244,25 +2648,32 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    **do not run it**. Run the lock advisor first and pass its `--lock` list.
    A placement step claims NO nets (see the Step 5b carve-out) and
    invalidates every downstream routed board.
-1. **Fanout** (if needed) - Escape routing first, while the board is empty. Exclude
-   nets that planes will handle (`"*" "!GND" "!VCC"`) — the exclusion also marks
-   them for automatic **plane-drop vias** (#424): each excluded plane ball gets a
-   dog-bone/in-pad via at fanout time that the Step 1c pour picks up at fill, so
-   the plane step never has to tap through the finished ball field (#360).
-   **After each BGA/PGA fanout, run `place_fanout_clearance.py`** (Step 1b) to
-   clear decoupling-cap / fanout-via collisions (#130) before signal routing.
-1c. **Pour the planes (early — before any routing).** A bare `route_planes`
-   call: nets + layers only. NO `--add-gnd-vias`, NO `--stitch-vias`, NO
-   `--rip-blocker-nets` — those adapt to signals that don't exist yet (the old
-   #56 hazard) and belong in Step 3. Why the pour comes first (#424, measured):
-   the fanout's plane-drop vias connect to a still-intact pour immediately, and
-   the **plane-fragility field** (default on: `KICAD_PLANE_FRAGILITY_COST`,
-   2.0 mm-equiv, `=0` reverts) then makes every later routing step pay to cut
-   the real fill where it is narrow — so signals cross planes mid-pour, not at
-   necks. Measured on a 4-layer corpus board, this order + the field: power nets fully connected,
-   +3V3 pour ONE intact island, GND weld copper cut to a third, connectivity
-   net-better, DRC clean. With planes poured signals-first style instead, the
-   pour under a BGA arrives pre-shredded and every drop via needs repair welds.
+1. **Pour the planes FIRST — on the EMPTY board, before the fanout.** A bare
+   `route_planes` call: nets + layers only. NO `--add-gnd-vias`, NO
+   `--stitch-vias`, NO `--rip-blocker-nets` — those adapt to signals that don't
+   exist yet (the old #56 hazard) and belong in Step 3. **The order is
+   load-bearing, not stylistic**: the pour gate (`route_planes.py`) exempts
+   only a board with NO signal copper at all, and a fanout's escape stubs ARE
+   signal copper — with the fanout first, the pour refuses (exit 3, "N net(s)
+   carry BARE pads") on every board with a fanout and unrouted nets. Two runs
+   measured exactly that refusal and had to re-declare pour-first as a chain
+   deviation; this ordering is the fix. Why pour-first also wins on outcomes
+   (#424, measured): the fanout's plane-drop vias connect to a still-intact
+   pour immediately, and the **plane-fragility field** (default on:
+   `KICAD_PLANE_FRAGILITY_COST`, 2.0 mm-equiv, `=0` reverts) then makes every
+   later routing step pay to cut the real fill where it is narrow — signals
+   cross planes mid-pour, not at necks. On ottercast: power nets fully
+   connected, +3V3 pour ONE intact island, GND weld copper cut to a third,
+   DRC clean; poured-last instead, the pour under a BGA arrives pre-shredded
+   and every drop via needs repair welds.
+1b. **Fanout** (if needed) — escape routing on the poured-but-unrouted board.
+   Exclude nets that planes handle (`"*" "!GND" "!VCC"`) — the exclusion also
+   marks them for automatic **plane-drop vias** (#424): each excluded plane
+   ball gets a dog-bone/in-pad via at fanout time that the Step 1 pour's fill
+   picks up, so the plane step never has to tap through the finished ball
+   field (#360). **After each BGA/PGA fanout, run
+   `place_fanout_clearance.py`** to clear decoupling-cap / fanout-via
+   collisions (#130) before signal routing.
 2. **Differential Pairs** - The most constrained routes claim their channels before
    anything else can block them (if present). Add `--impedance <ohms>` for the
    controlled ones (USB/Ethernet/LVDS/balanced-RF; from `/find-high-speed-nets`).
@@ -2822,6 +3233,12 @@ python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/board_score.py \
 `blocking > 0` (exit 4) → the board is **not done**; go to **Step 9** and spend
 an iteration. Do not write a summary that describes an unfinished board as
 finished with caveats.
+
+**And run `check_orphan_stubs.py` in the same breath** — it is the one Step 6
+check no other instrument covers (an orphan stub breaks no connectivity and
+no clearance), and a run shipped one because its chain template carried every
+gate EXCEPT this line. A chain template that omits it will pass every other
+gate with the defect on board.
 
 **DO NOT PIPE A GATE.** This step and Step 9 decide on **exit codes**, and every
 `2>&1 | tee /tmp/…` in this document is for a *log*, not a *gate* — a piped
@@ -3735,20 +4152,25 @@ better; a non-zero exit or a missing SCORE rejects the round.
 full chain re-run, and that assumption is wrong (9.3a). A scoped retry takes
 seconds, so a hundred of them is an afternoon, not a week.
 
-**Count two kinds separately, and say which you are spending:**
+**Count three kinds separately, and say which you are spending:**
 
 | kind | what it does | example |
 |---|---|---|
 | **completion** | changes the copper: routes a net, heals a separation, fixes a width | `route.py --nets QSPI_SD1 ... --rip-existing-nets ...` |
+| **placement** | moves footprints: a quench, a repair, a reconstruction — connects nothing, tunes no instrument | `place_seed --repair`, `place_reconstruct`, a 0c quench, a loop round |
 | **systemic** | changes how the chain routes, measures or grades — no net gets connected by it | pinning the fab floor, restoring net classes, filling zones, fixing a checker |
+
+(`placement` exists because two runs had to file placement repairs as
+`systemic` for want of a kind, and `status`'s systemic-share warning cried
+wolf about runs that were spending their budget on the board.)
 
 Systemic iterations are necessary and they are not progress. A run once spent
 **nine of eleven** on them, moved `blocking` every time, and finished with five
 nets carrying no copper. **If three consecutive iterations are systemic, stop and
 ask what is actually unconnected** — you are tuning the instrument, not the board.
 
-Record `"kind": "completion" | "systemic"` in every ledger entry. The final report
-states both counts.
+Record `"kind": "completion" | "placement" | "systemic"` in every ledger entry.
+The final report states all three counts.
 
 ```bash
 python3 -X utf8 route.py board.kicad_pcb --list-groups --group-by auto
@@ -4080,6 +4502,65 @@ cost a commit. The score is the record; the lever text is a caption of it.
 **Log the systemic/completion split in the final report**: *"41 iterations: 9
 systemic, 32 completion"* is a fact about how the budget was spent, and a run that
 cannot state it was not keeping a ledger.
+
+#### 9.4b — Boundary verification: BLOCKING, at every accepted iteration and at close
+
+The ledger records what the operator SAYS happened; nothing above checks it
+until the close-out audit, and by then the errors have compounded. Run 4's
+audit found exactly this: 6 of 8 entries batch-written after the fact (the
+per-step timestamps said so), and one `[read:]` tag claiming a pixel read
+that never happened. Both were honest-looking entries a contemporaneous
+check would have bounced in seconds.
+
+**The rule: after every ACCEPTED iteration's ledger entry, and at close-out,
+an independent subagent verifies the entry against its artifacts BEFORE the
+next step may start. A FAIL blocks; remediate (fix the entry, re-read the
+artifact, or re-run the step) and re-verify.**
+
+What the boundary verifier receives — and it must be ONLY this, never the
+raw board (it verifies the RECORD, not the routing):
+
+- the ledger entry (the JSONL line just written),
+- the score JSON it attaches (`--score` payload),
+- the render JSON(s) the entry's `[read: ...]` tags name,
+- the operator's one-paragraph claim of what the iteration did.
+
+What it checks, each with the artifact that decides:
+
+1. **board_sha binding** — the score payload's `board_sha` matches the
+   entry's `result_sha`; a stale attachment (run 4 had two, deliberate but
+   warned) must be lever-explained in the entry itself.
+2. **`[read:]` truthfulness** — every panel the entry claims was read exists
+   in the named render JSON, and every checklist value the claim quotes
+   matches that JSON. An entry whose claim quotes numbers appearing in no
+   attached artifact FAILS (run 4's e4: the tag implied a read that lived
+   only in the journal).
+3. **Contemporaneity** — the entry's timestamp is AFTER its artifacts'
+   mtimes and BEFORE any later step's artifacts. Batch-written history
+   shows up as a cluster of entries stamped within seconds; that is a FAIL
+   on every entry in the cluster except the last (run-2's defect, recurred
+   run 4; "record between steps or disclose in the entry, no third option").
+4. **Claims-vs-artifacts** — every number in the operator's claim traces to
+   a field in the entry, the score, or a named render JSON. "Fixed 4 nets"
+   with no names in the lever text is a FAIL (the whack-a-mole rule above).
+5. **Assembly-clean** (run 6; placement-phase and fix-loop boundaries) —
+   the verifier additionally receives the fresh `check_assembly` JSON and
+   the render JSON, and FAILS unless `blocking == 0`, the checklist's
+   `b_body_overlap_pairs` is empty, and every NEW-vs-baseline advisory
+   pair is either fixed or dispositioned in the entry. A claim of
+   "placement done" with no attached `check_assembly` JSON is itself a
+   FAIL — the run-5 lesson is that the phase ended on belief.
+
+Reply format is the watcher's: one line,
+`VERDICT=PASS` or `VERDICT=FAIL:check=<1-5>;finding=<one line>;evidence=<path#pointer>`.
+
+Cadence discipline: REJECTED iterations do not get a boundary verification
+(their entries record a road not taken; the close-out audit samples them),
+and the verifier is bounded to the slices above — handing it the whole work
+dir invites it to re-litigate routing decisions, which is the convergence
+loop's job, not the record-keeper's. The close-out boundary verification
+additionally walks the WHOLE ledger for checks 3 and 4 (monotone t-stamps
+end to end; the final entry's stop condition quoted against its score).
 
 #### 9.5 — Stop conditions. Only these four. Say which one fired, every time.
 

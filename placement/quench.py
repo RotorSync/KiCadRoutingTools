@@ -45,7 +45,8 @@ from placement.parser import (courtyard_for_side, extract_courtyard_sides,
                               extract_locked_refs, warn_missing_courtyards)
 from placement.utility import compute_footprint_bbox_local, snap_to_grid
 from placement import legality
-from placement.legality import (BoardOutlineGate, footprint_has_through_pads,
+from placement.legality import (CONTAINER_RATIO, BoardOutlineGate,
+                                footprint_has_through_pads,
                                 footprint_side, pair_min_gap, rect_gap,
                                 rotate_local_bounds, sides_occupied)
 
@@ -392,6 +393,15 @@ class QuenchState:
                  align_radius: float = 0.5,
                  align_span: float = 20.0,
                  orient_weight: float = 0.0,
+                 # --- pad+drill legality layer, APPENDED for the same
+                 # positional-binding reason as the #548 block above.
+                 pad_legality: bool = True,
+                 # True HERE (no freeze): the zero-net freeze is an OPTIMIZER
+                 # policy, applied by quench() -- the seeder places mounting
+                 # holes from an intent and must not find them pre-locked
+                 # (measured: the freeze-in-state broke test_place_seed's
+                 # declared-edge H5 seat).
+                 move_unconnected: bool = True,
                  # --- corridor cut. Appended for the same reason as #548's
                  # four, and OFF by default: at weight 0.0 no corridor is ever
                  # built and the objective is bit-identical.
@@ -431,6 +441,14 @@ class QuenchState:
         no_courtyard = []
         for ref, fp in pcb_data.footprints.items():
             if not fp.pads:
+                # Zero-pad footprints (graphics-only mechanical parts, logos
+                # with a courtyard) used to be dropped entirely -- neither
+                # movable NOR an obstacle, so the optimizer walked parts onto
+                # them. With a drawn courtyard they now enter as locked static
+                # obstacles; without one there is no geometry to respect.
+                if ref in courtyards:
+                    self.parts[ref] = _Part(ref, fp, courtyards, True,
+                                            halo_base, halo_coef)
                 continue
             locked = (ref in locked_refs
                       or (move_refs is not None and ref not in move_refs))
@@ -438,10 +456,52 @@ class QuenchState:
                 no_courtyard.append(ref)
             self.parts[ref] = _Part(ref, fp, courtyards, locked,
                                     halo_base, halo_coef)
+            # A part with NO connected pins (mounting hole, NPTH, fiducial) is
+            # invisible to the airwire cost -- only halo/edge decide where it
+            # goes, which is how holes wander. Frozen by default; the caller
+            # frees them explicitly with move_unconnected (--move-unconnected).
+            if self.parts[ref].pin_count == 0 and not move_unconnected:
+                self.parts[ref].locked = True
             # Ignored nets (e.g. plane-routed power) don't contribute airwires
             self.parts[ref].nets = [n for n in self.parts[ref].nets
                                     if n not in ignore]
         warn_missing_courtyards(no_courtyard, 'quench')
+
+        # Run-6 CONTAINER exemption: a courtyard covering most of the board
+        # is a FRAME (a module-outline footprint hosting the whole design),
+        # not a body -- measured on rp2350_fpga_eensy: U8's courtyard is
+        # 1.13x the board area and the courtyard-hard gate refused EVERY
+        # pose on the board (13 unrepairable, 0.00mm moved), while the next
+        # largest ratio anywhere in the 33-board corpus is 0.29 (a
+        # connector). Pairs with a container member skip the courtyard
+        # channels; the PAD layer (pads_ok) still applies in full -- the
+        # module's pads are real obstacles.
+        barea = max(1e-9, (bounds[2] - bounds[0]) * (bounds[3] - bounds[1]))
+        self.container_refs = set()
+        for ref, p in self.parts.items():
+            r = p.rect()
+            if (r[2] - r[0]) * (r[3] - r[1]) >= CONTAINER_RATIO * barea:
+                self.container_refs.add(ref)
+        if self.container_refs:
+            print(f"  container footprint(s) (courtyard >= "
+                  f"{CONTAINER_RATIO:.0%} of the board -- frame, not body): "
+                  f"{', '.join(sorted(self.container_refs))}")
+
+        # --- pad + drill legality (gate currency; see placement/legality.py).
+        # pose_of/seed_of read the live _Part records, so the context follows
+        # every apply_move with no invalidation; baselines key off SEED poses.
+        self.pad_legality = bool(pad_legality)
+        self.legality_ctx = None
+        if self.pad_legality:
+            part_pads = legality.build_part_pads(
+                {ref: pcb_data.footprints[ref] for ref in self.parts
+                 if ref in pcb_data.footprints}, clearance)
+            self.legality_ctx = legality.LegalityContext(
+                part_pads, self.edge_gate, clearance,
+                pose_of=lambda r: (self.parts[r].x, self.parts[r].y,
+                                   self.parts[r].rot),
+                seed_of=lambda r: (self.parts[r].seed_x, self.parts[r].seed_y,
+                                   self.parts[r].orig_rot))
 
         # net -> refs touching it, as a SORTED LIST, not a set (#457).
         #
@@ -776,6 +836,9 @@ class QuenchState:
         them already; rects_a / rects_b carry the far-side rects when the caller
         has them (defaulting to the parts' live poses).
         """
+        if (part_a.ref in self.container_refs
+                or part_b.ref in self.container_refs):
+            return 0.0    # run-6: container = frame, not body
         required = part_a.halo + part_b.halo
         if not (part_a.has_tht or part_b.has_tht):
             # Fast path (nearly every pair): plain SMD parts interact only when
@@ -799,7 +862,12 @@ class QuenchState:
                 return 0.0
         if gap >= required:
             return 0.0
-        short = required - max(gap, 0.0)
+        # No clamp at zero: a deeper overlap must cost MORE than a shallow one,
+        # or nothing in the objective ever repairs an existing overlap (the
+        # clamp made a 2mm-deep overlap price identically to a touching pair).
+        # Bit-identical on any board with no overlapping pair -- the hard gate
+        # forbids CREATING one, so only seeded-in violations see the change.
+        short = required - gap
         return self.halo_weight * short * short
 
     def _edge_penalty(self, rect, ref=None):
@@ -910,9 +978,12 @@ class QuenchState:
         clr = self.clearance
         rect = rects[0]
         tht = part.has_tht
+        skip_containers = (ref in self.container_refs)
         for other_ref, other in others:
             if other_ref == ref or (exclude and other_ref in exclude):
                 continue
+            if skip_containers or other_ref in self.container_refs:
+                continue    # run-6: container = frame, not body
             if tht or other.has_tht:
                 gap = part.gap_to(other, rects)
                 if gap is None:
@@ -973,9 +1044,12 @@ class QuenchState:
                 others = self.parts.items()
             clr = self.clearance
             tht = part.has_tht
+            skip_containers = (ref in self.container_refs)
             for other_ref, other in others:
                 if other_ref == ref or (exclude and other_ref in exclude):
                     continue
+                if skip_containers or other_ref in self.container_refs:
+                    continue    # run-6: container = frame, not body
                 if tht or other.has_tht:
                     # Either part reaches the far side: fall through to the
                     # shared-side rule, which needs both parts' rect pairs.
@@ -1004,6 +1078,13 @@ class QuenchState:
                 if rect_gap(rect, r) < clr:
                     legal = False
                     break
+        if legal and self.legality_ctx is not None:
+            # Pad+drill layer: courtyard-clear does not imply pad-clear (pads
+            # overhanging courtyards, exchanged nets, NPTH holes). Baseline-
+            # relative: the pose may not worsen any pair vs the SEED, and a
+            # NEW different-net pad intersection is never admitted.
+            legal = self.legality_ctx.pads_ok(
+                ref, x, y, rot, self._pad_neighbors(ref), exclude=exclude)
         if legal:
             return True
         # Only now, on a rejected candidate, is the incumbent's legality worth
@@ -1019,8 +1100,53 @@ class QuenchState:
             return False
         cand_board, cand_overlap = self.violation_parts(
             ref, x, y, rot, exclude=exclude, limit=cur_board)
-        return (cand_overlap <= EPS_IMPROVE
-                and cand_board < cur_board - EPS_IMPROVE)
+        if not (cand_overlap <= EPS_IMPROVE
+                and cand_board < cur_board - EPS_IMPROVE):
+            return False
+        # The unfreeze branch gets the SAME pad/hole conjunct: a part may move
+        # back toward the board only without worsening any pad pair.
+        if self.legality_ctx is not None:
+            return self.legality_ctx.pads_ok(
+                ref, x, y, rot, self._pad_neighbors(ref), exclude=exclude)
+        return True
+
+    def _pad_neighbors(self, ref):
+        """Neighbor refs for the pad gate: the pruned list when built, else
+        everyone. The pruning boxes are widened with pad/hole extents in
+        build_neighbor_lists, so the list stays a superset of interacting
+        pairs."""
+        if self._neighbors is not None and ref in self._neighbors:
+            return self._neighbors[ref]
+        return [o for o in self.parts if o != ref]
+
+    def swap_pads_ok(self, ra, rb):
+        """May two parts exchange poses, pad/hole-wise? The exchange preserves
+        courtyard occupancy but NOT nets -- identical copper, exchanged net
+        assignments can land a pad inside a foreign (or locked) part's
+        clearance that the old net shared. Each part is tested at its partner's
+        pose against its own neighbors, plus the pair itself with both at
+        their new poses."""
+        if self.legality_ctx is None:
+            return True
+        pa, pb = self.parts[ra], self.parts[rb]
+        pose_a = (pb.x, pb.y, pb.rot)
+        pose_b = (pa.x, pa.y, pa.rot)
+        if not self.legality_ctx.pads_ok(ra, *pose_a,
+                                         self._pad_neighbors(ra),
+                                         exclude={rb}):
+            return False
+        if not self.legality_ctx.pads_ok(rb, *pose_b,
+                                         self._pad_neighbors(rb),
+                                         exclude={ra}):
+            return False
+        cur = self.legality_ctx.pair_shortfall(ra, rb, pose_a=pose_a,
+                                               pose_b=pose_b)
+        base = self.legality_ctx.seed_baseline(ra, rb)
+        if cur.pad > base.pad + EPS_IMPROVE:
+            return False
+        if cur.pad_overlap and not base.pad_overlap:
+            return False
+        return cur.hole <= base.hole + EPS_IMPROVE
 
     def _incumbent_violation(self, ref):
         v = self._inc_violation.get(ref)
@@ -1182,9 +1308,44 @@ class QuenchState:
                 oob_count += 1
                 oob_amount += amt
                 oob_area += self.edge_gate.out_of_board_area(p.rect)
-        return {'overlap_area': legality.placement_overlap_area(parts),
-                'oob_count': oob_count, 'oob_amount': oob_amount,
-                'oob_area': oob_area, 'hpwl': self.hpwl()}
+        out = {'overlap_area': legality.placement_overlap_area(parts),
+               'oob_count': oob_count, 'oob_amount': oob_amount,
+               'oob_area': oob_area, 'hpwl': self.hpwl()}
+        out.update(self.pad_legality_metrics())
+        return out
+
+    def pad_legality_metrics(self):
+        """AABB-currency pad/hole tallies of the CURRENT placement (the gate
+        currency -- conservative; the CLIs re-grade the written file with
+        exact geometry via legality.grade_pad_legality). Empty when the pad
+        layer is off."""
+        if self.legality_ctx is None:
+            return {}
+        refs = sorted(self.parts)
+        pairs = 0
+        short = 0.0
+        overlaps = 0
+        holes = 0.0
+        stacks = 0
+        for i, a in enumerate(refs):
+            for b in refs[i + 1:]:
+                sf = self.legality_ctx.pair_shortfall(a, b)
+                if sf.pad > legality.EPS:
+                    pairs += 1
+                    short += sf.pad
+                if sf.pad_overlap:
+                    overlaps += 1
+                if sf.stack:
+                    stacks += 1
+                holes += sf.hole
+        return {'pad_conflict_pairs': pairs,
+                'pad_shortfall': round(short, 4),
+                'pad_overlap_pairs': overlaps,
+                # run-6: ANY-net cross-footprint pad intersections -- the
+                # assembly (stacked-parts) channel, corpus-calibrated 0 on
+                # every healthy board in both exact and AABB currencies
+                'pad_intersection_pairs': stacks,
+                'hole_shortfall': round(holes, 4)}
 
     # ----- move application -------------------------------------------------
 
@@ -1273,14 +1434,37 @@ class QuenchState:
             if not p.locked:
                 group_rots.setdefault(p.footprint_name, set()).update(
                     p.bounds_by_rot)
+        # Pad/hole extents must also be bounded by the pruning boxes, or the
+        # pad gate's neighbor lists silently become lossy for parts whose pads
+        # overhang their courtyard (THT connectors are the common case).
+        def _pad_ext_boxes(ref, rots):
+            if self.legality_ctx is None:
+                return []
+            pp = self.legality_ctx.parts.get(ref)
+            if pp is None:
+                return []
+            out = []
+            for r in rots:
+                e = pp.extent_local(r)
+                if e is not None:
+                    out.append(e)
+            return out
+
         geom = {}
         for ref, p in self.parts.items():
             if p.locked:
                 lr = p.rect()
                 tr = p.tht_rect()
-                geom[ref] = ((lr if tr is None else
-                              (min(lr[0], tr[0]), min(lr[1], tr[1]),
-                               max(lr[2], tr[2]), max(lr[3], tr[3]))), 0.0)
+                box = (lr if tr is None else
+                       (min(lr[0], tr[0]), min(lr[1], tr[1]),
+                        max(lr[2], tr[2]), max(lr[3], tr[3])))
+                if self.legality_ctx is not None:
+                    pp = self.legality_ctx.parts.get(ref)
+                    pe = pp.extent(p.x, p.y, p.rot) if pp is not None else None
+                    if pe is not None:
+                        box = (min(box[0], pe[0]), min(box[1], pe[1]),
+                               max(box[2], pe[2]), max(box[3], pe[3]))
+                geom[ref] = (box, 0.0)
             else:
                 boxes = [p.bounds_by_rot[r] if r in p.bounds_by_rot
                          else _rotate_local_bounds(*p.bounds_by_rot[0.0], r)
@@ -1293,6 +1477,7 @@ class QuenchState:
                     boxes += [p.tht_by_rot[r] if r in p.tht_by_rot
                               else _rotate_local_bounds(*p.tht_by_rot[0.0], r)
                               for r in group_rots[p.footprint_name]]
+                boxes += _pad_ext_boxes(ref, group_rots[p.footprint_name])
                 u0 = min(b[0] for b in boxes)
                 u1 = min(b[1] for b in boxes)
                 u2 = max(b[2] for b in boxes)
@@ -1442,9 +1627,12 @@ def quench(pcb_data: PCBData, pcb_file: str,
            align_radius: float = 0.5,
            align_span: float = 20.0,
            orient_weight: float = 0.0,
+           verbose: bool = False,
+           pad_legality: bool = True,
+           min_gain_per_mm: float = 0.1,
+           move_unconnected: bool = False,
            corridor_weight: float = 0.0,
-           corridor_specs: Optional[Sequence[Dict]] = None,
-           verbose: bool = False) -> List[Dict]:
+           corridor_specs: Optional[Sequence[Dict]] = None) -> List[Dict]:
     """Greedy quench: iterate over parts, accept only cost-reducing moves.
 
     align_weight / align_radius / align_span, orient_weight: the #548 tidiness
@@ -1528,6 +1716,8 @@ def quench(pcb_data: PCBData, pcb_file: str,
                         net_weights=net_weights,
                         align_weight=align_weight, align_radius=align_radius,
                         align_span=align_span, orient_weight=orient_weight,
+                        pad_legality=pad_legality,
+                        move_unconnected=move_unconnected,
                         corridor_weight=corridor_weight,
                         corridor_specs=corridor_specs)
     state.build_neighbor_lists(max_displacement + grid_step)
@@ -1600,7 +1790,11 @@ def quench(pcb_data: PCBData, pcb_file: str,
                 c = eval_group(ddx, ddy)
                 if c < best[0] - EPS_IMPROVE:
                     best = (c, ddx, ddy)
-            if best[0] < base_cost - EPS_IMPROVE:
+            # Displacement-scaled acceptance: motion must buy objective. At 0
+            # this is exactly the old EPS_IMPROVE rule.
+            if (base_cost - best[0] > EPS_IMPROVE
+                    + min_gain_per_mm * math.hypot(best[1], best[2])
+                    and (best[1], best[2]) != (0.0, 0.0)):
                 improved += base_cost - best[0]
                 moves += 1
                 group_moves += 1
@@ -1650,7 +1844,10 @@ def quench(pcb_data: PCBData, pcb_file: str,
                     if c < best[0] - EPS_IMPROVE:
                         best = (c, cx, cy, rot)
 
-            if best[0] < current_cost - EPS_IMPROVE:
+            moved_dist = math.hypot(best[1] - part.x, best[2] - part.y)
+            rot_charge = 0.5 if best[3] != part.rot else 0.0
+            if (current_cost - best[0] > EPS_IMPROVE
+                    + min_gain_per_mm * (moved_dist + rot_charge)):
                 gain = current_cost - best[0]
                 improved += gain
                 moves += 1
@@ -1761,10 +1958,17 @@ def quench(pcb_data: PCBData, pcb_file: str,
                                     pb, pb.rect(bx, by, brot))
                             return net_cost + geo
 
+                        # Pad/hole gate BEFORE the expensive pair evaluation:
+                        # identical copper, exchanged nets can short against a
+                        # neighbor the old assignment shared a net with.
+                        if not state.swap_pads_ok(ra, rb):
+                            swaps_skipped_shape += 1
+                            continue
                         cur = eval_pair(pa.x, pa.y, pa.rot, pb.x, pb.y, pb.rot)
                         swapped = eval_pair(pb.x, pb.y, pb.rot,
                                             pa.x, pa.y, pa.rot)
-                        if swapped < cur - EPS_IMPROVE:
+                        swap_dist = 2.0 * math.hypot(pa.x - pb.x, pa.y - pb.y)
+                        if cur - swapped > EPS_IMPROVE + min_gain_per_mm * swap_dist:
                             gain = cur - swapped
                             improved += gain
                             moves += 1

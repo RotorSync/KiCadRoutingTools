@@ -165,3 +165,60 @@ measurement and a written finding about the requirement.
 order, on the same inputs, tag each `mode=inline`, and **say in the report that
 verification was single-agent**. A run must never look like a fan-out happened
 when it did not.
+
+
+## Pre-registration rule: arm falsifiers in BOTH directions (run-4 B12)
+
+A watcher pre-registering predictions must give, per prediction, the
+number/band that would CONFIRM it and the one that would REFUTE it — in
+both directions. Run 3's prereg armed a placement-erosion falsifier only
+upward ("home rises >= 3"), so the actual 26->15 DOWNWARD erosion on the
+rejected quenches never tripped it and was caught only by the close-out
+grading. This applies to regressions and to improvement claims alike: an
+improvement band without a floor is a prediction that cannot lose.
+
+## The boundary verifier (run-5, SKILL 9.4b): blocking, per accepted iteration
+
+Distinct from the close-out lenses above: it runs DURING the loop, after
+every accepted iteration's ledger entry, and a FAIL blocks the next step.
+It verifies the RECORD, never the routing — hand it the slices only.
+
+Prompt skeleton (fill the <>):
+
+> You are a blocking boundary verifier. You receive: (1) one ledger JSONL
+> entry, (2) the score JSON it attaches, (3) the render JSON(s) its
+> `[read:]` tags name, (4) the operator's one-paragraph claim. You never
+> see the board. Check, in order: [1] the score's `board_sha` equals the
+> entry's `result_sha` (a mismatch must be lever-explained in the entry);
+> [2] every claimed `[read: panel]` exists in the named render JSON and
+> every quoted checklist value matches it; [3] the entry's timestamp is
+> after its artifacts' mtimes and before any later artifact you were
+> given (a cluster of near-identical stamps is batch-written history —
+> FAIL); [4] every number in the claim traces to a field in an artifact
+> you hold; failing nets must be NAMED, not counted. Reply with exactly
+> one line: VERDICT=PASS or
+> VERDICT=FAIL:check=<1-4>;finding=<one line>;evidence=<path#pointer>.
+> Report the single most damning finding.
+
+Rules of engagement, mirrored from 9.4b:
+
+- Accepted iterations and close-out only; rejected entries wait for the
+  close-out audit.
+- The close-out instance additionally walks the whole ledger: monotone
+  timestamps end to end, and the `--final` entry's stop condition quoted
+  against its own score payload.
+- A FAIL is remediated (fix the entry, re-read the artifact, or re-run
+  the step) and re-verified before the loop continues — it is never
+  re-worded into a caveat.
+- When the `Agent` tool is unavailable, run the same checks yourself,
+  tag `mode=inline`, and say so in the report — same as the lens rule.
+
+## Check 5 addendum (run-6): assembly-clean at placement boundaries
+
+At any placement-phase or fix-loop boundary the verifier's input set grows
+by the fresh `check_assembly --json` output (and the render JSON's
+`checklist.b_body_overlap_pairs`). FAIL unless: `blocking == 0`;
+`b_body_overlap_pairs` is `[]`; every `new_advisory_pairs` entry (the
+--baseline delta -- the loop currency) is fixed or dispositioned in the
+ledger entry. An operator claim of "placement done" with no check_assembly
+JSON attached is a FAIL by itself. The verdict line's check id is 5.
