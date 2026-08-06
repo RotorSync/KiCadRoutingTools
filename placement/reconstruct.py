@@ -275,25 +275,42 @@ def fit_corner_insets(state, tiers: Tiers) -> Dict[str, List[Tuple[float, float]
     from collections import defaultdict
     groups = defaultdict(list)
     for ref, corner, ix, iy in holes:
-        if abs(ix - iy) <= 2 * GRID_TOL:
-            groups[round((ix + iy) / 2 / GRID_TOL)].append(
-                (ref, corner, (ix + iy) / 2))
+        # PER-AXIS conformance (run-8 A1). This used to demand ix ~= iy, i.e.
+        # a SQUARE inset, so an ordinary asymmetric pattern -- a hole 7.62mm
+        # in from one edge and 1.27mm from the other, which is just an
+        # imperial layout -- never conformed and the fit found nothing at all.
+        # Group on the inset PAIR instead: the two axes have to agree across
+        # holes, not with each other.
+        groups[(round(ix / GRID_TOL), round(iy / GRID_TOL))].append(
+            (ref, corner, (ix, iy)))
     proposals: Dict[str, List[Tuple[float, float]]] = {}
     for _key, members in sorted(groups.items(), key=lambda kv: -len(kv[1])):
         distinct = {m[1] for m in members}
         if len(members) < 2 or len(distinct) != len(members):
             continue
-        inset = sum(m[2] for m in members) / len(members)
+        inset_x = sum(m[2][0] for m in members) / len(members)
+        inset_y = sum(m[2][1] for m in members) / len(members)
         survivors = {m[0] for m in members}
         free_corners = [c for c in corners if c not in distinct]
-        for ref, _c, _ix, _iy in holes:
-            if ref in survivors or ref in tiers.locked:
+        for ref, _c, ix, iy in holes:
+            if ref in tiers.locked:
+                continue
+            # AT-HOME survivors are not proposals (run-8 A1). A hole already
+            # sitting on the fitted pattern has nothing to be moved to, and
+            # offering it every free corner is how a correct hole gets
+            # swapped into a wrong one -- the degeneracy that cost a earlier
+            # run ~0.16 of recovery. Its conformance is still what
+            # over-determines the fit; it just is not a candidate.
+            if ref in survivors:
+                continue
+            if (abs(ix - inset_x) <= GRID_TOL
+                    and abs(iy - inset_y) <= GRID_TOL):
                 continue
             cand = []
             for c in free_corners:
                 cx, cy = corners[c]
-                px = cx + inset if cx == b[0] else cx - inset
-                py = cy + inset if cy == b[1] else cy - inset
+                px = cx + inset_x if cx == b[0] else cx - inset_x
+                py = cy + inset_y if cy == b[1] else cy - inset_y
                 cand.append((round(px, 4), round(py, 4)))
             if cand:
                 proposals[ref] = cand
