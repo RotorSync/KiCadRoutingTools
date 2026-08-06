@@ -61,11 +61,11 @@ PLUG = os.path.join(REPO, "kicad_routing_plugin")
 # (CLI module, GUI module, CLI-side function name, GUI-side call name).
 # The names differ when the GUI imports the engine under an alias.
 PAIRS = [
-    ("route.py",            "kicad_routing_plugin/swig_gui.py",
+    ("py_router/route.py",            "kicad_routing_plugin/swig_gui.py",
      "batch_route", "batch_route"),
-    ("route_diff.py",       "kicad_routing_plugin/differential_gui.py",
+    ("py_router/route_diff.py",       "kicad_routing_plugin/differential_gui.py",
      "batch_route_diff_pairs", "batch_route_diff_pairs"),
-    ("route_planes.py",     "kicad_routing_plugin/planes_gui.py",
+    ("py_router/route_planes.py",     "kicad_routing_plugin/planes_gui.py",
      "create_plane", "create_plane"),
     # (No repair pair since #562: plane repair moved INSIDE batch_route's
     # finalize, so route.py<->swig_gui's batch_route pair covers it and the

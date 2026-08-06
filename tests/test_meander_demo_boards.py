@@ -316,8 +316,13 @@ def test_protected_nets(tmp):
                 "--track-width", "0.2", "--clearance", "0.15"])
     if "eligible for rip-up" not in out or "SE3" not in out.split("eligible for rip-up")[1][:80]:
         _fail("exact-name override did not make SE3 rip-eligible:\n" + out[-1200:])
-    if "PROTECTED net(s) excluded" in out:
-        _fail("exact-name override still reported SE3 as excluded")
+    # The pre-existing rip-candidacy pass legitimately prints an exclusion
+    # line for OTHER protected nets (SE1/SE2/DP_*) it declines to
+    # auto-register -- assert SE3 is not IN any exclusion line, not that no
+    # line exists.
+    for ln in out.splitlines():
+        if "PROTECTED net(s) excluded" in ln and "SE3" in ln:
+            _fail("exact-name override still reported SE3 as excluded:\n" + ln)
     print(f"PASS  protected nets: {len(prot)} recorded; glob rip skipped them "
           f"(lengths held); exact-name override made SE3 rip-eligible")
 
@@ -417,7 +422,7 @@ def test_impedance_redo(tmp):
 
     # check_impedance auto-reads the stored declarations (#521): SE2's entry
     # (gap 0 = declared non-coplanar) is picked up with no flags at all.
-    out = _run(["check_impedance.py", s2, "--exit-zero"])
+    out = _run(["py_tools/check_impedance.py", s2, "--exit-zero"])
     if "Auto-read 1 net impedance declaration(s)" not in out:
         _fail("check_impedance did not auto-read the stored spec:\n" + out[:1200])
 
@@ -427,7 +432,7 @@ def test_impedance_redo(tmp):
     s3 = os.path.join(tmp, "imp_s3.kicad_pcb")
     _run(["py_router/route.py", s2, s3, "--nets", "SE3", "--track-width", "0.15",
           "--clearance", "0.15", "--impedance", "60", "--coplanar-gap", "0.3"])
-    r = subprocess.run([sys.executable, "check_impedance.py", s3, "--nets", "SE3"],
+    r = subprocess.run([sys.executable, "py_tools/check_impedance.py", s3, "--nets", "SE3"],
                        capture_output=True, text=True, cwd=REPO)
     if "(1 coplanar)" not in r.stdout:
         _fail("stored coplanar declaration not auto-read:\n" + r.stdout[:1200])

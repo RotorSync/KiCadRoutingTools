@@ -96,11 +96,17 @@ def main():
 
     # ---- 1. route.py: signal churn ------------------------------------------
     out1 = os.path.join(tmp, "route_churn.kicad_pcb")
-    rc, log = run_cmd(["route.py", os.path.join(KF, "flat_hierarchy.kicad_pcb"), out1,
+    rc, log = run_cmd(["py_router/route.py", os.path.join(KF, "flat_hierarchy.kicad_pcb"), out1,
                        "--nets", "*", "!GND",
                        "--track-width", "0.8", "--clearance", "0.7",
                        "--via-size", "1.0", "--via-drill", "0.6",
-                       "--layers", "F.Cu", "B.Cu", "--max-ripup", "10"],
+                       # 2026-08-05 re-tune (per this header: more congestion,
+                       # never delete): the two-layer recipe stopped churning
+                       # once the engine gained pre-existing rip candidacy +
+                       # the plain-net via rung -- it now routes clean at ANY
+                       # fatness on two layers. Single-layer restores real
+                       # churn: 64 rips / 13 tap windows, maps still BALANCED.
+                       "--layers", "F.Cu", "--max-ripup", "10"],
                       ledger=True, fragility_off=True)
     check("route.py: run completed", rc == 0, f"rc={rc}")
     rips = len(re.findall(r"[Rr]ipping|Extending to N", log))
@@ -115,7 +121,7 @@ def main():
 
     # ---- 2. route_diff -------------------------------------------------------
     out2 = os.path.join(tmp, "diff_bal.kicad_pcb")
-    rc, log = run_cmd(["route_diff.py", os.path.join(KF, "lvds_converter_dualclk.kicad_pcb"),
+    rc, log = run_cmd(["py_router/route_diff.py", os.path.join(KF, "lvds_converter_dualclk.kicad_pcb"),
                        out2, "--nets", "/CLK+", "/CLK-", "/DATA+", "/DATA-",
                        "/CLK_P", "/CLK_N",
                        "--diff-pair-gap", "0.25", "--track-width", "0.2",
@@ -140,14 +146,14 @@ def main():
     # happened and the balance assertion below went vacuous. These nets put
     # RIPPABLE signal copper around U102's plane pads; the stage now logs 3
     # real rips out of 36 rip-up attempts.
-    rc, log = run_cmd(["route.py", os.path.join(KF, "kit-dev-coldfire-xilinx_5213.kicad_pcb"),
+    rc, log = run_cmd(["py_router/route.py", os.path.join(KF, "kit-dev-coldfire-xilinx_5213.kicad_pcb"),
                        kit_out, "--nets", "/AN*", "/IRQ*", "/QSPI*", "/DTIN*",
                        "/PWM*", "/GPT*", "/PST*", "/DDAT*",
                        "--layers", "F.Cu", "In1.Cu", "In2.Cu", "B.Cu",
                        "--max-ripup", "10"] + kit_geom, audit=False)
     check("route_planes: kit signal pre-route completed", rc == 0, f"rc={rc}")
     kit_plane = os.path.join(tmp, "kit_plane.kicad_pcb")
-    rc, log = run_cmd(["route_planes.py", kit_out, kit_plane,
+    rc, log = run_cmd(["py_router/route_planes.py", kit_out, kit_plane,
                        "--nets", "+3.3V", "GND", "+3.3V", "GND",
                        "--plane-layers", "F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
                       + kit_geom)
@@ -169,20 +175,20 @@ def main():
     iu_fan = os.path.join(tmp, "iu_fanout.kicad_pcb")
     iu_routed = os.path.join(tmp, "iu_routed.kicad_pcb")
     iu_fixed = os.path.join(tmp, "iu_repair.kicad_pcb")
-    rc, _ = run_cmd(["route_planes.py", os.path.join(KF, "interf_u_unrouted.kicad_pcb"),
+    rc, _ = run_cmd(["py_router/route_planes.py", os.path.join(KF, "interf_u_unrouted.kicad_pcb"),
                      iu_plane, "--nets", "VCC", "GND",
                      "--plane-layers", "F.Cu", "B.Cu"], audit=False)
     check("repair: interf_u planes step completed", rc == 0, f"rc={rc}")
-    rc, _ = run_cmd(["bga_fanout.py", iu_plane, "--component", "U9",
+    rc, _ = run_cmd(["py_router/bga_fanout.py", iu_plane, "--component", "U9",
                      "--output", iu_fan, "--nets", "/*"], audit=False)
     check("repair: interf_u fanout step completed", rc == 0, f"rc={rc}")
-    rc, _ = run_cmd(["route.py", iu_fan, iu_routed, "--no-bga-zone",
+    rc, _ = run_cmd(["py_router/route.py", iu_fan, iu_routed, "--no-bga-zone",
                      "--layer-costs", "1", "1", "--max-ripup", "10",
                      "--stub-proximity-radius", "10", "--stub-proximity-cost", "3.0",
                      "--max-iterations", "1000000",
                      "--board-edge-clearance", "0.55"], audit=False)
     check("repair: interf_u signal route completed", rc == 0, f"rc={rc}")
-    rc, log = run_cmd(["repair_planes.py", iu_routed, iu_fixed,
+    rc, log = run_cmd(["py_router/repair_planes.py", iu_routed, iu_fixed,
                        "--board-edge-clearance", "0.6"], audit=False, tap_verify=True)
     check("repair: run completed under TAP_MAP_VERIFY", rc == 0, f"rc={rc}")
     check("repair: no shared-map divergence",

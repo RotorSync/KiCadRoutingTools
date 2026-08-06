@@ -39,7 +39,7 @@ def main():
         open(os.path.join(src, "0.25"), "w").write("decoy")
 
         cmds = [
-            (src, ["route.py", "a.kicad_pcb", "b.kicad_pcb",
+            (src, ["py_router/route.py", "a.kicad_pcb", "b.kicad_pcb",
                    "--net-clearances", "net_clearances_1v8.json",
                    "--clearance", "0.25", "--nets", "+3.3V",
                    "--routetrace", "trace.json"]),

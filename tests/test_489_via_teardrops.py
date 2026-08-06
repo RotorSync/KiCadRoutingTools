@@ -158,8 +158,8 @@ def run():
     # The filed gap: --add-teardrops existed on 3 of 6 CLIs, missing exactly from
     # the two scripts that place the most pad-entry copper and from plane repair.
     import re as _re
-    for rel in ("route.py", "route_diff.py", "route_planes.py",
-                "repair_planes.py",
+    for rel in ("py_router/route.py", "py_router/route_diff.py", "py_router/route_planes.py",
+                "py_router/repair_planes.py",
                 "bga_fanout/__init__.py", "qfn_fanout/__init__.py"):
         src = open(os.path.join(ROOT_DIR, rel), encoding="utf-8").read()
         check("--add-teardrops" in src,

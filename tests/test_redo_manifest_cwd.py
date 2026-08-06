@@ -61,7 +61,7 @@ python3 py_router/route.py final.kicad_pcb step6.kicad_pcb
         # The follow-up route.py has NO `# cwd=` of its own -- it must INHERIT the
         # cp's cwd (sticky), not fall back to None (launcher cwd).
         check("follow-up route.py inherits cwd (sticky)",
-              c3 == "/runs/eurorack_pmod" and a3[1].endswith("route.py"))
+              c3 == "/runs/eurorack_pmod" and a3[1].endswith("py_router/route.py"))
 
     if fails:
         print("FAIL: " + ", ".join(fails))
