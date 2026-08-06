@@ -1038,24 +1038,6 @@ def repair_planes(
                                           via_size, clearance,
                                           input_file=input_file)
 
-    # Run-6 A5, warn-only here (the repair legitimately runs mid-loop on
-    # boards with known opens): every tap via this step adds shrinks a bare
-    # pad's escape channel further, and tap fields are not rippable copper.
-    try:
-        from check_connected import bare_pad_nets
-        _bare = bare_pad_nets(pcb_data, exclude_net_ids=set(unique_nets))
-        if _bare:
-            _bn = sorted(pcb_data.nets[i].name for i in _bare
-                         if i in pcb_data.nets)
-            print(f"  WARNING: {len(_bare)} net(s) still have >=2 pads and "
-                  f"ZERO copper ({', '.join(_bn[:6])}"
-                  f"{', ...' if len(_bn) > 6 else ''}) -- this step's tap "
-                  f"vias will crowd their escape channels; route them first "
-                  f"if their pads must connect (the pour is a one-way door "
-                  f"for bare pads).")
-    except Exception:
-        pass
-
     # #517 instrumentation: which PASS placed each piece of this run's new
     # copper (pad-tap, region-join, partial-restore, reconnect, custody
     # restore), so a custody REFUSED-restore can name the occupier class
@@ -1124,6 +1106,27 @@ def repair_planes(
         if net_id not in unique_nets:
             unique_nets[net_id] = (net_name, set())
         unique_nets[net_id][1].add(plane_layer)
+
+    # Run-6 A5, warn-only here (MOVED: this ran BEFORE unique_nets existed,
+    # so it raised NameError into the bare `except` below on every call and
+    # the warning never once fired) (the repair legitimately runs mid-loop on
+    # boards with known opens): every tap via this step adds shrinks a bare
+    # pad's escape channel further, and tap fields are not rippable copper.
+    try:
+        from check_connected import bare_pad_nets
+        _bare = bare_pad_nets(pcb_data, exclude_net_ids=set(unique_nets))
+        if _bare:
+            _bn = sorted(pcb_data.nets[i].name for i in _bare
+                         if i in pcb_data.nets)
+            print(f"  WARNING: {len(_bare)} net(s) still have >=2 pads and "
+                  f"ZERO copper ({', '.join(_bn[:6])}"
+                  f"{', ...' if len(_bn) > 6 else ''}) -- this step's tap "
+                  f"vias will crowd their escape channels; route them first "
+                  f"if their pads must connect (the pour is a one-way door "
+                  f"for bare pads).")
+    except Exception:
+        pass
+
 
     # --reroute-ripped-nets is deprecated (issue #141 reverted). This step used to
     # rip signal blockers, route plane/pad repairs into the freed space, then

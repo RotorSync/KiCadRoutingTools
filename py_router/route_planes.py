@@ -2716,10 +2716,6 @@ def create_plane(
     # placement should prefer to keep clear. None -> AUTO (the board's
     # protected/impedance records); ['none'] -> off.
     corridor_nets: Optional[List[str]] = None,
-    # Run-6 blocker guards: extra never-rip patterns, and exact names that
-    # lift the multi-pad rail guard (see protected_nets.blocker_never_rip_ids).
-    rip_blocker_exclude: Optional[List[str]] = None,
-    rip_blocker_allow: Optional[List[str]] = None,
     # Run-6 A5 pour gate: a bare pad (>=2-pad net with zero copper) at pour
     # time has its escape channel consumed by the tap-via carpet, permanently.
     # CLI refuses (exit 3) unless --allow-bare-pads; the GUI path warns only.
@@ -2879,16 +2875,11 @@ def create_plane(
             sys.exit(3)
         print(f"{'!'*60}\n")
 
-    # Run-6 fix: the create side's tap rip ladder used to protect ONLY its own
-    # plane nets -- protection_map was never consulted here, so it could rip a
-    # length-matched or diff-pair net the repair script refuses to touch. The
-    # shared helper also applies the multi-pad rail guard and the CLI excludes.
-    from protected_nets import blocker_never_rip_ids
-    _never_rip_ids = blocker_never_rip_ids(
-        pcb_data, set(net_ids),
-        exclude_patterns=rip_blocker_exclude,
-        allow_names=rip_blocker_allow,
-        announce=bool(rip_blocker_nets))
+    # (The run-6 blocker guard that used to sit here is GONE with #562: the
+    # pour places no taps and cannot rip, so there is no blocker ladder to
+    # guard. It computed _never_rip_ids, which nothing read, and referenced a
+    # rip_blocker_nets parameter #562 had already removed -- a NameError on
+    # every pour. The guard still runs, and matters, in repair_planes.py.)
 
     # Track failed pads per net for retry passes
     # Each entry is (net_id, net_name, plane_layer, pad_info)
@@ -3946,15 +3937,6 @@ Examples:
                              "never excludes the only viable site). Default: AUTO -- the "
                              "board's protected nets and impedance declarations. Pass "
                              "'none' to disable.")
-    parser.add_argument("--rip-blocker-exclude", nargs="+", metavar="PATTERN",
-                        default=None,
-                        help="Net-name globs the blocker rip ladder must never pick, on top of "
-                             "the built-in guards (plane nets, #521-protected nets, and nets "
-                             "with more pads than the rail guard allows).")
-    parser.add_argument("--rip-blocker-allow", nargs="+", metavar="NET",
-                        default=None,
-                        help="EXACT net names for which the multi-pad rail guard is lifted -- "
-                             "a deliberate single-rail rip. Does not lift #521 protection.")
     parser.add_argument("--allow-bare-pads", action="store_true",
                         help="Pour even when nets with >=2 pads carry ZERO copper. Default "
                              "REFUSES (exit 3): the tap-via carpet permanently seals a bare "
@@ -4119,8 +4101,6 @@ Examples:
         input_file=args.input_file,
         output_file=args.output_file,
         corridor_nets=args.corridor_nets,
-        rip_blocker_exclude=args.rip_blocker_exclude,
-        rip_blocker_allow=args.rip_blocker_allow,
         allow_bare_pads=args.allow_bare_pads,
         ripup_blocker_select=args.ripup_blocker_select,
         net_names=net_names,
