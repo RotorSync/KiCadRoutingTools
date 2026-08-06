@@ -3093,7 +3093,36 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # staged-save oracle (planes-tab pattern) after the copper lands on the
     # live board.
     # Gate: KICAD_PLANE_FINALIZE=1 (default ON; env var is a kill switch).
-    if (final_reconcile and not skip_routing and not _ckpt_stop
+    #
+    # Debug re-entry (Andy, 0805): most finalize debugging pays a full route
+    # step per cycle. Two env knobs split the run at THIS boundary:
+    #   KICAD_CKPT_PREFINALIZE=1  -> snapshot the just-written board (+
+    #     .kicad_pro sibling) to <output-stem>.prefinalize.kicad_pcb before
+    #     the finalize touches it (CLI file mode only).
+    #   KICAD_FINALIZE_ONLY=1     -> with --skip-routing, run ONLY the
+    #     finalize + final reconciliation on the input board's existing
+    #     copper:  KICAD_FINALIZE_ONLY=1 python3 py_router/route.py \
+    #       x.prefinalize.kicad_pcb --output dbg.kicad_pcb --skip-routing \
+    #       --nets <same> <same params>
+    _fin_only = os.environ.get('KICAD_FINALIZE_ONLY', '0') == '1'
+    if (os.environ.get('KICAD_CKPT_PREFINALIZE', '0') == '1'
+            and output_file and not return_results and not skip_routing):
+        try:
+            import shutil as _sh9
+            _stem9 = (output_file[:-len('.kicad_pcb')]
+                      if output_file.endswith('.kicad_pcb') else output_file)
+            _ck9 = _stem9 + '.prefinalize.kicad_pcb'
+            _sh9.copy2(output_file, _ck9)
+            _pro9 = _stem9 + '.kicad_pro'
+            if os.path.exists(_pro9):
+                _sh9.copy2(_pro9, _stem9 + '.prefinalize.kicad_pro')
+            print(f"  CHECKPOINT: pre-finalize board -> {_ck9} "
+                  f"(KICAD_CKPT_PREFINALIZE; re-enter with "
+                  f"KICAD_FINALIZE_ONLY=1 + --skip-routing)")
+        except Exception as _e9c:
+            print(f"  (pre-finalize checkpoint failed: {_e9c})")
+    if (final_reconcile and (not skip_routing or _fin_only)
+            and not _ckpt_stop
             and (output_file or return_results)
             and not _plane_finalize_active()
             and os.environ.get('KICAD_PLANE_FINALIZE', '1') == '1'):
@@ -3261,6 +3290,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         # custody-restores casualties; KICAD_FINALIZE_RIP=0
                         # reverts for A/B.
                         rip_blocker_nets=_finalize_rip9,
+                        power_nets=power_nets,
+                        power_nets_widths=power_nets_widths,
                         pcb_data=pcb_data, return_results=True,
                         progress_callback=_pcb9)
                     _cursid9 = {id(s) for s in pcb_data.segments}
@@ -3327,6 +3358,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         board_edge_clearance=config.board_edge_clearance,
                         # Same rip-authority restoration as the GUI leg above.
                         rip_blocker_nets=_finalize_rip9,
+                        power_nets=power_nets,
+                        power_nets_widths=power_nets_widths,
                         pcb_data=_live9,
                         progress_callback=_pcb9)
                 print(f"  [finalize timing] engine leg: "

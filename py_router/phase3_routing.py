@@ -1287,6 +1287,25 @@ def try_phase3_ripup(
                 refused_sink=state.collision_refused_net_ids
             )
 
+    # #103 hint recording (hint-coverage): phase-3 tap edges were the last
+    # failure path that never recorded its pre-existing blockers -- ecp5
+    # /PF26+ dies HERE, so its winning rip set was printed by other paths
+    # but never exported per-net, and the transactional reconciliation
+    # retried it blind (LAST_RUN_BLOCKER_HINTS empty for the net).
+    try:
+        from routing_diagnostics import preexisting_blocker_hint
+        _cells103 = (locals().get('last_retry_blocked_cells')
+                     or all_blocked_cells)
+        _h103, _b103 = preexisting_blocker_hint(
+            _cells103, config, pcb_data, net_id,
+            routed_net_ids=routed_net_ids, return_names=True)
+        if _h103:
+            print(f"    {_h103}")
+            record_net_event(state, net_id, "preexisting_blockers",
+                             {"hint": _h103, "blockers": _b103})
+    except Exception:
+        pass
+
     return None
 
 

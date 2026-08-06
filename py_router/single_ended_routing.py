@@ -3529,6 +3529,27 @@ def route_multipoint_main(
                 }
         print(f"  Failed to route a main edge after {cumulative_iterations} iterations "
               f"({max_main_attempts} edge(s) tried)")
+        # Name pre-existing blockers (#103) for MULTIPOINT failures too: the
+        # single-ended loop records this event for the reconciliation's rip
+        # escalation, but multipoint edge failures never did -- so a custody
+        # plane net (GND-class, always multipoint) could not feed the
+        # plane-weld escalation round (0804-wave finding).
+        if state is not None and last_failure:
+            try:
+                from routing_diagnostics import preexisting_blocker_hint
+                from routing_state import record_net_event as _rne103
+                _cells103 = (
+                    (last_failure.get('blocked_cells_forward') or [])
+                    + (last_failure.get('blocked_cells_backward') or []))
+                _h103, _b103 = preexisting_blocker_hint(
+                    _cells103, config, pcb_data, net_id,
+                    routed_net_ids=state.routed_net_ids, return_names=True)
+                if _h103:
+                    print(f"  {_h103}")
+                    _rne103(state, net_id, "preexisting_blockers",
+                            {"hint": _h103, "blockers": _b103})
+            except Exception:
+                pass
         failure = dict(last_failure or {'failed': True})
         failure['iterations'] = cumulative_iterations
         return failure
