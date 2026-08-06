@@ -88,9 +88,15 @@ read it when the step below points at it:
 
 ## Step 0: Placement gate — measure first, then decide
 
-Before planning any routing, decide whether the board should be **placed** or
-**re-placed** at all. Most of the time the answer is no, and running placement on
-a good board makes it worse.
+Before planning any routing, MEASURE whether the board should be **placed** or
+**re-placed** at all, then decide from that. Do not decide from the board's
+appearance, and do not decide in advance.
+
+The measurement below is two commands on the copper-free board. Both of its
+outcomes are real answers: a board that measures clean is routed as it stands
+(running an optimizer over a good placement makes it worse -- measured), and a
+board that measures dirty is repaired at the rung its damage calls for. What
+is never an answer is not looking.
 
 ```bash
 # Is the board even placed? (report-only, writes nothing, exits 3 if not)
