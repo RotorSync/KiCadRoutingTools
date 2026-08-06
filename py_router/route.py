@@ -3844,103 +3844,144 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _rk['power_nets'] = _pn5
                     _rk['power_nets_widths'] = _pw5
             if return_results:
-                # GUI-parity reconciliation (gap-closure): re-invoke against
-                # the SAME in-memory board (the copper this run just
-                # committed lives in pcb_data, not in any file) and merge
-                # the sub-run's results into ours. An inner strip that
-                # targets copper THIS run emitted must instead drop it from
-                # our write-lists (the GUI applier REMOVES FIRST and adds
-                # after -- swig_gui runs the remove channels before the add
-                # loop -- so a strip of a not-yet-added segment would no-op
-                # against the live board and the deleted copper would ship).
-                #
-                # SNAP FIRST. The CLI branch below reconciles against the
-                # WRITTEN file, whose coordinates are 100% on KiCad's integer-nm
-                # grid because the writer quantises on the way out. The router
-                # works in float mm, so this in-memory board is NOT: ~20% of its
-                # coordinates sit up to 0.49 nm off-grid (eth_tap step 11:
-                # 2813/13692). Reconciling against an un-snapped board means the
-                # two fronts retry against DIFFERENT boards, so `return_results`
-                # -- which should only decide whether results are RETURNED --
-                # changed what got ROUTED: 3423 (CLI) vs 3428 (GUI) segments on
-                # identical input and identical kwargs. Snapping here makes this
-                # board bit-identical to the file the CLI would have re-parsed.
-                # Geometrically a no-op (max deviation 0.4878 nm < the 0.5 nm
-                # rounding threshold, so every value lands on the same integer
-                # nm the writer emits).
-                from kicad_parser import snap_pcb_data_to_iu_grid
-                _snapped = snap_pcb_data_to_iu_grid(pcb_data)
-                if _snapped:
-                    print(f"  Reconciliation: snapped {_snapped} in-memory "
-                          f"coordinate(s) onto the nm grid (CLI-file parity).")
-                _rk.update(return_results=True, pcb_data=pcb_data)
-                _rok, _rfail, _rt, _rdata = batch_route(
-                    input_file, "", _rec_names, **_rk)
-                _our_new_segs = set()
-                for _r in results_data.get('results', []):
-                    for _s in (_r.get('new_segments') or []):
-                        _our_new_segs.add(id(_s))
-                _inner_strips = _rdata.get('segments_to_remove') or []
-                _strip_ours = {id(_s) for _s in _inner_strips
-                               if id(_s) in _our_new_segs}
-                if _strip_ours:
+                # Bounded PROGRESS-LOOP -- GUI leg (2026-08-06): SAME laps
+                # as the CLI branch below, entirely in-memory (no temp
+                # board files): each lap re-snaps pcb_data to the nm grid
+                # (the eth_tap parity fix) so a lap sees the bit-identical
+                # board the CLI lap re-parses, then merges its own _rdata
+                # through the standard channels. Identical loop condition
+                # and cap => identical copper on both fronts.
+                _rok = 0
+                _rfail = 0
+                _rt = 0.0
+                for _lap10 in range(3):
+                    # GUI-parity reconciliation (gap-closure): re-invoke against
+                    # the SAME in-memory board (the copper this run just
+                    # committed lives in pcb_data, not in any file) and merge
+                    # the sub-run's results into ours. An inner strip that
+                    # targets copper THIS run emitted must instead drop it from
+                    # our write-lists (the GUI applier REMOVES FIRST and adds
+                    # after -- swig_gui runs the remove channels before the add
+                    # loop -- so a strip of a not-yet-added segment would no-op
+                    # against the live board and the deleted copper would ship).
+                    #
+                    # SNAP FIRST. The CLI branch below reconciles against the
+                    # WRITTEN file, whose coordinates are 100% on KiCad's integer-nm
+                    # grid because the writer quantises on the way out. The router
+                    # works in float mm, so this in-memory board is NOT: ~20% of its
+                    # coordinates sit up to 0.49 nm off-grid (eth_tap step 11:
+                    # 2813/13692). Reconciling against an un-snapped board means the
+                    # two fronts retry against DIFFERENT boards, so `return_results`
+                    # -- which should only decide whether results are RETURNED --
+                    # changed what got ROUTED: 3423 (CLI) vs 3428 (GUI) segments on
+                    # identical input and identical kwargs. Snapping here makes this
+                    # board bit-identical to the file the CLI would have re-parsed.
+                    # Geometrically a no-op (max deviation 0.4878 nm < the 0.5 nm
+                    # rounding threshold, so every value lands on the same integer
+                    # nm the writer emits).
+                    from kicad_parser import snap_pcb_data_to_iu_grid
+                    _snapped = snap_pcb_data_to_iu_grid(pcb_data)
+                    if _snapped:
+                        print(f"  Reconciliation: snapped {_snapped} in-memory "
+                              f"coordinate(s) onto the nm grid (CLI-file parity).")
+                    _rk.update(return_results=True, pcb_data=pcb_data)
+                    _lrok, _lrfail, _lrt, _rdata = batch_route(
+                        input_file, "", _rec_names, **_rk)
+                    _rok += _lrok
+                    _rfail = _lrfail
+                    _rt += _lrt
+                    _our_new_segs = set()
                     for _r in results_data.get('results', []):
-                        _r['new_segments'] = [
-                            _s for _s in (_r.get('new_segments') or [])
-                            if id(_s) not in _strip_ours]
-                results_data.setdefault('results', []).extend(
-                    _rdata.get('results', []))
-                results_data.setdefault('segments_to_remove', []).extend(
-                    _s for _s in _inner_strips if id(_s) not in _strip_ours)
-                # #484 H2: mirror the segment "ours" de-dup for vias -- an
-                # inner strip naming a via THIS run emitted must drop it from
-                # our write-lists, not ride vias_to_remove (the GUI applier
-                # removes before adding, so a positional collision could
-                # leave the emitted via shipped un-removed).
-                _our_new_vias = set()
-                for _r in results_data.get('results', []):
-                    for _v in (_r.get('new_vias') or []):
-                        _our_new_vias.add(id(_v))
-                _inner_vstrips = _rdata.get('vias_to_remove') or []
-                _vstrip_ours = {id(_v) for _v in _inner_vstrips
-                                if id(_v) in _our_new_vias}
-                if _vstrip_ours:
+                        for _s in (_r.get('new_segments') or []):
+                            _our_new_segs.add(id(_s))
+                    _inner_strips = _rdata.get('segments_to_remove') or []
+                    _strip_ours = {id(_s) for _s in _inner_strips
+                                   if id(_s) in _our_new_segs}
+                    if _strip_ours:
+                        for _r in results_data.get('results', []):
+                            _r['new_segments'] = [
+                                _s for _s in (_r.get('new_segments') or [])
+                                if id(_s) not in _strip_ours]
+                    results_data.setdefault('results', []).extend(
+                        _rdata.get('results', []))
+                    results_data.setdefault('segments_to_remove', []).extend(
+                        _s for _s in _inner_strips if id(_s) not in _strip_ours)
+                    # #484 H2: mirror the segment "ours" de-dup for vias -- an
+                    # inner strip naming a via THIS run emitted must drop it from
+                    # our write-lists, not ride vias_to_remove (the GUI applier
+                    # removes before adding, so a positional collision could
+                    # leave the emitted via shipped un-removed).
+                    _our_new_vias = set()
                     for _r in results_data.get('results', []):
-                        _r['new_vias'] = [
-                            _v for _v in (_r.get('new_vias') or [])
-                            if id(_v) not in _vstrip_ours]
-                if _inner_vstrips:
-                    results_data.setdefault('vias_to_remove', []).extend(
-                        _v for _v in _inner_vstrips
-                        if id(_v) not in _vstrip_ours)
-                # #484 H2: pad_swaps / single_ended_target_swap_info were
-                # silently dropped -- a target/polarity swap performed by the
-                # reconciliation sub-run then never reached the GUI applier,
-                # and the reconciled net's stub pointed at the OLD net.
-                for _key in ('all_swap_vias', 'all_swap_segments',
-                             'all_segment_modifications', 'pad_swaps',
-                             'single_ended_target_swap_info',
-                             'exclusion_zone_lines', 'boundary_debug_labels'):
-                    if _rdata.get(_key):
-                        results_data.setdefault(_key, []).extend(_rdata[_key])
-                # SNAP AGAIN. The sub-run above routed in float mm too, so the
-                # copper it just merged is back off-grid (8 coordinates on
-                # eth_tap step 11) even though we snapped before invoking it.
-                # The CLI's equivalent copper goes through the writer and lands
-                # grid-exact, so without this the fork reopens on exactly the
-                # nets the reconcile pass touched. Snap pcb_data AND the
-                # results the GUI applier will read -- they are usually the
-                # same Segment objects, but not contractually.
-                snap_pcb_data_to_iu_grid(pcb_data)
-                for _r in results_data.get('results', []):
-                    _rsnap = type('_P', (), {})()
-                    _rsnap.segments = _r.get('new_segments') or []
-                    _rsnap.vias = _r.get('new_vias') or []
-                    snap_pcb_data_to_iu_grid(_rsnap)
+                        for _v in (_r.get('new_vias') or []):
+                            _our_new_vias.add(id(_v))
+                    _inner_vstrips = _rdata.get('vias_to_remove') or []
+                    _vstrip_ours = {id(_v) for _v in _inner_vstrips
+                                    if id(_v) in _our_new_vias}
+                    if _vstrip_ours:
+                        for _r in results_data.get('results', []):
+                            _r['new_vias'] = [
+                                _v for _v in (_r.get('new_vias') or [])
+                                if id(_v) not in _vstrip_ours]
+                    if _inner_vstrips:
+                        results_data.setdefault('vias_to_remove', []).extend(
+                            _v for _v in _inner_vstrips
+                            if id(_v) not in _vstrip_ours)
+                    # #484 H2: pad_swaps / single_ended_target_swap_info were
+                    # silently dropped -- a target/polarity swap performed by the
+                    # reconciliation sub-run then never reached the GUI applier,
+                    # and the reconciled net's stub pointed at the OLD net.
+                    for _key in ('all_swap_vias', 'all_swap_segments',
+                                 'all_segment_modifications', 'pad_swaps',
+                                 'single_ended_target_swap_info',
+                                 'exclusion_zone_lines', 'boundary_debug_labels'):
+                        if _rdata.get(_key):
+                            results_data.setdefault(_key, []).extend(_rdata[_key])
+                    # SNAP AGAIN. The sub-run above routed in float mm too, so the
+                    # copper it just merged is back off-grid (8 coordinates on
+                    # eth_tap step 11) even though we snapped before invoking it.
+                    # The CLI's equivalent copper goes through the writer and lands
+                    # grid-exact, so without this the fork reopens on exactly the
+                    # nets the reconcile pass touched. Snap pcb_data AND the
+                    # results the GUI applier will read -- they are usually the
+                    # same Segment objects, but not contractually.
+                    snap_pcb_data_to_iu_grid(pcb_data)
+                    for _r in results_data.get('results', []):
+                        _rsnap = type('_P', (), {})()
+                        _rsnap.segments = _r.get('new_segments') or []
+                        _rsnap.vias = _r.get('new_vias') or []
+                        snap_pcb_data_to_iu_grid(_rsnap)
+                    if not (_lrok and _lrfail):
+                        break
+                    print(f"  Reconciliation progress-loop: lap "
+                          f"{_lap10 + 1} recovered {_lrok} with "
+                          f"{_lrfail} still failed -- one more lap on "
+                          f"the updated board")
             else:
                 _rk.update(return_results=False)
-                _rok, _rfail, _rt = batch_route(
-                    output_file, output_file, _rec_names, **_rk)
+                # Bounded PROGRESS-LOOP (2026-08-06, Andy's step7-vs-step8
+                # observation): each retry reshuffles the board enough that
+                # the NEXT attempt can win -- the recorded chains' manual
+                # retry steps were lap 2 by hand. Re-lap the SAME sub-run
+                # while the previous lap recovered something and targets
+                # remain failed (cap 3 laps). Cheap by construction: the
+                # sub-run re-parses the updated board and already-closed
+                # targets short-circuit as 'Already fully connected'; no
+                # grading, no snapshots, no temp board files.
+                _rok = 0
+                _rfail, _rt = 0, 0.0
+                for _lap10 in range(3):
+                    _lrok, _lrfail, _lrt = batch_route(
+                        output_file, output_file, _rec_names, **_rk)
+                    _rok += _lrok
+                    _rfail = _lrfail
+                    _rt += _lrt
+                    if not (_lrok and _lrfail):
+                        break
+                    print(f"  Reconciliation progress-loop: lap "
+                          f"{_lap10 + 1} recovered {_lrok} with {_lrfail} "
+                          f"still failed -- one more lap on the updated "
+                          f"board")
             print("Note: the JSON_SUMMARY above covers only the "
                   "reconciliation subset; the run's full tally is the "
                   "earlier JSON_SUMMARY plus these recoveries.")
