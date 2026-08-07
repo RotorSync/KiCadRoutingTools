@@ -504,6 +504,16 @@ harmless.
     can legitimately spend 30-90+ min in a single signal-route step — that is
     slow progress, NOT a hang. Only kill a command once it shows no log growth
     AND no output-file size change for >45 min, and record it as a hang.
+    **This is ENFORCED, not advisory:** `run_limited.sh` carries an orphan guard.
+    It cannot see the `&` (that lives in your shell), but when the launching shell
+    exits it detects the re-parent to init, writes `ORPHANED_STEP.txt` into the run
+    dir, prints `BACKGROUNDED_STEP_ORPHANED`, and KILLS the step with exit 138 —
+    its output would never be graded, and a killed process never runs
+    `redo_record`'s atexit hook, so the replay record is lost too (that is how
+    ottercast_audio, abn6502 and pcie_test_edge were lost on 2026-08-06). Poll in
+    the foreground as above instead. Escape hatch for a deliberate detached run:
+    `STRESS_ALLOW_ORPHAN=1` (warns once, does not kill); grace period
+    `ORPHAN_GRACE` seconds, default 60.
 13. If a tool crashes (traceback), capture the full traceback in the JSON
     issues list. A crash is a valuable finding, not a failure of your task —
     continue with remaining steps if possible.
