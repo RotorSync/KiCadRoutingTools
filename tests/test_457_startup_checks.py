@@ -148,7 +148,11 @@ _PROBE = textwrap.dedent('''
 
 
 def _run_probe(module_name):
-    env = dict(os.environ, PYTHONPATH=ROOT)
+    # #522: startup_checks lives under py_router/ now; the probe subprocess
+    # needs it on ITS path (rust_router for the library the checks probe).
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(
+        (os.path.join(ROOT, 'py_router'),
+         os.path.join(ROOT, 'rust_router'), ROOT)))
     return subprocess.run([sys.executable, '-c', _PROBE, module_name],
                           capture_output=True, text=True, cwd=ROOT, env=env)
 
@@ -179,7 +183,9 @@ def test_routing_clis_use_the_guard_at_module_scope():
     grid_router fails with something cryptic."""
     for name in ('route.py', 'route_diff.py', 'route_planes.py',
                  'repair_planes.py'):
-        src = open(os.path.join(ROOT, name), encoding='utf-8').read()
+        # #522: the routing CLIs live under py_router/ now.
+        src = open(os.path.join(ROOT, 'py_router', name),
+                   encoding='utf-8').read()
         assert 'exit_on_error_if_main(__name__)' in src, \
             f"{name} does not use the import-safe guard"
         assert 'run_all_checks()' not in src, \

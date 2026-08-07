@@ -69,7 +69,12 @@ sys.stdout.write("RESULT" + json.dumps({
 
 
 def _run(board, seed):
-    env = dict(os.environ, PYTHONHASHSEED=seed, PYTHONPATH=ROOT)
+    # #522: kicad_parser/placement live under py_router/ now; the probe
+    # subprocess needs them on ITS path too (rust_router for grid_router).
+    env = dict(os.environ, PYTHONHASHSEED=seed,
+               PYTHONPATH=os.pathsep.join(
+                   (os.path.join(ROOT, 'py_router'),
+                    os.path.join(ROOT, 'rust_router'), ROOT)))
     r = subprocess.run([sys.executable, '-c', _PROBE,
                         os.path.join(ROOT, 'kicad_files', board)],
                        capture_output=True, text=True, cwd=ROOT, env=env)

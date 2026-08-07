@@ -68,8 +68,12 @@ def main():
             fails.append(f"[clamp] Default.clearance = {cls['Default'].get('clearance')}, expected 0.09")
         if not near(cls["Z100_inner"]["clearance"], 0.09):
             fails.append(f"[clamp] Z100_inner.clearance = {cls['Z100_inner'].get('clearance')}, expected 0.09 (should clamp)")
-        if not near(cls["Z100_inner"]["track_width"], 0.0889):
-            fails.append(f"[clamp] Z100_inner.track_width = {cls['Z100_inner'].get('track_width')}, expected 0.0889")
+        # track_width is a DRAW DEFAULT, not a DRC floor: the non-Default clamp
+        # deliberately PRESERVES it (fix_kicad_drc_settings doctrine -- lowering
+        # it prevents no violation and overwrote a hard impedance spec figure,
+        # USB_FS_DIFF 0.8 -> 0.15). Only clearance clamps.
+        if not near(cls["Z100_inner"]["track_width"], 0.162):
+            fails.append(f"[clamp] Z100_inner.track_width = {cls['Z100_inner'].get('track_width')}, expected 0.162 (draw default preserved)")
 
     if fails:
         print("FAIL: " + "; ".join(fails))

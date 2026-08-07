@@ -160,7 +160,8 @@ def main():
     # 7. CLI end-to-end (regression guard for the vias-only main() fixes).
     out7 = os.path.join(tempfile.mkdtemp(), 'interior_cli.kicad_pcb')
     r = subprocess.run(
-        [sys.executable, 'qfn_fanout.py', BOARD, '--component', 'U1',
+        [sys.executable, os.path.join('py_router', 'qfn_fanout.py'),  # #522
+         BOARD, '--component', 'U1',
          '--nets', 'INT*', '--escape-method', 'underpad', '--allow-via-in-pad',
          '--via-size', str(VIA_SIZE), '--via-drill', str(VIA_DRILL),
          '--clearance', str(CLEARANCE), '--grid-step', str(GRID),

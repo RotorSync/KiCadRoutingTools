@@ -40,7 +40,9 @@ def _run(body):
         f.write(text)
         path = f.name
     try:
-        r = subprocess.run([sys.executable, 'check_drc.py', path, '-c', '0.1'],
+        r = subprocess.run([sys.executable,
+                            os.path.join('py_router', 'check_drc.py'),  # #522
+                            path, '-c', '0.1'],
                            capture_output=True, text=True, cwd=REPO)
         out = r.stdout + r.stderr
         # #320 step 3: soft joints are COUNTED violations (per-type header),
