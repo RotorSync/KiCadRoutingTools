@@ -23,7 +23,14 @@ _here = os.path.dirname(os.path.abspath(__file__))
 for _cand in (os.path.abspath(os.path.join(_here, "..", "..")),
               os.path.expanduser("~/Documents/KiCadRoutingTools")):
     if os.path.exists(os.path.join(_cand, "py_router/kicad_parser.py")):
+        # #522 half-migration guard: the probe above was updated to the new
+        # py_router/ path but the insert below was not, so the check passed while
+        # `import kicad_parser` still failed -- this script died on import. The
+        # engine modules are IN py_router/py_tools, so those dirs (not just the
+        # repo root) have to go on sys.path, as grade_final.py does.
         sys.path.insert(0, _cand)
+        sys.path.insert(0, os.path.join(_cand, "py_router"))
+        sys.path.insert(0, os.path.join(_cand, "py_tools"))
         break
 from kicad_parser import parse_kicad_pcb
 from list_nets import read_design_rules

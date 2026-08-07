@@ -88,7 +88,9 @@ Paths for THIS board:
 
 Rules that matter most:
 - Prefix EVERY routing/fanout/plane/check command with: bash $REPO/tests/stress/run_limited.sh
-- Run tools as: python3 -X utf8 $REPO/<tool>.py ...
+- Run tools as: python3 -X utf8 $REPO/py_router/<tool>.py ...  (#522 moved the
+  engine + CLIs into py_router/; a bare \$REPO/<tool>.py does not exist. The few
+  repo-root scripts -- build_router.py, install_plugin.py -- stay at \$REPO/.)
 - REDO_MANIFEST is ALREADY exported for you (the replay manifest). Do NOT re-export
   or override it -- especially not as \"\$PWD/redo_commands.sh\": you also cd into
   the tools repo to import kicad_parser, and from there \$PWD is the CHECKOUT, so
