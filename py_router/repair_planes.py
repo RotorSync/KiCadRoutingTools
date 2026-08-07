@@ -738,6 +738,10 @@ def repair_planes(
     clamp_netclasses: bool = True,
     clearance_ceiling: Optional[float] = None,
     add_teardrops: bool = False,
+    # #581: > 0 keeps every repair via off same-net pads at this edge-to-edge
+    # clearance. None (default) auto-reads the persisted .kicad_pro record;
+    # explicit values win (the #562 finalize forwards its resolved value).
+    same_net_pad_clearance: Optional[float] = None,
 ) -> Tuple[int, int]:
     """
     Route between disconnected regions in power plane zones.
@@ -884,6 +888,21 @@ def repair_planes(
         board_edge_clearance=board_edge_clearance,
         ripup_blocker_select=ripup_blocker_select
     )
+    # #581: keep repair vias (pad taps, region joins, reconnects) off same-net
+    # pads when the constraint is active. Explicit kwarg wins (route.py's #562
+    # finalize forwards its resolved value -- the output's .kicad_pro sibling
+    # does not exist yet mid-run, same reasoning as layer_clearances below);
+    # None -> auto-read the persisted project record. > 0 activates.
+    if same_net_pad_clearance is not None and same_net_pad_clearance > 0:
+        config.same_net_pad_clearance = same_net_pad_clearance
+    elif same_net_pad_clearance is None:
+        from protected_nets import read_snpc_for_pcb_data as _read_snpc581
+        _snpc581 = _read_snpc581(pcb_data, input_file)
+        if _snpc581 > 0:
+            config.same_net_pad_clearance = _snpc581
+    if config.same_net_pad_clearance > 0:
+        print(f"  Same-net pad via clearance {config.same_net_pad_clearance:g}mm "
+              f"(#581): repair vias stay off same-net pads")
     # #498: repair copper (region joins, pad taps, reconnects) must obey the
     # board's per-layer .kicad_dru clearance rules like every routed copper.
     # An explicit `layer_clearances` wins and stops the auto-read: route.py's
@@ -2672,7 +2691,9 @@ def repair_planes(
             pcb_data, all_new_segments, _scope, clearance=clearance,
             max_shift=config.grid_step / 2, all_new_vias=all_new_vias,
             hole_to_hole=config.hole_to_hole_clearance,
-            protected_pads=_tapped_pads)
+            protected_pads=_tapped_pads,
+            same_net_pad_clearance=getattr(config, 'same_net_pad_clearance',
+                                           -1.0))  # #581
         if _gz_rm:
             print(f"  Graze prune: removed {_gz_rm} grazing repair segment(s)")
         if _gz_nudge:
@@ -3090,6 +3111,11 @@ Examples:
                         help=f"Clearance from board edge in mm (default: the board min_copper_edge_clearance, else {defaults.PLANE_EDGE_CLEARANCE})")
     parser.add_argument("--hole-to-hole-clearance", type=float, default=None,
                         help=f"Minimum clearance between drill holes in mm (default: the board min_hole_to_hole, else {defaults.HOLE_TO_HOLE_CLEARANCE})")
+    parser.add_argument("--same-net-pad-clearance", type=float, default=None,
+                        help="Edge-to-edge clearance (mm) between repair vias (taps, joins, "
+                             "reconnects) and same-net pads (#581). > 0 keeps vias off "
+                             "same-net pads; -1 explicitly allows via-in-pad. Default: the "
+                             "project's recorded value, else -1.")
 
     # Via options (for config)
     parser.add_argument("--via-size", type=float, default=None,
@@ -3309,7 +3335,8 @@ Examples:
         no_bga_zone=args.no_bga_zone,
         clamp_netclasses=args._clamp_netclasses,
         clearance_ceiling=args._clearance_ceiling,
-        add_teardrops=args.add_teardrops
+        add_teardrops=args.add_teardrops,
+        same_net_pad_clearance=args.same_net_pad_clearance
     )
 
     # Dead-end sweep + gap-snap on the repaired plane copper (issue #84), gated

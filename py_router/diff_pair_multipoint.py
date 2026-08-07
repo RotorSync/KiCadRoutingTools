@@ -390,6 +390,10 @@ def _relocate_blocked_terminals(state, pair: DiffPairNet, terminals, obstacles, 
     (attach to the route on success, remove on failure)."""
     config = state.config
     pcb_data = state.pcb_data
+    # #581: relocation drops a via ON each pad -- forbidden while an active
+    # (> 0) same-net pad via clearance is in force.
+    if getattr(config, 'same_net_pad_clearance', -1.0) > 0:
+        return list(terminals), []
     centers = [_terminal_center(t) for t in terminals]
     tgt_idx = config.layers.index(target_layer)
     new_terminals = list(terminals)

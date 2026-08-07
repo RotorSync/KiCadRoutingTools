@@ -1772,7 +1772,8 @@ def _neck_plane_segments(all_new_segments, pcb_data, clearance, all_layers,
 def _finalize_plane_copper(all_new_segments, all_new_vias, pcb_data, clearance,
                            all_layers, track_width, grid_step, via_size,
                            via_drill, hole_to_hole_clearance,
-                           net_clearances=None, strip_sink=None):
+                           net_clearances=None, strip_sink=None,
+                           same_net_pad_clearance=None):  # #581
     """Run the full pre-write cleanup pipeline on plane tap copper and return the
     resulting all_new_segments.
 
@@ -1814,7 +1815,10 @@ def _finalize_plane_copper(all_new_segments, all_new_vias, pcb_data, clearance,
          gz_input_strips) = cleanup_plane_taps_grazing(
             pcb_data, all_new_segments, scope, clearance=clearance,
             max_shift=grid_step / 2, all_new_vias=all_new_vias,
-            hole_to_hole=hole_to_hole_clearance)
+            hole_to_hole=hole_to_hole_clearance,
+            same_net_pad_clearance=(same_net_pad_clearance
+                                    if same_net_pad_clearance is not None
+                                    else -1.0))  # #581
         if gz_rm:
             print(f"  Graze prune: removed {gz_rm} grazing tap segment(s)")
         if gz_nudge:
@@ -2696,7 +2700,10 @@ def create_plane(
     add_teardrops: bool = False,
     pcb_data: Optional[PCBData] = None,
     return_results: bool = False,
-    same_net_pad_clearance: float = defaults.SAME_NET_PAD_CLEARANCE,
+    # #581: None (default) auto-reads the persisted .kicad_pro record;
+    # explicit values keep their meaning (> 0 active, >= 0 legacy
+    # stitching semantics, -1 explicitly allows via-in-pad).
+    same_net_pad_clearance: Optional[float] = None,
     skip_existing_zones: bool = False,
     no_bga_zone: bool = False,
     progress_callback=None,
@@ -2982,6 +2989,23 @@ def create_plane(
         layer_costs=layer_costs,
         ripup_blocker_select=ripup_blocker_select
     )
+    # #581: an ACTIVE (> 0) same-net pad via clearance rides the config so
+    # every via this step places (stitching already honored it; taps, joins,
+    # blocker reroutes now do too) keeps off same-net pads; -1 and 0 keep the
+    # pre-#581 behavior exactly. Resolution: an explicit flag value wins
+    # (> 0 activates; 0 / -1 explicitly off); None (unset) auto-reads the
+    # record an earlier chain step persisted into the sibling .kicad_pro.
+    # Normalized to a concrete float here -- downstream stitching/tap call
+    # sites compare it numerically.
+    if same_net_pad_clearance is None:
+        from protected_nets import read_snpc_for_pcb_data as _read_snpc581
+        _snpc581 = _read_snpc581(pcb_data, input_file)
+        same_net_pad_clearance = _snpc581 if _snpc581 > 0 else -1.0
+        if _snpc581 > 0:
+            print(f"  Same-net pad via clearance {_snpc581:g}mm (from project "
+                  f"record, #581)")
+    if same_net_pad_clearance > 0:
+        config.same_net_pad_clearance = same_net_pad_clearance
     # #498: per-layer .kicad_dru clearance rules -- tap tracks/vias, region
     # joins and blocker reroutes must obey them like every other routed copper.
     from kicad_dru import install_layer_clearances
@@ -3585,7 +3609,8 @@ def create_plane(
     all_new_segments = _finalize_plane_copper(
         all_new_segments, all_new_vias, pcb_data, clearance, all_layers,
         track_width, grid_step, via_size, via_drill, hole_to_hole_clearance,
-        net_clearances=net_clearances, strip_sink=_finalize_strips)
+        net_clearances=net_clearances, strip_sink=_finalize_strips,
+        same_net_pad_clearance=same_net_pad_clearance)  # #581
 
     # Route trace (#482): emit the finalized plane-tap tracks/vias, grouped by
     # net so each plane's taps land as one animation event, then write
@@ -3701,6 +3726,20 @@ def create_plane(
     # the GUI applier must delete these individually -- the whole-net delete
     # only covers ripped nets.
     reconnect_strips: list = list(_finalize_strips)
+    # #581 GUI leg: the CLI main persists an active same-net pad via clearance
+    # into the OUTPUT's project after fix_project_for_output; the GUI has no
+    # output file, so record it against the live board's own project here.
+    if return_results and same_net_pad_clearance is not None \
+            and same_net_pad_clearance > 0:
+        try:
+            from protected_nets import (persist_same_net_pad_clearance,
+                                        pro_path_for_board)
+            _src581 = getattr(pcb_data, 'source_path', "") or ""
+            if _src581:
+                persist_same_net_pad_clearance(
+                    pro_path_for_board(_src581), same_net_pad_clearance)
+        except Exception as _e581:
+            print(f"  (skipped same-net pad clearance record: {_e581})")
     if return_results:
         # GUI parity with the CLI's in-run ripped-net reconnect (#347): the
         # file path above reroutes verified-broken casualties after writing;
@@ -3852,10 +3891,13 @@ Examples:
 
     # Same-net pad clearance (avoid via-in-pad)
     parser.add_argument("--same-net-pad-clearance", type=float,
-                        default=defaults.SAME_NET_PAD_CLEARANCE,
-                        help="Edge-to-edge clearance (mm) between stitching vias and same-net pads. "
-                             "-1 (default) allows via-in-pad placement; any value >= 0 forces vias "
-                             "outside same-net pads with that clearance.")
+                        default=None,
+                        help="Edge-to-edge clearance (mm) between placed vias and same-net pads. "
+                             "> 0 keeps ALL of this step's vias (stitching, taps, joins) off "
+                             "same-net pads and is recorded in the sibling .kicad_pro so later "
+                             "chain steps (route/route_diff/fanout/repair) inherit it (#581); "
+                             "0 keeps its legacy stitching-only meaning; -1 explicitly allows "
+                             "via-in-pad. Default: the project's recorded value, else -1.")
 
     # Debug options
     parser.add_argument("--dry-run", action="store_true", help="Analyze without writing output")
@@ -4225,6 +4267,18 @@ Examples:
                 **drc_fix_kwargs(args))
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
+        # #581: record an ACTIVE same-net pad via clearance in the output's
+        # project so every later chain step keeps its vias off same-net pads
+        # too. After fix_project_for_output so the .kicad_pro exists.
+        try:
+            from protected_nets import (persist_same_net_pad_clearance,
+                                        pro_path_for_board)
+            persist_same_net_pad_clearance(
+                pro_path_for_board(args.output_file),
+                args.same_net_pad_clearance
+                if args.same_net_pad_clearance is not None else -1.0)
+        except Exception as e:
+            print(f"  (skipped same-net pad clearance record: {e})")
 
     # Machine-readable summary so an orchestrator and the next pipeline step can
     # read the clearance this step actually used (mirrors route.py/route_diff.py).

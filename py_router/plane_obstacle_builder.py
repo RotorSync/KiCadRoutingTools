@@ -394,9 +394,20 @@ def build_via_obstacle_map(
         same_net_pad_clearance: If >= 0, also block target-net pads as via obstacles
             using this edge-to-edge clearance (in mm) in place of config.clearance.
             -1 (default) leaves same-net pads unblocked, allowing via-in-pad placement.
+            When the caller leaves it negative, the config's own
+            same_net_pad_clearance (#581: set from the route_planes flag or the
+            persisted .kicad_pro record) applies — so every via map built from a
+            config that carries the constraint honors it, including callers that
+            never learned the parameter (repair_planes taps, the #562 finalize).
     """
     import time
     t_start = time.time()
+    if same_net_pad_clearance is None or same_net_pad_clearance < 0:
+        # #581 compat contract: only an ACTIVE (> 0) config value changes
+        # behavior; an explicit caller-passed 0 above keeps its legacy meaning.
+        _cfg_snpc = getattr(config, 'same_net_pad_clearance', -1.0)
+        same_net_pad_clearance = _cfg_snpc if (_cfg_snpc is not None
+                                               and _cfg_snpc > 0) else -1.0
 
     coord = GridCoord(config.grid_step)
     num_layers = len(config.layers)

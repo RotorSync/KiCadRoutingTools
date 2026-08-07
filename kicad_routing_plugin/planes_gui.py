@@ -307,35 +307,11 @@ class CreatePlanesOptionsPanel(wx.Panel):
         _zrow.Add(self.zone_clearance, 1, wx.EXPAND)
         grid.Add(_zrow, 0, wx.EXPAND)
 
-        # Same-net pad clearance (default = main clearance; checkbox below overrides to via-in-pad)
-        grid.Add(wx.StaticText(self, label="Same-net Pad Clearance (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        r = defaults.PARAM_RANGES['same_net_pad_clearance']
-        self.same_net_pad_clearance = wx.SpinCtrlDouble(self, min=r['min'], max=r['max'],
-                                                        initial=defaults.CLEARANCE, inc=r['inc'])
-        self.same_net_pad_clearance.SetDigits(r['digits'])
-        self.same_net_pad_clearance.SetToolTip(
-            "Edge-to-edge clearance between stitching vias and same-net pads. "
-            "Disabled if 'Allow via-in-pad' is checked.")
-        grid.Add(self.same_net_pad_clearance, 0, wx.EXPAND)
-
         zone_sizer.Add(grid, 0, wx.EXPAND | wx.ALL, 5)
-
-        # Via-in-pad override: when checked, vias may be placed inside same-net pads
-        # (and Same-net Pad Clearance is disabled / passed as -1).
-        self.via_in_pad_check = wx.CheckBox(self, label="Allow via-in-pad (override clearance)")
-        self.via_in_pad_check.SetToolTip(
-            "When checked, stitching vias may be placed on top of same-net pads, "
-            "ignoring 'Same-net Pad Clearance'.")
-        # Default ON = same_net_pad_clearance -1.0, matching route_planes.py's
-        # SAME_NET_PAD_CLEARANCE default. A same-net stitching via on its own
-        # net's pad can't short; enforcing a positive clearance instead (the old
-        # GUI default 0.25) blocks stitches and left 24 MORE pads unconnected at
-        # plane create on rp2350 (67 vs 43) -- a CLI/GUI parity gap that drove
-        # the plane-repair overshoot (#362). Uncheck to enforce a clearance.
-        self.via_in_pad_check.SetValue(True)
-        self.via_in_pad_check.Bind(wx.EVT_CHECKBOX, self._on_via_in_pad_toggle)
-        self.same_net_pad_clearance.Enable(False)  # sync with default-checked box
-        zone_sizer.Add(self.via_in_pad_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+        # #581: the via-in-pad policy controls (Allow via-in-pad checkbox +
+        # Same-net Pad Clearance spin) moved to the TOP of the Basic tab's
+        # Options box -- one policy shared by every step; this tab reads it
+        # through get_shared_params.
 
         # #487: thermal-relief pad connections (the zone writer always
         # supported them; every front hardcoded solid). Control named after
@@ -482,23 +458,14 @@ class CreatePlanesOptionsPanel(wx.Panel):
 
         self.SetSizer(sizer)
 
-    def _on_via_in_pad_toggle(self, event):
-        """Enable/disable the same-net pad clearance spin ctrl based on the via-in-pad checkbox."""
-        self.same_net_pad_clearance.Enable(not self.via_in_pad_check.GetValue())
-
     def get_config(self):
         """Get the configuration values."""
-        if self.via_in_pad_check.GetValue():
-            same_net_clr = -1.0  # via-in-pad allowed
-        else:
-            same_net_clr = self.same_net_pad_clearance.GetValue()
         return {
             'zone_clearance': (self.zone_clearance.GetValue()
                                if self.zone_clearance_check.GetValue() else None),
             'add_gnd_vias': self.add_gnd_vias_check.GetValue(),
             'gnd_via_distance': self.gnd_via_distance.GetValue(),
             'gnd_via_net': self.gnd_via_net.GetValue(),
-            'same_net_pad_clearance': same_net_clr,
             'thermal_relief': self.thermal_relief.GetValue(),
             'thermal_vias': self.thermal_vias.GetValue(),
             'stitch_vias': self.stitch_vias.GetValue(),
@@ -1041,7 +1008,9 @@ class PlanesTab(wx.Panel):
                 pcb_data=self.pcb_data,
                 return_results=True,
                 layer_nets=layer_nets,
-                same_net_pad_clearance=config.get('same_net_pad_clearance', defaults.SAME_NET_PAD_CLEARANCE),
+                # #581: from the Basic tab via get_shared_params (explicit;
+                # -1 = via-in-pad allowed).
+                same_net_pad_clearance=config.get('same_net_pad_clearance', -1.0),
                 # #381 D6: config-driven (was hardcoded True). Interactive
                 # default stays True -- an interactive re-create on a live board
                 # should skip re-emitting an existing zone. A plan can override

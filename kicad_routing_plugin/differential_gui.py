@@ -942,6 +942,8 @@ class DifferentialTab(wx.Panel):
                 input_file=self.board_filename,
                 output_file="",  # Not used when return_results=True
                 net_names=net_names,
+                # #581: the Basic tab's via-in-pad policy (shared params).
+                same_net_pad_clearance=config.get('same_net_pad_clearance', -1.0),
                 layers=config.get('layers', defaults.DEFAULT_LAYERS),
                 layer_costs=config.get('layer_costs') or None,  # per-layer bias (#193); None -> all 1.0
                 track_width=config.get('diff_pair_width', defaults.DIFF_PAIR_WIDTH),

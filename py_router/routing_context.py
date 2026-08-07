@@ -551,6 +551,17 @@ def prepare_obstacles_inplace(
                                 continue
                             same_net_via_cells.append((gx + ex, gy + ey))
 
+    # #581: same-net pad via keep-out. When the board carries an active
+    # same_net_pad_clearance (flag / persisted .kicad_pro record), the CURRENT
+    # net's own SMD pads block via placement at pad-edge + that clearance --
+    # so escape vias land off-pad. Rides same_net_via_cells so the restore
+    # stays balanced. Track blocking is untouched -- the route may still REACH
+    # its pad; only a via may not land on/near it.
+    from obstacle_map import same_net_pad_via_keepout_cells
+    _pad_cells_581 = same_net_pad_via_keepout_cells(pcb_data, net_id, config)
+    if len(_pad_cells_581):
+        same_net_via_cells.extend(map(tuple, _pad_cells_581.tolist()))
+
     # Batch add same-net via clearance (convert to numpy for Rust FFI)
     if same_net_via_cells:
         same_net_via_arr = np.array(same_net_via_cells, dtype=np.int32)

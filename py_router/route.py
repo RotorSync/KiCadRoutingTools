@@ -417,7 +417,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # their EXACT links as endpoint overrides with the full rip
                 # ladder behind them (fix direction 2). INTERNAL: set only
                 # by the finalize custody handoff; deliberately no CLI flag.
-                oracle_links: Optional[List] = None) -> Tuple[int, int, float]:
+                oracle_links: Optional[List] = None,
+                # #581: edge-to-edge clearance between every via this run
+                # places and same-net SMD pads. None (default) -> auto-read
+                # the persisted .kicad_pro record; > 0 activates (and is
+                # persisted for later chain steps); 0 / -1 explicitly OFF.
+                same_net_pad_clearance: Optional[float] = None) -> Tuple[int, int, float]:
     """
     Route single-ended nets using the Rust router.
 
@@ -870,6 +875,23 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         config_kwargs['net_layer_widths'] = net_layer_widths_map
     if collect_stats:
         config_kwargs['collect_stats'] = collect_stats
+    # #581: an active (> 0) same-net pad via clearance keeps EVERY via this
+    # run places off same-net SMD pads -- escape vias, the #189 via-in-pad
+    # rescue, swap pad vias, finalize taps. Resolution: an explicit
+    # --same-net-pad-clearance wins (> 0 activates; 0 / -1 explicitly off);
+    # unset auto-reads the record an earlier chain step persisted into the
+    # sibling .kicad_pro (kicad_routing_tools.same_net_pad_clearance).
+    if same_net_pad_clearance is None:
+        from protected_nets import read_snpc_for_pcb_data as _read_snpc581
+        _snpc581 = _read_snpc581(pcb_data, input_file)
+        _snpc_src = "project record"
+    else:
+        _snpc581 = same_net_pad_clearance
+        _snpc_src = "flag"
+    if _snpc581 > 0:
+        config_kwargs['same_net_pad_clearance'] = _snpc581
+        print(f"Same-net pad via clearance {_snpc581:g}mm (from {_snpc_src}, "
+              f"#581): vias stay off same-net pads")
     config = GridRouteConfig(**config_kwargs)
 
     try:
@@ -1498,6 +1520,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # rules (caught by test_dru_layer_clearance_e2e: a reconciliation +3V3 via
     # 0.25mm inside the B.Cu rule against GND).
     _reconcile_kwargs['layer_clearances'] = dict(config.layer_clearances)
+    # #581: same reasoning -- the reconciliation sub-run reads the OUTPUT file
+    # whose .kicad_pro record does not exist yet mid-run; forward the resolved
+    # value (None keeps the sub-run's own auto-read for the inactive case).
+    if config.same_net_pad_clearance > 0:
+        _reconcile_kwargs['same_net_pad_clearance'] = config.same_net_pad_clearance
     # #568: rung-1 via legality is only sound when base copper blocks EVERY
     # rung, i.e. when the base is frozen into the static keep-out bitmap. The
     # one remaining path that builds an UNFROZEN base is KICAD_NO_STATIC_BASE
@@ -3337,6 +3364,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         # project rule, so a board declaring 0.6 got finalize
                         # copper at 0.5 -- real edge DRC.
                         board_edge_clearance=config.board_edge_clearance,
+                        # #581: forward the resolved same-net pad via
+                        # clearance -- the output's .kicad_pro sibling
+                        # does not exist yet mid-run, so the engine's
+                        # own auto-read would find nothing.
+                        same_net_pad_clearance=(
+                            config.same_net_pad_clearance
+                            if config.same_net_pad_clearance > 0 else None),
                         # Rip authority (0804-wave finding): the absorbed
                         # repair step ran with --rip-blocker-nets in 143/150
                         # recorded chains, and dropping it left "unroutable
@@ -3412,6 +3446,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         # -- output_file has no sibling .kicad_pro yet, and
                         # the engine default 0.5 masks the project read.
                         board_edge_clearance=config.board_edge_clearance,
+                        # #581: forward the resolved same-net pad via
+                        # clearance -- the output's .kicad_pro sibling
+                        # does not exist yet mid-run, so the engine's
+                        # own auto-read would find nothing.
+                        same_net_pad_clearance=(
+                            config.same_net_pad_clearance
+                            if config.same_net_pad_clearance > 0 else None),
                         # Same rip-authority restoration as the GUI leg above.
                         rip_blocker_nets=_finalize_rip9,
                         power_nets=power_nets,
@@ -4448,6 +4489,13 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--board-edge-clearance", type=float, default=None,
                         help="Clearance from board edge in mm. Default: the board's own "
                              f"min_copper_edge_clearance constraint, else {defaults.BOARD_EDGE_CLEARANCE}.")
+    parser.add_argument("--same-net-pad-clearance", type=float, default=None,
+                        help="Edge-to-edge clearance (mm) between EVERY placed via and "
+                             "same-net pads (#581). > 0 keeps vias off same-net SMD pads "
+                             "(escape vias, via-in-pad rescue, tap vias) and is recorded "
+                             "in the sibling .kicad_pro so later chain steps inherit it; "
+                             "-1 explicitly allows via-in-pad. Default: the project's "
+                             "recorded value, else via-in-pad allowed.")
     from fix_kicad_drc_settings import add_drc_fix_args
     add_drc_fix_args(parser)
 
@@ -4751,6 +4799,7 @@ For differential pair routing, use route_diff.py:
                 routing_clearance_margin=args.routing_clearance_margin,
                 hole_to_hole_clearance=args.hole_to_hole_clearance,
                 board_edge_clearance=args.board_edge_clearance,
+                same_net_pad_clearance=args.same_net_pad_clearance,
                 vertical_attraction_radius=args.vertical_attraction_radius,
                 vertical_attraction_cost=args.vertical_attraction_cost,
                 ripped_route_avoidance_radius=args.ripped_route_avoidance_radius,
@@ -4817,5 +4866,11 @@ For differential pair routing, use route_diff.py:
             _pro = pro_path_for_board(args.output_file)
             persist_protected_nets(_pro, consume_protection_candidates())
             persist_impedance_specs(_pro, consume_impedance_specs())
+            # #581: an explicit active flag on this step is recorded so later
+            # chain steps keep their vias off same-net pads too.
+            if getattr(args, 'same_net_pad_clearance', None) is not None \
+                    and args.same_net_pad_clearance > 0:
+                from protected_nets import persist_same_net_pad_clearance
+                persist_same_net_pad_clearance(_pro, args.same_net_pad_clearance)
         except Exception as e:
             print(f"  (skipped protected-nets record: {e})")

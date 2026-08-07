@@ -316,6 +316,17 @@ def _attempt_edge(pcb_data, net_id, gap, config, net_clearances,
                                   add_same_net_pad_drill_via_clearance)
         add_same_net_via_clearance(obstacles, window, net_id, cfg)
         add_same_net_pad_drill_via_clearance(obstacles, window, net_id, cfg)
+        # #581: the window holds pads by CENTER, so a long pad whose center
+        # lies outside but whose copper reaches in is invisible to the
+        # window-based stamp above -- the rescue then drops a via inside its
+        # keep-out (neo6502 /A15: 0.025-grid rescue via 0.272mm from a 4.25mm
+        # BUS pad whose center sat 2.6mm outside). Stamp the same-net pad via
+        # keep-out from the FULL board; cells outside the fenced window are
+        # unreachable anyway, so the extra stamps are inert.
+        from obstacle_map import same_net_pad_via_keepout_cells
+        _cells581 = same_net_pad_via_keepout_cells(pcb_data, net_id, cfg)
+        if len(_cells581):
+            obstacles.add_blocked_vias_batch(_cells581)
         # Constrain the route to the window: drop endpoints outside it and keep the
         # source/target overrides from punching the fence, so the A* can never leave
         # the stamped region and cross foreign copper the window never modelled (#396).

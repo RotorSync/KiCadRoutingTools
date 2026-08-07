@@ -756,6 +756,15 @@ class RoutingDialog(wx.Dialog):
     def _effective_clearance(self):
         return self._effective_geometry_floor('clearance')
 
+    def _same_net_pad_clearance_value(self):
+        """#581: the Basic tab's via-in-pad policy as the engines' scalar --
+        -1.0 while 'Allow via-in-pad' is checked (the default, pre-#581
+        behavior), else the spin's clearance (> 0 keeps every placed via off
+        same-net SMD pads). Shared by ALL step tabs."""
+        if self.via_in_pad_check.GetValue():
+            return -1.0
+        return self.same_net_pad_clearance.GetValue()
+
     def _effective_via_size(self):
         return self._effective_geometry_floor('via_size')
 
@@ -1100,6 +1109,39 @@ class RoutingDialog(wx.Dialog):
         options_scroll = wx.ScrolledWindow(panel, style=wx.VSCROLL)
         options_scroll.SetScrollRate(0, 10)
         options_inner = wx.BoxSizer(wx.VERTICAL)
+
+        # #581: via-in-pad policy, shared by EVERY step (route, diff, planes,
+        # fanout). Checked (default) = via-in-pad allowed (pre-#581 behavior);
+        # unchecked = the spin's clearance keeps ALL placed vias off same-net
+        # SMD pads (escape vias, rescue vias, tap vias; fanout runs dog-bone).
+        # Moved here from the Planes tab -- one policy for the whole session.
+        self.via_in_pad_check = wx.CheckBox(options_scroll,
+                                            label="Allow via-in-pad")
+        self.via_in_pad_check.SetValue(True)
+        self.via_in_pad_check.SetToolTip(
+            "When checked (default), vias may be placed on same-net pads. "
+            "Uncheck to keep EVERY placed via (escape, rescue, tap, stitch) "
+            "at 'Same-net Pad Clearance' from same-net SMD pads; BGA/QFN "
+            "fanout then runs dog-bone escapes (#581).")
+        options_inner.Add(self.via_in_pad_check, 0, wx.ALL, 3)
+        snpc_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        snpc_sizer.Add(wx.StaticText(options_scroll,
+                                     label="Same-net Pad Clearance (mm):"),
+                       0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        _snpc_r = defaults.PARAM_RANGES['same_net_pad_clearance']
+        self.same_net_pad_clearance = wx.SpinCtrlDouble(
+            options_scroll, min=_snpc_r['min'], max=_snpc_r['max'],
+            initial=defaults.CLEARANCE, inc=_snpc_r['inc'])
+        self.same_net_pad_clearance.SetDigits(_snpc_r['digits'])
+        self.same_net_pad_clearance.SetToolTip(
+            "Edge-to-edge clearance between placed vias and same-net SMD "
+            "pads. Active only while 'Allow via-in-pad' is unchecked.")
+        self.same_net_pad_clearance.Enable(False)  # sync with default-checked box
+        self.via_in_pad_check.Bind(
+            wx.EVT_CHECKBOX,
+            lambda evt: self.same_net_pad_clearance.Enable(not evt.IsChecked()))
+        snpc_sizer.Add(self.same_net_pad_clearance, 0)
+        options_inner.Add(snpc_sizer, 0, wx.EXPAND | wx.ALL, 3)
 
         # Stub layer swaps
         self.enable_layer_switch = wx.CheckBox(options_scroll, label="Stub layer swaps")
@@ -1674,6 +1716,9 @@ class RoutingDialog(wx.Dialog):
                 # reaches fanout too -- it is the step where a track-to-via
                 # teardrop matters most.
                 'add_teardrops': self.add_teardrops_check.GetValue(),
+                # #581: one via-in-pad policy for every step (Basic tab).
+                # > 0 -> BGA under-pad escapes run dog-bone, QFN via-in-pad off.
+                'same_net_pad_clearance': self._same_net_pad_clearance_value(),
             }
 
         return FanoutTab(
@@ -1726,6 +1771,8 @@ class RoutingDialog(wx.Dialog):
                 # Shared across all tabs: the single "Fix DRC settings after
                 # routing" toggle lives on the Basic tab (issue #160).
                 'fix_drc_settings': self.fix_drc_check.GetValue(),
+                # #581: one via-in-pad policy for every step (Basic tab).
+                'same_net_pad_clearance': self._same_net_pad_clearance_value(),
                 'keep_thermal': self.keep_thermal_check.GetValue(),
                 'clamp_netclasses': self.clearance_check.GetValue(),
                 'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
@@ -1798,6 +1845,8 @@ class RoutingDialog(wx.Dialog):
                 # Shared across all tabs: the single "Fix DRC settings after
                 # routing" toggle lives on the Basic tab (issue #160).
                 'fix_drc_settings': self.fix_drc_check.GetValue(),
+                # #581: one via-in-pad policy for every step (Basic tab).
+                'same_net_pad_clearance': self._same_net_pad_clearance_value(),
             }
 
         def get_routing_config():
@@ -2036,6 +2085,24 @@ class RoutingDialog(wx.Dialog):
             # Enable hide checkbox by default on Basic tab only
             if self.net_panel.hide_check:
                 self.net_panel.hide_check.SetValue(True)
+
+        # #581: surface the board's PERSISTED same-net pad via clearance (a
+        # CLI chain step recorded it in the .kicad_pro) in the Basic-tab
+        # controls, so a GUI session on that board honors the constraint by
+        # default instead of silently reverting to via-in-pad. Runs after the
+        # settings restore -- the board's recorded constraint outranks a stale
+        # per-user habit; the user can still re-check the box to override.
+        try:
+            from protected_nets import (read_same_net_pad_clearance,
+                                        pro_path_for_board)
+            _rec581 = read_same_net_pad_clearance(
+                pro_path_for_board(self.board_filename or ""))
+            if _rec581 > 0:
+                self.via_in_pad_check.SetValue(False)
+                self.same_net_pad_clearance.SetValue(_rec581)
+                self.same_net_pad_clearance.Enable(True)
+        except Exception:
+            pass
 
         # Pre-check nets the user selected in the PCB editor. This overrides any
         # restored/default net selection so the KiCad selection takes priority.
@@ -2311,12 +2378,14 @@ class RoutingDialog(wx.Dialog):
                 _po.gnd_via_distance.SetValue(defaults.GND_VIA_DISTANCE)
             if hasattr(_po, 'gnd_via_net'):
                 _po.gnd_via_net.SetValue(defaults.GND_VIA_NET)
-            if hasattr(_po, 'via_in_pad_check'):
-                # Default ON = same_net_pad_clearance -1.0 (CLI parity, big plane
-                # connectivity win; see CreatePlanesOptionsPanel #362).
-                _po.via_in_pad_check.SetValue(True)
-                if hasattr(_po, 'same_net_pad_clearance'):
-                    _po.same_net_pad_clearance.Enable(False)
+        except Exception:
+            pass
+        # #581: the via-in-pad policy controls live on the Basic tab now
+        # (moved from the planes tab). Default ON = -1.0 (CLI parity).
+        try:
+            self.via_in_pad_check.SetValue(True)
+            self.same_net_pad_clearance.SetValue(defaults.CLEARANCE)
+            self.same_net_pad_clearance.Enable(False)
         except Exception:
             pass
         try:
@@ -2703,6 +2772,8 @@ class RoutingDialog(wx.Dialog):
             # Basic parameters
             'track_width': self._effective_track_width(),
             'clearance': self._effective_clearance(),
+            # #581: via-in-pad policy (Basic tab; -1 = allowed)
+            'same_net_pad_clearance': self._same_net_pad_clearance_value(),
             'via_size': self._effective_via_size(),
             'via_drill': self._effective_via_drill(),
             'grid_step': self.grid_step.GetValue(),
@@ -3177,6 +3248,9 @@ class RoutingDialog(wx.Dialog):
                     input_file=self.board_filename,
                     output_file="",  # Not used when return_results=True
                     net_names=net_names,
+                    # #581: the Basic tab's via-in-pad policy (explicit value;
+                    # the dialog control is the session authority).
+                    same_net_pad_clearance=self._same_net_pad_clearance_value(),
                     layers=config['layers'],
                     track_width=track_width,
                     # #435 companion: Track Width override UNCHECKED (and no impedance)

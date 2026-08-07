@@ -307,7 +307,11 @@ def generate_underpad_escape(footprint: Footprint,
                              dogbone: bool = False,
                              plane_drop_nets: Optional[Set[int]] = None,
                              plane_drop_report: Optional[Dict] = None,
-                             plane_net_layers: Optional[Dict[str, List[str]]] = None
+                             plane_net_layers: Optional[Dict[str, List[str]]] = None,
+                             # #581: forbid ANY via overlapping its own pad --
+                             # dog-bone/off-pad sites only; balls with no legal
+                             # off-pad site fail honestly.
+                             no_via_in_pad: bool = False
                              ) -> Tuple[List[Dict], List[Dict], List[str]]:
     """Route BGA signal balls to the boundary under the pad field.
 
@@ -1694,11 +1698,16 @@ def generate_underpad_escape(footprint: Footprint,
             if site is not None:
                 _reserve_dogbone(p, site)
                 n_db += 1
-            else:
+            elif not no_via_in_pad:
                 _reserve_via_site(p)   # classic via-in-pad fallback
+            # #581 (no_via_in_pad): no centre reservation -- the classic
+            # escape below may still place an OFF-pad via (gated by _via_ok),
+            # else the ball fails honestly.
         if verbose:
             print(f"  Dog-bone: {n_db}/{len(db_all)} inner balls got a gap "
-                  f"via site ({len(db_all) - n_db} via-in-pad fallback)")
+                  f"via site ({len(db_all) - n_db} "
+                  f"{'off-pad-or-fail (#581)' if no_via_in_pad else 'via-in-pad'}"
+                  f" fallback)")
     else:
         for p in inner_pads:
             _reserve_via_site(p)
@@ -1800,7 +1809,17 @@ def generate_underpad_escape(footprint: Footprint,
         _memo = {}
 
         def _via_ok(x, y, at_center, _cs=_cs, _cd=_cd, _nid=p.net_id,
-                    _c=_ctx, _m=_memo):
+                    _c=_ctx, _m=_memo, _p=p):
+            if no_via_in_pad:
+                # #581: no via may overlap its own pad -- centre is out, and an
+                # off-centre via must clear the pad copper (circumscribed
+                # radius; exact for circular balls).
+                if at_center:
+                    return False
+                _pr = math.hypot(_p.size_x, _p.size_y) / 2.0
+                if math.hypot(x - _p.global_x, y - _p.global_y) \
+                        < _pr + via_size / 2.0:
+                    return False
             if locked_smd_pads and not via_site_ok(
                     x, y, (_cs if at_center else via_size) / 2.0):
                 return False
@@ -2029,7 +2048,11 @@ def generate_underpad_escape(footprint: Footprint,
             # underpad centre-reservation contract cannot be assumed here.
             cs, cd, ckeep = via_for_pad(p)
             _ctx = _via_ctx(p.net_id, gx, gy)
-            ok = not (locked_smd_pads and not via_site_ok(gx, gy, cs / 2.0))
+            # #581 (no_via_in_pad): the centre fallback IS a via-in-pad --
+            # fail the drop instead (the ball is left for the plane tap,
+            # which honors the same constraint through its via map).
+            ok = not no_via_in_pad
+            ok = ok and not (locked_smd_pads and not via_site_ok(gx, gy, cs / 2.0))
             if ok and _via_site_conflict(gx, gy, p.net_id, _ctx,
                                          vr=cs / 2.0, vdr=cd / 2.0) is not None:
                 ok = False

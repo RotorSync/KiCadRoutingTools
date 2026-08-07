@@ -157,6 +157,16 @@ class GridRouteConfig:
                                            # Hole-to-Hole Spacing" (keep in sync with
                                            # routing_defaults.HOLE_TO_HOLE_CLEARANCE)
     board_edge_clearance: float = 0.0  # mm - clearance from board edge (0 = use track clearance)
+    # #581: edge-to-edge clearance between ANY placed via and SAME-NET pads.
+    # > 0 forbids via-in-pad globally: routing/tap/rescue via placement blocks
+    # same-net SMD pads at this clearance, and pad-centre swap vias are
+    # declined. -1 (default) AND 0 preserve the pre-#581 behavior exactly
+    # (0 keeps only its legacy meaning where route_planes passes it explicitly
+    # into its stitching via maps). Set from route_planes
+    # --same-net-pad-clearance or the persisted .kicad_pro record
+    # (kicad_routing_tools.same_net_pad_clearance); there is deliberately no
+    # route.py/route_diff.py CLI flag.
+    same_net_pad_clearance: float = -1.0
     max_turn_angle: float = 180.0  # Max cumulative turn angle (degrees) before reset, to prevent U-turns
     # Power-tap neck-down (issue #72): when a wide power-net tap edge fails,
     # retry it at the layer's default track width. The narrow neck extends

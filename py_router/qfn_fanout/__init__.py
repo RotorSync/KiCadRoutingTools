@@ -436,7 +436,11 @@ def generate_qfn_fanout(footprint: Footprint,
                         via_size: float = 0.45,
                         via_drill: float = 0.25,
                         allow_via_in_pad: bool = False,
-                        board_edge_clearance: float = 0.0) -> Tuple[List[Dict], List[Dict], List[str]]:
+                        board_edge_clearance: float = 0.0,
+                        # #581: > 0 forbids via-in-pad (overrides
+                        # allow_via_in_pad); None auto-reads the .kicad_pro
+                        # record a chain step persisted.
+                        same_net_pad_clearance: Optional[float] = None) -> Tuple[List[Dict], List[Dict], List[str]]:
     """
     Generate QFN fanout tracks for a footprint.
 
@@ -467,6 +471,16 @@ def generate_qfn_fanout(footprint: Footprint,
     if layout is None:
         print(f"Warning: {footprint.reference} doesn't appear to be a QFN/QFP")
         return [], [], []
+
+    # #581: an active (> 0) same-net pad via clearance forbids via-in-pad --
+    # it overrides an explicit allow_via_in_pad.
+    if same_net_pad_clearance is None:
+        from protected_nets import read_snpc_for_pcb_data as _read_snpc581
+        same_net_pad_clearance = _read_snpc581(pcb_data)
+    if same_net_pad_clearance > 0 and allow_via_in_pad:
+        print(f"  Same-net pad via clearance {same_net_pad_clearance:g}mm "
+              f"(#581): via-in-pad DISABLED (overrides allow-via-in-pad)")
+        allow_via_in_pad = False
 
     # #498: a .kicad_dru rule for the (single) escape layer REPLACES the pair
     # clearance -- QFN stubs live on exactly one layer, so the scalar swap is
@@ -902,6 +916,11 @@ def main():
                              'that would graze the board edge are shortened or '
                              'dropped; underpad escape vias near the edge are '
                              'rejected (issue #288).')
+    parser.add_argument('--same-net-pad-clearance', type=float, default=None,
+                        help='#581: > 0 forbids via-in-pad (overrides --allow-via-in-pad) and '
+                             'is recorded in the sibling .kicad_pro so later chain steps '
+                             'inherit it. -1 explicitly allows via-in-pad. Default: the '
+                             'project record, else allowed.')
     parser.add_argument('--allow-via-in-pad', action='store_true',
                         help='Underpad escape: let the escape via overlap its OWN pad '
                              '(via-in-pad), so a via boxed in on the outward side can '
@@ -1009,7 +1028,8 @@ def main():
         escape_method=args.escape_method,
         via_size=args.via_size,
         via_drill=args.via_drill,
-        allow_via_in_pad=args.allow_via_in_pad
+        allow_via_in_pad=args.allow_via_in_pad,
+        same_net_pad_clearance=args.same_net_pad_clearance  # #581
     )
 
     if tracks or vias:
@@ -1088,6 +1108,16 @@ def main():
                 clamp_nondefault_netclasses=True)  # #439: fanout escapes route to --clearance; always clamp
         except Exception as _e:
             print(f"  (skipped DRC-settings fix: {_e})")
+        # #581: record an ACTIVE same-net pad via clearance for later steps.
+        try:
+            from protected_nets import (persist_same_net_pad_clearance,
+                                        pro_path_for_board)
+            if args.same_net_pad_clearance is not None \
+                    and args.same_net_pad_clearance > 0:
+                persist_same_net_pad_clearance(
+                    pro_path_for_board(out_path), args.same_net_pad_clearance)
+        except Exception as _e:
+            print(f"  (skipped same-net pad clearance record: {_e})")
     summary = {
         'component': args.component,
         'requested': requested,

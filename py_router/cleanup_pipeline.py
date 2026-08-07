@@ -287,7 +287,9 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
             # leaves; a full cell reaches them while a via never moves more than
             # one cell. Moves the via (still connected), never shrinks it.
             max_shift=config.grid_step,
-            net_clearances=_nc, board_edge_clearance=_bec)
+            net_clearances=_nc, board_edge_clearance=_bec,
+            same_net_pad_clearance=getattr(config, 'same_net_pad_clearance',
+                                           -1.0))  # #581
         counts['vias_nudged'] = _vn_moved
         _trace('via_nudge')
         if _vn_moved:

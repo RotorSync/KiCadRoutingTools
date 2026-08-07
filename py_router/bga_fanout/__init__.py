@@ -1862,7 +1862,10 @@ def _generate_bga_fanout_core(footprint: Footprint,
                         layer_costs: Optional[List[float]] = None,
                         _pad_filter: Optional[Set[Tuple[float, float]]] = None,
                         _ignore_prefanned: bool = False,
-                        _single_pass: bool = False) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+                        _single_pass: bool = False,
+                        # #581: > 0 forbids via-in-pad (underpad escapes run
+                        # dog-bone); None auto-reads the .kicad_pro record.
+                        same_net_pad_clearance: Optional[float] = None) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """
     Generate BGA fanout tracks for a footprint.
 
@@ -1906,6 +1909,21 @@ def _generate_bga_fanout_core(footprint: Footprint,
     if layers is None:
         layers = ["F.Cu", "B.Cu"]
 
+    # #581: an active (> 0) same-net pad via clearance forbids via-in-pad, so
+    # an under-pad escape runs in DOG-BONE mode (#128: via in the diagonal
+    # inter-ball gap) instead. Explicit param wins; None auto-reads the record
+    # a chain step persisted into the sibling .kicad_pro. The 'auto' fallback
+    # re-enters this function with escape_method='underpad' and the resolved
+    # value forwarded, so it is remapped there too. The channel engine places
+    # no via-in-pad and is untouched.
+    if same_net_pad_clearance is None:
+        from protected_nets import read_snpc_for_pcb_data as _read_snpc581
+        same_net_pad_clearance = _read_snpc581(pcb_data)
+    if same_net_pad_clearance > 0 and escape_method == 'underpad':
+        print(f"  Same-net pad via clearance {same_net_pad_clearance:g}mm "
+              f"(#581): under-pad escape runs dog-bone (no via-in-pad)")
+        escape_method = 'dogbone'
+
     # Non-orthogonally-placed parts (issue #137): the grid/escape logic below is
     # global-axis-bound, so rotate the whole board into this footprint's frame
     # (where its balls are axis-aligned), run the pipeline, and map the resulting
@@ -1941,7 +1959,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
             force_escape_direction=force_escape_direction, rebalance_escape=rebalance_escape,
             via_size=via_size, via_drill=via_drill, check_for_previous=check_for_previous,
             no_inner_top_layer=no_inner_top_layer, escape_method=escape_method,
-            grid_step=grid_step, layer_costs=layer_costs)
+            grid_step=grid_step, layer_costs=layer_costs,
+            same_net_pad_clearance=same_net_pad_clearance)
         back_transform_results(tracks, vias_to_add, vias_to_remove, back)
         return tracks, vias_to_add, vias_to_remove, failed_nets
 
@@ -2036,7 +2055,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
                 rebalance_escape=rebalance_escape, via_size=via_size,
                 via_drill=via_drill, no_inner_top_layer=no_inner_top_layer,
                 escape_method=escape_method, grid_step=grid_step,
-                layer_costs=layer_costs)
+                layer_costs=layer_costs,
+                same_net_pad_clearance=same_net_pad_clearance)
             # Coverage gate (issue #367): the legacy single pass runs FIRST.
             # When it escapes every ball there is nothing for prioritization
             # to improve -- reshuffling the escape competition only butterflies
@@ -2376,6 +2396,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
             grid_step=grid_step,
             only_pad_keys=_pad_filter,
             dogbone=(escape_method == 'dogbone'),
+            no_via_in_pad=(same_net_pad_clearance is not None
+                           and same_net_pad_clearance > 0),  # #581
         )
         tracks, vias_to_add, failed_nets = generate_underpad_escape(
             footprint, pcb_data, grid, layers, **_up_kw)
@@ -2982,7 +3004,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
             check_for_previous=check_for_previous,
             no_inner_top_layer=no_inner_top_layer, escape_method='underpad',
             grid_step=grid_step, _pad_filter=_pad_filter,
-            _ignore_prefanned=_ignore_prefanned, _single_pass=_single_pass)
+            _ignore_prefanned=_ignore_prefanned, _single_pass=_single_pass,
+            same_net_pad_clearance=same_net_pad_clearance)
         if len(up_failed) < len(failed_nets):
             print(f"  Under-pad escape wins: {len(failed_nets)} -> "
                   f"{len(up_failed)} dropped ball(s); using it")
@@ -3030,7 +3053,8 @@ def generate_plane_drops(footprint: Footprint,
                          grid_step: float = 0.0,
                          plane_min_pads: int = 6,
                          verbose: bool = True,
-                         plane_net_layers: Optional[Dict[str, List[str]]] = None
+                         plane_net_layers: Optional[Dict[str, List[str]]] = None,
+                         no_via_in_pad: bool = False
                          ) -> Tuple[List[Dict], List[Dict], Dict]:
     """Drop a via for every plane-net ball of `footprint` (#424 D2).
 
@@ -3080,13 +3104,13 @@ def generate_plane_drops(footprint: Footprint,
         plane_min_pads=plane_min_pads, net_filter_fn=net_filter_fn,
         grid_step=grid_step, only_pad_keys=frozenset(),
         plane_drop_nets=drop_ids, plane_drop_report=rep, verbose=verbose,
-        plane_net_layers=plane_net_layers)
+        plane_net_layers=plane_net_layers, no_via_in_pad=no_via_in_pad)
     return d_tracks, d_vias, rep
 
 
 def _plane_drop_pass(footprint, pcb_data, new_tracks, new_vias, net_filter,
                      layers, track_width, clearance, via_size, via_drill,
-                     grid_step, plane_net_layers=None):
+                     grid_step, plane_net_layers=None, no_via_in_pad=False):
     """Plane-ball drops against the board PLUS this call's fresh copper.
 
     The signal escape's tracks/vias are only result dicts at this point, so
@@ -3119,7 +3143,7 @@ def _plane_drop_pass(footprint, pcb_data, new_tracks, new_vias, net_filter,
                 track_width=track_width, clearance=clearance,
                 via_size=via_size, via_drill=via_drill,
                 net_filter=net_filter, grid_step=grid_step,
-                plane_net_layers=plane_net_layers)
+                plane_net_layers=plane_net_layers, no_via_in_pad=no_via_in_pad)
             back_transform_results(d_tracks, d_vias, [], back)
             return d_tracks, d_vias, rep
         return generate_plane_drops(
@@ -3127,7 +3151,7 @@ def _plane_drop_pass(footprint, pcb_data, new_tracks, new_vias, net_filter,
             track_width=track_width, clearance=clearance,
             via_size=via_size, via_drill=via_drill,
             net_filter=net_filter, grid_step=grid_step,
-            plane_net_layers=plane_net_layers)
+            plane_net_layers=plane_net_layers, no_via_in_pad=no_via_in_pad)
     finally:
         del pcb_data.segments[n_seg0:]
         del pcb_data.vias[n_via0:]
@@ -3156,7 +3180,10 @@ def generate_bga_fanout(footprint: Footprint,
                         plane_net_layers: Optional[Dict[str, List[str]]] = None,
                         _pad_filter: Optional[Set[Tuple[float, float]]] = None,
                         _ignore_prefanned: bool = False,
-                        _single_pass: bool = False) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+                        _single_pass: bool = False,
+                        # #581: > 0 forbids via-in-pad (dog-bone escapes/
+                        # drops only); None auto-reads the .kicad_pro record.
+                        same_net_pad_clearance: Optional[float] = None) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """BGA fanout: the signal escape engines plus the plane-ball drop pass.
 
     See _generate_bga_fanout_core for the escape-engine parameters. After the
@@ -3191,6 +3218,11 @@ def generate_bga_fanout(footprint: Footprint,
         if isinstance(_e, StartupCheckError):
             raise
 
+    # #581: resolve once in the wrapper so the core and the plane-drop pass
+    # share the same value (the core's own auto-read then no-ops).
+    if same_net_pad_clearance is None:
+        from protected_nets import read_snpc_for_pcb_data as _read_snpc581
+        same_net_pad_clearance = _read_snpc581(pcb_data)
     tracks, vias_to_add, vias_to_remove, failed_nets = _generate_bga_fanout_core(
         footprint, pcb_data, net_filter=net_filter,
         diff_pair_patterns=diff_pair_patterns, layers=layers,
@@ -3204,7 +3236,8 @@ def generate_bga_fanout(footprint: Footprint,
         no_inner_top_layer=no_inner_top_layer, escape_method=escape_method,
         grid_step=grid_step, layer_costs=layer_costs,
         _pad_filter=_pad_filter, _ignore_prefanned=_ignore_prefanned,
-        _single_pass=_single_pass)
+        _single_pass=_single_pass,
+        same_net_pad_clearance=same_net_pad_clearance)
 
     LAST_PLANE_DROP_REPORT.clear()
     _knob = (env_knobs.FANOUT_PLANE_DROP or '').strip().lower()
@@ -3215,7 +3248,9 @@ def generate_bga_fanout(footprint: Footprint,
         d_tracks, d_vias, rep = _plane_drop_pass(
             footprint, pcb_data, tracks, vias_to_add, net_filter,
             layers, track_width, clearance, via_size, via_drill, grid_step,
-            plane_net_layers=plane_net_layers)
+            plane_net_layers=plane_net_layers,
+            no_via_in_pad=(same_net_pad_clearance is not None
+                           and same_net_pad_clearance > 0))
         tracks = tracks + d_tracks
         vias_to_add = vias_to_add + d_vias
         LAST_PLANE_DROP_REPORT.update(rep)
@@ -3268,6 +3303,12 @@ def main():
     parser.add_argument('--no-inner-top-layer', action='store_true',
                         help='Prevent inner pads from using F.Cu (top layer). '
                              'Use when there is not enough clearance on top layer for inner routes.')
+    parser.add_argument('--same-net-pad-clearance', type=float, default=None,
+                        help='#581: > 0 forbids via-in-pad entirely (under-pad escapes and '
+                             'plane drops run dog-bone; balls with no legal off-pad via site '
+                             'fail visibly) and is recorded in the sibling .kicad_pro so later '
+                             'chain steps inherit it. -1 explicitly allows via-in-pad. '
+                             'Default: the project record, else allowed.')
     parser.add_argument('--escape-method', choices=['auto', 'channel', 'underpad', 'dogbone'], default='auto',
                         help='Fanout engine (default: auto). "channel" = 45-stub + '
                              'channel router with diff-pair support. "underpad" = dense-array '
@@ -3395,6 +3436,7 @@ def main():
     tracks, vias_to_add, vias_to_remove, _failed_nets = generate_bga_fanout(
         footprint,
         pcb_data,
+        same_net_pad_clearance=args.same_net_pad_clearance,  # #581
         net_filter=args.nets,
         diff_pair_patterns=args.diff_pairs,
         layers=args.layers,
@@ -3513,6 +3555,17 @@ def main():
                 clamp_nondefault_netclasses=True)  # #439: fanout escapes route to --clearance; always clamp
         except Exception as _e:
             print(f"  (skipped DRC-settings fix: {_e})")
+        # #581: record an ACTIVE same-net pad via clearance so later chain
+        # steps keep their vias off same-net pads too.
+        try:
+            from protected_nets import (persist_same_net_pad_clearance,
+                                        pro_path_for_board)
+            if args.same_net_pad_clearance is not None \
+                    and args.same_net_pad_clearance > 0:
+                persist_same_net_pad_clearance(
+                    pro_path_for_board(out_path), args.same_net_pad_clearance)
+        except Exception as _e:
+            print(f"  (skipped same-net pad clearance record: {_e})")
     summary = {
         'component': args.component,
         'requested': requested,

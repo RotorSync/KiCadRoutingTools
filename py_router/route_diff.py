@@ -167,6 +167,10 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 routing_clearance_margin: float = defaults.ROUTING_CLEARANCE_MARGIN,
                 hole_to_hole_clearance: float = defaults.HOLE_TO_HOLE_CLEARANCE,
                 board_edge_clearance: float = defaults.BOARD_EDGE_CLEARANCE,
+                # #581: > 0 keeps every placed via off same-net SMD pads at
+                # this edge-to-edge clearance; None auto-reads the persisted
+                # .kicad_pro record; 0 / -1 explicitly off.
+                same_net_pad_clearance: Optional[float] = None,
                 max_turn_angle: float = defaults.DIFF_PAIR_MAX_TURN_ANGLE,
                 gnd_via_enabled: bool = True,
                 vertical_attraction_radius: float = defaults.VERTICAL_ATTRACTION_RADIUS,
@@ -486,6 +490,21 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # track_margin channel to ride instead. Margin helpers computed against
     # this reserve are then 0 for impedance-width legs, i.e. today's behaviour.
     config_kwargs['reserve_layer_widths'] = True
+    # #581: an active (> 0) same-net pad via clearance keeps every placed via
+    # off same-net SMD pads. Explicit --same-net-pad-clearance wins (> 0
+    # activates; 0 / -1 explicitly off); unset auto-reads the record an
+    # earlier chain step persisted into the sibling .kicad_pro.
+    if same_net_pad_clearance is None:
+        from protected_nets import read_snpc_for_pcb_data as _read_snpc581
+        _snpc581 = _read_snpc581(pcb_data, input_file)
+        _snpc_src = "project record"
+    else:
+        _snpc581 = same_net_pad_clearance
+        _snpc_src = "flag"
+    if _snpc581 > 0:
+        config_kwargs['same_net_pad_clearance'] = _snpc581
+        print(f"Same-net pad via clearance {_snpc581:g}mm (from {_snpc_src}, "
+              f"#581): vias stay off same-net pads")
     config = GridRouteConfig(**config_kwargs)
 
     # Find differential pairs from all provided nets
@@ -1759,6 +1778,13 @@ Examples:
     parser.add_argument("--board-edge-clearance", type=float, default=None,
                         help="Clearance from board edge in mm. Default: the board's own "
                              f"min_copper_edge_clearance constraint, else {defaults.BOARD_EDGE_CLEARANCE}.")
+    parser.add_argument("--same-net-pad-clearance", type=float, default=None,
+                        help="Edge-to-edge clearance (mm) between EVERY placed via and "
+                             "same-net pads (#581). > 0 keeps vias off same-net SMD pads "
+                             "(escape vias, via-in-pad rescue, tap vias) and is recorded "
+                             "in the sibling .kicad_pro so later chain steps inherit it; "
+                             "-1 explicitly allows via-in-pad. Default: the project's "
+                             "recorded value, else via-in-pad allowed.")
     parser.add_argument("--max-turn-angle", type=float, default=180.0,
                         help="Max cumulative turn angle (degrees) before reset, to prevent U-turns (default: 180)")
 
@@ -2033,6 +2059,7 @@ Examples:
                 routing_clearance_margin=args.routing_clearance_margin,
                 hole_to_hole_clearance=args.hole_to_hole_clearance,
                 board_edge_clearance=args.board_edge_clearance,
+                same_net_pad_clearance=args.same_net_pad_clearance,
                 max_turn_angle=args.max_turn_angle,
                 gnd_via_enabled=not args.no_gnd_vias,
                 vertical_attraction_radius=args.vertical_attraction_radius,
@@ -2089,5 +2116,11 @@ Examples:
             _pro = pro_path_for_board(args.output_file)
             persist_protected_nets(_pro, consume_protection_candidates())
             persist_impedance_specs(_pro, consume_impedance_specs())
+            # #581: an explicit active flag on this step is recorded so later
+            # chain steps keep their vias off same-net pads too.
+            if getattr(args, 'same_net_pad_clearance', None) is not None \
+                    and args.same_net_pad_clearance > 0:
+                from protected_nets import persist_same_net_pad_clearance
+                persist_same_net_pad_clearance(_pro, args.same_net_pad_clearance)
         except Exception as e:
             print(f"  (skipped protected-nets record: {e})")

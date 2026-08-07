@@ -3957,7 +3957,12 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
                        max_shift: float = 0.025,
                        allowed_via_ids=None,
                        net_clearances=None,
-                       board_edge_clearance: float = 0.0) -> Tuple[int, int, List[Tuple]]:
+                       board_edge_clearance: float = 0.0,
+                       # #581: > 0 -> a nudge candidate must also keep this
+                       # edge-to-edge clearance from SAME-net SMD pads (the
+                       # sub-grid move must not trade a foreign graze for a
+                       # same-net pad one).
+                       same_net_pad_clearance: float = -1.0) -> Tuple[int, int, List[Tuple]]:
     """Sub-grid nudge for a VIA that grazes foreign copper or a drill (#280).
 
     Two vias snapped to the routing grid can land a few µm inside clearance
@@ -4159,7 +4164,21 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
                 near_vias.append(o)
         for pads in pcb_data.pads_by_net.values():
             for p in pads:
-                if p.net_id == v.net_id or getattr(p, 'pad_type', '') == 'np_thru_hole':
+                if getattr(p, 'pad_type', '') == 'np_thru_hole':
+                    continue
+                if p.net_id == v.net_id:
+                    if same_net_pad_clearance > 0 and not getattr(p, 'drill', 0):
+                        # #581 same-net SMD pads: EXTENT-aware window -- a long
+                        # pad (BUS/connector finger) reaches into range while
+                        # its CENTER sits outside; the center-only test dropped
+                        # it from worst_gap and the nudge moved a via INTO its
+                        # clearance (neo6502 BUS1.35: 4.25mm tall, center 2.7mm
+                        # away, copper 0.575mm away). Foreign pads keep the
+                        # center test below -- the pre-#581 behavior, byte-
+                        # compatible when the flag is unset.
+                        if (abs(p.global_x - x) <= WINDOW + p.size_x / 2
+                                and abs(p.global_y - y) <= WINDOW + p.size_y / 2):
+                            near_pads.append(p)
                     continue
                 if abs(p.global_x - x) <= WINDOW and abs(p.global_y - y) <= WINDOW:
                     near_pads.append(p)
@@ -4200,9 +4219,12 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
             consider(d - (r + o.size / 2.0 + pair_clr(own, o.net_id)), o.x, o.y)
         for p in near_pads:
             tp, g = _nearest_pad_point(x, y, p)
-            consider(g - (r + max(pair_clr(own, p.net_id),
-                                  getattr(p, 'local_clearance', 0.0) or 0.0)),
-                     tp[0], tp[1])
+            if p.net_id == v.net_id:
+                _need = same_net_pad_clearance  # #581 (only gathered when > 0)
+            else:
+                _need = max(pair_clr(own, p.net_id),
+                            getattr(p, 'local_clearance', 0.0) or 0.0)
+            consider(g - (r + _need), tp[0], tp[1])
         if vd > 0:
             for hx, hy, hr in near_holes:
                 d = math.hypot(x - hx, y - hy)
@@ -4462,7 +4484,8 @@ def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
                                max_shift: float = 0.025,
                                all_new_vias: Optional[List[Dict]] = None,
                                hole_to_hole: float = 0.20,
-                               protected_pads=None):
+                               protected_pads=None,
+                               same_net_pad_clearance: float = -1.0):  # #581
     """Apply prune_grazing_segments + nudge_grazing_octolinear + sweep_dead_ends to a
     PLANE script's write-list (issue #224).
 
@@ -4601,7 +4624,8 @@ def cleanup_plane_taps_grazing(pcb_data: PCBData, all_new_segments: List[Dict],
     n_via_moved, _, via_moves = nudge_grazing_vias(
         [], pcb_data, scope_net_ids, clearance,
         hole_to_hole=hole_to_hole, max_shift=max_shift,
-        allowed_via_ids=allowed)
+        allowed_via_ids=allowed,
+        same_net_pad_clearance=same_net_pad_clearance)  # #581
     if via_moves:
         n_nudged += n_via_moved
         moved_pts = {(net, _pt(ox, oy)): (nx, ny)

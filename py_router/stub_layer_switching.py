@@ -1078,6 +1078,13 @@ def validate_swap(stub_p: StubInfo, stub_n: StubInfo, dest_layer: str,
     Returns:
         (is_valid, error_message)
     """
+    # #581: an active (> 0) same-net pad via clearance forbids pad-centre vias.
+    if getattr(config, 'same_net_pad_clearance', -1.0) > 0:
+        for stub in (stub_p, stub_n):
+            if needs_pad_via_for_switch(stub):
+                return False, ("needs a pad via, forbidden by same-net pad "
+                               "clearance (#581)")
+
     # Check 0: never orphan an SMD pad mounted on the stub's layer (issue #83)
     for stub in (stub_p, stub_n):
         orphans, orphan_reason = swap_would_orphan_smd_pad(pcb_data, stub, dest_layer)
@@ -1400,6 +1407,12 @@ def validate_single_swap(stub: StubInfo, dest_layer: str,
     Returns:
         (is_valid, error_message)
     """
+    # #581: an active (> 0) same-net pad via clearance forbids the pad-centre
+    # via this switch would drill -- decline the swap instead.
+    if (getattr(config, 'same_net_pad_clearance', -1.0) > 0
+            and needs_pad_via_for_switch(stub)):
+        return False, "needs a pad via, forbidden by same-net pad clearance (#581)"
+
     # Check 0: never orphan an SMD pad mounted on the stub's layer (issue #83)
     orphans, orphan_reason = swap_would_orphan_smd_pad(pcb_data, stub, dest_layer)
     if orphans:

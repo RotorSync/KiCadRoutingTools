@@ -2145,6 +2145,46 @@ def remove_vias_list_from_obstacles(obstacles: GridObstacleMap, vias: list,
     _ledger_close(obstacles, _pre, "remove_vias_list")
 
 
+def same_net_pad_via_keepout_cells(pcb_data: PCBData, net_id: int,
+                                   config: GridRouteConfig) -> "np.ndarray":
+    """#581: (N, 2) via-block cells over the net's own SMD pads when an active
+    (> 0) same_net_pad_clearance is on the config; empty otherwise.
+
+    Blocks VIA placement only (never tracks) at pad-edge + via/2 + clearance,
+    mirroring plane_obstacle_builder._add_pad_via_obstacle's geometry.
+    Through-hole pads are exempt (their barrel is the layer transition, and
+    the #581 concern is SMD reflow)."""
+    snpc = getattr(config, 'same_net_pad_clearance', -1.0)
+    if snpc is None or snpc <= 0:
+        return np.empty((0, 2), dtype=np.int32)
+    from routing_utils import pad_blocked_cells_array
+    coord = GridCoord(config.grid_step)
+    margin = config.via_size / 2 + snpc + config.grid_step / 2
+    chunks = []
+    for pad in pcb_data.pads_by_net.get(net_id, []):
+        if getattr(pad, 'drill', 0):
+            continue
+        gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+        hw, hh = pad.size_x / 2, pad.size_y / 2
+        if pad.shape in ('circle', 'oval'):
+            cr = min(hw, hh)
+        elif pad.shape == 'roundrect':
+            cr = getattr(pad, 'roundrect_rratio', 0.25) * min(pad.size_x,
+                                                              pad.size_y)
+        else:
+            cr = 0
+        cells = pad_blocked_cells_array(
+            gx, gy, hw, hh, margin, config.grid_step, cr,
+            off_x=pad.global_x - gx * coord.grid_step,
+            off_y=pad.global_y - gy * coord.grid_step,
+            rotation_deg=getattr(pad, 'rect_rotation', 0.0) or 0.0)
+        if len(cells):
+            chunks.append(cells)
+    if not chunks:
+        return np.empty((0, 2), dtype=np.int32)
+    return np.concatenate(chunks)
+
+
 def add_same_net_via_clearance(obstacles: GridObstacleMap, pcb_data: PCBData,
                                 net_id: int, config: GridRouteConfig):
     """Add via-via clearance blocking for same-net vias.
@@ -2153,6 +2193,22 @@ def add_same_net_via_clearance(obstacles: GridObstacleMap, pcb_data: PCBData,
     enforcing DRC via-via clearance even within a single net.
     """
     coord = GridCoord(config.grid_step)
+
+    # #581: keep every new via off this net's own SMD pads when the board
+    # carries an active same-net pad via clearance. Callers of this function
+    # stamp CLONED per-route maps (Phase 3 taps, the non-incremental builder),
+    # so no balanced removal is needed. MIRROR into the small-rung map (#568):
+    # a rung-1 search consults ONLY blocked_vias_small for dynamic copper, so
+    # without the mirror it drops a small fab-rung via straight into the pad
+    # this keep-out exists to protect (neo6502: 0.45mm vias in R14/U6 pads).
+    _pad_cells = same_net_pad_via_keepout_cells(pcb_data, net_id, config)
+    if len(_pad_cells):
+        obstacles.add_blocked_vias_batch(_pad_cells)
+        try:
+            if _rung_small_armed():
+                obstacles.add_blocked_vias_small_batch(_pad_cells)
+        except (AttributeError, NameError):
+            pass
 
     # Via-via clearance: center-to-center distance must be >= via_size + clearance
     # So we block via placement within this radius of existing vias

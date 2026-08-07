@@ -1352,6 +1352,8 @@ class FanoutTab(wx.Panel):
             tracks, vias_to_add, vias_to_remove, failed_nets = generate_bga_fanout(
                 footprint,
                 self.pcb_data,
+                # #581: Basic-tab via-in-pad policy -- > 0 forces dog-bone.
+                same_net_pad_clearance=shared.get('same_net_pad_clearance', -1.0),
                 net_filter=net_patterns,
                 diff_pair_patterns=config['diff_pair_patterns'] or None,
                 layers=layers,
@@ -1473,6 +1475,8 @@ class FanoutTab(wx.Panel):
                 via_drill=via_drill,
                 allow_via_in_pad=allow_via_in_pad,
                 board_edge_clearance=shared.get('board_edge_clearance', 0.0),
+                # #581: Basic-tab policy overrides allow_via_in_pad when > 0.
+                same_net_pad_clearance=shared.get('same_net_pad_clearance', -1.0),
             )
 
             self._apply_fanout_results(

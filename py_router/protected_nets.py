@@ -40,6 +40,7 @@ from typing import Dict, Iterable, List, Optional, Set
 PRO_NAMESPACE = "kicad_routing_tools"
 PRO_KEY = "protected_nets"
 IMPEDANCE_KEY = "net_impedance"
+SNPC_KEY = "same_net_pad_clearance"
 
 _GLOB_CHARS = set('*?[')
 
@@ -151,6 +152,58 @@ def persist_impedance_specs(pro_path: str, mapping: Dict[str, dict],
                             verbose: bool = True) -> bool:
     return _persist_map(pro_path, IMPEDANCE_KEY, mapping,
                         "Net impedance specs (reapplied on redo)", verbose)
+
+
+def persist_same_net_pad_clearance(pro_path: str, value: float,
+                                   verbose: bool = True) -> bool:
+    """Record an ACTIVE (> 0) same-net pad via clearance (#581) so every later
+    chain step keeps its vias off same-net pads too. Scalar, not a map: one
+    board-wide assembly constraint. No-op for <= 0 (-1 = via-in-pad allowed,
+    the default; 0 keeps its legacy stitching-only meaning and, per the
+    compat contract, must not change any other step's behavior) or when the
+    project file is absent."""
+    if value is None or value <= 0 or not pro_path or not os.path.isfile(pro_path):
+        return False
+    try:
+        with open(pro_path, 'r', encoding='utf-8') as f:
+            proj = json.load(f)
+        ns = proj.setdefault(PRO_NAMESPACE, {})
+        if ns.get(SNPC_KEY) == value:
+            return False
+        ns[SNPC_KEY] = value
+        with open(pro_path, 'w', encoding='utf-8') as f:
+            json.dump(proj, f, indent=2)
+        if verbose:
+            print(f"  Same-net pad via clearance {value:g}mm recorded in "
+                  f"{os.path.basename(pro_path)} (later steps keep vias off "
+                  f"same-net pads)")
+        return True
+    except Exception as e:
+        if verbose:
+            print(f"  (skipped same-net pad clearance record: {e})")
+        return False
+
+
+def read_same_net_pad_clearance(pro_path: str) -> float:
+    """The persisted #581 clearance, or -1.0 when absent/unreadable."""
+    try:
+        if not pro_path or not os.path.isfile(pro_path):
+            return -1.0
+        with open(pro_path, 'r', encoding='utf-8') as f:
+            proj = json.load(f)
+        v = (proj.get(PRO_NAMESPACE) or {}).get(SNPC_KEY)
+        return float(v) if isinstance(v, (int, float)) and float(v) > 0 else -1.0
+    except Exception:
+        return -1.0
+
+
+def read_snpc_for_pcb_data(pcb_data, input_file: Optional[str] = None) -> float:
+    """#581 clearance for the board an engine is working on (same discovery
+    rule as read_for_pcb_data: input_file, else PCBData.source_path)."""
+    path = input_file or getattr(pcb_data, 'source_path', "") or ""
+    if not path:
+        return -1.0
+    return read_same_net_pad_clearance(pro_path_for_board(path))
 
 
 def read_impedance_specs(pro_path: str) -> Dict[str, dict]:

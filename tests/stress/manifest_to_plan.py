@@ -71,6 +71,9 @@ FLAG_PARAMS = {
     '--stitch-max-freq': 'stitch_max_freq',
     '--exit-margin': 'exit_margin',
     '--extension': 'extension',
+    # #581: same-net pad via clearance -- valid on planes, route, route_diff,
+    # bga/qfn fanout and repair steps; the GUI control lives on the Basic tab.
+    '--same-net-pad-clearance': 'same_net_pad_clearance',
     '--max-track-width': 'max_track_width',
     '--min-track-width': 'min_track_width',
     '--analysis-grid-step': 'analysis_grid_step',

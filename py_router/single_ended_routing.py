@@ -2081,6 +2081,11 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id, coord
     # route there is not a layer-access problem a via-in-pad would fix.
     if pad_obj is None or getattr(pad_obj, 'drill', 0):
         return None
+    # #581: an active (> 0) same-net pad via clearance forbids via-in-pad
+    # outright -- this rescue's whole move is a via INSIDE the pad, so it is
+    # off the table (the pad fails visibly instead, for a human fanout stub).
+    if getattr(config, 'same_net_pad_clearance', -1.0) > 0:
+        return None
     if hasattr(pad_obj, 'layers') and '*.Cu' in pad_obj.layers:
         return None
     pad_layer = next((l for l in pad_obj.layers

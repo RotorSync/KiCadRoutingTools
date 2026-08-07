@@ -826,6 +826,12 @@ def apply_diff_pair_layer_swaps(
                     print(f"    Bare-pad target swap skipped for {pair_name}: "
                           f"{p_reason if not p_clear else n_reason}")
                     continue
+                # #581: the fan drops a via ON each pad -- forbidden while an
+                # active (> 0) same-net pad via clearance is in force.
+                if getattr(config, 'same_net_pad_clearance', -1.0) > 0:
+                    print(f"    Bare-pad target swap skipped for {pair_name}: "
+                          f"pad vias forbidden by same-net pad clearance (#581)")
+                    continue
 
                 # Candidate stub directions (issue #357): aiming BOTH stubs at
                 # the pair's source center converges them -- from fine-pitch
