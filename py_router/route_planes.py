@@ -2782,6 +2782,9 @@ def create_plane(
             pass
 
     # Step 1: Load PCB (or use provided pcb_data)
+    # Whether the CALLER handed us live board state decides who is authoritative
+    # about existing zones further down (see Step 2).
+    _live_pcb_data = pcb_data is not None
     if pcb_data is None:
         print(f"Loading PCB from {input_file}...")
         pcb_data = parse_kicad_pcb(input_file)
@@ -2823,23 +2826,37 @@ def create_plane(
     # Each entry is (net_id, net_name, plane_layer, pad_info)
 
     # Step 2: Check for existing zones on each target layer.
-    # Combine zones from the input file with zones already present in the
-    # provided pcb_data (the live pcbnew board state when invoked from the
-    # GUI). This way zones that exist on the live board but haven't been
-    # saved to disk are also detected.
-    try:
-        existing_zones = list(extract_zones(input_file))
-    except (FileNotFoundError, OSError):
-        existing_zones = []
-    seen_keys = {(z.net_name, z.layer) for z in existing_zones}
-    for z in (getattr(pcb_data, 'zones', None) or []):
-        key = (z.net_name, z.layer)
-        if key in seen_keys:
-            continue
-        existing_zones.append(ZoneInfo(net_id=z.net_id, net_name=z.net_name, layer=z.layer,
-                                      in_footprint=getattr(z, 'in_footprint', False),
-                                      priority=int(getattr(z, 'priority', 0) or 0)))
-        seen_keys.add(key)
+    #
+    # When the caller supplied pcb_data it IS the board (the live pcbnew state
+    # from the GUI), and it is the ONLY authority. This used to union the input
+    # FILE's zones in as well, to catch a zone added live but not yet saved --
+    # but a union can only ever ADD, so the opposite edit was invisible: delete a
+    # zone by hand in KiCad, hit Create Plane, and the unsaved-to-disk file still
+    # supplied the deleted zone, so skip_existing_zones kept "it already exists"
+    # and no plane was ever poured. The live board already reports both cases
+    # correctly (build_pcb_data_from_board lists the zone before deletion and
+    # none after), so trust it alone. Only fall back to the file when no caller
+    # supplied board state -- i.e. the CLI, where the file IS the board.
+    existing_zones = []
+    if _live_pcb_data:
+        for z in (getattr(pcb_data, 'zones', None) or []):
+            existing_zones.append(ZoneInfo(net_id=z.net_id, net_name=z.net_name, layer=z.layer,
+                                           in_footprint=getattr(z, 'in_footprint', False),
+                                           priority=int(getattr(z, 'priority', 0) or 0)))
+    else:
+        try:
+            existing_zones = list(extract_zones(input_file))
+        except (FileNotFoundError, OSError):
+            existing_zones = []
+        seen_keys = {(z.net_name, z.layer) for z in existing_zones}
+        for z in (getattr(pcb_data, 'zones', None) or []):
+            key = (z.net_name, z.layer)
+            if key in seen_keys:
+                continue
+            existing_zones.append(ZoneInfo(net_id=z.net_id, net_name=z.net_name, layer=z.layer,
+                                          in_footprint=getattr(z, 'in_footprint', False),
+                                          priority=int(getattr(z, 'priority', 0) or 0)))
+            seen_keys.add(key)
 
     should_create_zones = []  # Per-net flag for whether to create zone
     zones_to_replace = []  # List of (net_id, layer) tuples for zones to replace

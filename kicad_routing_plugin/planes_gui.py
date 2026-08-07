@@ -934,6 +934,7 @@ class PlanesTab(wx.Panel):
         _plane_clamp = config.get('clamp_netclasses', False)
         _plane_ceiling = _plane_clearance if _plane_clamp else None
         _plane_net_clearances = {}
+        plane_error = None      # set if plane creation raises; surfaced to the dialog
         try:
             from .fanout_gui import _get_net_classes_from_board
             from .swig_gui import _get_netclass_parameters
@@ -1142,9 +1143,29 @@ class PlanesTab(wx.Panel):
             import traceback
             traceback.print_exc()
             print(f"Error creating planes: {e}")
+            # SURFACE it. This used to only print, and the result dict below was
+            # then built with zeros and no 'error' key -- so a hard failure inside
+            # create_plane was indistinguishable from a legitimate no-op, and the
+            # traceback went to stdout, which is invisible unless KiCad's scripting
+            # console happens to be open. The dialog reported "0 vias, 0 traces"
+            # (now "No plane was created") and the user had nothing to act on.
+            plane_error = f"{type(e).__name__}: {e}"
+
+        # How many requested pours the ENGINE kept as-is because that net already
+        # has a zone on that layer (skip_existing_zones). Without this the dialog
+        # cannot distinguish "already there, nothing to do" from a real failure --
+        # both arrive as zero new zones.
+        try:
+            _have = {(z.net_name, z.layer)
+                     for z in (getattr(self.pcb_data, 'zones', None) or [])}
+            zones_kept = sum(1 for _n, _l in zip(expanded_nets, expanded_layers)
+                             if (_n, _l) in _have)
+        except Exception:
+            zones_kept = 0
 
         self._operation_result = {
             'mode': 'create',
+            'zones_kept': zones_kept,
             'total_vias': total_vias,
             'total_traces': total_traces,
             'total_pads': total_pads,
@@ -1153,6 +1174,8 @@ class PlanesTab(wx.Panel):
             'affected_nets': sorted(set(expanded_nets)),
             'config': config,
         }
+        if plane_error:
+            self._operation_result['error'] = plane_error
 
 
     def _poll_operation(self):
@@ -1214,11 +1237,14 @@ class PlanesTab(wx.Panel):
             msg += f" on {len(nets)} net(s)\n" if nets else "\n"
         else:
             msg = "No plane was created.\n\n"
-        if zones_skipped:
-            # The usual reason a pour looks like it did nothing.
-            msg += (f"Skipped: {zones_skipped} zone(s) -- that net already has a "
-                    f"zone on that layer.\nUncheck 'Skip existing zones' to pour "
-                    f"anyway.\n")
+        kept = zones_skipped + result.get('zones_kept', 0)
+        if kept:
+            # The usual reason a pour looks like it did nothing. Covers both the
+            # engine keeping an existing zone and the apply step declining to
+            # duplicate one already on the live board.
+            msg += (f"Kept existing: {kept} zone(s) -- that net already has a "
+                    f"zone on that layer, so nothing needed pouring.\n"
+                    f"Uncheck 'Skip existing zones' to replace it instead.\n")
         for label, key in (("Vias placed", 'total_vias'), ("Traces added", 'total_traces')):
             if result.get(key, 0):
                 msg += f"{label}: {result[key]}\n"
@@ -1226,8 +1252,8 @@ class PlanesTab(wx.Panel):
             msg += f"Failed pads (no via placed): {failed_pads}\n"
 
         status = f"Created: {zones_added} zone(s)"
-        if zones_skipped:
-            status += f", {zones_skipped} skipped (already present)"
+        if kept:
+            status += f", {kept} kept (already present)"
         if failed_pads:
             status += f", {failed_pads} failed"
         self.status_text.SetLabel(status)
