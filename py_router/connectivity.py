@@ -653,6 +653,8 @@ def get_stub_direction(segments: List[Segment], stub_x: float, stub_y: float, st
     for seg in segments:
         if seg.layer != stub_layer:
             continue
+        if getattr(seg, 'graphic', False):
+            continue  # board art never defines a stub's direction (#583)
 
         # Check if start matches stub position
         if abs(seg.start_x - stub_x) < tolerance and abs(seg.start_y - stub_y) < tolerance:
@@ -696,7 +698,16 @@ def get_stub_segments(pcb_data: PCBData, net_id: int, stub_x: float, stub_y: flo
     Returns:
         List of segments forming the stub, ordered from free end to pad
     """
-    net_segments = [s for s in pcb_data.segments if s.net_id == net_id and s.layer == stub_layer]
+    # Copper GRAPHICS are excluded: they never conduct (#513) and are written
+    # back from the original file with their original layer, so a stub walk
+    # that picks one up hands immovable board copper to the layer-swap
+    # machinery -- which then relayers it in pcb_data only, blinding the
+    # obstacle map to the real copper (#583: apple1_aci_card tracks routed
+    # through graphic clearance zones after a multipoint collapse "moved"
+    # 96 F.Cu graphics to B.Cu).
+    net_segments = [s for s in pcb_data.segments
+                    if s.net_id == net_id and s.layer == stub_layer
+                    and not getattr(s, 'graphic', False)]
     net_pads = pcb_data.pads_by_net.get(net_id, [])
     pad_positions = [(p.global_x, p.global_y) for p in net_pads]
 

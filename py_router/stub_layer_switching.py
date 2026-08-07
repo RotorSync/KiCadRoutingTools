@@ -88,7 +88,9 @@ def get_stub_info(pcb_data: PCBData, net_id: int, stub_x: float, stub_y: float,
     # This handles cases where get_stub_segments walked wrong direction or chain was incomplete.
     # Using BFS ensures we find a pad that's actually connected to our chain, not a different chain.
     if pad_x is None:
-        layer_segments = [s for s in pcb_data.segments if s.net_id == net_id and s.layer == stub_layer]
+        layer_segments = [s for s in pcb_data.segments
+                          if s.net_id == net_id and s.layer == stub_layer
+                          and not getattr(s, 'graphic', False)]  # graphics never conduct (#513/#583)
         # BFS from chain end position to find connected pad
         visited = set()
         queue = [(current_x, current_y)]
@@ -208,10 +210,16 @@ def apply_stub_layer_switch(pcb_data: PCBData, stub: StubInfo, new_layer: str,
     # Find ALL segments on this layer for this net that connect to either the stub position
     # or the pad position. This handles cases where get_stub_segments walked the wrong direction.
     tolerance = STUB_POSITION_TOLERANCE
-    segments_to_switch = set(id(s) for s in stub.segments)
+    segments_to_switch = set(id(s) for s in stub.segments
+                             if not getattr(s, 'graphic', False))
 
     for seg in pcb_data.segments:
         if seg.net_id != stub.net_id or seg.layer != stub.layer:
+            continue
+        if getattr(seg, 'graphic', False):
+            # Copper graphics are immovable board copper: the writer emits them
+            # from the original file on their ORIGINAL layer, so relayering one
+            # here only corrupts the in-memory obstacle model (#583).
             continue
         if id(seg) in segments_to_switch:
             continue
@@ -220,8 +228,9 @@ def apply_stub_layer_switch(pcb_data: PCBData, stub: StubInfo, new_layer: str,
            (abs(seg.end_x - stub.pad_x) < tolerance and abs(seg.end_y - stub.pad_y) < tolerance):
             segments_to_switch.add(id(seg))
 
-    # Get actual segment objects
-    all_segments = [s for s in stub.segments]
+    # Get actual segment objects (graphics filtered again in case a caller's
+    # StubInfo predates the get_stub_segments graphic exclusion)
+    all_segments = [s for s in stub.segments if not getattr(s, 'graphic', False)]
     for seg in pcb_data.segments:
         if id(seg) in segments_to_switch and seg not in all_segments:
             all_segments.append(seg)
@@ -443,6 +452,9 @@ def revert_stub_layer_switch(pcb_data: 'PCBData', segment_mods: List[Dict], new_
             continue
         for seg in pcb_data.segments:
             if (seg.net_id == mod['net_id'] and
+                not getattr(seg, 'graphic', False) and  # never relabel board art:
+                # a same-net graphic with identical geometry on the dest layer
+                # (apple1-style F/B twins) would soak up the revert (#583)
                 abs(seg.start_x - mod['start'][0]) < SEGMENT_MATCH_TOLERANCE and
                 abs(seg.start_y - mod['start'][1]) < SEGMENT_MATCH_TOLERANCE and
                 abs(seg.end_x - mod['end'][0]) < SEGMENT_MATCH_TOLERANCE and
@@ -945,8 +957,12 @@ def connected_stub_segments_on_layer(pcb_data: PCBData, net_id: int, layer: str,
     foreign copper we need that whole trace, so BFS the net's layer copper from
     the seed endpoints. Returns the connected segment objects (incl. the seeds).
     """
+    # Graphics never conduct (#513) and are immovable, so the component walk
+    # must not extend through them -- a track stub touching own-net board art
+    # would otherwise drag the art into the moved set (#583).
     layer_segs = [s for s in pcb_data.segments
-                  if s.net_id == net_id and s.layer == layer]
+                  if s.net_id == net_id and s.layer == layer
+                  and not getattr(s, 'graphic', False)]
     if not layer_segs:
         return list(seed_segments)
 
