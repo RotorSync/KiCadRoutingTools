@@ -42,7 +42,15 @@ import math
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_root = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _root)
+# #522/py_placer layout: the engine modules (kicad_parser, cli_banner, ...)
+# live in py_router/py_tools/py_placer, not at the repo root, so inserting
+# only _root left `import cli_banner` failing when run as a script.
+for _pkg in ('py_router', 'py_tools', 'py_placer'):
+    _d = os.path.join(_root, _pkg)
+    if os.path.isdir(_d):
+        sys.path.insert(0, _d)
 
 # A pair whose two members moved by vectors differing by less than this is
 # treated as one block. It is a MILLIMETRE tolerance, not a grid step: real
