@@ -30,7 +30,10 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from startup_checks import get_cargo_version
+# the engine moved into py_router/ (#522). Import it as a package rather than
+# flat: python puts THIS script's directory (the repo root) on sys.path, so this
+# resolves no matter what cwd install_plugin.py is invoked from.
+from py_router.startup_checks import get_cargo_version
 
 
 PLUGIN_NAME = "KiCadRoutingTools"

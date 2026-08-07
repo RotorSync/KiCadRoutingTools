@@ -101,10 +101,11 @@ CLI_ONLY_OK = {
 GUI_ONLY_OK = {
     "input_file", "output_file", "net_names", "pcb_data", "return_results",
     "progress_callback", "cancel_check", "net_clearances",
-    # #562: the in-run finalize's ORACLE leg needs a board staged on disk to
-    # verify against KiCad's fill. The CLI already has one (output_file); the
-    # GUI hands back a SaveBoard of the LIVE board via this callback. Live-board
-    # plumbing with no CLI equivalent, exactly like pcb_data above.
+    # The #562 finalize's oracle leg needs a real FILE for kicad-cli's exact
+    # fill. The CLI already has one (output_file); under return_results the GUI
+    # hands the engine a SaveBoard of the live board through this callback. An
+    # engine callback the GUI supplies internally -- not a dialog parameter,
+    # deliberately not Claude-settable, and by construction CLI-side absent.
     "stage_board_fn",
 }
 

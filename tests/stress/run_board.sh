@@ -44,6 +44,28 @@ rm -f "$RUNDIR/.worker_done"
 # The tools self-record when REDO_MANIFEST is set, so capture is reliable even if
 # the agent doesn't route a command through run_limited.sh. Start each run fresh.
 export REDO_MANIFEST="$RUNDIR/redo_commands.sh"
+# The run dir is the recorder's authority (redo_record._resolve_manifest): agents
+# re-export REDO_MANIFEST as "$PWD/redo_commands.sh" and also cd into the repo to
+# import kicad_parser, which would otherwise record into the CHECKOUT.
+export REDO_RUNDIR="$RUNDIR"
+# ...but NEVER by deleting the previous attempt's record. A relaunch (watchdog
+# retry after a worker routed the board yet died before writing its results JSON)
+# used to `rm -f` a COMPLETE manifest and leave the routed step*.kicad_pcb behind,
+# so the new agent either did nothing (board ships with NO manifest) or resumed
+# mid-chain (manifest starts at a step*.kicad_pcb that no step in it creates).
+# Either way the board reported success with a silently unreplayable chain --
+# measured at 8 damaged manifests over 9 relaunches in the 2026-08-06 sets-11-25
+# wave. Archive the whole prior attempt instead: the record survives, AND moving
+# the intermediates out forces the relaunched agent to route from the input.
+if [ -s "$REDO_MANIFEST" ] || ls "$RUNDIR"/step*.kicad_pcb >/dev/null 2>&1; then
+  n=1; while [ -e "$RUNDIR/attempt_$n" ]; do n=$((n+1)); done
+  mkdir -p "$RUNDIR/attempt_$n"
+  mv "$REDO_MANIFEST" "$RUNDIR/attempt_$n/" 2>/dev/null
+  # timings is append-only across attempts: COPY (keep the running log intact).
+  cp -p "$RUNDIR/redo_commands.timings.jsonl" "$RUNDIR/attempt_$n/" 2>/dev/null
+  mv "$RUNDIR"/step*.kicad_pcb "$RUNDIR"/step*.kicad_pro "$RUNDIR/attempt_$n/" 2>/dev/null
+  echo "[run_board] archived prior attempt -> attempt_$n" >> "$RUNDIR/worker.log"
+fi
 rm -f "$REDO_MANIFEST"
 
 PROMPT="Stress-test the KiCadRoutingTools autorouter on ONE board: **$BOARD** (set $SET).
@@ -66,7 +88,15 @@ Paths for THIS board:
 
 Rules that matter most:
 - Prefix EVERY routing/fanout/plane/check command with: bash $REPO/tests/stress/run_limited.sh
-- Run tools as: python3 -X utf8 $REPO/<tool>.py ...
+- Run tools as: python3 -X utf8 $REPO/py_router/<tool>.py ...  (#522 moved the
+  engine + CLIs into py_router/; a bare \$REPO/<tool>.py does not exist. The few
+  repo-root scripts -- build_router.py, install_plugin.py -- stay at \$REPO/.)
+- REDO_MANIFEST is ALREADY exported for you (the replay manifest). Do NOT re-export
+  or override it -- especially not as \"\$PWD/redo_commands.sh\": you also cd into
+  the tools repo to import kicad_parser, and from there \$PWD is the CHECKOUT, so
+  your steps get recorded into the repo instead of this board's manifest.
+- Stay in your working dir and invoke tools by ABSOLUTE path. Do not cd into
+  $REPO; write every output/log under $RUNDIR, never into the tools checkout.
 - Use the flags that 'list_nets.py <board> --design-rules' prints (working via,
   manufacturing-floor clearance, DRC floor). Grade DRC at that floor.
 - On a 4+ layer board, pass ALL inner copper layers to bga_fanout AND route_diff
@@ -96,10 +126,15 @@ When fully done:
      issues + suggestions.
   3. Print the single line: BOARD_DONE $BOARD"
 
+# APPEND, never truncate: a relaunch used to overwrite the previous attempt's
+# worker.log, so relaunch history was unrecoverable and the manifest-clobber bug
+# above was invisible in the logs (a retried board showed exactly one start line).
+# Note `board=` appears on BOTH the start and the exit line -- count launches with
+# `grep -c 'start='`, not `grep -c 'board='`.
 {
   echo "[run_board] board=$BOARD set=$SET backend=$BACKEND model=${MODEL:-(backend default)} start=$(date)"
   echo "[run_board] result=$RESULT"
-} > "$RUNDIR/worker.log"
+} >> "$RUNDIR/worker.log"
 
 # Record a per-copper route trace for each route.py / route_diff.py step the
 # agent runs (#482), so render_run.py can build a whole-run movie afterward.

@@ -4,15 +4,11 @@ High-performance A* grid router implemented in Rust with Python bindings via PyO
 
 **Current Version: 0.20.0**
 
-> **Release note:** prebuilt 0.20.0 binaries are NOT published yet, while
-> `/VERSION` and `metadata.json` still name the 0.19.3 PCM release. Until a
-> v0.20.0 release exists, a user WITHOUT a Rust toolchain cannot install
-> HEAD: `build_router.py` fetches the latest published asset (0.19.3),
-> `startup_checks` rejects any binary whose version differs from
-> `Cargo.toml`, and the #568 `via_rung=` kwarg does not exist on a 0.19.x
-> `.so` anyway. Publishing the 0.20.0 per-platform binaries and realigning
-> `/VERSION` + `metadata.json` is a required release step, not optional
-> polish.
+> **Release note:** the 0.20.0 per-platform binaries are published as of
+> [v0.20.0](https://github.com/drandyhaas/KiCadRoutingTools/releases/tag/v0.20.0),
+> and `/VERSION` + `metadata.json` name that release. `build_router.py`
+> fetches them directly -- a plain `python build_router.py` is enough, and
+> `--from-source` is only needed when testing local Rust changes.
 
 ## Features
 
