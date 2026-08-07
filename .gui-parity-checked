@@ -1,9 +1,55 @@
-6113245 2026-08-06 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+4b0479a 2026-08-07 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 check_release_version.check_gui_parity reads `marker.read_text().split()[0]`
 and diffs it against HEAD. Every entry until now opened with the word "HEAD"
 (or "ADDENDUM"), which git resolves happily -- so `git diff HEAD..HEAD` was
 empty and the release parity gate passed UNCONDITIONALLY, for every release
 that has ever run it. Keep a real SHA first or the gate is decorative.
+
+2026-08-07 parity audit 6113245..4b0479a (13 commits: the v0.20.0 release,
+stress-harness robustness, #582 install fix, the live-board zone-deletion
+authority pair, #583 graphics-never-stubs, #581 board-wide
+same-net-pad-clearance, and the run_all test fixes). Outcome: NO gaps at
+HEAD -- the one commit with a large new engine surface (#581) carried its
+own two-front wiring, built against the parity rules from the start.
+
+  Audit surface:
+  * #583 (0cc04da): shared engine modules only (connectivity,
+    stub_layer_switching, layer_swap_optimization, diff_pair_multipoint) --
+    both fronts call them through the shared functions; no new flags,
+    params, or post-passes. build_pcb_data_from_board already tags
+    graphics at parity with the text parser (verified, lines 4112-4157).
+  * #581 (dc396c2): NEW engine param same_net_pad_clearance on batch_route,
+    batch_route_diff_pairs, create_plane, repair_planes,
+    generate_bga_fanout, generate_qfn_fanout, nudge_grazing_vias,
+    cleanup_plane_taps_grazing + NEW CLI flag on 6 scripts. Threaded to
+    EVERY GUI call site in the same commit: the controls moved from the
+    planes tab to the Basic tab (via_in_pad_check +
+    same_net_pad_clearance, dialog-level so the plan executor resolves
+    the param name), all three get_shared_params closures +
+    _build_routing_config supply it, route/diff/planes/fanout engine
+    calls pass it, settings_persistence saves/restores it (legacy dicts
+    default to via-in-pad allowed), reset_params_to_defaults resets it,
+    manifest_to_plan FLAG_PARAMS maps the flag, and the dialog seeds
+    from the persisted .kicad_pro record at open.
+  * 95bc8a7 + 79ee514 are themselves a CLI/GUI pair (live-board zone
+    authority + planes-GUI ZONES reporting).
+  * Everything else in the range is stress harness (py_tools/tests),
+    install_plugin, docs, or test files -- no engine surface.
+
+  Gates at 4b0479a (all four, fresh):
+  * test_gui_engine_parity: PARITY, copper sets IDENTICAL (segments
+    1335/1335, vias 140/140, drc 0/0, kicad_unconnected 0/0).
+  * test_settings_roundtrip: clean (save, restore, LEGACY, re-save;
+    180 keys incl. the two new Basic-tab #581 controls).
+  * test_manifest_plan_parity: 23361 flag-checks, 0 mismatches
+    (incl. --same-net-pad-clearance).
+  * test_cli_postpass_coverage: 0 failures.
+  Also green this range: run_all 250/0 (first fully green board -- the 5
+  chronic failures were 4x #522 subprocess path debris + 1 stale
+  expectation, fixed in 4b0479a), doc-examples gate 0 failed.
+
+  Known gate blind spot unchanged: the engine-parity plan is signal+plane
+  only (no diff-pair / impedance params).
 
 2026-08-06 parity audit 89914ce..4c8b79d (27 commits: #570 false-weld
 rejection, fc5ee0e finalize-with-rip-authority, #572 forced links + lap
