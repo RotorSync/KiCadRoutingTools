@@ -24,6 +24,38 @@ import sys
 import time
 
 
+def _resolve_manifest(manifest: str):
+    """Pin the manifest to the board's run dir, never the tools checkout.
+
+    Stress agents re-export REDO_MANIFEST as "$PWD/redo_commands.sh" even though
+    run_board.sh already exports the absolute run-dir path. That is correct only
+    while PWD is the run dir -- and agents `cd` into the repo to import
+    kicad_parser, after which $PWD is the CHECKOUT. The record then lands in
+    py_router/redo_commands.sh, so the board's own manifest is silently missing
+    those steps (qfhmix01: 3 of 24 steps recorded into the repo, 2026-08-06) and
+    the repo accumulates untracked debris.
+
+    REDO_RUNDIR (exported by run_board.sh) is the authority: relative paths
+    resolve against it, and a path that lands inside this checkout is redirected
+    back to it. Returns None when the record would escape and there is no run dir
+    to fall back on -- dropping the record beats corrupting the repo.
+    """
+    rundir = os.environ.get("REDO_RUNDIR")
+    if not os.path.isabs(manifest):
+        manifest = os.path.join(rundir or os.getcwd(), manifest)
+    manifest = os.path.abspath(manifest)
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        escaped = os.path.commonpath([manifest, repo]) == repo
+    except ValueError:      # different drives (Windows) -> cannot be inside
+        escaped = False
+    if escaped:
+        if not rundir:
+            return None
+        manifest = os.path.join(rundir, os.path.basename(manifest))
+    return manifest
+
+
 def _register_timing(manifest: str, cmd: list, cwd: str) -> None:
     """Append this command's wall-clock to a sibling timings log when the
     process exits (issue #132). Kept in a SEPARATE file from the manifest so the
@@ -55,6 +87,9 @@ def record_invocation(manifest_env: str = "REDO_MANIFEST") -> None:
     if not manifest or manifest == os.devnull or manifest == "/dev/null":
         return
     try:
+        manifest = _resolve_manifest(manifest)
+        if not manifest:
+            return
         argv = list(sys.argv)
         if not argv:
             return

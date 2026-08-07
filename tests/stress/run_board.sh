@@ -44,6 +44,10 @@ rm -f "$RUNDIR/.worker_done"
 # The tools self-record when REDO_MANIFEST is set, so capture is reliable even if
 # the agent doesn't route a command through run_limited.sh. Start each run fresh.
 export REDO_MANIFEST="$RUNDIR/redo_commands.sh"
+# The run dir is the recorder's authority (redo_record._resolve_manifest): agents
+# re-export REDO_MANIFEST as "$PWD/redo_commands.sh" and also cd into the repo to
+# import kicad_parser, which would otherwise record into the CHECKOUT.
+export REDO_RUNDIR="$RUNDIR"
 # ...but NEVER by deleting the previous attempt's record. A relaunch (watchdog
 # retry after a worker routed the board yet died before writing its results JSON)
 # used to `rm -f` a COMPLETE manifest and leave the routed step*.kicad_pcb behind,
@@ -85,6 +89,12 @@ Paths for THIS board:
 Rules that matter most:
 - Prefix EVERY routing/fanout/plane/check command with: bash $REPO/tests/stress/run_limited.sh
 - Run tools as: python3 -X utf8 $REPO/<tool>.py ...
+- REDO_MANIFEST is ALREADY exported for you (the replay manifest). Do NOT re-export
+  or override it -- especially not as \"\$PWD/redo_commands.sh\": you also cd into
+  the tools repo to import kicad_parser, and from there \$PWD is the CHECKOUT, so
+  your steps get recorded into the repo instead of this board's manifest.
+- Stay in your working dir and invoke tools by ABSOLUTE path. Do not cd into
+  $REPO; write every output/log under $RUNDIR, never into the tools checkout.
 - Use the flags that 'list_nets.py <board> --design-rules' prints (working via,
   manufacturing-floor clearance, DRC floor). Grade DRC at that floor.
 - On a 4+ layer board, pass ALL inner copper layers to bga_fanout AND route_diff
