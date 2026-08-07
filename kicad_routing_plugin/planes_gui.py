@@ -1200,17 +1200,37 @@ class PlanesTab(wx.Panel):
         # Apply results to board
         self._apply_results_to_board()
 
-        # Show completion message
-        msg = f"Plane creation complete!\n\n"
-        msg += f"Vias placed: {result.get('total_vias', 0)}\n"
-        msg += f"Traces added: {result.get('total_traces', 0)}\n"
+        # Show completion message. Lead with ZONES: the pour is what this tab
+        # produces. Vias/traces are legacy tap counters that are structurally 0
+        # now the plane step places no taps (#492/#562), so only mention them
+        # when non-zero -- otherwise every successful pour announced "0 and 0".
+        zones_added, zones_skipped = getattr(self, '_last_zone_counts', (0, 0))
+        nets = result.get('affected_nets') or []
         failed_pads = result.get('failed_pads', 0)
+
+        if zones_added:
+            msg = "Plane creation complete!\n\n"
+            msg += f"Planes poured: {zones_added} zone(s)"
+            msg += f" on {len(nets)} net(s)\n" if nets else "\n"
+        else:
+            msg = "No plane was created.\n\n"
+        if zones_skipped:
+            # The usual reason a pour looks like it did nothing.
+            msg += (f"Skipped: {zones_skipped} zone(s) -- that net already has a "
+                    f"zone on that layer.\nUncheck 'Skip existing zones' to pour "
+                    f"anyway.\n")
+        for label, key in (("Vias placed", 'total_vias'), ("Traces added", 'total_traces')):
+            if result.get(key, 0):
+                msg += f"{label}: {result[key]}\n"
         if failed_pads:
             msg += f"Failed pads (no via placed): {failed_pads}\n"
-        self.status_text.SetLabel(
-            f"Created: {result.get('total_vias', 0)} vias, "
-            f"{result.get('total_traces', 0)} traces, "
-            f"{failed_pads} failed")
+
+        status = f"Created: {zones_added} zone(s)"
+        if zones_skipped:
+            status += f", {zones_skipped} skipped (already present)"
+        if failed_pads:
+            status += f", {failed_pads} failed"
+        self.status_text.SetLabel(status)
 
         # If any pads failed to get a via, append heuristic suggestions.
         if result.get('failed_pads', 0) > 0:
@@ -1256,6 +1276,9 @@ class PlanesTab(wx.Panel):
         """Apply operation results to the pcbnew board."""
         import pcbnew
 
+        # Reset before the early return below, so the completion message can
+        # never report a PREVIOUS run's zone tally.
+        self._last_zone_counts = (0, 0)
         board = pcbnew.GetBoard()
         if board is None:
             return
@@ -1547,6 +1570,14 @@ class PlanesTab(wx.Panel):
 
         if vias_added > 0 or tracks_added > 0 or zones_added > 0:
             print(f"Added to board: {zones_added} zones, {vias_added} vias, {tracks_added} tracks")
+
+        # Hand the zone tally to the completion message. The pour itself is the
+        # product here -- vias/traces are structurally 0 since the plane step
+        # stopped placing taps (#492/#562), so a dialog reporting only those two
+        # reads as "nothing happened" on a perfectly successful pour, and hides
+        # the one number that explains a no-op: zones SKIPPED because the net
+        # already has a zone on that layer (skip_existing_zones, default on).
+        self._last_zone_counts = (zones_added, zones_skipped)
 
         # Build connectivity before filling so nets are resolved properly.
         board.BuildConnectivity()
