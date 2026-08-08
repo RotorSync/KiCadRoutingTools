@@ -180,10 +180,14 @@ def retap_pad(pcb_data: PCBData, config: GridRouteConfig,
     if placed is None:
         return False
     new_via = placed[0]
+    # #535 off-pad escape rung: the pad->via stub ships with the via (empty
+    # for the classic in-pad placement).
+    _stub_segs = placed[3] if len(placed) > 3 else []
     entry = net_obstacles_cache.get(nid)
     if working_obstacles is not None and entry is not None:
         remove_net_obstacles_from_cache(working_obstacles, entry)
         pcb_data.vias.append(new_via)
+        pcb_data.segments.extend(_stub_segs)
         net_obstacles_cache[nid] = precompute_net_obstacles(
             pcb_data, nid, config, extra_clearance=0.0,
             diagonal_margin=defaults.DIAGONAL_MARGIN)
@@ -191,6 +195,7 @@ def retap_pad(pcb_data: PCBData, config: GridRouteConfig,
                                      net_obstacles_cache[nid])
     else:
         pcb_data.vias.append(new_via)
+        pcb_data.segments.extend(_stub_segs)
     print(f"  TAP RELOCATION: re-tapped {pad.component_ref}.{pad.pad_number} "
           f"with a fresh via at ({new_via.x:.2f}, {new_via.y:.2f})")
     return new_via

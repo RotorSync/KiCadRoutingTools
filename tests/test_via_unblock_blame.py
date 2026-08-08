@@ -53,8 +53,17 @@ def _cfg():
 def test_declined_via_in_pad_names_the_keystone():
     pcb, pad = _board()
     cfg = _cfg()
-    res = _place_shrunk_via_in_pad(pad, None, cfg, pcb, VICTIM,
-                                   GridCoord(cfg.grid_step), LAYERS)
+    # This test exercises the DECLINE + blame path specifically, so disable
+    # the #535 off-pad escape rung -- on this sparse fixture it would find a
+    # legal via just outside the pocket and rescue the pad instead.
+    import env_knobs
+    _saved = env_knobs.ESCAPE_STUB_RADIUS
+    env_knobs.ESCAPE_STUB_RADIUS = 0.0
+    try:
+        res = _place_shrunk_via_in_pad(pad, None, cfg, pcb, VICTIM,
+                                       GridCoord(cfg.grid_step), LAYERS)
+    finally:
+        env_knobs.ESCAPE_STUB_RADIUS = _saved
     assert res is None, "no via can legally fit over the KEYSTONE trace"
     blame = getattr(pcb, '_via_unblock_blame', None)
     assert blame and blame.get(VICTIM) == {KEYSTONE}, \

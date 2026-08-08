@@ -107,13 +107,30 @@ def main():
         check("0.3 read back", read_same_net_pad_clearance(pro) == 0.3)
 
     # -- 3: #189 rescue gate --------------------------------------------------
-    print("3: via-in-pad rescue declines when active")
+    # With #581 active the IN-PAD arm is forbidden; the #535 off-pad escape
+    # rung is the compliant rescue. Accept either outcome: None, or an
+    # OFF-pad via (with its escape stub) that itself honors the clearance.
+    print("3: via-in-pad rescue is #581-compliant when active")
     from single_ended_routing import _place_shrunk_via_in_pad
+    import math as _math
     cfg_on = GridRouteConfig(layers=['F.Cu', 'B.Cu'])
     cfg_on.same_net_pad_clearance = 0.3
     res = _place_shrunk_via_in_pad(_pad(10, 10), None, cfg_on, pcb, 1,
                                    GridCoord(0.1), ['F.Cu', 'B.Cu'])
-    check("rescue returns None", res is None)
+    if res is None:
+        check("rescue declined (no compliant escape)", True)
+    else:
+        _via, _cell, _pli, _stub = res
+        # pad is 1.0mm square at (10,10): via edge to pad edge >= 0.3
+        _edge_d = (max(abs(_via.x - 10.0), abs(_via.y - 10.0)) - 0.5
+                   - _via.size / 2.0)
+        check("escape via keeps the same-net pad clearance",
+              _edge_d >= 0.3 - 1e-6)
+        check("escape ships its pad->via stub", bool(_stub))
+    # In-pad arm stays forbidden either way: the via must never sit ON the pad
+    if res is not None:
+        check("via is OFF the pad",
+              max(abs(res[0].x - 10.0), abs(res[0].y - 10.0)) > 0.5)
 
     # -- 4: swap validator gate ----------------------------------------------
     print("4: pad-via swap declined when active")

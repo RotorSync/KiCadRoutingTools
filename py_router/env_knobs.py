@@ -76,6 +76,12 @@ def refresh() -> None:
     # post-rescue whole-net retry with track width + via size marching down
     # together toward the fab floor. =0 disables for A/B debugging.
     g['TERMINAL_ESCALATION'] = _s('KICAD_TERMINAL_ESCALATION', '1') != '0'
+    # PR #535's idea as a #189 escalation rung: when the in-pad unblock via
+    # fails (or #581 forbids via-in-pad), search this radius (mm) around the
+    # boxed pad for the first spot where a through-via is legal on every
+    # layer and inject a pad->via escape stub (the plane-tap machinery does
+    # the search + trace). =0 disables the off-pad rung.
+    g['ESCAPE_STUB_RADIUS'] = _f('KICAD_ESCAPE_STUB_RADIUS', 1.0)
     # #529 dynamic iterations, DEFAULT ON (=0 reverts to static caps): full
     # searches run at min(base, CLAMP) and earn +1x base tranches while the
     # heuristic keeps approaching, up to a flat 1e7 ceiling. CLAMP defaults
