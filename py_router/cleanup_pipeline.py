@@ -47,11 +47,29 @@ from pcb_modification import (
     sweep_dead_ends,
     trim_dangles_past_body_anchor,
     neck_wide_segments_grazing_pads,
+    smooth_octolinear_chains,
     close_soft_joints,
 )
 
 RED = '\033[91m'
 RESET = '\033[0m'
+
+
+def _smooth_skip_net_ids(pcb_data):
+    """Nets the #536 octolinear smoothing pass must never touch: protected
+    nets (length/time-matched groups, coupled diff pairs, KiCad-locked
+    copper -- prior steps via the .kicad_pro plus THIS step's not-yet-
+    consumed registrations) and impedance-declared nets. Their geometry is
+    the spec: meanders exist on purpose, and smoothing one pair leg destroys
+    the coupling. Peeks at protected_nets._notes WITHOUT consuming -- the
+    writeback site owns the consume."""
+    import protected_nets as _pn
+    names = set(_pn.protection_map(pcb_data))
+    names |= set(_pn._notes.get(_pn.PRO_KEY, {}) or {})
+    names |= set(_pn.read_impedance_for_pcb_data(pcb_data))
+    names |= set(_pn._notes.get(_pn.IMPEDANCE_KEY, {}) or {})
+    return {nid for nid, net in pcb_data.nets.items()
+            if getattr(net, 'name', None) in names}
 
 
 @dataclass
@@ -103,6 +121,11 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
       8. sweep_dead_ends       -- trim dead-end spurs and unsupported vias.
       9. neck_wide_segments_grazing_pads -- width-only fix for wide power
                                   trunks overlapping a fine-pitch foreign pad.
+      9b. smooth_octolinear_chains -- OPT-IN (KICAD_SMOOTH_ROUTE=1, #536):
+                                  collapse staircase micro-jogs into diagonal+
+                                  axis shortcuts. Last shape pass, still before
+                                  close (it removes copper); skips protected /
+                                  impedance nets (_smooth_skip_net_ids).
      10. close_soft_joints     -- LAST copper step (#319 ordering): bridge any
                                   remaining same-net soft joint. The
                                   subtractive passes above run with the
@@ -384,6 +407,33 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         if _necked:
             print(f"{label}Width neck: narrowed {_necked} wide segment(s) "
                   f"grazing a foreign pad")
+
+    # Octolinear smoothing (#536, OPT-IN via KICAD_SMOOTH_ROUTE=1): collapse
+    # grid-A* staircase micro-jogs into a single diagonal+axis run. Last
+    # copper-SHAPE pass by design -- it must see the junk-free copper the
+    # subtractive passes leave (a smoothed staircase can't be cycle-pruned
+    # apart, and neck's width changes are deliberate chain boundaries) and
+    # must still run BEFORE close_soft_joints (#319 ordering). The connector
+    # is hard-clearance-checked but SOFT-cost-blind, so smoothed copper can
+    # squat in corridors a later routing step's soft model kept open --
+    # which is why the knob is opt-in and belongs on the FINAL chain step.
+    if env_knobs.SMOOTH_ROUTE:
+        _prog("octolinear smoothing")
+        _sm_n, _sm_nets, _sm_strip, _sm_added, _sm_stats = smooth_octolinear_chains(
+            results, pcb_data, _sub_scope, clearance=config.clearance,
+            keep_input_copper=keep_input_copper,
+            net_clearances=_nc, board_edge_clearance=_bec,
+            config=config,
+            skip_net_ids=_smooth_skip_net_ids(pcb_data))
+        counts['smoothed_spans'] = _sm_stats.get('spans', 0)
+        counts['smoothed_saved_mm'] = _sm_stats.get('saved_mm', 0.0)
+        _trace('smooth')
+        strip.extend(_sm_strip)
+        if _sm_n:
+            print(f"{label}Octolinear smoothing: collapsed "
+                  f"{_sm_stats.get('spans', 0)} staircase span(s) on "
+                  f"{_sm_nets} net(s), -{_sm_stats.get('saved_mm', 0.0):.2f} mm "
+                  f"of copper (#536)")
 
     # FINAL copper step (#319 ordering): nothing below may remove copper.
     # KICAD_NO_SOFT_JOINT_BRIDGE=1 is an A/B ablation knob (like

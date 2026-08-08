@@ -164,9 +164,39 @@ def _custom_pad_min_dist(custom, net_id, pts, base_clearance=None):
         adj = 0.0
         if base_clearance is not None:
             adj = max((getattr(pad, 'local_clearance', 0.0) or 0.0) - base_clearance, 0.0)
+        # Branch-and-bound prune (exact-result-preserving): the polygons are
+        # stored in GLOBAL coordinates, so the distance from a sample point to
+        # the polygon's bounding BOX is a valid lower bound on its edge
+        # distance (a bbox is tighter than a bounding radius on the elongated
+        # connector/thermal polygons that dominate real boards). Points are
+        # visited lowest-bound first; once the bound can no longer beat
+        # `best`, no later point can either. Cuts the exact polygon walk from
+        # every windowed sample point (the 5mm window is generous) to the few
+        # that matter -- it dominated the #536 smoothing pass.
+        bb = getattr(pad, '_poly_bbox', None)
+        if bb is None:
+            vs = [v for poly in (getattr(pad, 'polygons', None) or ()) for v in poly]
+            if vs:
+                bb = (min(v[0] for v in vs), min(v[1] for v in vs),
+                      max(v[0] for v in vs), max(v[1] for v in vs))
+            else:
+                bb = (pad.global_x - ex, pad.global_y - ey,
+                      pad.global_x + ex, pad.global_y + ey)
+            try:
+                pad._poly_bbox = bb
+            except Exception:
+                pass
+        cand = []
         for (px, py) in pts:
             if abs(px - pad.global_x) > R + ex or abs(py - pad.global_y) > R + ey:
                 continue
+            lo = math.hypot(max(bb[0] - px, px - bb[2], 0.0),
+                            max(bb[1] - py, py - bb[3], 0.0))
+            cand.append((lo, px, py))
+        cand.sort()
+        for lo, px, py in cand:
+            if lo - adj >= best:
+                break
             d = point_to_pad_distance(px, py, pad) - adj
             if d < best:
                 best = d
