@@ -42,6 +42,13 @@ import pcbnew
 src = sys.argv[1]
 dst = sys.argv[2]
 board = pcbnew.LoadBoard(src)
+if board is None:
+    # LoadBoard returns None (no exception) on a file it rejects;
+    # ZONE_FILLER(None) then SEGFAULTS in C++ -- a macOS crash-report popup
+    # per occurrence during test runs. Exit cleanly; the caller already
+    # degrades to the raster model on any non-REFILL_OK outcome.
+    print("REFILL_FAIL LoadBoard returned None")
+    sys.exit(3)
 filler = pcbnew.ZONE_FILLER(board)
 zones = board.Zones()
 filler.Fill(zones)
