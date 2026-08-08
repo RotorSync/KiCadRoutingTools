@@ -828,7 +828,12 @@ def terminal_web_neck_exact(pcb_data, net_id, layer, ex, ey, floor,
     for pad in pcb_data.pads_by_net.get(net_id, []):
         if not (layer in pad.layers or any('*' in L for L in pad.layers)):
             continue
-        if abs(pad.global_x - ex) < radius and abs(pad.global_y - ey) < radius:
+        # Extent-aware window (the foreign-long-pad class): a long pad's
+        # copper can reach the endpoint while its CENTER sits outside the
+        # radius; missing it under-credits own copper here and produces
+        # false "dangling" verdicts downstream.
+        if (abs(pad.global_x - ex) < radius + pad.size_x / 2
+                and abs(pad.global_y - ey) < radius + pad.size_y / 2):
             shp = _pad_web_polygon(pad)
             if shp is not None:
                 shapes.append(shp)
@@ -4166,21 +4171,19 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
             for p in pads:
                 if getattr(p, 'pad_type', '') == 'np_thru_hole':
                     continue
-                if p.net_id == v.net_id:
-                    if same_net_pad_clearance > 0 and not getattr(p, 'drill', 0):
-                        # #581 same-net SMD pads: EXTENT-aware window -- a long
-                        # pad (BUS/connector finger) reaches into range while
-                        # its CENTER sits outside; the center-only test dropped
-                        # it from worst_gap and the nudge moved a via INTO its
-                        # clearance (neo6502 BUS1.35: 4.25mm tall, center 2.7mm
-                        # away, copper 0.575mm away). Foreign pads keep the
-                        # center test below -- the pre-#581 behavior, byte-
-                        # compatible when the flag is unset.
-                        if (abs(p.global_x - x) <= WINDOW + p.size_x / 2
-                                and abs(p.global_y - y) <= WINDOW + p.size_y / 2):
-                            near_pads.append(p)
-                    continue
-                if abs(p.global_x - x) <= WINDOW and abs(p.global_y - y) <= WINDOW:
+                if p.net_id == v.net_id and not (
+                        same_net_pad_clearance > 0 and not getattr(p, 'drill', 0)):
+                    continue  # same-net pads only matter under #581 (SMD)
+                # EXTENT-aware window (the foreign-long-pad class): a long pad
+                # (BUS/connector finger) reaches into range while its CENTER
+                # sits outside; a center-only test dropped it from worst_gap
+                # and the nudge moved a via INTO its clearance. Bit both ways
+                # on neo6502 BUS1 (4.25mm pads): same-net under #581, and a
+                # foreign via nudged to 0.03mm inside a foreign BUS pad's
+                # clearance -- a real shipped graze the candidate validation
+                # never saw.
+                if (abs(p.global_x - x) <= WINDOW + p.size_x / 2
+                        and abs(p.global_y - y) <= WINDOW + p.size_y / 2):
                     near_pads.append(p)
         for hid, hx, hy, hr in hole_list:
             if hid != me and abs(hx - x) <= WINDOW and abs(hy - y) <= WINDOW:
