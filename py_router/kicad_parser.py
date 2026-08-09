@@ -1000,6 +1000,9 @@ def _unescape_kicad_string(s: str) -> str:
     return s.replace('\\\\', '\\').replace('\\"', '"')
 
 
+_PAREN_OR_QUOTE = re.compile(r'["()]')
+
+
 def find_matching_paren(content: str, open_idx: int) -> int:
     """Return the index just past the ``)`` matching the ``(`` at ``open_idx``.
 
@@ -1010,29 +1013,43 @@ def find_matching_paren(content: str, open_idx: int) -> int:
     following footprints' pads (issue #113). Returns ``len(content)`` if no match
     is found.
     """
+    # Hot path for every block extraction: instead of a per-character state
+    # machine, jump between the only characters that matter (quote/parens)
+    # with C-level scans. Semantics are identical to the classic loop: a
+    # quote toggles string mode, and inside a string a quote only closes it
+    # when preceded by an even run of backslashes (\" and \\ escapes).
     depth = 0
-    in_string = False
     i = open_idx
     n = len(content)
-    while i < n:
-        char = content[i]
-        if in_string:
-            if char == '\\':
-                i += 2  # skip escaped char
-                continue
-            if char == '"':
-                in_string = False
-        else:
-            if char == '"':
-                in_string = True
-            elif char == '(':
-                depth += 1
-            elif char == ')':
-                depth -= 1
-                if depth == 0:
-                    return i + 1
-        i += 1
-    return n
+    search = _PAREN_OR_QUOTE.search
+    find_quote = content.find
+    while True:
+        m = search(content, i)
+        if m is None:
+            return n
+        j = m.start()
+        c = content[j]
+        if c == '(':
+            depth += 1
+            i = j + 1
+        elif c == ')':
+            depth -= 1
+            if depth == 0:
+                return j + 1
+            i = j + 1
+        else:  # opening quote: skip the whole string
+            i = j + 1
+            while True:
+                k = find_quote('"', i)
+                if k == -1:
+                    return n  # unterminated string: no match, like the old loop
+                nb = 0
+                while k - 1 - nb >= 0 and content[k - 1 - nb] == '\\':
+                    nb += 1
+                if nb % 2 == 0:
+                    i = k + 1
+                    break
+                i = k + 1
 
 
 def extract_layers(content: str) -> BoardInfo:

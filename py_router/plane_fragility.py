@@ -299,12 +299,28 @@ class FragilityField:
             # a refresh that just vstacks re-introduces the duplicates, so a
             # cost consumer that sums rows double-charges overlap cells
             # relative to the static field.
-            order = np.lexsort((out[:, 3], out[:, 2], out[:, 1], out[:, 0]))
-            out = out[order]
+            # Sort order is (layer, gx, gy, cost, original index). Packing the
+            # four columns into one offset int64 key lets a single stable
+            # (radix) argsort produce the identical permutation the 4-key
+            # lexsort did, at a fraction of the cost; the lexsort fallback
+            # covers a grid so large the packing would overflow.
+            o64 = out.astype(np.int64)
+            mins = o64.min(axis=0)
+            spans = o64.max(axis=0) - mins + 1
+            if int(spans[0]) * int(spans[1]) * int(spans[2]) * int(spans[3]) < (1 << 62):
+                cell_key = ((o64[:, 0] - mins[0]) * spans[1]
+                            + (o64[:, 1] - mins[1])) * spans[2] + (o64[:, 2] - mins[2])
+                order = np.argsort(cell_key * spans[3] + (o64[:, 3] - mins[3]),
+                                   kind='stable')
+                out = out[order]
+                same = np.diff(cell_key[order]) == 0
+            else:
+                order = np.lexsort((out[:, 3], out[:, 2], out[:, 1], out[:, 0]))
+                out = out[order]
+                same = ((np.diff(out[:, 0]) == 0) & (np.diff(out[:, 1]) == 0)
+                        & (np.diff(out[:, 2]) == 0))
             keep = np.ones(len(out), dtype=bool)
-            same = ((np.diff(out[:, 0]) == 0) & (np.diff(out[:, 1]) == 0)
-                    & (np.diff(out[:, 2]) == 0))
-            keep[:-1][same] = False   # lexsort put max cost last per cell
+            keep[:-1][same] = False   # sort put max cost last per cell
             self.cache[PLANE_FRAGILITY_CACHE_KEY] = out[keep]
         else:
             self.cache.pop(PLANE_FRAGILITY_CACHE_KEY, None)

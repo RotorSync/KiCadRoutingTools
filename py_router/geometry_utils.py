@@ -87,8 +87,35 @@ class UnionFind:
 
         Uses union by rank for O(α(n)) amortized time complexity.
         """
-        px = self._root_id(x)
-        py = self._root_id(y)
+        index = self._index
+        keys = self._keys
+        parent = self._parent
+        i = index.get(x)
+        if i is None:
+            index[x] = i = len(keys)
+            keys.append(x)
+            parent.append(i)
+            self._rank.append(0)
+            px = i
+        else:
+            px = i
+            while parent[px] != px:
+                px = parent[px]
+            while parent[i] != px:  # Path compression
+                parent[i], i = px, parent[i]
+        j = index.get(y)
+        if j is None:
+            index[y] = j = len(keys)
+            keys.append(y)
+            parent.append(j)
+            self._rank.append(0)
+            py = j
+        else:
+            py = j
+            while parent[py] != py:
+                py = parent[py]
+            while parent[j] != py:  # Path compression
+                parent[j], j = py, parent[j]
         if px == py:
             return  # Already in same set
         rank = self._rank

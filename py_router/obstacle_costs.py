@@ -16,6 +16,7 @@ from bresenham_utils import walk_line
 # Module-level cache for pre-computed proximity offset tables
 # Key: (radius_grid, cost_grid) -> List of (ex, ey, cost) tuples
 _proximity_offset_cache: Dict[Tuple[int, int], List[Tuple[int, int, int]]] = {}
+_proximity_offset_np_cache: dict = {}
 
 
 def _get_proximity_offsets(radius_grid: int, cost_grid: int,
@@ -53,6 +54,20 @@ def _get_proximity_offsets(radius_grid: int, cost_grid: int,
 
     _proximity_offset_cache[cache_key] = offsets
     return offsets
+
+
+def _get_proximity_offsets_np(radius_grid: int, cost_grid: int,
+                              half_width_grid: int = 0) -> 'np.ndarray':
+    """(O, 3) int64 [ex, ey, cost] mirror of _get_proximity_offsets, same
+    table order, cached separately."""
+    cache_key = (radius_grid, cost_grid, half_width_grid)
+    arr = _proximity_offset_np_cache.get(cache_key)
+    if arr is None:
+        offsets = _get_proximity_offsets(radius_grid, cost_grid, half_width_grid)
+        arr = (np.array(offsets, dtype=np.int64) if offsets
+               else np.empty((0, 3), dtype=np.int64))
+        _proximity_offset_np_cache[cache_key] = arr
+    return arr
 
 
 # Import Rust router
@@ -707,13 +722,16 @@ def compute_ripped_route_costs(saved_result: dict, config: GridRouteConfig,
     radius_grid = coord.to_grid_dist(config.ripped_route_avoidance_radius)
     cost_grid = config.cell_cost(config.ripped_route_avoidance_cost)
 
-    # Use dict internally for efficient max tracking
-    result: Dict[Tuple[int, int, int], int] = {}  # (layer, gx, gy) -> cost
-
     # Sample every ~1mm along segments (not every grid step) for performance
     sample_interval = max(1, int(1.0 / config.grid_step))
 
-    # Process segments (layer-specific costs)
+    # Emit candidate rows per segment (points x offsets, broadcast), then
+    # reduce to per-cell max. The classic implementation walked a
+    # points-outer/offsets-inner Python loop into a max dict; this emits the
+    # same rows in the same order and reduces in numpy, reproducing the dict
+    # exactly: first-occurrence order (np.unique return_index) and max cost
+    # per cell (exact int max) -- so the returned array is bit-identical.
+    chunks = []
     new_segments = saved_result.get('new_segments', [])
     for seg in new_segments:
         layer_idx = layer_map.get(seg.layer)
@@ -722,27 +740,44 @@ def compute_ripped_route_costs(saved_result: dict, config: GridRouteConfig,
 
         # Width-aware ghost (#585 item 3): a ripped fat trunk vacates -- and
         # reserves -- a correspondingly wider corridor.
-        offsets = _get_proximity_offsets(
+        offsets = _get_proximity_offsets_np(
             radius_grid, cost_grid,
             coord.to_grid_dist((seg.width or 0.0) / 2.0))
+        if offsets.size == 0:
+            continue
 
         # Walk along segment using walk_line, sampling every sample_interval points
         gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
         gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+        pts = [p for i, p in enumerate(walk_line(gx1, gy1, gx2, gy2))
+               if i % sample_interval == 0]
+        p = np.asarray(pts, dtype=np.int64)                     # (S, 2)
+        gx = p[:, 0:1] + offsets[:, 0]                          # (S, O)
+        gy = p[:, 1:2] + offsets[:, 1]
+        rows = np.empty((gx.size, 4), dtype=np.int64)
+        rows[:, 0] = layer_idx
+        rows[:, 1] = gx.ravel()
+        rows[:, 2] = gy.ravel()
+        rows[:, 3] = np.broadcast_to(offsets[:, 2], gx.shape).ravel()
+        chunks.append(rows)
 
-        for step_count, (gx, gy) in enumerate(walk_line(gx1, gy1, gx2, gy2)):
-            # Only process every sample_interval'th point
-            if step_count % sample_interval == 0:
-                # Add proximity costs using pre-computed offset table
-                for ex, ey, cost in offsets:
-                    key = (layer_idx, gx + ex, gy + ey)
-                    # Store max cost at each cell
-                    if key not in result or cost > result[key]:
-                        result[key] = cost
-
-    # Convert layer costs to numpy array
-    if result:
-        layer_costs = np.array([[layer, gx, gy, cost] for (layer, gx, gy), cost in result.items()], dtype=np.int32)
+    # Reduce to one row per cell: max cost, rows ordered by first occurrence
+    if chunks:
+        allrows = np.vstack(chunks)
+        cells = allrows[:, :3]
+        mins = cells.min(axis=0)
+        spans = cells.max(axis=0) - mins + 1
+        key = (((cells[:, 0] - mins[0]) * spans[1] + (cells[:, 1] - mins[1]))
+               * spans[2] + (cells[:, 2] - mins[2]))
+        uniq, first_idx, inv = np.unique(key, return_index=True,
+                                         return_inverse=True)
+        maxcost = np.zeros(len(uniq), dtype=np.int64)
+        np.maximum.at(maxcost, inv, allrows[:, 3])
+        order = np.argsort(first_idx, kind='stable')
+        sel = first_idx[order]
+        layer_costs = np.empty((len(uniq), 4), dtype=np.int32)
+        layer_costs[:, :3] = allrows[sel, :3]
+        layer_costs[:, 3] = maxcost[order]
     else:
         layer_costs = np.empty((0, 4), dtype=np.int32)
 
