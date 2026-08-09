@@ -1762,9 +1762,12 @@ are RETRY settings — the defaults stay mild on purpose):**
   — both combinations measured WORSE than either alone (they remove exactly
   the freedom the corridor pricing needs).
 - **Boards routing fine at defaults:** leave everything alone.
-- Never set `--via-proximity-cost 0` (a measured ~200x CPU explosion), and
-  leave `--ripped-route-avoidance-radius` at its default (widening it
-  measured worse).
+- `--via-proximity-cost 0` now simply means "no extra via cost from
+  proximity" (Rust 0.20.1 removed the old 0 = hard-via-ban mode, which was a
+  measured ~200x CPU explosion) — safe, but rarely useful: the default 10 is
+  what keeps vias out of escape fields. Leave
+  `--ripped-route-avoidance-radius` at its default (widening it measured
+  worse).
 
 After running routing commands:
 1. Report how many nets were routed successfully
