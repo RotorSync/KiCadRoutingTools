@@ -59,31 +59,31 @@ _GEOM = ['--track-width', '0.1', '--clearance', '0.1',
 _RECIPES = {
     'qfn_fanned_out.kicad_pcb': (
         'haasoscope_pro_max_test.kicad_pcb',
-        lambda src, dst: ['qfn_fanout.py', src, '--output', dst,
+        lambda src, dst: ['py_router/qfn_fanout.py', src, '--output', dst,
                           '--component', 'U2', '--nets', 'Net-(U2*)']),
     'fanout_starting_point.kicad_pcb': (
         'qfn_fanned_out.kicad_pcb',
-        lambda src, dst: ['bga_fanout.py', src, '--component', 'U3',
+        lambda src, dst: ['py_router/bga_fanout.py', src, '--component', 'U3',
                           '--output', dst, '--nets', '*U2A*DATA*',
                           '--primary-escape', 'horizontal',
                           '--force-escape-direction'] + _L4 + _GEOM),
     'fanout_output1.kicad_pcb': (
         'fanout_starting_point.kicad_pcb',
-        lambda src, dst: ['bga_fanout.py', src, '--component', 'U3',
+        lambda src, dst: ['py_router/bga_fanout.py', src, '--component', 'U3',
                           '--output', dst, '--nets', '*U2A*',
                           '--primary-escape', 'horizontal',
                           '--check-for-previous',
                           '--force-escape-direction'] + _L4 + _GEOM),
     'fanout_output2.kicad_pcb': (
         'fanout_output1.kicad_pcb',
-        lambda src, dst: ['bga_fanout.py', src, '--component', 'IC1',
+        lambda src, dst: ['py_router/bga_fanout.py', src, '--component', 'IC1',
                           '--output', dst, '--nets', '*lvds_rx*',
                           '--diff-pairs', '*lvds_rx*',
                           '--primary-escape', 'vertical']
                          + _L5 + ['--no-inner-top-layer'] + _GEOM),
     'interf_u_plane.kicad_pcb': (
         'interf_u_unrouted.kicad_pcb',
-        lambda src, dst: ['route_planes.py', src, dst, '--nets', 'VCC', 'GND',
+        lambda src, dst: ['py_router/route_planes.py', src, dst, '--nets', 'VCC', 'GND',
                           '--plane-layers', 'F.Cu', 'B.Cu']),
 }
 
