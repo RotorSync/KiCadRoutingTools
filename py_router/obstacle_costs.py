@@ -61,9 +61,14 @@ def add_stub_proximity_costs(obstacles: GridObstacleMap, unrouted_stubs: List[Tu
                               config: GridRouteConfig):
     """Add stub proximity costs to the obstacle map.
 
-    When via_proximity_cost == 0, vias are blocked within stub proximity radius.
     Uses batch Rust method for performance.
     Also registers zone centers for direction-aware cost calculation.
+
+    via_proximity_cost no longer participates here: 0 used to mean "hard-BLOCK
+    vias within the stub radius" (the one knob where 0 was the STRONGEST
+    setting, a documented ~200x CPU hazard); 0 now means "no extra via cost
+    from proximity" like every other knob's 0-is-off, and the Rust-side ban
+    machinery (block_vias + the B2 refcount ledger) is removed.
     """
     if not unrouted_stubs:
         return
@@ -71,7 +76,6 @@ def add_stub_proximity_costs(obstacles: GridObstacleMap, unrouted_stubs: List[Tu
     coord = GridCoord(config.grid_step)
     stub_radius_grid = coord.to_grid_dist(config.stub_proximity_radius)
     stub_cost_grid = config.cell_cost(config.stub_proximity_cost)
-    block_vias = (config.via_proximity_cost_int() == 0)
 
     # Convert stub positions to grid coordinates
     stub_grid_positions = []
@@ -82,54 +86,14 @@ def add_stub_proximity_costs(obstacles: GridObstacleMap, unrouted_stubs: List[Tu
 
     # Use batch Rust method for performance
     obstacles.add_stub_proximity_costs_batch(
-        stub_grid_positions, stub_radius_grid, stub_cost_grid, block_vias
+        stub_grid_positions, stub_radius_grid, stub_cost_grid
     )
 
 
-def add_bga_proximity_costs(obstacles: GridObstacleMap, config: GridRouteConfig):
-    """Add BGA proximity costs around zone edges AND across zone interiors.
-
-    Penalizes routing near BGA edges with linear falloff from max cost at edge
-    to zero at bga_proximity_radius distance. Zone-INTERIOR cells get the full
-    edge-tier cost: the interior is mostly hard-blocked (set_bga_zone), but
-    allowed_cells windows (endpoint windows, #189 via-in-pad unblocks) punch
-    routable holes in it — without an interior stamp those holes carried ZERO
-    proximity cost, so the router preferred dropping vias inside the escape
-    window under the BGA (where escape capacity is most precious) over paying
-    the ring cost just outside it. The cost is a preference, not a block:
-    blocked cells ignore it, and a via that can only go in the window still
-    goes there.
-    """
-    if config.bga_proximity_radius <= 0:
-        return  # Feature disabled
-
-    coord = GridCoord(config.grid_step)
-    radius_grid = coord.to_grid_dist(config.bga_proximity_radius)
-    cost_grid = config.cell_cost(config.bga_proximity_cost)
-
-    for zone in config.bga_exclusion_zones:
-        min_x, min_y, max_x, max_y = zone[:4]
-        gmin_x, gmin_y = coord.to_grid(min_x, min_y)
-        gmax_x, gmax_y = coord.to_grid(max_x, max_y)
-
-        # Iterate over cells within radius of BGA zone edges, INCLUDING the
-        # zone interior (interior cells clamp to dist=0 -> full edge-tier
-        # cost). The interior was historically skipped as "already blocked",
-        # which became a free-via hole once allowed_cells windows could
-        # unblock cells inside the zone.
-        for gx in range(gmin_x - radius_grid, gmax_x + radius_grid + 1):
-            for gy in range(gmin_y - radius_grid, gmax_y + radius_grid + 1):
-                # Calculate distance to nearest edge of rectangle
-                # Clamp point to rect, then calculate distance from original to clamped
-                cx = max(gmin_x, min(gx, gmax_x))
-                cy = max(gmin_y, min(gy, gmax_y))
-                dist = ((gx - cx) ** 2 + (gy - cy) ** 2) ** 0.5
-
-                if dist <= radius_grid:
-                    proximity = 1.0 - (dist / radius_grid)
-                    cost = int(proximity * cost_grid)
-                    obstacles.set_stub_proximity(gx, gy, cost)
-
+# (add_bga_proximity_costs, the old base-map stub_proximity stamp, is deleted:
+# it was dead in production after the B1 move to the cache below -- the stamp
+# was wiped by prepare_obstacles_inplace's clear_stub_proximity before every
+# single-ended net. compute_bga_proximity_cost_cells is the live path.)
 
 # Reserved track_proximity_cache key for the BGA proximity cost cells
 # (soft-knobs review B1): real net ids are positive, so -1 can never collide
@@ -141,8 +105,11 @@ def compute_bga_proximity_cost_cells(config: GridRouteConfig,
                                      num_layers: int) -> np.ndarray:
     """BGA proximity costs as an (N, 4) [layer, gx, gy, cost] array.
 
-    Same geometry and cost math as add_bga_proximity_costs, but emitted for
-    the LAYER proximity map via the track-proximity cache under
+    Linear falloff from full cost at the zone edge to zero at
+    bga_proximity_radius; zone-INTERIOR cells clamp to dist=0 = full
+    edge-tier cost (so allowed-cells windows punched through the hard block
+    are not free-via holes). Emitted for the LAYER proximity map via the
+    track-proximity cache under
     BGA_PROXIMITY_CACHE_KEY (soft-knobs review B1): the old base-map
     stub_proximity stamp was wiped by prepare_obstacles_inplace's
     clear_stub_proximity() before every single-ended net, silently no-op'ing

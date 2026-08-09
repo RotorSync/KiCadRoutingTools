@@ -1649,7 +1649,7 @@ Examples:
     parser.add_argument("--via-cost", type=int, default=50,
                         help="Penalty for placing a via, in 0.1mm grid steps (default: 50 = 5mm of path, doubled for diff pairs; mm-equivalent at any --grid-step)")
     parser.add_argument("--via-proximity-cost", type=int, default=10,
-                        help="Via cost multiplier in stub/BGA proximity zones (default: 10, 0=block vias)")
+                        help="Via cost multiplier in stub/BGA proximity zones (default: 10, 0=no extra cost)")
     parser.add_argument("--max-iterations", type=int, default=200000,
                         help="Max A* iterations before giving up (default: 200000)")
     parser.add_argument("--max-probe-iterations", type=int, default=5000,

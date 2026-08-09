@@ -111,7 +111,7 @@ class GridRouteConfig:
     # NOTE (soft-knobs C6): in the Rust via branch this also MULTIPLIES the
     # summed stub+layer proximity at the via site (track-proximity and
     # ripped-corridor soft costs included), not just stub/BGA-zone costs.
-    via_proximity_cost: float = 10.0  # via cost multiplier in stub/BGA proximity zones (0 = block vias)
+    via_proximity_cost: float = 10.0  # via cost multiplier in stub/BGA proximity zones (0 = no extra cost)
     bga_proximity_radius: float = 7.0  # mm - distance from BGA edges to penalize
     bga_proximity_cost: float = 0.2  # mm equivalent cost at BGA edge
     # Direction search order: "forward" or "backward"
@@ -595,10 +595,14 @@ class GridRouteConfig:
     def via_proximity_cost_int(self) -> int:
         """Rust-facing integer via-proximity multiplier.
 
-        0 stays 0 (its special meaning: BLOCK vias near obstacles instead of
-        penalizing); any positive fraction rounds to at least 1 (soft-knobs
-        review B3: a GUI value of 0.5 passed through bare int() became 0 --
-        neither blocked nor penalized, weaker than both settings around it).
+        0 means NO EXTRA via cost from proximity -- the same "0 = off"
+        convention as every other soft knob. (Historically 0 meant BLOCK
+        vias in proximity zones; that inverted mode -- 0 as the STRONGEST
+        setting -- is removed. The single-ended router multiplies the
+        graded proximity cost by this value, so 0 is naturally inert
+        there.) Any positive fraction rounds to at least 1 (soft-knobs
+        review B3: a GUI value of 0.5 passed through bare int() became 0,
+        silently weaker than both settings around it).
         """
         c = self.via_proximity_cost
         return 0 if c == 0 else max(1, int(round(c)))

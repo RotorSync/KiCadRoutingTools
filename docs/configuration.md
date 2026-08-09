@@ -248,7 +248,7 @@ See [Rip-Up and Reroute](rip-up-reroute.md) for how failed routes trigger rip-up
 |--------|---------|-------------|
 | `--stub-proximity-radius` | 2.0 | Radius around stubs to penalize (mm) |
 | `--stub-proximity-cost` | 0.2 | Cost penalty at stub center (mm equivalent) |
-| `--via-proximity-cost` | 10.0 | Via cost multiplier in stub proximity zones (0 = block vias) |
+| `--via-proximity-cost` | 10.0 | Via cost multiplier in stub proximity zones (0 = no extra cost) |
 | `--bga-proximity-radius` | 7.0 | Radius around BGA edges to penalize (mm) |
 | `--bga-proximity-cost` | 0.2 | Cost penalty at BGA edge (mm equivalent) |
 | `--track-proximity-distance` | 2.0 | Radius around routed tracks to penalize on same layer (mm) |

@@ -972,7 +972,7 @@ pub struct GridRouter {
     via_cost: i32,
     h_weight: f32,
     turn_cost: i32,
-    via_proximity_cost: i32,  // Multiplier for stub proximity cost when placing vias (0 = block vias near stubs)
+    via_proximity_cost: i32,  // Multiplier on graded proximity cost when placing vias (0 = no extra cost)
     vertical_attraction_radius: i32,  // Grid units for cross-layer attraction lookup (0 = disabled)
     vertical_attraction_bonus: i32,   // Cost reduction for positions aligned with other-layer tracks
     layer_costs: Vec<i32>,  // Per-layer cost multipliers (1000 = 1.0x, 1500 = 1.5x penalty)

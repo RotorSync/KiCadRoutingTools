@@ -2804,8 +2804,7 @@ def build_base_obstacles(
         obstacles.add_stub_proximity_costs_batch(
             all_other_vias,
             proximity_radius_grid,
-            proximity_cost_grid,
-            False
+            proximity_cost_grid
         )
 
     # Block via placement near ALL vias (including same-net) for hole-to-hole

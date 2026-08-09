@@ -104,8 +104,7 @@ def merge_ripped_route_costs(obstacles, ripped_route_layer_costs: Dict[int, np.n
             all_via_positions.extend(via_list)
 
         if all_via_positions:
-            # Use batch method with block_vias=False since we just want soft costs
-            obstacles.add_stub_proximity_costs_batch(all_via_positions, radius_grid, cost_grid, False)
+            obstacles.add_stub_proximity_costs_batch(all_via_positions, radius_grid, cost_grid)
 
 
 def build_diff_pair_obstacles(

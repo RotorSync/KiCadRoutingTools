@@ -1925,7 +1925,8 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
 
     # Create pose-based router for centerline
     # Double via cost since diff pairs place two vias per layer change
-    # via_proximity_cost is a multiplier on via cost in stub/BGA proximity zones (0 = block vias)
+    # via_proximity_cost multiplies the graded (stub + layer) proximity cost at
+    # via placement, same formula as the single-ended router (0 = no extra cost)
     # diff_pair_spacing is the P/N offset from centerline in grid units (for self-intersection prevention)
     # Use 2*spacing to prevent P/N tracks from crossing when centerline loops.
     # Flipped (opposite-side) attempts wrap around their endpoints, so give the

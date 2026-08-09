@@ -4362,7 +4362,7 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--via-cost", type=int, default=defaults.VIA_COST,
                         help=f"Penalty for placing a via, in 0.1mm grid steps (default: {defaults.VIA_COST} = 5mm of path; mm-equivalent at any --grid-step)")
     parser.add_argument("--via-proximity-cost", type=int, default=defaults.VIA_PROXIMITY_COST,
-                        help=f"Via cost multiplier in stub/BGA proximity zones (default: {defaults.VIA_PROXIMITY_COST}, 0=block vias)")
+                        help=f"Via cost multiplier in stub/BGA proximity zones (default: {defaults.VIA_PROXIMITY_COST}, 0=no extra cost)")
     parser.add_argument("--max-iterations", type=int, default=defaults.MAX_ITERATIONS,
                         help=f"Max A* iterations before giving up (default: {defaults.MAX_ITERATIONS})")
     parser.add_argument("--max-probe-iterations", type=int, default=5000,

@@ -54,7 +54,7 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 |-------|---------|---------|
 | `stub_proximity_radius` | `2.0` | Radius around unrouted stubs to penalize |
 | `stub_proximity_cost` | `0.2` | Cost at the stub center (mm-equivalent detour) |
-| `via_proximity_cost` | `10.0` | Via-cost multiplier inside stub/BGA zones (0 = block vias there) |
+| `via_proximity_cost` | `10.0` | Via-cost multiplier inside stub/BGA zones (0 = no extra cost) |
 | `bga_proximity_radius` | `7.0` | Distance from BGA edges to penalize |
 | `bga_proximity_cost` | `0.2` | Cost at the BGA edge |
 | `track_proximity_distance` | `2.0` | Radius around routed tracks (same layer) |

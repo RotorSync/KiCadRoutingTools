@@ -896,8 +896,7 @@ def build_plane_base_obstacles(
         obstacles.add_stub_proximity_costs_batch(
             all_other_vias_grid,
             proximity_radius_grid,
-            proximity_cost_grid,
-            False
+            proximity_cost_grid
         )
 
     # Block existing segments on this layer from other nets

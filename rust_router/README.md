@@ -311,6 +311,20 @@ src/
 
 ## Version History
 
+- **0.20.1**: **`via_proximity_cost 0` = no extra cost, ban mode removed.**
+  0 used to hard-block vias in stub/BGA proximity zones -- the only knob whose
+  0 was its strongest setting (and a ~200x CPU hazard). 0 now means "no extra
+  via cost from proximity", matching every other knob's 0-is-off. Removed:
+  `add_stub_proximity_costs_batch`'s `block_vias` parameter (now 3 args), the
+  B2 `stub_via_block_cells` refcount ledger + its `clear_stub_proximity`
+  drain, and the pose router's `via_proximity_cost == 0` via-ban branch.
+  **Pose via-proximity penalty is now GRADED**, matching the single-ended
+  router: `(stub + dest-layer proximity) * via_proximity_cost` added to the
+  via cost, replacing the binary `via_cost * multiplier` cliff (~10x for any
+  via anywhere in the 7mm BGA ring / any stub-zone rim cell, ~a 90mm-detour
+  equivalent that effectively forbade diff-pair layer changes near escape
+  fields). BGA proximity rides the layer-proximity map, so
+  `--bga-proximity-cost 0` now truly disarms it for diff pairs too.
 - **0.20.0**: Removed `VisualRouter`/`SearchSnapshot` and `visual_router.rs` with the pygame visualizer (#569) -- the debugging workflow it served is covered by grading, manifest replay and the GUI. **#568 per-rung via legality** — `blocked_vias_small`, a second
   refcounted via-block map at the small fab-rung reserve (subset semantics:
   EMPTY = unpopulated, rung>=1 queries fall back to `blocked_vias`, so

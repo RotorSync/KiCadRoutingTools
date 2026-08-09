@@ -147,8 +147,13 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                  if static_base and hasattr(_real_obstacles, "add_static_blocked_cells_batch")
                  else _real_obstacles)
 
-    # Set BGA proximity radius for is_in_bga_proximity() checks
-    bga_prox_radius_grid = coord.to_grid_dist(config.bga_proximity_radius)
+    # Set BGA proximity radius for is_in_bga_proximity() checks -- armed only
+    # when the COST knob is on, so --bga-proximity-cost 0 is a real off-switch.
+    # (This used to arm unconditionally; with the old pose-router binary via
+    # cliff keyed on the radius alone, zeroing the cost silently left a 10x
+    # via multiplier active across the whole 7mm ring for diff pairs.)
+    bga_prox_radius_grid = (coord.to_grid_dist(config.bga_proximity_radius)
+                            if config.bga_proximity_cost > 0 else 0)
     obstacles.set_bga_proximity_radius(bga_prox_radius_grid)
 
     # Set BGA exclusion zones - block vias AND tracks on ALL layers.
