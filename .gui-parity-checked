@@ -1,3 +1,32 @@
+eb8f633 2026-08-09 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit 6064707..eb8f633 (pre-v0.20.2 release gate): NO GAPS. 14 engine/GUI files
+changed, 570 insertions -- #584 KICAD_PROXIMITY_SUM=softcap, #585 screening wave
+(width-aware track proximity, package_proximity_zones, congestion2), the
+worktree-py-speedups merge (bit-identical parser/UnionFind/publish/ripped-ghost
+vectorization), and the corpus/Modal-sweep tooling.
+
+Why no GUI work was needed: the range adds NO new CLI flag to route.py or
+route_diff.py -- the Class-2 drift risk -- and its new knobs are env-gated
+(KICAD_*), which are deliberately not GUI controls. The changes are internal
+engine functions, so both fronts pick them up through the shared engine.
+
+All four gates green at eb8f633:
+  manifest->plan parity ....... 7540 flag-checks / 341 manifests, 0 parity gaps
+  CLI post-pass coverage ...... 8 registered, 0 unreachable, 0 failures
+  settings round-trip ......... save/restore/legacy/re-save, 180 keys
+  GUI/CLI engine parity ....... VERDICT: PARITY, copper sets IDENTICAL
+                                (segments 1262/1262, vias 171/171, 0 either-only)
+
+Pre-existing, NOT from this range (do not chase it as a regression here):
+manifest->plan reports 1 mismatch, uncutgem_nv -- a corpus manifest with an
+unbalanced quote that shlex cannot split. manifest_to_plan.py last changed at
+dc396c2, before the previously audited SHA. Worth a separate fix.
+
+Note on running gate 4 here: it took 715s for step 1 (normally ~9s) while a
+99-board stress wave held the machine, and was mistaken for a hang. It is not
+the macOS restore alert (that shows state SN at ~0 CPU); it was swapped out in
+state U. Run it on a quiet machine.
+
 6064707 2026-08-09 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 check_release_version.check_gui_parity reads `marker.read_text().split()[0]`
 and diffs it against HEAD. Every entry until now opened with the word "HEAD"
