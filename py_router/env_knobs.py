@@ -95,8 +95,16 @@ def refresh() -> None:
     # Proximity composition: SUM across sources (per-net / per-category,
     # deduped max WITHIN each source) instead of a flat per-cell max. Adds a
     # density gradient (10 stubs price higher than 1) at the cost of steeper
-    # fields in dense escape regions. Off = historical max semantics.
-    g['PROXIMITY_SUM'] = _opt_in('KICAD_PROXIMITY_SUM')
+    # fields in dense escape regions. Values: '1'/'sum' = sum everywhere;
+    # 'zoned' = sum in open field, MAX inside BGA escape fields (zone +
+    # bga_proximity_radius) -- the sum win comes from open-field density,
+    # while inside the escape collar the stacked foreign-stub fields price a
+    # net's MANDATORY approach (lpddr4 A/B: deficit 1->2, 6x search).
+    # Off = historical max semantics everywhere.
+    _ps = _s('KICAD_PROXIMITY_SUM', '').strip().lower()
+    g['PROXIMITY_SUM_MODE'] = ('zoned' if _ps == 'zoned'
+                               else 'sum' if _ps in _ON else '')
+    g['PROXIMITY_SUM'] = bool(g['PROXIMITY_SUM_MODE'])
     # per-tranche quantum = max(CELLS grid cells, PCT% of tranche-start best_h)
     g['DYNAMIC_ITERATIONS_QUANTUM_CELLS'] = _f('KICAD_DYNAMIC_ITERATIONS_QUANTUM_CELLS', 2.0)
     g['DYNAMIC_ITERATIONS_QUANTUM_PCT'] = _f('KICAD_DYNAMIC_ITERATIONS_QUANTUM_PCT', 2.0)

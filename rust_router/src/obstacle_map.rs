@@ -753,10 +753,18 @@ impl GridObstacleMap {
     /// fields prices 10x one net's). Adds into the existing map -- callers
     /// clear (or start from a fresh clone) before the per-route stamp
     /// sequence, exactly like the max-mode batch above.
+    ///
+    /// max_zone_rects ('zoned' mode): inclusive grid rectangles (BGA zones
+    /// expanded by the proximity radius -- the escape fields) inside which
+    /// cells compose by MAX instead of ADD: there the stacked foreign-stub
+    /// fields price a net's MANDATORY approach, not an avoidable crowd.
+    #[pyo3(signature = (groups, max_zone_rects=None))]
     pub fn add_stub_proximity_costs_grouped(
         &mut self,
         groups: Vec<(Vec<(i32, i32)>, i32, i32)>,
+        max_zone_rects: Option<Vec<(i32, i32, i32, i32)>>,
     ) {
+        let rects = max_zone_rects.unwrap_or_default();
         for (points, radius, max_cost) in groups {
             if radius <= 0 || points.is_empty() {
                 continue;
@@ -783,7 +791,19 @@ impl GridObstacleMap {
                 }
             }
             for (key, cost) in field {
-                *self.stub_proximity.entry(key).or_insert(0) += cost;
+                let entry = self.stub_proximity.entry(key).or_insert(0);
+                let in_max_zone = !rects.is_empty() && {
+                    let (gx, gy) = unpack_xy(key);
+                    rects.iter().any(|&(x0, y0, x1, y1)|
+                        gx >= x0 && gx <= x1 && gy >= y0 && gy <= y1)
+                };
+                if in_max_zone {
+                    if cost > *entry {
+                        *entry = cost;
+                    }
+                } else {
+                    *entry += cost;
+                }
             }
         }
     }

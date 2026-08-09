@@ -157,7 +157,8 @@ def build_diff_pair_obstacles(
     # Add track proximity costs (+ ripped-corridor layer ghosts, one pass)
     merge_track_proximity_costs(
         obstacles, track_proximity_cache,
-        ghost_costs=filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids))
+        ghost_costs=filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids),
+        config=config)
 
     # Add cross-layer track data
     add_cross_layer_tracks(obstacles, pcb_data, config, layer_map,
@@ -284,7 +285,8 @@ def build_single_ended_obstacles(
     # Add track proximity costs (+ ripped-corridor layer ghosts, one pass)
     merge_track_proximity_costs(
         obstacles, track_proximity_cache,
-        ghost_costs=filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids))
+        ghost_costs=filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids),
+        config=config)
     # Congestion v2 (#424): demand/capacity field, owner-exempt (no-op
     # unless KICAD_CONGESTION2_COST > 0 and the field was built).
     from congestion_field import stamp_congestion2
@@ -358,7 +360,7 @@ def build_incremental_obstacles(
                          config)
 
     # Add track proximity costs
-    merge_track_proximity_costs(obstacles, track_proximity_cache)
+    merge_track_proximity_costs(obstacles, track_proximity_cache, config=config)
 
     # Add cross-layer track data
     add_cross_layer_tracks(obstacles, pcb_data, config, layer_map,
@@ -453,7 +455,8 @@ def prepare_obstacles_inplace(
     # Add track proximity costs (+ ripped-corridor layer ghosts, one pass)
     merge_track_proximity_costs(
         working_obstacles, track_proximity_cache,
-        ghost_costs=filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids))
+        ghost_costs=filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids),
+        config=config)
     from congestion_field import stamp_congestion2
     stamp_congestion2(working_obstacles, config, net_id, routed_net_ids)
 

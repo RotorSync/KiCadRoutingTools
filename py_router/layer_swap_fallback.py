@@ -365,7 +365,7 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
             all_stubs = unrouted_stubs + chip_pads
             apply_stub_proximity(retry_obstacles, pcb_data,
                                  stub_proximity_net_ids, all_stubs, config)
-            merge_track_proximity_costs(retry_obstacles, track_proximity_cache)
+            merge_track_proximity_costs(retry_obstacles, track_proximity_cache, config=config)
             add_same_net_via_clearance(retry_obstacles, pcb_data, pair.p_net_id, config)
             add_same_net_via_clearance(retry_obstacles, pcb_data, pair.n_net_id, config)
             add_same_net_pad_drill_via_clearance(retry_obstacles, pcb_data, pair.p_net_id, config)
@@ -482,7 +482,7 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                             apply_stub_proximity(rip_obstacles, pcb_data,
                                                  stub_proximity_net_ids,
                                                  rip_all_stubs, config)
-                            merge_track_proximity_costs(rip_obstacles, track_proximity_cache)
+                            merge_track_proximity_costs(rip_obstacles, track_proximity_cache, config=config)
                             add_same_net_via_clearance(rip_obstacles, pcb_data, pair.p_net_id, config)
                             add_same_net_via_clearance(rip_obstacles, pcb_data, pair.n_net_id, config)
                             add_same_net_pad_drill_via_clearance(rip_obstacles, pcb_data, pair.p_net_id, config)
@@ -528,7 +528,7 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                                         apply_stub_proximity(reroute_obstacles, pcb_data,
                                                              reroute_stub_net_ids,
                                                              reroute_all_stubs, config)
-                                        merge_track_proximity_costs(reroute_obstacles, track_proximity_cache)
+                                        merge_track_proximity_costs(reroute_obstacles, track_proximity_cache, config=config)
 
                                         reroute_result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, reroute_obstacles, base_obstacles, reroute_stubs)
                                         if reroute_result and not reroute_result.get('failed') and not reroute_result.get('probe_blocked'):

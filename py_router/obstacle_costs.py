@@ -92,6 +92,25 @@ def add_stub_proximity_costs(obstacles: GridObstacleMap, unrouted_stubs: List[Tu
     )
 
 
+def proximity_max_zone_rects(config: GridRouteConfig, coord: GridCoord):
+    """Inclusive grid rectangles of the BGA ESCAPE FIELDS (zone expanded by
+    bga_proximity_radius) for 'zoned' sum composition: inside them sources
+    compose by MAX (the stacked foreign-stub fields there price a net's
+    MANDATORY approach, not an avoidable crowd), outside by SUM. Independent
+    of the bga_proximity_cost knob -- this is a composition boundary, not the
+    BGA cost. Returns None unless zoned mode is active and zones exist."""
+    if env_knobs.PROXIMITY_SUM_MODE != 'zoned' or not config.bga_exclusion_zones:
+        return None
+    r = coord.to_grid_dist(config.bga_proximity_radius)
+    rects = []
+    for zone in config.bga_exclusion_zones:
+        min_x, min_y, max_x, max_y = zone[:4]
+        gx0, gy0 = coord.to_grid(min_x, min_y)
+        gx1, gy1 = coord.to_grid(max_x, max_y)
+        rects.append((gx0 - r, gy0 - r, gx1 + r, gy1 + r))
+    return rects
+
+
 def apply_stub_proximity(obstacles: GridObstacleMap, pcb_data: PCBData,
                          stub_net_ids: List[int],
                          all_stubs: List[Tuple[float, float]],
@@ -153,7 +172,8 @@ def apply_stub_proximity(obstacles: GridObstacleMap, pcb_data: PCBData,
             if vias:
                 groups.append(([tuple(v) for v in vias], rra_radius, rra_cost))
     if groups:
-        obstacles.add_stub_proximity_costs_grouped(groups)
+        obstacles.add_stub_proximity_costs_grouped(
+            groups, proximity_max_zone_rects(config, coord))
 
 
 # (add_bga_proximity_costs, the old base-map stub_proximity stamp, is deleted:
@@ -312,7 +332,8 @@ _MERGE_MEMO_MAX = 32
 
 def merge_track_proximity_costs(obstacles: GridObstacleMap,
                                  per_net_costs: Dict[int, np.ndarray],
-                                 ghost_costs: Dict[int, np.ndarray] = None):
+                                 ghost_costs: Dict[int, np.ndarray] = None,
+                                 config: GridRouteConfig = None):
     """Merge pre-computed per-net track proximity costs into the obstacle map.
 
     Args:
@@ -373,11 +394,15 @@ def merge_track_proximity_costs(obstacles: GridObstacleMap,
     #     across a long GUI session.
     # Measured note: this was NOT the eth_tap step-11 divergence (disabling the
     # memo entirely left it unchanged), but the hazard is real and latent.
+    _zone_rects = None
+    if env_knobs.PROXIMITY_SUM_MODE == 'zoned' and config is not None:
+        _zone_rects = proximity_max_zone_rects(config, GridCoord(config.grid_step))
     key = id(per_net_costs)
     sig = (len(arrays_to_merge),
            sum(len(a) for a in arrays_to_merge),
            sum(id(a) & 0xFFFFFFFF for a in arrays_to_merge),
-           env_knobs.PROXIMITY_SUM)
+           env_knobs.PROXIMITY_SUM_MODE,
+           tuple(_zone_rects) if _zone_rects else None)
     memo = _MERGE_MEMO.get(key)
     if memo is not None and memo[0] == sig:
         all_costs = memo[1]
@@ -387,7 +412,9 @@ def merge_track_proximity_costs(obstacles: GridObstacleMap,
             # Compose the SUM in numpy so the Rust write primitive stays the
             # idempotent max-insert: pack (layer, gx, gy) into one int64 key,
             # group, and sum each cell's per-source costs. Output rows are
-            # unique per cell.
+            # unique per cell. In 'zoned' mode, cells inside a BGA escape
+            # field take the per-cell MAX instead (mandatory approaches are
+            # not an avoidable crowd).
             _OFF = 1 << 23  # grid coords are well inside +/-2^23
             packed = ((all_costs[:, 0].astype(np.int64) << 48)
                       | ((all_costs[:, 1].astype(np.int64) + _OFF) << 24)
@@ -400,6 +427,14 @@ def merge_track_proximity_costs(obstacles: GridObstacleMap,
             composed[:, 1] = ((uniq >> 24) & ((1 << 24) - 1)).astype(np.int32) - _OFF
             composed[:, 2] = (uniq & ((1 << 24) - 1)).astype(np.int32) - _OFF
             composed[:, 3] = np.minimum(sums, float(np.iinfo(np.int32).max)).astype(np.int32)
+            if _zone_rects:
+                maxs = np.zeros(len(uniq), dtype=np.int32)
+                np.maximum.at(maxs, inv, all_costs[:, 3])
+                in_zone = np.zeros(len(uniq), dtype=bool)
+                for (x0, y0, x1, y1) in _zone_rects:
+                    in_zone |= ((composed[:, 1] >= x0) & (composed[:, 1] <= x1)
+                                & (composed[:, 2] >= y0) & (composed[:, 2] <= y1))
+                composed[in_zone, 3] = maxs[in_zone]
             all_costs = composed
         # Bound first, then store WITH keepalive refs (see the note above):
         # per_net_costs and the member arrays are held so their ids cannot be
