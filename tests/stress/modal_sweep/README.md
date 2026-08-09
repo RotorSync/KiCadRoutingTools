@@ -77,22 +77,60 @@ tests nothing would look like "the parameter has no effect".
 Anchor `manifest_sed` patterns tightly — a loose one rewrites more of the chain
 than you intended.
 
-## Running it
+## Start here: the 2-board smoke test
+
+Do this BEFORE the full sweep. It costs a few cents and exercises every moving
+part — image build, corpus volume, the absolute-path remap, parameter patching,
+grading, and result harvesting. The remap in particular has never been exercised
+inside a container.
 
 ```bash
-pip install modal && modal setup
+pip install modal && modal setup          # interactive browser login, once
 
-# once (and again only when the corpus changes)
-python3 tests/stress/modal_sweep/upload_corpus.py --sets set1,...,set10 --dry-run
-python3 tests/stress/modal_sweep/upload_corpus.py --sets set1,...,set10
+# ~37 files / a few MB -- just two of the cheapest boards (~0.2 min each)
+python3 tests/stress/modal_sweep/upload_corpus.py \
+    --sets set9 --boards stm32_rfm95_lora,cc1101_rf_module --dry-run
+python3 tests/stress/modal_sweep/upload_corpus.py \
+    --sets set9 --boards stm32_rfm95_lora,cc1101_rf_module
 
-# check the plan without spending anything
+# plan only, spends nothing
+modal run tests/stress/modal_sweep/modal_app.py \
+    --arms tests/stress/modal_sweep/arms.example.json \
+    --sets set9 --boards stm32_rfm95_lora,cc1101_rf_module --dry-run
+
+# 2 boards x 2 arms = 4 tasks
+python3 -c "import json;json.dump([{'name':'baseline'},{'name':'tp2','defaults':{'TRACK_PROXIMITY_COST':2.0}}],open('/tmp/arms_smoke.json','w'))"
+modal run tests/stress/modal_sweep/modal_app.py \
+    --arms /tmp/arms_smoke.json --sets set9 --boards stm32_rfm95_lora,cc1101_rf_module
+```
+
+The first run pays a cold image build (a few minutes); later runs reuse it.
+
+**What to check in the output — a green exit is not enough:**
+
+1. `chain_complete` is true for all 4 rows. False means the replay broke, most
+   likely the repo-path remap.
+2. `patched_defaults` on the `tp2` rows shows `TRACK_PROXIMITY_COST: '2.0'`. If
+   it is empty the arm tested nothing and every arm would have looked identical.
+3. The two arms differ *somewhere* (completion, DRC, or `total_seconds`). Two
+   byte-identical arms usually mean the parameter never reached the engine.
+4. `total_seconds` is in the right ballpark (~10-30 s here). Wildly higher means
+   the container is undersized and swapping.
+
+Only then scale up.
+
+## The full sweep
+
+```bash
+python3 tests/stress/modal_sweep/upload_corpus.py --sets set1,...,set10   # ~2.2 GB, one-off
 modal run tests/stress/modal_sweep/modal_app.py \
     --arms tests/stress/modal_sweep/arms.example.json --dry-run
-
 modal run tests/stress/modal_sweep/modal_app.py \
     --arms tests/stress/modal_sweep/arms.example.json
 ```
+
+`--limit N` keeps the N *cheapest* boards (the default order is longest-first,
+which is right for throughput but wrong for a quick look).
 
 Output: a per-arm table (boards, chain-complete, mean completion %, total real
 DRC, CPU-hours) plus every raw row, written to `sweep_<ts>.json`. Each
@@ -115,11 +153,14 @@ Tested here, against real repo files and the real corpus:
 - **The Modal API calls.** Image-builder method names have moved across client
   versions (`add_local_dir(..., copy=True)` vs the older `copy_local_dir`). Pin
   `modal` and expect to adjust if you are on an older client.
-- **The Linux `grid_router` build.** Per `CLAUDE.md` the 0.20.1 linux asset is
-  not published — the release carries 0.20.0 binaries — so the image installs a
-  Rust toolchain and falls back to `build_router.py --from-source`. **Publishing
-  the 0.20.1 linux asset removes that whole image layer and ~10 min of cold
-  build.** Do that first if you can.
+- **The Linux `grid_router` build.** Resolved as of v0.20.2 (2026-08-09): that
+  release publishes `grid_router-linux-x86_64.so` built from crate 0.20.1, so the
+  image just runs `build_router.py` and keeps the prebuilt — no Rust toolchain,
+  ~10 min off the cold build. Verified on the macos-arm64 asset (`__version__`
+  reports 0.20.1, matching `Cargo.toml`); the *linux* asset has not been imported
+  on a linux box yet, which the smoke test covers. The image deliberately fails
+  at build time if a future crate bump ships without binaries — see the comment
+  in `modal_app.py` for the two-line fallback.
 - **An end-to-end replay in a container.** Manifests bake absolute tool paths;
   `recorded_repo_prefix` detects each manifest's own prefix and remaps it, and
   that logic is tested — but the remap has not been exercised inside a container.

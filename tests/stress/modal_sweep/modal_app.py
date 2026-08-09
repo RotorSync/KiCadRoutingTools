@@ -59,22 +59,31 @@ image = (
     # optional kicad-cli cross-check degrades to None. Cross-check the winning
     # arm locally, where KiCad already lives -- that check caught #487.)
     .pip_install("numpy>=1.21.0", "scipy>=1.7.0", "shapely>=1.8.0")
-    # Rust toolchain is needed ONLY because the 0.20.1 grid_router linux asset is
-    # not published yet (CLAUDE.md). Publish it and this whole layer drops out,
-    # taking ~10 min off a cold image build.
-    .apt_install("curl", "build-essential")
-    .run_commands(
-        "curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal",
-        'echo ". $HOME/.cargo/env" >> /etc/profile',
-    )
+    .apt_install("curl")
     .add_local_dir(str(_repo_root), REPO, copy=True, ignore=[
         "**/.git/**", "**/__pycache__/**", "**/target/**", "**/.claude/worktrees/**",
     ])
     .run_commands(
-        # build_router.py downloads the matching prebuilt when one exists and
-        # falls back to source; either way it lands grid_router.so in rust_router/.
-        f"cd {REPO} && . $HOME/.cargo/env && python3 build_router.py || "
-        f"(cd {REPO} && . $HOME/.cargo/env && python3 build_router.py --from-source)",
+        # NO Rust toolchain: the v0.20.2 release publishes grid_router-linux-x86_64.so
+        # built from crate 0.20.1, so build_router.py downloads the prebuilt and keeps
+        # it (verified: the released macos-arm64 asset reports __version__ 0.20.1,
+        # matching Cargo.toml). That took a rustup + build-essential layer and a ~10 min
+        # cargo build off the cold image.
+        #
+        # This FAILS LOUDLY at image-build time if a future crate bump ships without
+        # publishing binaries -- which is the behaviour you want. To unblock, either
+        # publish the assets (a python-only release republishes current crate binaries;
+        # see CLAUDE.md) or re-add:
+        #   .apt_install("build-essential")
+        #   .run_commands("curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal")
+        # and append `|| (. $HOME/.cargo/env && python3 build_router.py --from-source)`.
+        f"cd {REPO} && python3 build_router.py",
+        # Prove the extension actually imports in a FRESH interpreter before 15,000
+        # tasks depend on it. build_router verifies in a subprocess for the same
+        # reason: an in-process re-import of a compiled extension reports the
+        # PREVIOUSLY loaded library, so it can mask a bad install.
+        f"cd {REPO} && python3 -c \"import sys; sys.path.insert(0,'rust_router'); "
+        f"import grid_router; print('grid_router', grid_router.__version__)\"",
     )
 )
 
@@ -175,16 +184,33 @@ def replay_big(task: dict) -> dict:
 
 @app.local_entrypoint()
 def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,set10",
-         stress_dir: str = "", out: str = "", dry_run: bool = False):
+         stress_dir: str = "", out: str = "", dry_run: bool = False,
+         boards: str = "", limit: int = 0):
+    """boards: comma-separated board names to restrict to (smoke tests).
+    limit:  keep only the N CHEAPEST boards -- a smoke test wants fast feedback,
+            and the default longest-first order would otherwise hand you the
+            50-minute monster first."""
     stress = Path(stress_dir or os.path.expanduser("~/Documents/kicad_stress_test"))
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import sweep_lib as sl
 
     arm_specs = json.loads(Path(arms).read_text())
     set_list = [s.strip() for s in sets.split(",") if s.strip()]
-    boards = sl.discover_boards(stress, set_list)
+    board_list = sl.discover_boards(stress, set_list)
     costs = sl.load_cost_table(stress)
-    tasks = sl.build_tasks(arm_specs, boards, costs)
+
+    if boards:
+        want = {b.strip() for b in boards.split(",") if b.strip()}
+        board_list = [(s, b) for s, b in board_list if b in want]
+        missing = want - {b for _, b in board_list}
+        if missing:
+            raise SystemExit(f"not found in sets {set_list}: {sorted(missing)}")
+    if limit:
+        board_list = sorted(board_list,
+                            key=lambda sb: (costs.get(sb[1]) or {}).get("seconds", 1e9))[:limit]
+
+    tasks = sl.build_tasks(arm_specs, board_list, costs)
+    boards = board_list  # keep the downstream name
 
     est_h = sum(t["est_seconds"] for t in tasks) / 3600
     floor_m = max((t["est_seconds"] for t in tasks), default=0) / 60

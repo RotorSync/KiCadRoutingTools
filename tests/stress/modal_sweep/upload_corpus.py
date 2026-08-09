@@ -73,12 +73,20 @@ def main():
     ap.add_argument("--sets", default=",".join(f"set{i}" for i in range(1, 11)))
     ap.add_argument("--stress-dir", default=os.path.expanduser("~/Documents/kicad_stress_test"))
     ap.add_argument("--volume", default="kicad-corpus")
+    ap.add_argument("--boards", default="",
+                    help="comma-separated board names -- upload only these (smoke tests)")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
 
     stress = Path(a.stress_dir)
     sets = [s.strip() for s in a.sets.split(",") if s.strip()]
     files = collect(stress, sets)
+    if a.boards:
+        want = {b.strip() for b in a.boards.split(",") if b.strip()}
+        # keep a file if it belongs to a wanted board, matching on the board dir
+        # component or the <board>.kicad_* basename
+        files = [(f, rel) for f, rel in files
+                 if any(p == b or p.startswith(b + ".") for p in Path(rel).parts for b in want)]
     total = sum(f.stat().st_size for f, _ in files)
     print(f"{len(files)} files, {total/1e9:.2f} GB across {len(sets)} sets")
     if a.dry_run:
