@@ -1,9 +1,53 @@
-4b0479a 2026-08-07 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+46e4cd6 2026-08-08 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 check_release_version.check_gui_parity reads `marker.read_text().split()[0]`
 and diffs it against HEAD. Every entry until now opened with the word "HEAD"
 (or "ADDENDUM"), which git resolves happily -- so `git diff HEAD..HEAD` was
 empty and the release parity gate passed UNCONDITIONALLY, for every release
 that has ever run it. Keep a real SHA first or the gate is decorative.
+
+2026-08-08 parity audit 4b0479a..46e4cd6 (4 commits: run_all parallel jobs,
+#536 octolinear smoothing + DEFAULT ON for the route step, the exact-fill
+LoadBoard-None segfault guard). Outcome: NO gaps at HEAD -- the whole wave
+is engine-side by construction, and the default flip is proven copper-
+identical across fronts by the engine-parity gate.
+
+  Audit surface:
+  * #536 smoothing (2e7811a + 46e4cd6): a NEW cleanup pass
+    (smooth_octolinear_chains) inside the SHARED run_post_route_cleanup --
+    Class-1, both fronts inherit; no CLI flag, no dialog control, no
+    manifest work BY DESIGN (env-knob-only surface, the #529 precedent).
+    KICAD_SMOOTH_ROUTE is tri-state ('' = front default, '1'/'0' force);
+    the front default rides the ``smooth`` kwarg set at batch_route's
+    internal cleanup call (route step ON) -- engine-side, so the GUI
+    signal tab gets the default automatically and the diff/planes tabs
+    stay OFF exactly like their CLI twins. Guide-corridor steps keep the
+    default OFF via config.guide_corridor_enabled, read in the shared
+    pipeline. Keepout/rule-area guard + pour-blind doctrine live inside
+    the pass. Skip set peeks protected_nets._notes WITHOUT consuming, so
+    the fronts' differing consume sites are untouched.
+  * c891f61: kicad_exact_fill._REFILL_SCRIPT subprocess guard -- shared
+    module; the GUI's in-process live_fill_islands path takes a live
+    board object (never LoadBoard) and is unaffected.
+  * d43a07a: tests/run_all.py only -- no engine surface.
+
+  Gates at 46e4cd6 (all four, fresh):
+  * test_gui_engine_parity: PARITY, copper sets IDENTICAL (segments
+    1182/1182 -- DOWN from 1335 at the last audit because BOTH fronts now
+    smooth; vias 140/140, drc 0/0, kicad_unconnected 0/0). This is the
+    direct check that the default flip forked nothing.
+  * test_settings_roundtrip: clean (save, restore, LEGACY, re-save; 180
+    keys -- no dialog controls changed this wave).
+  * test_manifest_plan_parity: 12 params checked, 0 unresolved (no new
+    flags).
+  * test_cli_postpass_coverage: 8 registered, 15 in CLI use, 0 failures
+    (run_drc stays the acknowledged report-only CLI-only pass).
+  Also green this range: run_all 251/0 (three default-on burn-in sweeps;
+  the first two caught and fixed the rule-area and guide-corridor intent
+  gaps INSIDE the shared engine, so both fronts got the fixes for free).
+
+  Known gate blind spot unchanged: the engine-parity plan is signal+plane
+  only (no diff-pair / impedance params) -- acceptable here since the
+  diff front deliberately defaults smoothing OFF.
 
 2026-08-07 parity audit 6113245..4b0479a (13 commits: the v0.20.0 release,
 stress-harness robustness, #582 install fix, the live-board zone-deletion
