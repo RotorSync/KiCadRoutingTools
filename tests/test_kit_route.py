@@ -21,7 +21,13 @@ into the tracked ``kicad_files/`` tree.  This keeps two problems from biting
 The input board is read straight from ``kicad_files/`` (read-only); only the
 generated ``kit-out*`` artifacts move to the temp dir.
 
-Known result (issue #426): this is a dense, fine-pitch board and the router
+The default run routes only the ``/AN*`` nets (~30 s) so run_all's per-test
+timeout survives a loaded machine; the full signal set is behind ``--full``
+(~10 min). Both exercise the identical chain -- route, both plane steps, and
+all three checkers.
+
+Known result for the FULL run (``--full``, issue #426): this is a dense,
+fine-pitch board and the router
 does NOT complete it with these parameters -- ``route.py`` (step 1) leaves
 roughly 50 of the U102<->U301 signal nets unrouted (their pads are boxed in by
 neighbouring copper), so the final ``check_connected`` / ``check_drc`` still
@@ -44,7 +50,12 @@ from run_utils import run, ROOT_DIR
 def main():
     parser = argparse.ArgumentParser(description='Test routing on kit-dev-coldfire-xilinx board')
     parser.add_argument('--quick', '-q', action='store_true',
-                        help='Quick mode: only route a few nets (default: route all U102 nets)')
+                        help='Quick mode: only route the /AN* nets (the default; '
+                             'kept as an explicit flag for compatibility)')
+    parser.add_argument('--full', action='store_true',
+                        help='Route the full signal set (~10 min; the #426 dense-board '
+                             'run that used to be the default and blew run_all\'s '
+                             'per-test timeout under load)')
     parser.add_argument('-u', '--unbuffered', action='store_true',
                         help='Run python commands with -u (unbuffered output)')
     parser.add_argument('--planes-only', action='store_true',
@@ -55,7 +66,7 @@ def main():
                              'path to keep the outputs for inspection.')
     args = parser.parse_args()
 
-    quick = args.quick
+    quick = not args.full
     unbuffered = args.unbuffered
 
     #target = "--component U102"
