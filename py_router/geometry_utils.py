@@ -14,9 +14,6 @@ from __future__ import annotations
 import math
 from typing import Tuple, Optional, Dict, List, Any, TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from kicad_parser import Segment
-
 
 class UnionFind:
     """

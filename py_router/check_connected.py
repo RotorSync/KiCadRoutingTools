@@ -74,7 +74,7 @@ class SpatialIndex:
 
     def __init__(self, cell_size: float = 1.0):
         self.cell_size = cell_size
-        self.grid: Dict[Tuple[int, int, str], list] = defaultdict(list)  # (gx, gy, layer) -> list of (x, y, point_id, size)
+        self.grid = defaultdict(list)  # (gx, gy, layer) -> list of (x, y, point_id, size)
 
     def _cell(self, x: float, y: float) -> Tuple[int, int]:
         return (int(x // self.cell_size), int(y // self.cell_size))
@@ -101,7 +101,7 @@ class SegmentIndex:
 
     def __init__(self, cell_size: float = 1.0):
         self.cell_size = cell_size
-        self.grid: Dict[Tuple[int, int, str], list] = defaultdict(list)  # (gx, gy, layer) -> list of (seg, seg_start_id)
+        self.grid = defaultdict(list)  # (gx, gy, layer) -> list of (seg, seg_start_id)
 
     def _cells_for_segment(self, seg) -> List[Tuple[int, int]]:
         """Return all grid cells that a segment passes through."""
@@ -123,7 +123,7 @@ class SegmentIndex:
         gx, gy = int(x // self.cell_size), int(y // self.cell_size)
         return self.grid.get((gx, gy, layer), [])
 
-    def query_near(self, x: float, y: float, layer: str, radius: Optional[float] = None):
+    def query_near(self, x: float, y: float, layer: str, radius: float = None):
         """Like query_at but over the cell neighbourhood, deduped - for
         proximity tests whose tolerance (a track width) can cross a cell
         edge. `radius` widens the ring: a big via's barrel credit reaches
@@ -356,7 +356,7 @@ def make_real_fill_validator(pcb_data, net_id, margin: float = 0.25,
     assert margin <= _BUCKET_REACH_MARGIN + 1e-9, \
         f"validator margin {margin} exceeds bucket reach {_BUCKET_REACH_MARGIN}"
     _shared = shared_buckets if shared_buckets is not None else {}
-    _buckets: dict = {}
+    _buckets = {}
 
     def _build(layer):
         _ck = (net_id, layer)
@@ -454,7 +454,7 @@ def net_break_within_outlines(pcb_data, result):
     return True, (kept or dps)
 
 
-def net_pad_pairs_within_outlines(pcb_data, result, pads) -> Tuple[int, int]:
+def net_pad_pairs_within_outlines(pcb_data, result, pads):
     """Outline-aware pad-pair credit for route.py's #409 tallies. Pairs are
     counted WITHIN each outer Edge.Cuts outline -- pads split across outlines
     are joined by a board-to-board connector at assembly, never by copper
@@ -499,7 +499,7 @@ def net_pad_pairs_within_outlines(pcb_data, result, pads) -> Tuple[int, int]:
 
 
 def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via],
-                           pads: List[Pad], zones: Optional[List[Zone]] = None,
+                           pads: List[Pad], zones: List[Zone] = None,
                            tolerance: float = 0.02,
                            verbose: bool = False,
                            return_graph: bool = False,
@@ -598,7 +598,7 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     # Each point: (x, y, layer, point_id, size, type, extra_info)
     all_points = []
     point_id = 0
-    point_info: Dict[int, tuple] = {}  # Maps point_id to descriptive info
+    point_info = {}  # Maps point_id to descriptive info
 
     # Add segment endpoints
     for seg_idx, seg in enumerate(segments):
@@ -721,7 +721,7 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
 
         # Find which points are inside the zone polygon
         points_in_zone = []   # legacy blob (no model verdict)
-        points_by_comp: Dict[int, list] = {}   # fill component id -> [pid]
+        points_by_comp = {}   # fill component id -> [pid]
         for x, y, layer, pid, size in points_on_layer:
             if point_in_polygon(x, y, zone.polygon):
                 # Removal gates pass a fill validator (#outline-over-credit,
@@ -1027,7 +1027,7 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     unique_roots = set(pad_roots)
 
     # Find which pads are disconnected from the main group
-    root_counts: Dict[object, int] = defaultdict(int)
+    root_counts = defaultdict(int)
     for root in pad_roots:
         root_counts[root] += 1
     main_root = max(root_counts.keys(), key=lambda r: root_counts[r])
@@ -1152,7 +1152,7 @@ def analyze_conn_excluding(graph: Dict, excluded_seg_indices=()) -> Dict:
         if i_ in excluded:
             continue
         copper_roots.add(uf.find(2 * i_))
-    root_counts: Dict[object, int] = defaultdict(int)
+    root_counts = defaultdict(int)
     for r in pad_roots:
         root_counts[r] += 1
     main_root = max(root_counts.keys(), key=lambda r: root_counts[r])
@@ -1407,7 +1407,7 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                 # has anything routable. A one-pad-per-board net is purely a
                 # board-to-board link -- nothing on either board to route.
                 if _outlines:
-                    _counts: dict = {}
+                    _counts = {}
                     for _p in pads_by_net[net_id]:
                         _oi = _which_outline(_p.global_x, _p.global_y)
                         _counts[_oi] = _counts.get(_oi, 0) + 1
@@ -1607,7 +1607,7 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                 _issue_names = {i['net_name'] for i in issues}
                 _skip_names = set(skipped_cross_board)
                 _zone_net_ids = {_z.net_id for _z in pcb_data.zones}
-                _eligible: dict = {}
+                _eligible = {}
                 for _nid, _n in pcb_data.nets.items():
                     if _n.name and (_nid in _zone_net_ids
                                     or _nid in segments_by_net
