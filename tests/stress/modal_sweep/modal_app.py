@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+"""Modal app: fan a routing-parameter sweep across the stress corpus.
+
+    modal run tests/stress/modal_sweep/modal_app.py \
+        --arms tests/stress/modal_sweep/arms.example.json \
+        --sets set1,set2,set3,set4,set5,set6,set7,set8,set9,set10
+
+ONE TASK = ONE (arm, board). That granularity is the whole point: an arm run as
+a single task is ~9 CPU-hours SERIAL, so 100 of those in parallel still take
+9 hours. Fanning out to board level makes the wall-clock floor the single
+longest BOARD (tens of minutes) instead.
+
+Measured on sets 1-10 (see sweep_lib.load_cost_table for provenance):
+  one arm ~8.6 CPU-h  ->  100 arms ~864 CPU-h / 15,000 tasks
+  500 concurrent cores ~1.7 h   |   ~1,730 cores reaches the floor
+
+Two container tiers, assigned from recorded peak_footprint_mb: 4 GB standard,
+12 GB for the handful of boards that spike (one hit 10 GB). Sizing off
+peak_rss_mb instead would under-provision those by up to 5x -- RSS
+under-reports (issue #419).
+
+Prerequisites and known-unverified bits are in README.md. Notably this file has
+NOT been executed against Modal's API from this repo -- pin `modal` per the
+README and expect to adjust image-builder method names if you are on an older
+client.
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import modal
+
+# Recorded manifests bake ABSOLUTE tool paths. Rather than assume one prefix, we
+# detect each manifest's own and remap it (sweep_lib.recorded_repo_prefix), so
+# manifests recorded from a worktree or another machine replay unchanged.
+REPO = "/opt/kicad-routing-tools"
+CORPUS = "/corpus"          # read-only volume: runs_setN/ manifests + boards
+RESULTS = "/results"        # writable volume: one JSON per (arm, board)
+
+app = modal.App("kicad-routing-sweep")
+
+corpus_vol = modal.Volume.from_name("kicad-corpus", create_if_missing=True)
+results_vol = modal.Volume.from_name("kicad-sweep-results", create_if_missing=True)
+
+_here = Path(__file__).resolve().parent
+_repo_root = _here.parent.parent.parent
+
+image = (
+    modal.Image.debian_slim(python_version="3.12")
+    # numpy/scipy/shapely are the ENTIRE runtime dependency set: check_drc.py and
+    # the router are pure python + the compiled grid_router. No KiCad needed --
+    # replay+grade never calls pcbnew or kicad-cli. (Cost: ab_replay_grade's
+    # optional kicad-cli cross-check degrades to None. Cross-check the winning
+    # arm locally, where KiCad already lives -- that check caught #487.)
+    .pip_install("numpy>=1.21.0", "scipy>=1.7.0", "shapely>=1.8.0")
+    # Rust toolchain is needed ONLY because the 0.20.1 grid_router linux asset is
+    # not published yet (CLAUDE.md). Publish it and this whole layer drops out,
+    # taking ~10 min off a cold image build.
+    .apt_install("curl", "build-essential")
+    .run_commands(
+        "curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal",
+        'echo ". $HOME/.cargo/env" >> /etc/profile',
+    )
+    .add_local_dir(str(_repo_root), REPO, copy=True, ignore=[
+        "**/.git/**", "**/__pycache__/**", "**/target/**", "**/.claude/worktrees/**",
+    ])
+    .run_commands(
+        # build_router.py downloads the matching prebuilt when one exists and
+        # falls back to source; either way it lands grid_router.so in rust_router/.
+        f"cd {REPO} && . $HOME/.cargo/env && python3 build_router.py || "
+        f"(cd {REPO} && . $HOME/.cargo/env && python3 build_router.py --from-source)",
+    )
+)
+
+with image.imports():
+    sys.path.insert(0, f"{REPO}/tests/stress/modal_sweep")
+    import sweep_lib
+
+
+def _replay_one(task: dict) -> dict:
+    """Replay + grade ONE board under ONE arm. Runs inside the container."""
+    t0 = time.time()
+    arm, board, set_name = task["arm"], task["board"], task["set"]
+    work = Path(f"/tmp/{arm}/{set_name}")
+    stage = work / "stage"
+    stage.mkdir(parents=True, exist_ok=True)
+
+    # 1. Stage a one-board "set" dir. ab_replay_grade enumerates subdirs of --set
+    #    that contain redo_commands.sh, so a dir holding exactly one board makes
+    #    it replay+grade exactly that board -- and emit the SAME summary.json
+    #    schema as a full-set wave, so `ab_replay_grade.py --compare` still works
+    #    on the aggregate. No grading logic is duplicated here.
+    src = Path(CORPUS) / f"runs_{set_name}" / board
+    dst = stage / board
+    shutil.copytree(src, dst, dirs_exist_ok=True)
+
+    # 2. Apply this arm's parameters.
+    spec = task["arm_spec"]
+    env = dict(os.environ)
+    env.update({k: str(v) for k, v in (spec.get("env") or {}).items()})
+    patched = {}
+    if spec.get("defaults"):
+        # Each container has its own writable copy of the repo, so this needs no
+        # git state and cannot race another arm.
+        patched = sweep_lib.patch_routing_defaults(Path(REPO), spec["defaults"])
+    manifest_path = dst / "redo_commands.sh"
+    text = manifest_path.read_text()
+    if spec.get("manifest_sed"):
+        text = sweep_lib.patch_manifest(text, spec["manifest_sed"])
+        manifest_path.write_text(text)
+
+    # 3. Remap the recorded repo prefix onto this container's repo.
+    extra = []
+    prefix = sweep_lib.recorded_repo_prefix(text)
+    if prefix and prefix.rstrip("/") != REPO:
+        extra = ["--extra-remap", f"{prefix.rstrip('/')}/:{REPO}/"]
+
+    out_dir = work / "wave"
+    cmd = [sys.executable, f"{REPO}/tests/stress/ab_replay_grade.py",
+           "--set", str(stage), "--out", str(out_dir),
+           "--label", arm, "--jobs", "1"] + extra
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=env,
+                          timeout=task.get("timeout_s", 4 * 3600))
+
+    # 4. Harvest the single summary row.
+    row, summary_file = {}, out_dir / "summary.json"
+    if summary_file.exists():
+        try:
+            rows = json.loads(summary_file.read_text())
+            if rows:
+                row = rows[0]
+        except Exception as e:
+            row = {"parse_error": str(e)[:200]}
+    row.update({
+        "arm": arm, "set": set_name, "board": board,
+        "rc": proc.returncode,
+        "sweep_wall_s": round(time.time() - t0, 1),
+        "patched_defaults": {k: v[1] for k, v in patched.items()},
+        "env_overrides": spec.get("env") or {},
+    })
+    if not summary_file.exists():
+        # A board that produced no summary at all is a real finding, not noise --
+        # keep enough context to reproduce it rather than dropping the row.
+        row["stderr_tail"] = (proc.stderr or "")[-2000:]
+        row["chain_complete"] = False
+
+    dest = Path(RESULTS) / arm
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / f"{set_name}__{board}.json").write_text(json.dumps(row, indent=1))
+    results_vol.commit()
+    return row
+
+
+@app.function(image=image, cpu=1.0, memory=4096,
+              timeout=4 * 3600, retries=modal.Retries(max_retries=1),
+              volumes={CORPUS: corpus_vol, RESULTS: results_vol})
+def replay_standard(task: dict) -> dict:
+    return _replay_one(task)
+
+
+@app.function(image=image, cpu=1.0, memory=12288,
+              timeout=6 * 3600, retries=modal.Retries(max_retries=1),
+              volumes={CORPUS: corpus_vol, RESULTS: results_vol})
+def replay_big(task: dict) -> dict:
+    """Same work, 12 GB. For boards whose recorded peak footprint exceeds
+    ~3.5 GB -- four boards in the reference wave, one at 10 GB."""
+    return _replay_one(task)
+
+
+@app.local_entrypoint()
+def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,set10",
+         stress_dir: str = "", out: str = "", dry_run: bool = False):
+    stress = Path(stress_dir or os.path.expanduser("~/Documents/kicad_stress_test"))
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import sweep_lib as sl
+
+    arm_specs = json.loads(Path(arms).read_text())
+    set_list = [s.strip() for s in sets.split(",") if s.strip()]
+    boards = sl.discover_boards(stress, set_list)
+    costs = sl.load_cost_table(stress)
+    tasks = sl.build_tasks(arm_specs, boards, costs)
+
+    est_h = sum(t["est_seconds"] for t in tasks) / 3600
+    floor_m = max((t["est_seconds"] for t in tasks), default=0) / 60
+    big = [t for t in tasks if t["memory_mb"] > 4096]
+    print(f"{len(arm_specs)} arms x {len(boards)} boards = {len(tasks)} tasks")
+    print(f"  estimated {est_h:,.0f} CPU-hours; floor (longest board) {floor_m:.0f} min")
+    print(f"  {len(big)} tasks routed to the 12 GB tier")
+    unknown = sum(1 for t in tasks if t["board"] not in costs)
+    if unknown:
+        print(f"  NOTE {unknown} tasks have no recorded cost -- ordered mid-pack, "
+              f"so a hidden monster could extend the tail")
+    if dry_run:
+        for t in tasks[:10]:
+            print(f"   {t['est_seconds']/60:6.1f}m {t['memory_mb']:>6}MB {t['arm']:20} {t['board']}")
+        return
+
+    started = time.time()
+    std = [t for t in tasks if t["memory_mb"] <= 4096]
+    results = []
+
+    # .map() BLOCKS until its tier drains, so calling the two tiers in sequence
+    # would hold every 12 GB board back until the 4 GB ones finished (or vice
+    # versa) -- and the 12 GB tier holds the longest boards, i.e. exactly the
+    # ones that must start first. Drain both concurrently instead.
+    import threading
+    lock = threading.Lock()
+
+    def drain(fn, items):
+        if not items:
+            return
+        for r in fn.map(items, order_outputs=False):
+            with lock:
+                results.append(r)
+
+    threads = [threading.Thread(target=drain, args=(replay_big, big)),
+               threading.Thread(target=drain, args=(replay_standard, std))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    summary = sl.summarize(results)
+    summary["wall_clock_s"] = round(time.time() - started, 1)
+    out_path = Path(out or (stress / f"sweep_{int(started)}.json"))
+    out_path.write_text(json.dumps({"summary": summary, "rows": results}, indent=1))
+    print(f"\nwall {summary['wall_clock_s']/3600:.2f} h -> {out_path}")
+    print(f"{'arm':24} {'boards':>6} {'ok':>4} {'mean_compl%':>11} {'DRC':>6} {'CPU-h':>7}")
+    for a in summary["arms"]:
+        print(f"{a['arm']:24} {a['boards']:6} {a['chain_complete']:4} "
+              f"{str(a['mean_completion_pct']):>11} {str(a['total_drc_real']):>6} {a['cpu_hours']:7.2f}")
