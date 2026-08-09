@@ -100,11 +100,18 @@ def refresh() -> None:
     # bga_proximity_radius) -- the sum win comes from open-field density,
     # while inside the escape collar the stacked foreign-stub fields price a
     # net's MANDATORY approach (lpddr4 A/B: deficit 1->2, 6x search).
+    # 'softcap' (#584) = the global blend max + ALPHA*(sum - max) per cell,
+    # everywhere: keeps the max-mode floor plus a fraction of the crowd
+    # pressure, so density still repels but stacked fields near mandatory
+    # approaches can't explode. ALPHA=0 reproduces max, ALPHA=1 reproduces
+    # sum (both exactly, up to integer-cost rounding).
     # Off = historical max semantics everywhere.
     _ps = _s('KICAD_PROXIMITY_SUM', '').strip().lower()
     g['PROXIMITY_SUM_MODE'] = ('zoned' if _ps == 'zoned'
+                               else 'softcap' if _ps == 'softcap'
                                else 'sum' if _ps in _ON else '')
     g['PROXIMITY_SUM'] = bool(g['PROXIMITY_SUM_MODE'])
+    g['PROXIMITY_SOFTCAP_ALPHA'] = _f('KICAD_PROXIMITY_SOFTCAP_ALPHA', 0.3)
     # #585 item 1: layer-aware stub proximity. The stub's OWN layer keeps the
     # full cost; other layers pay cost/M (M = n_layers/2 by default, so a
     # 2-layer board is unchanged and a 6-layer board discounts 3x) -- a via

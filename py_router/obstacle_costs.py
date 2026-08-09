@@ -253,26 +253,58 @@ def apply_stub_proximity(obstacles: GridObstacleMap, pcb_data: PCBData,
                     config.cell_cost(config.ripped_route_avoidance_cost))
         return surplus
 
-    # Sum mode: (points, radius, cost) per source
+    # softcap (#584): max + alpha*(sum-max) == (1-alpha)*max + alpha*sum,
+    # composed with the EXISTING Rust primitives -- the flat batch max-inserts
+    # the (1-alpha)-scaled all-sources field (same structure as max mode
+    # above), then the grouped call below ADDS the alpha-scaled per-source
+    # fields on top. alpha=0 reproduces max mode, alpha=1 sum mode (up to
+    # integer-cost rounding). The stub-map SURPLUS (layer-aware m>1) is
+    # emitted ONCE at full cost by this branch: it rides the layer map,
+    # where merge_track_proximity_costs applies the same blend.
+    alpha = (env_knobs.PROXIMITY_SOFTCAP_ALPHA
+             if env_knobs.PROXIMITY_SUM_MODE == 'softcap' else None)
+    if alpha is not None:
+        mscale = 1.0 - alpha
+        if all_stubs and stub_radius_grid > 0:
+            mcost = int((base_cost if m > 1.0 else full_cost) * mscale)
+            if mcost > 0:
+                grid_pts = [coord.to_grid(p[0], p[1]) for p in all_stubs]
+                obstacles.add_stub_proximity_costs_batch(
+                    grid_pts, stub_radius_grid, mcost)
+        if ghost_active:
+            all_via_positions = []
+            for via_list in ghost_via_groups.values():
+                all_via_positions.extend(via_list)
+            mrra = int(config.cell_cost(config.ripped_route_avoidance_cost)
+                       * mscale)
+            rra_radius_g = coord.to_grid_dist(
+                config.ripped_route_avoidance_radius)
+            if all_via_positions and mrra > 0 and rra_radius_g > 0:
+                obstacles.add_stub_proximity_costs_batch(
+                    all_via_positions, rra_radius_g, mrra)
+    sscale = alpha if alpha is not None else 1.0
+
+    # Sum component: (points, radius, cost) per source
     from connectivity import get_stub_endpoints
     from net_queries import get_chip_pad_positions
     groups = []
     pts_by_net = {}
     if full_cost > 0 and stub_radius_grid > 0:
+        src_cost = int((base_cost if m > 1.0 else full_cost) * sscale)
         for nid in stub_net_ids:
             pts = (get_stub_endpoints(pcb_data, [nid])
                    + get_chip_pad_positions(pcb_data, [nid]))
             if pts:
                 pts_by_net[nid] = pts
                 groups.append(([coord.to_grid(p[0], p[1]) for p in pts],
-                               stub_radius_grid,
-                               base_cost if m > 1.0 else full_cost))
+                               stub_radius_grid, src_cost))
     if m > 1.0 and layer_map and pts_by_net:
         surplus = _stub_surplus_arrays(pts_by_net, stub_radius_grid,
                                        surplus_cost, coord, layer_map)
     if ghost_active:
         rra_radius = coord.to_grid_dist(config.ripped_route_avoidance_radius)
-        rra_cost = config.cell_cost(config.ripped_route_avoidance_cost)
+        rra_cost = int(config.cell_cost(config.ripped_route_avoidance_cost)
+                       * sscale)
         for nid in sorted(ghost_via_groups):
             vias = ghost_via_groups[nid]
             if vias:
@@ -526,6 +558,7 @@ def merge_track_proximity_costs(obstacles: GridObstacleMap,
            sum(len(a) for a in arrays_to_merge),
            sum(id(a) & 0xFFFFFFFF for a in arrays_to_merge),
            env_knobs.PROXIMITY_SUM_MODE,
+           env_knobs.PROXIMITY_SOFTCAP_ALPHA,
            tuple(_zone_rects) if _zone_rects else None)
     memo = _MERGE_MEMO.get(key)
     if memo is not None and memo[0] == sig:
@@ -551,6 +584,15 @@ def merge_track_proximity_costs(obstacles: GridObstacleMap,
             composed[:, 1] = ((uniq >> 24) & ((1 << 24) - 1)).astype(np.int32) - _OFF
             composed[:, 2] = (uniq & ((1 << 24) - 1)).astype(np.int32) - _OFF
             composed[:, 3] = np.minimum(sums, float(np.iinfo(np.int32).max)).astype(np.int32)
+            if env_knobs.PROXIMITY_SUM_MODE == 'softcap':
+                # softcap (#584): per-cell max + alpha*(sum - max) -- the
+                # max-mode floor plus a fraction of the crowd pressure.
+                maxs = np.zeros(len(uniq), dtype=np.int64)
+                np.maximum.at(maxs, inv, all_costs[:, 3].astype(np.int64))
+                a = env_knobs.PROXIMITY_SOFTCAP_ALPHA
+                blended = maxs + a * (sums - maxs)
+                composed[:, 3] = np.minimum(
+                    blended, float(np.iinfo(np.int32).max)).astype(np.int32)
             if _zone_rects:
                 maxs = np.zeros(len(uniq), dtype=np.int32)
                 np.maximum.at(maxs, inv, all_costs[:, 3])

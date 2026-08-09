@@ -193,7 +193,7 @@ otherwise invisible in flag tables:
 |-------|----------|---------|----------------|
 | Plane fragility | `KICAD_PLANE_FRAGILITY_COST` | **2.0 = ON** | Cells near pour boundaries/necks, so signals do not bisect a plane. The LARGEST default field (10x the stub tier). `0` reverts. |
 | Congestion v1 | `KICAD_CONGESTION_COST` | 0 = off | All-layer copper-density field. |
-| Congestion v2 | `KICAD_CONGESTION2_COST` | 0 = off | Demand/capacity bins, owner-exempt (your own destination does not repel you). Stamped per net at prepare, composes by max even in sum mode. |
+| Congestion v2 | `KICAD_CONGESTION2_COST` | 0 = off | Demand/capacity bins, owner-exempt (your own destination does not repel you). A source in the layer-map composition pass since d52f1c2 (#585 item 7): sums in sum mode, max-mode unchanged by commutativity. |
 
 #### Composition: how multiple sources combine (`KICAD_PROXIMITY_SUM`)
 
@@ -209,6 +209,14 @@ never depends on sampling density). Across sources, per cell:
 - **`zoned`: sum, except max inside BGA escape fields** (zone +
   `bga_proximity_radius`), where stacked foreign fields price a net's
   MANDATORY approach rather than an avoidable crowd.
+- **`softcap`: the global blend `max + α·(sum − max)` per cell, everywhere**
+  (#584). `KICAD_PROXIMITY_SOFTCAP_ALPHA` sets α (default `0.3`): the
+  max-mode floor plus a fraction of the crowd pressure, so density still
+  repels but stacked fields on mandatory approaches can't explode. α=0
+  reproduces max, α=1 reproduces sum (both exactly, up to integer-cost
+  rounding). Implemented with the existing primitives — the stub map stamps
+  the `(1−α)`-scaled max-insert batch plus the `α`-scaled grouped sum; the
+  layer map blends both aggregates in one pass.
 
 Double-merge safety is structural in all modes: the layer-map write primitive
 is an idempotent max-insert over uniquely-composed rows (re-merging the same
