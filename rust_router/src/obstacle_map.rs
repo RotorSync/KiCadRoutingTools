@@ -744,6 +744,50 @@ impl GridObstacleMap {
         }
     }
 
+    /// Sum-composition stub proximity (KICAD_PROXIMITY_SUM): each group is one
+    /// SOURCE (a net's stubs, a ripped net's ghost vias) with its own
+    /// (radius, max_cost) falloff. Within a group the per-cell cost is the MAX
+    /// over the group's point disks (dedupe: a net's 6 connector stubs are one
+    /// source, and cost stays independent of point/sampling density); across
+    /// groups the per-cell costs ADD (a corridor threading 10 nets' stub
+    /// fields prices 10x one net's). Adds into the existing map -- callers
+    /// clear (or start from a fresh clone) before the per-route stamp
+    /// sequence, exactly like the max-mode batch above.
+    pub fn add_stub_proximity_costs_grouped(
+        &mut self,
+        groups: Vec<(Vec<(i32, i32)>, i32, i32)>,
+    ) {
+        for (points, radius, max_cost) in groups {
+            if radius <= 0 || points.is_empty() {
+                continue;
+            }
+            let radius_sq = radius * radius;
+            let radius_f = radius as f32;
+            let mut field: FxHashMap<u64, i32> = FxHashMap::default();
+            for (gcx, gcy) in points {
+                for dx in -radius..=radius {
+                    for dy in -radius..=radius {
+                        let dist_sq = dx * dx + dy * dy;
+                        if dist_sq <= radius_sq {
+                            let dist = (dist_sq as f32).sqrt();
+                            let proximity = 1.0 - (dist / radius_f);
+                            let cost = (proximity * max_cost as f32) as i32;
+                            if cost > 0 {
+                                let entry = field.entry(pack_xy(gcx + dx, gcy + dy)).or_insert(0);
+                                if cost > *entry {
+                                    *entry = cost;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for (key, cost) in field {
+                *self.stub_proximity.entry(key).or_insert(0) += cost;
+            }
+        }
+    }
+
     /// Check if cell is blocked
     #[inline]
     pub fn is_blocked(&self, gx: i32, gy: i32, layer: usize) -> bool {

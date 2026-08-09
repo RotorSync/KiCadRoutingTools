@@ -16,7 +16,8 @@ from obstacle_map import (
     get_same_net_through_hole_positions
 )
 from obstacle_costs import (
-    add_stub_proximity_costs, merge_track_proximity_costs,
+    add_stub_proximity_costs, apply_stub_proximity,
+    merge_track_proximity_costs,
     add_cross_layer_tracks, compute_track_proximity_for_net
 )
 from obstacle_cache import (
@@ -55,56 +56,23 @@ def _add_free_via_positions(obstacles, pcb_data, net_ids: List[int], config):
         obstacles.add_free_vias_batch(free_via_positions)
 
 
-def merge_ripped_route_costs(obstacles, ripped_route_layer_costs: Dict[int, np.ndarray],
-                              ripped_route_via_positions: Dict[int, List[Tuple[int, int]]],
-                              config: GridRouteConfig,
-                              routed_net_ids=None):
-    """Merge ripped route avoidance costs into the obstacle map.
+def filter_ripped_ghosts(ghost_dict, config: GridRouteConfig, routed_net_ids=None):
+    """C1 filter for ripped-route ghost dicts (layer costs OR via positions).
 
-    When a net is ripped up, we want to apply soft penalties to its former corridor
-    so the current routing avoids that area, increasing the chance the ripped net
-    can be rerouted later.
-
-    Args:
-        obstacles: GridObstacleMap to add costs to
-        ripped_route_layer_costs: Dict of net_id -> numpy array [layer, gx, gy, cost] for segments
-        ripped_route_via_positions: Dict of net_id -> list of (gx, gy) for vias
-        config: Routing configuration
-        routed_net_ids: Nets that have ROUTED again since being ripped -- their
-            ghosts are skipped (soft-knobs review C1): once the net has real
-            copper down, the reserved corridor is either re-occupied (the real
-            obstacles suffice) or empty and useful, and the ghost would repel
-            every remaining net from it for the rest of the run.
+    Nets that have ROUTED again since being ripped are skipped (soft-knobs
+    review C1): once the net has real copper down, the reserved corridor is
+    either re-occupied (the real obstacles suffice) or empty and useful, and
+    the ghost would repel every remaining net from it for the rest of the run.
+    Returns {} when the avoidance feature is off. Both composition entry
+    points (merge_track_proximity_costs for the layer ghosts,
+    apply_stub_proximity for the via ghosts) require pre-filtered dicts so
+    each source is counted exactly once.
     """
-    if config.ripped_route_avoidance_cost <= 0:
-        return  # Feature disabled
-
-    if routed_net_ids:
-        done = set(routed_net_ids)
-        if ripped_route_layer_costs:
-            ripped_route_layer_costs = {nid: v for nid, v in ripped_route_layer_costs.items()
-                                        if nid not in done}
-        if ripped_route_via_positions:
-            ripped_route_via_positions = {nid: v for nid, v in ripped_route_via_positions.items()
-                                          if nid not in done}
-
-    # Merge layer-specific costs (segments) - same as track proximity
-    if ripped_route_layer_costs:
-        merge_track_proximity_costs(obstacles, ripped_route_layer_costs)
-
-    # Merge via costs into stub_proximity (all-layer)
-    # Uses existing add_stub_proximity_costs_batch() with via positions
-    if ripped_route_via_positions:
-        coord = GridCoord(config.grid_step)
-        radius_grid = coord.to_grid_dist(config.ripped_route_avoidance_radius)
-        cost_grid = config.cell_cost(config.ripped_route_avoidance_cost)
-
-        all_via_positions = []
-        for via_list in ripped_route_via_positions.values():
-            all_via_positions.extend(via_list)
-
-        if all_via_positions:
-            obstacles.add_stub_proximity_costs_batch(all_via_positions, radius_grid, cost_grid)
+    if not ghost_dict or config.ripped_route_avoidance_cost <= 0:
+        return {}
+    done = set(routed_net_ids or ())
+    return {nid: v for nid, v in ghost_dict.items()
+            if nid not in done and v is not None and len(v) > 0}
 
 
 def build_diff_pair_obstacles(
@@ -182,18 +150,14 @@ def build_diff_pair_obstacles(
     all_stubs = unrouted_stubs + chip_pads
     if config.verbose:
         print(f"    stub proximity: {len(stub_proximity_net_ids)} nets, {len(unrouted_stubs)} stubs, {len(chip_pads)} chip pads")
-    if all_stubs:
-        add_stub_proximity_costs(obstacles, all_stubs, config)
+    _ghost_vias = filter_ripped_ghosts(ripped_route_via_positions, config, routed_net_ids)
+    apply_stub_proximity(obstacles, pcb_data, stub_proximity_net_ids, all_stubs,
+                         config, ghost_via_groups=_ghost_vias)
 
-    # Add track proximity costs
-    merge_track_proximity_costs(obstacles, track_proximity_cache)
-
-    # Add ripped route avoidance costs
-    if ripped_route_layer_costs is not None or ripped_route_via_positions is not None:
-        merge_ripped_route_costs(obstacles,
-                                  ripped_route_layer_costs or {},
-                                  ripped_route_via_positions or {},
-                                  config, routed_net_ids=routed_net_ids)
+    # Add track proximity costs (+ ripped-corridor layer ghosts, one pass)
+    merge_track_proximity_costs(
+        obstacles, track_proximity_cache,
+        ghost_costs=filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids))
 
     # Add cross-layer track data
     add_cross_layer_tracks(obstacles, pcb_data, config, layer_map,
@@ -313,22 +277,18 @@ def build_single_ended_obstacles(
     unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
     chip_pads = get_chip_pad_positions(pcb_data, stub_proximity_net_ids)
     all_stubs = unrouted_stubs + chip_pads
-    if all_stubs:
-        add_stub_proximity_costs(obstacles, all_stubs, config)
+    _ghost_vias = filter_ripped_ghosts(ripped_route_via_positions, config, routed_net_ids)
+    apply_stub_proximity(obstacles, pcb_data, stub_proximity_net_ids, all_stubs,
+                         config, ghost_via_groups=_ghost_vias)
 
-    # Add track proximity costs
-    merge_track_proximity_costs(obstacles, track_proximity_cache)
+    # Add track proximity costs (+ ripped-corridor layer ghosts, one pass)
+    merge_track_proximity_costs(
+        obstacles, track_proximity_cache,
+        ghost_costs=filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids))
     # Congestion v2 (#424): demand/capacity field, owner-exempt (no-op
     # unless KICAD_CONGESTION2_COST > 0 and the field was built).
     from congestion_field import stamp_congestion2
     stamp_congestion2(obstacles, config, net_id, routed_net_ids)
-
-    # Add ripped route avoidance costs
-    if ripped_route_layer_costs is not None or ripped_route_via_positions is not None:
-        merge_ripped_route_costs(obstacles,
-                                  ripped_route_layer_costs or {},
-                                  ripped_route_via_positions or {},
-                                  config, routed_net_ids=routed_net_ids)
 
     # Add cross-layer track data
     add_cross_layer_tracks(obstacles, pcb_data, config, layer_map,
@@ -394,8 +354,8 @@ def build_incremental_obstacles(
     unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
     chip_pads = get_chip_pad_positions(pcb_data, stub_proximity_net_ids)
     all_stubs = unrouted_stubs + chip_pads
-    if all_stubs:
-        add_stub_proximity_costs(obstacles, all_stubs, config)
+    apply_stub_proximity(obstacles, pcb_data, stub_proximity_net_ids, all_stubs,
+                         config)
 
     # Add track proximity costs
     merge_track_proximity_costs(obstacles, track_proximity_cache)
@@ -486,20 +446,16 @@ def prepare_obstacles_inplace(
     unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
     chip_pads = get_chip_pad_positions(pcb_data, stub_proximity_net_ids)
     all_stubs = unrouted_stubs + chip_pads
-    if all_stubs:
-        add_stub_proximity_costs(working_obstacles, all_stubs, config)
+    _ghost_vias = filter_ripped_ghosts(ripped_route_via_positions, config, routed_net_ids)
+    apply_stub_proximity(working_obstacles, pcb_data, stub_proximity_net_ids,
+                         all_stubs, config, ghost_via_groups=_ghost_vias)
 
-    # Add track proximity costs
-    merge_track_proximity_costs(working_obstacles, track_proximity_cache)
+    # Add track proximity costs (+ ripped-corridor layer ghosts, one pass)
+    merge_track_proximity_costs(
+        working_obstacles, track_proximity_cache,
+        ghost_costs=filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids))
     from congestion_field import stamp_congestion2
     stamp_congestion2(working_obstacles, config, net_id, routed_net_ids)
-
-    # Add ripped route avoidance costs (soft penalty for routing through ripped corridors)
-    if ripped_route_layer_costs is not None or ripped_route_via_positions is not None:
-        merge_ripped_route_costs(working_obstacles,
-                                  ripped_route_layer_costs or {},
-                                  ripped_route_via_positions or {},
-                                  config, routed_net_ids=routed_net_ids)
 
     # Add cross-layer track data
     add_cross_layer_tracks(working_obstacles, pcb_data, config, layer_map,

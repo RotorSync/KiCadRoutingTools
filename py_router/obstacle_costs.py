@@ -56,6 +56,8 @@ try:
 except ImportError:
     GridObstacleMap = None
 
+import env_knobs
+
 
 def add_stub_proximity_costs(obstacles: GridObstacleMap, unrouted_stubs: List[Tuple[float, float]],
                               config: GridRouteConfig):
@@ -88,6 +90,70 @@ def add_stub_proximity_costs(obstacles: GridObstacleMap, unrouted_stubs: List[Tu
     obstacles.add_stub_proximity_costs_batch(
         stub_grid_positions, stub_radius_grid, stub_cost_grid
     )
+
+
+def apply_stub_proximity(obstacles: GridObstacleMap, pcb_data: PCBData,
+                         stub_net_ids: List[int],
+                         all_stubs: List[Tuple[float, float]],
+                         config: GridRouteConfig,
+                         ghost_via_groups: Dict[int, List[Tuple[int, int]]] = None):
+    """Single entry point for the STUB proximity map (foreign stubs/chip pads
+    + ripped-route via ghosts), composing per the active mode.
+
+    Max mode (default): byte-identical to the historical calls -- the flat
+    ``all_stubs`` batch (per-cell max), then the ghost vias as a second flat
+    batch at the ripped-route falloff (formerly merge_ripped_route_costs).
+
+    Sum mode (KICAD_PROXIMITY_SUM): each SOURCE -- one net's stubs+chip pads,
+    or one ripped net's ghost vias -- is deduped internally by max (a net's
+    six connector stubs are one source), then sources ADD per cell. One
+    grouped Rust call per stamp sequence; the caller's clear (or fresh clone)
+    brackets it exactly like max mode, and stamping the same sequence after a
+    clear reproduces identical values (no cross-prepare accumulation).
+
+    ghost_via_groups must already be C1-filtered (re-routed nets dropped) --
+    both modes assume each source appears at most once.
+    """
+    coord = GridCoord(config.grid_step)
+    ghost_active = (ghost_via_groups and
+                    config.ripped_route_avoidance_cost > 0)
+
+    if not env_knobs.PROXIMITY_SUM:
+        if all_stubs:
+            add_stub_proximity_costs(obstacles, all_stubs, config)
+        if ghost_active:
+            all_via_positions = []
+            for via_list in ghost_via_groups.values():
+                all_via_positions.extend(via_list)
+            if all_via_positions:
+                obstacles.add_stub_proximity_costs_batch(
+                    all_via_positions,
+                    coord.to_grid_dist(config.ripped_route_avoidance_radius),
+                    config.cell_cost(config.ripped_route_avoidance_cost))
+        return
+
+    # Sum mode: (points, radius, cost) per source
+    from connectivity import get_stub_endpoints
+    from net_queries import get_chip_pad_positions
+    groups = []
+    stub_radius_grid = coord.to_grid_dist(config.stub_proximity_radius)
+    stub_cost_grid = config.cell_cost(config.stub_proximity_cost)
+    if stub_cost_grid > 0 and stub_radius_grid > 0:
+        for nid in stub_net_ids:
+            pts = (get_stub_endpoints(pcb_data, [nid])
+                   + get_chip_pad_positions(pcb_data, [nid]))
+            if pts:
+                groups.append(([coord.to_grid(p[0], p[1]) for p in pts],
+                               stub_radius_grid, stub_cost_grid))
+    if ghost_active:
+        rra_radius = coord.to_grid_dist(config.ripped_route_avoidance_radius)
+        rra_cost = config.cell_cost(config.ripped_route_avoidance_cost)
+        for nid in sorted(ghost_via_groups):
+            vias = ghost_via_groups[nid]
+            if vias:
+                groups.append(([tuple(v) for v in vias], rra_radius, rra_cost))
+    if groups:
+        obstacles.add_stub_proximity_costs_grouped(groups)
 
 
 # (add_bga_proximity_costs, the old base-map stub_proximity stamp, is deleted:
@@ -245,15 +311,45 @@ _MERGE_MEMO_MAX = 32
 
 
 def merge_track_proximity_costs(obstacles: GridObstacleMap,
-                                 per_net_costs: Dict[int, np.ndarray]):
+                                 per_net_costs: Dict[int, np.ndarray],
+                                 ghost_costs: Dict[int, np.ndarray] = None):
     """Merge pre-computed per-net track proximity costs into the obstacle map.
 
     Args:
         obstacles: The obstacle map to add costs to
         per_net_costs: Dict of net_id -> numpy array with columns [layer, gx, gy, cost]
+        ghost_costs: optional ripped-corridor layer ghosts (C1-filtered by the
+            caller), composed in the SAME pass. In max mode this is identical
+            to the historical separate merge call (per-cell max commutes); the
+            single pass exists for SUM mode, where "each source counted
+            exactly once" is only enforceable with one composition point.
+
+    Composition (soft-knobs sum experiment): per-cell MAX across sources by
+    default; with KICAD_PROXIMITY_SUM, per-cell SUM across sources. Every
+    array is one source (a routed net's corridor, a ripped net's ghost, the
+    BGA/-1 field, congestion, fragility) and is already deduped internally
+    (unique cells per array), so summing rows = summing sources -- a cell
+    never inherits a source twice, and sampling density never inflates cost.
+    The composed rows stay unique per cell, so the Rust max-insert write is a
+    plain write on the cleared map every prepare starts from -- an accidental
+    re-merge of the same composition re-writes identical values instead of
+    doubling them (double-merge stays harmless in both modes).
+
+    Double-merge guard: a net id appearing in BOTH dicts would count one
+    net's copper twice in sum mode -- overlaps are dropped from the ghosts
+    (the cache entry means the net has live copper again) with a warning.
     """
+    if ghost_costs:
+        overlap = per_net_costs.keys() & ghost_costs.keys()
+        if overlap:
+            print(f"    WARNING: ghost/cache key overlap dropped "
+                  f"(double-merge guard): {sorted(overlap)}")
+            ghost_costs = {k: v for k, v in ghost_costs.items()
+                           if k not in overlap}
     # Concatenate all arrays for efficient batch processing
     arrays_to_merge = [arr for arr in per_net_costs.values() if len(arr) > 0]
+    if ghost_costs:
+        arrays_to_merge += [arr for arr in ghost_costs.values() if len(arr) > 0]
     if not arrays_to_merge:
         return
 
@@ -280,12 +376,31 @@ def merge_track_proximity_costs(obstacles: GridObstacleMap,
     key = id(per_net_costs)
     sig = (len(arrays_to_merge),
            sum(len(a) for a in arrays_to_merge),
-           sum(id(a) & 0xFFFFFFFF for a in arrays_to_merge))
+           sum(id(a) & 0xFFFFFFFF for a in arrays_to_merge),
+           env_knobs.PROXIMITY_SUM)
     memo = _MERGE_MEMO.get(key)
     if memo is not None and memo[0] == sig:
         all_costs = memo[1]
     else:
         all_costs = np.vstack(arrays_to_merge)
+        if env_knobs.PROXIMITY_SUM:
+            # Compose the SUM in numpy so the Rust write primitive stays the
+            # idempotent max-insert: pack (layer, gx, gy) into one int64 key,
+            # group, and sum each cell's per-source costs. Output rows are
+            # unique per cell.
+            _OFF = 1 << 23  # grid coords are well inside +/-2^23
+            packed = ((all_costs[:, 0].astype(np.int64) << 48)
+                      | ((all_costs[:, 1].astype(np.int64) + _OFF) << 24)
+                      | (all_costs[:, 2].astype(np.int64) + _OFF))
+            uniq, inv = np.unique(packed, return_inverse=True)
+            sums = np.bincount(inv, weights=all_costs[:, 3].astype(np.float64),
+                               minlength=len(uniq))
+            composed = np.empty((len(uniq), 4), dtype=np.int32)
+            composed[:, 0] = (uniq >> 48).astype(np.int32)
+            composed[:, 1] = ((uniq >> 24) & ((1 << 24) - 1)).astype(np.int32) - _OFF
+            composed[:, 2] = (uniq & ((1 << 24) - 1)).astype(np.int32) - _OFF
+            composed[:, 3] = np.minimum(sums, float(np.iinfo(np.int32).max)).astype(np.int32)
+            all_costs = composed
         # Bound first, then store WITH keepalive refs (see the note above):
         # per_net_costs and the member arrays are held so their ids cannot be
         # recycled while this entry is live.

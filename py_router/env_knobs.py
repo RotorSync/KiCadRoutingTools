@@ -92,6 +92,11 @@ def refresh() -> None:
 
     # --- opt-in experiments (env turns ON) ----------------------------------
     g['COLLINEAR_VIAS'] = _opt_in('KICAD_COLLINEAR_VIAS')  # #487: on-axis vias
+    # Proximity composition: SUM across sources (per-net / per-category,
+    # deduped max WITHIN each source) instead of a flat per-cell max. Adds a
+    # density gradient (10 stubs price higher than 1) at the cost of steeper
+    # fields in dense escape regions. Off = historical max semantics.
+    g['PROXIMITY_SUM'] = _opt_in('KICAD_PROXIMITY_SUM')
     # per-tranche quantum = max(CELLS grid cells, PCT% of tranche-start best_h)
     g['DYNAMIC_ITERATIONS_QUANTUM_CELLS'] = _f('KICAD_DYNAMIC_ITERATIONS_QUANTUM_CELLS', 2.0)
     g['DYNAMIC_ITERATIONS_QUANTUM_PCT'] = _f('KICAD_DYNAMIC_ITERATIONS_QUANTUM_PCT', 2.0)

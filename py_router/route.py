@@ -1680,7 +1680,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # #540 item 2: price the outer pass's vacated corridors in every search
     # of this batch. The entries ride the existing ripped-route avoidance
-    # dicts (merge_ripped_route_costs), so per-net maps, rip-up retries and
+    # dicts (filter_ripped_ghosts -> the composition passes), so per-net maps, rip-up retries and
     # reroute rounds all see them; the owners never route here, so the
     # routed_net_ids skip never drops them and no net repels itself.
     if external_ripped_ghosts and config.ripped_route_avoidance_cost > 0:
