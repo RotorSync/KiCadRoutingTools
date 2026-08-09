@@ -12,7 +12,7 @@ This module consolidates geometry calculations used across multiple modules:
 from __future__ import annotations
 
 import math
-from typing import Tuple, Optional, Dict, Any, TYPE_CHECKING
+from typing import Tuple, Optional, Dict, List, Any, TYPE_CHECKING
 
 
 class UnionFind:
@@ -29,9 +29,17 @@ class UnionFind:
         assert uf.find('a') == uf.find('c')  # a and c are connected
     """
 
-    def __init__(self):
-        self.parent: Dict[Any, Any] = {}
-        self.rank: Dict[Any, int] = {}
+    __slots__ = ('_index', '_keys', '_parent', '_rank')
+
+    def __init__(self) -> None:
+        # Keys are interned to dense int ids; parent/rank are flat int lists.
+        # Root selection matches the classic dict implementation exactly
+        # (same union-by-rank, same first-argument tie-break), so callers see
+        # identical representatives.
+        self._index: Dict[Any, int] = {}
+        self._keys: List[Any] = []
+        self._parent: List[int] = []
+        self._rank: List[int] = []
 
     def find(self, x: Any) -> Any:
         """
@@ -40,12 +48,38 @@ class UnionFind:
         Uses path compression for O(α(n)) amortized time complexity.
         Creates a new singleton set if x is not yet tracked.
         """
-        if x not in self.parent:
-            self.parent[x] = x
-            self.rank[x] = 0
-        if self.parent[x] != x:
-            self.parent[x] = self.find(self.parent[x])  # Path compression
-        return self.parent[x]
+        i = self._index.get(x)
+        if i is None:
+            keys = self._keys
+            self._index[x] = i = len(keys)
+            keys.append(x)
+            self._parent.append(i)
+            self._rank.append(0)
+            return x
+        parent = self._parent
+        root = i
+        while parent[root] != root:
+            root = parent[root]
+        while parent[i] != root:  # Path compression
+            parent[i], i = root, parent[i]
+        return self._keys[root]
+
+    def _root_id(self, x: Any) -> int:
+        i = self._index.get(x)
+        if i is None:
+            keys = self._keys
+            self._index[x] = i = len(keys)
+            keys.append(x)
+            self._parent.append(i)
+            self._rank.append(0)
+            return i
+        parent = self._parent
+        root = i
+        while parent[root] != root:
+            root = parent[root]
+        while parent[i] != root:  # Path compression
+            parent[i], i = root, parent[i]
+        return root
 
     def union(self, x: Any, y: Any) -> None:
         """
@@ -53,19 +87,48 @@ class UnionFind:
 
         Uses union by rank for O(α(n)) amortized time complexity.
         """
-        px, py = self.find(x), self.find(y)
+        index = self._index
+        keys = self._keys
+        parent = self._parent
+        i = index.get(x)
+        if i is None:
+            index[x] = i = len(keys)
+            keys.append(x)
+            parent.append(i)
+            self._rank.append(0)
+            px = i
+        else:
+            px = i
+            while parent[px] != px:
+                px = parent[px]
+            while parent[i] != px:  # Path compression
+                parent[i], i = px, parent[i]
+        j = index.get(y)
+        if j is None:
+            index[y] = j = len(keys)
+            keys.append(y)
+            parent.append(j)
+            self._rank.append(0)
+            py = j
+        else:
+            py = j
+            while parent[py] != py:
+                py = parent[py]
+            while parent[j] != py:  # Path compression
+                parent[j], j = py, parent[j]
         if px == py:
             return  # Already in same set
+        rank = self._rank
         # Union by rank - attach smaller tree under larger tree
-        if self.rank[px] < self.rank[py]:
+        if rank[px] < rank[py]:
             px, py = py, px
-        self.parent[py] = px
-        if self.rank[px] == self.rank[py]:
-            self.rank[px] += 1
+        self._parent[py] = px
+        if rank[px] == rank[py]:
+            rank[px] += 1
 
     def connected(self, x: Any, y: Any) -> bool:
         """Check if x and y are in the same set."""
-        return self.find(x) == self.find(y)
+        return self._root_id(x) == self._root_id(y)
 
 
 def point_to_segment_distance(px: float, py: float,

@@ -271,9 +271,10 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
         _foreign_pad_arrays(pcb_data, layer)
     n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.02) + 1)
     _t = np.linspace(0.0, 1.0, n + 1)
+    sx = x1 + (x2 - x1) * _t
+    sy = y1 + (y2 - y1) * _t
     best_custom = _custom_pad_min_dist(
-        custom, net_id,
-        list(zip(x1 + (x2 - x1) * _t, y1 + (y2 - y1) * _t)), base_clearance)
+        custom, net_id, list(zip(sx, sy)), base_clearance)
     if cx.size == 0:
         return best_custom
     R = _FOREIGN_PAD_WINDOW
@@ -286,9 +287,6 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
         return best_custom
     fcx, fcy, fhx, fhy, fcr = cx[near], cy[near], hx[near], hy[near], cr[near]
     frc, frs = rc[near], rs[near]
-    t = np.linspace(0.0, 1.0, n + 1)
-    sx = x1 + (x2 - x1) * t
-    sy = y1 + (y2 - y1) * t
     # Rounded-rect signed distance in each pad's LOCAL frame (query offsets
     # rotated by R(-rot); identity for axis-aligned pads): shrink the
     # half-extents by the corner radius, take the outside distance to that

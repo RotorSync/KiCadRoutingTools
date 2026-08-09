@@ -2575,20 +2575,22 @@ def prune_redundant_cycles(results, pcb_data: PCBData, scope_net_ids=None,
     return len(removed_routed_ids) + len(original_to_remove), nets_pruned, original_to_remove
 
 
+def _pt_seg(px, py, x1, y1, x2, y2):
+    vx, vy = x2 - x1, y2 - y1
+    l2 = vx * vx + vy * vy
+    if l2 <= 0.0:
+        return math.hypot(px - x1, py - y1)
+    t = ((px - x1) * vx + (py - y1) * vy) / l2
+    t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
+    return math.hypot(px - (x1 + t * vx), py - (y1 + t * vy))
+
+
 def _seg_seg_min_dist(ax, ay, bx, by, cx, cy, dx, dy) -> float:
     """Minimum Euclidean distance between segments AB and CD (endpoint sampling,
     exact for the non-crossing case a clearance test cares about; crossing -> ~0
     which still flags)."""
-    def pt_seg(px, py, x1, y1, x2, y2):
-        vx, vy = x2 - x1, y2 - y1
-        l2 = vx * vx + vy * vy
-        if l2 <= 0.0:
-            return math.hypot(px - x1, py - y1)
-        t = ((px - x1) * vx + (py - y1) * vy) / l2
-        t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
-        return math.hypot(px - (x1 + t * vx), py - (y1 + t * vy))
-    return min(pt_seg(ax, ay, cx, cy, dx, dy), pt_seg(bx, by, cx, cy, dx, dy),
-               pt_seg(cx, cy, ax, ay, bx, by), pt_seg(dx, dy, ax, ay, bx, by))
+    return min(_pt_seg(ax, ay, cx, cy, dx, dy), _pt_seg(bx, by, cx, cy, dx, dy),
+               _pt_seg(cx, cy, ax, ay, bx, by), _pt_seg(dx, dy, ax, ay, bx, by))
 
 
 def weld_redundant_grazing_detours(results, pcb_data: PCBData, scope_net_ids=None,
