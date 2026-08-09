@@ -1301,45 +1301,84 @@ def get_all_unrouted_net_ids(pcb_data: PCBData) -> List[int]:
 
 
 def get_chip_pad_positions(pcb_data: PCBData, net_ids: List[int], min_pads: int = 4) -> List[Tuple[float, float, str]]:
-    """Get pad positions on chips for unrouted nets, to use as pseudo-stubs for proximity avoidance.
+    """Pad positions acting as PSEUDO-STUBS for proximity avoidance: pads of
+    fine-pitch chip packages (BGA/QFN/QFP) whose net has NOT yet escaped the
+    pad -- the future escape needs the surrounding space, so routing is
+    discouraged near it.
 
-    This treats pads on "chips" (components with many pads) as stubs, discouraging
-    routing near them to avoid blocking future routes to those pads.
+    Two gates (both matter):
+    - Package type, not raw pad count. Historically ANY footprint with
+      >= min_pads pads was a "chip", which made 4-pad capacitors and big
+      pin-header/edge connectors pseudo-stub emitters; a many-pin connector
+      concentrates many distinct nets' fields in one small area (exactly the
+      open-field stacking the #584 sum experiment measured), yet its coarse
+      pads need no escape protection. Only escape-constrained fine-pitch
+      packages qualify.
+    - No stub attached. Once fanout (or routing) has attached same-net copper
+      to the pad -- a segment end or a via inside the pad's reach -- the REAL
+      stub endpoint is the proximity signal (get_stub_endpoints) and the pad
+      proxy retires; keeping it would defend space the escape already used.
 
     Args:
         pcb_data: PCB data
         net_ids: List of unrouted net IDs to get chip pads for
-        min_pads: Minimum pads for a footprint to be considered a "chip" (default: 4)
+        min_pads: Minimum pads for a footprint to be considered (default: 4)
 
     Returns:
         List of (x, y, layer) tuples for chip pad positions.
     """
-    # Build set of chip footprint references
-    chip_refs = set()
-    for ref, footprint in pcb_data.footprints.items():
-        if footprint.pads and len(footprint.pads) >= min_pads:
-            chip_refs.add(ref)
+    from kicad_parser import detect_package_type
+
+    net_id_set = set(net_ids)
+
+    # Fine-pitch chip packages only (sorted for deterministic output order).
+    # A "qualify by >=8 distinct routable nets too" variant (re-admitting
+    # IO-bank headers / dense connectors) was A/B'd and NOT adopted: it
+    # regressed glasgow's default-mode result back to baseline while only
+    # marginally helping lpddr4 -- see #585 item 8 for the grid.
+    chip_refs = sorted(
+        ref for ref, footprint in pcb_data.footprints.items()
+        if footprint.pads and len(footprint.pads) >= min_pads
+        and detect_package_type(footprint) in ('BGA', 'QFN', 'QFP'))
 
     if not chip_refs:
         return []
 
-    # Collect pad positions for unrouted nets that are on chips
-    net_id_set = set(net_ids)
-    chip_pads = []
+    # Same-net attachment points for the "already escaped" test:
+    # segment endpoints and via centers of the tracked nets.
+    attach_points: dict = {}
+    for seg in pcb_data.segments:
+        if seg.net_id in net_id_set:
+            attach_points.setdefault(seg.net_id, []).append((seg.start_x, seg.start_y))
+            attach_points[seg.net_id].append((seg.end_x, seg.end_y))
+    for via in pcb_data.vias:
+        if via.net_id in net_id_set:
+            attach_points.setdefault(via.net_id, []).append((via.x, via.y))
 
+    chip_pads = []
     for ref in chip_refs:
         footprint = pcb_data.footprints[ref]
         for pad in footprint.pads:
             # Only include pads for nets we're tracking
-            if pad.net_id in net_id_set:
-                # Use first copper layer from pad's layers
-                pad_layer = None
-                for layer in pad.layers:
-                    if layer.endswith('.Cu') and not layer.startswith('*'):
-                        pad_layer = layer
-                        break
-                if pad_layer:
-                    chip_pads.append((pad.global_x, pad.global_y, pad_layer))
+            if pad.net_id not in net_id_set:
+                continue
+            # Use first copper layer from pad's layers
+            pad_layer = None
+            for layer in pad.layers:
+                if layer.endswith('.Cu') and not layer.startswith('*'):
+                    pad_layer = layer
+                    break
+            if not pad_layer:
+                continue
+            # Skip pads that already have an escape (stub end / via in reach)
+            pts = attach_points.get(pad.net_id)
+            if pts:
+                reach = max(pad.size_x, pad.size_y) / 2.0 + 0.05
+                reach_sq = reach * reach
+                px, py = pad.global_x, pad.global_y
+                if any((x - px) ** 2 + (y - py) ** 2 <= reach_sq for x, y in pts):
+                    continue
+            chip_pads.append((pad.global_x, pad.global_y, pad_layer))
 
     return chip_pads
 

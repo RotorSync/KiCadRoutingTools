@@ -50,17 +50,174 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 
 ### Proximity penalties (soft costs)
 
+Quick table; every field is specified in detail right below — **what feeds it,
+its gates and exemptions, how sources compose, and who consumes it**. Costs are
+"mm-equivalent detour per cell" at the reference grid: `0.2` means a cell at
+the source center costs like 0.2&nbsp;mm of extra path (2&times; the plain move
+cost of a 0.1&nbsp;mm cell); all falloffs are linear from full cost at the
+source to zero at the radius.
+
 | Field | Default | Meaning |
 |-------|---------|---------|
-| `stub_proximity_radius` | `2.0` | Radius around unrouted stubs to penalize |
+| `stub_proximity_radius` | `2.0` | Radius around unrouted stubs / unescaped chip pads |
 | `stub_proximity_cost` | `0.2` | Cost at the stub center (mm-equivalent detour) |
-| `via_proximity_cost` | `10.0` | Via-cost multiplier inside stub/BGA zones (0 = no extra cost) |
+| `via_proximity_cost` | `10.0` | Multiplier on graded proximity when placing a via (0 = no extra cost) |
 | `bga_proximity_radius` | `7.0` | Distance from BGA edges to penalize |
-| `bga_proximity_cost` | `0.2` | Cost at the BGA edge |
+| `bga_proximity_cost` | `0.2` | Cost at the BGA edge (0 = fully off, radius disarmed too) |
 | `track_proximity_distance` | `2.0` | Radius around routed tracks (same layer) |
-| `track_proximity_cost` | `0.0` | Cost near routed tracks (0 = off) |
+| `track_proximity_cost` | `0.0` | Cost near routed tracks (**0 = off by default**) |
 | `ripped_route_avoidance_radius` | `1.0` | Radius around just-ripped routes |
 | `ripped_route_avoidance_cost` | `0.1` | Cost near just-ripped routes (helps reroutes diverge) |
+
+Two per-cell fields carry all of these: the **stub map** (one all-layer map)
+and the **layer map** (one map per copper layer). Every A* move pays
+`stub(cell) + layer(cell, current layer)` on top of the move cost; placing a
+via pays `(stub + layer-at-destination) x via_proximity_cost` on top of the
+via cost (both routers, single-ended and pose/diff-pair, same formula).
+
+#### Stub map (all-layer): `stub_proximity_radius` / `stub_proximity_cost`
+
+Sources, each with its own gate — this is the complete list:
+
+1. **Stub endpoints** of *unrouted foreign* nets (`connectivity.get_stub_endpoints`).
+   Gate: the net has >= 2 segments forming >= 2 disconnected groups — i.e.
+   PARTIALLY routed copper with free ends (fanout stubs, interrupted routes).
+   A bare unrouted net emits none; a fully-connected net emits none.
+2. **Chip-pad pseudo-stubs** (`net_queries.get_chip_pad_positions`): pads whose
+   future escape needs the surrounding space. Gate: the pad's footprint is a
+   fine-pitch chip package (**BGA/QFN/QFP by `detect_package_type`, >= 4 pads**)
+   AND the net has not yet escaped that pad (no same-net segment end or via
+   within the pad's half-size + 0.05 mm). A pad retires as a source the moment
+   fanout or routing attaches copper to it. (Historically ANY >= 4-pad
+   footprint counted — 4-pad capacitors and multi-pin connectors emitted
+   pseudo-stubs, and a connector's many distinct nets stacked into exactly the
+   open-field noise the #584 sum experiment measured.)
+3. **Ripped-route ghost vias** (see the ripped-route section below) at the
+   `ripped_route_avoidance_*` falloff, per ripped net.
+4. **Plane-flow via avoidance**: `route_planes` / the plane region connector
+   stamp foreign vias into their own scratch maps with caller-chosen
+   radius/cost (same mechanism, different knobs; not part of signal prepare).
+
+Exclusions and exemptions:
+
+- The **current net never repels itself** (its id is excluded from the source
+  net list), and **routed nets are excluded** (their real copper is a hard
+  obstacle instead).
+- **Endpoint exemption** (soft-knobs C5): lookups within one track-width +
+  clearance of the current net's own endpoints return 0, so the final approach
+  to a pad sitting beside foreign stubs is not taxed. This exemption applies
+  to the stub map ONLY — layer-map costs (BGA field, track ghosts) are not
+  endpoint-exempt.
+- `via_proximity_cost = 0` means vias pay **no extra** near stubs (the
+  historical inverted meaning — 0 = hard via ban + ~200x CPU hazard — was
+  removed in Rust 0.20.1).
+
+Definition review flags (open questions, not bugs):
+
+- The stamp is **all-layer**: a stub on B.Cu repels routing on F.Cu.
+  `get_stub_endpoints` returns each stub's layer, but the stamp ignores it —
+  layer-aware stub proximity is an untested candidate refinement.
+- Stub endpoints of nets destined for **planes/pours** still emit; arguably a
+  net that will be pour-connected needs no escape corridor.
+
+#### BGA proximity field: `bga_proximity_radius` / `bga_proximity_cost`
+
+Geometry: for every auto-detected **BGA** component (pad-bounding-box zones —
+**QFN/QFP get hard fanout zones but NO proximity field**), the zone interior
+carries the full edge-tier cost on EVERY copper layer (so allowed-cells
+windows punched through the hard block are not free-via holes), with the
+linear ring falling to zero at `bga_proximity_radius` outside the zone edge.
+
+Plumbing: the field rides the **layer map** under a reserved cache key
+(soft-knobs B1), registered once per `batch_route` / `batch_route_diff_pairs`
+call and re-merged on every per-net prepare — stamping it into the base map
+instead would be wiped before every net (that was the pre-B1 silent no-op).
+
+`bga_proximity_cost = 0` fully disarms the feature: the field is not emitted
+AND the `is_in_bga_proximity` radius used by the proximity heuristic and the
+pose router is not armed (historically the radius armed unconditionally, so
+zeroing the cost silently left a 10x diff-pair via cliff active in the 7 mm
+ring; both the cliff and the gap are gone as of Rust 0.20.1).
+
+Definition review flags: the radius is a flat 7 mm regardless of package size;
+QFN/QFP have no proximity ring at all (only the hard zone).
+
+#### Track proximity: `track_proximity_distance` / `track_proximity_cost`
+
+Per-layer corridors around copper **routed in THIS run**: on every routing
+success the net's segments are sampled (~1 mm spacing, deduped within the net)
+into a per-net array in the track-proximity cache; rip-up removes the entry.
+Merged into the layer map on every prepare.
+
+**Default OFF** (`cost 0.0`) — yet it is the strongest single knob measured
+(2026-08-02 study: `--track-proximity-cost 2` took cynthion 97.9 -> 100%).
+Chain-level results were mixed across board types, so it ships as retry
+guidance rather than a default.
+
+Definition review flags: **pre-existing input-board copper never emits** — 
+nets registered as rippable-pre-existing skip the cache, so corridors of
+already-routed boards exert no spreading pressure on new routes. No width
+awareness (a 2 mm power trunk and a 0.1 mm signal emit the same field).
+
+#### Via proximity multiplier: `via_proximity_cost`
+
+Not a field — a multiplier consumed at via placement in BOTH routers:
+`(stub + layer-at-destination) x via_proximity_cost` added to the via cost.
+Because the layer map carries every contributor, this multiplies BGA fields,
+track ghosts, ripped-route ghosts, congestion and plane-fragility costs alike
+— a via in a fragile pour neck at default fragility pays up to 10 x 2.0
+mm-equivalent. `0` = no extra cost (see stub map above); fractional values
+round up to at least 1.
+
+#### Ripped-route avoidance: `ripped_route_avoidance_radius` / `_cost`
+
+When rip-up removes a net's copper, its former corridor keeps a per-net ghost:
+segment corridors go to the **layer map** (per layer), via sites to the
+**stub map** (all-layer), both at this falloff. Ghosts are dropped the moment
+the ripped net has real copper again (soft-knobs C1 — a re-routed net's ghost
+would otherwise repel everyone from a corridor that is already re-occupied or
+legitimately free), and a net can never appear as both a live corridor and a
+ghost (enforced with a warning at merge). The #540 outer-pass "casualty"
+ghosts and the plane-repair corridor ghosts (soft mode) ride the same dicts
+and falloff (plane-repair floors zero knobs to 0.1/1.0 rather than no-op).
+
+#### Env-gated fields riding the same layer map
+
+These compose with everything above and are documented here because they are
+otherwise invisible in flag tables:
+
+| Field | Env knob | Default | What it prices |
+|-------|----------|---------|----------------|
+| Plane fragility | `KICAD_PLANE_FRAGILITY_COST` | **2.0 = ON** | Cells near pour boundaries/necks, so signals do not bisect a plane. The LARGEST default field (10x the stub tier). `0` reverts. |
+| Congestion v1 | `KICAD_CONGESTION_COST` | 0 = off | All-layer copper-density field. |
+| Congestion v2 | `KICAD_CONGESTION2_COST` | 0 = off | Demand/capacity bins, owner-exempt (your own destination does not repel you). Stamped per net at prepare, composes by max even in sum mode. |
+
+#### Composition: how multiple sources combine (`KICAD_PROXIMITY_SUM`)
+
+Every source above is deduped WITHIN itself (per net per category: a net's six
+connector stubs, or one track's overlapping sample disks, count once — cost
+never depends on sampling density). Across sources, per cell:
+
+- **unset (default): max.** Saturating — 30 overlapping stub fields cost the
+  same as one. Byte-identical to the historical behavior.
+- **`1`/`sum`: sum.** Density gradient — corridors threading many nets' fields
+  price proportionally (glasgow A/B: 11 -> 4 failures). Steeper fields around
+  clustered pads (lpddr4 A/B: 6x search, one extra pad short).
+- **`zoned`: sum, except max inside BGA escape fields** (zone +
+  `bga_proximity_radius`), where stacked foreign fields price a net's
+  MANDATORY approach rather than an avoidable crowd.
+
+Double-merge safety is structural in all modes: the layer-map write primitive
+is an idempotent max-insert over uniquely-composed rows (re-merging the same
+composition rewrites identical values), and the stub map is stamped once per
+cleared prepare cycle.
+
+#### Search-side (not stamps)
+
+`proximity_heuristic_factor` (default `0.02`) adds an estimated proximity cost
+per remaining step to the A* heuristic when a route's endpoints sit inside
+stub/BGA zones — a deliberate slight overestimate that trades exactness for
+search speed on proximity-heavy boards.
 
 ### Layer preferences and alignment
 
@@ -68,8 +225,8 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 |-------|---------|---------|
 | `layer_costs` | `[]` | Per-layer cost multipliers (1.0 = neutral), parallel to `layers` |
 | `direction_preference_cost` | `250` | Penalty for off-direction moves; layers alternate H/V starting horizontal on top (0 = off). 250 (~25% of a move) nudges toward H/V lanes without starving routability; diagonal moves charge the wrong-axis component. Higher values (e.g. 5000 = 5x a move) enforce strict human-style lanes but make dense boards' short diagonal hops unroutable (sets 6-11 A/B regression) |
-| `vertical_attraction_radius` | `0.2` | Radius for cross-layer alignment bonus (0 = off) |
-| `vertical_attraction_cost` | `0.0` | Bonus (negative cost) for vertically aligned positions |
+| `vertical_attraction_radius` | `1.0` | Radius for cross-layer alignment bonus (0 = off) |
+| `vertical_attraction_cost` | `0.0` | Bonus (negative cost) for vertically aligned positions (**0 = off by default**). NET-AGNOSTIC (soft-knobs C4): the per-cell layer bitmask carries no net id, so it pulls toward ANY other net's tracks on other layers; suppressed inside stub-proximity cells and BGA zones; capped so a step can never go free |
 
 ### BGA zones
 
