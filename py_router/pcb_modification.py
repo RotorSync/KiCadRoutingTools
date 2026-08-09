@@ -3586,6 +3586,67 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
     # the fill-model caches are invalidated below so the oracle's zone
     # credit sees the smoothed copper, never a stale pre-smoothing fill.
 
+    # KEEP-OUTS are different: the route detoured around them BY DESIGN, and
+    # a shortcut through one is a hard DRC violation no later stage repairs
+    # (the run_all rule-area gate caught exactly this on default-on). Both
+    # kinds: native rule areas ((keepout (tracks not_allowed)), honored
+    # unconditionally) and user-drawn keepouts (config.keepout_enabled, all
+    # layers). Margin mirrors add_rule_area_keepout_obstacles: copper AND
+    # clearance stay out (centreline >= clearance + w/2 from the boundary).
+    _keepout_areas = []          # (rings, bbox, layer_tokens_or_None)
+    for _ko in (getattr(pcb_data.board_info, 'keepouts', None) or []):
+        if _ko.get('tracks_allowed', True):
+            continue
+        _poly = _ko.get('polygon') or []
+        if len(_poly) < 3:
+            continue
+        _rings = [_poly] + [h for h in (_ko.get('holes') or []) if len(h) >= 3]
+        _kxs = [p[0] for r in _rings for p in r]
+        _kys = [p[1] for r in _rings for p in r]
+        _kls = _ko.get('layers') or set()
+        _keepout_areas.append((_rings, (min(_kxs), min(_kys), max(_kxs), max(_kys)),
+                               set(_kls) if _kls else None))
+    if getattr(config, 'keepout_enabled', False):
+        for _kz in (getattr(pcb_data, 'keepout_zones', None) or []):
+            if len(_kz.points) >= 3:
+                _kxs = [p[0] for p in _kz.points]
+                _kys = [p[1] for p in _kz.points]
+                _keepout_areas.append(([list(_kz.points)],
+                                       (min(_kxs), min(_kys), max(_kxs), max(_kys)),
+                                       None))
+
+    def _ko_on_layer(kls, layer):
+        if kls is None:
+            return True                     # empty layer list = all layers
+        return (layer in kls or '*.Cu' in kls
+                or (layer in ('F.Cu', 'B.Cu') and bool({'F&B.Cu', 'F&B'} & kls)))
+
+    def keepout_clears(x1, y1, x2, y2, layer, w):
+        if not _keepout_areas:
+            return True
+        from obstacle_map import point_in_polygon, point_to_polygon_edge_distance
+        margin = clearance + w / 2.0
+        for rings, (kx0, ky0, kx1, ky1), kls in _keepout_areas:
+            if not _ko_on_layer(kls, layer):
+                continue
+            if (max(x1, x2) < kx0 - margin or min(x1, x2) > kx1 + margin or
+                    max(y1, y2) < ky0 - margin or min(y1, y2) > ky1 + margin):
+                continue
+            n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.1) + 1)
+            for q in range(n + 1):
+                t = q / n
+                px, py = x1 + t * (x2 - x1), y1 + t * (y2 - y1)
+                inside = False
+                for ring in rings:          # even-odd: holes un-block
+                    if point_in_polygon(px, py, ring):
+                        inside = not inside
+                if inside:
+                    return False
+                if any(point_to_polygon_edge_distance(px, py, ring) < margin
+                       for ring in rings):
+                    return False
+        return True
+
     def clears(x1, y1, x2, y2, layer, net_id, w):
         eff = pair_base(net_id, layer)
         d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
@@ -3597,7 +3658,8 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
         hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2)
         return (d >= eff + w / 2.0 - 1e-4 and
                 hd >= npth_clr + w / 2.0 - 1e-4 and
-                edge_clears(x1, y1, x2, y2, w))
+                edge_clears(x1, y1, x2, y2, w) and
+                keepout_clears(x1, y1, x2, y2, layer, w))
 
     def vk(x, y):
         return (round(x, 3), round(y, 3))

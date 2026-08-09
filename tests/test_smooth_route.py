@@ -192,37 +192,95 @@ def test_smooth_skip_reads_protection_notes():
         pn._notes.update(saved)
 
 
+def test_keepout_blocks_shortcut():
+    """A rule area with (tracks not_allowed) is a hard connector keep-out:
+    the route detoured around it BY DESIGN, and no later stage repairs a
+    shortcut through it (the run_all rule-area gate caught this class)."""
+    segs, (ex, ey) = staircase(10.0, 10.0, 8, pitch=1.0)
+    pcb = _board(end_pads(ex, ey), list(segs))
+    # Small box in the pocket between staircase corners: the ORIGINAL route
+    # clears it, only the shortcut diagonal (10,10)->(14,14) crosses it.
+    pcb.board_info.keepouts = [{
+        'polygon': [(11.3, 11.3), (11.7, 11.3), (11.7, 11.7), (11.3, 11.7)],
+        'layers': {'F.Cu'}, 'tracks_allowed': False, 'vias_allowed': False,
+    }]
+    _n, _nets, _strip, _added, st = smooth_octolinear_chains([], pcb, clearance=0.1)
+    from obstacle_map import point_in_polygon
+    poly = pcb.board_info.keepouts[0]['polygon']
+    intruders = []
+    for s in pcb.segments:
+        n = max(2, int(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y) / 0.05))
+        for q in range(n + 1):
+            t = q / n
+            px = s.start_x + t * (s.end_x - s.start_x)
+            py = s.start_y + t * (s.end_y - s.start_y)
+            if point_in_polygon(px, py, poly):
+                intruders.append((s.start_x, s.start_y, s.end_x, s.end_y))
+                break
+    check("no smoothed copper inside the rule area", not intruders, intruders[:2])
+    # same board, keepout permissive -> the shortcut IS taken (gating check)
+    segs2, _ = staircase(10.0, 10.0, 8, pitch=1.0)
+    pcb2 = _board(end_pads(ex, ey), list(segs2))
+    pcb2.board_info.keepouts = [{
+        'polygon': [(11.3, 11.3), (11.7, 11.3), (11.7, 11.7), (11.3, 11.7)],
+        'layers': {'F.Cu'}, 'tracks_allowed': True, 'vias_allowed': True,
+    }]
+    _n2, _nets2, _s2, _a2, st2 = smooth_octolinear_chains([], pcb2, clearance=0.1)
+    check("permissive rule area does not block", st2['saved_mm'] > st['saved_mm'],
+          (st['saved_mm'], st2['saved_mm']))
+
+
 def test_pipeline_gate():
+    """Tri-state gating: the ``smooth`` kwarg is the FRONT default (route
+    step passes True, diff/plane fronts False); KICAD_SMOOTH_ROUTE overrides
+    both ways ('1' on, '0' off, '' = front default)."""
     from cleanup_pipeline import run_post_route_cleanup
     from routing_config import GridRouteConfig
 
-    def _run():
+    def _run(smooth):
         segs, (ex, ey) = staircase(10.0, 10.0, 20)
         pcb = _board(end_pads(ex, ey), list(segs))
         cfg = GridRouteConfig(clearance=0.1)
         out = run_post_route_cleanup([], pcb, {1}, cfg,
                                      snap=False, phantom=False, graze=False,
                                      octolinear=False, via_nudge=False,
-                                     cycles=False, neck=False)
+                                     cycles=False, neck=False, smooth=smooth)
         return pcb, out
+
+    def ran(pcb, out):
+        return out.counts.get('smoothed_spans', 0) >= 1 and len(pcb.segments) < 20
 
     old = os.environ.pop('KICAD_SMOOTH_ROUTE', None)
     try:
         env_knobs.refresh()
-        pcb_off, out_off = _run()
-        check("knob off: pass does not run",
-              'smoothed_spans' not in out_off.counts and
-              len(pcb_off.segments) == 20)
+        check("env unset + route-front default ON: runs", ran(*_run(True)))
+        check("env unset + diff/plane-front default OFF: does not run",
+              not ran(*_run(False)))
+        os.environ['KICAD_SMOOTH_ROUTE'] = '0'
+        env_knobs.refresh()
+        check("env '0' overrides front ON: does not run", not ran(*_run(True)))
         os.environ['KICAD_SMOOTH_ROUTE'] = '1'
         env_knobs.refresh()
-        pcb_on, out_on = _run()
-        check("knob on: pass runs in the pipeline",
-              out_on.counts.get('smoothed_spans', 0) >= 1 and
-              len(pcb_on.segments) < 20, out_on.counts)
-        check("knob on: strip carries input removals",
+        check("env '1' overrides front OFF: runs", ran(*_run(False)))
+        os.environ.pop('KICAD_SMOOTH_ROUTE', None)
+        env_knobs.refresh()
+        # Guide-corridor steps (#7): drawn geometry is the spec -- the front
+        # default must not flatten the arch the route deliberately followed.
+        segs_g, (exg, eyg) = staircase(10.0, 10.0, 20)
+        pcb_g = _board(end_pads(exg, eyg), list(segs_g))
+        from routing_config import GridRouteConfig
+        from cleanup_pipeline import run_post_route_cleanup
+        cfg_g = GridRouteConfig(clearance=0.1, guide_corridor_enabled=True)
+        out_g = run_post_route_cleanup([], pcb_g, {1}, cfg_g,
+                                       snap=False, phantom=False, graze=False,
+                                       octolinear=False, via_nudge=False,
+                                       cycles=False, neck=False, smooth=True)
+        check("guide-corridor step: front default does not smooth",
+              not ran(pcb_g, out_g))
+        pcb_on, out_on = _run(True)
+        check("strip carries input removals",
               len(out_on.input_strip_segments) > 0)
-        check("knob on: output octolinear",
-              all(octolinear(s) for s in pcb_on.segments))
+        check("output octolinear", all(octolinear(s) for s in pcb_on.segments))
     finally:
         if old is None:
             os.environ.pop('KICAD_SMOOTH_ROUTE', None)
@@ -235,7 +293,8 @@ if __name__ == '__main__':
     for fn in (test_staircase_collapses, test_blocked_shortcut_keeps_clearance,
                test_dry_run_mutates_nothing, test_via_tap_splits_chain,
                test_writelist_custody, test_skip_net_ids_absolute,
-               test_smooth_skip_reads_protection_notes, test_pipeline_gate):
+               test_smooth_skip_reads_protection_notes,
+               test_keepout_blocks_shortcut, test_pipeline_gate):
         print(fn.__name__)
         fn()
     if fails:

@@ -113,10 +113,14 @@ def refresh() -> None:
     g['TAP_RELOCATION'] = _opt_in('KICAD_TAP_RELOCATION')  # phase-3 tap pocket moves
     # #536 octolinear route smoothing (cleanup_pipeline pass 9b): collapse
     # staircase micro-jogs into diagonal+axis shortcuts, DRC-checked, output
-    # strictly octolinear. Opt-in, and meant for the FINAL chain step only:
-    # the connector is clearance-checked but soft-cost-blind, so smoothed
-    # copper can occupy corridors a LATER routing step's soft model kept open.
-    g['SMOOTH_ROUTE'] = _opt_in('KICAD_SMOOTH_ROUTE')
+    # strictly octolinear. Tri-state like KICAD_FANOUT_PLANE_DROP: '' (unset,
+    # default) = follow the FRONT's default -- ON for the single-ended route
+    # step, OFF for diff pairs and the plane file-round-trip; '1' forces on,
+    # '0' forces off. Protected copper (diff pairs, length/time-matched,
+    # impedance-declared, locked) is never touched regardless. Pour cuts the
+    # shortcut may inflict are the plane finalize / kicad-oracle recheck's
+    # job, which runs after cleanup on both fronts.
+    g['SMOOTH_ROUTE'] = _s('KICAD_SMOOTH_ROUTE', '')
     g['PLANE_PARTIAL_RESTORE'] = _s('KICAD_PLANE_PARTIAL_RESTORE') == '1'
     g['DUMP_BATCH_KWARGS_CONTINUE'] = _s('KICAD_DUMP_BATCH_KWARGS_CONTINUE') == '1'
 

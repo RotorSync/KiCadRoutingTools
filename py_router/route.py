@@ -2312,7 +2312,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         original_via_ids=({id(v) for lst in _orig_via_by_net.values() for v in lst}
                           | {id(v) for v in all_swap_vias}),
         keep_input_copper=keep_input_copper,
-        progress_callback=progress_callback)
+        progress_callback=progress_callback,
+        # #536: octolinear smoothing is ON by default for the single-ended
+        # route step (both fronts share this call). Diff pairs and the plane
+        # file-round-trip keep it off; KICAD_SMOOTH_ROUTE=0/1 overrides.
+        smooth=True)
     dead_end_input_segments = _cleanup.input_strip_segments if _cleanup is not None else []
 
     # Issue #220: the output writer copies the INPUT FILE verbatim, then adds the
