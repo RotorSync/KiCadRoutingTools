@@ -1,9 +1,56 @@
-46e4cd6 2026-08-08 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+6064707 2026-08-09 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 check_release_version.check_gui_parity reads `marker.read_text().split()[0]`
 and diffs it against HEAD. Every entry until now opened with the word "HEAD"
 (or "ADDENDUM"), which git resolves happily -- so `git diff HEAD..HEAD` was
 empty and the release parity gate passed UNCONDITIONALLY, for every release
 that has ever run it. Keep a real SHA first or the gate is decorative.
+
+2026-08-09 parity audit 46e4cd6..6064707 (7 commits: the soft-cost wave --
+vpc=0 semantics + graded pose via penalty + Rust 0.20.1, build_router
+self-heal, sum/zoned composition, the chip-pad pseudo-stub gate, skill
+text). Outcome: NO gaps at HEAD -- the entire wave is engine-side or
+tooling by construction.
+
+  Audit surface:
+  * c36a826 (vpc semantics + graded pose via, Rust 0.20.1): all inside
+    shared modules (obstacle_costs, routing_config, diff_pair_routing's
+    pose kwargs, obstacle_map.py radius gating) + Rust. NO new flag, NO
+    new engine kwarg, NO dialog control -- via_proximity_cost already
+    existed end-to-end; only its 0-value MEANING changed, which both
+    fronts read through the same config method. The GUI tooltip and CLI
+    help text were updated in the same commit.
+  * d440c67 + 6afcae9 (sum / zoned composition): env-knob-only surface BY
+    DESIGN (KICAD_PROXIMITY_SUM via env_knobs -- the #529 precedent: no
+    flag, no control); composition lives in obstacle_costs/
+    routing_context/layer_swap_fallback, shared by both fronts. The
+    merge_track_proximity_costs config kwarg is engine-internal.
+  * f785a7e (chip-pad pseudo-stub gate): net_queries.get_chip_pad_positions,
+    shared. Docs: api-routing-config soft-cost section is now the single
+    detailed soft-cost reference.
+  * 8f5c480 (build_router), 6064707 (skill text): no engine surface.
+
+  Gates at 6064707 (all four, fresh):
+  * test_gui_engine_parity: PARITY, copper sets IDENTICAL (segments
+    1233/1233 -- shifted from 1182 at the last audit because the soft-cost
+    wave changes routing on BOTH fronts equally; vias 137/137, drc 0/0,
+    kicad_unconnected 0/0).
+  * test_settings_roundtrip: clean (save, restore, LEGACY, re-save -- no
+    dialog controls changed this wave).
+  * test_manifest_plan_parity: 12 params checked, 0 unresolved (no new
+    flags; corpus manifests carry ZERO soft-cost flags, separately
+    verified -- see memory soft-costs-validated-0808).
+  * test_cli_postpass_coverage: 8 registered, 15 in CLI use, 0 failures
+    (run_drc stays the acknowledged report-only CLI-only pass).
+  Also green this range: probe_soft_costs (scratchpad; stamp semantics,
+  falloff, composition modes, double-merge idempotency on real boards),
+  pose unit tests, retargeted test_bga_proximity_interior, doc-examples
+  gate 30/0, and a 6-board redo_diff_stage old-vs-new replay (identical
+  results -- recorded diff stages are unaffected by the graded via change).
+
+  Known gate blind spot unchanged: the engine-parity plan is signal+plane
+  only (no diff-pair / impedance params) -- relevant this wave since the
+  pose router's via pricing changed; covered instead by the pose unit
+  tests and the 6-board diff-stage replay above.
 
 2026-08-08 parity audit 4b0479a..46e4cd6 (4 commits: run_all parallel jobs,
 #536 octolinear smoothing + DEFAULT ON for the route step, the exact-fill
