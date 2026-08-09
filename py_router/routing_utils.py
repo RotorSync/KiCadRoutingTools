@@ -10,7 +10,7 @@ The bulk of routing functionality has been split into:
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -168,7 +168,7 @@ def iter_pad_blocked_cells(
     margin: float,
     grid_step: float,
     corner_radius: float = 0.0,
-    corner_buffer: float = None,
+    corner_buffer: Optional[float] = None,
     off_x: float = 0.0,
     off_y: float = 0.0,
     rotation_deg: float = 0.0
@@ -250,7 +250,7 @@ def pad_blocked_cells_array(
     margin: float,
     grid_step: float,
     corner_radius: float = 0.0,
-    corner_buffer: float = None,
+    corner_buffer: Optional[float] = None,
     off_x: float = 0.0,
     off_y: float = 0.0,
     rotation_deg: float = 0.0,
