@@ -1704,6 +1704,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # The cache is re-merged on every prepare in every path (single-ended,
     # diff pair, Phase 3 via the working-map clone).
     from obstacle_costs import compute_bga_proximity_cost_cells, BGA_PROXIMITY_CACHE_KEY
+    # #585 item 4: proximity fields for EVERY fine-pitch package (BGA/QFN/QFP)
+    # with pad-count-scaled radii; the hard zones stay BGA-only.
+    from routing_common import package_proximity_zones
+    if env_knobs.PACKAGE_PROXIMITY:
+        config.package_proximity_zones = package_proximity_zones(
+            pcb_data, config.bga_proximity_radius)
     _bga_cells = compute_bga_proximity_cost_cells(config, len(config.layers))
     if len(_bga_cells):
         track_proximity_cache[BGA_PROXIMITY_CACHE_KEY] = _bga_cells
@@ -1757,6 +1763,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             'iterations': 0,
             'is_existing_route': True,
         }
+        # #585 item 3a (env-gated): pre-existing copper emits track-proximity
+        # ghosts like copper routed this run, so an already-routed board
+        # exerts the same corridor-spreading pressure on new routes. Only
+        # meaningful when track_proximity_cost > 0; rip-up removes the entry
+        # exactly like a this-run net's.
+        if env_knobs.TRACK_PROX_PREEXISTING and \
+                config.track_proximity_cost > 0 and _reg_segs.get(nid):
+            track_proximity_cache[nid] = compute_track_proximity_for_net(
+                pcb_data, nid, config, layer_map)
     ripup_success_pairs = state.ripup_success_pairs
     rerouted_pairs = state.rerouted_pairs
     remaining_net_ids = state.remaining_net_ids

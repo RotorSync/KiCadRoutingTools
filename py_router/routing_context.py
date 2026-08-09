@@ -151,13 +151,19 @@ def build_diff_pair_obstacles(
     if config.verbose:
         print(f"    stub proximity: {len(stub_proximity_net_ids)} nets, {len(unrouted_stubs)} stubs, {len(chip_pads)} chip pads")
     _ghost_vias = filter_ripped_ghosts(ripped_route_via_positions, config, routed_net_ids)
-    apply_stub_proximity(obstacles, pcb_data, stub_proximity_net_ids, all_stubs,
-                         config, ghost_via_groups=_ghost_vias)
+    _stub_surplus = apply_stub_proximity(obstacles, pcb_data, stub_proximity_net_ids,
+                                         all_stubs, config,
+                                         ghost_via_groups=_ghost_vias,
+                                         layer_map=layer_map)
 
-    # Add track proximity costs (+ ripped-corridor layer ghosts, one pass)
+    # Add track proximity costs (+ ripped-corridor layer ghosts + layer-aware
+    # stub surplus, one composition pass). Congestion v2 stays out of the
+    # diff-pair path (it never stamped here -- its owner exemption is
+    # single-net).
     merge_track_proximity_costs(
         obstacles, track_proximity_cache,
-        ghost_costs=filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids),
+        ghost_costs={**filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids),
+                     **(_stub_surplus or {})},
         config=config)
 
     # Add cross-layer track data
@@ -279,18 +285,24 @@ def build_single_ended_obstacles(
     chip_pads = get_chip_pad_positions(pcb_data, stub_proximity_net_ids)
     all_stubs = unrouted_stubs + chip_pads
     _ghost_vias = filter_ripped_ghosts(ripped_route_via_positions, config, routed_net_ids)
-    apply_stub_proximity(obstacles, pcb_data, stub_proximity_net_ids, all_stubs,
-                         config, ghost_via_groups=_ghost_vias)
+    _stub_surplus = apply_stub_proximity(obstacles, pcb_data, stub_proximity_net_ids,
+                                         all_stubs, config,
+                                         ghost_via_groups=_ghost_vias,
+                                         layer_map=layer_map)
 
-    # Add track proximity costs (+ ripped-corridor layer ghosts, one pass)
+    # Add track proximity costs (+ ripped-corridor layer ghosts + layer-aware
+    # stub surplus, one composition pass)
+    from congestion_field import congestion2_rows
+    _c2 = congestion2_rows(config, net_id, routed_net_ids)
     merge_track_proximity_costs(
         obstacles, track_proximity_cache,
-        ghost_costs=filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids),
+        ghost_costs={**filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids),
+                     **(_stub_surplus or {}),
+                     **({('congestion2',): _c2} if _c2 is not None else {})},
         config=config)
     # Congestion v2 (#424): demand/capacity field, owner-exempt (no-op
     # unless KICAD_CONGESTION2_COST > 0 and the field was built).
-    from congestion_field import stamp_congestion2
-    stamp_congestion2(obstacles, config, net_id, routed_net_ids)
+
 
     # Add cross-layer track data
     add_cross_layer_tracks(obstacles, pcb_data, config, layer_map,
@@ -356,11 +368,14 @@ def build_incremental_obstacles(
     unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
     chip_pads = get_chip_pad_positions(pcb_data, stub_proximity_net_ids)
     all_stubs = unrouted_stubs + chip_pads
-    apply_stub_proximity(obstacles, pcb_data, stub_proximity_net_ids, all_stubs,
-                         config)
+    _stub_surplus = apply_stub_proximity(obstacles, pcb_data,
+                                         stub_proximity_net_ids, all_stubs,
+                                         config, layer_map=layer_map)
 
-    # Add track proximity costs
-    merge_track_proximity_costs(obstacles, track_proximity_cache, config=config)
+    # Add track proximity costs (+ layer-aware stub surplus)
+    merge_track_proximity_costs(obstacles, track_proximity_cache,
+                                ghost_costs=_stub_surplus or None,
+                                config=config)
 
     # Add cross-layer track data
     add_cross_layer_tracks(obstacles, pcb_data, config, layer_map,
@@ -449,16 +464,22 @@ def prepare_obstacles_inplace(
     chip_pads = get_chip_pad_positions(pcb_data, stub_proximity_net_ids)
     all_stubs = unrouted_stubs + chip_pads
     _ghost_vias = filter_ripped_ghosts(ripped_route_via_positions, config, routed_net_ids)
-    apply_stub_proximity(working_obstacles, pcb_data, stub_proximity_net_ids,
-                         all_stubs, config, ghost_via_groups=_ghost_vias)
+    _stub_surplus = apply_stub_proximity(working_obstacles, pcb_data,
+                                         stub_proximity_net_ids, all_stubs,
+                                         config, ghost_via_groups=_ghost_vias,
+                                         layer_map=layer_map)
 
-    # Add track proximity costs (+ ripped-corridor layer ghosts, one pass)
+    # Add track proximity costs (+ ripped-corridor layer ghosts + layer-aware
+    # stub surplus, one composition pass)
+    from congestion_field import congestion2_rows
+    _c2 = congestion2_rows(config, net_id, routed_net_ids)
     merge_track_proximity_costs(
         working_obstacles, track_proximity_cache,
-        ghost_costs=filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids),
+        ghost_costs={**filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids),
+                     **(_stub_surplus or {}),
+                     **({('congestion2',): _c2} if _c2 is not None else {})},
         config=config)
-    from congestion_field import stamp_congestion2
-    stamp_congestion2(working_obstacles, config, net_id, routed_net_ids)
+
 
     # Add cross-layer track data
     add_cross_layer_tracks(working_obstacles, pcb_data, config, layer_map,

@@ -1022,6 +1022,12 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # The cache is re-merged on every prepare in every path (single-ended,
     # diff pair, Phase 3 via the working-map clone).
     from obstacle_costs import compute_bga_proximity_cost_cells, BGA_PROXIMITY_CACHE_KEY
+    # #585 item 4: proximity fields for EVERY fine-pitch package (BGA/QFN/QFP)
+    # with pad-count-scaled radii; the hard zones stay BGA-only.
+    from routing_common import package_proximity_zones
+    if env_knobs.PACKAGE_PROXIMITY:
+        config.package_proximity_zones = package_proximity_zones(
+            pcb_data, config.bga_proximity_radius)
     _bga_cells = compute_bga_proximity_cost_cells(config, len(config.layers))
     if len(_bga_cells):
         track_proximity_cache[BGA_PROXIMITY_CACHE_KEY] = _bga_cells

@@ -105,6 +105,25 @@ def refresh() -> None:
     g['PROXIMITY_SUM_MODE'] = ('zoned' if _ps == 'zoned'
                                else 'sum' if _ps in _ON else '')
     g['PROXIMITY_SUM'] = bool(g['PROXIMITY_SUM_MODE'])
+    # #585 item 1: layer-aware stub proximity. The stub's OWN layer keeps the
+    # full cost; other layers pay cost/M (M = n_layers/2 by default, so a
+    # 2-layer board is unchanged and a 6-layer board discounts 3x) -- a via
+    # escape near the stub still needs track room on other layers, just less
+    # of it. KICAD_STUB_LAYER_M overrides M (>= 1).
+    g['STUB_LAYER_AWARE'] = _opt_in('KICAD_STUB_LAYER_AWARE')
+    g['STUB_LAYER_M'] = _f('KICAD_STUB_LAYER_M', 0.0)  # 0 = auto n_layers/2
+    # (#585 item 2 -- excluding plane-destined nets' stubs -- was DECIDED
+    # AS-IS, no knob: a pour needs reserved access space exactly like tracks.)
+    # #585 item 4: per-package proximity fields (BGA/QFN/QFP, radius scaled
+    # sqrt(n_pads/1000) x bga_proximity_radius clamped [2, cap]). Screened
+    # NEGATIVE as a default (glasgow 7->10, oc midchain 23->26 -- the sqrt
+    # scaling SHRINKS large-BGA rings, and tiny DFN/SOT packages classified
+    # QFN add clutter); opt-in pending a scale-up-only / pad-floor variant.
+    g['PACKAGE_PROXIMITY'] = _opt_in('KICAD_PACKAGE_PROXIMITY')
+    # #585 item 3a: pre-existing (input-board) copper of rippable registered
+    # nets emits track-proximity ghosts like copper routed this run (only
+    # matters when track_proximity_cost > 0).
+    g['TRACK_PROX_PREEXISTING'] = _opt_in('KICAD_TRACK_PROX_PREEXISTING')
     # per-tranche quantum = max(CELLS grid cells, PCT% of tranche-start best_h)
     g['DYNAMIC_ITERATIONS_QUANTUM_CELLS'] = _f('KICAD_DYNAMIC_ITERATIONS_QUANTUM_CELLS', 2.0)
     g['DYNAMIC_ITERATIONS_QUANTUM_PCT'] = _f('KICAD_DYNAMIC_ITERATIONS_QUANTUM_PCT', 2.0)

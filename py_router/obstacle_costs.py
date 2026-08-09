@@ -18,26 +18,36 @@ from bresenham_utils import walk_line
 _proximity_offset_cache: Dict[Tuple[int, int], List[Tuple[int, int, int]]] = {}
 
 
-def _get_proximity_offsets(radius_grid: int, cost_grid: int) -> List[Tuple[int, int, int]]:
+def _get_proximity_offsets(radius_grid: int, cost_grid: int,
+                           half_width_grid: int = 0) -> List[Tuple[int, int, int]]:
     """Get pre-computed proximity offsets and costs for a given radius.
 
-    Returns a list of (ex, ey, cost) tuples for all grid cells within the radius.
-    Uses caching to avoid recomputing the same table multiple times.
+    Returns a list of (ex, ey, cost) tuples for all grid cells within
+    radius + half_width. half_width_grid > 0 makes the field WIDTH-AWARE
+    (#585 item 3): full cost across the copper (dist <= half_width), then
+    the standard linear falloff measured from the copper EDGE -- so a 2 mm
+    power trunk casts a wider field than a 0.1 mm signal instead of the
+    same centerline disk. Uses caching to avoid recomputing the same table.
     """
-    cache_key = (radius_grid, cost_grid)
+    cache_key = (radius_grid, cost_grid, half_width_grid)
     if cache_key in _proximity_offset_cache:
         return _proximity_offset_cache[cache_key]
 
     offsets = []
-    radius_sq = radius_grid * radius_grid
+    reach = radius_grid + half_width_grid
+    reach_sq = reach * reach
 
-    for ex in range(-radius_grid, radius_grid + 1):
-        for ey in range(-radius_grid, radius_grid + 1):
+    for ex in range(-reach, reach + 1):
+        for ey in range(-reach, reach + 1):
             dist_sq = ex * ex + ey * ey
-            if dist_sq <= radius_sq:
+            if dist_sq <= reach_sq:
                 dist = dist_sq ** 0.5
-                # Use exact same formula as original to avoid floating-point differences
-                proximity = 1.0 - (dist / radius_grid) if radius_grid > 0 else 1.0
+                # Falloff from the copper edge; exact original formula when
+                # half_width_grid == 0 (float-identical: dist/radius path).
+                edge_dist = max(0.0, dist - half_width_grid)
+                proximity = 1.0 - (edge_dist / radius_grid) if radius_grid > 0 else 1.0
+                if proximity < 0.0:
+                    continue
                 cost = int(proximity * cost_grid)
                 offsets.append((ex, ey, cost))
 
@@ -99,23 +109,88 @@ def proximity_max_zone_rects(config: GridRouteConfig, coord: GridCoord):
     MANDATORY approach, not an avoidable crowd), outside by SUM. Independent
     of the bga_proximity_cost knob -- this is a composition boundary, not the
     BGA cost. Returns None unless zoned mode is active and zones exist."""
-    if env_knobs.PROXIMITY_SUM_MODE != 'zoned' or not config.bga_exclusion_zones:
+    if env_knobs.PROXIMITY_SUM_MODE != 'zoned':
         return None
-    r = coord.to_grid_dist(config.bga_proximity_radius)
+    if config.package_proximity_zones is not None:
+        zone_list = list(config.package_proximity_zones)
+    else:
+        zone_list = [(z[0], z[1], z[2], z[3], config.bga_proximity_radius)
+                     for z in config.bga_exclusion_zones]
+    if not zone_list:
+        return None
     rects = []
-    for zone in config.bga_exclusion_zones:
-        min_x, min_y, max_x, max_y = zone[:4]
+    for min_x, min_y, max_x, max_y, radius_mm in zone_list:
+        r = coord.to_grid_dist(radius_mm)
         gx0, gy0 = coord.to_grid(min_x, min_y)
         gx1, gy1 = coord.to_grid(max_x, max_y)
         rects.append((gx0 - r, gy0 - r, gx1 + r, gy1 + r))
     return rects
 
 
+def _stub_layer_m(config: GridRouteConfig) -> float:
+    """M for layer-aware stub proximity (#585 item 1): other layers pay the
+    stub cost / M; the stub's own layer keeps full cost. Default M =
+    n_layers / 2 (a 2-layer board is unchanged; a 6-layer board discounts
+    3x -- more alternative layers = less protection needed on each).
+    Returns 1.0 (no discount, legacy) when the feature is off."""
+    if not env_knobs.STUB_LAYER_AWARE:
+        return 1.0
+    m = env_knobs.STUB_LAYER_M or (len(config.layers) / 2.0)
+    return max(1.0, m)
+
+
+def _stub_surplus_arrays(points_by_key, radius_grid: int, surplus_cost: int,
+                         coord: GridCoord, layer_map: Dict[str, int]):
+    """Own-layer surplus disks for layer-aware stub proximity: for each
+    source key, an (N, 4) [layer, gx, gy, cost] array of the falloff disks
+    stamped ONLY on each point's own layer, max-deduped within the source
+    (same within-source rule as everything else). Points whose layer is not
+    in layer_map (or that carry no layer) contribute no surplus -- they stay
+    base-tier-only, slightly under-protected rather than over."""
+    out = {}
+    if surplus_cost <= 0 or radius_grid <= 0:
+        return out
+    offsets = _get_proximity_offsets(radius_grid, surplus_cost)
+    if not offsets:
+        return out
+    off = np.array(offsets, dtype=np.int64)  # columns: ex, ey, cost
+    _OFF = 1 << 23
+    for key, pts in points_by_key.items():
+        rows = []
+        for p in pts:
+            li = layer_map.get(p[2]) if len(p) > 2 else None
+            if li is None:
+                continue
+            gx, gy = coord.to_grid(p[0], p[1])
+            r = np.empty((len(off), 4), dtype=np.int64)
+            r[:, 0] = li
+            r[:, 1] = gx + off[:, 0]
+            r[:, 2] = gy + off[:, 1]
+            r[:, 3] = off[:, 2]
+            rows.append(r)
+        if not rows:
+            continue
+        allr = np.concatenate(rows)
+        packed = ((allr[:, 0] << 48) | ((allr[:, 1] + _OFF) << 24)
+                  | (allr[:, 2] + _OFF))
+        uniq, inv = np.unique(packed, return_inverse=True)
+        maxs = np.zeros(len(uniq), dtype=np.int64)
+        np.maximum.at(maxs, inv, allr[:, 3])
+        arr = np.empty((len(uniq), 4), dtype=np.int32)
+        arr[:, 0] = (uniq >> 48).astype(np.int32)
+        arr[:, 1] = ((uniq >> 24) & ((1 << 24) - 1)).astype(np.int32) - _OFF
+        arr[:, 2] = (uniq & ((1 << 24) - 1)).astype(np.int32) - _OFF
+        arr[:, 3] = maxs.astype(np.int32)
+        out[('stub_surplus', key)] = arr
+    return out
+
+
 def apply_stub_proximity(obstacles: GridObstacleMap, pcb_data: PCBData,
                          stub_net_ids: List[int],
                          all_stubs: List[Tuple[float, float]],
                          config: GridRouteConfig,
-                         ghost_via_groups: Dict[int, List[Tuple[int, int]]] = None):
+                         ghost_via_groups: Dict[int, List[Tuple[int, int]]] = None,
+                         layer_map: Dict[str, int] = None):
     """Single entry point for the STUB proximity map (foreign stubs/chip pads
     + ripped-route via ghosts), composing per the active mode.
 
@@ -130,6 +205,16 @@ def apply_stub_proximity(obstacles: GridObstacleMap, pcb_data: PCBData,
     brackets it exactly like max mode, and stamping the same sequence after a
     clear reproduces identical values (no cross-prepare accumulation).
 
+    Layer-aware mode (#585 item 1, KICAD_STUB_LAYER_AWARE, composable with
+    either composition mode): the all-layer stub-map stamp drops to
+    cost / M (M = n_layers/2 by default) and each source's OWN-layer surplus
+    (cost - cost/M falloff disks) is RETURNED as [layer, gx, gy, cost]
+    arrays for the caller to feed into merge_track_proximity_costs'
+    ghost_costs -- riding the layer map keeps composition (max/sum/zoned)
+    and the via formula consistent: a via INTO a stub's layer pays more
+    than one leaving it. Ghost vias stay full-cost all-layer (a barrel
+    occupies every layer). Returns {} when not armed.
+
     ghost_via_groups must already be C1-filtered (re-routed nets dropped) --
     both modes assume each source appears at most once.
     """
@@ -137,9 +222,26 @@ def apply_stub_proximity(obstacles: GridObstacleMap, pcb_data: PCBData,
     ghost_active = (ghost_via_groups and
                     config.ripped_route_avoidance_cost > 0)
 
+    m = _stub_layer_m(config)
+    stub_radius_grid = coord.to_grid_dist(config.stub_proximity_radius)
+    full_cost = config.cell_cost(config.stub_proximity_cost)
+    base_cost = int(full_cost / m)
+    surplus_cost = full_cost - base_cost
+    surplus: Dict = {}
+
     if not env_knobs.PROXIMITY_SUM:
         if all_stubs:
-            add_stub_proximity_costs(obstacles, all_stubs, config)
+            if m > 1.0:
+                grid_pts = [coord.to_grid(p[0], p[1]) for p in all_stubs]
+                if base_cost > 0 and stub_radius_grid > 0:
+                    obstacles.add_stub_proximity_costs_batch(
+                        grid_pts, stub_radius_grid, base_cost)
+                if layer_map:
+                    surplus = _stub_surplus_arrays(
+                        {'all': all_stubs}, stub_radius_grid, surplus_cost,
+                        coord, layer_map)
+            else:
+                add_stub_proximity_costs(obstacles, all_stubs, config)
         if ghost_active:
             all_via_positions = []
             for via_list in ghost_via_groups.values():
@@ -149,21 +251,25 @@ def apply_stub_proximity(obstacles: GridObstacleMap, pcb_data: PCBData,
                     all_via_positions,
                     coord.to_grid_dist(config.ripped_route_avoidance_radius),
                     config.cell_cost(config.ripped_route_avoidance_cost))
-        return
+        return surplus
 
     # Sum mode: (points, radius, cost) per source
     from connectivity import get_stub_endpoints
     from net_queries import get_chip_pad_positions
     groups = []
-    stub_radius_grid = coord.to_grid_dist(config.stub_proximity_radius)
-    stub_cost_grid = config.cell_cost(config.stub_proximity_cost)
-    if stub_cost_grid > 0 and stub_radius_grid > 0:
+    pts_by_net = {}
+    if full_cost > 0 and stub_radius_grid > 0:
         for nid in stub_net_ids:
             pts = (get_stub_endpoints(pcb_data, [nid])
                    + get_chip_pad_positions(pcb_data, [nid]))
             if pts:
+                pts_by_net[nid] = pts
                 groups.append(([coord.to_grid(p[0], p[1]) for p in pts],
-                               stub_radius_grid, stub_cost_grid))
+                               stub_radius_grid,
+                               base_cost if m > 1.0 else full_cost))
+    if m > 1.0 and layer_map and pts_by_net:
+        surplus = _stub_surplus_arrays(pts_by_net, stub_radius_grid,
+                                       surplus_cost, coord, layer_map)
     if ghost_active:
         rra_radius = coord.to_grid_dist(config.ripped_route_avoidance_radius)
         rra_cost = config.cell_cost(config.ripped_route_avoidance_cost)
@@ -174,6 +280,7 @@ def apply_stub_proximity(obstacles: GridObstacleMap, pcb_data: PCBData,
     if groups:
         obstacles.add_stub_proximity_costs_grouped(
             groups, proximity_max_zone_rects(config, coord))
+    return surplus
 
 
 # (add_bga_proximity_costs, the old base-map stub_proximity stamp, is deleted:
@@ -206,16 +313,29 @@ def compute_bga_proximity_cost_cells(config: GridRouteConfig,
     stub_proximity stamp was all-layer.
     """
     if config.bga_proximity_radius <= 0 or config.bga_proximity_cost <= 0 \
-            or not config.bga_exclusion_zones or num_layers <= 0:
+            or num_layers <= 0:
+        return np.empty((0, 4), dtype=np.int32)
+
+    # #585 item 4: per-package proximity zones (BGA/QFN/QFP, per-zone radius
+    # scaled by pad count) when the engine filled them; legacy fallback =
+    # the hard BGA zones at the flat radius.
+    if config.package_proximity_zones is not None:
+        zone_list = [(z[0], z[1], z[2], z[3], z[4])
+                     for z in config.package_proximity_zones]
+    else:
+        zone_list = [(z[0], z[1], z[2], z[3], config.bga_proximity_radius)
+                     for z in config.bga_exclusion_zones]
+    if not zone_list:
         return np.empty((0, 4), dtype=np.int32)
 
     coord = GridCoord(config.grid_step)
-    radius_grid = coord.to_grid_dist(config.bga_proximity_radius)
     cost_grid = config.cell_cost(config.bga_proximity_cost)
     cells: Dict[Tuple[int, int], int] = {}
 
-    for zone in config.bga_exclusion_zones:
-        min_x, min_y, max_x, max_y = zone[:4]
+    for min_x, min_y, max_x, max_y, radius_mm in zone_list:
+        radius_grid = coord.to_grid_dist(radius_mm)
+        if radius_grid <= 0:
+            continue
         gmin_x, gmin_y = coord.to_grid(min_x, min_y)
         gmax_x, gmax_y = coord.to_grid(max_x, max_y)
         for gx in range(gmin_x - radius_grid, gmax_x + radius_grid + 1):
@@ -266,9 +386,6 @@ def compute_track_proximity_for_net(pcb_data: PCBData, net_id: int, config: Grid
     radius_grid = coord.to_grid_dist(config.track_proximity_distance)
     cost_grid = config.cell_cost(config.track_proximity_cost)
 
-    # Get pre-computed offset table (cached)
-    offsets = _get_proximity_offsets(radius_grid, cost_grid)
-
     # Sample every ~1mm along segments (not every grid step) for performance
     sample_interval = max(1, int(1.0 / config.grid_step))
 
@@ -279,6 +396,13 @@ def compute_track_proximity_for_net(pcb_data: PCBData, net_id: int, config: Grid
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             continue
+
+        # Width-aware field (#585 item 3): falloff from the copper edge.
+        # The offsets table is cached per (radius, cost, half-width), so the
+        # few distinct widths on a board cost one table each.
+        offsets = _get_proximity_offsets(
+            radius_grid, cost_grid,
+            coord.to_grid_dist((seg.width or 0.0) / 2.0))
 
         # Walk along segment using Bresenham, sampling every sample_interval points
         gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
@@ -541,9 +665,6 @@ def compute_ripped_route_costs(saved_result: dict, config: GridRouteConfig,
     radius_grid = coord.to_grid_dist(config.ripped_route_avoidance_radius)
     cost_grid = config.cell_cost(config.ripped_route_avoidance_cost)
 
-    # Get pre-computed offset table (cached)
-    offsets = _get_proximity_offsets(radius_grid, cost_grid)
-
     # Use dict internally for efficient max tracking
     result: Dict[Tuple[int, int, int], int] = {}  # (layer, gx, gy) -> cost
 
@@ -556,6 +677,12 @@ def compute_ripped_route_costs(saved_result: dict, config: GridRouteConfig,
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             continue
+
+        # Width-aware ghost (#585 item 3): a ripped fat trunk vacates -- and
+        # reserves -- a correspondingly wider corridor.
+        offsets = _get_proximity_offsets(
+            radius_grid, cost_grid,
+            coord.to_grid_dist((seg.width or 0.0) / 2.0))
 
         # Walk along segment using walk_line, sampling every sample_interval points
         gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)

@@ -112,8 +112,15 @@ class GridRouteConfig:
     # summed stub+layer proximity at the via site (track-proximity and
     # ripped-corridor soft costs included), not just stub/BGA-zone costs.
     via_proximity_cost: float = 10.0  # via cost multiplier in stub/BGA proximity zones (0 = no extra cost)
-    bga_proximity_radius: float = 7.0  # mm - distance from BGA edges to penalize
+    bga_proximity_radius: float = 7.0  # mm - proximity-field CAP (largest packages reach it)
     bga_proximity_cost: float = 0.2  # mm equivalent cost at BGA edge
+    # Per-package proximity-field rects (#585 item 4): (min_x, min_y, max_x,
+    # max_y, radius_mm) for EVERY fine-pitch package (BGA/QFN/QFP), radius
+    # scaled by sqrt(n_pads/1000) * bga_proximity_radius clamped to
+    # [2.0, bga_proximity_radius]. Filled by the batch engines from the board
+    # (routing_common.package_proximity_zones); None = legacy behavior
+    # (bga_exclusion_zones at the flat radius).
+    package_proximity_zones: Optional[List[Tuple[float, float, float, float, float]]] = None
     # Direction search order: "forward" or "backward"
     direction_order: str = "forward"
     # Differential pair routing parameters

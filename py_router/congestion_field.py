@@ -222,12 +222,16 @@ def build_congestion2(pcb_data, config, net_ids_to_route):
     return {'bins': bins, 'bin_mm': bin_mm, 'terminals': terminals, 'k': k}
 
 
-def stamp_congestion2(obstacles, config, net_id, routed_net_ids):
-    """Per-net prepare stamp: demand recomputed by set arithmetic, owner
-    disks exempted, rows applied as layer-proximity costs."""
+def congestion2_rows(config, net_id, routed_net_ids):
+    """Per-net congestion-v2 rows [layer, gx, gy, cost] (or None): demand
+    recomputed by set arithmetic, owner disks exempted. Returned as a SOURCE
+    for merge_track_proximity_costs' composition pass (#585 item 7) so sum
+    mode SUMS congestion with the other fields instead of max-inserting it
+    afterwards (in max mode the two are identical -- max commutes). Rows are
+    unique per (layer, cell) by construction = within-source dedupe."""
     d2 = getattr(config, '_congestion2', None)
     if d2 is None:
-        return
+        return None
     k = d2['k']
     bin_mm = d2['bin_mm']
     routed = set(routed_net_ids)
@@ -258,4 +262,14 @@ def stamp_congestion2(obstacles, config, net_id, routed_net_ids):
                 for li in range(num_layers):
                     rows.append((li, gx0 + dx, gy0 + dy, c))
     if rows:
-        obstacles.set_layer_proximity_batch(np.array(rows, dtype=np.int32))
+        return np.array(rows, dtype=np.int32)
+    return None
+
+
+def stamp_congestion2(obstacles, config, net_id, routed_net_ids):
+    """Legacy direct stamp (max-insert) -- kept for callers outside the
+    composition pass; the routing builders feed congestion2_rows into
+    merge_track_proximity_costs instead."""
+    rows = congestion2_rows(config, net_id, routed_net_ids)
+    if rows is not None:
+        obstacles.set_layer_proximity_batch(rows)

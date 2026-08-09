@@ -31,6 +31,29 @@ from length_matching import (
 )
 
 
+def package_proximity_zones(pcb_data, bga_proximity_radius: float):
+    """(min_x, min_y, max_x, max_y, radius_mm) proximity-field rects for
+    EVERY fine-pitch package -- BGA, QFN, QFP (#585 item 4). Unlike the hard
+    exclusion zones (BGA-only: a QFN's interior stays routable, just priced),
+    these feed only the SOFT proximity field, with a per-package radius
+    scaled by escape demand: r = bga_proximity_radius * sqrt(n_pads / 1000),
+    clamped to [2.0 mm, bga_proximity_radius] -- a 1000+-ball monster earns
+    the full radius, a 100-ball BGA ~2.2 mm, any QFN the 2 mm floor.
+    Rects are pad-bounding-box anchored (margin 0), like the hard zones."""
+    from kicad_parser import find_components_by_type, get_footprint_bounds
+    zones = []
+    for pkg in ('BGA', 'QFN', 'QFP'):
+        for fp in find_components_by_type(pcb_data, pkg):
+            n = len(fp.pads) if fp.pads else 0
+            if n < 4:
+                continue
+            r = bga_proximity_radius * (n / 1000.0) ** 0.5
+            r = min(bga_proximity_radius, max(2.0, r))
+            bounds = get_footprint_bounds(fp, margin=0.0)
+            zones.append((*bounds, r))
+    return zones
+
+
 def setup_bga_exclusion_zones(
     pcb_data: PCBData,
     disable_bga_zones: Optional[List[str]],

@@ -123,7 +123,9 @@ Definition review flags (open questions, not bugs):
 #### BGA proximity field: `bga_proximity_radius` / `bga_proximity_cost`
 
 Geometry: for every auto-detected **BGA** component (pad-bounding-box zones —
-**QFN/QFP get hard fanout zones but NO proximity field**), the zone interior
+**QFN/QFP get NEITHER the hard zone NOR the proximity field**; the engine only
+ever auto-detects BGA packages, so a QFN's sole protection is its pads as hard
+obstacles plus chip-pad pseudo-stubs on unescaped pads), the zone interior
 carries the full edge-tier cost on EVERY copper layer (so allowed-cells
 windows punched through the hard block are not free-via holes), with the
 linear ring falling to zero at `bga_proximity_radius` outside the zone edge.
@@ -140,7 +142,8 @@ zeroing the cost silently left a 10x diff-pair via cliff active in the 7 mm
 ring; both the cliff and the gap are gone as of Rust 0.20.1).
 
 Definition review flags: the radius is a flat 7 mm regardless of package size;
-QFN/QFP have no proximity ring at all (only the hard zone).
+QFN/QFP have no hard zone and no proximity ring at all — their escape collar
+carries no graded protection (#585 item 4).
 
 #### Track proximity: `track_proximity_distance` / `track_proximity_cost`
 
