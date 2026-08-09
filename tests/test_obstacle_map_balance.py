@@ -182,7 +182,14 @@ def main():
     rc, _ = run_cmd(["py_router/bga_fanout.py", iu_plane, "--component", "U9",
                      "--output", iu_fan, "--nets", "/*"], audit=False)
     check("repair: interf_u fanout step completed", rc == 0, f"rc={rc}")
+    # Plane nets are EXCLUDED from the route step's --nets so its in-run
+    # finalize (#562) skips the pours BY PLAN and the signal step's pour
+    # damage survives for repair_planes. With the plane nets in scope the
+    # recipe only churned while the finalize happened to MISS some damage --
+    # a band the 0808-09 engine wave closed (total_routes went to 0 and this
+    # stage's TAP_MAP_VERIFY coverage silently went vacuous).
     rc, _ = run_cmd(["py_router/route.py", iu_fan, iu_routed, "--no-bga-zone",
+                     "--nets", "*", "!VCC", "!GND",
                      "--layer-costs", "1", "1", "--max-ripup", "10",
                      "--stub-proximity-radius", "10", "--stub-proximity-cost", "3.0",
                      "--max-iterations", "1000000",
