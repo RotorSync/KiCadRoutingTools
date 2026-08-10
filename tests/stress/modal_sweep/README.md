@@ -77,47 +77,62 @@ tests nothing would look like "the parameter has no effect".
 Anchor `manifest_sed` patterns tightly — a loose one rewrites more of the chain
 than you intended.
 
+## The files
+
+| file | what it is |
+|---|---|
+| `modal_app.py` | the app: fan-out, staging, parameter application, aggregation |
+| `sweep_lib.py` | pure-python helpers (no `modal` import) — cost table, discovery, patching |
+| `upload_corpus.py` | populate the corpus volume (`--boards` for a small slice) |
+| `arms.example.json` | template showing all three arm mechanisms |
+| `arms.smoke.json` | the 2-arm config the smoke test uses |
+| `smoke_test.sh` | **run this first** — end-to-end, self-verifying |
+| `check_sweep.py` | validates a sweep result; exits non-zero if untrustworthy |
+
 ## Start here: the 2-board smoke test
 
-Do this BEFORE the full sweep. It costs a few cents and exercises every moving
-part — image build, corpus volume, the absolute-path remap, parameter patching,
-grading, and result harvesting. The remap in particular has never been exercised
-inside a container.
+Do this BEFORE the full sweep. A few cents, and it exercises every moving part:
+image build, corpus volume, the absolute-path remap, parameter patching,
+container reuse, grading, result harvesting.
 
 ```bash
 pip install modal && modal setup          # interactive browser login, once
-
-# ~37 files / a few MB -- just two of the cheapest boards (~0.2 min each)
-python3 tests/stress/modal_sweep/upload_corpus.py \
-    --sets set9 --boards stm32_rfm95_lora,cc1101_rf_module --dry-run
-python3 tests/stress/modal_sweep/upload_corpus.py \
-    --sets set9 --boards stm32_rfm95_lora,cc1101_rf_module
-
-# plan only, spends nothing
-modal run tests/stress/modal_sweep/modal_app.py \
-    --arms tests/stress/modal_sweep/arms.example.json \
-    --sets set9 --boards stm32_rfm95_lora,cc1101_rf_module --dry-run
-
-# 2 boards x 2 arms = 4 tasks
-python3 -c "import json;json.dump([{'name':'baseline'},{'name':'tp2','defaults':{'TRACK_PROXIMITY_COST':2.0}}],open('/tmp/arms_smoke.json','w'))"
-modal run tests/stress/modal_sweep/modal_app.py \
-    --arms /tmp/arms_smoke.json --sets set9 --boards stm32_rfm95_lora,cc1101_rf_module
+bash tests/stress/modal_sweep/smoke_test.sh
 ```
 
-The first run pays a cold image build (a few minutes); later runs reuse it.
+That uploads a ~37-file slice (two of the cheapest boards), runs 2 arms × 2
+boards, and then **checks the result** with `check_sweep.py`. Override with
+`SMOKE_SET`, `SMOKE_BOARDS`, `SMOKE_OUT`. First run pays a cold image build of a
+few minutes; later runs reuse it.
 
-**What to check in the output — a green exit is not enough:**
+**Why the run is CHECKED rather than eyeballed.** A sweep can exit green and be
+meaningless. During bring-up one run reported `chain_complete` on every row,
+100% completion and 0 DRC — while both arms had secretly executed with the same
+routing constants, because the image shipped an uncommitted working-tree edit
+and the "baseline" was not the baseline. At 100 arms that reads as "the
+parameter has no effect", and nothing in the output contradicts it.
 
-1. `chain_complete` is true for all 4 rows. False means the replay broke, most
-   likely the repo-path remap.
-2. `patched_defaults` on the `tp2` rows shows `TRACK_PROXIMITY_COST: '2.0'`. If
-   it is empty the arm tested nothing and every arm would have looked identical.
-3. The two arms differ *somewhere* (completion, DRC, or `total_seconds`). Two
-   byte-identical arms usually mean the parameter never reached the engine.
-4. `total_seconds` is in the right ballpark (~10-30 s here). Wildly higher means
-   the container is undersized and swapping.
+`check_sweep.py` tests four things:
 
-Only then scale up.
+1. **chain_complete** — a broken chain is not a result. On failure it prints the
+   captured `_replay.log` tail, since the container is gone by then.
+2. **arm spec applied** — an arm declaring `defaults` must report non-empty
+   `patched_defaults`; inconsistency across boards means container reuse is
+   leaking arms.
+3. **arms actually differ** — separating routing *outcomes* from *runtime*.
+   Runtime alone is noisy: the contaminated run above still differed 5% and
+   0.06% on `total_seconds`, so a naive "do they differ?" passes it. Anything
+   under 10% is treated as jitter, not proof.
+4. **provenance** — every row carries a source commit; a `+dirty` sha is
+   reported.
+
+Run it on any sweep, not just the smoke test:
+
+```bash
+python3 tests/stress/modal_sweep/check_sweep.py <sweep.json>
+# --require-all-complete  : any broken chain fails (right for the smoke test;
+#                           a real sweep legitimately has some failing boards)
+```
 
 ## The full sweep
 
