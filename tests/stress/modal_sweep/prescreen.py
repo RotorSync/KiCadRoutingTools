@@ -1,54 +1,74 @@
 #!/usr/bin/env python3
 """Local dose-range prescreen: the free stage before any cloud spend.
 
-    python3 tests/stress/modal_sweep/prescreen.py HEURISTIC_WEIGHT 1.5 2.0 2.5 3.0
+    python3 tests/stress/modal_sweep/prescreen.py HEURISTIC_WEIGHT 1.0 1.5 2.5 3.0
     python3 tests/stress/modal_sweep/prescreen.py --env KICAD_PROXIMITY_SUM 0 1 softcap
 
-Runs TWO cheap discriminative boards (from board_value.json's screen list,
-override with --boards) locally at each candidate value of ONE knob, and
-prints verdict / iterations / wall per value. Purpose: find the range where
-a knob makes any sense AT ALL -- a value that blows up quality or cost on
-two boards in minutes should never reach the cloud screen, and the
-survivors tell you which 2-3 values deserve arms. The funnel:
+Runs two challenging-but-fast boards (baseline verdict >= 2 so movement
+shows in BOTH directions -- a perfectly-routed board hides small damage and
+cannot show improvement; override with --boards) at each candidate value of
+ONE knob, and prints verdict / wall per value. Purpose: find the range
+where a knob makes any sense AT ALL. Division of labor, measured on first
+use: the prescreen catches BLOWUPS (quality collapse, wall explosion);
+mild degradation is the cloud screen's job (hw3.0 tied 0-0 locally, died
+across 12 cloud boards). The funnel:
 
   prescreen (2 boards, local, $0)  ->  screen (12 boards, ~$0.02/arm)
   ->  full corpus (~$0.7/arm)      ->  holdout (untouched sets)
 
-Values are numbers or strings (RIPUP_ABANDON_METRIC total-pads ...); with
---env the knob is exported instead of patched into routing_defaults.
-Boards replay through the same ab_replay_grade.do_board as every other
-stage, so numbers are comparable up the funnel (modulo local-vs-cloud
-python-version micro-divergence -- fine for range-finding). The working
-tree is patched per value and restored afterwards; do not run concurrently
-with other local routing work.
+PARALLEL up to --jobs (default 4): defaults-mode values each get their own
+temporary git WORKTREE (routing_defaults is per-tree state; the compiled
+grid_router.so is copied into each worktree's rust_router/ -- worktrees
+don't inherit build artifacts). Env-mode values need no isolation. The
+main tree is never patched, so this can run alongside other local work.
 """
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent.parent
 sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(REPO / "tests" / "stress"))
 
 
-def pick_boards(stress: Path, n=2):
+def pick_boards(n=2):
     bv = json.loads((HERE / "board_value.json").read_text())
     costs = {s["board"]: s for s in bv.get("table", [])}
-    # Highest measured spread first (cost as tiebreak): discrimination is what
-    # a range-finder needs. Caveat learned on first use: spread is KNOB-FAMILY
-    # dependent (esp_prog spreads 14 under soft-cost arms, ZERO under the
-    # heuristic dial), so a 2-board prescreen reliably catches BLOWUPS
-    # (quality collapse, wall-time explosion) while mild degradation is the
-    # cloud screen's job -- that division is what each stage costs.
-    screen = sorted((b for b in bv.get("screen", []) if b in costs),
-                    key=lambda b: (-costs[b]["spread"], costs[b]["cost_h"]))
-    return screen[:n]
+
+    # Andy's criterion: challenging-but-fast -- baseline must NOT route the
+    # board perfectly (verdict >= 2), cheap enough for minutes-scale local
+    # runs, then highest spread. (Cloud verdicts can differ from local:
+    # interpreter-version divergence -- the flat-baseline warning below
+    # catches a pick that routes perfectly on THIS machine.)
+    def ok(b):
+        s = costs.get(b, {})
+        return s.get("baseline_verdict", 0) >= 2 and s.get("cost_h", 9) <= 0.15
+    pool = [b for b in bv.get("screen", []) if ok(b)]
+    pool += sorted((s["board"] for s in bv.get("table", [])
+                    if ok(s["board"]) and s["board"] not in pool),
+                   key=lambda b: (-costs[b]["spread"], costs[b]["cost_h"]))
+    pool.sort(key=lambda b: (-costs[b]["spread"], costs[b]["cost_h"]))
+    return pool[:n]
+
+
+_WORKER = r"""
+import json, os, sys
+sys.path.insert(0, sys.argv[1] + "/tests/stress")
+import ab_replay_grade as abg
+from pathlib import Path
+stress, set_dir, out, board, tag = (Path(sys.argv[2]), sys.argv[3],
+                                    Path(sys.argv[4]), sys.argv[5], sys.argv[6])
+r = abg.do_board(stress / set_dir, out, tag, board)
+(out / f"row_{board}.json").write_text(json.dumps(r))
+"""
 
 
 def main():
@@ -58,16 +78,16 @@ def main():
     ap.add_argument("--env", action="store_true",
                     help="knob is a KICAD_* env var, not a routing_defaults constant")
     ap.add_argument("--boards", default="",
-                    help="comma-separated; default: 2 cheapest screen boards")
+                    help="comma-separated; default: 2 challenging-but-fast boards")
+    ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--stress-dir",
                     default=os.path.expanduser("~/Documents/kicad_stress_test"))
     a = ap.parse_args()
 
-    import ab_replay_grade as abg
     import sweep_lib as sl
     stress = Path(a.stress_dir)
     boards = ([b.strip() for b in a.boards.split(",") if b.strip()]
-              or pick_boards(stress))
+              or pick_boards())
     locs = {b: s for s, b in sl.discover_boards(
         stress, [f"set{i}" for i in range(1, 26)]) if b in set(boards)}
     missing = set(boards) - set(locs)
@@ -83,51 +103,83 @@ def main():
             except ValueError:
                 return v
 
-    dirty = subprocess.run(["git", "-C", str(REPO), "diff", "--name-only",
-                            "--", "py_router/routing_defaults.py"],
-                           capture_output=True, text=True).stdout.strip()
-    if dirty and not a.env:
-        raise SystemExit("routing_defaults.py is dirty -- restore before prescreening")
+    values = [None] + [parse(v) for v in a.values]   # None = default
+    tags = {v: ("default" if v is None else str(v).replace("/", "_"))
+            for v in values}
+    out_root = Path(tempfile.mkdtemp(prefix="kicad_prescreen_"))
 
-    print(f"prescreen {a.knob} on {boards}")
-    rows = []
-    out_root = Path(os.environ.get("TMPDIR", "/tmp")) / "kicad_prescreen"
-    for v in ["<default>"] + a.values:
-        val = None if v == "<default>" else parse(v)
+    # One worktree per defaults-mode non-default value; env-mode and the
+    # default value run from the main repo untouched.
+    trees, made = {}, []
+    for v in values:
+        if v is None or a.env:
+            trees[v] = REPO
+            continue
+        wt = out_root / f"wt_{tags[v]}"
+        subprocess.run(["git", "-C", str(REPO), "worktree", "add", "--detach",
+                        str(wt), "HEAD"], check=True, capture_output=True)
+        made.append(wt)
+        # worktrees don't inherit build artifacts (memory: grid_router.so
+        # belongs in rust_router/, not the root)
+        shutil.copy(REPO / "rust_router" / "grid_router.so",
+                    wt / "rust_router" / "grid_router.so")
+        sl.patch_routing_defaults(wt, {a.knob: v})
+        trees[v] = wt
+
+    def run_one(v, board):
         env = dict(os.environ)
-        if val is not None:
-            if a.env:
-                env[a.knob] = str(val)
-            else:
-                sl.patch_routing_defaults(REPO, {a.knob: val})
-        os.environ.update(env)   # do_board children inherit via os.environ
-        try:
-            tag = str(val if val is not None else "default").replace("/", "_")
-            out = out_root / f"{a.knob}_{tag}"
-            out.mkdir(parents=True, exist_ok=True)
-            verd = iters = wall = 0
-            ok = True
-            for b in boards:
-                r = abg.do_board(stress / f"runs_{locs[b]}", out, f"pre:{tag}", b)
-                if not r.get("chain_complete"):
-                    ok = False
-                    continue
-                verd += (r.get("nets_incomplete") or 0) + (r.get("conn") or 0)
-                wall += r.get("total_seconds") or 0
-            rows.append((v, verd if ok else None, wall, ok))
-        finally:
-            if val is not None:
-                if a.env:
-                    os.environ.pop(a.knob, None)
-                else:
-                    subprocess.run(["git", "-C", str(REPO), "checkout", "--",
-                                    "py_router/routing_defaults.py"], check=True)
+        if a.env and v is not None:
+            env[a.knob] = str(v)
+        out = out_root / f"res_{tags[v]}"
+        out.mkdir(parents=True, exist_ok=True)
+        subprocess.run([sys.executable, "-c", _WORKER, str(trees[v]),
+                        str(stress), f"runs_{locs[board]}", str(out), board,
+                        f"pre:{tags[v]}"], env=env, check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        p = out / f"row_{board}.json"
+        return json.loads(p.read_text()) if p.exists() else {}
+
+    print(f"prescreen {a.knob} on {boards} ({a.jobs} parallel)")
+    results = {}
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=a.jobs) as ex:
+            futs = {ex.submit(run_one, v, b): (v, b)
+                    for v in values for b in boards}
+            for f in concurrent.futures.as_completed(futs):
+                v, b = futs[f]
+                results[(v, b)] = f.result()
+                r = results[(v, b)]
+                print(f"  [{tags[v]}] {b}: "
+                      f"{'ok' if r.get('chain_complete') else 'BROKEN'} "
+                      f"compl={r.get('completion_pct')} t={r.get('total_seconds')}s",
+                      flush=True)
+    finally:
+        for wt in made:
+            subprocess.run(["git", "-C", str(REPO), "worktree", "remove",
+                            "--force", str(wt)], capture_output=True)
+
+    rows = []
+    for v in values:
+        verd, wall, ok = 0, 0, True
+        for b in boards:
+            r = results.get((v, b), {})
+            if not r.get("chain_complete"):
+                ok = False
+                continue
+            verd += (r.get("nets_incomplete") or 0) + (r.get("conn") or 0)
+            wall += r.get("total_seconds") or 0
+        rows.append((tags[v], verd if ok else None, wall, ok))
+
+    if rows[0][3] and rows[0][1] is not None and rows[0][1] < 2:
+        print(f"\nWARN: boards route near-perfectly at the DEFAULT locally "
+              f"(verdict {rows[0][1]}) -- damage and improvement both "
+              "invisible; pick more challenging --boards.")
     print(f"\n{'value':<12}{'verdict':>8}{'wall_s':>8}")
     best = min((r[1] for r in rows if r[1] is not None), default=0)
-    for v, verd, wall, ok in rows:
+    for tag, verd, wall, ok in rows:
         note = "" if ok else "  CHAIN BROKEN"
         flag = "" if verd is None or verd <= best + 3 else "  <- outside sensible range?"
-        print(f"{str(v):<12}{str(verd):>8}{wall:>8.0f}{note}{flag}")
+        print(f"{tag:<12}{str(verd):>8}{wall:>8.0f}{note}{flag}")
     print("\nPick 2-3 values from the sensible range for the cloud screen.")
     return 0
 

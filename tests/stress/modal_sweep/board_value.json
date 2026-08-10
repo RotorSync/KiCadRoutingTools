@@ -71,7 +71,8 @@
    "cost_h": 0.006,
    "spread": 14,
    "stdev": 2.8,
-   "info_per_h": 279.8
+   "info_per_h": 279.8,
+   "baseline_verdict": 0
   },
   {
    "board": "olimex_lora",
@@ -79,7 +80,8 @@
    "cost_h": 0.012,
    "spread": 10,
    "stdev": 1.96,
-   "info_per_h": 157.5
+   "info_per_h": 157.5,
+   "baseline_verdict": 0
   },
   {
    "board": "stm32_datalogger",
@@ -87,7 +89,8 @@
    "cost_h": 0.013,
    "spread": 7,
    "stdev": 1.9,
-   "info_per_h": 147.2
+   "info_per_h": 147.2,
+   "baseline_verdict": 0
   },
   {
    "board": "hhkb_ctrl",
@@ -95,7 +98,8 @@
    "cost_h": 0.02,
    "spread": 8,
    "stdev": 2.66,
-   "info_per_h": 133.9
+   "info_per_h": 133.9,
+   "baseline_verdict": 0
   },
   {
    "board": "usbgpib",
@@ -103,7 +107,8 @@
    "cost_h": 0.016,
    "spread": 6,
    "stdev": 1.98,
-   "info_per_h": 124.8
+   "info_per_h": 124.8,
+   "baseline_verdict": 1
   },
   {
    "board": "vis_nir_spec",
@@ -111,7 +116,8 @@
    "cost_h": 0.019,
    "spread": 8,
    "stdev": 2.04,
-   "info_per_h": 109.6
+   "info_per_h": 109.6,
+   "baseline_verdict": 0
   },
   {
    "board": "throwing_star",
@@ -119,7 +125,8 @@
    "cost_h": 0.01,
    "spread": 4,
    "stdev": 1.09,
-   "info_per_h": 107.3
+   "info_per_h": 107.3,
+   "baseline_verdict": 0
   },
   {
    "board": "usb_fm_radio",
@@ -127,7 +134,8 @@
    "cost_h": 0.013,
    "spread": 6,
    "stdev": 1.22,
-   "info_per_h": 92.9
+   "info_per_h": 92.9,
+   "baseline_verdict": 0
   },
   {
    "board": "watchy",
@@ -135,7 +143,8 @@
    "cost_h": 0.017,
    "spread": 6,
    "stdev": 1.55,
-   "info_per_h": 89.3
+   "info_per_h": 89.3,
+   "baseline_verdict": 4
   },
   {
    "board": "rp2350_dev",
@@ -143,7 +152,8 @@
    "cost_h": 0.009,
    "spread": 4,
    "stdev": 0.86,
-   "info_per_h": 86.2
+   "info_per_h": 86.2,
+   "baseline_verdict": 0
   },
   {
    "board": "core1106_cam",
@@ -151,7 +161,8 @@
    "cost_h": 0.02,
    "spread": 6,
    "stdev": 1.66,
-   "info_per_h": 83.1
+   "info_per_h": 83.1,
+   "baseline_verdict": 1
   },
   {
    "board": "uhk_trackball",
@@ -159,7 +170,8 @@
    "cost_h": 0.027,
    "spread": 9,
    "stdev": 2.14,
-   "info_per_h": 78.4
+   "info_per_h": 78.4,
+   "baseline_verdict": 0
   },
   {
    "board": "mod_bme280",
@@ -167,7 +179,8 @@
    "cost_h": 0.007,
    "spread": 4,
    "stdev": 0.78,
-   "info_per_h": 78.4
+   "info_per_h": 78.4,
+   "baseline_verdict": 4
   },
   {
    "board": "upduino",
@@ -175,7 +188,8 @@
    "cost_h": 0.051,
    "spread": 14,
    "stdev": 3.71,
-   "info_per_h": 72.0
+   "info_per_h": 72.0,
+   "baseline_verdict": 0
   },
   {
    "board": "openstint",
@@ -183,7 +197,8 @@
    "cost_h": 0.015,
    "spread": 5,
    "stdev": 1.04,
-   "info_per_h": 68.2
+   "info_per_h": 68.2,
+   "baseline_verdict": 0
   },
   {
    "board": "bread_stepper",
@@ -191,7 +206,8 @@
    "cost_h": 0.006,
    "spread": 2,
    "stdev": 0.65,
-   "info_per_h": 65.0
+   "info_per_h": 65.0,
+   "baseline_verdict": 0
   },
   {
    "board": "datalogger",
@@ -199,7 +215,8 @@
    "cost_h": 0.005,
    "spread": 2,
    "stdev": 0.65,
-   "info_per_h": 65.0
+   "info_per_h": 65.0,
+   "baseline_verdict": 0
   },
   {
    "board": "hid_remapper",
@@ -207,7 +224,8 @@
    "cost_h": 0.01,
    "spread": 2,
    "stdev": 0.65,
-   "info_per_h": 65.0
+   "info_per_h": 65.0,
+   "baseline_verdict": 0
   },
   {
    "board": "unl_flight_computer",
@@ -215,7 +233,8 @@
    "cost_h": 0.016,
    "spread": 5,
    "stdev": 0.98,
-   "info_per_h": 61.9
+   "info_per_h": 61.9,
+   "baseline_verdict": 0
   },
   {
    "board": "tinytapeout_qfn",
@@ -223,7 +242,8 @@
    "cost_h": 0.071,
    "spread": 20,
    "stdev": 3.91,
-   "info_per_h": 55.2
+   "info_per_h": 55.2,
+   "baseline_verdict": 1
   },
   {
    "board": "hex_gateway",
@@ -231,7 +251,8 @@
    "cost_h": 0.016,
    "spread": 4,
    "stdev": 0.86,
-   "info_per_h": 54.8
+   "info_per_h": 54.8,
+   "baseline_verdict": 0
   },
   {
    "board": "drawbot_ctrl",
@@ -239,7 +260,8 @@
    "cost_h": 0.017,
    "spread": 2,
    "stdev": 0.9,
-   "info_per_h": 54.4
+   "info_per_h": 54.4,
+   "baseline_verdict": 0
   },
   {
    "board": "pedal_404",
@@ -247,7 +269,8 @@
    "cost_h": 0.007,
    "spread": 2,
    "stdev": 0.54,
-   "info_per_h": 54.3
+   "info_per_h": 54.3,
+   "baseline_verdict": 0
   },
   {
    "board": "tigard",
@@ -255,7 +278,8 @@
    "cost_h": 0.04,
    "spread": 8,
    "stdev": 2.12,
-   "info_per_h": 52.7
+   "info_per_h": 52.7,
+   "baseline_verdict": 4
   },
   {
    "board": "eurorack_pmod",
@@ -263,7 +287,8 @@
    "cost_h": 0.048,
    "spread": 6,
    "stdev": 2.51,
-   "info_per_h": 52.0
+   "info_per_h": 52.0,
+   "baseline_verdict": 6
   },
   {
    "board": "teensy4_galvos",
@@ -271,7 +296,8 @@
    "cost_h": 0.025,
    "spread": 4,
    "stdev": 1.29,
-   "info_per_h": 51.8
+   "info_per_h": 51.8,
+   "baseline_verdict": 1
   },
   {
    "board": "picodvi",
@@ -279,7 +305,8 @@
    "cost_h": 0.014,
    "spread": 2,
    "stdev": 0.74,
-   "info_per_h": 51.4
+   "info_per_h": 51.4,
+   "baseline_verdict": 0
   },
   {
    "board": "fomu",
@@ -287,7 +314,8 @@
    "cost_h": 0.038,
    "spread": 9,
    "stdev": 1.92,
-   "info_per_h": 51.0
+   "info_per_h": 51.0,
+   "baseline_verdict": 0
   },
   {
    "board": "eis",
@@ -295,7 +323,8 @@
    "cost_h": 0.074,
    "spread": 14,
    "stdev": 3.43,
-   "info_per_h": 46.1
+   "info_per_h": 46.1,
+   "baseline_verdict": 4
   },
   {
    "board": "quickfeather",
@@ -303,7 +332,8 @@
    "cost_h": 0.038,
    "spread": 6,
    "stdev": 1.7,
-   "info_per_h": 44.4
+   "info_per_h": 44.4,
+   "baseline_verdict": 2
   },
   {
    "board": "mdfpga_hub75",
@@ -311,7 +341,8 @@
    "cost_h": 0.026,
    "spread": 3,
    "stdev": 1.08,
-   "info_per_h": 41.5
+   "info_per_h": 41.5,
+   "baseline_verdict": 1
   },
   {
    "board": "polykit_x",
@@ -319,7 +350,8 @@
    "cost_h": 0.019,
    "spread": 4,
    "stdev": 0.78,
-   "info_per_h": 41.2
+   "info_per_h": 41.2,
+   "baseline_verdict": 0
   },
   {
    "board": "rotten_pedal",
@@ -327,7 +359,8 @@
    "cost_h": 0.009,
    "spread": 2,
    "stdev": 0.39,
-   "info_per_h": 39.2
+   "info_per_h": 39.2,
+   "baseline_verdict": 0
   },
   {
    "board": "lna3030",
@@ -335,7 +368,8 @@
    "cost_h": 0.006,
    "spread": 2,
    "stdev": 0.39,
-   "info_per_h": 39.2
+   "info_per_h": 39.2,
+   "baseline_verdict": 0
   },
   {
    "board": "rp2040_dev",
@@ -343,7 +377,8 @@
    "cost_h": 0.014,
    "spread": 2,
    "stdev": 0.54,
-   "info_per_h": 38.0
+   "info_per_h": 38.0,
+   "baseline_verdict": 0
   },
   {
    "board": "steppenprobe",
@@ -351,7 +386,8 @@
    "cost_h": 0.028,
    "spread": 5,
    "stdev": 1.04,
-   "info_per_h": 36.7
+   "info_per_h": 36.7,
+   "baseline_verdict": 0
   },
   {
    "board": "ft2232h_jtag",
@@ -359,7 +395,8 @@
    "cost_h": 0.016,
    "spread": 2,
    "stdev": 0.59,
-   "info_per_h": 36.6
+   "info_per_h": 36.6,
+   "baseline_verdict": 0
   },
   {
    "board": "macropad4l",
@@ -367,7 +404,8 @@
    "cost_h": 0.011,
    "spread": 2,
    "stdev": 0.39,
-   "info_per_h": 35.6
+   "info_per_h": 35.6,
+   "baseline_verdict": 0
   },
   {
    "board": "icepi_zero",
@@ -375,7 +413,8 @@
    "cost_h": 0.085,
    "spread": 9,
    "stdev": 2.79,
-   "info_per_h": 32.9
+   "info_per_h": 32.9,
+   "baseline_verdict": 0
   },
   {
    "board": "splitflap_driver",
@@ -383,7 +422,8 @@
    "cost_h": 0.078,
    "spread": 9,
    "stdev": 2.49,
-   "info_per_h": 31.7
+   "info_per_h": 31.7,
+   "baseline_verdict": 0
   },
   {
    "board": "fpga_sdram",
@@ -391,7 +431,8 @@
    "cost_h": 0.06,
    "spread": 5,
    "stdev": 1.86,
-   "info_per_h": 31.1
+   "info_per_h": 31.1,
+   "baseline_verdict": 5
   },
   {
    "board": "smartknob_base",
@@ -399,7 +440,8 @@
    "cost_h": 0.09,
    "spread": 8,
    "stdev": 2.49,
-   "info_per_h": 27.6
+   "info_per_h": 27.6,
+   "baseline_verdict": 4
   },
   {
    "board": "ecp5_mini",
@@ -407,7 +449,8 @@
    "cost_h": 0.078,
    "spread": 7,
    "stdev": 2.12,
-   "info_per_h": 27.1
+   "info_per_h": 27.1,
+   "baseline_verdict": 4
   },
   {
    "board": "usb_pd",
@@ -415,7 +458,8 @@
    "cost_h": 0.02,
    "spread": 2,
    "stdev": 0.54,
-   "info_per_h": 27.0
+   "info_per_h": 27.0,
+   "baseline_verdict": 0
   },
   {
    "board": "dilemma",
@@ -423,7 +467,8 @@
    "cost_h": 0.067,
    "spread": 4,
    "stdev": 1.71,
-   "info_per_h": 25.7
+   "info_per_h": 25.7,
+   "baseline_verdict": 4
   },
   {
    "board": "dsp_adau1452",
@@ -431,7 +476,8 @@
    "cost_h": 0.016,
    "spread": 2,
    "stdev": 0.39,
-   "info_per_h": 25.3
+   "info_per_h": 25.3,
+   "baseline_verdict": 0
   },
   {
    "board": "kuchen",
@@ -439,7 +485,8 @@
    "cost_h": 0.074,
    "spread": 7,
    "stdev": 1.81,
-   "info_per_h": 24.4
+   "info_per_h": 24.4,
+   "baseline_verdict": 2
   },
   {
    "board": "haxophone",
@@ -447,7 +494,8 @@
    "cost_h": 0.106,
    "spread": 12,
    "stdev": 2.4,
-   "info_per_h": 22.7
+   "info_per_h": 22.7,
+   "baseline_verdict": 0
   },
   {
    "board": "neptune",
@@ -455,7 +503,8 @@
    "cost_h": 0.064,
    "spread": 4,
    "stdev": 1.4,
-   "info_per_h": 22.0
+   "info_per_h": 22.0,
+   "baseline_verdict": 4
   },
   {
    "board": "qmtech_k7",
@@ -463,7 +512,8 @@
    "cost_h": 0.008,
    "spread": 1,
    "stdev": 0.2,
-   "info_per_h": 20.4
+   "info_per_h": 20.4,
+   "baseline_verdict": 0
   },
   {
    "board": "rp2040_numpad",
@@ -471,7 +521,8 @@
    "cost_h": 0.007,
    "spread": 1,
    "stdev": 0.2,
-   "info_per_h": 19.6
+   "info_per_h": 19.6,
+   "baseline_verdict": 0
   },
   {
    "board": "microzed_carrier",
@@ -479,7 +530,8 @@
    "cost_h": 0.038,
    "spread": 3,
    "stdev": 0.73,
-   "info_per_h": 19.5
+   "info_per_h": 19.5,
+   "baseline_verdict": 1
   },
   {
    "board": "nrfmicro",
@@ -487,7 +539,8 @@
    "cost_h": 0.094,
    "spread": 6,
    "stdev": 1.74,
-   "info_per_h": 18.5
+   "info_per_h": 18.5,
+   "baseline_verdict": 4
   },
   {
    "board": "cryologger_aws",
@@ -495,7 +548,8 @@
    "cost_h": 0.03,
    "spread": 2,
    "stdev": 0.54,
-   "info_per_h": 18.3
+   "info_per_h": 18.3,
+   "baseline_verdict": 0
   },
   {
    "board": "upsy_desky",
@@ -503,7 +557,8 @@
    "cost_h": 0.085,
    "spread": 7,
    "stdev": 1.47,
-   "info_per_h": 17.2
+   "info_per_h": 17.2,
+   "baseline_verdict": 2
   },
   {
    "board": "lily58",
@@ -511,7 +566,8 @@
    "cost_h": 0.07,
    "spread": 6,
    "stdev": 1.18,
-   "info_per_h": 16.9
+   "info_per_h": 16.9,
+   "baseline_verdict": 0
   },
   {
    "board": "orbiter_kb",
@@ -519,7 +575,8 @@
    "cost_h": 0.206,
    "spread": 9,
    "stdev": 3.17,
-   "info_per_h": 15.4
+   "info_per_h": 15.4,
+   "baseline_verdict": 12
   },
   {
    "board": "nano_eeprom_prog",
@@ -527,7 +584,8 @@
    "cost_h": 0.026,
    "spread": 2,
    "stdev": 0.39,
-   "info_per_h": 15.0
+   "info_per_h": 15.0,
+   "baseline_verdict": 0
   },
   {
    "board": "ottercast_audio",
@@ -535,7 +593,8 @@
    "cost_h": 0.272,
    "spread": 11,
    "stdev": 3.95,
-   "info_per_h": 14.6
+   "info_per_h": 14.6,
+   "baseline_verdict": 2
   },
   {
    "board": "tsuraragb",
@@ -543,7 +602,8 @@
    "cost_h": 0.06,
    "spread": 4,
    "stdev": 0.87,
-   "info_per_h": 14.6
+   "info_per_h": 14.6,
+   "baseline_verdict": 0
   },
   {
    "board": "open_weather_station",
@@ -551,7 +611,8 @@
    "cost_h": 0.067,
    "spread": 5,
    "stdev": 0.98,
-   "info_per_h": 14.5
+   "info_per_h": 14.5,
+   "baseline_verdict": 5
   },
   {
    "board": "orbtrace_bob",
@@ -559,7 +620,8 @@
    "cost_h": 0.027,
    "spread": 2,
    "stdev": 0.39,
-   "info_per_h": 14.4
+   "info_per_h": 14.4,
+   "baseline_verdict": 0
   },
   {
    "board": "crkbd",
@@ -567,7 +629,8 @@
    "cost_h": 0.227,
    "spread": 16,
    "stdev": 3.15,
-   "info_per_h": 13.9
+   "info_per_h": 13.9,
+   "baseline_verdict": 2
   },
   {
    "board": "bus_pirate5",
@@ -575,7 +638,8 @@
    "cost_h": 0.049,
    "spread": 2,
    "stdev": 0.65,
-   "info_per_h": 13.2
+   "info_per_h": 13.2,
+   "baseline_verdict": 0
   },
   {
    "board": "ch32v303_dev",
@@ -583,7 +647,8 @@
    "cost_h": 0.015,
    "spread": 1,
    "stdev": 0.2,
-   "info_per_h": 12.9
+   "info_per_h": 12.9,
+   "baseline_verdict": 0
   },
   {
    "board": "kevinbot_v3",
@@ -591,7 +656,8 @@
    "cost_h": 0.128,
    "spread": 4,
    "stdev": 1.65,
-   "info_per_h": 12.9
+   "info_per_h": 12.9,
+   "baseline_verdict": 2
   },
   {
    "board": "nebula_watch",
@@ -599,7 +665,8 @@
    "cost_h": 0.035,
    "spread": 2,
    "stdev": 0.43,
-   "info_per_h": 12.3
+   "info_per_h": 12.3,
+   "baseline_verdict": 0
   },
   {
    "board": "schoko",
@@ -607,7 +674,8 @@
    "cost_h": 0.046,
    "spread": 2,
    "stdev": 0.54,
-   "info_per_h": 11.9
+   "info_per_h": 11.9,
+   "baseline_verdict": 0
   },
   {
    "board": "megadesk",
@@ -615,7 +683,8 @@
    "cost_h": 0.053,
    "spread": 2,
    "stdev": 0.58,
-   "info_per_h": 10.9
+   "info_per_h": 10.9,
+   "baseline_verdict": 2
   },
   {
    "board": "lumenpnp_mobo",
@@ -623,7 +692,8 @@
    "cost_h": 0.276,
    "spread": 9,
    "stdev": 2.93,
-   "info_per_h": 10.6
+   "info_per_h": 10.6,
+   "baseline_verdict": 2
   },
   {
    "board": "eth_tap",
@@ -631,7 +701,8 @@
    "cost_h": 0.069,
    "spread": 2,
    "stdev": 0.73,
-   "info_per_h": 10.6
+   "info_per_h": 10.6,
+   "baseline_verdict": 0
   },
   {
    "board": "usbc_liion_charger",
@@ -639,7 +710,8 @@
    "cost_h": 0.038,
    "spread": 2,
    "stdev": 0.39,
-   "info_per_h": 10.3
+   "info_per_h": 10.3,
+   "baseline_verdict": 0
   },
   {
    "board": "sofle_pico",
@@ -647,7 +719,8 @@
    "cost_h": 0.206,
    "spread": 10,
    "stdev": 1.98,
-   "info_per_h": 9.6
+   "info_per_h": 9.6,
+   "baseline_verdict": 2
   },
   {
    "board": "ulx3s",
@@ -655,7 +728,8 @@
    "cost_h": 0.635,
    "spread": 25,
    "stdev": 6.09,
-   "info_per_h": 9.6
+   "info_per_h": 9.6,
+   "baseline_verdict": 7
   },
   {
    "board": "scalenode_cm4",
@@ -663,7 +737,8 @@
    "cost_h": 0.147,
    "spread": 4,
    "stdev": 1.35,
-   "info_per_h": 9.2
+   "info_per_h": 9.2,
+   "baseline_verdict": 0
   },
   {
    "board": "neo6502",
@@ -671,7 +746,8 @@
    "cost_h": 0.433,
    "spread": 14,
    "stdev": 3.89,
-   "info_per_h": 9.0
+   "info_per_h": 9.0,
+   "baseline_verdict": 2
   },
   {
    "board": "cynthion",
@@ -679,7 +755,8 @@
    "cost_h": 0.3,
    "spread": 11,
    "stdev": 2.67,
-   "info_per_h": 8.9
+   "info_per_h": 8.9,
+   "baseline_verdict": 6
   },
   {
    "board": "glasgow_revC",
@@ -687,7 +764,8 @@
    "cost_h": 0.339,
    "spread": 9,
    "stdev": 2.68,
-   "info_per_h": 7.9
+   "info_per_h": 7.9,
+   "baseline_verdict": 2
   },
   {
    "board": "ulx5m_gatemate",
@@ -695,7 +773,8 @@
    "cost_h": 0.512,
    "spread": 16,
    "stdev": 4.0,
-   "info_per_h": 7.8
+   "info_per_h": 7.8,
+   "baseline_verdict": 10
   },
   {
    "board": "robotics_psu",
@@ -703,7 +782,8 @@
    "cost_h": 0.102,
    "spread": 4,
    "stdev": 0.8,
-   "info_per_h": 7.8
+   "info_per_h": 7.8,
+   "baseline_verdict": 0
   },
   {
    "board": "osprey_kb",
@@ -711,7 +791,8 @@
    "cost_h": 0.036,
    "spread": 1,
    "stdev": 0.27,
-   "info_per_h": 7.6
+   "info_per_h": 7.6,
+   "baseline_verdict": 0
   },
   {
    "board": "mokya_lora_phone",
@@ -719,7 +800,8 @@
    "cost_h": 0.141,
    "spread": 4,
    "stdev": 1.06,
-   "info_per_h": 7.5
+   "info_per_h": 7.5,
+   "baseline_verdict": 2
   },
   {
    "board": "openairscope",
@@ -727,7 +809,8 @@
    "cost_h": 0.074,
    "spread": 2,
    "stdev": 0.54,
-   "info_per_h": 7.4
+   "info_per_h": 7.4,
+   "baseline_verdict": 0
   },
   {
    "board": "zynq_ad9364",
@@ -735,7 +818,8 @@
    "cost_h": 0.958,
    "spread": 19,
    "stdev": 6.77,
-   "info_per_h": 7.1
+   "info_per_h": 7.1,
+   "baseline_verdict": 19
   },
   {
    "board": "keks",
@@ -743,7 +827,8 @@
    "cost_h": 0.309,
    "spread": 8,
    "stdev": 2.13,
-   "info_per_h": 6.9
+   "info_per_h": 6.9,
+   "baseline_verdict": 3
   },
   {
    "board": "sechzig",
@@ -751,7 +836,8 @@
    "cost_h": 0.179,
    "spread": 4,
    "stdev": 1.23,
-   "info_per_h": 6.9
+   "info_per_h": 6.9,
+   "baseline_verdict": 1
   },
   {
    "board": "zynq7020_som",
@@ -759,7 +845,8 @@
    "cost_h": 0.654,
    "spread": 19,
    "stdev": 4.17,
-   "info_per_h": 6.4
+   "info_per_h": 6.4,
+   "baseline_verdict": 6
   },
   {
    "board": "butterstick",
@@ -767,7 +854,8 @@
    "cost_h": 1.233,
    "spread": 26,
    "stdev": 6.78,
-   "info_per_h": 5.5
+   "info_per_h": 5.5,
+   "baseline_verdict": 25
   },
   {
    "board": "nrf51_ble_module",
@@ -775,7 +863,8 @@
    "cost_h": 0.082,
    "spread": 2,
    "stdev": 0.43,
-   "info_per_h": 5.3
+   "info_per_h": 5.3,
+   "baseline_verdict": 0
   },
   {
    "board": "lpddr4_testbed",
@@ -783,7 +872,8 @@
    "cost_h": 0.385,
    "spread": 7,
    "stdev": 1.92,
-   "info_per_h": 5.0
+   "info_per_h": 5.0,
+   "baseline_verdict": 9
   },
   {
    "board": "orangecrab",
@@ -791,7 +881,8 @@
    "cost_h": 1.305,
    "spread": 26,
    "stdev": 6.45,
-   "info_per_h": 4.9
+   "info_per_h": 4.9,
+   "baseline_verdict": 65
   },
   {
    "board": "rp2040_motorctrl",
@@ -799,7 +890,8 @@
    "cost_h": 0.08,
    "spread": 2,
    "stdev": 0.39,
-   "info_per_h": 4.9
+   "info_per_h": 4.9,
+   "baseline_verdict": 0
   },
   {
    "board": "cparti_fpga",
@@ -807,7 +899,8 @@
    "cost_h": 0.98,
    "spread": 16,
    "stdev": 4.16,
-   "info_per_h": 4.2
+   "info_per_h": 4.2,
+   "baseline_verdict": 18
   },
   {
    "board": "piantor",
@@ -815,7 +908,8 @@
    "cost_h": 0.096,
    "spread": 2,
    "stdev": 0.39,
-   "info_per_h": 4.1
+   "info_per_h": 4.1,
+   "baseline_verdict": 0
   },
   {
    "board": "caravel_nucleo",
@@ -823,7 +917,8 @@
    "cost_h": 0.141,
    "spread": 2,
    "stdev": 0.54,
-   "info_per_h": 3.9
+   "info_per_h": 3.9,
+   "baseline_verdict": 0
   },
   {
    "board": "eit_mux",
@@ -831,7 +926,8 @@
    "cost_h": 0.276,
    "spread": 3,
    "stdev": 1.02,
-   "info_per_h": 3.7
+   "info_per_h": 3.7,
+   "baseline_verdict": 0
   },
   {
    "board": "hackrf_one",
@@ -839,7 +935,8 @@
    "cost_h": 1.582,
    "spread": 14,
    "stdev": 4.61,
-   "info_per_h": 2.9
+   "info_per_h": 2.9,
+   "baseline_verdict": 6
   },
   {
    "board": "sata_sniffer",
@@ -847,7 +944,8 @@
    "cost_h": 0.269,
    "spread": 2,
    "stdev": 0.65,
-   "info_per_h": 2.4
+   "info_per_h": 2.4,
+   "baseline_verdict": 0
   },
   {
    "board": "linht_radio",
@@ -855,7 +953,8 @@
    "cost_h": 0.458,
    "spread": 3,
    "stdev": 1.01,
-   "info_per_h": 2.2
+   "info_per_h": 2.2,
+   "baseline_verdict": 1
   },
   {
    "board": "daisho",
@@ -863,7 +962,8 @@
    "cost_h": 1.374,
    "spread": 10,
    "stdev": 2.65,
-   "info_per_h": 1.9
+   "info_per_h": 1.9,
+   "baseline_verdict": 3
   },
   {
    "board": "duet2_3dp",
@@ -871,7 +971,8 @@
    "cost_h": 0.416,
    "spread": 2,
    "stdev": 0.73,
-   "info_per_h": 1.8
+   "info_per_h": 1.8,
+   "baseline_verdict": 2
   },
   {
    "board": "meshtastic_solar",
@@ -879,7 +980,8 @@
    "cost_h": 0.006,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "ackack_rover",
@@ -887,7 +989,8 @@
    "cost_h": 0.013,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "dc_poe_injector",
@@ -895,7 +998,8 @@
    "cost_h": 0.008,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "picoprobe_tester",
@@ -903,7 +1007,8 @@
    "cost_h": 0.01,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "nudac",
@@ -911,7 +1016,8 @@
    "cost_h": 0.009,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "atf1502_cpld",
@@ -919,7 +1025,8 @@
    "cost_h": 0.002,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "ch32v203_ev",
@@ -927,7 +1034,8 @@
    "cost_h": 0.004,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "kbic65",
@@ -935,7 +1043,8 @@
    "cost_h": 0.011,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "free_dap",
@@ -943,7 +1052,8 @@
    "cost_h": 0.018,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "mantis_kb",
@@ -951,7 +1061,8 @@
    "cost_h": 0.014,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "minisolarmesh",
@@ -959,7 +1070,8 @@
    "cost_h": 0.053,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "can_shield",
@@ -967,7 +1079,8 @@
    "cost_h": 0.005,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "vfo_ctrl",
@@ -975,7 +1088,8 @@
    "cost_h": 0.008,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "a20_can",
@@ -983,7 +1097,8 @@
    "cost_h": 0.002,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "system76_launch",
@@ -991,7 +1106,8 @@
    "cost_h": 0.012,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "ice5lp4k_hat",
@@ -999,7 +1115,8 @@
    "cost_h": 0.004,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "ch32v006_dev",
@@ -1007,7 +1124,8 @@
    "cost_h": 0.003,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "bfo9000",
@@ -1015,7 +1133,8 @@
    "cost_h": 0.056,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "usb_sniffer",
@@ -1023,7 +1142,8 @@
    "cost_h": 0.041,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "pinci",
@@ -1031,7 +1151,8 @@
    "cost_h": 0.026,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "stm32g474_fc",
@@ -1039,7 +1160,8 @@
    "cost_h": 0.024,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "nitrokey_pro",
@@ -1047,7 +1169,8 @@
    "cost_h": 0.01,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "castor_pollux",
@@ -1055,7 +1178,8 @@
    "cost_h": 0.036,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "bread_dcmotor",
@@ -1063,7 +1187,8 @@
    "cost_h": 0.007,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "esp32cam_pcb",
@@ -1071,7 +1196,8 @@
    "cost_h": 0.025,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "urchin_kb",
@@ -1079,7 +1205,8 @@
    "cost_h": 0.012,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "co2_monitor",
@@ -1087,7 +1214,8 @@
    "cost_h": 0.005,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "cc1101_rf_module",
@@ -1095,7 +1223,8 @@
    "cost_h": 0.002,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "urchin",
@@ -1103,7 +1232,8 @@
    "cost_h": 0.056,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "chocofi",
@@ -1111,7 +1241,8 @@
    "cost_h": 0.01,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "esp32s3_ref",
@@ -1119,7 +1250,8 @@
    "cost_h": 0.005,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "fusb302_pd_dev",
@@ -1127,7 +1259,8 @@
    "cost_h": 0.008,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "daplink",
@@ -1135,7 +1268,8 @@
    "cost_h": 0.004,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "bitaxe_ultra",
@@ -1143,7 +1277,8 @@
    "cost_h": 0.087,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "thatmicpre",
@@ -1151,7 +1286,8 @@
    "cost_h": 0.009,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "ble02_rf_module",
@@ -1159,7 +1295,8 @@
    "cost_h": 0.002,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "zigbee_sensor",
@@ -1167,7 +1304,8 @@
    "cost_h": 0.004,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "micro_ox_vco",
@@ -1175,7 +1313,8 @@
    "cost_h": 0.023,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "lora_v3",
@@ -1183,7 +1322,8 @@
    "cost_h": 0.013,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "stm32_rfm95_lora",
@@ -1191,7 +1331,8 @@
    "cost_h": 0.025,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "corax56",
@@ -1199,7 +1340,8 @@
    "cost_h": 0.021,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "noahfc",
@@ -1207,7 +1349,8 @@
    "cost_h": 0.027,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "starlighteye_cam",
@@ -1215,7 +1358,8 @@
    "cost_h": 0.021,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "helium_mult",
@@ -1223,7 +1367,8 @@
    "cost_h": 0.006,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "ch32v003_usb",
@@ -1231,7 +1376,8 @@
    "cost_h": 0.004,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "ethersweep",
@@ -1239,7 +1385,8 @@
    "cost_h": 0.014,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   },
   {
    "board": "ghoul",
@@ -1247,8 +1394,8 @@
    "cost_h": 0.06,
    "spread": 0,
    "stdev": 0.0,
-   "info_per_h": 0.0
+   "info_per_h": 0.0,
+   "baseline_verdict": 0
   }
- ],
- "caveat": "Exclusions are FITTED TO THE MEASURED ARM FAMILY (#584 soft-cost knobs, 25 arms): zero spread here does not guarantee zero spread under a different knob family (#586 heuristic/rip-up). A new family's FIRST sweep should either ignore the exclude list or re-run curate_boards on its own screen results before trusting it."
+ ]
 }

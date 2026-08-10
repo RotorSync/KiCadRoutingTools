@@ -57,10 +57,16 @@ def main():
         vals = [v for v, _ in arms.values()]
         cost = statistics.mean(t for _, t in arms.values()) / 3600
         sd = statistics.pstdev(vals)
-        scored.append({"board": b, "arms": len(arms), "cost_h": round(cost, 3),
-                       "spread": max(vals) - min(vals),
-                       "stdev": round(sd, 2),
-                       "info_per_h": round(sd / max(cost, 0.01), 1)})
+        entry = {"board": b, "arms": len(arms), "cost_h": round(cost, 3),
+                 "spread": max(vals) - min(vals),
+                 "stdev": round(sd, 2),
+                 "info_per_h": round(sd / max(cost, 0.01), 1)}
+        if "baseline" in arms:
+            # prescreen picks want boards NOT perfectly routed at baseline:
+            # verdict 0 leaves no room to see improvement and hides small
+            # damage (Andy, after the hw prescreen tied 0-0-0-0-0).
+            entry["baseline_verdict"] = arms["baseline"][0]
+        scored.append(entry)
     scored.sort(key=lambda s: -s["info_per_h"])
 
     exclude = [s["board"] for s in scored if s["spread"] == 0]
