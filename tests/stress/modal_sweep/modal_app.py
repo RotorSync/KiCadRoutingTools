@@ -45,7 +45,11 @@ REPO = "/opt/kicad-routing-tools"
 CORPUS = "/corpus"          # read-only volume: runs_setN/ manifests + boards
 RESULTS = "/results"        # writable volume: one JSON per (arm, board)
 
-app = modal.App("kicad-routing-sweep")
+# Dashboard-distinguishable runs: run_sweep.sh derives KICAD_SWEEP_NAME from
+# the arms file (arms.586.json -> kicad-sweep-586); direct `modal run` keeps
+# the generic name. In-container the env var is absent -- harmless, the name
+# only matters at client-side app creation.
+app = modal.App(os.environ.get("KICAD_SWEEP_NAME", "kicad-routing-sweep"))
 
 corpus_vol = modal.Volume.from_name("kicad-corpus", create_if_missing=True)
 results_vol = modal.Volume.from_name("kicad-sweep-results", create_if_missing=True)

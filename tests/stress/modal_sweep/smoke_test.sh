@@ -12,6 +12,7 @@
 #
 # Prereq (interactive, once):  pip install modal && modal setup
 set -euo pipefail
+export KICAD_SWEEP_NAME="${KICAD_SWEEP_NAME:-kicad-sweep-smoke}"
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SELF/../../.." && pwd)"

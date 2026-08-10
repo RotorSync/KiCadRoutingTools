@@ -34,6 +34,11 @@ SETS="${2:-${SWEEP_SETS:-set1,set2,set3,set4,set5,set6,set7,set8,set9,set10}}"
 OUT="${SWEEP_OUT:-}"
 
 [ -f "$ARMS" ] || { echo "no such arms file: $ARMS" >&2; exit 1; }
+
+# Name the Modal app after the arms file so runs are distinguishable on the
+# dashboard: arms.586.json -> kicad-sweep-586, arms.holdout.json -> kicad-sweep-holdout.
+_stem="$(basename "$ARMS" .json)"; _stem="${_stem#arms.}"; _stem="${_stem#arms_}"
+export KICAD_SWEEP_NAME="${KICAD_SWEEP_NAME:-kicad-sweep-${_stem}}"
 # Exit 3 means specifically "no baseline arm"; any other non-zero is a malformed
 # file whose own error was already printed. Collapsing the two would report
 # "no baseline" for e.g. duplicate arm names and send you hunting the wrong bug.
