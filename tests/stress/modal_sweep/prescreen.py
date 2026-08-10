@@ -60,13 +60,17 @@ def pick_boards(n=2):
 
 
 _WORKER = r"""
-import json, os, sys
+import json, os, resource, sys
 sys.path.insert(0, sys.argv[1] + "/tests/stress")
 import ab_replay_grade as abg
 from pathlib import Path
 stress, set_dir, out, board, tag = (Path(sys.argv[2]), sys.argv[3],
                                     Path(sys.argv[4]), sys.argv[5], sys.argv[6])
 r = abg.do_board(stress / set_dir, out, tag, board)
+# CPU of the whole reaped chain (redo + tools): wall time under a parallel
+# pool is contamination; CPU is the honest per-value cost (Andy).
+ru = resource.getrusage(resource.RUSAGE_CHILDREN)
+r["cpu_s"] = round(ru.ru_utime + ru.ru_stime, 1)
 (out / f"row_{board}.json").write_text(json.dumps(r))
 """
 
@@ -160,7 +164,7 @@ def main():
 
     rows = []
     for v in values:
-        verd, wall, ok = 0, 0, True
+        verd, wall, cpu, peak, ok = 0, 0, 0.0, 0.0, True
         for b in boards:
             r = results.get((v, b), {})
             if not r.get("chain_complete"):
@@ -168,18 +172,33 @@ def main():
                 continue
             verd += (r.get("nets_incomplete") or 0) + (r.get("conn") or 0)
             wall += r.get("total_seconds") or 0
-        rows.append((tags[v], verd if ok else None, wall, ok))
+            cpu += r.get("cpu_s") or 0
+            peak = max(peak, r.get("peak_rss_mb") or 0)
+        rows.append((tags[v], verd if ok else None, cpu, peak, wall, ok))
 
-    if rows[0][3] and rows[0][1] is not None and rows[0][1] < 2:
+    if rows[0][5] and rows[0][1] is not None and rows[0][1] < 2:
         print(f"\nWARN: boards route near-perfectly at the DEFAULT locally "
               f"(verdict {rows[0][1]}) -- damage and improvement both "
               "invisible; pick more challenging --boards.")
-    print(f"\n{'value':<12}{'verdict':>8}{'wall_s':>8}")
+    print(f"\n{'value':<12}{'verdict':>8}{'cpu_s':>8}{'peak_mb':>9}{'wall_s':>8}")
     best = min((r[1] for r in rows if r[1] is not None), default=0)
-    for tag, verd, wall, ok in rows:
-        note = "" if ok else "  CHAIN BROKEN"
-        flag = "" if verd is None or verd <= best + 3 else "  <- outside sensible range?"
-        print(f"{tag:<12}{str(verd):>8}{wall:>8.0f}{note}{flag}")
+    base_cpu, base_peak = rows[0][2], rows[0][3]
+    for tag, verd, cpu, peak, wall, ok in rows:
+        # Viability (Andy): >50% over the DEFAULT's measured CPU or peak RSS
+        # disqualifies a value regardless of quality -- resources are part of
+        # the default contract. CPU not wall (pool contention); peak is the
+        # tree-sampled max across boards.
+        flags = []
+        if not ok:
+            flags.append("CHAIN BROKEN")
+        if verd is not None and verd > best + 3:
+            flags.append("quality: outside sensible range?")
+        if base_cpu and cpu > 1.5 * base_cpu:
+            flags.append(f"NOT VIABLE cpu +{100*(cpu/base_cpu-1):.0f}%")
+        if base_peak and peak > 1.5 * base_peak:
+            flags.append(f"NOT VIABLE mem +{100*(peak/base_peak-1):.0f}%")
+        sfx = ("  <- " + "; ".join(flags)) if flags else ""
+        print(f"{tag:<12}{str(verd):>8}{cpu:>8.0f}{peak:>9.0f}{wall:>8.0f}{sfx}")
     print("\nPick 2-3 values from the sensible range for the cloud screen.")
     return 0
 
