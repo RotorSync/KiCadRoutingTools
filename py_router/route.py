@@ -3613,10 +3613,26 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     board_edge_clearance=_oedge)
                 from kicad_dru import install_layer_clearances
                 install_layer_clearances(_ocfg, None, input_file, None)
+                # #527 follow-up: the oracle's own per-round / per-link
+                # callbacks were already there, but THIS call site never
+                # passed one -- so the whole leg ran behind the cleanup
+                # pipeline's last message ("Cleanup: soft-joint bridging..."),
+                # which reads as a hang. It is the longest silent stretch in
+                # the run: on a board where the model and KiCad's exact fill
+                # disagree the oracle can spend minutes routing the missing
+                # links (act_probe_2ghz: 33 links, ~10k seeded on-pad start
+                # cells per blocked endpoint). Deliberately NO cancel_check:
+                # the plane finalize is custody work, and #527's rule is that
+                # cancel must never abandon a restore half-done.
+                _opc9 = None
+                if progress_callback:
+                    _opc9 = (lambda c, t, m, _o=progress_callback:
+                             _o(c, t, f"Plane finalize: {m}"))
                 _orc = oracle_reconnect(
                     _orc_file9, _zna, _ocfg,
                     track_via_clearance=defaults.PLANE_TRACK_VIA_CLEARANCE,
                     hole_to_hole_clearance=config.hole_to_hole_clearance,
+                    progress_callback=_opc9,
                     project_from=input_file)
                 print(f"  [finalize timing] oracle leg: "
                       f"{_time9.time() - _t9:.1f}s")

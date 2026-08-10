@@ -1134,6 +1134,14 @@ def oracle_reconnect(board_file: str, net_names, config,
                         from kicad_exact_fill import refill_islands
                         print("  KiCad-oracle recheck: fetching exact fill "
                               "islands (pcbnew refill)...")
+                        # A whole-board pcbnew refill: seconds to minutes on a
+                        # dense board, and it used to run with no status of its
+                        # own (the caller's last per-link label stayed frozen
+                        # on screen for its whole duration).
+                        if progress_callback:
+                            progress_callback(
+                                0, 0, "KiCad-oracle: refilling zones for "
+                                      "exact fill islands...")
                         _exact_cache['islands'] = refill_islands(
                             board_file, verbose=verbose)
                         if _exact_cache['islands'] is not None:

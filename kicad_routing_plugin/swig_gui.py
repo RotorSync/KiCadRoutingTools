@@ -3407,6 +3407,24 @@ class RoutingDialog(wx.Dialog):
             self.progress_bar.Pulse()  # Indeterminate progress
             self.status_text.SetLabel(step_name)
 
+    def _apply_status(self, message):
+        """Status update for the APPLY phase, which runs on the UI thread.
+
+        _update_progress is fed by the engine thread through wx.CallAfter, so
+        the main loop paints it. Apply runs ON the main thread and blocks it,
+        so a bare SetLabel would not repaint until apply finished -- leaving
+        the engine's LAST message ("Plane finalize: ...", "Cleanup: ...") on
+        screen for the whole apply and reading as a hang. Force the repaint.
+        Guarded: a status update must never be able to break the apply.
+        """
+        try:
+            self.status_text.SetLabel(message)
+            self.progress_bar.Pulse()
+            self.status_text.Update()
+            self.progress_bar.Update()
+        except Exception:
+            pass
+
     def _clear_user_layer_graphics(self, board, layer_name):
         """Remove graphic shapes (lines/polys/rects) on a User layer from the board.
 
@@ -3439,6 +3457,8 @@ class RoutingDialog(wx.Dialog):
         if board is None:
             wx.MessageBox("Board is no longer open", "Error", wx.OK | wx.ICON_ERROR)
             return
+
+        self._apply_status("Applying copper to the board...")
 
         # Apply pad/stub net swaps (target swaps) and stub layer modifications
         # BEFORE adding new tracks - the routes were created assuming these
@@ -3587,6 +3607,7 @@ class RoutingDialog(wx.Dialog):
                 print(f"Cleared {cleared} graphic(s) from the guide/keepout User layer(s)")
 
         # Build connectivity to register new items properly
+        self._apply_status("Rebuilding board connectivity...")
         board.BuildConnectivity()
 
         # Re-fill plane zones so any pour pulls back around the copper we just
@@ -3594,6 +3615,7 @@ class RoutingDialog(wx.Dialog):
         # leave the plane fill stale (no antipad), which KiCad DRC flags as
         # clearance / shorting violations on the saved board.
         from .gui_utils import refill_all_zones
+        self._apply_status("Refilling zones around the new copper...")
         _rf = refill_all_zones(board)
         if _rf:
             print(f"Refilled {_rf} zone(s) around the new copper")
@@ -3612,6 +3634,11 @@ class RoutingDialog(wx.Dialog):
         if _pfo and _pfo.get('nets'):
             try:
                 from .gui_utils import run_kicad_oracle_on_live_board
+                # Runs on the UI thread like the rest of apply, so it reports
+                # through _apply_status (which forces the repaint) rather than
+                # the engine-thread callback. The oracle names the net and the
+                # link count it is working through, so a long leg is legible
+                # instead of looking wedged.
                 _orc = run_kicad_oracle_on_live_board(
                     board, _pfo['nets'],
                     clearance=_pfo.get('clearance'),
@@ -3621,8 +3648,13 @@ class RoutingDialog(wx.Dialog):
                     grid_step=_pfo.get('grid_step'),
                     hole_to_hole_clearance=_pfo.get(
                         'hole_to_hole_clearance'),
-                    layer_clearances=_pfo.get('layer_clearances'))
+                    layer_clearances=_pfo.get('layer_clearances'),
+                    progress_callback=(
+                        lambda c, t, m: self._apply_status(
+                            f"{m} ({c}/{t})" if t else m)))
                 if _orc is not None:
+                    self._apply_status("Rebuilding connectivity after the "
+                                       "plane-finalize oracle...")
                     board.BuildConnectivity()
                     _rf2 = refill_all_zones(board)
                     if _rf2:
@@ -3684,10 +3716,12 @@ class RoutingDialog(wx.Dialog):
             pass
 
         # Refresh the view
+        self._apply_status("Refreshing the board view...")
         pcbnew.Refresh()
 
         # Sync pcb_data from pcbnew board to ensure subsequent routing and
         # connectivity checks see the new tracks
+        self._apply_status("Syncing board data...")
         self._sync_pcb_data_from_board()
 
         # Update UI and show completion message
