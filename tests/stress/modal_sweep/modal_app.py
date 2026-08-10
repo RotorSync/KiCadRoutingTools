@@ -370,11 +370,22 @@ def replay_big(task: dict) -> dict:
 @app.local_entrypoint()
 def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,set10",
          stress_dir: str = "", out: str = "", dry_run: bool = False,
-         boards: str = "", limit: int = 0):
+         boards: str = "", limit: int = 0, stage: str = "full",
+         gate_margin: float = 0.25):
     """boards: comma-separated board names to restrict to (smoke tests).
     limit:  keep only the N CHEAPEST boards -- a smoke test wants fast feedback,
             and the default longest-first order would otherwise hand you the
-            50-minute monster first."""
+            50-minute monster first.
+    stage:  'full' = every arm x every board (minus board_value.json excludes).
+            'screened' = successive halving: every arm first runs the ~12-board
+            SCREEN set from board_value.json (~$0.15/arm); arms whose screen
+            pad-verdict is worse than baseline's by more than gate_margin
+            (fractional, min +3 absolute) are KILLED before the full set --
+            a clearly-bad arm costs cents instead of dollars.
+    gate_margin: screened-stage kill threshold; generous by default so
+            regime-specialists (good on boards the cheap screen lacks) survive
+            to the full set. The gate can only save money, not flip winners:
+            final rankings still come from the full set."""
     stress = Path(stress_dir or os.path.expanduser("~/Documents/kicad_stress_test"))
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import sweep_lib as sl
@@ -383,6 +394,15 @@ def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,se
     set_list = [s.strip() for s in sets.split(",") if s.strip()]
     board_list = sl.discover_boards(stress, set_list)
     costs = sl.load_cost_table(stress)
+
+    bv_path = Path(__file__).resolve().parent / "board_value.json"
+    board_value = json.loads(bv_path.read_text()) if bv_path.exists() else {}
+    excluded = set(board_value.get("exclude", []))
+    if excluded:
+        n0 = len(board_list)
+        board_list = [(s, b) for s, b in board_list if b not in excluded]
+        print(f"  board_value: excluded {n0 - len(board_list)} zero-information "
+              f"board(s): {sorted(excluded & {b for _, b in board_list} | excluded)}")
 
     if boards:
         want = {b.strip() for b in boards.split(",") if b.strip()}
@@ -438,29 +458,80 @@ def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,se
         print(f"  resume: {before - len(tasks)} tasks already have rows on "
               f"the volume -- skipped; {len(tasks)} to run")
 
-    std = [t for t in tasks if t["memory_mb"] <= sl.DEFAULT_MEM_MB]
-    results = []
-
     # .map() BLOCKS until its tier drains, so calling the two tiers in sequence
-    # would hold every 12 GB board back until the 4 GB ones finished (or vice
-    # versa) -- and the 12 GB tier holds the longest boards, i.e. exactly the
-    # ones that must start first. Drain both concurrently instead.
+    # would hold every big-tier board back until the small ones finished (or
+    # vice versa) -- and the big tier holds the longest boards, i.e. exactly
+    # the ones that must start first. Drain both concurrently instead.
     import threading
-    lock = threading.Lock()
 
-    def drain(fn, items):
-        if not items:
-            return
-        for r in fn.map(items, order_outputs=False):
-            with lock:
-                results.append(r)
+    def run_tasks(items):
+        rows, lock = [], threading.Lock()
 
-    threads = [threading.Thread(target=drain, args=(replay_big, big)),
-               threading.Thread(target=drain, args=(replay_standard, std))]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+        def drain(fn, sub):
+            if not sub:
+                return
+            for r in fn.map(sub, order_outputs=False):
+                with lock:
+                    rows.append(r)
+
+        threads = [threading.Thread(target=drain, args=(
+                       replay_big,
+                       [t for t in items if t["memory_mb"] > sl.DEFAULT_MEM_MB])),
+                   threading.Thread(target=drain, args=(
+                       replay_standard,
+                       [t for t in items if t["memory_mb"] <= sl.DEFAULT_MEM_MB]))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        return rows
+
+    if stage == "screened":
+        screen_boards = set(board_value.get("screen", []))
+        if not screen_boards:
+            raise SystemExit("--stage screened needs board_value.json with a "
+                             "screen list (run curate_boards.py)")
+        screen_tasks = [t for t in tasks if t["board"] in screen_boards]
+        rest = [t for t in tasks if t["board"] not in screen_boards]
+        print(f"  stage 1: screen -- {len(screen_tasks)} tasks on "
+              f"{len(screen_boards)} boards")
+        results = run_tasks(screen_tasks)
+        # Gate on the pad-verdict proxy summed over screen boards, PAIRED:
+        # an arm is judged only against the boards where both it and baseline
+        # completed this run. Arms whose screen rows were all banked (resume)
+        # have no fresh coverage and ADVANCE -- the gate saves money on
+        # clearly-bad NEW arms, it never blocks on missing data, and final
+        # rankings always come from the full set.
+        per = {}
+        for r in results:
+            if r and r.get("chain_complete"):
+                v = (r.get("nets_incomplete") or 0) + (r.get("conn") or 0)
+                per.setdefault(r["arm"], {})[r["board"]] = v
+        killed = set()
+        base = per.get("baseline")
+        if not base:
+            print("  gate: no fresh baseline screen rows -- gate skipped")
+        else:
+            for a_, sc in sorted(per.items()):
+                if a_ == "baseline":
+                    continue
+                both = set(sc) & set(base)
+                if len(both) < max(3, len(base) // 2):
+                    continue    # too little paired coverage to judge
+                s_arm = sum(sc[b] for b in both)
+                s_base = sum(base[b] for b in both)
+                thresh = s_base + max(3.0, gate_margin * s_base)
+                if s_arm > thresh:
+                    killed.add(a_)
+                    print(f"  gate: KILLED {a_} (screen {s_arm} vs baseline "
+                          f"{s_base} on {len(both)} boards, threshold {thresh:.1f})")
+        survivors = {s["name"] for s in arm_specs} - killed
+        rest = [t for t in rest if t["arm"] in survivors]
+        print(f"  stage 2: full -- {len(survivors)}/{len(arm_specs)} arms, "
+              f"{len(rest)} tasks")
+        results += run_tasks(rest)
+    else:
+        results = run_tasks(tasks)
 
     summary = sl.summarize(results)
     summary["wall_clock_s"] = round(time.time() - started, 1)

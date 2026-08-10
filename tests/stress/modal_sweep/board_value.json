@@ -1,0 +1,338 @@
+{
+ "generated_from": "/private/tmp/claude-501/-Users-andy-Documents-KiCadRoutingTools/271b5ae5-1237-4275-ba5e-81b756160bee/scratchpad/cloudopt",
+ "boards_scored": 39,
+ "screen": [
+  "eis",
+  "icepi_zero",
+  "fpga_sdram",
+  "nrfmicro",
+  "dilemma",
+  "ottercast_audio",
+  "lily58",
+  "orbiter_kb",
+  "crkbd",
+  "kevinbot_v3",
+  "sechzig",
+  "ecp5_mini"
+ ],
+ "exclude": [
+  "vfo_ctrl",
+  "bfo9000",
+  "open_weather_station",
+  "ghoul"
+ ],
+ "table": [
+  {
+   "board": "eis",
+   "arms": 25,
+   "cost_h": 0.074,
+   "spread": 14,
+   "stdev": 3.43,
+   "info_per_h": 46.1
+  },
+  {
+   "board": "icepi_zero",
+   "arms": 24,
+   "cost_h": 0.083,
+   "spread": 9,
+   "stdev": 2.66,
+   "info_per_h": 32.0
+  },
+  {
+   "board": "fpga_sdram",
+   "arms": 25,
+   "cost_h": 0.06,
+   "spread": 5,
+   "stdev": 1.86,
+   "info_per_h": 31.1
+  },
+  {
+   "board": "nrfmicro",
+   "arms": 24,
+   "cost_h": 0.062,
+   "spread": 6,
+   "stdev": 1.78,
+   "info_per_h": 28.7
+  },
+  {
+   "board": "dilemma",
+   "arms": 20,
+   "cost_h": 0.065,
+   "spread": 4,
+   "stdev": 1.83,
+   "info_per_h": 28.1
+  },
+  {
+   "board": "ottercast_audio",
+   "arms": 20,
+   "cost_h": 0.22,
+   "spread": 11,
+   "stdev": 3.72,
+   "info_per_h": 16.9
+  },
+  {
+   "board": "lily58",
+   "arms": 25,
+   "cost_h": 0.07,
+   "spread": 6,
+   "stdev": 1.18,
+   "info_per_h": 16.9
+  },
+  {
+   "board": "orbiter_kb",
+   "arms": 25,
+   "cost_h": 0.206,
+   "spread": 9,
+   "stdev": 3.17,
+   "info_per_h": 15.4
+  },
+  {
+   "board": "crkbd",
+   "arms": 25,
+   "cost_h": 0.227,
+   "spread": 16,
+   "stdev": 3.15,
+   "info_per_h": 13.9
+  },
+  {
+   "board": "kevinbot_v3",
+   "arms": 25,
+   "cost_h": 0.128,
+   "spread": 4,
+   "stdev": 1.65,
+   "info_per_h": 12.9
+  },
+  {
+   "board": "sechzig",
+   "arms": 18,
+   "cost_h": 0.103,
+   "spread": 4,
+   "stdev": 1.27,
+   "info_per_h": 12.3
+  },
+  {
+   "board": "ecp5_mini",
+   "arms": 6,
+   "cost_h": 0.075,
+   "spread": 2,
+   "stdev": 0.75,
+   "info_per_h": 10.0
+  },
+  {
+   "board": "sofle_pico",
+   "arms": 25,
+   "cost_h": 0.206,
+   "spread": 10,
+   "stdev": 1.98,
+   "info_per_h": 9.6
+  },
+  {
+   "board": "ulx3s",
+   "arms": 24,
+   "cost_h": 0.628,
+   "spread": 25,
+   "stdev": 6.03,
+   "info_per_h": 9.6
+  },
+  {
+   "board": "cynthion",
+   "arms": 25,
+   "cost_h": 0.3,
+   "spread": 11,
+   "stdev": 2.67,
+   "info_per_h": 8.9
+  },
+  {
+   "board": "tsuraragb",
+   "arms": 24,
+   "cost_h": 0.052,
+   "spread": 2,
+   "stdev": 0.44,
+   "info_per_h": 8.4
+  },
+  {
+   "board": "zynq_ad9364",
+   "arms": 12,
+   "cost_h": 0.897,
+   "spread": 19,
+   "stdev": 7.3,
+   "info_per_h": 8.1
+  },
+  {
+   "board": "ulx5m_gatemate",
+   "arms": 25,
+   "cost_h": 0.512,
+   "spread": 16,
+   "stdev": 4.0,
+   "info_per_h": 7.8
+  },
+  {
+   "board": "osprey_kb",
+   "arms": 25,
+   "cost_h": 0.036,
+   "spread": 1,
+   "stdev": 0.27,
+   "info_per_h": 7.6
+  },
+  {
+   "board": "scalenode_cm4",
+   "arms": 21,
+   "cost_h": 0.154,
+   "spread": 4,
+   "stdev": 1.14,
+   "info_per_h": 7.4
+  },
+  {
+   "board": "neo6502",
+   "arms": 21,
+   "cost_h": 0.463,
+   "spread": 11,
+   "stdev": 3.25,
+   "info_per_h": 7.0
+  },
+  {
+   "board": "keks",
+   "arms": 25,
+   "cost_h": 0.309,
+   "spread": 8,
+   "stdev": 2.13,
+   "info_per_h": 6.9
+  },
+  {
+   "board": "zynq7020_som",
+   "arms": 25,
+   "cost_h": 0.654,
+   "spread": 19,
+   "stdev": 4.17,
+   "info_per_h": 6.4
+  },
+  {
+   "board": "butterstick",
+   "arms": 24,
+   "cost_h": 1.234,
+   "spread": 26,
+   "stdev": 6.91,
+   "info_per_h": 5.6
+  },
+  {
+   "board": "lpddr4_testbed",
+   "arms": 23,
+   "cost_h": 0.369,
+   "spread": 7,
+   "stdev": 1.95,
+   "info_per_h": 5.3
+  },
+  {
+   "board": "orangecrab",
+   "arms": 24,
+   "cost_h": 1.302,
+   "spread": 26,
+   "stdev": 6.57,
+   "info_per_h": 5.0
+  },
+  {
+   "board": "rp2040_motorctrl",
+   "arms": 25,
+   "cost_h": 0.08,
+   "spread": 2,
+   "stdev": 0.39,
+   "info_per_h": 4.9
+  },
+  {
+   "board": "cparti_fpga",
+   "arms": 23,
+   "cost_h": 0.972,
+   "spread": 16,
+   "stdev": 4.11,
+   "info_per_h": 4.2
+  },
+  {
+   "board": "caravel_nucleo",
+   "arms": 25,
+   "cost_h": 0.141,
+   "spread": 2,
+   "stdev": 0.54,
+   "info_per_h": 3.9
+  },
+  {
+   "board": "hackrf_one",
+   "arms": 15,
+   "cost_h": 1.277,
+   "spread": 14,
+   "stdev": 4.82,
+   "info_per_h": 3.8
+  },
+  {
+   "board": "eit_mux",
+   "arms": 23,
+   "cost_h": 0.289,
+   "spread": 3,
+   "stdev": 1.03,
+   "info_per_h": 3.6
+  },
+  {
+   "board": "sata_sniffer",
+   "arms": 25,
+   "cost_h": 0.269,
+   "spread": 2,
+   "stdev": 0.65,
+   "info_per_h": 2.4
+  },
+  {
+   "board": "linht_radio",
+   "arms": 25,
+   "cost_h": 0.458,
+   "spread": 3,
+   "stdev": 1.01,
+   "info_per_h": 2.2
+  },
+  {
+   "board": "duet2_3dp",
+   "arms": 24,
+   "cost_h": 0.372,
+   "spread": 2,
+   "stdev": 0.75,
+   "info_per_h": 2.0
+  },
+  {
+   "board": "daisho",
+   "arms": 24,
+   "cost_h": 1.392,
+   "spread": 10,
+   "stdev": 2.68,
+   "info_per_h": 1.9
+  },
+  {
+   "board": "vfo_ctrl",
+   "arms": 24,
+   "cost_h": 0.008,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0
+  },
+  {
+   "board": "bfo9000",
+   "arms": 25,
+   "cost_h": 0.056,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0
+  },
+  {
+   "board": "open_weather_station",
+   "arms": 24,
+   "cost_h": 0.029,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0
+  },
+  {
+   "board": "ghoul",
+   "arms": 18,
+   "cost_h": 0.06,
+   "spread": 0,
+   "stdev": 0.0,
+   "info_per_h": 0.0
+  }
+ ]
+}
