@@ -130,16 +130,45 @@ def main():
         sl.patch_routing_defaults(wt, {a.knob: v})
         trees[v] = wt
 
+    # Workers run in their OWN process group and are tracked, so killing the
+    # prescreen kills the whole tree. Learned the hard way: pkill of the
+    # parent left 4 orphaned worker chains (redo + route, no "prescreen" in
+    # their cmdlines) burning CPU into an abandoned tmp dir alongside the
+    # next run's legitimate 4 (Andy counted 8).
+    import atexit
+    import signal
+    live = set()
+
+    def _reap(*_):
+        for proc in list(live):
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        if _:
+            sys.exit(143)
+
+    atexit.register(_reap)
+    signal.signal(signal.SIGTERM, _reap)
+    signal.signal(signal.SIGINT, _reap)
+
     def run_one(v, board):
         env = dict(os.environ)
         if a.env and v is not None:
             env[a.knob] = str(v)
         out = out_root / f"res_{tags[v]}"
         out.mkdir(parents=True, exist_ok=True)
-        subprocess.run([sys.executable, "-c", _WORKER, str(trees[v]),
-                        str(stress), f"runs_{locs[board]}", str(out), board,
-                        f"pre:{tags[v]}"], env=env, check=False,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen([sys.executable, "-c", _WORKER, str(trees[v]),
+                                 str(stress), f"runs_{locs[board]}", str(out),
+                                 board, f"pre:{tags[v]}"], env=env,
+                                start_new_session=True,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        live.add(proc)
+        try:
+            proc.wait()
+        finally:
+            live.discard(proc)
         p = out / f"row_{board}.json"
         return json.loads(p.read_text()) if p.exists() else {}
 
