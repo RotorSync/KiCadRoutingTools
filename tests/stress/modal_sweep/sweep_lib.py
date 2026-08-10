@@ -17,10 +17,19 @@ import json
 import re
 from pathlib import Path
 
-# A board whose recorded peak footprint exceeds this gets the big container tier.
-BIG_MEM_THRESHOLD_MB = 3500
-DEFAULT_MEM_MB = 4096
-BIG_MEM_MB = 12288
+# Memory tiers, resized 2026-08-10 from 414 MEASURED cloud tasks (real Linux
+# RSS via the fixed /proc sampler). Modal bills max(reserved, used) per
+# second, so a reservation only ever ADDS cost -- it buys OOM-protection,
+# not capacity (containers burst above the reservation). Measured: flat 1 GB
+# lands 0.3% above the pure-usage floor (673 vs 671 GB-h on the sample),
+# while per-board peak reservation costs +78% (the board max bills against
+# every LIGHT arm's runtime too) and the old 4/12 sizing +47%. Peaks
+# routinely exceed the reserve BY DESIGN: p50 2.1 GB, p90 5.2 GB, max 8.6 GB
+# (hackrf_one, every arm) all completed in 2 GB containers via burst.
+# The big tier is OOM insurance for boards that PROVE flaky under burst:
+# name them in KICAD_SWEEP_BIG_BOARDS (comma-separated) for a top-up run.
+DEFAULT_MEM_MB = 1024
+BIG_MEM_MB = 8192
 # Fallback cost for a board with no recorded timing (mid-pack, not last).
 DEFAULT_COST_S = 120.0
 
@@ -177,11 +186,14 @@ LONG_BOARD_S = 30 * 60
 
 
 def memory_mb_for(board: str, costs: dict) -> int:
-    c = costs.get(board) or {}
-    peak = c.get("peak_mb", 0.0)
-    if peak:
-        return BIG_MEM_MB if peak > BIG_MEM_THRESHOLD_MB else DEFAULT_MEM_MB
-    return BIG_MEM_MB if c.get("seconds", 0.0) > LONG_BOARD_S else DEFAULT_MEM_MB
+    """Everything rides the small tier (see the tier note above: reserving
+    for predicted need measurably COSTS money under max(reserved, used)
+    billing and burst covers real peaks). The big tier is opt-in OOM
+    insurance for boards that proved flaky under burst."""
+    import os
+    big = {b.strip() for b in os.environ.get("KICAD_SWEEP_BIG_BOARDS",
+                                             "").split(",") if b.strip()}
+    return BIG_MEM_MB if board in big else DEFAULT_MEM_MB
 
 
 def build_tasks(arms: list, boards: list, costs: dict) -> list:

@@ -14,10 +14,11 @@ Measured on sets 1-10 (see sweep_lib.load_cost_table for provenance):
   one arm ~8.6 CPU-h  ->  100 arms ~864 CPU-h / 15,000 tasks
   500 concurrent cores ~1.7 h   |   ~1,730 cores reaches the floor
 
-Two container tiers, assigned from recorded peak_footprint_mb: 4 GB standard,
-12 GB for the handful of boards that spike (one hit 10 GB). Sizing off
-peak_rss_mb instead would under-provision those by up to 5x -- RSS
-under-reports (issue #419).
+Memory: ONE small tier (1 GB) for everything -- Modal bills max(reserved,
+used), so reservations only add cost while burst covers real peaks (p90
+5.2 GB tasks complete fine; measured 0.3% over the pure-usage floor). The
+8 GB tier is opt-in OOM insurance via KICAD_SWEEP_BIG_BOARDS; see
+sweep_lib's tier note for the 414-task measurement behind this.
 
 Prerequisites and known-unverified bits are in README.md. Notably this file has
 NOT been executed against Modal's API from this repo -- pin `modal` per the
@@ -348,14 +349,14 @@ def extract_corpus(archive_rel: str) -> int:
     return n
 
 
-@app.function(image=image, cpu=1.0, memory=2048,
+@app.function(image=image, cpu=1.0, memory=1024,
               timeout=4 * 3600, retries=modal.Retries(max_retries=1),
               volumes={CORPUS: corpus_vol, RESULTS: results_vol})
 def replay_standard(task: dict) -> dict:
     return _replay_one(task)
 
 
-@app.function(image=image, cpu=1.0, memory=4096,
+@app.function(image=image, cpu=1.0, memory=8192,
               timeout=6 * 3600, retries=modal.Retries(max_retries=1),
               volumes={CORPUS: corpus_vol, RESULTS: results_vol})
 def replay_big(task: dict) -> dict:
@@ -398,7 +399,7 @@ def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,se
 
     est_h = sum(t["est_seconds"] for t in tasks) / 3600
     floor_m = max((t["est_seconds"] for t in tasks), default=0) / 60
-    big = [t for t in tasks if t["memory_mb"] > 4096]
+    big = [t for t in tasks if t["memory_mb"] > sl.DEFAULT_MEM_MB]
     print(f"{len(arm_specs)} arms x {len(boards)} boards = {len(tasks)} tasks")
     print(f"  estimated {est_h:,.0f} CPU-hours; floor (longest board) {floor_m:.0f} min")
     print(f"  {len(big)} tasks routed to the big tier")
@@ -437,7 +438,7 @@ def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,se
         print(f"  resume: {before - len(tasks)} tasks already have rows on "
               f"the volume -- skipped; {len(tasks)} to run")
 
-    std = [t for t in tasks if t["memory_mb"] <= 4096]
+    std = [t for t in tasks if t["memory_mb"] <= sl.DEFAULT_MEM_MB]
     results = []
 
     # .map() BLOCKS until its tier drains, so calling the two tiers in sequence
