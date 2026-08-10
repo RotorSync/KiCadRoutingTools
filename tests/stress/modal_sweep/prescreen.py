@@ -40,8 +40,14 @@ sys.path.insert(0, str(REPO / "tests" / "stress"))
 def pick_boards(stress: Path, n=2):
     bv = json.loads((HERE / "board_value.json").read_text())
     costs = {s["board"]: s for s in bv.get("table", [])}
+    # Highest measured spread first (cost as tiebreak): discrimination is what
+    # a range-finder needs. Caveat learned on first use: spread is KNOB-FAMILY
+    # dependent (esp_prog spreads 14 under soft-cost arms, ZERO under the
+    # heuristic dial), so a 2-board prescreen reliably catches BLOWUPS
+    # (quality collapse, wall-time explosion) while mild degradation is the
+    # cloud screen's job -- that division is what each stage costs.
     screen = sorted((b for b in bv.get("screen", []) if b in costs),
-                    key=lambda b: costs[b]["cost_h"])
+                    key=lambda b: (-costs[b]["spread"], costs[b]["cost_h"]))
     return screen[:n]
 
 
