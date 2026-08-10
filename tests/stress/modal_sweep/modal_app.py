@@ -418,13 +418,18 @@ def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,se
     # (arm, board) whose row exists; true holes (preempted-twice, OOM) have
     # no row and re-run naturally. This is what makes stop -> retier ->
     # relaunch iterations cheap.
+    # ONE recursive listing, and failures are LOUD: the first version did 25
+    # per-arm listdir calls with except-pass, transient failures silently
+    # un-skipped those arms' rows, and 43 banked tasks re-ran (harmless --
+    # deterministic rows overwrite identically -- but re-billed).
     existing = set()
-    for spec in arm_specs:
-        try:
-            for e in results_vol.listdir(f"/{spec['name']}"):
-                existing.add(f"{spec['name']}/{os.path.basename(e.path)}")
-        except Exception:
-            pass
+    try:
+        for e in results_vol.listdir("/", recursive=True):
+            p = e.path.lstrip("/")
+            if p.endswith(".json") and "/" in p:
+                existing.add(p)
+    except Exception as ex:
+        print(f"  resume: results-volume listing FAILED ({ex}); running all tasks")
     if existing:
         before = len(tasks)
         tasks = [t for t in tasks
