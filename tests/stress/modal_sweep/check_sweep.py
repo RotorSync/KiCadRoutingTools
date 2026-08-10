@@ -39,7 +39,8 @@ OUTCOME_KEYS = ("completion_pct", "drc", "conn", "nets_incomplete")
 TIMING_NOISE_FRAC = 0.10
 
 
-def check(data: dict, require_all_complete: bool = False) -> int:
+def check(data: dict, require_all_complete: bool = False,
+          max_broken_frac: float = 0.25) -> int:
     rows = data.get("rows") or []
     if not rows:
         print("FAIL: no rows in this sweep")
@@ -49,8 +50,20 @@ def check(data: dict, require_all_complete: bool = False) -> int:
     # 1 -----------------------------------------------------------------
     broken = [r for r in rows if not r.get("chain_complete")]
     if broken:
-        msg = f"{len(broken)}/{len(rows)} rows have a broken chain"
-        (failures if require_all_complete else warnings).append(msg)
+        frac = len(broken) / len(rows)
+        msg = f"{len(broken)}/{len(rows)} rows have a broken chain ({frac*100:.0f}%)"
+        # A real sweep legitimately has SOME failing boards, so a broken chain is
+        # normally a warning. But a high RATE means something systemic, not board
+        # difficulty -- e.g. the pre-#522 manifests whose root-level tool paths
+        # went unremapped: every step exited rc=2 while --continue-on-error kept
+        # the task green, and that flavour is 75 of the 150 boards in sets 1-10.
+        # Reporting half the corpus as a warning would bury it.
+        if require_all_complete or frac > max_broken_frac:
+            failures.append(msg + (f" -- above the {max_broken_frac*100:.0f}% "
+                                   "threshold, so this looks systemic, not per-board"
+                                   if not require_all_complete else ""))
+        else:
+            warnings.append(msg)
         for r in broken[:5]:
             tail = (r.get("replay_log_tail") or r.get("stderr_tail") or "").strip().splitlines()
             print(f"   broken: {r.get('arm')}/{r.get('board')}"
@@ -139,11 +152,16 @@ def check(data: dict, require_all_complete: bool = False) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("sweep_json")
+    ap.add_argument("--max-broken-frac", type=float, default=0.25,
+                    help="fail if more than this FRACTION of rows have a broken "
+                         "chain (default 0.25) -- a high rate is systemic, not "
+                         "board difficulty")
     ap.add_argument("--require-all-complete", action="store_true",
                     help="treat ANY broken chain as failure (right for a smoke test; "
                          "a real sweep legitimately has some failing boards)")
     a = ap.parse_args()
-    return check(json.loads(Path(a.sweep_json).read_text()), a.require_all_complete)
+    return check(json.loads(Path(a.sweep_json).read_text()),
+                 a.require_all_complete, a.max_broken_frac)
 
 
 if __name__ == "__main__":
