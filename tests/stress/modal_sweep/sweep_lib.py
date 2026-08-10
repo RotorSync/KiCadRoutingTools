@@ -92,6 +92,19 @@ def recorded_repo_prefix(manifest_text: str) -> str | None:
     return m.group(1) if m else None
 
 
+def recorded_corpus_prefix(manifest_text: str) -> str | None:
+    """The stress dir baked into a manifest, from its `# cwd=` line.
+
+    Manifests reference the INPUT board absolutely
+    (`<stress>/boards_unrouted_<set>/<board>.kicad_pcb`) while intermediates are
+    relative to the run dir. So a replay needs the corpus reachable at its
+    recorded path, not just the repo. The `# cwd=` line is
+    `<stress>/runs_<set>/<board>`, so the stress dir is its grandparent.
+    """
+    m = re.search(r"^#\s*cwd=(\S+)/runs_[^/\s]+/[^/\s]+\s*$", manifest_text, re.MULTILINE)
+    return m.group(1) if m else None
+
+
 # --------------------------------------------------------------------------
 # 2. Recorded cost table (dispatch order + memory tier)
 # --------------------------------------------------------------------------

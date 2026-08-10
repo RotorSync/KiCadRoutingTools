@@ -51,6 +51,50 @@ results_vol = modal.Volume.from_name("kicad-sweep-results", create_if_missing=Tr
 _here = Path(__file__).resolve().parent
 _repo_root = _here.parent.parent.parent
 
+
+def _image_source() -> tuple:
+    """(dir_to_ship, provenance) -- a CLEAN checkout of HEAD by default.
+
+    Shipping the working tree makes the baseline arm whatever happens to be
+    uncommitted locally. That is not hypothetical: the first green smoke run had
+    `baseline` and `tp2` produce byte-identical results (8.05s, 100%, 0 DRC)
+    because another session's uncommitted TRACK_PROXIMITY_COST=2.0 was baked in
+    as "pristine", so both arms ran at 2.0. A sweep would have compared 100 arms
+    against an unknown baseline and reported "no effect".
+
+    `git archive HEAD` pins the image to a commit, which also means a sweep is
+    reproducible and you can keep editing locally while it runs.
+
+    KICAD_SWEEP_DIRTY=1 ships the working tree instead -- for deliberately
+    sweeping an uncommitted engine change. It warns, and the commit recorded in
+    every result row is suffixed `+dirty` so the provenance is never silent.
+    """
+    import subprocess as _sp
+    import tempfile
+
+    def _git(*a):
+        return _sp.run(["git", "-C", str(_repo_root), *a],
+                       capture_output=True, text=True).stdout.strip()
+
+    sha = _git("rev-parse", "--short", "HEAD") or "unknown"
+    if os.environ.get("KICAD_SWEEP_DIRTY") == "1":
+        dirty = _git("status", "--porcelain")
+        print(f"!! KICAD_SWEEP_DIRTY=1: shipping the WORKING TREE, not {sha}."
+              f" Uncommitted files:\n{dirty or '   (none -- tree is clean)'}")
+        return str(_repo_root), f"{sha}+dirty"
+    tmp = Path(tempfile.mkdtemp(prefix="kicad-sweep-src-"))
+    rc = _sp.run(["git", "-C", str(_repo_root), "archive", "--format=tar", "HEAD",
+                  "-o", str(tmp / "src.tar")]).returncode
+    if rc != 0:
+        raise SystemExit("git archive HEAD failed -- cannot build a reproducible image")
+    _sp.run(["tar", "-xf", str(tmp / "src.tar"), "-C", str(tmp)], check=True)
+    (tmp / "src.tar").unlink()
+    print(f"image source: clean checkout of {sha}")
+    return str(tmp), sha
+
+
+_src_dir, GIT_SHA = _image_source()
+
 image = (
     modal.Image.debian_slim(python_version="3.12")
     # numpy/scipy/shapely are the ENTIRE runtime dependency set: check_drc.py and
@@ -60,7 +104,7 @@ image = (
     # arm locally, where KiCad already lives -- that check caught #487.)
     .pip_install("numpy>=1.21.0", "scipy>=1.7.0", "shapely>=1.8.0")
     .apt_install("curl")
-    .add_local_dir(str(_repo_root), REPO, copy=True, ignore=[
+    .add_local_dir(_src_dir, REPO, copy=True, ignore=[
         "**/.git/**", "**/__pycache__/**", "**/target/**", "**/.claude/worktrees/**",
     ])
     .run_commands(
@@ -78,6 +122,9 @@ image = (
         #   .run_commands("curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal")
         # and append `|| (. $HOME/.cargo/env && python3 build_router.py --from-source)`.
         f"cd {REPO} && python3 build_router.py",
+        # Pristine copy for per-task restore: containers are REUSED, so without
+        # this a previous arm's routing_defaults patch leaks into the next task.
+        f"cp {REPO}/py_router/routing_defaults.py {REPO}/py_router/routing_defaults.py.orig",
         # Prove the extension actually imports in a FRESH interpreter before 15,000
         # tasks depend on it. build_router verifies in a subprocess for the same
         # reason: an in-process re-import of a compiled extension reports the
@@ -96,18 +143,47 @@ def _replay_one(task: dict) -> dict:
     """Replay + grade ONE board under ONE arm. Runs inside the container."""
     t0 = time.time()
     arm, board, set_name = task["arm"], task["board"], task["set"]
-    work = Path(f"/tmp/{arm}/{set_name}")
-    stage = work / "stage"
-    stage.mkdir(parents=True, exist_ok=True)
 
-    # 1. Stage a one-board "set" dir. ab_replay_grade enumerates subdirs of --set
-    #    that contain redo_commands.sh, so a dir holding exactly one board makes
-    #    it replay+grade exactly that board -- and emit the SAME summary.json
-    #    schema as a full-set wave, so `ab_replay_grade.py --compare` still works
-    #    on the aggregate. No grading logic is duplicated here.
-    src = Path(CORPUS) / f"runs_{set_name}" / board
-    dst = stage / board
-    shutil.copytree(src, dst, dirs_exist_ok=True)
+    # 0. Restore a pristine routing_defaults.py. Modal REUSES containers across
+    #    tasks and the image's repo copy is a writable overlay, so a previous
+    #    arm's patch would otherwise persist -- a `baseline` task landing in a
+    #    container that already ran `tp2` would silently route with tp2's costs
+    #    and the two arms would look identical. Failing loudly if the pristine
+    #    copy is missing beats sweeping with contaminated defaults.
+    pristine = Path(REPO) / "py_router" / "routing_defaults.py.orig"
+    if not pristine.exists():
+        raise RuntimeError("routing_defaults.py.orig missing -- image built without it; "
+                           "arms would contaminate each other in a reused container")
+    shutil.copy(pristine, Path(REPO) / "py_router" / "routing_defaults.py")
+
+    # 1. Stage the board at its RECORDED absolute path. Manifests bake the input
+    #    board absolutely (<stress>/boards_unrouted_<set>/<board>.kicad_pcb) while
+    #    intermediates are relative, and ab_replay_grade's own --remap src:dst
+    #    assumes --set IS the recorded run dir. Staging anywhere else breaks both:
+    #    the first tool exits rc=1 on a missing input, which is what the smoke test
+    #    caught. Reconstructing the recorded path makes every baked path resolve
+    #    natively, so only the REPO prefix ever needs remapping.
+    manifest_src = Path(CORPUS) / f"runs_{set_name}" / board / "redo_commands.sh"
+    recorded_stress = sweep_lib.recorded_corpus_prefix(manifest_src.read_text())
+    if not recorded_stress:
+        raise RuntimeError(f"{board}: no '# cwd=' line -- cannot place the corpus")
+    root = Path(recorded_stress)
+    set_dir = root / f"runs_{set_name}"
+    set_dir.mkdir(parents=True, exist_ok=True)
+    dst = set_dir / board
+    if dst.exists():
+        shutil.rmtree(dst)            # reused container: never inherit a prior wave
+    shutil.copytree(Path(CORPUS) / f"runs_{set_name}" / board, dst)
+    # Board dirs are read-only inputs -> symlink rather than copy.
+    for d in (f"boards_unrouted_{set_name}", f"boards_{set_name}"):
+        srcd, lnk = Path(CORPUS) / d, root / d
+        if srcd.exists() and not lnk.exists():
+            lnk.symlink_to(srcd)
+    # set_dir holds exactly this ONE board, so ab_replay_grade replays only it --
+    # and emits the SAME summary.json schema as a full-set wave, so `--compare`
+    # still works on the aggregate and no grading logic is duplicated here.
+    stage = set_dir
+    work = Path(f"/tmp/{arm}__{set_name}__{board}")
 
     # 2. Apply this arm's parameters.
     spec = task["arm_spec"]
@@ -115,8 +191,6 @@ def _replay_one(task: dict) -> dict:
     env.update({k: str(v) for k, v in (spec.get("env") or {}).items()})
     patched = {}
     if spec.get("defaults"):
-        # Each container has its own writable copy of the repo, so this needs no
-        # git state and cannot race another arm.
         patched = sweep_lib.patch_routing_defaults(Path(REPO), spec["defaults"])
     manifest_path = dst / "redo_commands.sh"
     text = manifest_path.read_text()
@@ -147,7 +221,7 @@ def _replay_one(task: dict) -> dict:
         except Exception as e:
             row = {"parse_error": str(e)[:200]}
     row.update({
-        "arm": arm, "set": set_name, "board": board,
+        "arm": arm, "set": set_name, "board": board, "git": GIT_SHA,
         "rc": proc.returncode,
         "sweep_wall_s": round(time.time() - t0, 1),
         "patched_defaults": {k: v[1] for k, v in patched.items()},
@@ -158,6 +232,15 @@ def _replay_one(task: dict) -> dict:
         # keep enough context to reproduce it rather than dropping the row.
         row["stderr_tail"] = (proc.stderr or "")[-2000:]
         row["chain_complete"] = False
+    if not row.get("chain_complete"):
+        # A summary can exist and STILL report a broken chain (a tool exited
+        # non-zero). The engine's error lives in the per-board _replay.log inside
+        # the ephemeral container, so carry its tail out -- without it the row
+        # says only "chain_complete: false" and the failure is undiagnosable,
+        # which is exactly where the first smoke run left us.
+        log = out_dir / board / "_replay.log"
+        if log.exists():
+            row["replay_log_tail"] = log.read_text(errors="replace")[-3000:]
 
     dest = Path(RESULTS) / arm
     dest.mkdir(parents=True, exist_ok=True)
