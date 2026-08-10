@@ -511,10 +511,32 @@ def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,se
             if r and r.get("chain_complete"):
                 v = (r.get("nets_incomplete") or 0) + (r.get("conn") or 0)
                 per.setdefault(r["arm"], {})[r["board"]] = v
+        # Top up screen coverage from BANKED rows: an arm fully banked by a
+        # prior run (baseline, after any earlier campaign) has no FRESH rows,
+        # which used to skip the gate entirely. Banked rows are equally valid
+        # comparison data -- read them off the volume.
+        for spec in arm_specs:
+            aname = spec["name"]
+            have = per.get(aname, {})
+            for sb in screen_boards - set(have):
+                hit = next((p for p in existing
+                            if p.startswith(f"{aname}/")
+                            and p.endswith(f"__{sb}.json")), None)
+                if not hit:
+                    continue
+                try:
+                    raw = b"".join(results_vol.read_file(hit))
+                    r = json.loads(raw)
+                    r = r[0] if isinstance(r, list) else r
+                    if r.get("chain_complete"):
+                        per.setdefault(aname, {})[sb] = \
+                            (r.get("nets_incomplete") or 0) + (r.get("conn") or 0)
+                except Exception as ex:
+                    print(f"  gate: banked row {hit} unreadable ({ex})")
         killed = set()
         base = per.get("baseline")
         if not base:
-            print("  gate: no fresh baseline screen rows -- gate skipped")
+            print("  gate: no baseline screen rows at all -- gate skipped")
         else:
             for a_, sc in sorted(per.items()):
                 if a_ == "baseline":
