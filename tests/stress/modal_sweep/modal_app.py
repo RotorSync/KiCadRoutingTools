@@ -350,14 +350,14 @@ def extract_corpus(archive_rel: str) -> int:
 
 
 @app.function(image=image, cpu=1.0, memory=1024,
-              timeout=4 * 3600, retries=modal.Retries(max_retries=1),
+              timeout=4 * 3600, retries=modal.Retries(max_retries=3),
               volumes={CORPUS: corpus_vol, RESULTS: results_vol})
 def replay_standard(task: dict) -> dict:
     return _replay_one(task)
 
 
 @app.function(image=image, cpu=1.0, memory=8192,
-              timeout=6 * 3600, retries=modal.Retries(max_retries=1),
+              timeout=6 * 3600, retries=modal.Retries(max_retries=3),
               volumes={CORPUS: corpus_vol, RESULTS: results_vol})
 def replay_big(task: dict) -> dict:
     """Same work, bigger tier (4 GB while measuring -- was 12 GB sized
