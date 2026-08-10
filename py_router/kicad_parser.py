@@ -4329,6 +4329,19 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         groups=groups,
         guide_paths=guide_paths,
         keepout_zones=keepout_zones,
+        # Writer parity with parse_kicad_pcb (which has always set this): on a
+        # KiCad 10 name-net board the writers emit `(net "NAME")` ONLY when they
+        # have this map -- `board_uses_name_nets()` decides the FORM, but the
+        # call sites pass `net_id_to_name if kicad_v10 else None`, so an empty
+        # map silently degrades to numeric `(net N)` ids. KiCad 10 boards carry
+        # NO numeric net table, so those ids are resolved against pcbnew's own
+        # ordering: harmless when our numbering happens to coincide, and wrong
+        # copper when it does not. A board loaded from a pre-KiCad-10 file
+        # renumbers on load, so it does not coincide -- act_probe_2ghz's staged
+        # finalize board came back with 90 phantom unconnected links (all of
+        # GND aimed at one point) and the oracle ground for minutes trying to
+        # weld breaks that never existed.
+        net_id_to_name={net_id: net.name for net_id, net in nets.items()},
         # #498 parity with parse_kicad_pcb: sibling-file discovery (.kicad_dru)
         source_path=os.path.abspath(board.GetFileName()) if board.GetFileName() else "",
         # #424: exact-fill consumers read the LIVE board, never a stale file

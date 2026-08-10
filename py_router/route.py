@@ -1648,6 +1648,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         total_layer_swaps=total_layer_swaps,
         net_obstacles_cache=net_obstacles_cache,
         working_obstacles=working_obstacles,
+        # Latent today (only diff_pair_loop reads state.cancel_check, and
+        # route_diff passes its own), but the single-ended state carried None
+        # while its caller had a live cancel in hand -- any future consumer
+        # would silently be uncancellable.
+        cancel_check=cancel_check,
     )
 
     # Create local aliases for frequently-used state fields
@@ -3621,9 +3626,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # the run: on a board where the model and KiCad's exact fill
                 # disagree the oracle can spend minutes routing the missing
                 # links (act_probe_2ghz: 33 links, ~10k seeded on-pad start
-                # cells per blocked endpoint). Deliberately NO cancel_check:
-                # the plane finalize is custody work, and #527's rule is that
-                # cancel must never abandon a restore half-done.
+                # cells per blocked endpoint).
+                #
+                # cancel_check IS threaded, and is custody-safe here by
+                # construction (#527's rule: cancel must never abandon a
+                # restore half-done). The oracle leg is purely ADDITIVE --
+                # it welds links KiCad reports missing -- and its own
+                # cancel_check breaks only BETWEEN links/rounds, then returns
+                # the normal result dict. So a cancel lands every weld
+                # completed so far and drops only the unstarted ones; it can
+                # never strand a net at zero copper the way an interrupted
+                # rip/restore could.
                 _opc9 = None
                 if progress_callback:
                     _opc9 = (lambda c, t, m, _o=progress_callback:
@@ -3633,6 +3646,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     track_via_clearance=defaults.PLANE_TRACK_VIA_CLEARANCE,
                     hole_to_hole_clearance=config.hole_to_hole_clearance,
                     progress_callback=_opc9,
+                    cancel_check=cancel_check,
                     project_from=input_file)
                 print(f"  [finalize timing] oracle leg: "
                       f"{_time9.time() - _t9:.1f}s")
