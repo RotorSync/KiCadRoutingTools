@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -189,7 +190,16 @@ def _replay_one(task: dict) -> dict:
         shutil.rmtree(dst)            # reused container: never inherit a prior wave
     shutil.copytree(Path(CORPUS) / f"runs_{set_name}" / board, dst)
     # Board dirs are read-only inputs -> symlink rather than copy.
-    for d in (f"boards_unrouted_{set_name}", f"boards_{set_name}"):
+    # NAME SPLIT: the RUN dir may carry a recording suffix (runs_set3_llm0801)
+    # while the board dirs never do (boards_unrouted_set3) -- deriving them
+    # from the full set_name made srcd.exists() False, silently skipped the
+    # symlink, and every chain's step 1 died on its absolute input path.
+    # Symlink both spellings; manifests reference the unsuffixed one.
+    base = re.match(r"(set\d+[a-z]*)", set_name)
+    names = {f"boards_unrouted_{set_name}", f"boards_{set_name}"}
+    if base:
+        names |= {f"boards_unrouted_{base.group(1)}", f"boards_{base.group(1)}"}
+    for d in sorted(names):
         srcd, lnk = Path(CORPUS) / d, root / d
         if srcd.exists() and not lnk.exists():
             lnk.symlink_to(srcd)
