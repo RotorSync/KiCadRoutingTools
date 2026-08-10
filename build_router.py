@@ -185,7 +185,17 @@ def try_download_prebuilt(script_dir, rust_dir, tag):
     if tag is None:
         want = _cargo_version(rust_dir)
         rel_ver = (release.get('tag_name') or '').lstrip('v')
-        if want and rel_ver and rel_ver != want:
+        # Skip ONLY when Cargo.toml is genuinely AHEAD of the newest release: no
+        # published asset can satisfy the startup version guard, so the download
+        # is pointless. Cargo.toml BEHIND the release tag is normal and the asset
+        # is usually exactly right -- /VERSION may lead Cargo.toml, and a
+        # python-only release republishes the CURRENT crate binaries (v0.20.2
+        # ships crate 0.20.1). This used to be a plain `!=`, which also skipped
+        # the behind case and sent every such user to a source build -- the
+        # normal state right after any python-only release. Whatever we download
+        # is still verified by the post-install version check in main(), which
+        # self-heals a stale asset, so trying is cheap and never wrong.
+        if want and rel_ver and _ver_tuple(rel_ver) < _ver_tuple(want):
             print("Latest release is v%s but rust_router/Cargo.toml is %s -- "
                   "no matching prebuilt exists yet." % (rel_ver, want))
             return False
@@ -344,6 +354,20 @@ def _import_version_subprocess(rust_dir):
         print("Import failed: %s" % (out.stderr.strip() or out.stdout.strip()))
         return None
     return out.stdout.strip() or 'unknown'
+
+
+def _ver_tuple(v):
+    """'0.20.10' -> (0, 20, 10) for ORDERED comparison.
+
+    Not a string compare: '0.20.10' < '0.20.9' lexically but is newer. Unparsable
+    components sort as 0, which makes an odd version compare as older and so
+    merely attempts a download the post-install check would reject anyway.
+    """
+    out = []
+    for part in str(v).split('.'):
+        digits = ''.join(c for c in part if c.isdigit())
+        out.append(int(digits) if digits else 0)
+    return tuple(out)
 
 
 def _cargo_version(rust_dir):
