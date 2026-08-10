@@ -154,10 +154,49 @@ with image.imports():
     import sweep_lib
 
 
+_TEE_RE = None
+
+
+def _run_teed(cmd, env, tag, timeout_s):
+    """subprocess.run(capture_output=True) replacement that TEES the chain's
+    step-level progress to container stdout, so the Modal logs tab shows
+    which board is on which routing step instead of 'no logs to display'
+    (each task was otherwise silent by design: the full output goes to the
+    per-board _replay.log). Echoed lines only -- step starts ([3/15] tool
+    ...), step end-timings (-> 12.3s exit 0), the wave's per-board result
+    line, and errors; the complete text is still captured and returned on a
+    subprocess.run-compatible object for the harvest/log-persistence logic.
+    """
+    global _TEE_RE
+    import re as _re
+    import threading
+    if _TEE_RE is None:
+        _TEE_RE = _re.compile(
+            r"^\[\d+/\d+\] |^\s*-> [\d.]+s|^\[[^]]+\] \S+: chain="
+            r"|Traceback|FATAL|NORESULT|ABORT")
+    proc = subprocess.Popen(cmd, env=env, text=True, errors="replace",
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    timer = threading.Timer(timeout_s, proc.kill)
+    timer.start()
+    buf = []
+    try:
+        for line in proc.stdout:
+            buf.append(line)
+            if _TEE_RE.search(line):
+                print(f"[{tag}] {line.rstrip()[:200]}", flush=True)
+        proc.wait()
+    finally:
+        timer.cancel()
+    out = "".join(buf)
+    print(f"[{tag}] done rc={proc.returncode}", flush=True)
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, "")
+
+
 def _replay_one(task: dict) -> dict:
     """Replay + grade ONE board under ONE arm. Runs inside the container."""
     t0 = time.time()
     arm, board, set_name = task["arm"], task["board"], task["set"]
+    print(f"[{arm}/{board}] start ({set_name})", flush=True)
 
     # 0. Restore a pristine routing_defaults.py. Modal REUSES containers across
     #    tasks and the image's repo copy is a writable overlay, so a previous
@@ -232,8 +271,8 @@ def _replay_one(task: dict) -> dict:
     cmd = [sys.executable, f"{REPO}/tests/stress/ab_replay_grade.py",
            "--set", str(stage), "--out", str(out_dir),
            "--label", arm, "--jobs", "1"] + extra
-    proc = subprocess.run(cmd, capture_output=True, text=True, env=env,
-                          timeout=task.get("timeout_s", 4 * 3600))
+    proc = _run_teed(cmd, env=env, tag=f"{arm}/{board}",
+                     timeout_s=task.get("timeout_s", 4 * 3600))
 
     # 4. Harvest the single summary row.
     row, summary_file = {}, out_dir / "summary.json"
@@ -254,7 +293,8 @@ def _replay_one(task: dict) -> dict:
     if not summary_file.exists():
         # A board that produced no summary at all is a real finding, not noise --
         # keep enough context to reproduce it rather than dropping the row.
-        row["stderr_tail"] = (proc.stderr or "")[-2000:]
+        # (stderr rides stdout since the _run_teed change.)
+        row["stderr_tail"] = (proc.stderr or proc.stdout or "")[-2000:]
         row["chain_complete"] = False
     if not row.get("chain_complete"):
         # A summary can exist and STILL report a broken chain (a tool exited
