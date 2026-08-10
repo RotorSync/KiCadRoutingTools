@@ -258,6 +258,16 @@ def _replay_one(task: dict) -> dict:
 
     dest = Path(RESULTS) / arm
     dest.mkdir(parents=True, exist_ok=True)
+    if not row.get("chain_complete"):
+        # Tail-only context proved insufficient (the first failing step's
+        # error scrolls off a 3000-char tail on a 15-command chain): persist
+        # the WHOLE replay log as a sibling on a broken chain. Cheap -- only
+        # broken rows pay -- and it turns cloud debugging from re-run-with-
+        # a-tweak roundtrips into a single volume get.
+        log = out_dir / board / "_replay.log"
+        if log.exists():
+            (dest / f"{set_name}__{board}.log").write_text(
+                log.read_text(errors="replace"))
     (dest / f"{set_name}__{board}.json").write_text(json.dumps(row, indent=1))
     results_vol.commit()
     return row
