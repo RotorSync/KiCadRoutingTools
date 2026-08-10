@@ -3415,15 +3415,13 @@ class RoutingDialog(wx.Dialog):
         so a bare SetLabel would not repaint until apply finished -- leaving
         the engine's LAST message ("Plane finalize: ...", "Cleanup: ...") on
         screen for the whole apply and reading as a hang. Force the repaint.
-        Guarded: a status update must never be able to break the apply.
+        Guarded: a status update must never be able to break the apply. See
+        gui_utils.ui_thread_status for why the repaint is deliberately narrow
+        (no Gauge.Pulse) inside an action plugin.
         """
-        try:
-            self.status_text.SetLabel(message)
-            self.progress_bar.Pulse()
-            self.status_text.Update()
-            self.progress_bar.Update()
-        except Exception:
-            pass
+        from .gui_utils import ui_thread_status
+        ui_thread_status(getattr(self, 'status_text', None),
+                         getattr(self, 'progress_bar', None), message)
 
     def _clear_user_layer_graphics(self, board, layer_name):
         """Remove graphic shapes (lines/polys/rects) on a User layer from the board.

@@ -4,6 +4,61 @@ KiCad Routing Tools - GUI Utilities
 Shared utilities for the plugin GUI.
 """
 
+# Re-entrancy latch for ui_thread_status (see below). Module-level, not
+# per-tab: a nested repaint can reach a DIFFERENT tab's helper.
+_IN_UI_STATUS = False
+
+
+def ui_thread_status(status_text, progress_bar, message):
+    """Show `message` for work running ON the wx main thread.
+
+    Engine-thread progress reaches the UI through wx.CallAfter, so the main
+    loop paints it. Work that runs ON the main thread (the apply phase, the
+    fanout, the plane-copper cleanup) BLOCKS that loop, so a bare SetLabel
+    would not repaint until the work finished -- the previous phase's label
+    stays on screen and reads as a hang.
+
+    Repainting from inside a KiCad ACTION PLUGIN is the delicate part, and the
+    reason this is one guarded helper rather than three hand-rolled copies:
+
+      * Only ever touch wx from the main thread. Off-thread callers are
+        marshalled with CallAfter instead (never dropped).
+      * Refresh + Update ONLY the static text. `wx.Gauge.Pulse()` starts an
+        indeterminate ANIMATION -- on macOS that schedules timers and can
+        dispatch events re-entrantly, which is exactly what corrupts the
+        thread state PYTHON_ACTION_PLUGIN::CallMethod releases on return
+        (a PyGILState_Release fatal abort takes KiCad down with it).
+      * A latch, because Update() runs the paint path and a nested call from
+        it must not recurse.
+      * Fully guarded: a status update must never break the work it reports.
+
+    Escape hatch: KICAD_NO_UI_STATUS_REPAINT=1 sets the label but never forces
+    the paint. The status then lags on blocking phases (the pre-fix behaviour),
+    which is strictly cosmetic -- so if a repaint from inside the plugin ever
+    destabilises a KiCad build, the label is the thing to give up, not the run.
+    """
+    global _IN_UI_STATUS
+    if _IN_UI_STATUS:
+        return
+    try:
+        import os
+        import wx
+        if not wx.IsMainThread():
+            wx.CallAfter(ui_thread_status, status_text, progress_bar, message)
+            return
+        _IN_UI_STATUS = True
+        try:
+            if status_text:
+                status_text.SetLabel(message)
+                if os.environ.get('KICAD_NO_UI_STATUS_REPAINT', '') not in \
+                        ('1', 'yes', 'true'):
+                    status_text.Refresh()
+                    status_text.Update()
+        finally:
+            _IN_UI_STATUS = False
+    except Exception:
+        _IN_UI_STATUS = False
+
 
 class StdoutRedirector:
     """Redirects stdout to a callback function while preserving original output."""

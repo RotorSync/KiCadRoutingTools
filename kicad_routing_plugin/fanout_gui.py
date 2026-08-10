@@ -1324,15 +1324,13 @@ class FanoutTab(wx.Panel):
 
         A bare SetLabel cannot repaint while the main thread is blocked, so
         force it -- otherwise the tab shows one frozen label for the whole run.
-        Guarded: reporting must never break the fanout.
+        Guarded: reporting must never break the fanout. See
+        gui_utils.ui_thread_status for why the repaint is deliberately narrow
+        (no Gauge.Pulse) inside an action plugin.
         """
-        try:
-            self.status_text.SetLabel(message)
-            self.progress_bar.Pulse()
-            self.status_text.Update()
-            self.progress_bar.Update()
-        except Exception:
-            pass
+        from .gui_utils import ui_thread_status
+        ui_thread_status(getattr(self, 'status_text', None),
+                         getattr(self, 'progress_bar', None), message)
 
     def _run_bga_fanout(self, footprint, net_patterns, config):
         """Run BGA fanout."""

@@ -819,15 +819,13 @@ class PlanesTab(wx.Panel):
         the main loop paints it. Anything running ON the main thread blocks that
         loop, so a bare SetLabel would not repaint until the work finished --
         leaving the previous phase's label on screen and reading as a hang.
-        Guarded: a status update must never break the apply.
+        Guarded: a status update must never break the apply. See
+        gui_utils.ui_thread_status for why the repaint is deliberately narrow
+        (no Gauge.Pulse) inside an action plugin.
         """
-        try:
-            self.status_text.SetLabel(message)
-            self.progress_bar.Pulse()
-            self.status_text.Update()
-            self.progress_bar.Update()
-        except Exception:
-            pass
+        from .gui_utils import ui_thread_status
+        ui_thread_status(getattr(self, 'status_text', None),
+                         getattr(self, 'progress_bar', None), message)
 
     def _run_create_planes(self, config):
         """Run plane creation."""
