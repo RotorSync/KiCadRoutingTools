@@ -66,6 +66,10 @@ import ab_replay_grade as abg
 from pathlib import Path
 stress, set_dir, out, board, tag = (Path(sys.argv[2]), sys.argv[3],
                                     Path(sys.argv[4]), sys.argv[5], sys.argv[6])
+if board == "ddr5_testbed":
+    # its manifest bakes one output into the OLD runs_set2/ dir; without this
+    # remap the clobber guard aborts the chain (same fix as wave_driver's)
+    abg.EXTRA_REMAPS.append(f"{stress}/runs_set2/ddr5_testbed:{out / board}")
 r = abg.do_board(stress / set_dir, out, tag, board)
 # CPU of the whole reaped chain (redo + tools): wall time under a parallel
 # pool is contamination; CPU is the honest per-value cost (Andy).
