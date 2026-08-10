@@ -2962,7 +2962,7 @@ if __name__ == "__main__":
 
     from fab_tiers import add_fab_tier_args, fab_tier_from_args, set_default_fab_tier
     add_fab_tier_args(parser)
-    args = parser.parse_args()
+    args = __import__("cli_nets").pin_dash_digit_values(parser).parse_args()
     set_default_fab_tier(*fab_tier_from_args(args))
 
     # Grade at the clearance the board was actually routed to. When -c is not

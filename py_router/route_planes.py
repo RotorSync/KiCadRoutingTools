@@ -3953,7 +3953,7 @@ Examples:
     from fab_tiers import (add_fab_tier_args, fab_tier_from_args, set_default_fab_tier,
                            enforce_fab_floors, count_copper_layers_in_file)
     add_fab_tier_args(parser)
-    args = parser.parse_args()
+    args = __import__("cli_nets").pin_dash_digit_values(parser).parse_args()
     # #439: identical net-class/clearance model to route.py. --clearance is the
     # clamp switch: GIVEN -> ceiling, every class capped at min(class, ceiling),
     # writeback clamps (_clamp_netclasses True). OMITTED -> each net routes at its

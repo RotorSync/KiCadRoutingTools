@@ -393,7 +393,7 @@ def main():
     parser.add_argument("--work-dir", default=None,
                         help="Directory for intermediate files "
                              "(default: alongside output)")
-    args = parser.parse_args()
+    args = __import__("cli_nets").pin_dash_digit_values(parser).parse_args()
 
     if args.max_displacement < 0:
         parser.error("--max-displacement must be >= 0")

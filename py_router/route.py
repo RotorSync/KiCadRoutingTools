@@ -4555,7 +4555,7 @@ For differential pair routing, use route_diff.py:
     from fab_tiers import (add_fab_tier_args, fab_tier_from_args, set_default_fab_tier,
                            enforce_fab_floors, count_copper_layers_in_file)
     add_fab_tier_args(parser)
-    args = parser.parse_args()
+    args = __import__("cli_nets").pin_dash_digit_values(parser).parse_args()
     # #439: the PRESENCE of --clearance is the clamp switch. Given -> it is the
     # ceiling: non-Default classes are capped at min(class, --clearance) and the
     # output .kicad_pro clamps them to the routed floor. Omitted -> honor the

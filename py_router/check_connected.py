@@ -1741,7 +1741,7 @@ if __name__ == "__main__":
     parser.add_argument('--routed-only', '-r', action='store_true',
                         help='Only check routed nets (skip unrouted net detection)')
 
-    args = parser.parse_args()
+    args = __import__("cli_nets").pin_dash_digit_values(parser).parse_args()
 
     issues = run_connectivity_check(args.pcb, args.nets, args.tolerance, args.quiet, args.verbose, args.component, args.routed_only)
     sys.exit(1 if issues else 0)

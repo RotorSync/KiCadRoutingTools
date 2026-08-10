@@ -1823,7 +1823,7 @@ Examples:
     from fab_tiers import (add_fab_tier_args, fab_tier_from_args, set_default_fab_tier,
                            enforce_fab_floors, count_copper_layers_in_file)
     add_fab_tier_args(parser)
-    args = parser.parse_args()
+    args = __import__("cli_nets").pin_dash_digit_values(parser).parse_args()
     # #439: the PRESENCE of --clearance is the clamp switch (see route.py). Given ->
     # non-Default classes capped at min(class, --clearance) + writeback clamps.
     # Omitted -> honor classes: base = board Default net-class clearance, classes
