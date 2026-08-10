@@ -28,6 +28,15 @@ TIER_PKG = {"easy": "2-layer,MCU", "medium": "4-layer,USB,MCU", "hard": "BGA,FPG
 # What a set IS, carried into the generated fetch_setN.py docstring. Without this
 # the generator overwrites any hand-written description every time it re-runs.
 SET_BLURB = {
+    "set28": (
+        "set28 is the hwidvorakinfo (Daniel Dvorak) batch -- a single-designer\n"
+        "survey of that author's 22 public repos, of which only 3 ship a\n"
+        ".kicad_pcb at all (the rest are firmware-only STM32 Eclipse projects).\n"
+        "BEASTH7_01 was rejected by validate_candidate.py as pre-KiCad-6 format\n"
+        "(20171130, ships a v5 .pro rather than a .kicad_pro), leaving two:\n"
+        "a 2 GHz active scope probe (RF/analog, few nets but tight geometry) and\n"
+        "a 218-footprint smart agricultural switch (mains-side power + MCU)."
+    ),
     "set3monster": (
         "set3monster is the \"extreme / intractable\" monster batch: boards whose\n"
         "size or stackup puts a single route step near (or past) the RUNBOOK 3h/command\n"
