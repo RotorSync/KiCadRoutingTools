@@ -440,7 +440,10 @@ def generate_qfn_fanout(footprint: Footprint,
                         # #581: > 0 forbids via-in-pad (overrides
                         # allow_via_in_pad); None auto-reads the .kicad_pro
                         # record a chain step persisted.
-                        same_net_pad_clearance: Optional[float] = None) -> Tuple[List[Dict], List[Dict], List[str]]:
+                        same_net_pad_clearance: Optional[float] = None,
+                        # progress_callback(current, total, label); the fanout
+                        # tab otherwise shows one static label for the run.
+                        progress_callback=None) -> Tuple[List[Dict], List[Dict], List[str]]:
     """
     Generate QFN fanout tracks for a footprint.
 
@@ -530,6 +533,11 @@ def generate_qfn_fanout(footprint: Footprint,
     # Analyze all pads
     pad_infos: List[PadInfo] = []
     side_counts = defaultdict(int)
+
+    if progress_callback:
+        progress_callback(
+            0, 0, f"QFN fanout {getattr(footprint, 'reference', '?')}: "
+                  f"analyzing {len(footprint.pads)} pad(s)...")
 
     for pad in footprint.pads:
         if not pad.net_name or pad.net_id == 0:
@@ -636,8 +644,11 @@ def generate_qfn_fanout(footprint: Footprint,
     install_layer_clearances(_obs_cfg, None, None, pcb_data)  # #498
     _obs_layer_map = build_layer_map(_obs_cfg.layers)
     _fanned_net_ids = [p.net_id for p in footprint.pads if p.net_id]
+    if progress_callback:
+        progress_callback(0, 0, "QFN fanout: building obstacle map...")
     _obstacles = build_base_obstacle_map(pcb_data, _obs_cfg, nets_to_route=_fanned_net_ids,
-                                         extra_clearance=track_width / 2)
+                                         extra_clearance=track_width / 2,
+                                         progress_callback=progress_callback)
     _obs_layer_idx = _obs_layer_map.get(layer)
     # Window the foreign-pad scan by the actual STUB extent (every stub endpoint),
     # not the part's pad bbox: on large packages (LQFP) a straight escape runs

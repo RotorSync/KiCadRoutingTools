@@ -734,9 +734,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         # DQ_S0's target was fanned to B.Cu, which is 100% blocked by a connector
         # pad wall, while the inner layers right there were empty).
         _swap_probe_clearance = (config.track_width + config.diff_pair_gap) / 2
+        if progress_callback:
+            progress_callback(0, 0, "Building layer-swap probe obstacle map...")
         swap_probe_obstacles = build_base_obstacle_map(
             pcb_data, config, [nid for _, nid in net_ids], _swap_probe_clearance,
-            net_clearances=net_clearances)
+            net_clearances=net_clearances, progress_callback=progress_callback)
         total_layer_swaps, all_stubs_by_layer, stub_endpoints_by_layer = apply_diff_pair_layer_swaps(
             pcb_data, config, diff_pair_ids_to_route_set, diff_pairs,
             can_swap_to_top_layer, all_segment_modifications, all_swap_vias,
@@ -841,10 +843,13 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # Extra clearance = spacing from centerline to P/N track center
     diff_pair_extra_clearance = (config.track_width + config.diff_pair_gap) / 2
     print(f"Building diff pair obstacle map (extra clearance: {diff_pair_extra_clearance:.3f}mm)...")
+    if progress_callback:
+        progress_callback(0, 0, "Building diff-pair obstacle map...")
     dp_base_start = time.time()
     diff_pair_base_obstacles = build_base_obstacle_map(pcb_data, config, all_net_ids_to_route,
                                                        diff_pair_extra_clearance,
-                                                       net_clearances=net_clearances)
+                                                       net_clearances=net_clearances,
+                                                       progress_callback=progress_callback)
     dp_base_elapsed = time.time() - dp_base_start
     print(f"Diff pair obstacle map built in {dp_base_elapsed:.2f}s")
     if debug_memory:
@@ -889,9 +894,14 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                     _ec = (geom[0] + geom[1]) / 2
                     print(f"  #435: building diff obstacle map for class geometry "
                           f"width={geom[0]} gap={geom[1]} (extra clearance {_ec:.3f}mm)...")
+                    if progress_callback:
+                        progress_callback(
+                            0, 0, f"Building diff-pair obstacle map "
+                                  f"(width {geom[0]} / gap {geom[1]})...")
                     diff_pair_base_obstacles_by_geom[geom] = build_base_obstacle_map(
                         pcb_data, replace(config, track_width=geom[0], diff_pair_gap=geom[1]),
-                        all_net_ids_to_route, _ec, net_clearances=net_clearances)
+                        all_net_ids_to_route, _ec, net_clearances=net_clearances,
+                        progress_callback=progress_callback)
             if len(set(pair_diff_geom.values())) > 1:
                 print(f"  #435: {len(diff_pair_base_obstacles_by_geom)} distinct diff-pair "
                       f"geometries across {len(pair_diff_geom)} pair(s).")

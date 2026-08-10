@@ -1319,6 +1319,21 @@ class FanoutTab(wx.Panel):
             config = self.qfn_options.get_config()
             self._run_qfn_fanout(footprint, selected_nets, config)
 
+    def _fanout_status(self, message):
+        """Status update for the fanout, which runs ON the UI thread.
+
+        A bare SetLabel cannot repaint while the main thread is blocked, so
+        force it -- otherwise the tab shows one frozen label for the whole run.
+        Guarded: reporting must never break the fanout.
+        """
+        try:
+            self.status_text.SetLabel(message)
+            self.progress_bar.Pulse()
+            self.status_text.Update()
+            self.progress_bar.Update()
+        except Exception:
+            pass
+
     def _run_bga_fanout(self, footprint, net_patterns, config):
         """Run BGA fanout."""
         self.fanout_btn.Disable()
@@ -1399,6 +1414,12 @@ class FanoutTab(wx.Panel):
                 # Shared Basic-tab per-layer costs (issue #288), same values the
                 # route/diff tabs use; None when the control is empty/invalid.
                 layer_costs=shared.get('layer_costs') or None,
+                # The fanout runs ON the UI thread, so it reports through
+                # _fanout_status (which forces the repaint). Without this the
+                # tab pulsed one static "Running BGA fanout..." for the whole
+                # run -- minutes on a large ball field.
+                progress_callback=(lambda c, t, m:
+                                   self._fanout_status(f"{m} ({c}/{t})" if t else m)),
             )
 
             self._apply_fanout_results(
@@ -1477,6 +1498,8 @@ class FanoutTab(wx.Panel):
                 board_edge_clearance=shared.get('board_edge_clearance', 0.0),
                 # #581: Basic-tab policy overrides allow_via_in_pad when > 0.
                 same_net_pad_clearance=shared.get('same_net_pad_clearance', -1.0),
+                progress_callback=(lambda c, t, m:
+                                   self._fanout_status(f"{m} ({c}/{t})" if t else m)),
             )
 
             self._apply_fanout_results(

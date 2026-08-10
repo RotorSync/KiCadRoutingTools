@@ -1648,11 +1648,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         total_layer_swaps=total_layer_swaps,
         net_obstacles_cache=net_obstacles_cache,
         working_obstacles=working_obstacles,
-        # Latent today (only diff_pair_loop reads state.cancel_check, and
-        # route_diff passes its own), but the single-ended state carried None
-        # while its caller had a live cancel in hand -- any future consumer
-        # would silently be uncancellable.
+        # Latent today (only diff_pair_loop reads state.cancel_check /
+        # state.progress_callback, and route_diff passes its own), but the
+        # single-ended state carried None while its caller had both in hand --
+        # any future consumer would silently be uncancellable and silent.
         cancel_check=cancel_check,
+        progress_callback=progress_callback,
     )
 
     # Create local aliases for frequently-used state fields

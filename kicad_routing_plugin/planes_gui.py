@@ -812,6 +812,23 @@ class PlanesTab(wx.Panel):
             self.progress_bar.Pulse()  # Indeterminate phase
             self.status_text.SetLabel(label)
 
+    def _apply_status(self, message):
+        """Status update for work running ON the UI thread (the apply path).
+
+        _update_progress is marshalled from the engine thread via CallAfter, so
+        the main loop paints it. Anything running ON the main thread blocks that
+        loop, so a bare SetLabel would not repaint until the work finished --
+        leaving the previous phase's label on screen and reading as a hang.
+        Guarded: a status update must never break the apply.
+        """
+        try:
+            self.status_text.SetLabel(message)
+            self.progress_bar.Pulse()
+            self.status_text.Update()
+            self.progress_bar.Update()
+        except Exception:
+            pass
+
     def _run_create_planes(self, config):
         """Run plane creation."""
         # Cleared here; repopulated from create_plane's returned ripped set
@@ -1695,8 +1712,15 @@ class PlanesTab(wx.Panel):
             cfg = getattr(self, '_plane_drc_config', {}) or {}
             clearance = cfg.get('clearance') or defaults.CLEARANCE
             grid_step = cfg.get('grid_step', defaults.GRID_STEP)
+            self._apply_status("Plane cleanup: reading the live board...")
             pcb = build_pcb_data_from_board(board)
-            delta = compute_plane_copper_cleanup(pcb, names, clearance, grid_step)
+            # Runs on the UI thread, so it reports through _apply_status (which
+            # forces the repaint) rather than the engine-thread callback. This
+            # is the shared 13-pass pipeline -- it named none of its passes.
+            delta = compute_plane_copper_cleanup(
+                pcb, names, clearance, grid_step,
+                progress_callback=(lambda c, t, m:
+                                   self._apply_status(f"{m} ({c}/{t})" if t else m)))
             if delta.is_empty:
                 return
 

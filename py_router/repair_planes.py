@@ -2828,7 +2828,10 @@ def repair_planes(
                 _res_wrap, pcb_data, _scope,
                 SimpleNamespace(clearance=clearance, grid_step=grid_step),
                 label='Plane ', phantom=False, via_nudge=False, neck=False,
-                microshift_max_shift=grid_step)
+                microshift_max_shift=grid_step,
+                # 13 passes that reported nothing: the status bar sat on the
+                # previous phase's label for the whole cleanup.
+                progress_callback=progress_callback)
             for _r in _res_wrap:
                 for _s in (_r.get('new_segments') or []):
                     all_new_segments.append(

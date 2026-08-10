@@ -3183,7 +3183,12 @@ def generate_bga_fanout(footprint: Footprint,
                         _single_pass: bool = False,
                         # #581: > 0 forbids via-in-pad (dog-bone escapes/
                         # drops only); None auto-reads the .kicad_pro record.
-                        same_net_pad_clearance: Optional[float] = None) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+                        same_net_pad_clearance: Optional[float] = None,
+                        # progress_callback(current, total, label) -- the fanout
+                        # tab used to pulse ONE static "Running BGA fanout..."
+                        # for the whole run (minutes on a big BGA). Phase-level
+                        # here; (0, 0, label) means indeterminate.
+                        progress_callback=None) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """BGA fanout: the signal escape engines plus the plane-ball drop pass.
 
     See _generate_bga_fanout_core for the escape-engine parameters. After the
@@ -3223,6 +3228,10 @@ def generate_bga_fanout(footprint: Footprint,
     if same_net_pad_clearance is None:
         from protected_nets import read_snpc_for_pcb_data as _read_snpc581
         same_net_pad_clearance = _read_snpc581(pcb_data)
+    _ref = getattr(footprint, 'reference', '?')
+    if progress_callback:
+        _nballs = sum(1 for _p in footprint.pads if _p.net_id)
+        progress_callback(0, 0, f"BGA fanout {_ref}: escaping {_nballs} ball(s)...")
     tracks, vias_to_add, vias_to_remove, failed_nets = _generate_bga_fanout_core(
         footprint, pcb_data, net_filter=net_filter,
         diff_pair_patterns=diff_pair_patterns, layers=layers,
@@ -3245,6 +3254,9 @@ def generate_bga_fanout(footprint: Footprint,
                 '1': True, 'on': True, 'auto': True}.get(
                     _knob, plane_drop != 'off')
     if _enabled and _pad_filter is None and not _single_pass:
+        if progress_callback:
+            progress_callback(
+                0, 0, f"BGA fanout {_ref}: dropping plane balls to vias...")
         d_tracks, d_vias, rep = _plane_drop_pass(
             footprint, pcb_data, tracks, vias_to_add, net_filter,
             layers, track_width, clearance, via_size, via_drill, grid_step,
