@@ -115,7 +115,11 @@ image = (
     # optional kicad-cli cross-check degrades to None. Cross-check the winning
     # arm locally, where KiCad already lives -- that check caught #487.)
     .pip_install("numpy>=1.21.0", "scipy>=1.7.0", "shapely>=1.8.0")
-    .apt_install("curl")
+    # procps: redo_stress_test's peak-RSS sampler shells out to ps/pgrep;
+    # absent from debian_slim, the sampler's except-pass reported 0 MB for
+    # every cloud task -- which is exactly the data needed to right-size
+    # (and stop over-paying for) the container memory tiers.
+    .apt_install("curl", "procps")
     # Carry the source commit to the containers. They cannot compute it: no git
     # binary, no repo -- see the is_local() guard above.
     .env({"KICAD_SWEEP_GIT": GIT_SHA})

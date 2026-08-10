@@ -43,8 +43,27 @@ REPO = Path(__file__).resolve().parent.parent.parent  # tests/stress/ -> repo ro
 
 
 def _tree_rss_kb(pid):
-    """Resident set size (KB) of a process plus its direct children, via ps --
+    """Resident set size (KB) of a process plus its direct children.
+
+    Linux: read /proc directly -- no subprocess spawns (the ps path forks
+    twice per 0.5s sample), and it works in slim containers that carry no
+    procps at all (the Modal image's silent 0-MB rows). Elsewhere: ps, the
     same tree-RSS method run_limited.sh uses for its memory watchdog."""
+    if os.path.isdir(f"/proc/{pid}"):
+        total = 0
+        try:
+            pids = [str(pid)]
+            with open(f"/proc/{pid}/task/{pid}/children") as f:
+                pids += f.read().split()
+            for p_ in pids:
+                with open(f"/proc/{p_}/status") as f:
+                    for line in f:
+                        if line.startswith("VmRSS:"):
+                            total += int(line.split()[1])
+                            break
+        except Exception:
+            pass
+        return total
     total = 0
     try:
         out = subprocess.run(["ps", "-o", "rss=", "-p", str(pid)],
