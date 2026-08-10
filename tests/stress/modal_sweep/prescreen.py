@@ -228,7 +228,11 @@ def main():
             flags.append("quality: outside sensible range?")
         if base_cpu and cpu > 1.5 * base_cpu:
             flags.append(f"NOT VIABLE cpu +{100*(cpu/base_cpu-1):.0f}%")
-        if base_peak and peak > 1.5 * base_peak:
+        # Mem threshold 2x, not 1.5x: single-run peak RSS is phase-noise
+        # sensitive (non-monotone across doses -- turn-cost 300 flagged while
+        # 10000 passed), so the 50-100% band is unreliable; CPU stays at 1.5x
+        # (smooth and reproducible across the battery).
+        if base_peak and peak > 2.0 * base_peak:
             flags.append(f"NOT VIABLE mem +{100*(peak/base_peak-1):.0f}%")
         sfx = ("  <- " + "; ".join(flags)) if flags else ""
         print(f"{tag:<12}{str(verd):>8}{cpu:>8.0f}{peak:>9.0f}{wall:>8.0f}{sfx}")
