@@ -348,18 +348,20 @@ def extract_corpus(archive_rel: str) -> int:
     return n
 
 
-@app.function(image=image, cpu=1.0, memory=4096,
+@app.function(image=image, cpu=1.0, memory=2048,
               timeout=4 * 3600, retries=modal.Retries(max_retries=1),
               volumes={CORPUS: corpus_vol, RESULTS: results_vol})
 def replay_standard(task: dict) -> dict:
     return _replay_one(task)
 
 
-@app.function(image=image, cpu=1.0, memory=12288,
+@app.function(image=image, cpu=1.0, memory=4096,
               timeout=6 * 3600, retries=modal.Retries(max_retries=1),
               volumes={CORPUS: corpus_vol, RESULTS: results_vol})
 def replay_big(task: dict) -> dict:
-    """Same work, 12 GB. For boards whose recorded peak footprint exceeds
+    """Same work, bigger tier (4 GB while measuring -- was 12 GB sized
+    from macOS footprint; real Linux RSS now recorded per task, resize from
+    that). For boards whose recorded peak footprint exceeds
     ~3.5 GB -- four boards in the reference wave, one at 10 GB."""
     return _replay_one(task)
 
@@ -399,7 +401,7 @@ def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,se
     big = [t for t in tasks if t["memory_mb"] > 4096]
     print(f"{len(arm_specs)} arms x {len(boards)} boards = {len(tasks)} tasks")
     print(f"  estimated {est_h:,.0f} CPU-hours; floor (longest board) {floor_m:.0f} min")
-    print(f"  {len(big)} tasks routed to the 12 GB tier")
+    print(f"  {len(big)} tasks routed to the big tier")
     unknown = sum(1 for t in tasks if t["board"] not in costs)
     if unknown:
         print(f"  NOTE {unknown} tasks have no recorded cost -- ordered mid-pack, "
@@ -410,6 +412,26 @@ def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,se
         return
 
     started = time.time()
+
+    # Resume: a stopped run's completed work is banked as rows on the results
+    # volume -- re-running those tasks would just re-bill them. Skip any
+    # (arm, board) whose row exists; true holes (preempted-twice, OOM) have
+    # no row and re-run naturally. This is what makes stop -> retier ->
+    # relaunch iterations cheap.
+    existing = set()
+    for spec in arm_specs:
+        try:
+            for e in results_vol.listdir(f"/{spec['name']}"):
+                existing.add(f"{spec['name']}/{os.path.basename(e.path)}")
+        except Exception:
+            pass
+    if existing:
+        before = len(tasks)
+        tasks = [t for t in tasks
+                 if f"{t['arm']}/{t['set']}__{t['board']}.json" not in existing]
+        print(f"  resume: {before - len(tasks)} tasks already have rows on "
+              f"the volume -- skipped; {len(tasks)} to run")
+
     std = [t for t in tasks if t["memory_mb"] <= 4096]
     results = []
 
