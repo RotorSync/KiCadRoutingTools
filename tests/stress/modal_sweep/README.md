@@ -87,6 +87,8 @@ than you intended.
 | `arms.example.json` | template showing all three arm mechanisms |
 | `arms.smoke.json` | the 2-arm config the smoke test uses |
 | `smoke_test.sh` | **run this first** — end-to-end, self-verifying |
+| `run_sweep.sh` | a full sweep: plan → run → verify, with guard rails |
+| `arms.track_proximity.json` | worked example of a real parameter sweep |
 | `check_sweep.py` | validates a sweep result; exits non-zero if untrustworthy |
 
 ## Start here: the 2-board smoke test
@@ -134,18 +136,53 @@ python3 tests/stress/modal_sweep/check_sweep.py <sweep.json>
 #                           a real sweep legitimately has some failing boards)
 ```
 
-## The full sweep
+## A full sweep with a parameter change
 
 ```bash
-python3 tests/stress/modal_sweep/upload_corpus.py --sets set1,...,set10   # ~2.2 GB, one-off
-modal run tests/stress/modal_sweep/modal_app.py \
-    --arms tests/stress/modal_sweep/arms.example.json --dry-run
-modal run tests/stress/modal_sweep/modal_app.py \
-    --arms tests/stress/modal_sweep/arms.example.json
+# first time only: populate the corpus volume (~2.2 GB)
+SWEEP_UPLOAD=1 SWEEP_DRY=1 \
+  bash tests/stress/modal_sweep/run_sweep.sh \
+       tests/stress/modal_sweep/arms.track_proximity.json
+
+# then run it
+bash tests/stress/modal_sweep/run_sweep.sh \
+     tests/stress/modal_sweep/arms.track_proximity.json
 ```
 
-`--limit N` keeps the N *cheapest* boards (the default order is longest-first,
-which is right for throughput but wrong for a quick look).
+`arms.track_proximity.json` is a worked example: a baseline plus
+`TRACK_PROXIMITY_COST` at 0.5 / 2.0 / 4.0, and one arm pairing it with
+`RIPPED_ROUTE_AVOIDANCE_COST`. Copy it and edit. Bracketing a value like that is
+deliberate — a monotone trend across three points is far stronger evidence than
+one arm beating baseline once.
+
+Its plan over sets 1-10:
+
+```
+5 arms x 150 boards = 750 tasks
+  estimated 64 CPU-hours; floor (longest board) 50 min
+  35 tasks routed to the 12 GB tier
+```
+
+`run_sweep.sh` **always prints that plan before spending anything**, then runs,
+then pipes the result through `check_sweep.py`. It refuses an arms file with no
+baseline arm, with duplicate names, or that isn't a non-empty list.
+
+| env | effect |
+|---|---|
+| `SWEEP_SETS=set1,set2` | override the sets (or pass as `$2`) |
+| `SWEEP_UPLOAD=1` | populate the corpus volume first (one-off) |
+| `SWEEP_DRY=1` | stop after the plan, spend nothing |
+| `SWEEP_OUT=/path.json` | where to write the result |
+| `KICAD_SWEEP_DIRTY=1` | ship the working tree instead of a clean `HEAD` |
+
+Note the verification here does **not** use `--require-all-complete`: a real
+sweep legitimately contains boards whose chain breaks. Those are reported; the
+hard failures are "all arms identical" and "no provenance", which mean the sweep
+answered nothing.
+
+For a quick look, `modal_app.py --limit N` keeps the N *cheapest* boards — the
+default order is longest-first, which is right for throughput but would hand you
+the 50-minute board first.
 
 Output: a per-arm table (boards, chain-complete, mean completion %, total real
 DRC, CPU-hours) plus every raw row, written to `sweep_<ts>.json`. Each
