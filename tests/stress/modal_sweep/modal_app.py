@@ -93,7 +93,18 @@ def _image_source() -> tuple:
     return str(tmp), sha
 
 
-_src_dir, GIT_SHA = _image_source()
+# THIS FILE IS IMPORTED INSIDE THE CONTAINER TOO, so nothing at module scope may
+# assume a local dev environment. _image_source() shells out to `git`, which the
+# container image does not have (and there is no repo there anyway): running it
+# container-side raised FileNotFoundError on import, so EVERY container died at
+# startup and Modal reported "crash-looping". Compute locally, then hand the
+# result to the containers as an image env var.
+if modal.is_local():
+    _src_dir, GIT_SHA = _image_source()
+else:
+    # In-container: the image is already built, so the path is unused; the sha
+    # comes from the env var stamped in at build time.
+    _src_dir, GIT_SHA = "/tmp", os.environ.get("KICAD_SWEEP_GIT", "unknown")
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -104,6 +115,9 @@ image = (
     # arm locally, where KiCad already lives -- that check caught #487.)
     .pip_install("numpy>=1.21.0", "scipy>=1.7.0", "shapely>=1.8.0")
     .apt_install("curl")
+    # Carry the source commit to the containers. They cannot compute it: no git
+    # binary, no repo -- see the is_local() guard above.
+    .env({"KICAD_SWEEP_GIT": GIT_SHA})
     .add_local_dir(_src_dir, REPO, copy=True, ignore=[
         "**/.git/**", "**/__pycache__/**", "**/target/**", "**/.claude/worktrees/**",
     ])
