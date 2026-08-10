@@ -263,6 +263,27 @@ def _replay_one(task: dict) -> dict:
     return row
 
 
+@app.function(image=image, cpu=2.0, memory=4096, timeout=1800,
+              volumes={CORPUS: corpus_vol})
+def extract_corpus(archive_rel: str) -> int:
+    """Server-side half of the compressed corpus upload: extract a tar.gz
+    that upload_corpus.py placed on the volume, then delete it. The corpus
+    is s-expression text (~6-8x gzip), so shipping one compressed archive
+    turns a ~2.2 GB / ~10 min upload into ~2 min total. Extraction runs
+    where bandwidth is free."""
+    import os
+    import tarfile
+    ar = os.path.join(CORPUS, archive_rel.lstrip("/"))
+    n = 0
+    with tarfile.open(ar, "r:gz") as tf:
+        for m in tf:
+            tf.extract(m, CORPUS, filter="data")
+            n += 1
+    os.remove(ar)
+    corpus_vol.commit()
+    return n
+
+
 @app.function(image=image, cpu=1.0, memory=4096,
               timeout=4 * 3600, retries=modal.Retries(max_retries=1),
               volumes={CORPUS: corpus_vol, RESULTS: results_vol})

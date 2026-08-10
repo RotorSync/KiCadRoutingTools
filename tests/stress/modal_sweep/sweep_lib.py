@@ -87,8 +87,25 @@ def recorded_repo_prefix(manifest_text: str) -> str | None:
     recorded prefix and hand ab_replay_grade an --extra-remap for it. Detecting
     it (rather than assuming one constant) is what lets manifests recorded from
     different checkouts -- a worktree, someone else's home dir -- all replay.
+
+    Two flavors exist: post-#522 manifests say <repo>/py_router/<tool>.py (and
+    tests/ for checks), but PRE-#522 recordings (e.g. the whole llm0801 wave --
+    10 of the first 12 set dirs) bake ROOT-level tool paths
+    (<repo>/bga_fanout.py) with no py_router/tests component anywhere. The
+    first pattern misses those entirely -- which made every such board's steps
+    exit rc=2 in the container ("can't open file", no remap) while
+    --continue-on-error kept the task green. The fallback anchors on the
+    python3 invocation itself, so the token is always a TOOL path, never a
+    corpus path; in-container the remapped root-level path is then dead and
+    redo_stress_test's relocate_moved_scripts (#522/#562) rewrites it into
+    py_router/ -- the same two-step dance that makes these manifests replay
+    locally.
     """
     m = re.search(r"(\S+?)/(?:py_router|tests)/[A-Za-z_0-9]+\.py", manifest_text)
+    if m:
+        return m.group(1)
+    m = re.search(r"python3\S*(?: -X \S+)? (\S+?)/[A-Za-z_0-9.]+\.py",
+                  manifest_text)
     return m.group(1) if m else None
 
 
