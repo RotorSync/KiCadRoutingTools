@@ -348,7 +348,7 @@ def _replay_one(task: dict) -> dict:
     return row
 
 
-@app.function(image=image, cpu=2.0, memory=4096, timeout=1800,
+@app.function(image=image, memory=4096, timeout=1800,
               volumes={CORPUS: corpus_vol})
 def extract_corpus(archive_rel: str) -> int:
     """Server-side half of the compressed corpus upload: extract a tar.gz
@@ -369,14 +369,20 @@ def extract_corpus(archive_rel: str) -> int:
     return n
 
 
-@app.function(image=image, cpu=1.0, memory=1024,
+# NO cpu= request: the chain is single-threaded, so a cpu=1.0 request
+# reserved a full physical core while one hyperthread consumed ~half of it
+# -- billed on max(request, usage), that's ~2x the honest CPU price. At the
+# 0.125-core floor request, billing follows consumption (~0.5 core/job) and
+# scheduling stays wide-not-fat (Andy). OMP/BLAS pinning at a low request is
+# single-thread -- identical to the cpu=1.0 behavior, so results unchanged.
+@app.function(image=image, memory=1024,
               timeout=4 * 3600, retries=modal.Retries(max_retries=3),
               volumes={CORPUS: corpus_vol, RESULTS: results_vol})
 def replay_standard(task: dict) -> dict:
     return _replay_one(task)
 
 
-@app.function(image=image, cpu=1.0, memory=8192,
+@app.function(image=image, memory=8192,
               timeout=6 * 3600, retries=modal.Retries(max_retries=3),
               volumes={CORPUS: corpus_vol, RESULTS: results_vol})
 def replay_big(task: dict) -> dict:
