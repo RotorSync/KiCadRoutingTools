@@ -25,35 +25,40 @@ lets a 50-minute board start near the end and add 50 minutes to the tail.
 | Floor | ~50 min (`daisho`) |
 | Cores to reach the floor | ~1,730 |
 | 500 cores | ~1.7 h |
-| Cost | ~$17 spot / ~$39 on-demand at $0.02-0.045 per vCPU-hour |
+| CPU cost | ~$41 at Modal's $0.0000131 / core / sec |
+| RAM cost | ~= actual usage, since the 1 GB reservation sits below it (see below) |
 
 Cost is not the constraint; **burst concurrency quota is**. 1,700 concurrent
 containers is above the default limit on every platform — plan on 500-1,000
 for the first run and raise the limit if the tail matters.
 
-## Memory: two tiers, and why not one
+## Memory: one 1 GB tier — a reservation buys OOM-protection, not capacity
 
-Containers are 4 GB, with a 12 GB tier for boards whose recorded peak exceeds
-3.5 GB (7 boards in the reference wave).
+Everything rides a **1 GB** tier (`DEFAULT_MEM_MB`). The **8 GB** tier
+(`BIG_MEM_MB`) is opt-in OOM insurance, not a capacity requirement.
 
-Size from **`peak_footprint_mb`, never `peak_rss_mb`**. RSS under-reports by up
-to 5x (mimalloc-retained + IOAccelerator-tagged pages, issue #419). Across the
-same 150 boards:
+That is counter-intuitive, so the measurement matters. **Modal bills
+`max(reserved, used)` per second, and containers BURST above the reservation.**
+Resized from **414 measured cloud tasks** (real Linux RSS, `d56ef8b`):
 
-| metric | median | p90 | p99 | max | over 4 GB |
-|---|---|---|---|---|---|
-| `peak_rss_mb` | 447 MB | 931 MB | 1,845 MB | 2,025 MB | 0 |
-| `peak_footprint_mb` | 612 MB | 1,858 MB | 4,689 MB | **10,240 MB** | 4 |
+| reservation scheme | cost vs the pure-usage floor |
+|---|---|
+| **flat 1 GB** | **+0.3%** (673 vs 671 GB-h) |
+| 4 GB + 12 GB tiers | +47% |
+| per-board known peak | +78% — a board's max bills against every light arm's runtime |
 
-Sizing off RSS says "2 GB is plenty" and OOMs the heavy boards.
+Real Linux peaks on that sample: **p50 2.1 GB, p90 5.2 GB, max 8.6 GB**
+(`hackrf_one`, every arm) — and **all of them completed in 2 GB containers via
+burst**. Reserving to the peak buys nothing except the bill.
 
-Boards with a long recorded runtime but *no* recorded memory (LLM-sourced rows
-carry no peak) also get the big tier — losing an 8-hour board to an OOM is far
-more expensive than over-provisioning a few containers.
+**Do not size these containers from macOS `peak_footprint_mb`.** That metric is
+darwin-only, and an earlier version of this file recommended exactly that: it
+produced the 4/12 tiering above, i.e. +47% for no benefit. `peak_footprint` is
+still the right number for sizing a *local* macOS run — where RSS under-reports
+by up to 5x (mimalloc-retained + IOAccelerator-tagged pages, issue #419) — but it
+does not transfer to a cloud reservation. Measure on the target OS.
 
-`peak_footprint_mb` is darwin-only, so a Linux sweep records RSS only. The
-reference numbers above came from macOS and are the conservative ones to size
-from.
+Raise a board to the 8 GB tier only if it actually OOMs.
 
 ## Three ways to express an arm
 
@@ -160,7 +165,7 @@ Its plan over sets 1-10:
 ```
 5 arms x 150 boards = 750 tasks
   estimated 64 CPU-hours; floor (longest board) 50 min
-  35 tasks routed to the 12 GB tier
+  0 tasks routed to the big tier
 ```
 
 `run_sweep.sh` **always prints that plan before spending anything**, then runs,

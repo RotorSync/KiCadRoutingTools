@@ -74,9 +74,21 @@ machine before):
   (LLM latency) and only intermittently in a heavy python route step, so ~Ncore
   boards keep the cores busy without Ncore heavy processes at once. The real guard
   is per-step memory, not the worker count — `run_limited.sh` kills any single step
-  that exceeds ~4 GB. Lower the arg only if you actually see swapping.
-- **Every tool command runs through `tests/stress/run_limited.sh`** (~4 GB RSS
-  watchdog). An OOM kill is a finding, not noise.
+  that exceeds **12 GB**. Lower the arg only if you actually see swapping.
+- **Every tool command runs through `tests/stress/run_limited.sh`** (**12 GB** RSS
+  watchdog — raised from 4 GB in #422; a legitimate fine-grid run on a big sparse
+  board can still peak several GB, so 4 GB killed real work). An OOM kill is a
+  finding, not noise.
+  **Size a machine from 12 GB, not 4** — this is the figure people provision
+  from, and 4 GB under-provisions by 3x.
+- **Give every routing command an explicit long timeout.** The runbook tells the
+  worker to block for up to the 3-hour per-command cap, but a driving harness's
+  *default* is often ~120 s — two orders of magnitude smaller. In the sets-21-27
+  wave that killed at least one route attempt on **21 of 99 boards** (steps that
+  legitimately take 141-316 s), and the orphan guard then reaped the reparented
+  child. Worse, the killed step's log is usually **empty** (stdout fully buffered,
+  nothing flushed before SIGTERM), so it looks like a hang rather than a timeout —
+  pass `python3 -u` if you want a diagnosable partial log. See #599.
 - On 4+ layer boards, BGA/PGA fanout must pass the inner copper layers to
   `bga_fanout.py` (`--layers F.Cu In1.Cu In2.Cu B.Cu`); its default is the two
   outer layers only, which silently caps deep-ball escape (RUNBOOK rule 5).
