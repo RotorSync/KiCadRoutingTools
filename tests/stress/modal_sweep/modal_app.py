@@ -371,7 +371,7 @@ def replay_big(task: dict) -> dict:
 def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,set10",
          stress_dir: str = "", out: str = "", dry_run: bool = False,
          boards: str = "", limit: int = 0, stage: str = "full",
-         gate_margin: float = 0.25):
+         gate_margin: float = 0.25, ignore_excludes: bool = False):
     """boards: comma-separated board names to restrict to (smoke tests).
     limit:  keep only the N CHEAPEST boards -- a smoke test wants fast feedback,
             and the default longest-first order would otherwise hand you the
@@ -397,7 +397,11 @@ def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,se
 
     bv_path = Path(__file__).resolve().parent / "board_value.json"
     board_value = json.loads(bv_path.read_text()) if bv_path.exists() else {}
-    excluded = set(board_value.get("exclude", []))
+    # --ignore-excludes: board_value's exclude list is FITTED to the arm
+    # family it was measured on (see the caveat field) -- a NEW knob family's
+    # first sweep must not inherit it (a board where soft-cost arms all tie
+    # may discriminate heuristic/rip-up arms fine).
+    excluded = set() if ignore_excludes else set(board_value.get("exclude", []))
     if excluded:
         n0 = len(board_list)
         board_list = [(s, b) for s, b in board_list if b not in excluded]
