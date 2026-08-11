@@ -11,16 +11,17 @@ the finished `.kicad_pcb`/`.kicad_pro` and then compares to a baseline. One arm,
 no overrides -- the question is not "what does this knob do" but "what does the
 CURRENT engine do to these 150 boards, versus the last time we looked".
 
-Five stages, run in order by default; pick with --only:
+Six stages, run in order by default; pick with --only:
 
   plan      discover boards, price the run, check preflight. SPENDS NOTHING.
   upload    push any sets the corpus volume is missing (idempotent)
   run       the cloud replay, artifact-keeping ON
   harvest   pull rows + boards into a local wave dir shaped like an
             ab_replay_grade wave, so --compare AND --regrade both work on it
-  compare   per-set + aggregate A/B against the baseline wave
+  baseline  build the baseline from the ORIGINAL recorded runs, re-graded today
+  compare   per-set + aggregate A/B
 
-Two things this is careful about, both of which have burned this repo before:
+Three things this is careful about, all of which have burned this repo before:
 
 1. **The kept board travels with its `.kicad_pro`.** The project carries the DRC
    floor the chain actually routed to. A bare `.kicad_pcb` re-grades against the
@@ -28,14 +29,24 @@ Two things this is careful about, both of which have burned this repo before:
    (#441). The container-side copy in modal_app.py takes every sibling
    (.kicad_pro/.kicad_dru/.kicad_prl) plus the manifest.
 
-2. **A published baseline summary is not automatically a valid code datum.**
-   Graders drift, and some archived waves were produced by dirty trees. This
-   prints the baseline's provenance (commit + dirty flag) next to every
-   comparison, refuses a dirty baseline unless you pass --allow-dirty-baseline,
-   and offers --regrade-baseline to re-score the baseline's OWN kept boards with
-   TODAY's grader -- which is the only way to attribute a delta to code rather
-   than to grading. It snapshots the archive's summary.json first and never
-   discards it.
+2. **The baseline is the recorded run itself, not an archived wave.** The corpus
+   gets RE-RECORDED. Sets 10-19 were, after the #562 pours-first reshape: the
+   2026-07-28 `ab_main_0728a` wave replayed a `route -> planes -> repair` chain,
+   while today's manifests run `planes -> route` with the repair absorbed --
+   all 150 boards produce a different final output than that wave recorded. A
+   board-for-board diff against it therefore mixes a different recorded PLAN in
+   with the engine delta and cannot separate the two. The recorded run dir holds
+   the very boards the manifest we are replaying produced, so `--baseline
+   recorded` (the default) compares like with like. Pointing --baseline at a wave
+   dir still works, but preflight refuses it when the chains disagree unless you
+   pass --allow-chain-mismatch.
+
+3. **Graders drift, so the baseline is re-graded, never read off an old table.**
+   `--baseline recorded` re-scores the recorded boards with TODAY's grader, which
+   is what makes a delta attributable to the engine. The recorded runs are
+   symlinked into a scratch wave rather than copied or graded in place -- the
+   corpus is not ours to rewrite, and regrade() overwrites summary.json in
+   whatever directory it is given.
 
 The arm name carries the source commit, so resuming re-uses banked rows only
 within one commit; changing the code forces a real re-run instead of silently
@@ -189,7 +200,25 @@ def stage_plan(args, sets, stress) -> dict:
     for s in sets:
         if not sl.run_dirs_for(stress, s):
             problems.append(f"{s}: no runs dir under {stress}")
-    if not args.no_baseline:
+    if not args.no_baseline and args.baseline == "recorded":
+        # Baseline is built from the recorded runs later; check it CAN be.
+        from ab_replay_grade import final_output_name
+        no_final = 0
+        for s in sets:
+            for rd in sl.run_dirs_for(stress, s)[:1]:
+                for bdir in sorted(p for p in rd.iterdir() if p.is_dir()):
+                    man = bdir / "redo_commands.sh"
+                    if not man.exists():
+                        continue
+                    fn = final_output_name(man.read_text())
+                    if not (fn and (bdir / fn).exists()):
+                        no_final += 1
+        print(f"  baseline: the recorded runs themselves, re-graded with today's grader")
+        if no_final:
+            warnings.append(f"{no_final} recorded board(s) have no final output "
+                            f"(their chain never completed when recorded); they will "
+                            f"be excluded from the paired comparison")
+    elif not args.no_baseline:
         for s in sets:
             bp = baseline_summary(args, s)
             if not bp.exists():
@@ -200,6 +229,36 @@ def stage_plan(args, sets, stress) -> dict:
                     msg = (f"{s}: baseline {prov.get('commit','?')[:9]} was built from a "
                            f"DIRTY tree -- its numbers are not reproducible from git")
                     (problems if not args.allow_dirty_baseline else warnings).append(msg)
+        # A wave baseline is only comparable if it replayed the SAME chain. The
+        # corpus gets re-recorded, and then a board-for-board diff silently mixes
+        # a different recorded PLAN into the engine delta. Detect it by the final
+        # output name, which changes when the chain is reshaped.
+        from ab_replay_grade import final_output_name
+        changed = tot = 0
+        for s in sets:
+            bp = baseline_summary(args, s)
+            rds = sl.run_dirs_for(stress, s)
+            if not (bp.exists() and rds):
+                continue
+            for r in json.loads(bp.read_text()):
+                man = rds[0] / str(r.get("board")) / "redo_commands.sh"
+                if not man.exists():
+                    continue
+                tot += 1
+                cur = final_output_name(man.read_text())
+                if not (r.get("final") and cur
+                        and Path(str(r["final"])).name == Path(cur).name):
+                    changed += 1
+        if tot and changed:
+            msg = (f"{changed}/{tot} baseline board(s) recorded a DIFFERENT final "
+                   f"output than today's manifest produces -- that wave replayed a "
+                   f"different chain, so a diff against it is NOT a pure code delta. "
+                   f"Prefer --baseline recorded.")
+            (warnings if changed < tot or args.allow_chain_mismatch
+             else problems).append(msg)
+            if changed == tot and not args.allow_chain_mismatch:
+                problems.append("every board's chain differs; pass --allow-chain-mismatch "
+                                "if you really want this comparison")
     dirty = tree_dirty()
     if dirty:
         warnings.append(f"working tree has {len(dirty)} modified tracked file(s); "
@@ -217,7 +276,82 @@ def stage_plan(args, sets, stress) -> dict:
 
 
 def baseline_summary(args, set_name: str) -> Path:
+    if args.baseline == "recorded":
+        return Path(args.out).expanduser() / "_baseline" / set_name / "summary.json"
     return Path(args.baseline).expanduser() / set_name / "summary.json"
+
+
+def build_recorded_baseline(args, sets, stress):
+    """Baseline = the ORIGINAL recorded runs, re-graded with today's grader.
+
+    This is the right baseline for a replay, and an archived ab_* wave usually is
+    not. The corpus gets RE-RECORDED (sets 10-19 were, after the #562 pours-first
+    reshape: the 2026-07-28 wave replayed a `route -> planes -> repair` chain,
+    while today's manifests run `planes -> route` with the repair absorbed). A
+    board-for-board diff against that wave therefore mixes a different recorded
+    PLAN in with the engine delta and cannot separate them.
+
+    The recorded run dir, by contrast, holds the very boards the manifest we are
+    replaying produced -- same plan, so the only moving parts are the engine and
+    (removed here) the grader.
+
+    Materialized as SYMLINKS into a scratch wave dir rather than copies: the
+    corpus is precious and read-only in spirit, and regrade() rewrites
+    summary.json in whatever directory you hand it -- pointed at runs_setN that
+    would clobber the recorded run's own summary.
+    """
+    import sweep_lib as sl
+    from ab_replay_grade import final_output_name
+    root = Path(args.out).expanduser() / "_baseline"
+    print(f"\n=== BASELINE (recorded runs, re-graded today) ===\n  {root}")
+    for s in sets:
+        rds = sl.run_dirs_for(stress, s)
+        if not rds:
+            print(f"  {s}: no runs dir; skipped")
+            continue
+        run_dir = rds[0]
+        wave = root / s
+        wave.mkdir(parents=True, exist_ok=True)
+        linked = missing = 0
+        for bdir in sorted(p for p in run_dir.iterdir() if p.is_dir()):
+            man = bdir / "redo_commands.sh"
+            if not man.exists():
+                continue
+            fn = final_output_name(man.read_text())
+            final = bdir / fn if fn else None
+            dest = wave / bdir.name
+            dest.mkdir(parents=True, exist_ok=True)
+            if not (final and final.exists()):
+                missing += 1
+                continue
+            # The project/dru siblings must come along: grading a board without
+            # its .kicad_pro resolves the floor from the STOCK netclass and
+            # invents sub-floor violations on correct copper (#441).
+            for sib in sorted(final.parent.glob(final.stem + ".*")):
+                if sib.suffix not in (".kicad_pcb", ".kicad_pro", ".kicad_dru", ".kicad_prl"):
+                    continue
+                link = dest / sib.name
+                if link.is_symlink() or link.exists():
+                    link.unlink()
+                link.symlink_to(sib)
+            linked += 1
+        print(f"  {s:9} {linked:3} final board(s) linked"
+              + (f", {missing} with NO final (chain never completed in the recording)"
+                 if missing else ""))
+        sh([sys.executable, str(HERE / "ab_replay_grade.py"),
+            "--regrade", str(wave), "--set", str(run_dir)],
+           stdout=subprocess.DEVNULL)
+        summ = wave / "summary.json"
+        if summ.exists():
+            rows = json.loads(summ.read_text())
+            ok = sum(1 for r in rows if r.get("chain_complete"))
+            print(f"  {s:9} regraded: {ok}/{len(rows)} complete")
+            (wave / "git_version.json").write_text(json.dumps(
+                {"label": "recorded-run", "source": "runs dir, re-graded today",
+                 "commit": git_sha(short=False), "describe": git_sha(),
+                 "dirty": bool(tree_dirty()),
+                 "note": "boards are the ORIGINAL recorded outputs; the grader is today's"},
+                indent=1))
 
 
 # ------------------------------------------------------------------- upload
@@ -476,7 +610,7 @@ def aggregate_totals(args, sets, out) -> dict:
     """
     tot = {"boards_compared": 0, "drc_old": 0, "drc_new": 0,
            "incompl_old": 0, "incompl_new": 0,
-           "baseline_only_complete": [], "new_only_complete": []}
+           "baseline_only_complete": [], "new_only_complete": [], "not_run": []}
     for s in sets:
         op, np_ = baseline_summary(args, s), out / s / "summary.json"
         if not (op.exists() and np_.exists()):
@@ -487,6 +621,12 @@ def aggregate_totals(args, sets, out) -> dict:
             o, n = old.get(b), new.get(b)
             oc = bool(o and o.get("chain_complete"))
             nc = bool(n and n.get("chain_complete"))
+            if n is None:
+                # Absent from the new wave entirely (partial run, --boards/--limit,
+                # or a task that never produced a row). Calling that a REGRESSION
+                # would be a lie -- it was never attempted.
+                tot["not_run"].append(f"{s}/{b}")
+                continue
             if oc and not nc:
                 tot["baseline_only_complete"].append(f"{s}/{b}")
             elif nc and not oc:
@@ -524,6 +664,10 @@ def print_aggregate(t: dict):
     if t["baseline_only_complete"]:
         print(f"  REGRESSED to broken chain ({len(t['baseline_only_complete'])}): "
               f"{', '.join(t['baseline_only_complete'][:8])}")
+    if t.get("not_run"):
+        print(f"  not run in this wave ({len(t['not_run'])}, NOT a regression): "
+              f"{', '.join(t['not_run'][:8])}"
+              f"{' ...' if len(t['not_run']) > 8 else ''}")
     if t["new_only_complete"]:
         print(f"  newly completing ({len(t['new_only_complete'])}): "
               f"{', '.join(t['new_only_complete'][:8])}")
@@ -531,7 +675,7 @@ def print_aggregate(t: dict):
 
 # --------------------------------------------------------------------- main
 
-STAGES = ["plan", "upload", "run", "harvest", "compare"]
+STAGES = ["plan", "upload", "run", "harvest", "baseline", "compare"]
 
 
 def main():
@@ -545,8 +689,13 @@ def main():
     ap.add_argument("--sets", default="set10-set19",
                     help="ranges and/or names: set10-set19, set10,set12 (default: %(default)s)")
     ap.add_argument("--out", default="", help="local wave dir (default: <stress>/cloud_<label>_<sha>)")
-    ap.add_argument("--baseline", default=str(DEFAULT_STRESS / "ab_main_0728a"),
-                    help="baseline wave dir holding <set>/summary.json (default: %(default)s)")
+    ap.add_argument("--baseline", default="recorded",
+                    help="'recorded' (default) = the ORIGINAL recorded runs, re-graded with "
+                         "today's grader -- same chain, same grader, so a delta is the ENGINE. "
+                         "Or a path to a wave dir holding <set>/summary.json (e.g. an ab_* "
+                         "wave), which is only comparable if it replayed the same chain.")
+    ap.add_argument("--allow-chain-mismatch", action="store_true",
+                    help="compare against a wave that replayed a DIFFERENT chain anyway")
     ap.add_argument("--label", default="replay", help="run label, part of the arm name")
     ap.add_argument("--stress-dir", default=str(DEFAULT_STRESS))
     ap.add_argument("--workdir", default="", help="scratch for the generated arms file")
@@ -597,6 +746,8 @@ def main():
         stage_run(args, sets, stress, plan)
     if "harvest" in stages:
         stage_harvest(args, sets, stress)
+    if "baseline" in stages and not args.no_baseline and args.baseline == "recorded":
+        build_recorded_baseline(args, sets, stress)
     if "compare" in stages and not args.no_baseline:
         stage_compare(args, sets, stress)
     return 0
