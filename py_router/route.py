@@ -659,6 +659,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             print(f"Warning: could not auto-read netclass track widths ({_e}).")
             net_track_widths = {}
 
+    # #600: cleared at the START of every run so a previous call's verdict can
+    # never leak into this one (this is a function attribute, and the GUI calls
+    # batch_route repeatedly in one process). main() reads it to skip the
+    # post-passes that would otherwise mutate a reverted board.
+    batch_route._improvement_gate_reverted = False
+
     # Issue #8: snapshot the input board's copper per net BEFORE any routing.
     # The final connectivity reconciliation reports against the copper that will
     # be WRITTEN (this original copper + the write-list's new copper), not against
@@ -4266,6 +4272,151 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         batch_route._forced_link_hints = {}
         batch_route._forced_link_landed = []
 
+    # ---- IMPROVEMENT GATE (#600) -------------------------------------------
+    # Never ship a board this run made WORSE. route.py may rip already-routed
+    # copper from two entry points -- the in-run finalize/reconciliation
+    # (clearing a blocker, placing a plane tap) and --rip-existing-nets retry
+    # rounds -- and a rip whose restore is refused leaves that net broken. The
+    # damage was reported honestly and the board written anyway: in the
+    # sets-21-27 wave that was the largest single source of lost connectivity,
+    # bigger than routing failure (bms_sensor turned a 3-pad problem into a
+    # 20-pad one; spartan6_4layer lost 20 nets all of their copper). Detection
+    # was never the missing half -- ROLLBACK was.
+    #
+    # It runs HERE, at the very end, on the WRITTEN file: that is the run's
+    # true final artifact, after the finalize AND every reconciliation lap, so
+    # one check covers both rip entry points instead of chasing each. It is
+    # also why this is not a route.py main() post-pass -- inside batch_route
+    # it is on the shared engine path, and the verdict reaches the GUI too.
+    #
+    # BOTH fronts measure AND revert, by the same verdict. The two reverts are
+    # spelled differently only because the artifact is: the file front rewrites
+    # the output as the input board, and the GUI front returns an EMPTY
+    # change-set. No pcbnew surgery is involved on either -- the GUI applier
+    # runs AFTER batch_route returns, so withholding the change-set is a true
+    # rollback, not an un-apply.
+    #
+    # Only the run that OWNS the artifact gates. Every nested batch_route --
+    # the reconciliation sub-run, the plane finalize's reconnects -- carries
+    # final_reconcile=False, and a nested verdict is both meaningless (it
+    # measures one slice of the board) and actively misleading (it would print
+    # a REVERT notice for a sub-run whose caller is still working). The CLI
+    # sub-run is additionally in-place (input == output), which the file branch
+    # excludes anyway; the GUI sub-run is not, which is how this surfaced.
+    #
+    # A board with no input copper cannot regress -- there is nothing yet to
+    # break -- so the first (and usually largest) route step of a chain pays
+    # nothing for the gate, and only the later steps, which are exactly where
+    # the rips live, are measured.
+    _gate_report = None
+    _gate_ok = (env_knobs.IMPROVEMENT_GATE and not _ckpt_stop
+                and final_reconcile
+                and any(_orig_seg_by_net.values())
+                and (return_results
+                     or (output_file and input_file
+                         and os.path.isfile(output_file)
+                         and os.path.isfile(input_file)
+                         and os.path.abspath(output_file)
+                         != os.path.abspath(input_file))))
+    if _gate_ok:
+        try:
+            from improvement_gate import (net_connectivity_map,
+                                          compare_connectivity, gate_verdict,
+                                          format_report)
+            if return_results:
+                # The board the GUI applier will produce: input copper MINUS
+                # what it removes PLUS what it adds. NOT pcb_data, which also
+                # carries orphan copper from rip/reroute that reaches no
+                # apply channel and would grade a broken net as connected
+                # (the same trap the #8 write-model sweep documents).
+                _drop_s = {id(s) for s in (results_data.get('segments_to_remove') or [])}
+                _drop_v = {id(v) for v in (results_data.get('vias_to_remove') or [])}
+                _after_s = {nid: [s for s in lst if id(s) not in _drop_s]
+                            for nid, lst in _orig_seg_by_net.items()}
+                _after_v = {nid: [v for v in lst if id(v) not in _drop_v]
+                            for nid, lst in _orig_via_by_net.items()}
+                for _r6 in results_data.get('results', []):
+                    for _s6 in (_r6.get('new_segments') or []):
+                        _after_s.setdefault(_s6.net_id, []).append(_s6)
+                    for _v6 in (_r6.get('new_vias') or []):
+                        _after_v.setdefault(_v6.net_id, []).append(_v6)
+                for _s6 in (results_data.get('all_swap_segments') or []):
+                    _after_s.setdefault(_s6.net_id, []).append(_s6)
+                for _v6 in (results_data.get('all_swap_vias') or []):
+                    _after_v.setdefault(_v6.net_id, []).append(_v6)
+                _before_map = net_connectivity_map(
+                    pcb_data, segs_by_net=_orig_seg_by_net,
+                    vias_by_net=_orig_via_by_net)
+                _after_map = net_connectivity_map(
+                    pcb_data, segs_by_net=_after_s, vias_by_net=_after_v)
+                _name_of = (lambda nid: (pcb_data.nets[nid].name
+                                         if nid in pcb_data.nets
+                                         else f"Net {nid}"))
+            else:
+                from kicad_parser import parse_kicad_pcb as _pk600
+                _before_pcb = _pk600(input_file)
+                _after_pcb = _pk600(output_file)
+                _before_map = net_connectivity_map(_before_pcb)
+                _after_map = net_connectivity_map(_after_pcb)
+                _name_of = (lambda nid: (_after_pcb.nets[nid].name
+                                         if nid in _after_pcb.nets
+                                         else f"Net {nid}"))
+            _cmp = compare_connectivity(_before_map, _after_map, _name_of)
+            _verdict = gate_verdict(_cmp)
+            _why = ("This run did not fail to execute -- it ran and was "
+                    "REJECTED, so re-running it with MORE rip authority "
+                    "cannot help: change the approach (thinner track / finer "
+                    "grid / different layers), or accept the open nets and "
+                    "report them. See docs/rip-up-reroute.md 'Improvement "
+                    "gate'. KICAD_IMPROVEMENT_GATE=0 ships the regression "
+                    "instead.")
+            if _verdict == 'reject' and return_results:
+                # Withhold the change-set: the applier has not touched the
+                # live board yet, so an empty result IS the rollback. Keep
+                # the diagnostics (blockers / open pad pairs) -- they are
+                # why the caller asked -- and the gate report itself.
+                _keep6 = {k: results_data.get(k) or []
+                          for k in ('blockers', 'pad_pairs_open')}
+                results_data = _empty_results_data()
+                results_data.update(_keep6)
+                _action = ("DISCARDED this run's changes (nothing is applied "
+                           "to the board; the pre-rip board is the better "
+                           "artifact). " + _why)
+            elif _verdict == 'reject':
+                # Restore the input board. Passing it through keeps the chain
+                # intact (the next step still has a board) instead of failing
+                # the run and stranding the pipeline.
+                #
+                # copy_board, NOT a bare .kicad_pcb copy: the SIBLINGS have to
+                # travel with it (#441). The rejected run may already have
+                # stamped its own .kicad_pro DRC floor next to the output, and
+                # leaving that beside a reverted board is precisely the
+                # stranded-project trap -- the next step would resolve floors
+                # from a project describing copper that is no longer there.
+                if (input_file.endswith('.kicad_pcb')
+                        and output_file.endswith('.kicad_pcb')):
+                    from copy_board import copy_board as _cb600
+                    _cb600(input_file, output_file)
+                else:
+                    from pcb_io_utils import passthrough_copy as _pt600
+                    _pt600(input_file, output_file)
+                batch_route._improvement_gate_reverted = True
+                _action = (f"REVERTED {output_file} to the input board (the "
+                           f"pre-rip board is the better artifact). " + _why)
+            else:
+                _action = ("shipped (the run connected at least as many nets "
+                           "as it broke)")
+            _gate_report = dict(_cmp, verdict=_verdict)
+            if _cmp['lost'] or _verdict == 'reject':
+                print("\n" + RED + format_report(_cmp, _verdict, _action)
+                      + RESET)
+            print(f"JSON_IMPROVEMENT_GATE: {json.dumps(_gate_report)}")
+            if return_results:
+                results_data['improvement_gate'] = _gate_report
+        except Exception as _ge:
+            # A gate that crashes must not take the run's board with it.
+            print(f"  (improvement gate skipped: {_ge})")
+
     if return_results:
         return successful, failed, total_time, results_data
     return successful, failed, total_time
@@ -4869,10 +5020,22 @@ For differential pair routing, use route_diff.py:
                 add_teardrops=args.add_teardrops,
                 collect_stats=args.stats)
 
+    # #600: when the improvement gate reverted the output, it IS the input
+    # board -- byte for byte, siblings included. Every post-pass below must
+    # stand down: the castellated retract MUTATES the board (so the revert
+    # would no longer be faithful) and the DRC writeback would stamp this
+    # run's requested floors onto copper this run did not produce, which is
+    # the stranded-project trap the revert exists to avoid (#441).
+    _gate_reverted = getattr(batch_route, '_improvement_gate_reverted', False)
+    if _gate_reverted:
+        print("  (improvement gate reverted the output -- skipping the "
+              "castellated retract and the DRC-settings writeback; the "
+              "output is the input board, project and rules included)")
+
     # Castellated landings (run-6 fix 1.7): pull track ends that landed inside
     # a castellated pad's edge-clearance zone back to the pad's inner reach.
     # No-op on boards without pad_prop_castellated pads or an edge rule.
-    if not args.skip_routing and args.output_file \
+    if not args.skip_routing and args.output_file and not _gate_reverted \
             and os.path.isfile(args.output_file):
         try:
             from fix_kicad_drc_settings import effective_board_edge_clearance
@@ -4889,6 +5052,7 @@ For differential pair routing, use route_diff.py:
     # problems instead of stock-default noise (issue #160). Only edits the
     # .kicad_pro, never the .kicad_pcb, so the board's KiCad version is preserved.
     if not args.no_fix_drc_settings and not args.skip_routing \
+            and not _gate_reverted \
             and args.output_file and os.path.isfile(args.output_file):
         try:
             import clearance_ledger

@@ -160,6 +160,11 @@ def refresh() -> None:
     # shortcut may inflict are the plane finalize / kicad-oracle recheck's
     # job, which runs after cleanup on both fronts.
     g['SMOOTH_ROUTE'] = _s('KICAD_SMOOTH_ROUTE', '')
+    # #600 improvement gate: refuse to ship a board this run made WORSE (more
+    # previously-connected nets broken than newly connected). '0' disables --
+    # for A/B, and for the rare case where an operator genuinely wants the
+    # regressed board on disk to inspect it.
+    g['IMPROVEMENT_GATE'] = _s('KICAD_IMPROVEMENT_GATE', '1') != '0'
     g['PLANE_PARTIAL_RESTORE'] = _s('KICAD_PLANE_PARTIAL_RESTORE') == '1'
     g['DUMP_BATCH_KWARGS_CONTINUE'] = _s('KICAD_DUMP_BATCH_KWARGS_CONTINUE') == '1'
 

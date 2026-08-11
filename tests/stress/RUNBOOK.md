@@ -475,6 +475,25 @@ harmless.
    blockers are the already-routed wider tracks), keep power/impedance nets wide,
    add a finer --grid-step for fine-pitch escapes; if still congested step the
    width down further toward 0.0889.
+10a. RIP AUTHORITY IS A LAST RESORT, NOT A RETRY DEFAULT (#600). `--rip-existing-nets`
+   and `--force-reroute` are permission to DESTROY already-routed copper, and a rip
+   whose restore is refused leaves that net broken. In the sets-21-27 wave this was
+   the single largest source of lost connectivity — larger than routing failure
+   itself (7 of 99 boards; `bms_sensor` turned a 3-pad problem into a 20-pad one,
+   `spartan6_4layer` lost 20 nets all of their copper). **Scoping `--nets` does NOT
+   protect you** — `ftdi_debug_toolkit` regressed from a retry naming three nets. It
+   is the rip PERMISSION, not the route scope. Order of preference: (1) re-run the
+   whole signal step THINNER per rule 10 — destroys nothing; (2) a PLAIN retry of the
+   failed nets — the in-run #103 escalation already grants itself targeted authority
+   over the exact blockers the log named, so you usually need no flag at all;
+   (3) `--rip-existing-nets <the named blockers>`; (4) `'*'` only as a last resort,
+   and never with `--force-reroute` over a large net list — that combination is the
+   `spartan6_4layer` shape. The engine now backstops this: a run that ends net-worse
+   prints `IMPROVEMENT GATE … REVERTED` and restores the input board. **If you see
+   that, the step did not fail to run — it ran and was REJECTED.** Do not re-run it
+   with more authority; change the approach or accept the open nets and report them.
+   Assert on the `JSON_IMPROVEMENT_GATE:` line (`lost`/`gained`/`verdict`) rather
+   than reading prose, and record a REVERTED step in `issues`.
 11. Verification (always, on the final board):
     - `check_drc.py <final> --clearance <floor> --hole-to-hole-clearance <floor> 2>&1 | tee drc.log`
       (manufacturing floor from `--design-rules`, per step 7; note the flags used)
