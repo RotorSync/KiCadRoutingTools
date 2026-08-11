@@ -1747,6 +1747,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     config._congestion2 = build_congestion2(pcb_data, config,
                                             list(all_net_ids_to_route))
 
+    # History congestion (#590): fresh per-cell conflict field for this call
+    # (rips + failed frontiers bump it; every prepare prices it). Env-gated
+    # off by default.
+    from history_congestion import reset_history
+    reset_history(config)
+
     # Register rippable pre-existing nets as already-routed (issue #103):
     # blocking analysis iterates routed_net_paths (cells are recomputed from
     # pcb_data, so an empty path is fine), filter_rippable_blockers requires
@@ -2832,6 +2838,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if _frag is not None and _frag.refreshes:
         print(f"  Fragility refresh (#466): {_frag.refreshes} windows, "
               f"{_frag.refresh_s:.2f}s total")
+    from history_congestion import print_history_summary
+    print_history_summary(config)
 
     # Print detailed failure summary
     if failed_single:

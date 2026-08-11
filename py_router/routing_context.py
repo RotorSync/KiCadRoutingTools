@@ -160,10 +160,12 @@ def build_diff_pair_obstacles(
     # stub surplus, one composition pass). Congestion v2 stays out of the
     # diff-pair path (it never stamped here -- its owner exemption is
     # single-net).
+    from history_congestion import add_history_source
     merge_track_proximity_costs(
         obstacles, track_proximity_cache,
-        ghost_costs={**filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids),
-                     **(_stub_surplus or {})},
+        ghost_costs=add_history_source(
+            {**filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids),
+             **(_stub_surplus or {})}, config),
         config=config)
 
     # Add cross-layer track data
@@ -293,12 +295,14 @@ def build_single_ended_obstacles(
     # Add track proximity costs (+ ripped-corridor layer ghosts + layer-aware
     # stub surplus, one composition pass)
     from congestion_field import congestion2_rows
+    from history_congestion import add_history_source
     _c2 = congestion2_rows(config, net_id, routed_net_ids)
     merge_track_proximity_costs(
         obstacles, track_proximity_cache,
-        ghost_costs={**filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids),
-                     **(_stub_surplus or {}),
-                     **({('congestion2',): _c2} if _c2 is not None else {})},
+        ghost_costs=add_history_source(
+            {**filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids),
+             **(_stub_surplus or {}),
+             **({('congestion2',): _c2} if _c2 is not None else {})}, config),
         config=config)
     # Congestion v2 (#424): demand/capacity field, owner-exempt (no-op
     # unless KICAD_CONGESTION2_COST > 0 and the field was built).
@@ -372,10 +376,12 @@ def build_incremental_obstacles(
                                          stub_proximity_net_ids, all_stubs,
                                          config, layer_map=layer_map)
 
-    # Add track proximity costs (+ layer-aware stub surplus)
-    merge_track_proximity_costs(obstacles, track_proximity_cache,
-                                ghost_costs=_stub_surplus or None,
-                                config=config)
+    # Add track proximity costs (+ layer-aware stub surplus, #590 history)
+    from history_congestion import add_history_source
+    merge_track_proximity_costs(
+        obstacles, track_proximity_cache,
+        ghost_costs=add_history_source(_stub_surplus or None, config) or None,
+        config=config)
 
     # Add cross-layer track data
     add_cross_layer_tracks(obstacles, pcb_data, config, layer_map,
@@ -472,12 +478,14 @@ def prepare_obstacles_inplace(
     # Add track proximity costs (+ ripped-corridor layer ghosts + layer-aware
     # stub surplus, one composition pass)
     from congestion_field import congestion2_rows
+    from history_congestion import add_history_source
     _c2 = congestion2_rows(config, net_id, routed_net_ids)
     merge_track_proximity_costs(
         working_obstacles, track_proximity_cache,
-        ghost_costs={**filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids),
-                     **(_stub_surplus or {}),
-                     **({('congestion2',): _c2} if _c2 is not None else {})},
+        ghost_costs=add_history_source(
+            {**filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids),
+             **(_stub_surplus or {}),
+             **({('congestion2',): _c2} if _c2 is not None else {})}, config),
         config=config)
 
 

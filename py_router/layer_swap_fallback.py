@@ -24,6 +24,7 @@ from obstacle_costs import (
     apply_stub_proximity, merge_track_proximity_costs, compute_track_proximity_for_net
 )
 from blocking_analysis import analyze_frontier_blocking
+from history_congestion import add_history_source, record_rip   # #590
 from polarity_swap import get_canonical_net_id
 
 
@@ -367,9 +368,10 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                                                  stub_proximity_net_ids,
                                                  all_stubs, config,
                                                  layer_map=layer_map)
-            merge_track_proximity_costs(retry_obstacles, track_proximity_cache,
-                                        ghost_costs=_stub_surplus or None,
-                                        config=config)
+            merge_track_proximity_costs(
+                retry_obstacles, track_proximity_cache,
+                ghost_costs=add_history_source(_stub_surplus or None, config)
+                or None, config=config)
             add_same_net_via_clearance(retry_obstacles, pcb_data, pair.p_net_id, config)
             add_same_net_via_clearance(retry_obstacles, pcb_data, pair.n_net_id, config)
             add_same_net_pad_drill_via_clearance(retry_obstacles, pcb_data, pair.p_net_id, config)
@@ -456,6 +458,10 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                             if was_in_results:
                                 results.remove(saved_result)
                             remove_route_from_pcb_data(pcb_data, saved_result)
+                            # #590: a blocker rip, done inline here rather than
+                            # through rip_up_net -- charge it the same way, or
+                            # this path's conflicts are invisible to history.
+                            record_rip(config, saved_result, layer_map)
                             for rid in rip_net_ids:
                                 if rid in routed_net_ids:
                                     routed_net_ids.remove(rid)
@@ -487,9 +493,11 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                                 rip_obstacles, pcb_data,
                                 stub_proximity_net_ids, rip_all_stubs, config,
                                 layer_map=layer_map)
-                            merge_track_proximity_costs(rip_obstacles, track_proximity_cache,
-                                                        ghost_costs=_stub_surplus or None,
-                                                        config=config)
+                            merge_track_proximity_costs(
+                                rip_obstacles, track_proximity_cache,
+                                ghost_costs=add_history_source(
+                                    _stub_surplus or None, config) or None,
+                                config=config)
                             add_same_net_via_clearance(rip_obstacles, pcb_data, pair.p_net_id, config)
                             add_same_net_via_clearance(rip_obstacles, pcb_data, pair.n_net_id, config)
                             add_same_net_pad_drill_via_clearance(rip_obstacles, pcb_data, pair.p_net_id, config)
@@ -537,9 +545,11 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                                             reroute_stub_net_ids,
                                             reroute_all_stubs, config,
                                             layer_map=layer_map)
-                                        merge_track_proximity_costs(reroute_obstacles, track_proximity_cache,
-                                                                    ghost_costs=_stub_surplus or None,
-                                                                    config=config)
+                                        merge_track_proximity_costs(
+                                            reroute_obstacles, track_proximity_cache,
+                                            ghost_costs=add_history_source(
+                                                _stub_surplus or None, config) or None,
+                                            config=config)
 
                                         reroute_result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, reroute_obstacles, base_obstacles, reroute_stubs)
                                         if reroute_result and not reroute_result.get('failed') and not reroute_result.get('probe_blocked'):

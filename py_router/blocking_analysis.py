@@ -296,6 +296,14 @@ def analyze_frontier_blocking(
     blocked_arr = np.asarray(list(blocked_cells), dtype=np.int64)
     blocked_keys = np.unique(_pack_cells(blocked_arr[:, :2], blocked_arr[:, 2]))
 
+    # #590: the frontier of a search that FAILED is a conflict event too --
+    # weaker than a rip (it includes static copper no rip can clear), so it
+    # carries a fractional weight. Hooked here so every caller (single-ended
+    # ladder, reroute loop, phase 3, diff-pair loop, layer-swap fallback)
+    # feeds it. No-op unless KICAD_HISTORY_COST > 0.
+    from history_congestion import record_blocked_frontier
+    record_blocked_frontier(config, blocked_arr)
+
     # Compute source/target grid coords and proximity threshold
     coord = GridCoord(config.grid_step)
     target_gx, target_gy = None, None

@@ -40,7 +40,8 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
                ripped_route_layer_costs: Dict[int, 'np.ndarray'] = None,
                ripped_route_via_positions: Dict[int, List[Tuple[int, int]]] = None,
                layer_map: Dict[str, int] = None,
-               only_segments: Optional[List] = None) -> Tuple[Optional[dict], List[int], bool]:
+               only_segments: Optional[List] = None,
+               history_conflict: bool = True) -> Tuple[Optional[dict], List[int], bool]:
     """Rip up a routed net (or diff pair), removing it from pcb_data and tracking structures.
 
     #510 PARTIAL (leg-level) RIP: pass `only_segments` to remove just those
@@ -71,6 +72,11 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
         ripped_route_layer_costs: Optional dict to store ripped route layer-specific costs
         ripped_route_via_positions: Optional dict to store ripped route via positions
         layer_map: Optional layer name to index mapping (required for ripped route costs)
+        history_conflict: #590 -- True (default) if this rip is CONTENTION
+            (another net wanted the ground). Pass False for an own-tree
+            re-ask (#444 seam dissolution), which rips a net's own copper to
+            re-ask it: no second net is competing, so charging the negotiated-
+            congestion field there would price a cell nobody contested.
 
     Returns:
         tuple: (saved_result, ripped_net_ids, was_in_results) for later restoration
@@ -196,6 +202,12 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
             ripped_route_layer_costs[net_id] = _lc
             if ripped_route_via_positions is not None:
                 ripped_route_via_positions[net_id] = _vp
+        # #590: the branch we just tore out was contested ground -- bump its
+        # cells' PERMANENT history cost (no-op unless KICAD_HISTORY_COST > 0).
+        # Unlike the ghost above this survives the victim's reroute.
+        if history_conflict:
+            from history_congestion import record_rip as _record_rip590
+            _record_rip590(config, partial, layer_map)
         partial['_owner_result'] = saved_result
         if _preexist_rip:
             _note_preexisting_rip(True)
@@ -280,6 +292,15 @@ def rip_up_net(net_id: int, pcb_data: PCBData, routed_net_ids: List[int],
             ripped_route_layer_costs[rid] = layer_costs
             if ripped_route_via_positions is not None:
                 ripped_route_via_positions[rid] = via_positions
+
+    # #590 history congestion: one conflict event per rip, charged to the
+    # cells the ripped copper occupied. Independent of the ghosts above --
+    # those are per-NET and vanish when the victim reroutes (C1 filter); this
+    # is per-CELL and cumulative for the rest of the call. No-op unless
+    # KICAD_HISTORY_COST > 0.
+    if history_conflict:
+        from history_congestion import record_rip as _record_rip590
+        _record_rip590(config, saved_result, layer_map)
 
     # #468: keep the pre-rip payload reachable for the terminal-failure
     # restore (rip_restore.try_terminal_restore). Keyed under EVERY ripped

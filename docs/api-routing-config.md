@@ -228,6 +228,48 @@ otherwise invisible in flag tables:
 | Plane fragility | `KICAD_PLANE_FRAGILITY_COST` | **2.0 = ON** | Cells near pour boundaries/necks, so signals do not bisect a plane. The LARGEST default field (10x the stub tier). `0` reverts. |
 | Congestion v1 | `KICAD_CONGESTION_COST` | 0 = off | All-layer copper-density field. |
 | Congestion v2 | `KICAD_CONGESTION2_COST` | 0 = off | Demand/capacity bins, owner-exempt (your own destination does not repel you). A source in the layer-map composition pass since d52f1c2 (#585 item 7): sums in sum mode, max-mode unchanged by commutativity. |
+| History congestion | `KICAD_HISTORY_COST` | 0 = off | PathFinder-style negotiated congestion (#590): per-CELL, CUMULATIVE conflict history for the rest of the call. See below. |
+
+##### History congestion (#590), the only field that measures TIME
+
+Every other field prices the board's state *now*. This one prices how often a
+cell has been **fought over**, so repeatedly-contested ground gets steadily
+more expensive and the contest dissolves without anyone arbitrating whom to
+rip (the 0802 rip study refuted every frame-local rip gate and concluded "soft
+rra pricing beats refusal"; this is that conclusion made cumulative).
+
+Conflict events, both charged in mm-equivalent to the cells involved:
+
+- a **rip** — full increment over the ripped copper's footprint (half width +
+  `KICAD_HISTORY_RADIUS`, vias on every layer). Recorded in `rip_up_net`, so
+  every rip in the engine feeds it, on both front-ends.
+- a **failed search's blocked frontier** — `KICAD_HISTORY_BLOCKED_WEIGHT` ×
+  the increment (a frontier is large and includes static copper no rip can
+  clear). One failure analyzed twice in a row is charged once.
+
+| Knob | Default | Meaning |
+|------|---------|---------|
+| `KICAD_HISTORY_COST` | `0` (off) | mm-equivalent per conflict event |
+| `KICAD_HISTORY_CAP` | `0` (uncapped) | Ceiling on a cell's accumulated history. Guards the *productive*-churn regime — a fine-pitch BGA escape field, where 15 rips converge, must not wall itself off. |
+| `KICAD_HISTORY_RADIUS` | `0.25` mm | Added to the copper half-width when a rip stamps (a retry that dodges by one cell has not found different ground) |
+| `KICAD_HISTORY_BLOCKED_WEIGHT` | `0.25` | Frontier weight; `0` = rips only |
+| `KICAD_HISTORY_MAX_CELLS` | `500000` | Growth guard bounding the per-prepare merge: past this, an event's NEW cells are refused whole (existing cells keep accruing). Disclosed in the run summary along with the field's size and upkeep time. |
+
+**Cost.** The event path is cheap (a rip stamps its corridor by vectorized
+linspace sampling at half-radius spacing, and the sorted field takes new cells
+by merge-insert, so an event is O(field), not O(field·log field) — ~14 ms at a
+pathological 2 M-cell field, well under 1 ms at realistic sizes). What you
+actually pay is the per-prepare composition, which now vstacks one more source:
+measured against a 200 k-row baseline of existing sources, +2.5 ms/prepare at a
+50 k-cell field and +8.7 ms at 200 k. The run summary prints the field's event
+count, cell count, peak, and upkeep time so an A/B can see both sides.
+
+Distinct from the ripped-route ghosts above in the two ways that matter: those
+are per-NET and are **deleted** when the victim reroutes (C1); this is
+per-CELL and survives for the whole call. Scope is one routing call (fresh at
+batch start, like congestion v2's bins); cross-step persistence is a v2
+question. No decay — decay is an FPGA-ism for hundred-iteration convergence.
+No CLI flag or GUI control until the corpus says it earns one.
 
 #### Composition: how multiple sources combine (`KICAD_PROXIMITY_SUM`)
 

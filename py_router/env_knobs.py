@@ -215,6 +215,15 @@ def refresh() -> None:
         'exempt_r': _f('KICAD_CONGESTION2_EXEMPT_R', 1.0),
         'ramp_top': _f('KICAD_CONGESTION2_RAMP_TOP', 2.0),
     }
+    # History-based negotiated congestion (#590, PathFinder): permanent
+    # per-cell bump at each conflict event. See history_congestion.py.
+    g['HISTORY'] = {
+        'cost': _f('KICAD_HISTORY_COST', 0.0),            # 0 = disabled
+        'cap': _f('KICAD_HISTORY_CAP', 0.0),              # 0 = uncapped
+        'radius': _f('KICAD_HISTORY_RADIUS', 0.25),       # mm beyond half-width
+        'blocked_weight': _f('KICAD_HISTORY_BLOCKED_WEIGHT', 0.25),
+        'max_cells': _i('KICAD_HISTORY_MAX_CELLS', 500_000),
+    }
 
     # --- strings -------------------------------------------------------------
     g['HYBRID_LEG_DEBUG'] = _s('KICAD_HYBRID_LEG_DEBUG')   # truthy; '2' = verbose

@@ -1857,7 +1857,8 @@ def seam_reask_one_net(net_id, pcb_data, config, state, base_obstacles,
         diff_pair_by_net_id or {}, remaining_net_ids, results, config,
         track_proximity_cache, state.working_obstacles,
         state.net_obstacles_cache, state.ripped_route_layer_costs,
-        state.ripped_route_via_positions, layer_map)
+        state.ripped_route_via_positions, layer_map,
+        history_conflict=False)   # #590: own-tree re-ask, not contention
     if saved is None:
         return False
     cfg_polish = _dc_replace(config, max_rip_up_count=0)
@@ -1885,7 +1886,8 @@ def seam_reask_one_net(net_id, pcb_data, config, state, base_obstacles,
             routed_results, diff_pair_by_net_id or {}, remaining_net_ids,
             results, config, track_proximity_cache, state.working_obstacles,
             state.net_obstacles_cache, state.ripped_route_layer_costs,
-            state.ripped_route_via_positions, layer_map)
+            state.ripped_route_via_positions, layer_map,
+            history_conflict=False)   # #590: undoing our own re-ask
     restore_net(net_id, saved, ripped_ids, was_in, pcb_data, routed_net_ids,
                 routed_net_paths, routed_results, diff_pair_by_net_id or {},
                 remaining_net_ids, results, config, track_proximity_cache,

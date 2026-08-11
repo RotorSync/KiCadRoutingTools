@@ -1048,6 +1048,10 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # cell cost via the Rust via branch.
     from congestion_field import register_congestion_field
     register_congestion_field(pcb_data, config, track_proximity_cache)
+
+    # History congestion (#590): fresh per-cell conflict field for this call.
+    from history_congestion import reset_history
+    reset_history(config)
     layer_map = state.layer_map
     reroute_queue = state.reroute_queue
     polarity_swapped_pairs = state.polarity_swapped_pairs
