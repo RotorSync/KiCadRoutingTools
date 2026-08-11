@@ -66,7 +66,7 @@ Options: `-o/--output` (the extension picks `.mp4` vs `.gif`), `--size`, `--fps`
 `--png-dir` (dump raw frames), `--png` (also write a full-resolution still of the
 final board), `--quiet`.
 
-**In the GUI:** tick **Make routing movie** in the Advanced tab's *Debug*
+**In the GUI:** tick **Make routing movie** in the Advanced options tab's *Debug*
 section (default off). While it is on the plugin records what it routes and
 writes the movie next to the board as `<board>_routing.mp4` (then `_routing_2`,
 `_routing_3`, … — earlier movies are never overwritten), printing the path in

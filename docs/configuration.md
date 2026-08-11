@@ -84,7 +84,7 @@ connected") — there is no way to make the router replace a
 connected-but-unwanted route (e.g. one that squeaked through a corridor you
 want cleared). `--force-reroute` is that way: every selected net has its
 copper stripped and is replanned from scratch. In the GUI it is the
-**Force re-route selected nets** checkbox on the Basic tab.
+**Force re-route selected nets** checkbox on the Route tab.
 
 Safety rails:
 
@@ -124,7 +124,7 @@ The **fab tier** is the JLCPCB manufacturing floor every routing step shrinks tr
 vias and clearances *down toward* when it needs to. It is shared by every CLI
 (`route.py`, `route_diff.py`, `route_planes.py`, `repair_planes.py`,
 `bga_fanout.py`, `qfn_fanout.py`, `check_drc.py`, `fix_kicad_drc_settings.py`,
-`list_nets.py`) and the GUI (one selector on the Basic tab). Values are sourced from
+`list_nets.py`) and the GUI (one selector on the Route tab). Values are sourced from
 [jlcpcb.com/capabilities](https://jlcpcb.com/capabilities).
 
 | Option | Default | Description |
@@ -358,7 +358,7 @@ Notes:
   meant for open board area.
 - Unlike a guide corridor (which is best-effort), a keepout is absolute — if a zone walls off the
   only path to a pad, that net will fail to route. With the flag off, routing is unchanged.
-- **Plugin only:** the Basic tab has optional "Clear guide layer after routing" / "Clear keepout
+- **Plugin only:** the Route tab has optional "Clear guide layer after routing" / "Clear keepout
   layer after routing" checkboxes (unchecked by default). When ticked, a *successful* route deletes
   the drawn guide/keepout graphics from that User layer so you can draw fresh ones — it only acts
   for the feature it pairs with, and never runs if nothing routed.

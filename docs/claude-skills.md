@@ -43,8 +43,8 @@ controls):
 | AI tab | **Plan Routing** | `/plan-pcb-routing` | Fills parameters across the tabs and loads a checkable step list; **Run Selected Steps** executes them in-process |
 | AI tab | **Review Routed Board** | `/review-routed-board` | QA report in the transcript with a PASS/FAIL verdict |
 | AI tab | **Diagnose Routing Failures** | `/diagnose-routing-failures` | Root-cause report from the board + the Log tab content |
-| Basic tab (Layers) | **Check Stackup (Claude)** | `/recommend-stackup` | Stackup report; recommended layer count logged |
-| Basic tab (Options) | **Ask AI** (Power Nets) | `/analyze-power-nets` | Fills the Power Nets / Power Widths fields |
+| Route tab (Layers) | **Check Stackup (Claude)** | `/recommend-stackup` | Stackup report; recommended layer count logged |
+| Route tab (Options) | **Ask AI** (Power Nets) | `/analyze-power-nets` | Fills the Power Nets / Power Widths fields |
 | Differential tab | **Ask AI** | `/identify-diff-pairs` | Checks confirmed pairs, unchecks name-matching false positives; unconventional pairs reported in the log |
 | Planes tab | **Ask AI** (assignments) | `/recommend-plane-mappings` | Fills the net → layer assignment list (replace/merge prompt) |
 | Planes tab | **Ask AI** (GND vias) | `/find-high-speed-nets` | Fills the GND via Max Distance field |
@@ -55,7 +55,7 @@ backend; opencode models are `provider/model` strings, its effort maps to
 `--variant`). Claude Code runs show a startup header (version, model, discovered
 skills) so you can confirm what actually ran.
 
-**Recording a plan run.** Tick **Make routing movie** in the Advanced tab's *Debug*
+**Recording a plan run.** Tick **Make routing movie** in the Advanced options tab's *Debug*
 section (default off) and a plan run writes one movie covering every step it ran,
 next to the board, with the path logged in green. A routing step run on its own tab
 gets its own movie the same way. See

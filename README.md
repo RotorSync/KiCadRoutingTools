@@ -63,7 +63,7 @@ Fast, grid-based A\* routing with a native Rust core (~10× faster than pure Pyt
 **Interfaces**
 - Full [KiCad plugin GUI](#kicad-plugin) (KiCad 9 & 10) and a scriptable [CLI](#command-line-interface)
 - [AI assistance](docs/claude-skills.md) — a **AI tab** that plans an entire routing workflow, per-field "Ask AI" helpers, and datasheet-driven power / high-speed / diff-pair analysis
-- [Board rendering & routing animation](docs/route-animation.md) — fast geometry PNG renderer, plus a movie of the router laying/ripping/restoring copper (`make_movie.py`, or the Advanced tab's **Make routing movie** debug checkbox → `.mp4`/`.gif`)
+- [Board rendering & routing animation](docs/route-animation.md) — fast geometry PNG renderer, plus a movie of the router laying/ripping/restoring copper (`make_movie.py`, or the Advanced options tab's **Make routing movie** debug checkbox → `.mp4`/`.gif`)
 - [Routing plans as files](docs/claude-skills.md#plans-from-the-command-line) — save/load a whole routing chain as JSON: build one from a recorded command chain (`make_plan.py`), run it headless through the real plugin (`run_plan.py`), or load it in the GUI
 
 ## Quick Start
@@ -200,7 +200,7 @@ With [Claude Code](https://claude.ai/claude-code) or [opencode](https://opencode
 
 - **AI tab** - *Plan Routing* runs `/plan-pcb-routing`: the plan fills the parameter fields across the tabs and appears as a checkable step list, which *Run Selected Steps* executes sequentially in-process on the live board with per-step status marks. *Review Routed Board* and *Diagnose Routing Failures* give post-route QA and failure root-causing. Backend, model, and effort selectors control every AI run and persist with the dialog settings (model/effort remembered per backend).
 - **Save / Load a plan** - *Save…* writes the generated step list to a JSON file; *Load…* reads one back and runs it with **no Claude call** — handy for replaying a workflow that worked on another board. A recorded stress-test chain converts to a loadable plan too (`tests/stress/manifest_to_plan.py <board>/redo_commands.sh plan.json`).
-- **Per-field "Ask AI" buttons** - power nets/widths (Basic tab), stackup check (Layers), differential-pair verification by pin function (Differential tab), net-to-plane layer mappings and GND return via distance (Planes tab).
+- **Per-field "Ask AI" buttons** - power nets/widths (Route tab), stackup check (Layers), differential-pair verification by pin function (Differential tab), net-to-plane layer mappings and GND return via distance (Planes tab).
 
 The full button-to-skill map is in [Claude Skills - Plugin GUI Integration](docs/claude-skills.md#plugin-gui-integration). Datasheet-based skills use web lookups and take a few minutes; every run shows a live transcript with cancel.
 
@@ -269,7 +269,7 @@ python package_pcm.py --binary-dir ./path/to/release/artifacts
 
 ### Plugin Tabs
 
-**Basic Tab:**
+**Route Tab:**
 - Net selection with filtering and component filtering
 - Nets selected in the PCB editor before opening the plugin are pre-checked automatically (also applies to the Fanout, Planes, and Differential tabs)
 - Option to separate nets by net class (organizes into tabs per class)
@@ -280,7 +280,7 @@ python package_pcm.py --binary-dir ./path/to/release/artifacts
 - **Keepout zones** - draw one or more closed polygons on a User layer (e.g. `User.2`) and tick "Keep out of User-layer polygon(s)" to keep routed tracks out of those areas (hard keepout, all routed nets)
 - **Clear guide/keepout layers** - optional "Clear guide layer after routing" / "Clear keepout layer after routing" checkboxes (unchecked by default) delete the drawn guide/keepout graphics from their User layer after a successful route, so you can draw fresh ones for the next run
 
-**Advanced Tab:**
+**Advanced options Tab:**
 - Swappable nets configuration for target swap optimization
 - Routing parameters: iterations, heuristic weight, rip-up, probe iterations
 - MPS ordering options, direction control, length matching
@@ -654,7 +654,7 @@ KiCadRoutingTools/
 ├── rust_router/              # Rust A* implementation
 ├── kicad_routing_plugin/     # KiCad ActionPlugin
 │   ├── action_plugin.py      # ActionPlugin entry point
-│   ├── swig_gui.py           # Main routing dialog (Basic/Advanced tabs)
+│   ├── swig_gui.py           # Main routing dialog (Route/Advanced options tabs)
 │   ├── differential_gui.py   # Differential pair routing tab
 │   ├── fanout_gui.py         # BGA/QFN fanout tab and net selection panel
 │   ├── planes_gui.py         # Power/ground planes tab

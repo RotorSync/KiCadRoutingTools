@@ -365,13 +365,13 @@ class RoutingDialog(wx.Dialog):
         # Create notebook for tabs
         self.notebook = wx.Notebook(main_panel)
 
-        # Tab 1: Basic parameters
+        # Tab 1: Route (the basic routing parameters)
         config_panel = self._create_config_tab()
-        self.notebook.AddPage(config_panel, "Basic")
+        self.notebook.AddPage(config_panel, "Route")
 
-        # Tab 2: Advanced (swappable nets + advanced parameters + options)
+        # Tab 2: Advanced options (swappable nets + advanced parameters + options)
         advanced_panel = self._create_advanced_tab()
-        self.notebook.AddPage(advanced_panel, "Advanced")
+        self.notebook.AddPage(advanced_panel, "Advanced options")
 
         # Tab 3: Differential
         differential_panel = self._create_differential_tab()

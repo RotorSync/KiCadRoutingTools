@@ -1046,10 +1046,10 @@ override box is the equivalent (unchecked = honor classes, checked = clamp).
 The **GUI plugin** does the equivalent on the live board via the pcbnew API
 (`BOARD_DESIGN_SETTINGS` + the Default net class + severities) after routing, and
 marks the board modified so your next save keeps it. A single **"Fix DRC settings
-after routing"** checkbox on the **Basic tab** controls this for every routing
+after routing"** checkbox on the **Route tab** controls this for every routing
 action in the dialog — single-ended routing, differential pairs, and plane
 create/repair all read that one shared toggle (it is on by default); a **"Keep
-thermal-relief DRC severity"** checkbox on the **Advanced tab** is the GUI
+thermal-relief DRC severity"** checkbox on the **Advanced options tab** is the GUI
 counterpart of `--keep-thermal` (off by default). Both front-ends share the same
 target-computing logic (`compute_targets` / `severity_plan` in
 `fix_kicad_drc_settings.py`) and differ only in how they apply it (`.kicad_pro`

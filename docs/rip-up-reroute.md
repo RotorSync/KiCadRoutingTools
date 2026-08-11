@@ -195,7 +195,7 @@ end up worse off. The *abandon decision* arbitrates: keep the retry, or
 abandon it, restore the net's original tap, and re-route the whole rip tree
 around it (issues #85, #354).
 
-`--ripup-abandon-metric` (GUI: Advanced tab → "Rip-up Abandon Metric"; env
+`--ripup-abandon-metric` (GUI: Advanced options tab → "Rip-up Abandon Metric"; env
 override `KICAD_RIPUP_ABANDON_METRIC` for replay A/Bs) selects how the two
 worlds are compared. All metrics except `stranded` compare the **retry
 world** (retry kept, rip-tree victims re-routed around it) against the

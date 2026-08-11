@@ -230,7 +230,7 @@ assumes a ≤5 GHz design; a much faster board would warrant a smaller value.
 This rule is shared by the CLI (`route_diff.py`) and the GUI. In the GUI's
 Differential tab, the **"Hide short routes"** option (on by default) uses the
 same test to drop these pairs from the differential pair list, and keeps their
-nets visible on the Basic tab — even under "Hide differential" — so they get
+nets visible on the Route tab — even under "Hide differential" — so they get
 routed single-ended.
 
 ### Pose-Based Centerline Routing
