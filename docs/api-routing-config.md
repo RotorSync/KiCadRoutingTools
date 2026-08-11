@@ -235,14 +235,17 @@ Every source above is deduped WITHIN itself (per net per category: a net's six
 connector stubs, or one track's overlapping sample disks, count once — cost
 never depends on sampling density). Across sources, per cell:
 
-- **unset (default): max.** Saturating — 30 overlapping stub fields cost the
-  same as one. Byte-identical to the historical behavior.
+- **unset (default): `zoned`** — since the hw-2.3 core rescan (-30 verdict,
+  DRC-clean vs max). `'0'`/`'off'`/`'max'` restores historical max.
+- **max**: saturating — 30 overlapping stub fields cost the same as one.
+  The historical behavior.
 - **`1`/`sum`: sum.** Density gradient — corridors threading many nets' fields
   price proportionally (glasgow A/B: 11 -> 4 failures). Steeper fields around
   clustered pads (lpddr4 A/B: 6x search, one extra pad short).
-- **`zoned`: sum, except max inside BGA escape fields** (zone +
+- **`zoned` (the default): sum, except max inside BGA escape fields** (zone +
   `bga_proximity_radius`), where stacked foreign fields price a net's
-  MANDATORY approach rather than an avoidable crowd.
+  MANDATORY approach rather than an avoidable crowd. On boards with no BGA
+  it is exactly `sum`.
 - **`softcap`: the global blend `max + α·(sum − max)` per cell, everywhere**
   (#584). `KICAD_PROXIMITY_SOFTCAP_ALPHA` sets α (default `0.3`): the
   max-mode floor plus a fraction of the crowd pressure, so density still

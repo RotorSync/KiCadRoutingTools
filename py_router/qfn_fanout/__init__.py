@@ -902,7 +902,8 @@ def main():
                              'is mounted on)')
     parser.add_argument('--width', '-w', type=float, default=0.1,
                         help='Track width in mm')
-    parser.add_argument('--extension', type=float, default=0.1,
+    import routing_defaults as defaults
+    parser.add_argument('--extension', type=float, default=defaults.QFN_EXTENSION,
                         help='Extension past pad edge before bend (mm)')
     parser.add_argument('--clearance', type=float, default=0.1,
                         help='Min clearance to other-net pads (mm); stubs that '
