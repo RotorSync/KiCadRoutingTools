@@ -1300,6 +1300,24 @@ def repair_planes(
 
         # Pick first zone layer as "primary" (for plane_layer_idx in routing)
         primary_layer = sorted(net_zone_layers)[0]
+        # #612 gap 7: fill-model discovery is gated on the PRIMARY layer's
+        # model, so an unmodelable first layer dropped the whole net to the
+        # raster fallback even when the other poured layers modeled fine.
+        # Prefer a layer whose model built (get_fill_models is cached, so
+        # this costs no extra model builds).
+        try:
+            from plane_fill_model import get_fill_models as _gfm612
+            _mbl612 = _gfm612(pcb_data, net_id)
+            if _mbl612 and not _mbl612.get(primary_layer):
+                _modeled = [l for l in sorted(net_zone_layers)
+                            if _mbl612.get(l)]
+                if _modeled:
+                    print(f"  (#612: {primary_layer} has no usable fill "
+                          f"model; using {_modeled[0]} as the primary "
+                          f"analysis layer)")
+                    primary_layer = _modeled[0]
+        except Exception:
+            pass
 
         layers_str = ", ".join(sorted(net_zone_layers))
         clearances_str = ", ".join(f"{l}={zone_clearances.get(l, zone_clearance)}mm" for l in sorted(net_zone_layers))

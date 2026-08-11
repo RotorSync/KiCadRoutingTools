@@ -694,7 +694,11 @@ On a multi-layer plane, every poured layer is scanned (#611): a kept island
 cut off on a non-primary layer is reported by the first pass, then joined by
 a **follow-up pass with that layer as the primary analysis layer**. An
 island whose same-net via reaches anchored fill on another poured layer is
-recognized as connected through the stack and left alone.
+recognized as connected through the stack and left alone. This holds on both
+discovery paths (#612): the raster fallback (used when the fill models can't
+build) runs its own per-layer sweep, and the primary analysis layer is
+auto-swapped to a layer whose fill model built rather than silently dropping
+the whole net to the raster path.
 
 #### 2. MST-Based Region Selection
 

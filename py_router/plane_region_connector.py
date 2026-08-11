@@ -382,15 +382,25 @@ def _island_kept_by_filler(pcb_data, net_id: int, plane_layer: str, patch,
                 _near_patch(s.start_x, s.start_y) or _near_patch(s.end_x, s.end_y)):
             return True
 
-    gx, gy = next(iter(patch))
-    x, y = coord.to_float(gx, gy)
+    # Owner lookup samples SEVERAL spread cells, not one arbitrary cell
+    # (#612): raster patches include cells rounded onto the zone outline,
+    # where point_in_polygon returns False -- an unlucky single sample then
+    # found no owner and defaulted to "keep", promoting filler-erased
+    # islands to joinable regions. The median-of-sorted cells are interior.
+    _cells = sorted(patch)
+    _samples = {_cells[len(_cells) // 2], _cells[len(_cells) // 4],
+                _cells[(3 * len(_cells)) // 4], _cells[0], _cells[-1]}
     owner = None
-    for z in (getattr(pcb_data, 'zones', []) or []):
-        if z.net_id == net_id and z.layer == plane_layer \
-                and getattr(z, 'polygon', None) \
-                and point_in_polygon(x, y, z.polygon):
-            if owner is None or getattr(z, 'priority', 0) > getattr(owner, 'priority', 0):
-                owner = z
+    for (sgx, sgy) in _samples:
+        x, y = coord.to_float(sgx, sgy)
+        for z in (getattr(pcb_data, 'zones', []) or []):
+            if z.net_id == net_id and z.layer == plane_layer \
+                    and getattr(z, 'polygon', None) \
+                    and point_in_polygon(x, y, z.polygon):
+                if owner is None or getattr(z, 'priority', 0) > getattr(owner, 'priority', 0):
+                    owner = z
+        if owner is not None:
+            break
     if owner is None:
         return True
     mode = getattr(owner, 'island_removal_mode', 0)
@@ -821,9 +831,8 @@ def find_disconnected_zone_regions(
     # analyses many (net, layer) pairs, so a previous zone's dropped-island
     # tally must never be read as this one's. #611: same for the
     # kept-but-unjoined tally (islands KiCad KEEPS -- below the join bar or
-    # on a non-primary poured layer). The raster fallback never sets either,
-    # so it retains the pre-#611 blind spot; the fill-model path is the
-    # default whenever models build.
+    # on a non-primary poured layer). #612: the raster fallback sets both
+    # too (its own per-layer orphan sweep), at a coarser 25mm^2 floor.
     find_disconnected_zone_regions._last_dropped = (0, 0.0)
     find_disconnected_zone_regions._last_kept_unjoined = (0, 0.0, (), ())
 
@@ -1220,13 +1229,15 @@ def find_disconnected_zone_regions(
     # fill-cell pseudo-anchors give them connectable points. Tiny slivers
     # (<1mm^2 at the analysis grid) are model noise, not real islands.
     orphan_patches: List[Set[Tuple[int, int]]] = []
+    _cell_mm2 = analysis_grid_step * analysis_grid_step
+    # High bar: >=25mm^2. The raster's fill is approximate (thermal spokes,
+    # coarse carves) and a low bar manufactured DOZENS of phantom 0-anchor
+    # regions on zone-heavy boards -- 75 join edges of copper spam on the
+    # kit board. Small REAL islands are the kicad-oracle recheck's job (it
+    # sees the authoritative fill).
+    min_patch_cells = max(100, int(25.0 / _cell_mm2))
+    _drop612_n, _drop612_mm2 = 0, 0.0
     if inside_plane is not None:
-        # High bar: >=25mm^2. The model's fill is approximate (thermal
-        # spokes, coarse carves) and a low bar manufactured DOZENS of
-        # phantom 0-anchor regions on zone-heavy boards -- 75 join edges of
-        # copper spam on the kit board. Small REAL islands are the
-        # kicad-oracle recheck's job (it sees the authoritative fill).
-        min_patch_cells = max(100, int(25.0 / (analysis_grid_step * analysis_grid_step)))
         for start in inside_plane:
             if start in plane_visited or start in blocked_plane:
                 continue
@@ -1246,10 +1257,109 @@ def find_disconnected_zone_regions(
                     plane_visited.add((nx, ny))
                     patch.add((nx, ny))
                     queue.append((nx, ny))
-            if len(patch) >= min_patch_cells and _island_kept_by_filler(
-                    pcb_data, net_id, plane_layer, patch, coord,
-                    analysis_grid_step):
+            if len(patch) < min_patch_cells:
+                continue
+            if _island_kept_by_filler(pcb_data, net_id, plane_layer, patch,
+                                      coord, analysis_grid_step):
                 orphan_patches.append(patch)
+            else:
+                # #612: filler-erased islands were silently skipped on this
+                # path (the fill-model path counts them since #609), so the
+                # caller printed "fully connected" over an erased-copper
+                # split whenever the raster fallback ran.
+                _drop612_n += 1
+                _drop612_mm2 += len(patch) * _cell_mm2
+
+    # #612: the sweep above covers plane_layer only -- the raster fallback
+    # had the whole #611 blind spot. Re-derive blocked/inside per OTHER
+    # poured layer (no fill models on this path), mark copper reachable
+    # from the net's vias/THT barrels/on-layer pads, and sweep the leftovers
+    # into orphan patches: KEPT ones land in the #611 kept tally (so
+    # repair_planes runs its per-layer follow-up joins here too), bare ones
+    # in the dropped tally. Anchored-but-split islands on non-primary
+    # layers remain coarser on this path than on the fill-model path.
+    _kept612_n, _kept612_mm2 = 0, 0.0
+    _kept612_layers: Set[str] = set()
+    _kept612_details: List[Tuple[str, float, float, float]] = []
+    for _olayer in sorted(set(zone_layers) - {plane_layer}):
+        _oclr = (zone_clearances or {}).get(_olayer, zone_clearance)
+        _oblocked, _oseg = _build_layer_blocked_set(
+            _olayer, net_id, pcb_data, coord, _oclr)
+        _oinside = _zone_interior_cells(net_id, _olayer, pcb_data, coord,
+                                        bounds_grid)
+        if not _oinside:
+            continue
+        _ovis: Set[Tuple[int, int]] = set()
+        _oseeds: List[Tuple[int, int]] = []
+        for (_vx, _vy, _vlayers) in cross_layer_points:
+            if _olayer in _vlayers:
+                _oseeds.append(coord.to_grid(_vx, _vy))
+        for _p in pcb_data.pads_by_net.get(net_id, []):
+            if _olayer in (_p.layers or []) or '*.Cu' in (_p.layers or []):
+                _oseeds.append(coord.to_grid(_p.global_x, _p.global_y))
+        for _s0 in _oseeds:
+            if _s0 in _ovis:
+                continue
+            _ovis.add(_s0)
+            _q = deque([_s0])
+            while _q:
+                _gx, _gy = _q.popleft()
+                for _dx, _dy in ((0, 1), (0, -1), (1, 0), (-1, 0),
+                                 (1, 1), (1, -1), (-1, 1), (-1, -1)):
+                    _n = (_gx + _dx, _gy + _dy)
+                    if _n in _ovis:
+                        continue
+                    if not (min_gx <= _n[0] <= max_gx
+                            and min_gy <= _n[1] <= max_gy):
+                        continue
+                    if _dx != 0 and _dy != 0 and _n not in _oseg:
+                        continue
+                    if (_n in _oblocked or _n not in _oinside) \
+                            and _n not in _oseg:
+                        continue
+                    _ovis.add(_n)
+                    _q.append(_n)
+        for _start in _oinside:
+            if _start in _ovis or _start in _oblocked:
+                continue
+            _patch = {_start}
+            _ovis.add(_start)
+            _q = deque([_start])
+            while _q:
+                _gx, _gy = _q.popleft()
+                for _dx, _dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                    _n = (_gx + _dx, _gy + _dy)
+                    if _n in _ovis or _n in _oblocked or _n not in _oinside:
+                        continue
+                    if not (min_gx <= _n[0] <= max_gx
+                            and min_gy <= _n[1] <= max_gy):
+                        continue
+                    _ovis.add(_n)
+                    _patch.add(_n)
+                    _q.append(_n)
+            if len(_patch) < min_patch_cells:
+                continue   # raster noise floor stays high, unlike the
+                           # fill-model path's 1mm^2 kept floor
+            if _island_kept_by_filler(pcb_data, net_id, _olayer, _patch,
+                                      coord, analysis_grid_step):
+                _kept612_n += 1
+                _amm2 = len(_patch) * _cell_mm2
+                _kept612_mm2 += _amm2
+                _kept612_layers.add(_olayer)
+                _kept612_details.append((
+                    _olayer, _amm2,
+                    round(sum(c[0] for c in _patch) / len(_patch)
+                          * analysis_grid_step, 1),
+                    round(sum(c[1] for c in _patch) / len(_patch)
+                          * analysis_grid_step, 1)))
+            else:
+                _drop612_n += 1
+                _drop612_mm2 += len(_patch) * _cell_mm2
+    find_disconnected_zone_regions._last_dropped = (_drop612_n, _drop612_mm2)
+    if _kept612_n:
+        find_disconnected_zone_regions._last_kept_unjoined = (
+            _kept612_n, _kept612_mm2, tuple(sorted(_kept612_layers)),
+            tuple(_kept612_details[:8]))
 
     # Group anchors by their root
     groups: Dict[int, List[int]] = {}
@@ -1749,12 +1859,44 @@ def _try_route_between_regions(
     _attempt_details = []
     _any_exhausted = False
 
+    # #612 gap 6: a bare (x, y) seed that is an SMD pad of this net on some
+    # OTHER layer must stamp on the PAD's layer -- _stamp puts 2-tuple
+    # non-via seeds on plane_layer_idx, so a strap "joining" a cross-layer
+    # region landed on copper that isn't the island's. Convert such seeds to
+    # the (x, y, layer) form _stamp already understands. Fill pseudo-anchors
+    # (not pads) correctly stay on the plane layer.
+    _smd_lname: Dict[Tuple[float, float], str] = {}
+    if pcb_data is not None and net_id is not None:
+        from kicad_parser import pad_is_plated_through as _pipt612
+        _plname = routing_layers[plane_layer_idx] \
+            if 0 <= plane_layer_idx < len(routing_layers) else None
+        for _p in pcb_data.pads_by_net.get(net_id, []):
+            if _pipt612(_p) or (_p.drill or 0) > 0:
+                continue
+            _pls = [l for l in (_p.layers or []) if l in routing_layers]
+            if _pls and _plname not in _pls:
+                _smd_lname[(round(_p.global_x, 3),
+                            round(_p.global_y, 3))] = _pls[0]
+
+    def _lift(pts):
+        if not _smd_lname:
+            return pts
+        out = []
+        for pt in pts:
+            if len(pt) == 2:
+                _ln = _smd_lname.get((round(pt[0], 3), round(pt[1], 3)))
+                if _ln is not None:
+                    out.append((pt[0], pt[1], _ln))
+                    continue
+            out.append(pt)
+        return out
+
     def _try_route(src, tgt, margin, iters, label):
         """Helper to attempt one route and track stats."""
         nonlocal _attempt_count, _total_route_time
         _t0 = _time.time()
         result, used_iters = route_plane_connection_wide(
-            src, tgt,
+            _lift(src), _lift(tgt),
             plane_layer_idx=plane_layer_idx,
             routing_layers=routing_layers,
             base_obstacles=base_obstacles,
