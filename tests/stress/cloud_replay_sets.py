@@ -537,6 +537,54 @@ def stage_harvest(args, sets, stress) -> dict:
               f"{with_art:3} with kept boards")
 
     print(f"  harvested {total} row(s), {artifacts} board artifact dir(s)")
+
+    # Re-grade the harvested boards LOCALLY, on equal terms with the baseline.
+    #
+    # The cloud image deliberately ships no KiCad, so ab_replay_grade's kicad-cli
+    # cross-check degrades to None there and `drc_real` falls back to RAW DRC.
+    # The baseline is graded locally, where kicad-cli reconciles violations that
+    # are pre-existing or not real. Comparing the two directly is not an engine
+    # measurement at all -- it measures which machine did the grading.
+    #
+    # Measured on sets 10-19 the first time this ran: the comparison reported
+    # "real DRC 47 -> 87, +40 WORSE", of which +77 was this artifact across 9
+    # boards, while the 8 genuine raw-DRC changes netted -37 BETTER (one board,
+    # apple1_aci_card, went 44 -> 0). The headline number had the wrong SIGN.
+    #
+    # Keeping the boards is what makes the fix possible: grade them here, with
+    # the same grader and the same kicad-cli the baseline gets.
+    if not getattr(args, "no_local_regrade", False):
+        _regrade_locally(args, sorted(rows_by_set), stress, out, "harvested wave")
+    return rows_by_set
+
+
+def _regrade_locally(args, sets, stress, out, what):
+    """Re-grade an already-materialized wave in place, sets in parallel."""
+    import concurrent.futures
+    import sweep_lib as sl
+    jobs = max(1, int(getattr(args, "jobs", 6) or 6))
+    print(f"  re-grading the {what} locally ({len(sets)} sets, {jobs} in parallel) "
+          f"so it is graded on the SAME terms as the baseline")
+
+    def one(s):
+        rds = sl.run_dirs_for(stress, s)
+        wave = out / s
+        if not rds or not wave.is_dir():
+            return f"    {s}: skipped (no runs dir or no wave dir)"
+        subprocess.run([sys.executable, str(HERE / "ab_replay_grade.py"),
+                        "--regrade", str(wave), "--set", str(rds[0])],
+                       stdout=subprocess.DEVNULL)
+        summ = wave / "summary.json"
+        if not summ.exists():
+            return f"    {s}: regrade produced no summary"
+        rr = json.loads(summ.read_text())
+        kc = sum(1 for r in rr if r.get("kicad_connection_width") is not None)
+        return (f"    {s:9} {sum(1 for r in rr if r.get('chain_complete')):3}/"
+                f"{len(rr):<3} complete, {kc:3} with the kicad-cli cross-check")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
+        for line in ex.map(one, sets):
+            print(line, flush=True)
     missing_pro = [f"{r.get('set')}/{r.get('board')}"
                    for rows in rows_by_set.values() for r in rows
                    if r.get("artifact_warning")]
@@ -544,7 +592,6 @@ def stage_harvest(args, sets, stress) -> dict:
         print(f"  WARN {len(missing_pro)} board(s) flagged an artifact problem "
               f"(a .kicad_pcb without its .kicad_pro re-grades against the stock "
               f"netclass): {', '.join(missing_pro[:5])}")
-    return rows_by_set
 
 
 # ------------------------------------------------------------------ compare
@@ -722,6 +769,10 @@ def main():
                          "Use it to harvest/compare a wave produced by another session or "
                          "commit (`modal volume ls kicad-sweep-results /` lists them).")
     ap.add_argument("--stress-dir", default=str(DEFAULT_STRESS))
+    ap.add_argument("--no-local-regrade", action="store_true",
+                    help="do NOT re-grade harvested boards locally. The cloud has no "
+                         "kicad-cli, so its drc_real falls back to raw DRC; leaving that "
+                         "un-regraded compares graders, not engines.")
     ap.add_argument("--jobs", type=int, default=6,
                     help="sets re-graded in parallel during the baseline stage (default 6)")
     ap.add_argument("--workdir", default="", help="scratch for the generated arms file")
