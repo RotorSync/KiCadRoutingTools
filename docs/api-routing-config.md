@@ -259,7 +259,7 @@ cleared prepare cycle.
 
 #### Search-side (not stamps)
 
-`proximity_heuristic_factor` (default `0.02`) adds an estimated proximity cost
+`proximity_heuristic_factor` (default `0.0` since the heuristic-weight 2.3 flip; formerly `0.02`) adds an estimated proximity cost
 per remaining step to the A* heuristic when a route's endpoints sit inside
 stub/BGA zones — a deliberate slight overestimate that trades exactness for
 search speed on proximity-heavy boards.
@@ -427,7 +427,7 @@ assert config.obstacle_clearance(some_default_net) == 0.15  # not in the map -> 
 | `debug_memory` | `False` | Print memory statistics |
 | `collect_stats` | `False` | Collect A* statistics |
 | `add_teardrops` | `False` | Add teardrops to all pads in the output |
-| `proximity_heuristic_factor` | `0.02` | Tightens the A* heuristic for proximity costs (speed) |
+| `proximity_heuristic_factor` | `0.0` | Tightens the A* heuristic for proximity costs (off: hw 2.3 already covers it; s2 rescan quality-neutral, -8% CPU) |
 
 ### Methods
 

@@ -267,7 +267,7 @@ class GridRouteConfig:
     # Debug options
     collect_stats: bool = False  # Collect A* search statistics for debugging
     # Heuristic tuning
-    proximity_heuristic_factor: float = 0.02  # Factor for proximity heuristic (higher = tighter heuristic, faster but may overestimate)
+    proximity_heuristic_factor: float = 0.0  # proximity add-on to the A* heuristic (0 since the hw-2.3 default; the base greediness covers it)
     # Layer direction preference - alternates H/V starting with horizontal on top
     direction_preference_cost: int = 250  # Cost penalty for non-preferred direction (0 = disabled); see routing_defaults
     # Bus routing - auto-detection and parallel routing of grouped nets

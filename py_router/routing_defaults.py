@@ -105,7 +105,7 @@ STITCH_PITCH = 20.0  # mm
 # Algorithm parameters
 MAX_ITERATIONS = 200000
 HEURISTIC_WEIGHT = 2.3  # 1.9 -> 2.3: #586 corpus dose-response peak (-30 verdict, DRC -67, cpu/mem ~0.85x; 1.7 and 2.5 both worse)
-PROXIMITY_HEURISTIC_FACTOR = 0.02
+PROXIMITY_HEURISTIC_FACTOR = 0.0  # 0.02 -> 0: at heuristic_weight 2.3 the base greediness covers it (s2 rescan: quality-neutral, -8% CPU)
 MAX_RIPUP = 3
 # Phase 3 tap rip-up abandon metric (#85 arbitration); documented in
 # docs/rip-up-reroute.md "Abandon metrics". Must match phase3_routing.ABANDON_METRICS.

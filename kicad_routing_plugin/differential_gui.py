@@ -968,7 +968,7 @@ class DifferentialTab(wx.Panel):
                 grid_step=config.get('grid_step', 0.1),
                 via_cost=config.get('via_cost', defaults.VIA_COST),
                 max_iterations=config.get('max_iterations', 200000),
-                proximity_heuristic_factor=config.get('proximity_heuristic_factor', 0.02),
+                proximity_heuristic_factor=config.get('proximity_heuristic_factor', defaults.PROXIMITY_HEURISTIC_FACTOR),
                 keepout_enabled=config.get('keepout_enabled', False),
                 keepout_layer=config.get('keepout_layer', defaults.KEEPOUT_LAYER),
                 diff_pair_gap=config.get('diff_pair_gap', 0.101),
