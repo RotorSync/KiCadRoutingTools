@@ -436,28 +436,36 @@ def _regions_from_fill_models(net_id, pcb_data, coord, plane_layer,
                 return (id(m), c)
         return None
 
-    # Coarse-grid cells per plane-layer fill component: one vectorized
-    # gather of each model's label array at the analysis-grid cell centres.
-    cells_by_comp: Dict[tuple, Set[Tuple[int, int]]] = {}
     gxs = np.arange(min_gx, max_gx + 1)
     gys = np.arange(min_gy, max_gy + 1)
     if gxs.size == 0 or gys.size == 0:
         return None
-    for m in plane_models:
-        ix = ((gxs * coord.grid_step - m.x0) / m.cell).astype(np.int64)
-        iy = ((gys * coord.grid_step - m.y0) / m.cell).astype(np.int64)
-        ok_x = (ix >= 0) & (ix < m.nx)
-        ok_y = (iy >= 0) & (iy < m.ny)
-        lab = np.zeros((gxs.size, gys.size), dtype=m.labels.dtype)
-        sel_x = np.where(ok_x)[0]
-        sel_y = np.where(ok_y)[0]
-        if sel_x.size == 0 or sel_y.size == 0:
-            continue
-        lab[np.ix_(sel_x, sel_y)] = m.labels[ix[sel_x][:, None], iy[sel_y]]
-        nz = np.nonzero(lab)
-        for ii, jj in zip(nz[0].tolist(), nz[1].tolist()):
-            cells_by_comp.setdefault((id(m), int(lab[ii, jj])), set()).add(
-                (int(gxs[ii]), int(gys[jj])))
+
+    def _gather_cells(models):
+        """Coarse-grid cells per fill component: one vectorized gather of
+        each model's label array at the analysis-grid cell centres."""
+        out: Dict[tuple, Set[Tuple[int, int]]] = {}
+        for m in models:
+            ix = ((gxs * coord.grid_step - m.x0) / m.cell).astype(np.int64)
+            iy = ((gys * coord.grid_step - m.y0) / m.cell).astype(np.int64)
+            ok_x = (ix >= 0) & (ix < m.nx)
+            ok_y = (iy >= 0) & (iy < m.ny)
+            lab = np.zeros((gxs.size, gys.size), dtype=m.labels.dtype)
+            sel_x = np.where(ok_x)[0]
+            sel_y = np.where(ok_y)[0]
+            if sel_x.size == 0 or sel_y.size == 0:
+                continue
+            lab[np.ix_(sel_x, sel_y)] = m.labels[ix[sel_x][:, None], iy[sel_y]]
+            nz = np.nonzero(lab)
+            for ii, jj in zip(nz[0].tolist(), nz[1].tolist()):
+                out.setdefault((id(m), int(lab[ii, jj])), set()).add(
+                    (int(gxs[ii]), int(gys[jj])))
+        return out
+
+    # Coarse-grid cells per plane-layer fill component. Regions/join seeds
+    # are built from THESE only; other poured layers are gathered later for
+    # the #611 report-only orphan scan.
+    cells_by_comp = _gather_cells(plane_models)
 
     if not cells_by_comp:
         return None
@@ -615,9 +623,63 @@ def _regions_from_fill_models(net_id, pcb_data, coord, plane_layer,
     # as "the zone is whole", and the caller was making the second one.
     dropped_cells = 0
     dropped_islands = 0
+    # #611: KEPT islands that are real KiCad missing-connections but not
+    # join-eligible from THIS analysis -- below the join area bar, or on a
+    # non-primary poured layer (joins seed from plane_layer geometry only).
+    # KiCad keeps them on refill and flags 'Missing connection between
+    # items'; they must at least be REPORTED. Report-only: never appended to
+    # the region list, so routed copper is unchanged.
+    _cell_mm2 = analysis_grid_step * analysis_grid_step
+    kept_unjoined = 0
+    kept_unjoined_mm2 = 0.0
+    kept_layers: Set[str] = set()
+    kept_details: List[Tuple[str, float, float, float]] = []  # (layer, mm2, x, y)
+
+    def _kept_note(layer, cset):
+        cx = sum(c[0] for c in cset) / len(cset) * analysis_grid_step
+        cy = sum(c[1] for c in cset) / len(cset) * analysis_grid_step
+        kept_details.append((layer, len(cset) * _cell_mm2,
+                             round(cx, 1), round(cy, 1)))
+    # A kept island is a DRC item at any size, but sub-mm^2 patches are model
+    # quantization noise -- floor the report at 1 mm^2.
+    kept_floor_cells = max(4, int(round(1.0 / _cell_mm2)))
+
+    def _connected_through_a_via(layer, cset):
+        """#611 false-alarm guard (the #217 blocked-anchor class): a same-net
+        via ON/NEAR this island that also lands on ANCHORED fill of another
+        poured layer means the island is genuinely connected through the
+        stack -- the union gate just missed it because the model blocks cells
+        at the barrel. Suppress the split report for it."""
+        for v in pcb_data.vias:
+            if v.net_id != net_id:
+                continue
+            cgx, cgy = coord.to_grid(v.x, v.y)
+            if not any((cgx + dx, cgy + dy) in cset
+                       for dx in range(-2, 3) for dy in range(-2, 3)):
+                continue
+            for l2 in zone_layers:
+                if l2 == layer:
+                    continue
+                k2 = _comp_key_at(l2, v.x, v.y)
+                if k2 is not None and uf.find(k2) in anchored_roots:
+                    return True
+        return False
+
     for root, cset in orphan_cells.items():
         if len(cset) < min_patch_cells:
-            continue                      # below the area bar, as before
+            # Below the JOIN bar. A bare sliver is noise (the filler deletes
+            # it silently, as KiCad itself does), but a KEPT one is still a
+            # real missing connection KiCad will flag -- tally it (#611;
+            # previously this `continue` skipped it with no trace).
+            if (len(cset) >= kept_floor_cells
+                    and _island_kept_by_filler(pcb_data, net_id, plane_layer,
+                                               cset, coord, analysis_grid_step)
+                    and not _connected_through_a_via(plane_layer, cset)):
+                kept_unjoined += 1
+                kept_unjoined_mm2 += len(cset) * _cell_mm2
+                kept_layers.add(plane_layer)
+                _kept_note(plane_layer, cset)
+            continue
         if _island_kept_by_filler(pcb_data, net_id, plane_layer, cset,
                                   coord, analysis_grid_step):
             region_anchors.append([])
@@ -627,21 +689,60 @@ def _regions_from_fill_models(net_id, pcb_data, coord, plane_layer,
             dropped_islands += 1
             dropped_cells += len(cset)
 
+    # #611: the scan above only sees plane_layer's fill. On a multi-layer
+    # plane the repair pass makes ONE call with plane_layer = the first
+    # poured layer, so a pad-less island cut off on any OTHER poured layer
+    # was structurally invisible -- no region, no tally -- and the caller
+    # printed "Zone is fully connected" while KiCad flagged the missing link
+    # (the #611 5-layer GND). Scan the remaining layers' models too.
+    # REPORT-ONLY: kept islands go into the kept_unjoined tally, and
+    # filler-deleted ones above the area bar into the dropped tally.
+    _judged_roots = set(orphan_cells.keys())
+    _off_primary: Dict[tuple, Dict[str, Set[Tuple[int, int]]]] = {}
+    for _layer in sorted(set(zone_layers) - {plane_layer}):
+        for ck, cset in _gather_cells(
+                models_by_layer.get(_layer) or []).items():
+            root = uf.find(ck)
+            if root in anchored_roots or root in _judged_roots:
+                continue     # connected, or already judged via its
+                             # plane_layer fragment above
+            _lay = _off_primary.setdefault(root, {})
+            _lay.setdefault(_layer, set()).update(cset)
+    for root, bylayer in _off_primary.items():
+        total_cells = sum(len(c) for c in bylayer.values())
+        if total_cells < kept_floor_cells:
+            continue
+        kept = any(_island_kept_by_filler(pcb_data, net_id, l, c, coord,
+                                          analysis_grid_step)
+                   and not _connected_through_a_via(l, c)
+                   for l, c in bylayer.items())
+        if kept:
+            kept_unjoined += 1
+            kept_unjoined_mm2 += total_cells * _cell_mm2
+            kept_layers.update(bylayer.keys())
+            for l, c in bylayer.items():
+                _kept_note(l, c)
+        elif total_cells >= min_patch_cells:
+            dropped_islands += 1
+            dropped_cells += total_cells
+
     # dropped = islands the FILLER will erase. Carried out (not just skipped)
     # so the caller can say what actually happened instead of "fully
-    # connected" -- see the #609 note above.
-    dropped = (dropped_islands,
-               dropped_cells * analysis_grid_step * analysis_grid_step)
+    # connected" -- see the #609 note above. kept_report = kept-but-unjoined
+    # islands (#611), same reason.
+    dropped = (dropped_islands, dropped_cells * _cell_mm2)
+    kept_report = (kept_unjoined, kept_unjoined_mm2,
+                   tuple(sorted(kept_layers)), tuple(kept_details[:8]))
     if len(region_anchors) < 2:
         return ([region_anchors[0] if region_anchors else []],
                 [region_cells[0] if region_cells else set()],
                 [region_islands[0] if region_islands else set()],
-                dropped)
+                dropped, kept_report)
     print(f"  Region discovery from fill model: {len(region_anchors)} "
           f"region(s) ({len(cells_by_comp)} fill island(s), "
           f"{len(singletons)} off-fill anchor(s), "
           f"{sum(1 for a in region_anchors if not a)} orphan island(s))")
-    return region_anchors, region_cells, region_islands, dropped
+    return region_anchors, region_cells, region_islands, dropped, kept_report
 
 
 def find_disconnected_zone_regions(
@@ -687,8 +788,13 @@ def find_disconnected_zone_regions(
     """
     # #609: cleared per call -- this is a function attribute and one run
     # analyses many (net, layer) pairs, so a previous zone's dropped-island
-    # tally must never be read as this one's.
+    # tally must never be read as this one's. #611: same for the
+    # kept-but-unjoined tally (islands KiCad KEEPS -- below the join bar or
+    # on a non-primary poured layer). The raster fallback never sets either,
+    # so it retains the pre-#611 blind spot; the fill-model path is the
+    # default whenever models build.
     find_disconnected_zone_regions._last_dropped = (0, 0.0)
+    find_disconnected_zone_regions._last_kept_unjoined = (0, 0.0, (), ())
 
     # Use a coarser grid for connectivity analysis (much faster)
     coord = GridCoord(analysis_grid_step)
@@ -783,10 +889,13 @@ def find_disconnected_zone_regions(
             _models_by_layer, anchor_points, zone_bounds,
             analysis_grid_step)
         if _res is not None:
-            # #609: stash what the FILLER will erase so the caller reports the
-            # split instead of "fully connected". An attribute, not a 5th
-            # return value: this function's 4-tuple is consumed positionally.
+            # #609/#611: stash what the FILLER will erase (dropped) and what
+            # it KEEPS but this pass cannot join (kept_unjoined) so the
+            # caller reports the split instead of "fully connected".
+            # Attributes, not extra return values: this function's 4-tuple
+            # is consumed positionally.
             find_disconnected_zone_regions._last_dropped = _res[3]
+            find_disconnected_zone_regions._last_kept_unjoined = _res[4]
             return _res[0], _res[1], [], _res[2]
 
     # Collect cross-layer connection points using helper function
@@ -1856,6 +1965,28 @@ def route_disconnected_regions(
         )
 
     n_regions = len(region_anchors)
+    # #611: islands KiCad KEEPS on refill (they carry same-net copper) that
+    # this pass cannot join -- below the join area bar, or cut off on a
+    # poured layer other than the primary analysis layer (a 5-layer GND is
+    # analysed in ONE call with plane_layer = the first poured layer, and
+    # these used to be structurally invisible: no region, no tally, "Zone is
+    # fully connected" over a plane KiCad grades as missing a connection).
+    # Report-only -- copper is unchanged; the post-write kicad-cli oracle
+    # recheck is what attempts these.
+    _kept_n, _kept_mm2, _kept_layers, _kept_details = getattr(
+        find_disconnected_zone_regions, '_last_kept_unjoined',
+        (0, 0.0, (), ()))
+    if _kept_n:
+        print(f"  {RED}Zone SPLIT: {_kept_n} island(s) ({_kept_mm2:.1f} mm^2) "
+              f"on {', '.join(_kept_layers)} carry same-net copper, so KiCad "
+              f"KEEPS them on refill and flags the missing connection "
+              f"(#611){RESET}")
+        for (_kl, _kmm2, _kx, _ky) in _kept_details:
+            print(f"    - {_kl} near ({_kx}, {_ky}): {_kmm2:.1f} mm^2")
+        print(f"    Not joined by this pass: region joins seed from the "
+              f"primary analysis layer ({plane_layer}) at/above the join "
+              f"area bar. The post-write kicad-cli oracle recheck attempts "
+              f"these; grade with 'kicad-cli pcb drc --refill-zones'.")
     if n_regions < 2:
         n_anchors = len(region_anchors[0]) if region_anchors else 0
         # #609: do NOT claim "fully connected" when the discovery just found
@@ -1881,7 +2012,10 @@ def route_disconnected_regions(
                   f"the check reads a stale fill and reports 0), and treat a "
                   f"split reference plane as a return-path/impedance defect, "
                   f"not just a connectivity one (#609).")
-        else:
+        elif not _kept_n:
+            # Only claim it when BOTH tallies are empty -- a kept-unjoined
+            # island (#611) is a split even though the region list has one
+            # entry.
             print(f"  Zone is fully connected ({n_anchors} anchors in 1 region)")
         return [], [], 0, [], connectivity_paths
 
