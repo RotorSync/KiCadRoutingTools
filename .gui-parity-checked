@@ -1,3 +1,37 @@
+15292a0 2026-08-12 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit b50fc86..15292a0: NO GAPS -- every change in range is engine-side in
+shared modules, consumed identically by both fronts. Range: #610 (impedance
+width floor: from_class semantics change threaded through BOTH mains AND
+swig_gui in the same commit; the diff GUI's expression was already the
+correct one and is now consistent rather than divergent), #611 (all-layer
+orphan scan + kept-island joins: plane_region_connector/repair_planes bodies
+shared by CLI, GUI planes tab, and the route.py finalize; split_report is an
+internal kwarg, not a user param -- no threading needed), #612 (raster
+fallback sweep, modeled-primary pick, cross-layer seed stamps: same shared
+bodies), cloud_replay_sets (test tooling only).
+
+Parity evidence at 15292a0 (2026-08-12):
+  * gate 1 test_manifest_plan_parity: 9022 flag-checks / 399 manifests, 0
+    mismatches (run at 9dc8ac9; no flags changed since).
+  * gate 2 test_cli_postpass_coverage: 8 registered / 15 active / 1
+    acknowledged CLI-only, 0 failures (run at both 9dc8ac9 and dff64aa).
+  * gate 3 test_settings_roundtrip: 180 keys, save/restore/legacy/re-save
+    clean (run at 9dc8ac9; no dialog controls changed since).
+  * gate 4 test_gui_engine_parity: VERDICT PARITY, kicad unconnected CLI=0
+    GUI=0, drc CLI=0 GUI=0, copper sets IDENTICAL (run at 15292a0 -- the
+    plan exercises the plane finalize, which is exactly what #611/#612
+    changed).
+  * gate 5 test_cli_defaults_parity: 100 defaults / 6 CLIs, 0 disagreements
+    (run at 9dc8ac9 and dff64aa).
+  * test_gui_livechain_rp2350: PASS, both chains grade clean at every stage
+    (run at 15292a0).
+Caveat unchanged from before: gate 4's plan is signal+plane, so impedance /
+diff-pair params (#610's floor change) are NOT exercised by it -- #610's own
+verification was the CLI smoke set (solved widths land on copper end to end)
+plus test_610_impedance_width_floor; the GUI side shares batch_route's floor
+computation, which the KICAD_DUMP_BATCH_KWARGS diff shows receiving identical
+track_width_from_class bits.
+
 b50fc86 2026-08-11 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit eb8f633..b50fc86: ONE REAL GAP FOUND AND FIXED (Class-3 defaults drift),
 plus a GUI-side reset bug. 15 engine/GUI files, #537 (shared component->nets
