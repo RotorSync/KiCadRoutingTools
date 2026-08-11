@@ -64,6 +64,7 @@ source to zero at the radius.
 | `via_proximity_cost` | `10.0` | Multiplier on graded proximity when placing a via (0 = no extra cost) |
 | `bga_proximity_radius` | `7.0` | Distance from BGA edges to penalize |
 | `bga_proximity_cost` | `0.2` | Cost at the BGA edge (0 = fully off, radius disarmed too) |
+| `package_proximity_zones` | `None` | Per-package proximity rects `(min_x, min_y, max_x, max_y, radius_mm)` for BGA/QFN/QFP, filled by the batch engines under the opt-in `KICAD_PACKAGE_PROXIMITY`. `None` = legacy (the hard BGA zones at the flat radius) |
 | `track_proximity_distance` | `2.0` | Radius around routed tracks (same layer) |
 | `track_proximity_cost` | `0.0` | Cost near routed tracks (**0 = off by default**) |
 | `ripped_route_avoidance_radius` | `1.0` | Radius around just-ripped routes |
@@ -143,7 +144,40 @@ ring; both the cliff and the gap are gone as of Rust 0.20.1).
 
 Definition review flags: the radius is a flat 7 mm regardless of package size;
 QFN/QFP have no hard zone and no proximity ring at all — their escape collar
-carries no graded protection (#585 item 4).
+carries no graded protection (#585 item 4). Both flags still describe the
+DEFAULT path; `package_proximity_zones` below is the opt-in answer to them.
+
+#### Per-package proximity zones: `package_proximity_zones`
+
+`(min_x, min_y, max_x, max_y, radius_mm)` rects giving **every** fine-pitch
+package — BGA, QFN **and** QFP with >= 4 pads — its own proximity ring, with the
+radius scaled by escape demand rather than flat:
+
+```
+r = bga_proximity_radius * sqrt(n_pads / 1000), clamped to [2.0, bga_proximity_radius]
+```
+
+so a 1000+-ball monster earns the full 7 mm, a 100-ball BGA ~2.2 mm, and any
+QFN the 2 mm floor. Rects are pad-bounding-box anchored (margin 0), like the
+hard zones.
+
+This feeds the **soft field only** — the hard exclusion zones stay BGA-only, so
+a QFN's interior remains routable, just priced. It also defines the
+max-composition boundary in `zoned` sum mode
+(`obstacle_costs.proximity_max_zone_rects`).
+
+`None` (the default) means legacy behavior: the field is built from
+`bga_exclusion_zones` at the flat `bga_proximity_radius`. `bga_proximity_cost`
+and `bga_proximity_radius` still gate the whole field either way — this changes
+*where* the rings go, not whether they exist.
+
+Filled by `batch_route` / `batch_route_diff_pairs` from the board
+(`routing_common.package_proximity_zones`) **only under the opt-in env knob
+`KICAD_PACKAGE_PROXIMITY`**, so a default run leaves it `None`. It is opt-in
+because it screened **negative** as a default (glasgow 7 -> 10 failures, `oc`
+midchain 23 -> 26): the sqrt scaling *shrinks* the ring on exactly the
+large BGAs that need it most, and tiny DFN/SOT packages classified as QFN add
+clutter. A scale-up-only variant with a pad-count floor is the pending idea.
 
 #### Track proximity: `track_proximity_distance` / `track_proximity_cost`
 
