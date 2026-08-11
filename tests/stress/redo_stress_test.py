@@ -790,14 +790,24 @@ def main():
         if cwd and not os.path.isdir(cwd):
             os.makedirs(cwd, exist_ok=True)
         cmd_t0 = time.time()
+        # Per-command USER+SYS CPU via getrusage(RUSAGE_CHILDREN) deltas:
+        # commands run serially and each child's whole reaped tree folds into
+        # the counter at wait(), so the delta is that command's tree CPU.
+        # Wall time is load-confounded (parallel pools, shared cloud hosts);
+        # CPU-seconds are the honest cross-run cost metric.
+        import resource as _res
+        _ru0 = _res.getrusage(_res.RUSAGE_CHILDREN)
         timeout = args.timeout if args.timeout and args.timeout > 0 else None
         rc, peak_kb, timed_out, peak_fp_mb = run_with_peak_rss(argv, cwd, timeout=timeout)
+        _ru1 = _res.getrusage(_res.RUSAGE_CHILDREN)
+        cpu_s = (_ru1.ru_utime - _ru0.ru_utime) + (_ru1.ru_stime - _ru0.ru_stime)
         if rc == 0 and not timed_out:
             # A `cp`/`mv` of a board must carry its .kicad_pro (the recorded DRC
             # floor) or the renamed board grades at the looser design default.
             mirror_project_sibling(argv, cwd)
         dt = time.time() - cmd_t0
-        rec = {"index": i, "seconds": round(dt, 3), "returncode": rc,
+        rec = {"index": i, "seconds": round(dt, 3),
+               "cpu_seconds": round(cpu_s, 3), "returncode": rc,
                "peak_rss_mb": round(peak_kb / 1024, 1),
                "timed_out": timed_out, "argv": argv}
         # peak_footprint_mb (darwin only): the authoritative memory number that

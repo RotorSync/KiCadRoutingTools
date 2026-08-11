@@ -314,11 +314,13 @@ def do_board(set_dir, out_dir, label, board):
     # list and a per-tool sum (route.py / route_planes.py / ... -- where the
     # vectorization speedups land), plus the total.
     steps, time_by_tool, peak_by_tool, total_s, peak_board = [], {}, {}, 0.0, 0.0
+    total_cpu = 0.0
     peak_fp_by_tool, peak_fp_board = {}, 0.0
     if os.path.exists(timings_path):
         for c in json.loads(Path(timings_path).read_text()).get("commands", []):
             tool = _tool_of(c.get("argv", []))
             sec = c.get("seconds", 0.0)
+            cpu = c.get("cpu_seconds", 0.0)
             pk = c.get("peak_rss_mb", 0.0)
             # peak_footprint_mb (darwin only): the authoritative memory number
             # RSS under-reports -- mimalloc-retained + IOAccelerator-tagged pages
@@ -333,6 +335,7 @@ def do_board(set_dir, out_dir, label, board):
             if fp:
                 peak_fp_by_tool[tool] = round(max(peak_fp_by_tool.get(tool, 0.0), fp), 1)
             total_s += sec
+            total_cpu += cpu
             peak_board = max(peak_board, pk)
             peak_fp_board = max(peak_fp_board, fp)
     # Coupled diff-pair completion is parsed from route_diff's JSON_SUMMARY in the
@@ -357,7 +360,8 @@ def do_board(set_dir, out_dir, label, board):
            "final": fname if done else None, "chain_complete": done,
            "drc": None, "conn": None, "nets_total": None, "nets_incomplete": None,
            "completion_pct": None,
-           "total_seconds": round(total_s, 3), "total_iterations": total_iters,
+           "total_seconds": round(total_s, 3), "cpu_seconds": round(total_cpu, 3),
+           "total_iterations": total_iters,
            "peak_rss_mb": round(peak_board, 1),
            "time_by_tool": time_by_tool, "peak_by_tool": peak_by_tool, "steps": steps,
            **dp}
