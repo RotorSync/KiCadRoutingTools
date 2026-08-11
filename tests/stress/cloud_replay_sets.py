@@ -164,7 +164,7 @@ def stage_plan(args, sets, stress) -> dict:
     # and retries included) and badly overestimate a replay, so they are shown
     # separately rather than folded into one confident number.
     replay_s = llm_s = 0.0
-    llm_boards, big_boards, longest = [], [], (0.0, "")
+    llm_boards, longest = [], (0.0, "")
     for s, b in boards:
         e = costs.get(b, {})
         sec = e.get("seconds", 0.0) or 0.0
@@ -175,8 +175,6 @@ def stage_plan(args, sets, stress) -> dict:
         else:
             llm_s += sec
             llm_boards.append(b)
-        if (e.get("peak_mb") or 0) > 3500:
-            big_boards.append(b)
 
     est_s = replay_s + 0.68 * llm_s      # README's measured replay:LLM ratio
     print(f"\n=== PLAN: {len(boards)} boards across {len(sets)} set(s) ===")
@@ -192,8 +190,9 @@ def stage_plan(args, sets, stress) -> dict:
         print(f"  NOTE {len(llm_boards)} board(s) priced from LLM sessions, which "
               f"overestimate a replay: {', '.join(sorted(llm_boards)[:6])}"
               f"{' ...' if len(llm_boards) > 6 else ''}")
-    if big_boards:
-        print(f"  big memory tier      {len(big_boards)}: {', '.join(sorted(set(big_boards)))}")
+    peak = max((costs.get(b, {}).get("peak_mb") or 0) for _, b in boards)
+    print(f"  heaviest board       {peak/1024:6.1f} GB peak -- containers BURST above their "
+          f"reservation, so no board needs its own tier")
 
     # Preflight -- every failure here is cheaper to hit now than after upload.
     problems, warnings = [], []
@@ -271,8 +270,7 @@ def stage_plan(args, sets, stress) -> dict:
     if problems:
         raise SystemExit("preflight failed; nothing was spent")
 
-    return {"boards": boards, "per_set": per_set, "est_seconds": est_s,
-            "big_boards": sorted(set(big_boards))}
+    return {"boards": boards, "per_set": per_set, "est_seconds": est_s}
 
 
 def baseline_summary(args, set_name: str) -> Path:
@@ -421,8 +419,11 @@ def stage_run(args, sets, stress, plan):
 
     env = dict(os.environ)
     env.setdefault("KICAD_SWEEP_NAME", f"kicad-replay-{sets[0]}-{sets[-1]}")
-    if plan["big_boards"]:
-        env["KICAD_SWEEP_BIG_BOARDS"] = ",".join(plan["big_boards"])
+    # No big-memory tier. Modal bills max(reserved, used) and containers burst
+    # ABOVE their reservation, so pinning a heavy board to a fat tier buys no
+    # capacity -- only a larger bill against every hour it runs (the sweep
+    # README measured a flat 1 GB reservation at +0.3% over the pure-usage
+    # floor, versus +47% for tiering and +78% for per-board peaks).
 
     print(f"\n=== RUN ===\n  arm: {arm}\n  artifacts: ON "
           f"(final .kicad_pcb + siblings kept per board)")
@@ -734,7 +735,7 @@ def main():
     print(f"out       : {args.out}")
     print(f"stages    : {', '.join(stages)}")
 
-    plan = stage_plan(args, sets, stress) if "plan" in stages else {"big_boards": []}
+    plan = stage_plan(args, sets, stress) if "plan" in stages else {}
     if args.dry_run:
         print("\n--dry-run: stopping after plan; nothing was spent")
         if "upload" in stages:
