@@ -88,7 +88,8 @@ Paths for THIS board:
 
 Rules that matter most:
 - Prefix EVERY routing/fanout/plane/check command with: bash $REPO/tests/stress/run_limited.sh
-- Run tools as: python3 -X utf8 $REPO/py_router/<tool>.py ...  (#522 moved the
+- Run tools as: python3 -u -X utf8 $REPO/py_router/<tool>.py ...  ('-u' is
+  REQUIRED: without it a step killed part-way leaves an EMPTY log, #599. #522 moved the
   engine + CLIs into py_router/; a bare \$REPO/<tool>.py does not exist. The few
   repo-root scripts -- build_router.py, install_plugin.py -- stay at \$REPO/.)
 - REDO_MANIFEST is ALREADY exported for you (the replay manifest). Do NOT re-export
@@ -105,7 +106,13 @@ Rules that matter most:
 - Keep fine (sub-Default) clearance LOCAL to fine-pitch escapes, never board-wide.
 - Run EVERY command in the FOREGROUND and BLOCK until it returns — even if a
   single route step takes an hour (hard 3-hour/command cap, ~3.5-hour board
-  budget). NEVER background a command (no trailing '&', no run_in_background, no
+  budget). PASS AN EXPLICIT timeout: 600000 (10 min, the max) ON EVERY routing/
+  fanout/plane command — the DEFAULT is only 120000 ms (2 min) and route steps
+  routinely take 3-20x that, so omitting it kills your own work and looks like a
+  hang (#599: it cost 21 of 99 boards an attempt). If run_limited.sh prints
+  'the CALLER's command timeout is too short', believe it: re-run WITH the
+  timeout instead of retrying identically or recording a router bug. NEVER
+  background a command (no trailing '&', no run_in_background, no
   'I'll wait for the background task to finish'): this is a headless run with NO
   notifications and NO scheduled wakeups, so if you background a step and pause,
   the board is recorded as a FAILURE. Do not stop until the results JSON is written.

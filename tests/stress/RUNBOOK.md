@@ -80,7 +80,7 @@ within a board. `<SET>` below is `_set<N>` (e.g. `_set1` for set 1, `_set2` for 
 
 
 **`<TOOLS_REPO>` below means the tools-repo directory whose ABSOLUTE path your
-prompt already gives you** (the same path in "Run tools as: `python3 -X utf8
+prompt already gives you** (the same path in "Run tools as: `python3 -u -X utf8
 <TOOLS_REPO>/<tool>.py`" and in `--add-dir`). Substitute that absolute path
 yourself wherever you see `<TOOLS_REPO>`; never type the literal string
 `<TOOLS_REPO>` into a shell, and do not expect it to be set as an environment
@@ -194,11 +194,15 @@ harmless.
 
 ## Rules
 
-1. Invoke all tools as `python3 -X utf8 <TOOLS_REPO>/<tool>.py ...`
+1. Invoke all tools as `python3 -u -X utf8 <TOOLS_REPO>/<tool>.py ...`
    from your working dir. Tee every command's output to a log file in your run dir.
+   **`-u` is mandatory, not cosmetic (#599):** without it stdout is fully
+   buffered, so a step killed part-way — by a command timeout, the memory
+   watchdog, or a crash — leaves an EMPTY log and the one artifact that would
+   explain the kill dies with it (`usmu_smu`, sets-21-27 wave).
    MEMORY CAP (mandatory): prefix EVERY routing/fanout/plane/check command with
    the watchdog wrapper, e.g.
-   `bash <TOOLS_REPO>/tests/stress/run_limited.sh python3 -X utf8 .../route.py ... 2>&1 | tee step.log`
+   `bash <TOOLS_REPO>/tests/stress/run_limited.sh python3 -u -X utf8 .../route.py ... 2>&1 | tee step.log`
    It kills the job at ~4 GB RSS (exit 137, `MEMORY_LIMIT_EXCEEDED` on stderr).
    Separately, the board-mutating tools self-record their invocations to
    `<run-dir>/redo_commands.sh` (run_board.sh sets `REDO_MANIFEST`) so the whole
@@ -496,7 +500,19 @@ harmless.
     cycles 1M-iteration A* exhaustions with no net newly connected (issue #211:
     ulx3s) is wedged, not slow. NEVER end your turn while
     a routing command is still running — you will be terminated and the run
-    orphaned. Run commands in the FOREGROUND (timeout up to 600000 ms). If a
+    orphaned. Run commands in the FOREGROUND, and **pass an EXPLICIT timeout on
+    every routing/fanout/plane command: `timeout: 600000` (10 min, the maximum).
+    This is required, not an upper bound you may ignore (#599).** The Bash
+    tool's DEFAULT timeout is 120000 ms — two minutes — while a route step
+    routinely takes 3-20x that (`faderbank_16nx` 316 s, `wisweep_driver` 264 s,
+    `crazyflie_fpga_deck` 189 s). Omitting the timeout killed at least one
+    attempt on 21 of the 99 boards in the sets-21-27 wave; the kill takes the
+    launching shell with it, so `run_limited.sh` reports it as
+    `BACKGROUNDED_STEP_ORPHANED` and it reads like a hang or a rule-12
+    violation when it was neither. The wrapper now prints the elapsed time and
+    a "the caller's timeout is too short" hint when it dies far short of the
+    3-hour cap — believe it, and re-run with the timeout rather than retrying
+    the same way or blaming the router. If a
     command exceeds the 10-min foreground cap, keep waiting in foreground:
     repeatedly run `until ! pgrep -f "<unique-cmd-fragment>" >/dev/null; do
     sleep 10; done` (each up to 10 min) until the process exits, then read its

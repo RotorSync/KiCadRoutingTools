@@ -224,6 +224,17 @@ performance can be compared across code versions:
   Timing the deterministic replay (not the LLM run, whose wall time is interleaved
   with model thinking) is the apples-to-apples measurement.
 
+The two files together also **identify attempts that DIED** (#599): the manifest
+line is written when a command *starts*, but the timings record only on a clean
+exit, so a manifest command with no matching `redo_timings.jsonl` entry was
+killed part-way — by the caller's command timeout, the memory watchdog, or a
+crash. That is the cheapest way to tell a wave's wasted attempts from its real
+work. Such an attempt does not corrupt a replay: it wrote no output, and
+`minimize_manifest.py`'s backward slice binds each read to the file's *current*
+producer, so the successful rerun's write supersedes it and the dead line drops
+out. Check `ORPHANED_STEP.txt` / `KILLED_STEP.txt` in the run dir for the
+wrapper's own account of what killed it.
+
 ### Minimizing a manifest (#132)
 
 A recorded manifest contains the agent's trial-and-error — `--help` probes,

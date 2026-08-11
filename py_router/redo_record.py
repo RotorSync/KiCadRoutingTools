@@ -80,8 +80,12 @@ def record_invocation(manifest_env: str = "REDO_MANIFEST") -> None:
     """Append this process's invocation to the manifest named by manifest_env.
 
     Best-effort: any failure (unwritable path, etc.) is swallowed so recording
-    can never affect the wrapped tool. Records `python3 -X utf8 <script> <args>`
-    so the replayed command matches the RUNBOOK convention.
+    can never affect the wrapped tool. Records
+    `python3 -u -X utf8 <script> <args>` so the replayed command matches the
+    RUNBOOK convention. `-u` is not cosmetic (#599): a replayed step killed
+    part-way -- by the caller's command timeout, the memory watchdog, or a
+    Ctrl-C -- leaves an EMPTY log with buffered stdout, so the one artifact
+    that would explain the kill dies with it (usmu_smu, sets-21-27 wave).
     """
     manifest = os.environ.get(manifest_env)
     if not manifest or manifest == os.devnull or manifest == "/dev/null":
@@ -93,7 +97,7 @@ def record_invocation(manifest_env: str = "REDO_MANIFEST") -> None:
         argv = list(sys.argv)
         if not argv:
             return
-        cmd = ["python3", "-X", "utf8"] + argv
+        cmd = ["python3", "-u", "-X", "utf8"] + argv
         quoted = " ".join(shlex.quote(a) for a in cmd)
         header = ""
         if not os.path.exists(manifest) or os.path.getsize(manifest) == 0:
