@@ -553,6 +553,14 @@ def stage_harvest(args, sets, stress) -> dict:
     #
     # Keeping the boards is what makes the fix possible: grade them here, with
     # the same grader and the same kicad-cli the baseline gets.
+    missing_pro = [f"{r.get('set')}/{r.get('board')}"
+                   for rows in rows_by_set.values() for r in rows
+                   if r.get("artifact_warning")]
+    if missing_pro:
+        print(f"  WARN {len(missing_pro)} board(s) flagged an artifact problem "
+              f"(a .kicad_pcb without its .kicad_pro re-grades against the stock "
+              f"netclass): {', '.join(missing_pro[:5])}")
+
     if not getattr(args, "no_local_regrade", False):
         _regrade_locally(args, sorted(rows_by_set), stress, out, "harvested wave")
     return rows_by_set
@@ -585,13 +593,6 @@ def _regrade_locally(args, sets, stress, out, what):
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
         for line in ex.map(one, sets):
             print(line, flush=True)
-    missing_pro = [f"{r.get('set')}/{r.get('board')}"
-                   for rows in rows_by_set.values() for r in rows
-                   if r.get("artifact_warning")]
-    if missing_pro:
-        print(f"  WARN {len(missing_pro)} board(s) flagged an artifact problem "
-              f"(a .kicad_pcb without its .kicad_pro re-grades against the stock "
-              f"netclass): {', '.join(missing_pro[:5])}")
 
 
 # ------------------------------------------------------------------ compare
