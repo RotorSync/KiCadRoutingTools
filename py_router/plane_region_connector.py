@@ -668,17 +668,20 @@ def _regions_from_fill_models(net_id, pcb_data, coord, plane_layer,
     for root, cset in orphan_cells.items():
         if len(cset) < min_patch_cells:
             # Below the JOIN bar. A bare sliver is noise (the filler deletes
-            # it silently, as KiCad itself does), but a KEPT one is still a
-            # real missing connection KiCad will flag -- tally it (#611;
-            # previously this `continue` skipped it with no trace).
+            # it silently, as KiCad itself does), but a KEPT one is a real
+            # missing connection KiCad will flag forever -- make it a REGION
+            # so the join runs (#611 follow-up). The area bar exists to stop
+            # clutter joins for copper the filler ERASES (duodyne); that
+            # argument does not apply to kept islands, and the join here is
+            # cheaper and more exact than leaving it to the post-write
+            # kicad-cli oracle (a last resort).
             if (len(cset) >= kept_floor_cells
                     and _island_kept_by_filler(pcb_data, net_id, plane_layer,
                                                cset, coord, analysis_grid_step)
                     and not _connected_through_a_via(plane_layer, cset)):
-                kept_unjoined += 1
-                kept_unjoined_mm2 += len(cset) * _cell_mm2
-                kept_layers.add(plane_layer)
-                _kept_note(plane_layer, cset)
+                region_anchors.append([])
+                region_cells.append(cset)
+                region_islands.append(islands_by_root.get(root, set()))
             continue
         if _island_kept_by_filler(pcb_data, net_id, plane_layer, cset,
                                   coord, analysis_grid_step):
@@ -698,16 +701,40 @@ def _regions_from_fill_models(net_id, pcb_data, coord, plane_layer,
     # REPORT-ONLY: kept islands go into the kept_unjoined tally, and
     # filler-deleted ones above the area bar into the dropped tally.
     _judged_roots = set(orphan_cells.keys())
+    # #611 audit gap 4: an ANCHORED region whose fill lives entirely on
+    # non-primary layers (groups[root]['cells'] empty -- e.g. an SMD-pad
+    # island on another poured layer when pad repair is off) gets no join
+    # seeds and no model-island verification from THIS call, and a non-via
+    # seed is stamped on the PRIMARY layer, so its strap lands on the wrong
+    # layer's copper. Flag its layer(s) for the per-layer follow-up join,
+    # which analyses with that layer primary and joins it correctly.
+    followup_layers: Set[str] = set()
     _off_primary: Dict[tuple, Dict[str, Set[Tuple[int, int]]]] = {}
     for _layer in sorted(set(zone_layers) - {plane_layer}):
         for ck, cset in _gather_cells(
                 models_by_layer.get(_layer) or []).items():
             root = uf.find(ck)
-            if root in anchored_roots or root in _judged_roots:
-                continue     # connected, or already judged via its
-                             # plane_layer fragment above
+            if root in _judged_roots:
+                continue     # already judged via its plane_layer fragment
+            if root in anchored_roots:
+                if not groups.get(root, {}).get('cells'):
+                    followup_layers.add(_layer)
+                continue     # connected (or an anchored region handled above)
             _lay = _off_primary.setdefault(root, {})
             _lay.setdefault(_layer, set()).update(cset)
+
+    _all_net_zones = [z for z in (getattr(pcb_data, 'zones', None) or [])
+                      if z.net_id == net_id]
+
+    def _drop_bar_cells(layers_involved):
+        # #611 audit gap 8: the dropped-island area bar follows the involved
+        # LAYERS' zones' island_area_min, not the primary layer's.
+        amin = 0.0
+        for z in _all_net_zones:
+            if z.layer in layers_involved:
+                amin = max(amin, getattr(z, 'island_area_min', 0.0) or 0.0)
+        return max(100, int(max(25.0, amin) / _cell_mm2))
+
     for root, bylayer in _off_primary.items():
         total_cells = sum(len(c) for c in bylayer.values())
         if total_cells < kept_floor_cells:
@@ -722,7 +749,7 @@ def _regions_from_fill_models(net_id, pcb_data, coord, plane_layer,
             kept_layers.update(bylayer.keys())
             for l, c in bylayer.items():
                 _kept_note(l, c)
-        elif total_cells >= min_patch_cells:
+        elif total_cells >= _drop_bar_cells(bylayer.keys()):
             dropped_islands += 1
             dropped_cells += total_cells
 
@@ -731,8 +758,12 @@ def _regions_from_fill_models(net_id, pcb_data, coord, plane_layer,
     # connected" -- see the #609 note above. kept_report = kept-but-unjoined
     # islands (#611), same reason.
     dropped = (dropped_islands, dropped_cells * _cell_mm2)
+    # Layers may include follow-up-only entries (anchored regions with no
+    # primary cells, audit gap 4) beyond the kept-island count -- the repair
+    # loop keys its per-layer follow-up joins off this tuple's layer list.
     kept_report = (kept_unjoined, kept_unjoined_mm2,
-                   tuple(sorted(kept_layers)), tuple(kept_details[:8]))
+                   tuple(sorted(kept_layers | followup_layers)),
+                   tuple(kept_details[:8]))
     if len(region_anchors) < 2:
         return ([region_anchors[0] if region_anchors else []],
                 [region_cells[0] if region_cells else set()],
@@ -1913,7 +1944,8 @@ def route_disconnected_regions(
     debug_connectivity: bool = False,
     zone_clearances: Optional[Dict[str, float]] = None,
     progress_callback=None,
-    cancel_check=None
+    cancel_check=None,
+    split_report: bool = True
 ) -> Tuple[List[Dict], List[Dict], int, List[List[Tuple[float, float]]], List[Tuple[List[Tuple[float, float]], str]]]:
     """
     Detect and route between disconnected zone regions.
@@ -1940,6 +1972,10 @@ def route_disconnected_regions(
             region discovery and per connection attempt (issue #364)
         cancel_check: Optional callable returning True to abort; checked
             before each region connection (issue #364)
+        split_report: False suppresses the red Zone SPLIT banners (#609
+            dropped-island, #611 kept-island). Used by the per-layer
+            follow-up joins so the banners the primary call already printed
+            are not repeated; the tallies are still recorded.
 
     Returns:
         Tuple of (list of segment dicts, list of via dicts, number of routes added,
@@ -1976,17 +2012,16 @@ def route_disconnected_regions(
     _kept_n, _kept_mm2, _kept_layers, _kept_details = getattr(
         find_disconnected_zone_regions, '_last_kept_unjoined',
         (0, 0.0, (), ()))
-    if _kept_n:
+    if _kept_n and split_report:
         print(f"  {RED}Zone SPLIT: {_kept_n} island(s) ({_kept_mm2:.1f} mm^2) "
               f"on {', '.join(_kept_layers)} carry same-net copper, so KiCad "
               f"KEEPS them on refill and flags the missing connection "
               f"(#611){RESET}")
         for (_kl, _kmm2, _kx, _ky) in _kept_details:
             print(f"    - {_kl} near ({_kx}, {_ky}): {_kmm2:.1f} mm^2")
-        print(f"    Not joined by this pass: region joins seed from the "
-              f"primary analysis layer ({plane_layer}) at/above the join "
-              f"area bar. The post-write kicad-cli oracle recheck attempts "
-              f"these; grade with 'kicad-cli pcb drc --refill-zones'.")
+        print(f"    Joins from this call seed from the primary analysis "
+              f"layer ({plane_layer}); a follow-up join runs with each "
+              f"flagged layer primary (#611).")
     if n_regions < 2:
         n_anchors = len(region_anchors[0]) if region_anchors else 0
         # #609: do NOT claim "fully connected" when the discovery just found
@@ -2000,7 +2035,7 @@ def route_disconnected_regions(
         # once the zones were refilled.
         _drop_n, _drop_mm2 = getattr(
             find_disconnected_zone_regions, '_last_dropped', (0, 0.0))
-        if _drop_n:
+        if _drop_n and split_report:
             print(f"  {RED}Zone SPLIT: 1 anchored region plus {_drop_n} "
                   f"stranded island(s) ({_drop_mm2:.1f} mm^2) with no pad, "
                   f"via or track on them{RESET}")
@@ -2012,10 +2047,11 @@ def route_disconnected_regions(
                   f"the check reads a stale fill and reports 0), and treat a "
                   f"split reference plane as a return-path/impedance defect, "
                   f"not just a connectivity one (#609).")
-        elif not _kept_n:
+        elif not _kept_n and not _drop_n:
             # Only claim it when BOTH tallies are empty -- a kept-unjoined
             # island (#611) is a split even though the region list has one
-            # entry.
+            # entry. (split_report=False keeps a follow-up call from
+            # re-printing banners the primary call already showed.)
             print(f"  Zone is fully connected ({n_anchors} anchors in 1 region)")
         return [], [], 0, [], connectivity_paths
 
@@ -2276,10 +2312,16 @@ def route_disconnected_regions(
         # Pseudo-anchors on the fill nearest the closest approach: a new via
         # anywhere on a region's fill IS the region (castor +3.3VA -- the
         # human's bridge started at a bare fill spot 20mm from the anchor).
-        _zone_polys = [z.polygon for z in (getattr(pcb_data, 'zones', []) or [])
-                       if z.net_id == net_id and getattr(z, 'polygon', None)]
         _plane_layer_name = [l for l, i in layer_map.items()
                              if i == plane_layer_idx][0]
+        # #611 audit gap 5: only THIS layer's outlines. The obstacle tests
+        # inside _real_fill_point are already plane_layer-scoped; an
+        # unfiltered outline list accepted pseudo-anchors that sit only in
+        # ANOTHER layer's zone (split power planes with different outlines
+        # per layer), validated against the wrong layer's obstacles.
+        _zone_polys = [z.polygon for z in (getattr(pcb_data, 'zones', []) or [])
+                       if z.net_id == net_id and z.layer == _plane_layer_name
+                       and getattr(z, 'polygon', None)]
         _margin = zone_clearance + min_track_width / 2
 
         def _valid_fill(pt):

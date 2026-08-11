@@ -682,6 +682,20 @@ Uses flood fill on a coarse grid (`--analysis-grid-step`) to identify disconnect
 4. Flood fill from each anchor to identify connected regions
 5. Group anchors by their connected region
 
+Pad-less **orphan islands** found by the fill model are classified by what
+KiCad's filler would do on refill (#609/#611): an island the filler ERASES
+(truly bare, `island_removal_mode` 0) is never strapped — that would ship
+copper that is never poured — but it is reported as a `Zone SPLIT` with its
+area, because a split reference plane is a return-path defect even when the
+copper disappears. An island the filler KEEPS (it carries a same-net
+track/via) is a real KiCad `Missing connection` and is **joined at any size**
+(≥1 mm²; the 25 mm² area bar only guards clutter joins for erased copper).
+On a multi-layer plane, every poured layer is scanned (#611): a kept island
+cut off on a non-primary layer is reported by the first pass, then joined by
+a **follow-up pass with that layer as the primary analysis layer**. An
+island whose same-net via reaches anchored fill on another poured layer is
+recognized as connected through the stack and left alone.
+
 #### 2. MST-Based Region Selection
 
 Uses Kruskal's algorithm to build a Minimum Spanning Tree connecting all regions:

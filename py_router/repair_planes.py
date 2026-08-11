@@ -46,7 +46,9 @@ from kicad_parser import parse_kicad_pcb, PCBData, Segment, Via, KICAD_10_MIN_VE
 from kicad_writer import generate_segment_sexpr, generate_gr_line_sexpr, generate_via_sexpr
 from routing_config import GridRouteConfig
 from plane_io import extract_zones
-from plane_region_connector import route_disconnected_regions, build_base_obstacles
+from plane_region_connector import (route_disconnected_regions,
+                                    find_disconnected_zone_regions,
+                                    build_base_obstacles)
 import plane_pad_tap
 from plane_pad_tap import (find_unconnected_plane_pads, tap_pad_with_escalation,
                            SharedViaMaps)
@@ -1538,7 +1540,13 @@ def repair_planes(
             cancel_check=cancel_check
         )
 
-        if routes_added > 0:
+        def _absorb_join(region_segments, region_vias, routes_added,
+                         route_paths):
+            """Book a route_disconnected_regions result: write-lists, totals,
+            debug lines, and pcb_data (so subsequent nets/joins see the new
+            copper as obstacles). Shared by the primary join call and the
+            #611 per-layer follow-ups."""
+            nonlocal total_routes, total_regions, total_vias
             all_new_segments.extend(region_segments)
             all_new_vias.extend(region_vias)
             total_routes += routes_added
@@ -1552,7 +1560,6 @@ def repair_planes(
                         p1, p2 = route_path[i], route_path[i + 1]
                         all_debug_lines.append(generate_gr_line_sexpr(p1, p2, 0.1, "User.4"))
 
-            # Add segments to pcb_data so subsequent nets see them as obstacles
             for s in region_segments:
                 start = s['start']
                 end = s['end']
@@ -1564,7 +1571,6 @@ def repair_planes(
                 _prov_seg(s['net_id'], s['layer'], start[0], start[1],
                           end[0], end[1], 'region-join')
 
-            # Add vias to pcb_data so subsequent nets see them as obstacles
             for v in region_vias:
                 pcb_data.vias.append(Via(
                     x=v['x'], y=v['y'],
@@ -1575,6 +1581,49 @@ def repair_planes(
                 _prov_via(v['net_id'], v['x'], v['y'], 'region-join')
             from route_trace import plane_capture as _plane_capture
             _plane_capture(pcb_data, 'plane-join', net_id, net_name)  # individual region-join frame
+
+        if routes_added > 0:
+            _absorb_join(region_segments, region_vias, routes_added,
+                         route_paths)
+
+        # #611: kept islands on NON-primary poured layers cannot be joined
+        # from the primary call -- its join seeds and fill-material checks
+        # are plane_layer-scoped -- so re-run discovery+join once per
+        # flagged layer with THAT layer primary. This is the cheap, exact
+        # fix; the post-write kicad-cli oracle stays the last resort. The
+        # kept island becomes an ordinary primary-layer orphan region in the
+        # follow-up (join-eligible at any size >= the 1 mm^2 kept floor).
+        _kept611 = getattr(find_disconnected_zone_regions,
+                           '_last_kept_unjoined', (0, 0.0, (), ()))
+        for _flayer in [l for l in _kept611[2] if l != primary_layer]:
+            if cancel_check and cancel_check():
+                break
+            print(f"  #611 follow-up join with {_flayer} primary "
+                  f"(kept island(s) reported there):")
+            _fsegs, _fvias, _fadd, _fpaths, _ = route_disconnected_regions(
+                net_id=net_id,
+                net_name=net_name,
+                plane_layer=_flayer,
+                zone_bounds=zone_bounds,
+                pcb_data=pcb_data,
+                config=config,
+                base_obstacles=base_obstacles,
+                layer_map=layer_map,
+                zone_clearance=max_zone_clearance,
+                max_track_width=max_track_width,
+                min_track_width=min_track_width,
+                track_via_clearance=track_via_clearance,
+                hole_to_hole_clearance=hole_to_hole_clearance,
+                analysis_grid_step=analysis_grid_step,
+                max_iterations=max_iterations,
+                verbose=verbose,
+                zone_layers=net_zone_layers,
+                zone_clearances=zone_clearances,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+                split_report=False)
+            if _fadd > 0:
+                _absorb_join(_fsegs, _fvias, _fadd, _fpaths)
 
     # Partial restores: emit kept pieces as new copper and strip the nets'
     # input copper (replacement semantics -- same as route_planes b2557cd).

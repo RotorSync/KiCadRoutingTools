@@ -36,7 +36,8 @@ def check(label, cond):
         _failures.append(label)
 
 
-def build(cut_fcu=False, fcu_stub=False, fcu_via=False, bcu_pocket=False):
+def build(cut_fcu=False, fcu_stub=False, fcu_via=False, bcu_pocket=False,
+          fcu_pad=False):
     """40x20 board, GND poured on BOTH B.Cu and F.Cu; THT GND pads on the
     left anchor both pours. Options:
       cut_fcu:    a SIG track cuts the F.Cu pour in half (B.Cu stays whole),
@@ -71,6 +72,12 @@ def build(cut_fcu=False, fcu_stub=False, fcu_via=False, bcu_pocket=False):
                              net_id=GND, width=0.25))
     if fcu_via:
         vias.append(make_via(30.0, 10.0, net_id=GND))
+    if fcu_pad:
+        # SMD GND pad on the stranded F.Cu island: the region is ANCHORED
+        # (audit gap 4) but its fill lives entirely off the primary layer.
+        pads.append(make_pad(GND, 30.0, 10.0, ref='C9', num='1',
+                             net_name='GND', size_x=1.0, size_y=1.0,
+                             layers=('F.Cu',)))
     if bcu_pocket:
         # SIG ring on B.Cu around (32,10); the pour inside it is a GND
         # island of roughly 3x3 mm -- far below the 25 mm^2 join bar.
@@ -89,13 +96,13 @@ def build(cut_fcu=False, fcu_stub=False, fcu_via=False, bcu_pocket=False):
                     segments=segs, vias=vias, zones=zones)
 
 
-def regions(pcb):
+def regions(pcb, primary='B.Cu'):
     cfg = GridRouteConfig(grid_step=0.1, track_width=0.25, clearance=0.2,
                           layers=['F.Cu', 'B.Cu'])
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         ra, rc, cp, ri = find_disconnected_zone_regions(
-            GND, 'B.Cu', BOUNDS, pcb, cfg, 0.3, 0.5,
+            GND, primary, BOUNDS, pcb, cfg, 0.3, 0.5,
             ['F.Cu', 'B.Cu'], {'B.Cu', 'F.Cu'}, False)
     dropped = getattr(find_disconnected_zone_regions, '_last_dropped', (0, 0.0))
     kept = getattr(find_disconnected_zone_regions, '_last_kept_unjoined',
@@ -120,17 +127,57 @@ n, (dn, dmm2), (kn, kmm2, klay) = regions(build(cut_fcu=True, fcu_stub=True))
 check("F.Cu island with a GND track: kept-unjoined tally names the layer",
       n == 1 and dn == 0 and kn == 1 and kmm2 > 100.0 and klay == ('F.Cu',))
 
+# The tally drives repair_planes' follow-up join with that layer primary --
+# from that side the same island is an ordinary joinable orphan region.
+n, (dn, dmm2), (kn, kmm2, klay) = regions(build(cut_fcu=True, fcu_stub=True),
+                                          primary='F.Cu')
+check("follow-up view (F.Cu primary): the kept island is a joinable region",
+      n == 2 and kn == 0)
+
 # --- Stitching via makes it genuinely connected: no alarm at all ------------
 n, (dn, dmm2), (kn, kmm2, klay) = regions(build(cut_fcu=True, fcu_via=True))
 check("F.Cu island with a via to the intact B.Cu pour: no tallies",
       n == 1 and dn == 0 and kn == 0)
 
 # --- Small kept island BELOW the join bar on the PRIMARY layer --------------
+# Kept = KiCad flags it forever, so it is JOINED regardless of the 25 mm^2
+# bar (the bar only guards clutter joins for copper the filler erases).
 n, (dn, dmm2), (kn, kmm2, klay) = regions(build(bcu_pocket=True))
-check("sub-bar kept island on B.Cu: tallied (was silently skipped)",
-      n == 1 and kn == 1 and 1.0 <= kmm2 < 25.0 and klay == ('B.Cu',))
-check("sub-bar kept island on B.Cu: never join-eligible (copper unchanged)",
-      n == 1)
+check("sub-bar kept island on B.Cu: joinable region (was silently skipped)",
+      n == 2 and kn == 0 and dn == 0)
+
+# --- ANCHORED island on the non-primary layer (audit gap 4) -----------------
+# An SMD pad anchors the F.Cu island, so it IS a region -- but its fill has
+# no primary-layer cells, so a join from the B.Cu-primary call would land on
+# the wrong layer's copper. Its layer must be flagged for the follow-up.
+def kept_layers_of(pcb, primary='B.Cu'):
+    regions(pcb, primary)
+    return getattr(find_disconnected_zone_regions, '_last_kept_unjoined',
+                   (0, 0.0, (), ()))[2]
+
+lay = kept_layers_of(build(cut_fcu=True, fcu_pad=True))
+check("anchored SMD-pad island on F.Cu: layer flagged for follow-up join",
+      'F.Cu' in lay)
+
+# --- Integration: repair_planes runs the follow-up join and closes it -------
+# The kept island on the non-primary layer must come out CONNECTED, not just
+# reported: the primary call tallies it, the follow-up call (that layer
+# primary) joins it, and the join must land before the orphan-copper cleanup
+# so the island's stub is protected by the strap.
+pcb = build(cut_fcu=True, fcu_stub=True)
+from repair_planes import repair_planes as _repair
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    _res = _repair('', '', ['GND', 'GND'], ['B.Cu', 'F.Cu'], pcb_data=pcb,
+                   return_results=True, repair_pads=False,
+                   routing_layers=['F.Cu', 'B.Cu'])
+out = buf.getvalue()
+check("repair: follow-up join announced and attempted",
+      '#611 follow-up join with F.Cu primary' in out)
+check("repair: the join routed", 'All 1 route(s) succeeded' in out)
+n, (dn, dmm2), (kn, kmm2, klay) = regions(pcb)
+check("repair: island connected afterwards (no tallies, 1 region)",
+      n == 1 and dn == 0 and kn == 0)
 
 print()
 if _failures:
