@@ -382,7 +382,14 @@ def _replay_one(task: dict) -> dict:
     # sub-floor violations on copper that is actually correct (#441 -- icepi_zero
     # turned a dropped 0.09 floor into 160 phantom grazes). Shipping the pcb
     # without the pro would make every artifact we keep un-regradable.
-    if os.environ.get("KICAD_SWEEP_KEEP_ARTIFACTS") and row.get("final"):
+    # Carried on the ARM SPEC, which is serialized into the task -- a Modal
+    # container does NOT inherit the launching shell's environment, so setting
+    # KICAD_SWEEP_KEEP_ARTIFACTS locally silently kept nothing (caught by the
+    # smoke run: chain green, 0 artifacts). The env var remains an in-container
+    # override for ad-hoc use.
+    keep = (task["arm_spec"].get("keep_artifacts")
+            or os.environ.get("KICAD_SWEEP_KEEP_ARTIFACTS"))
+    if keep and row.get("final"):
         final = out_dir / board / str(row["final"])
         if final.exists():
             adir = dest / "artifacts" / f"{set_name}__{board}"

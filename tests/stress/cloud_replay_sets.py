@@ -277,20 +277,30 @@ def stage_run(args, sets, stress, plan):
     arms_file = Path(args.workdir) / "arms.replay.json"
     arms_file.parent.mkdir(parents=True, exist_ok=True)
     # One arm, no overrides: a straight replay of whatever the image ships.
+    # keep_artifacts rides the ARM SPEC because that is what gets serialized into
+    # the task -- a Modal container does not inherit this shell's environment, so
+    # exporting the env var here would keep nothing (the smoke run proved it:
+    # chain green, zero artifacts).
     arms_file.write_text(json.dumps(
-        [{"name": arm, "note": "cloud replay, no parameter overrides"}], indent=1))
+        [{"name": arm, "keep_artifacts": True,
+          "note": "cloud replay, no parameter overrides"}], indent=1))
 
     env = dict(os.environ)
-    env["KICAD_SWEEP_KEEP_ARTIFACTS"] = "1"      # the point of this driver
     env.setdefault("KICAD_SWEEP_NAME", f"kicad-replay-{sets[0]}-{sets[-1]}")
     if plan["big_boards"]:
         env["KICAD_SWEEP_BIG_BOARDS"] = ",".join(plan["big_boards"])
 
     print(f"\n=== RUN ===\n  arm: {arm}\n  artifacts: ON "
           f"(final .kicad_pcb + siblings kept per board)")
+    # --ignore-excludes: board_value.json's exclude list is FITTED to the arm
+    # family it was measured on -- boards where competing soft-cost arms all tied
+    # carry no information FOR A SWEEP. A replay is not a sweep: every board is a
+    # datum, and the baseline wave graded all of them, so dropping any would
+    # silently shrink the comparison (the smoke run showed it culling 5 of
+    # set10's 15 before we asked for one board).
     cmd = ["modal", "run", str(SWEEP / "modal_app.py"),
            "--arms", str(arms_file), "--sets", ",".join(sets),
-           "--stress-dir", str(stress)]
+           "--stress-dir", str(stress), "--ignore-excludes"]
     if args.limit:
         cmd += ["--limit", str(args.limit)]
     if args.boards:
