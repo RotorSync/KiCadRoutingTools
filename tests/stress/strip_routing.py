@@ -6,6 +6,7 @@ Also sets all copper layer types to 'signal' so kicad_parser sees them
 
 Run with KiCad's bundled Python.
 """
+import shutil
 import sys
 from pathlib import Path
 import os
@@ -161,6 +162,12 @@ for f in files:
         board.SetLayerType(lid, pcbnew.LT_SIGNAL)
 
     out = DST / f.name
-    pcbnew.SaveBoard(str(out), board)
+    # aSkipSettings + sibling copy: the implicit settings save SIGABRTs on
+    # KiCad-9-saved projects (PR #613); see normalize_boards.py.
+    pcbnew.SaveBoard(str(out), board, aSkipSettings=True)
+    for ext in ('.kicad_pro', '.kicad_dru'):
+        sib = f.with_suffix(ext)
+        if sib.exists():
+            shutil.copy(sib, out.with_suffix(ext))
     print(f"{f.stem:18s} removed {len(tracks):5d} tracks, {removed_zones:2d} zones "
           f"(kept {kept_zones} rule areas)")

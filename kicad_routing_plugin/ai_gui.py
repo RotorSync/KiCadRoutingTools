@@ -70,6 +70,24 @@ def board_path_for_analysis(board_filename):
             # would crash on pre-KiCad-10 projects (uncaught C++ type_error
             # in the .kicad_pro merge; see _stage_live_board in swig_gui.py).
             pcbnew.SaveBoard(snapshot, board, aSkipSettings=True)
+            # Stage the on-disk project siblings beside the snapshot so the
+            # analysis sees the real netclasses and layer rules (#498) --
+            # the implicit settings save this replaced never carried the
+            # .kicad_dru at all. The snapshot path is deterministic, so a
+            # sibling left by an earlier snapshot of a DIFFERENT project
+            # must be removed, not inherited.
+            import shutil
+            for ext in ('.kicad_pro', '.kicad_dru'):
+                sib = (os.path.splitext(board_filename)[0] + ext
+                       if board_filename else None)
+                stale = os.path.splitext(snapshot)[0] + ext
+                try:
+                    if sib and os.path.isfile(sib):
+                        shutil.copy(sib, stale)
+                    elif os.path.isfile(stale):
+                        os.remove(stale)
+                except OSError:
+                    pass
             return snapshot
         except Exception as e:
             wx.MessageBox(
