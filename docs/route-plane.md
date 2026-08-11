@@ -105,6 +105,8 @@ The `--plane-track-via-clearance` parameter ensures MST routes don't pass throug
 
 A net earns a Voronoi zone on a shared layer if it has **any** connection point there — a stitching via *or* a pad. A net whose pads are all through-hole or already on the layer places zero stitching vias, but its zone is still poured (seeded from those pads' positions); the partition is not gated on placing ≥1 via (issue #114).
 
+A net with **no copper at all** on the layer still earns one. Because pours run before routing (#562), a virgin *inner* layer carries neither vias nor pads — every pad is SMD on an outer layer — so a requested inner split plane used to produce **zero zones** for *both* nets, with only a buried `no vias or pads on layer, skipping zone` warning to show for it (issue #598). Such a net is now seeded from its pads **projected onto the layer** (their x/y, whatever layer the copper sits on, off-board pads excluded): those positions exist regardless of routing state, they are where the route step's pour-launch vias come down, and they partition the layer the way the components themselves are spread over the board. These are partition seeds only — they never enter the via list, so no MST edge or plane route is invented for them, and a net that has seeds of its own is untouched.
+
 ### Re-routing Options
 
 | Option | Default | Description |

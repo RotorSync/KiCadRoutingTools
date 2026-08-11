@@ -1119,9 +1119,43 @@ def _generate_multinet_layer_zones(
                 pts.append((pad.global_x, pad.global_y))
         pads_on_layer_by_net[net_id] = pts
 
+    # A pad outside the Edge.Cuts outline can never reach the fill (it is
+    # clipped to the outline) -- point-seeding it plants a Voronoi cell in dead
+    # space (#291 class). Used by the projected-pad seeding just below and by
+    # the #107 corridor pass further down.
+    from check_drc import make_off_board_test
+    _off_board_test = make_off_board_test(pcb_data.board_info)
+
+    # #598: pours run BEFORE any routing (#562), so a virgin INNER layer holds
+    # no copper at all -- no vias, and no pads either when every pad is SMD on
+    # an outer layer. Both nets of a requested inner split plane then had zero
+    # seeds and BOTH zones were silently skipped, shipping a board with no
+    # plane where one was explicitly asked for. Fall back to that net's pads
+    # PROJECTED onto this layer (their x/y, whatever layer the copper sits on):
+    # those positions exist regardless of routing state, they are where the
+    # route step's pour-launch vias will come down, and they partition the
+    # layer between the nets the way the components themselves are spread over
+    # the board. Only nets with NO seeds of their own get this, so a board that
+    # already poured correctly is untouched.
+    projected_pads_by_net: Dict[int, List[Tuple[float, float]]] = {}
+    for net_name in nets_on_layer:
+        net_id = net_name_to_id.get(net_name)
+        if net_id is None or vias_by_net.get(net_id) or pads_on_layer_by_net.get(net_id):
+            continue
+        pts = []
+        for pad in pcb_data.pads_by_net.get(net_id, []):
+            if getattr(pad, 'pad_type', '') == 'np_thru_hole':
+                continue  # NPTH has no copper to tie into the plane (#328)
+            px, py = pad.global_x, pad.global_y
+            if _off_board_test is not None and _off_board_test(px, py):
+                continue
+            pts.append((px, py))
+        projected_pads_by_net[net_id] = pts
+
     # A net earns a zone if it has ANY connection point on this layer -- a via
-    # or a pad. nets_with_vias still drives the via-to-via MST routing below;
-    # nets_with_seeds (vias OR pads) drives whether a zone is created at all.
+    # or a pad -- or, with the layer still bare, its projected pads. nets_with_vias
+    # still drives the via-to-via MST routing below; nets_with_seeds (vias, pads,
+    # or projected pads) drives whether a zone is created at all.
     nets_with_vias = []
     nets_with_seeds = []
     for net_name in nets_on_layer:
@@ -1130,15 +1164,20 @@ def _generate_multinet_layer_zones(
             continue
         via_count = len(vias_by_net.get(net_id, []))
         pad_count = len(pads_on_layer_by_net.get(net_id, []))
-        if via_count == 0 and pad_count == 0:
-            print(f"  Warning: Net '{net_name}' has no vias or pads on layer {layer}, skipping zone")
+        proj_count = len(projected_pads_by_net.get(net_id, []))
+        if via_count == 0 and pad_count == 0 and proj_count == 0:
+            print(f"  Warning: Net '{net_name}' has no vias or pads on layer {layer}, "
+                  f"and no on-board pads anywhere to project, skipping zone")
             continue
         nets_with_seeds.append(net_name)
         if via_count > 0:
             nets_with_vias.append(net_name)
             print(f"  Net '{net_name}': {via_count} vias")
-        else:
+        elif pad_count > 0:
             print(f"  Net '{net_name}': no vias, {pad_count} pad(s) on {layer} (pad-seeded zone)")
+        else:
+            print(f"  Net '{net_name}': no copper on {layer} yet, partition seeded "
+                  f"from {proj_count} projected pad(s) (#598)")
 
     if len(nets_with_seeds) < 2:
         # Only one net has connections on this layer: use full board rectangle.
@@ -1347,11 +1386,9 @@ def _generate_multinet_layer_zones(
         th_fallback = 0
         th_off_board = 0
         fallback_pad_refs: List[str] = []
-        # A pad outside the Edge.Cuts outline can never reach the fill (it is
-        # clipped to the outline) -- corridor-routing toward it is wasted and
+        # _off_board_test (built above) skips pads outside the outline: the fill
+        # is clipped there, so corridor-routing toward such a pad is wasted and
         # point-seeding it plants a Voronoi cell in dead space (#291 class).
-        from check_drc import make_off_board_test
-        _off_board_test = make_off_board_test(pcb_data.board_info)
         for nm_on_layer in nets_on_layer:
             nid = net_name_to_id.get(nm_on_layer)
             if nid is None:
@@ -1413,9 +1450,11 @@ def _generate_multinet_layer_zones(
 
     # #114: a net with no stitching vias gets no MST and therefore no Voronoi
     # seeds from the routing above. Seed it directly from its pads on this layer
-    # (through-hole + SMD-on-layer) so it still receives a Voronoi-partitioned
+    # (through-hole + SMD-on-layer), or -- with the layer still bare -- from its
+    # pads projected onto it (#598), so it still receives a Voronoi-partitioned
     # zone. Via-bearing nets are left to the #107 corridor logic above so their
-    # via topology is not perturbed.
+    # via topology is not perturbed. These are partition seeds ONLY: they never
+    # enter vias_by_net, so no MST edge or plane route is invented for them.
     if augmented_vias_by_net is not None:
         for net_name in nets_with_seeds:
             net_id = net_name_to_id.get(net_name)
@@ -1423,7 +1462,8 @@ def _generate_multinet_layer_zones(
                 continue
             seeds = augmented_vias_by_net.setdefault(net_id, [])
             seen = {(round(x, 3), round(y, 3)) for x, y in seeds}
-            for px, py in pads_on_layer_by_net.get(net_id, []):
+            for px, py in (pads_on_layer_by_net.get(net_id) or
+                           projected_pads_by_net.get(net_id, [])):
                 k = (round(px, 3), round(py, 3))
                 if k not in seen:
                     seeds.append((px, py))
