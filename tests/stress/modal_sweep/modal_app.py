@@ -60,6 +60,15 @@ def _run_name():
         for pre in ("arms.", "arms_"):
             if stem.startswith(pre):
                 stem = stem[len(pre):]
+        # Same arms file on different board sets = identically-named apps on
+        # the dashboard (two cross_lean runs, curated vs holdout). Append a
+        # compact sets tag whenever --sets is explicit.
+        if "--sets" in sys.argv[:-1]:
+            sets = [s.strip() for s in
+                    sys.argv[sys.argv.index("--sets") + 1].split(",") if s.strip()]
+            if sets:
+                tag = sets[0] if len(sets) == 1 else f"{sets[0]}-{sets[-1]}"
+                stem = f"{stem}-{tag}"
         if stem:
             return f"kicad-sweep-{stem}"
     return "kicad-routing-sweep"
