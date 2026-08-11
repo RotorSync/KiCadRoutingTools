@@ -340,6 +340,16 @@ def do_board(set_dir, out_dir, label, board):
     log_path = f"{dst}/_replay.log"
     log_text = Path(log_path).read_text(errors="replace") if os.path.exists(log_path) else ""
     dp = _diff_pair_stats(log_text)
+    # Deterministic search effort, summed over every JSON_SUMMARY in the
+    # chain: wall/CPU comparisons across waves run at different times are
+    # load-confounded (cloud hosts, local pools); iterations are byte-stable
+    # per config and the only honest cross-run effort metric.
+    total_iters = 0
+    for m in re.finditer(r"JSON_SUMMARY:\s*(\{.*\})", log_text):
+        try:
+            total_iters += json.loads(m.group(1)).get("total_iterations", 0)
+        except Exception:
+            pass
     fname = final_output_name(txt)
     final = os.path.join(dst, fname) if fname else None
     done = bool(final) and os.path.exists(final)
@@ -347,7 +357,8 @@ def do_board(set_dir, out_dir, label, board):
            "final": fname if done else None, "chain_complete": done,
            "drc": None, "conn": None, "nets_total": None, "nets_incomplete": None,
            "completion_pct": None,
-           "total_seconds": round(total_s, 3), "peak_rss_mb": round(peak_board, 1),
+           "total_seconds": round(total_s, 3), "total_iterations": total_iters,
+           "peak_rss_mb": round(peak_board, 1),
            "time_by_tool": time_by_tool, "peak_by_tool": peak_by_tool, "steps": steps,
            **dp}
     # Footprint (darwin) is the memory number that actually caught issue #419;
