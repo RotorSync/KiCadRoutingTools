@@ -367,7 +367,15 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         print(f"  Layer costs: {costs_str}")
 
     # Calculate layer-specific widths for impedance-controlled routing
-    # For diff pairs, we use the diff_pair_gap as the fixed spacing and calculate width
+    # For diff pairs, we use the diff_pair_gap as the fixed spacing and calculate width.
+    # #610: with --track-width OMITTED the impedance request sets the width floor
+    # it implies (bounded below by the fab tier); an explicit --track-width stays
+    # a verbatim floor. Clamps land in impedance_width_clamped -> JSON_SUMMARY.
+    from impedance import impedance_width_floor
+    imp_width_floor, imp_floor_desc = impedance_width_floor(
+        track_width, diff_pair_width_from_class,
+        len(getattr(pcb_data.board_info, 'copper_layers', None) or []))
+    impedance_width_clamped = {}
     layer_widths = {}
     if impedance is None and coplanar_gap:
         # See route.py: the gap only selects the impedance model (#486).
@@ -380,16 +388,22 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         else:
             print(f"\nCalculating trace widths for {impedance}Ω differential impedance...")
             print(f"Using diff pair spacing: {diff_pair_gap}mm ({diff_pair_gap * 39.3701:.2f} mil)")
+            if diff_pair_width_from_class:
+                print(f"  --track-width not given: solved widths floor at the "
+                      f"fab-tier track minimum {imp_width_floor}mm, not the "
+                      f"default pair width (#610)")
             layer_widths = calculate_layer_widths_for_impedance(
                 pcb_data, layers, impedance,
                 spacing=diff_pair_gap, is_differential=True,
                 fallback_width=track_width,
-                min_width=track_width,
-                coplanar_gap=coplanar_gap
+                min_width=imp_width_floor,
+                coplanar_gap=coplanar_gap,
+                floor_desc=imp_floor_desc,
+                clamp_report=impedance_width_clamped
             )
             print_impedance_routing_plan(pcb_data, layers, impedance,
                                         spacing=diff_pair_gap, is_differential=True,
-                                        min_width=track_width,
+                                        min_width=imp_width_floor,
                                         coplanar_gap=coplanar_gap)
 
     # #521: impedance declarations persist per net (see route.py's twin).
@@ -421,11 +435,15 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 print(f"  Reapplying stored {_ohms:g} ohm differential impedance "
                       f"(gap {_pgap}mm{f', coplanar {_cgap}mm' if _cgap else ''}) "
                       f"from .kicad_pro (recorded by an earlier --impedance step)")
+                # #610: same floor rule as a live --impedance solve, so the
+                # reapplied widths really ARE the same widths.
                 layer_widths = calculate_layer_widths_for_impedance(
                     pcb_data, layers, _ohms,
                     spacing=_pgap or diff_pair_gap, is_differential=True,
-                    fallback_width=track_width, min_width=track_width,
-                    coplanar_gap=_cgap)
+                    fallback_width=track_width, min_width=imp_width_floor,
+                    coplanar_gap=_cgap,
+                    floor_desc=imp_floor_desc,
+                    clamp_report=impedance_width_clamped)
         elif _specs:
             print(f"  WARNING: targeted nets carry {len(_specs)} different stored "
                   f"impedance spec(s){' (plus unspecified nets)' if _uncovered else ''} "
@@ -883,7 +901,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 _classes, _rules, _wfloor, _gfloor = {}, {}, 0.0, 0.0
             for _pn, _pair in diff_pair_ids_to_route:
                 _c = _classes.get(resolve_net_class(_pair.p_net_name, _rules), {}) if _classes else {}
-                _w = _c.get('diff_pair_width') if diff_pair_width_from_class else None
+                # --impedance derives width per layer, so a netclass width must
+                # not override it (#610: from_class now purely means "the flag
+                # was omitted", the impedance guard lives here).
+                _w = (_c.get('diff_pair_width')
+                      if diff_pair_width_from_class and impedance is None else None)
                 _g = _c.get('diff_pair_gap') if diff_pair_gap_from_class else None
                 _ew = max(_w if _w is not None else config.track_width, _wfloor)
                 _eg = max(_g if _g is not None else config.diff_pair_gap, _gfloor)
@@ -1443,6 +1465,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     }
     if ac_coupled_summary:
         summary['ac_coupled_xnets'] = ac_coupled_summary
+    if impedance_width_clamped:
+        # #610: layers whose impedance-solved width was clamped UP to the
+        # width floor, {layer: [solved_mm, floor_mm]} -- those layers will NOT
+        # meet the impedance request. Key absent when no clamp fired.
+        summary['impedance_width_clamped'] = impedance_width_clamped
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
 
     # Write output file or return results for direct application
@@ -1876,9 +1903,11 @@ Examples:
     # #435: whether the diff geometry was EXPLICITLY set on the CLI. If NOT, each
     # pair falls back engine-side to its OWN netclass diff_pair_gap/width (not the
     # board Default class), so a multi-class board routes every pair to its own
-    # impedance geometry. An explicit value (or --impedance for width) is honored
-    # verbatim for all pairs, subject only to the fab/board DRC floors.
-    _dp_width_explicit = (args.track_width is not None) or (args.impedance is not None)
+    # impedance geometry. --impedance no longer counts as explicit here (#610):
+    # the engine guards the netclass-width path itself when impedance is set, and
+    # uses this bit to floor impedance-solved widths at the fab tier instead of
+    # the resolved default pair width.
+    _dp_width_explicit = args.track_width is not None
     _dp_gap_explicit = args.diff_pair_gap is not None
     # --track-width IS the diff-pair LEG WIDTH here: when omitted, default to the
     # board's OWN Default net-class diff_pair_width (else routing_defaults), so a

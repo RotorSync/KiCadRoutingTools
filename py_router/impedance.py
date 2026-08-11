@@ -1255,11 +1255,36 @@ def print_stackup_impedance_table(pcb: PCBData, trace_width: float = 0.15, spaci
 IMPEDANCE_WIDTH_SCALE = 1.0
 
 
+def impedance_width_floor(track_width: float, width_from_class: bool,
+                          copper_layer_count: int) -> Tuple[float, str]:
+    """#610: the width floor impedance-solved widths are clamped to.
+
+    An EXPLICIT --track-width (width_from_class=False) is honored verbatim --
+    the operator asked for that geometry. With --track-width OMITTED, the
+    impedance request sets the floor it implies, bounded below only by the
+    active fab tier's track minimum: clamping solved widths to the resolved
+    default width silently converted an electrical spec into a geometric one
+    (90 ohm requested -> 0.3 mm ~45 ohm copper shipped, invisible to
+    pipelines).
+
+    Returns (floor_mm, floor_desc) where floor_desc names the floor's source
+    for the clamp warning.
+    """
+    if not width_from_class:
+        return track_width, "--track-width; lower it to reach the target"
+    from fab_tiers import fab_floors
+    floor = fab_floors(copper_layer_count or 4).get('track_width', 0.0) or 0.0
+    return floor, ("the fab-tier track minimum (--track-width not given); the "
+                   "target needs a narrower trace than this fab tier can build")
+
+
 def calculate_layer_widths_for_impedance(pcb: PCBData, layers: List[str], target_z0: float,
                                          spacing: float = 0.0, is_differential: bool = False,
                                          fallback_width: float = 0.1,
                                          min_width: float = 0.0,
-                                         coplanar_gap: float = 0.0) -> Dict[str, float]:
+                                         coplanar_gap: float = 0.0,
+                                         floor_desc: str = "--track-width; lower it to reach the target",
+                                         clamp_report: Optional[Dict[str, List[float]]] = None) -> Dict[str, float]:
     """
     Calculate trace widths for each layer to achieve target impedance.
 
@@ -1276,10 +1301,17 @@ def calculate_layer_widths_for_impedance(pcb: PCBData, layers: List[str], target
         spacing: Differential pair spacing in mm (required if is_differential=True)
         is_differential: If True, target_z0 is differential impedance
         fallback_width: Width to use if impedance calculation fails
-        min_width: Minimum allowed track width (from --track-width parameter)
+        min_width: Minimum allowed track width (an explicit --track-width, or
+            the fab-tier track floor when --track-width was omitted -- see
+            impedance_width_floor, #610)
         coplanar_gap: DESIGN side gap to same-layer ground pour in mm (#486).
             > 0 uses the coplanar-waveguide-over-ground model on outer layers.
             Callers pass this straight through from --coplanar-gap.
+        floor_desc: names min_width's source in the clamp warning (#610).
+        clamp_report: optional dict the caller owns; every clamped layer is
+            recorded as {layer: [solved_mm, floor_mm]} so the run summary can
+            surface the clamp (#610 -- it was loud on a terminal and invisible
+            in JSON_SUMMARY).
 
     Returns:
         Dict mapping layer name to trace width in mm
@@ -1301,11 +1333,13 @@ def calculate_layer_widths_for_impedance(pcb: PCBData, layers: List[str], target
             calculated_width = result['calculated_width_mm'] * IMPEDANCE_WIDTH_SCALE
 
             # Enforce minimum width. Say what the clamp COSTS, not just that it
-            # happened (#607): the floor is --track-width, which defaults to
-            # 0.3mm, so an --impedance run that passes no --track-width can have
-            # every solved width silently replaced and route nothing like the
-            # target. Naming the impedance the clamped trace will actually have
-            # makes that visible in a scripted run's log.
+            # happened (#607): naming the impedance the clamped trace will
+            # actually have makes that visible in a scripted run's log. #610
+            # narrowed when this fires at all: with --track-width omitted the
+            # callers pass the fab-tier floor here (impedance_width_floor), so
+            # only an explicit --track-width or a genuinely unmanufacturable
+            # target still clamps -- and the clamp lands in clamp_report so
+            # JSON_SUMMARY consumers can detect it.
             if calculated_width < min_width:
                 clamped_z = 0.0
                 try:
@@ -1318,8 +1352,10 @@ def calculate_layer_widths_for_impedance(pcb: PCBData, layers: List[str], target
                         f"{target_z0:g}") if clamped_z > 0 else ""
                 print(f"  WARNING: {layer_name} calculated width {calculated_width:.4f}mm "
                       f"< min {min_width:.4f}mm, using min{note}")
-                print(f"           (the floor is --track-width; lower it to route "
-                      f"{target_z0:g} ohm on {layer_name})")
+                print(f"           (the width floor is {floor_desc})")
+                if clamp_report is not None:
+                    clamp_report[layer_name] = [round(calculated_width, 4),
+                                                round(min_width, 4)]
                 calculated_width = min_width
 
             layer_widths[layer_name] = calculated_width

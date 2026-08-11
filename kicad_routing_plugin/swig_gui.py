@@ -3255,12 +3255,13 @@ class RoutingDialog(wx.Dialog):
                     same_net_pad_clearance=self._same_net_pad_clearance_value(),
                     layers=config['layers'],
                     track_width=track_width,
-                    # #435 companion: Track Width override UNCHECKED (and no impedance)
-                    # -> route each net at its OWN netclass width engine-side, matching
-                    # the CLI's omitted --track-width. Checked/impedance = the CLI's
-                    # explicit flag (verbatim global width).
-                    track_width_from_class=(not self.track_width_check.GetValue()
-                                            and not config.get('impedance')),
+                    # #435 companion: Track Width override UNCHECKED -> the width was
+                    # not explicitly set, matching the CLI's omitted --track-width.
+                    # Without impedance the engine routes each net at its OWN netclass
+                    # width; with impedance it floors solved widths at the fab tier
+                    # instead of the default width (#610 -- the engine guards the
+                    # netclass path itself, so no impedance term here anymore).
+                    track_width_from_class=not self.track_width_check.GetValue(),
                     clearance=clearance,
                     via_size=via_size,
                     via_drill=via_drill,

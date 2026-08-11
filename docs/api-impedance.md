@@ -199,12 +199,31 @@ Inverse: returns `{'calculated_width_mm', 'calculated_width_mils',
 calculate_layer_widths_for_impedance(pcb, layers, target_z0,
                                      spacing=0.0, is_differential=False,
                                      fallback_width=0.1,
-                                     min_width=0.0) -> Dict[str, float]
+                                     min_width=0.0,
+                                     coplanar_gap=0.0,
+                                     floor_desc="--track-width; ...",
+                                     clamp_report=None) -> Dict[str, float]
 ```
 
 The function impedance-controlled routing actually uses: width per layer
-(0.90-scaled, clamped to `min_width`, `fallback_width` on failure), ready to
-assign to `GridRouteConfig.layer_widths`.
+(`IMPEDANCE_WIDTH_SCALE`-scaled, clamped to `min_width`, `fallback_width` on
+failure), ready to assign to `GridRouteConfig.layer_widths`. Pass a dict as
+`clamp_report` to collect `{layer: [solved_mm, floor_mm]}` for every clamped
+layer — the routing engines forward it to `JSON_SUMMARY` as
+`impedance_width_clamped` (#610). `floor_desc` names `min_width`'s source in
+the clamp warning.
+
+```python
+impedance_width_floor(track_width, width_from_class,
+                      copper_layer_count) -> Tuple[float, str]
+```
+
+The `min_width` the engines pass (#610): an explicit `--track-width`
+(`width_from_class=False`) is honored verbatim; with the flag omitted the
+impedance request sets the floor it implies, bounded below only by the active
+fab tier's track minimum — so `--impedance 90` alone yields 90 Ω geometry
+instead of being silently clamped to the 0.3 mm default width. Returns
+`(floor_mm, floor_desc)`.
 
 ```python
 from kicad_parser import parse_kicad_pcb
