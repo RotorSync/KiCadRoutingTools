@@ -1670,8 +1670,8 @@ Examples:
                         help="Max A* iterations before giving up (default: 200000)")
     parser.add_argument("--max-probe-iterations", type=int, default=5000,
                         help="Max iterations for quick probe phase per direction (default: 5000)")
-    parser.add_argument("--heuristic-weight", type=float, default=1.9,
-                        help="A* heuristic weight, higher=faster but less optimal (default: 1.9)")
+    parser.add_argument("--heuristic-weight", type=float, default=defaults.HEURISTIC_WEIGHT,
+                        help=f"A* heuristic weight, higher=faster but less optimal (default: {defaults.HEURISTIC_WEIGHT})")
     parser.add_argument("--proximity-heuristic-factor", type=float, default=0.02,
                         help="Factor for proximity-aware A* heuristic (default: 0.02, 0=disabled)")
     parser.add_argument("--turn-cost", type=int, default=1000,

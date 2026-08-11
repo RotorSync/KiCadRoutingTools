@@ -966,7 +966,7 @@ class DifferentialTab(wx.Panel):
                 board_edge_clearance=config.get('board_edge_clearance',
                                                 defaults.BOARD_EDGE_CLEARANCE),
                 grid_step=config.get('grid_step', 0.1),
-                via_cost=config.get('via_cost', 50),
+                via_cost=config.get('via_cost', defaults.VIA_COST),
                 max_iterations=config.get('max_iterations', 200000),
                 proximity_heuristic_factor=config.get('proximity_heuristic_factor', 0.02),
                 keepout_enabled=config.get('keepout_enabled', False),
@@ -996,7 +996,7 @@ class DifferentialTab(wx.Panel):
                 direction_order=config.get('direction'),
                 disable_bga_zones=config.get('no_bga_zones'),
                 max_probe_iterations=config.get('max_probe_iterations', 5000),
-                heuristic_weight=config.get('heuristic_weight', 1.9),
+                heuristic_weight=config.get('heuristic_weight', defaults.HEURISTIC_WEIGHT),
                 turn_cost=config.get('turn_cost', 1000),
                 direction_preference_cost=config.get(
                     'direction_preference_cost', defaults.DIRECTION_PREFERENCE_COST),

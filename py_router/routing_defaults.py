@@ -38,7 +38,7 @@ DIAGONAL_MARGIN = 0.25  # mm
 UNBLOCK_REFIT_MARGIN_MM = 0.05  # mm (absolute; NOT a fraction like check_drc's clearance_margin)
 
 # Cost parameters
-VIA_COST = 50
+VIA_COST = 75  # 50 -> 75: #586 corpus (via75: -8 verdict, DRC -13, and composes with hw 2.3)
 VIA_PROXIMITY_COST = 10
 TURN_COST = 1000
 STUB_PROXIMITY_COST = 0.2
@@ -104,7 +104,7 @@ STITCH_PITCH = 20.0  # mm
 
 # Algorithm parameters
 MAX_ITERATIONS = 200000
-HEURISTIC_WEIGHT = 1.9
+HEURISTIC_WEIGHT = 2.3  # 1.9 -> 2.3: #586 corpus dose-response peak (-30 verdict, DRC -67, cpu/mem ~0.85x; 1.7 and 2.5 both worse)
 PROXIMITY_HEURISTIC_FACTOR = 0.02
 MAX_RIPUP = 3
 # Phase 3 tap rip-up abandon metric (#85 arbitration); documented in

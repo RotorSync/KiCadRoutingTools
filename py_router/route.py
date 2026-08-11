@@ -313,7 +313,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 via_cost: int = 50,
                 max_iterations: int = 200000,
                 max_probe_iterations: int = 5000,
-                heuristic_weight: float = 1.9,
+                heuristic_weight: float = defaults.HEURISTIC_WEIGHT,
                 turn_cost: int = 1000,
                 direction_preference_cost: int = defaults.DIRECTION_PREFERENCE_COST,
                 bus_enabled: bool = False,
@@ -457,7 +457,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         grid_step: Grid resolution in mm (default: 0.1)
         via_cost: Penalty for placing a via in 0.1mm grid steps (default: 50 = 5mm; mm-equivalent at any grid_step)
         max_iterations: Max A* iterations before giving up (default: 200000)
-        heuristic_weight: A* heuristic weight, higher=faster but less optimal (default: 1.9)
+        heuristic_weight: A* heuristic weight, higher=faster but less optimal (default: routing_defaults.HEURISTIC_WEIGHT)
         stub_proximity_radius: Radius around stubs to penalize in mm (default: 2.0)
         stub_proximity_cost: Cost penalty near stubs in mm equivalent (default: 0.2)
         bga_proximity_radius: Radius around BGA edges to penalize in mm (default: 7.0)

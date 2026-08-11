@@ -43,8 +43,8 @@ automatically at other grid steps (see [cost scaling](#cost-scaling)).
 |-------|---------|---------|
 | `max_iterations` | `200000` | A* iteration cap per attempt |
 | `max_probe_iterations` | `5000` | Quick probe per direction to detect blocked routes early |
-| `heuristic_weight` | `1.9` | A* greediness (>1 = faster, possibly non-optimal paths) |
-| `via_cost` | `50` | Via penalty, in grid steps at the reference grid |
+| `heuristic_weight` | `2.3` | A* greediness (>1 = faster, possibly non-optimal paths); 1.9 -> 2.3 from the #586 corpus dose-response (peak at 2.3, both neighbors worse) |
+| `via_cost` | `75` | Via penalty, in grid steps at the reference grid; 50 -> 75 from the #586 corpus (DRC -13, composes with heuristic 2.3) |
 | `turn_cost` | `1000` | Penalty per direction change (straighter routes) |
 | `direction_order` | `'forward'` | Try `'forward'` or `'backward'` direction first |
 
