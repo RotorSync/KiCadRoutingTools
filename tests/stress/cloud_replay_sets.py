@@ -298,15 +298,19 @@ def build_recorded_baseline(args, sets, stress):
     summary.json in whatever directory you hand it -- pointed at runs_setN that
     would clobber the recorded run's own summary.
     """
+    import concurrent.futures
     import sweep_lib as sl
     from ab_replay_grade import final_output_name
     root = Path(args.out).expanduser() / "_baseline"
-    print(f"\n=== BASELINE (recorded runs, re-graded today) ===\n  {root}")
-    for s in sets:
+    jobs = max(1, int(getattr(args, "jobs", 6) or 6))
+    print(f"\n=== BASELINE (recorded runs, re-graded today) ===\n  {root}\n"
+          f"  {len(sets)} set(s), {jobs} in parallel")
+
+    def one_set(s):
         rds = sl.run_dirs_for(stress, s)
         if not rds:
-            print(f"  {s}: no runs dir; skipped")
-            continue
+            return f"  {s}: no runs dir; skipped"
+        out_lines = []
         run_dir = rds[0]
         wave = root / s
         wave.mkdir(parents=True, exist_ok=True)
@@ -333,23 +337,32 @@ def build_recorded_baseline(args, sets, stress):
                     link.unlink()
                 link.symlink_to(sib)
             linked += 1
-        print(f"  {s:9} {linked:3} final board(s) linked"
-              + (f", {missing} with NO final (chain never completed in the recording)"
-                 if missing else ""))
-        sh([sys.executable, str(HERE / "ab_replay_grade.py"),
-            "--regrade", str(wave), "--set", str(run_dir)],
-           stdout=subprocess.DEVNULL)
+        out_lines.append(f"  {s:9} {linked:3} final board(s) linked"
+                         + (f", {missing} with NO final (chain never completed "
+                            f"in the recording)" if missing else ""))
+        subprocess.run([sys.executable, str(HERE / "ab_replay_grade.py"),
+                        "--regrade", str(wave), "--set", str(run_dir)],
+                       stdout=subprocess.DEVNULL)
         summ = wave / "summary.json"
         if summ.exists():
             rows = json.loads(summ.read_text())
             ok = sum(1 for r in rows if r.get("chain_complete"))
-            print(f"  {s:9} regraded: {ok}/{len(rows)} complete")
+            out_lines.append(f"  {s:9} regraded: {ok}/{len(rows)} complete")
             (wave / "git_version.json").write_text(json.dumps(
                 {"label": "recorded-run", "source": "runs dir, re-graded today",
                  "commit": git_sha(short=False), "describe": git_sha(),
                  "dirty": bool(tree_dirty()),
                  "note": "boards are the ORIGINAL recorded outputs; the grader is today's"},
                 indent=1))
+        return "\n".join(out_lines)
+
+    # Regrading a set is an independent subprocess over its own boards, so the
+    # sets fan out cleanly. Results are printed in COMPLETION order but each set
+    # emits its lines as one block, so the log stays readable.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
+        for line in ex.map(one_set, sets):
+            if line:
+                print(line, flush=True)
 
 
 # ------------------------------------------------------------------- upload
@@ -709,6 +722,8 @@ def main():
                          "Use it to harvest/compare a wave produced by another session or "
                          "commit (`modal volume ls kicad-sweep-results /` lists them).")
     ap.add_argument("--stress-dir", default=str(DEFAULT_STRESS))
+    ap.add_argument("--jobs", type=int, default=6,
+                    help="sets re-graded in parallel during the baseline stage (default 6)")
     ap.add_argument("--workdir", default="", help="scratch for the generated arms file")
     ap.add_argument("--only", default="", help=f"run one/some stages: {'|'.join(STAGES)} (comma-separated)")
     ap.add_argument("--dry-run", action="store_true",
