@@ -401,6 +401,12 @@ def arm_name(args) -> str:
     engines as one -- the exact failure the sweep README calls out ("the
     baseline was not the baseline").
     """
+    # --arm overrides entirely: harvesting a wave produced by ANOTHER session
+    # (or another commit) must not depend on what this checkout happens to be
+    # sitting on. Without it, `--only harvest` silently looks for the local
+    # HEAD's arm and reports "no result rows" for a run that is right there.
+    if getattr(args, "arm", ""):
+        return args.arm
     return f"{args.label}_{git_sha()}"
 
 
@@ -698,6 +704,10 @@ def main():
     ap.add_argument("--allow-chain-mismatch", action="store_true",
                     help="compare against a wave that replayed a DIFFERENT chain anyway")
     ap.add_argument("--label", default="replay", help="run label, part of the arm name")
+    ap.add_argument("--arm", default="",
+                    help="exact arm name on the results volume, overriding <label>_<sha>. "
+                         "Use it to harvest/compare a wave produced by another session or "
+                         "commit (`modal volume ls kicad-sweep-results /` lists them).")
     ap.add_argument("--stress-dir", default=str(DEFAULT_STRESS))
     ap.add_argument("--workdir", default="", help="scratch for the generated arms file")
     ap.add_argument("--only", default="", help=f"run one/some stages: {'|'.join(STAGES)} (comma-separated)")
