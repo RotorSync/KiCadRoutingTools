@@ -66,7 +66,10 @@ def board_path_for_analysis(board_filename):
         base = os.path.basename(board_filename) if board_filename else "board.kicad_pcb"
         snapshot = os.path.join(tempfile.gettempdir(), f"kicadrt_analysis_{base}")
         try:
-            pcbnew.SaveBoard(snapshot, board)
+            # aSkipSettings: analysis snapshot; writing a .kicad_pro besides
+            # would crash on pre-KiCad-10 projects (uncaught C++ type_error
+            # in the .kicad_pro merge; see _stage_live_board in swig_gui.py).
+            pcbnew.SaveBoard(snapshot, board, aSkipSettings=True)
             return snapshot
         except Exception as e:
             wx.MessageBox(
