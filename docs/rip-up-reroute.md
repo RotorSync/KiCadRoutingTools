@@ -101,16 +101,30 @@ union-find `check_connected` uses:
 - **lost** — connected before, broken after
 - **gained** — broken (or bare) before, connected after
 
-The run is **rejected** when it is worse on `(nets_lost - nets_gained,
-disconnected_pads_after - disconnected_pads_before)` compared
-lexicographically: more nets broken than fixed, or — on an equal net count —
-more disconnected pads than it started with. A rejected run's output file is
-replaced by the input board, because in every recorded case the pre-rip board
-was the better artifact, and the chain keeps a board to continue from.
+The run is **rejected** when it ends worse on **either** axis — more nets broken
+than it connected, *or* more disconnected pads than it started with. Both must
+be non-worse to ship. A rejected run's output file is replaced by the input
+board, because in every recorded case the pre-rip board was the better
+artifact, and the chain keeps a board to continue from.
 
-An equal trade on both axes ships, and is reported with both net lists named:
-the operator who passed `--rip-existing-nets` authorised that trade; what they
-could not do before was see it.
+**Neither axis may outvote the other**, and `spartan6_4layer` is why. Re-running
+its wave command gives `lost 36, gained 43` — a net count that looks *better* by
+7 — while the board's disconnected pads go `83 → 154`. The nets it broke were
+far larger than the ones it closed. An earlier version of this gate compared
+the two lexicographically with the net count first and shipped that board. Pad
+count is the honest measure of how much of the board is unreachable, so a run
+that raises it is worse regardless of the net tally.
+
+This is still not an "any regression" test: a pass that closes five nets and
+breaks one ships, provided the pad count did not rise — the recovered pads
+outnumber the lost ones, which is exactly when discarding the run would throw
+away more than it saves.
+
+An equal trade on both axes ships, reported with both net lists named:
+`bms_sensor`'s retry reproduced today closes the three nets it was asked to
+close, breaks three others, and leaves the pad count unchanged. The operator who
+passed `--rip-existing-nets` authorised that; what they could not do before was
+see it.
 
 ```
 IMPROVEMENT GATE: this run broke 3 previously-connected net(s) and connected 3 -- ACCEPTED

@@ -33,21 +33,33 @@ the grader.
 - **lost**    -- connected BEFORE, broken AFTER. The regression this exists for.
 - **gained**  -- broken (or bare) BEFORE, connected AFTER. The run's actual work.
 
-A run is REJECTED when it is worse on `(nets_lost - nets_gained,
-disconnected_pads_after - disconnected_pads_before)`, compared
-lexicographically: more nets broken than fixed, or -- on an equal net count --
-more disconnected pads than it started with.
+A run is REJECTED when it ends worse on EITHER axis: more nets broken than it
+connected, **or** more disconnected pads than it started with. Both must be
+non-worse to ship.
 
-Deliberately a NET-worse test, not "any regression": a pass that closes five
-nets and breaks one is still progress, and discarding it would throw away more
-than it saves. The pad tie-break is what makes an equal-looking trade honest:
-`bms_sensor`'s retry closed the three nets it was asked to close and broke
-three others, which by net count is a draw -- but it is the pad count that
-turned a 3-pad problem into a 20-pad one, and that must not ship as a draw.
+Neither axis may outvote the other, and `spartan6_4layer` is why. Re-running
+its wave command produced:
 
-An exact draw on BOTH axes ships, and is reported loudly with both net lists.
-The operator who passed `--rip-existing-nets` authorised that trade; what they
-could not do before is see it.
+    lost 36 nets, gained 43   ->  net count says BETTER by 7
+    disconnected pads 83 -> 154  ->  the board's open pads nearly DOUBLED
+
+An earlier version of this gate compared the two lexicographically with the net
+count first, and shipped that board: the 36 lost nets were far larger than the
+43 gained ones, so a favourable net count hid a doubling of open pads. Pad count
+is the honest measure of how much of the board is unreachable -- it is what the
+graders report and what a human sees as damage -- so a run that increases it is
+worse no matter how the net tally looks.
+
+This is still not an "any regression" test. A pass that closes five nets and
+breaks one ships, provided the pad count did not rise: the recovered pads
+outnumber the lost ones, which is exactly the case where discarding the run
+would throw away more than it saves.
+
+An exact draw on both axes ships, and is reported loudly with both net lists.
+`bms_sensor`'s retry reproduced today closes the three nets it was asked to
+close, breaks three others, and leaves the pad count unchanged at 3 -- a
+genuine lateral trade. The operator who passed `--rip-existing-nets` authorised
+that; what they could not do before is see it.
 
 The prior art is unanimous on why the gate has to exist at all: five separate
 measurements (2026-08-05/06) found that the SAME rip authority WITHOUT an
@@ -132,19 +144,17 @@ def compare_connectivity(before: Dict[int, Tuple[bool, int]],
 
 
 def gate_verdict(cmp: Dict) -> str:
-    """'reject' when the run left the board worse, else 'accept'.
+    """'reject' when the run left the board worse on EITHER axis.
 
-    Lexicographic on (nets_lost - nets_gained, pads_after - pads_before): a
-    net-count loss rejects outright; an equal net count rejects only when the
-    run also ends with more disconnected pads. See the module docstring.
+    Worse = more nets broken than connected, OR more disconnected pads than it
+    started with. Neither axis may outvote the other: spartan6_4layer gained 7
+    on the net count while DOUBLING its open pads (83 -> 154), because the nets
+    it broke were much larger than the ones it closed. See the module
+    docstring.
     """
     net_delta = len(cmp['lost']) - len(cmp['gained'])
     pad_delta = cmp['disconnected_pads_after'] - cmp['disconnected_pads_before']
-    if net_delta > 0:
-        return 'reject'
-    if net_delta == 0 and pad_delta > 0:
-        return 'reject'
-    return 'accept'
+    return 'reject' if (net_delta > 0 or pad_delta > 0) else 'accept'
 
 
 def format_report(cmp: Dict, verdict: str, action: str) -> str:

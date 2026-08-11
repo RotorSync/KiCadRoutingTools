@@ -50,16 +50,32 @@ check("bms shape: 9 lost vs 1 gained is rejected",
 c = _cmp({1: (True, 0), 2: (True, 0)}, {1: (True, 0), 2: (False, 4)})
 check("one net lost, none gained -> reject", gate_verdict(c) == 'reject')
 
-# Progress with collateral: five closed, one broken. Discarding this would
-# throw away more than it saves.
+# Progress with collateral: five closed, one broken, and the pad count falls.
+# Discarding this would throw away more than it saves.
 _b5 = {i: (False, 2) for i in range(1, 6)}
 _b5[9] = (True, 0)
 _a5 = {i: (True, 0) for i in range(1, 6)}
 _a5[9] = (False, 1)
 c = _cmp(_b5, _a5)
-check("5 gained vs 1 lost -> accept", gate_verdict(c) == 'accept')
+check("5 gained vs 1 lost, pads fall -> accept", gate_verdict(c) == 'accept')
 
-# The trade the repro produced: equal net counts. The PAD count decides.
+# spartan6_4layer's REAL numbers, re-running its wave command (2026-08-11):
+# the net count says better by 7 while the board's open pads nearly DOUBLE,
+# because the 36 nets it broke are far bigger than the 43 it closed. Neither
+# axis may outvote the other -- an earlier lexicographic rule with nets first
+# SHIPPED this board.
+_bs = {i: (True, 0) for i in range(1, 37)}          # 36 connected -> broken
+_bs.update({100 + i: (False, 2) for i in range(43)})  # 43 broken -> connected
+_as = {i: (False, 4) for i in range(1, 37)}
+_as.update({100 + i: (True, 0) for i in range(43)})
+c = _cmp(_bs, _as)
+check("spartan6 shape: net count better, pads worse -> REJECT",
+      len(c['gained']) > len(c['lost'])
+      and c['disconnected_pads_after'] > c['disconnected_pads_before']
+      and gate_verdict(c) == 'reject')
+
+# An equal trade that leaves the pad count untouched is a genuine lateral move
+# (bms_sensor's retry reproduced today) -- it ships, loudly reported.
 c = _cmp({1: (True, 0), 2: (True, 0), 3: (False, 3)},
          {1: (False, 3), 2: (True, 0), 3: (True, 0)})
 check("equal trade, equal pads -> accept (and is reported)",
