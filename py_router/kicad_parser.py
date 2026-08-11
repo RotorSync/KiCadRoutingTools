@@ -3792,15 +3792,41 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
 
         # Net-tie pad groups — parity with the text parser (Kelvin shunts /
         # net-tie parts; KiCad exempts the grouped pads' mutual clearance).
-        # GetNetTiePadGroups() returns a vector of "1, 2"-style strings.
+        #
+        # #604: GetNetTiePadGroups() returns a raw std::vector<wxString> that
+        # this SWIG build does not wrap as a Python sequence -- iterating it
+        # raises TypeError, the except swallowed it, and every net-tie board
+        # came back with net_tie_groups=[] while the text parser read the
+        # groups fine. That is a real model gap (the GUI builds its PCBData
+        # here, so its clearance waiver was blind to net ties), and it made
+        # validate_pcb_data report a permanent false parity FAIL on 7 of the
+        # 99 sets-21-27 boards (lm399_burnin: 26 NT parts).
+        #
+        # GetNetTiePads(pad) IS wrapped -- it returns a tuple of the PADs tied
+        # to that pad, the queried pad included -- so rebuild each group from
+        # it and de-duplicate. Gated on IsNetTie() so ordinary footprints cost
+        # one bool, and the raw-vector path stays as the fallback for builds
+        # that wrap it but lack IsNetTie.
+        fp_net_tie = []
         try:
-            fp_net_tie = []
-            for _grp in fp.GetNetTiePadGroups():
-                _nums = [p.strip() for p in str(_grp).split(',') if p.strip()]
-                if len(_nums) >= 2:
-                    fp_net_tie.append(_nums)
+            if fp.IsNetTie():
+                _seen = set()
+                for _pad in fp.Pads():
+                    _grp = frozenset(str(p.GetNumber())
+                                     for p in fp.GetNetTiePads(_pad))
+                    if len(_grp) >= 2 and _grp not in _seen:
+                        _seen.add(_grp)
+                        fp_net_tie.append(sorted(_grp))
         except Exception:
             fp_net_tie = []
+        if not fp_net_tie:
+            try:
+                for _grp in fp.GetNetTiePadGroups():
+                    _nums = [p.strip() for p in str(_grp).split(',') if p.strip()]
+                    if len(_nums) >= 2:
+                        fp_net_tie.append(_nums)
+            except Exception:
+                pass
 
         # Own uuid + sheet path (#459), the pcbnew mirrors of the text parser's
         # (uuid ...) / (path ...). Defensive: both accessors have moved across
@@ -4096,14 +4122,21 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                     locked=bool(track.IsLocked()),
                 ))
         elif track_class == "PCB_VIA":
-            # KiCad 9/10 padstack vias can refuse layerless GetWidth() with
-            # 'result with an error set' (seen on vias ADDED in-session by
-            # the plugin, then re-synced); GetFrontWidth() is the stable
-            # accessor for the outer-annulus size.
+            # GetFrontWidth() FIRST (#605). KiCad 9/10 padstack vias can
+            # refuse layerless GetWidth() with 'result with an error set'
+            # (seen on vias ADDED in-session by the plugin, then re-synced),
+            # and on KiCad 10 a bare PCB_VIA::GetWidth() trips a wxASSERT
+            # ("GetWidth called without a layer argument") for EVERY via. The
+            # assert does NOT raise, so asking GetWidth() first printed one
+            # stderr line per via and then fell through to the same answer:
+            # 34 of the 99 sets-21-27 boards logged 70-90 lines of it, in the
+            # same stream as warnings that matter. GetFrontWidth() is the
+            # stable outer-annulus accessor; GetWidth stays as the fallback
+            # for builds that lack it.
             try:
-                _vw = track.GetWidth()
-            except Exception:
                 _vw = track.GetFrontWidth()
+            except Exception:
+                _vw = track.GetWidth()
             v = Via(
                 x=to_mm(track.GetPosition().x),
                 y=to_mm(track.GetPosition().y),

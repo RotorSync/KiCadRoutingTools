@@ -40,11 +40,13 @@ except ImportError:  # pragma: no cover - stale checkout
 def _via_width(via):
     """KiCad 9/10 padstack vias can refuse layerless GetWidth() ('result
     with an error set', seen on vias ADDED in-session then re-synced);
-    GetFrontWidth() is the stable outer-annulus accessor."""
+    GetFrontWidth() is the stable outer-annulus accessor and is asked FIRST
+    (#605) -- a bare PCB_VIA::GetWidth() also trips a non-raising wxASSERT
+    on KiCad 10, one stderr line per via, before returning the same answer."""
     try:
-        return via.GetWidth()
-    except Exception:
         return via.GetFrontWidth()
+    except Exception:
+        return via.GetWidth()
 
 from .fanout_gui import NetSelectionPanel
 from .gui_utils import StdoutRedirector
