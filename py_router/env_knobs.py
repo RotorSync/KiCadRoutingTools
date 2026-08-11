@@ -106,12 +106,12 @@ def refresh() -> None:
     # approaches can't explode. ALPHA=0 reproduces max, ALPHA=1 reproduces
     # sum (both exactly, up to integer-cost rounding).
     # Off = historical max semantics everywhere.
-    # DEFAULT = 'zoned' since the s2 rescan at the hw2.3 core (-30 verdict,
-    # 24W/15L, DRC-clean; plain sum -22 and softcap ~0 there): sum pressure in
-    # open field, max-floor inside BGA escape collars -- exactly the split the
-    # toxic sum+greedy combo demanded. '0'/'off'/'false'/'max' restores the
-    # historical per-cell max everywhere.
-    _ps = _s('KICAD_PROXIMITY_SUM', 'zoned').strip().lower()
+    # Default = historical MAX. Briefly 'zoned' (s2 rescan -30 on the curated
+    # set) -- REVERTED with MAX_RIPUP=5: the sets-11-15 holdout showed the two
+    # together erasing the other flips' gains on ordinary boards (v4 -2% vs
+    # lean -45% vs old defaults) at +37% CPU. zoned/sum/softcap remain opt-in
+    # (retry-tier on knob-sensitive boards).
+    _ps = _s('KICAD_PROXIMITY_SUM', '').strip().lower()
     g['PROXIMITY_SUM_MODE'] = ('zoned' if _ps == 'zoned'
                                else 'softcap' if _ps == 'softcap'
                                else 'sum' if _ps in _ON else '')

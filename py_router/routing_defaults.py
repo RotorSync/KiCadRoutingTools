@@ -106,7 +106,7 @@ STITCH_PITCH = 20.0  # mm
 MAX_ITERATIONS = 200000
 HEURISTIC_WEIGHT = 2.3  # 1.9 -> 2.3: #586 corpus dose-response peak (-30 verdict, DRC -67, cpu/mem ~0.85x; 1.7 and 2.5 both worse)
 PROXIMITY_HEURISTIC_FACTOR = 0.0  # 0.02 -> 0: at heuristic_weight 2.3 the base greediness covers it (s2 rescan: quality-neutral, -8% CPU)
-MAX_RIPUP = 5  # 3 -> 5: s2 rescan at the hw2.3 core (-30 verdict, 16W/9L, DRC-clean; deeper rip authority beats repeated failed searches)
+MAX_RIPUP = 3  # briefly 5 (s2 rescan -30 on the curated set) -- REVERTED: holdout sets 11-15 showed ripup5+zoned ERASING the other flips' gains (v4 -2% vs lean -45% vs old defaults) at +37% CPU; deep rip-up stays retry-tier guidance
 # Phase 3 tap rip-up abandon metric (#85 arbitration); documented in
 # docs/rip-up-reroute.md "Abandon metrics". Must match phase3_routing.ABANDON_METRICS.
 RIPUP_ABANDON_METRIC = 'stranded'

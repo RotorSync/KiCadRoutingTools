@@ -138,7 +138,7 @@ class GridRouteConfig:
     min_turning_radius: float = 0.2  # mm - minimum turning radius for pose-based routing
     debug_lines: bool = False  # Output debug geometry on User.2/3/8/9 layers
     verbose: bool = False  # Print detailed diagnostic output
-    max_rip_up_count: int = 5  # Maximum blockers to rip up at once during rip-up and retry (1 to N; 3 -> 5 per the s2 rescan)
+    max_rip_up_count: int = 3  # Maximum blockers to rip up at once during rip-up and retry (1 to N)
     # How the #85 arbitration decides keep-retry vs abandon after a Phase 3
     # tap rip-up cascade (docs/rip-up-reroute.md "Abandon metrics"). One of
     # phase3_routing.ABANDON_METRICS: stranded | total-pads | complete-nets |
