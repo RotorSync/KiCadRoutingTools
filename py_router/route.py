@@ -4510,7 +4510,7 @@ For differential pair routing, use route_diff.py:
                              "Ignored if --impedance is specified.")
     parser.add_argument("--impedance", type=float, default=None,
                         help="Target single-ended impedance in ohms (e.g., 50). Calculates track width per layer from board stackup.")
-    parser.add_argument("--coplanar-gap", type=float, default=0.0,
+    parser.add_argument("--coplanar-gap", type=float, default=defaults.COPLANAR_GAP,
                         help="Declare that impedance-controlled traces run through a "
                              "ground pour on their OWN layer, this far (mm, trace edge "
                              "to pour edge) from it. Outer layers then use the "
@@ -4572,7 +4572,7 @@ For differential pair routing, use route_diff.py:
                         help=f"Via cost multiplier in stub/BGA proximity zones (default: {defaults.VIA_PROXIMITY_COST}, 0=no extra cost)")
     parser.add_argument("--max-iterations", type=int, default=defaults.MAX_ITERATIONS,
                         help=f"Max A* iterations before giving up (default: {defaults.MAX_ITERATIONS})")
-    parser.add_argument("--max-probe-iterations", type=int, default=5000,
+    parser.add_argument("--max-probe-iterations", type=int, default=defaults.MAX_PROBE_ITERATIONS,
                         help="Max iterations for quick probe phase per direction (default: 5000)")
     parser.add_argument("--heuristic-weight", type=float, default=defaults.HEURISTIC_WEIGHT,
                         help=f"A* heuristic weight, higher=faster but less optimal (default: {defaults.HEURISTIC_WEIGHT})")
@@ -4601,8 +4601,9 @@ For differential pair routing, use route_diff.py:
                         help="Keep routed tracks out of one or more polygons drawn on a User layer (issue #27)")
     parser.add_argument("--keepout-layer", type=str, default=defaults.KEEPOUT_LAYER,
                         help=f"User layer the keepout polygons are drawn on (default: {defaults.KEEPOUT_LAYER})")
-    parser.add_argument("--proximity-heuristic-factor", type=float, default=0.02,
-                        help="Factor for proximity heuristic estimation (default: 0.02, higher=faster but may find suboptimal paths)")
+    parser.add_argument("--proximity-heuristic-factor", type=float,
+                        default=defaults.PROXIMITY_HEURISTIC_FACTOR,
+                        help=f"Factor for proximity heuristic estimation (default: {defaults.PROXIMITY_HEURISTIC_FACTOR}, higher=faster but may find suboptimal paths)")
 
     # Stub proximity penalty
     parser.add_argument("--stub-proximity-radius", type=float, default=defaults.STUB_PROXIMITY_RADIUS,
@@ -4611,9 +4612,9 @@ For differential pair routing, use route_diff.py:
                         help=f"Cost penalty near stubs in mm equivalent (default: {defaults.STUB_PROXIMITY_COST})")
 
     # BGA proximity penalty
-    parser.add_argument("--bga-proximity-radius", type=float, default=7.0,
+    parser.add_argument("--bga-proximity-radius", type=float, default=defaults.BGA_PROXIMITY_RADIUS,
                         help="Radius around BGA edges to penalize routing in mm (default: 7.0)")
-    parser.add_argument("--bga-proximity-cost", type=float, default=0.2,
+    parser.add_argument("--bga-proximity-cost", type=float, default=defaults.BGA_PROXIMITY_COST,
                         help="Cost penalty near BGA edges in mm equivalent (default: 0.2)")
 
     # Track proximity penalty (same layer only)
@@ -4633,7 +4634,7 @@ For differential pair routing, use route_diff.py:
                         help="Glob patterns for nets that can have targets swapped (e.g., '*DATA_*')")
     parser.add_argument("--schematic-dir", default=None,
                         help="Directory containing .kicad_sch files to update with pad swaps (default: no schematic update)")
-    parser.add_argument("--crossing-penalty", type=float, default=1000.0,
+    parser.add_argument("--crossing-penalty", type=float, default=defaults.CROSSING_PENALTY,
                         help="Penalty for crossing assignments in target swap optimization (default: 1000.0)")
     parser.add_argument("--mps-reverse-rounds", action="store_true",
                         help="Reverse MPS round order: route most-conflicting groups first instead of least-conflicting")
@@ -4654,9 +4655,9 @@ For differential pair routing, use route_diff.py:
     # Length matching options
     parser.add_argument("--length-match-group", action="append", nargs="+", dest="length_match_groups",
                         help="Net patterns to length-match as a group (can be repeated). Use 'auto' for DDR4 auto-grouping")
-    parser.add_argument("--length-match-tolerance", type=float, default=0.1,
+    parser.add_argument("--length-match-tolerance", type=float, default=defaults.LENGTH_MATCH_TOLERANCE,
                         help="Acceptable length variance within group in mm (default: 0.1)")
-    parser.add_argument("--meander-amplitude", type=float, default=1.0,
+    parser.add_argument("--meander-amplitude", type=float, default=defaults.MEANDER_AMPLITUDE,
                         help="Height of meander perpendicular to trace in mm (default: 1.0)")
     parser.add_argument("--meander-spacing", type=float, default=defaults.MEANDER_SPACING,
                         help="Centre-to-centre spacing of adjacent meander arms, in multiples of "
@@ -4665,7 +4666,7 @@ For differential pair routing, use route_diff.py:
     # Time matching options (alternative to length matching)
     parser.add_argument("--time-matching", action="store_true",
                         help="Match by propagation time instead of length (accounts for layer dielectric)")
-    parser.add_argument("--time-match-tolerance", type=float, default=1.0,
+    parser.add_argument("--time-match-tolerance", type=float, default=defaults.TIME_MATCH_TOLERANCE,
                         help="Acceptable time variance in picoseconds (default: 1.0)")
 
     # Rip-up and retry options

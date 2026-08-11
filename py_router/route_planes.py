@@ -3987,7 +3987,7 @@ Examples:
         help="Pin GND return vias to this net (default: auto -- match each "
              "signal's own ground domain, which is plain GND on a board with "
              "one ground)")
-    parser.add_argument("--gnd-via-distance", type=float, default=2.0,
+    parser.add_argument("--gnd-via-distance", type=float, default=defaults.GND_VIA_DISTANCE,
         help="Maximum distance from signal via to place GND via in mm (default: 2.0)")
 
     from fab_tiers import (add_fab_tier_args, fab_tier_from_args, set_default_fab_tier,

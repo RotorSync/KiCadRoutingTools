@@ -1658,7 +1658,7 @@ Examples:
                              "width can only widen it), not ignored.")
     parser.add_argument("--impedance", type=float, default=None,
                         help="Target differential impedance in ohms (e.g., 100). Calculates track width per layer from board stackup using --diff-pair-gap as spacing.")
-    parser.add_argument("--coplanar-gap", type=float, default=0.0,
+    parser.add_argument("--coplanar-gap", type=float, default=defaults.COPLANAR_GAP,
                         help="Declare that the pairs in this call run through a ground "
                              "pour on their OWN layer, this far (mm) from each trace's "
                              "OUTER edge. Outer layers then use the coplanar-waveguide-"
@@ -1690,21 +1690,22 @@ Examples:
                         help="Via drill size in mm (default: the board Default net-class via drill, else 0.3)")
 
     # Router algorithm parameters
-    parser.add_argument("--grid-step", type=float, default=0.1,
+    parser.add_argument("--grid-step", type=float, default=defaults.GRID_STEP,
                         help="Grid resolution in mm (default: 0.1)")
-    parser.add_argument("--via-cost", type=int, default=50,
-                        help="Penalty for placing a via, in 0.1mm grid steps (default: 50 = 5mm of path, doubled for diff pairs; mm-equivalent at any --grid-step)")
-    parser.add_argument("--via-proximity-cost", type=int, default=10,
+    parser.add_argument("--via-cost", type=int, default=defaults.VIA_COST,
+                        help=f"Penalty for placing a via, in 0.1mm grid steps (default: {defaults.VIA_COST}, doubled for diff pairs; mm-equivalent at any --grid-step)")
+    parser.add_argument("--via-proximity-cost", type=int, default=defaults.VIA_PROXIMITY_COST,
                         help="Via cost multiplier in stub/BGA proximity zones (default: 10, 0=no extra cost)")
-    parser.add_argument("--max-iterations", type=int, default=200000,
+    parser.add_argument("--max-iterations", type=int, default=defaults.MAX_ITERATIONS,
                         help="Max A* iterations before giving up (default: 200000)")
-    parser.add_argument("--max-probe-iterations", type=int, default=5000,
+    parser.add_argument("--max-probe-iterations", type=int, default=defaults.MAX_PROBE_ITERATIONS,
                         help="Max iterations for quick probe phase per direction (default: 5000)")
     parser.add_argument("--heuristic-weight", type=float, default=defaults.HEURISTIC_WEIGHT,
                         help=f"A* heuristic weight, higher=faster but less optimal (default: {defaults.HEURISTIC_WEIGHT})")
-    parser.add_argument("--proximity-heuristic-factor", type=float, default=0.02,
-                        help="Factor for proximity-aware A* heuristic (default: 0.02, 0=disabled)")
-    parser.add_argument("--turn-cost", type=int, default=1000,
+    parser.add_argument("--proximity-heuristic-factor", type=float,
+                        default=defaults.PROXIMITY_HEURISTIC_FACTOR,
+                        help=f"Factor for proximity-aware A* heuristic (default: {defaults.PROXIMITY_HEURISTIC_FACTOR}, 0=disabled)")
+    parser.add_argument("--turn-cost", type=int, default=defaults.TURN_COST,
                         help="Penalty for direction changes, encourages straighter paths (default: 1000)")
     parser.add_argument("--direction-preference-cost", type=int, default=defaults.DIRECTION_PREFERENCE_COST,
                         help=f"Penalty for non-preferred layer direction, 0=disabled (default: {defaults.DIRECTION_PREFERENCE_COST})")
@@ -1724,21 +1725,21 @@ Examples:
                         help=f"User layer the keepout polygons are drawn on (default: {defaults.KEEPOUT_LAYER})")
 
     # Stub proximity penalty
-    parser.add_argument("--stub-proximity-radius", type=float, default=2.0,
+    parser.add_argument("--stub-proximity-radius", type=float, default=defaults.STUB_PROXIMITY_RADIUS,
                         help="Radius around stubs to penalize routing in mm (default: 2.0)")
-    parser.add_argument("--stub-proximity-cost", type=float, default=0.2,
+    parser.add_argument("--stub-proximity-cost", type=float, default=defaults.STUB_PROXIMITY_COST,
                         help="Cost penalty near stubs in mm equivalent (default: 0.2)")
 
     # BGA proximity penalty
-    parser.add_argument("--bga-proximity-radius", type=float, default=7.0,
+    parser.add_argument("--bga-proximity-radius", type=float, default=defaults.BGA_PROXIMITY_RADIUS,
                         help="Radius around BGA edges to penalize routing in mm (default: 7.0)")
-    parser.add_argument("--bga-proximity-cost", type=float, default=0.2,
+    parser.add_argument("--bga-proximity-cost", type=float, default=defaults.BGA_PROXIMITY_COST,
                         help="Cost penalty near BGA edges in mm equivalent (default: 0.2)")
 
     # Track proximity penalty (same layer only)
-    parser.add_argument("--track-proximity-distance", type=float, default=2.0,
+    parser.add_argument("--track-proximity-distance", type=float, default=defaults.TRACK_PROXIMITY_DISTANCE,
                         help="Radius around routed tracks in mm, same layer only (0 = disabled, default: 2.0)")
-    parser.add_argument("--track-proximity-cost", type=float, default=0.0,
+    parser.add_argument("--track-proximity-cost", type=float, default=defaults.TRACK_PROXIMITY_COST,
                         help="Cost penalty near routed tracks (0 = disabled, default: 0.0)")
 
     # Differential pair routing options
@@ -1767,7 +1768,7 @@ Examples:
                         help="Glob patterns for diff pair nets that can have targets swapped (e.g., 'rx1_*')")
     parser.add_argument("--schematic-dir", default=None,
                         help="Directory containing .kicad_sch files to update with pad swaps (default: no schematic update)")
-    parser.add_argument("--crossing-penalty", type=float, default=1000.0,
+    parser.add_argument("--crossing-penalty", type=float, default=defaults.CROSSING_PENALTY,
                         help="Penalty for crossing assignments in target swap optimization (default: 1000.0)")
     parser.add_argument("--mps-reverse-rounds", action="store_true",
                         help="Reverse MPS round order: route most-conflicting groups first instead of least-conflicting")
@@ -1782,9 +1783,9 @@ Examples:
     # Length matching options
     parser.add_argument("--length-match-group", action="append", nargs="+", dest="length_match_groups",
                         help="Net patterns to length-match as a group (can be repeated). Use 'auto' for DDR4 auto-grouping")
-    parser.add_argument("--length-match-tolerance", type=float, default=0.1,
+    parser.add_argument("--length-match-tolerance", type=float, default=defaults.LENGTH_MATCH_TOLERANCE,
                         help="Acceptable length variance within group in mm (default: 0.1)")
-    parser.add_argument("--meander-amplitude", type=float, default=1.0,
+    parser.add_argument("--meander-amplitude", type=float, default=defaults.MEANDER_AMPLITUDE,
                         help="Height of meander perpendicular to trace in mm (default: 1.0)")
     parser.add_argument("--meander-spacing", type=float, default=defaults.MEANDER_SPACING,
                         help="Centre-to-centre spacing of adjacent single-ended meander arms, in "
@@ -1795,7 +1796,7 @@ Examples:
     # Time matching options (alternative to length matching)
     parser.add_argument("--time-matching", action="store_true",
                         help="Match by propagation time instead of length (accounts for layer dielectric)")
-    parser.add_argument("--time-match-tolerance", type=float, default=1.0,
+    parser.add_argument("--time-match-tolerance", type=float, default=defaults.TIME_MATCH_TOLERANCE,
                         help="Acceptable time variance in picoseconds (default: 1.0)")
 
     parser.add_argument("--diff-chamfer-extra", type=float, default=1.5,
@@ -1808,7 +1809,7 @@ Examples:
                              "and place the compensating meanders on whichever segment has room. Off by default.")
 
     # Rip-up and retry options
-    parser.add_argument("--max-ripup", type=int, default=3,
+    parser.add_argument("--max-ripup", type=int, default=defaults.MAX_RIPUP,
                         help="Maximum blockers to rip up at once during rip-up and retry (default: 3)")
     parser.add_argument("--ripup-blocker-select",
                         choices=list(defaults.RIPUP_BLOCKER_SELECT_CHOICES),
@@ -1816,7 +1817,7 @@ Examples:
                         help="""Blocker SELECTION algorithm for the rip-up ladder (see route.py --help / docs/rip-up-reroute.md)""")
     parser.add_argument("--max-setback-angle", type=float, default=45.0,
                         help="Maximum angle (degrees) for setback position search (default: 45.0)")
-    parser.add_argument("--routing-clearance-margin", type=float, default=1.0,
+    parser.add_argument("--routing-clearance-margin", type=float, default=defaults.ROUTING_CLEARANCE_MARGIN,
                         help="Multiplier on track-via clearance (1.0 = minimum DRC)")
     parser.add_argument("--hole-to-hole-clearance", type=float, default=None,
                         help="Minimum clearance between drill holes in mm. Default: the "
@@ -1835,9 +1836,9 @@ Examples:
                         help="Max cumulative turn angle (degrees) before reset, to prevent U-turns (default: 180)")
 
     # Vertical alignment attraction options
-    parser.add_argument("--vertical-attraction-radius", type=float, default=1.0,
+    parser.add_argument("--vertical-attraction-radius", type=float, default=defaults.VERTICAL_ATTRACTION_RADIUS,
                         help="Radius in mm for cross-layer track attraction (0 = disabled, default: 1.0)")
-    parser.add_argument("--vertical-attraction-cost", type=float, default=0.0,
+    parser.add_argument("--vertical-attraction-cost", type=float, default=defaults.VERTICAL_ATTRACTION_COST,
                         help="Cost bonus for aligning with tracks on other layers (0 = disabled, default: 0.0)")
 
     # Ripped route avoidance options

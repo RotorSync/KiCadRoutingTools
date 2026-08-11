@@ -905,12 +905,12 @@ def main():
     import routing_defaults as defaults
     parser.add_argument('--extension', type=float, default=defaults.QFN_EXTENSION,
                         help='Extension past pad edge before bend (mm)')
-    parser.add_argument('--clearance', type=float, default=0.1,
+    parser.add_argument('--clearance', type=float, default=defaults.QFN_CLEARANCE,
                         help='Min clearance to other-net pads (mm); stubs that '
                              'would graze a foreign pad are shortened or dropped')
     parser.add_argument('--nets', '-n', nargs='*',
                         help='Net patterns to include')
-    parser.add_argument('--grid-step', type=float, default=0.1,
+    parser.add_argument('--grid-step', type=float, default=defaults.GRID_STEP,
                         help='Routing grid step in mm (default: 0.1). Fanned stub ends are '
                              'snapped to this grid so the router gets on-grid terminals (issue '
                              '#149); MATCH the --grid-step you pass to route.py.')
@@ -922,7 +922,7 @@ def main():
                         help='Underpad escape via outer diameter (mm, default 0.45)')
     parser.add_argument('--via-drill', type=float, default=0.25,
                         help='Underpad escape via drill diameter (mm, default 0.25)')
-    parser.add_argument('--board-edge-clearance', type=float, default=0.0,
+    parser.add_argument('--board-edge-clearance', type=float, default=defaults.BOARD_EDGE_CLEARANCE,
                         help='Min clearance from stub/via copper to the Edge.Cuts '
                              'outline in mm (default 0 = use --clearance). Stubs '
                              'that would graze the board edge are shortened or '

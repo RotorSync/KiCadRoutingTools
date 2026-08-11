@@ -3351,7 +3351,7 @@ def main():
                              '(>= 6 balls, or any excluded net that already owns a zone); '
                              '"off" disables. KICAD_FANOUT_PLANE_DROP=0/1 overrides both '
                              '(the recorded-manifest A/B switch).')
-    parser.add_argument('--grid-step', type=float, default=0.1,
+    parser.add_argument('--grid-step', type=float, default=defaults.GRID_STEP,
                         help='Routing grid step in mm (default: 0.1). Escape stub ends are '
                              'snapped to this grid so the router gets on-grid terminals (issue '
                              '#149); MATCH the --grid-step you pass to route.py.')
