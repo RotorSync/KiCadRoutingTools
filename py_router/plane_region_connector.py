@@ -581,37 +581,67 @@ def _regions_from_fill_models(net_id, pcb_data, coord, plane_layer,
     # inside the copperpour keep-out band, so all 482 of its islands survive
     # and 199 are DRC-flagged isolated_copper, while we skipped every one as
     # "the filler will delete it" and left them to the post-write oracle.
-    _unanchored = not _net_has_pourable_anchor(pcb_data, net_id, plane_layer)
-    if _modes != {0} or _unanchored:
-        _amin = max([getattr(z, 'island_area_min', 0.0) or 0.0
-                     for z in _zones] + [0.0])
-        orphan_min_mm2 = max(25.0, _amin)
-        anchored_roots = set(groups.keys())
-        min_patch_cells = max(100, int(orphan_min_mm2
-                                       / (analysis_grid_step * analysis_grid_step)))
-        orphan_cells: Dict[tuple, Set[Tuple[int, int]]] = {}
-        for ck, cset in cells_by_comp.items():
-            root = uf.find(ck)
-            if root in anchored_roots:
-                continue
-            orphan_cells.setdefault(root, set())
-            orphan_cells[root] |= cset
-        for root, cset in orphan_cells.items():
-            if len(cset) >= min_patch_cells:
-                region_anchors.append([])
-                region_cells.append(cset)
-                region_islands.append(islands_by_root.get(root, set()))
+    # #609: decide PER ISLAND with the same filler-aware test the raster path
+    # uses, instead of a blanket mode-0 skip. The old gate was
+    # `if _modes != {0} or _unanchored:` -- under the KiCad-DEFAULT mode 0
+    # (which is also what route_planes writes) it appended NOTHING, so every
+    # pad-less island vanished from the region list with no area bar and no
+    # per-island judgement. `len(region_anchors) < 2` then printed "Zone is
+    # fully connected" over a plane the model had just found split: a signal
+    # net routed across a pour islands it, and the pass whose job is to find
+    # exactly that reported the zone whole and exited satisfied.
+    #
+    # _island_kept_by_filler answers the real question -- would KiCad KEEP this
+    # fill? An island with any same-net pad/via/track on or near it is not
+    # isolated, so the filler keeps it under ANY mode (the #217 castor +3.3VA
+    # class, itself a mode-0 zone) and it must be joined. Only a TRULY bare
+    # island follows the zone's removal mode, which preserves the duodyne
+    # finding that joining islands the filler deletes is pure clutter.
+    _amin = max([getattr(z, 'island_area_min', 0.0) or 0.0
+                 for z in _zones] + [0.0])
+    orphan_min_mm2 = max(25.0, _amin)
+    anchored_roots = set(groups.keys())
+    min_patch_cells = max(100, int(orphan_min_mm2
+                                   / (analysis_grid_step * analysis_grid_step)))
+    orphan_cells: Dict[tuple, Set[Tuple[int, int]]] = {}
+    for ck, cset in cells_by_comp.items():
+        root = uf.find(ck)
+        if root in anchored_roots:
+            continue
+        orphan_cells.setdefault(root, set())
+        orphan_cells[root] |= cset
+    # Islands the filler will DELETE are still skipped -- but they are counted
+    # and reported, because "the filler will erase this" is not the same claim
+    # as "the zone is whole", and the caller was making the second one.
+    dropped_cells = 0
+    dropped_islands = 0
+    for root, cset in orphan_cells.items():
+        if len(cset) < min_patch_cells:
+            continue                      # below the area bar, as before
+        if _island_kept_by_filler(pcb_data, net_id, plane_layer, cset,
+                                  coord, analysis_grid_step):
+            region_anchors.append([])
+            region_cells.append(cset)
+            region_islands.append(islands_by_root.get(root, set()))
+        else:
+            dropped_islands += 1
+            dropped_cells += len(cset)
 
+    # dropped = islands the FILLER will erase. Carried out (not just skipped)
+    # so the caller can say what actually happened instead of "fully
+    # connected" -- see the #609 note above.
+    dropped = (dropped_islands,
+               dropped_cells * analysis_grid_step * analysis_grid_step)
     if len(region_anchors) < 2:
-        n_anchors = len(region_anchors[0]) if region_anchors else 0
         return ([region_anchors[0] if region_anchors else []],
                 [region_cells[0] if region_cells else set()],
-                [region_islands[0] if region_islands else set()])
+                [region_islands[0] if region_islands else set()],
+                dropped)
     print(f"  Region discovery from fill model: {len(region_anchors)} "
           f"region(s) ({len(cells_by_comp)} fill island(s), "
           f"{len(singletons)} off-fill anchor(s), "
           f"{sum(1 for a in region_anchors if not a)} orphan island(s))")
-    return region_anchors, region_cells, region_islands
+    return region_anchors, region_cells, region_islands, dropped
 
 
 def find_disconnected_zone_regions(
@@ -655,6 +685,11 @@ def find_disconnected_zone_regions(
         - List of grid cell sets per region (for finding closest points)
         - List of (path, layer) tuples showing connectivity paths (if debug=True, else empty)
     """
+    # #609: cleared per call -- this is a function attribute and one run
+    # analyses many (net, layer) pairs, so a previous zone's dropped-island
+    # tally must never be read as this one's.
+    find_disconnected_zone_regions._last_dropped = (0, 0.0)
+
     # Use a coarser grid for connectivity analysis (much faster)
     coord = GridCoord(analysis_grid_step)
     min_x, min_y, max_x, max_y = zone_bounds
@@ -748,6 +783,10 @@ def find_disconnected_zone_regions(
             _models_by_layer, anchor_points, zone_bounds,
             analysis_grid_step)
         if _res is not None:
+            # #609: stash what the FILLER will erase so the caller reports the
+            # split instead of "fully connected". An attribute, not a 5th
+            # return value: this function's 4-tuple is consumed positionally.
+            find_disconnected_zone_regions._last_dropped = _res[3]
             return _res[0], _res[1], [], _res[2]
 
     # Collect cross-layer connection points using helper function
@@ -1819,7 +1858,31 @@ def route_disconnected_regions(
     n_regions = len(region_anchors)
     if n_regions < 2:
         n_anchors = len(region_anchors[0]) if region_anchors else 0
-        print(f"  Zone is fully connected ({n_anchors} anchors in 1 region)")
+        # #609: do NOT claim "fully connected" when the discovery just found
+        # pour islands and discarded them. They are skipped because KiCad's
+        # filler will DELETE them (island_removal_mode 0 + a truly bare
+        # island), which is a different statement from "the zone is whole" --
+        # the pour IS split, the copper is about to disappear, and the
+        # reference plane under whatever crosses it has a hole. Saying
+        # "fully connected" here is what let a split plane ship: the summary
+        # was clean, the zone check was clean, and the break only appeared
+        # once the zones were refilled.
+        _drop_n, _drop_mm2 = getattr(
+            find_disconnected_zone_regions, '_last_dropped', (0, 0.0))
+        if _drop_n:
+            print(f"  {RED}Zone SPLIT: 1 anchored region plus {_drop_n} "
+                  f"stranded island(s) ({_drop_mm2:.1f} mm^2) with no pad, "
+                  f"via or track on them{RESET}")
+            print(f"    Not joined: the zone's island_removal_mode deletes "
+                  f"isolated islands, so KiCad ERASES this copper on refill "
+                  f"-- strapping it would ship copper that is never poured.")
+            print(f"    But the pour IS cut here. Grade with "
+                  f"'kicad-cli pcb drc --refill-zones' (without the refill "
+                  f"the check reads a stale fill and reports 0), and treat a "
+                  f"split reference plane as a return-path/impedance defect, "
+                  f"not just a connectivity one (#609).")
+        else:
+            print(f"  Zone is fully connected ({n_anchors} anchors in 1 region)")
         return [], [], 0, [], connectivity_paths
 
     # #513 item 8 (idempotency): the region model can read a plane as split
