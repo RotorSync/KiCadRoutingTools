@@ -203,6 +203,17 @@ identical.
 ranks per-board regressions, and flags broken chains separately (a release blocker
 that can never appear as a DRC delta).
 
+**`diff_pairs_coupled` is a TRUNK measure, not a pad-connectivity one** (#602).
+A pair whose coupled trunk routed but whose terminals were peeled to the
+single-ended follow-up counts as coupled by design — its trunk *is* coupled and
+the follow-up closes the terminals — so the coupled count alone never tells you
+a pair's member pads are open. Gate on **`diff_pairs_member_incomplete`** for
+that: it is route_diff's own member audit, carried through as
+`member_incomplete_pairs` in `JSON_SUMMARY`, and it names every pair with a
+disconnected member pad whatever bucket the pair landed in. `diff_pairs_partial`
+counts the pairs route_diff demoted out of `coupled` because they claimed a
+finished coupled route the audit contradicted (`outcome: "incomplete"`).
+
 Both are documented in depth in `RUNBOOK.md` → "Multi-set waves & release
 sign-off", including the run-for-hours checklist: detach with `nohup`, wrap in
 `caffeinate -s`, attach a monitor that greps failures as well as progress, freeze

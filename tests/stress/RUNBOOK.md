@@ -724,6 +724,13 @@ they interoperate with `--compare` and `--regrade`.
   are listed separately and are a release blocker — they can never show up as a
   DRC delta, because a broken chain has no final board to grade.
 
+  `diff_pairs_coupled` measures COUPLED TRUNKS, not member-pad connectivity
+  (#602): a pair whose terminals were peeled to the single-ended follow-up is
+  counted as coupled by design. To assert that a diff-pair stage left no open
+  member pads, gate on **`diff_pairs_member_incomplete`** (route_diff's own
+  member audit, `member_incomplete_pairs` in `JSON_SUMMARY`) — not on the
+  coupled count, and not by grepping the `MEMBER AUDIT` lines out of the log.
+
 ### Running a wave that lasts hours
 
 - **Detach it**: `nohup … &`, and verify it reparented to init

@@ -1304,9 +1304,21 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                                       skipped_fanout=skipped_fanout_info)
     _audit_mismatches = [r for r in pair_reports if r['member_audit_mismatch']]
     for _r in _audit_mismatches:
+        # The pair CLAIMED 'coupled'; build_pair_reports has already demoted
+        # its outcome to 'incomplete' (#602), so name the claim, not the
+        # post-demotion value.
         print(f"{RED}MEMBER AUDIT MISMATCH: {_r['pair']} reported "
-              f"'{_r['outcome']}' but member(s) with disconnected pads: "
-              f"{', '.join(_r['incomplete_members'])}{RESET}")
+              f"'coupled' but member(s) with disconnected pads: "
+              f"{', '.join(_r['incomplete_members'])} "
+              f"-> outcome '{_r['outcome']}'{RESET}")
+    # #602: the audit's own verdict as a machine-readable field. Every pair
+    # with ANY disconnected member pad lands here -- both the contradicted
+    # 'coupled' claims above and the by-design 'partial' pairs whose peeled
+    # terminals the single-ended follow-up still has to close -- so a caller
+    # can gate on it without deciding which of those it is, and without
+    # parsing the MEMBER AUDIT prose out of the log.
+    _member_incomplete = sorted({r['pair'] for r in pair_reports
+                                 if r.get('incomplete_members')})
     routed_diff_pairs = []
     failed_diff_pairs = []
     single_ended_diff_pairs = []
@@ -1355,6 +1367,14 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         print(f"  {RED}Partial:       {len(partial_diff_pairs)} pair(s) whose coupled "
               f"route left member pads disconnected (see MEMBER AUDIT): "
               f"{', '.join(sorted(partial_diff_pairs))}{RESET}")
+    if _member_incomplete:
+        # Counted separately from the buckets above: a by-design 'partial'
+        # pair is still in routed_diff_pairs (its trunk IS coupled), so the
+        # coupled count alone never tells you its pads are open (#602).
+        print(f"  Member-incomplete: {len(_member_incomplete)} pair(s) with "
+              f"disconnected member pads at this step "
+              f"({', '.join(_member_incomplete)}) — JSON_SUMMARY."
+              f"member_incomplete_pairs")
     if ripup_success_pairs:
         print(f"  Rip-up success: {len(ripup_success_pairs)} (routes that ripped blockers)")
     if rerouted_pairs:
@@ -1382,6 +1402,12 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         'routed_diff_pairs': routed_diff_pairs,
         'failed_diff_pairs': failed_diff_pairs,
         'partial_diff_pairs': sorted(partial_diff_pairs),
+        # #602: every pair the member audit found with a disconnected member
+        # pad, whatever bucket it landed in. Gate on THIS for "did the pair's
+        # copper actually reach its pads", instead of inferring it from the
+        # coupled count (which by design still includes a partial pair whose
+        # trunk is coupled and whose peeled terminals close later).
+        'member_incomplete_pairs': _member_incomplete,
         'single_ended_diff_pairs': single_ended_diff_pairs,
         'ripup_success_pairs': sorted(ripup_success_pairs),
         'rerouted_pairs': sorted(rerouted_pairs),

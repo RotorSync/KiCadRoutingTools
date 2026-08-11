@@ -162,6 +162,20 @@ def build_pair_reports(state, diff_pair_ids_to_route, member_audit,
         incomplete = [nm for tag, nm in (('p', pair.p_net_name),
                                          ('n', pair.n_net_name))
                       if not aud.get(tag, True)]
+        # A COUPLED claim contradicted by actual pad connectivity (#514).
+        mismatch = bool(outcome == 'coupled' and incomplete)
+        if mismatch:
+            # #602: demote the OUTCOME as well, not just the summary bucket.
+            # route_diff already keeps such a pair out of routed_diff_pairs,
+            # but the per-pair record kept saying 'coupled' next to its own
+            # 'members with disconnected pads' -- one JSON blob carrying two
+            # verdicts, and callers read the optimistic one (muzy_zynq4
+            # /HDMI_CK + /HDMI_D2, lwdo_sdr, spartan6_4layer). 'incomplete'
+            # is distinct from the by-design 'partial': a partial pair's
+            # peeled terminals are EXPECTED to close in the single-ended
+            # follow-up, whereas this one claimed a finished coupled route
+            # and did not deliver it.
+            outcome = 'incomplete'
         rep = {
             'pair': pair_name,
             'p_net': pair.p_net_name,
@@ -172,18 +186,19 @@ def build_pair_reports(state, diff_pair_ids_to_route, member_audit,
             'failure_stage': (diag.get('stage')
                               ) if outcome in ('failed', 'deferred') else None,
             'incomplete_members': incomplete,
-            # A COUPLED claim contradicted by actual pad connectivity: the
-            # "one member silently incomplete" class (#514, peaksat CAN).
-            # 'partial' is deliberately NOT in this tuple: a partial pair
+            # The "one member silently incomplete" class (#514, peaksat CAN).
+            # 'partial' is deliberately NOT flagged here: a partial pair
             # already DECLARES disconnected members (its peeled terminals
             # close in the single-ended follow-up, which runs after this
-            # audit), so flagging it here made every multipoint pair with a
+            # audit), so flagging it made every multipoint pair with a
             # by-design peeled leg -- tigard /USB_D's redundant J1 row --
             # read as a contradicted claim and demoted it from
             # routed_diff_pairs while its trunk was coupled and its board
-            # finished clean. incomplete_members stays populated either way.
-            'member_audit_mismatch': bool(outcome == 'coupled'
-                                          and incomplete),
+            # finished clean. incomplete_members stays populated either way,
+            # and JSON_SUMMARY's member_incomplete_pairs carries the audit's
+            # own verdict so a caller can gate on it without that judgement
+            # call (#602).
+            'member_audit_mismatch': mismatch,
         }
         if diag.get('blocking_nets'):
             rep['blocking_nets'] = diag['blocking_nets']

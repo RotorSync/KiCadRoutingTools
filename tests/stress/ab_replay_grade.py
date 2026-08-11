@@ -119,6 +119,7 @@ def _diff_pair_stats(log_text):
     routed as coupled diff pairs (single-ended fallback does NOT count). Returns
     None pct when the board has no diff pairs."""
     status = {}
+    incomplete = set()
     for m in re.finditer(r"JSON_SUMMARY:\s*(\{.*\})", log_text):
         try:
             d = json.loads(m.group(1))
@@ -129,12 +130,27 @@ def _diff_pair_stats(log_text):
         for p in d.get("routed_diff_pairs", []):       status[p] = "coupled"
         for p in d.get("single_ended_diff_pairs", []): status[p] = "single_ended"
         for p in d.get("failed_diff_pairs", []):       status[p] = "failed"
+        # #602: partial_diff_pairs was NOT consumed here, so "final status
+        # wins" quietly failed for the one demotion that matters. A pair
+        # reported coupled by call 1 and demoted to partial by a later call
+        # kept its stale "coupled" -- the member-audit demotion route_diff had
+        # already made was invisible to the very metric this computes.
+        for p in d.get("partial_diff_pairs", []):      status[p] = "partial"
+        # Pairs the audit found with disconnected member pads, in ANY bucket.
+        for p in d.get("member_incomplete_pairs", []): incomplete.add(p)
+        for p in d.get("routed_diff_pairs", []):
+            if p not in d.get("member_incomplete_pairs", []):
+                incomplete.discard(p)   # a later call closed it
     total = len(status)
     coupled = sum(1 for v in status.values() if v == "coupled")
     return {"diff_pairs_total": total,
             "diff_pairs_coupled": coupled,
             "diff_pairs_single_ended": sum(1 for v in status.values() if v == "single_ended"),
             "diff_pairs_failed": sum(1 for v in status.values() if v == "failed"),
+            "diff_pairs_partial": sum(1 for v in status.values() if v == "partial"),
+            # Gate on this for "member pads actually connected" -- it is the
+            # audit's verdict, not an inference from the coupled count.
+            "diff_pairs_member_incomplete": len(incomplete),
             "diff_coupled_pct": round(100.0 * coupled / total, 1) if total else None}
 
 
