@@ -1,3 +1,63 @@
+f3cf300 2026-08-11 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit eb8f633..f3cf300: NO GAPS FOUND; one GUI-side bug FIXED in range (below).
+15 engine/GUI files changed, 771 insertions -- #537 (shared component->nets
+helper), #600 improvement gate, #609 split-pour report, #598 inner split-plane
+seed, #602/#603/#604/#605, #607 diff stripline, #597 negative-rail net names,
+the accepted defaults wave (HEURISTIC_WEIGHT 2.3, VIA_COST 75,
+PROXIMITY_HEURISTIC_FACTOR 0, MAX_RIPUP 3, QFN_EXTENSION 0.05), the GUI
+progress/cancel + net_id_to_name fixes, and the Modal-sweep tooling.
+
+Class-2 drift (a new CLI-only flag): NONE. The only add_argument changes in the
+whole range are two defaults moving to the shared module (--extension ->
+defaults.QFN_EXTENSION, --heuristic-weight -> defaults.HEURISTIC_WEIGHT) and
+#537 teaching the EXISTING --component nargs="+". No flag was added or renamed,
+so there is no argparse-layer surface the GUI could be missing.
+
+Changed defaults (the other parity trap -- the GUI sets its own values from UI
+controls and does not inherit argparse defaults): CHECKED, all clean. Every
+default that moved this range is read by the GUI from routing_defaults --
+HEURISTIC_WEIGHT, VIA_COST, MAX_RIPUP, PROXIMITY_HEURISTIC_FACTOR and
+QFN_EXTENSION each resolve via `defaults.<NAME>` at 3 GUI call sites, with ZERO
+hardcoded copies in kicad_routing_plugin/. So the wave propagates to both fronts
+by construction.
+
+GUI bug found and fixed in range (#537 item 4): reset_params_to_defaults cleared
+the component dropdown only inside `if panel.component_dropdown:` and never
+cleared the Comp Filter TEXT BOX at all -- so a plan step that set a component
+filter leaked it into every later step. Now loops all five panels and clears
+dropdown + text box + value. Verified in the real headless dialog: box goes
+'U3' -> '' on reset for both the basic and fanout panels.
+
+All four gates green at f3cf300:
+  manifest->plan parity ....... 9022 flag-checks / 399 manifests, 0 mismatches
+  CLI post-pass coverage ...... 8 registered, 15 in active CLI use, 0 unreachable,
+                                0 failures, 1 acknowledged CLI-only (fanout DRC audit)
+  settings round-trip ......... save/restore/legacy/re-save, 180 keys
+  GUI/CLI engine parity ....... VERDICT: PARITY (drc CLI=0 GUI=0,
+                                kicad unconnected CLI=0 GUI=0)
+
+Gate 4 copper-set note -- READ THIS BEFORE CHASING IT. The previous audit
+recorded copper sets IDENTICAL (segments 1262/1262, vias 171/171). This audit
+records them DIFFERING slightly:
+  segments CLI=1267 GUI=1269 (gui-only 2), vias CLI=128 GUI=127 (cli-only 1)
+  gui-only: ('GND','F.Cu',(144.8,35.0),(151.2,35.0),0.127)
+            ('GND','F.Cu',(151.2,35.0),(151.8,34.4),0.127)
+i.e. the GUI ran two GND surface segments where the CLI dropped a via -- the
+known-deliberate divergence class (CLI mains' oracle recheck / clean_plane_copper
+/ end-of-run reconciliation), not a connectivity or DRC difference.
+
+It is NOT from #537. Re-running gate 4 at 893f680 (the commit before the #537
+work) reproduces it BYTE-FOR-BYTE: same two segments, same via, same counts. It
+entered somewhere in eb8f633..893f680, and the via total moving 171 -> 128
+points at the accepted VIA_COST 50 -> 75 / HEURISTIC_WEIGHT 1.9 -> 2.3 defaults
+rather than at any GUI-side change. Worth a separate look; it is not a gap this
+audit introduced or can close by threading a parameter.
+
+Still pre-existing, NOT from this range (carried from the last marker): the
+manifest->plan uncutgem_nv mismatch is GONE from this run (0 mismatches across
+399 manifests, up from 341) -- the multi-line manifest parser fix in 46731be
+appears to have resolved it.
+
 eb8f633 2026-08-09 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit 6064707..eb8f633 (pre-v0.20.2 release gate): NO GAPS. 14 engine/GUI files
 changed, 570 insertions -- #584 KICAD_PROXIMITY_SUM=softcap, #585 screening wave
