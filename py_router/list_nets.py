@@ -107,9 +107,23 @@ def effective_floors(constraints, copper_layers):
         # like the human originals); it's the routing-capability floor, distinct
         # from the DRC floor above. The deepest reachable, so DRC grades pass it.
         'fab_track_width':      fmin['track_width'],
+        # min_clearance is deliberately NOT pinned up here (see the docstring):
+        # nothing downstream enforces it either -- check_drc does not raise its
+        # clearance from the constraint -- so the fab floor IS the honest value.
         'drc_clearance':        fmin['clearance'],
-        'drc_hole_to_hole':     fmin['hole_to_hole'],
-        'pad_hole_to_hole':     fmin['pad_hole_to_hole'],
+        # #603: hole-to-hole and board-edge ARE pinned up by the board's own
+        # DRC-enforced constraint everywhere else in the toolchain -- check_drc
+        # raises both from the project (#439) and route.py adopts the constraint
+        # when the flag is omitted -- so printing the bare fab minimum advertised
+        # a floor nothing will honour. muzy_zynq2 declares min_hole_to_hole 0.25
+        # and this line printed 0.2; the RUNBOOK tells the worker to take its
+        # flags from here, so --hole-to-hole-clearance 0.2 went into every
+        # command and was then silently graded at 0.25 anyway.
+        'drc_hole_to_hole':     floor(constraints.get('min_hole_to_hole'), fmin['hole_to_hole']),
+        # Pad-drill/pad-drill: the same board rule applies to any two holes, so
+        # it floors at the constraint too (usually the JLC pad minimum is larger).
+        'pad_hole_to_hole':     floor(constraints.get('min_hole_to_hole'), fmin['pad_hole_to_hole']),
+        'drc_edge_clearance':   floor(constraints.get('min_copper_edge_clearance'), fmin['board_edge']),
         'fab': fab,
     }
 
@@ -436,7 +450,28 @@ def print_design_rules(pcb_path):
           f"min, whichever is larger): "
           f"via {eff['working_via_diameter']}/{eff['working_via_drill']}  "
           f"clearance {eff['drc_clearance']}  hole-to-hole {eff['drc_hole_to_hole']}  "
+          f"edge {eff['drc_edge_clearance']}  "
           f"track {eff['min_track_width']} (DRC track floor = board min_track_width)")
+    # #603: name the constraint when it -- not the fab -- set the hole-to-hole
+    # floor. The RUNBOOK tells the worker to route and grade from this line, and
+    # a board minimum ABOVE the JLC figure is exactly the case where the two
+    # disagreed: the printed 0.2 went into every command and check_drc graded at
+    # the board's 0.25 anyway.
+    _h2h_con = float((dr['constraints'] or {}).get('min_hole_to_hole') or 0.0)
+    if _h2h_con > eff['fab']['hole_to_hole']:
+        print(f"  - hole-to-hole {eff['drc_hole_to_hole']} comes from the BOARD's "
+              f"min_hole_to_hole ({_h2h_con}), above the JLC fab min "
+              f"{eff['fab']['hole_to_hole']}: it is DRC-enforced, so route AND grade "
+              "at it (check_drc raises a lower --hole-to-hole-clearance to it anyway).")
+    # Copper clearance is the one floor NOT pinned up by the board's constraint
+    # -- min_clearance is an unreliable edit-floor (often 0, sometimes stale-large)
+    # and nothing downstream enforces it, so the fab minimum is the honest value.
+    _clr_con = float((dr['constraints'] or {}).get('min_clearance') or 0.0)
+    if _clr_con > eff['drc_clearance']:
+        print(f"  - clearance {eff['drc_clearance']} is the FAB floor; the board's "
+              f"min_clearance ({_clr_con}) is deliberately NOT applied here (it is an "
+              "aspirational edit-floor, and grading above what was routed manufactures "
+              "phantom violations -- #439). Fine-pitch escapes route down to the fab floor.")
     # The router must honour these as DISTINCT rules (issue #125):
     print(f"  - via hole-to-hole {eff['drc_hole_to_hole']} = drill-to-drill minimum, "
           "net-INDEPENDENT (via/via and via/pad-drill, all nets incl. same-net); "
@@ -492,7 +527,8 @@ def print_design_rules(pcb_path):
     # the human original passes -- NOT the inflated net-class clearance (#111).
     print(f"\nSUGGESTED check_drc.py flags (grade at the manufacturing floor):\n  "
           f"--clearance {eff['drc_clearance']} "
-          f"--hole-to-hole-clearance {eff['drc_hole_to_hole']}")
+          f"--hole-to-hole-clearance {eff['drc_hole_to_hole']} "
+          f"--board-edge-clearance {eff['drc_edge_clearance']}")
 
 
 def find_differential_pairs(pcb_data):

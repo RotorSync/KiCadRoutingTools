@@ -3022,24 +3022,46 @@ if __name__ == "__main__":
             net_clearances = net_clearance_map(
                 args.pcb, [n.name for n in _net_objs.values()],
                 rules=_rules) or None
-        _pro_edge = float(_rules.get('constraints', {})
-                          .get('min_copper_edge_clearance') or 0.0)
-        if _pro_edge > args.board_edge_clearance:
-            args.board_edge_clearance = _pro_edge
-            if not args.quiet:
-                print(f"Board-edge clearance {_pro_edge:.4g} mm "
-                      f"(from project min_copper_edge_clearance)")
+        # #603: a board minimum that overrides an EXPLICIT CLI value is
+        # announced on stderr even under --quiet. Silently substituting is how
+        # polykit_x_inputboard's `--hole-to-hole-clearance 0.2` (taken from
+        # list_nets' then-wrong floor line) came back graded at 0.25 with
+        # nothing in the output saying so -- the grader could not tell the
+        # requested floor from the applied one. stderr keeps stdout
+        # machine-readable for the callers that parse it.
+        def _pin_up(attr, board_val, source, label):
+            cur = getattr(args, attr)
+            if board_val <= cur:
+                return
+            # Explicitness must come from the COMMAND LINE, not from comparing
+            # against the default: --hole-to-hole-clearance 0.2 IS the default
+            # value, and that is exactly the case in the field report.
+            flag = '--' + attr.replace('_', '-')
+            explicit = any(a == flag or a.startswith(flag + '=')
+                           for a in sys.argv[1:])
+            setattr(args, attr, board_val)
+            msg = f"{label} {board_val:.4g} mm (from project {source})"
+            if explicit:
+                print(f"NOTE: {label} CLAMPED UP to {board_val:.4g} mm by the "
+                      f"board's own {source} -- the requested {cur:.4g} mm is "
+                      f"below a DRC-enforced minimum and cannot be graded at. "
+                      f"Route at {board_val:.4g} too, or the grade will not "
+                      f"match what was routed.", file=sys.stderr)
+            elif not args.quiet:
+                print(msg)
+
+        _pin_up('board_edge_clearance',
+                float(_rules.get('constraints', {})
+                      .get('min_copper_edge_clearance') or 0.0),
+                'min_copper_edge_clearance', 'Board-edge clearance')
         # #439: board-derive the hole-to-hole floor too (symmetry with edge above
         # and with the router, which pins it from min_hole_to_hole). Without this a
         # board declaring min_hole_to_hole > the 0.2 default is graded too loose and
         # a real hole-to-hole violation between 0.2 and the board value is missed.
-        _pro_h2h = float(_rules.get('constraints', {})
-                         .get('min_hole_to_hole') or 0.0)
-        if _pro_h2h > args.hole_to_hole_clearance:
-            args.hole_to_hole_clearance = _pro_h2h
-            if not args.quiet:
-                print(f"Hole-to-hole clearance {_pro_h2h:.4g} mm "
-                      f"(from project min_hole_to_hole)")
+        _pin_up('hole_to_hole_clearance',
+                float(_rules.get('constraints', {})
+                      .get('min_hole_to_hole') or 0.0),
+                'min_hole_to_hole', 'Hole-to-hole clearance')
     except Exception as e:
         if not args.quiet:
             print(f"  (netclass/edge rules not read: {e})")

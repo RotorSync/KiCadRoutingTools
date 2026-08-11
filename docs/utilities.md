@@ -387,7 +387,19 @@ It reads two tiers of rules and combines them with the JLCPCB fab floor:
   nominal and still pass DRC (issues #111/#115).
 
 From these it prints a **manufacturing floor** (the Constraint or the JLC fab
-minimum for the board's layer count, whichever is larger). The floor spells out
+minimum for the board's layer count, whichever is larger — for **hole-to-hole**
+and **board-edge**, which the rest of the toolchain pins up from the board's own
+constraint). **Copper clearance is the deliberate exception:** it prints the fab
+minimum alone, because `min_clearance` is an unreliable edit-floor (often 0,
+sometimes stale-large), nothing downstream enforces it, and grading above what
+was routed manufactures phantom violations (#439). A board minimum that raised
+the hole-to-hole floor above the JLC figure is named on its own line, since that
+is the value to route *and* grade at (#603 — printing the bare fab 0.2 while
+`check_drc` graded at the board's 0.25 sent a value into every command that the
+toolchain would not honour). Where an explicit `--hole-to-hole-clearance` /
+`--board-edge-clearance` is below such a minimum, `check_drc` now says it is
+being clamped (on stderr, so it survives `--quiet`) instead of substituting
+silently. The floor spells out
 two distinct rules the router honours: **hole-to-hole** (drill-to-drill) is
 net-INDEPENDENT and applies to via/via, via/pad-drill and pad-drill/pad-drill on
 *all* nets including same-net; **copper clearance** applies to via/pad and
