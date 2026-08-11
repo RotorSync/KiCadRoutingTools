@@ -3237,7 +3237,15 @@ class RoutingDialog(wx.Dialog):
                     with tempfile.NamedTemporaryFile(
                             suffix='.kicad_pcb', delete=False) as _f:
                         _p = _f.name
-                    pcbnew.SaveBoard(_p, _b)
+                    # aSkipSettings: the oracle leg needs the copper, not a
+                    # .kicad_pro. KiCad 10's implicit project-settings save
+                    # merges the pre-migration on-disk project JSON with its
+                    # migrated in-memory view and throws on any key whose
+                    # type changed (KiCad 9 wrote sheet_component_classes as
+                    # [], 10 holds an object) -- and with no C++ handler
+                    # above this worker thread, that throw aborts ALL of
+                    # KiCad. Snapshots must always skip the settings save.
+                    pcbnew.SaveBoard(_p, _b, aSkipSettings=True)
                     return _p
                 except Exception as e:
                     print(f"(could not stage the live board for the "

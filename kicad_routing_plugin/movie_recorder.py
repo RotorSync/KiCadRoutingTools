@@ -212,7 +212,11 @@ class MovieRecorder:
             if board is None:
                 return None
             path = os.path.join(self._temp_dir(), f"{name}.kicad_pcb")
-            pcbnew.SaveBoard(path, board)
+            # aSkipSettings: frames only need copper; the settings save
+            # aborts KiCad on worker threads for pre-KiCad-10 projects
+            # (uncaught C++ type_error in the .kicad_pro merge; see
+            # _stage_live_board in swig_gui.py).
+            pcbnew.SaveBoard(path, board, aSkipSettings=True)
             return path
         except Exception as e:
             self._log(f"{YELLOW}Routing movie: snapshot failed ({e}){RESET}")

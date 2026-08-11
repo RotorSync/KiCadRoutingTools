@@ -177,7 +177,12 @@ def run_plan(board_path, steps, indices=None, snapshot_dir=None,
             snap = os.path.join(snapshot_dir, snapshot_format.format(
                 prefix=snapshot_prefix, n=index + 1, action=action))
             try:
-                pcbnew.SaveBoard(snap, board)
+                # aSkipSettings: per-step copper snapshot, no .kicad_pro
+                # wanted (KiCad 10's settings save merges the pre-migration
+                # on-disk project JSON with its migrated in-memory view;
+                # an uncaught type_error aborts the process on any
+                # pre-KiCad-10 project).
+                pcbnew.SaveBoard(snap, board, aSkipSettings=True)
                 result['snapshots'].append(snap)
             except Exception as e:
                 result['log'].append(f"snapshot step {index + 1} failed: {e}")
@@ -190,7 +195,13 @@ def run_plan(board_path, steps, indices=None, snapshot_dir=None,
                 # Save back to the same path, beside the .kicad_pro that
                 # PlanExecutor._write_drc_floors just stamped with the routed
                 # floors -- a board without its floor grades wrong (#441).
-                pcbnew.SaveBoard(board_path, board)
+                # aSkipSettings for two reasons: the implicit settings save
+                # would REWRITE that just-stamped .kicad_pro from KiCad's
+                # in-memory (pre-stamp) view, silently dropping the floors;
+                # and on pre-KiCad-10 projects it aborts the process outright
+                # (uncaught type_error merging the pre-migration file with
+                # the migrated in-memory settings).
+                pcbnew.SaveBoard(board_path, board, aSkipSettings=True)
             except Exception as e:
                 result['log'].append(f"final save failed: {e}")
         app.ExitMainLoop()
