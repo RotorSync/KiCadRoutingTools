@@ -402,11 +402,99 @@ def test_epsilon_eff_backcompat():
           f"{ee_tight:.4f} vs {ee_c:.4f}")
 
 
+def test_asymmetric_differential_stripline():
+    """#607: the DIFFERENTIAL stripline path must honour plane asymmetry too.
+
+    The asymmetry flag was computed for the single-ended answer and discarded
+    for the differential one, which then ran at the arithmetic-mean height. A
+    90-ohm ask returned a width measuring ~67 ohm on a field solver -- and
+    returned it WIDER, the opposite direction from the physics.
+    """
+    print("asymmetric differential stripline (#607)")
+    er, t, s = 4.3, 0.0152, 0.15
+    h1, h2 = 0.10, 0.55        # 6-layer: thin outer prepreg, thick core
+
+    zd_asym, zodd = I.differential_stripline_z0_asymmetric(0.2385, s, h1, h2, t, er)
+    zd_arith, _ = I.differential_stripline_z0(0.2385, s, (h1 + h2) / 2, t, er)
+    check(zd_asym < zd_arith * 0.75,
+          "asymmetric Zdiff is far below the averaged-height answer",
+          f"asym={zd_asym:.2f} arith={zd_arith:.2f}")
+    check(close(zd_asym, 2 * zodd, 1e-9), "Zdiff is twice the odd mode")
+
+    # Degenerate inputs return (0,0) rather than raising.
+    check(I.differential_stripline_z0_asymmetric(0.2, 0.0, h1, h2, t, er) == (0.0, 0.0),
+          "zero spacing is not differential")
+    check(I.differential_stripline_z0_asymmetric(0.2, s, 0.0, h2, t, er) == (0.0, 0.0),
+          "missing plane distance yields no answer")
+
+    # The solver must round-trip against the model the verifier scores -- the
+    # #486 invariant, which #607 found still broken on the differential path.
+    w = I.differential_stripline_asymmetric_width_for_z0(90.0, s, h1, h2, t, er)
+    check(w > 0, "differential asymmetric solver produced a width")
+    got, _ = I.differential_stripline_z0_asymmetric(w, s, h1, h2, t, er)
+    check(close(got, 90.0, 1.0), "solved width round-trips to its target",
+          f"w={w:.4f} got={got:.2f}")
+
+    w_sym = I.differential_stripline_width_for_z0(90.0, s, (h1 + h2) / 2, t, er)
+    check(w_sym > w * 1.5, "the old averaged solve was far too wide",
+          f"sym={w_sym:.4f} asym={w:.4f}")
+
+    # End to end through the stackup, which is where the bug was reported.
+    class SL:
+        def __init__(self, name, ltype, thick, eps=0.0):
+            self.name, self.layer_type, self.thickness = name, ltype, thick
+            self.epsilon_r, self.loss_tangent, self.material = eps, 0.0, ''
+
+    class BI:
+        stackup = [SL('F.Cu', 'copper', 0.035), SL('p1', 'prepreg', h1, er),
+                   SL('In1.Cu', 'copper', t), SL('c1', 'core', h2, er),
+                   SL('In2.Cu', 'copper', t), SL('p2', 'prepreg', h1, er),
+                   SL('B.Cu', 'copper', 0.035)]
+
+    class PCB:
+        board_info = BI()
+
+    pcb = PCB()
+    widths = I.calculate_layer_widths_for_impedance(
+        pcb, ['F.Cu', 'In1.Cu'], 90.0, spacing=s, is_differential=True)
+    check(widths['In1.Cu'] < 0.16,
+          "90-ohm inner width is narrow, not the 0.2385 the averaged model gave",
+          f"{widths['In1.Cu']:.4f}")
+    # With planes on BOTH sides the trace must be narrower than the microstrip
+    # on the outer layer -- the sign that was inverted.
+    check(widths['In1.Cu'] < widths['F.Cu'],
+          "stripline is narrower than microstrip for the same target",
+          f"In1={widths['In1.Cu']:.4f} F={widths['F.Cu']:.4f}")
+
+    scored = I.calculate_impedance_for_layer(pcb, 'In1.Cu', widths['In1.Cu'],
+                                             spacing=s)
+    check(close(scored['zdiff'], 90.0, 1.0),
+          "calculate_impedance_for_layer agrees with the solved width",
+          f"{scored['zdiff']:.2f}")
+
+    # A SYMMETRIC inner layer must be untouched by this change.
+    class BIS:
+        stackup = [SL('F.Cu', 'copper', 0.035), SL('p1', 'prepreg', 0.2, er),
+                   SL('In1.Cu', 'copper', t), SL('c1', 'core', 0.2, er),
+                   SL('In2.Cu', 'copper', t), SL('p2', 'prepreg', 0.2, er),
+                   SL('B.Cu', 'copper', 0.035)]
+
+    class PCBS:
+        board_info = BIS()
+
+    sym = I.calculate_impedance_for_layer(PCBS(), 'In1.Cu', 0.15, spacing=s)
+    ref, _ = I.differential_stripline_z0(0.15, s, 0.2, t, er)
+    check(close(sym['zdiff'], ref, 1e-9),
+          "symmetric stripline still uses the symmetric model",
+          f"{sym['zdiff']:.4f} vs {ref:.4f}")
+
+
 def main():
     for fn in (test_elliptic, test_cpwg_limits, test_cpwg_z0_behaviour,
                test_cpwg_applies, test_cpwg_width_solver, test_differential_cpwg,
                test_microstrip_thickness, test_width_scale_is_neutral,
-               test_asymmetric_stripline, test_checker_helpers,
+               test_asymmetric_stripline, test_asymmetric_differential_stripline,
+               test_checker_helpers,
                test_calculate_width_selects_model, test_epsilon_eff_backcompat):
         fn()
     print()
