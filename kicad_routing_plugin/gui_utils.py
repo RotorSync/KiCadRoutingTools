@@ -715,7 +715,12 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
         with tempfile.NamedTemporaryFile(suffix='.kicad_pcb',
                                          delete=False) as f:
             tmp = f.name
-        pcbnew.SaveBoard(tmp, board)
+        # aSkipSettings: rules reach the oracle via project_from below, never
+        # via a temp-sibling .kicad_pro -- and the implicit settings save
+        # aborts KiCad on worker threads for pre-KiCad-10 projects (uncaught
+        # C++ type_error in the .kicad_pro merge; see _stage_live_board in
+        # swig_gui.py).
+        pcbnew.SaveBoard(tmp, board, aSkipSettings=True)
         # #490: stage the REAL project's netclasses for the refill, or the
         # exact-fill link source runs at stock rules.
         try:

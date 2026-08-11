@@ -52,7 +52,10 @@ if board is None:
 filler = pcbnew.ZONE_FILLER(board)
 zones = board.Zones()
 filler.Fill(zones)
-pcbnew.SaveBoard(dst, board)
+# aSkipSettings: dst is parsed for island polygons only; the settings save
+# aborts this subprocess (SIGABRT, degrading the fill to the raster model)
+# when the staged project predates KiCad 10.
+pcbnew.SaveBoard(dst, board, aSkipSettings=True)
 print("REFILL_OK", len(list(zones)))
 """
 

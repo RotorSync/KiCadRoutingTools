@@ -4317,7 +4317,12 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             import pcbnew as _pcbnew
             fd, tmp = tempfile.mkstemp(suffix='.kicad_pcb')
             os.close(fd)
-            _pcbnew.SaveBoard(tmp, _board)
+            # aSkipSettings: the memo keys on the saved BOARD bytes and the
+            # refill takes its rules from project_from, so a temp-sibling
+            # .kicad_pro is never read -- and writing one aborts KiCad on
+            # pre-KiCad-10 projects (uncaught type_error merging the
+            # pre-migration file with the migrated in-memory settings).
+            _pcbnew.SaveBoard(tmp, _board, aSkipSettings=True)
             with open(tmp, 'rb') as _fh:
                 _key = hashlib.sha256(_fh.read()).digest()
             if _key in _memo:
