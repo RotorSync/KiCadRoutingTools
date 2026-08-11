@@ -135,7 +135,12 @@ image = (
     # replay+grade never calls pcbnew or kicad-cli. (Cost: ab_replay_grade's
     # optional kicad-cli cross-check degrades to None. Cross-check the winning
     # arm locally, where KiCad already lives -- that check caught #487.)
-    .pip_install("numpy>=1.21.0", "scipy>=1.7.0", "shapely>=1.8.0")
+    # PINNED exactly (2026-08-11): unpinned ranges let image rebuilds float the
+    # numeric stack, and a float-behavior drift between two builds routed
+    # 28/96 boards DIFFERENTLY at identical config -- silently voiding every
+    # cross-era comparison (verified: both code eras identical locally).
+    # Bump only deliberately, expecting a new baseline era.
+    .pip_install("numpy==2.5.2", "scipy==1.18.0", "shapely==2.1.2")
     # procps: redo_stress_test's peak-RSS sampler shells out to ps/pgrep;
     # absent from debian_slim, the sampler's except-pass reported 0 MB for
     # every cloud task -- which is exactly the data needed to right-size
@@ -215,6 +220,14 @@ def _run_teed(cmd, env, tag, timeout_s):
     out = "".join(buf)
     print(f"[{tag}] done rc={proc.returncode}", flush=True)
     return subprocess.CompletedProcess(cmd, proc.returncode, out, "")
+
+
+def _dep_versions() -> str:
+    """numpy/scipy/shapely versions, stamped into every row: the era-drift
+    postmortem's second defense -- if the pin is ever bumped or bypassed,
+    rows self-document which numeric stack produced them."""
+    from importlib.metadata import version
+    return ",".join(f"{m}={version(m)}" for m in ("numpy", "scipy", "shapely"))
 
 
 def _replay_one(task: dict) -> dict:
@@ -310,6 +323,7 @@ def _replay_one(task: dict) -> dict:
             row = {"parse_error": str(e)[:200]}
     row.update({
         "arm": arm, "set": set_name, "board": board, "git": GIT_SHA,
+        "deps": _dep_versions(),
         "rc": proc.returncode,
         "sweep_wall_s": round(time.time() - t0, 1),
         "patched_defaults": {k: v[1] for k, v in patched.items()},
