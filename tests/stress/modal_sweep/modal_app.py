@@ -366,6 +366,49 @@ def _replay_one(task: dict) -> dict:
         if log.exists():
             (dest / f"{set_name}__{board}.log").write_text(
                 log.read_text(errors="replace"))
+
+    # Keep the routed board itself, not just its score (KICAD_SWEEP_KEEP_ARTIFACTS).
+    #
+    # A sweep only needs the numbers, so this is OPT-IN -- 150 boards of copper is
+    # storage a parameter sweep should not pay for. A cloud REPLAY is the other
+    # case: the whole point is to end up with boards you can open, re-grade with a
+    # later grader, or diff against a baseline, and the container is gone the
+    # moment the row is written.
+    #
+    # The final .kicad_pcb travels WITH ITS SIBLINGS (.kicad_pro / .kicad_dru /
+    # .kicad_prl), never alone. The project carries the DRC floor the chain routed
+    # to and the dru carries per-layer clearance (#498); a bare .kicad_pcb is
+    # re-graded against the STOCK netclass instead, which manufactures phantom
+    # sub-floor violations on copper that is actually correct (#441 -- icepi_zero
+    # turned a dropped 0.09 floor into 160 phantom grazes). Shipping the pcb
+    # without the pro would make every artifact we keep un-regradable.
+    if os.environ.get("KICAD_SWEEP_KEEP_ARTIFACTS") and row.get("final"):
+        final = out_dir / board / str(row["final"])
+        if final.exists():
+            adir = dest / "artifacts" / f"{set_name}__{board}"
+            adir.mkdir(parents=True, exist_ok=True)
+            kept = []
+            for sib in sorted(final.parent.glob(final.stem + ".*")):
+                if sib.suffix in (".kicad_pcb", ".kicad_pro", ".kicad_dru", ".kicad_prl"):
+                    shutil.copy2(sib, adir / sib.name)
+                    kept.append(sib.name)
+            # The manifest travels too: --regrade needs it to recover the routed
+            # --clearance, and grading at anything else is the classic phantom-DRC
+            # mistake (CLAUDE.md: grade at the clearance the board was routed to).
+            man = dst / "redo_commands.sh"
+            if man.exists():
+                shutil.copy2(man, adir / "redo_commands.sh")
+                kept.append("redo_commands.sh")
+            row["artifacts"] = kept
+            if ".kicad_pro" not in {Path(k).suffix for k in kept}:
+                # Loud, because the failure mode is silent and only shows up much
+                # later as phantom DRC on a regrade.
+                row["artifact_warning"] = f"{row['final']} has no sibling .kicad_pro"
+                print(f"[{arm}/{board}] WARNING: no .kicad_pro beside {row['final']}",
+                      flush=True)
+        else:
+            row["artifact_warning"] = f"final {row['final']} not found in wave dir"
+
     (dest / f"{set_name}__{board}.json").write_text(json.dumps(row, indent=1))
     results_vol.commit()
     return row
