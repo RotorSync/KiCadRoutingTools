@@ -901,15 +901,12 @@ def _component_net_names(pcb_data, ref, globs):
     include/exclude semantics (matches_net_filter) so a replayed plan selects the
     same nets the recorded CLI command did.
     """
-    footprint = pcb_data.footprints.get(ref)
-    if footprint is None:
-        return []
-    from net_queries import matches_net_filter
-    names = set()
-    for pad in footprint.pads:
-        if pad.net_id and pad.net_name and matches_net_filter(pad.net_name, globs):
-            names.add(pad.net_name)
-    return sorted(names)
+    from net_queries import matches_net_filter, nets_for_components
+    # #537: resolve the reference through the shared helper so a replayed plan
+    # selects the same nets the recorded CLI command did. 'glob' keeps this
+    # path's exact-reference matching (a plan names one real footprint).
+    sel = nets_for_components(pcb_data, [ref], match='glob')
+    return sorted(n for n in sel.net_names if matches_net_filter(n, globs))
 
 
 def _select_component(net_panel, ref):

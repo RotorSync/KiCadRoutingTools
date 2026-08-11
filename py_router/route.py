@@ -28,7 +28,6 @@ from startup_checks import exit_on_error_if_main
 exit_on_error_if_main(__name__)
 
 import time
-import fnmatch
 import json
 from typing import List, Optional, Tuple, Dict, Set
 
@@ -53,7 +52,7 @@ from net_queries import (
     get_all_unrouted_net_ids, get_chip_pad_positions,
     compute_mps_net_ordering, find_pad_nearest_to_position,
     expand_net_patterns, find_single_ended_nets, identify_power_nets,
-    filter_routable_nets
+    filter_routable_nets, nets_for_components, suggest_component_refs
 )
 from impedance import calculate_layer_widths_for_impedance, print_impedance_routing_plan
 from obstacle_map import (
@@ -4464,7 +4463,10 @@ For differential pair routing, use route_diff.py:
     parser.add_argument("--nets", "-n", nargs="+", help="Net names or wildcard patterns to route (alternative to positional args)")
     parser.add_argument("--overwrite", "-O", action="store_true",
                         help="Overwrite input file instead of creating _routed copy")
-    parser.add_argument("--component", "-C", help="Route all nets connected to this component (e.g., U1). Excludes GND/VCC/VDD unless net patterns also specified.")
+    parser.add_argument("--component", "-C", nargs="+", metavar="REF",
+                        help="Route all nets connected to these components (e.g., U1, or U3 U4 'J1*'). "
+                             "fnmatch globs allowed; a bare reference is exact, so U1 does not "
+                             "match U10. Excludes GND/VCC/VDD unless net patterns also specified.")
     # Ordering and strategy options
     parser.add_argument("--ordering", "-o", choices=["inside_out", "mps", "original", "bus"],
                         default=defaults.DEFAULT_ORDERING_STRATEGY,
@@ -4859,13 +4861,18 @@ For differential pair routing, use route_diff.py:
     # names -- so the guard lives here.) An explicit --nets '*' is honored:
     # the operator said so, and #521 protection still shields matched groups
     # (glob is not an override).
-    if args.force_reroute and not all_patterns and not args.component:
+    # --component now takes one OR MORE references, with fnmatch globs. A
+    # single one behaves exactly as before, so recorded redo_commands.sh
+    # manifests and .claude/skills/* keep replaying unchanged.
+    component_patterns = list(args.component or [])
+
+    if args.force_reroute and not all_patterns and not component_patterns:
         parser.error("--force-reroute requires an explicit net scope "
                      "(--nets, positional patterns, or --component): it rips "
                      "and re-routes every selected net from scratch.")
 
     # Default to "*" (all nets) if no patterns and no component specified
-    if not all_patterns and not args.component:
+    if not all_patterns and not component_patterns:
         all_patterns = ["*"]
 
     # Get nets from patterns and/or component
@@ -4875,32 +4882,54 @@ For differential pair routing, use route_diff.py:
         net_names = []  # Will be populated by component filter below
 
     # Filter by component if specified
-    if args.component:
-        component_nets = set()
-        for net_id, pads in pcb_data.pads_by_net.items():
-            for pad in pads:
-                if pad.component_ref == args.component:
-                    net_info = pcb_data.nets.get(net_id)
-                    if net_info and net_info.name:
-                        component_nets.add(net_info.name)
-                    break
+    if component_patterns:
+        # Power/ground is dropped only when the components ARE the whole net
+        # scope; with --nets also given the operator has named what they want.
+        sel = nets_for_components(
+            pcb_data, component_patterns,
+            exclude_patterns=None if all_patterns else POWER_NET_EXCLUSION_PATTERNS)
+
+        # A reference that matched no footprint is a typo, not an empty result:
+        # routing the remaining subset would quietly do the wrong thing.
+        if sel.unmatched_patterns:
+            all_refs = sorted(set(pcb_data.footprints or {}))
+            detail = "; ".join(
+                f"{p!r}{suggest_component_refs(all_refs, p)}"
+                for p in sel.unmatched_patterns)
+            # --component takes one or more references, so it greedily consumes
+            # the tokens after it -- a POSITIONAL output path written after it
+            # lands here as a bogus reference. Say so rather than making the
+            # operator work it out from a filename in a footprint error.
+            swallowed = [p for p in sel.unmatched_patterns
+                         if p.endswith('.kicad_pcb') or os.sep in p]
+            hint = ""
+            if swallowed:
+                hint = (f" NOTE: --component accepts several references, so it "
+                        f"consumed the positional argument {swallowed[0]!r} -- "
+                        f"pass the output via --output, or put --component last.")
+            parser.error(
+                f"--component matched no footprint on this board: {detail}. "
+                f"Board has {len(all_refs)} references"
+                f"{' (e.g. ' + ', '.join(all_refs[:5]) + ')' if all_refs else ''}."
+                f"{hint}")
+
         if all_patterns:
             # Intersect with pattern-matched nets
-            net_names = [n for n in net_names if n in component_nets]
+            _comp_nets = set(sel.net_names)
+            net_names = [n for n in net_names if n in _comp_nets]
         else:
-            # Use all component nets (excluding power/ground and unconnected pins)
-            exclude_patterns = POWER_NET_EXCLUSION_PATTERNS
-            filtered = []
-            for name in component_nets:
-                excluded = False
-                for pattern in exclude_patterns:
-                    if pattern and fnmatch.fnmatch(name.upper(), pattern.upper()):
-                        excluded = True
-                        break
-                if not excluded:
-                    filtered.append(name)
-            net_names = sorted(filtered)
-        print(f"Filtered to {len(net_names)} nets on component {args.component}")
+            net_names = list(sel.net_names)
+        print(f"Matched {len(sel.matched_refs)} footprint(s) "
+              f"({', '.join(sel.matched_refs[:8])}"
+              f"{', ...' if len(sel.matched_refs) > 8 else ''}) "
+              f"-> {len(net_names)} nets")
+        if sel.excluded_names:
+            # Historically silent, which is how "--component U1 routed nothing"
+            # turned into a mystery on a part whose nets are mostly rails.
+            print(f"  dropped {len(sel.excluded_names)} power/ground net(s): "
+                  f"{', '.join(sel.excluded_names[:5])}"
+                  f"{', ...' if len(sel.excluded_names) > 5 else ''} "
+                  f"(name them in --nets to route them)")
 
     if not net_names:
         print("No nets matched the given patterns!")

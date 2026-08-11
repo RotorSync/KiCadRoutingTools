@@ -1302,12 +1302,20 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
     # Filter by component if specified
     component_net_ids = None
     if component:
-        component_net_ids = set()
-        for net_id, pads in pads_by_net.items():
-            for pad in pads:
-                if pad.component_ref == component:
-                    component_net_ids.add(net_id)
-                    break
+        # Shared with route.py via net_queries (#537): a checker that resolved
+        # --component differently from the router would be verifying a different
+        # set of nets than the one that was routed.
+        #
+        # This also drops net 0 from the component's net set, which the local
+        # loop used to include. Net 0 is the no-net pseudo-net (#497): on a board
+        # that carries it in `nets`, --component graded it as a real net and
+        # reported every no-net pad on the part as "disconnected" -- interf_u
+        # --component U9 shipped a phantom "(net 0): 6 disconnected components".
+        # The no-component path never had this (net 0 has no segments/vias, so
+        # its `and net_id in pads_by_net` arm excludes it); only the component
+        # filter let it through.
+        from net_queries import nets_for_components
+        component_net_ids = set(nets_for_components(pcb_data, [component]).net_ids)
         if not quiet:
             print(f"Found {len(component_net_ids)} nets on component {component}")
 

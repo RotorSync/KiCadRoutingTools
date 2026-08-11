@@ -386,18 +386,20 @@ class NetSelectionPanel(wx.Panel):
         if sync_from_visible:
             self._sync_checked_state_from_view()
 
-        # Build set of nets connected to the filtered component
+        # Build set of nets connected to the filtered component. Shared with the
+        # CLI via net_queries (#537) so the same reference cannot select
+        # different nets here than it does in route.py. 'substring' keeps this
+        # box's long-standing behaviour -- a bare "U1" still narrows to U1, U10,
+        # U100 as you type -- while a token carrying * ? or [ is now honoured as
+        # a glob instead of being searched for literally.
         component_nets = set()
         component_net_ids = set()
         if component_filter:
-            for net_id, pads in self.pcb_data.pads_by_net.items():
-                for pad in pads:
-                    if pad.component_ref and component_filter.lower() in pad.component_ref.lower():
-                        net_info = self.pcb_data.nets.get(net_id)
-                        if net_info and net_info.name:
-                            component_nets.add(net_info.name)
-                            component_net_ids.add(net_id)
-                        break
+            from net_queries import nets_for_components
+            _sel = nets_for_components(self.pcb_data, [component_filter],
+                                       match='substring')
+            component_nets = set(_sel.net_names)
+            component_net_ids = set(_sel.net_ids)
 
         # Filter by text and component
         filtered_nets = []

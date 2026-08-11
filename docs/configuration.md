@@ -38,7 +38,17 @@ python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net-(*CLK*)" "Net-(
 
 # Route all nets on a component (auto-excludes GND/VCC/VDD/unconnected)
 python py_router/route.py in.kicad_pcb out.kicad_pcb --component U1
+
+# Several components at once, with fnmatch globs. A BARE reference is exact,
+# so U1 does not also select U10; write U1* if that is what you want.
+python py_router/route.py in.kicad_pcb out.kicad_pcb --component U3 U4 "J1*"
 ```
+
+`--component` takes one or more references and errors out (naming the offender,
+with a did-you-mean) if any of them matches no footprint — routing the remaining
+subset after a typo would quietly do the wrong thing. Because it accepts several
+values it consumes the tokens after it, so pass the output via `--output` or put
+`--component` last.
 
 ### Ripping Pre-Existing Routes
 

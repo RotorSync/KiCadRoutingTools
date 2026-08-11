@@ -220,8 +220,24 @@ def parse_command(argv):
                 i += 1
             lists[a] = vals
         elif a == '--component':
-            step['component'] = argv[i + 1]
-            i += 2
+            # #537: --component now takes one or more references. One converts
+            # to the `component` key the plan executor already understands;
+            # several are kept under `components` so the step is not silently
+            # narrowed to the first footprint (the GUI list control that
+            # consumes them is still to come -- see the issue's Tier 2).
+            # Stop at a positional board file: bga_fanout/qfn_fanout still take
+            # a SINGLE --component, and `--component U9 out.kicad_pcb` must not
+            # swallow the output path out of step['_files'] (which pruning uses).
+            vals = []
+            i += 1
+            while (i < len(argv) and not argv[i].startswith('--')
+                   and not argv[i].endswith('.kicad_pcb')):
+                vals.append(argv[i])
+                i += 1
+            if len(vals) == 1:
+                step['component'] = vals[0]
+            elif vals:
+                step['components'] = vals
         elif a.startswith('--'):
             # unknown flag: skip it and any non-flag values (still carried
             # generically when it maps to a control name)

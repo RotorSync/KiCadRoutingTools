@@ -2592,22 +2592,22 @@ class RoutingDialog(wx.Dialog):
         self.ai_tab.set_model_value(None)
         self.ai_tab.set_effort_value(None)
 
-        # Reset component dropdowns to "All"
-        if self.net_panel.component_dropdown:
-            self.net_panel.component_dropdown.SetSelection(0)
-            self.net_panel._component_filter_value = ""
-        if self.swappable_net_panel.component_dropdown:
-            self.swappable_net_panel.component_dropdown.SetSelection(0)
-            self.swappable_net_panel._component_filter_value = ""
-        if self.differential_tab.pair_panel.component_dropdown:
-            self.differential_tab.pair_panel.component_dropdown.SetSelection(0)
-            self.differential_tab.pair_panel._component_filter_value = ""
-        if self.fanout_tab.net_panel.component_dropdown:
-            self.fanout_tab.net_panel.component_dropdown.SetSelection(0)
-            self.fanout_tab.net_panel._component_filter_value = ""
-        if self.planes_tab.net_panel.component_dropdown:
-            self.planes_tab.net_panel.component_dropdown.SetSelection(0)
-            self.planes_tab.net_panel._component_filter_value = ""
+        # Reset component filters to "All".
+        #
+        # #537: this used to clear the dropdown and the programmatic value ONLY
+        # inside `if panel.component_dropdown:`, and never touched the Comp
+        # Filter TEXT BOX at all. A param the reset misses leaks between plan
+        # steps (CLAUDE.md), so a step that set a component filter silently
+        # scoped every later step to the same footprint.
+        for _panel in (self.net_panel, self.swappable_net_panel,
+                       self.differential_tab.pair_panel,
+                       self.fanout_tab.net_panel,
+                       self.planes_tab.net_panel):
+            if getattr(_panel, 'component_dropdown', None):
+                _panel.component_dropdown.SetSelection(0)
+            if getattr(_panel, 'component_filter_ctrl', None):
+                _panel.component_filter_ctrl.SetValue("")
+            _panel._component_filter_value = ""
 
         # Reset differential tab
         self.differential_tab.diff_pair_width_check.SetValue(False)

@@ -7,6 +7,7 @@ MPS (Maximum Planar Subset) net ordering.
 from __future__ import annotations
 
 import math
+import difflib
 import fnmatch
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict, Set, Union
@@ -731,6 +732,164 @@ def expand_net_patterns(pcb_data: PCBData, patterns: List[str],
                           f"{_did_you_mean(pattern)}")
 
     return result
+
+
+# --------------------------------------------------------- component filters
+
+_REF_GLOB_CHARS = '*?['
+
+
+@dataclass
+class ComponentNetSelection:
+    """What :func:`nets_for_components` resolved a set of ref patterns to.
+
+    `unmatched_patterns` is the field that exists so a typo'd reference can be
+    reported as such: selecting nets by component and getting nothing back is
+    otherwise indistinguishable from "this component has no routable nets".
+    """
+    net_names: List[str]           # selected nets, sorted
+    net_ids: List[int]             # the same nets as ids, sorted
+    matched_refs: List[str]        # footprint references the patterns matched
+    unmatched_patterns: List[str]  # patterns that matched no footprint at all
+    excluded_names: List[str]      # nets dropped by `exclude_patterns`, sorted
+
+
+def component_ref_matches(ref: str, pattern: str, match: str = 'glob') -> bool:
+    """Match one footprint reference against one pattern.
+
+    Both modes send a pattern carrying an fnmatch metacharacter (``*?[``) through
+    fnmatch. They differ only in what a BARE token means:
+
+      ``glob``       bare token is an EXACT reference -- 'U1' does NOT match 'U10'
+      ``substring``  bare token is a substring        -- 'U1' matches 'U10', 'U100'
+
+    ``substring`` is the GUI Comp Filter's long-standing behaviour, and it is the
+    right reading there: it narrows a visible list as you type. ``glob`` is what
+    the CLI has always done, where the filter decides what copper gets placed and
+    a silently-included extra footprint is a real hazard.
+
+    Matching is case-insensitive, via ``fnmatchcase`` on upper-cased inputs so a
+    pattern resolves identically on Windows (where plain ``fnmatch`` case-folds
+    against the platform rules) and on POSIX (where it does not).
+    """
+    if not ref or not pattern:
+        return False
+    ref_u, pat_u = ref.upper(), pattern.upper()
+    if any(c in pattern for c in _REF_GLOB_CHARS):
+        return fnmatch.fnmatchcase(ref_u, pat_u)
+    if match == 'substring':
+        return pat_u in ref_u
+    return ref_u == pat_u
+
+
+def suggest_component_refs(refs, pattern: str, limit: int = 3) -> str:
+    """" (did you mean 'U3', 'U4'?)" for a reference pattern that matched nothing."""
+    if not pattern or not refs:
+        return ""
+    close = difflib.get_close_matches(pattern.upper(),
+                                      {r.upper(): r for r in refs}, n=limit, cutoff=0.6)
+    by_upper = {r.upper(): r for r in refs}
+    names = [by_upper[c] for c in close if c in by_upper]
+    return f" (did you mean {', '.join(repr(n) for n in names)}?)" if names else ""
+
+
+def nets_for_components(pcb_data: PCBData,
+                        patterns,
+                        *,
+                        mode: str = 'any',
+                        match: str = 'glob',
+                        exclude_patterns: Optional[List[str]] = None
+                        ) -> ComponentNetSelection:
+    """Nets touching the footprints matched by `patterns` (issue #537).
+
+    This is the single implementation of "the nets of these components". It
+    replaced four divergent ones that disagreed about the only question that
+    matters -- whether 'U1' also means U10, U12 and U100 -- so the same request
+    selected different nets on the CLI, in the GUI, and in a replayed plan.
+    Callers pick the policy explicitly via `match` (see
+    :func:`component_ref_matches`) instead of inheriting whichever loop they
+    happened to be written next to.
+
+    mode:
+      ``any``       net has >=1 pad on a matched footprint (the historical
+                    behaviour of every call site, and the default)
+      ``between``   net reaches >=2 DISTINCT matched footprints -- the wires
+                    running between the selected parts. Note this is stricter
+                    than ">=2 matched pads": two pads of one net on a single
+                    matched footprint run between nothing.
+      ``internal``  EVERY pad of the net is on a matched footprint -- the nets
+                    that do not leave the selected block. Beware that this is
+                    near-empty for a SINGLE selected footprint, which reads as a
+                    bug rather than as the correct answer it is.
+
+    `exclude_patterns` (e.g. POWER_NET_EXCLUSION_PATTERNS) drops matching nets
+    from the result and reports them in `excluded_names`, so a caller can say
+    what it dropped rather than dropping it silently.
+    """
+    if isinstance(patterns, str):
+        patterns = [patterns]
+    patterns = [p.strip() for p in (patterns or []) if p and p.strip()]
+    if mode not in ('any', 'between', 'internal'):
+        raise ValueError(f"nets_for_components: bad mode {mode!r}")
+    if match not in ('glob', 'substring'):
+        raise ValueError(f"nets_for_components: bad match {match!r}")
+    if not patterns:
+        return ComponentNetSelection([], [], [], [], [])
+
+    # Every reference the board carries. `footprints` is the authoritative list,
+    # but pads carry `component_ref` independently, so union both -- a pattern is
+    # only "matched nothing" if it misses everything a pad could name.
+    all_refs = set(pcb_data.footprints or {})
+    for pads in pcb_data.pads_by_net.values():
+        for pad in pads:
+            if pad.component_ref:
+                all_refs.add(pad.component_ref)
+
+    matched_refs: Set[str] = set()
+    unmatched: List[str] = []
+    for pattern in patterns:
+        hits = {r for r in all_refs if component_ref_matches(r, pattern, match)}
+        if hits:
+            matched_refs |= hits
+        else:
+            unmatched.append(pattern)
+
+    selected: List[Tuple[str, int]] = []
+    for net_id, pads in pcb_data.pads_by_net.items():
+        if net_id <= 0 or not pads:
+            continue
+        on_matched = [p for p in pads if p.component_ref in matched_refs]
+        if not on_matched:
+            continue
+        if mode == 'between':
+            if len({p.component_ref for p in on_matched}) < 2:
+                continue
+        elif mode == 'internal':
+            if len(on_matched) != len(pads):
+                continue
+        net = pcb_data.nets.get(net_id)
+        name = (net.name if net and net.name else None) or pads[0].net_name
+        if name:
+            selected.append((name, net_id))
+
+    excluded: List[str] = []
+    if exclude_patterns:
+        kept = []
+        for name, net_id in selected:
+            if any(p and fnmatch.fnmatchcase(name.upper(), p.upper())
+                   for p in exclude_patterns):
+                excluded.append(name)
+            else:
+                kept.append((name, net_id))
+        selected = kept
+
+    return ComponentNetSelection(
+        net_names=sorted({n for n, _ in selected}),
+        net_ids=sorted({i for _, i in selected}),
+        matched_refs=sorted(matched_refs),
+        unmatched_patterns=unmatched,
+        excluded_names=sorted(set(excluded)),
+    )
 
 
 def identify_power_nets(pcb_data: PCBData,

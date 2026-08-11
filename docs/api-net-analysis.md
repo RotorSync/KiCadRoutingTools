@@ -39,6 +39,62 @@ print(expand_net_patterns(pcb, ['*lvds_rx1*']))
 print(expand_net_patterns(pcb, ['*lvds*', '!*_N']))   # only the P sides
 ```
 
+#### `nets_for_components`
+
+```python
+nets_for_components(pcb_data, patterns, *, mode='any', match='glob',
+                    exclude_patterns=None) -> ComponentNetSelection
+```
+
+The nets touching a set of footprints — the engine behind `route.py --component`
+and the GUI's Comp Filter, shared so a reference cannot select different nets on
+the two fronts.
+
+`match` decides what a **bare** token means; a token carrying `*`, `?` or `[` is
+an fnmatch glob under both. Matching is case-insensitive.
+
+| `match` | bare token | `'U1'` matches `U10`? | used by |
+|---|---|---|---|
+| `'glob'` | exact reference | no | CLI, plan replay |
+| `'substring'` | substring | yes | GUI Comp Filter (narrow-as-you-type) |
+
+`mode` decides which nets of the matched footprints are selected:
+
+| `mode` | selects |
+|---|---|
+| `'any'` | net has ≥1 pad on a matched footprint (default) |
+| `'between'` | net reaches ≥2 **distinct** matched footprints — the wires between the selected parts |
+| `'internal'` | **every** pad of the net is on a matched footprint — nets that never leave the block |
+
+`'internal'` is near-empty for a single selected footprint; that is the correct
+answer, not a bug. `exclude_patterns` (e.g. `POWER_NET_EXCLUSION_PATTERNS`) drops
+matching nets and reports them in `excluded_names`, so a caller can say what it
+dropped instead of dropping it silently.
+
+Returns a `ComponentNetSelection` with `net_names`, `net_ids`, `matched_refs`,
+`unmatched_patterns` and `excluded_names`. `unmatched_patterns` exists so a
+typo'd reference is reportable: selecting by component and getting nothing back
+is otherwise indistinguishable from "this part has no routable nets".
+
+```python
+from kicad_parser import parse_kicad_pcb
+from net_queries import nets_for_components
+
+pcb = parse_kicad_pcb('kicad_files/splitflap_driver.kicad_pcb')
+
+sel = nets_for_components(pcb, ['U1'])
+print(len(sel.net_names), sel.matched_refs)          # U1 only -- not U10
+
+sel = nets_for_components(pcb, ['U*'])               # glob: the whole U series
+print(len(sel.matched_refs), 'footprints')
+
+sel = nets_for_components(pcb, ['U1'], match='substring')
+print(sel.matched_refs)                              # ['U1', 'U10'] -- GUI behaviour
+
+sel = nets_for_components(pcb, ['U1', 'ZZ99'])
+print(sel.unmatched_patterns)                        # ['ZZ99'] -- a typo, reportable
+```
+
 ### `identify_power_nets`
 
 ```python
