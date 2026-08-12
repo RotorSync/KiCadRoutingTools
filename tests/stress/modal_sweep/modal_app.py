@@ -632,11 +632,13 @@ def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,se
                 existing.add(p)
     except Exception as ex:
         print(f"  resume: results-volume listing FAILED ({ex}); running all tasks")
+    skipped = []
     if existing:
-        before = len(tasks)
-        tasks = [t for t in tasks
-                 if f"{t['arm']}/{t['set']}__{t['board']}.json" not in existing]
-        print(f"  resume: {before - len(tasks)} tasks already have rows on "
+        def _row_path(t):
+            return f"{t['arm']}/{t['set']}__{t['board']}.json"
+        skipped = [t for t in tasks if _row_path(t) in existing]
+        tasks = [t for t in tasks if _row_path(t) not in existing]
+        print(f"  resume: {len(skipped)} tasks already have rows on "
               f"the volume -- skipped; {len(tasks)} to run")
 
     # .map() BLOCKS until its tier drains, so calling the two tiers in sequence
@@ -746,6 +748,30 @@ def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,se
         results += run_tasks(rest)
     else:
         results = run_tasks(tasks)
+
+    # Merge the RESUMED rows back in. Skipping a banked task saves the compute;
+    # dropping its row from the output silently shrinks the comparison instead,
+    # and every downstream consumer (rank_arms' pairing, check_sweep's
+    # arms-differ check, the summary table) reads the output json alone. A
+    # resumed sweep therefore used to report a partial corpus as if it were the
+    # whole one -- worst on the boards a relaunch is most likely to follow, the
+    # slow ones that got banked before an interruption.
+    if skipped:
+        recovered, lost = [], []
+        for t in skipped:
+            path = f"{t['arm']}/{t['set']}__{t['board']}.json"
+            try:
+                r = json.loads(b"".join(results_vol.read_file(path)))
+                recovered.append(r[0] if isinstance(r, list) else r)
+            except Exception as ex:
+                lost.append(f"{path} ({ex})")
+        results += recovered
+        print(f"  resume: merged {len(recovered)} banked row(s) into the result")
+        if lost:
+            # Loud: an unreadable banked row is a HOLE in the comparison, and a
+            # hole reads as "this board was never run" rather than as an error.
+            print(f"  WARNING: {len(lost)} banked row(s) unreadable, so those "
+                  f"(arm, board) pairs are MISSING from this result: {lost[:5]}")
 
     summary = sl.summarize(results)
     summary["wall_clock_s"] = round(time.time() - started, 1)
