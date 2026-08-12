@@ -13,6 +13,7 @@ Usage:
     python3 tests/run_all.py pad via         # only files whose name matches a term
     python3 tests/run_all.py --list          # print classification, run nothing
     python3 tests/run_all.py --timeout 300   # per-test timeout (seconds)
+    python3 tests/run_all.py -j 1            # serial (default runs 4 in parallel)
 
 A test is "integration" (slow; skipped by --fast) if its source shells out --
 it imports run_utils or uses subprocess. That auto-classification needs no
@@ -60,6 +61,8 @@ def main():
     ap.add_argument('filters', nargs='*', help='only run files whose name contains a term')
     ap.add_argument('--fast', action='store_true', help='skip integration (CLI/board) tests')
     ap.add_argument('--timeout', type=float, default=600.0, help='per-test timeout in seconds')
+    ap.add_argument('--jobs', '-j', type=int, default=4,
+                    help='run this many tests in parallel (default 4; 1 = serial)')
     ap.add_argument('--list', action='store_true', help='list tests + classification, run nothing')
     args = ap.parse_args()
 
@@ -76,14 +79,32 @@ def main():
               f'({sum(is_integration(f) for f in tests)} integration).')
         return 0
 
-    passed, failed, skipped, timed_out = [], [], [], []
-    t0 = time.time()
+    passed, failed, skipped = [], [], []
+    to_run = []
     for f in tests:
         name = os.path.basename(f)
         if args.fast and is_integration(f):
             skipped.append(name)
             print(f'SKIP  {name}  (integration; --fast)')
             continue
+        to_run.append(f)
+
+    jobs = max(1, args.jobs)
+    if jobs > 1 and to_run:
+        # Pre-build the shared fixture boards ONCE, serially, before fanning
+        # out: fixture_boards.ensure() builds into a shared kicad_files/ path,
+        # and two workers racing the same build would collide (the module's
+        # own __main__ exists exactly for this pre-build).
+        try:
+            subprocess.run([sys.executable,
+                            os.path.join(TESTS_DIR, 'fixture_boards.py')],
+                           cwd=ROOT, capture_output=True, text=True,
+                           timeout=args.timeout)
+        except subprocess.TimeoutExpired:
+            print('WARN  fixture pre-build timed out; continuing')
+
+    def run_one(f):
+        name = os.path.basename(f)
         try:
             # `text=True` alone decodes with the LOCALE default (cp1252 on
             # Windows) and raises UnicodeDecodeError in the reader thread the
@@ -97,37 +118,51 @@ def main():
                                encoding='utf-8', errors='replace',
                                timeout=args.timeout)
         except subprocess.TimeoutExpired:
-            failed.append(name)
-            timed_out.append(name)
-            print(f'TIME  {name}  (timeout after {args.timeout:.0f}s -- NOT a '
-                  f'failed assertion; re-run it alone before treating it as one)')
-            continue
+            return name, None, (f'TIME  {name}  (timeout after '
+                                f'{args.timeout:.0f}s -- NOT a failed '
+                                f'assertion; re-run it alone before treating '
+                                f'it as one)')
         if r.returncode == 0:
+            return name, True, f'PASS  {name}'
+        tail = (r.stdout or '')[-800:] + (r.stderr or '')[-800:]
+        return name, False, f'FAIL  {name}  (exit {r.returncode})\n{tail}'
+
+    timed_out = []
+
+    def record(name, ok, line):
+        if ok is None:
+            timed_out.append(name)
+        elif ok:
             passed.append(name)
-            print(f'PASS  {name}')
         else:
             failed.append(name)
-            tail = (r.stdout or '')[-800:] + (r.stderr or '')[-800:]
-            print(f'FAIL  {name}  (exit {r.returncode})\n{tail}')
+        print(line)
+
+    t0 = time.time()
+    if jobs == 1:
+        for f in to_run:
+            record(*run_one(f))
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=jobs) as ex:
+            for name, ok, line in ex.map(run_one, to_run):
+                record(name, ok, line)
 
     dt = time.time() - t0
-    # A TIMEOUT AND A FAILED ASSERTION ARE DIFFERENT FACTS, and the summary used
-    # to render them identically -- one `failed` list, one "N failed" count. A
-    # clean baseline run reported "336 passed, 8 failed"; two of those eight
-    # were slow integration tests that PASS when run alone with headroom, and
-    # finding that out took a manual re-run of each. Anyone comparing a run
-    # against a recorded baseline needs the split, because a timeout moving in
-    # or out of the list is a machine-speed fact, not a code fact.
-    _real = [n for n in failed if n not in timed_out]
-    print(f'\n{len(passed)} passed, {len(_real)} failed, '
+    # A TIMEOUT AND A FAILED ASSERTION ARE DIFFERENT FACTS: a timeout moving
+    # in or out of the list is a machine-speed fact, not a code fact, so it
+    # gets its own bucket and never joins the exit-deciding `failed` count on
+    # its own -- but the exit code still goes non-zero, because an unfinished
+    # suite is not a green one.
+    print(f'\n{len(passed)} passed, {len(failed)} failed, '
           f'{len(timed_out)} timed out, {len(skipped)} skipped in {dt:.1f}s')
-    if _real:
-        print('Failed: ' + ', '.join(_real))
+    if failed:
+        print('Failed: ' + ', '.join(failed))
     if timed_out:
         print(f'Timed out at {args.timeout:.0f}s: ' + ', '.join(timed_out))
         print('  A timeout is not evidence of a broken test. Re-run each one '
               'alone (or raise --timeout) before recording it as a failure.')
-    return 1 if failed else 0
+    return 1 if (failed or timed_out) else 0
 
 
 if __name__ == '__main__':
