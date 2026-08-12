@@ -1465,18 +1465,35 @@ def get_chip_pad_positions(pcb_data: PCBData, net_ids: List[int], min_pads: int 
     pad -- the future escape needs the surrounding space, so routing is
     discouraged near it.
 
-    Two gates (both matter):
-    - Package type, not raw pad count. Historically ANY footprint with
-      >= min_pads pads was a "chip", which made 4-pad capacitors and big
-      pin-header/edge connectors pseudo-stub emitters; a many-pin connector
-      concentrates many distinct nets' fields in one small area (exactly the
-      open-field stacking the #584 sum experiment measured), yet its coarse
-      pads need no escape protection. Only escape-constrained fine-pitch
-      packages qualify.
-    - No stub attached. Once fanout (or routing) has attached same-net copper
-      to the pad -- a segment end or a via inside the pad's reach -- the REAL
-      stub endpoint is the proximity signal (get_stub_endpoints) and the pad
-      proxy retires; keeping it would defend space the escape already used.
+    #585 item 8 added two gates. Both are now OFF by default and independently
+    re-enablable, because together they measurably cost connectivity and the
+    bisect pinned the COMMIT, not either gate individually:
+
+    - `KICAD_FINE_PITCH_PSEUDO_STUBS` -- emit only for BGA/QFN/QFP. Introduced
+      to stop 4-pad capacitors and dense connectors emitting fields, reasoning
+      that "coarse pads need no escape protection". But the field protects
+      ARRIVAL as much as escape, and without it nets could not REACH multi-pin
+      headers: spartan6_6layer went 2 -> 7 incomplete nets across this commit,
+      three of four casualties on 24-pin headers H1/H5/H7 (package 'OTHER'),
+      and the same class took cubesat_backplane's /H2-* nets.
+
+      Its stacking rationale is also weaker than it looks under the shipped
+      default: composition is MAX (KICAD_PROXIMITY_SUM unset), so N overlapping
+      fields cost the max, not the sum -- a connector cannot inflate cost by
+      concentration unless an opt-in sum/zoned/softcap mode is selected.
+
+    - `KICAD_PSEUDO_STUB_RETIRE` -- drop the proxy once same-net copper reaches
+      the pad, on the grounds that the real stub endpoint takes over as the
+      proximity signal. Plausible, but it retires on ANY attachment: a header
+      pad with one stub on it stops defending the corridor the REST of its
+      route still needs.
+
+    Kept as knobs rather than reverted because the trade is real and
+    board-dependent: a "re-admit dense connectors" variant regressed glasgow
+    while helping lpddr4 (#585 item 8). The likely missing piece is MAGNITUDE,
+    not membership -- the radius is a flat STUB_PROXIMITY_RADIUS (2.0mm)
+    whether the pad is a 0.5mm BGA ball or a 2.54mm header pin, so re-admitted
+    headers got a BGA-sized keep-out. A pitch-scaled radius would settle it.
 
     Args:
         pcb_data: PCB data
@@ -1486,19 +1503,18 @@ def get_chip_pad_positions(pcb_data: PCBData, net_ids: List[int], min_pads: int 
     Returns:
         List of (x, y, layer) tuples for chip pad positions.
     """
+    import env_knobs
     from kicad_parser import detect_package_type
 
     net_id_set = set(net_ids)
 
-    # Fine-pitch chip packages only (sorted for deterministic output order).
-    # A "qualify by >=8 distinct routable nets too" variant (re-admitting
-    # IO-bank headers / dense connectors) was A/B'd and NOT adopted: it
-    # regressed glasgow's default-mode result back to baseline while only
-    # marginally helping lpddr4 -- see #585 item 8 for the grid.
+    # Sorted for deterministic output order.
+    _fine_only = env_knobs.FINE_PITCH_PSEUDO_STUBS
     chip_refs = sorted(
         ref for ref, footprint in pcb_data.footprints.items()
         if footprint.pads and len(footprint.pads) >= min_pads
-        and detect_package_type(footprint) in ('BGA', 'QFN', 'QFP'))
+        and (not _fine_only
+             or detect_package_type(footprint) in ('BGA', 'QFN', 'QFP')))
 
     if not chip_refs:
         return []
@@ -1530,7 +1546,7 @@ def get_chip_pad_positions(pcb_data: PCBData, net_ids: List[int], min_pads: int 
             if not pad_layer:
                 continue
             # Skip pads that already have an escape (stub end / via in reach)
-            pts = attach_points.get(pad.net_id)
+            pts = attach_points.get(pad.net_id) if env_knobs.PSEUDO_STUB_RETIRE else None
             if pts:
                 reach = max(pad.size_x, pad.size_y) / 2.0 + 0.05
                 reach_sq = reach * reach

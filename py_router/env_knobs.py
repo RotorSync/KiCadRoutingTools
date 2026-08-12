@@ -122,6 +122,14 @@ def refresh() -> None:
     # 2-layer board is unchanged and a 6-layer board discounts 3x) -- a via
     # escape near the stub still needs track room on other layers, just less
     # of it. KICAD_STUB_LAYER_M overrides M (>= 1).
+    # #585 item 8's two pseudo-stub gates, split so each can be A/B'd alone.
+    # Both OFF = the pre-f785a7e behaviour (any footprint with >= min_pads pads
+    # emits, and the proxy never retires). The commit shipped both ON and cost
+    # connectivity on header-heavy boards (spartan6 2 -> 7 incomplete nets,
+    # cubesat's /H2-*); the bisect pinned the commit, not either gate, so they
+    # are separable here rather than reverted together.
+    g['FINE_PITCH_PSEUDO_STUBS'] = _opt_in('KICAD_FINE_PITCH_PSEUDO_STUBS')
+    g['PSEUDO_STUB_RETIRE'] = _opt_in('KICAD_PSEUDO_STUB_RETIRE')
     g['STUB_LAYER_AWARE'] = _opt_in('KICAD_STUB_LAYER_AWARE')
     g['STUB_LAYER_M'] = _f('KICAD_STUB_LAYER_M', 0.0)  # 0 = auto n_layers/2
     # (#585 item 2 -- excluding plane-destined nets' stubs -- was DECIDED
