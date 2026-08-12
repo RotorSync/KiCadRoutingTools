@@ -1805,6 +1805,10 @@ def _underpad_shrink_rescue(footprint, pcb_data, grid, layers, up_kw,
                 if p.net_name in still}
         if not keys:
             break
+        _pcb = up_kw.get('progress_callback')
+        if _pcb:
+            _pcb(0, 0, f"BGA fanout {getattr(footprint, 'reference', '?')}: "
+                       f"fab-floor rescue of {len(still)} dropped ball(s)...")
         n_seg0, n_via0 = len(pcb_data.segments), len(pcb_data.vias)
         try:
             for t in tracks:
@@ -1865,7 +1869,13 @@ def _generate_bga_fanout_core(footprint: Footprint,
                         _single_pass: bool = False,
                         # #581: > 0 forbids via-in-pad (underpad escapes run
                         # dog-bone); None auto-reads the .kicad_pro record.
-                        same_net_pad_clearance: Optional[float] = None) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+                        same_net_pad_clearance: Optional[float] = None,
+                        # progress_callback(current, total, label): forwarded
+                        # into every recursion (rotated frame, #129 passes,
+                        # the underpad retry) and the underpad engine's
+                        # per-ball loops, so the GUI status line moves during
+                        # the minutes a large array takes. None = silent.
+                        progress_callback=None) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """
     Generate BGA fanout tracks for a footprint.
 
@@ -1908,6 +1918,12 @@ def _generate_bga_fanout_core(footprint: Footprint,
     """
     if layers is None:
         layers = ["F.Cu", "B.Cu"]
+
+    _ref_prog = getattr(footprint, 'reference', '?')
+
+    def _prog(what):
+        if progress_callback:
+            progress_callback(0, 0, f"BGA fanout {_ref_prog}: {what}")
 
     # #581: an active (> 0) same-net pad via clearance forbids via-in-pad, so
     # an under-pad escape runs in DOG-BONE mode (#128: via in the diagonal
@@ -1960,7 +1976,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
             via_size=via_size, via_drill=via_drill, check_for_previous=check_for_previous,
             no_inner_top_layer=no_inner_top_layer, escape_method=escape_method,
             grid_step=grid_step, layer_costs=layer_costs,
-            same_net_pad_clearance=same_net_pad_clearance)
+            same_net_pad_clearance=same_net_pad_clearance,
+            progress_callback=progress_callback)
         back_transform_results(tracks, vias_to_add, vias_to_remove, back)
         return tracks, vias_to_add, vias_to_remove, failed_nets
 
@@ -2056,7 +2073,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
                 via_drill=via_drill, no_inner_top_layer=no_inner_top_layer,
                 escape_method=escape_method, grid_step=grid_step,
                 layer_costs=layer_costs,
-                same_net_pad_clearance=same_net_pad_clearance)
+                same_net_pad_clearance=same_net_pad_clearance,
+                progress_callback=progress_callback)
             # Coverage gate (issue #367): the legacy single pass runs FIRST.
             # When it escapes every ball there is nothing for prioritization
             # to improve -- reshuffling the escape competition only butterflies
@@ -2082,6 +2100,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
             _tw = max(track_width, _ff(_ncu)['track_width'])
             _all_keys = {(_p.global_x, _p.global_y) for _p in footprint.pads}
             _extra_keys = {(_p.global_x, _p.global_y) for _p in _extras}
+            _prog("escape priority pass 1 (one ball per net)...")
             tracks, vias_to_add, vias_to_remove, failed_nets = _generate_bga_fanout_core(
                 footprint, pcb_data, check_for_previous=check_for_previous,
                 _pad_filter=_all_keys - _extra_keys, **_kw)
@@ -2101,6 +2120,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
                         x=_v['x'], y=_v['y'], size=_v['size'], drill=_v['drill'],
                         layers=_v.get('layers') or ['F.Cu', 'B.Cu'],
                         net_id=_v['net_id']))
+                _prog(f"escape priority pass 2 ({len(_extras)} extra ball(s))...")
                 t2, v2, vr2, f2 = _generate_bga_fanout_core(
                     footprint, pcb_data, check_for_previous=True,
                     _pad_filter=_extra_keys, _ignore_prefanned=True, **_kw)
@@ -2242,6 +2262,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
             _bare = [_p for _p in _extras
                      if _p.net_name in _escaped_names and not _has_copper(_p)]
             if _bare:
+                _prog(f"strapping {len(_bare)} unescaped extra ball(s)...")
                 _n_strap, _still = _strap_unescaped_extras(
                     footprint, pcb_data, _bare, tracks, vias_to_add,
                     _tw, clearance, via_size, via_drill, grid_step)
@@ -2398,6 +2419,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
             dogbone=(escape_method == 'dogbone'),
             no_via_in_pad=(same_net_pad_clearance is not None
                            and same_net_pad_clearance > 0),  # #581
+            # Rides _up_kw so the shrink rescue's re-run reports too.
+            progress_callback=progress_callback,
         )
         tracks, vias_to_add, failed_nets = generate_underpad_escape(
             footprint, pcb_data, grid, layers, **_up_kw)
@@ -2566,6 +2589,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
     install_layer_clearances(obstacle_cfg, None, None, pcb_data)  # #498
     obstacle_layer_map = build_layer_map(obstacle_cfg.layers)
     print(f"  Building pad-aware obstacle map ({len(fanned_net_ids)} fanned nets excluded)...")
+    _prog("building obstacle map...")
     obstacles = build_base_obstacle_map(
         pcb_data, obstacle_cfg,
         nets_to_route=list(fanned_net_ids),
@@ -2728,6 +2752,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
             print(f"  Reassigned {reassigned_count} on-channel pads to adjacent channels")
 
         # Smart layer assignment (keeps diff pairs together, avoids existing tracks)
+        _prog(f"assigning layers to {len(routes)} route(s)...")
         assign_layers_smart(routes, layers, track_width, clearance, diff_pair_gap, existing_tracks, no_inner_top_layer)
 
         # Calculate jog length = distance from BGA edge to first pad row/col
@@ -2758,6 +2783,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
 
             # Try to resolve collisions by reassigning layers or using alternate channels
             print(f"  Attempting to resolve collisions...")
+            _prog(f"resolving {collision_count} collision(s)...")
             # Build net_id -> net_name mapping for error reporting
             net_id_to_name = {r.net_id: r.pad.net_name for r in routes if r.pad.net_name}
             reassigned, failed_nets = resolve_collisions(routes, tracks, layers, track_width, clearance, diff_pair_gap,
@@ -2805,6 +2831,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
             print(f"    {layer}: {count} routes")
 
         # Via management: add vias where needed, remove unnecessary ones
+        _prog("placing vias...")
         vias_to_add, vias_to_remove, via_blocked_routes = manage_vias(
             routes, pcb_data, layers[0], via_size, via_drill, clearance
         )
@@ -2991,6 +3018,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
         print(f"\n  Channel escape dropped {len(failed_nets)} ball(s) "
               f"({', '.join(failed_nets)}) - retrying with the under-pad grid "
               f"escape (issue #288)...")
+        _prog(f"channel escape dropped {len(failed_nets)} ball(s) - "
+              f"retrying under-pad...")
         up_tracks, up_vias, up_vias_rm, up_failed = _generate_bga_fanout_core(
             footprint, pcb_data, net_filter=net_filter,
             diff_pair_patterns=diff_pair_patterns, layers=underpad_layers,
@@ -3005,7 +3034,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
             no_inner_top_layer=no_inner_top_layer, escape_method='underpad',
             grid_step=grid_step, _pad_filter=_pad_filter,
             _ignore_prefanned=_ignore_prefanned, _single_pass=_single_pass,
-            same_net_pad_clearance=same_net_pad_clearance)
+            same_net_pad_clearance=same_net_pad_clearance,
+            progress_callback=progress_callback)
         if len(up_failed) < len(failed_nets):
             print(f"  Under-pad escape wins: {len(failed_nets)} -> "
                   f"{len(up_failed)} dropped ball(s); using it")
@@ -3246,7 +3276,8 @@ def generate_bga_fanout(footprint: Footprint,
         grid_step=grid_step, layer_costs=layer_costs,
         _pad_filter=_pad_filter, _ignore_prefanned=_ignore_prefanned,
         _single_pass=_single_pass,
-        same_net_pad_clearance=same_net_pad_clearance)
+        same_net_pad_clearance=same_net_pad_clearance,
+        progress_callback=progress_callback)
 
     LAST_PLANE_DROP_REPORT.clear()
     _knob = (env_knobs.FANOUT_PLANE_DROP or '').strip().lower()

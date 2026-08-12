@@ -1768,6 +1768,10 @@ class FanoutTab(wx.Panel):
                 max_passes=int(fanout_config.get('cap_max_passes', 30)),
                 cap_prefix=fanout_config.get('cap_prefix', 'C,R'),
                 allow_rotations=fanout_config.get('cap_allow_rotation', True),
+                # Runs ON the UI thread; _fanout_status forces the repaint so
+                # the label moves per cap visit instead of freezing (#130).
+                progress_callback=(lambda c, t, m:
+                                   self._fanout_status(f"{m} ({c}/{t})" if t else m)),
             )
 
             for p in result.get('placements', []):

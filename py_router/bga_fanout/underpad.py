@@ -311,7 +311,12 @@ def generate_underpad_escape(footprint: Footprint,
                              # #581: forbid ANY via overlapping its own pad --
                              # dog-bone/off-pad sites only; balls with no legal
                              # off-pad site fail honestly.
-                             no_via_in_pad: bool = False
+                             no_via_in_pad: bool = False,
+                             # progress_callback(current, total, label); the
+                             # per-ball A* is where a large array's minutes go,
+                             # so each escape loop reports its count through
+                             # here (GUI status line). None = silent (CLI).
+                             progress_callback=None
                              ) -> Tuple[List[Dict], List[Dict], List[str]]:
     """Route BGA signal balls to the boundary under the pad field.
 
@@ -429,6 +434,16 @@ def generate_underpad_escape(footprint: Footprint,
                    and ((p.global_x, p.global_y) in only_pad_keys
                         if only_pad_keys is not None
                         else p.net_id not in fanned_net_ids)]
+
+    _ref = getattr(footprint, 'reference', '?')
+
+    def _prog(cur, tot, what):
+        if progress_callback:
+            progress_callback(cur, tot, f"Under-pad escape {_ref}: {what}")
+
+    # The occupancy grid + keep-out carving below is itself seconds on a
+    # dense array; say so before going quiet.
+    _prog(0, 0, f"gridding {len(signal_pads)} ball(s)...")
 
     # Region: BGA bbox plus margin so routes can exit past the boundary.
     # Grid resolution defaults to ~1/32 of the pitch - fine enough to place the
@@ -1534,7 +1549,8 @@ def generate_underpad_escape(footprint: Footprint,
     # pads under them" strategy.
     coupled_targets.sort(key=lambda t: depth(t[1]) + depth(t[2]))
     remaining_pairs = []
-    for base, pp, nn in coupled_targets:
+    for _ci, (base, pp, nn) in enumerate(coupled_targets):
+        _prog(_ci + 1, len(coupled_targets), f"coupled pair {base}")
         if (try_coupled(pp, nn, [(top_idx, False)])
                 or try_coupled_endon(pp, nn, [(top_idx, False)])):
             n_coupled += 1
@@ -1555,10 +1571,12 @@ def generate_underpad_escape(footprint: Footprint,
     inner_pads = list(single_pads)
     if nl > 1:
         inner_pads = []
-        for p in sorted(single_pads, key=depth):
+        _order = sorted(single_pads, key=depth)
+        for _si, p in enumerate(_order):
             if depth(p) > outer_depth:
                 inner_pads.append(p)
                 continue
+            _prog(_si + 1, len(_order), f"top-layer escape {p.net_name}")
             sx, sy = occ.cell(p.global_x, p.global_y)
             home = home_of(p)
             carve = _carve_foreign([(p.global_x, p.global_y)], home, {p.net_id})
@@ -1721,7 +1739,8 @@ def generate_underpad_escape(footprint: Footprint,
     # already reserved, so it just joins the inner single balls).
     remaining_pairs.sort(key=lambda t: depth(t[1]) + depth(t[2]), reverse=True)
     inner_cands = [(L, True) for L in range(nl) if L != top_idx]
-    for base, pp, nn in remaining_pairs:
+    for _ci, (base, pp, nn) in enumerate(remaining_pairs):
+        _prog(_ci + 1, len(remaining_pairs), f"inner coupled pair {base}")
         if (try_coupled(pp, nn, inner_cands)
                 or try_coupled_endon(pp, nn, inner_cands)):
             n_coupled += 1
@@ -1763,7 +1782,8 @@ def generate_underpad_escape(footprint: Footprint,
     # claims the scarce central space before the shallower balls).
     n_db_esc = 0
     inner_pads.sort(key=depth, reverse=True)
-    for p in inner_pads:
+    for _ii, p in enumerate(inner_pads):
+        _prog(_ii + 1, len(inner_pads), f"inner escape {p.net_name}")
         # Dog-bone route (#128): the via already has a reserved gap site; the
         # inner run starts AT the via, so the ball-grid position stays free.
         # Any failure falls through to the classic via-in-pad A* (the classic
