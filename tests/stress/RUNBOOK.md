@@ -718,16 +718,47 @@ boards" and "which commit broke connectivity".
    Comparing a cloud row against a locally-graded baseline measures the GRADER:
    it once reported "DRC +40 worse" when the truth was "-37 better". Harvest
    re-grades the kept boards locally by default (`--no-local-regrade` opts out).
-3. **Compare arms only on boards that replayed an IDENTICAL chain** (same
-   `nets_total` and step count). A short chain grades artificially WELL, because
+3. **Compare arms only on boards that replayed an IDENTICAL chain** — same step
+   count and same final board. A short chain grades artificially WELL, because
    nets its missing steps never attempted are not counted as incomplete.
-4. **A two-board result is not a default change.** Per-board run-to-run spread is
+
+   **Do NOT pair on `nets_total` as reported.** It is not a property of the
+   board: check_connected's "Checking N routed nets" counts only nets that ended
+   up with COPPER, so a net an arm fails entirely drops out of that arm's total
+   and reappears under "Unrouted nets". The same board therefore reports a
+   different total per arm (butterstick: 310/314/316/316 on an identical 16-step
+   chain — all 317 once the unrouted are added back), and pairing on it discards
+   exactly the boards WITH unrouted nets, i.e. the congested ones. On the #590
+   sets 1-10 wave that dropped 40 of 103 boards carrying ~85% of all the
+   incompleteness and turned a -48 result into -8. `ab_replay_grade._completion`
+   now reports the corrected census; `rank_arms.gradeable_nets` reconstructs it
+   for rows banked earlier. Known residual: a one-pad net that picks up plane
+   copper counts as routed but never appears among the unrouted (which grades
+   >=2-pad nets), leaving a rare +-1 that only a census emitted by
+   check_connected itself can fix.
+4. **Score connectivity on `nets_incomplete` ALONE.** It already counts unrouted
+   PLUS connectivity-issue nets. `nets_incomplete + conn` (which the sweep's
+   screened-stage gate used to score) counts every connectivity-issue net twice,
+   pricing "failed to connect a net" at double "lost the net's copper entirely".
+   Grading on `conn` alone is wrong from the other side: a net that loses its
+   copper LEAVES the conn bucket for the unrouted one, so conn can fall while the
+   board got worse. `rank_arms.py <sweep.json>` applies all of this — paired
+   verdict per arm, W/L, DRC reported beside it rather than folded in.
+5. **A two-board result is not a default change.** Per-board run-to-run spread is
    +-2..3 nets (the same config measured 7 and 5 on consecutive runs), so single
    boards cannot resolve anything smaller. Two defaults were shipped and reverted
    on this exact mistake.
-5. **Arm names carry the source commit**, so resuming re-uses banked rows only
+6. **Arm names carry the source commit**, so resuming re-uses banked rows only
    within one commit; the launch-time name is recorded in `<out>/arm.txt` because
    HEAD moves between stages when another session commits.
+7. **A manifest records COMMANDS, not the recording shell's environment.** A
+   `KICAD_*` export the driving agent set as a workaround replays as unset --
+   the recorded timing/outcome can then be unreproducible at ANY commit.
+   core64_logic (#625) "replayed in 4 min historically": the original run only
+   terminated because its agent exported `KICAD_DYNAMIC_ITERATIONS=0` mid-run;
+   every replay ran the shipped default and burned the 3 h cap. Before trusting
+   a recorded run as a baseline, grep its `transcript.jsonl` for `KICAD_`
+   exports (the timing sidecar cannot tell you).
 
 ## Multi-set waves & release sign-off
 

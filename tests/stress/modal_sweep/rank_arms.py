@@ -30,7 +30,7 @@ into one number hides exactly that trade.
 
 Read the W/L column, not just the total: per-board run-to-run spread is +-2..3
 nets, so a total driven by one or two boards is noise wearing a verdict's
-clothes (RUNBOOK rule 4 -- two defaults have been shipped and reverted on it).
+clothes (RUNBOOK rule 5 -- two defaults have been shipped and reverted on it).
 """
 from __future__ import annotations
 
