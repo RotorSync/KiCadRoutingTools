@@ -893,7 +893,16 @@ class AITab(wx.Panel):
                           "(or Load a plan file).", "AI",
                           wx.OK | wx.ICON_WARNING)
             return
+        # Default to <boardname>.plan.json next to the board.
+        default_dir = ""
+        default_file = "plan.json"
+        if self.board_filename:
+            default_dir = os.path.dirname(os.path.abspath(self.board_filename))
+            stem = os.path.splitext(os.path.basename(self.board_filename))[0]
+            if stem:
+                default_file = f"{stem}.plan.json"
         with wx.FileDialog(self, "Save plan (.json)", wildcard="*.json",
+                           defaultDir=default_dir, defaultFile=default_file,
                            style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
             if dlg.ShowModal() != wx.ID_OK:
                 return
