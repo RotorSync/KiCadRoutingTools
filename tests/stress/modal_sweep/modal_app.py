@@ -686,12 +686,23 @@ def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,se
                 except Exception as ex:
                     print(f"  gate: banked row {hit} unreadable ({ex})")
         killed = set()
-        base = per.get("baseline")
+        # The control arm is the first one declaring no overrides -- NOT the
+        # literal name "baseline". Arms files deliberately name it something
+        # unique (baseline590, base590h) because the results volume banks rows
+        # BY ARM NAME, so a prior campaign's "baseline" rows at another commit
+        # satisfy the resume check and poison the anchor. Matching on the name
+        # meant every such wave silently ran with the gate disabled.
+        base_arm = next((s["name"] for s in arm_specs
+                         if not s.get("env") and not s.get("defaults")
+                         and not s.get("manifest_sed")), None)
+        base = per.get(base_arm) if base_arm else None
         if not base:
-            print("  gate: no baseline screen rows at all -- gate skipped")
+            print(f"  gate: no control-arm screen rows "
+                  f"({base_arm or 'no control arm declared'}) -- gate skipped")
         else:
+            print(f"  gate: control arm is {base_arm}")
             for a_, sc in sorted(per.items()):
-                if a_ == "baseline":
+                if a_ == base_arm:
                     continue
                 both = set(sc) & set(base)
                 if len(both) < max(3, len(base) // 2):
