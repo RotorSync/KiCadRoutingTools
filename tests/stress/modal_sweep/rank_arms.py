@@ -73,7 +73,14 @@ def gradeable_nets(r: dict):
     exactly `nets_incomplete - conn`.
     """
     tot, ni, cn = r.get("nets_total"), r.get("nets_incomplete"), r.get("conn")
-    if tot is None or ni is None or cn is None:
+    if tot is None:
+        return None
+    # Already on the corrected basis -- adding the unrouted nets again would
+    # inflate it, and in a result set spanning the fix that shows up as arms
+    # "disagreeing" about a board that in fact matched.
+    if r.get("nets_total_basis") == "gradeable":
+        return tot
+    if ni is None or cn is None:
         return None
     return tot + max(0, ni - cn)
 

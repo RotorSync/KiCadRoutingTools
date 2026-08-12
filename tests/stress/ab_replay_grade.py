@@ -298,7 +298,16 @@ def grade(pcb, clearance, baseline=None):
     ctext = conn.stdout + conn.stderr
     total, incomplete, pct = _completion(ctext)
     out = {"drc": _drc_count(drc.stdout + drc.stderr), "conn": _conn_count(ctext),
-           "nets_total": total, "nets_incomplete": incomplete, "completion_pct": pct}
+           "nets_total": total, "nets_incomplete": incomplete, "completion_pct": pct,
+           # Which BASIS nets_total is on, so a consumer never has to guess (or
+           # sniff the commit) when a result set spans a grader change. It cost
+           # two boards to learn: a sweep whose rows were graded partly before
+           # and partly after the census fix had consumers reconstruct the
+           # corrected total from rows that already carried it, double-counting
+           # the unrouted nets and dropping those boards as "different chains".
+           # "routed" (the pre-fix basis) never appears here -- only a legacy
+           # row lacking the key is on it.
+           "nets_total_basis": "gradeable"}
     out.update(_kicad_grade(pcb, clearance, baseline=baseline))
     # raw `drc` is the full check_drc count (NOT baseline-subtracted -- it counts
     # pre-existing input copper like edge-connector pads and chassis-ground pours).
