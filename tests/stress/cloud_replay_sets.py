@@ -420,6 +420,16 @@ def arm_name(args) -> str:
     # HEAD's arm and reports "no result rows" for a run that is right there.
     if getattr(args, "arm", ""):
         return args.arm
+    # A previous stage's arm name, recorded at RUN time. HEAD moves -- a
+    # concurrent session committing between `run` and `harvest` silently
+    # renamed the arm this driver looks for, and harvest then reported "no
+    # result rows" for a wave sitting complete on the volume. The launch-time
+    # name is the truth; recompute only when there is nothing recorded.
+    stamp = Path(args.out).expanduser() / "arm.txt"
+    if stamp.exists():
+        name = stamp.read_text().strip()
+        if name:
+            return name
     return f"{args.label}_{git_sha()}"
 
 
@@ -427,6 +437,10 @@ def stage_run(args, sets, stress, plan):
     arm = arm_name(args)
     arms_file = Path(args.workdir) / "arms.replay.json"
     arms_file.parent.mkdir(parents=True, exist_ok=True)
+    # Record the arm name so later stages find it even if HEAD has moved.
+    out_dir = Path(args.out).expanduser()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "arm.txt").write_text(arm + "\n")
     # One arm, no overrides: a straight replay of whatever the image ships.
     # keep_artifacts rides the ARM SPEC because that is what gets serialized into
     # the task -- a Modal container does not inherit this shell's environment, so
