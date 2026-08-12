@@ -55,10 +55,23 @@ fi
 CRATE=$(git -C "$WT" show "$SHA:rust_router/Cargo.toml" | grep -m1 '^version' | tr -d ' "' | cut -d= -f2)
 if [ -n "$CRATE" ]; then
   REL=$CRATE; [ "$CRATE" = "0.20.1" ] && REL=0.20.2
-  sed -i '' "s|python3 build_router.py\"|python3 build_router.py --tag v$REL\"|" \
-      "$WT/tests/stress/modal_sweep/modal_app.py" 2>/dev/null || \
-  sed -i "s|python3 build_router.py\"|python3 build_router.py --tag v$REL\"|" \
-      "$WT/tests/stress/modal_sweep/modal_app.py"
+  # Rewrite the image's build step with python, not sed: the retry wrapper
+  # contains parentheses and &&, which BSD sed rejects ("invalid command code"),
+  # and a FAILED rewrite is silent -- the arm then builds unpinned and dies 30
+  # minutes later. Retry the download 3x: GitHub intermittently drops the asset
+  # fetch ("Remote end closed connection without response") and build_router's
+  # fallback is a source build the image cannot do (no Rust toolchain).
+  python3 - "$WT/tests/stress/modal_sweep/modal_app.py" "$REL" <<'PYEOF' || exit 1
+import sys, pathlib
+p, rel = pathlib.Path(sys.argv[1]), sys.argv[2]
+t = p.read_text()
+old = 'f"cd {REPO} && python3 build_router.py"'
+br = f"python3 build_router.py --tag v{rel}"
+new = f'f"cd {{REPO}} && ({br} || (sleep 20 && {br}) || (sleep 60 && {br}))"'
+if old not in t:
+    sys.exit(f"build step not found in {p} -- refusing to launch unpinned")
+p.write_text(t.replace(old, new, 1))
+PYEOF
   echo "  $TAG: crate $CRATE -> image build pinned to release v$REL"
 fi
 echo "  $TAG: engine=$SHA harness=HEAD  (py_router matches $SHA)"
