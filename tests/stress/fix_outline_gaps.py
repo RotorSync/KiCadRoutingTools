@@ -27,7 +27,10 @@ import os
 import re
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+sys.path.insert(0, _REPO)
+sys.path.insert(0, os.path.join(_REPO, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(_REPO, 'py_tools'))  # #522
 
 _NUM = r'(-?[\d.]+)'
 

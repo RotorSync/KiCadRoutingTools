@@ -27,7 +27,10 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+_REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, _REPO)
+sys.path.insert(0, os.path.join(_REPO, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(_REPO, 'py_tools'))  # #522
 
 
 def render_final_snapshot(board_path, size=1600, per_layer=True, quiet=False):
