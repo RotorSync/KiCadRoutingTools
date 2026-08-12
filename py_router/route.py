@@ -378,6 +378,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 pcb_data=None,
                 net_clearances: dict = None,
                 keep_input_copper: bool = False,
+                smoothing: bool = False,
                 rip_existing_nets: Optional[List[str]] = None,
                 force_reroute: bool = False,
                 # The RAW --nets patterns as the operator typed them, BEFORE
@@ -2377,10 +2378,25 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                           | {id(v) for v in all_swap_vias}),
         keep_input_copper=keep_input_copper,
         progress_callback=progress_callback,
-        # #536: octolinear smoothing is ON by default for the single-ended
-        # route step (both fronts share this call). Diff pairs and the plane
-        # file-round-trip keep it off; KICAD_SMOOTH_ROUTE=0/1 overrides.
-        smooth=True)
+        # #536 octolinear smoothing: OFF unless the caller asks for it.
+        #
+        # It used to be ON for every route step, and that is what broke
+        # connectivity on multi-step chains. Smoothing ITSELF is safe -- run
+        # alone on a finished board it collapsed 900 spans for -214mm of copper
+        # and degraded ZERO nets, its per-net gate reverting anything that would
+        # strand a pad. The damage was second-order: every chain step is its own
+        # route.py invocation, so smoothing fired at the end of EACH one (8x on
+        # cubesat_backplane), and the LATER steps then ripped, re-routed and
+        # rescued against copper an earlier step had already collapsed. The
+        # staircase slack those passes rely on was gone, so nets that used to
+        # recover shipped in two pieces (cubesat 4 -> 10 incomplete nets,
+        # spartan6 0 -> 12; both recover with smoothing off).
+        #
+        # The docstring's "callers gate this to the final chain step" was
+        # therefore unachievable: no single invocation can know it is last. So
+        # the CALLER says so -- --smoothing on the last route step only.
+        # KICAD_SMOOTH_ROUTE=0/1 still overrides either way.
+        smooth=smoothing)
     dead_end_input_segments = _cleanup.input_strip_segments if _cleanup is not None else []
 
     # Issue #220: the output writer copies the INPUT FILE verbatim, then adds the
@@ -4681,6 +4697,13 @@ For differential pair routing, use route_diff.py:
                         help="Enable MPS-aware layer swaps to reduce crossing conflicts")
     parser.add_argument("--mps-segment-intersection", action="store_true",
                         help="Force MPS to use segment intersection for crossing detection (auto-enabled when no BGA chips)")
+    parser.add_argument("--smoothing", action="store_true",
+                        help="Collapse grid-A* staircase micro-jogs into octolinear "
+                             "shortcuts (#536) at the end of this route step. OFF by "
+                             "default and intended for the LAST route step of a chain: "
+                             "smoothing removes the staircase slack that a later step's "
+                             "rip-up/rescue needs, so enabling it mid-chain costs "
+                             "connectivity. KICAD_SMOOTH_ROUTE=0/1 overrides.")
     parser.add_argument("--keep-input-copper", action="store_true",
                         help="Treat the input file's own copper as read-only: the post-route "
                              "cleanup passes (dead-end sweep, orphan islands, cycle/redundancy "
@@ -5038,6 +5061,7 @@ For differential pair routing, use route_diff.py:
                 clearance=args.clearance,
                 net_clearances=_net_clearances_map,
                 keep_input_copper=args.keep_input_copper,
+                smoothing=args.smoothing,
                 via_size=args.via_size,
                 via_drill=args.via_drill,
                 grid_step=args.grid_step,

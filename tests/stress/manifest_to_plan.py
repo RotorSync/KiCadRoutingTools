@@ -103,6 +103,7 @@ LIST_FLAGS = {
 }
 BOOL_FLAGS = {
     '--rip-blocker-nets': 'rip_blocker_nets',
+    '--smoothing': 'smoothing',   # #536, last-route-step only
     '--add-gnd-vias': 'add_gnd_vias',
     # #485: route_planes area via stitching toggles (planes-tab checkboxes
     # stitch_vias / stitch_edge_fence, applied by the plan executor's

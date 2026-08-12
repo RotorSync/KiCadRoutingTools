@@ -1314,6 +1314,19 @@ class RoutingDialog(wx.Dialog):
             "only this run's new copper is cleaned")
         options_inner.Add(self.keep_input_copper, 0, wx.ALL, 3)
 
+        # #536 octolinear smoothing. OFF by default and meant for the LAST route
+        # step: it removes the staircase slack a later step's rip-up/rescue
+        # relies on, so enabling it mid-chain costs connectivity (cubesat
+        # 4 -> 10 incomplete nets, spartan6 0 -> 12). Named `smoothing` to match
+        # the engine param, so the AI plan executor can set it by name.
+        self.smoothing = wx.CheckBox(options_scroll, label="Smooth routes (last step only)")
+        self.smoothing.SetToolTip(
+            "Collapse staircase micro-jogs into octolinear shortcuts at the end of this "
+            "route step (#536). Leave OFF for intermediate steps: later rip-up/rescue "
+            "passes need the staircase slack, and smoothing mid-chain loses nets. "
+            "Turn it on for the FINAL route step to shorten copper for free.")
+        options_inner.Add(self.smoothing, 0, wx.ALL, 3)
+
         # Layer costs
         layer_sizer = wx.BoxSizer(wx.HORIZONTAL)
         layer_sizer.Add(wx.StaticText(options_scroll, label="Layer Costs:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
@@ -2540,6 +2553,7 @@ class RoutingDialog(wx.Dialog):
         self.mps_reverse_rounds.SetValue(False)
         self.mps_layer_swap.SetValue(False)
         self.keep_input_copper.SetValue(False)
+        self.smoothing.SetValue(False)
         self.mps_segment_intersection.SetValue(False)
         self.bus_enabled.SetValue(False)
         self.bus_detection_radius.SetValue(defaults.BUS_DETECTION_RADIUS)
@@ -2845,6 +2859,7 @@ class RoutingDialog(wx.Dialog):
             'mps_reverse_rounds': self.mps_reverse_rounds.GetValue(),
             'mps_layer_swap': self.mps_layer_swap.GetValue(),
             'keep_input_copper': self.keep_input_copper.GetValue(),
+            'smoothing': self.smoothing.GetValue(),
             'force_reroute': self.force_reroute.GetValue(),
             'mps_segment_intersection': self.mps_segment_intersection.GetValue(),
             # Bus routing options
@@ -3315,6 +3330,7 @@ class RoutingDialog(wx.Dialog):
                     mps_reverse_rounds=config.get('mps_reverse_rounds', False),
                     mps_layer_swap=config.get('mps_layer_swap', False),
                     keep_input_copper=config.get('keep_input_copper', False),
+                    smoothing=config.get('smoothing', False),
                     mps_segment_intersection=config.get('mps_segment_intersection', False),
                     bus_enabled=config.get('bus_enabled', False),
                     bus_detection_radius=config.get('bus_detection_radius', 5.0),
