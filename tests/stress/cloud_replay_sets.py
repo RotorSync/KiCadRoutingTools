@@ -432,9 +432,22 @@ def stage_run(args, sets, stress, plan):
     # the task -- a Modal container does not inherit this shell's environment, so
     # exporting the env var here would keep nothing (the smoke run proved it:
     # chain green, zero artifacts).
-    arms_file.write_text(json.dumps(
-        [{"name": arm, "keep_artifacts": True,
-          "note": "cloud replay, no parameter overrides"}], indent=1))
+    spec = {"name": arm, "keep_artifacts": True,
+            "note": "cloud replay"}
+    # Overrides ride the ARM SPEC, not this shell's environment -- a Modal
+    # container inherits nothing from here (that is what silently kept zero
+    # artifacts on the first run). `env` reaches the routing subprocess;
+    # `defaults` patches routing_defaults.py inside the container's own repo
+    # copy, which is how a module constant is A/B'd without shared git state.
+    if getattr(args, "env", None):
+        spec["env"] = dict(kv.split("=", 1) for kv in args.env)
+    if getattr(args, "defaults", None):
+        spec["defaults"] = {k: float(v) if v.replace(".", "", 1).lstrip("-").isdigit() else v
+                            for k, v in (kv.split("=", 1) for kv in args.defaults)}
+    if spec.get("env") or spec.get("defaults"):
+        spec["note"] = f"cloud replay; env={spec.get('env')} defaults={spec.get('defaults')}"
+    arms_file.write_text(json.dumps([spec], indent=1))
+    print(f"  arm spec: {json.dumps(spec)}")
 
     env = dict(os.environ)
     env.setdefault("KICAD_SWEEP_NAME", f"kicad-replay-{sets[0]}-{sets[-1]}")
@@ -774,6 +787,11 @@ def main():
                     help="do NOT re-grade harvested boards locally. The cloud has no "
                          "kicad-cli, so its drc_real falls back to raw DRC; leaving that "
                          "un-regraded compares graders, not engines.")
+    ap.add_argument("--env", action="append", default=[], metavar="K=V",
+                    help="KICAD_* knob for this arm, repeatable. Rides the arm spec "
+                         "(containers do not inherit this shell's environment).")
+    ap.add_argument("--defaults", action="append", default=[], metavar="NAME=VALUE",
+                    help="routing_defaults.py constant to patch for this arm, repeatable.")
     ap.add_argument("--jobs", type=int, default=6,
                     help="sets re-graded in parallel during the baseline stage (default 6)")
     ap.add_argument("--workdir", default="", help="scratch for the generated arms file")
