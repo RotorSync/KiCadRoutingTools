@@ -1314,17 +1314,15 @@ class RoutingDialog(wx.Dialog):
             "only this run's new copper is cleaned")
         options_inner.Add(self.keep_input_copper, 0, wx.ALL, 3)
 
-        # #536 octolinear smoothing. OFF by default and meant for the LAST route
-        # step: it removes the staircase slack a later step's rip-up/rescue
-        # relies on, so enabling it mid-chain costs connectivity (cubesat
-        # 4 -> 10 incomplete nets, spartan6 0 -> 12). Named `smoothing` to match
-        # the engine param, so the AI plan executor can set it by name.
-        self.smoothing = wx.CheckBox(options_scroll, label="Smooth routes (last step only)")
+        # #536 octolinear smoothing, ON by default (the brief OFF default was
+        # refuted by a 147-board A/B: ON 129 incomplete nets vs OFF 149). Named
+        # `smoothing` to match the engine param, so the plan executor sets it by name.
+        self.smoothing = wx.CheckBox(options_scroll, label="Smooth routes")
+        self.smoothing.SetValue(True)
         self.smoothing.SetToolTip(
-            "Collapse staircase micro-jogs into octolinear shortcuts at the end of this "
-            "route step (#536). Leave OFF for intermediate steps: later rip-up/rescue "
-            "passes need the staircase slack, and smoothing mid-chain loses nets. "
-            "Turn it on for the FINAL route step to shorten copper for free.")
+            "Collapse staircase micro-jogs into octolinear shortcuts (#536). ON by "
+            "default: a 147-board corpus A/B measured smoothing ON at 129 incomplete "
+            "nets and OFF at 149, so disabling it costs ~20 nets. Uncheck only to A/B.")
         options_inner.Add(self.smoothing, 0, wx.ALL, 3)
 
         # Layer costs
@@ -2554,7 +2552,7 @@ class RoutingDialog(wx.Dialog):
         self.mps_reverse_rounds.SetValue(False)
         self.mps_layer_swap.SetValue(False)
         self.keep_input_copper.SetValue(False)
-        self.smoothing.SetValue(False)
+        self.smoothing.SetValue(True)
         self.mps_segment_intersection.SetValue(False)
         self.bus_enabled.SetValue(False)
         self.bus_detection_radius.SetValue(defaults.BUS_DETECTION_RADIUS)
@@ -3340,7 +3338,7 @@ class RoutingDialog(wx.Dialog):
                     mps_reverse_rounds=config.get('mps_reverse_rounds', False),
                     mps_layer_swap=config.get('mps_layer_swap', False),
                     keep_input_copper=config.get('keep_input_copper', False),
-                    smoothing=config.get('smoothing', False),
+                    smoothing=config.get('smoothing', True),
                     mps_segment_intersection=config.get('mps_segment_intersection', False),
                     bus_enabled=config.get('bus_enabled', False),
                     bus_detection_radius=config.get('bus_detection_radius', 5.0),

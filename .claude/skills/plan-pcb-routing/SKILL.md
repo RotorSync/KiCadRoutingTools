@@ -1068,30 +1068,29 @@ route from `board_step2b.kicad_pcb`.)
 This produces the **canonical final board** — the finalize's `JSON_ORACLE`
 line reports the KiCad-verified plane-completion verdict for the run.
 
-#### `--smoothing`: ON for the LAST route step, OFF for every earlier one
+#### Octolinear smoothing is ON by default -- leave it alone
 
-`route.py --smoothing` collapses grid-A* staircase micro-jogs into octolinear
-shortcuts (#536). It is **off by default and must be added to exactly one
-invocation: the final `route.py` of the whole chain** — after every retry, after
-the impedance pass, after anything that still re-routes. If Step 2 is the last
-routing you do, put it there; if you run retries afterwards, move it to the last
-retry instead.
+`route.py` collapses grid-A* staircase micro-jogs into octolinear shortcuts
+(#536) at the end of every route step, by default. Do not disable it, and do not
+try to schedule it onto one step.
 
-Do NOT set it on an intermediate step. Smoothing is safe *in itself* — measured
-on a finished board it collapsed 900 spans for −214 mm of copper and degraded
-**zero** nets, because its per-net gate reverts any span whose removal would
-strand a pad. The damage is second-order: each chain step is its own `route.py`
-process, so smoothing mid-chain hands the NEXT step pre-collapsed copper, and
-that step's rip-up/rescue passes need the staircase slack to recover a blocked
-net. Measured cost of smoothing every step (the old default):
+It was briefly defaulted OFF, on the theory that smoothing mid-chain removes the
+staircase slack a later step's rip-up/rescue needs. Two boards supported that
+(cubesat_backplane 10 -> 2 incomplete nets, spartan6_6layer 12 -> 7). A corpus
+A/B refuted it -- one commit, 147 boards, only the knob differing:
 
-| board | incomplete nets, smoothing every step | last step only / off |
+| smoothing | incomplete nets | per board |
 |---|---|---|
-| `cubesat_backplane` | 10 | 2 |
-| `spartan6_6layer` | 12 | 4 |
+| ON (default) | 129 | 0.878 |
+| OFF | 149 | 1.014 |
 
-So it is free copper-shortening at the end, and a net-loser in the middle.
-(`KICAD_SMOOTH_ROUTE=0/1` overrides the flag either way, for A/B.)
+Turning it off costs ~20 nets: 34 boards worse, 10 better. Even spartan6, one of
+the two boards that motivated the change, measures ON=6 OFF=9 there. So
+smoothing is not starving the later passes -- on balance it helps them,
+presumably by freeing corridor space.
+
+`--no-smoothing` exists for A/B only (`KICAD_SMOOTH_ROUTE=0/1` overrides either
+way). The lesson worth carrying: a two-board result is not a default change.
 
 ### Step 3: Finalize Planes — GND Return Vias + Stitching (only if wanted)
 Skip this step entirely on low-speed boards. When the speed analysis calls
@@ -1593,7 +1592,7 @@ For difficult boards, consider tuning these parameters:
 | Parameter | Default | Effect |
 |-----------|---------|--------|
 | `--max-ripup 3` | 3 | Max blocking nets to rip up and retry |
-| `--smoothing` | off | Octolinear staircase smoothing (#536). **LAST route step only** — mid-chain it costs connectivity |
+| `--no-smoothing` | (smoothing is ON) | Disables #536 octolinear smoothing. A/B only — OFF measured ~20 nets worse across 147 boards |
 | `--max-iterations 200000` | 200000 | A* base budget per route (self-extends to 1e7 while progressing — #529; don't tune) |
 | `--heuristic-weight 2.3` | 2.3 | >1 = faster but may miss tight routes, 1.0 = optimal. 2.3 = the corpus dose-response peak (#586: 1.7 and 3.0 both worse; do not "tune it down for quality" -- measured, not intuitive) |
 | `--via-cost 75` | 75 | Higher = fewer vias, longer paths; lower (25) for BGA escape. 75 = corpus-measured default (#586); 25 measured WORSE overall |

@@ -378,7 +378,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 pcb_data=None,
                 net_clearances: dict = None,
                 keep_input_copper: bool = False,
-                smoothing: bool = False,
+                smoothing: bool = True,
                 rip_existing_nets: Optional[List[str]] = None,
                 force_reroute: bool = False,
                 # The RAW --nets patterns as the operator typed them, BEFORE
@@ -2378,24 +2378,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                           | {id(v) for v in all_swap_vias}),
         keep_input_copper=keep_input_copper,
         progress_callback=progress_callback,
-        # #536 octolinear smoothing: OFF unless the caller asks for it.
+        # #536 octolinear smoothing: ON by default (restored).
         #
-        # It used to be ON for every route step, and that is what broke
-        # connectivity on multi-step chains. Smoothing ITSELF is safe -- run
-        # alone on a finished board it collapsed 900 spans for -214mm of copper
-        # and degraded ZERO nets, its per-net gate reverting anything that would
-        # strand a pad. The damage was second-order: every chain step is its own
-        # route.py invocation, so smoothing fired at the end of EACH one (8x on
-        # cubesat_backplane), and the LATER steps then ripped, re-routed and
-        # rescued against copper an earlier step had already collapsed. The
-        # staircase slack those passes rely on was gone, so nets that used to
-        # recover shipped in two pieces (cubesat 4 -> 10 incomplete nets,
-        # spartan6 0 -> 12; both recover with smoothing off).
+        # It was briefly defaulted OFF on the theory that smoothing mid-chain
+        # starves a later step's rip-up/rescue of staircase slack -- two boards
+        # (cubesat_backplane 10->2, spartan6_6layer 12->7) supported that. The
+        # CORPUS refutes it: a direct A/B at one commit over 147 boards, with
+        # only this knob differing, put smoothing ON at 129 incomplete nets and
+        # OFF at 149 -- turning it off costs ~20, worsening 34 boards and helping
+        # 10. Even spartan6, one of the two boards that motivated the change,
+        # measures ON=6 OFF=9 there.
         #
-        # The docstring's "callers gate this to the final chain step" was
-        # therefore unachievable: no single invocation can know it is last. So
-        # the CALLER says so -- --smoothing on the last route step only.
-        # KICAD_SMOOTH_ROUTE=0/1 still overrides either way.
+        # So smoothing is not starving the later passes; on balance it helps
+        # them, presumably by freeing corridor space. --no-smoothing disables it
+        # per step; KICAD_SMOOTH_ROUTE=0/1 still overrides either way.
         smooth=smoothing)
     dead_end_input_segments = _cleanup.input_strip_segments if _cleanup is not None else []
 
@@ -4697,13 +4693,14 @@ For differential pair routing, use route_diff.py:
                         help="Enable MPS-aware layer swaps to reduce crossing conflicts")
     parser.add_argument("--mps-segment-intersection", action="store_true",
                         help="Force MPS to use segment intersection for crossing detection (auto-enabled when no BGA chips)")
-    parser.add_argument("--smoothing", action="store_true",
-                        help="Collapse grid-A* staircase micro-jogs into octolinear "
-                             "shortcuts (#536) at the end of this route step. OFF by "
-                             "default and intended for the LAST route step of a chain: "
-                             "smoothing removes the staircase slack that a later step's "
-                             "rip-up/rescue needs, so enabling it mid-chain costs "
-                             "connectivity. KICAD_SMOOTH_ROUTE=0/1 overrides.")
+    _sm = parser.add_mutually_exclusive_group()
+    _sm.add_argument("--smoothing", dest="smoothing", action="store_true", default=True,
+                     help="Collapse grid-A* staircase micro-jogs into octolinear shortcuts "
+                          "(#536). ON by default -- measured worth ~20 incomplete nets "
+                          "across 147 corpus boards versus off.")
+    _sm.add_argument("--no-smoothing", dest="smoothing", action="store_false",
+                     help="Disable #536 octolinear smoothing for this step. "
+                          "KICAD_SMOOTH_ROUTE=0/1 overrides either way.")
     parser.add_argument("--keep-input-copper", action="store_true",
                         help="Treat the input file's own copper as read-only: the post-route "
                              "cleanup passes (dead-end sweep, orphan islands, cycle/redundancy "
