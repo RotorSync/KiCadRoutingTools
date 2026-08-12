@@ -35,6 +35,25 @@ import cli_banner  # noqa: E402
 BOARD = os.path.join(ROOT, 'kicad_files', 'splitflap_driver.kicad_pcb')
 
 
+def _argparse_takes_dash_values():
+    """Python 3.14's argparse accepts a dash-prefixed value in an nargs='+'
+    list, so on those interpreters `--nets -12V` is not an error at all -- the
+    failure the hint annotates cannot be provoked. Probed, not version-gated:
+    what matters is the behaviour, not the number."""
+    p = argparse.ArgumentParser(prog='probe', add_help=False)
+    p.add_argument('--nets', nargs='+')
+    try:
+        return p.parse_args(['--nets', '+12V', '-12V']).nets == ['+12V', '-12V']
+    except SystemExit:
+        return False
+
+
+_HINT_NOT_PROVOCABLE = _argparse_takes_dash_values()
+_SKIP_REASON = ("this Python's argparse accepts dash-prefixed values in "
+                "nargs='+' lists (3.14+), so the error the hint annotates "
+                "never happens here; the hint is inert by design")
+
+
 class DashHintUnitTest(unittest.TestCase):
 
     def setUp(self):
@@ -49,11 +68,13 @@ class DashHintUnitTest(unittest.TestCase):
                 self.p.parse_args(argv)
         return buf.getvalue()
 
+    @unittest.skipIf(_HINT_NOT_PROVOCABLE, _SKIP_REASON)
     def test_hint_fires_on_a_leading_dash_value(self):
         out = self._err(['--nets', '+12V', '-12V'])
         self.assertIn("'-12V'", out)
         self.assertIn('--nets=-12V', out)
 
+    @unittest.skipIf(_HINT_NOT_PROVOCABLE, _SKIP_REASON)
     def test_the_real_argparse_error_still_prints(self):
         out = self._err(['--nets', '+12V', '-12V'])
         self.assertIn('unrecognized arguments', out,
@@ -84,6 +105,7 @@ class DashHintCliTest(unittest.TestCase):
                                os.path.join(ROOT, 'py_router', 'route.py')] + args,
                               capture_output=True, text=True, timeout=600)
 
+    @unittest.skipIf(_HINT_NOT_PROVOCABLE, _SKIP_REASON)
     def test_route_py_emits_the_hint_and_still_exits_2(self):
         r = self._run([BOARD, os.path.join(ROOT, '_no_such_out.kicad_pcb'),
                        '--nets', '+12V', '-12V'])
