@@ -24,6 +24,11 @@ def set_ui_status_mirror(fn):
     _UI_STATUS_MIRROR = fn
 
 
+# Timestamp of the last UI-category event-loop pump (see ui_thread_status):
+# throttles the YieldFor so a fast message burst stays cheap.
+_LAST_UI_YIELD = 0.0
+
+
 def ui_thread_status(status_text, progress_bar, message):
     """Show `message` for work running ON the wx main thread.
 
@@ -47,26 +52,41 @@ def ui_thread_status(status_text, progress_bar, message):
         it must not recurse.
       * Fully guarded: a status update must never break the work it reports.
 
+    macOS caveat that shaped this function: wxWindow.Update() CANNOT force a
+    synchronous repaint on wxOSX/Cocoa -- painting only happens when the run
+    loop turns (the wx docs call this out; Andy's report confirms it: labels
+    set + Refresh + Update during a blocking fanout never appeared on screen).
+    So after invalidating the label(s), this pumps the event loop for the
+    UI/paint CATEGORY ONLY, throttled: wx.EventLoopBase.YieldFor(
+    wx.EVT_CATEGORY_UI) dispatches paint/geometry events and RE-QUEUES
+    everything else -- user input (a stray click, the dialog's close button)
+    and timers (the plan executor's poll) are NOT dispatched, so nothing can
+    re-enter a handler mid-run. This is deliberately narrower than the plain
+    wx.Yield() the tabs use once at run start.
+
     Escape hatch: KICAD_NO_UI_STATUS_REPAINT=1 sets the label but never forces
-    the paint. The status then lags on blocking phases (the pre-fix behaviour),
-    which is strictly cosmetic -- so if a repaint from inside the plugin ever
-    destabilises a KiCad build, the label is the thing to give up, not the run.
+    the paint or pumps the loop. The status then lags on blocking phases (the
+    pre-fix behaviour), which is strictly cosmetic -- so if a repaint from
+    inside the plugin ever destabilises a KiCad build, the label is the thing
+    to give up, not the run.
     """
-    global _IN_UI_STATUS
+    global _IN_UI_STATUS, _LAST_UI_YIELD
     if _IN_UI_STATUS:
         return
     try:
         import os
+        import time
         import wx
         if not wx.IsMainThread():
             wx.CallAfter(ui_thread_status, status_text, progress_bar, message)
             return
         _IN_UI_STATUS = True
         try:
+            no_repaint = os.environ.get('KICAD_NO_UI_STATUS_REPAINT', '') in \
+                ('1', 'yes', 'true')
             if status_text:
                 status_text.SetLabel(message)
-                if os.environ.get('KICAD_NO_UI_STATUS_REPAINT', '') not in \
-                        ('1', 'yes', 'true'):
+                if not no_repaint:
                     status_text.Refresh()
                     status_text.Update()
             if _UI_STATUS_MIRROR is not None:
@@ -78,6 +98,25 @@ def ui_thread_status(status_text, progress_bar, message):
                     _UI_STATUS_MIRROR(message)
                 except Exception:
                     pass
+            if not no_repaint:
+                # Actually PAINT the invalidated labels (see macOS caveat in
+                # the docstring). Throttled so a fast per-ball burst costs a
+                # bounded number of loop turns; a slow phase paints every
+                # message. Guarded: a failed pump degrades to the lagging
+                # label, never breaks the run.
+                now = time.monotonic()
+                if now - _LAST_UI_YIELD >= 0.05:
+                    _LAST_UI_YIELD = now
+                    try:
+                        loop = wx.EventLoopBase.GetActive()
+                        # IsRunning guard: only pump a loop that is actually
+                        # dispatching (KiCad's MainLoop). An activated-but-
+                        # never-run loop (synthetic harnesses) asserts inside
+                        # YieldFor's pending-event sweep.
+                        if loop is not None and loop.IsRunning():
+                            loop.YieldFor(wx.EVT_CATEGORY_UI)
+                    except Exception:
+                        pass
         finally:
             _IN_UI_STATUS = False
     except Exception:
