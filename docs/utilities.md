@@ -660,8 +660,15 @@ Options:
 
 By default it downloads a prebuilt binary for the current platform from the
 GitHub Release and installs it, verifying the version. With `--from-source` it
-skips the download and builds locally with `cargo` instead. Either way it copies
-the resulting library to the correct location:
+skips the download and builds locally with `cargo` instead.
+
+In a git checkout whose `rust_router/` differs from main (a branch carrying
+crate changes, or uncommitted crate edits), it skips the download and builds
+from source automatically: release binaries are built from main's crate, so a
+prebuilt can match the version string yet carry a different ABI (#615). An
+explicit `--tag` overrides this. Release-zip installs (no git) are unaffected.
+
+Either way it copies the resulting library to the correct location:
    - Windows: `grid_router.pyd`
    - Linux/Mac: `grid_router.so`
 
