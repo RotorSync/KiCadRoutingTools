@@ -272,8 +272,19 @@ def _replay_one(task: dict) -> dict:
     set_dir = root / f"runs_{set_name}"
     set_dir.mkdir(parents=True, exist_ok=True)
     dst = set_dir / board
-    if dst.exists():
-        shutil.rmtree(dst)            # reused container: never inherit a prior wave
+    # Clear EVERY board dir, not just this one. Modal reuses containers, and each
+    # task stages into the same recorded set_dir -- so a previous task's board
+    # was still sitting there when the next one ran. ab_replay_grade --set
+    # replays every board dir it finds, so the wave then contained TWO boards and
+    # `rows[0]` below could return the WRONG one: rows appeared with another
+    # board's step names and net counts (ploopy_nano graded with
+    # sensorwatch_round's step3b_fix_coxa chain). That silently varied chain
+    # length across arms on 53 of 130 boards and corrupted every cross-arm
+    # comparison, because a short chain grades artificially WELL -- nets its
+    # missing steps never attempted are not counted as incomplete.
+    for _stale in set_dir.iterdir() if set_dir.exists() else []:
+        if _stale.is_dir():
+            shutil.rmtree(_stale, ignore_errors=True)
     shutil.copytree(Path(CORPUS) / f"runs_{set_name}" / board, dst)
     # Board dirs are read-only inputs -> symlink rather than copy.
     # NAME SPLIT: the RUN dir may carry a recording suffix (runs_set3_llm0801)
@@ -289,7 +300,8 @@ def _replay_one(task: dict) -> dict:
         srcd, lnk = Path(CORPUS) / d, root / d
         if srcd.exists() and not lnk.exists():
             lnk.symlink_to(srcd)
-    # set_dir holds exactly this ONE board, so ab_replay_grade replays only it --
+    # set_dir now holds exactly this ONE board (enforced above), so
+    # ab_replay_grade replays only it --
     # and emits the SAME summary.json schema as a full-set wave, so `--compare`
     # still works on the aggregate and no grading logic is duplicated here.
     stage = set_dir
@@ -326,8 +338,18 @@ def _replay_one(task: dict) -> dict:
     if summary_file.exists():
         try:
             rows = json.loads(summary_file.read_text())
-            if rows:
-                row = rows[0]
+            # Select BY BOARD NAME. rows[0] is whatever sorted first, which is
+            # only this board when the wave holds exactly one -- the invariant
+            # container reuse broke above. Belt and braces: even if a stale dir
+            # survives, we never publish another board's numbers under this
+            # board's name.
+            _mine = [r for r in rows if r.get("board") == board]
+            if _mine:
+                row = _mine[0]
+            elif rows:
+                row = dict(rows[0])
+                row["wrong_board"] = (f"summary had no row for {board}; "
+                                      f"got {[r.get('board') for r in rows]}")
         except Exception as e:
             row = {"parse_error": str(e)[:200]}
     row.update({
