@@ -1555,6 +1555,8 @@ class FanoutTab(wx.Panel):
             wx.MessageBox("Board is no longer open", "Error", wx.OK | wx.ICON_ERROR)
             return
 
+        self._fanout_status("Applying fanout copper to the board...")
+
         # Get layer mappings
         name_to_id, _ = _build_layer_mappings()
 
@@ -1621,6 +1623,7 @@ class FanoutTab(wx.Panel):
             vias_added += 1
 
         # Build connectivity to register new items properly
+        self._fanout_status("Rebuilding board connectivity...")
         board.BuildConnectivity()
 
         # Teardrops, if the shared "Add teardrops" checkbox is on (#489 §9). The
@@ -1651,6 +1654,7 @@ class FanoutTab(wx.Panel):
         # fewer obstacles. A 2-step chain (route_diff -> route, pcb_data built
         # fresh) was bit-identical, which is what localized it to the carry
         # rather than to the router.
+        self._fanout_status("Syncing board data...")
         if self.sync_pcb_data_callback:
             self.sync_pcb_data_callback()
 

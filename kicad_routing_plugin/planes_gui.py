@@ -1293,6 +1293,8 @@ class PlanesTab(wx.Panel):
         if board is None:
             return
 
+        self._apply_status("Applying plane copper to the board...")
+
         # Relocate net-less copper logos/graphics to silkscreen (issue #146),
         # matching the CLI plane writer (plane_io.py): a copper logo is not a
         # router obstacle, so the pour/repair copper added here would short
@@ -1590,6 +1592,7 @@ class PlanesTab(wx.Panel):
         self._last_zone_counts = (zones_added, zones_skipped)
 
         # Build connectivity before filling so nets are resolved properly.
+        self._apply_status("Rebuilding board connectivity...")
         board.BuildConnectivity()
 
         # Teardrops, if the shared "Add teardrops" checkbox is on (#489 §9). Both
@@ -1608,6 +1611,7 @@ class PlanesTab(wx.Panel):
         # around it, and later signal steps add copper these planes must clear
         # too (#362). Filling only new_zone_objs left the existing planes stale.
         from .gui_utils import refill_all_zones
+        self._apply_status("Refilling zones (KiCad exact fill)...")
         _rf = refill_all_zones(board)
         if _rf:
             print(f"Filled/refilled {_rf} zone(s)")
@@ -1668,9 +1672,11 @@ class PlanesTab(wx.Panel):
             except Exception as e:
                 print(f"(skipped DRC-settings write-back: {e})")
 
+        self._apply_status("Refreshing the board view...")
         pcbnew.Refresh()
 
         # Sync pcb_data
+        self._apply_status("Syncing board data...")
         if self.sync_pcb_data_callback:
             self.sync_pcb_data_callback()
 

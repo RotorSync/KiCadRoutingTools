@@ -973,10 +973,17 @@ class AITab(wx.Panel):
             self._log("AI plan: stop requested (cancelling current step)")
 
     def _on_plan_step_progress(self, index, step, label, value, rng,
-                               elapsed, is_busy):
+                               elapsed, is_busy, force_repaint=False):
         """Mirror the working tab's status bar here: same text, same gauge,
         plus which step and its elapsed time -- a route_diff step reads
-        exactly like the differential tab while it runs."""
+        exactly like the differential tab while it runs.
+
+        Two feeds land here: the executor's POLL (main loop alive, normal
+        paint) and the ui_thread_status PUSH-mirror (`force_repaint=True`) for
+        steps that run ON the main loop -- fanout, cap optimize, the apply
+        phases -- where only a forced Refresh+Update can make the text visible
+        (same narrow repaint as gui_utils.ui_thread_status: label only, never
+        Gauge.Pulse, inside an action plugin)."""
         if not self:
             return
         mins, secs = divmod(int(elapsed), 60)
@@ -986,6 +993,13 @@ class AITab(wx.Panel):
             text += f" - {label}"
         self.elapsed_label.SetLabel(text)
         self.Layout()
+        if force_repaint:
+            try:
+                self.elapsed_label.Refresh()
+                self.elapsed_label.Update()
+            except Exception:
+                pass
+            return  # gauge untouched: the value is meaningless mid-block
         try:
             if self.gauge.GetRange() != rng and rng > 0:
                 self.gauge.SetRange(rng)

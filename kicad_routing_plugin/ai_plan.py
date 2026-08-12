@@ -1080,6 +1080,13 @@ class PlanExecutor:
 
     def _finish(self, aborted_reason):
         self._current_action = None
+        # Unhook the ui_thread_status push-mirror: after the plan ends,
+        # tab-local status must stay tab-local.
+        try:
+            from .gui_utils import set_ui_status_mirror
+            set_ui_status_mirror(None)
+        except Exception:
+            pass
         self.dialog._suppress_plane_offer = False
         self.dialog._suppress_completion_popups = False
         # Before any heavy Python work below (see _join_worker_threads).
@@ -1292,6 +1299,19 @@ class PlanExecutor:
             invoke, busy = self._action_parts(step["action"])
             import time as _time
             self._step_started = _time.time()
+            # Push-mirror for UI-thread steps (fanout, cap optimize, the
+            # apply phases): this tab's poll (_poll_until_idle, wx.CallLater)
+            # cannot fire while a step BLOCKS the main loop, so without this
+            # the AI tab froze exactly when the working tab was busiest.
+            # ui_thread_status forwards every forced-repaint message here.
+            from .gui_utils import set_ui_status_mirror
+
+            def _mirror(msg, _idx=index, _step=step):
+                if self.on_progress is not None:
+                    _el = _time.time() - (self._step_started or _time.time())
+                    self.on_progress(_idx, _step, msg, 0, 0, _el, True,
+                                     force_repaint=True)
+            set_ui_status_mirror(_mirror)
             invoke()
         except Exception as e:
             self.on_status(index, "failed")

@@ -1176,6 +1176,20 @@ class DifferentialTab(wx.Panel):
         # Refresh the pair list to show updated connectivity
         self.pair_panel.refresh()
 
+    def _apply_status(self, message):
+        """Status update for the apply phase, which runs ON the UI thread.
+
+        _update_progress is marshalled from the engine thread via CallAfter, so
+        the main loop paints it; the apply BLOCKS that loop, so a bare SetLabel
+        would leave the last routing message frozen on screen for the whole
+        apply. Same pattern as the route/planes/fanout tabs; see
+        gui_utils.ui_thread_status for why the repaint is deliberately narrow
+        (no Gauge.Pulse) inside an action plugin.
+        """
+        from .gui_utils import ui_thread_status
+        ui_thread_status(getattr(self, 'status_text', None),
+                         getattr(self, 'progress_bar', None), message)
+
     def _apply_results_to_board(self, results_data):
         """Apply routing results directly to the open pcbnew board."""
         import pcbnew
@@ -1187,6 +1201,8 @@ class DifferentialTab(wx.Panel):
         if board is None:
             wx.MessageBox("Board is no longer open", "Error", wx.OK | wx.ICON_ERROR)
             return 0, 0, 0
+
+        self._apply_status("Applying diff-pair copper to the board...")
 
         # Apply pad/stub net swaps (polarity fixes, target swaps) and stub layer
         # modifications BEFORE adding new tracks - the routes were created
@@ -1289,6 +1305,7 @@ class DifferentialTab(wx.Panel):
             tracks_added += 1
 
         # Build connectivity to register new items properly
+        self._apply_status("Rebuilding board connectivity...")
         board.BuildConnectivity()
 
         # Make the live board's DRC constraints consistent with what we just
@@ -1334,6 +1351,7 @@ class DifferentialTab(wx.Panel):
                 print(f"(skipped DRC-settings write-back: {e})")
 
         # Refresh the view
+        self._apply_status("Refreshing the board view...")
         pcbnew.Refresh()
 
         # Sync pcb_data from pcbnew board

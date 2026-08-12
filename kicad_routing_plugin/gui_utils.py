@@ -8,6 +8,21 @@ Shared utilities for the plugin GUI.
 # per-tab: a nested repaint can reach a DIFFERENT tab's helper.
 _IN_UI_STATUS = False
 
+# Secondary sink for ui_thread_status messages. The AI-tab plan executor
+# registers one while a plan runs: its own status mirror is POLL-driven
+# (wx.CallLater), so a step that runs ON the UI thread (fanout, cap
+# optimize, every tab's apply phase) blocks the poll and the AI tab froze
+# even while the working tab's label was repainting. ui_thread_status
+# pushes each message here as well, so the tab the user is actually
+# LOOKING at moves too. fn(message); None = no mirror.
+_UI_STATUS_MIRROR = None
+
+
+def set_ui_status_mirror(fn):
+    """Register (or clear, with None) the secondary ui_thread_status sink."""
+    global _UI_STATUS_MIRROR
+    _UI_STATUS_MIRROR = fn
+
 
 def ui_thread_status(status_text, progress_bar, message):
     """Show `message` for work running ON the wx main thread.
@@ -54,6 +69,15 @@ def ui_thread_status(status_text, progress_bar, message):
                         ('1', 'yes', 'true'):
                     status_text.Refresh()
                     status_text.Update()
+            if _UI_STATUS_MIRROR is not None:
+                # Push to the AI tab's mirror (inside the latch, so a
+                # paint-triggered nested call cannot recurse). Guarded
+                # separately: a dead mirror widget must not break the
+                # working tab's own status.
+                try:
+                    _UI_STATUS_MIRROR(message)
+                except Exception:
+                    pass
         finally:
             _IN_UI_STATUS = False
     except Exception:
