@@ -124,6 +124,24 @@ def _image_source() -> tuple:
     return str(tmp), sha
 
 
+def _build_step() -> str:
+    """The image's Rust-router build command: pinnable, and retried.
+
+    A bare `build_router.py` has exactly two ways to fail here and both cost the
+    entire image (there is no Rust toolchain, so its source-build fallback can
+    only die): a flaky GitHub asset fetch, and #615 refusing the prebuilt when
+    the shipped `rust_router/` differs from origin/main -- which is every image
+    built at an old commit, i.e. every bisect arm.
+
+    Both are handled here rather than by rewriting this file from the caller
+    (corpus_bisect.sh used to sed the command in): a rewrite that silently
+    no-ops launches an arm that dies half an hour later.
+    """
+    tag = os.environ.get("KICAD_SWEEP_BUILD_TAG", "").strip()
+    br = "python3 build_router.py" + (f" --tag {tag}" if tag else "")
+    return f"cd {REPO} && ({br} || (sleep 20 && {br}) || (sleep 60 && {br}))"
+
+
 # THIS FILE IS IMPORTED INSIDE THE CONTAINER TOO, so nothing at module scope may
 # assume a local dev environment. _image_source() shells out to `git`, which the
 # container image does not have (and there is no repo there anyway): running it
@@ -175,7 +193,20 @@ image = (
         #   .apt_install("build-essential")
         #   .run_commands("curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal")
         # and append `|| (. $HOME/.cargo/env && python3 build_router.py --from-source)`.
-        f"cd {REPO} && python3 build_router.py",
+        # Retried 3x with backoff: GitHub intermittently drops the release-asset
+        # fetch ("Remote end closed connection without response"), and with no
+        # Rust here build_router's fallback is a source build that cannot
+        # succeed -- so ONE flaky download kills the whole image, and with it
+        # every arm riding it (that is how the set20 upload died on 2026-08-12,
+        # and how three bisect arms died together when six concurrent image
+        # builds pulled the same asset).
+        #
+        # KICAD_SWEEP_BUILD_TAG pins the release the prebuilt comes from, for
+        # callers building an image at an OLD engine commit: #615 makes
+        # build_router skip the prebuilt whenever rust_router/ differs from
+        # origin/main, and unpinned that means a source build -- i.e. death,
+        # half an hour in. Read client-side, where the image is defined.
+        _build_step(),
         # Pristine copy for per-task restore: containers are REUSED, so without
         # this a previous arm's routing_defaults patch leaks into the next task.
         f"cp {REPO}/py_router/routing_defaults.py {REPO}/py_router/routing_defaults.py.orig",

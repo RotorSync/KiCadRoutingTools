@@ -53,29 +53,26 @@ if ! git -C "$WT" diff --quiet "$SHA" -- py_router; then
   echo "  $TAG: engine checkout MISMATCH -- aborting before spending"; exit 1
 fi
 CRATE=$(git -C "$WT" show "$SHA:rust_router/Cargo.toml" | grep -m1 '^version' | tr -d ' "' | cut -d= -f2)
+BUILD_TAG=""
 if [ -n "$CRATE" ]; then
   REL=$CRATE; [ "$CRATE" = "0.20.1" ] && REL=0.20.2
-  # Rewrite the image's build step with python, not sed: the retry wrapper
-  # contains parentheses and &&, which BSD sed rejects ("invalid command code"),
-  # and a FAILED rewrite is silent -- the arm then builds unpinned and dies 30
-  # minutes later. Retry the download 3x: GitHub intermittently drops the asset
-  # fetch ("Remote end closed connection without response") and build_router's
-  # fallback is a source build the image cannot do (no Rust toolchain).
-  python3 - "$WT/tests/stress/modal_sweep/modal_app.py" "$REL" <<'PYEOF' || exit 1
-import sys, pathlib
-p, rel = pathlib.Path(sys.argv[1]), sys.argv[2]
-t = p.read_text()
-old = 'f"cd {REPO} && python3 build_router.py"'
-br = f"python3 build_router.py --tag v{rel}"
-new = f'f"cd {{REPO}} && ({br} || (sleep 20 && {br}) || (sleep 60 && {br}))"'
-if old not in t:
-    sys.exit(f"build step not found in {p} -- refusing to launch unpinned")
-p.write_text(t.replace(old, new, 1))
-PYEOF
+  # Pin the image's prebuilt to this commit's crate release. This used to REWRITE
+  # modal_app.py's build command from here; it now rides an env var that
+  # modal_app._build_step() reads client-side, because a rewrite that silently
+  # no-ops launches an arm that builds unpinned and dies 30 minutes later (#615
+  # skips the prebuilt in a bisect worktree, and the image has no Rust). Keep the
+  # loud guard: if the knob is gone, refuse to launch rather than spend on an arm
+  # that cannot build.
+  if ! grep -q "KICAD_SWEEP_BUILD_TAG" "$WT/tests/stress/modal_sweep/modal_app.py"; then
+    echo "  $TAG: modal_app.py has no KICAD_SWEEP_BUILD_TAG support -- refusing to launch unpinned"
+    exit 1
+  fi
+  BUILD_TAG="v$REL"
   echo "  $TAG: crate $CRATE -> image build pinned to release v$REL"
 fi
 echo "  $TAG: engine=$SHA harness=HEAD  (py_router matches $SHA)"
 cd "$WT"
+KICAD_SWEEP_BUILD_TAG="$BUILD_TAG" \
 KICAD_SWEEP_DIRTY=1 caffeinate -dimsu nohup python3 tests/stress/cloud_replay_sets.py \
    --sets "$SETS" --arm "bis${TAG}" --label "bis${TAG}" --limit "$LIMIT" \
    --exclude core64_logic --out "$ST/cloud_bis${TAG}" --only plan,run \
