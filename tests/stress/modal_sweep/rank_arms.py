@@ -16,15 +16,17 @@ obvious ways to compute it are all subtly wrong:
   BETTER on the sum of what remains. Every arm is therefore scored only on
   boards where EVERY arm produced a complete chain.
 * **A shorter chain grades artificially well** (RUNBOOK rule 3): nets that a
-  missing step never attempted are not counted as incomplete. So arms must
-  agree on the number of steps they ran, exactly -- see `same_chain`, which
-  also explains why the census half of that rule must NOT be applied literally.
+  missing step never attempted are not counted as incomplete. Arms must
+  therefore agree on step count, final board, and net census -- see
+  `same_chain`, and `gradeable_nets` for why the census has to be RECONSTRUCTED
+  before it can be compared at all.
 
-The verdict itself is `nets_incomplete + conn` -- the same quantity the
-screened-stage gate uses. Lower is better. DRC is reported alongside but NOT
-folded in: it is a separate gate (a #590 arm that wins on connectivity while
-adding real DRC must not be armed), and mixing them into one number hides
-exactly that trade.
+The verdict is `nets_incomplete` -- unrouted plus connectivity-issue nets, and
+NOT `nets_incomplete + conn`, which is what modal_app's screened gate scores and
+counts every connectivity-issue net twice (see `verdict`). Lower is better. DRC
+is reported alongside but NOT folded in: it is a separate gate (a #590 arm that
+wins on connectivity while adding real DRC must not be armed), and mixing them
+into one number hides exactly that trade.
 
 Read the W/L column, not just the total: per-board run-to-run spread is +-2..3
 nets, so a total driven by one or two boards is noise wearing a verdict's
@@ -39,13 +41,20 @@ from pathlib import Path
 
 
 def verdict(r: dict):
-    """nets_incomplete + conn, or None if this row cannot be scored."""
+    """Incomplete nets, or None if this row cannot be scored.
+
+    `nets_incomplete` ALREADY equals unrouted + connectivity-issue nets, so the
+    `nets_incomplete + conn` that modal_app's screened gate uses counts every
+    connectivity-issue net twice. ab_replay_grade says so where it defines the
+    same verdict for its own A/B: grade on total incomplete nets, "NOT the conn
+    count alone", because a net that loses its copper entirely LEAVES the conn
+    bucket for the unrouted bucket -- conn can fall while the board got worse.
+    Double-counting does not just rescale the score: it weights losing a net's
+    copper differently from failing to connect it.
+    """
     if not r.get("chain_complete"):
         return None
-    ni, cn = r.get("nets_incomplete"), r.get("conn")
-    if ni is None or cn is None:
-        return None
-    return ni + cn
+    return r.get("nets_incomplete")
 
 
 def step_count(r: dict):
@@ -53,40 +62,46 @@ def step_count(r: dict):
     return len(steps) if isinstance(steps, list) else steps
 
 
-# How far the net census may drift between arms before the board is treated as
-# a different chain rather than the same one routed differently.
-CENSUS_TOLERANCE = 0.05
+def gradeable_nets(r: dict):
+    """Outcome-INDEPENDENT net census for this board.
+
+    Rows carry `nets_total` as reported by check_connected, which counts only
+    nets that ended up with copper -- so it shrinks on an arm that fails nets,
+    and the same board reports a different total per arm (see ab_replay_grade's
+    _completion, which now adds these back at grade time). Reconstruct it here
+    too, so rows recorded BEFORE that fix pair correctly: the unrouted nets are
+    exactly `nets_incomplete - conn`.
+    """
+    tot, ni, cn = r.get("nets_total"), r.get("nets_incomplete"), r.get("conn")
+    if tot is None or ni is None or cn is None:
+        return None
+    return tot + max(0, ni - cn)
 
 
 def same_chain(rows: list) -> str:
     """"" if these arms' rows are comparable, else why they are not.
 
-    The RUNBOOK states the pairing rule as "same nets_total and step count".
-    Taken literally that is too strict, and wrong in the expensive direction:
-    `nets_total` is not a fixed property of the board but the net census of the
-    FINAL routed copper, and it drifts a net or two with the routing itself
-    (butterstick: 316/316/310/314 across four arms on an identical 16-step
-    chain). Demanding exact equality dropped 40 of 103 boards on the #590 sets
-    1-10 wave -- and the dropped ones were the congested boards carrying ~85%
-    of all the incompleteness, i.e. precisely the boards a congestion knob is
-    measured on. It shrank that wave's headline from -54 to -8.
-
-    What the rule is actually protecting against is a TRUNCATED chain, whose
-    missing steps never attempt their nets so they are never counted incomplete
-    -- and that shows up as a differing STEP COUNT, which is enforced exactly.
-    The census is allowed to drift within a tolerance, which still catches a
-    chain that silently routed a different net set (datalogger: 26 nets in 4
-    steps vs 33 in 6).
+    Guards the RUNBOOK's rule 3 -- a TRUNCATED chain grades artificially well,
+    because nets its missing steps never attempted are never counted incomplete.
+    All three signals are exact; none of them is a tolerance, because the thing
+    that used to look like tolerable noise (a net total drifting a few counts
+    between arms) was the outcome-dependent denominator above, not noise.
     """
     steps = {step_count(r) for r in rows}
     if len(steps) != 1:
         return f"step counts differ: {sorted(steps)}"
-    census = [r.get("nets_total") or 0 for r in rows]
-    lo, hi = min(census), max(census)
-    if lo <= 0:
+    finals = {r.get("final") for r in rows}
+    if len(finals) != 1:
+        return f"different final board: {sorted(str(f) for f in finals)}"
+    census = {gradeable_nets(r) for r in rows}
+    if None in census:
         return "no net census"
-    if (hi - lo) / lo > CENSUS_TOLERANCE:
-        return f"net census differs by >{CENSUS_TOLERANCE:.0%}: {lo}-{hi}"
+    if len(census) != 1:
+        # Rare and real: a one-pad net counts as routed when it picks up plane
+        # copper but never appears among the unrouted, so it cannot be added
+        # back. Dropping the board is right -- the arms did grade different net
+        # sets -- but it is a checker limitation, not a router difference.
+        return f"gradeable net census differs: {sorted(census)}"
     return ""
 
 
@@ -155,12 +170,14 @@ def main() -> int:
     print(f"{len(arms)} arms, {len(all_boards)} boards seen, "
           f"{len(paired)} PAIRED (scored) / {len(dropped)} dropped")
     if wobble:
-        # Disclosed, not hidden: these boards ARE compared, on a net census that
-        # differs slightly between arms. Small drift is normal; a board with a
-        # large one deserves a look before it decides anything.
-        print(f"    {len(wobble)} paired board(s) have a net-census wobble "
-              f"(max {max(wobble.values())} nets: "
-              f"{max(wobble, key=wobble.get)})")
+        # Expected, and disclosed anyway: check_connected's raw "Checking N
+        # routed nets" counts only nets that ended up with copper, so an arm
+        # that fails nets reports a smaller one. These boards ARE comparable --
+        # they matched on the reconstructed gradeable census -- and the spread
+        # is a direct read on how differently the arms performed.
+        print(f"    {len(wobble)} paired board(s) differ in ROUTED-net count "
+              f"(max {max(wobble.values())}: {max(wobble, key=wobble.get)}) "
+              f"-- expected; the gradeable census matched")
     if dropped:
         reasons: dict[str, int] = {}
         for why in dropped.values():
@@ -176,7 +193,8 @@ def main() -> int:
     nets = sum(by_arm[base][b].get("nets_total") or 0 for b in paired)
 
     print(f"\n{len(paired)} paired boards, {nets} nets. "
-          f"verdict = incomplete + disconnected (LOWER is better)\n")
+          f"verdict = incomplete nets (unrouted + connectivity issues; "
+          f"LOWER is better)\n")
     print(f"{'arm':20} {'verdict':>8} {'vs base':>8} {'%':>7} "
           f"{'W':>4} {'L':>4} {'T':>4} {'DRC':>7} {'vs base':>8}")
     order = sorted(arms, key=lambda n: (n != base, tot[n]))

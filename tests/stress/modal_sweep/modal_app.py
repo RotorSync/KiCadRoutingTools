@@ -685,11 +685,19 @@ def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,se
         # have no fresh coverage and ADVANCE -- the gate saves money on
         # clearly-bad NEW arms, it never blocks on missing data, and final
         # rankings always come from the full set.
+        # Score = nets_incomplete ALONE. It already counts unrouted PLUS
+        # connectivity-issue nets, so adding `conn` back counted every
+        # connectivity-issue net twice -- which is not a harmless rescaling: it
+        # priced "failed to connect a net" at double "lost the net's copper
+        # entirely", and the gate KILLS arms on this number. ab_replay_grade
+        # states the same definition where it grades its own A/B.
+        def _verdict(r):
+            return r.get("nets_incomplete") or 0
+
         per = {}
         for r in results:
             if r and r.get("chain_complete"):
-                v = (r.get("nets_incomplete") or 0) + (r.get("conn") or 0)
-                per.setdefault(r["arm"], {})[r["board"]] = v
+                per.setdefault(r["arm"], {})[r["board"]] = _verdict(r)
         # Top up screen coverage from BANKED rows: an arm fully banked by a
         # prior run (baseline, after any earlier campaign) has no FRESH rows,
         # which used to skip the gate entirely. Banked rows are equally valid
@@ -708,8 +716,7 @@ def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,se
                     r = json.loads(raw)
                     r = r[0] if isinstance(r, list) else r
                     if r.get("chain_complete"):
-                        per.setdefault(aname, {})[sb] = \
-                            (r.get("nets_incomplete") or 0) + (r.get("conn") or 0)
+                        per.setdefault(aname, {})[sb] = _verdict(r)
                 except Exception as ex:
                     print(f"  gate: banked row {hit} unreadable ({ex})")
         killed = set()

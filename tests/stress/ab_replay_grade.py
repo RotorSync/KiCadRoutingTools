@@ -90,14 +90,42 @@ def _conn_count(text):
 def _completion(text):
     """Routing completion from check_connected output: a net is complete if it is
     neither unrouted nor has a connectivity issue. Returns (total, incomplete, pct)
-    or (None, None, None) if the net total can't be parsed."""
+    or (None, None, None) if the net total can't be parsed.
+
+    The total is `Checking N ... nets` PLUS the unrouted ones, and the two must be
+    added or the denominator moves with the result. check_connected's "Checking N
+    routed nets" counts only nets that ended up with copper -- its net selection is
+    literally `(net_id in segments_by_net or net_id in vias_by_net) and net_id in
+    pads_by_net`. A net an arm fails to route at all therefore has no copper, drops
+    OUT of that count, and is then reported separately under "Unrouted nets (M)".
+
+    Two consequences, both of which have already cost real analysis time:
+
+    * The same board reports a DIFFERENT net total per arm, which reads as
+      nondeterminism in a checker that is deterministic (butterstick: 310 / 314 /
+      316 / 316 across four arms of an identical 16-step chain -- all of them 317
+      once the unrouted nets are added back). An A/B that pairs boards on "same
+      net total" then discards exactly the congested boards, because those are the
+      ones with unrouted nets. On the #590 sets 1-10 wave that dropped 40 of 103
+      boards, which carried ~85% of all the incompleteness.
+    * The failing nets were subtracted from the numerator while being excluded
+      from the denominator, so completion % was computed over the wrong base and
+      the old `min(total, ...)` clamp existed only to stop that inconsistency from
+      producing a negative percentage.
+
+    Residual: a ONE-pad net counts in `Checking` when it happens to pick up copper
+    (a plane tap) but never appears under "Unrouted nets", which grades nets of >=2
+    pads. That leaves a rare +-1 that no arithmetic here can recover -- it needs a
+    census emitted by check_connected itself.
+    """
     tm = re.search(r"Checking (\d+) [\w ]*nets", text)
     if not tm:
         return None, None, None
-    total = int(tm.group(1))
     um = re.search(r"Unrouted nets \((\d+)\)", text)
     im = re.search(r"Connectivity issues \((\d+)\)", text)
-    incomplete = min(total, (int(um.group(1)) if um else 0) + (int(im.group(1)) if im else 0))
+    unrouted = int(um.group(1)) if um else 0
+    total = int(tm.group(1)) + unrouted
+    incomplete = unrouted + (int(im.group(1)) if im else 0)
     pct = round(100.0 * (total - incomplete) / total, 1) if total else None
     return total, incomplete, pct
 
