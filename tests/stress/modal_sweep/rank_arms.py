@@ -16,10 +16,9 @@ obvious ways to compute it are all subtly wrong:
   BETTER on the sum of what remains. Every arm is therefore scored only on
   boards where EVERY arm produced a complete chain.
 * **A shorter chain grades artificially well** (RUNBOOK rule 3): nets that a
-  missing step never attempted are not counted as incomplete. So a board is
-  paired only when the arms agree on `nets_total` AND on the number of steps
-  they ran -- otherwise the arms replayed different work and the delta is not
-  attributable to the parameter.
+  missing step never attempted are not counted as incomplete. So arms must
+  agree on the number of steps they ran, exactly -- see `same_chain`, which
+  also explains why the census half of that rule must NOT be applied literally.
 
 The verdict itself is `nets_incomplete + conn` -- the same quantity the
 screened-stage gate uses. Lower is better. DRC is reported alongside but NOT
@@ -49,10 +48,46 @@ def verdict(r: dict):
     return ni + cn
 
 
-def chain_key(r: dict):
-    """What must MATCH across arms for a board to be comparable."""
+def step_count(r: dict):
     steps = r.get("steps")
-    return (r.get("nets_total"), len(steps) if isinstance(steps, list) else steps)
+    return len(steps) if isinstance(steps, list) else steps
+
+
+# How far the net census may drift between arms before the board is treated as
+# a different chain rather than the same one routed differently.
+CENSUS_TOLERANCE = 0.05
+
+
+def same_chain(rows: list) -> str:
+    """"" if these arms' rows are comparable, else why they are not.
+
+    The RUNBOOK states the pairing rule as "same nets_total and step count".
+    Taken literally that is too strict, and wrong in the expensive direction:
+    `nets_total` is not a fixed property of the board but the net census of the
+    FINAL routed copper, and it drifts a net or two with the routing itself
+    (butterstick: 316/316/310/314 across four arms on an identical 16-step
+    chain). Demanding exact equality dropped 40 of 103 boards on the #590 sets
+    1-10 wave -- and the dropped ones were the congested boards carrying ~85%
+    of all the incompleteness, i.e. precisely the boards a congestion knob is
+    measured on. It shrank that wave's headline from -54 to -8.
+
+    What the rule is actually protecting against is a TRUNCATED chain, whose
+    missing steps never attempt their nets so they are never counted incomplete
+    -- and that shows up as a differing STEP COUNT, which is enforced exactly.
+    The census is allowed to drift within a tolerance, which still catches a
+    chain that silently routed a different net set (datalogger: 26 nets in 4
+    steps vs 33 in 6).
+    """
+    steps = {step_count(r) for r in rows}
+    if len(steps) != 1:
+        return f"step counts differ: {sorted(steps)}"
+    census = [r.get("nets_total") or 0 for r in rows]
+    lo, hi = min(census), max(census)
+    if lo <= 0:
+        return "no net census"
+    if (hi - lo) / lo > CENSUS_TOLERANCE:
+        return f"net census differs by >{CENSUS_TOLERANCE:.0%}: {lo}-{hi}"
+    return ""
 
 
 def main() -> int:
@@ -96,7 +131,7 @@ def main() -> int:
 
     # Pair: scoreable everywhere, and the SAME chain everywhere.
     all_boards = sorted({b for m in by_arm.values() for b in m})
-    paired, dropped = [], {}
+    paired, dropped, wobble = [], {}, {}
     for b in all_boards:
         got = [(n, by_arm[n].get(b)) for n in arms]
         missing = [n for n, r in got if r is None]
@@ -107,14 +142,25 @@ def main() -> int:
         if unscored:
             dropped[b] = f"chain incomplete/ungraded in {len(unscored)} arm(s)"
             continue
-        keys = {chain_key(r) for _, r in got}
-        if len(keys) != 1:
-            dropped[b] = f"chains differ across arms: {sorted(keys)}"
+        why = same_chain([r for _, r in got])
+        if why:
+            dropped[b] = f"chains differ across arms: {why}"
             continue
         paired.append(b)
+        spread = max(r.get("nets_total") or 0 for _, r in got) - \
+            min(r.get("nets_total") or 0 for _, r in got)
+        if spread:
+            wobble[b] = spread
 
     print(f"{len(arms)} arms, {len(all_boards)} boards seen, "
           f"{len(paired)} PAIRED (scored) / {len(dropped)} dropped")
+    if wobble:
+        # Disclosed, not hidden: these boards ARE compared, on a net census that
+        # differs slightly between arms. Small drift is normal; a board with a
+        # large one deserves a look before it decides anything.
+        print(f"    {len(wobble)} paired board(s) have a net-census wobble "
+              f"(max {max(wobble.values())} nets: "
+              f"{max(wobble, key=wobble.get)})")
     if dropped:
         reasons: dict[str, int] = {}
         for why in dropped.values():
