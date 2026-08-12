@@ -486,6 +486,16 @@ def stage_run(args, sets, stress, plan):
         cmd += ["--limit", str(args.limit)]
     if args.boards:
         cmd += ["--boards", args.boards]
+    if getattr(args, "exclude", ""):
+        # modal_app has no exclude flag, so express it as an explicit board LIST
+        # minus the exclusions. Needed because one hung board holds up every arm:
+        # core64_logic replays in 4 min historically and now never terminates,
+        # so every arm sits at 129/130 waiting on it.
+        drop = {b.strip() for b in args.exclude.split(",") if b.strip()}
+        keep = [b for _s, b in plan.get("boards", []) if b not in drop]
+        if keep and not args.boards:
+            cmd += ["--boards", ",".join(sorted(set(keep)))]
+        print(f"  excluding {len(drop)} board(s): {', '.join(sorted(drop))}")
     r = sh(cmd, env=env)
     if r.returncode != 0:
         raise SystemExit(f"cloud run failed (rc={r.returncode}); banked rows are "
@@ -859,6 +869,9 @@ def main():
                     help="plan only, and make `upload` report sizes without pushing")
     ap.add_argument("--limit", type=int, default=0, help="keep only the N cheapest boards (smoke)")
     ap.add_argument("--boards", default="", help="restrict to these board names (smoke)")
+    ap.add_argument("--exclude", default="",
+                    help="board names to DROP (comma-separated). One non-terminating "
+                         "board stalls every arm at N-1, so exclude known hangs.")
     ap.add_argument("--regrade-baseline", action="store_true",
                     help="re-score the baseline's own boards with TODAY's grader before "
                          "comparing (snapshots the archive's summary.json first). Use this "
