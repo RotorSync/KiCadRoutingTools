@@ -112,6 +112,14 @@ def main() -> int:
                     help="control arm (default: the one declaring no overrides)")
     ap.add_argument("--top", type=int, default=8, help="movers to list per arm")
     ap.add_argument("--csv", default="", help="also write per-board verdicts here")
+    ap.add_argument("--hard", type=int, default=0, metavar="N",
+                    help="score only boards where the CONTROL leaves >=N nets "
+                         "incomplete. A corpus is mostly boards that route "
+                         "clean, and on those every arm ties -- so a knob that "
+                         "only acts under congestion is diluted toward zero by "
+                         "the boards it cannot affect. Selecting on the CONTROL "
+                         "(never on an arm's own result) keeps the split "
+                         "independent of what is being measured.")
     a = ap.parse_args()
 
     data = json.loads(Path(a.sweep).read_text())
@@ -187,6 +195,16 @@ def main() -> int:
     if not paired:
         print("\nNOTHING PAIRED -- no verdict. Check chain_complete rates first.")
         return 1
+
+    if a.hard:
+        n0 = len(paired)
+        paired = [b for b in paired if verdict(by_arm[base][b]) >= a.hard]
+        print(f"\n--hard {a.hard}: {len(paired)} of {n0} paired boards leave "
+              f">={a.hard} nets incomplete in the control "
+              f"({n0 - len(paired)} route clean enough to tie)")
+        if not paired:
+            print("no boards meet the threshold -- no verdict")
+            return 1
 
     tot = {n: sum(verdict(by_arm[n][b]) for b in paired) for n in arms}
     drc = {n: sum((by_arm[n][b].get("drc") or 0) for b in paired) for n in arms}
