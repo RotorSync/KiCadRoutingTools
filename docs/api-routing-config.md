@@ -238,22 +238,39 @@ more expensive and the contest dissolves without anyone arbitrating whom to
 rip (the 0802 rip study refuted every frame-local rip gate and concluded "soft
 rra pricing beats refusal"; this is that conclusion made cumulative).
 
-Conflict events, both charged in mm-equivalent to the cells involved:
+Conflict events, charged in mm-equivalent to the cells involved (v2
+re-targeted the charging after the v1 one-board screen — whole-footprint rip
+stamps were measured negative, raw-frontier charging mostly priced static
+copper no rip can clear):
 
-- a **rip** — full increment over the ripped copper's footprint (half width +
-  `KICAD_HISTORY_RADIUS`, vias on every layer). Recorded in `rip_up_net`, so
-  every rip in the engine feeds it, on both front-ends.
-- a **failed search's blocked frontier** — `KICAD_HISTORY_BLOCKED_WEIGHT` ×
-  the increment (a frontier is large and includes static copper no rip can
-  clear). One failure analyzed twice in a row is charged once.
+- a **contest** (primary, full increment) — the intersection of a failed
+  search's blocked frontier with a routed net's keep-out: ground one net
+  holds and another just stalled against, the engine's analog of
+  PathFinder's *overused nodes*. Charged inside
+  `analyze_frontier_blocking` (which already computes the per-blocker
+  intersection for rip ranking), **before** any rip — so a ripped blocker's
+  reroute already sees its contested ground priced and relocates instead of
+  re-taking it. Repeat contests **escalate**: at `KICAD_HISTORY_ESCALATE`
+  1.0 a re-charged cell *doubles* (0.1 → 0.2 → 0.4 …), because a routing
+  call has only a handful of rip rounds and a flat increment cannot build a
+  gradient in that many iterations. One failure analyzed twice in a row is
+  charged once.
+- a **rip's whole footprint** (v1) — `KICAD_HISTORY_RIP_WEIGHT` × the
+  increment over the ripped copper (half width + `KICAD_HISTORY_RADIUS`,
+  vias on every layer). Default **0**: kept only for A/B against v1.
+- a **failed search's raw blocked frontier** (v1) —
+  `KICAD_HISTORY_BLOCKED_WEIGHT` × the increment. Default **0**: the contest
+  event charges the useful subset at full weight.
 
 | Knob | Default | Meaning |
 |------|---------|---------|
-| `KICAD_HISTORY_COST` | `0` (off) | mm-equivalent per conflict event |
+| `KICAD_HISTORY_COST` | `0` (off) | mm-equivalent per contest event |
 | `KICAD_HISTORY_CAP` | `0` (uncapped) | Ceiling on a cell's accumulated history. Guards the *productive*-churn regime — a fine-pitch BGA escape field, where 15 rips converge, must not wall itself off. |
-| `KICAD_HISTORY_RADIUS` | `0.25` mm | Added to the copper half-width when a rip stamps (a retry that dodges by one cell has not found different ground) |
-| `KICAD_HISTORY_BLOCKED_WEIGHT` | `0.25` | Frontier weight; `0` = rips only |
-| `KICAD_HISTORY_MAX_CELLS` | `500000` | Growth guard bounding the per-prepare merge: past this, an event's NEW cells are refused whole (existing cells keep accruing). Disclosed in the run summary along with the field's size and upkeep time. |
+| `KICAD_HISTORY_ESCALATE` | `1.0` | Repeat-contest multiplier: re-charging a cell adds `max(inc, escalate × accumulated)` — 1.0 doubles per repeat; `0` = flat v1 accumulation |
+| `KICAD_HISTORY_RIP_WEIGHT` | `0` (off) | v1 whole-footprint rip stamp weight |
+| `KICAD_HISTORY_RADIUS` | `0.25` mm | Added to the copper half-width when a v1 rip stamps |
+| `KICAD_HISTORY_BLOCKED_WEIGHT` | `0` (off) | v1 raw-frontier weight |
+| `KICAD_HISTORY_MAX_CELLS` | `500000` | Growth guard bounding the per-prepare merge: past this, each event **evicts the lowest-weight cells** to make room (chronological refusal would unprice the endgame conflicts — the ones completion is measured on). Evictions are disclosed in the run summary along with the field's size and upkeep time. |
 
 **Cost.** The event path is cheap (a rip stamps its corridor by vectorized
 linspace sampling at half-radius spacing, and the sorted field takes new cells

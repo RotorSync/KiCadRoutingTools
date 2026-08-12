@@ -20,7 +20,13 @@ it that lever rather than another transient proximity field:
   6. Rows compose through the real merge_track_proximity_costs pass into the
      real Rust layer-proximity map, unique per (layer, cell) so sum mode
      counts history exactly once.
-  7. The rip hook is really wired into rip_up_reroute.rip_up_net.
+  7. The rip hook is really wired into rip_up_reroute.rip_up_net, and the v2
+     contest hook into blocking_analysis.analyze_frontier_blocking.
+  8. v2 (contest-targeted): at the v2 defaults the v1 whole-footprint rip
+     stamp and raw-frontier charge are OFF; the frontier∩blocker contest
+     event charges at FULL weight and repeat contests DOUBLE (escalate 1.0).
+  9. The growth guard EVICTS lowest-weight cells instead of refusing new
+     events (chronological refusal unpriced the endgame conflicts).
 
     python3 tests/test_590_history_congestion.py
 """
@@ -62,19 +68,32 @@ def _result(segs=(), vias=()):
     return {'new_segments': list(segs), 'new_vias': list(vias)}
 
 
+_ALL_KNOBS = ('KICAD_HISTORY_COST', 'KICAD_HISTORY_CAP', 'KICAD_HISTORY_RADIUS',
+              'KICAD_HISTORY_BLOCKED_WEIGHT', 'KICAD_HISTORY_MAX_CELLS',
+              'KICAD_HISTORY_RIP_WEIGHT', 'KICAD_HISTORY_ESCALATE')
+
+
 def _arm(**over):
-    """Set the knobs and re-read them (env_knobs caches at import)."""
+    """Set the knobs and re-read them (env_knobs caches at import).
+
+    The base values pin the v1 semantics the older sections assert (flat
+    accumulation, full-weight rip stamps, 0.25 raw-frontier weight); the v2
+    sections override toward the v2 defaults explicitly.
+    """
+    for k in _ALL_KNOBS:
+        os.environ.pop(k, None)
     vals = {'KICAD_HISTORY_COST': '0.5', 'KICAD_HISTORY_CAP': '0',
             'KICAD_HISTORY_RADIUS': '0.0',
-            'KICAD_HISTORY_BLOCKED_WEIGHT': '0.25'}
+            'KICAD_HISTORY_BLOCKED_WEIGHT': '0.25',
+            'KICAD_HISTORY_RIP_WEIGHT': '1.0',
+            'KICAD_HISTORY_ESCALATE': '0'}
     vals.update({k: str(v) for k, v in over.items()})
     os.environ.update(vals)
     env_knobs.refresh()
 
 
 def _disarm():
-    for k in ('KICAD_HISTORY_COST', 'KICAD_HISTORY_CAP', 'KICAD_HISTORY_RADIUS',
-              'KICAD_HISTORY_BLOCKED_WEIGHT', 'KICAD_HISTORY_MAX_CELLS'):
+    for k in _ALL_KNOBS:
         os.environ.pop(k, None)
     env_knobs.refresh()
 
@@ -96,6 +115,7 @@ def main():
     hc.reset_history(cfg)
     hc.record_rip(cfg, _result([_seg(1.0, 1.0, 3.0, 1.0)]), LAYER_MAP)
     hc.record_blocked_frontier(cfg, [(10, 10, 0)])
+    hc.record_contested(cfg, [(10, 10, 0)])
     if hc.history_rows(cfg) is not None:
         failures.append('disabled: history_rows must be None')
     if getattr(cfg, '_history_cong', 'unset') is not None:
@@ -218,6 +238,52 @@ def main():
     if obs.get_layer_proximity_cost(gx, gy + 30, 0) != 0:
         failures.append('history must not leak far from the ripped corridor')
 
+    # ---- 8. v2 defaults: contest event is primary, v1 stamps are off -------
+    _arm(KICAD_HISTORY_COST='0.1', KICAD_HISTORY_RIP_WEIGHT='0',
+         KICAD_HISTORY_BLOCKED_WEIGHT='0', KICAD_HISTORY_ESCALATE='1.0')
+    cfg = _cfg()
+    hc.reset_history(cfg)
+    hc.record_rip(cfg, route, LAYER_MAP)              # v1 stamp off ...
+    hc.record_blocked_frontier(cfg, [(9, 9, 0)])      # ... and raw frontier off
+    if hc.history_rows(cfg) is not None:
+        failures.append('v2 defaults: rip footprint / raw frontier must not charge')
+    contested = [(50, 50, 0), (51, 50, 0), (50, 51, 1)]
+    hc.record_contested(cfg, contested)
+    cc = _cost_at(hc.history_rows(cfg), 0, 50, 50)
+    if cc != cfg.cell_cost(0.1):
+        failures.append(f'contest cell {cc} != full cell_cost(0.1)='
+                        f'{cfg.cell_cost(0.1)}')
+    if _cost_at(hc.history_rows(cfg), 1, 50, 51) != cc:
+        failures.append('contest must charge the cell on ITS layer')
+    hc.record_contested(cfg, contested)               # same failure re-analyzed
+    if _cost_at(hc.history_rows(cfg), 0, 50, 50) != cc:
+        failures.append('one contest analyzed twice in a row must charge once')
+    hc.record_rip(cfg, route, LAYER_MAP)              # board changed
+    hc.record_contested(cfg, contested)               # repeat -> doubles
+    if _cost_at(hc.history_rows(cfg), 0, 50, 50) != 2 * cc:
+        failures.append('2nd contest of a cell must DOUBLE it (escalate 1.0)')
+    hc.record_rip(cfg, route, LAYER_MAP)
+    hc.record_contested(cfg, contested)               # third -> doubles again
+    if _cost_at(hc.history_rows(cfg), 0, 50, 50) != 4 * cc:
+        failures.append('3rd contest must double again (0.1 -> 0.2 -> 0.4)')
+    field = cfg._history_cong
+    if field.contests != 3:
+        failures.append(f'contest counter {field.contests} != 3')
+
+    # ---- 9. growth guard EVICTS lowest-weight, never refuses ---------------
+    _arm(KICAD_HISTORY_MAX_CELLS='5')                 # flat v1 accumulation
+    field = hc.HistoryField()
+    field.accumulate(np.array([1, 2, 3], dtype=np.int64), 0.5)
+    field.accumulate(np.array([1, 2, 3], dtype=np.int64), 0.5)   # w = 1.0
+    field.accumulate(np.array([4, 5, 6, 7, 8], dtype=np.int64), 0.5)
+    if list(field.keys) != [1, 2, 3, 7, 8]:
+        failures.append(f'eviction must drop the lowest-weight cells '
+                        f'(key tie-break), got {list(field.keys)}')
+    if field.evicted != 3:
+        failures.append(f'evicted counter {field.evicted} != 3')
+    if [float(w) for w in field.weights] != [1.0, 1.0, 1.0, 0.5, 0.5]:
+        failures.append('eviction must keep the heavy cells\' weights intact')
+
     # ---- 7. the hook is really in rip_up_net ------------------------------
     import inspect
     import rip_up_reroute
@@ -239,9 +305,12 @@ def main():
         failures.append('the layer-swap fallback rips blockers INLINE (not via '
                         'rip_up_net) -- that rip must be recorded too')
     import blocking_analysis
-    if 'record_blocked_frontier' not in inspect.getsource(
-            blocking_analysis.analyze_frontier_blocking):
+    ba_src = inspect.getsource(blocking_analysis.analyze_frontier_blocking)
+    if 'record_blocked_frontier' not in ba_src:
         failures.append('failed-search frontier hook missing')
+    if 'record_contested' not in ba_src:
+        failures.append('v2 contest hook (frontier∩blocker) missing from '
+                        'analyze_frontier_blocking')
 
     _disarm()
     if failures:

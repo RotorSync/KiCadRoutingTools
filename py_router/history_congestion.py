@@ -15,18 +15,33 @@ frame-local rip gate was refuted, "soft rra pricing beats refusal" -- and
 history is the principled version of that finding: per-CELL and cumulative
 where the rip ghosts are per-NET and transient.
 
-Conflict events (both weighted in mm-equivalent, composed like every other
-soft source):
+Conflict events (all in mm-equivalent, composed like every other soft
+source). v2 re-targeted the charging after the v1 study (see the #590 issue
+thread): the whole-footprint rip stamp was measured NEGATIVE (it prices the
+victim's entire corridor -- almost all of it never contested -- and, once the
+victim reroutes, permanently prices vacated ground) and the raw-frontier
+charge mostly lands on static copper no rip can clear. PathFinder charges
+only the OVERUSED nodes; the engine's analog is:
 
-  * a RIP -- the ripped copper's own footprint was contested ground: one net
-    wanted it enough to tear another net out of it. Full increment. Recorded
-    from ``rip_up_reroute.rip_up_net``, which every rip in the engine
-    (single-ended ladder, reroute loop, phase 3, diff-pair loop, leg rips)
-    funnels through, so both front-ends get it for free.
-  * a FAILED search's blocked frontier -- the cells a search stalled against.
-    Weaker signal (a frontier is large and includes plenty of static copper
-    no rip can clear), so it carries a fractional weight. Recorded from
-    ``blocking_analysis.analyze_frontier_blocking``.
+  * a CONTEST (primary, full increment) -- the intersection of a FAILED
+    search's blocked frontier with a routed net's copper: ground one net
+    holds and another just stalled against. ``analyze_frontier_blocking``
+    already computes exactly these cells per blocker (its rip-candidate
+    ranking); they are charged there, BEFORE any rip, so a ripped blocker's
+    reroute already sees its contested ground priced and relocates instead
+    of re-taking it.
+  * a RIP's whole footprint (v1, ``KICAD_HISTORY_RIP_WEIGHT``, default 0) --
+    kept only for A/B against the v1 behavior.
+  * a FAILED search's raw blocked frontier (v1,
+    ``KICAD_HISTORY_BLOCKED_WEIGHT``, default 0) -- ditto.
+
+Repeat contests ESCALATE (``KICAD_HISTORY_ESCALATE``): the second charge of
+a cell adds max(inc, escalate x accumulated), i.e. at the default 1.0 the
+cell's price DOUBLES per repeat (0.1, 0.2, 0.4, ...). A routing call has only
+a handful of rip rounds -- a flat increment cannot build a useful gradient in
+that many iterations, and ground contested once (the productive-churn BGA
+escape regime, 0802 study) stays near-free while ground fought over
+repeatedly prices itself out fast.
 
 Scope is ONE routing call: the field is created/reset at batch start and
 attached to the config, like congestion v2's bins. No decay (v1) -- decay is
@@ -44,15 +59,25 @@ CLAUDE.md):
                                 PRODUCTIVE churn -- the fine-pitch BGA escape
                                 field, where the 0802 study found 15 rips
                                 converge -- from walling itself off)
+  KICAD_HISTORY_ESCALATE        repeat-contest multiplier: re-charging a cell
+                                adds max(inc, escalate x accumulated). 1.0
+                                (default) doubles per repeat; 0 = flat v1
+                                accumulation
+  KICAD_HISTORY_RIP_WEIGHT      fraction of the increment for the v1
+                                whole-footprint rip stamp (default 0 = off;
+                                measured negative in the v1 screen)
   KICAD_HISTORY_RADIUS          mm added to the copper half-width when
-                                stamping a rip (default 0.25 ~ one clearance:
-                                a retry that dodges by one cell has not
-                                actually found different ground)
+                                stamping a v1 rip (default 0.25 ~ one
+                                clearance)
   KICAD_HISTORY_BLOCKED_WEIGHT  fraction of the increment charged to a failed
-                                search's blocked frontier cells (default 0.25;
-                                0 = rips only)
-  KICAD_HISTORY_MAX_CELLS       growth guard: stop accepting NEW cells beyond
-                                this many (existing cells keep accumulating)
+                                search's RAW blocked frontier (default 0 =
+                                off; the contest event charges the useful
+                                subset at full weight)
+  KICAD_HISTORY_MAX_CELLS       growth guard: past this many cells, each new
+                                event EVICTS the lowest-weight cells to make
+                                room -- chronological refusal would unprice
+                                the endgame conflicts, which are the ones
+                                completion is measured on
 """
 from __future__ import annotations
 
@@ -93,7 +118,8 @@ class HistoryField:
     """
 
     __slots__ = ('keys', 'weights', 'version', '_rows', '_rows_version',
-                 'rips', 'frontiers', 'capped_at', 'last_frontier',
+                 'rips', 'frontiers', 'contests', 'evicted',
+                 'last_frontier', 'last_contest',
                  'record_s', 'rows_s')
 
     def __init__(self):
@@ -104,13 +130,19 @@ class HistoryField:
         self._rows_version = -1
         self.rips = 0
         self.frontiers = 0
-        self.capped_at = 0          # cells refused by the growth guard
+        self.contests = 0
+        self.evicted = 0            # cells evicted by the growth guard
         self.last_frontier = None   # signature of the last frontier charged
+        self.last_contest = None    # signature of the last contest charged
         self.record_s = 0.0         # time in the event path (disclosed)
         self.rows_s = 0.0           # time building composition rows
 
     def accumulate(self, cells: np.ndarray, inc: float) -> None:
-        """Add ``inc`` mm-equivalent to every packed cell key in ``cells``.
+        """Charge every packed cell key in ``cells``.
+
+        Fresh cells take ``inc`` mm-equivalent; cells already in the field
+        take ``max(inc, escalate x accumulated)`` -- at the default escalate
+        1.0 a repeat contest DOUBLES the cell's price (0 = flat +inc, v1).
 
         Kept O(field) per event, not O(field log field): ``keys`` is sorted,
         ``np.unique`` returns the event's cells sorted, so the new cells go in
@@ -119,17 +151,9 @@ class HistoryField:
         if inc <= 0 or cells is None or len(cells) == 0:
             return
         t0 = _perf()
+        esc = env_knobs.HISTORY['escalate']
         cells = np.unique(np.asarray(cells, dtype=np.int64))
         if self.keys.size == 0:
-            if cells.size > env_knobs.HISTORY['max_cells']:
-                # Refuse the whole event's cells rather than a prefix: the keys
-                # are packed coordinates, so a prefix is a spatially BIASED
-                # slice of the board (low layer, low x). Chronological refusal
-                # keeps whatever is in the field unbiased.
-                self.capped_at += cells.size
-                self.version += 1
-                self.record_s += _perf() - t0
-                return
             self.keys = cells
             self.weights = np.full(cells.size, float(inc), dtype=np.float64)
         else:
@@ -140,17 +164,29 @@ class HistoryField:
             if hit.any():
                 # `cells` is unique, so the hit targets are distinct and this
                 # fancy-index += cannot lose an update to aliasing.
-                self.weights[idx[hit]] += float(inc)
+                w = self.weights[idx[hit]]
+                charge = np.maximum(float(inc), esc * w) if esc > 0 \
+                    else float(inc)
+                self.weights[idx[hit]] = w + charge
             fresh_mask = ~hit
             if fresh_mask.any():
-                fresh = cells[fresh_mask]
-                if (self.keys.size + fresh.size
-                        > env_knobs.HISTORY['max_cells']):
-                    self.capped_at += fresh.size      # see the note above
-                else:
-                    self.keys = np.insert(self.keys, idx[fresh_mask], fresh)
-                    self.weights = np.insert(self.weights, idx[fresh_mask],
-                                             float(inc))
+                self.keys = np.insert(self.keys, idx[fresh_mask],
+                                      cells[fresh_mask])
+                self.weights = np.insert(self.weights, idx[fresh_mask],
+                                         float(inc))
+        over = self.keys.size - env_knobs.HISTORY['max_cells']
+        if over > 0:
+            # Growth guard: EVICT the lowest-weight cells (deterministic
+            # tie-break on the key) instead of refusing new ones -- the
+            # conflicts that arrive after the field fills are the endgame
+            # ones completion is measured on, so chronological refusal
+            # would unprice exactly the cells that matter most.
+            order = np.lexsort((self.keys, self.weights))
+            keep = np.ones(self.keys.size, dtype=bool)
+            keep[order[:over]] = False
+            self.keys = self.keys[keep]        # mask keeps the sort order
+            self.weights = self.weights[keep]
+            self.evicted += over
         self.version += 1
         self.record_s += _perf() - t0
 
@@ -188,16 +224,17 @@ class HistoryField:
     def summary(self) -> str:
         k = env_knobs.HISTORY
         peak = float(self.weights.max()) if self.weights.size else 0.0
-        capped = f", {self.capped_at} cell(s) refused by the growth guard" \
-            if self.capped_at else ""
-        return (f"History congestion (#590): {self.rips} rip + "
-                f"{self.frontiers} blocked-frontier event(s) over "
-                f"{self.keys.size} cell(s), peak "
+        evicted = f", {self.evicted} cell(s) evicted by the growth guard" \
+            if self.evicted else ""
+        return (f"History congestion (#590): {self.contests} contest + "
+                f"{self.rips} rip + {self.frontiers} blocked-frontier "
+                f"event(s) over {self.keys.size} cell(s), peak "
                 f"{min(peak, k['cap']) if k['cap'] > 0 else peak:.2f}mm-equiv"
                 f" (inc {k['cost']}mm, cap "
-                f"{k['cap'] if k['cap'] > 0 else 'none'}, frontier weight "
-                f"{k['blocked_weight']}), {self.record_s + self.rows_s:.2f}s"
-                f" of field upkeep{capped}")
+                f"{k['cap'] if k['cap'] > 0 else 'none'}, escalate "
+                f"{k['escalate']}, rip weight {k['rip_weight']}, frontier "
+                f"weight {k['blocked_weight']}), "
+                f"{self.record_s + self.rows_s:.2f}s of field upkeep{evicted}")
 
 
 def reset_history(config: GridRouteConfig) -> Optional[HistoryField]:
@@ -212,9 +249,10 @@ def reset_history(config: GridRouteConfig) -> Optional[HistoryField]:
     field = HistoryField()
     config._history_cong = field
     k = history_knobs()
-    print(f"History congestion (#590) armed: +{k['cost']}mm-equiv per conflict"
-          f", cap {k['cap'] if k['cap'] > 0 else 'none'}, rip radius "
-          f"+{k['radius']}mm, frontier weight {k['blocked_weight']}")
+    print(f"History congestion (#590) armed: +{k['cost']}mm-equiv per contest"
+          f", cap {k['cap'] if k['cap'] > 0 else 'none'}, escalate "
+          f"{k['escalate']}, rip weight {k['rip_weight']} (radius "
+          f"+{k['radius']}mm), frontier weight {k['blocked_weight']}")
     return field
 
 
@@ -312,17 +350,54 @@ def _disk_offsets(radius_grid: int) -> np.ndarray:
 
 def record_rip(config: GridRouteConfig, saved_result: dict,
                layer_map: Optional[Dict[str, int]]) -> None:
-    """Conflict event: this copper was contested enough to be torn out."""
+    """Rip event. The contested-cell charge already happened at blocking
+    analysis (record_contested, which identified this rip's victim); the v1
+    whole-footprint stamp here is kept behind KICAD_HISTORY_RIP_WEIGHT
+    (default 0 -- it was measured negative: it prices the victim's entire
+    corridor, almost all of it never contested)."""
     field = _field(config)
-    if field is None or not saved_result or not layer_map:
+    if field is None or not saved_result:
+        return
+    field.rips += 1
+    # The board just changed: a frontier/contest seen after this is a NEW
+    # conflict, not the re-analysis the duplicate guard suppresses.
+    field.last_frontier = None
+    field.last_contest = None
+    w = env_knobs.HISTORY['rip_weight']
+    if w <= 0 or not layer_map:
         return
     keys = _route_cell_keys(saved_result, config, layer_map)
     if keys.size == 0:
         return
-    field.rips += 1
-    # The board just changed: a frontier seen after this is a NEW conflict,
-    # not the re-analysis the duplicate guard suppresses.
-    field.last_frontier = None
+    field.accumulate(keys, env_knobs.HISTORY['cost'] * w)
+
+
+def record_contested(config: GridRouteConfig, cells) -> None:
+    """PRIMARY conflict event (#590 v2): frontier∩blocker intersection.
+
+    ``cells`` are (gx, gy, layer) triples -- the cells of ROUTED nets a
+    failed search stalled against, straight from analyze_frontier_blocking's
+    per-blocker intersection. This is the engine's analog of PathFinder's
+    overused nodes: ground one net holds and another wants. Charged at the
+    FULL increment, before any rip, so a ripped blocker's reroute already
+    sees its contested ground priced and relocates instead of re-taking it.
+    """
+    field = _field(config)
+    if field is None or cells is None or len(cells) == 0:
+        return
+    arr = np.asarray(cells, dtype=np.int64)
+    if arr.ndim != 2 or arr.shape[1] < 3:
+        return
+    keys = np.unique(_pack(arr[:, 2], arr[:, 0], arr[:, 1]))
+    # Same consecutive-duplicate guard as the frontier event: one failure is
+    # often analyzed twice back to back with a different exclude set -- one
+    # conflict, one charge. A contest recurring LATER (other events in
+    # between) is a genuine repeat and escalates.
+    sig = (keys.size, int(keys[0]), int(keys[-1]), int(keys.sum()))
+    if sig == field.last_contest:
+        return
+    field.last_contest = sig
+    field.contests += 1
     field.accumulate(keys, env_knobs.HISTORY['cost'])
 
 
@@ -390,5 +465,5 @@ def history_rows(config) -> Optional[np.ndarray]:
 
 def print_history_summary(config) -> None:
     field = getattr(config, '_history_cong', None)
-    if field is not None and (field.rips or field.frontiers):
+    if field is not None and (field.rips or field.frontiers or field.contests):
         print(f"  {field.summary()}")

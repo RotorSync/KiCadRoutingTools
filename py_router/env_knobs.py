@@ -217,11 +217,17 @@ def refresh() -> None:
     }
     # History-based negotiated congestion (#590, PathFinder): permanent
     # per-cell bump at each conflict event. See history_congestion.py.
+    # v2 (contest-targeted): the primary event charges the frontier∩blocker
+    # INTERSECTION (the cells one net holds and another stalled against) at
+    # the full increment; the v1 whole-footprint rip stamp and raw-frontier
+    # charge were measured negative/inert and now default OFF behind weights.
     g['HISTORY'] = {
         'cost': _f('KICAD_HISTORY_COST', 0.0),            # 0 = disabled
         'cap': _f('KICAD_HISTORY_CAP', 0.0),              # 0 = uncapped
-        'radius': _f('KICAD_HISTORY_RADIUS', 0.25),       # mm beyond half-width
-        'blocked_weight': _f('KICAD_HISTORY_BLOCKED_WEIGHT', 0.25),
+        'radius': _f('KICAD_HISTORY_RADIUS', 0.25),       # mm beyond half-width (rip stamp)
+        'blocked_weight': _f('KICAD_HISTORY_BLOCKED_WEIGHT', 0.0),  # raw frontier residue
+        'rip_weight': _f('KICAD_HISTORY_RIP_WEIGHT', 0.0),  # v1 whole-footprint rip stamp
+        'escalate': _f('KICAD_HISTORY_ESCALATE', 1.0),    # repeat-contest multiplier (0 = flat)
         'max_cells': _i('KICAD_HISTORY_MAX_CELLS', 500_000),
     }
 

@@ -397,6 +397,17 @@ def analyze_frontier_blocking(
         cells, counts = np.unique(all_blocking, return_counts=True)
         solo_cells = cells[counts == 1]
         n_attributed = int(cells.size)
+        # #590 v2 CONTEST event: these cells -- routed copper the failed
+        # search stalled against -- are the negotiated-congestion field's
+        # primary signal (frontier∩blocker, the PathFinder overused-node
+        # analog). Charged at full weight, BEFORE any rip, so a ripped
+        # blocker's reroute sees its contested ground priced. No-op unless
+        # KICAD_HISTORY_COST > 0.
+        from history_congestion import history_enabled, record_contested
+        if history_enabled():
+            cgx, cgy = _unpack_xy(cells)
+            record_contested(config, np.stack(
+                (cgx, cgy, cells & 0xFF), axis=1))
     else:
         solo_cells = np.empty(0, dtype=np.int64)
         n_attributed = 0
