@@ -123,13 +123,16 @@ def refresh() -> None:
     # escape near the stub still needs track room on other layers, just less
     # of it. KICAD_STUB_LAYER_M overrides M (>= 1).
     # #585 item 8's two pseudo-stub gates, split so each can be A/B'd alone.
-    # Both OFF = the pre-f785a7e behaviour (any footprint with >= min_pads pads
-    # emits, and the proxy never retires). The commit shipped both ON and cost
-    # connectivity on header-heavy boards (spartan6 2 -> 7 incomplete nets,
-    # cubesat's /H2-*); the bisect pinned the commit, not either gate, so they
-    # are separable here rather than reverted together.
-    g['FINE_PITCH_PSEUDO_STUBS'] = _opt_in('KICAD_FINE_PITCH_PSEUDO_STUBS')
-    g['PSEUDO_STUB_RETIRE'] = _opt_in('KICAD_PSEUDO_STUB_RETIRE')
+    # Both ON = f785a7e's shipped behaviour, restored. They were briefly
+    # defaulted OFF on a two-board 2x2 whose spread turned out comparable to its
+    # own noise; two corpus A/Bs then measured ON BETTER (by 3 on 148 boards, by
+    # 2 on 129 with smoothing restored -- 7 boards better vs 4 worse). Setting
+    # =0 gives the pre-f785a7e behaviour: any footprint with >= min_pads pads
+    # emits, and the proxy never retires. Kept as separate knobs because the two
+    # gates are wildly asymmetric -- on spartan6's final board the retire gate
+    # removes 95%% of emitters (667 -> 33 pads), the package gate 33%%.
+    g['FINE_PITCH_PSEUDO_STUBS'] = _on_default('KICAD_FINE_PITCH_PSEUDO_STUBS')
+    g['PSEUDO_STUB_RETIRE'] = _on_default('KICAD_PSEUDO_STUB_RETIRE')
     g['STUB_LAYER_AWARE'] = _opt_in('KICAD_STUB_LAYER_AWARE')
     g['STUB_LAYER_M'] = _f('KICAD_STUB_LAYER_M', 0.0)  # 0 = auto n_layers/2
     # (#585 item 2 -- excluding plane-destined nets' stubs -- was DECIDED

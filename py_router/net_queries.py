@@ -1465,11 +1465,16 @@ def get_chip_pad_positions(pcb_data: PCBData, net_ids: List[int], min_pads: int 
     pad -- the future escape needs the surrounding space, so routing is
     discouraged near it.
 
-    #585 item 8 added two gates. Both are now OFF by default and independently
-    re-enablable, because together they measurably cost connectivity and the
-    bisect pinned the COMMIT, not either gate individually:
+    #585 item 8 added two gates. Both are ON by default (f785a7e's shipped
+    behaviour) and independently disablable with =0. They were briefly defaulted
+    OFF on a two-board 2x2 whose spread turned out comparable to its own noise;
+    two corpus A/Bs then measured ON BETTER -- by 3 nets on 148 boards, and by 2
+    on 129 boards with smoothing restored (7 boards better, 4 worse). They stay
+    SEPARATE knobs because the two are wildly asymmetric in reach: on spartan6's
+    final board the retire gate removes 95% of emitters (667 -> 33 pads) while
+    the package gate removes a third (667 -> 448).
 
-    - `KICAD_FINE_PITCH_PSEUDO_STUBS` -- emit only for BGA/QFN/QFP. Introduced
+    - `KICAD_FINE_PITCH_PSEUDO_STUBS` (default ON) -- emit only for BGA/QFN/QFP. Introduced
       to stop 4-pad capacitors and dense connectors emitting fields, reasoning
       that "coarse pads need no escape protection". But the field protects
       ARRIVAL as much as escape, and without it nets could not REACH multi-pin
@@ -1482,7 +1487,7 @@ def get_chip_pad_positions(pcb_data: PCBData, net_ids: List[int], min_pads: int 
       fields cost the max, not the sum -- a connector cannot inflate cost by
       concentration unless an opt-in sum/zoned/softcap mode is selected.
 
-    - `KICAD_PSEUDO_STUB_RETIRE` -- drop the proxy once same-net copper reaches
+    - `KICAD_PSEUDO_STUB_RETIRE` (default ON) -- drop the proxy once same-net copper reaches
       the pad, on the grounds that the real stub endpoint takes over as the
       proximity signal. Plausible, but it retires on ANY attachment: a header
       pad with one stub on it stops defending the corridor the REST of its
