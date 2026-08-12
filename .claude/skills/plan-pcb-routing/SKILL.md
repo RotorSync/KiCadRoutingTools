@@ -1046,6 +1046,10 @@ plane-drop vias (#424), so this retry is rare.)
 > searches stop early. A net that still fails after an
 > `"dynamic iterations (#529): search extended to N"` log line is a
 > capacity problem (rip-up, clearance, layers), not a budget problem.
+> The aggregate is bounded too (#625): once a net (or the run) burns its
+> failed-extension budget, later searches drop to static caps — the
+> `"dynamic iterations (#625): ..."` lines are that safety valve working,
+> never a reason to raise budgets.
 > (`KICAD_DYNAMIC_ITERATIONS=0` restores the legacy static caps for A/B.)
 
 python3 -X utf8 py_router/route.py board_step1c.kicad_pcb board_step2.kicad_pcb \

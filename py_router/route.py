@@ -69,7 +69,8 @@ from obstacle_cache import (
     precompute_all_net_obstacles, build_working_obstacle_map, update_net_obstacles_after_routing
 )
 from single_ended_routing import (route_net_with_obstacles,
-                                   route_multipoint_taps, build_corridor_waypoints)
+                                   route_multipoint_taps, build_corridor_waypoints,
+                                   reset_dynamic_waste_ledger)
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers
 from rip_up_reroute import rip_up_net, restore_net
 from layer_swap_optimization import apply_single_ended_layer_swaps
@@ -503,6 +504,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # never leave a previous invocation's hints for the caller to harvest.
     batch_route._forced_link_hints = {}
     batch_route._forced_link_landed = []
+    # #625: fresh extension-waste budget per engine run (a long-lived GUI
+    # process must not carry one run's spent budget into the next; the
+    # nested reconcile sub-run re-arms deliberately -- its scope is bounded).
+    reset_dynamic_waste_ledger()
     if env_knobs.DUMP_BATCH_KWARGS:
         # Parameter-parity probe: dump THIS call's full parameter set so the
         # CLI front (argparse->main) and the GUI front (plan setters->tab

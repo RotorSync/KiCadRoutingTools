@@ -228,6 +228,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         If return_results=False: (successful_count, failed_count, total_time)
         If return_results=True: (successful_count, failed_count, total_time, results_data)
     """
+    # #625: fresh extension-waste budget per engine run (see batch_route).
+    from single_ended_routing import reset_dynamic_waste_ledger
+    reset_dynamic_waste_ledger()
     # Diff-pair coupling gap may never sit below `clearance` (#441). KiCad grades a
     # pair's P<->N coupling under the plain copper-clearance rule (P and N are
     # different nets), so a gap tighter than clearance is flagged as a clearance
