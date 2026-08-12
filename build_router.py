@@ -6,6 +6,13 @@ GitHub Releases page, so users do NOT need to install a Rust toolchain. If the
 download fails (no network, no matching release, etc.) it falls back to a local
 `cargo build --release`. Pass --from-source to skip the download and build
 locally; pass --tag vX.Y.Z to pin a specific release.
+
+In a git checkout whose rust_router/ differs from main (a branch carrying crate
+changes, or uncommitted crate edits), the prebuilt is skipped and the build goes
+straight to source: release assets are built from main's crate, so a downloaded
+binary can agree on the version string yet carry a different ABI (#615 -- the
+`placement` branch's Python passed `block_vias`, the downloaded binary didn't
+take it). An explicit --tag overrides this and is honored as-given.
 """
 
 import sys
@@ -313,6 +320,48 @@ def _verify_import(rust_dir):
     return True
 
 
+def _crate_matches_release_source(script_dir):
+    """Does the working tree's rust_router/ match main -- the source the release
+    assets are built from?
+
+    Returns True when it matches (a prebuilt is trustworthy), False when it
+    differs (committed branch changes or local edits, tracked or untracked --
+    a prebuilt could agree on the version string yet carry a different ABI,
+    #615), and None when it cannot be determined (git missing, not a git
+    checkout -- e.g. a release-zip install -- or no main ref to compare
+    against). None callers keep the download path: the post-install version
+    check still self-heals a version mismatch, which is the pre-#615 behavior.
+    """
+    def _git(*argv):
+        return subprocess.run(['git', '-C', script_dir] + list(argv),
+                              capture_output=True, text=True, timeout=30)
+
+    try:
+        if _git('rev-parse', '--git-dir').returncode != 0:
+            return None
+        # Prefer origin/main (current even when the local main branch is stale
+        # or absent, as in a clone that checked out another branch).
+        ref = next((r for r in ('origin/main', 'main')
+                    if _git('rev-parse', '--verify', '--quiet',
+                            r + '^{commit}').returncode == 0), None)
+        if ref is None:
+            return None
+        # Worktree (staged + unstaged) vs main for tracked files...
+        diff = _git('diff', '--quiet', ref, '--', 'rust_router')
+        if diff.returncode == 1:
+            return False
+        if diff.returncode != 0:
+            return None
+        # ...plus untracked files (a new .rs file never diffs). Build outputs
+        # (grid_router.so/.pyd, target/) are gitignored, so they don't trip this.
+        status = _git('status', '--porcelain', '--', 'rust_router')
+        if status.returncode != 0:
+            return None
+        return not any(line.startswith('??') for line in status.stdout.splitlines())
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def _cargo_version(rust_dir):
     """Read the [package] version from rust_router/Cargo.toml (None if unreadable)."""
     cargo_path = os.path.join(rust_dir, 'Cargo.toml')
@@ -365,6 +414,23 @@ def main():
         return
 
     if args.from_source:
+        build_from_source(script_dir, rust_dir)
+        return
+
+    # Release assets are built from main's crate. On a checkout whose
+    # rust_router/ differs from main, a prebuilt can pass the startup version
+    # gate yet carry the wrong ABI (#615: the `placement` branch at crate
+    # 0.20.0 downloaded the 0.20.1 asset, and even a hand-bumped Cargo.toml
+    # just traded the startup rejection for TypeErrors at run time). Go
+    # straight to source. An explicit --tag is honored as-given, same as the
+    # skip logic in try_download_prebuilt.
+    if args.tag is None and _crate_matches_release_source(script_dir) is False:
+        print("This checkout's rust_router/ differs from main, and prebuilt "
+              "release binaries are built from main's crate --")
+        print("a downloaded binary could match the version string yet carry a "
+              "different ABI. Building from source instead.")
+        print("(Pass --tag vX.Y.Z to force a specific prebuilt release.)")
+        print()
         build_from_source(script_dir, rust_dir)
         return
 
