@@ -600,6 +600,15 @@ def _regrade_locally(args, sets, stress, out, what):
     jobs = max(1, int(getattr(args, "jobs", 6) or 6))
     print(f"  re-grading the {what} locally ({len(sets)} sets, {jobs} in parallel) "
           f"so it is graded on the SAME terms as the baseline")
+    # Snapshot every harvested row BEFORE the regrade overwrites summary.json.
+    _pre_regrade = {}
+    for s in sets:
+        f = out / s / "summary.json"
+        if f.exists():
+            try:
+                _pre_regrade[s] = {r.get("board"): r for r in json.loads(f.read_text())}
+            except Exception:
+                pass
 
     def one(s):
         rds = sl.run_dirs_for(stress, s)
@@ -613,9 +622,33 @@ def _regrade_locally(args, sets, stress, out, what):
         if not summ.exists():
             return f"    {s}: regrade produced no summary"
         rr = json.loads(summ.read_text())
+
+        # Merge back rows the regrade DROPPED. --regrade rebuilds summary.json
+        # from the board DIRECTORIES it finds, so any board whose artifact was
+        # not kept vanishes from the results entirely -- 150 harvested rows
+        # became 137, and the comparison then reported those boards as "not run"
+        # when in fact they ran, completed, and their rows were on the volume.
+        # Keep them, marked as cloud-graded, so they are excluded from the
+        # PAIRED comparison honestly rather than deleted silently.
+        pre = _pre_regrade.get(s) or {}
+        have = {r.get("board") for r in rr}
+        readded = []
+        for b, row in sorted(pre.items()):
+            if b not in have:
+                row = dict(row)
+                row["regraded"] = False
+                rr.append(row)
+                readded.append(b)
+        if readded:
+            rr.sort(key=lambda r: r.get("board") or "")
+            summ.write_text(json.dumps(rr, indent=2))
+
         kc = sum(1 for r in rr if r.get("kicad_connection_width") is not None)
         return (f"    {s:9} {sum(1 for r in rr if r.get('chain_complete')):3}/"
-                f"{len(rr):<3} complete, {kc:3} with the kicad-cli cross-check")
+                f"{len(rr):<3} complete, {kc:3} with the kicad-cli cross-check"
+                + (f"; {len(readded)} kept as CLOUD-GRADED (no artifact to "
+                   f"re-grade: {', '.join(readded[:3])}"
+                   f"{'...' if len(readded) > 3 else ''})" if readded else ""))
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
         for line in ex.map(one, sets):
@@ -705,7 +738,8 @@ def aggregate_totals(args, sets, out) -> dict:
     """
     tot = {"boards_compared": 0, "drc_old": 0, "drc_new": 0,
            "incompl_old": 0, "incompl_new": 0,
-           "baseline_only_complete": [], "new_only_complete": [], "not_run": []}
+           "baseline_only_complete": [], "new_only_complete": [], "not_run": [],
+           "cloud_graded_only": []}
     for s in sets:
         op, np_ = baseline_summary(args, s), out / s / "summary.json"
         if not (op.exists() and np_.exists()):
@@ -716,6 +750,11 @@ def aggregate_totals(args, sets, out) -> dict:
             o, n = old.get(b), new.get(b)
             oc = bool(o and o.get("chain_complete"))
             nc = bool(n and n.get("chain_complete"))
+            if n is not None and n.get("regraded") is False:
+                # Ran and completed, but has no local re-grade -- comparing it
+                # against a locally-graded baseline would compare GRADERS.
+                tot.setdefault("cloud_graded_only", []).append(f"{s}/{b}")
+                continue
             if n is None:
                 # Absent from the new wave entirely (partial run, --boards/--limit,
                 # or a task that never produced a row). Calling that a REGRESSION
@@ -759,6 +798,12 @@ def print_aggregate(t: dict):
     if t["baseline_only_complete"]:
         print(f"  REGRESSED to broken chain ({len(t['baseline_only_complete'])}): "
               f"{', '.join(t['baseline_only_complete'][:8])}")
+    if t.get("cloud_graded_only"):
+        print(f"  cloud-graded only, excluded from the pairing "
+              f"({len(t['cloud_graded_only'])}, they RAN -- their artifact was not "
+              f"kept so they could not be re-graded on the baseline's terms): "
+              f"{', '.join(t['cloud_graded_only'][:6])}"
+              f"{' ...' if len(t['cloud_graded_only']) > 6 else ''}")
     if t.get("not_run"):
         print(f"  not run in this wave ({len(t['not_run'])}, NOT a regression): "
               f"{', '.join(t['not_run'][:8])}"
