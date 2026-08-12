@@ -149,7 +149,15 @@ Every recorded stress run leaves a `redo_commands.sh` manifest that replays the
 full chain with **no LLM**. To regression-test or A/B an engine change across the
 board corpus, use `tests/stress/ab_replay_grade.py` (whole-set replay + DRC/
 connectivity grading) or `tests/stress/redo_diff_stage.py` (diff-pair stages only).
-See `tests/stress/RUNBOOK.md` ("Replaying & A/B (no LLM)") for the recipes.
+For CORPUS-SCALE work (~$1/arm on rented cores, keeps the routed boards):
+`tests/stress/cloud_replay_sets.py` A/Bs a change over whole sets, and
+`tests/stress/corpus_bisect.sh` scores one engine commit for bisecting a
+regression. See `tests/stress/RUNBOOK.md` ("Replaying & A/B (no LLM)" and
+"Corpus-scale A/B and bisect on the cloud") for the recipes and the rules that
+make them trustworthy -- notably: the baseline is the RECORDED RUNS re-graded
+(not an archived wave), grade both sides on the same terms, compare only boards
+that replayed an IDENTICAL chain, and **a two-board result is not a default
+change** (per-board spread is +-2..3 nets).
 
 ## Keep CLI and GUI routing in sync
 

@@ -678,6 +678,57 @@ Rule of thumb: full-chain regressions → `ab_replay_grade.py`; diff-pair
 regressions → `redo_diff_stage.py`; plane/reconnect/grading-only changes →
 `partial_replay_from_planes.py` (reuses a prior wave's upstream boards).
 
+## Corpus-scale A/B and bisect on the cloud (no LLM, ~$1/arm)
+
+`ab_replay_grade.py` and `ab_wave_driver.py` run locally and grade what YOUR
+machine can chew through. These two run the same replays on rented cores, keep
+the routed boards, and are what you want for "did this change help across 150
+boards" and "which commit broke connectivity".
+
+- **`cloud_replay_sets.py`** — replay whole sets on Modal, KEEP the finished
+  `.kicad_pcb` (with its `.kicad_pro`/`.kicad_dru` siblings), and A/B against a
+  baseline. Six stages, pick with `--only`: `plan` (prices it, spends nothing) /
+  `upload` / `run` / `harvest` / `baseline` / `compare`.
+
+  ```bash
+  # where does HEAD stand vs the recorded runs, sets 10-19?
+  python3 tests/stress/cloud_replay_sets.py --sets set10-set19
+  # one arm with a knob changed (rides the ARM SPEC -- containers do NOT
+  # inherit your shell's env)
+  python3 tests/stress/cloud_replay_sets.py --sets set10-set19 --label smoothoff \
+      --env KICAD_SMOOTH_ROUTE=0
+  # or a routing_defaults constant, patched in the container's own repo copy
+  ... --label hw19 --defaults HEURISTIC_WEIGHT=1.9
+  ```
+
+- **`corpus_bisect.sh`** — score ONE engine commit across the corpus, for
+  bisecting a regression: `bash tests/stress/corpus_bisect.sh <sha> <tag>`.
+  5-6 points bracket a 38-commit range for under $10.
+
+### Rules that make these trustworthy
+
+1. **The baseline is the RECORDED RUNS, re-graded — not an archived `ab_*` wave.**
+   The corpus gets re-recorded: after the #562 pours-first reshape every one of
+   sets 10-19's 150 boards produces a different final output than the 2026-07-28
+   wave did, so diffing against it mixes a different PLAN in with the engine
+   delta. `--baseline recorded` (the default) compares like with like; preflight
+   refuses a wave whose chains disagree.
+2. **Grade both sides on the same terms.** The cloud image ships no KiCad, so
+   `drc_real` falls back to raw DRC and connectivity uses the raster fill model.
+   Comparing a cloud row against a locally-graded baseline measures the GRADER:
+   it once reported "DRC +40 worse" when the truth was "-37 better". Harvest
+   re-grades the kept boards locally by default (`--no-local-regrade` opts out).
+3. **Compare arms only on boards that replayed an IDENTICAL chain** (same
+   `nets_total` and step count). A short chain grades artificially WELL, because
+   nets its missing steps never attempted are not counted as incomplete.
+4. **A two-board result is not a default change.** Per-board run-to-run spread is
+   +-2..3 nets (the same config measured 7 and 5 on consecutive runs), so single
+   boards cannot resolve anything smaller. Two defaults were shipped and reverted
+   on this exact mistake.
+5. **Arm names carry the source commit**, so resuming re-uses banked rows only
+   within one commit; the launch-time name is recorded in `<out>/arm.txt` because
+   HEAD moves between stages when another session commits.
+
 ## Multi-set waves & release sign-off
 
 `ab_replay_grade.py` grades **one set**. A release decision (should this become a
