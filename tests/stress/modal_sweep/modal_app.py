@@ -523,8 +523,12 @@ def replay_big(task: dict) -> dict:
 def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,set10",
          stress_dir: str = "", out: str = "", dry_run: bool = False,
          boards: str = "", limit: int = 0, stage: str = "full",
-         gate_margin: float = 0.25, ignore_excludes: bool = False):
+         gate_margin: float = 0.25, ignore_excludes: bool = False,
+         exclude: str = ""):
     """boards: comma-separated board names to restrict to (smoke tests).
+    exclude: comma-separated board names to SKIP this run -- the ad-hoc lever
+            for multi-hour monsters that set the wall-clock floor (on sets
+            11-20, four boards are half the cost and all of the 11 h floor).
     limit:  keep only the N CHEAPEST boards -- a smoke test wants fast feedback,
             and the default longest-first order would otherwise hand you the
             50-minute monster first.
@@ -555,10 +559,31 @@ def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,se
     # may discriminate heuristic/rip-up arms fine).
     excluded = set() if ignore_excludes else set(board_value.get("exclude", []))
     if excluded:
-        n0 = len(board_list)
+        # Report what was actually DROPPED from this run, not the whole exclude
+        # list: printing the list next to a count of 0 reads as "46 boards
+        # excluded" when the truth is "none of them are in these sets".
+        dropped = sorted({b for _, b in board_list} & excluded)
         board_list = [(s, b) for s, b in board_list if b not in excluded]
-        print(f"  board_value: excluded {n0 - len(board_list)} zero-information "
-              f"board(s): {sorted(excluded & {b for _, b in board_list} | excluded)}")
+        if dropped:
+            print(f"  board_value: excluded {len(dropped)} zero-information "
+                  f"board(s): {dropped}")
+
+    # --exclude: boards to skip in THIS run, by name. Distinct from
+    # board_value's list (which is a fitted, persistent judgement about boards
+    # that discriminate nothing): this is the ad-hoc "not worth its wall clock
+    # today" lever -- a handful of multi-hour monsters can be most of a sweep's
+    # cost and all of its wall-clock floor, and dropping them buys back hours
+    # without materially changing the corpus a verdict rests on.
+    if exclude:
+        skip = {b.strip() for b in exclude.split(",") if b.strip()}
+        matched = skip & {b for _, b in board_list}
+        board_list = [(s, b) for s, b in board_list if b not in skip]
+        print(f"  --exclude: dropped {len(matched)} board(s): {sorted(matched)}")
+        if skip - matched:
+            # Loud: a typo'd name silently leaves the monster in the run, and
+            # you find that out from the wall clock many hours later.
+            print(f"  WARNING: excluded name(s) matching no board in {set_list}: "
+                  f"{sorted(skip - matched)} -- check for typos")
 
     if boards:
         want = {b.strip() for b in boards.split(",") if b.strip()}

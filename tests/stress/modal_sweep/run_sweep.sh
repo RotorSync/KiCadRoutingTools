@@ -18,6 +18,12 @@
 #                             corpus changes
 #   SWEEP_DRY=1               stop after the plan, spend nothing
 #   SWEEP_OUT=/path.json      where to write the result (default: stress dir)
+#   SWEEP_EXCLUDE=a,b         skip these boards -- the wall-clock lever. A
+#                             handful of multi-hour monsters can be half a
+#                             sweep's cost and ALL of its floor (sets 11-20:
+#                             4 boards = 50% of the CPU-h and the whole 11 h
+#                             floor), and dropping them barely moves a verdict
+#                             drawn from ~150 boards.
 #   KICAD_SWEEP_DIRTY=1       ship the WORKING TREE instead of a clean HEAD
 #                             checkout -- for deliberately sweeping an
 #                             uncommitted engine change. Otherwise the image is
@@ -32,6 +38,8 @@ SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ARMS="${1:?usage: run_sweep.sh <arms.json> [sets]}"
 SETS="${2:-${SWEEP_SETS:-set1,set2,set3,set4,set5,set6,set7,set8,set9,set10}}"
 OUT="${SWEEP_OUT:-}"
+EXCLUDE="${SWEEP_EXCLUDE:-}"
+EXARG=(); [ -n "$EXCLUDE" ] && EXARG=(--exclude "$EXCLUDE")
 
 [ -f "$ARMS" ] || { echo "no such arms file: $ARMS" >&2; exit 1; }
 
@@ -62,12 +70,15 @@ esac
 
 if [ "${SWEEP_UPLOAD:-0}" = "1" ]; then
   echo "== populating the corpus volume (~2.2 GB, one-off)"
+  # No --exclude here on purpose: the corpus volume is shared across runs, so
+  # a board this ONE sweep skips for wall-clock reasons must still be uploaded
+  # for the next one.
   python3 "$SELF/upload_corpus.py" --sets "$SETS"
   echo
 fi
 
 echo "== plan (spends nothing)"
-modal run "$SELF/modal_app.py" --arms "$ARMS" --sets "$SETS" --dry-run
+modal run "$SELF/modal_app.py" --arms "$ARMS" --sets "$SETS" "${EXARG[@]}" --dry-run
 
 if [ "${SWEEP_DRY:-0}" = "1" ]; then
   echo
@@ -78,10 +89,10 @@ fi
 echo
 echo "== running the sweep"
 if [ -n "$OUT" ]; then
-  modal run "$SELF/modal_app.py" --arms "$ARMS" --sets "$SETS" --out "$OUT"
+  modal run "$SELF/modal_app.py" --arms "$ARMS" --sets "$SETS" "${EXARG[@]}" --out "$OUT"
   RESULT="$OUT"
 else
-  modal run "$SELF/modal_app.py" --arms "$ARMS" --sets "$SETS" | tee /tmp/sweep_run.log
+  modal run "$SELF/modal_app.py" --arms "$ARMS" --sets "$SETS" "${EXARG[@]}" | tee /tmp/sweep_run.log
   RESULT="$(grep -oE '/[^ ]*sweep_[0-9]+\.json' /tmp/sweep_run.log | tail -1)"
 fi
 
