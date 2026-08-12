@@ -1743,7 +1743,8 @@ class RoutingDialog(wx.Dialog):
             get_shared_params=get_shared_params,
             on_fanout_complete=self._on_tab_operation_complete,
             get_connectivity_check=self._get_connectivity_check_fn,
-            sync_pcb_data_callback=self._sync_pcb_data_from_board
+            sync_pcb_data_callback=self._sync_pcb_data_from_board,
+            append_log=self._append_log
         )
 
     def _create_planes_tab(self):
@@ -2664,8 +2665,17 @@ class RoutingDialog(wx.Dialog):
         self.status_text.SetLabel("Settings reset to defaults")
 
     def _append_log(self, text):
-        """Append text to the log (thread-safe via CallAfter)."""
-        wx.CallAfter(self._do_append_log, text)
+        """Append text to the log (thread-safe via CallAfter).
+
+        Main-thread callers append DIRECTLY: a UI-thread step (fanout, the
+        apply phases) blocks the loop, so a CallAfter'd append would queue
+        until the step ENDED and the log would arrive in one burst. Direct
+        append + the ui_thread_status UI-category pump makes it live.
+        """
+        if wx.IsMainThread():
+            self._do_append_log(text)
+        else:
+            wx.CallAfter(self._do_append_log, text)
 
     def _do_append_log(self, text):
         """Actually append text to log (must be called on main thread).
@@ -3473,8 +3483,21 @@ class RoutingDialog(wx.Dialog):
             board.RemoveNative(d)
         return len(to_remove)
 
-    def _apply_results_to_board(self, results_data, successful, failed, total_time, config):
-        """Apply routing results directly to the open pcbnew board."""
+    def _apply_results_to_board(self, results_data, successful, failed,
+                                total_time, config):
+        """Apply routing results directly to the open pcbnew board.
+
+        Delegates under a log tee: the worker's stdout redirect is restored
+        before this main-thread handler runs, so without it the apply/oracle/
+        refill narration reached the terminal but never the log tab.
+        """
+        from .gui_utils import redirect_prints_to_log
+        with redirect_prints_to_log(self._append_log):
+            return self._apply_results_to_board_body(
+                results_data, successful, failed, total_time, config)
+
+    def _apply_results_to_board_body(self, results_data, successful, failed,
+                                     total_time, config):
         import pcbnew
         from .board_swaps import apply_swaps_to_board
 

@@ -1283,7 +1283,17 @@ class PlanesTab(wx.Panel):
         self.net_panel.refresh()
 
     def _apply_results_to_board(self):
-        """Apply operation results to the pcbnew board."""
+        """Apply operation results to the pcbnew board.
+
+        Delegates under a log tee: the worker's stdout redirect is restored
+        before this main-thread handler runs, so without it the zone-add/
+        refill/cleanup narration reached the terminal but never the log tab.
+        """
+        from .gui_utils import redirect_prints_to_log
+        with redirect_prints_to_log(self.append_log):
+            return self._apply_results_to_board_body()
+
+    def _apply_results_to_board_body(self):
         import pcbnew
 
         # Reset before the early return below, so the completion message can

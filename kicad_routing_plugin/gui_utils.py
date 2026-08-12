@@ -123,6 +123,38 @@ def ui_thread_status(status_text, progress_bar, message):
         _IN_UI_STATUS = False
 
 
+from contextlib import contextmanager
+
+
+@contextmanager
+def redirect_prints_to_log(append_log):
+    """Route print() output into the GUI log for the duration of a block,
+    while preserving the original stdout (StdoutRedirector tees, not swallows).
+
+    One shared helper because the audit found the coverage was accidental:
+    the route/diff/planes WORKERS redirected, but the fanout tab never did,
+    and every tab's APPLY phase runs after its worker restored stdout -- so
+    engine narration (fanout escapes, the oracle reconnect, zone refills,
+    plane cleanup) reached the terminal but never the log tab. Guarded:
+    append_log=None (or a failure) degrades to plain stdout, never breaks
+    the work.
+    """
+    import sys
+    if not append_log:
+        yield
+        return
+    original = sys.stdout
+    try:
+        sys.stdout = StdoutRedirector(append_log, original)
+    except Exception:
+        yield
+        return
+    try:
+        yield
+    finally:
+        sys.stdout = original
+
+
 class StdoutRedirector:
     """Redirects stdout to a callback function while preserving original output."""
 

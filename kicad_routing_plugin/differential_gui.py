@@ -1092,7 +1092,11 @@ class DifferentialTab(wx.Panel):
         # front let the executor start the NEXT step mid-apply (Andy's
         # 'tracks don't all appear, rerun fixes it').
         try:
-            self._on_routing_complete_body()
+            # Tee the apply phase's prints into the log tab: the worker's
+            # redirect was restored before this main-thread handler runs.
+            from .gui_utils import redirect_prints_to_log
+            with redirect_prints_to_log(self.append_log):
+                self._on_routing_complete_body()
         finally:
             self.route_btn.Enable()
             self.cancel_btn.SetLabel("Close")

@@ -1130,7 +1130,8 @@ class FanoutTab(wx.Panel):
 
     def __init__(self, parent, pcb_data, board_filename,
                  get_shared_params=None, on_fanout_complete=None,
-                 get_connectivity_check=None, sync_pcb_data_callback=None):
+                 get_connectivity_check=None, sync_pcb_data_callback=None,
+                 append_log=None):
         """
         Create the fanout tab.
 
@@ -1152,6 +1153,10 @@ class FanoutTab(wx.Panel):
         # Keeps the dialog's in-memory pcb_data in step with the board after a
         # fanout applies copper (see _apply_fanout_results).
         self.sync_pcb_data_callback = sync_pcb_data_callback
+        # Dialog log sink: the fanout engines narrate through print(), and
+        # without this tee that narration reached the terminal but never the
+        # log tab (the route/diff/planes workers already redirected).
+        self.append_log = append_log
 
         self._create_ui()
 
@@ -1361,6 +1366,13 @@ class FanoutTab(wx.Panel):
             self.progress_bar.SetValue(0)
             return
 
+        # Tee engine narration into the log tab (placed AFTER the no-layers
+        # early return above so stdout is never left redirected).
+        import sys
+        from .gui_utils import StdoutRedirector
+        _orig_stdout = sys.stdout
+        if self.append_log:
+            sys.stdout = StdoutRedirector(self.append_log, _orig_stdout)
         try:
             from bga_fanout import generate_bga_fanout
 
@@ -1448,6 +1460,7 @@ class FanoutTab(wx.Panel):
                 wx.OK | wx.ICON_ERROR
             )
         finally:
+            sys.stdout = _orig_stdout
             self.fanout_btn.Enable()
             self.progress_bar.SetValue(0)
 
@@ -1476,6 +1489,12 @@ class FanoutTab(wx.Panel):
         via_size = shared.get('via_size', defaults.BGA_VIA_SIZE)
         via_drill = shared.get('via_drill', defaults.BGA_VIA_DRILL)
 
+        # Tee engine narration into the log tab (same as the BGA path).
+        import sys
+        from .gui_utils import StdoutRedirector
+        _orig_stdout = sys.stdout
+        if self.append_log:
+            sys.stdout = StdoutRedirector(self.append_log, _orig_stdout)
         try:
             from qfn_fanout import generate_qfn_fanout
 
@@ -1522,6 +1541,7 @@ class FanoutTab(wx.Panel):
                 wx.OK | wx.ICON_ERROR
             )
         finally:
+            sys.stdout = _orig_stdout
             self.fanout_btn.Enable()
             self.progress_bar.SetValue(0)
 
@@ -1885,8 +1905,10 @@ class FanoutTab(wx.Panel):
             'grid_step': shared.get('grid_step', defaults.GRID_STEP),
             'via_size': shared.get('via_size', defaults.BGA_VIA_SIZE),
         })
-        summary = self._optimize_decoupling_caps(board, pcbnew, cfg)
-        board.BuildConnectivity()
+        from .gui_utils import redirect_prints_to_log
+        with redirect_prints_to_log(self.append_log):
+            summary = self._optimize_decoupling_caps(board, pcbnew, cfg)
+            board.BuildConnectivity()
         pcbnew.Refresh()
         if summary:
             self.status_text.SetLabel(summary)
