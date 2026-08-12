@@ -16,6 +16,7 @@ mkdir -p "$STRESS/boards_unrouted_set28" "$STRESS/boards_set28"
 MAP=(
   "act_probe_2ghz|act_probe_2ghz"
   "agri_smart_switch|agri_smart_switch"
+  "mez_rx|mez_rx"
 )
 
 for entry in "${MAP[@]}"; do
