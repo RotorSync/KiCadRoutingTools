@@ -112,6 +112,70 @@ def same_chain(rows: list) -> str:
     return ""
 
 
+def report_perf(by_arm, paired, base, order):
+    """Wall / CPU / iterations / peak RSS, reported three ways.
+
+    One number here is actively misleading, which this repo has now proved on
+    itself: a #590 arm looked 8.2% faster with 23% fewer iterations, and 92% of
+    that "saving" was ONE board (cm4_underwater) where the arm did less work
+    because it FAILED. Sums reward giving up. So:
+
+      * TOTAL   -- the sum, which is what a corpus run actually costs, but is
+                   dominated by the few heaviest boards;
+      * MEDIAN  -- the per-board ratio, which says what a TYPICAL board sees
+                   and cannot be moved by one monster;
+      * SAME-VERDICT -- the sum restricted to boards where both arms left the
+                   same nets incomplete, which is the only honest speed
+                   comparison: outcome held fixed, so a arm cannot buy time by
+                   routing less.
+
+    Cloud wall-clock also carries container noise (a board measured 600 s and
+    1,221 s at +4.6% iterations and identical completion), so prefer CPU and
+    iterations; iterations are byte-stable per config and the only fully
+    deterministic effort metric.
+    """
+    import statistics
+    keys = [("total_seconds", "wall s"), ("cpu_seconds", "cpu s"),
+            ("total_iterations", "iters"), ("peak_rss_mb", "peak MB")]
+
+    def tot(n, k):
+        return sum((by_arm[n][b].get(k) or 0) for b in paired)
+
+    print(f"\n=== PERF, {len(paired)} paired boards ===")
+    print(f"{'arm':20}" + "".join(f"{lbl:>18}" for _, lbl in keys))
+    for n in order:
+        row = f"{n:20}"
+        for k, _ in keys:
+            v, v0 = tot(n, k), tot(base, k)
+            row += f"{v:12,.0f}" + (f"{100*(v-v0)/v0:+5.1f}%" if (n != base and v0) else "      ")
+        print(row + ("  <- control" if n == base else ""))
+
+    print(f"\n  per-board MEDIAN ratio vs control (1.000 = same):")
+    print(f"{'arm':20}" + "".join(f"{lbl:>12}" for _, lbl in keys))
+    for n in order:
+        if n == base:
+            continue
+        row = f"{n:20}"
+        for k, _ in keys:
+            r = [(by_arm[n][b].get(k) or 0) / (by_arm[base][b].get(k) or 1)
+                 for b in paired if (by_arm[base][b].get(k) or 0) > 0]
+            row += f"{statistics.median(r):12.3f}" if r else f"{'n/a':>12}"
+        print(row)
+
+    print(f"\n  SAME-VERDICT boards only (outcome held fixed):")
+    print(f"{'arm':20}{'boards':>8}" + "".join(f"{lbl:>14}" for _, lbl in keys))
+    for n in order:
+        if n == base:
+            continue
+        same = [b for b in paired if verdict(by_arm[n][b]) == verdict(by_arm[base][b])]
+        row = f"{n:20}{len(same):>8}"
+        for k, _ in keys:
+            v = sum((by_arm[n][b].get(k) or 0) for b in same)
+            v0 = sum((by_arm[base][b].get(k) or 0) for b in same)
+            row += f"{100*(v-v0)/v0:+13.1f}%" if v0 else f"{'n/a':>14}"
+        print(row)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("sweep", help="sweep_*.json written by modal_app")
@@ -119,6 +183,9 @@ def main() -> int:
                     help="control arm (default: the one declaring no overrides)")
     ap.add_argument("--top", type=int, default=8, help="movers to list per arm")
     ap.add_argument("--csv", default="", help="also write per-board verdicts here")
+    ap.add_argument("--perf", action="store_true",
+                    help="also report wall/CPU/iterations/peak-RSS. Reported "
+                         "three ways on purpose -- see report_perf.")
     ap.add_argument("--exclude", default="", metavar="B1,B2",
                     help="drop these boards from the scoring. For SENSITIVITY "
                          "checks (is the verdict carried by one board?) -- the "
@@ -303,6 +370,9 @@ def main() -> int:
                            + [verdict(by_arm[n][b]) for n in order]
                            + [by_arm[n][b].get("drc") for n in order])
         print(f"\nper-board verdicts -> {a.csv}")
+
+    if a.perf:
+        report_perf(by_arm, paired, base, order)
 
     print("\nReminder: per-board spread is +-2..3 nets. A total carried by one or "
           "two boards is not a result, and connectivity does not license a "
