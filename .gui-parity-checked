@@ -1,3 +1,51 @@
+de944ce 2026-08-13 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit 15292a0..de944ce (61 commits): the range's only parity gap was issue
+#627 -- gate 4's copper sets went DIFFER at dab5c82 (PR #613 aSkipSettings)
+-- and de944ce closes it. Root cause, found this audit: the implicit
+project-settings save that aSkipSettings removed had been LOAD-BEARING for
+parity. It wrote a temp-sibling .kicad_pro from KiCad's IN-MEMORY settings
+beside every GUI snapshot, and the GUI's exact-fill refills resolved their
+rules from it. Without it, build_pcb_data_from_board._live_fill (whose
+project_from=tmp resolves nothing) refilled at pcbnew STOCK rules (Default
+clearance 0.2) while the CLI's fragility refill resolved the chain-stamped
+project (0.15); the fill delta re-priced the plane-fragility field and
+shifted 4 GND segments + 1 via by one grid cell. #627's own probes had
+concluded _live_fill/_stage_live_board "never execute in this gate" --
+refuted by a SaveBoard stack-logging wrapper (now permanent: KICAD_SAVELOG
+in test_gui_engine_parity); its three reverted candidate fixes staged the
+ON-DISK (stock) project, which is why they were byte-identical no-ops.
+Fix: kicad_parser.stage_live_project_rules authors the snapshot's sibling
+.kicad_pro from the live board's in-memory values (crash-safe: plain JSON,
+every aSkipSettings=True stays); wired into _live_fill (memo now hashes
+board+project bytes) and run_kicad_oracle_on_live_board (same rules flip on
+the planes-tab/fallback oracle path).
+Everything else in range audited clean, agreeing with #627's notes: the GUI
+feedback trilogy (364f9e5/776ef1b/728a7e7) is presentation-only; #536
+smoothing (97e4443, re-defaulted 68db5e3) is threaded through all seven
+layers; #625's ledger (349abc3) sits in shared engine entry points; d8e3c06
+(PR #613 follow-ups) stages real project siblings for analysis snapshots;
+c0082a4 (plan-save default path), 969a0fe (progress granularity), f38d6fb
+(log ANSI) touch no engine parameter; the perf vectorization wave is
+byte/state-identical by its own commit gates.
+
+Parity evidence at de944ce (2026-08-13):
+  * gate 1 test_manifest_plan_parity: PASS (run at f38d6fb+fix).
+  * gate 2 test_cli_postpass_coverage: PASS -- no new CLI-only post-pass
+    (stage_live_project_rules is GUI-side staging, inside the shared-call
+    boundary).
+  * gate 3 test_settings_roundtrip: PASS (no dialog controls changed).
+  * gate 4 test_gui_engine_parity: VERDICT PARITY, kicad unconnected CLI=0
+    GUI=0, drc CLI=0 GUI=0, copper sets IDENTICAL (1269/1269 segments,
+    127/127 vias, 0 one-sided) -- restored from DIFFER (4 seg + 1 via) at
+    f38d6fb.
+  * gate 5 test_cli_defaults_parity: PASS.
+  * test_gui_livechain_rp2350: PASS, both chains grade clean at every stage
+    (GUI route step 496.6s; DRC @ 0.09 GUI=0 CLI=0 at both stages).
+  * stage_live_project_rules smoke (KiCad python): live netclass mutations
+    land in the staged project; no-project seed path works.
+Caveat unchanged: gate 4's plan is signal+plane -- impedance / diff-pair
+params are not exercised by it.
+
 15292a0 2026-08-12 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit b50fc86..15292a0: NO GAPS -- every change in range is engine-side in
 shared modules, consumed identically by both fronts. Range: #610 (impedance
