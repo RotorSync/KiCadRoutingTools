@@ -51,8 +51,7 @@ from pcb_modification import (
     close_soft_joints,
 )
 
-RED = '\033[91m'
-RESET = '\033[0m'
+from terminal_colors import RED, RESET
 
 
 def _smooth_skip_net_ids(pcb_data):

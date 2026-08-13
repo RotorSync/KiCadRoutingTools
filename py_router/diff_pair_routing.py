@@ -3463,8 +3463,11 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
     if attract_path:
         router.set_attraction_path([(int(p[0]), int(p[1]), int(p[2]))
                                     for p in attract_path])
-        print(f"      leg couple: net {net_id} attracted to partner leg "
-              f"({len(attract_path)} pts, radius {_att_radius}, bonus {_att_bonus})")
+        if config.verbose:
+            # Mechanism narration, not an outcome: the coupling heuristic
+            # engaging is the normal case, once per leg.
+            print(f"      leg couple: net {net_id} attracted to partner leg "
+                  f"({len(attract_path)} pts, radius {_att_radius}, bonus {_att_bonus})")
     nlayers = len(config.layers)
     own_tol = _launch_assoc_tol(config)
     # An existing same-net through-hole (the net's THT pads + any pre-placed via,
@@ -3616,8 +3619,9 @@ def _route_hybrid_leg(pcb_data, net_id, config, obstacles, layer_names, coord,
         if path is None and sibling_margin:
             # Reserved sibling room doesn't fit here -- route at normal width
             # (the sibling leg then finds its own way; completion beats room).
-            print(f"      leg couple: sibling-room margin ({sibling_margin} cells) "
-                  f"unroutable for net {net_id}; retrying without")
+            if config.verbose:
+                print(f"      leg couple: sibling-room margin ({sibling_margin} cells) "
+                      f"unroutable for net {net_id}; retrying without")
             path, _it2 = _route_leg(router, obstacles, config, sources, targets,
                                     0, pcb_data, net_id)
             it += _it2

@@ -1300,7 +1300,10 @@ def try_phase3_ripup(
             _cells103, config, pcb_data, net_id,
             routed_net_ids=routed_net_ids, return_names=True)
         if _h103:
-            print(f"    {_h103}")
+            from routing_diagnostics import condense_hint as _ch
+            _c103 = _ch(_h103)
+            if _c103:
+                print(f"    {_c103}")
             record_net_event(state, net_id, "preexisting_blockers",
                              {"hint": _h103, "blockers": _b103})
     except Exception:

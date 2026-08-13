@@ -79,7 +79,8 @@ from connectivity import (
 from net_queries import get_chip_pad_positions, calculate_route_length
 from pcb_modification import add_route_to_pcb_data
 from single_ended_routing import (route_net_with_obstacles,
-                                  route_multipoint_main, route_oracle_links)
+                                  route_multipoint_main, route_oracle_links,
+                                  deferred_diagnostics, flush_diagnostics)
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache, record_frontier_blocking
 from rip_up_reroute import rip_up_net, restore_net
 from leg_rip import LEG_RIP_ENABLED, select_blocking_branch  # #510
@@ -608,7 +609,6 @@ def route_single_ended_nets(
             if failed > 0:
                 msg += f" ({failed} failed)"
             progress_callback(route_index, total_routes, msg)
-        print("-" * 40)
 
         # Periodic memory reporting (every 10 nets)
         if config.debug_memory and (route_index % 10 == 1 or route_index == total_routes):
@@ -680,23 +680,27 @@ def route_single_ended_nets(
         _olinks = (getattr(state, 'oracle_links_by_net', None) or {}).get(net_id)
         # Check for multi-point net (3+ pads, no existing segments)
         multipoint_pads = get_multipoint_net_pads(pcb_data, net_id, config)
-        if _olinks:
-            print(f"  Routing {len(_olinks)} exact-fill oracle link(s) "
-                  f"(#572 forced edges)")
-            result = route_oracle_links(pcb_data, net_id, cfg_route, obstacles,
-                                        _olinks,
-                                        attraction_path=attraction_path)
-        elif multipoint_pads:
-            print(f"  Detected multi-point net with {len(multipoint_pads)} pads (Phase 1: main route only)")
-            result = route_multipoint_main(pcb_data, net_id, cfg_route, obstacles, multipoint_pads,
-                                           attraction_path=attraction_path, state=state)
-            # Track for Phase 3 completion after length matching
-            if result and not result.get('failed') and result.get('is_multipoint'):
-                state.pending_multipoint_nets[net_id] = result
-        else:
-            result = route_net_with_obstacles(pcb_data, net_id, cfg_route, obstacles,
-                                              attraction_path=attraction_path,
-                                              reverse_direction=reverse_direction)
+        # Hold the A* search diagnostics until we know whether this net failed;
+        # a stall that the router recovers from needs no explanation (--verbose
+        # streams them live).
+        with deferred_diagnostics(config) as diag_buf:
+            if _olinks:
+                print(f"  Routing {len(_olinks)} exact-fill oracle link(s) "
+                      f"(#572 forced edges)")
+                result = route_oracle_links(pcb_data, net_id, cfg_route, obstacles,
+                                            _olinks,
+                                            attraction_path=attraction_path)
+            elif multipoint_pads:
+                print(f"  Detected multi-point net with {len(multipoint_pads)} pads (Phase 1: main route only)")
+                result = route_multipoint_main(pcb_data, net_id, cfg_route, obstacles, multipoint_pads,
+                                               attraction_path=attraction_path, state=state)
+                # Track for Phase 3 completion after length matching
+                if result and not result.get('failed') and result.get('is_multipoint'):
+                    state.pending_multipoint_nets[net_id] = result
+            else:
+                result = route_net_with_obstacles(pcb_data, net_id, cfg_route, obstacles,
+                                                  attraction_path=attraction_path,
+                                                  reverse_direction=reverse_direction)
 
         elapsed = time.time() - start_time
         total_time += elapsed
@@ -752,6 +756,9 @@ def route_single_ended_nets(
             invalidate_obstacle_cache(obstacle_cache, net_id)
         else:
             iterations = result['iterations'] if result else 0
+            # This net failed, so the buffered search diagnostics are now the
+            # explanation the reader wants -- print them ahead of the verdict.
+            flush_diagnostics(diag_buf)
             print(f"  FAILED: Could not find route ({elapsed:.2f}s)")
             total_iterations += iterations
 
@@ -1412,10 +1419,14 @@ def route_single_ended_nets(
                     "reason": "no rippable blockers found"
                 })
                 print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
-                from routing_diagnostics import static_boxin_hint, preexisting_blocker_hint
+                from routing_diagnostics import (static_boxin_hint,
+                                                 preexisting_blocker_hint,
+                                                 condense_hint)
                 hint = static_boxin_hint(result, config, pcb_data)
                 if hint:
-                    print(f"  {hint}")
+                    hint = condense_hint(hint)
+                    if hint:
+                        print(f"  {hint}")
                 # #301: the blockers may be PRE-EXISTING copper (earlier run/
                 # step) the rip-up attribution cannot see -- name them and the
                 # --rip-existing-nets retry. Cells were popped into
@@ -1431,7 +1442,9 @@ def route_single_ended_nets(
                     _cells301, config, pcb_data, net_id,
                     routed_net_ids=state.routed_net_ids, return_names=True)
                 if hint301:
-                    print(f"  {hint301}")
+                    _c301 = condense_hint(hint301)
+                    if _c301:
+                        print(f"  {_c301}")
                     record_net_event(state, net_id, "preexisting_blockers", {
                         "hint": hint301, "blockers": blockers301})
                 # Tap-relocation rung (#424 planes-first, env-gated): a

@@ -508,6 +508,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # process must not carry one run's spent budget into the next; the
     # nested reconcile sub-run re-arms deliberately -- its scope is bounded).
     reset_dynamic_waste_ledger()
+    # Same reasoning for the failure-hint rationale latch: each run reprints
+    # the full explanations once, rather than inheriting "already said that"
+    # from a previous board in the same (GUI) process.
+    from routing_diagnostics import reset_hint_condenser
+    reset_hint_condenser()
     if env_knobs.DUMP_BATCH_KWARGS:
         # Parameter-parity probe: dump THIS call's full parameter set so the
         # CLI front (argparse->main) and the GUI front (plan setters->tab
@@ -1437,7 +1442,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"net(s) cached for single-tap surgery")
     # Main-pass rip candidacy for PRE-EXISTING nets (0805, design intent):
     # a blocker routed by an EARLIER chain step used to be visible only as a
-    # text hint ("the blocking copper belongs to pre-existing net(s) ...")
+    # text hint ("the blocking copper belongs to N pre-existing net(s) ...")
     # while the run died with 'no rippable blockers found' -- even when the
     # blocker was one cell of an ordinary unprotected signal net. Plain
     # pre-existing nets are fair game: register them exactly like

@@ -9,6 +9,7 @@ import env_knobs
 import math
 import time
 import numpy as np
+from contextlib import contextmanager
 from typing import Dict, List, Optional, Set, Tuple
 from terminal_colors import YELLOW, GREEN, RESET
 
@@ -899,6 +900,73 @@ def _identify_blocking_obstacles(
     return blockers
 
 
+# --- deferred search diagnostics ---------------------------------------------
+# The blocked-start dump and the probe/stuck chatter explain why an A* search
+# STALLED. A stall is usually recovered moments later (neck-down retry, the
+# other direction, rip-up), so these lines mostly narrate nets that route fine:
+# over a 15-board corpus run, ~35% of these bytes sat on nets that ended in
+# SUCCESS, and the category as a whole was ~50% of all routing output.
+#
+# So buffer them for the duration of one net's routing attempt and emit only if
+# that net actually fails -- which is the moment they are worth reading, and
+# where they now appear, directly above the FAILED line. `--verbose` streams
+# them live as before.
+_DEFERRED_DIAG: Optional[List[str]] = None
+
+
+def _diag(msg: str) -> None:
+    """Emit a search diagnostic: live, or into the active per-net capture."""
+    if _DEFERRED_DIAG is None:
+        print(msg)
+    else:
+        _DEFERRED_DIAG.append(msg)
+
+
+@contextmanager
+def deferred_diagnostics(config: GridRouteConfig = None):
+    """Capture search diagnostics for one net instead of printing them.
+
+    Yields the buffer (a list of lines), or None when diagnostics stream live --
+    under `--verbose`, or when an outer capture is already active and owns them.
+    The buffer stays readable after the block exits; pass it to
+    `flush_diagnostics()` on the failure path.
+    """
+    global _DEFERRED_DIAG
+    if (config is not None and getattr(config, 'verbose', False)) or _DEFERRED_DIAG is not None:
+        yield None
+        return
+    buf: List[str] = []
+    _DEFERRED_DIAG = buf
+    try:
+        yield buf
+    finally:
+        _DEFERRED_DIAG = None
+
+
+def flush_diagnostics(buf: Optional[List[str]]) -> None:
+    """Print diagnostics captured by `deferred_diagnostics` (no-op if empty).
+
+    Repeated attempts on one net (wide then neck-down, the #189 via-unblock
+    retry) re-run the same probe and re-report the same stall, verbatim. An
+    exactly identical line says nothing new the second time, so identical lines
+    collapse to their first occurrence, tagged with a repeat count.
+    """
+    if not buf:
+        return
+    counts: Dict[str, int] = {}
+    order: List[str] = []
+    for line in buf:
+        if line in counts:
+            counts[line] += 1
+        else:
+            counts[line] = 1
+            order.append(line)
+    for line in order:
+        n = counts[line]
+        print(f"{line}  [x{n}]" if n > 1 else line)
+    del buf[:]
+
+
 def _diagnose_blocked_start(obstacles: 'GridObstacleMap', cells: List, label: str, print_prefix: str = "", track_margin=0,
                             pcb_data: PCBData = None, config: GridRouteConfig = None, current_net_id: int = -1):
     """
@@ -908,11 +976,14 @@ def _diagnose_blocked_start(obstacles: 'GridObstacleMap', cells: List, label: st
     If pcb_data and config are provided, also identifies which nets are blocking.
     """
     if not cells:
-        print(f"{print_prefix}  {label}: no cells to check")
+        _diag(f"{print_prefix}  {label}: no cells to check")
         return
 
-    # Check a sample of cells (first few)
-    sample_cells = cells[:3] if len(cells) > 3 else cells
+    # Check a sample of cells. One is enough to characterize a boxed-in
+    # endpoint -- the sampled cells are neighbors of each other and report
+    # near-identical blockage; --verbose keeps the wider sample.
+    sample_n = 3 if (config is not None and getattr(config, 'verbose', False)) else 1
+    sample_cells = cells[:sample_n]
 
     for gx, gy, layer in sample_cells:
         # Diagnostic sweep radius: the layer's margin, rounded UP to whole cells
@@ -925,7 +996,6 @@ def _diagnose_blocked_start(obstacles: 'GridObstacleMap', cells: List, label: st
         # Check neighbors (8-connected)
         blocked_neighbors = 0
         total_neighbors = 0
-        blocked_details = []
         for dx in [-1, 0, 1]:
             for dy in [-1, 0, 1]:
                 if dx == 0 and dy == 0:
@@ -945,14 +1015,14 @@ def _diagnose_blocked_start(obstacles: 'GridObstacleMap', cells: List, label: st
                     neighbor_blocked = obstacles.is_blocked(gx + dx, gy + dy, layer)
                 if neighbor_blocked:
                     blocked_neighbors += 1
-                    blocked_details.append(f"({gx+dx},{gy+dy})")
 
         status = "BLOCKED" if cell_blocked else "ok"
         margin_str = f" (margin={cell_margin})" if cell_margin > 0 else ""
-        print(f"{print_prefix}  {label} cell ({gx}, {gy}, layer={layer}): {status}, {blocked_neighbors}/{total_neighbors} neighbors blocked{margin_str}")
-        # Show which specific neighbors are blocked for debugging
-        if blocked_neighbors == total_neighbors and blocked_neighbors > 0:
-            print(f"{print_prefix}    ALL neighbors blocked: {', '.join(blocked_details)}")
+        _diag(f"{print_prefix}  {label} cell ({gx}, {gy}, layer={layer}): {status}, {blocked_neighbors}/{total_neighbors} neighbors blocked{margin_str}")
+        # The individual blocked-neighbor coordinates used to be listed here,
+        # but only when ALL of them were blocked -- i.e. exactly when they are
+        # the eight neighbors of the cell just printed, and so derivable from
+        # it. That line alone was 18% of all routing output.
 
         # Identify what's blocking if pcb_data and config are provided
         if blocked_neighbors > 0 and pcb_data is not None and config is not None:
@@ -977,7 +1047,7 @@ def _diagnose_blocked_start(obstacles: 'GridObstacleMap', cells: List, label: st
                     # Sort by count descending
                     sorted_blockers = sorted(blockers.items(), key=lambda x: x[1][1], reverse=True)
                     blocker_strs = [f"{name}({count})" for net_id, (name, count) in sorted_blockers[:5]]
-                    print(f"{print_prefix}    Blocking obstacles: {', '.join(blocker_strs)}")
+                    _diag(f"{print_prefix}    Blocking obstacles: {', '.join(blocker_strs)}")
 
 
 def _via_drill_exclusion_radius(config: 'GridRouteConfig') -> int:
@@ -1113,7 +1183,7 @@ def _note_dynamic_extension(iters: int, base: int,
                             print_prefix: str = "") -> None:
     """One line of attribution when a full search ran past the static cap."""
     if iters > base:
-        print(f"{print_prefix}dynamic iterations (#529): search extended to "
+        _diag(f"{print_prefix}dynamic iterations (#529): search extended to "
               f"{iters} (base {base})")
 
 
@@ -1240,14 +1310,14 @@ def _probe_route_with_frontier_once(
         first_reached_max = first_probe_iters >= probe_iterations
         if not first_reached_max:
             # Forward is stuck
-            print(f"{print_prefix}{first_label} stuck ({first_probe_iters} < {probe_iterations}) [single-direction bus mode]")
+            _diag(f"{print_prefix}{first_label} stuck ({first_probe_iters} < {probe_iterations}) [single-direction bus mode]")
             _diagnose_blocked_start(obstacles, forward_sources, first_label, print_prefix, track_margin,
                                     pcb_data=pcb_data, config=config, current_net_id=current_net_id)
             fwd_iters, bwd_iters = get_fwd_bwd_iters()
             return None, total_iterations, forward_blocked, backward_blocked, False, fwd_iters, bwd_iters
 
         # Forward probe reached max - do full search
-        print(f"{print_prefix}Probe: {first_label}={first_probe_iters} iters [single-direction bus mode], trying full iterations...")
+        _diag(f"{print_prefix}Probe: {first_label}={first_probe_iters} iters [single-direction bus mode], trying full iterations...")
         _dyn_base, _dyn_kw = _dynamic_iterations(config, current_net_id)
         path, full_iters, full_blocked = router.route_with_frontier(
             obstacles, forward_sources, forward_targets, _dyn_base, track_margin=track_margin, via_exclusion_radius=_ver, via_rung=_vrung,
@@ -1289,17 +1359,17 @@ def _probe_route_with_frontier_once(
     if not (first_reached_max and second_reached_max):
         # At least one probe didn't reach max - that direction is stuck, skip full search
         if not first_reached_max and not second_reached_max:
-            print(f"{print_prefix}Both directions stuck ({first_label}={first_probe_iters}, {second_label}={second_probe_iters} < {probe_iterations})")
+            _diag(f"{print_prefix}Both directions stuck ({first_label}={first_probe_iters}, {second_label}={second_probe_iters} < {probe_iterations})")
             _diagnose_blocked_start(obstacles, forward_sources, first_label, print_prefix, track_margin,
                                     pcb_data=pcb_data, config=config, current_net_id=current_net_id)
             _diagnose_blocked_start(obstacles, forward_targets, second_label, print_prefix, track_margin,
                                     pcb_data=pcb_data, config=config, current_net_id=current_net_id)
         elif not first_reached_max:
-            print(f"{print_prefix}{first_label} stuck ({first_probe_iters} < {probe_iterations}), {second_label}={second_probe_iters}")
+            _diag(f"{print_prefix}{first_label} stuck ({first_probe_iters} < {probe_iterations}), {second_label}={second_probe_iters}")
             _diagnose_blocked_start(obstacles, forward_sources, first_label, print_prefix, track_margin,
                                     pcb_data=pcb_data, config=config, current_net_id=current_net_id)
         else:
-            print(f"{print_prefix}{second_label} stuck ({second_probe_iters} < {probe_iterations}), {first_label}={first_probe_iters}")
+            _diag(f"{print_prefix}{second_label} stuck ({second_probe_iters} < {probe_iterations}), {first_label}={first_probe_iters}")
             _diagnose_blocked_start(obstacles, forward_targets, second_label, print_prefix, track_margin,
                                     pcb_data=pcb_data, config=config, current_net_id=current_net_id)
             # Print visual obstacle map around the stuck target
@@ -1310,7 +1380,7 @@ def _probe_route_with_frontier_once(
         return None, total_iterations, forward_blocked, backward_blocked, False, fwd_iters, bwd_iters
 
     # Both probes reached max iterations - do full search on forward direction
-    print(f"{print_prefix}Probe: {first_label}={first_probe_iters}, {second_label}={second_probe_iters} iters, trying {first_label} with full iterations...")
+    _diag(f"{print_prefix}Probe: {first_label}={first_probe_iters}, {second_label}={second_probe_iters} iters, trying {first_label} with full iterations...")
 
     _dyn_base, _dyn_kw = _dynamic_iterations(config, current_net_id)
     path, full_iters, full_blocked = router.route_with_frontier(
@@ -1326,7 +1396,7 @@ def _probe_route_with_frontier_once(
         return path, total_iterations, forward_blocked, backward_blocked, False, fwd_iters, bwd_iters
 
     # Forward failed, try backward
-    print(f"{print_prefix}No route found after {full_iters} iterations ({first_label}), trying {second_label}...")
+    _diag(f"{print_prefix}No route found after {full_iters} iterations ({first_label}), trying {second_label}...")
     forward_blocked = full_blocked
     _charge_dynamic_waste(current_net_id, full_iters, _dyn_base, print_prefix)
     # Re-resolve: the forward failure may just have exhausted the budget, in
@@ -1742,7 +1812,7 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
 
     if path is None:
         dir_msg = "single direction" if use_single_direction else "both directions"
-        print(f"No route found after {total_iterations} iterations ({dir_msg})")
+        _diag(f"No route found after {total_iterations} iterations ({dir_msg})")
         return {
             'failed': True,
             'iterations': total_iterations,
@@ -1752,7 +1822,7 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             'iterations_backward': bwd_iters,
         }
 
-    print(f"Route found in {total_iterations} iterations, path length: {len(path)}")
+    _diag(f"Route found in {total_iterations} iterations, path length: {len(path)}")
 
     # Collect and print stats if enabled
     if config.collect_stats:
@@ -3748,7 +3818,10 @@ def route_multipoint_main(
                     _cells103, config, pcb_data, net_id,
                     routed_net_ids=state.routed_net_ids, return_names=True)
                 if _h103:
-                    print(f"  {_h103}")
+                    from routing_diagnostics import condense_hint as _ch
+                    _c103 = _ch(_h103)
+                    if _c103:
+                        print(f"  {_c103}")
                     _rne103(state, net_id, "preexisting_blockers",
                             {"hint": _h103, "blockers": _b103})
             except Exception:
@@ -4362,64 +4435,68 @@ def _route_multipoint_taps_impl(
             [(t[0], t[1]) for t in targets[:8]],
             coord.to_grid_dist(config.track_width + config.clearance))
 
-        (path, tap_iterations, forward_blocked, backward_blocked, reversed_tap_path,
-         _, _, necked_down, uniform_width, unblock_vias,
-         unblock_segments) = _route_with_via_unblock(
-            router, obstacles, config, sources, targets, track_margin,
-            pcb_data, net_id, print_prefix="      ", direction_labels=("forward", "backward"),
-            waypoints=waypoint_buckets.get(frozenset((src_idx, tgt_idx)), [])
-        )
+        # Hold this edge's search diagnostics until its outcome is known:
+        # the via-in-pad rescue below often turns a stalled edge into a
+        # routed one, and then nothing needs explaining.
+        with deferred_diagnostics(config) as _edge_diag:
+            (path, tap_iterations, forward_blocked, backward_blocked, reversed_tap_path,
+             _, _, necked_down, uniform_width, unblock_vias,
+             unblock_segments) = _route_with_via_unblock(
+                router, obstacles, config, sources, targets, track_margin,
+                pcb_data, net_id, print_prefix="      ", direction_labels=("forward", "backward"),
+                waypoints=waypoint_buckets.get(frozenset((src_idx, tgt_idx)), [])
+            )
 
-        if path is None:
-            # Multipoint parity rung (#424): the #189 unblock inside the
-            # wrapper fires only on the walled-in signature (probe stuck
-            # BELOW its limit); a CONGESTION failure burns the full budget
-            # and is never offered the via a human would drop (ottercast
-            # R86: both pads of a series resistor stranded in the U1 pocket
-            # while the net routes fine alone). Place a validated fab-floor
-            # via in the target pad UNCONDITIONALLY and retry once at the
-            # probe budget; the memoisation cache in _place_shrunk_via_in_pad
-            # keeps repeated failures cheap.
-            _pad_obj = pad_info[tgt_idx][5] if len(pad_info[tgt_idx]) > 5 else None
-            # Real pads only: tap targets can be _EndpointStub pseudo-pads
-            # (mid-trace tap points) -- no copper of their own to via into.
-            if getattr(_pad_obj, 'component_ref', None) is None:
-                _pad_obj = None
-            _r189 = (_place_shrunk_via_in_pad(_pad_obj, obstacles, config,
-                                              pcb_data, net_id, coord, layer_names)
-                     if _pad_obj is not None and not getattr(_pad_obj, 'drill', 0)
-                     else None)
-            if _unblock_debug():
-                _pname = (f"{_pad_obj.component_ref}.{_pad_obj.pad_number}"
-                          if _pad_obj is not None else "NO-PAD-OBJ")
-                print(f"      TAP-RESCUE rung: tgt {_pname} -> "
-                      f"{'placed' if _r189 else 'DECLINED'}")
-            if _r189 is None and _pad_obj is not None:
-                # Rip-integrated terminal access (#424): name the copper the
-                # validator saw and feed it to the rip cascade as synthetic
-                # frontier cells (see _pad_via_conflict_cells).
-                _via_conflict_extra = _pad_via_conflict_cells(
-                    pcb_data, _pad_obj, config, coord, layer_names)
-                if _unblock_debug() and _via_conflict_extra:
-                    print(f"      TAP-RESCUE rung: {len(_via_conflict_extra)} "
-                          f"conflict cell(s) fed to rip attribution")
-            if _r189 is not None:
-                _via189, (_vgx, _vgy), _pli, _stub189 = _r189
-                _register_unblock_via(obstacles, _vgx, _vgy, layer_names)
-                _retry_cfg = replace(config, max_iterations=config.max_probe_iterations)
-                _tgts2 = list(targets) + [(_vgx, _vgy, li)
-                                          for li in range(len(layer_names))]
-                (path, _it2, _fb2, _bb2, reversed_tap_path, _, _,
-                 necked_down, uniform_width) = _route_main_connection(
-                    router, obstacles, _retry_cfg, sources, _tgts2, track_margin,
-                    pcb_data, net_id, print_prefix="      ")
-                total_iterations += _it2
-                if path is not None:
-                    unblock_vias = list(unblock_vias) + [_via189]
-                    unblock_segments = list(unblock_segments) + _stub189
-                    print(f"      {GREEN}TAP PAD-VIA RESCUE: edge routed after "
-                          f"unconditional via-in-pad at "
-                          f"{_pad_obj.component_ref}.{_pad_obj.pad_number}{RESET}")
+            if path is None:
+                # Multipoint parity rung (#424): the #189 unblock inside the
+                # wrapper fires only on the walled-in signature (probe stuck
+                # BELOW its limit); a CONGESTION failure burns the full budget
+                # and is never offered the via a human would drop (ottercast
+                # R86: both pads of a series resistor stranded in the U1 pocket
+                # while the net routes fine alone). Place a validated fab-floor
+                # via in the target pad UNCONDITIONALLY and retry once at the
+                # probe budget; the memoisation cache in _place_shrunk_via_in_pad
+                # keeps repeated failures cheap.
+                _pad_obj = pad_info[tgt_idx][5] if len(pad_info[tgt_idx]) > 5 else None
+                # Real pads only: tap targets can be _EndpointStub pseudo-pads
+                # (mid-trace tap points) -- no copper of their own to via into.
+                if getattr(_pad_obj, 'component_ref', None) is None:
+                    _pad_obj = None
+                _r189 = (_place_shrunk_via_in_pad(_pad_obj, obstacles, config,
+                                                  pcb_data, net_id, coord, layer_names)
+                         if _pad_obj is not None and not getattr(_pad_obj, 'drill', 0)
+                         else None)
+                if _unblock_debug():
+                    _pname = (f"{_pad_obj.component_ref}.{_pad_obj.pad_number}"
+                              if _pad_obj is not None else "NO-PAD-OBJ")
+                    print(f"      TAP-RESCUE rung: tgt {_pname} -> "
+                          f"{'placed' if _r189 else 'DECLINED'}")
+                if _r189 is None and _pad_obj is not None:
+                    # Rip-integrated terminal access (#424): name the copper the
+                    # validator saw and feed it to the rip cascade as synthetic
+                    # frontier cells (see _pad_via_conflict_cells).
+                    _via_conflict_extra = _pad_via_conflict_cells(
+                        pcb_data, _pad_obj, config, coord, layer_names)
+                    if _unblock_debug() and _via_conflict_extra:
+                        print(f"      TAP-RESCUE rung: {len(_via_conflict_extra)} "
+                              f"conflict cell(s) fed to rip attribution")
+                if _r189 is not None:
+                    _via189, (_vgx, _vgy), _pli, _stub189 = _r189
+                    _register_unblock_via(obstacles, _vgx, _vgy, layer_names)
+                    _retry_cfg = replace(config, max_iterations=config.max_probe_iterations)
+                    _tgts2 = list(targets) + [(_vgx, _vgy, li)
+                                              for li in range(len(layer_names))]
+                    (path, _it2, _fb2, _bb2, reversed_tap_path, _, _,
+                     necked_down, uniform_width) = _route_main_connection(
+                        router, obstacles, _retry_cfg, sources, _tgts2, track_margin,
+                        pcb_data, net_id, print_prefix="      ")
+                    total_iterations += _it2
+                    if path is not None:
+                        unblock_vias = list(unblock_vias) + [_via189]
+                        unblock_segments = list(unblock_segments) + _stub189
+                        print(f"      {GREEN}TAP PAD-VIA RESCUE: edge routed after "
+                              f"unconditional via-in-pad at "
+                              f"{_pad_obj.component_ref}.{_pad_obj.pad_number}{RESET}")
 
         # If path was found in reverse direction, reverse it so it goes sources -> targets
         if path is not None and reversed_tap_path:
@@ -4432,6 +4509,7 @@ def _route_multipoint_taps_impl(
         total_iterations += tap_iterations
 
         if path is None:
+            flush_diagnostics(_edge_diag)
             print(f"      {YELLOW}Failed to route MST edge after {tap_iterations} iterations ({tap_elapsed:.2f}s){RESET}")
             edge_key = (min(src_idx, tgt_idx), max(src_idx, tgt_idx))
             failed_edges.add(edge_key)

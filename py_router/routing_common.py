@@ -452,9 +452,24 @@ def filter_already_routed(
             nets_to_route.append((net_name, net_id))
 
     if already_routed:
-        print(f"\nSkipping {len(already_routed)} already-routed net(s):")
+        # Summarize by reason. This list is usually most of the board (a
+        # 158-net run skipped 82) and carries only a handful of distinct
+        # reasons, so the roster pushed the actual run configuration off the
+        # top of the log while telling the reader nothing per line.
+        by_reason: Dict[str, List[str]] = {}
         for net_name, reason in already_routed:
-            print(f"  {net_name}: {reason}")
+            by_reason.setdefault(reason, []).append(net_name)
+        # Reason strings are reproduced VERBATIM (not lowercased to read as
+        # prose): they are the vocabulary other readers grep these logs for.
+        if len(by_reason) == 1:
+            breakdown = next(iter(by_reason))
+        else:
+            breakdown = ", ".join(f"{len(names)} x {reason}"
+                                  for reason, names in sorted(by_reason.items()))
+        print(f"\nSkipping {len(already_routed)} already-routed net(s): {breakdown}")
+        if getattr(config, 'verbose', False):
+            for net_name, reason in already_routed:
+                print(f"  {net_name}: {reason}")
 
     return nets_to_route, already_routed
 

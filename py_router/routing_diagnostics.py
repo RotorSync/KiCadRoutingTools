@@ -9,7 +9,8 @@ dialog.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Any
+import re
+from typing import Dict, List, Any, Set
 
 
 def _g(config: Dict[str, Any], key: str, default=None):
@@ -351,6 +352,48 @@ def format_suggestions_for_dialog(suggestions: List[str]) -> str:
     return "\n".join(lines)
 
 
+_HINT_SENTENCES_SEEN: Set[str] = set()
+
+
+def condense_hint(text: str) -> str:
+    """Drop rationale sentences this run has already printed verbatim.
+
+    The failure hints are mostly fixed prose -- what --rip-existing-nets does,
+    why the router will never rip a protected net, what to try for fine-pitch
+    parts. On a board where several nets fail the same way that paragraph
+    repeats per net (15 times, ~8 KB, on one corpus retry step) while only its
+    first sentence -- the one naming THIS net's blockers -- differs.
+
+    Sentence-level rather than hint-specific: the variable sentence always
+    differs and so always survives, and any hint added later gets the same
+    treatment with no extra wiring. The full text is still what the hint
+    functions RETURN, so net-history records stay complete -- this condensing
+    is for the console only.
+    """
+    if not text:
+        return text
+    out_lines = []
+    for line in text.split("\n"):
+        kept, dropped = [], 0
+        for sentence in re.split(r'(?<=\.)\s+', line):
+            if not sentence.strip():
+                continue
+            if sentence in _HINT_SENTENCES_SEEN:
+                dropped += 1
+                continue
+            _HINT_SENTENCES_SEEN.add(sentence)
+            kept.append(sentence)
+        if kept:
+            out_lines.append(" ".join(kept)
+                             + ("  [rationale as above]" if dropped else ""))
+    return "\n".join(out_lines)
+
+
+def reset_hint_condenser() -> None:
+    """Forget printed sentences (new run / new board in one process)."""
+    _HINT_SENTENCES_SEEN.clear()
+
+
 def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
                               routed_net_ids=(), rip_existing_names=None,
                               return_names=False):
@@ -485,13 +528,16 @@ def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
     if not names:
         return _ret(prot_txt.lstrip("\n") if prot_txt else "", [])
     quoted = " ".join(f"'{n}'" for n in names)
-    return _ret(f"Hint: the blocking copper belongs to pre-existing net(s) {quoted} "
-            f"(committed by an earlier run/step), which this run is not allowed "
-            f"to rip. Retry with --rip-existing-nets {quoted} to rip and "
-            f"re-route them in this run (issue #103) -- the decisive blocker "
-            f"may be any of them, so start with the full set (each ripped net "
-            f"is re-routed and the run reports honestly if one cannot be), "
-            f"then bisect if you want a minimal rip." + prot_txt, names)
+    # The net list appears ONCE, in the retry command -- naming them in the
+    # prose as well doubled a hint that already runs to several hundred
+    # characters, and the command is the half the reader acts on.
+    return _ret(f"Hint: the blocking copper belongs to {len(names)} pre-existing "
+            f"net(s) committed by an earlier run/step, which this run is not "
+            f"allowed to rip. Retry with --rip-existing-nets {quoted} to rip "
+            f"and re-route them in this run (issue #103) -- the decisive "
+            f"blocker may be any of them, so start with the full set (each "
+            f"ripped net is re-routed and the run reports honestly if one "
+            f"cannot be), then bisect if you want a minimal rip." + prot_txt, names)
 
 
 def static_boxin_hint(result, config, pcb_data=None) -> str:

@@ -221,7 +221,6 @@ def route_diff_pairs(
         print(f"\n[{route_index}/{total_routes}{failed_str}] Routing diff pair {pair_name}")
         print(f"  P: {pair.p_net_name} (id={pair.p_net_id})")
         print(f"  N: {pair.n_net_name} (id={pair.n_net_id})")
-        print("-" * 40)
 
         # Update progress
         if state.progress_callback is not None:
