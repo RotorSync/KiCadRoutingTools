@@ -506,11 +506,90 @@ def _point_to_polys_distance(x: float, y: float, polys) -> float:
     return best
 
 
+# Sweep item 6 (#625 follow-up): per-poly edge arrays, memoized like the
+# ring arrays above (a pad's polygons list lives as long as the pad).
+_POLYS_EDGE_CACHE: Dict[int, tuple] = {}
+
+
+def _polys_edge_arrays(polys):
+    key = id(polys)
+    fp = (len(polys), tuple(len(p) for p in polys))
+    hit = _POLYS_EDGE_CACHE.get(key)
+    if hit is not None and hit[0] == fp:
+        return hit[1]
+    vx, vy, ex, ey = [], [], [], []
+    for poly in polys:
+        P = np.asarray(poly, dtype=np.float64)
+        if len(P) < 2:
+            continue
+        Q = np.roll(P, -1, axis=0)
+        vx.append(P[:, 0]); vy.append(P[:, 1])
+        ex.append(Q[:, 0]); ey.append(Q[:, 1])
+    if not vx:
+        arrays = None
+    else:
+        x1 = np.concatenate(vx); y1 = np.concatenate(vy)
+        x2 = np.concatenate(ex); y2 = np.concatenate(ey)
+        dx, dy = x2 - x1, y2 - y1
+        arrays = (x1, y1, dx, dy, dx * dx + dy * dy)
+    if len(_POLYS_EDGE_CACHE) > 64:
+        _POLYS_EDGE_CACHE.clear()
+    _POLYS_EDGE_CACHE[key] = (fp, arrays)
+    return arrays
+
+
 def _segment_to_polys_distance(x1: float, y1: float, x2: float, y2: float, polys):
     """Min distance from a segment to custom-pad polygon copper (0 if it enters),
-    sampled along the segment like segment_to_rect_distance. Returns (dist, pt)."""
+    sampled along the segment like segment_to_rect_distance. Returns (dist, pt).
+
+    Sweep item 6 (#625 follow-up): the 0.05mm samples x poly edges used to run
+    the scalar _point_to_polys_distance per sample (millions of calls per DRC
+    on custom-pad boards). The broadcast below NOMINATES the minimal samples
+    (multiply-squared kernel; **2 = libm pow rounds 1 ULP apart on rare
+    values), then the winners are recomputed with the scalar in sample order,
+    preserving the strict first-minimum tie-break -- returns byte-identical."""
     length = math.hypot(x2 - x1, y2 - y1)
     n = max(10, int(length / 0.05))
+    arrays = _polys_edge_arrays(polys)
+    if arrays is not None and (n + 1) * len(arrays[0]) >= 4096:
+        px1, py1, pdx, pdy, plen_sq = arrays
+        t = np.arange(n + 1, dtype=np.float64) / n
+        sx = x1 + t * (x2 - x1)
+        sy = y1 + t * (y2 - y1)
+        # inside-any test + min edge distance per sample, chunked.
+        best_d2 = np.empty(n + 1)
+        inside = np.zeros(n + 1, dtype=bool)
+        _B = max(1, 2_000_000 // max(1, len(px1)))
+        for s in range(0, n + 1, _B):
+            bx = sx[s:s + _B, None]
+            by = sy[s:s + _B, None]
+            for poly in polys:
+                P = np.asarray(poly, dtype=np.float64)
+                if len(P) < 2:
+                    continue
+                yi = P[:, 1][None, :]
+                yj = np.roll(P[:, 1], 1)[None, :]
+                xi = P[:, 0][None, :]
+                xj = np.roll(P[:, 0], 1)[None, :]
+                cond = (yi > by) != (yj > by)
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    xint = (xj - xi) * (by - yi) / (yj - yi) + xi
+                    crossing = cond & (bx < xint)
+                inside[s:s + _B] |= (np.count_nonzero(crossing, axis=1) & 1).astype(bool)
+            best_d2[s:s + _B] = _pt_edges_d2(bx, by, px1[None, :], py1[None, :],
+                                             pdx[None, :], pdy[None, :],
+                                             plen_sq[None, :]).min(axis=1)
+        best_d2 = np.where(inside, 0.0, best_d2)
+        m = best_d2.min()
+        cand = np.nonzero(best_d2 <= m + 8 * np.spacing(m))[0]
+        best = float('inf')
+        best_pt = (x1, y1)
+        for i in cand:
+            d = _point_to_polys_distance(float(sx[i]), float(sy[i]), polys)
+            if d < best:
+                best = d
+                best_pt = (float(sx[i]), float(sy[i]))
+        return best, best_pt
     best = float('inf')
     best_pt = (x1, y1)
     for i in range(n + 1):
