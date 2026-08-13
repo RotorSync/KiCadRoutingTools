@@ -457,9 +457,18 @@ harmless.
    a progressing search to a 1e7 ceiling, so a fixed budget only caps it.
    `--max-ripup` above 5 is measured WORSE (each extra rip level risks a
    victim whose corridor is taken while it is out).
-10. One retry round allowed: if routing fails some nets, re-run the failed nets
-   per the skill's "Diagnose and Retry" table (use the same output->input
-   chaining). Record both attempts. If the failures are CONGESTION (rippable
+10. One retry round allowed: if routing fails some nets, re-run per the skill's
+   "Diagnose and Retry" table (use the same output->input chaining) with
+   **`--nets '*'`, NOT a hand-listed set of the failed net names**. route.py
+   skips nets that are already fully connected, so a wildcard retry attempts
+   exactly the nets still broken -- same work, same result, and it stays correct
+   for any router. A hand-listed retry freezes THIS run's failure identity into
+   the manifest: every future replay hands the baseline a rescue fitted to its
+   own failures while any engine change, failing a different net, gets its
+   failure shipped and healthy nets retried (RUNBOOK rule 5 -- 25% of the corpus
+   is already contaminated this way). Name nets only when the naming IS the
+   experiment (the skill's failed-first split), and expect that board to be
+   unusable for A/B. Record both attempts. If the failures are CONGESTION (rippable
    churn, many fails clustered in one channel, or "boxed in by static obstacles"
    at fine pitch), route signals at the FAB FLOOR (skill: "Route signals at the
    FAB floor by default"). KEY POINTS: (a) thinner is monotonically better on

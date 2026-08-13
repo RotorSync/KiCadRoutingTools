@@ -1744,7 +1744,13 @@ Rules of the loop:
     detours available, failures share a corridor with early-routed nets) →
     try a **failed-first split**: re-run the step as two invocations, first
     `--nets <the failed nets>` on the clean input, then everything else to a
-    fresh output. Ordering is the cheapest knob but rarely decisive:
+    fresh output. This is the one retry where naming nets is the POINT (you are
+    changing the order), so accept it knowingly: a manifest that names nets
+    cannot be A/B'd afterwards, because a replay hands the baseline a rescue
+    fitted to its own failures and penalises every engine change that fails a
+    different net. An ordinary retry should use `--nets '*'` instead -- route.py
+    skips already-connected nets, so a wildcard retries exactly what is still
+    broken. Ordering is the cheapest knob but rarely decisive:
     measured on four corpus boards of varying density, an automatic
     failed-first restart NEVER beat the normal order (twice it graded
     worse), so an in-engine restart was tried and removed — only reach for
