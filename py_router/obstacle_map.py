@@ -2518,6 +2518,85 @@ def _tie_pad_key(pad):
             round(pad.size_x, 6), round(pad.size_y, 6))
 
 
+def _pad_dist_le_batch(xs, ys, pad, tol):
+    """Vectorized `point_to_pad_distance(x, y, pad) <= tol` over coordinate
+    arrays -- the same geometry as check_drc's scalar (custom polygons,
+    rounded/rect/circle/oval, rect_rotation frames), without the per-point
+    Python. #625: the corridor sampler below ran the scalar ~2M times per
+    cold pass (134M segment distances) -- ~44 s that this brings to ~1 s."""
+    xs = np.asarray(xs, dtype=np.float64)
+    ys = np.asarray(ys, dtype=np.float64)
+    polys = getattr(pad, 'polygons', None)
+    if polys:
+        out = np.zeros(xs.shape, dtype=bool)
+        tol_sq = tol * tol
+        for poly in polys:
+            P = np.asarray(poly, dtype=np.float64)
+            if len(P) < 2:
+                continue
+            x1, y1 = P[:, 0], P[:, 1]
+            x2, y2 = np.roll(x1, -1), np.roll(y1, -1)
+            ex, ey = x2 - x1, y2 - y1
+            len_sq = ex * ex + ey * ey
+            # Chunk the (points x edges) broadcasts to bound temporaries.
+            _B = 8192
+            for s in range(0, xs.size, _B):
+                px = xs[s:s + _B, None]
+                py = ys[s:s + _B, None]
+                # Even-odd ray cast, the scalar _point_in_poly comparisons
+                # (its (i, j=i-1) vertex pairs are this same edge set).
+                cond = (y1[None, :] > py) != (y2[None, :] > py)
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    xint = ex[None, :] * (py - y1[None, :]) / (y2 - y1)[None, :] + x1[None, :]
+                    crossing = cond & (px < xint)
+                inside = (np.count_nonzero(crossing, axis=1) & 1).astype(bool)
+                # Min point-segment distance over edges, the scalar
+                # point_to_segment_distance formula (degenerate edge -> p1).
+                apx = px - x1[None, :]
+                apy = py - y1[None, :]
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    t = np.clip((apx * ex[None, :] + apy * ey[None, :]) / len_sq[None, :],
+                                0.0, 1.0)
+                t = np.where(len_sq[None, :] < 1e-10, 0.0, t)
+                ddx = apx - t * ex[None, :]
+                ddy = apy - t * ey[None, :]
+                d2 = (ddx * ddx + ddy * ddy).min(axis=1)
+                out[s:s + _B] |= inside | (d2 <= tol_sq)
+        return out
+    # Rounded/rect/circle/oval path, the scalar point_to_pad_distance tail.
+    if pad.shape in ('circle', 'oval'):
+        corner_radius = min(pad.size_x, pad.size_y) / 2
+    elif pad.shape == 'roundrect':
+        corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
+    else:
+        corner_radius = 0.0
+    x, y = xs, ys
+    if pad.rect_rotation:
+        rad = math.radians(pad.rect_rotation)
+        cos_r, sin_r = math.cos(rad), math.sin(rad)
+        dx0 = xs - pad.global_x
+        dy0 = ys - pad.global_y
+        x = pad.global_x + dx0 * cos_r + dy0 * sin_r
+        y = pad.global_y - dx0 * sin_r + dy0 * cos_r
+    rel_x = np.abs(x - pad.global_x)
+    rel_y = np.abs(y - pad.global_y)
+    half_x, half_y = pad.size_x / 2, pad.size_y / 2
+    dxe = np.maximum(0.0, rel_x - half_x)
+    dye = np.maximum(0.0, rel_y - half_y)
+    dist = np.sqrt(dxe * dxe + dye * dye)
+    if corner_radius > 0:
+        inner_x = half_x - corner_radius
+        inner_y = half_y - corner_radius
+        corner = (rel_x > inner_x) & (rel_y > inner_y)
+        cdx = rel_x - inner_x
+        cdy = rel_y - inner_y
+        dist = np.where(
+            corner,
+            np.maximum(0.0, np.sqrt(cdx * cdx + cdy * cdy) - corner_radius),
+            dist)
+    return dist <= tol
+
+
 def _compute_net_tie_corridors(pcb_data, config, coord):
     """Per tied net: the (gx, gy) cells where KiCad's net-tie exemption lets
     that net's copper pass its PARTNER copper, plus the partner pad/net ids
@@ -2586,16 +2665,12 @@ def _compute_net_tie_corridors(pcb_data, config, coord):
                         sy = np.arange(y0, y1 + fine, fine)
                         SX, SY = np.meshgrid(sx, sy)
                         SXf, SYf = SX.ravel(), SY.ravel()
-                        in_p = np.fromiter(
-                            (point_to_pad_distance(float(a), float(b), partner) <= 1e-9
-                             for a, b in zip(SXf, SYf)), dtype=bool, count=SXf.size)
+                        in_p = _pad_dist_le_batch(SXf, SYf, partner, 1e-9)
                         if not in_p.any():
                             _TIE_PAIR_SAMPLE_CACHE[_ck] = None
                             continue
                         px, py = SXf[in_p], SYf[in_p]
-                        out_o = np.fromiter(
-                            (point_to_pad_distance(float(a), float(b), own) > 1e-9
-                             for a, b in zip(px, py)), dtype=bool, count=px.size)
+                        out_o = ~_pad_dist_le_batch(px, py, own, 1e-9)
                         bad_x, bad_y = px[out_o], py[out_o]
                         # Memory: the dense cells x bad-points distance matrix hit
                         # GB-scale temporaries (a 1.5mm pad sampled at 0.01mm is
@@ -2610,11 +2685,14 @@ def _compute_net_tie_corridors(pcb_data, config, coord):
                             _kx = np.round(bad_x / fine).astype(np.int64)
                             _ky = np.round(bad_y / fine).astype(np.int64)
                             _bad_keys = set(zip(_kx.tolist(), _ky.tolist()))
-                            _boundary = np.fromiter(
-                                (not ((kx + 1, ky) in _bad_keys and (kx - 1, ky) in _bad_keys
-                                      and (kx, ky + 1) in _bad_keys and (kx, ky - 1) in _bad_keys)
-                                 for kx, ky in zip(_kx.tolist(), _ky.tolist())),
-                                dtype=bool, count=bad_x.size)
+                            # Interior = all 4 lattice neighbors present; test
+                            # via packed int64 keys (np.isin) instead of 4 set
+                            # probes per point.
+                            _pk = (_kx << 32) + _ky
+                            _boundary = ~(np.isin(_pk + (1 << 32), _pk)
+                                          & np.isin(_pk - (1 << 32), _pk)
+                                          & np.isin(_pk + 1, _pk)
+                                          & np.isin(_pk - 1, _pk))
                             bad_x, bad_y = bad_x[_boundary], bad_y[_boundary]
                         _TIE_PAIR_SAMPLE_CACHE[_ck] = (bad_x, bad_y, _bad_keys)
                     # Candidate cells: everything a stamp of this partner's
