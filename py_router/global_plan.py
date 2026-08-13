@@ -150,9 +150,12 @@ def plan_global_routes(pcb_data, config, net_ids: List[Tuple[str, int]],
                     if k['zone_scale'] != 1.0 else None)
 
     plan = GlobalPlan()
+    max_iters = 0
     for _name, nid in net_ids:
         result = route_net_with_obstacles(pcb_data, nid, rough_cfg, probe_map)
-        plan.probe_iterations += int((result or {}).get('iterations', 0) or 0)
+        _it = int((result or {}).get('iterations', 0) or 0)
+        plan.probe_iterations += _it
+        max_iters = max(max_iters, _it)
         if not result or result.get('failed') or not result.get('path'):
             plan.probe_failures += 1
             continue
@@ -178,7 +181,8 @@ def plan_global_routes(pcb_data, config, net_ids: List[Tuple[str, int]],
           f"{len(plan.reservations)} corridor reservation(s) "
           f"({res_cells} cells at {k['cost']}mm-equiv), "
           f"{n_cross} net(s) with predicted crossings, "
-          f"{n_share} sharing corridors")
+          f"{n_share} sharing corridors; heaviest probe {max_iters} "
+          f"iters (cap {int(k['iters'])})")
     if verbose or env_knobs.GLOBAL_PLAN.get('debug'):
         name_of = {nid: nm for nm, nid in net_ids}
         hot = sorted(((sum(w.values()), nid)
