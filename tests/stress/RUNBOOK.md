@@ -744,14 +744,36 @@ boards" and "which commit broke connectivity".
    copper LEAVES the conn bucket for the unrouted one, so conn can fall while the
    board got worse. `rank_arms.py <sweep.json>` applies all of this — paired
    verdict per arm, W/L, DRC reported beside it rather than folded in.
-5. **A two-board result is not a default change.** Per-board run-to-run spread is
+5. **A recorded RESCUE step biases the board against any change — 25% of the
+   corpus has one.** Chains often end with `route.py ... --nets '/CM4
+   GPIO/GPIO22' '/CM4 GPIO/SD_CMD'`: the nets that failed *in the run being
+   recorded*, retried at a tighter clearance or width. The baseline replays that
+   run deterministically, so the rescue lands exactly on its failures and the
+   board finishes clean; an arm that routes differently fails a DIFFERENT net,
+   which the frozen list never retries, so its failure ships while healthy nets
+   get retried. None of that measures routing — in production the retry is
+   authored AFTER seeing what failed; only in replay is it pinned to one arm's
+   failure set.
+
+   The bias bites hardest where the rescue leaves the baseline nearly clean:
+   no headroom to win, every displaced net a loss. Measured on both #590 waves,
+   that cell punished EVERY arm — sets 11-20: +2..+8 per arm over 22 boards
+   holding 2 baseline failures; sets 1-10: +3..+6 over 16 boards holding 4.
+   Congested rescue boards still discriminate (they keep showing arm-ordered
+   differences), so only the clean ones are unmeasurable. Removing that cell
+   alone moved the sets 11-20 winner from -2.5% (p=0.15) to -5.2% (p=0.046).
+
+   `ab_replay_grade` records `rescue_steps` per board; `rank_arms.py` reports
+   the cell and drops it with `--drop-rescue-clean`. Report it either way —
+   silently dropping boards is how a knob talks itself into a default.
+6. **A two-board result is not a default change.** Per-board run-to-run spread is
    +-2..3 nets (the same config measured 7 and 5 on consecutive runs), so single
    boards cannot resolve anything smaller. Two defaults were shipped and reverted
    on this exact mistake.
-6. **Arm names carry the source commit**, so resuming re-uses banked rows only
+7. **Arm names carry the source commit**, so resuming re-uses banked rows only
    within one commit; the launch-time name is recorded in `<out>/arm.txt` because
    HEAD moves between stages when another session commits.
-7. **A manifest records COMMANDS, not the recording shell's environment.** A
+8. **A manifest records COMMANDS, not the recording shell's environment.** A
    `KICAD_*` export the driving agent set as a workaround replays as unset --
    the recorded timing/outcome can then be unreproducible at ANY commit.
    core64_logic (#625) "replayed in 4 min historically": the original run only

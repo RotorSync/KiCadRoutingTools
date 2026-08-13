@@ -30,7 +30,7 @@ into one number hides exactly that trade.
 
 Read the W/L column, not just the total: per-board run-to-run spread is +-2..3
 nets, so a total driven by one or two boards is noise wearing a verdict's
-clothes (RUNBOOK rule 5 -- two defaults have been shipped and reverted on it).
+clothes (RUNBOOK rule 6 -- two defaults have been shipped and reverted on it).
 """
 from __future__ import annotations
 
@@ -119,6 +119,18 @@ def main() -> int:
                     help="control arm (default: the one declaring no overrides)")
     ap.add_argument("--top", type=int, default=8, help="movers to list per arm")
     ap.add_argument("--csv", default="", help="also write per-board verdicts here")
+    ap.add_argument("--exclude", default="", metavar="B1,B2",
+                    help="drop these boards from the scoring. For SENSITIVITY "
+                         "checks (is the verdict carried by one board?) -- the "
+                         "headline stays the unfiltered number, because "
+                         "dropping boards an arm does badly on is how a knob "
+                         "talks itself into a default it did not earn.")
+    ap.add_argument("--drop-rescue-clean", action="store_true",
+                    help="drop boards that are nearly clean at baseline BECAUSE "
+                         "a recorded rescue step retries its exact failures by "
+                         "name. That cell cannot measure routing: the baseline's "
+                         "rescue fits only the baseline, so every arm is "
+                         "penalised whatever it does. Reported either way.")
     ap.add_argument("--hard", type=int, default=0, metavar="N",
                     help="score only boards where the CONTROL leaves >=N nets "
                          "incomplete. A corpus is mostly boards that route "
@@ -202,6 +214,42 @@ def main() -> int:
     if not paired:
         print("\nNOTHING PAIRED -- no verdict. Check chain_complete rates first.")
         return 1
+
+    # Boards whose recorded chain rescues named nets are biased AGAINST any
+    # change (see ab_replay_grade.rescue_steps). The bias bites hardest where
+    # the rescue makes the baseline nearly clean: there is no headroom to win
+    # and every displaced net is a loss. Congested rescue boards still measure
+    # something -- they keep showing arm-ordered differences -- so only the
+    # clean ones are separable.
+    def rescue(b):
+        return max((by_arm[n][b].get("rescue_steps") or 0) for n in arms)
+
+    have_shape = any(by_arm[n][b].get("rescue_steps") is not None
+                     for n in arms for b in paired)
+    biased = [b for b in paired
+              if have_shape and rescue(b) > 0 and verdict(by_arm[base][b]) < 2]
+    if biased:
+        dmg = {n: sum(verdict(by_arm[n][b]) - verdict(by_arm[base][b])
+                      for b in biased) for n in arms if n != base}
+        base_v = sum(verdict(by_arm[base][b]) for b in biased)
+        print(f"\n{len(biased)} board(s) are nearly clean at baseline BECAUSE a "
+              f"recorded rescue retries its failures by name")
+        print(f"    baseline leaves {base_v} net(s) incomplete there; arms: "
+              + ", ".join(f"{n} {v:+}" for n, v in sorted(dmg.items(), key=lambda kv: kv[1])))
+        print("    this cell penalises any change regardless of quality "
+              f"({'DROPPED' if a.drop_rescue_clean else 'still counted -- '
+                 'pass --drop-rescue-clean to exclude'})")
+        if a.drop_rescue_clean:
+            paired = [b for b in paired if b not in set(biased)]
+    elif not have_shape:
+        print("\n(rows predate `rescue_steps`; cannot flag replay-biased boards)")
+
+    if a.exclude:
+        drop = {b.strip() for b in a.exclude.split(",") if b.strip()}
+        hit = drop & set(paired)
+        paired = [b for b in paired if b not in drop]
+        print(f"\n--exclude: dropped {len(hit)} board(s): {sorted(hit)}"
+              + (f"  (not present: {sorted(drop - hit)})" if drop - hit else ""))
 
     if a.hard:
         n0 = len(paired)

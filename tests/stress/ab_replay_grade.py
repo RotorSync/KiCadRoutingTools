@@ -130,6 +130,45 @@ def _completion(text):
     return total, incomplete, pct
 
 
+def rescue_steps(manifest_txt):
+    """How many route.py steps name SPECIFIC nets rather than a wildcard.
+
+    A recorded chain often ends with a rescue: `route.py ... --nets '/CM4
+    GPIO/GPIO22' '/CM4 GPIO/GPIO24' ...`, naming the nets that failed IN THE
+    RUN BEING RECORDED, usually at a tighter clearance or width. That makes the
+    board a biased A/B subject, and the bias runs one way -- against change:
+
+      * the BASELINE replays the recorded run deterministically, so the rescue
+        lands exactly on its failures and the board finishes clean;
+      * any arm that routes differently fails a DIFFERENT net, which the frozen
+        list never retries, so its failure ships while nets that are fine get
+        retried.
+
+    Nothing about that measures routing quality. In production the retry is
+    authored AFTER seeing what failed; only in replay is it pinned to one arm's
+    failure set. Measured on the #590 sweeps, boards that are nearly clean at
+    baseline BECAUSE of such a rescue punish every arm (sets 11-20: +2..+8 per
+    arm across 22 boards holding 2 baseline failures; sets 1-10: +3..+6), while
+    congested boards keep showing real, arm-ordered differences.
+
+    Consumers should report that cell separately rather than fold it into a
+    verdict -- see rank_arms.py. 25% of the corpus carries one.
+    """
+    n = 0
+    for line in manifest_txt.splitlines():
+        if "route.py" not in line or "--help" in line:
+            continue
+        if "route_planes" in line or "route_diff" in line:
+            continue
+        m = re.search(r"--nets\s+(.*?)(?:--\w|$)", line)
+        if not m:
+            continue
+        names = [a.strip("'\"") for a in m.group(1).split()]
+        if names and not any(a == "*" for a in names):
+            n += 1
+    return n
+
+
 def _tool_of(argv):
     """Tool name (basename of the first .py arg) for per-tool timing aggregation."""
     for a in argv:
@@ -417,6 +456,9 @@ def do_board(set_dir, out_dir, label, board):
            "total_iterations": total_iters,
            "peak_rss_mb": round(peak_board, 1),
            "time_by_tool": time_by_tool, "peak_by_tool": peak_by_tool, "steps": steps,
+           # Chain shape, so a consumer can tell a routing result from a replay
+           # artifact without re-reading the manifest (see rescue_steps).
+           "rescue_steps": rescue_steps(txt),
            **dp}
     # Footprint (darwin) is the memory number that actually caught issue #419;
     # keep it additive so non-darwin records are unchanged.
