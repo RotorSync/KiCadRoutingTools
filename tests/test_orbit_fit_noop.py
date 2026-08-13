@@ -18,9 +18,9 @@ direction that flattered it: it reported the un-guarded rate as 6 of 33 (it is
 Run:  python3 tests/test_orbit_fit_noop.py
 """
 import contextlib
-import glob
 import io
 import os
+import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -33,31 +33,63 @@ import pose_score                                              # noqa: E402
 from kicad_parser import parse_kicad_pcb                       # noqa: E402
 from placement import reconstruct as R                         # noqa: E402
 
-CORPUS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                      'kicad_files')
+#: Number of boards `_corpus_boards()` returns. Pinned, because every count in
+#: MATRIX is a claim about THIS set; if a board is added to or removed from the
+#: repo, re-measure the rows rather than nudging this number.
+CORPUS_N = 22
 
 #: (label, min_inliers, guard overrides) -> boards of the corpus that fire.
-#: Ordered so each row adds ONE guard to the row above it.
+#: Ordered so each row adds ONE guard to the row above it. Counts are measured
+#: over the TRACKED corpus (see `_corpus_boards`); the rows below the occupancy
+#: guard are unchanged from the ones measured over a polluted kicad_files/,
+#: which is the useful part -- the extra artifact boards were all discarded by
+#: occupancy anyway, so the guard ladder's conclusion never depended on them.
 MATRIX = [
     ('no guards at all', 3,
      dict(ORBIT_MAX_RADIUS_FRAC=1e9, ORBIT_M_RANGE=range(2, 25),
-          ORBIT_MIN_SEATS_PER_CLASS=1, ORBIT_MIN_OCCUPANCY=0.0), 28),
+          ORBIT_MIN_SEATS_PER_CLASS=1, ORBIT_MIN_OCCUPANCY=0.0), 17),
     ('+ scale', 3,
      dict(ORBIT_M_RANGE=range(2, 25), ORBIT_MIN_SEATS_PER_CLASS=1,
-          ORBIT_MIN_OCCUPANCY=0.0), 28),
+          ORBIT_MIN_OCCUPANCY=0.0), 17),
     ('+ curvature (m >= 3)', 3,
-     dict(ORBIT_MIN_SEATS_PER_CLASS=1, ORBIT_MIN_OCCUPANCY=0.0), 28),
+     dict(ORBIT_MIN_SEATS_PER_CLASS=1, ORBIT_MIN_OCCUPANCY=0.0), 17),
     ('+ over-determination (>= 3 distinct SEATS/class)', 3,
-     dict(ORBIT_MIN_OCCUPANCY=0.0), 14),
+     dict(ORBIT_MIN_OCCUPANCY=0.0), 11),
     ('+ occupancy (>= 0.60 of slots filled)', 3, {}, 7),
     ('+ min_inliers 4', 4, {}, 2),
     ('+ min_inliers 5  [SHIPPED]', 5, {}, 0),
 ]
 
 
+def _corpus_boards():
+    """The boards the REPO SHIPS -- not whatever happens to sit in kicad_files/.
+
+    That directory accumulates routing OUTPUTS (`*_routed`, `*_fanout`,
+    `*_plane`, `*_connected`), which .gitignore:49-51 covers precisely because
+    they are per-machine junk. Globbing it made this corpus a property of whose
+    checkout ran the test: 22 boards on a clean clone, 29 on a used one, and
+    >= 30 on the machine that pinned the MATRIX counts below -- so the numbers
+    could only ever be right in one working copy. Every expected count in this
+    file is a claim about a FIXED set of boards, so the set has to be fixed
+    too, and git is the only thing that knows which files those are.
+
+    Returns [] when git cannot answer; main() then SKIPS rather than grading
+    against a set it cannot identify.
+    """
+    try:
+        p = subprocess.run(['git', 'ls-files', '-z', 'kicad_files/*.kicad_pcb'],
+                           cwd=ROOT, capture_output=True, text=True, timeout=60)
+        if p.returncode == 0:
+            return sorted(os.path.join(ROOT, n)
+                          for n in p.stdout.split('\0') if n)
+    except Exception:                                            # noqa: BLE001
+        pass
+    return []
+
+
 def _states():
     out = {}
-    for b in sorted(glob.glob(os.path.join(CORPUS, '*.kicad_pcb'))):
+    for b in _corpus_boards():
         with contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(io.StringIO()):
             pcb = parse_kicad_pcb(b)
@@ -83,7 +115,16 @@ def _fire(states, min_inliers, patch):
 
 def main():
     states = _states()
-    assert len(states) >= 30, f'corpus shrank to {len(states)} boards'
+    if not states:
+        print('SKIP: the tracked corpus could not be enumerated (git not '
+              'available here?), and every count below is a claim about a '
+              'fixed board set -- grading against an unknown set would be '
+              'worse than not grading.')
+        return 0
+    assert len(states) == CORPUS_N, (
+        f'corpus is {len(states)} boards, expected {CORPUS_N}. The MATRIX '
+        f'counts are pinned to a fixed set: if a board was added to or removed '
+        f'from kicad_files/, re-measure the rows and update both.')
     print(f'corpus: {len(states)} healthy boards\n')
     bad = []
     for label, mi, patch, expect in MATRIX:

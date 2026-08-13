@@ -58,6 +58,19 @@ AUDIT = os.path.join(ROOT, 'tests', 'stress', 'fence_audit.py')
 
 DEADLINE_EXIT = 7
 
+# A budget that is SPENT BY CONSTRUCTION, on any machine. The original 0.4 s
+# encoded "surely less than a route takes", which is a claim about the HOST,
+# not about the tool: route_diff.py on lvds_converter_dualclk finishes its work
+# in well under 0.4 s on a 2026 Mac, exited 0, and failed four checks that have
+# nothing to do with wall time. A millisecond is already gone by the first
+# deadline check anywhere, and a SLOWER host only trips it more surely -- so
+# the assertion is one-directional instead of resting on a speed guess.
+# (Verified: all three routing mains exit 7 with a landed
+# complete=false/status=deadline summary at this value.)
+SPENT_DEADLINE_S = 0.001
+# The mirror case: a budget the run must NEVER reach, so it has to stay large.
+UNSPENT_DEADLINE_S = 600
+
 _failures = []
 
 
@@ -102,9 +115,19 @@ def test_fence(tmp):
                         control_out=ctl)
     said = buf.getvalue()
 
+    # What matters is that GROUND TRUTH is not in the work dir -- NOT that the
+    # work dir holds exactly one file. Pinning the listing conflated the two
+    # and broke on machines that are merely used: copy_board deliberately
+    # carries every sibling of the source board (a board without its
+    # .kicad_pro loses the DRC floor, #441), and `kicad_files/*.kicad_prl` is
+    # gitignored, so whether a sibling exists at all depends on whether anyone
+    # has opened this board in KiCad here. Green on a clean checkout, red on a
+    # developer's, for a reason the fence has nothing to do with.
+    truth_in_wd = [f for f in os.listdir(wd)
+                   if 'control' in f.lower() or f.endswith('.perturb.json')]
     check('control_out puts the control outside the work dir',
-          os.path.isfile(ctl) and sorted(os.listdir(wd)) == ['board.kicad_pcb'],
-          sorted(os.listdir(wd)))
+          os.path.isfile(ctl) and not truth_in_wd,
+          f'leaked {truth_in_wd} of {sorted(os.listdir(wd))}')
     # The record carries `original_poses`, so fencing the board while leaving
     # the record behind would move the leak rather than close it.
     check('...and the record follows it',
@@ -172,7 +195,7 @@ def test_deadline_and_banner(tmp):
           'was invoked')
     for label, argv in ROUTING_TOOLS:
         out = os.path.join(tmp, label.replace('.py', '') + '_dl.kicad_pcb')
-        rc, log = run(argv(out) + ['--deadline', '0.4'])
+        rc, log = run(argv(out) + ['--deadline', str(SPENT_DEADLINE_S)])
 
         check(f'{label}: a spent budget exits {DEADLINE_EXIT}, not the shell\'s',
               rc == DEADLINE_EXIT, f'rc={rc}\n' + log[-600:])
@@ -186,7 +209,7 @@ def test_deadline_and_banner(tmp):
                                  for s in subs),
               [{k: s.get(k) for k in ('complete', 'status')} for s in subs])
         check(f'{label}: ...and names the budget it spent',
-              bool(subs) and all(s.get('deadline_s') == 0.4
+              bool(subs) and all(s.get('deadline_s') == SPENT_DEADLINE_S
                                  and s.get('elapsed_s') is not None
                                  for s in subs),
               [{k: s.get(k) for k in ('deadline_s', 'elapsed_s', 'stopped_in')}
@@ -225,7 +248,8 @@ def test_no_deadline_unchanged(tmp):
               and 'DEADLINE:' not in log,
               f'rc={rc} n={len(subs)}')
 
-        rc, log = run(argv(base + '_big.kicad_pcb') + ['--deadline', '600'])
+        rc, log = run(argv(base + '_big.kicad_pcb')
+                      + ['--deadline', str(UNSPENT_DEADLINE_S)])
         subs = summaries(log)
         check(f'{label}: a budget that is not spent -> exit 0 and no '
               f'"incomplete" line',
@@ -240,7 +264,7 @@ def test_deadline_env(tmp):
     print('\n1: KRT_DEADLINE_S budgets a chain without touching its commands')
     out = os.path.join(tmp, 'env.kicad_pcb')
     rc, log = run(['py_router/route.py', BOARD, out, '--nets', '*', '--clearance', '0.1'],
-                  env={'KRT_DEADLINE_S': '0.4'})
+                  env={'KRT_DEADLINE_S': str(SPENT_DEADLINE_S)})
     check('route.py honours KRT_DEADLINE_S', rc == DEADLINE_EXIT,
           f'rc={rc}\n' + log[-400:])
 
@@ -286,7 +310,7 @@ def test_merge_keeps_incompleteness(tmp):
     from route_summary import merge_route_summaries
     out = os.path.join(tmp, 'merge.kicad_pcb')
     _rc, log = run(['py_router/route.py', BOARD, out, '--nets', '*', '--clearance', '0.1',
-                    '--deadline', '0.4'])
+                    '--deadline', str(SPENT_DEADLINE_S)])
     m = merge_route_summaries(log)
     check('merge_route_summaries reports the run as partial',
           m is not None and m.get('complete') is False

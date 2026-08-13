@@ -143,9 +143,31 @@ def main():
         # a FALSE "INCOMPLETE: blocking is null" wearing a correctly-bound
         # doc['board']. Every other test in this file runs after os.chdir(ROOT),
         # which is exactly why it survived.
-        sub = os.path.join(td, 'elsewhere')
-        os.makedirs(sub)
-        rel = os.path.relpath(os.path.join(ROOT, BOARD), sub)
+        # The cwd must be somewhere that is NOT the repo root AND from which
+        # the board is still reachable by a RELATIVE path -- on every OS this
+        # repo is developed on, not just the one that wrote the test:
+        #   macOS: tempfile lives under /var, a symlink to /private/var. A
+        #     relpath built from the LOGICAL temp path ascends one directory
+        #     too few once the kernel resolves `..` against the PHYSICAL
+        #     /private/var, so the board does not exist from `sub`,
+        #     check_complete exits BOARD_STATE "no such board", and the three
+        #     checks below fail for a reason that has nothing to do with what
+        #     they test. realpath BOTH sides and the chain is right. Linux has
+        #     no such symlink, which is why this passes there and failed here.
+        #   Windows: the system temp dir may sit on a different DRIVE, where no
+        #     relative path to the repo exists at all and relpath raises
+        #     ValueError. Fall back to a scratch dir inside ROOT -- same drive
+        #     by construction. What this case needs is a cwd that is not ROOT,
+        #     not one at any particular place on disk.
+        board_abs = os.path.realpath(os.path.join(ROOT, BOARD))
+        sub = os.path.realpath(os.path.join(td, 'elsewhere'))
+        os.makedirs(sub, exist_ok=True)
+        try:
+            rel = os.path.relpath(board_abs, sub)
+        except ValueError:
+            sub = os.path.realpath(tempfile.mkdtemp(dir=ROOT,
+                                                    prefix='_elsewhere_'))
+            rel = os.path.relpath(board_abs, sub)
         p = subprocess.run(
             [sys.executable, '-X', 'utf8',
              os.path.join(ROOT, 'check_complete.py'), rel,
@@ -160,6 +182,10 @@ def main():
         if os.path.isfile(jp):
             with open(jp, encoding='utf-8') as fh:
                 doc = json.load(fh)
+        # The Windows fallback above puts the scratch cwd inside ROOT; `td` is
+        # self-cleaning, that is not. Nothing below reads `sub`.
+        if not sub.startswith(os.path.realpath(td)):
+            shutil.rmtree(sub, ignore_errors=True)
         check('...and the document names itself for a shape test',
               doc.get('kind') == 'board-complete' and doc.get('schema') == 1,
               repr({k: doc.get(k) for k in ('kind', 'schema')}))
