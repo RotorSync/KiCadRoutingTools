@@ -53,6 +53,35 @@ def point_in_polygon(x: float, y: float, polygon: List[Tuple[float, float]]) -> 
     return inside
 
 
+def points_in_polygon_mask(xs, ys, polygon):
+    """Vectorized point_in_polygon over coordinate arrays -- the same even-odd
+    ray cast, comparison for comparison (pure compares and one division, no
+    pow), so the mask is byte-identical to the scalar per point. Sweep item 7
+    (#625 follow-up): the zone-credit scan ran the scalar per net point per
+    zone per connectivity check."""
+    import numpy as np
+    xs = np.asarray(xs, dtype=np.float64)
+    ys = np.asarray(ys, dtype=np.float64)
+    n = len(polygon)
+    if n < 3 or not len(xs):
+        return np.zeros(xs.shape, dtype=bool)
+    P = np.asarray(polygon, dtype=np.float64)
+    xi, yi = P[:, 0], P[:, 1]
+    xj, yj = np.roll(P[:, 0], 1), np.roll(P[:, 1], 1)
+    inside = np.zeros(xs.shape, dtype=bool)
+    # Chunk the (points x vertices) broadcast to bound temporaries.
+    _B = max(1, 4_000_000 // n)
+    for s in range(0, len(xs), _B):
+        px = xs[s:s + _B, None]
+        py = ys[s:s + _B, None]
+        cond = (yi[None, :] > py) != (yj[None, :] > py)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            xint = (xj - xi)[None, :] * (py - yi[None, :]) / (yj - yi)[None, :] + xi[None, :]
+            crossing = cond & (px < xint)
+        inside[s:s + _B] = (np.count_nonzero(crossing, axis=1) & 1).astype(bool)
+    return inside
+
+
 def matches_any_pattern(name: str, patterns: List[str]) -> bool:
     """Check if a net name matches any of the given patterns (fnmatch style)."""
     for pattern in patterns:
@@ -730,11 +759,16 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         points_on_layer = [(x, y, layer, pid, size) for x, y, layer, pid, size in all_points
                            if layer == zone_layer]
 
-        # Find which points are inside the zone polygon
+        # Find which points are inside the zone polygon (item 7: one
+        # vectorized ray cast for the whole layer's points, then the model /
+        # validator logic only on the inside ones -- mask byte-identical).
         points_in_zone = []   # legacy blob (no model verdict)
         points_by_comp = {}   # fill component id -> [pid]
-        for x, y, layer, pid, size in points_on_layer:
-            if point_in_polygon(x, y, zone.polygon):
+        _mask = points_in_polygon_mask([p[0] for p in points_on_layer],
+                                       [p[1] for p in points_on_layer],
+                                       zone.polygon)
+        for _in_poly, (x, y, layer, pid, size) in zip(_mask, points_on_layer):
+            if _in_poly:
                 # Removal gates pass a fill validator (#outline-over-credit,
                 # bitaxe Q2): outline membership only counts where real fill
                 # can provably exist. GRADING callers pass None and keep the
