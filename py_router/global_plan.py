@@ -144,7 +144,8 @@ def plan_global_routes(pcb_data, config, net_ids: List[Tuple[str, int]],
     rough_cfg = replace(config,
                         heuristic_weight=k['hweight'],
                         max_iterations=max(1, int(k['iters'])),
-                        power_tap_neckdown=False)
+                        power_tap_neckdown=False,
+                        plan_probe=True)
     # The reservation stamp reuses the ripped-ghost machinery at the plan's
     # own knobs (a replace clone, never a shared-config mutation).
     res_cfg = replace(config,
@@ -262,9 +263,17 @@ def _assign_clique_layers(plan: GlobalPlan, config) -> None:
         for nid in comp:
             for l, c in hist.get(nid, {}).items():
                 totals[l] = totals.get(l, 0) + c
-        viable = [l for l, _ in sorted(totals.items(),
-                                       key=lambda t: (-t[1], t[0]))
-                  if l in allowed]
+        # Spread across ALL allowed layers, probe-used ones first (by
+        # usage): probes are biased toward the cheapest layer, so a clique
+        # whose probes all stayed on F.Cu would otherwise collapse to a
+        # one-layer "spread" -- the exact bias this assignment exists to
+        # break. Unprobed-but-allowed layers join at the tail; both levers
+        # stay soft/validated, so a genuinely bad layer is refused
+        # downstream (discounts never force, swaps must validate).
+        used = [l for l, _ in sorted(totals.items(),
+                                     key=lambda t: (-t[1], t[0]))
+                if l in allowed]
+        viable = used + [l for l in sorted(allowed) if l not in used]
         if not viable:
             continue
         for i, nid in enumerate(comp):
@@ -331,6 +340,9 @@ def apply_plan_layer_swaps(pcb_data, config, plan: GlobalPlan,
     from layer_swap_optimization import _swap_vias_fit_or_shrink
     swaps = 0
     declined = 0
+    same_layer = 0
+    no_stub = 0
+    no_endpoints = 0
     stubs_by_layer = all_stubs_by_layer if all_stubs_by_layer is not None else {}
     for name, nid in net_ids:
         li = plan.layer_pref.get(nid)
@@ -341,14 +353,24 @@ def apply_plan_layer_swaps(pcb_data, config, plan: GlobalPlan,
             continue
         sources, targets, error = get_net_endpoints(pcb_data, nid, config)
         if error or not sources or not targets:
+            no_endpoints += 1
+            if verbose:
+                print(f"  [plan] swap skipped {name}: endpoints -- "
+                      f"{error or 'empty side'}")
             continue
         for end in (sources, targets):
             cur_layer = config.layers[end[0][2]]
             if cur_layer == target_layer:
+                same_layer += 1
                 continue
             stub = get_stub_info(pcb_data, nid, end[0][3], end[0][4],
                                  cur_layer)
             if stub is None:
+                no_stub += 1
+                if verbose:
+                    print(f"  [plan] swap skipped {name} "
+                          f"{cur_layer}->{target_layer}: no stub copper at "
+                          f"({end[0][3]:.2f}, {end[0][4]:.2f})")
                 continue
             valid, reason = validate_single_swap(
                 stub, target_layer, stubs_by_layer, pcb_data, config)
@@ -373,9 +395,10 @@ def apply_plan_layer_swaps(pcb_data, config, plan: GlobalPlan,
             if verbose:
                 print(f"  Plan layer swap: {name} {cur_layer}->{target_layer}"
                       + (f" (+{len(new_vias)} via)" if new_vias else ""))
-    if swaps or declined:
-        print(f"Global plan stub swaps: {swaps} applied, {declined} "
-              f"declined (validated, soft)")
+    print(f"Global plan stub swaps: {swaps} applied, {declined} declined, "
+          f"{no_stub} end(s) without stub copper, {same_layer} already on "
+          f"the assigned layer, {no_endpoints} net(s) without derivable "
+          f"endpoints")
     return swaps
 
 

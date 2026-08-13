@@ -103,6 +103,13 @@ class GridRouteConfig:
     max_iterations: int = 200000
     max_probe_iterations: int = 5000  # Quick probe per direction to detect stuck routes
     heuristic_weight: float = 2.3  # (#586: 1.9 -> 2.3, corpus dose-response peak)
+    # #589 rough-pass probe marker: the result is a HINT (predicted path),
+    # never shipped copper, so ship-safety rejects (the #157 terminal-bridge
+    # short gate) must not veto it -- on a fanned board the probe map
+    # excludes every to-route net's stubs (relaxed legality), so probe
+    # terminals legitimately overlap future nets' copper. Set only on the
+    # global plan's replace() clone; never on a config that emits copper.
+    plan_probe: bool = False
     turn_cost: int = 1000  # Penalty for direction changes (encourages straighter paths)
     # BGA exclusion zones (auto-detected from PCB) - vias blocked inside these areas
     bga_exclusion_zones: List[Tuple[float, float, float, float]] = field(default_factory=list)

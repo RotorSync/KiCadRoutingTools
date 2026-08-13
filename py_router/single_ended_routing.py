@@ -1884,7 +1884,10 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         term_pts.append((end_original[0], end_original[1]))
     _necked157, _hard157 = _neck_terminal_grazes(new_segments, term_pts,
                                                  pcb_data, net_id, config)
-    if _hard157:
+    # #589: a plan probe's result is a hint, never shipped copper -- its
+    # terminals legitimately overlap future nets' stubs (the probe map
+    # excluded them), so the short gate must not veto the prediction.
+    if _hard157 and not config.plan_probe:
         _hs, _hd = _hard157[0]
         print(f"  {YELLOW}terminal copper on {_hs.layer} would OVERLAP a "
               f"foreign track/via (edge dist {_hd:.3f}mm < floor half-width) "
