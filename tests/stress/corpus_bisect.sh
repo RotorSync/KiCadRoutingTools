@@ -43,6 +43,11 @@ S=${SCRATCH:-/tmp}/kicad-corpus-bisect
 ST=${STRESS_DIR:-$HOME/Documents/kicad_stress_test}
 SETS=${SETS:-set10-set19}
 LIMIT=${LIMIT:-130}
+# BOARDS: score a FIXED board list instead of "the N cheapest". A bisect
+# wants the boards that actually MOVED -- --limit picks by cost, which is
+# uncorrelated with where a regression lives, so without this a 5-point
+# ladder can spend its whole budget on boards that never differed.
+BOARDS=${BOARDS:-}
 mkdir -p "$S"
 WT=$S/bx_$TAG
 rm -rf "$WT"; git -C "$REPO" worktree prune
@@ -75,6 +80,7 @@ cd "$WT"
 KICAD_SWEEP_BUILD_TAG="$BUILD_TAG" \
 KICAD_SWEEP_DIRTY=1 caffeinate -dimsu nohup python3 tests/stress/cloud_replay_sets.py \
    --sets "$SETS" --arm "bis${TAG}" --label "bis${TAG}" --limit "$LIMIT" \
+   ${BOARDS:+--boards "$BOARDS"} \
    --exclude core64_logic --out "$ST/cloud_bis${TAG}" --only plan,run \
    > "$S/bis_$TAG.log" 2>&1 &
 disown

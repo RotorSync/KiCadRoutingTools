@@ -464,7 +464,14 @@ def stage_run(args, sets, stress, plan):
     print(f"  arm spec: {json.dumps(spec)}")
 
     env = dict(os.environ)
-    env.setdefault("KICAD_SWEEP_NAME", f"kicad-replay-{sets[0]}-{sets[-1]}")
+    # Name the Modal app after the ARM, not just the sets. A bisect ladder
+    # runs many points over the SAME sets, and naming by sets alone made
+    # every point show up on the dashboard as an identical
+    # "kicad-replay-set1-set5" -- so a half-launched ladder (three points
+    # silently lost to Modal's app-create rate limit) looked indistinguishable
+    # from a healthy one, and you cannot tell which point a running app is.
+    _slug = arm if arm.startswith("kicad") else f"kicad-{arm}"
+    env.setdefault("KICAD_SWEEP_NAME", f"{_slug}-{sets[0]}-{sets[-1]}")
     # No big-memory tier. Modal bills max(reserved, used) and containers burst
     # ABOVE their reservation, so pinning a heavy board to a fat tier buys no
     # capacity -- only a larger bill against every hour it runs (the sweep
