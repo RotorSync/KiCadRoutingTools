@@ -2039,19 +2039,25 @@ def remove_segments_list_from_obstacles(obstacles: GridObstacleMap, segments: li
         expansion_mm = reserve_width / 2 + seg_width / 2 + seg_clearance + extra_clearance
         via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance
 
-        for cgx, cgy in segment_blocked_cells_array(
-                seg.start_x, seg.start_y, seg.end_x, seg.end_y, expansion_mm, coord.grid_step):
-            cells_to_remove.append((int(cgx), int(cgy), layer_idx))
-        for cgx, cgy in segment_blocked_cells_array(
-                seg.start_x, seg.start_y, seg.end_x, seg.end_y, via_block_mm, coord.grid_step):
-            vias_to_remove.append((int(cgx), int(cgy)))
+        # Sweep item 2 (#625 follow-up): the arrays already exist -- stack a
+        # layer column instead of per-row int() tuple appends (this runs on
+        # EVERY rip/restore; the batch rows are the identical multiset).
+        cell_arr = segment_blocked_cells_array(
+            seg.start_x, seg.start_y, seg.end_x, seg.end_y, expansion_mm, coord.grid_step)
+        if len(cell_arr):
+            cells_to_remove.append(np.column_stack(
+                [cell_arr.astype(np.int32),
+                 np.full(len(cell_arr), layer_idx, dtype=np.int32)]))
+        via_arr = segment_blocked_cells_array(
+            seg.start_x, seg.start_y, seg.end_x, seg.end_y, via_block_mm, coord.grid_step)
+        if len(via_arr):
+            vias_to_remove.append(via_arr.astype(np.int32))
 
     # Batch remove cells and vias
     if cells_to_remove:
-        cells_array = np.array(cells_to_remove, dtype=np.int32)
-        obstacles.remove_blocked_cells_batch(cells_array)
+        obstacles.remove_blocked_cells_batch(np.concatenate(cells_to_remove))
     if vias_to_remove:
-        vias_array = np.array(vias_to_remove, dtype=np.int32)
+        vias_array = np.concatenate(vias_to_remove)
         obstacles.remove_blocked_vias_batch(vias_array)
         if _rung_small_armed():  # #568: mirror of the add-side small stamp
             obstacles.remove_blocked_vias_small_batch(vias_array)
@@ -2106,36 +2112,45 @@ def remove_vias_list_from_obstacles(obstacles: GridObstacleMap, vias: list,
                                via.y - gy * coord.grid_step) / coord.grid_step
 
         # Track blocking - PER LAYER (mirror _add_via_obstacle's per-layer list).
+        # Sweep item 2 (#625 follow-up): disc enumeration via a mask over the
+        # integer offset grid. The threshold stays the scalar's `radius ** 2`
+        # (libm pow -- radius*radius rounds 1 ULP apart on rare values and
+        # would flip borderline cells); integer ex*ex+ey*ey against that
+        # scalar is an exact comparison, so the cell multiset is identical.
         for layer_idx in range(num_layers):
             radius = via_track_expansion_grid[layer_idx] + diagonal_margin + off_cells
             effective_track_block_sq = radius ** 2
             track_block_range = int(math.ceil(radius))
-            for ex in range(-track_block_range, track_block_range + 1):
-                for ey in range(-track_block_range, track_block_range + 1):
-                    if ex*ex + ey*ey <= effective_track_block_sq:
-                        cells_to_remove.append((gx + ex, gy + ey, layer_idx))
+            ax = np.arange(-track_block_range, track_block_range + 1, dtype=np.int32)
+            EX, EY = np.meshgrid(ax, ax, indexing='ij')
+            m = EX * EX + EY * EY <= effective_track_block_sq
+            if m.any():
+                cells_to_remove.append(np.column_stack(
+                    [EX[m] + gx, EY[m] + gy,
+                     np.full(int(m.sum()), layer_idx, dtype=np.int32)]))
 
         # Via blocking cells
         via_radius = via_via_expansion_grid + off_cells
         vr_range = int(math.ceil(via_radius))
         vr_sq = via_radius * via_radius
-        for ex in range(-vr_range, vr_range + 1):
-            for ey in range(-vr_range, vr_range + 1):
-                if ex*ex + ey*ey <= vr_sq:
-                    vias_to_remove.append((gx + ex, gy + ey))
+        ax = np.arange(-vr_range, vr_range + 1, dtype=np.int32)
+        EX, EY = np.meshgrid(ax, ax, indexing='ij')
+        m = EX * EX + EY * EY <= vr_sq
+        if m.any():
+            vias_to_remove.append(np.column_stack([EX[m] + gx, EY[m] + gy]))
 
         # #441: mirror the drill hole-to-hole disc add_vias_list_as_obstacles
         # stamped (same _via_h2h_cells), so rip-up removes exactly what it added.
         _h2h = _via_h2h_cells(via, config, coord)
-        if _h2h is not None:
-            vias_to_remove.extend((int(a), int(b)) for a, b in _h2h)
+        if _h2h is not None and len(_h2h):
+            vias_to_remove.append(np.asarray(_h2h, dtype=np.int64))
 
     # Batch remove cells and vias
     if cells_to_remove:
-        cells_array = np.array(cells_to_remove, dtype=np.int32)
+        cells_array = np.concatenate(cells_to_remove).astype(np.int32)
         obstacles.remove_blocked_cells_batch(cells_array)
     if vias_to_remove:
-        vias_array = np.array(vias_to_remove, dtype=np.int32)
+        vias_array = np.concatenate(vias_to_remove).astype(np.int32)
         obstacles.remove_blocked_vias_batch(vias_array)
         if _rung_small_armed():  # #568: mirror of the add-side small stamp
             obstacles.remove_blocked_vias_small_batch(vias_array)
