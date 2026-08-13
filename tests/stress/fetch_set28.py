@@ -19,7 +19,18 @@ corpus median of 100%. It has NEVER been human-routed, so boards_set28/
 mez_rx.kicad_pcb is a DEGENERATE reference (0 segments/0 vias):
 compare_to_original and the DRC-delta-vs-original are meaningless for it.
 
-Downloads each board (and its sibling .kicad_pro, which carries the DRC floor)
+storm_tracker (solderable/storm-tracker-hardware) joined 2026-08-13 at
+Andy's request: a 4-layer 36.5x69mm ESP32-C6-MINI-1U lightning detector
+(AS3935 + 1.54" e-paper over a 24-pin 0.5mm FFC, USB-C, battery charger).
+Small but dense -- 342 vias in 2500mm2, a 0.13mm fab floor -- and one of
+only two corpus boards with a real .kicad_dru; unlike mez_rx's DFM
+ruleset, its single rule is CONDITIONED on a netclass
+(A.NetClass == '90R_DP' && B.NetName == 'GND'), and its USB pair is
+netclass-assigned by PATTERN (*USB_D* -> 90R_DP). Fully human-routed, so
+unlike mez_rx it is a usable compare_to_original reference.
+
+Downloads each board and its sibling project files -- the .kicad_pro (DRC floor,
+#441) and the .kicad_dru (per-layer clearance rules, #498) --
 into $STRESS_DIR/sources/github_set28/. After fetching, run `bash prep_set28.sh`
 (needs KiCad's bundled python / pcbnew) to produce boards_set28/ (routed
 reference) + boards_unrouted_set28/ (stripped).
@@ -92,11 +103,18 @@ def main():
         if r.returncode != 0 or not dest.exists() or dest.stat().st_size == 0:
             print(f"  FAIL {b['repo']}  <- {b['raw_url']}")
             continue
-        # sibling .kicad_pro: never drop it (see CLAUDE.md #441 -- a board without
-        # its project file resolves its DRC floor from the STOCK netclass).
-        pro_url = b["raw_url"][: -len(".kicad_pcb")] + ".kicad_pro"
-        subprocess.run(["curl", "-sL", "--fail", pro_url, "-o",
-                        str(dest.with_suffix(".kicad_pro"))], capture_output=True)
+        # siblings: never drop them. Without the .kicad_pro a board resolves its
+        # DRC floor from the STOCK netclass (#441); without the .kicad_dru every
+        # routing step and check_drc lose the per-layer/conditioned clearance
+        # rules that OUTRANK --clearance (#498). A 404 under --fail can still
+        # leave a zero-byte file, which reads as "rules present, none" -- drop it.
+        for ext in (".kicad_pro", ".kicad_dru"):
+            sib = dest.with_suffix(ext)
+            subprocess.run(["curl", "-sL", "--fail",
+                            b["raw_url"][: -len(".kicad_pcb")] + ext,
+                            "-o", str(sib)], capture_output=True)
+            if sib.exists() and sib.stat().st_size == 0:
+                sib.unlink()
         ok += 1
         print(f"  OK  {b['repo']:42} {dest.stat().st_size // 1024}KB  [{b.get('tier','?')}]")
     print(f"\n{ok}/{len(boards)} set28 sources -> {out_dir}")
