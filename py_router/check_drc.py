@@ -813,6 +813,89 @@ def _pad_has_no_copper(pad: Pad) -> bool:
     return not any(l == '*.Cu' or l.endswith('.Cu') for l in pad.layers)
 
 
+# Sweep item 5 (#625 follow-up): the pad-pad and pad-touch passes ran 64
+# scalar point_to_pad_distance calls per candidate pair (~2.5M per grade).
+# Perimeter samples are memoized per pad (built by the SAME scalar sampler,
+# so the values are identical), and each pair runs one broadcast of the
+# multiply-squared kernel that NOMINATES minimal/borderline samples; the
+# verdict/returned distance is recomputed on those with the scalar itself
+# (**2 = libm pow rounds 1 ULP apart on rare values).
+_PAD_PERIMETER_CACHE: Dict[int, tuple] = {}
+
+
+def _pad_perimeter_array(pad):
+    key = id(pad)
+    fp = (pad.pad_number, round(pad.global_x, 9), round(pad.global_y, 9),
+          round(pad.size_x, 9), round(pad.size_y, 9))
+    hit = _PAD_PERIMETER_CACHE.get(key)
+    if hit is not None and hit[0] == fp:
+        return hit[1]
+    pts = _pad_perimeter_points(pad)
+    arr = (np.array([p[0] for p in pts], dtype=np.float64),
+           np.array([p[1] for p in pts], dtype=np.float64), pts)
+    if len(_PAD_PERIMETER_CACHE) > 4096:
+        _PAD_PERIMETER_CACHE.clear()
+    _PAD_PERIMETER_CACHE[key] = (fp, arr)
+    return arr
+
+
+def _pad_dist_d2_proxy(xs, ys, pad):
+    """Squared-distance PROXY from points to a pad's copper via multiply
+    kernels -- monotone with the scalar point_to_pad_distance to within 1 ULP
+    (used only to nominate candidates; verdicts recompute the scalar)."""
+    polys = getattr(pad, 'polygons', None)
+    if polys:
+        arrays = _polys_edge_arrays(polys)
+        if arrays is None:
+            return np.full(xs.shape, np.inf)
+        px1, py1, pdx, pdy, plen_sq = arrays
+        d2 = _pt_edges_d2(xs[:, None], ys[:, None], px1[None, :], py1[None, :],
+                          pdx[None, :], pdy[None, :], plen_sq[None, :]).min(axis=1)
+        inside = np.zeros(xs.shape, dtype=bool)
+        for poly in polys:
+            P = np.asarray(poly, dtype=np.float64)
+            if len(P) < 2:
+                continue
+            yi = P[:, 1][None, :]; yj = np.roll(P[:, 1], 1)[None, :]
+            xi = P[:, 0][None, :]; xj = np.roll(P[:, 0], 1)[None, :]
+            cond = (yi > ys[:, None]) != (yj > ys[:, None])
+            with np.errstate(divide='ignore', invalid='ignore'):
+                xint = (xj - xi) * (ys[:, None] - yi) / (yj - yi) + xi
+                crossing = cond & (xs[:, None] < xint)
+            inside |= (np.count_nonzero(crossing, axis=1) & 1).astype(bool)
+        return np.where(inside, 0.0, d2)
+    if pad.shape in ('circle', 'oval'):
+        corner_radius = min(pad.size_x, pad.size_y) / 2
+    elif pad.shape == 'roundrect':
+        corner_radius = pad.roundrect_rratio * min(pad.size_x, pad.size_y)
+    else:
+        corner_radius = 0.0
+    x, y = xs, ys
+    if pad.rect_rotation:
+        rad = math.radians(pad.rect_rotation)
+        cos_r, sin_r = math.cos(rad), math.sin(rad)
+        dx0 = xs - pad.global_x
+        dy0 = ys - pad.global_y
+        x = pad.global_x + dx0 * cos_r + dy0 * sin_r
+        y = pad.global_y - dx0 * sin_r + dy0 * cos_r
+    rel_x = np.abs(x - pad.global_x)
+    rel_y = np.abs(y - pad.global_y)
+    half_x, half_y = pad.size_x / 2, pad.size_y / 2
+    dxe = np.maximum(0.0, rel_x - half_x)
+    dye = np.maximum(0.0, rel_y - half_y)
+    d = np.sqrt(dxe * dxe + dye * dye)
+    if corner_radius > 0:
+        inner_x = half_x - corner_radius
+        inner_y = half_y - corner_radius
+        corner = (rel_x > inner_x) & (rel_y > inner_y)
+        cdx = rel_x - inner_x
+        cdy = rel_y - inner_y
+        d = np.where(corner,
+                     np.maximum(0.0, np.sqrt(cdx * cdx + cdy * cdy) - corner_radius),
+                     d)
+    return d * d
+
+
 def check_pad_pad_overlap(pad1: Pad, pad2: Pad, clearance: float,
                           routing_layers: List[str],
                           clearance_margin: float = 0.05
@@ -834,18 +917,27 @@ def check_pad_pad_overlap(pad1: Pad, pad2: Pad, clearance: float,
     if not shared:
         return False, 0.0, None
 
+    # Nominate minimal samples with the broadcast proxy, then recompute the
+    # winners with the scalar in the scalar's own order (pad1 samples then
+    # pad2's, strict first-minimum) -- byte-identical returns.
+    x1a, y1a, pts1 = _pad_perimeter_array(pad1)
+    x2a, y2a, pts2 = _pad_perimeter_array(pad2)
+    d2a = _pad_dist_d2_proxy(x1a, y1a, pad2) if len(x1a) else np.empty(0)
+    d2b = _pad_dist_d2_proxy(x2a, y2a, pad1) if len(x2a) else np.empty(0)
+    m = min(d2a.min() if len(d2a) else np.inf, d2b.min() if len(d2b) else np.inf)
     best = float('inf')
     best_pt = None
-    for px, py in _pad_perimeter_points(pad1):
-        d = point_to_pad_distance(px, py, pad2)
-        if d < best:
-            best = d
-            best_pt = (px, py)
-    for px, py in _pad_perimeter_points(pad2):
-        d = point_to_pad_distance(px, py, pad1)
-        if d < best:
-            best = d
-            best_pt = (px, py)
+    if np.isfinite(m):
+        thr = m + 8 * np.spacing(m)
+        for d2, pts, other in ((d2a, pts1, pad2), (d2b, pts2, pad1)):
+            if not len(d2):
+                continue
+            for i in np.nonzero(d2 <= thr)[0]:
+                px, py = pts[i]
+                d = point_to_pad_distance(px, py, other)
+                if d < best:
+                    best = d
+                    best_pt = (px, py)
 
     overlap = clearance - best
     if overlap > clearance * clearance_margin:

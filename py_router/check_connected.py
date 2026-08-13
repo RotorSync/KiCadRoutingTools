@@ -213,12 +213,23 @@ def _pads_copper_touch(pi: Pad, pj: Pad, tolerance: float = 0.05) -> bool:
         return point_to_pad_distance(pj.global_x, pj.global_y, pi) <= tolerance
     # Both directions: one pad fully inside the other still hits (the inner
     # pad's perimeter samples are inside the outer copper, distance 0).
-    for x, y in _pad_perimeter_points(pi):
-        if point_to_pad_distance(x, y, pj) <= tolerance:
-            return True
-    for x, y in _pad_perimeter_points(pj):
-        if point_to_pad_distance(x, y, pi) <= tolerance:
-            return True
+    # Sweep item 5 (#625 follow-up): the broadcast proxy nominates candidate
+    # samples (with a generous band around the tolerance, since its multiply
+    # kernel rounds up to 1 ULP apart from the scalar's **2); the verdict on
+    # each candidate is the scalar itself, so the boolean is byte-identical.
+    # This feeds the multipoint router's terminal grouping (#317/#346), so
+    # exactness matters here, not just speed.
+    from check_drc import _pad_perimeter_array, _pad_dist_d2_proxy
+    import numpy as np
+    hi2 = (tolerance * (1 + 1e-9)) ** 2
+    for a, b in ((pi, pj), (pj, pi)):
+        xs, ys, pts = _pad_perimeter_array(a)
+        if not len(xs):
+            continue
+        d2 = _pad_dist_d2_proxy(xs, ys, b)
+        for i in np.nonzero(d2 <= hi2)[0]:
+            if point_to_pad_distance(pts[i][0], pts[i][1], b) <= tolerance:
+                return True
     return False
 
 
