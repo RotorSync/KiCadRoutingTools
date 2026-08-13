@@ -1056,73 +1056,65 @@ def _add_rectangular_edge_obstacles(obstacles: GridObstacleMap, coord: GridCoord
     an in-band pad's own copper cells landable on its own layer.
     """
     _le = layer_exempt or {}
-    _EMPTY = frozenset()
     edge_expand = max(track_expand, via_expand)
     grid_margin = edge_expand + 5
 
-    # Block left edge (full height, so it also covers the via band at both left corners)
-    for gx in range(gmin_x - grid_margin, gmin_x + edge_expand + 1):
-        block_track = gx <= gmin_x + track_expand
-        block_via = gx < gmin_x + via_expand
-        if not (block_track or block_via):
-            continue
-        for gy in range(gmin_y - grid_margin, gmax_y + grid_margin + 1):
-            if block_track:
-                _k = (gx << 32) + (gy & 0xFFFFFFFF)
-                for layer_idx in range(num_layers):
-                    if _k in _le.get(layer_idx, _EMPTY):
-                        continue  # #441: pad-own copper on its layer stays landable
-                    obstacles.add_static_blocked_cell(gx, gy, layer_idx)
-            if block_via:
-                obstacles.add_static_blocked_via(gx, gy)
+    # Sweep item 8 (#625 follow-up): the four edge sweeps called
+    # add_static_blocked_cell/add_static_blocked_via once PER CELL per layer
+    # (~300k+ FFI calls per build on a bbox-outline board). The bands are
+    # rectangles, so each sweep is one meshgrid + the same per-axis masks,
+    # exempt keys filtered with packed-int np.isin (the exact key packing the
+    # scalar used, including the & 0xFFFFFFFF wrap), and two _batch calls.
+    # The static bitmaps are idempotent sets, so equal cell sets = equal
+    # state, regardless of add order.
+    _le_packed = {li: np.sort(np.fromiter(s, dtype=np.int64, count=len(s)))
+                  for li, s in _le.items() if s}
 
-    # Block right edge (full height)
-    for gx in range(gmax_x - edge_expand, gmax_x + grid_margin + 1):
-        block_track = gx >= gmax_x - track_expand
-        block_via = gx > gmax_x - via_expand
-        if not (block_track or block_via):
-            continue
-        for gy in range(gmin_y - grid_margin, gmax_y + grid_margin + 1):
-            if block_track:
-                _k = (gx << 32) + (gy & 0xFFFFFFFF)
-                for layer_idx in range(num_layers):
-                    if _k in _le.get(layer_idx, _EMPTY):
-                        continue  # #441: pad-own copper on its layer stays landable
-                    obstacles.add_static_blocked_cell(gx, gy, layer_idx)
-            if block_via:
-                obstacles.add_static_blocked_via(gx, gy)
+    def _sweep(gx_lo, gx_hi, gy_lo, gy_hi, track_mask_fn, via_mask_fn, by_x):
+        xs = np.arange(gx_lo, gx_hi + 1, dtype=np.int64)
+        ys = np.arange(gy_lo, gy_hi + 1, dtype=np.int64)
+        if not len(xs) or not len(ys):
+            return
+        axis = xs if by_x else ys
+        tmask = track_mask_fn(axis)
+        vmask = via_mask_fn(axis)
+        GX, GY = np.meshgrid(xs, ys, indexing='ij')
+        gxf, gyf = GX.ravel(), GY.ravel()
+        cell_t = np.repeat(tmask, len(ys)) if by_x else np.tile(tmask, len(xs))
+        cell_v = np.repeat(vmask, len(ys)) if by_x else np.tile(vmask, len(xs))
+        if cell_t.any():
+            tx, ty = gxf[cell_t], gyf[cell_t]
+            keys = (tx << 32) + (ty & 0xFFFFFFFF)
+            for layer_idx in range(num_layers):
+                ex = _le_packed.get(layer_idx)
+                keep = ~np.isin(keys, ex) if ex is not None else slice(None)
+                kx, ky = tx[keep], ty[keep]
+                if len(kx):
+                    obstacles.add_static_blocked_cells_batch(np.column_stack(
+                        [kx, ky, np.full(len(kx), layer_idx, dtype=np.int64)]
+                    ).astype(np.int32))
+        if cell_v.any():
+            obstacles.add_static_blocked_vias_batch(np.column_stack(
+                [gxf[cell_v], gyf[cell_v]]).astype(np.int32))
 
-    # Block top edge (middle span; corners covered by the left/right sweeps above)
-    for gy in range(gmin_y - grid_margin, gmin_y + edge_expand + 1):
-        block_track = gy <= gmin_y + track_expand
-        block_via = gy < gmin_y + via_expand
-        if not (block_track or block_via):
-            continue
-        for gx in range(gmin_x + track_expand + 1, gmax_x - track_expand):
-            if block_track:
-                _k = (gx << 32) + (gy & 0xFFFFFFFF)
-                for layer_idx in range(num_layers):
-                    if _k in _le.get(layer_idx, _EMPTY):
-                        continue  # #441: pad-own copper on its layer stays landable
-                    obstacles.add_static_blocked_cell(gx, gy, layer_idx)
-            if block_via:
-                obstacles.add_static_blocked_via(gx, gy)
-
-    # Block bottom edge (middle span)
-    for gy in range(gmax_y - edge_expand, gmax_y + grid_margin + 1):
-        block_track = gy >= gmax_y - track_expand
-        block_via = gy > gmax_y - via_expand
-        if not (block_track or block_via):
-            continue
-        for gx in range(gmin_x + track_expand + 1, gmax_x - track_expand):
-            if block_track:
-                _k = (gx << 32) + (gy & 0xFFFFFFFF)
-                for layer_idx in range(num_layers):
-                    if _k in _le.get(layer_idx, _EMPTY):
-                        continue  # #441: pad-own copper on its layer stays landable
-                    obstacles.add_static_blocked_cell(gx, gy, layer_idx)
-            if block_via:
-                obstacles.add_static_blocked_via(gx, gy)
+    # Left edge (full height, so it also covers the via band at both left
+    # corners); right edge (full height); top/bottom middle spans.
+    _sweep(gmin_x - grid_margin, gmin_x + edge_expand,
+           gmin_y - grid_margin, gmax_y + grid_margin,
+           lambda gx: gx <= gmin_x + track_expand,
+           lambda gx: gx < gmin_x + via_expand, True)
+    _sweep(gmax_x - edge_expand, gmax_x + grid_margin,
+           gmin_y - grid_margin, gmax_y + grid_margin,
+           lambda gx: gx >= gmax_x - track_expand,
+           lambda gx: gx > gmax_x - via_expand, True)
+    _sweep(gmin_x + track_expand + 1, gmax_x - track_expand - 1,
+           gmin_y - grid_margin, gmin_y + edge_expand,
+           lambda gy: gy <= gmin_y + track_expand,
+           lambda gy: gy < gmin_y + via_expand, False)
+    _sweep(gmin_x + track_expand + 1, gmax_x - track_expand - 1,
+           gmax_y - edge_expand, gmax_y + grid_margin,
+           lambda gy: gy >= gmax_y - track_expand,
+           lambda gy: gy > gmax_y - via_expand, False)
 
 
 def _add_polygon_edge_obstacles(obstacles: GridObstacleMap, polygons,
