@@ -511,10 +511,13 @@ def prepare_obstacles_inplace(
         radius = via_via_expansion_grid + off_cells
         rng = int(math.ceil(radius))
         radius_sq = radius * radius
-        for ex in range(-rng, rng + 1):
-            for ey in range(-rng, rng + 1):
-                if ex*ex + ey*ey <= radius_sq:
-                    same_net_via_cells.append((gx + ex, gy + ey))
+        # Sweep item 3 (#625): integer-mask disc, identical cell set (the
+        # threshold scalar is unchanged; runs per net per prepare).
+        _ax = np.arange(-rng, rng + 1, dtype=np.int64)
+        _EX, _EY = np.meshgrid(_ax, _ax, indexing='ij')
+        _m = _EX * _EX + _EY * _EY <= radius_sq
+        same_net_via_cells.extend(
+            zip((_EX[_m] + gx).tolist(), (_EY[_m] + gy).tolist()))
 
     # Pad drill hole clearance
     # Skip the pad center - the router can use existing through-holes for layer transitions
@@ -530,13 +533,13 @@ def prepare_obstacles_inplace(
                 expand = int(math.ceil(radius))
                 radius_sq = radius * radius
                 gx, gy = coord.to_grid(pad.global_x, pad.global_y)
-                for ex in range(-expand, expand + 1):
-                    for ey in range(-expand, expand + 1):
-                        if ex*ex + ey*ey <= radius_sq:
-                            # Skip the pad center - allow layer transitions at through-holes
-                            if ex == 0 and ey == 0:
-                                continue
-                            same_net_via_cells.append((gx + ex, gy + ey))
+                # Sweep item 3 (#625): integer-mask disc; the pad centre stays
+                # landable (layer transitions at through-holes), identical set.
+                _ax = np.arange(-expand, expand + 1, dtype=np.int64)
+                _EX, _EY = np.meshgrid(_ax, _ax, indexing='ij')
+                _m = (_EX * _EX + _EY * _EY <= radius_sq) & ~((_EX == 0) & (_EY == 0))
+                same_net_via_cells.extend(
+                    zip((_EX[_m] + gx).tolist(), (_EY[_m] + gy).tolist()))
 
     # #581: same-net pad via keep-out. When the board carries an active
     # same_net_pad_clearance (flag / persisted .kicad_pro record), the CURRENT

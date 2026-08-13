@@ -2239,11 +2239,18 @@ def add_same_net_via_clearance(obstacles: GridObstacleMap, pcb_data: PCBData,
         radius = via_via_expansion_grid + off_cells
         rng = int(math.ceil(radius))
         radius_sq = radius * radius
-        # Only block via placement, not track routing (tracks can pass through same-net vias)
-        for ex in range(-rng, rng + 1):
-            for ey in range(-rng, rng + 1):
-                if ex*ex + ey*ey <= radius_sq:
-                    obstacles.add_blocked_via(gx + ex, gy + ey)
+        # Only block via placement, not track routing (tracks can pass through
+        # same-net vias). Sweep item 3 (#625): mask over the integer offset
+        # grid + one batch call instead of one FFI call per cell (this runs
+        # per net per prepare, re-run every rip round); integer ex*ex+ey*ey
+        # against the same scalar threshold blocks the identical cell set,
+        # and the batch increments refcounts exactly like the per-cell add.
+        ax = np.arange(-rng, rng + 1, dtype=np.int32)
+        EX, EY = np.meshgrid(ax, ax, indexing='ij')
+        m = EX * EX + EY * EY <= radius_sq
+        if m.any():
+            obstacles.add_blocked_vias_batch(
+                np.column_stack([EX[m] + gx, EY[m] + gy]))
 
 
 def add_same_net_pad_drill_via_clearance(obstacles: GridObstacleMap, pcb_data: PCBData,
@@ -2280,16 +2287,32 @@ def add_same_net_pad_drill_via_clearance(obstacles: GridObstacleMap, pcb_data: P
         half_len = math.hypot(p2x - p1x, p2y - p1y) / 2.0
         expand = coord.to_grid_dist_safe(required_dist + half_len) + 1  # ceil + 1-cell margin
 
-        for ex in range(-expand, expand + 1):
-            cx = (gx + ex) * step
-            for ey in range(-expand, expand + 1):
-                cy = (gy + ey) * step
-                if point_to_segment_distance(cx, cy, p1x, p1y, p2x, p2y) < required_dist:
-                    # Skip the pad center - the router can use the existing
-                    # through-hole for layer transitions without a new via
-                    if ex == 0 and ey == 0:
-                        continue
-                    obstacles.add_blocked_via(gx + ex, gy + ey)
+        # Sweep item 3 (#625): broadcast the capsule distance over the offset
+        # grid and batch the adds (was one scalar distance + one FFI call per
+        # cell, per net per prepare). The multiply-squared kernel NOMINATES:
+        # clearly-inside cells pass, cells within a few ULP of the strict
+        # `< required_dist` boundary are re-judged with the scalar (its **2 =
+        # libm pow rounds 1 ULP apart on rare values) -- identical cell set.
+        ax = np.arange(-expand, expand + 1, dtype=np.int64)
+        EX, EY = np.meshgrid(ax, ax, indexing='ij')
+        exf, eyf = EX.ravel(), EY.ravel()
+        cxs = (gx + exf) * step
+        cys = (gy + eyf) * step
+        dx_, dy_ = p2x - p1x, p2y - p1y
+        len_sq = dx_ * dx_ + dy_ * dy_
+        d2 = _pt_seg_d2_arr(cxs, cys, p1x, p1y, dx_, dy_, len_sq)
+        req2 = required_dist * required_dist
+        lo = req2 * (1 - 1e-12)
+        hi = req2 * (1 + 1e-12)
+        take = d2 < lo
+        border = np.nonzero((d2 >= lo) & (d2 <= hi))[0]
+        for i in border:
+            take[i] = point_to_segment_distance(
+                float(cxs[i]), float(cys[i]), p1x, p1y, p2x, p2y) < required_dist
+        take &= ~((exf == 0) & (eyf == 0))  # keep the pad centre landable
+        if take.any():
+            obstacles.add_blocked_vias_batch(np.column_stack(
+                [exf[take] + gx, eyf[take] + gy]).astype(np.int32))
 
 
 def get_same_net_through_hole_positions(pcb_data: PCBData, net_id: int,
@@ -2523,6 +2546,21 @@ def _tie_pad_key(pad):
     return (pad.component_ref, pad.pad_number, tuple(pad.layers or ()),
             round(pad.global_x, 6), round(pad.global_y, 6),
             round(pad.size_x, 6), round(pad.size_y, 6))
+
+
+def _pt_seg_d2_arr(px, py, x1, y1, dx, dy, len_sq):
+    """Squared point-to-segment distance over point arrays vs ONE segment --
+    the point_to_segment_distance formula with its exact proj association
+    (multiply-squared: nominate with it, judge borderline cells with the
+    scalar, whose **2 is libm pow)."""
+    if len_sq < 1e-10:
+        ddx = px - x1
+        ddy = py - y1
+        return ddx * ddx + ddy * ddy
+    t = np.clip(((px - x1) * dx + (py - y1) * dy) / len_sq, 0.0, 1.0)
+    ddx = px - (x1 + t * dx)
+    ddy = py - (y1 + t * dy)
+    return ddx * ddx + ddy * ddy
 
 
 def _pad_dist_le_batch(xs, ys, pad, tol):
