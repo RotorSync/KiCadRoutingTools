@@ -273,6 +273,7 @@ def refresh() -> None:
         # lesson, predicted by the issue). 1.0 = off, 0 = no reservations
         # inside collars.
         'zone_scale': _f('KICAD_GLOBAL_PLAN_ZONE_SCALE', 1.0),
+        'debug': _opt_in('KICAD_GLOBAL_PLAN_DEBUG'),    # ordering forensics dump
     }
 
     # --- strings -------------------------------------------------------------

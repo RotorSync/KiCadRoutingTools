@@ -179,6 +179,17 @@ def plan_global_routes(pcb_data, config, net_ids: List[Tuple[str, int]],
           f"({res_cells} cells at {k['cost']}mm-equiv), "
           f"{n_cross} net(s) with predicted crossings, "
           f"{n_share} sharing corridors")
+    if verbose or env_knobs.GLOBAL_PLAN.get('debug'):
+        name_of = {nid: nm for nm, nid in net_ids}
+        hot = sorted(((sum(w.values()), nid)
+                      for nid, w in plan.conflict_w.items() if w),
+                     reverse=True)[:20]
+        for total, nid in hot:
+            parts = sorted(plan.conflict_w[nid].items(),
+                           key=lambda t: -t[1])[:5]
+            print(f"  [plan] {name_of.get(nid, nid)}: {total} crossing(s) "
+                  f"with " + ", ".join(
+                      f"{name_of.get(p, p)}({c})" for p, c in parts))
     return plan
 
 
@@ -369,6 +380,11 @@ def apply_plan_order(net_ids: List[Tuple[str, int]], plan: GlobalPlan,
     print(f"Global plan order ({mode}): {moved}/{len(net_ids)} net(s) "
           f"changed position" + (f" ({len(front)} direct-first net(s) "
                                  f"kept in front)" if front else ""))
+    if env_knobs.GLOBAL_PLAN.get('debug'):
+        print("  [plan] order head: "
+              + ", ".join(nm for nm, _ in reordered[:20]))
+        print("  [plan] order tail: "
+              + ", ".join(nm for nm, _ in reordered[-10:]))
     return reordered
 
 
