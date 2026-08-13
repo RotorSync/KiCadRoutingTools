@@ -162,6 +162,36 @@ def add_gnd_vias_to_existing_board(
         return not (min_x + margin <= x_mm <= max_x - margin
                     and min_y + margin <= y_mm <= max_y - margin)
 
+    # Sweep item 11 (#625 follow-up): the clearance checker scanned ALL board
+    # vias and ALL drilled pads in Python per candidate position (candidates =
+    # signal vias x 24 angles x radii -- ~100M+ scalar ops on big boards).
+    # Precompute their arrays once; each candidate then runs two broadcasts
+    # that NOMINATE possible violators, and only those are re-judged by the
+    # scalar formulas in the original iteration order -- so the verdict AND
+    # the first-failure reason string (with its formatted distance) are
+    # byte-identical.
+    import numpy as np
+    _via_xs = np.array([v.x for v in pcb_data.vias], dtype=np.float64)
+    _via_ys = np.array([v.y for v in pcb_data.vias], dtype=np.float64)
+    _drill_pads = [pad for _nid, _pads in pcb_data.pads_by_net.items()
+                   for pad in _pads if pad.drill and pad.drill > 0]
+    _caps = [pad_drill_capsule(p) for p in _drill_pads]
+    _cap_p1x = np.array([c[0][0] for c in _caps], dtype=np.float64)
+    _cap_p1y = np.array([c[0][1] for c in _caps], dtype=np.float64)
+    _cap_dx = np.array([c[1][0] - c[0][0] for c in _caps], dtype=np.float64)
+    _cap_dy = np.array([c[1][1] - c[0][1] for c in _caps], dtype=np.float64)
+    _cap_len_sq = _cap_dx * _cap_dx + _cap_dy * _cap_dy
+    _cap_rad = np.array([c[2] for c in _caps], dtype=np.float64)
+
+    def _cap_d2(px, py):
+        with np.errstate(divide='ignore', invalid='ignore'):
+            t = np.clip(((px - _cap_p1x) * _cap_dx + (py - _cap_p1y) * _cap_dy)
+                        / _cap_len_sq, 0.0, 1.0)
+        t = np.where(_cap_len_sq < 1e-10, 0.0, t)
+        ddx = px - (_cap_p1x + t * _cap_dx)
+        ddy = py - (_cap_p1y + t * _cap_dy)
+        return ddx * ddx + ddy * ddy
+
     def is_via_position_clear(x_mm: float, y_mm: float, sig_via_x: float, sig_via_y: float) -> tuple:
         """Check if a via can be placed at the given position.
 
@@ -188,29 +218,39 @@ def add_gnd_vias_to_existing_board(
                         if obstacles.is_blocked(gx + dx, gy + dy, layer_idx):
                             return (False, f"track_blocked_layer{layer_idx}_at_({dx},{dy})")
 
-        # Check via-to-via clearance for OTHER vias (skip the signal via we're targeting)
-        for via in pcb_data.vias:
-            # Skip the signal via we're placing a GND via near
-            if abs(via.x - sig_via_x) < 0.01 and abs(via.y - sig_via_y) < 0.01:
-                continue
-            dist = math.sqrt((x_mm - via.x)**2 + (y_mm - via.y)**2)
-            if dist < via_via_min_dist:
-                return (False, f"too_close_to_via({dist:.2f}mm)")
+        # Check via-to-via clearance for OTHER vias (skip the signal via we're
+        # targeting). Broadcast nominates (band around the strict < threshold
+        # covers the **2-pow vs multiply ULP); candidates re-judged in via
+        # order with the scalar formula so the first-failure reason matches.
+        if len(_via_xs):
+            _dxv = x_mm - _via_xs
+            _dyv = y_mm - _via_ys
+            _d2v = _dxv * _dxv + _dyv * _dyv
+            _thr = (via_via_min_dist * (1 + 1e-9)) ** 2
+            for i in np.nonzero(_d2v < _thr)[0]:
+                via = pcb_data.vias[i]
+                if abs(via.x - sig_via_x) < 0.01 and abs(via.y - sig_via_y) < 0.01:
+                    continue
+                dist = math.sqrt((x_mm - via.x)**2 + (y_mm - via.y)**2)
+                if dist < via_via_min_dist:
+                    return (False, f"too_close_to_via({dist:.2f}mm)")
 
         # Check drill hole-to-hole clearance from through-hole pad drills (a
         # physical drill-to-drill minimum -> hole_to_hole_clearance, NOT the copper
         # clearance, which under-enforces it; issue #125 PAD-DRILL-VIA-DRILL).
-        for net_id, pads in pcb_data.pads_by_net.items():
-            for pad in pads:
-                if pad.drill and pad.drill > 0:
-                    # Measure to the drill's real CAPSULE (a slot is a milled slot,
-                    # not a round hole): distance to the capsule axis minus its
-                    # radius. Round drills degenerate to the old centre distance.
-                    (p1x, p1y), (p2x, p2y), prad = pad_drill_capsule(pad)
-                    dist = point_to_segment_distance(x_mm, y_mm, p1x, p1y, p2x, p2y) - prad
-                    min_pad_dist = config.hole_to_hole_clearance + config.via_drill / 2
-                    if dist < min_pad_dist:
-                        return (False, f"too_close_to_th_pad({dist:.2f}mm)")
+        # Same nomination pattern against the precomputed drill CAPSULES (a
+        # slot is a milled slot, not a round hole; round drills degenerate to
+        # the centre distance).
+        if len(_cap_rad):
+            min_pad_dist = config.hole_to_hole_clearance + config.via_drill / 2
+            _d2c = _cap_d2(x_mm, y_mm)
+            _lim = (min_pad_dist + _cap_rad) * (1 + 1e-9)
+            for i in np.nonzero(_d2c < _lim * _lim)[0]:
+                pad = _drill_pads[i]
+                (p1x, p1y), (p2x, p2y), prad = pad_drill_capsule(pad)
+                dist = point_to_segment_distance(x_mm, y_mm, p1x, p1y, p2x, p2y) - prad
+                if dist < min_pad_dist:
+                    return (False, f"too_close_to_th_pad({dist:.2f}mm)")
 
         # Check against GND vias we're placing in this batch. Physical spacing,
         # so EVERY batch via counts regardless of which ground domain it serves.
