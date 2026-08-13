@@ -85,7 +85,8 @@ class GlobalPlan:
     rough_paths: Dict[int, List[Tuple[int, int, int]]] = field(default_factory=dict)
     reservations: Dict[int, np.ndarray] = field(default_factory=dict)
     via_sites: Dict[int, List[Tuple[int, int]]] = field(default_factory=dict)
-    conflict_w: Dict[int, Dict[int, int]] = field(default_factory=dict)
+    conflict_w: Dict[int, Dict[int, int]] = field(default_factory=dict)  # crossings
+    share_w: Dict[int, Dict[int, int]] = field(default_factory=dict)     # corridor share
     probe_iterations: int = 0
     probe_failures: int = 0
 
@@ -145,6 +146,8 @@ def plan_global_routes(pcb_data, config, net_ids: List[Tuple[str, int]],
     res_cfg = replace(config,
                       ripped_route_avoidance_cost=k['cost'],
                       ripped_route_avoidance_radius=k['radius'])
+    collar_rects = (_escape_collar_rects(config)
+                    if k['zone_scale'] != 1.0 else None)
 
     plan = GlobalPlan()
     for _name, nid in net_ids:
@@ -157,28 +160,114 @@ def plan_global_routes(pcb_data, config, net_ids: List[Tuple[str, int]],
         if k['cost'] > 0:
             rows, via_pos = compute_ripped_route_costs(result, res_cfg,
                                                        layer_map)
+            rows = _scale_rows_in_collars(rows, collar_rects,
+                                          k['zone_scale'])
             if len(rows):
                 plan.reservations[nid] = rows
             if via_pos:
                 plan.via_sites[nid] = via_pos
 
-    plan.conflict_w = _conflict_graph(plan.rough_paths, config)
-    n_conf = sum(1 for w in plan.conflict_w.values() if w)
+    plan.conflict_w, plan.share_w = _conflict_graphs(plan.rough_paths,
+                                                     config)
+    n_cross = sum(1 for w in plan.conflict_w.values() if w)
+    n_share = sum(1 for w in plan.share_w.values() if w)
     res_cells = sum(len(r) for r in plan.reservations.values())
     print(f"Global plan: {len(plan.rough_paths)}/{len(ids)} rough routes in "
           f"{time.time() - t0:.1f}s ({plan.probe_iterations} probe "
           f"iterations, {plan.probe_failures} failed); "
           f"{len(plan.reservations)} corridor reservation(s) "
           f"({res_cells} cells at {k['cost']}mm-equiv), "
-          f"{n_conf} net(s) with predicted conflicts")
+          f"{n_cross} net(s) with predicted crossings, "
+          f"{n_share} sharing corridors")
     return plan
 
 
-def _conflict_graph(rough_paths: Dict[int, List[Tuple[int, int, int]]],
-                    config) -> Dict[int, Dict[int, int]]:
-    """Pairwise corridor conflict weights: number of shared same-layer
-    buckets (bucket = one track pitch) between two nets' predicted paths.
-    O(total path cells); deterministic (weights are commutative sums)."""
+def _escape_collar_rects(config):
+    """Inclusive grid rects of the BGA escape collars (zone expanded by
+    bga_proximity_radius) -- same geometry as obstacle_costs.
+    proximity_max_zone_rects but independent of the composition mode (that
+    helper is deliberately gated on zoned sum). None when no zones."""
+    from routing_config import GridCoord
+    coord = GridCoord(config.grid_step)
+    if getattr(config, 'package_proximity_zones', None) is not None:
+        zone_list = list(config.package_proximity_zones)
+    else:
+        zone_list = [(z[0], z[1], z[2], z[3], config.bga_proximity_radius)
+                     for z in (config.bga_exclusion_zones or [])]
+    if not zone_list:
+        return None
+    rects = []
+    for min_x, min_y, max_x, max_y, radius_mm in zone_list:
+        r = coord.to_grid_dist(radius_mm)
+        gx0, gy0 = coord.to_grid(min_x, min_y)
+        gx1, gy1 = coord.to_grid(max_x, max_y)
+        rects.append((gx0 - r, gy0 - r, gx1 + r, gy1 + r))
+    return rects
+
+
+def _scale_rows_in_collars(rows: np.ndarray, rects, scale: float) -> np.ndarray:
+    """Scale reservation cost inside the escape collars (zone_scale knob):
+    corridors converge on a BGA's collar by necessity, so full-price
+    reservations there tax every net's MANDATORY approach (#584's zoned
+    lesson). scale 0 drops the rows entirely. Returns a fresh array (the
+    merge memo keys on array identity)."""
+    if rects is None or not len(rows):
+        return rows
+    inside = np.zeros(len(rows), dtype=bool)
+    for gx0, gy0, gx1, gy1 in rects:
+        inside |= ((rows[:, 1] >= gx0) & (rows[:, 1] <= gx1)
+                   & (rows[:, 2] >= gy0) & (rows[:, 2] <= gy1))
+    if not inside.any():
+        return rows
+    out = rows.copy()
+    out[inside, 3] = (out[inside, 3].astype(np.float64) * scale).astype(
+        np.int32)
+    return out[out[:, 3] > 0]
+
+
+def _path_segments(path):
+    """Same-layer (x1, y1, x2, y2, layer) spans of a simplified path
+    (layer-change steps contribute no lateral extent)."""
+    segs = []
+    for (x1, y1, l1), (x2, y2, l2) in zip(path, path[1:]):
+        if l1 == l2 and (x1, y1) != (x2, y2):
+            segs.append((x1, y1, x2, y2, l1))
+    return segs
+
+
+def _orient(ox, oy, ax, ay, bx, by):
+    return (ax - ox) * (by - oy) - (ay - oy) * (bx - ox)
+
+
+def _segments_cross(s, t):
+    """Proper crossing of two integer segments (shared endpoints and
+    collinear overlap -- a bus lane -- do NOT count)."""
+    d1 = _orient(t[0], t[1], t[2], t[3], s[0], s[1])
+    d2 = _orient(t[0], t[1], t[2], t[3], s[2], s[3])
+    d3 = _orient(s[0], s[1], s[2], s[3], t[0], t[1])
+    d4 = _orient(s[0], s[1], s[2], s[3], t[2], t[3])
+    return (d1 != 0 and d2 != 0 and d3 != 0 and d4 != 0
+            and (d1 > 0) != (d2 > 0) and (d3 > 0) != (d4 > 0))
+
+
+def _conflict_graphs(rough_paths: Dict[int, List[Tuple[int, int, int]]],
+                     config) -> Tuple[Dict[int, Dict[int, int]],
+                                      Dict[int, Dict[int, int]]]:
+    """Two pairwise weights over the predicted paths, one per ordering
+    semantic:
+
+    - crossings: count of same-layer PROPER polyline crossings -- the MPS
+      conflict semantic measured on predicted paths instead of straight MST
+      chords. Parallel corridor-sharing (a bus) is deliberately NOT a
+      conflict here: neighbors that run alongside never force a detour, and
+      weighting them scattered glasgow's bank buses.
+    - share: shared same-layer corridor buckets (one track pitch) -- the
+      DEMAND/capacity pressure metric for 'contended' mode, where parallel
+      packing does compete for the same gap.
+
+    Bucket co-occupancy prefilters the crossing tests (only co-located
+    pairs are tested); integer orientation tests keep it exact and
+    deterministic."""
     bucket = max(2, int(round((config.track_width + config.clearance)
                               / config.grid_step)))
     occupancy: Dict[Tuple[int, int, int], set] = {}
@@ -191,33 +280,49 @@ def _conflict_graph(rough_paths: Dict[int, List[Tuple[int, int, int]]],
                 cells.add((l1, gx // bucket, gy // bucket))
         for c in cells:
             occupancy.setdefault(c, set()).add(nid)
-    w: Dict[int, Dict[int, int]] = {nid: {} for nid in rough_paths}
+    share: Dict[int, Dict[int, int]] = {nid: {} for nid in rough_paths}
+    candidates = set()
     for nets in occupancy.values():
         if len(nets) < 2:
             continue
         ordered = sorted(nets)
         for i, a in enumerate(ordered):
-            wa = w[a]
+            sa = share[a]
             for b in ordered[i + 1:]:
-                wa[b] = wa.get(b, 0) + 1
-                w[b][a] = w[b].get(a, 0) + 1
-    return w
+                sa[b] = sa.get(b, 0) + 1
+                share[b][a] = share[b].get(a, 0) + 1
+                candidates.add((a, b))
+    cross: Dict[int, Dict[int, int]] = {nid: {} for nid in rough_paths}
+    segs = {nid: _path_segments(p) for nid, p in rough_paths.items()}
+    for a, b in sorted(candidates):
+        n = 0
+        for s in segs[a]:
+            for t in segs[b]:
+                if s[4] == t[4] and _segments_cross(s, t):
+                    n += 1
+        if n:
+            cross[a][b] = n
+            cross[b][a] = n
+    return cross, share
 
 
 def _order_block(block: List[Tuple[str, int]], plan: GlobalPlan,
                  mode: str) -> List[Tuple[str, int]]:
-    """Reorder one partition block by the plan's conflict graph. Nets the
-    rough pass could not route carry no signal (weight 0): in 'planar' they
-    lead (no known conflicts, like MPS's conflict-free nets), in
-    'contended' they trail. Incoming position is always the tiebreak, so
-    the result is deterministic and degrades to the incoming order when the
-    graph is empty."""
+    """Reorder one partition block by the plan's conflict graphs: 'planar'
+    peels the CROSSING graph (MPS semantics on predicted paths -- parallel
+    bus neighbors are not conflicts), 'contended' sorts by corridor-SHARE
+    weight (demand pressure -- most-contended first). Nets the rough pass
+    could not route carry no signal (weight 0): in 'planar' they lead (no
+    known conflicts, like MPS's conflict-free nets), in 'contended' they
+    trail. Incoming position is always the tiebreak, so the result is
+    deterministic and degrades to the incoming order when the graph is
+    empty."""
     if len(block) < 2:
         return block
     idx = {nid: i for i, (_, nid) in enumerate(block)}
     members = set(idx)
-    w = {nid: {p: c for p, c in plan.conflict_w.get(nid, {}).items()
-               if p in members}
+    src = plan.share_w if mode == 'contended' else plan.conflict_w
+    w = {nid: {p: c for p, c in src.get(nid, {}).items() if p in members}
          for _, nid in block}
     if mode == 'contended':
         score = {nid: sum(w[nid].values()) for _, nid in block}
@@ -252,7 +357,9 @@ def apply_plan_order(net_ids: List[Tuple[str, int]], plan: GlobalPlan,
     partition: the front block and the rest are reordered independently and
     never merged. No-op when the order knob is '' or the plan is empty."""
     mode = global_plan_knobs()['order']
-    if not mode or plan is None or not plan.conflict_w:
+    if not mode or plan is None:
+        return net_ids
+    if not (plan.share_w if mode == 'contended' else plan.conflict_w):
         return net_ids
     front_ids = front_ids or set()
     front = [t for t in net_ids if t[1] in front_ids]

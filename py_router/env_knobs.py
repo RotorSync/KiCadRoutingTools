@@ -267,6 +267,12 @@ def refresh() -> None:
         'iters': _i('KICAD_GLOBAL_PLAN_ITERS', 5000),   # static probe cap; <=10k disarms #529 extension
         'order': _s('KICAD_GLOBAL_PLAN_ORDER', 'planar'),  # ''=keep order | planar | contended
         'c2': _opt_in('KICAD_GLOBAL_PLAN_C2'),          # seed congestion-v2 demand with rough paths
+        # Reservation cost multiplier INSIDE the BGA escape collars (zone +
+        # bga_proximity_radius): corridors converge there by NECESSITY, so
+        # stacked reservations price the mandatory approach (the #584 zoned
+        # lesson, predicted by the issue). 1.0 = off, 0 = no reservations
+        # inside collars.
+        'zone_scale': _f('KICAD_GLOBAL_PLAN_ZONE_SCALE', 1.0),
     }
 
     # --- strings -------------------------------------------------------------
