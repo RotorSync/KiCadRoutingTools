@@ -85,7 +85,13 @@ def test_pair_reports():
         ('D', mk(7, 8, '/D_P', '/D_N')),    # deferred (electrically short)
         ('E', mk(9, 10, '/E_P', '/E_N')),   # partial: coupled + peeled terminals
     ]
-    st.routed_results = {1: {}, 2: {}, 3: {}, 4: {}, 9: {}, 10: {}}
+    # E's shared result is a real coupled route (the trunk-credit
+    # discriminator reads is_diff_pair + new_segments; see
+    # test_partial_trunk_kept_keeps_credit /
+    # test_partial_no_trunk_demotes for both directions of that rule).
+    _e_trunk = {'is_diff_pair': True, 'new_segments': [SimpleNamespace()],
+                'new_vias': []}
+    st.routed_results = {1: {}, 2: {}, 3: {}, 4: {}, 9: _e_trunk, 10: _e_trunk}
     st.diff_pair_single_ended_nets = {7: '/D_P', 8: '/D_N', 9: '/E_P', 10: '/E_N'}
     record_pair_diag(st, 'C', outcome='failed', reason='congestion',
                      stage='initial-route', blocking_nets=['X'])
@@ -115,6 +121,9 @@ def test_pair_reports():
           and reps['D']['failure_reason'] == 'electrically-short')
     check("E coupled+peeled -> partial",
           reps['E']['outcome'] == 'partial')
+    check("E partial with trunk -> not demoted",
+          not reps['E']['member_audit_mismatch']
+          and not reps['E']['no_coupled_trunk'])
     check("skipped fanout pair reported",
           reps['F']['outcome'] == 'skipped'
           and reps['F']['failure_reason'] == 'fanout-self-overlap')
@@ -125,6 +134,64 @@ def test_pair_reports():
     import json
     check("reports JSON-serializable",
           bool(json.dumps(list(reps.values()))))
+
+
+def _mk_pair(p, n, pn, nn):
+    return SimpleNamespace(p_net_id=p, n_net_id=n, p_net_name=pn,
+                           n_net_name=nn)
+
+
+def _reports_with_output(st, pairs, audit):
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        reps = {r['pair']: r for r in build_pair_reports(st, pairs, audit)}
+    return reps, buf.getvalue()
+
+
+def test_partial_trunk_kept_keeps_credit():
+    """Direction 1 (maintainer's tigard counterexample, unit-level): a
+    'partial' pair that KEPT coupled trunk copper keeps its
+    routed_diff_pairs credit -- even with BOTH members incomplete. The
+    deferred pads (tigard /USB_D's redundant J1 row) close in the designed
+    single-ended follow-up: expected step-level state, not false success;
+    incomplete members are already counted as pad deficit at chain level."""
+    st = _fake_state()
+    trunk = {'is_diff_pair': True, 'new_segments': [SimpleNamespace()],
+             'new_vias': []}
+    st.routed_results = {1: trunk, 2: trunk}
+    st.diff_pair_single_ended_nets = {1: '/G_P', 2: '/G_N'}
+    reps, out = _reports_with_output(
+        st, [('G', _mk_pair(1, 2, '/G_P', '/G_N'))],
+        {'G': {'p': False, 'n': False}})
+    check("partial + trunk kept + both members incomplete -> credit KEPT",
+          reps['G']['outcome'] == 'partial'
+          and not reps['G']['member_audit_mismatch']
+          and not reps['G']['no_coupled_trunk'])
+    check("kept pair prints no demotion line", 'DEMOTED' not in out)
+
+
+def test_partial_no_trunk_demotes():
+    """Direction 2: a 'partial' pair that kept NO coupled trunk copper at
+    all is demoted (member_audit_mismatch -> partial_diff_pairs, off the
+    routed_diff_pairs credit list), and the demotion line says why."""
+    st = _fake_state()
+    # Members carry results, but none is a coupled route with committed
+    # segments -- there is no coupled trunk to credit.
+    hollow = {'new_segments': [], 'new_vias': []}
+    st.routed_results = {3: hollow, 4: hollow}
+    st.diff_pair_single_ended_nets = {3: '/H_P', 4: '/H_N'}
+    reps, out = _reports_with_output(
+        st, [('H', _mk_pair(3, 4, '/H_P', '/H_N'))],
+        {'H': {'p': False, 'n': False}})
+    check("partial + NO coupled trunk copper -> DEMOTED",
+          reps['H']['outcome'] == 'partial'
+          and reps['H']['member_audit_mismatch']
+          and reps['H']['no_coupled_trunk'])
+    check("demotion line names the pair and the reason",
+          any('DEMOTED H' in ln and 'no coupled trunk copper kept' in ln
+              for ln in out.splitlines()))
 
 
 def _mk_state(pcb, cfg):
@@ -251,6 +318,8 @@ def main():
     test_classifier()
     test_custody_recording()
     test_pair_reports()
+    test_partial_trunk_kept_keeps_credit()
+    test_partial_no_trunk_demotes()
     print("-" * 60)
     test_reconcile_restore_first()
     test_reconcile_refused_then_partial()
