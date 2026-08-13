@@ -232,13 +232,20 @@ def refresh() -> None:
     # INTERSECTION (the cells one net holds and another stalled against) at
     # the full increment; the v1 whole-footprint rip stamp and raw-frontier
     # charge were measured negative/inert and now default OFF behind weights.
+    # #590 SHIPPED DEFAULT = the "v1flat_01" arm: the flat diffuse field at dose
+    # 0.1 / cap 0.5, whole-footprint rip stamps at full weight, raw frontier at
+    # 0.25, and NO escalation. Best of every arm tested on three corpora; see
+    # the promotion note in history_congestion.py for the evidence AND for the
+    # caveat (the win is concentrated on congested boards; a pre-registered
+    # sets 21-27 test did not clear its own bar). KICAD_HISTORY_COST=0 restores
+    # the pre-promotion OFF state for A/B.
     g['HISTORY'] = {
-        'cost': _f('KICAD_HISTORY_COST', 0.0),            # 0 = disabled
-        'cap': _f('KICAD_HISTORY_CAP', 0.0),              # 0 = uncapped
+        'cost': _f('KICAD_HISTORY_COST', 0.1),            # 0 = disabled
+        'cap': _f('KICAD_HISTORY_CAP', 0.5),              # 0 = uncapped
         'radius': _f('KICAD_HISTORY_RADIUS', 0.25),       # mm beyond half-width (rip stamp)
-        'blocked_weight': _f('KICAD_HISTORY_BLOCKED_WEIGHT', 0.0),  # raw frontier residue
-        'rip_weight': _f('KICAD_HISTORY_RIP_WEIGHT', 0.0),  # v1 whole-footprint rip stamp
-        'escalate': _f('KICAD_HISTORY_ESCALATE', 1.0),    # repeat-contest multiplier (0 = flat)
+        'blocked_weight': _f('KICAD_HISTORY_BLOCKED_WEIGHT', 0.25),  # raw frontier residue
+        'rip_weight': _f('KICAD_HISTORY_RIP_WEIGHT', 1.0),  # v1 whole-footprint rip stamp
+        'escalate': _f('KICAD_HISTORY_ESCALATE', 0.0),   # repeat-contest multiplier (0 = flat)
         'max_cells': _i('KICAD_HISTORY_MAX_CELLS', 500_000),
     }
 

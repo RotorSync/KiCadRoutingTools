@@ -109,17 +109,37 @@ def main():
     failures = []
     coord = GridCoord(_cfg().grid_step)
 
-    # ---- 1. off by default -------------------------------------------------
-    _disarm()
+    # ---- 1a. the SHIPPED default is the promoted v1flat_01 arm -------------
+    # #590 no longer ships OFF: clearing the env now yields the flat diffuse
+    # field. Pin the exact promoted values, so a later edit to env_knobs cannot
+    # quietly change what every user routes with.
+    _disarm()                       # clears every KICAD_HISTORY_* + refresh
+    _shipped = dict(env_knobs.HISTORY)
+    for _k, _v in (('cost', 0.1), ('cap', 0.5), ('rip_weight', 1.0),
+                   ('blocked_weight', 0.25), ('escalate', 0.0)):
+        if _shipped.get(_k) != _v:
+            failures.append(f'shipped default {_k}: expected {_v}, got {_shipped.get(_k)}')
+    if not hc.history_enabled():
+        failures.append('shipped default: history_enabled() must be True')
+
+    # ---- 1b. KICAD_HISTORY_COST=0 still fully disables ---------------------
+    # The escape hatch is the whole A/B story now that the mechanism ships on.
+    # #625 shipped a knob whose 0 did NOT disable it and had to be reverted --
+    # this asserts #590's does.
+    os.environ['KICAD_HISTORY_COST'] = '0'
+    env_knobs.refresh()
     cfg = _cfg()
     hc.reset_history(cfg)
     hc.record_rip(cfg, _result([_seg(1.0, 1.0, 3.0, 1.0)]), LAYER_MAP)
     hc.record_blocked_frontier(cfg, [(10, 10, 0)])
     hc.record_contested(cfg, [(10, 10, 0)])
+    if hc.history_enabled():
+        failures.append('COST=0: history_enabled() must be False')
     if hc.history_rows(cfg) is not None:
-        failures.append('disabled: history_rows must be None')
+        failures.append('COST=0: history_rows must be None')
     if getattr(cfg, '_history_cong', 'unset') is not None:
-        failures.append('disabled: reset_history must clear the field')
+        failures.append('COST=0: reset_history must clear the field')
+    _disarm()
 
     # ---- 2/3. cumulative per cell, and not a function of routed state ------
     _arm()
@@ -317,7 +337,8 @@ def main():
         for f in failures:
             print(f'FAIL: {f}')
         return 1
-    print('PASS: history congestion off by default, accumulates per cell '
+    print('PASS: history congestion ships ARMED (v1flat_01) with a working '
+          'COST=0 disable, accumulates per cell '
           'across rips, caps, weights frontiers lower, composes through the '
           'real merge pass, and is wired into every rip / builder')
     return 0

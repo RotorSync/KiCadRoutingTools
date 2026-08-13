@@ -48,12 +48,32 @@ attached to the config, like congestion v2's bins. No decay (v1) -- decay is
 an FPGA-ism for hundred-iteration convergence; a PCB run has a handful of rip
 rounds.
 
-Experimental knobs via environment (no CLI flag / GUI control until the lever
-proves itself on the corpus -- promotion needs the full parity wiring per
-CLAUDE.md):
+PROMOTED TO A SHIPPED DEFAULT (2026-08-13) at the "v1flat_01" settings: cost
+0.1, cap 0.5, rip_weight 1.0, blocked_weight 0.25, escalate 0 -- the flat
+diffuse field. It was the best arm of every one tested, on three independent
+corpora, and on sets 1-10 it recovers ~40 of the ~41-net gap that opened
+between v0.20.2 and HEAD while keeping HEAD's DRC advantage (66 vs the
+release's 144).
+
+Read the caveat with the result. The win is CONCENTRATED ON CONGESTED BOARDS
+and vanishes where there are none: sets 1-10 -47 nets (20W/11L, p=0.075), sets
+11-20 +1 (flat, a repeated null), sets 21-27 -15 but with two boards supplying
+113% of it (7W/6L, p=0.50). A pre-registered sets 21-27 confirmation did NOT
+clear its own thresholds (>=3% AND p<0.05); it was shipped as a default anyway,
+on the strength of the congested-corpus recovery. Nothing here reaches p<0.05,
+so treat a future corpus result that contradicts it as informative rather than
+surprising -- and note two defaults have been reverted on this repo before for
+exactly that reason.
+
+`KICAD_HISTORY_COST=0` restores the pre-promotion OFF state for A/B. There is
+still no CLI flag and no GUI control: both fronts read these knobs through the
+shared engine, so the default reaches them identically and needs no parity
+wiring.
+
+Knobs via environment:
 
   KICAD_HISTORY_COST            mm-equivalent added to each contested cell per
-                                conflict event (0 = disabled, the default)
+                                conflict event (0 = disabled; SHIPPED 0.1)
   KICAD_HISTORY_CAP             ceiling on the accumulated per-cell history in
                                 mm-equivalent (0 = uncapped; a cap keeps
                                 PRODUCTIVE churn -- the fine-pitch BGA escape
