@@ -782,7 +782,25 @@ def main(arms: str, sets: str = "set1,set2,set3,set4,set5,set6,set7,set8,set9,se
 
     summary = sl.summarize(results)
     summary["wall_clock_s"] = round(time.time() - started, 1)
-    out_path = Path(out or (stress / f"sweep_{int(started)}.json"))
+    if out:
+        out_path = Path(out)
+    else:
+        # Name the default by ARM, not by the clock alone. `started` is stamped
+        # AFTER the image build, so two runs launched seconds apart that share a
+        # cached image reach it within the same second and derive the SAME
+        # filename -- and the second silently clobbers the first. That is not
+        # hypothetical: the v0.20.2-vs-HEAD engine A/B ran both arms
+        # concurrently and lost one arm's result json outright. It was only
+        # recoverable because rows are ALSO banked per-arm on the results
+        # volume; the local json is the convenient copy, not the record.
+        _tag = "-".join(sorted(s["name"] for s in arm_specs))[:60] or "sweep"
+        out_path = stress / f"sweep_{int(started)}_{_tag}.json"
+        _n = 1
+        while out_path.exists():
+            # Two runs of the SAME arms in one second is unlikely, but never
+            # overwrite a sibling run's result on the way to finding out.
+            out_path = stress / f"sweep_{int(started)}_{_tag}_{_n}.json"
+            _n += 1
     out_path.write_text(json.dumps({"summary": summary, "rows": results}, indent=1))
     print(f"\nwall {summary['wall_clock_s']/3600:.2f} h -> {out_path}")
     print(f"{'arm':24} {'boards':>6} {'ok':>4} {'mean_compl%':>11} {'DRC':>6} {'CPU-h':>7}")
