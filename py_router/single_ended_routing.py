@@ -1090,61 +1090,8 @@ def _path_has_close_vias(path: Optional[List], config: 'GridRouteConfig') -> boo
 # heap (~24-32 B/push) and wall clock even when every tranche keeps earning.
 DYNAMIC_ITERATIONS_CEILING = 10_000_000
 
-# #625 waste ledger: the per-search ceiling above bounds ONE search, but
-# nothing bounded the AGGREGATE -- a board whose failing nets keep earning
-# tranches on hopeless searches multiplies million-iteration failures across
-# retries, rip-up rounds and rescue rungs into hours (core64_logic: 950
-# extended FAILED searches, ~590M extension iterations, killed at the 3 h
-# cap). Every failed full search is charged its extension overrun
-# (iterations - static base) here; once a net -- or the whole run -- exceeds
-# its budget, later searches fall back to the static caps (pre-#529
-# behavior). Successful extensions are never charged: they end the search.
-# Iteration-based, so the bound is deterministic and machine-independent.
-_dyn_waste: dict = {'total': 0, 'per_net': {}, 'announced': set(),
-                    'announced_total': False}
 
-
-def reset_dynamic_waste_ledger() -> None:
-    """Fresh #625 extension-waste budget; engine entry points call this so a
-    long-lived process (the GUI plugin) never carries one run's spent budget
-    into the next run."""
-    _dyn_waste['total'] = 0
-    _dyn_waste['per_net'].clear()
-    _dyn_waste['announced'].clear()
-    _dyn_waste['announced_total'] = False
-
-
-def _dyn_waste_exhausted(net_id: int) -> bool:
-    per, total = env_knobs.DYNAMIC_WASTE_PER_NET, env_knobs.DYNAMIC_WASTE_TOTAL
-    return bool((total and _dyn_waste['total'] >= total) or
-                (per and _dyn_waste['per_net'].get(net_id, 0) >= per))
-
-
-def _charge_dynamic_waste(net_id: int, iters: int, base: int,
-                          print_prefix: str = "") -> None:
-    """Charge a FAILED full search's extension overrun to the #625 ledger."""
-    waste = iters - base
-    if waste <= 0:
-        return
-    _dyn_waste['total'] += waste
-    _dyn_waste['per_net'][net_id] = _dyn_waste['per_net'].get(net_id, 0) + waste
-    per, total = env_knobs.DYNAMIC_WASTE_PER_NET, env_knobs.DYNAMIC_WASTE_TOTAL
-    if (per and _dyn_waste['per_net'][net_id] >= per
-            and net_id not in _dyn_waste['announced']):
-        _dyn_waste['announced'].add(net_id)
-        print(f"{print_prefix}dynamic iterations (#625): net {net_id} spent "
-              f"{_dyn_waste['per_net'][net_id]} iterations on failed extended "
-              f"searches; its further searches run at static caps")
-    if (total and _dyn_waste['total'] >= total
-            and not _dyn_waste['announced_total']):
-        _dyn_waste['announced_total'] = True
-        print(f"{print_prefix}dynamic iterations (#625): run spent "
-              f"{_dyn_waste['total']} iterations on failed extended searches; "
-              f"all further searches run at static caps")
-
-
-def _dynamic_iterations(config: 'GridRouteConfig',
-                        net_id: int = -1) -> Tuple[int, dict]:
+def _dynamic_iterations(config: 'GridRouteConfig') -> Tuple[int, dict]:
     """#529 dynamic iterations (DEFAULT ON; KICAD_DYNAMIC_ITERATIONS=0 reverts to
     static caps): (effective_base, kwargs) for a FULL search. The base is
     min(config.max_iterations, KICAD_DYNAMIC_ITERATIONS_CLAMP) -- CLAMP defaults
@@ -1158,14 +1105,10 @@ def _dynamic_iterations(config: 'GridRouteConfig',
     plane, and pose (diff-pair centerline) searches don't go through this helper
     at all.
     With the knob OFF no kwarg is passed, so such runs are byte-identical to the
-    pre-#529 caps and predate-0.19.2 grid_router binaries keep working.
-    A net (or run) that exhausted its #625 waste budget gets the same static
-    treatment: base only, no ceiling kwarg."""
+    pre-#529 caps and predate-0.19.2 grid_router binaries keep working."""
     if not env_knobs.DYNAMIC_ITERATIONS or config.max_iterations <= 10_000:
         return config.max_iterations, {}
     base = min(config.max_iterations, env_knobs.DYNAMIC_ITERATIONS_CLAMP)
-    if _dyn_waste_exhausted(net_id):
-        return base, {}
     kwargs = {'max_iterations_ceiling': DYNAMIC_ITERATIONS_CEILING}
     # Quantum/grace dials (#529 A/B): only pass when non-default (they
     # postdate the ceiling kwarg; older binaries lack them).
@@ -1318,7 +1261,7 @@ def _probe_route_with_frontier_once(
 
         # Forward probe reached max - do full search
         _diag(f"{print_prefix}Probe: {first_label}={first_probe_iters} iters [single-direction bus mode], trying full iterations...")
-        _dyn_base, _dyn_kw = _dynamic_iterations(config, current_net_id)
+        _dyn_base, _dyn_kw = _dynamic_iterations(config)
         path, full_iters, full_blocked = router.route_with_frontier(
             obstacles, forward_sources, forward_targets, _dyn_base, track_margin=track_margin, via_exclusion_radius=_ver, via_rung=_vrung,
         collinear_vias=env_knobs.COLLINEAR_VIAS, **_dyn_kw)
@@ -1330,8 +1273,6 @@ def _probe_route_with_frontier_once(
             forward_blocked = []
         else:
             forward_blocked = full_blocked
-            _charge_dynamic_waste(current_net_id, full_iters, _dyn_base,
-                                  print_prefix)
         fwd_iters, bwd_iters = get_fwd_bwd_iters()
         return path, total_iterations, forward_blocked, backward_blocked, False, fwd_iters, bwd_iters
 
@@ -1382,7 +1323,7 @@ def _probe_route_with_frontier_once(
     # Both probes reached max iterations - do full search on forward direction
     _diag(f"{print_prefix}Probe: {first_label}={first_probe_iters}, {second_label}={second_probe_iters} iters, trying {first_label} with full iterations...")
 
-    _dyn_base, _dyn_kw = _dynamic_iterations(config, current_net_id)
+    _dyn_base, _dyn_kw = _dynamic_iterations(config)
     path, full_iters, full_blocked = router.route_with_frontier(
         obstacles, forward_sources, forward_targets, _dyn_base, track_margin=track_margin, via_exclusion_radius=_ver, via_rung=_vrung,
         collinear_vias=env_knobs.COLLINEAR_VIAS, **_dyn_kw)
@@ -1398,10 +1339,6 @@ def _probe_route_with_frontier_once(
     # Forward failed, try backward
     _diag(f"{print_prefix}No route found after {full_iters} iterations ({first_label}), trying {second_label}...")
     forward_blocked = full_blocked
-    _charge_dynamic_waste(current_net_id, full_iters, _dyn_base, print_prefix)
-    # Re-resolve: the forward failure may just have exhausted the budget, in
-    # which case the backward leg already runs static.
-    _dyn_base, _dyn_kw = _dynamic_iterations(config, current_net_id)
 
     path, backward_full_iters, backward_full_blocked = router.route_with_frontier(
         obstacles, forward_targets, forward_sources, _dyn_base, track_margin=track_margin, via_exclusion_radius=_ver, via_rung=_vrung,
@@ -1416,8 +1353,6 @@ def _probe_route_with_frontier_once(
         return path, total_iterations, forward_blocked, backward_blocked, True, fwd_iters, bwd_iters
 
     backward_blocked = backward_full_blocked
-    _charge_dynamic_waste(current_net_id, backward_full_iters, _dyn_base,
-                          print_prefix)
     fwd_iters, bwd_iters = get_fwd_bwd_iters()
     return None, total_iterations, forward_blocked, backward_blocked, False, fwd_iters, bwd_iters
 

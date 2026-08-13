@@ -89,15 +89,6 @@ def refresh() -> None:
     # set CLAMP=200000 as the deliberate speed-over-completion dial.
     g['DYNAMIC_ITERATIONS'] = _s('KICAD_DYNAMIC_ITERATIONS', '1') != '0'
     g['DYNAMIC_ITERATIONS_CLAMP'] = _i('KICAD_DYNAMIC_ITERATIONS_CLAMP', 10_000_000)
-    # #625 waste ledger: a FAILED full search that ran past its static base
-    # burned its extension for nothing, and a board with many hopeless nets
-    # multiplies million-iteration failures into hours (core64_logic: 950
-    # extended failures, 3 h, killed). Once a net has wasted PER_NET extended
-    # iterations -- or the whole run TOTAL -- later searches run at the
-    # static caps (pre-#529 behavior). Successful extensions never count.
-    # =0 removes that cap (the old unbounded behavior).
-    g['DYNAMIC_WASTE_PER_NET'] = _i('KICAD_DYNAMIC_WASTE_PER_NET', 3_000_000)
-    g['DYNAMIC_WASTE_TOTAL'] = _i('KICAD_DYNAMIC_WASTE_TOTAL', 30_000_000)
 
     # --- opt-in experiments (env turns ON) ----------------------------------
     g['COLLINEAR_VIAS'] = _opt_in('KICAD_COLLINEAR_VIAS')  # #487: on-axis vias

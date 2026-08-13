@@ -2806,9 +2806,6 @@ def create_plane(
         _empty_plane_results (never a short tuple).
     """
     _dump_engine_config('create_plane', dict(locals()))
-    # #625: fresh extension-waste budget per engine run (see batch_route).
-    from single_ended_routing import reset_dynamic_waste_ledger
-    reset_dynamic_waste_ledger()
     if all_layers is None:
         all_layers = ['F.Cu', 'B.Cu']
 
