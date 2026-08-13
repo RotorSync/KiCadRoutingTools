@@ -1,3 +1,44 @@
+61e56a0 2026-08-13 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit de944ce..61e56a0: NO GAPS. Five commits, of which two touch the engine and
+both are ENV-KNOB-ONLY changes read through the shared engine -- no CLI flag, no
+GUI control, no argparse default, so both fronts inherit them identically and
+there is nothing to thread. The other three are harness/test tooling
+(rank_arms --perf, the modal_sweep output-collision fix) and the previous
+marker entry.
+
+  * dbf0c46 Revert #625 (dynamic-iteration waste ledger). Removes env knobs and
+    three reset_dynamic_waste_ledger() calls from the shared engine entry
+    points. Two later hunks were preserved by hand during the revert --
+    f38d6fb's reset_hint_condenser() in route.py and its _diag() call in
+    single_ended_routing.py -- so a blind `git revert` of this range would
+    delete unrelated work; check both if it is ever re-applied.
+  * 61e56a0 #590 history congestion PROMOTED TO A SHIPPED DEFAULT at the
+    v1flat_01 settings (cost 0.1 / cap 0.5 / rip_weight 1.0 /
+    blocked_weight 0.25 / escalate 0). This is a DEFAULT CHANGE, the class
+    CLAUDE.md warns must match on both fronts -- it does so by construction
+    here, because the value lives in env_knobs.HISTORY and both fronts read it
+    from the same place. Gate 4 confirms it empirically below: with the field
+    ARMED on both legs, the copper sets are still byte-identical.
+    KICAD_HISTORY_COST=0 restores the OFF state; test_590 asserts that hatch.
+
+Parity evidence at 61e56a0 (2026-08-13):
+  * gate 1 test_manifest_plan_parity: 9022 flag-checks / 399 manifests, 0
+    mismatches; 12 params resolved. PASS
+  * gate 2 test_cli_postpass_coverage: 8 registered / 15 active / 1
+    acknowledged CLI-only, 0 failures, 0 warnings. PASS
+  * gate 3 test_settings_roundtrip: 181 keys, save/restore/legacy/re-save
+    clean. PASS
+  * gate 4 test_gui_engine_parity: VERDICT PARITY, kicad unconnected CLI=0
+    GUI=0, drc CLI=0 GUI=0, **copper sets IDENTICAL** (segments 1269/1269,
+    vias 127/127, 0 either-only) -- run WITH the new #590 default armed on
+    both legs, which is exactly what this range needed to prove.
+  * gate 5 test_cli_defaults_parity: 100 defaults / 6 CLIs, 0 disagreements.
+    PASS
+Caveat carried forward: gate 4's plan is signal+plane, so it does not exercise
+diff-pair or impedance parameters; and #590's own corpus evidence is recorded
+in the issue -- the default ships on a congested-corpus recovery, not on a
+p<0.05 result.
+
 de944ce 2026-08-13 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit 15292a0..de944ce (61 commits): the range's only parity gap was issue
 #627 -- gate 4's copper sets went DIFFER at dab5c82 (PR #613 aSkipSettings)
