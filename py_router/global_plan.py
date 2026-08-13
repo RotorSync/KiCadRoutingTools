@@ -332,7 +332,10 @@ def _order_block(block: List[Tuple[str, int]], plan: GlobalPlan,
         return block
     idx = {nid: i for i, (_, nid) in enumerate(block)}
     members = set(idx)
-    src = plan.share_w if mode == 'contended' else plan.conflict_w
+    # 'planar' peels crossings; 'share' peels the corridor-share graph
+    # (glasgow wave 1's winning arm ran exactly this peel); 'contended'
+    # sorts by descending share.
+    src = plan.share_w if mode in ('contended', 'share') else plan.conflict_w
     w = {nid: {p: c for p, c in src.get(nid, {}).items() if p in members}
          for _, nid in block}
     if mode == 'contended':

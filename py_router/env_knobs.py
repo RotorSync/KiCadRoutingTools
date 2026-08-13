@@ -265,7 +265,7 @@ def refresh() -> None:
         'radius': _f('KICAD_GLOBAL_PLAN_RADIUS', 1.0),  # falloff radius (mm) beyond half-width
         'hweight': _f('KICAD_GLOBAL_PLAN_HWEIGHT', 4.0),  # probe A* weight (near-greedy)
         'iters': _i('KICAD_GLOBAL_PLAN_ITERS', 5000),   # static probe cap; <=10k disarms #529 extension
-        'order': _s('KICAD_GLOBAL_PLAN_ORDER', 'planar'),  # ''=keep order | planar | contended
+        'order': _s('KICAD_GLOBAL_PLAN_ORDER', 'planar'),  # ''=keep | planar (crossings) | share (share-peel) | contended
         'c2': _opt_in('KICAD_GLOBAL_PLAN_C2'),          # seed congestion-v2 demand with rough paths
         # Reservation cost multiplier INSIDE the BGA escape collars (zone +
         # bga_proximity_radius): corridors converge there by NECESSITY, so
