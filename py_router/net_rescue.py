@@ -127,13 +127,34 @@ def _sampled(points, cap=300):
 
 
 def _closest_pair(points_a, points_b):
-    """(dist, ax, ay, bx, by) of the closest pair, or None."""
+    """(dist, ax, ay, bx, by) of the closest pair, or None.
+
+    Sweep item 10 (#625 follow-up): the 300x300 scalar hypot double loop ran
+    per rescue attempt pass (~1-3 s per shattered net). A squared-distance
+    broadcast NOMINATES the minimal pairs (math.hypot rounds up to ~1 ULP
+    apart from sqrt(dx*dx+dy*dy)); the winners are recomputed with hypot in
+    the loop's row-major order, preserving the strict first-minimum
+    tie-break -- returns byte-identical."""
+    sa = _sampled(points_a)
+    sb = _sampled(points_b)
+    if not sa or not sb:
+        return None
+    import numpy as np
+    A = np.asarray(sa, dtype=np.float64)
+    B = np.asarray(sb, dtype=np.float64)
+    dx = A[:, 0][:, None] - B[:, 0][None, :]
+    dy = A[:, 1][:, None] - B[:, 1][None, :]
+    d2 = dx * dx + dy * dy
+    m = d2.min()
+    cand = np.nonzero((d2 <= m + 8 * np.spacing(m)).ravel())[0]
+    nb = len(sb)
     best = None
-    for ax, ay in _sampled(points_a):
-        for bx, by in _sampled(points_b):
-            d = math.hypot(ax - bx, ay - by)
-            if best is None or d < best[0]:
-                best = (d, ax, ay, bx, by)
+    for k in cand:
+        ax, ay = sa[k // nb]
+        bx, by = sb[k % nb]
+        d = math.hypot(ax - bx, ay - by)
+        if best is None or d < best[0]:
+            best = (d, ax, ay, bx, by)
     return best
 
 
