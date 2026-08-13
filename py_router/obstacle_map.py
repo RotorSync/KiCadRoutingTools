@@ -2659,7 +2659,7 @@ def _compute_net_tie_corridors(pcb_data, config, coord):
                         _cv = _TIE_PAIR_SAMPLE_CACHE[_ck]
                         if _cv is None:
                             continue
-                        bad_x, bad_y, _bad_keys = _cv
+                        bad_x, bad_y, _bad_packed = _cv
                     else:
                         sx = np.arange(x0, x1 + fine, fine)
                         sy = np.arange(y0, y1 + fine, fine)
@@ -2680,21 +2680,24 @@ def _compute_net_tie_corridors(pcb_data, config, coord):
                         # needed); (b) for the rest, the nearest bad point is on
                         # the region BOUNDARY, so the distance matrix only needs
                         # boundary points -- identical results, ~100x smaller.
-                        _bad_keys = None
+                        _bad_packed = None
                         if bad_x.size > 256:
                             _kx = np.round(bad_x / fine).astype(np.int64)
                             _ky = np.round(bad_y / fine).astype(np.int64)
-                            _bad_keys = set(zip(_kx.tolist(), _ky.tolist()))
                             # Interior = all 4 lattice neighbors present; test
                             # via packed int64 keys (np.isin) instead of 4 set
-                            # probes per point.
+                            # probes per point. The packed key array replaces
+                            # the old tuple set (item 13): its only other
+                            # consumer, the center-in-region kill below, is
+                            # an np.isin too.
                             _pk = (_kx << 32) + _ky
-                            _boundary = ~(np.isin(_pk + (1 << 32), _pk)
-                                          & np.isin(_pk - (1 << 32), _pk)
-                                          & np.isin(_pk + 1, _pk)
-                                          & np.isin(_pk - 1, _pk))
+                            _bad_packed = np.sort(_pk)
+                            _boundary = ~(np.isin(_pk + (1 << 32), _bad_packed)
+                                          & np.isin(_pk - (1 << 32), _bad_packed)
+                                          & np.isin(_pk + 1, _bad_packed)
+                                          & np.isin(_pk - 1, _bad_packed))
                             bad_x, bad_y = bad_x[_boundary], bad_y[_boundary]
-                        _TIE_PAIR_SAMPLE_CACHE[_ck] = (bad_x, bad_y, _bad_keys)
+                        _TIE_PAIR_SAMPLE_CACHE[_ck] = (bad_x, bad_y, _bad_packed)
                     # Candidate cells: everything a stamp of this partner's
                     # copper could have blocked (bbox + keep-out reach + 1).
                     reach = half_w + config.clearance + coord.grid_step
@@ -2716,15 +2719,12 @@ def _compute_net_tie_corridors(pcb_data, config, coord):
                             d2 = ((cxm[_s:_s + _B, None] - bad_x[None, :]) ** 2 +
                                   (cym[_s:_s + _B, None] - bad_y[None, :]) ** 2).min(axis=1)
                             ok[_s:_s + _B] = d2 >= thr
-                        if _bad_keys is not None:
+                        if _bad_packed is not None:
                             # (a) center-in-region kill (boundary points alone
                             # under-measure distances for interior cells).
-                            _ck = np.round(cxm / fine).astype(np.int64)
-                            _cyk = np.round(cym / fine).astype(np.int64)
-                            _inside = np.fromiter(
-                                ((kx, ky) in _bad_keys
-                                 for kx, ky in zip(_ck.tolist(), _cyk.tolist())),
-                                dtype=bool, count=cxm.size)
+                            _ckx = np.round(cxm / fine).astype(np.int64)
+                            _cky = np.round(cym / fine).astype(np.int64)
+                            _inside = np.isin((_ckx << 32) + _cky, _bad_packed)
                             ok &= ~_inside
                     else:
                         ok = np.ones(cxm.shape, dtype=bool)
@@ -2747,6 +2747,9 @@ def _assemble_net_tie_lifts(corridors, recorded, layer_map):
         return lifts
     for net_id, entry in corridors.items():
         cells = entry['cells']
+        # Item 13: packed-int membership instead of a tuple-set probe per row.
+        packed_cells = np.sort(np.fromiter(
+            ((gx << 32) + gy for gx, gy in cells), dtype=np.int64, count=len(cells)))
         for kind, key, arr in recorded:
             if kind == 'pad' and key not in entry['partner_pad_ids']:
                 continue
@@ -2754,9 +2757,8 @@ def _assemble_net_tie_lifts(corridors, recorded, layer_map):
                 continue
             if not len(arr):
                 continue
-            mask = np.fromiter(
-                ((int(r[0]), int(r[1])) in cells for r in arr),
-                dtype=bool, count=len(arr))
+            a = np.asarray(arr, dtype=np.int64)
+            mask = np.isin((a[:, 0] << 32) + a[:, 1], packed_cells)
             if mask.any():
                 lifts.setdefault(net_id, []).append(arr[mask])
     return lifts
