@@ -2498,6 +2498,26 @@ class _RecordingObstacles:
         return getattr(self._real, name)
 
 
+# #625: cache of the expensive per-(own, partner) pad sampling below --
+# the partner-minus-own bad region reduced to its boundary points. It is a
+# pure function of the two pads' geometry (fine is a constant), yet it was
+# recomputed inside EVERY build_base_obstacle_map call: ~48 s per pass on
+# core64_logic's 14 custom-pad solder jumpers (2.16M point_to_pad_distance
+# calls -> 134M segment distances), multiplied by every rescue-rung window,
+# plane-finalize leg and reconcile sub-run rebuild -- hours of CPU on
+# 1.5 mm jumpers. Keyed by pad identity + position + size so a GUI process
+# that reloads an edited board never reuses stale samples. Value:
+# (bad_x, bad_y, bad_keys) post-boundary-reduction, or None when the
+# partner sampling found no in-pad points.
+_TIE_PAIR_SAMPLE_CACHE: Dict[tuple, object] = {}
+
+
+def _tie_pad_key(pad):
+    return (pad.component_ref, pad.pad_number, tuple(pad.layers or ()),
+            round(pad.global_x, 6), round(pad.global_y, 6),
+            round(pad.size_x, 6), round(pad.size_y, 6))
+
+
 def _compute_net_tie_corridors(pcb_data, config, coord):
     """Per tied net: the (gx, gy) cells where KiCad's net-tie exemption lets
     that net's copper pass its PARTNER copper, plus the partner pad/net ids
@@ -2550,39 +2570,53 @@ def _compute_net_tie_corridors(pcb_data, config, coord):
                     pex = partner.size_x / 2 + partner.size_y / 2
                     x0, x1 = partner.global_x - pex, partner.global_x + pex
                     y0, y1 = partner.global_y - pex, partner.global_y + pex
-                    sx = np.arange(x0, x1 + fine, fine)
-                    sy = np.arange(y0, y1 + fine, fine)
-                    SX, SY = np.meshgrid(sx, sy)
-                    SXf, SYf = SX.ravel(), SY.ravel()
-                    in_p = np.fromiter(
-                        (point_to_pad_distance(float(a), float(b), partner) <= 1e-9
-                         for a, b in zip(SXf, SYf)), dtype=bool, count=SXf.size)
-                    if not in_p.any():
-                        continue
-                    px, py = SXf[in_p], SYf[in_p]
-                    out_o = np.fromiter(
-                        (point_to_pad_distance(float(a), float(b), own) > 1e-9
-                         for a, b in zip(px, py)), dtype=bool, count=px.size)
-                    bad_x, bad_y = px[out_o], py[out_o]
-                    # Memory: the dense cells x bad-points distance matrix hit
-                    # GB-scale temporaries (a 1.5mm pad sampled at 0.01mm is
-                    # ~20k points; 7GB footprint on hackrf's NT jumpers).
-                    # Split the test: (a) a cell whose disc CENTER falls in
-                    # the bad region fails by set membership (no distances
-                    # needed); (b) for the rest, the nearest bad point is on
-                    # the region BOUNDARY, so the distance matrix only needs
-                    # boundary points -- identical results, ~100x smaller.
-                    _bad_keys = None
-                    if bad_x.size > 256:
-                        _kx = np.round(bad_x / fine).astype(np.int64)
-                        _ky = np.round(bad_y / fine).astype(np.int64)
-                        _bad_keys = set(zip(_kx.tolist(), _ky.tolist()))
-                        _boundary = np.fromiter(
-                            (not ((kx + 1, ky) in _bad_keys and (kx - 1, ky) in _bad_keys
-                                  and (kx, ky + 1) in _bad_keys and (kx, ky - 1) in _bad_keys)
-                             for kx, ky in zip(_kx.tolist(), _ky.tolist())),
-                            dtype=bool, count=bad_x.size)
-                        bad_x, bad_y = bad_x[_boundary], bad_y[_boundary]
+                    # #625: the (bad_x, bad_y, bad_keys) sampling below is a
+                    # pure function of the two pads -- serve repeat builds
+                    # (rescue windows, finalize legs, reconcile sub-runs)
+                    # from the cache instead of re-sampling ~63k points
+                    # through custom-pad polygon distances every time.
+                    _ck = (_tie_pad_key(own), _tie_pad_key(partner))
+                    if _ck in _TIE_PAIR_SAMPLE_CACHE:
+                        _cv = _TIE_PAIR_SAMPLE_CACHE[_ck]
+                        if _cv is None:
+                            continue
+                        bad_x, bad_y, _bad_keys = _cv
+                    else:
+                        sx = np.arange(x0, x1 + fine, fine)
+                        sy = np.arange(y0, y1 + fine, fine)
+                        SX, SY = np.meshgrid(sx, sy)
+                        SXf, SYf = SX.ravel(), SY.ravel()
+                        in_p = np.fromiter(
+                            (point_to_pad_distance(float(a), float(b), partner) <= 1e-9
+                             for a, b in zip(SXf, SYf)), dtype=bool, count=SXf.size)
+                        if not in_p.any():
+                            _TIE_PAIR_SAMPLE_CACHE[_ck] = None
+                            continue
+                        px, py = SXf[in_p], SYf[in_p]
+                        out_o = np.fromiter(
+                            (point_to_pad_distance(float(a), float(b), own) > 1e-9
+                             for a, b in zip(px, py)), dtype=bool, count=px.size)
+                        bad_x, bad_y = px[out_o], py[out_o]
+                        # Memory: the dense cells x bad-points distance matrix hit
+                        # GB-scale temporaries (a 1.5mm pad sampled at 0.01mm is
+                        # ~20k points; 7GB footprint on hackrf's NT jumpers).
+                        # Split the test: (a) a cell whose disc CENTER falls in
+                        # the bad region fails by set membership (no distances
+                        # needed); (b) for the rest, the nearest bad point is on
+                        # the region BOUNDARY, so the distance matrix only needs
+                        # boundary points -- identical results, ~100x smaller.
+                        _bad_keys = None
+                        if bad_x.size > 256:
+                            _kx = np.round(bad_x / fine).astype(np.int64)
+                            _ky = np.round(bad_y / fine).astype(np.int64)
+                            _bad_keys = set(zip(_kx.tolist(), _ky.tolist()))
+                            _boundary = np.fromiter(
+                                (not ((kx + 1, ky) in _bad_keys and (kx - 1, ky) in _bad_keys
+                                      and (kx, ky + 1) in _bad_keys and (kx, ky - 1) in _bad_keys)
+                                 for kx, ky in zip(_kx.tolist(), _ky.tolist())),
+                                dtype=bool, count=bad_x.size)
+                            bad_x, bad_y = bad_x[_boundary], bad_y[_boundary]
+                        _TIE_PAIR_SAMPLE_CACHE[_ck] = (bad_x, bad_y, _bad_keys)
                     # Candidate cells: everything a stamp of this partner's
                     # copper could have blocked (bbox + keep-out reach + 1).
                     reach = half_w + config.clearance + coord.grid_step
