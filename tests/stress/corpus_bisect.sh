@@ -77,11 +77,31 @@ if [ -n "$CRATE" ]; then
 fi
 echo "  $TAG: engine=$SHA harness=HEAD  (py_router matches $SHA)"
 cd "$WT"
-KICAD_SWEEP_BUILD_TAG="$BUILD_TAG" \
-KICAD_SWEEP_DIRTY=1 caffeinate -dimsu nohup python3 tests/stress/cloud_replay_sets.py \
-   --sets "$SETS" --arm "bis${TAG}" --label "bis${TAG}" --limit "$LIMIT" \
-   ${BOARDS:+--boards "$BOARDS"} \
-   --exclude core64_logic --out "$ST/cloud_bis${TAG}" --only plan,run \
-   > "$S/bis_$TAG.log" 2>&1 &
+# Retry the LAUNCH, not just the build. Modal rate-limits app CREATION, and a
+# bisect ladder starts several points back to back -- launching six ~2s apart
+# had three rejected outright with "App create rate limit exceeded". The script
+# used to exit rc=1 there, backgrounded, so a half-launched ladder was
+# indistinguishable from a healthy one until someone read six separate logs (or
+# noticed the missing apps on the dashboard). Same transient class as the flaky
+# prebuilt fetch the image build already retries.
+_launch() {
+  KICAD_SWEEP_BUILD_TAG="$BUILD_TAG" \
+  KICAD_SWEEP_DIRTY=1 caffeinate -dimsu nohup python3 tests/stress/cloud_replay_sets.py \
+     --sets "$SETS" --arm "bis${TAG}" --label "bis${TAG}" --limit "$LIMIT" \
+     ${BOARDS:+--boards "$BOARDS"} \
+     --exclude core64_logic --out "$ST/cloud_bis${TAG}" --only plan,run \
+     > "$S/bis_$TAG.log" 2>&1
+}
+(
+  for _try in 1 2 3 4; do
+    _launch && break
+    if grep -q "rate limit exceeded" "$S/bis_$TAG.log" 2>/dev/null; then
+      echo "  $TAG: app-create rate limited, retry $_try in $((_try*90))s" >> "$S/bis_$TAG.log"
+      sleep $((_try * 90))
+      continue
+    fi
+    break            # a non-rate-limit failure is real; leave it in the log
+  done
+) &
 disown
-echo "  $TAG: launched -> $S/bis_$TAG.log"
+echo "  $TAG: launched -> $S/bis_$TAG.log  (auto-retries an app-create rate limit)"
