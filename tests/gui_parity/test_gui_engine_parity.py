@@ -342,6 +342,23 @@ def main():
     os.makedirs(workdir, exist_ok=True)
 
     board = stage_board(board, workdir)
+    # KICAD_SAVELOG=<path>: log every in-process SaveBoard call + stack.
+    # Ground truth for "which snapshot sites actually run in this gate" --
+    # #627's mechanism hunt stalled on instrumentation that concluded
+    # _live_fill/_stage_live_board never execute here; this hook shows both
+    # do (via plane_fragility and the in-run finalize oracle staging).
+    if os.environ.get('KICAD_SAVELOG'):
+        import pcbnew as _pn
+        import traceback as _tb
+        _orig_save = _pn.SaveBoard
+
+        def _logged_save(*a, **k):
+            with open(os.environ['KICAD_SAVELOG'], 'a') as _f:
+                _f.write(f"SaveBoard args={a[:1]} kwargs={k}\n")
+                _tb.print_stack(file=_f)
+                _f.write('---\n')
+            return _orig_save(*a, **k)
+        _pn.SaveBoard = _logged_save
     cli_final = run_cli_leg(board, workdir)
     gui_final = run_gui_leg(board, workdir)
 

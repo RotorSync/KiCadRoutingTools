@@ -3437,6 +3437,109 @@ def _nm_quantize_bounds(bounds):
     return tuple(round(v, 6) for v in bounds)
 
 
+def stage_live_project_rules(board_path: str, board):
+    """Author `board_path`'s sibling .kicad_pro from the LIVE pcbnew board's
+    in-memory design settings. Crash-safe replacement for the sibling that
+    pcbnew.SaveBoard's implicit settings save used to write (#627).
+
+    dab5c82 (the PR #613 SIGABRT fix) passed aSkipSettings=True at every
+    SaveBoard, so GUI temp snapshots stopped carrying a sibling .kicad_pro
+    -- and the exact-fill refill of such a snapshot fell back to pcbnew's
+    STOCK rules (the "bare board refills at stock rules" trap refill_islands
+    documents). The CLI's counterpart refill resolves the chain-stamped
+    project (update_live_drc_floors mirrors those clamps into the live
+    board's memory, but nothing put them back on disk for the subprocess),
+    so the GUI's plane-fragility field priced the A* off a different fill:
+    4 GND segments + 1 via on the parity board, one grid cell apart.
+
+    Seeds from the board's real project file when one exists (non-Default
+    classes, assignments, and every key we do not own survive verbatim),
+    then overwrites the design-settings rule floors and the Default net
+    class with the live in-memory values -- the only values the GUI mutates
+    mid-session. Serializing plain values cannot re-trigger the KiCad 10
+    settings-save merge crash. Best-effort: returns the written path, or
+    None (callers refill bare, exactly today's behavior).
+    """
+    import json
+    try:
+        pro = os.path.splitext(board_path)[0] + '.kicad_pro'
+        proj = None
+        try:
+            src = board.GetFileName() or ''
+        except Exception:
+            src = ''
+        if src:
+            src_pro = os.path.splitext(src)[0] + '.kicad_pro'
+            if os.path.isfile(src_pro):
+                try:
+                    with open(src_pro, 'r', encoding='utf-8') as fh:
+                        proj = json.load(fh)
+                except Exception:
+                    proj = None
+        if proj is None:
+            proj = {"board": {"design_settings": {"rules": {}}},
+                    "meta": {"filename": os.path.basename(pro),
+                             "version": 1},
+                    "net_settings": {"classes": [], "meta": {"version": 0}}}
+        rules = proj.setdefault('board', {}).setdefault(
+            'design_settings', {}).setdefault('rules', {})
+        bds = board.GetDesignSettings()
+        for key, attr in (('min_clearance', 'm_MinClearance'),
+                          ('min_track_width', 'm_TrackMinWidth'),
+                          ('min_via_diameter', 'm_ViasMinSize'),
+                          ('min_through_hole_diameter', 'm_MinThroughDrill'),
+                          ('min_via_annular_width', 'm_ViasMinAnnularWidth'),
+                          ('min_hole_to_hole', 'm_HoleToHoleMin'),
+                          ('min_hole_clearance', 'm_HoleClearance'),
+                          ('min_copper_edge_clearance',
+                           'm_CopperEdgeClearance')):
+            try:
+                rules[key] = getattr(bds, attr) / 1e6
+            except Exception:
+                pass
+        # Default net class: KiCad 10 accessor first (board.GetNetClasses()
+        # returns an EMPTY map there), then the legacy map.
+        nc = None
+        try:
+            nc = bds.m_NetSettings.GetDefaultNetclass()
+        except Exception:
+            nc = None
+        if nc is None:
+            try:
+                for _name, _c in board.GetNetClasses().items():
+                    if _name == 'Default':
+                        nc = _c
+                        break
+            except Exception:
+                nc = None
+        if nc is not None:
+            classes = proj.setdefault('net_settings',
+                                      {}).setdefault('classes', [])
+            entry = None
+            for c in classes:
+                if isinstance(c, dict) and c.get('name') == 'Default':
+                    entry = c
+                    break
+            if entry is None:
+                entry = {'name': 'Default'}
+                classes.append(entry)
+            for key, getter in (('clearance', 'GetClearance'),
+                                ('track_width', 'GetTrackWidth'),
+                                ('via_diameter', 'GetViaDiameter'),
+                                ('via_drill', 'GetViaDrill')):
+                try:
+                    entry[key] = getattr(nc, getter)() / 1e6
+                except Exception:
+                    pass
+        tmp = pro + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            json.dump(proj, fh, indent=2)
+        os.replace(tmp, pro)
+        return pro
+    except Exception:
+        return None
+
+
 def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                               keepout_layer: str = "User.2") -> PCBData:
     """Build PCBData directly from a pcbnew board object (no file I/O).
@@ -4317,20 +4420,32 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             import pcbnew as _pcbnew
             fd, tmp = tempfile.mkstemp(suffix='.kicad_pcb')
             os.close(fd)
-            # aSkipSettings: the memo keys on the saved BOARD bytes and the
-            # refill takes its rules from project_from, so a temp-sibling
-            # .kicad_pro is never read -- and writing one aborts KiCad on
+            # aSkipSettings: the implicit settings save aborts KiCad on
             # pre-KiCad-10 projects (uncaught type_error merging the
             # pre-migration file with the migrated in-memory settings).
+            # The sibling .kicad_pro that save used to write is what made
+            # the refill run at the session's LIVE rules -- losing it was
+            # #627's GUI-only copper drift (the refill fell back to stock
+            # rules; project_from=tmp resolved nothing). stage_live_
+            # project_rules re-authors it from the live board, crash-free.
             _pcbnew.SaveBoard(tmp, _board, aSkipSettings=True)
+            _pro = stage_live_project_rules(tmp, _board)
+            _h = hashlib.sha256()
             with open(tmp, 'rb') as _fh:
-                _key = hashlib.sha256(_fh.read()).digest()
+                _h.update(_fh.read())
+            if _pro:
+                # The fill depends on the staged rules too: a step boundary
+                # can change the live floors on an unchanged board, and the
+                # memo must miss then.
+                with open(_pro, 'rb') as _fh:
+                    _h.update(_fh.read())
+            _key = _h.digest()
             if _key in _memo:
                 # Deep copy on hit: a caller mutating its polygons must not
                 # poison later consumers (same contract as refill_islands'
                 # own memo).
                 return _copy.deepcopy(_memo[_key])
-            islands = refill_islands(tmp, project_from=tmp)
+            islands = refill_islands(tmp)
             if islands:
                 _memo.clear()          # one board state at a time
                 _memo[_key] = _copy.deepcopy(islands)

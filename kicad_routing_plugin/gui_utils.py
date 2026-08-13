@@ -810,12 +810,20 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
         with tempfile.NamedTemporaryFile(suffix='.kicad_pcb',
                                          delete=False) as f:
             tmp = f.name
-        # aSkipSettings: rules reach the oracle via project_from below, never
-        # via a temp-sibling .kicad_pro -- and the implicit settings save
-        # aborts KiCad on worker threads for pre-KiCad-10 projects (uncaught
-        # C++ type_error in the .kicad_pro merge; see _stage_live_board in
-        # swig_gui.py).
+        # aSkipSettings: the implicit settings save aborts KiCad on worker
+        # threads for pre-KiCad-10 projects (uncaught C++ type_error in the
+        # .kicad_pro merge; see _stage_live_board in swig_gui.py). But the
+        # sibling .kicad_pro it used to write carried the session's LIVE
+        # rules to the oracle's exact-fill refill -- project_from below only
+        # stages the on-disk project, which is missing every clamp
+        # update_live_drc_floors applied in memory (#627). Re-author the
+        # sibling from the live board instead, crash-free.
         pcbnew.SaveBoard(tmp, board, aSkipSettings=True)
+        try:
+            from kicad_parser import stage_live_project_rules
+            stage_live_project_rules(tmp, board)
+        except Exception:
+            pass
         # #490: stage the REAL project's netclasses for the refill, or the
         # exact-fill link source runs at stock rules.
         try:
@@ -832,10 +840,12 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
                                     if hole_to_hole_clearance is not None
                                     else defaults.HOLE_TO_HOLE_CLEARANCE),
             progress_callback=progress_callback)
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+        for _p in (tmp, os.path.splitext(tmp)[0] + '.kicad_pro',
+                   os.path.splitext(tmp)[0] + '.kicad_prl'):
+            try:
+                os.unlink(_p)
+            except OSError:
+                pass
         # #508 finding 15: the oracle's stranded-fragment deletions are
         # stripped from its temp file, but the LIVE board still holds that
         # copper -- delete it here, BEFORE the adds, so a same-position
