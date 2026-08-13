@@ -337,9 +337,13 @@ def _order_block(block: List[Tuple[str, int]], plan: GlobalPlan,
     idx = {nid: i for i, (_, nid) in enumerate(block)}
     members = set(idx)
     # 'planar' peels crossings; 'share' peels the corridor-share graph
-    # (glasgow wave 1's winning arm ran exactly this peel); 'contended'
-    # sorts by descending share.
-    src = plan.share_w if mode in ('contended', 'share') else plan.conflict_w
+    # (glasgow wave 1's winning arm ran exactly this peel); 'share_rev'
+    # REVERSES that peel -- entangled cliques route FIRST with maximal free
+    # space (still consecutive, the cascade survives reversal), loners last
+    # (they find room anyway); 'contended' sorts by descending share
+    # statically (no cascade -- glasgow wave 1: 8, tied baseline).
+    src = (plan.share_w if mode in ('contended', 'share', 'share_rev')
+           else plan.conflict_w)
     w = {nid: {p: c for p, c in src.get(nid, {}).items() if p in members}
          for _, nid in block}
     if mode == 'contended':
@@ -365,6 +369,8 @@ def _order_block(block: List[Tuple[str, int]], plan: GlobalPlan,
             if p not in emitted:
                 deg[p] -= c
                 heapq.heappush(heap, (deg[p], idx[p], p))
+    if mode == 'share_rev':
+        order.reverse()
     name_of = {nid: name for name, nid in block}
     return [(name_of[nid], nid) for nid in order]
 
