@@ -669,6 +669,13 @@ def route_single_ended_nets(
         # scaled step costs everywhere EXCEPT near the lane, where the
         # attraction discount compensates -- defection costs real money.
         cfg_route = bus_stick_config(config, attraction_path)
+        # #589 option 2 (KICAD_GLOBAL_PLAN_LAYER=pref): soft discount on the
+        # net's plan-assigned layer so corridor cliques pack N layers deep
+        # instead of all fighting for the probes' shared favorite layer.
+        # Unchanged cfg_route when the plan/knob is off or the net has no
+        # assignment.
+        from global_plan import plan_layer_config
+        cfg_route = plan_layer_config(cfg_route, config, net_id)
         # #572: oracle forced links outrank endpoint derivation -- the
         # model's zone credit merges the exact-fill clusters, so both the
         # multipoint and plain derivations "see" no gap and succeed with

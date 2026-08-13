@@ -1310,6 +1310,45 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print(f"\nRouting {total_routes} single-ended net(s)...")
         print("=" * 60)
 
+    # Global planning pass (#589, KICAD_GLOBAL_PLAN=1 opt-in): rough-route
+    # every net once against a throwaway base-style map (probes commit
+    # nothing). Predicted paths become the plan's products: soft corridor
+    # reservations (folded owner-exempt into every obstacle build via
+    # global_plan.add_plan_source), a plan-informed net order (the #472
+    # direct-first partition is preserved), clique-aware per-net layer
+    # preferences (a soft step-cost discount applied in the SE loop), and
+    # optional plan-driven stub layer swaps. The pass runs HERE -- before
+    # the base obstacle map -- because the swaps MUTATE stub copper, which
+    # must precede every map/cache build (the MPS-swap precedent); its
+    # probe map is built and discarded locally either way. Engine-level,
+    # so the GUI gets it for free. Probe iterations join total_iterations
+    # so the pass is graded honestly against spending the same budget on
+    # detailed search.
+    # TOP-LEVEL RUNS ONLY: gated on final_reconcile, the structural
+    # recursion guard every internal sub-run clears (the reconcile laps and
+    # the repair_planes reconnects) -- planning exists to pre-route an open
+    # board, and on a finished board the probes are slow and useless
+    # (glasgow: the reconcile sub-run burned 11.6s / 92k iterations probing
+    # 19 nets against full copper for 0 usable conflicts). Coupling note: a
+    # deliberate top-level final_reconcile=False run also skips the plan.
+    from global_plan import (plan_global_routes, apply_plan_order,
+                             apply_plan_layer_swaps)
+    _gp_layer_map = {name: i for i, name in enumerate(config.layers)}
+    _gplan = (plan_global_routes(pcb_data, config, single_ended_nets,
+                                 _gp_layer_map, verbose=verbose,
+                                 net_clearances=net_clearances)
+              if final_reconcile else None)
+    if _gplan is not None:
+        config._global_plan = _gplan
+        single_ended_nets = apply_plan_order(single_ended_nets, _gplan,
+                                             front_ids=_direct_front_ids)
+        total_iterations += _gplan.probe_iterations
+        total_layer_swaps += apply_plan_layer_swaps(
+            pcb_data, config, _gplan, single_ended_nets,
+            all_segment_modifications, all_swap_vias,
+            all_stubs_by_layer=all_stubs_by_layer,
+            can_swap_to_top_layer=can_swap_to_top_layer, verbose=verbose)
+
     # Build base obstacle map once (excludes all nets we're routing)
     all_net_ids_to_route = [nid for _, nid in net_ids]
 
@@ -1818,49 +1857,22 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Congestion v2 (#424): demand/capacity bins + owner terminals; per-net
     # stamping happens at prepare (routing_context.stamp_congestion2).
+    # #589 'c2': when the global plan ran, its predicted corridors seed the
+    # demand map (rough paths ARE the demand map), replacing the
+    # endpoints-only estimate. No-op unless KICAD_CONGESTION2_COST > 0.
     from congestion_field import build_congestion2
+    _gp_c2 = (_gplan.demand_points(config)
+              if (_gplan is not None and env_knobs.GLOBAL_PLAN['c2'])
+              else None)
     config._congestion2 = build_congestion2(pcb_data, config,
-                                            list(all_net_ids_to_route))
+                                            list(all_net_ids_to_route),
+                                            extra_demand_points=_gp_c2)
 
     # History congestion (#590): fresh per-cell conflict field for this call
     # (rips + failed frontiers bump it; every prepare prices it). Env-gated
     # off by default.
     from history_congestion import reset_history
     reset_history(config)
-
-    # Global planning pass (#589, KICAD_GLOBAL_PLAN=1 opt-in): rough-route
-    # every net once against a throwaway base-style map (near-greedy
-    # h-weight, small static cap; probes commit nothing). Predicted paths
-    # become per-net soft corridor reservations -- folded owner-exempt into
-    # every obstacle build via global_plan.add_plan_source -- and a
-    # plan-informed net order (the #472 direct-first partition is
-    # preserved). Engine-level, so the GUI gets it for free. Probe
-    # iterations join total_iterations so the pass is graded honestly
-    # against spending the same budget on detailed search.
-    # TOP-LEVEL RUNS ONLY: gated on final_reconcile, the structural
-    # recursion guard every internal sub-run clears (the reconcile laps and
-    # the repair_planes reconnects) -- planning exists to pre-route an open
-    # board, and on a finished board the probes are slow and useless
-    # (glasgow: the reconcile sub-run burned 11.6s / 92k iterations probing
-    # 19 nets against full copper for 0 usable conflicts). Coupling note: a
-    # deliberate top-level final_reconcile=False run also skips the plan.
-    from global_plan import plan_global_routes, apply_plan_order
-    _gplan = (plan_global_routes(pcb_data, config, single_ended_nets,
-                                 layer_map, verbose=verbose)
-              if final_reconcile else None)
-    if _gplan is not None:
-        config._global_plan = _gplan
-        single_ended_nets = apply_plan_order(single_ended_nets, _gplan,
-                                             front_ids=_direct_front_ids)
-        total_iterations += _gplan.probe_iterations
-        # Optional ('c2'): reseed congestion v2's demand map with the
-        # predicted corridors -- rough paths ARE the demand map (#589) --
-        # replacing the endpoints-only estimate. No-op unless the v2 field
-        # is armed (KICAD_CONGESTION2_COST > 0) and was built above.
-        if env_knobs.GLOBAL_PLAN['c2'] and config._congestion2 is not None:
-            config._congestion2 = build_congestion2(
-                pcb_data, config, list(all_net_ids_to_route),
-                extra_demand_points=_gplan.demand_points(config))
 
     # Register rippable pre-existing nets as already-routed (issue #103):
     # blocking analysis iterates routed_net_paths (cells are recomputed from

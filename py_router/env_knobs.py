@@ -263,7 +263,7 @@ def refresh() -> None:
         'enable': _opt_in('KICAD_GLOBAL_PLAN'),
         'cost': _f('KICAD_GLOBAL_PLAN_COST', 0.0),      # mm-equiv reservation cost; 0 = no reservations (glasgow: 0.15 HURT, 0.05 mildly helped)
         'radius': _f('KICAD_GLOBAL_PLAN_RADIUS', 1.0),  # falloff radius (mm) beyond half-width
-        'hweight': _f('KICAD_GLOBAL_PLAN_HWEIGHT', 4.0),  # probe A* weight (near-greedy)
+        'hweight': _f('KICAD_GLOBAL_PLAN_HWEIGHT', 2.3),  # probe A* weight (glasgow: 2.3 == 4.0 verdict+cost; 1.0 worse AND 72x probes)
         'iters': _i('KICAD_GLOBAL_PLAN_ITERS', 5000),   # static probe cap; <=10k disarms #529 extension
         'order': _s('KICAD_GLOBAL_PLAN_ORDER', 'share'),  # ''=keep | planar (crossings) | share (share-peel, glasgow winner) | share_rev (reversed peel: cliques first) | contended
         'c2': _opt_in('KICAD_GLOBAL_PLAN_C2'),          # seed congestion-v2 demand with rough paths
@@ -273,6 +273,15 @@ def refresh() -> None:
         # lesson, predicted by the issue). 1.0 = off, 0 = no reservations
         # inside collars.
         'zone_scale': _f('KICAD_GLOBAL_PLAN_ZONE_SCALE', 1.0),
+        # Clique-aware layer levers (#589 options 1+2): 'layer'=pref arms the
+        # SOFT per-net step-cost discount on the plan-assigned layer;
+        # 'swaps'=1 MOVES stub copper onto the assigned layer up front via
+        # the validated stub-switch path. Either arms the assignment itself
+        # (share-graph cliques round-robined across their corridor's viable
+        # layers).
+        'layer': _s('KICAD_GLOBAL_PLAN_LAYER', ''),     # '' off | 'pref'
+        'layer_discount': _f('KICAD_GLOBAL_PLAN_LAYER_DISCOUNT', 0.7),
+        'swaps': _opt_in('KICAD_GLOBAL_PLAN_SWAPS'),
         'debug': _opt_in('KICAD_GLOBAL_PLAN_DEBUG'),    # ordering forensics dump
     }
 

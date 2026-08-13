@@ -87,6 +87,7 @@ class GlobalPlan:
     via_sites: Dict[int, List[Tuple[int, int]]] = field(default_factory=dict)
     conflict_w: Dict[int, Dict[int, int]] = field(default_factory=dict)  # crossings
     share_w: Dict[int, Dict[int, int]] = field(default_factory=dict)     # corridor share
+    layer_pref: Dict[int, int] = field(default_factory=dict)  # nid -> layer idx
     probe_iterations: int = 0
     probe_failures: int = 0
 
@@ -114,7 +115,8 @@ class GlobalPlan:
 
 def plan_global_routes(pcb_data, config, net_ids: List[Tuple[str, int]],
                        layer_map: Dict[str, int],
-                       verbose: bool = False) -> Optional[GlobalPlan]:
+                       verbose: bool = False,
+                       net_clearances=None) -> Optional[GlobalPlan]:
     """Run the rough pass over net_ids ([(name, id)]). Returns None when the
     gate is off or there is nothing to probe; failed probes are counted and
     simply contribute no reservation and no ordering signal."""
@@ -136,7 +138,9 @@ def plan_global_routes(pcb_data, config, net_ids: List[Tuple[str, int]],
     # only permanent copper -- collisions with other FUTURE nets are free by
     # construction (never a dead end, never a rip).
     probe_map = build_base_obstacle_map(
-        pcb_data, config, ids, net_clearances=config.net_clearances)
+        pcb_data, config, ids,
+        net_clearances=(net_clearances if net_clearances is not None
+                        else config.net_clearances))
     rough_cfg = replace(config,
                         heuristic_weight=k['hweight'],
                         max_iterations=max(1, int(k['iters'])),
@@ -172,6 +176,7 @@ def plan_global_routes(pcb_data, config, net_ids: List[Tuple[str, int]],
 
     plan.conflict_w, plan.share_w = _conflict_graphs(plan.rough_paths,
                                                      config)
+    _assign_clique_layers(plan, config)
     n_cross = sum(1 for w in plan.conflict_w.values() if w)
     n_share = sum(1 for w in plan.share_w.values() if w)
     res_cells = sum(len(r) for r in plan.reservations.values())
@@ -195,6 +200,183 @@ def plan_global_routes(pcb_data, config, net_ids: List[Tuple[str, int]],
                   f"with " + ", ".join(
                       f"{name_of.get(p, p)}({c})" for p, c in parts))
     return plan
+
+
+# A pair shares a corridor (is a "corridor-mate") only above this many
+# shared buckets; 1-2 bucket touches are incidental crossings/brushes and
+# would daisy-chain the whole board into one clique.
+MIN_SHARE_FOR_CLIQUE = 3
+
+
+def _assign_clique_layers(plan: GlobalPlan, config) -> None:
+    """#589 layer assignment: spread each corridor clique's members across
+    the clique's viable layers, round-robin, so the corridor packs N layers
+    deep instead of every member fighting for the probes' shared favorite
+    layer (probes are mutually blind, so a bus's probes ALL pick the same
+    best layer -- the one bias the ordering lever cannot fix).
+
+    Cliques = connected components of the share graph at corridor-mate
+    strength (>= MIN_SHARE_FOR_CLIQUE shared buckets). Viable layers = the
+    union of the members' predicted-path layers (they are proven reachable
+    for this corridor), ordered by total predicted usage, minus forbidden
+    (negative-cost) layers. Singletons get NO assignment -- the router's
+    own judgment is already fine for an uncontested net. Consumers:
+    plan_layer_config (soft discount, 'layer' knob) and
+    apply_plan_layer_swaps (stub moves, 'swaps' knob)."""
+    k = global_plan_knobs()
+    if not (k['layer'] or k['swaps']) or not plan.share_w:
+        return
+    n_layers = len(config.layers)
+    base_costs = list(config.layer_costs or []) or [1.0] * n_layers
+    while len(base_costs) < n_layers:
+        base_costs.append(1.0)
+    allowed = {i for i in range(n_layers) if base_costs[i] >= 0}
+    hist: Dict[int, Dict[int, int]] = {}
+    for nid, path in plan.rough_paths.items():
+        h: Dict[int, int] = {}
+        for (x1, y1, l1), (x2, y2, l2) in zip(path, path[1:]):
+            if l1 == l2:
+                h[l1] = h.get(l1, 0) + max(abs(x2 - x1), abs(y2 - y1))
+        hist[nid] = h
+    adj = {nid: [p for p, w in ws.items() if w >= MIN_SHARE_FOR_CLIQUE]
+           for nid, ws in plan.share_w.items()}
+    seen: set = set()
+    comps: List[List[int]] = []
+    for nid in sorted(adj):
+        if nid in seen:
+            continue
+        stack, comp = [nid], []
+        seen.add(nid)
+        while stack:
+            a = stack.pop()
+            comp.append(a)
+            for b in adj.get(a, ()):
+                if b not in seen:
+                    seen.add(b)
+                    stack.append(b)
+        comps.append(sorted(comp))
+    for comp in comps:
+        if len(comp) < 2:
+            continue
+        totals: Dict[int, int] = {}
+        for nid in comp:
+            for l, c in hist.get(nid, {}).items():
+                totals[l] = totals.get(l, 0) + c
+        viable = [l for l, _ in sorted(totals.items(),
+                                       key=lambda t: (-t[1], t[0]))
+                  if l in allowed]
+        if not viable:
+            continue
+        for i, nid in enumerate(comp):
+            plan.layer_pref[nid] = viable[i % len(viable)]
+    if plan.layer_pref:
+        sizes = sorted((len(c) for c in comps if len(c) >= 2), reverse=True)
+        print(f"Global plan layer assignment: {len(plan.layer_pref)} net(s) "
+              f"in {len(sizes)} clique(s) (sizes {sizes[:8]}"
+              f"{'...' if len(sizes) > 8 else ''}) spread across their "
+              f"corridors' viable layers")
+
+
+def plan_layer_config(cfg_route, config, net_id):
+    """#589 option 2 (KICAD_GLOBAL_PLAN_LAYER=pref): soft per-net layer
+    preference -- scale the plan-assigned layer's step cost by
+    KICAD_GLOBAL_PLAN_LAYER_DISCOUNT (< 1). Soft by construction: nothing
+    gets MORE expensive, forbidden layers stay forbidden, and the router
+    still defects for real obstacle-cost reasons. Returns cfg_route
+    unchanged when the plan/knob is off or the net has no assignment --
+    callers may wire it unconditionally (the SE loop does)."""
+    plan = getattr(config, '_global_plan', None)
+    if plan is None or not plan.layer_pref:
+        return cfg_route
+    if env_knobs.GLOBAL_PLAN.get('layer') != 'pref':
+        return cfg_route
+    li = plan.layer_pref.get(net_id)
+    if li is None or li >= len(cfg_route.layers):
+        return cfg_route
+    d = env_knobs.GLOBAL_PLAN['layer_discount']
+    if d == 1.0:
+        return cfg_route
+    base = list(cfg_route.layer_costs or []) or [1.0] * len(cfg_route.layers)
+    while len(base) < len(cfg_route.layers):
+        base.append(1.0)
+    if base[li] < 0:
+        return cfg_route
+    base[li] = base[li] * d
+    return replace(cfg_route, layer_costs=base)
+
+
+def apply_plan_layer_swaps(pcb_data, config, plan: GlobalPlan,
+                           net_ids: List[Tuple[str, int]],
+                           all_segment_modifications: List,
+                           all_swap_vias: List,
+                           all_stubs_by_layer=None,
+                           can_swap_to_top_layer: bool = True,
+                           verbose: bool = False) -> int:
+    """#589 option 1 (KICAD_GLOBAL_PLAN_SWAPS=1): move stub copper onto the
+    plan-assigned layer BEFORE any obstacle map is built (the MPS-swap
+    precedent: swaps mutate copper, so they must precede every map/cache
+    build). Reuses the validated swap path end to end -- get_stub_info ->
+    validate_single_swap -> apply_stub_layer_switch -> the #277/#299
+    via-fit gate with revert. Each end is treated independently; an end
+    already on the assigned layer is untouched, and a declined validation
+    just leaves that end where it was (soft, like everything in the plan).
+    """
+    k = global_plan_knobs()
+    if not k['swaps'] or plan is None or not plan.layer_pref:
+        return 0
+    from connectivity import get_net_endpoints
+    from stub_layer_switching import (get_stub_info, apply_stub_layer_switch,
+                                      revert_stub_layer_switch,
+                                      validate_single_swap)
+    from layer_swap_optimization import _swap_vias_fit_or_shrink
+    swaps = 0
+    declined = 0
+    stubs_by_layer = all_stubs_by_layer if all_stubs_by_layer is not None else {}
+    for name, nid in net_ids:
+        li = plan.layer_pref.get(nid)
+        if li is None or li >= len(config.layers):
+            continue
+        target_layer = config.layers[li]
+        if target_layer == 'F.Cu' and not can_swap_to_top_layer:
+            continue
+        sources, targets, error = get_net_endpoints(pcb_data, nid, config)
+        if error or not sources or not targets:
+            continue
+        for end in (sources, targets):
+            cur_layer = config.layers[end[0][2]]
+            if cur_layer == target_layer:
+                continue
+            stub = get_stub_info(pcb_data, nid, end[0][3], end[0][4],
+                                 cur_layer)
+            if stub is None:
+                continue
+            valid, reason = validate_single_swap(
+                stub, target_layer, stubs_by_layer, pcb_data, config)
+            if not valid:
+                declined += 1
+                if verbose:
+                    print(f"  [plan] swap declined {name} "
+                          f"{cur_layer}->{target_layer}: {reason}")
+                continue
+            new_vias, seg_mods = apply_stub_layer_switch(
+                pcb_data, stub, target_layer, config, debug=verbose)
+            if not _swap_vias_fit_or_shrink(pcb_data, new_vias, config):
+                revert_stub_layer_switch(pcb_data, seg_mods, new_vias)
+                declined += 1
+                if verbose:
+                    print(f"  [plan] swap reverted {name} "
+                          f"{cur_layer}->{target_layer}: pad via unfit")
+                continue
+            all_swap_vias.extend(new_vias)
+            all_segment_modifications.extend(seg_mods)
+            swaps += 1
+            if verbose:
+                print(f"  Plan layer swap: {name} {cur_layer}->{target_layer}"
+                      + (f" (+{len(new_vias)} via)" if new_vias else ""))
+    if swaps or declined:
+        print(f"Global plan stub swaps: {swaps} applied, {declined} "
+              f"declined (validated, soft)")
+    return swaps
 
 
 def _escape_collar_rects(config):
