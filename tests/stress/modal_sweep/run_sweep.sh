@@ -40,6 +40,12 @@ SETS="${2:-${SWEEP_SETS:-set1,set2,set3,set4,set5,set6,set7,set8,set9,set10}}"
 OUT="${SWEEP_OUT:-}"
 EXCLUDE="${SWEEP_EXCLUDE:-}"
 EXARG=(); [ -n "$EXCLUDE" ] && EXARG=(--exclude "$EXCLUDE")
+# Every use below expands as ${EXARG[@]+"${EXARG[@]}"}, never as the bare
+# "${EXARG[@]}": macOS ships bash 3.2, where expanding an EMPTY array that way
+# is an "unbound variable" error under `set -u`. Every earlier run happened to
+# set SWEEP_EXCLUDE, so the plain form worked until the first launch that did
+# not -- and it died AFTER the priced plan printed, i.e. at the moment of
+# spending, which is the worst place to learn about it.
 
 [ -f "$ARMS" ] || { echo "no such arms file: $ARMS" >&2; exit 1; }
 
@@ -78,7 +84,7 @@ if [ "${SWEEP_UPLOAD:-0}" = "1" ]; then
 fi
 
 echo "== plan (spends nothing)"
-modal run "$SELF/modal_app.py" --arms "$ARMS" --sets "$SETS" "${EXARG[@]}" --dry-run
+modal run "$SELF/modal_app.py" --arms "$ARMS" --sets "$SETS" ${EXARG[@]+"${EXARG[@]}"} --dry-run
 
 if [ "${SWEEP_DRY:-0}" = "1" ]; then
   echo
@@ -89,10 +95,10 @@ fi
 echo
 echo "== running the sweep"
 if [ -n "$OUT" ]; then
-  modal run "$SELF/modal_app.py" --arms "$ARMS" --sets "$SETS" "${EXARG[@]}" --out "$OUT"
+  modal run "$SELF/modal_app.py" --arms "$ARMS" --sets "$SETS" ${EXARG[@]+"${EXARG[@]}"} --out "$OUT"
   RESULT="$OUT"
 else
-  modal run "$SELF/modal_app.py" --arms "$ARMS" --sets "$SETS" "${EXARG[@]}" | tee /tmp/sweep_run.log
+  modal run "$SELF/modal_app.py" --arms "$ARMS" --sets "$SETS" ${EXARG[@]+"${EXARG[@]}"} | tee /tmp/sweep_run.log
   RESULT="$(grep -oE '/[^ ]*sweep_[0-9]+\.json' /tmp/sweep_run.log | tail -1)"
 fi
 
