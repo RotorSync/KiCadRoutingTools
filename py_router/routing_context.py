@@ -296,13 +296,15 @@ def build_single_ended_obstacles(
     # stub surplus, one composition pass)
     from congestion_field import congestion2_rows
     from history_congestion import add_history_source
+    from global_plan import add_plan_source
     _c2 = congestion2_rows(config, net_id, routed_net_ids)
     merge_track_proximity_costs(
         obstacles, track_proximity_cache,
-        ghost_costs=add_history_source(
+        ghost_costs=add_plan_source(add_history_source(
             {**filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids),
              **(_stub_surplus or {}),
              **({('congestion2',): _c2} if _c2 is not None else {})}, config),
+            config, net_id, routed_net_ids),
         config=config)
     # Congestion v2 (#424): demand/capacity field, owner-exempt (no-op
     # unless KICAD_CONGESTION2_COST > 0 and the field was built).
@@ -378,9 +380,12 @@ def build_incremental_obstacles(
 
     # Add track proximity costs (+ layer-aware stub surplus, #590 history)
     from history_congestion import add_history_source
+    from global_plan import add_plan_source
     merge_track_proximity_costs(
         obstacles, track_proximity_cache,
-        ghost_costs=add_history_source(_stub_surplus or None, config) or None,
+        ghost_costs=add_plan_source(
+            add_history_source(_stub_surplus or None, config),
+            config, net_id, routed_net_ids) or None,
         config=config)
 
     # Add cross-layer track data
@@ -479,13 +484,15 @@ def prepare_obstacles_inplace(
     # stub surplus, one composition pass)
     from congestion_field import congestion2_rows
     from history_congestion import add_history_source
+    from global_plan import add_plan_source
     _c2 = congestion2_rows(config, net_id, routed_net_ids)
     merge_track_proximity_costs(
         working_obstacles, track_proximity_cache,
-        ghost_costs=add_history_source(
+        ghost_costs=add_plan_source(add_history_source(
             {**filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids),
              **(_stub_surplus or {}),
              **({('congestion2',): _c2} if _c2 is not None else {})}, config),
+            config, net_id, routed_net_ids),
         config=config)
 
 

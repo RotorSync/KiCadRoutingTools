@@ -254,6 +254,20 @@ def refresh() -> None:
         'escalate': _f('KICAD_HISTORY_ESCALATE', 0.0),   # repeat-contest multiplier (0 = flat)
         'max_cells': _i('KICAD_HISTORY_MAX_CELLS', 500_000),
     }
+    # Global planning pass (#589): rough-route every net before detailed
+    # routing; predicted paths become soft corridor reservations and inform
+    # net ordering. See global_plan.py. Opt-in experiment; 'cost' and 'order'
+    # are independent so the A/B arms (reservations-only / order-only / both)
+    # are all expressible under the one master gate.
+    g['GLOBAL_PLAN'] = {
+        'enable': _opt_in('KICAD_GLOBAL_PLAN'),
+        'cost': _f('KICAD_GLOBAL_PLAN_COST', 0.15),     # mm-equiv reservation cost; 0 = no reservations
+        'radius': _f('KICAD_GLOBAL_PLAN_RADIUS', 1.0),  # falloff radius (mm) beyond half-width
+        'hweight': _f('KICAD_GLOBAL_PLAN_HWEIGHT', 4.0),  # probe A* weight (near-greedy)
+        'iters': _i('KICAD_GLOBAL_PLAN_ITERS', 5000),   # static probe cap; <=10k disarms #529 extension
+        'order': _s('KICAD_GLOBAL_PLAN_ORDER', 'planar'),  # ''=keep order | planar | contended
+        'c2': _opt_in('KICAD_GLOBAL_PLAN_C2'),          # seed congestion-v2 demand with rough paths
+    }
 
     # --- strings -------------------------------------------------------------
     g['HYBRID_LEG_DEBUG'] = _s('KICAD_HYBRID_LEG_DEBUG')   # truthy; '2' = verbose

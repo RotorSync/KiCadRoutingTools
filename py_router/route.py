@@ -1220,6 +1220,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # space (the human's sequence: nearby connections first). Inert on
     # boards with no bare balls -- stubs/vias at every ball leave the order
     # untouched. Board-state-driven and engine-level (GUI parity).
+    _direct_front_ids: set = set()  # captured for the #589 plan reorder
     if net_ids and env_knobs.DIRECT_FIRST:
         _bga_refs = set()
         from kicad_parser import find_components_by_type
@@ -1264,6 +1265,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _front = [t for t in net_ids if t[1] in _direct_ids]
             _rest = [t for t in net_ids if t[1] not in _direct_ids]
             net_ids = _front + _rest
+            _direct_front_ids = set(_direct_ids)
             print(f"Direct-first ordering (#472): {len(_front)} bare-ball "
                   f"net(s) moved to the front: "
                   f"{', '.join(nm for nm, _ in _front[:8])}"
@@ -1825,6 +1827,40 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # off by default.
     from history_congestion import reset_history
     reset_history(config)
+
+    # Global planning pass (#589, KICAD_GLOBAL_PLAN=1 opt-in): rough-route
+    # every net once against a throwaway base-style map (near-greedy
+    # h-weight, small static cap; probes commit nothing). Predicted paths
+    # become per-net soft corridor reservations -- folded owner-exempt into
+    # every obstacle build via global_plan.add_plan_source -- and a
+    # plan-informed net order (the #472 direct-first partition is
+    # preserved). Engine-level, so the GUI gets it for free. Probe
+    # iterations join total_iterations so the pass is graded honestly
+    # against spending the same budget on detailed search.
+    # TOP-LEVEL RUNS ONLY: gated on final_reconcile, the structural
+    # recursion guard every internal sub-run clears (the reconcile laps and
+    # the repair_planes reconnects) -- planning exists to pre-route an open
+    # board, and on a finished board the probes are slow and useless
+    # (glasgow: the reconcile sub-run burned 11.6s / 92k iterations probing
+    # 19 nets against full copper for 0 usable conflicts). Coupling note: a
+    # deliberate top-level final_reconcile=False run also skips the plan.
+    from global_plan import plan_global_routes, apply_plan_order
+    _gplan = (plan_global_routes(pcb_data, config, single_ended_nets,
+                                 layer_map, verbose=verbose)
+              if final_reconcile else None)
+    if _gplan is not None:
+        config._global_plan = _gplan
+        single_ended_nets = apply_plan_order(single_ended_nets, _gplan,
+                                             front_ids=_direct_front_ids)
+        total_iterations += _gplan.probe_iterations
+        # Optional ('c2'): reseed congestion v2's demand map with the
+        # predicted corridors -- rough paths ARE the demand map (#589) --
+        # replacing the endpoints-only estimate. No-op unless the v2 field
+        # is armed (KICAD_CONGESTION2_COST > 0) and was built above.
+        if env_knobs.GLOBAL_PLAN['c2'] and config._congestion2 is not None:
+            config._congestion2 = build_congestion2(
+                pcb_data, config, list(all_net_ids_to_route),
+                extra_demand_points=_gplan.demand_points(config))
 
     # Register rippable pre-existing nets as already-routed (issue #103):
     # blocking analysis iterates routed_net_paths (cells are recomputed from

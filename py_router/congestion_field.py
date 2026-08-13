@@ -167,9 +167,16 @@ def congestion2_knobs():
     return dict(env_knobs.CONGESTION2)
 
 
-def build_congestion2(pcb_data, config, net_ids_to_route):
+def build_congestion2(pcb_data, config, net_ids_to_route,
+                      extra_demand_points=None):
     """Precompute bins {(bx,by): (free_area_mm2, owners frozenset)} plus
-    per-net terminal coords. Returns None when disabled."""
+    per-net terminal coords. Returns None when disabled.
+
+    extra_demand_points (#589): optional {net_id: [(x_mm, y_mm), ...]} of
+    predicted-corridor samples (the global plan's rough paths) folded into
+    each net's terminal set -- the net then claims demand along its whole
+    predicted path instead of only at its endpoints, and its own exemption
+    disks follow the corridor (owner-exempt by construction)."""
     k = congestion2_knobs()
     if k['cost'] <= 0:
         return None
@@ -199,6 +206,8 @@ def build_congestion2(pcb_data, config, net_ids_to_route):
         for v in pcb_data.vias:
             if v.net_id == nid:
                 pts.append((v.x, v.y))
+        if extra_demand_points:
+            pts.extend(extra_demand_points.get(nid, ()))
         terminals[nid] = pts
         for (x, y) in pts:
             owners.setdefault((int(x // bin_mm), int(y // bin_mm)), set()).add(nid)
