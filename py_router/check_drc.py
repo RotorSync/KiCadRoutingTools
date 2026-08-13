@@ -1122,9 +1122,73 @@ def board_edge_geometry(board_info) -> Tuple[List[List[Tuple[float, float]]],
     return rings, outer, cutouts
 
 
+# Sweep item 1 (#625 follow-up): the board-edge pass calls the two ring
+# distances for EVERY segment, via, and pad perimeter sample with no
+# prefilter, and a curved Edge.Cuts outline tessellates to 1-2k edges --
+# 20-40M scalar seg-seg calls per full-board DRC. The rings are fixed for a
+# whole check run, so their edge arrays are memoized (id + fingerprint --
+# the fingerprint revalidates against id reuse) and each query is one
+# broadcast of the exact scalar formulas. Rings with fewer than 32 edges
+# (plain rectangular outlines) keep the scalar loop: numpy call overhead
+# would make them slower, and both paths return identical values.
+_RINGS_EDGE_CACHE: Dict[int, tuple] = {}
+_RINGS_VECTOR_MIN_EDGES = 32
+
+
+def _rings_edge_arrays(rings):
+    """(ex1, ey1, dx, dy, len_sq) float64 arrays over every ring edge."""
+    key = id(rings)
+    fp = (len(rings), tuple(len(r) for r in rings),
+          tuple(rings[0][0]) if rings and len(rings[0]) else None)
+    hit = _RINGS_EDGE_CACHE.get(key)
+    if hit is not None and hit[0] == fp:
+        return hit[1]
+    ex1, ey1, ex2, ey2 = [], [], [], []
+    for ring in rings:
+        P = np.asarray(ring, dtype=np.float64)
+        Q = np.roll(P, -1, axis=0)
+        ex1.append(P[:, 0]); ey1.append(P[:, 1])
+        ex2.append(Q[:, 0]); ey2.append(Q[:, 1])
+    x1 = np.concatenate(ex1); y1 = np.concatenate(ey1)
+    x2 = np.concatenate(ex2); y2 = np.concatenate(ey2)
+    dx, dy = x2 - x1, y2 - y1
+    arrays = (x1, y1, x2, y2, dx, dy, dx * dx + dy * dy)
+    if len(_RINGS_EDGE_CACHE) > 8:
+        _RINGS_EDGE_CACHE.clear()
+    _RINGS_EDGE_CACHE[key] = (fp, arrays)
+    return arrays
+
+
+def _pt_edges_d2(px, py, x1, y1, dx, dy, len_sq):
+    """Squared point-to-segment distance against every ring edge -- the
+    point_to_segment_distance formula, term for term (proj = x1 + t*dx, then
+    px - proj: the association matters, (px-x1) - t*dx rounds 1-2 ULP apart)."""
+    with np.errstate(divide='ignore', invalid='ignore'):
+        t = np.clip(((px - x1) * dx + (py - y1) * dy) / len_sq, 0.0, 1.0)
+    t = np.where(len_sq < 1e-10, 0.0, t)
+    ddx = px - (x1 + t * dx)
+    ddy = py - (y1 + t * dy)
+    return ddx * ddx + ddy * ddy
+
+
 def _point_to_rings_distance(x: float, y: float,
                              rings: List[List[Tuple[float, float]]]) -> float:
     """Min distance from a point to any edge ring's boundary."""
+    if sum(len(r) for r in rings) >= _RINGS_VECTOR_MIN_EDGES:
+        x1, y1, x2, y2, dx, dy, len_sq = _rings_edge_arrays(rings)
+        if not len(x1):
+            return float('inf')
+        # The vector kernel squares with a multiply; the scalar squares with
+        # `**2` = libm pow, which rounds 1 ULP differently on ~0.1% of values
+        # (macOS arm64) and no numpy op reproduces it. So the broadcast only
+        # NOMINATES the minimal edges (a few-ULP window); the returned value
+        # is recomputed on those with the scalar itself -- byte-identical by
+        # construction, and the candidate set is 1-2 edges.
+        d2 = _pt_edges_d2(x, y, x1, y1, dx, dy, len_sq)
+        m = d2.min()
+        cand = np.nonzero(d2 <= m + 8 * np.spacing(m))[0]
+        return min(point_to_segment_distance(x, y, x1[i], y1[i], x2[i], y2[i])
+                   for i in cand)
     best = float('inf')
     for ring in rings:
         n = len(ring)
@@ -1141,6 +1205,40 @@ def _segment_to_rings_distance(x1: float, y1: float, x2: float, y2: float,
                                rings: List[List[Tuple[float, float]]]) -> float:
     """Min distance from a track segment to any edge ring's boundary (0 if it
     crosses an edge)."""
+    if sum(len(r) for r in rings) >= _RINGS_VECTOR_MIN_EDGES:
+        ex1, ey1, ex2, ey2, dx, dy, len_sq = _rings_edge_arrays(rings)
+        if not len(ex1):
+            return float('inf')
+        # segments_intersect, vectorized: the same four ccw() comparisons.
+        def _ccw(ax, ay, bx, by, cx, cy):
+            return (cy - ay) * (bx - ax) > (by - ay) * (cx - ax)
+        inter = ((_ccw(x1, y1, ex1, ey1, ex2, ey2)
+                  != _ccw(x2, y2, ex1, ey1, ex2, ey2))
+                 & (_ccw(x1, y1, x2, y2, ex1, ey1)
+                    != _ccw(x1, y1, x2, y2, ex2, ey2)))
+        if inter.any():
+            # An intersected edge contributes exactly 0.0 to the scalar min.
+            return 0.0
+        # Endpoint-to-other-segment distances, both directions (the scalar
+        # min(d1..d4)), on squared values. As in _point_to_rings_distance,
+        # the multiply-squared kernel only NOMINATES minimal edges; the
+        # returned value comes from the scalar on those (pow-vs-multiply
+        # rounds 1 ULP apart on rare values).
+        sdx, sdy = x2 - x1, y2 - y1
+        slen_sq = sdx * sdx + sdy * sdy
+        d2 = np.minimum(
+            np.minimum(_pt_edges_d2(x1, y1, ex1, ey1, dx, dy, len_sq),
+                       _pt_edges_d2(x2, y2, ex1, ey1, dx, dy, len_sq)),
+            np.minimum(
+                _pt_edges_d2(ex1, ey1, np.float64(x1), np.float64(y1),
+                             np.float64(sdx), np.float64(sdy), np.float64(slen_sq)),
+                _pt_edges_d2(ex2, ey2, np.float64(x1), np.float64(y1),
+                             np.float64(sdx), np.float64(sdy), np.float64(slen_sq))))
+        m = d2.min()
+        cand = np.nonzero(d2 <= m + 8 * np.spacing(m))[0]
+        return min(_seg_seg_dist_coords(x1, y1, x2, y2,
+                                        ex1[i], ey1[i], ex2[i], ey2[i])
+                   for i in cand)
     best = float('inf')
     for ring in rings:
         n = len(ring)
