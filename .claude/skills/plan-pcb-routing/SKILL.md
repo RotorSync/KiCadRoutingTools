@@ -3318,14 +3318,14 @@ corridors the constrained nets used are sealed, and every still-open pad's
 escape channel is consumed by the tap-via carpet, which is not rippable
 copper: `--rip-existing-nets` can move a NET, never a tap field (measured: 5
 bare fine-pitch rail pads at a late pour oscillated 6-9 oracle joins across
-five post-pour repair attempts and never closed). **`route_planes` GATES on
-this: it refuses to pour (exit 3) while signal copper exists AND any net
-carries bare/stranded pads**, listing them; `--allow-bare-pads` is the
-deliberate opt-out (the GUI path warns instead). Treat the refusal as a
-blocking defect: go back, connect the named pads, re-pour. **The Step 1
-empty-board pour is exempt by design** — taps placed before any signal copper
-exists are ordinary obstacles the router routes around from the start, which
-is half of why pour-first wins.
+five post-pour repair attempts and never closed). **Nothing ENFORCES this** —
+`route_planes` once refused to pour (exit 3) over a partially-routed board
+carrying bare pads, but that gate and its `--allow-bare-pads` opt-out were
+removed in 5832e4eb so the branch matches main, which never had one. The
+ordering is yours to keep: connect every pad before you pour, or accept
+losing it. **The Step 1 empty-board pour is exempt by design** — taps placed
+before any signal copper exists are ordinary obstacles the router routes
+around from the start, which is half of why pour-first wins.
 
 **If you DO invoke the standalone `repair_planes.py`** on an out-of-chain
 board, it re-routes what it rips at ITS OWN parameters, so pass the per-net
@@ -4488,9 +4488,9 @@ learn:
    never for improving a route. **The door also closes on UNROUTED pads**:
    a tap carpet consumes every open pad's escape channel and is not
    rippable copper (run 6: 5 bare pads at a late pour, never recovered) —
-   `route_planes` refuses to pour over a partially-routed board with bare
-   pads (exit 3, `--allow-bare-pads` to override; the empty-board 1c pour
-   is exempt); connect every pad first, or accept losing it. (Cross-ref:
+   and no gate stops you: the exit-3 refusal and its `--allow-bare-pads`
+   override were removed in 5832e4eb (the empty-board 1c pour was the
+   exempt case). Connect every pad first, or accept losing it. (Cross-ref:
    the Step 5 ordering block says the same from the other side.)
 
 For plane-net pads that cannot reach their pour, the equivalent is

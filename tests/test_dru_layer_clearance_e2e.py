@@ -113,9 +113,9 @@ with tempfile.TemporaryDirectory() as d:
         [sys.executable, os.path.join(REPO, 'py_router', 'route_planes.py'),
          os.path.join(d, "in_dru.kicad_pcb"), "--output", plane_out,
          "--nets", "GND", "--plane-layers", "B.Cu",
-         "--clearance", "0.2", "--track-width", "0.25",
-         # deliberate partial-board pour; the run-6 A5 gate would refuse
-         "--allow-bare-pads"],
+         # deliberate partial-board pour: the run-6 A5 gate that used to refuse
+         # this (and its --allow-bare-pads opt-out) was removed in 5832e4eb.
+         "--clearance", "0.2", "--track-width", "0.25"],
         capture_output=True, text=True, timeout=1200)
     check("route_planes (dru) completed", rp.returncode == 0 and os.path.isfile(plane_out),
           f"rc={rp.returncode}")

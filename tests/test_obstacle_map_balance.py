@@ -177,8 +177,7 @@ def main():
     iu_fixed = os.path.join(tmp, "iu_repair.kicad_pcb")
     rc, _ = run_cmd(["py_router/route_planes.py", os.path.join(KF, "interf_u_unrouted.kicad_pcb"),
                      iu_plane, "--nets", "VCC", "GND",
-                     "--plane-layers", "F.Cu", "B.Cu",
-                     "--allow-bare-pads"], audit=False)
+                     "--plane-layers", "F.Cu", "B.Cu"], audit=False)
     check("repair: interf_u planes step completed", rc == 0, f"rc={rc}")
     rc, _ = run_cmd(["py_router/bga_fanout.py", iu_plane, "--component", "U9",
                      "--output", iu_fan, "--nets", "/*"], audit=False)
