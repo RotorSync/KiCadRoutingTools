@@ -18,8 +18,11 @@ from routing_utils import pad_blocked_cells_array, iter_pad_blocked_cells
 
 def run():
     fails = []
+    total = 0
 
     def check(name, cond):
+        nonlocal total
+        total += 1
         if not cond:
             fails.append(name)
 
@@ -52,11 +55,31 @@ def run():
     check("cell beyond margin stays free", (0, 13) not in blocked(off_y))
 
     # iter_pad_blocked_cells (plane generator) must agree with the array twin.
-    gen = {(gx, gy) for gx, gy in
-           iter_pad_blocked_cells(pad_gx, pad_gy, half_w, half_h, margin, grid,
-                                  corner_radius=0.0, off_y=off_y)}
+    # NOTE the ordering is load-bearing: `blocked()` above has already run, so
+    # pad_blocked_cells_array's memo (_PAD_OFFSETS_CACHE) is WARM for exactly
+    # this geometry key. The generator must not be served from that cache --
+    # see the "DELIBERATELY NOT MEMOIZED" note in routing_utils. A memo
+    # fast-path pasted into the generator returns instead of yielding, so it
+    # emits zero cells and every pad silently loses its keep-out (02f5375a,
+    # shipped in v0.20.4).
+    def gen_cells(off):
+        return {(gx, gy) for gx, gy in
+                iter_pad_blocked_cells(pad_gx, pad_gy, half_w, half_h, margin,
+                                       grid, corner_radius=0.0, off_y=off)}
+
+    gen = gen_cells(off_y)
     check("generator blocks the sub-cell-inside cell too", target in gen)
     check("generator matches array twin", gen == blocked(off_y))
+    # Explicit non-emptiness, so a generator that yields nothing fails with a
+    # message that names the cause instead of only tripping the set compare.
+    check("generator yields cells on a WARM array-twin cache", len(gen) > 0)
+    # And it must stay independent of call order: cold-cache first, then warm.
+    for key_off, name in ((0.021, "cold"), (0.021, "warm-after-array")):
+        if name == "warm-after-array":
+            pad_blocked_cells_array(pad_gx, pad_gy, half_w, half_h, margin,
+                                    grid, corner_radius=0.0, off_y=key_off)
+        got = gen_cells(key_off)
+        check(f"generator is call-order independent ({name})", len(got) > 0)
 
     print("=" * 60)
     if fails:
@@ -66,7 +89,7 @@ def run():
         return 1
     print("  PASS  pad keepout measured from the real center: blocks the")
     print("        sub-cell-inside cell (array + generator agree), no over-block")
-    print("\n5/5 checks passed")
+    print(f"\n{total}/{total} checks passed")
     return 0
 
 

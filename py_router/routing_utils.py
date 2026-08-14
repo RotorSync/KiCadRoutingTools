@@ -205,13 +205,21 @@ def iter_pad_blocked_cells(
     # sub-grid deviation (diff pair P/N offsets) pass a larger buffer.
     if corner_buffer is None:
         corner_buffer = grid_step / 2
-    key = (half_width, half_height, margin, grid_step, corner_radius,
-           corner_buffer, off_x, off_y, rotation_deg)
-    offs = _PAD_OFFSETS_CACHE.get(key)
-    if offs is not None:
-        out = np.empty_like(offs)
-        np.add(offs, np.array([[pad_gx, pad_gy]], dtype=np.int32), out=out)
-        return out
+    # DELIBERATELY NOT MEMOIZED -- do not paste the _PAD_OFFSETS_CACHE
+    # fast-path from pad_blocked_cells_array in here. Two reasons:
+    #   1. This is a GENERATOR. `return <array>` inside one is not a result,
+    #      it is a bare StopIteration -- the fast path would yield NOTHING
+    #      and the pad would silently get no keep-out at all. That shipped
+    #      once (02f5375a, v0.20.4) and emptied this function on every warm
+    #      cache; tests/test_pad_offset_keepout.py pins it.
+    #   2. Even done correctly it would be wrong to share: this scalar
+    #      rasterizer is the INDEPENDENT reference implementation that
+    #      test_pad_offset_keepout.py grades the vectorized twin against.
+    #      Serving it from the twin's cache makes that cross-check vacuous
+    #      (and only when the cache happens to be warm, so it would pass or
+    #      fail by call order). The perf case for the memo is entirely
+    #      pad_blocked_cells_array's -- that is the twin every obstacle
+    #      builder actually calls.
     rotated = abs(rotation_deg) > 1e-9 and abs(abs(rotation_deg) - 180.0) > 1e-9
     if rotated:
         _rrad = math.radians(rotation_deg)
