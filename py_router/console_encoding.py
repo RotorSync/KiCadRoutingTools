@@ -26,3 +26,54 @@ def enable_utf8_console():
             stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:
             pass
+
+
+# Readable ASCII stand-ins, used only when the stream genuinely cannot encode
+# the glyph. 'replace' alone would render "3.500 m?" -- the unit silently lost,
+# which is worse than a plain-ASCII spelling.
+_ASCII_FALLBACKS = {
+    "Ω": "ohm",   # GREEK CAPITAL OMEGA (impedance / resistance)
+    "Ω": "ohm",   # OHM SIGN
+    "µ": "u",     # MICRO SIGN
+    "→": "->",
+    "±": "+/-",
+    "⚠": "!",
+    "²": "^2",
+    "×": "x",
+}
+
+
+def ascii_safe(text, stream=None):
+    """``text`` with any glyph the target stream cannot encode spelled out.
+
+    For CLI entry points :func:`enable_utf8_console` is the better fix -- it
+    keeps the real glyph. This is for the OTHER caller shape: shared engine
+    functions invoked IN-PROCESS (a test, a script, an embedder), where no
+    ``__main__`` block ran and stdout is still the interpreter's default. On a
+    cp1252 Windows console that made a library ``print`` of "mΩ" abort the whole
+    run -- the CLI was protected, the same engine function called directly was
+    not (the CLAUDE.md CLI/GUI parity shape: a fix in ``main()`` is not a fix in
+    the engine).
+
+    Returns ``text`` unchanged whenever the stream can encode it, so UTF-8
+    consoles -- the normal case -- keep the real symbols.
+    """
+    if not text:
+        return text
+    stream = stream if stream is not None else sys.stdout
+    enc = getattr(stream, "encoding", None)
+    if not enc:
+        return text
+    try:
+        text.encode(enc)
+        return text
+    except UnicodeEncodeError:
+        pass
+    except (LookupError, TypeError):
+        return text
+    out = "".join(_ASCII_FALLBACKS.get(ch, ch) for ch in text)
+    try:
+        out.encode(enc)
+        return out
+    except UnicodeEncodeError:
+        return out.encode(enc, errors="replace").decode(enc, errors="replace")

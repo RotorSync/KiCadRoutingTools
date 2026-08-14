@@ -20,6 +20,7 @@ Two invariants, both of which were violated:
 """
 
 import os
+import re
 import subprocess
 import sys
 
@@ -99,6 +100,47 @@ def test_consumers_do_not_silently_skip_a_missing_fixture():
         print(f"  PASS: {fname} -> fixture_boards ({board})")
 
 
+def test_no_test_reads_an_untracked_board_directly():
+    """DERIVED cousin of the check above -- it names no test file.
+
+    The list in test_consumers_do_not_silently_skip_a_missing_fixture is
+    hand-maintained, so it only ever covers the consumers that existed when it
+    was written. test_gui_finalize_oracle_inrun.py was added later, read
+    kicad_files/kit-out-plane.kicad_pcb (gitignored, and produced by NOTHING
+    since #426 moved test_kit_route's outputs to a temp workdir), and sailed
+    past this gate -- crashing on a fresh clone while passing locally against a
+    stale leftover from the old chain.
+
+    So derive the consumer set instead of listing it: any test that resolves a
+    board out of kicad_files/ which git does not track must go through
+    fixture_boards. Matching is deliberately narrow -- a literal
+    'kicad_files/x.kicad_pcb' or a join of 'kicad_files', 'x.kicad_pcb' -- so
+    the many tests that write x.kicad_pcb into their own tempdir are not
+    swept in.
+    """
+    pats = [re.compile(r"['\"]kicad_files[/\\]([A-Za-z0-9_.\-]+\.kicad_pcb)['\"]"),
+            re.compile(r"['\"]kicad_files['\"]\s*,\s*['\"]([A-Za-z0-9_.\-]+\.kicad_pcb)['\"]")]
+    tracked = _tracked()
+    here = os.path.dirname(os.path.abspath(__file__))
+    offenders = []
+    for fname in sorted(os.listdir(here)):
+        if not (fname.startswith('test_') and fname.endswith('.py')):
+            continue
+        src = open(os.path.join(here, fname), encoding='utf-8').read()
+        boards = set()
+        for p in pats:
+            boards |= set(p.findall(src))
+        missing = sorted(b for b in boards if f'kicad_files/{b}' not in tracked)
+        if missing and 'fixture_boards' not in src:
+            offenders.append(f"{fname}: {', '.join(missing)}")
+    assert not offenders, (
+        "test(s) reading an UNTRACKED board straight out of kicad_files/:\n  "
+        + "\n  ".join(offenders)
+        + "\nOn a fresh clone that board does not exist. Add a recipe to "
+          "tests/fixture_boards.py and call ensure(), or use a tracked board.")
+    print("  PASS: no test reads an untracked kicad_files/ board directly")
+
+
 def test_fixtures_build_from_a_clean_state():
     """End to end: every fixture is producible right now."""
     for name in _RECIPES:
@@ -125,6 +167,7 @@ TESTS = [
     test_every_recipe_roots_in_a_tracked_board,
     test_no_tracked_project_file_without_its_board,
     test_consumers_do_not_silently_skip_a_missing_fixture,
+    test_no_test_reads_an_untracked_board_directly,
     test_fixtures_build_from_a_clean_state,
     test_building_a_fixture_leaves_no_tracked_file_modified,
 ]
