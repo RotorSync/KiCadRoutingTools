@@ -26,7 +26,10 @@ import json
 import os
 import shutil
 
-# Read-only analysis tools: the skills never need write access to the board.
+# Read-only analysis tools: the DEFAULT allowlist for the "Ask AI" analysis
+# skills, which never need write access to the board. Callers that drive a
+# board-mutating skill headless (the Placement tab) pass their own
+# write-capable allowlist via build_cmd(allowed_tools=...).
 CLAUDE_ALLOWED_TOOLS = "Read,Glob,Grep,Bash,WebSearch"
 
 # opencode has no per-run tool allowlist flag; the repo's opencode.json
@@ -75,8 +78,14 @@ class AIBackend:
         """Compose the prompt that invokes one of the repo's skills."""
         raise NotImplementedError
 
-    def build_cmd(self, cli_path, prompt, model=None, effort=None):
-        """The headless argv streaming one JSON event per stdout line."""
+    def build_cmd(self, cli_path, prompt, model=None, effort=None,
+                  allowed_tools=None, add_dirs=()):
+        """The headless argv streaming one JSON event per stdout line.
+
+        allowed_tools/add_dirs are honored by Claude Code (per-run tool
+        allowlist and extra writable directories); opencode ignores them
+        (its agent config in opencode.json is the equivalent).
+        """
         raise NotImplementedError
 
     def stream_state(self):
@@ -209,6 +218,12 @@ class ClaudeBackend(AIBackend):
         "/opt/homebrew/bin/claude",
         "/usr/local/bin/claude",
         "/usr/bin/claude",
+        # Windows: native installer and npm -g locations (KiCad launched from
+        # the desktop misses the shell PATH there too). An unset env var
+        # leaves the literal %VAR% in the path, which simply fails isfile().
+        os.path.expanduser("~/.local/bin/claude.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\claude\claude.exe"),
+        os.path.expandvars(r"%APPDATA%\npm\claude.cmd"),
     )
     # ALIASES, not pinned version IDs: the CLI resolves each to the newest
     # model of its tier, so the list never goes stale.
@@ -226,14 +241,17 @@ class ClaudeBackend(AIBackend):
     def skill_prompt(self, skill, args, instructions):
         return f"/{skill} {args} — {instructions}"
 
-    def build_cmd(self, cli_path, prompt, model=None, effort=None):
+    def build_cmd(self, cli_path, prompt, model=None, effort=None,
+                  allowed_tools=None, add_dirs=()):
         cmd = [
             cli_path, "-p", prompt,
             # stream-json (requires --verbose in -p mode) emits one JSON
             # event per line as the agent works, for live progress.
             "--output-format", "stream-json", "--verbose",
-            "--allowedTools", CLAUDE_ALLOWED_TOOLS,
+            "--allowedTools", allowed_tools or CLAUDE_ALLOWED_TOOLS,
         ]
+        for d in add_dirs:
+            cmd += ["--add-dir", d]
         if model:
             cmd += ["--model", model]
         if effort:
@@ -331,7 +349,10 @@ class OpencodeBackend(AIBackend):
         return (f"Load the '{skill}' skill with your skill tool and follow "
                 f"it for: {args} — {instructions}")
 
-    def build_cmd(self, cli_path, prompt, model=None, effort=None):
+    def build_cmd(self, cli_path, prompt, model=None, effort=None,
+                  allowed_tools=None, add_dirs=()):
+        # allowed_tools/add_dirs are Claude-specific (accepted for signature
+        # parity; the Placement tab pins the Claude backend anyway).
         cmd = [
             cli_path, "run",
             "--format", "json",       # one JSON event per line

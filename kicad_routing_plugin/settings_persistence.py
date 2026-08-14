@@ -240,6 +240,16 @@ def get_dialog_settings(dialog):
         'opencode_effort': dialog.ai_tab.get_effort_value_for('opencode'),
         'ai_plan': dialog.ai_tab.get_plan_state(),
 
+        # Placement sub-tab of the AI notebook (issue #481). The labels
+        # options travel as ONE dict so the panel can grow fields without new
+        # persistence keys; the transcript is deliberately NOT persisted (an
+        # hours-long run's stream can be tens of MB).
+        'ai_active_subtab': dialog.ai_notebook.GetSelection() if hasattr(dialog, 'ai_notebook') else 0,
+        'placement_backend': dialog.placement_tab.get_backend_value(),
+        'placement_extra_instructions': dialog.placement_tab.extra_instructions.GetValue(),
+        'placement_last_workdir': getattr(dialog.placement_tab, 'last_workdir', '') or '',
+        'placement_labels_options': dialog.placement_tab.labels_options.get_config(),
+
         # Log content
         'log_content': dialog.log_text.GetValue(),
 
@@ -714,6 +724,27 @@ def restore_dialog_settings(dialog, settings):
     plan_state = settings.get('ai_plan', settings.get('claude_plan'))
     if plan_state is not None:
         dialog.ai_tab.restore_plan_state(plan_state)
+
+    # Placement sub-tab (issue #481). Restoring the last workdir re-surfaces
+    # a previous session's movie/report/preview buttons when the artifacts
+    # still exist on disk.
+    if 'ai_active_subtab' in settings and hasattr(dialog, 'ai_notebook'):
+        idx = settings['ai_active_subtab']
+        if isinstance(idx, int) and 0 <= idx < dialog.ai_notebook.GetPageCount():
+            dialog.ai_notebook.SetSelection(idx)
+    if 'placement_backend' in settings:
+        # Unsupported/unknown saved ids revert to Claude Code inside the tab.
+        dialog.placement_tab.set_backend_value(settings['placement_backend'])
+    if 'placement_extra_instructions' in settings:
+        dialog.placement_tab.extra_instructions.SetValue(
+            settings['placement_extra_instructions'])
+    if 'placement_labels_options' in settings and isinstance(
+            settings['placement_labels_options'], dict):
+        dialog.placement_tab.labels_options.set_config(
+            settings['placement_labels_options'])
+    if 'placement_last_workdir' in settings and settings['placement_last_workdir']:
+        dialog.placement_tab.restore_last_workdir(
+            settings['placement_last_workdir'])
 
     # Restore net selections LAST - after all filters/checkboxes are set
     # This prevents the selections from being cleared by filter change events
