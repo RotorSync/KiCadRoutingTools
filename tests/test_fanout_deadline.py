@@ -66,7 +66,13 @@ QFN_BOARD = os.path.join(ROOT, 'kicad_files', 'haasoscope_pro_max_test.kicad_pcb
 # to reach the cancel and 2m15s to establish its completed baseline.
 MID_BOARD = os.path.join(ROOT, 'kicad_files', 'orangecrab_ext_pll.kicad_pcb')
 MID_COMPONENT = 'U4'
-MID_DEADLINE = '0.3'
+# WHICH budget lands mid-rescue is a property of the machine, not of the code:
+# too small and the clock is already spent when the FIRST pass head is reached
+# (the other shape, pinned by test_deadline_zero_...); too large and the run
+# finishes. Measured on one box: 0.3s lands mid-rescue idle and at the first
+# head under -j4 load. So escalate until the SHAPE appears, and say what was
+# tried if it never does -- a hard-coded number here is a flaky test.
+MID_DEADLINES = ('0.5', '1.5', '3', '5', '8')
 # The exact sentence a cancelled run must NOT print.
 CLEARANCE_ADVICE = 'Retry the fanout with a smaller --clearance'
 
@@ -161,30 +167,39 @@ def test_midrescue_cancel_is_not_reported_as_a_clearance_failure(tmpdir):
     sufficient contract. Everything below is a check that a budget is not
     reported as a measured routing defect.
     """
-    p, out = _fanout(tmpdir, 'mid.kicad_pcb', '--deadline', MID_DEADLINE,
-                     board=MID_BOARD, component=MID_COMPONENT)
-    if p.returncode == 2 and 'unrecognized arguments' in (p.stdout + p.stderr):
-        check(False, '--deadline is a real flag (base: argparse rejects it)')
+    tried = []
+    p = out = d = None
+    for i, budget in enumerate(MID_DEADLINES):
+        p, out = _fanout(tmpdir, f'mid{i}.kicad_pcb', '--deadline', budget,
+                         board=MID_BOARD, component=MID_COMPONENT)
+        if p.returncode == 2 and 'unrecognized arguments' in (p.stdout
+                                                              + p.stderr):
+            check(False, '--deadline is a real flag (base: argparse rejects it)')
+            return
+        docs = _summaries(p.stdout)
+        cand = docs[-1] if docs else {}
+        skipped = cand.get('deadline_skipped') or []
+        failed = cand.get('failed') or 0
+        tried.append(f'{budget}s -> rc {p.returncode}, {len(docs)} summar(ies), '
+                     f'failed {failed}, skipped {len(skipped)}')
+        if p.returncode == 7 and failed > 0 and not skipped:
+            d = cand
+            break
+        if p.returncode == 0:
+            break                     # the budget already outran the whole run
+    print('    (budgets tried: ' + ' | '.join(tried) + ')')
+    # The premise, reported as a CHECK: if the shape is unreachable on this
+    # machine the numbers below would be measuring the other cancel shape, and
+    # silently passing on them is how this stops being a regression test.
+    check(d is not None,
+          'PREMISE: a budget exists that cancels MID-RESCUE (failed > 0 with '
+          'deadline_skipped empty) -- the dominant shape this test is for')
+    if d is None:
         return
-    check(p.returncode == 7, f'exit is DEADLINE_EXIT (got {p.returncode})')
-    docs = _summaries(p.stdout)
-    check(len(docs) == 1, f'exactly ONE JSON_SUMMARY (got {len(docs)})')
-    if not docs:
-        return
-    d = docs[0]
+    check(len(_summaries(p.stdout)) == 1,
+          f'exactly ONE JSON_SUMMARY (got {len(_summaries(p.stdout))})')
     skipped = d.get('deadline_skipped') or []
     failed = d.get('failed') or 0
-
-    # The premise. If these two ever flip, this test has stopped testing the
-    # case it was written for and the numbers below mean nothing.
-    check(not skipped,
-          f'PREMISE: deadline_skipped is empty on this cancel (got '
-          f'{len(skipped)}) -- the cancel landed mid-rescue, not at a pass head')
-    check(failed > 0,
-          f'PREMISE: the completed channel pass filed real drops (failed='
-          f'{failed})')
-    if not failed:
-        return
 
     # THE finding this test exists for: the tool must not advise a tighter
     # clearance on evidence it did not gather.
