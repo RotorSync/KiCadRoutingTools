@@ -307,7 +307,8 @@ def generate_underpad_escape(footprint: Footprint,
                              dogbone: bool = False,
                              plane_drop_nets: Optional[Set[int]] = None,
                              plane_drop_report: Optional[Dict] = None,
-                             plane_net_layers: Optional[Dict[str, List[str]]] = None
+                             plane_net_layers: Optional[Dict[str, List[str]]] = None,
+                             cancel_check=None
                              ) -> Tuple[List[Dict], List[Dict], List[str]]:
     """Route BGA signal balls to the boundary under the pad field.
 
@@ -349,6 +350,19 @@ def generate_underpad_escape(footprint: Footprint,
     failures are reported there, never in the returned failed list (plane nets
     are not part of the requested/escaped ledger; the plane step's tap search
     remains the fallback).
+
+    Cancellation (#621): `cancel_check` is a zero-arg predicate honoured at the
+    head of the four escape loops (top-layer coupled pairs, the outside-in
+    surface phase, the inner coupled pairs, the inner single balls) -- the same
+    contract `batch_route` / `create_plane` already take, so a deadline here is
+    `krt_deadline.Deadline.cancel_check(...)` and nothing new. It BREAKS the
+    loop; it never raises (an exception dies in this package's `except
+    Exception` swallowers, which is the silent failure the deadline exists to
+    remove). Balls already escaped keep their copper; balls the cancel never got
+    to are simply absent from BOTH the emitted copper and the returned failed
+    list -- an unfinished search has measured nothing, so reporting it as a
+    routing failure is exactly the misreading `krt_deadline` warns about. The
+    caller names that complement (`bga_fanout.LAST_DEADLINE_SKIPPED`).
     """
     ref = footprint.reference
     fp_pads = [p for p in footprint.pads if p.net_id]
@@ -1563,6 +1577,8 @@ def generate_underpad_escape(footprint: Footprint,
     coupled_targets.sort(key=lambda t: depth(t[1]) + depth(t[2]))
     remaining_pairs = []
     for base, pp, nn in coupled_targets:
+        if cancel_check and cancel_check():    # #621
+            break
         if (try_coupled(pp, nn, [(top_idx, False)])
                 or try_coupled_endon(pp, nn, [(top_idx, False)])):
             n_coupled += 1
@@ -1584,6 +1600,10 @@ def generate_underpad_escape(footprint: Footprint,
     if nl > 1:
         inner_pads = []
         for p in sorted(single_pads, key=depth):
+            if cancel_check and cancel_check():    # #621
+                # Untried balls are NOT pushed into inner_pads: they were never
+                # attempted, so they must not reach the failure ledger either.
+                break
             if depth(p) > outer_depth:
                 inner_pads.append(p)
                 continue
@@ -1745,6 +1765,8 @@ def generate_underpad_escape(footprint: Footprint,
     remaining_pairs.sort(key=lambda t: depth(t[1]) + depth(t[2]), reverse=True)
     inner_cands = [(L, True) for L in range(nl) if L != top_idx]
     for base, pp, nn in remaining_pairs:
+        if cancel_check and cancel_check():    # #621
+            break
         if (try_coupled(pp, nn, inner_cands)
                 or try_coupled_endon(pp, nn, inner_cands)):
             n_coupled += 1
@@ -1787,6 +1809,8 @@ def generate_underpad_escape(footprint: Footprint,
     n_db_esc = 0
     inner_pads.sort(key=depth, reverse=True)
     for p in inner_pads:
+        if cancel_check and cancel_check():    # #621
+            break
         # Dog-bone route (#128): the via already has a reserved gap site; the
         # inner run starts AT the via, so the ball-grid position stays free.
         # Any failure falls through to the classic via-in-pad A* (the classic
