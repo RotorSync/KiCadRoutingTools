@@ -340,6 +340,25 @@ def pad_blocked_cells_array(
     return cells
 
 
+# Exact-key memo for the capsule rasterizer. Profiling the orangecrab rescue
+# tail (2026-08-14): the rescue/escalation ladders rebuild windowed obstacle
+# maps per rung (826 full builds in one step), re-rasterizing the same ~13k
+# segments ~800x each -- 10.8M calls / 332s of a 1228s profiled step, most
+# of it per-call meshgrid allocation. Keys are the EXACT input floats:
+# translation canonicalization is NOT bit-safe ((ax+k)*step float-rounds
+# differently per cell -- the #493 one-ULP class), so a hit returns the
+# byte-identical cell set by construction and cached-vs-computed behavior
+# cannot diverge. Arrays are returned READ-ONLY and shared (consumers stamp
+# or copy, never mutate -- audited: obstacle_map._add_segment_obstacle,
+# obstacle_cache._collect_segment_obstacles, plane_obstacle_builder,
+# blocking_analysis). Bounded by total cached rows; wholesale clear on
+# overflow (the keyspace only churns via per-rung clearance margins).
+_SEG_CAPSULE_CACHE: Dict[Tuple[float, float, float, float, float, float],
+                         "np.ndarray"] = {}
+_SEG_CAPSULE_ROWS = 0
+_SEG_CAPSULE_ROW_CAP = 8_000_000   # ~64 MB of (N,2) int32
+
+
 def segment_blocked_cells_array(x1: float, y1: float, x2: float, y2: float,
                                 margin: float, grid_step: float) -> "np.ndarray":
     """(N, 2) int32 cells whose centre is within ``margin`` mm of the TRUE float
@@ -352,7 +371,15 @@ def segment_blocked_cells_array(x1: float, y1: float, x2: float, y2: float,
     staircase under-covered the perpendicular direction between steps. A foreign
     track cleared the rounded stamp but grazed the real track (issue #70/B). Here
     distances are measured from the real segment, so off-grid + diagonal are exact.
+
+    The result is memoized (exact float key) and READ-ONLY -- callers must not
+    mutate it.
     """
+    global _SEG_CAPSULE_ROWS
+    key = (x1, y1, x2, y2, margin, grid_step)
+    cached = _SEG_CAPSULE_CACHE.get(key)
+    if cached is not None:
+        return cached
     inv = 1.0 / grid_step
     glo_x = int(math.floor((min(x1, x2) - margin) * inv))
     ghi_x = int(math.ceil((max(x1, x2) + margin) * inv))
@@ -376,6 +403,12 @@ def segment_blocked_cells_array(x1: float, y1: float, x2: float, y2: float,
     out = np.empty((int(mask.sum()), 2), dtype=np.int32)
     out[:, 0] = gxg[mask]
     out[:, 1] = gyg[mask]
+    out.setflags(write=False)
+    if _SEG_CAPSULE_ROWS + len(out) > _SEG_CAPSULE_ROW_CAP:
+        _SEG_CAPSULE_CACHE.clear()
+        _SEG_CAPSULE_ROWS = 0
+    _SEG_CAPSULE_CACHE[key] = out
+    _SEG_CAPSULE_ROWS += len(out)
     return out
 
 
