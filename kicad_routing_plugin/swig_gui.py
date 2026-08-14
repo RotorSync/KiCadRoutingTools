@@ -1819,22 +1819,11 @@ class RoutingDialog(wx.Dialog):
             on_complete=self._on_tab_operation_complete,
             append_log=self._append_log,
             sync_pcb_data_callback=self._sync_pcb_data_from_board,
-            get_claude_params=self._placement_ai_params,
         )
         self.ai_notebook.AddPage(self.placement_tab, "Placement")
         sizer.Add(self.ai_notebook, 1, wx.EXPAND)
         container.SetSizer(sizer)
         return container
-
-    def _placement_ai_params(self):
-        """Claude-pinned model/effort for the Placement sub-tab. Placement
-        runs require Claude Code regardless of the AI backend selection
-        (the opencode analysis agent denies edits), so this reads the AI
-        tab's remembered CLAUDE entries, not the current backend's."""
-        return {
-            'model': self.ai_tab.get_model_value_for('claude'),
-            'effort': self.ai_tab.get_effort_value_for('claude'),
-        }
 
     def _ai_params(self):
         """The AI tab's backend/model/effort selection, for the other tabs'
@@ -2584,6 +2573,11 @@ class RoutingDialog(wx.Dialog):
         self.ai_tab.set_backend_value(None)
         self.ai_tab.set_model_value(None)
         self.ai_tab.set_effort_value(None)
+
+        # Reset the Placement sub-tab's backend/model/effort too
+        self.placement_tab.set_backend_value(None)
+        self.placement_tab.set_model_value(None)
+        self.placement_tab.set_effort_value(None)
 
         # Reset component dropdowns to "All"
         if self.net_panel.component_dropdown:

@@ -49,6 +49,9 @@ for _sib in ('py_placer', 'py_tools'):
 
 MODE_LABELS = {"place": "Place", "place_route": "Place + Route"}
 
+# "Default" combo entry = don't pass the model/effort flag (ai_gui convention).
+DEFAULT_CHOICE = "Default"
+
 # Transcript control cap: an hours-long stream-json run grows without bound;
 # when the text exceeds the cap the oldest quarter is dropped.
 _TRANSCRIPT_CAP = 1024 * 1024
@@ -420,15 +423,13 @@ class PlacementTab(wx.Panel):
     """Placement sub-tab of the AI notebook (see module docstring)."""
 
     def __init__(self, parent, pcb_data, board_filename, on_complete=None,
-                 append_log=None, sync_pcb_data_callback=None,
-                 get_claude_params=None):
+                 append_log=None, sync_pcb_data_callback=None):
         super().__init__(parent)
         self.pcb_data = pcb_data
         self.board_filename = board_filename
         self.on_complete = on_complete
         self.append_log = append_log or (lambda text: None)
         self.sync_pcb_data_callback = sync_pcb_data_callback
-        self.get_claude_params = get_claude_params
         # The backend dropdown shows every harness but only
         # PLACEMENT_SUPPORTED_BACKENDS can actually be selected (today:
         # Claude Code - the skills must write, and e.g. opencode's analysis
@@ -477,11 +478,22 @@ class PlacementTab(wx.Panel):
         self.backend_choice.SetToolTip(
             "Harness that drives the placement skills. Only Claude Code is "
             "supported today (placement runs must WRITE, and the other "
-            "harnesses' agents deny edits); more harnesses later. "
-            "Model/effort come from the AI tab's Claude entries.")
+            "harnesses' agents deny edits); more harnesses later.")
         self.backend_choice.Bind(wx.EVT_CHOICE, self._on_backend_choice)
         backend_row.Add(self.backend_choice, 1)
         ai_sizer.Add(backend_row, 0, wx.EXPAND | wx.ALL, 3)
+        sel_grid = wx.FlexGridSizer(cols=2, vgap=3, hgap=4)
+        sel_grid.AddGrowableCol(1)
+        sel_grid.Add(wx.StaticText(self, label="Model:"), 0,
+                     wx.ALIGN_CENTER_VERTICAL)
+        self.model_choice = wx.ComboBox(self, value=DEFAULT_CHOICE, choices=[])
+        sel_grid.Add(self.model_choice, 0, wx.EXPAND)
+        sel_grid.Add(wx.StaticText(self, label="Effort:"), 0,
+                     wx.ALIGN_CENTER_VERTICAL)
+        self.effort_choice = wx.ComboBox(self, value=DEFAULT_CHOICE, choices=[])
+        sel_grid.Add(self.effort_choice, 0, wx.EXPAND)
+        ai_sizer.Add(sel_grid, 0, wx.EXPAND | wx.ALL, 3)
+        self._populate_ai_combos()
         self.cli_status_label = wx.StaticText(self, label="")
         ai_sizer.Add(self.cli_status_label, 0, wx.EXPAND | wx.ALL, 3)
         self.extra_instructions = wx.TextCtrl(
@@ -568,6 +580,39 @@ class PlacementTab(wx.Panel):
         self.status_text.Wrap(290)
         self.Layout()
 
+    def _populate_ai_combos(self):
+        """Load the selected backend's model/effort suggestions, keeping a
+        non-default entry the user already typed (AITab per-backend-memory
+        semantics collapse to this while only one backend is supported)."""
+        for ctrl, suggestions, tooltip in (
+                (self.model_choice, self.backend.model_suggestions,
+                 self.backend.model_tooltip),
+                (self.effort_choice, self.backend.effort_suggestions,
+                 self.backend.effort_tooltip)):
+            current = ctrl.GetValue().strip()
+            ctrl.Set(list(suggestions))
+            ctrl.SetValue(current or DEFAULT_CHOICE)
+            ctrl.SetToolTip(tooltip)
+
+    @staticmethod
+    def _combo_value(ctrl):
+        value = ctrl.GetValue().strip()
+        return None if not value or value == DEFAULT_CHOICE else value
+
+    def get_model_value(self):
+        """The model flag value for placement runs (None = CLI default)."""
+        return self._combo_value(self.model_choice)
+
+    def set_model_value(self, value):
+        self.model_choice.SetValue(value or DEFAULT_CHOICE)
+
+    def get_effort_value(self):
+        """The effort flag value for placement runs (None = CLI default)."""
+        return self._combo_value(self.effort_choice)
+
+    def set_effort_value(self, value):
+        self.effort_choice.SetValue(value or DEFAULT_CHOICE)
+
     def _on_backend_choice(self, event):
         bid = BACKEND_IDS[self.backend_choice.GetSelection()]
         if bid not in PLACEMENT_SUPPORTED_BACKENDS:
@@ -580,6 +625,7 @@ class PlacementTab(wx.Panel):
                 "that today.")
             return
         self.backend = BACKENDS[bid]
+        self._populate_ai_combos()
         self._refresh_cli_status()
 
     def get_backend_value(self):
@@ -593,6 +639,7 @@ class PlacementTab(wx.Panel):
             PLACEMENT_SUPPORTED_BACKENDS[0]
         self.backend = BACKENDS[bid]
         self.backend_choice.SetSelection(BACKEND_IDS.index(bid))
+        self._populate_ai_combos()
         self._refresh_cli_status()
 
     def _refresh_cli_status(self):
@@ -641,9 +688,8 @@ class PlacementTab(wx.Panel):
             self.backend, workdir, staged, mode,
             extra=self.extra_instructions.GetValue())
 
-        params = self.get_claude_params() if self.get_claude_params else {}
-        model = params.get('model') or None
-        effort = params.get('effort') or None
+        model = self.get_model_value()
+        effort = self.get_effort_value()
 
         label = MODE_LABELS[mode]
         self._set_running_ui(True)

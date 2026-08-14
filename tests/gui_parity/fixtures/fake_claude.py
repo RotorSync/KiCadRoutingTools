@@ -49,6 +49,10 @@ def main():
     if not os.path.isfile(staged):
         sys.stderr.write(f"fake_claude: staged board missing: {staged}\n")
         return 2
+    # Dump the received argv (prompt elided) so the test can assert flags
+    # like --model/--effort actually reached the CLI.
+    with open(os.path.join(workdir, "argv.json"), "w") as f:
+        json.dump([a if a is not prompt else "<prompt>" for a in argv], f)
 
     emit({"type": "system", "subtype": "init", "model": "fake-model",
           "claude_code_version": "0.0-test", "cwd": workdir,

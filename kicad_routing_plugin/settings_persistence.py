@@ -246,6 +246,8 @@ def get_dialog_settings(dialog):
         # hours-long run's stream can be tens of MB).
         'ai_active_subtab': dialog.ai_notebook.GetSelection() if hasattr(dialog, 'ai_notebook') else 0,
         'placement_backend': dialog.placement_tab.get_backend_value(),
+        'placement_model': dialog.placement_tab.get_model_value(),
+        'placement_effort': dialog.placement_tab.get_effort_value(),
         'placement_extra_instructions': dialog.placement_tab.extra_instructions.GetValue(),
         'placement_last_workdir': getattr(dialog.placement_tab, 'last_workdir', '') or '',
         'placement_labels_options': dialog.placement_tab.labels_options.get_config(),
@@ -735,6 +737,10 @@ def restore_dialog_settings(dialog, settings):
     if 'placement_backend' in settings:
         # Unsupported/unknown saved ids revert to Claude Code inside the tab.
         dialog.placement_tab.set_backend_value(settings['placement_backend'])
+    if 'placement_model' in settings:
+        dialog.placement_tab.set_model_value(settings['placement_model'])
+    if 'placement_effort' in settings:
+        dialog.placement_tab.set_effort_value(settings['placement_effort'])
     if 'placement_extra_instructions' in settings:
         dialog.placement_tab.extra_instructions.SetValue(
             settings['placement_extra_instructions'])

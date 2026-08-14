@@ -132,6 +132,15 @@ def main():
     check("restore of unsupported backend reverts too",
           tab.get_backend_value() == 'claude')
 
+    # Model/effort dropdowns: suggestions loaded, Default means no flag,
+    # a chosen value must reach the CLI argv (asserted post-run below).
+    check("model/effort suggestions loaded",
+          tab.model_choice.GetCount() > 1 and tab.effort_choice.GetCount() > 1)
+    check("Default resolves to no flag",
+          tab.get_model_value() is None and tab.get_effort_value() is None)
+    tab.model_choice.SetValue('opus')
+    tab.effort_choice.SetValue('high')
+
     tab._start_ai_run("place")
     check("run accepted (runner live)", tab._runner is not None)
     workdir = tab.last_workdir
@@ -193,6 +202,18 @@ def main():
               os.path.isfile(png), png)
     else:
         print("  [skip] preview render (Pillow not importable)")
+    try:
+        import json as _json
+        with open(os.path.join(workdir, "argv.json")) as f:
+            argv_seen = _json.load(f)
+    except OSError:
+        argv_seen = []
+    check("model dropdown value reached the CLI",
+          "--model" in argv_seen
+          and argv_seen[argv_seen.index("--model") + 1] == "opus", str(argv_seen))
+    check("effort dropdown value reached the CLI",
+          "--effort" in argv_seen
+          and argv_seen[argv_seen.index("--effort") + 1] == "high", str(argv_seen))
     check("RESULT parsed into pending result",
           tab._pending_result is not None
           and os.path.basename(tab._pending_result.get("board") or "")
