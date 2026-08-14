@@ -671,3 +671,54 @@ HEAD 2026-07-30 parity audit 191abc4..d73b1d6 (3 commits). Outcome: no gaps.
     gate runs a fanout step; ea992d9), its stale _path bootstrap
     (3c4fc48), and the #562 rename breaking every recorded manifest's
     repair step (relocate_moved_scripts rename table, 89914ce).
+
+ADDENDUM 2026-08-14 (301ee1b3, _global_to_local sign fix cherry-picked from
+the placement branch / PR #633 commit a2e96995) -- scope: that ONE hunk. The
+SHA at the top of this file is NOT bumped: no full audit ran, only this
+change was analysed.
+
+  * The bug: py_router/kicad_parser._global_to_local computed
+    R(-theta).(g - f), which IS local_to_global's forward map, not its
+    inverse. Correct inverse is R(+theta).(g - f). Round-trip over
+    kicad_files/ puts the OLD body wrong for roughly half the pads on every
+    board with rotated footprints -- glasgow_revC 612/1149 (worst 46.0mm),
+    kit-dev-coldfire 437/825 (worst 147.4mm), interf_u 156/379 (worst
+    82.1mm). Boards with no rotated footprint (cap_chain) were unaffected
+    either way. The NEW body round-trips to float noise (<=3e-7mm, which is
+    local_to_global's nm snap).
+  * Reach: ONE caller -- build_pcb_data_from_board's pad-local fallback, so
+    the GUI/pcbnew front only. The text parser reads pad locals verbatim
+    from the file, so the CLI never executed this and CLI routing cannot
+    change. It was NOT dormant on the GUI side: KiCad 7+ removed
+    pad.GetPos0() (verified absent on KiCad 10.0.0-103), so every pad in a
+    GUI-built PCBData went through the fallback.
+  * What actually consumes pad.local_x/local_y, and what the fix changes:
+      - qfn_fanout/layout.py (side classification, escape direction).
+        MEASURED, not reasoned: the real FanoutTab on a real headless
+        RoutingDialog, haasoscope_pro_max_test.kicad_pcb U2 (QFN-76 @ 90deg,
+        72 nets), run twice with only the formula swapped. Side labels flip
+        as predicted (bottom 17/top 3 -> bottom 3/top 17) but the emitted
+        copper is IDENTICAL: 104 tracks each way, 0 failed, all 104 escapes
+        outward, track sets equal. Escape geometry is built from pad
+        GLOBALS, so a 180deg relabel of a centre-symmetric package moves
+        nothing. QFN fanout output is UNCHANGED for orthogonal parts -- the
+        fix corrects wrong data that this consumer does not turn into
+        different copper.
+      - bga_fanout/rotate_frame.py:88 overwrites pad.global_x/y with
+        (cx + local_x, cy + local_y). This one WOULD move copper, but it is
+        gated behind is_orthogonal() and kicad_files/ holds ZERO
+        non-orthogonal multi-pad footprints, so it is unexercised here. At a
+        hypothetical 45deg/30deg placement of U3 (BGA-529) the old locals
+        misplace balls by up to 17.6mm/12.4mm -- load-bearing whenever
+        #137's frame transform actually runs.
+      - placement/utility.py (footprint bbox) and placement/quench.py
+        (pads_local): placement only, no routing consequence.
+    Signal routing, diff pairs and planes read global_x/global_y throughout
+    and are untouched.
+  * Gate on main WITH the fix: test_gui_engine_parity VERDICT PARITY, copper
+    sets IDENTICAL (segments 1267=1267, vias 128=128, 0 one-sided, drc 0/0,
+    kicad_unconnected 0/0).
+  * Standing gap this exposed: no gate runs a fanout step (same blind spot
+    ea992d9 hit above), so nothing in the suite would have caught this
+    either way. The QFN before/after above was a one-off harness, not a
+    committed gate.
