@@ -407,50 +407,164 @@ def _cluster_points(pcb_data, net_id, x, y, layer, comps, tol=0.06):
             or ([(x, y, layer)] if layer else [(x, y)])), root
 
 
+def _polygon_index(poly):
+    """Exact acceleration structure for point_in_polygon over one polygon.
+
+    NOT an approximation -- it returns the identical boolean for identical
+    arithmetic. The even-odd ray cast only ever flips on edges that straddle
+    the query's y ((yi > y) != (yj > y)), and the flip count's PARITY is
+    order-independent, so restricting the scan to the edges a y-bucket holds
+    (plus rejecting y outside [miny, maxy)) changes nothing but the work:
+
+      * a horizontal edge (yi == yj) can never satisfy the straddle test, so
+        dropping it is exact;
+      * an edge straddles y iff min(yi, yj) <= y < max(yi, yj), so bucketing
+        each edge over the buckets its half-open y-span touches (inclusive of
+        the end bucket -- conservative, never lossy) keeps every edge that
+        could flip;
+      * y < miny has no edge with ylo <= y, and y >= maxy has no edge with
+        y < yhi, so both are provably zero flips == False.
+
+    The surviving per-edge test below is copied term for term from
+    check_connected.point_in_polygon, so it is float-identical, not merely
+    close. Deliberately no x-bounds early-out: the "left of the bbox implies
+    an even flip count" argument is only true up to rounding of the
+    interpolated crossing, and the y index already carries the speedup.
+    """
+    n = len(poly)
+    if n < 3:
+        return None
+    ys = [p[1] for p in poly]
+    miny, maxy = min(ys), max(ys)
+    span = maxy - miny
+    if span <= 0:
+        return None                      # all-horizontal: never inside
+    nb = max(16, min(1024, n // 4))
+    bh = span / nb
+    buckets = [[] for _ in range(nb)]
+    j = n - 1
+    for i in range(n):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        j = i
+        if yi == yj:
+            continue
+        ylo, yhi = (yi, yj) if yi < yj else (yj, yi)
+        k0 = int((ylo - miny) / bh)
+        k1 = int((yhi - miny) / bh)
+        # Clamp BOTH ends into range. ylo < maxy strictly holds for every
+        # non-horizontal edge, so k0 == nb is unreachable in real arithmetic
+        # -- but it is reachable by rounding when ylo sits an ulp under maxy,
+        # and an unclamped k0 would make range(k0, k1 + 1) empty and drop the
+        # edge from the index entirely (a silently wrong containment answer).
+        k0 = 0 if k0 < 0 else (nb - 1 if k0 >= nb else k0)
+        k1 = 0 if k1 < 0 else (nb - 1 if k1 >= nb else k1)
+        if k1 < k0:
+            k1 = k0
+        e = (xi, yi, xj, yj)
+        for k in range(k0, k1 + 1):
+            buckets[k].append(e)
+    return (miny, maxy, bh, buckets)
+
+
+def _pip_indexed(x, y, idx):
+    """point_in_polygon(x, y, poly) through a _polygon_index -- same result."""
+    if idx is None:
+        return False
+    miny, maxy, bh, buckets = idx
+    if y < miny or y >= maxy:
+        return False
+    k = int((y - miny) / bh)
+    if k < 0:
+        k = 0
+    elif k >= len(buckets):
+        k = len(buckets) - 1
+    inside = False
+    for xi, yi, xj, yj in buckets[k]:
+        if ((yi > y) != (yj > y)) and \
+                (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+            inside = not inside
+    return inside
+
+
 def _trace_real_island(start, net_id, layer, pcb_data, zone_polys, margin,
-                       step=0.25, max_cells=40000):
+                       step=0.25, max_cells=40000, cache=None):
     """BFS over provably-REAL fill from the ratsnest point: cells inside one
     zone outline whose `margin` disc is clear of all foreign copper (exact
     geometry, spatially bucketed). This maps the actual island KiCad saw,
     so seeds can come from anywhere on it -- not just the one reported
-    point, which often sits at the island's edge."""
+    point, which often sits at the island's edge.
+
+    `cache` (optional dict) memoizes the three pure things this rebuilt from
+    scratch on every call -- the zone-outline point-in-polygon indexes, the
+    foreign-copper buckets, and the traced components themselves. It is the
+    CALLER's job to scope it to a stretch where pcb_data's copper cannot
+    change; the keys carry the copper counts as a second guard. Only an
+    UNCAPPED trace is memoized: it is then exactly the 4-connected component
+    of clear cells, so a later start whose seed lands inside it would run the
+    identical BFS to the identical set. A capped trace depends on BFS order
+    from its own seed, so it is never reused.
+    """
     from collections import deque
     from check_drc import point_to_pad_distance
-    from check_connected import point_in_polygon
 
-    buckets = {}
+    _ckey = (net_id, layer, margin, step, max_cells,
+             len(pcb_data.segments), len(pcb_data.vias))
 
-    def _add_span(x1, y1, x2, y2, reach, obj):
-        for bx in range(int(min(x1, x2) - reach) - 1,
-                        int(max(x1, x2) + reach) + 2):
-            for by in range(int(min(y1, y2) - reach) - 1,
-                            int(max(y1, y2) + reach) + 2):
-                buckets.setdefault((bx, by), []).append(obj)
+    # Zone-outline indexes: a pure function of the polygon list.
+    idxs = None
+    if cache is not None:
+        _got = cache.get(('polys', net_id, layer))
+        if _got is not None and _got[0] is zone_polys:
+            idxs = _got[1]
+    if idxs is None:
+        idxs = [_polygon_index(p) for p in zone_polys]
+        if cache is not None:
+            # Hold the polygon list alongside its indexes: the identity test
+            # above is only sound while that list is alive (id() reuse).
+            cache[('polys', net_id, layer)] = (zone_polys, idxs)
 
-    for v in pcb_data.vias:
-        if v.net_id != net_id:
-            _add_span(v.x, v.y, v.x, v.y, v.size / 2 + margin,
-                      ('c', v.x, v.y, v.size / 2))
-    for s in pcb_data.segments:
-        if s.net_id != net_id and s.layer == layer:
-            _add_span(s.start_x, s.start_y, s.end_x, s.end_y,
-                      s.width / 2 + margin, ('s', s))
-    for pads in pcb_data.pads_by_net.values():
-        for p in pads:
-            if p.net_id == net_id:
-                continue
-            if p.drill <= 0 and layer not in p.layers \
-                    and '*.Cu' not in p.layers:
-                continue
-            r = max(p.size_x, p.size_y) / 2
-            _add_span(p.global_x, p.global_y, p.global_x, p.global_y,
-                      r + margin, ('p', p))
+    buckets = cache.get(('buckets', _ckey)) if cache is not None else None
+    if buckets is not None:
+        _need_buckets = False
+    else:
+        _need_buckets = True
+        buckets = {}
+
+    if _need_buckets:
+        def _add_span(x1, y1, x2, y2, reach, obj):
+            for bx in range(int(min(x1, x2) - reach) - 1,
+                            int(max(x1, x2) + reach) + 2):
+                for by in range(int(min(y1, y2) - reach) - 1,
+                                int(max(y1, y2) + reach) + 2):
+                    buckets.setdefault((bx, by), []).append(obj)
+
+        for v in pcb_data.vias:
+            if v.net_id != net_id:
+                _add_span(v.x, v.y, v.x, v.y, v.size / 2 + margin,
+                          ('c', v.x, v.y, v.size / 2))
+        for s in pcb_data.segments:
+            if s.net_id != net_id and s.layer == layer:
+                _add_span(s.start_x, s.start_y, s.end_x, s.end_y,
+                          s.width / 2 + margin, ('s', s))
+        for pads in pcb_data.pads_by_net.values():
+            for p in pads:
+                if p.net_id == net_id:
+                    continue
+                if p.drill <= 0 and layer not in p.layers \
+                        and '*.Cu' not in p.layers:
+                    continue
+                r = max(p.size_x, p.size_y) / 2
+                _add_span(p.global_x, p.global_y, p.global_x, p.global_y,
+                          r + margin, ('p', p))
+        if cache is not None:
+            cache[('buckets', _ckey)] = buckets
 
     def clear(x, y):
         probes = ((x, y), (x + margin, y), (x - margin, y),
                   (x, y + margin), (x, y - margin))
-        if not any(all(point_in_polygon(px, py, poly) for px, py in probes)
-                   for poly in zone_polys):
+        if not any(all(_pip_indexed(px, py, ix) for px, py in probes)
+                   for ix in idxs):
             return False
         for obj in buckets.get((int(x), int(y)), ()):
             if obj[0] == 'c':
@@ -490,6 +604,12 @@ def _trace_real_island(start, net_id, layer, pcb_data, zone_polys, margin,
             break
     if seed is None:
         return set()
+    # Already traced this component (from a different anchor on the same
+    # island)? Same predicate + same seed-component => same BFS => same set.
+    if cache is not None:
+        for _comp in cache.get(('comp', _ckey), ()):
+            if seed in _comp:
+                return set(_comp)
     cells = {seed}
     q = deque([seed])
     while q and len(cells) < max_cells:
@@ -501,6 +621,8 @@ def _trace_real_island(start, net_id, layer, pcb_data, zone_polys, margin,
             if clear(n[0] * step, n[1] * step):
                 cells.add(n)
                 q.append(n)
+    if cache is not None and len(cells) < max_cells:
+        cache.setdefault(('comp', _ckey), []).append(frozenset(cells))
     return cells
 
 
@@ -551,7 +673,7 @@ def _island_seed_points(cells, step, pcb_data, net_id, layer,
     return pts
 
 
-def _snap_zone_anchor(pcb_data, net_id, x, y, layer, clearance):
+def _snap_zone_anchor(pcb_data, net_id, x, y, layer, clearance, cache=None):
     """Canonicalize a kicad-reported Zone anchor to a stable point on its
     fill island. kicad-cli's fill/ratsnest anchor coordinates wobble from
     run to run (its zone fill is threaded), and every downstream decision
@@ -566,7 +688,14 @@ def _snap_zone_anchor(pcb_data, net_id, x, y, layer, clearance):
     rung than a clear one), which would change the traced cell set -- so
     one refinement pass re-traces from the canonical candidate (open fill,
     coarse rung) to make the result rung-independent. Returns (x, y)
-    unchanged when no island is traceable or the trace over-floods."""
+    unchanged when no island is traceable or the trace over-floods.
+
+    `cache` is forwarded to _trace_real_island (see its docstring). Snapping a
+    round's anchors is the oracle's single hottest phase -- every anchor
+    re-flooded its island from scratch, and a plane net's links overwhelmingly
+    share a handful of islands, so the identical flood ran dozens of times
+    (storm_tracker: 362 anchors, 155s -> 1.3s).
+    """
     if not layer:
         return x, y
     zp = [z.polygon for z in (getattr(pcb_data, 'zones', []) or [])
@@ -579,7 +708,7 @@ def _snap_zone_anchor(pcb_data, net_id, x, y, layer, clearance):
     def _trace(sx, sy):
         for _m in (max(clearance, 0.2) + 0.1, 0.2, 0.15):
             cells = _trace_real_island((sx, sy), net_id, layer, pcb_data,
-                                       zp, _m, max_cells=_cap)
+                                       zp, _m, max_cells=_cap, cache=cache)
             if cells:
                 return cells
         return None
@@ -1077,8 +1206,14 @@ def oracle_reconnect(board_file: str, net_names, config,
             _links_unavailable = True
             break
         if progress_callback:
-            progress_callback(0, 0, f"KiCad-oracle: running kicad-cli DRC "
-                                    f"(round {rnd + 1})...")
+            # Name the link source that actually runs: the default is the
+            # deterministic exact-fill refill (#490), not kicad-cli, and a
+            # label naming the wrong tool sends anyone profiling a slow run
+            # (this leg is the longest in the chain) after the wrong process.
+            progress_callback(0, 0,
+                              f"KiCad-oracle: finding missing links via "
+                              f"{'kicad-cli DRC' if env_knobs.LEGACY_ORACLE else 'KiCad zone refill'} "
+                              f"(round {rnd + 1})...")
         links = None
         # DETERMINISTIC link source (#490): kicad-cli DRC's threaded
         # connectivity reported three different link sets on one unchanged
@@ -1166,6 +1301,14 @@ def oracle_reconnect(board_file: str, net_names, config,
         # by jitter drive identical decisions (same-pos test, split, retry
         # cap, seeds), then order the links canonically so processing order
         # doesn't depend on the report's ordering either.
+        # Island-trace cache, scoped to EXACTLY this loop: pcb_data was just
+        # parsed and no copper lands until the link loop below, so the traced
+        # components cannot go stale here. Dropped on exit rather than kept
+        # per-round -- these are cell sets, and the link loop mutates copper.
+        if progress_callback:
+            progress_callback(0, 0, f"KiCad-oracle round {rnd + 1}: "
+                                    f"canonicalizing {len(ours)} anchor(s)...")
+        _snap_cache = {}
         _snapped = []
         for net_name, A, B in ours:
             nid = name_to_id.get(net_name)
@@ -1174,13 +1317,16 @@ def oracle_reconnect(board_file: str, net_names, config,
                 bx_, by_, bl_, bk_ = B
                 if ak_ == 'zone':
                     ax_, ay_ = _snap_zone_anchor(pcb_data, nid, ax_, ay_,
-                                                 al_, config.clearance)
+                                                 al_, config.clearance,
+                                                 cache=_snap_cache)
                     A = (ax_, ay_, al_, ak_)
                 if bk_ == 'zone':
                     bx_, by_ = _snap_zone_anchor(pcb_data, nid, bx_, by_,
-                                                 bl_, config.clearance)
+                                                 bl_, config.clearance,
+                                                 cache=_snap_cache)
                     B = (bx_, by_, bl_, bk_)
             _snapped.append((net_name, A, B))
+        del _snap_cache
         ours = sorted(_snapped,
                       key=lambda l: (l[0], l[1][:2], l[2][:2],
                                      l[1][3], l[2][3]))
