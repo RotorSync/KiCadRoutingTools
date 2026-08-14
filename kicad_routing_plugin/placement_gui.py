@@ -482,22 +482,21 @@ class PlacementTab(wx.Panel):
         self.backend_choice.Bind(wx.EVT_CHOICE, self._on_backend_choice)
         backend_row.Add(self.backend_choice, 1)
         ai_sizer.Add(backend_row, 0, wx.EXPAND | wx.ALL, 3)
-        sel_grid = wx.FlexGridSizer(cols=2, vgap=3, hgap=4)
-        sel_grid.AddGrowableCol(1)
-        sel_grid.Add(wx.StaticText(self, label="Model:"), 0,
-                     wx.ALIGN_CENTER_VERTICAL)
+        sel_row = wx.BoxSizer(wx.HORIZONTAL)
+        sel_row.Add(wx.StaticText(self, label="Model:"), 0,
+                    wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         self.model_choice = wx.ComboBox(self, value=DEFAULT_CHOICE, choices=[])
-        sel_grid.Add(self.model_choice, 0, wx.EXPAND)
-        sel_grid.Add(wx.StaticText(self, label="Effort:"), 0,
-                     wx.ALIGN_CENTER_VERTICAL)
+        sel_row.Add(self.model_choice, 1, wx.RIGHT, 6)
+        sel_row.Add(wx.StaticText(self, label="Effort:"), 0,
+                    wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         self.effort_choice = wx.ComboBox(self, value=DEFAULT_CHOICE, choices=[])
-        sel_grid.Add(self.effort_choice, 0, wx.EXPAND)
-        ai_sizer.Add(sel_grid, 0, wx.EXPAND | wx.ALL, 3)
+        sel_row.Add(self.effort_choice, 1)
+        ai_sizer.Add(sel_row, 0, wx.EXPAND | wx.ALL, 3)
         self._populate_ai_combos()
         self.cli_status_label = wx.StaticText(self, label="")
         ai_sizer.Add(self.cli_status_label, 0, wx.EXPAND | wx.ALL, 3)
         self.extra_instructions = wx.TextCtrl(
-            self, style=wx.TE_MULTILINE, size=(-1, 54))
+            self, style=wx.TE_MULTILINE, size=(-1, 40))
         self.extra_instructions.SetToolTip(
             "Optional extra instructions passed to the agent (constraints, "
             "focus areas, budget hints).")
@@ -530,15 +529,22 @@ class PlacementTab(wx.Panel):
         labels_sizer.Add(self.action_btn, 0, wx.EXPAND | wx.ALL, 3)
         right.Add(labels_sizer, 0, wx.EXPAND | wx.BOTTOM, 6)
 
+        top.Add(right, 0, wx.EXPAND)
+        sizer.Add(top, 1, wx.EXPAND | wx.ALL, 5)
+
+        # Status spans the FULL dialog width (not the narrow right column):
+        # run statuses (elapsed + stage + summary) are long, and the column
+        # both clipped them and ran out of height for the buttons below.
+        # Apply/Close live here too - they are run-level controls, and moving
+        # them out keeps the right column short enough to never clip.
         status_box = wx.StaticBox(self, label="Status")
         status_sizer = wx.StaticBoxSizer(status_box, wx.VERTICAL)
+        status_row = wx.BoxSizer(wx.HORIZONTAL)
         self.status_text = wx.StaticText(self, label="Ready")
-        status_sizer.Add(self.status_text, 0, wx.EXPAND | wx.ALL, 3)
-        self.progress_bar = wx.Gauge(self, range=100)
-        status_sizer.Add(self.progress_bar, 0, wx.EXPAND | wx.ALL, 3)
-        right.Add(status_sizer, 0, wx.EXPAND | wx.BOTTOM, 6)
-
-        btn_row = wx.BoxSizer(wx.HORIZONTAL)
+        # Two lines reserved so a rare wrap doesn't re-flow the page.
+        self.status_text.SetMinSize(
+            (-1, self.status_text.GetCharHeight() * 2 + 4))
+        status_row.Add(self.status_text, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 3)
         self.apply_btn = wx.Button(self, label="Apply Result to Board")
         self.apply_btn.Enable(False)
         self.apply_btn.SetToolTip(
@@ -546,12 +552,12 @@ class PlacementTab(wx.Panel):
             "(footprint poses; Place + Route also replaces all tracks/vias). "
             "Asks for confirmation first.")
         self.cancel_btn = wx.Button(self, label="Close")
-        btn_row.Add(self.apply_btn, 1, wx.RIGHT, 3)
-        btn_row.Add(self.cancel_btn, 0)
-        right.Add(btn_row, 0, wx.EXPAND)
-
-        top.Add(right, 0, wx.EXPAND)
-        sizer.Add(top, 1, wx.EXPAND | wx.ALL, 5)
+        status_row.Add(self.apply_btn, 0, wx.ALL, 3)
+        status_row.Add(self.cancel_btn, 0, wx.ALL, 3)
+        status_sizer.Add(status_row, 0, wx.EXPAND)
+        self.progress_bar = wx.Gauge(self, range=100)
+        status_sizer.Add(self.progress_bar, 0, wx.EXPAND | wx.ALL, 3)
+        sizer.Add(status_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 5)
 
         self.transcript_ctrl = wx.TextCtrl(
             self, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2)
@@ -570,14 +576,13 @@ class PlacementTab(wx.Panel):
         self.cancel_btn.Bind(wx.EVT_BUTTON, self._on_cancel_or_close)
 
     def set_status(self, text):
-        """Set the status line, wrapped to the right column's width.
+        """Set the status line, wrapped to the tab's current width.
 
-        StaticText does not wrap on its own, and run statuses (elapsed +
-        stage + summary) routinely exceed the ~300 px column - unwrapped
-        they clip at the box edge.
+        StaticText does not wrap on its own; the box is full-width so this
+        only matters for unusually long summaries.
         """
         self.status_text.SetLabel(text)
-        self.status_text.Wrap(290)
+        self.status_text.Wrap(max(500, self.GetClientSize()[0] - 60))
         self.Layout()
 
     def _populate_ai_combos(self):
@@ -645,11 +650,15 @@ class PlacementTab(wx.Panel):
     def _refresh_cli_status(self):
         cli = self.backend.find_cli()
         if cli:
-            self.cli_status_label.SetLabel(f"{self.backend.label} CLI found: {cli}")
+            # One line; the full path rides in the tooltip (column height
+            # is the scarce resource here).
+            self.cli_status_label.SetLabel(f"{self.backend.label} CLI found.")
+            self.cli_status_label.SetToolTip(cli)
         else:
             self.cli_status_label.SetLabel(
                 self.backend.not_found_message() + " Then reopen this dialog.")
-        self.cli_status_label.Wrap(300)
+            self.cli_status_label.SetToolTip("")
+            self.cli_status_label.Wrap(300)
         self.place_btn.Enable(cli is not None)
         self.place_route_btn.Enable(cli is not None)
 
