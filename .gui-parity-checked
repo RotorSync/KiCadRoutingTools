@@ -1,3 +1,86 @@
+b2d8074b 2026-08-14 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit 61e56a0..b2d8074b: NO GAPS; one LATENT hazard hardened (below). Twenty
+upstream commits plus the hardening commit b2d8074b that closes this audit.
+The mechanical sweep is clean in all three dimensions CLAUDE.md names:
+NO new argparse flags on any of the six routing CLIs, NO added/removed
+batch_route or batch_route_diff_pairs kwargs, and exactly one new env knob
+(KICAD_RASTER_CACHE_MB, env_knobs.RASTER_CACHE_MB) which is read through the
+shared engine -- no flag, no control, no argparse default, so both fronts
+inherit it identically. Same env-knob-only class as the 61e56a0 audit.
+
+  * e9523f23 PROXIMITY_HEURISTIC_FACTOR 0 -> 0.02. A DEFAULT CHANGE, the class
+    CLAUDE.md warns must match on both fronts. It does: route.py/route_diff.py
+    argparse and the batch_route signature all read
+    defaults.PROXIMITY_HEURISTIC_FACTOR, and the GUI reads it in all three
+    places that matter (swig_gui SpinCtrlDouble `initial=`, its entry in
+    reset_params_to_defaults, and differential_gui's engine call).
+    HARDENED: swig_gui's engine call had a HARDCODED `config.get(
+    'proximity_heuristic_factor', 0.02)` fallback where its neighbours use
+    `defaults.*`. Dead code today (the dialog always supplies the key, and
+    0.02 is currently correct), but this is precisely the drift that caused
+    the regression e9523f23 fixes -- 1af3096 changed the module constant while
+    an explicit argparse default kept overriding it, and the corpus routed at
+    the old value for two more commits before b50fc86 exposed it (-17 nets on
+    a 5-board probe; restoring 0.02 recovered 14). Now reads defaults.*.
+  * 83b947bb #572 zero-length/duplicate forced-edge drop is INSIDE batch_route
+    (route.py:1711), i.e. the shared engine -- NOT a CLI main() post-pass, so
+    no Class-2 drift and gate 2 stays at 8 registered passes.
+  * 03b93453 per-WELD status reporting rides the EXISTING progress_callback
+    parameter inside kicad_oracle (shared), so whichever front supplies the
+    callback gets the new updates. Nothing to thread.
+  * 301ee1b3 _global_to_local sign fix is a kicad_parser change -- the one
+    class CLAUDE.md flags as NOT automatically shared, because the GUI COMPUTES
+    pad.local_x/local_y in build_pcb_data_from_board rather than reading them.
+    It is now covered by real gates (0c18db9c): test_fanout_rotated_gui (the
+    only gate that runs FANOUT, the sole routing consumer of local_x/local_y)
+    and the wx-free test_rotated_footprint_frame. Both run below. This
+    supersedes the 2026-08-14 ADDENDUM recorded under the de944ce entry.
+  * The nine perf commits (60b89202, d53c3ee8, 02f5375a, 14df3a67, b8da958b,
+    c45e8097, 15b718ce, b85436db, and 03b93453's dedup half) are memos and
+    batching INSIDE shared engine / low-level modules, each landed as
+    output-identical. Shared by construction.
+  * b9d201bc (AI-tab Save Plan filename) and the harness commits (a5efb461,
+    bfbde076, d3f6bd2c, 9097af39, 0c18db9c) touch no engine surface.
+
+SURVEYED, so the next audit need not re-derive it: the GUI's hardcoded numeric
+`config.get(key, <literal>)` fallbacks. 34 of them across swig_gui and
+differential_gui; 30 are value-identical to their shared constant and 4 only
+LOOK divergent -- differential_gui's clearance (0.1 vs defaults.CLEARANCE 0.25),
+via_size (0.3 vs 0.5) and via_drill (0.2 vs 0.3). Those are FALSE POSITIVES of
+a name->CONSTANT comparison: route_diff's argparse defaults for all three are
+None, meaning "resolve from the board's own net class" (#439), so
+defaults.CLEARANCE is not the value the CLI uses either -- and the GUI's config
+dict always supplies these keys from _effective_clearance/_via_size/_via_drill,
+making the fallbacks unreachable. No live divergence. They remain a latent
+class: a fallback literal cannot follow a changed constant.
+
+Parity evidence at b2d8074b (2026-08-14), all gates run, none skipped:
+  * gate 1 test_manifest_plan_parity: 9108 flag-checks / 402 manifests, 0
+    mismatches; 12 params resolved, 0 unresolved. PASS
+  * gate 2 test_cli_postpass_coverage: 8 registered / 15 active / 1
+    acknowledged CLI-only (fanout DRC graze audit, report-only), 0 unreachable,
+    0 failures, 0 warnings. PASS
+  * gate 3 test_settings_roundtrip: 181 keys; save, restore, legacy-dict
+    restore and re-save key parity all clean. PASS
+  * gate 4 test_gui_engine_parity: 3-step chain on splitflap_driver. Run
+    TWICE -- once at c45e8097 and again AT b2d8074b after the hardening
+    commit, so the SHA on line 1 is a measured result, not an inference
+    from 'the changed line was dead code'. Identical both times.
+    CLI conn_full=True issues=0 drc=0 kicad_unconnected=0; GUI identical.
+    COPPER SETS IDENTICAL -- segments 1267/1267, vias 128/128, 0 cli-only,
+    0 gui-only. PASS
+  * gate 5 test_cli_defaults_parity: 100 defaults across 6 CLIs, 0
+    disagreements. PASS
+  * fanout gate test_fanout_rotated_gui (U2 QFN-76 @ 90 deg): side
+    classification 78 pads 0 differing, copper 104/104 tracks identical, all
+    104 escapes outward on both fronts. 10/10. PASS
+  * test_rotated_footprint_frame (wx-free): 28/28. PASS
+
+Environment note: pcbnew 10.0.0-103-gacbf1898e0, wx 4.2.2a1 (wxWidgets 3.2.8),
+ApplePersistenceIgnoreState=1. The wx gates were PROBED, not assumed -- see the
+standing warning further down about markers carrying "pending a KiCad-python
+session" while the prerequisites worked the whole time.
+
 61e56a0 2026-08-13 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit de944ce..61e56a0: NO GAPS. Five commits, of which two touch the engine and
 both are ENV-KNOB-ONLY changes read through the shared engine -- no CLI flag, no
