@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from typing import List, Optional, Tuple, Dict, Set, Union
 from dataclasses import dataclass, field
+import env_knobs
 import numpy as np
+from collections import OrderedDict
 import math
 
 from kicad_parser import PCBData, Segment, Via, Pad, pad_drill_circles, pad_drill_capsule
@@ -458,6 +460,27 @@ def _banded_edge_distance_rows(px_axis, py_axis, x1, y1, x2, y2, threshold):
     return np.sqrt(out_sq)
 
 
+# Exact-key memo for polygon rasterization (2026-08-14 orangecrab
+# profiling: 123k calls / 52s -- the 830 rescue/escalation map builds
+# re-rasterize every keepout/cutout polygon each time, and those polygons
+# are net-independent, so escalation's board-global builds hit across ALL
+# nets and reconcile laps). Keyed on the exact polygon bytes + grid +
+# margin + clip (absolute-frame math, so translation canonicalization is
+# NOT bit-safe -- the #493 class); a hit returns the identical arrays by
+# construction, shared READ-ONLY (all consumers build masks / index; none
+# mutate -- audited). Bounded by total cached cells (a board-ring keepout
+# at a fine grid is millions of cells); wholesale clear on overflow.
+_POLY_RASTER_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
+_POLY_RASTER_BYTES = 0
+_POLY_CELL_BYTES = 17   # gx int32 + gy int32 + inside bool + edist float64
+
+
+def _poly_raster_byte_budget() -> int:
+    # 40% of the shared KICAD_RASTER_CACHE_MB budget (capsule cache takes
+    # half); LRU-evicted, never wholesale-cleared.
+    return int(env_knobs.RASTER_CACHE_MB * 0.4 * 1e6)
+
+
 def _rasterize_polygon(poly_points, coord: GridCoord, margin: float, clip_bounds=None):
     """Rasterize a closed polygon over its grid bounding box (expanded by `margin` mm).
 
@@ -479,9 +502,16 @@ def _rasterize_polygon(poly_points, coord: GridCoord, margin: float, clip_bounds
     or the bounding box is empty. Callers threshold ``edge_dist`` by their own
     clearance to decide which cells to block.
     """
+    global _POLY_RASTER_BYTES
     if len(poly_points) < 3:
         return None, None, None, None
     poly = np.array(poly_points, dtype=np.float64)
+    _mkey = (poly.tobytes(), coord.grid_step, margin,
+             tuple(clip_bounds) if clip_bounds is not None else None)
+    _mhit = _POLY_RASTER_CACHE.get(_mkey)
+    if _mhit is not None:
+        _POLY_RASTER_CACHE.move_to_end(_mkey)
+        return _mhit
     x1 = poly[:, 0]
     y1 = poly[:, 1]
     x2 = np.roll(poly[:, 0], -1)
@@ -493,12 +523,14 @@ def _rasterize_polygon(poly_points, coord: GridCoord, margin: float, clip_bounds
         cmin_x = max(cmin_x, clip_bounds[0]); cmin_y = max(cmin_y, clip_bounds[1])
         cmax_x = min(cmax_x, clip_bounds[2]); cmax_y = min(cmax_y, clip_bounds[3])
         if cmin_x > cmax_x or cmin_y > cmax_y:
+            _POLY_RASTER_CACHE[_mkey] = (None, None, None, None)
             return None, None, None, None  # polygon doesn't overlap the map
     gx_lo, gy_lo = coord.to_grid(cmin_x, cmin_y)
     gx_hi, gy_hi = coord.to_grid(cmax_x, cmax_y)
     gx_range = np.arange(gx_lo, gx_hi + 1, dtype=np.int32)
     gy_range = np.arange(gy_lo, gy_hi + 1, dtype=np.int32)
     if gx_range.size == 0 or gy_range.size == 0:
+        _POLY_RASTER_CACHE[_mkey] = (None, None, None, None)
         return None, None, None, None
 
     gx_grid, gy_grid = np.meshgrid(gx_range, gy_range)
@@ -516,7 +548,17 @@ def _rasterize_polygon(poly_points, coord: GridCoord, margin: float, clip_bounds
     edge_dist = _banded_edge_distance_rows(
         px_axis, py_axis, x1, y1, x2, y2, margin + coord.grid_step).ravel()
 
-    return gx_flat, gy_flat, inside, edge_dist
+    result = (gx_flat, gy_flat, inside, edge_dist)
+    for _a in result:
+        _a.setflags(write=False)
+    _POLY_RASTER_CACHE[_mkey] = result
+    _POLY_RASTER_BYTES += len(gx_flat) * _POLY_CELL_BYTES
+    budget = _poly_raster_byte_budget()
+    while _POLY_RASTER_BYTES > budget and _POLY_RASTER_CACHE:
+        _, old_res = _POLY_RASTER_CACHE.popitem(last=False)
+        if old_res[0] is not None:
+            _POLY_RASTER_BYTES -= len(old_res[0]) * _POLY_CELL_BYTES
+    return result
 
 
 def _block_cells_on_layers(obstacles: GridObstacleMap, gx_flat, gy_flat, mask, layer_idxs,
