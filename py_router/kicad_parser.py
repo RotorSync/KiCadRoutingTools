@@ -4503,16 +4503,26 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
 
 
 def _global_to_local(fp_x, fp_y, fp_rotation_deg, global_x, global_y):
-    """Reverse transform: global board coordinates to local footprint coordinates."""
-    rad = math.radians(fp_rotation_deg)  # Positive rotation to reverse the transform
+    """Reverse transform: global board coordinates to local footprint coordinates.
+
+    The exact inverse of `local_to_global` (whose forward negates the angle,
+    the KiCad rotation convention): local = R(+rotation) . (global - origin).
+    The previous body applied the TRANSPOSED rotation (both sin signs
+    flipped), so round-tripping a point through local_to_global came back
+    reflected for any rotated footprint -- measured 12.15mm off on a -90 part
+    (#481 label placement). That was latent until KiCad 7+ removed
+    pad.GetPos0(), which makes the pad-local fallback below run for EVERY pad
+    under a modern pcbnew.
+    """
+    rad = math.radians(fp_rotation_deg)  # POSITIVE angle reverses the negated forward
     cos_r = math.cos(rad)
     sin_r = math.sin(rad)
 
     dx = global_x - fp_x
     dy = global_y - fp_y
 
-    local_x = dx * cos_r + dy * sin_r
-    local_y = -dx * sin_r + dy * cos_r
+    local_x = dx * cos_r - dy * sin_r
+    local_y = dx * sin_r + dy * cos_r
 
     return local_x, local_y
 
