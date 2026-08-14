@@ -3733,9 +3733,17 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
     # #617: raised to the board's own min_hole_clearance when it declares one
     # above that floor. This pass MOVES copper by the measured shortfall, so
     # raising the floor both makes it SEE a declared-band graze it used to miss
-    # and stops it "fixing" other copper INTO that band. Every candidate is
-    # still re-validated against all foreign copper, so it can only remove a
-    # graze. Raise-only.
+    # and stops it "fixing" other copper INTO that band. Raise-only.
+    #
+    # DELIBERATE TRADE the raised floor makes: the same term sits in the
+    # candidate-acceptance clears() below, so on a DECLARING board a copper-
+    # graze repair whose only escape direction points at a hole is REFUSED
+    # outright when every candidate would land inside the declared band --
+    # the graze stays. That is the right side of the trade (check_drc grades
+    # the declared band as a real violation since #616, so "fixing" the graze
+    # would manufacture a counted DRC hit), but it is a trade, not a free
+    # win: on a silent board the same repair proceeds.
+    # tests/test_617_pcb_modification_hole_clearance.py pins both arms.
     npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE,
                    resolve_hole_clearance(pcb_data, config))
 

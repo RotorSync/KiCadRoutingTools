@@ -57,6 +57,7 @@ from single_ended_routing import (_seg_foreign_hole_dist, _seg_foreign_pad_dist,
 from pcb_modification import (_connector_clear, _seg_worst_offender,
                               close_soft_joints, nudge_grazing_microshift,
                               nudge_grazing_octolinear)
+from routing_defaults import NPTH_TO_TRACK_CLEARANCE
 from synth import make_pad, make_pcb, make_seg
 
 HOLE_X, HOLE_Y = 10.0, 10.0
@@ -145,6 +146,7 @@ def run():
 
         _worst_offender(check, declares, silent)
         _microshift(check, declares, silent)
+        _microshift_trade(check, declares, silent)
         _soft_joint_stays_flat(check, declares)
         _connector_stays_flat(check, declares)
         _octolinear_stays_flat(check, declares)
@@ -225,6 +227,51 @@ def _microshift(check, declares, silent):
         else:
             check('untouched copper keeps its exact geometry',
                   abs(hole1 - BAND) < 1e-9 and abs(cop1 - cop0) < 1e-12)
+    print()
+
+
+# === CHANGED site 2b: the acceptance-gate TRADE, pinned as policy ==========
+def _microshift_trade(check, declares, silent):
+    """The raised floor also sits in the candidate-acceptance clears(), so a
+    copper-graze repair whose only escape direction points at a hole is
+    REFUSED on a declaring board when every candidate would land inside the
+    declared band -- the graze stays. That is deliberate (since #616,
+    check_drc counts the declared band as a real violation, so 'fixing' the
+    graze would manufacture a counted DRC hit), but it is a TRADE, and this
+    pins BOTH arms so it can never be mistaken for a free win. Fixture: a
+    net-1 track grazing a foreign pad from below, with a mask-only NPTH just
+    beneath the track, so the only clearing shift direction is toward the
+    hole."""
+    print('CHANGED site 2b: acceptance gate -- the declaring-board trade is '
+          'deliberate and pinned')
+    yh = 0.86
+    pads = {2: [make_pad(net_id=2, x=2.0, y=0.34, ref='R1', num='1',
+                         size_x=0.3, size_y=0.3, shape='rect',
+                         layers=['F.Cu'], pad_type='smd')],
+            0: [_npth(2.0, -yh, 1.0, layers=('F.Mask', 'B.Mask'))]}
+    for path, label, repaired in ((declares, 'declared 0.25', False),
+                                  (silent, 'nothing declared', True)):
+        s = make_seg(0.0, 0.0, 4.0, 0.0, width=0.2, net_id=1)
+        pcb = _pcb(path, [s], pads, bounds=(-5.0, -5.0, 15.0, 15.0))
+        cop0, hole0 = min(_copper_gaps(pcb)), min(_hole_gaps(pcb))
+        changed, nets, _rm, _add = nudge_grazing_microshift(
+            [], pcb, clearance=0.1)
+        cop1, hole1 = min(_copper_gaps(pcb)), min(_hole_gaps(pcb))
+        print(f'        {label}: segs_changed={changed} nets={nets}; '
+              f'foreign-copper {cop0:+.4f} -> {cop1:+.4f}; '
+              f'copper-to-hole {hole0:.4f} -> {hole1:.4f}')
+        if repaired:
+            check('silent board: the copper-graze repair PROCEEDS (the flat '
+                  'floor permits the shift toward the hole)',
+                  nets == 1 and cop1 > cop0)
+            check('and stays legal at the flat NPTH floor',
+                  hole1 >= NPTH_TO_TRACK_CLEARANCE - 1e-4)
+        else:
+            check('declaring board: the same repair is REFUSED rather than '
+                  'moved into the declared band (the deliberate trade)',
+                  nets == 0 and abs(cop1 - cop0) < 1e-12)
+            check('and the incumbent copper-to-hole clearance is untouched',
+                  abs(hole1 - hole0) < 1e-12)
     print()
 
 
