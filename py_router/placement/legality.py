@@ -28,6 +28,14 @@ interior cutout -- a part gets nudged into the hole. `BoardOutlineGate` measures
 against the real Edge.Cuts rings, with the three-level short-circuit that makes
 it affordable: board-level opt-out when the outline IS its bbox, a cached
 per-part reachable-disk prune, then the exact ring test.
+
+**An interior ring can be SWALLOWED WHOLE.** Both exact tests work from the
+rect's four corners and four edges, so a rect large enough to contain an entire
+interior ring passes them: no corner is off-board and no rect edge comes within
+the margin of a ring edge. The swallow probe (`_swallow_pts`) is what closes
+that hole, and it must see BOTH kinds of interior ring -- `board_cutouts` AND
+the milled `board_edge_contours` that `drop_pad_containing_cutouts`
+reclassified (#505). It saw only the former until #628.
 """
 from __future__ import annotations
 
@@ -210,6 +218,16 @@ class BoardOutlineGate:
     Caching note: a key's answer is computed from the pose and budget of the
     FIRST call, so a caller whose budget grows later must use a distinct key.
     Over-estimating `travel` is always safe (more edges, same verdict).
+
+    Three ring collections, and they mean different things:
+
+    * `cutouts` -- real holes. Also drive the on-board (inside-outline,
+      outside-cutouts) point test, so their INTERIOR is off-board.
+    * `milled` -- `board_edge_contours` (#505): Edge.Cuts geometry KiCad mills
+      along that is neither a hole nor an outer ring. They carry an EDGE
+      CLEARANCE role only; they are deliberately NOT given containment
+      semantics -- see `_swallow_pts`.
+    * `rings` -- the flat union, what the distance tests measure against.
     """
 
     def __init__(self, board_info, margin: float):
@@ -221,6 +239,27 @@ class BoardOutlineGate:
         self.rings = rings
         self.outer = outer
         self.cutouts = cutouts
+        # Milled interior contours (#505). Already inside `rings` (that is what
+        # board_edge_geometry does with them), so the distance tests see them;
+        # kept separately because the SWALLOW probe needs them too (#628).
+        self.milled = [c for c in
+                       (getattr(board_info, 'board_edge_contours', None) or [])
+                       if len(c) >= 3]
+        # One representative vertex per interior ring, for the swallow probe in
+        # rect_blocked / rect_outside_amount. Any vertex serves: a ring wholly
+        # inside the rect has every vertex inside it, and a ring only partly
+        # inside is already caught by the corner and edge tests.
+        #
+        # DELIBERATELY NOT a containment rule. A milled contour's interior is
+        # NOT declared off-board here, and must not be: board_edge_contours
+        # mixes a real inner OUTLINE (interior = board -- crkbd's nested half,
+        # bus_pirate5's 60.8x80.2mm inner ring) with a milled SLOT (interior =
+        # not board), and the parser cannot tell them apart. Calling the
+        # interior off-board re-opens #291, where bus_pirate5 lost all 870 pads
+        # and the run broke the chain. "A part may not swallow a milled ring"
+        # is true for both readings, which is exactly why it is safe.
+        self._swallow_pts = ([r[0] for r in self.cutouts]
+                             + [r[0] for r in self.milled])
         self.margin = margin
         self.bounds = getattr(board_info, 'board_bounds', None)
         self.usable = None
@@ -291,8 +330,9 @@ class BoardOutlineGate:
 
     # -- level 3: the exact tests
     def rect_blocked(self, rect, edges=None) -> bool:
-        """True when a rect leaves the real outline, enters a cutout, or comes
-        within the edge margin of either.
+        """True when a rect leaves the real outline, enters a cutout, comes
+        within the edge margin of any Edge.Cuts ring, or SWALLOWS an interior
+        ring (a cutout or a milled contour) whole.
 
         `edges` restricts the distance test to a pre-filtered edge list from
         `edges_near`; omitted, every ring edge is measured.
@@ -308,9 +348,9 @@ class BoardOutlineGate:
                 if _seg_seg_dist_coords(ax, ay, bx, by,
                                         ex1, ey1, ex2, ey2) < self.margin:
                     return True
-        # A cutout ring FULLY INSIDE the rect evades both tests above.
-        for cut in self.cutouts:
-            cx, cy = cut[0]
+        # An interior ring FULLY INSIDE the rect evades both tests above -- no
+        # corner is off-board and no rect edge comes near a ring edge (#628).
+        for (cx, cy) in self._swallow_pts:
             if x0 <= cx <= x1 and y0 <= cy <= y1:
                 return True
         return False
@@ -359,8 +399,10 @@ class BoardOutlineGate:
                     default=float('inf'))
             if d < self.margin:
                 amt += self.margin - d
-        for cut in self.cutouts:
-            cx, cy = cut[0]
+        # Swallowed interior ring (cutout or milled contour), same probe and
+        # same charge as rect_blocked's -- the two must agree on legality or
+        # `violation()==0` stops implying `not rect_blocked()` (#628).
+        for (cx, cy) in self._swallow_pts:
             if x0 <= cx <= x1 and y0 <= cy <= y1:
                 amt += self.margin
         return amt
