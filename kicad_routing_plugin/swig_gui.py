@@ -3304,7 +3304,9 @@ class RoutingDialog(wx.Dialog):
                     max_iterations=config['max_iterations'],
                     max_probe_iterations=config.get('max_probe_iterations', 5000),
                     heuristic_weight=config['heuristic_weight'],
-                    proximity_heuristic_factor=config.get('proximity_heuristic_factor', 0.02),
+                    proximity_heuristic_factor=config.get(
+                        'proximity_heuristic_factor',
+                        defaults.PROXIMITY_HEURISTIC_FACTOR),
                     turn_cost=config['turn_cost'],
                     direction_preference_cost=config.get('direction_preference_cost', defaults.DIRECTION_PREFERENCE_COST),
                     max_rip_up_count=config['max_ripup'],
