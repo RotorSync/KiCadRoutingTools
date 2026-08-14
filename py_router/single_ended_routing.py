@@ -848,48 +848,70 @@ def _identify_blocking_obstacles(
     blocked = np.asarray(blocked_positions, dtype=np.int64) if blocked_positions \
         else np.empty((0, 3), dtype=np.int64)
 
-    seg_rows = []
-    for seg in pcb_data.segments:
-        if seg.net_id == current_net_id:
-            continue
-        li = layer_map.get(seg.layer)
-        if li is None:
-            continue
-        gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
-        gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
-        seg_rows.append((gx1, gy1, gx2, gy2, li, seg.net_id))
-    segs = np.asarray(seg_rows, dtype=np.int64) if seg_rows else np.empty((0, 6), dtype=np.int64)
-
-    via_rows = []
-    for via in pcb_data.vias:
-        if via.net_id == current_net_id:
-            continue
-        gx, gy = coord.to_grid(via.x, via.y)
-        via_rows.append((gx, gy, via.net_id))
-    vias = np.asarray(via_rows, dtype=np.int64) if via_rows else np.empty((0, 3), dtype=np.int64)
-
-    pad_rows = []
-    for ref, footprint in pcb_data.footprints.items():
-        for pad in footprint.pads:
-            if pad.net_id == current_net_id or pad.net_id == 0:
+    # Geometry-array memo (2026-08-14 profiling: 4,522 calls / 53s, each
+    # rebuilding these arrays from a full board scan). The ALL-NETS arrays
+    # depend only on (copper epoch, grid, layers, clearance/track/via
+    # geometry); the per-call net exclusion is a STABLE boolean filter, so
+    # the filtered arrays hold the same rows in the same order as the
+    # original per-call build -- byte-identical inputs to the Rust scan.
+    # (pad.net_id == 0 is excluded unconditionally in the base arrays,
+    # exactly as the original loop did.)
+    _gkey = (getattr(pcb_data, '_copper_epoch', 0), config.grid_step,
+             tuple(config.layers), config.track_width, config.clearance,
+             config.via_size)
+    _gmemo = getattr(pcb_data, '_blockid_geom_memo', None)
+    if _gmemo is not None and _gmemo[0] == _gkey:
+        segs_all, vias_all, pads_all = _gmemo[1], _gmemo[2], _gmemo[3]
+    else:
+        seg_rows = []
+        for seg in pcb_data.segments:
+            li = layer_map.get(seg.layer)
+            if li is None:
                 continue
-            gx, gy = coord.to_grid(pad.global_x, pad.global_y)
-            if hasattr(pad, 'size_x'):
-                pad_half_x, pad_half_y = pad_rect_halfspan(pad)
-            else:
-                pad_half_x = pad_half_y = 0.5
-            ex_x = max(1, coord.to_grid_dist(pad_half_x + config.clearance + config.track_width / 2))
-            ex_y = max(1, coord.to_grid_dist(pad_half_y + config.clearance + config.track_width / 2))
-            if pad.drill and pad.drill > 0:
-                mask = (1 << num_layers) - 1  # through-hole: all layers
-            else:
-                mask = 0
-                for layer_name in pad.layers:
-                    if layer_name in layer_map:
-                        mask |= 1 << layer_map[layer_name]
-            if mask:
-                pad_rows.append((gx, gy, ex_x, ex_y, pad.net_id, mask))
-    pads = np.asarray(pad_rows, dtype=np.int64) if pad_rows else np.empty((0, 6), dtype=np.int64)
+            gx1, gy1 = coord.to_grid(seg.start_x, seg.start_y)
+            gx2, gy2 = coord.to_grid(seg.end_x, seg.end_y)
+            seg_rows.append((gx1, gy1, gx2, gy2, li, seg.net_id))
+        segs_all = (np.asarray(seg_rows, dtype=np.int64) if seg_rows
+                    else np.empty((0, 6), dtype=np.int64))
+
+        via_rows = []
+        for via in pcb_data.vias:
+            gx, gy = coord.to_grid(via.x, via.y)
+            via_rows.append((gx, gy, via.net_id))
+        vias_all = (np.asarray(via_rows, dtype=np.int64) if via_rows
+                    else np.empty((0, 3), dtype=np.int64))
+
+        pad_rows = []
+        for ref, footprint in pcb_data.footprints.items():
+            for pad in footprint.pads:
+                if pad.net_id == 0:
+                    continue
+                gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+                if hasattr(pad, 'size_x'):
+                    pad_half_x, pad_half_y = pad_rect_halfspan(pad)
+                else:
+                    pad_half_x = pad_half_y = 0.5
+                ex_x = max(1, coord.to_grid_dist(pad_half_x + config.clearance + config.track_width / 2))
+                ex_y = max(1, coord.to_grid_dist(pad_half_y + config.clearance + config.track_width / 2))
+                if pad.drill and pad.drill > 0:
+                    mask = (1 << num_layers) - 1  # through-hole: all layers
+                else:
+                    mask = 0
+                    for layer_name in pad.layers:
+                        if layer_name in layer_map:
+                            mask |= 1 << layer_map[layer_name]
+                if mask:
+                    pad_rows.append((gx, gy, ex_x, ex_y, pad.net_id, mask))
+        pads_all = (np.asarray(pad_rows, dtype=np.int64) if pad_rows
+                    else np.empty((0, 6), dtype=np.int64))
+        pcb_data._blockid_geom_memo = (_gkey, segs_all, vias_all, pads_all)
+
+    segs = segs_all[segs_all[:, 5] != current_net_id] if len(segs_all) \
+        else segs_all
+    vias = vias_all[vias_all[:, 2] != current_net_id] if len(vias_all) \
+        else vias_all
+    pads = pads_all[pads_all[:, 4] != current_net_id] if len(pads_all) \
+        else pads_all
 
     counts = rust_fn(blocked, segs, vias, pads,
                      int(expansion_grid), int(via_expansion_grid), int(num_layers))
@@ -2168,7 +2190,46 @@ def _edge_span_mm(sources, targets, grid_step):
     return best * grid_step
 
 
-def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id, coord, layer_names):
+def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id,
+                             coord, layer_names):
+    """FAILURE-ONLY memo over the #189 in-pad via placement (2026-08-14
+    profiling: 2,693 attempts x a windowed plane-map build each, ~95s --
+    the same boxed pads re-fail across rescue rungs and rounds).
+
+    Only None results are cached, which is monotone-safe: a geometric
+    "no via fits" is pure in (pad, net, via geometry, copper epoch) -- rips
+    that could un-fail it bump the epoch -- and the _via_unblock_failed set
+    only ever ADDS Nones, so it cannot invalidate a cached failure.
+    Successes are never cached (they carry mutable Via/Segment objects and
+    the tap path's note_clearance_used side effect -- the exact two hazards
+    that sank the full-result memo, reverted same day). Bails to the impl
+    when phase-3 in-flight copper is pending: pending copper changes
+    placement legality WITHOUT an epoch bump, so a failure under inflight
+    state must not be trusted later."""
+    from plane_pad_tap import inflight_copper_dicts
+    _iv, _isg = inflight_copper_dicts(pcb_data)
+    _inflight = bool(_iv) or bool(_isg)
+    _memo = None
+    if not _inflight:
+        _memo = getattr(pcb_data, '_via_place_fail_memo', None)
+        if _memo is None:
+            _memo = pcb_data._via_place_fail_memo = set()
+        _mkey = (net_id, pad_obj.component_ref, pad_obj.pad_number,
+                 pad_obj.global_x, pad_obj.global_y,
+                 getattr(pcb_data, '_copper_epoch', 0),
+                 config.via_size, config.via_drill, config.clearance,
+                 config.board_edge_clearance, config.same_net_pad_clearance,
+                 tuple(layer_names))
+        if _mkey in _memo:
+            return None
+    r = _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data,
+                                      net_id, coord, layer_names)
+    if r is None and _memo is not None:
+        _memo.add(_mkey)
+    return r
+
+
+def _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data, net_id, coord, layer_names):
     """Issue #189: drop a DRC-legal fab-floor via INSIDE a boxed-in SMD pad so a
     stuck A* can reach the pad on an inner layer. Returns
     (Via, (gx, gy), pad_layer_idx, stub_segments) or None; stub_segments is
