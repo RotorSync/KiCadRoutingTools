@@ -104,7 +104,12 @@ def live_fill_islands(board):
                 poly = [(pcbnew.ToMM(ol.CPoint(j).x),
                          pcbnew.ToMM(ol.CPoint(j).y))
                         for j in range(ol.PointCount())]
-                if len(poly) >= 3:
+                # Same degenerate-polygon guard as the file path
+                # (_MIN_ISLAND_AREA_MM2): KiCad's fracturing emits these on
+                # the live board too, and a guard on only one of the two
+                # fronts is exactly the CLI/GUI divergence class.
+                if len(poly) >= 3 \
+                        and _polygon_area(poly) >= _MIN_ISLAND_AREA_MM2:
                     out.setdefault((net, lname), []).append(poly)
     return out
 
@@ -140,6 +145,37 @@ _NET_NAME_RE = re.compile(r'\(net_name\s+"((?:[^"\\]|\\.)*)"\)')
 # KiCad 10 files reference zone nets BY NAME with no net table (#344 class):
 # (net "Earth") -- there is no numeric token and no net_name attribute.
 _NET_STR_RE = re.compile(r'\(net\s+"((?:[^"\\]|\\.)*)"\)')
+
+
+# Smallest fill polygon that can be real copper, mm^2. KiCad's fracturing
+# emits DEGENERATE polygons -- 3-5 collinear or ~coincident points enclosing
+# no area -- alongside the real islands, and they are indistinguishable from
+# real islands to anything that just counts (filled_polygon ...) blocks.
+# Measured on storm_tracker's routed board: 741 of 788 polygons enclose less
+# than 1e-3 mm^2 (verbatim examples: three points sharing a y to 6 decimals;
+# three points 2 um apart), and the real copper starts at 1.04e-2 mm^2 -- a
+# THREE-ORDER-OF-MAGNITUDE gap, so the exact cut is not load-bearing anywhere
+# in [2e-4, 1e-2].
+#
+# Deliberately NOT a KiCad island_removal_mode / island_area_min decision:
+# those choose which REAL islands the filler keeps (corpus values are ~5 mm^2,
+# 5000x this), and honoring them is plane_region_connector's job
+# (_island_kept_by_filler). This is strictly a "this polygon encloses no
+# copper" test, so it is correct under every removal mode. 1e-3 mm^2 is a
+# 32 um square -- an order of magnitude below the ~0.1 mm minimum feature any
+# fab will image.
+_MIN_ISLAND_AREA_MM2 = 1e-3
+
+
+def _polygon_area(poly) -> float:
+    """Absolute shoelace area of a closed polygon, mm^2."""
+    a = 0.0
+    n = len(poly)
+    for i in range(n):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % n]
+        a += x1 * y2 - x2 * y1
+    return abs(a) / 2.0
 
 
 _REFILL_MEMO: Dict[tuple, dict] = {}
@@ -275,7 +311,8 @@ def parse_filled_islands(text: str
                 continue
             poly = [(float(a), float(b))
                     for a, b in _XY_RE.findall(fp_block)]
-            if len(poly) >= 3:
+            if len(poly) >= 3 \
+                    and _polygon_area(poly) >= _MIN_ISLAND_AREA_MM2:
                 out.setdefault((net_name, lm.group(1)), []).append(poly)
     return out
 
