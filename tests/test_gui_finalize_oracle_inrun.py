@@ -31,15 +31,45 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Needs real zones AND at least one INCOMPLETE plane net: the finalize is a
 # plane pass, and a board whose pours are already whole exits before it ever
 # reaches the oracle leg (which is how two earlier fixture picks here made
-# the gate vacuously "pass"). This one has both GND and +3.3V pours reading
-# unconnected, and routes in seconds.
-BOARD = os.path.join(REPO, 'kicad_files', 'kit-out-plane.kicad_pcb')
+# the gate vacuously "pass").
+#
+# It must ALSO be a board a fresh clone actually has. The original pick,
+# kit-out-plane.kicad_pcb, is an OUTPUT of tests/test_kit_route.py that
+# 25de9022 (#426, 2026-07-18) untracked and gitignored -- 17 days BEFORE this
+# gate was written (8bfa9011) -- and #426 also pointed that test at a temp
+# workdir, so nothing regenerates it either. The gate therefore never ran on
+# any clone; it only ever passed where a stale artifact happened to survive in
+# kicad_files/. /kicad_files/kit-out*.kicad_pcb is still gitignored: do not
+# point back at it.
+#
+# A TRACKED board is preferred over generating one (PR #635). Generating is
+# cheap here -- pouring planes onto the unrouted root is ~1.5s, not the
+# minutes a full kit-dev-coldfire route would cost -- but a static tracked
+# board cannot drift: a generated fixture silently goes vacuous the day the
+# engine gets good enough to leave its pour complete, and this gate's whole
+# failure mode is passing while testing nothing.
+#
+# lvds_converter_dualclk_gnd.kicad_pcb carries a real /GND pour that reads
+# unconnected (the run's improvement gate reports it gaining /GND, 42 -> 41
+# disconnected pads) and the whole gate runs in about a second. Verified
+# non-vacuous: re-introducing the #562 deferred-oracle behaviour makes it fail
+# with BOTH of its intended messages.
+BOARD = os.path.join(REPO, 'kicad_files', 'lvds_converter_dualclk_gnd.kicad_pcb')
 
 from kicad_parser import parse_kicad_pcb            # noqa: E402
 from route import batch_route                       # noqa: E402
 
 
 def _run(with_callback):
+    # BEFORE the copy, not after: shutil.copy raises FileNotFoundError itself,
+    # so a check placed below it can never run and the caller just gets the
+    # raw traceback this message exists to replace.
+    if not os.path.exists(BOARD):
+        raise SystemExit(
+            f"FAIL: fixture board is missing: {BOARD}\n"
+            "  This gate needs a TRACKED board. A generated/gitignored one "
+            "makes it unrunnable on every fresh clone (see the note above).")
+
     work = tempfile.mkdtemp(prefix='finalize_oracle_')
     board = os.path.join(work, 'in.kicad_pcb')
     shutil.copy(BOARD, board)
@@ -52,8 +82,14 @@ def _run(with_callback):
     zone_nets = sorted({pcb.nets[z.net_id].name for z in (pcb.zones or [])
                         if z.net_id in pcb.nets})
     if not zone_nets:
-        print("SKIP: fixture board has no zone nets")
-        return None
+        # Deliberately NOT a skip. A fixture with no zone nets never reaches
+        # the plane finalize, so the gate would report success while testing
+        # nothing -- the silent non-coverage this file's own note warns about,
+        # and main() turned that None into exit 0.
+        raise SystemExit(
+            "FAIL: fixture board has no zone nets, so the plane finalize -- "
+            "and the oracle leg this gate exists to check -- never runs. "
+            "Pick a fixture with a real, incomplete pour.")
 
     staged = []
 
@@ -80,8 +116,6 @@ def main():
     # 1. WITH a staging callback: the leg runs in-run, and the deferred
     #    hand-off to the applier must NOT be posted (both would double-run).
     r = _run(True)
-    if r is None:
-        return 0
     if r['staged'] < 1:
         failures.append("stage_board_fn was never called -- the finalize "
                         "did not try to stage a board for the oracle")

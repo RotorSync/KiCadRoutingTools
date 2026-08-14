@@ -18,6 +18,7 @@ from typing import List, Dict, Tuple, Optional
 from shapely.geometry import Polygon as ShapelyPolygon, LineString, Point
 from shapely.validation import make_valid
 
+from console_encoding import ascii_safe
 from routing_constants import (
     IPC_2221_EXPONENT_DT,
     IPC_2221_EXPONENT_AREA,
@@ -618,7 +619,11 @@ def print_single_net_resistance(result: Dict, net_name: str):
     print(f"    Path length: {result['path_length']:.1f} mm (diagonal)")
     print(f"    Avg width:   {result['avg_width']:.1f} mm")
     r_str = f"{result['resistance']*1000:.3f} mΩ" if result['resistance'] < float('inf') else "N/A"
-    print(f"    Resistance:  {r_str}")
+    # ascii_safe, not a bare print: create_plane is a SHARED ENGINE function and
+    # is called in-process (tests, scripts, the GUI) where route_planes.py's
+    # __main__ enable_utf8_console() never ran. On a cp1252 console that made
+    # this one line abort the whole pour.
+    print(ascii_safe(f"    Resistance:  {r_str}"))
     # An out-of-range area is NOT a rating: say so instead of printing a bare
     # number the reader will take as one (#489 §6).
     if result.get('max_current', 0) <= 0:
@@ -648,7 +653,7 @@ def print_multi_net_resistance(results: Dict[str, Dict]):
     label = _conditions_label(first) if first else "(1 oz copper, 10°C rise)"
     print(f"\n  Plane Resistance Analysis {label}:")
     print(f"  {'-'*74}")
-    print(f"  {'Net':<25} {'Path(mm)':<10} {'AvgW(mm)':<10} {'R(mΩ)':<10} {'Imax(A)':<12}")
+    print(ascii_safe(f"  {'Net':<25} {'Path(mm)':<10} {'AvgW(mm)':<10} {'R(mΩ)':<10} {'Imax(A)':<12}"))
     print(f"  {'-'*74}")
 
     any_extrapolated = False
