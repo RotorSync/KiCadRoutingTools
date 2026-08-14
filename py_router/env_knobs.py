@@ -207,6 +207,12 @@ def refresh() -> None:
     g['NO_FILL_NETCLASS'] = _truthy('KICAD_NO_FILL_NETCLASS')  # fill-model A/B
 
     # --- numeric knobs -------------------------------------------------------
+    # Rasterization memo budget (MB, shared convention across the capsule/
+    # polygon caches in routing_utils/obstacle_map). Profiling: 64MB cycled
+    # ~40x on orangecrab (69% hit rate where ~99% is available). Parallel
+    # stress workers multiply per-process caches -- export a smaller value
+    # there.
+    g['RASTER_CACHE_MB'] = _f('KICAD_RASTER_CACHE_MB', 256.0)
     g['BUS_XLAYER_PCT'] = _i('KICAD_BUS_XLAYER_PCT', 35)
     g['BUS_OFFLANE_MULT'] = _f('KICAD_BUS_OFFLANE_MULT', 1.0)   # off-lane surcharge (1.0 = off)
     g['BUS_CORRIDOR_PROBE_VIA_MULT'] = _f('KICAD_BUS_CORRIDOR_PROBE_VIA_MULT', 20.0)
