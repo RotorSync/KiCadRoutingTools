@@ -246,6 +246,15 @@ class _Repair:
         # placement/legality.py, shared with quench (#456 item 2).
         self.edge_gate = BoardOutlineGate(pcb_data.board_info, margin)
         self._edge_margin = margin
+        # ref -> the milled rings this mover's own pads sit inside (#628), the
+        # same exemption quench takes. Needed HERE and not only at the margin-0
+        # gates because this one runs at max(clearance, board_edge_clearance)
+        # and reaches the swallow probe through rect_blocked, whose ring term is
+        # BOOLEAN -- it returns True regardless of margin, so the "a margin-0
+        # gate is numerically inert" argument that covers lock_advisor /
+        # placement_state / seeder does not reach it. Seed-pose, cached, never
+        # invalidated, exactly like quench's.
+        self._owned_rings_cache: Dict[str, frozenset] = {}
         self._edge_active = self.edge_gate.active
         self._max_disp_cap = max_displacement_cap
         self.clearance = clearance
@@ -519,11 +528,42 @@ class _Repair:
             ref, cap.rect(cap.seed_x, cap.seed_y, cap.seed_rot),
             self._max_disp_cap)
 
-    def _rect_edge_blocked(self, rect):
+    def _owned_rings(self, ref) -> frozenset:
+        """Cached: the milled rings this mover's OWN pads sit inside (#628).
+
+        The cap analogue of QuenchState._owned_rings, and it matters for the
+        same reason: a milled contour is reclassified out of board_cutouts
+        precisely BECAUSE it encloses >= 2 pad centres, so a two-pad part whose
+        pads are what triggered that reclassification lives on its own relief.
+        Without the exemption `_rect_edge_blocked` rejects EVERY candidate for
+        it -- there is no unfreeze branch here, so the cap simply never moves.
+
+        Pad CENTRES at the SEED pose: `pad_rects` builds each rect as
+        centre +/- half-extent, so the bbox midpoint is the centre exactly.
+        Seed rather than candidate pose is the anti-gaming choice quench
+        documents -- ownership at the candidate pose would let any cap claim a
+        ring by moving onto it.
+        """
+        owned = self._owned_rings_cache.get(ref)
+        if owned is None:
+            cap = self.caps[ref]
+            pts = [((bx0 + bx1) * 0.5, (by0 + by1) * 0.5)
+                   for (bx0, by0, bx1, by1, _net) in
+                   cap.pad_rects(cap.seed_x, cap.seed_y, cap.seed_rot)]
+            owned = self.edge_gate.rings_enclosing(pts) if pts else frozenset()
+            self._owned_rings_cache[ref] = owned
+        return owned
+
+    def _rect_edge_blocked(self, rect, ref=None):
         """True when a candidate courtyard rect leaves the REAL board outline,
         enters a cutout, or comes within the edge margin of either (#370 B2 --
-        the bbox `usable` inset is blind to cutouts / curved outlines)."""
-        return self.edge_gate.rect_blocked(rect)
+        the bbox `usable` inset is blind to cutouts / curved outlines).
+
+        `ref` exempts the mover from the swallow rule on the milled rings it
+        OWNS (#628); real cutouts are never exempt, by construction in
+        `rings_enclosing`. `ref=None` charges every ring, the old behaviour."""
+        return self.edge_gate.rect_blocked(
+            rect, skip_rings=self._owned_rings(ref) if ref is not None else None)
 
     def _overlap(self, a, b):
         """Courtyard-clearance shortfall between two rects (0 if clear)."""
@@ -655,7 +695,7 @@ class _Repair:
         # Real outline / cutout gate (#370 B2): only when the bbox inset is
         # not exact (non-rect outline or cutouts) and this cap can reach one.
         if self._edge_active and self._cap_may_reach_edge(ref, cap) \
-                and self._rect_edge_blocked(rect):
+                and self._rect_edge_blocked(rect, ref=ref):
             return True
         # only same-side parts/caps within reach can collide (pre-pruned)
         for idx, r in self.cap_static[ref]:
