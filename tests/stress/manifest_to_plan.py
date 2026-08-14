@@ -38,11 +38,12 @@ TOOL_ACTIONS = {
 # board -> board_placed, whereas a missing one leaves the next step's input
 # produced by nothing and the pruner drops legitimate upstream steps.
 #
-# Refused rather than mapped, because there is nothing to map TO: placement is
-# CLI-only by design (there is no placement tab, so a plan step's
-# max_displacement/crossing_penalty/halo_* would resolve to nonexistent dialog
-# attributes and silently run at hardcoded defaults while the plan JSON claims
-# otherwise). And refused rather than DROPPED, because the unknown-tool path
+# Refused rather than mapped, because there is nothing to map TO: the plan
+# format has no placement step. (The GUI's Placement sub-tab drives the
+# placement SKILLS headless - it is not a plan action, so a plan step's
+# max_displacement/crossing_penalty/halo_* would still resolve to nonexistent
+# dialog attributes and silently run at hardcoded defaults while the plan JSON
+# claims otherwise.) And refused rather than DROPPED, because the unknown-tool path
 # only bumps a `skipped` counter -- a number, not a name -- so the converted
 # plan looks complete when it is not.
 REFUSED_TOOLS = {
@@ -65,6 +66,9 @@ REFUSED_TOOLS = {
         'step. Run it on the CLI and start the plan from the adopted board'),
     'render_placement.py': (
         'renders a PNG; it changes no board and has nothing to replay'),
+    'beautify_labels.py': (
+        'tidies reference-designator silkscreen; no plan step yet -- run it '
+        'before/after the plan'),
 }
 
 # CLI flag -> plan params key (numbers parsed; lists collected).

@@ -383,7 +383,8 @@ def check_refused_tools():
     discards legitimate upstream steps.
     """
     bad = []
-    for tool in ('place_optimize.py', 'place_route_loop.py', 'render_placement.py'):
+    for tool in ('place_optimize.py', 'place_route_loop.py', 'render_placement.py',
+                 'beautify_labels.py'):
         step = m2p.parse_command(['python3', tool, 'a.kicad_pcb', 'b.kicad_pcb'])
         if not step or '_refused' not in step:
             bad.append((tool, f"NOT refused -- converted to {step!r}"))
