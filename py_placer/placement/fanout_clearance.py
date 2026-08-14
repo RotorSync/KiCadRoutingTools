@@ -249,6 +249,19 @@ class _Repair:
         self._edge_active = self.edge_gate.active
         self._max_disp_cap = max_displacement_cap
         self.clearance = clearance
+        # #617: KiCad's copper-to-hole rule is the BOARD's `min_hole_clearance`
+        # whenever it declares one above the 0.20 NPTH fab floor -- the same
+        # value check_drc grades at. The NPTH keep-out rects below were grown
+        # to the flat floor only, so on such a board a cap pad could be parked
+        # in the declared band and read clean here while the checker flagged
+        # it. Raise-only and cached per board path, so a board that declares
+        # nothing keeps byte-identical keep-outs. `config` is None because the
+        # placement engine has no GridRouteConfig anywhere in this call chain
+        # (repair_fanout_clearance takes scalars); the board read is driven by
+        # pcb_data.source_path, so the declared floor arrives regardless.
+        from obstacle_map import resolve_hole_clearance
+        self.npth_floor = max(defaults.NPTH_TO_TRACK_CLEARANCE,
+                              resolve_hole_clearance(pcb_data, None))
         self.grid_step = grid_step
         self.capture_radius = capture_radius
         # cap_prefix may list several reference prefixes (e.g. "C,R" = caps and
@@ -354,8 +367,7 @@ class _Repair:
                     # the rect; net -1 never matches a cap pad's net (even a
                     # net-tied mounting hole is not connectable copper, #328).
                     if (p.drill or 0) > 0:
-                        grow = max(0.0, defaults.NPTH_TO_TRACK_CLEARANCE
-                                   - clearance)
+                        grow = max(0.0, self.npth_floor - clearance)
                         for hx, hy, hd in pad_drill_circles(p):
                             hr = hd / 2.0 + grow
                             self.foreign_pads.append(
@@ -1018,6 +1030,13 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
     edge_rings, edge_outer, edge_cutouts = board_edge_geometry(
         getattr(pcb_data, 'board_info', None))
     bounds = getattr(getattr(pcb_data, 'board_info', None), 'board_bounds', None)
+    # #617 deliberately leaves this at the flat fab floor. The mover searches a
+    # 0.6 mm budget for a spot where BOTH the relocated via and its connector
+    # back to the stub validate; raising the connector's hole floor does not
+    # relocate the via somewhere better, it makes the whole search return "no
+    # clear spot" and the #130 pad-via graze the pass exists to fix persists.
+    # Measured on the #370-B3 harness with a declared 0.25: raised -> 0 moves,
+    # 0 connectors; flat -> 1 move, 1 connector.
     npth_clr = max(clearance, defaults.NPTH_TO_TRACK_CLEARANCE)
 
     def edge_ok_point(x, y, r):
