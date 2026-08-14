@@ -105,7 +105,13 @@ STITCH_PITCH = 20.0  # mm
 # Algorithm parameters
 MAX_ITERATIONS = 200000
 HEURISTIC_WEIGHT = 2.3  # 1.9 -> 2.3: #586 corpus dose-response peak (-30 verdict, DRC -67, cpu/mem ~0.85x; 1.7 and 2.5 both worse)
-PROXIMITY_HEURISTIC_FACTOR = 0.0  # 0.02 -> 0: at heuristic_weight 2.3 the base greediness covers it (s2 rescan: quality-neutral, -8% CPU)
+PROXIMITY_HEURISTIC_FACTOR = 0.02  # restored from 0 (1af3096): "quality-neutral"
+# was measured on a CLI that never applied it -- route.py's argparse still passed an
+# explicit 0.02, which overrides the module default, so the corpus kept routing at 0.02
+# for two more commits. b50fc86 fixed that drift and connectivity dropped 17 nets on a
+# 5-board probe the same day; restoring 0.02 recovers 14 of them (50 -> 36 incomplete,
+# eis reaching zero). Neighbouring doses are NOT better (0.01 -> 49, 0.04 -> 55), so
+# treat 0.02 as the known-good value rather than a tuned optimum.
 MAX_RIPUP = 3  # briefly 5 (s2 rescan -30 on the curated set) -- REVERTED: holdout sets 11-15 showed ripup5+zoned ERASING the other flips' gains (v4 -2% vs lean -45% vs old defaults) at +37% CPU; deep rip-up stays retry-tier guidance
 # Phase 3 tap rip-up abandon metric (#85 arbitration); documented in
 # docs/rip-up-reroute.md "Abandon metrics". Must match phase3_routing.ABANDON_METRICS.
