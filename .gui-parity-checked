@@ -680,3 +680,43 @@ not audit -- the 2026-07-30 PARTIAL entry's rule).
   * Known blind spots unchanged, plus one new: the fake-run gate exercises
     the place leg only (place_route differs by one instruction line and the
     --no-delegate pin, covered wx-free in test_placement_run).
+
+CORRECTION 2026-08-14 to the addendum immediately above.
+
+Its first bullet, "Routing engine untouched", is true of what it actually
+enumerates -- no new batch_route/create_plane/fanout kwarg, no CLI-main
+post-pass -- but it reads as "no routing-path file changed", and one did:
+py_router/kicad_parser._global_to_local (commit a2e96995) is a BEHAVIORAL
+fix to shared routing-path code, not a placement-only addition. It was
+carried in under the #481 label because that is where the symptom surfaced.
+Stating it plainly so a later audit does not have to rediscover it:
+
+  * The old body computed R(-theta).(g - f) -- local_to_global's FORWARD map,
+    not its inverse (which is R(+theta).(g - f)). Wrong for roughly half the
+    pads on every board with rotated footprints; worst 147.4mm on
+    kit-dev-coldfire, 46.0mm on glasgow_revC. The new body round-trips exact.
+  * Reach is GUI-only: the single caller is build_pcb_data_from_board's
+    pad-local fallback, so CLI routing cannot change. But it was live, not
+    dormant -- KiCad 7+ removed pad.GetPos0() (absent on KiCad 10.0.0-103),
+    so every pad in a GUI-built PCBData took that fallback.
+  * Measured routing impact on the boards we have: NONE. The real FanoutTab
+    on a real headless RoutingDialog, haasoscope_pro_max_test U2 (QFN-76 @
+    90deg, 72 nets), run twice with only the formula swapped, flips the side
+    labels (bottom 17/top 3 -> bottom 3/top 17) but emits IDENTICAL copper --
+    104 tracks each way, 0 failed, all escapes outward, track sets equal.
+    Escape geometry is built from pad globals. The one consumer that would
+    move copper is bga_fanout/rotate_frame.py's (cx + local_x) ball snap,
+    gated behind is_orthogonal(); kicad_files/ has ZERO non-orthogonal
+    multi-pad footprints, so it is unexercised (at a hypothetical 45deg it
+    would misplace BGA-529 balls by up to 17.6mm -- load-bearing when #137's
+    transform runs). Placement's own consumers (placement/utility.py bbox,
+    placement/quench.py pads_local) are the ones that wanted this fixed.
+  * The engine-parity verdict quoted in the addendum above still stands; the
+    fix is additionally covered by test_gui_engine_parity on main after the
+    cherry-pick (PARITY, copper sets IDENTICAL, 1267/1267 segs, 128/128
+    vias).
+  * Cherry-picked to main as 301ee1b3 with the full measurement record in
+    main's copy of this file (ADDENDUM 2026-08-14).
+  * Blind spot this exposed, worth naming: NO gate runs a fanout step, so
+    nothing in the suite would have caught this in either direction. The QFN
+    before/after above was a one-off harness, not a committed gate.
