@@ -25,7 +25,24 @@ import animate_fanout_clearance as AFC  # noqa: E402
 from kicad_parser import parse_kicad_pcb  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BOARD = os.path.join(ROOT, 'kicad_files', 'fanout_output1.kicad_pcb')
+
+
+def _board():
+    """fanout_output1.kicad_pcb, BUILT if absent.
+
+    It is a fanout OUTPUT, gitignored (.gitignore: /kicad_files/fanout_output*)
+    -- so reading it straight from kicad_files/ passes only on a box where an
+    earlier run happened to leave one behind, and is a permanent red on a clean
+    checkout. fixture_boards knows its recipe (chained back to the tracked
+    haasoscope_pro_max_test.kicad_pcb), so ask for it instead of assuming it.
+
+    Resolved lazily rather than at import: `ensure` may SHELL OUT to build the
+    chain, and a module-level call would charge that to collection even for the
+    tests here that need no board at all.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from fixture_boards import ensure
+    return ensure('fanout_output1.kicad_pcb')
 
 
 class _Rec:
@@ -79,7 +96,7 @@ def test_it_renders_with_a_board_and_draws_the_substrate():
     try:
         out = os.path.join(d, 'a.gif')
         got = AFC.render_gif(_Rec(), out, size=300, sub_frames=4, fps=20,
-                             pcb=parse_kicad_pcb(BOARD))
+                             pcb=parse_kicad_pcb(_board()))
         assert got and os.path.getsize(out) > 500
         n, sizes = _frames(out)
         assert n > 5
