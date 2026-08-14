@@ -721,4 +721,33 @@ change was analysed.
   * Standing gap this exposed: no gate runs a fanout step (same blind spot
     ea992d9 hit above), so nothing in the suite would have caught this
     either way. The QFN before/after above was a one-off harness, not a
-    committed gate.
+    committed gate. -- CLOSED, see below.
+
+  * GAP CLOSED, same day: two gates now cover it, both verified to go RED
+    with the transposed body restored and green with it fixed.
+      - tests/test_rotated_footprint_frame.py (wx-free, ~1s, under run_all):
+        round-trip identity over 4 real boards; the rotate_frame ball
+        round-trip at 35/45/-20 deg (the non-orthogonal regime NO in-repo
+        board reaches, and the only consumer that turns a wrong local into
+        moved copper); and QFN side classification from file-true vs
+        GUI-recomputed locals. Each check is paired with a CHANGE DETECTOR
+        asserting the OLD body still fails it, so the file cannot go vacuous;
+        it also asserts the corpus still HAS rotated footprints, since a board
+        set that lost them would make the detectors unfalsifiable.
+      - tests/gui_parity/test_fanout_rotated_gui.py (KiCad python, seconds):
+        the first gate to run a FANOUT step. Real FanoutTab on a real headless
+        RoutingDialog vs the CLI's text-parsed engine call, on haasoscope U2
+        (QFN-76 @ 90deg). It replays the tab's OWN captured generate_qfn_fanout
+        kwargs on the CLI leg rather than rebuilding them -- the tab resolves
+        arguments from the QFN panel + Basic-tab shared params + defaults, and
+        mirroring that is the drift the plane gate's `Shim` already taught us
+        about.
+    Calibration worth recording: with the bug restored, the SIDE
+    CLASSIFICATION check fails (76/78 pads, "pad 1: CLI=left GUI=right") while
+    copper parity stays GREEN. That is not a weak gate -- it is the measured
+    truth that this bug does not move QFN copper. Anything asserting only on
+    copper would have shipped the bug twice.
+  * Deliberately NOT covered: an asymmetric or non-orthogonal package through
+    the real GUI fanout tab, because no in-repo board has one. That regime is
+    covered only synthetically (item 4 above). A corpus board with a
+    non-orthogonal multi-pad part would be the thing to add.
