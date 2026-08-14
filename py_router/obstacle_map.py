@@ -201,6 +201,8 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
 
     # Add segments as obstacles (excluding nets we'll route - their stubs added per-net)
     # Use actual segment width for obstacle, and layer-specific width for routing track
+    _seg_cell_batch: Dict[int, list] = {}
+    _seg_via_batch: list = []
     _n_segs = len(pcb_data.segments)
     for _seg_i, seg in enumerate(pcb_data.segments):
         if (_seg_i & 511) == 0:
@@ -224,7 +226,7 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                 vias_arr = segment_blocked_cells_array(
                     seg.start_x, seg.start_y, seg.end_x, seg.end_y,
                     via_block_mm, coord.grid_step)
-                _batch_vias(obstacles, vias_arr)
+                _seg_via_batch.append(vias_arr)
             continue
         # Compute expansion: routing-side reserve half-width (#156: nominal for
         # the single-ended engine -- impedance/power extra rides the per-net
@@ -237,7 +239,35 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         expansion_mm = reserve_width / 2 + seg_width / 2 + seg_clearance + extra_clearance
         # For via blocking by segments: via half-size + segment half-width + clearance
         via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance + extra_clearance
-        _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_mm, via_block_mm)
+        # FFI batching (2026-08-14 profiling): one Rust call per segment was
+        # 7.5M crossings / ~90s across a rescue-heavy step. Accumulate the
+        # (memoized, read-only) cell arrays and stamp once per build below --
+        # concatenation preserves the exact row multiset and order, and the
+        # batch inserts process rows identically whether split or joined.
+        cells_arr = segment_blocked_cells_array(
+            seg.start_x, seg.start_y, seg.end_x, seg.end_y,
+            expansion_mm, coord.grid_step)
+        if len(cells_arr):
+            _seg_cell_batch.setdefault(layer_idx, []).append(cells_arr)
+        vias_arr = segment_blocked_cells_array(
+            seg.start_x, seg.start_y, seg.end_x, seg.end_y,
+            via_block_mm, coord.grid_step)
+        if len(vias_arr):
+            _seg_via_batch.append(vias_arr)
+
+    # Flush the accumulated segment stamps: one Rust call per layer for the
+    # track keep-outs, one for the via keep-outs.
+    for _li, _arrs in sorted(_seg_cell_batch.items()):
+        _cells = np.concatenate(_arrs) if len(_arrs) > 1 else _arrs[0]
+        _rows = np.empty((len(_cells), 3), dtype=np.int32)
+        _rows[:, :2] = _cells
+        _rows[:, 2] = _li
+        obstacles.add_blocked_cells_batch(np.ascontiguousarray(_rows))
+    if _seg_via_batch:
+        _vall = (np.concatenate(_seg_via_batch)
+                 if len(_seg_via_batch) > 1 else _seg_via_batch[0])
+        obstacles.add_blocked_vias_batch(
+            np.ascontiguousarray(_vall.astype(np.int32)))
 
     # Add vias as obstacles (excluding nets we'll route)
     _n_vias = len(pcb_data.vias)

@@ -1509,31 +1509,52 @@ def get_chip_pad_positions(pcb_data: PCBData, net_ids: List[int], min_pads: int 
         List of (x, y, layer) tuples for chip pad positions.
     """
     import env_knobs
+    import numpy as _np
     from kicad_parser import detect_package_type
 
     net_id_set = set(net_ids)
 
-    # Sorted for deterministic output order.
+    # Sorted for deterministic output order. Footprints never move during a
+    # run, so the chip-ref list is board-static -- memoized per (min_pads,
+    # gate) on pcb_data (2026-08-14 profiling: this function was 95s of the
+    # orangecrab step, called 1,464x with a full package-detect + segment
+    # scan and a 570M-iteration retire genexpr each time).
     _fine_only = env_knobs.FINE_PITCH_PSEUDO_STUBS
-    chip_refs = sorted(
-        ref for ref, footprint in pcb_data.footprints.items()
-        if footprint.pads and len(footprint.pads) >= min_pads
-        and (not _fine_only
-             or detect_package_type(footprint) in ('BGA', 'QFN', 'QFP')))
+    _refs_memo = getattr(pcb_data, '_chip_refs_memo', None)
+    if _refs_memo is None:
+        _refs_memo = pcb_data._chip_refs_memo = {}
+    _rk = (min_pads, _fine_only)
+    chip_refs = _refs_memo.get(_rk)
+    if chip_refs is None:
+        chip_refs = _refs_memo[_rk] = sorted(
+            ref for ref, footprint in pcb_data.footprints.items()
+            if footprint.pads and len(footprint.pads) >= min_pads
+            and (not _fine_only
+                 or detect_package_type(footprint) in ('BGA', 'QFN', 'QFP')))
 
     if not chip_refs:
         return []
 
-    # Same-net attachment points for the "already escaped" test:
-    # segment endpoints and via centers of the tracked nets.
-    attach_points: dict = {}
-    for seg in pcb_data.segments:
-        if seg.net_id in net_id_set:
-            attach_points.setdefault(seg.net_id, []).append((seg.start_x, seg.start_y))
-            attach_points[seg.net_id].append((seg.end_x, seg.end_y))
-    for via in pcb_data.vias:
-        if via.net_id in net_id_set:
-            attach_points.setdefault(via.net_id, []).append((via.x, via.y))
+    # Same-net attachment points for the "already escaped" test: segment
+    # endpoints and via centers. Rebuilt once per COPPER EPOCH (the
+    # add/remove_route choke-point counter) for ALL nets as float64 arrays;
+    # per-call subsets just index the dict. The vectorized retire test below
+    # runs the same float64 ops elementwise, so decisions are bit-identical
+    # to the scalar genexpr it replaces.
+    _epoch = getattr(pcb_data, '_copper_epoch', 0)
+    _apm = getattr(pcb_data, '_attach_pts_memo', None)
+    if _apm is None or _apm[0] != _epoch:
+        _raw: dict = {}
+        for seg in pcb_data.segments:
+            _raw.setdefault(seg.net_id, []).append((seg.start_x, seg.start_y))
+            _raw[seg.net_id].append((seg.end_x, seg.end_y))
+        for via in pcb_data.vias:
+            _raw.setdefault(via.net_id, []).append((via.x, via.y))
+        _apm = pcb_data._attach_pts_memo = (
+            _epoch,
+            {nid: _np.array(pts, dtype=_np.float64)
+             for nid, pts in _raw.items()})
+    attach_points = _apm[1]
 
     chip_pads = []
     for ref in chip_refs:
@@ -1551,12 +1572,15 @@ def get_chip_pad_positions(pcb_data: PCBData, net_ids: List[int], min_pads: int 
             if not pad_layer:
                 continue
             # Skip pads that already have an escape (stub end / via in reach)
-            pts = attach_points.get(pad.net_id) if env_knobs.PSEUDO_STUB_RETIRE else None
-            if pts:
+            pts = (attach_points.get(pad.net_id)
+                   if env_knobs.PSEUDO_STUB_RETIRE else None)
+            if pts is not None and len(pts):
                 reach = max(pad.size_x, pad.size_y) / 2.0 + 0.05
                 reach_sq = reach * reach
                 px, py = pad.global_x, pad.global_y
-                if any((x - px) ** 2 + (y - py) ** 2 <= reach_sq for x, y in pts):
+                dx = pts[:, 0] - px
+                dy = pts[:, 1] - py
+                if bool((dx * dx + dy * dy <= reach_sq).any()):
                     continue
             chip_pads.append((pad.global_x, pad.global_y, pad_layer))
 

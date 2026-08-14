@@ -6,6 +6,8 @@ and tracking segment connectivity.
 """
 from __future__ import annotations
 
+from collections import OrderedDict
+
 import math
 from typing import List, Optional, Tuple, Dict, Set
 
@@ -182,6 +184,10 @@ def is_edge_stub(pad_x: float, pad_y: float, bga_zones: List) -> bool:
 COINCIDENCE_TOL = 0.02
 
 
+_CLUSTER_MEMO: "OrderedDict[tuple, tuple]" = OrderedDict()
+_CLUSTER_MEMO_CAP = 4096
+
+
 def cluster_coincident_points(points, tol: float = COINCIDENCE_TOL):
     """Union-find clustering of (x, y, layer) points by endpoint coincidence.
 
@@ -189,7 +195,17 @@ def cluster_coincident_points(points, tol: float = COINCIDENCE_TOL):
     shared sentinel layer for layer-agnostic clustering). O(n) via spatial
     hashing. Returns a list of cluster root indices, one per input point --
     the ONE shared implementation behind every coincidence consumer (#320).
+
+    Memoized (2026-08-14 profiling: 343k calls / 54s, endpoint derivations
+    re-clustering unchanged nets across rescue/escalation attempts): the
+    function is pure in (points, tol), so an exact-key hit is identical by
+    construction. A fresh list is returned per call (callers may mutate).
     """
+    _key = (tuple(points), tol)
+    _hit = _CLUSTER_MEMO.get(_key)
+    if _hit is not None:
+        _CLUSTER_MEMO.move_to_end(_key)
+        return list(_hit)
     n = len(points)
     parent = list(range(n))
 
@@ -218,7 +234,11 @@ def cluster_coincident_points(points, tol: float = COINCIDENCE_TOL):
                     ox, oy, olayer = points[j]
                     if olayer == layer and abs(x - ox) < tol and abs(y - oy) < tol:
                         union(i, j)
-    return [find(i) for i in range(n)]
+    roots = [find(i) for i in range(n)]
+    _CLUSTER_MEMO[_key] = tuple(roots)
+    while len(_CLUSTER_MEMO) > _CLUSTER_MEMO_CAP:
+        _CLUSTER_MEMO.popitem(last=False)
+    return roots
 
 
 def find_connected_groups(segments: List[Segment], tolerance: float = COINCIDENCE_TOL,
