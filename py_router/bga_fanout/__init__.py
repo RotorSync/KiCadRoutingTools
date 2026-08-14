@@ -2271,8 +2271,10 @@ def _generate_bga_fanout_core(footprint: Footprint,
             # `failed_nets` artificially SHORT (untried balls are not failures)
             # -- so "fewer dropped balls" would read a truncated pass as the
             # better result and throw away the completed single pass's copper.
-            # Measured: ulx3s U1 at --deadline 4 returned 0 tracks this way,
-            # while f0 held a real 890-segment escape. Keep the incumbent.
+            # Measured by neutering this guard and re-running ulx3s U1 at
+            # --deadline 4: the truncated pass WINS (`Under-pad escape wins:
+            # 185 -> 0 dropped ball(s)`) and the run ships 0 signal escapes;
+            # with the guard it ships 26. Keep the incumbent.
             if cancel_check and cancel_check():
                 print(f"  Escape priority: cancelled mid-pass -- keeping the "
                       f"single-pass result ({len(f0)} dropped ball(s)); a "
@@ -3047,16 +3049,17 @@ def _generate_bga_fanout_core(footprint: Footprint,
             # which is the opposite of what a truncated pass measured.
             #
             # The guard prefers the incumbent's copper over a truncated pass's
-            # silence. That is right when the incumbent is real work (ulx3s U1:
-            # an 890-segment escape kept instead of 0 tracks) and WRONG when the
-            # completed engine would itself have discarded it -- orangecrab
-            # ext_pll U4, where the under-pad pass legitimately concludes "0/0
-            # signals escaped, 54 already-fanned skipped" and its EMPTY result
-            # wins the comparison, so the finished run ships no signal escape at
-            # all (drc total 937) while a cancelled run keeps 22 channel escapes
-            # (1108). A cancelled pass and a legitimately-empty one return the
-            # same ([], []) from here, so the divergence is DISCLOSED rather
-            # than guessed at.
+            # silence. Measured on ulx3s U1 --deadline 4 by neutering it: with
+            # the guard 26 balls escape (96 segments, 10 vias); without it the
+            # truncated pass wins and 0 do (29 segments, 144 plane barrels).
+            # It is WRONG when the completed engine would itself have discarded
+            # the incumbent -- orangecrab_ext_pll U4, where the under-pad pass
+            # legitimately concludes "0/0 signals escaped, 54 already-fanned
+            # skipped" and its EMPTY result wins, so the finished run ships no
+            # signal escape at all (drc total 937, matching this guard turned
+            # OFF) while a cancelled run keeps 22 channel escapes (1108). A
+            # cancelled pass and a legitimately-empty one return the same
+            # ([], []) from here, so the divergence is DISCLOSED, not guessed.
             print(f"  Under-pad escape: cancelled mid-pass -- keeping the "
                   f"channel result and its {len(failed_nets)} dropped ball(s); "
                   f"a truncated pass has measured nothing. Those balls are "

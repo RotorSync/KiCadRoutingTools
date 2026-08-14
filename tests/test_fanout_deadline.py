@@ -29,9 +29,9 @@ Four things are pinned here, and the middle two are the load-bearing ones:
       - `deadline_unrescued` names the count, so a consumer can tell a budget
         from a clearance problem;
       - a CANCELLED pass never wins the "fewer dropped balls" comparison (its
-        loops broke early, so its failed list is artificially SHORT -- ulx3s U1
-        at --deadline 4 once returned 0 tracks this way while the completed pass
-        held an 890-segment escape);
+        loops broke early, so its failed list is artificially SHORT -- neuter
+        the guard and ulx3s U1 at --deadline 4 logs `Under-pad escape wins:
+        185 -> 0 dropped ball(s)` and ships 0 escapes instead of 26);
       - the plane-drop TAIL pass is skipped (it deliberately runs after the
         signal escape so signals keep first claim; with no finished escape it
         once shipped 115 via-in-pad barrels and 0 escapes).
@@ -41,7 +41,7 @@ Four things are pinned here, and the middle two are the load-bearing ones:
     A/B unnecessary: the cancel cannot change routing, only truncate it.
 
 NOT pinned here, and measured by hand instead because the board that shows it
-costs 2m15s: that the tighter-clearance advice SURVIVES on a completed run with
+costs 2m33s: that the tighter-clearance advice SURVIVES on a completed run with
 real failures (`ulx3s.kicad_pcb U1`, no budget -> `5 of 204 requested ball(s)
 could NOT be escaped ... Retry the fanout with a smaller --clearance`).
 
@@ -63,7 +63,7 @@ QFN_BOARD = os.path.join(ROOT, 'kicad_files', 'haasoscope_pro_max_test.kicad_pcb
 # A part whose channel pass COMPLETES (36 balls dropped) and whose rescue passes
 # are then cancelled at their heads -- the mid-rescue shape, in ~6s. Chosen over
 # the ulx3s U1 headline (same shape, 185 balls) because that one needs 14s just
-# to reach the cancel and 2m15s to establish its completed baseline.
+# to reach the cancel and 2m33s to establish its completed baseline.
 MID_BOARD = os.path.join(ROOT, 'kicad_files', 'orangecrab_ext_pll.kicad_pcb')
 MID_COMPONENT = 'U4'
 # WHICH budget lands mid-rescue is a property of the machine, not of the code:

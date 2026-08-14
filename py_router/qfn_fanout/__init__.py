@@ -1366,10 +1366,12 @@ def main():
     # #621: the BGA twin of this key exists because a cancel that lands
     # mid-rescue leaves `unescaped_nets` full and `deadline_skipped` empty, and
     # a consumer reading only the latter concludes the run tried everything.
-    # QFN's per-stub loop head normally yields real partials (measured:
-    # haasoscope U2 at --deadline 0.2 -> escaped 22, failed 0, skipped 26), but
-    # the disclosure is symmetric so a consumer can apply ONE rule to both
-    # fronts: on a cancelled run, `failed` is not evidence about clearance.
+    # QFN's per-stub loop head does yield real partials (measured, rp2350 U6:
+    # --deadline 0.2 -> escaped 7, failed 0, skipped 28), and both shapes can
+    # coexist here (--deadline 0.3 -> escaped 33, failed 1, skipped 2,
+    # unrescued 1). The disclosure is symmetric so a consumer can apply ONE
+    # rule to both fronts: on a cancelled run, `failed` is not evidence about
+    # clearance.
     deadline_unrescued = (len(unescaped)
                           if (_dl is not None and _dl.stopped_in) else 0)
     drc_grazes = {}
