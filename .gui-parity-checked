@@ -643,3 +643,40 @@ it already guarded > 1e-9; this closes the divergence in the other helper.
     (segments 1307=1307, vias 144=144, 0 one-sided); test_manifest_plan_parity
     OK; test_cli_postpass_coverage 7 registered / 14 in use / 1 acknowledged
     CLI-only (run_drc fanout graze audit, report-only) / 0 unreachable.
+
+ADDENDUM 2026-08-14 (PR: Placement sub-tab + #481 beautify_labels, commits
+a2e96995 + b07450ee) -- scope: this PR's changes only; the SHA above is NOT
+bumped (the span since it contains placement-branch commits this session did
+not audit -- the 2026-07-30 PARTIAL entry's rule).
+  * Routing engine untouched: no new batch_route/create_plane/fanout kwargs,
+    no CLI-main post-passes on the routing fronts. The AI-tab restructure is
+    a nested notebook whose container is the page; dialog.ai_tab still
+    points at the real AITab, verified against every external consumer
+    (settings_persistence, _ai_params, resets, PlanExecutor tables).
+  * NEW parser surface with its own parity gate: Footprint.ref_label is
+    filled by BOTH parse paths and pinned by
+    tests/gui_parity/test_ref_label_pcbnew_parity.py (65+266 labels
+    field-identical on splitflap/glasgow under KiCad 10 python, plus the
+    absolute-angle verdict via GetDrawRotation folds). The beautify engine
+    is called identically by CLI and GUI (same LabelConfig; the GUI applies
+    the SAME file-frame values pcbnew round-trips, so outputs match by
+    construction).
+  * manifest_to_plan: beautify_labels.py joins REFUSED_TOOLS (refused
+    loudly, chain intact -- fixture added to check_refused_tools). The
+    placement AI actions are skill runs, NOT plan actions; plan-format
+    placement steps remain refused. PlanExecutor._join_worker_threads
+    learns placement_tab (its beautify worker uses the canonical
+    _routing_thread contract).
+  * Gates at b07450ee (Windows KiCad 10.0 python, wx 4.2.2):
+    test_gui_engine_parity VERDICT PARITY, copper sets IDENTICAL (segments
+    1335=1335, vias 140=140, 0 one-sided; drc/kicad_unconnected -1/-1
+    identically skipped in the gate env). test_settings_roundtrip 183 keys
+    clean (5 new placement_* / ai_active_subtab keys). test_manifest_plan
+    _parity OK (+beautify fixture). test_cli_postpass_coverage 8/15/1/0
+    (beautify main is postpass-free by construction). NEW
+    test_placement_fake_run 26 checks (real .cmd fake-claude shim: argv,
+    stdin prompt handoff, monitor, stage derivation, RESULT parse, beautify
+    contract). test_placement_run 55 checks, test_503 clean.
+  * Known blind spots unchanged, plus one new: the fake-run gate exercises
+    the place leg only (place_route differs by one instruction line and the
+    --no-delegate pin, covered wx-free in test_placement_run).
