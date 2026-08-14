@@ -1363,6 +1363,15 @@ def main():
     deadline_skipped = [n for n in LAST_DEADLINE_SKIPPED
                         if n not in unescaped]
     requested = escaped + len(unescaped) + len(deadline_skipped)
+    # #621: the BGA twin of this key exists because a cancel that lands
+    # mid-rescue leaves `unescaped_nets` full and `deadline_skipped` empty, and
+    # a consumer reading only the latter concludes the run tried everything.
+    # QFN's per-stub loop head normally yields real partials (measured:
+    # haasoscope U2 at --deadline 0.2 -> escaped 22, failed 0, skipped 26), but
+    # the disclosure is symmetric so a consumer can apply ONE rule to both
+    # fronts: on a cancelled run, `failed` is not evidence about clearance.
+    deadline_unrescued = (len(unescaped)
+                          if (_dl is not None and _dl.stopped_in) else 0)
     drc_grazes = {}
     out_path = getattr(args, 'output', None)
     if out_path:
@@ -1427,6 +1436,10 @@ def main():
     # failures would report a budget as a routing defect.
     if deadline_skipped:
         summary['deadline_skipped'] = deadline_skipped
+    # #621: how many of `failed` this CANCELLED run cannot vouch for. Absent on
+    # every uncancelled run. See the BGA twin for the mechanism.
+    if deadline_unrescued:
+        summary['deadline_unrescued'] = deadline_unrescued
 
     # Emit through krt_deadline, NOT a raw print (#621): a bare print leaves
     # krt_deadline's `_emitted` False, and the atexit flush then publishes a
@@ -1446,12 +1459,17 @@ def main():
         # consumes the output path by name, so withholding the file breaks the
         # chain instead of degrading it (place_reconstruct stages because its
         # output path is a finished-placement contract).
+        # #621: "N never tried" alone is misleading whenever the cancel landed
+        # after something already dropped pads -- see the BGA twin's comment.
+        _unresc = (f", {deadline_unrescued} dropped by a pass whose RESCUE "
+                   f"never ran (NOT clearance failures)"
+                   if deadline_unrescued else "")
         print(f"\033[91mDEADLINE: this run stopped on its own budget after "
               f"{_dl.elapsed():.0f}s of {_dl.seconds:g}s"
               + (f" (in {_dl.stopped_in})" if _dl.stopped_in else "")
               + f". The board at {out_path or '(none)'} is a PARTIAL fanout: "
-              f"{escaped} pad net(s) escaped, {len(deadline_skipped)} never "
-              f"tried. Real, DRC-graded copper -- but the escape did not "
+              f"{escaped} pad net(s) escaped{_unresc}, {len(deadline_skipped)} "
+              f"never tried. Real, DRC-graded copper -- but the escape did not "
               f"finish, so do not read it as complete.\033[0m")
         return krt_deadline.DEADLINE_EXIT
 

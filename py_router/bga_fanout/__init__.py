@@ -2276,7 +2276,10 @@ def _generate_bga_fanout_core(footprint: Footprint,
             if cancel_check and cancel_check():
                 print(f"  Escape priority: cancelled mid-pass -- keeping the "
                       f"single-pass result ({len(f0)} dropped ball(s)); a "
-                      f"truncated pass has measured nothing to compare")
+                      f"truncated pass has measured nothing to compare. Those "
+                      f"balls are UNRESCUED, not clearance failures -- and this "
+                      f"copper is kept on the strength of a comparison that "
+                      f"never ran, so a completed run may ship a different set.")
                 return t0, v0, vr0, f0
             # Keep whichever result covers more nets; ties keep the single
             # pass (issue #367 -- mirror the channel/underpad auto-retry's
@@ -3039,14 +3042,34 @@ def _generate_bga_fanout_core(footprint: Footprint,
         # not failures, so it must not be allowed to displace the completed
         # channel result on that basis.
         if cancel_check and cancel_check():
-            print("  Under-pad escape: cancelled mid-pass -- keeping the "
-                  "channel result (a truncated pass has measured nothing)")
+            # No fall-through print here: the "did not improve (0 dropped)"
+            # line reads as the under-pad pass having succeeded perfectly,
+            # which is the opposite of what a truncated pass measured.
+            #
+            # The guard prefers the incumbent's copper over a truncated pass's
+            # silence. That is right when the incumbent is real work (ulx3s U1:
+            # an 890-segment escape kept instead of 0 tracks) and WRONG when the
+            # completed engine would itself have discarded it -- orangecrab
+            # ext_pll U4, where the under-pad pass legitimately concludes "0/0
+            # signals escaped, 54 already-fanned skipped" and its EMPTY result
+            # wins the comparison, so the finished run ships no signal escape at
+            # all (drc total 937) while a cancelled run keeps 22 channel escapes
+            # (1108). A cancelled pass and a legitimately-empty one return the
+            # same ([], []) from here, so the divergence is DISCLOSED rather
+            # than guessed at.
+            print(f"  Under-pad escape: cancelled mid-pass -- keeping the "
+                  f"channel result and its {len(failed_nets)} dropped ball(s); "
+                  f"a truncated pass has measured nothing. Those balls are "
+                  f"UNRESCUED, not clearance failures -- and this copper is "
+                  f"kept on the strength of a comparison that never ran, so a "
+                  f"completed run may legitimately ship less of it.")
         elif len(up_failed) < len(failed_nets):
             print(f"  Under-pad escape wins: {len(failed_nets)} -> "
                   f"{len(up_failed)} dropped ball(s); using it")
             return up_tracks, up_vias, up_vias_rm, up_failed
-        print(f"  Under-pad escape did not improve ({len(up_failed)} dropped) - "
-              f"keeping the channel result")
+        else:
+            print(f"  Under-pad escape did not improve ({len(up_failed)} dropped) - "
+                  f"keeping the channel result")
 
     # Write-list invariant (#508 findings 6/7): every surviving FanoutRoute
     # must have at least one track in the write list -- a route still counted
@@ -3665,7 +3688,29 @@ def main():
     # makes the partial ledger add up: requested == escaped + failed + skipped.
     deadline_skipped = list(LAST_DEADLINE_SKIPPED)
     requested = escaped + len(unescaped) + len(deadline_skipped)
-    if unescaped:
+    # #621: on a CANCELLED run `unescaped_nets` is NOT a measured escape-failure
+    # list, and the tighter-clearance advice below would be exactly the
+    # misdiagnosis this flag exists to prevent. The channel pass is
+    # UNINTERRUPTIBLE -- once it starts it runs to completion and files every
+    # ball it could not route into failed_nets -- while the passes that actually
+    # RECOVER those balls (the under-pad rescue, escape priority) are cancelled
+    # at their heads. Measured on ulx3s U1: the completed run goes
+    # `Channel escape dropped 185` -> `Under-pad escape wins: 185 -> 104` ->
+    # `Escape priority wins: 104 -> 5`, so `--deadline 4` ships 185 "failures"
+    # of which 180 the finished engine rescues. They STAY in unescaped_nets (a
+    # pass really did drop them -- moving them to deadline_skipped would erase
+    # that measurement), but the count is disclosed as `deadline_unrescued` and
+    # the advice is replaced by the one a cancelled run can honestly give.
+    deadline_unrescued = (len(unescaped)
+                          if (_dl is not None and _dl.stopped_in) else 0)
+    if deadline_unrescued:
+        print(f"\n  {deadline_unrescued} ball(s) are listed in unescaped_nets "
+              f"because a pass whose RESCUE never ran dropped them -- this run "
+              f"was cut short by --deadline. They are NOT measured clearance "
+              f"failures: do not retry at a smaller --clearance on this "
+              f"evidence. Re-run with a larger budget (or none) to find out "
+              f"what they really are.")
+    elif unescaped:
         print(f"\n  {len(unescaped)} of {requested} requested ball(s) could NOT be "
               f"escaped at --clearance {args.clearance}mm / --track-width "
               f"{args.track_width}mm and were DROPPED from the output. Retry the "
@@ -3750,6 +3795,15 @@ def main():
     # into a pointless tighter-clearance retry.
     if deadline_skipped:
         summary['deadline_skipped'] = deadline_skipped
+    # #621: how many of `failed` / `unescaped_nets` this CANCELLED run cannot
+    # vouch for -- balls a pass dropped whose rescue pass never ran. Absent on
+    # every uncancelled run, and on a cancelled run it equals `failed` (the
+    # dominant cancel lands mid-rescue, not at the first pass head). This is the
+    # key a consumer must read before treating `unescaped_nets` as evidence
+    # about clearance: `deadline_skipped` alone is 0 on exactly the runs that
+    # abandoned the most work.
+    if deadline_unrescued:
+        summary['deadline_unrescued'] = deadline_unrescued
 
     # Emit through krt_deadline, NOT a raw print (#621). `_emitted` is set only
     # inside krt_deadline.emit(), so a bare print leaves it False and the atexit
@@ -3776,12 +3830,20 @@ def main():
         # finished-placement contract; fanout is a CHAIN step whose successor
         # (route.py) consumes the output path by name, so withholding the file
         # breaks the chain at a different point instead of degrading it.
+        # #621: "N never tried" ALONE is a misleading headline. The dominant
+        # cancel lands mid-rescue, where deadline_skipped is 0 and every
+        # abandoned ball sits in unescaped_nets -- ulx3s U1 at --deadline 4
+        # rendered as "26 escaped, 0 never tried" while the summary carried 185
+        # failures. Name the unrescued balls in the same breath.
+        _unresc = (f", {deadline_unrescued} dropped by a pass whose RESCUE "
+                   f"never ran (NOT clearance failures)"
+                   if deadline_unrescued else "")
         print(f"\033[91mDEADLINE: this run stopped on its own budget after "
               f"{_dl.elapsed():.0f}s of {_dl.seconds:g}s"
               + (f" (in {_dl.stopped_in})" if _dl.stopped_in else "")
               + f". The board at {out_path or '(none)'} is a PARTIAL fanout: "
-              f"{escaped} ball(s) escaped, {len(deadline_skipped)} never "
-              f"tried. Real, DRC-graded copper -- but the escape did not "
+              f"{escaped} ball(s) escaped{_unresc}, {len(deadline_skipped)} "
+              f"never tried. Real, DRC-graded copper -- but the escape did not "
               f"finish, so do not read it as complete.\033[0m")
         return krt_deadline.DEADLINE_EXIT
 
