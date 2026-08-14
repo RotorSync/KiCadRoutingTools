@@ -318,7 +318,11 @@ class QuenchState:
         # true Edge.Cuts rings and self-disables when the bbox inset is already
         # exact (single rectangular ring, no cutouts) or when the parser found no
         # usable ring at all -- in which case behaviour is unchanged.
-        self.edge_gate = BoardOutlineGate(pcb_data.board_info, margin)
+        # footprints=: lets the gate precompute which milled Edge.Cuts ring each
+        # part OWNS (its own pads sit inside it), so a connector over a milled
+        # relief is not board-violating at its own seed pose (#628 follow-up).
+        self.edge_gate = BoardOutlineGate(pcb_data.board_info, margin,
+                                          footprints=pcb_data.footprints)
         self.clearance = clearance
         self.crossing_penalty = crossing_penalty
         self.length_weight = length_weight
@@ -576,8 +580,11 @@ class QuenchState:
         # near a ring pays only the bbox term (the ring terms cost ~100x), and
         # one that can measures only against the edges it can actually reach.
         near = self._edges_near(ref) if self.edge_gate.active else None
+        # ref=: same owner scoping as candidate_valid's rect_blocked call. The
+        # two MUST pass the same ref or `violation()==0` stops implying the hard
+        # gate passes, which is the invariant the unfreeze branch rides on.
         board = self.edge_gate.rect_outside_amount(
-            rects[0], exact=bool(near), edges=near)
+            rects[0], exact=bool(near), edges=near, ref=ref)
         overlap = 0.0
         if limit is not None and board > limit:
             return board, overlap
@@ -642,7 +649,7 @@ class QuenchState:
         # against only those edges.
         if legal and self.edge_gate.active:
             near = self._edges_near(ref)
-            if near and self.edge_gate.rect_blocked(rect, edges=near):
+            if near and self.edge_gate.rect_blocked(rect, edges=near, ref=ref):
                 legal = False
         if legal:
             if self._neighbors is not None and ref in self._neighbors:
@@ -832,7 +839,7 @@ class QuenchState:
         oob_amount = 0.0
         oob_area = 0.0
         for p in parts:
-            amt = self.edge_gate.rect_outside_amount(p.rect)
+            amt = self.edge_gate.rect_outside_amount(p.rect, ref=p.ref)
             if amt > legality.EPS:
                 oob_count += 1
                 oob_amount += amt

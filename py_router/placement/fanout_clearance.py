@@ -244,7 +244,13 @@ class _Repair:
         # _blocked_geom. Per-cap laziness: only caps whose reachable disk can
         # touch a ring pay for the exact test. The gate itself now lives in
         # placement/legality.py, shared with quench (#456 item 2).
-        self.edge_gate = BoardOutlineGate(pcb_data.board_info, margin)
+        # footprints=: milled-ring ownership, so a cap over its own milled relief
+        # is not blocked at its seed pose (#628 follow-up). Threaded here as well
+        # as in quench because this engine runs the SAME swallow rule through the
+        # same gate -- a cap whose two pads are what got the ring reclassified
+        # would otherwise have every candidate rejected and freeze.
+        self.edge_gate = BoardOutlineGate(pcb_data.board_info, margin,
+                                          footprints=pcb_data.footprints)
         self._edge_margin = margin
         self._edge_active = self.edge_gate.active
         self._max_disp_cap = max_displacement_cap
@@ -519,11 +525,14 @@ class _Repair:
             ref, cap.rect(cap.seed_x, cap.seed_y, cap.seed_rot),
             self._max_disp_cap)
 
-    def _rect_edge_blocked(self, rect):
+    def _rect_edge_blocked(self, rect, ref=None):
         """True when a candidate courtyard rect leaves the REAL board outline,
         enters a cutout, or comes within the edge margin of either (#370 B2 --
-        the bbox `usable` inset is blind to cutouts / curved outlines)."""
-        return self.edge_gate.rect_blocked(rect)
+        the bbox `usable` inset is blind to cutouts / curved outlines).
+
+        `ref` exempts the mover from the swallow rule on milled rings it owns
+        (#628 follow-up); real cutouts are never exempt."""
+        return self.edge_gate.rect_blocked(rect, ref=ref)
 
     def _overlap(self, a, b):
         """Courtyard-clearance shortfall between two rects (0 if clear)."""
@@ -655,7 +664,7 @@ class _Repair:
         # Real outline / cutout gate (#370 B2): only when the bbox inset is
         # not exact (non-rect outline or cutouts) and this cap can reach one.
         if self._edge_active and self._cap_may_reach_edge(ref, cap) \
-                and self._rect_edge_blocked(rect):
+                and self._rect_edge_blocked(rect, ref=ref):
             return True
         # only same-side parts/caps within reach can collide (pre-pruned)
         for idx, r in self.cap_static[ref]:
