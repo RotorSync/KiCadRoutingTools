@@ -454,6 +454,14 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   the tied net's copper may contact the partner pad only where the contact
   lies on its own pad. Consumers: `PCBData.net_tie_exempt_pad_ids(net_id)`,
   the obstacle builders (own-pad-sliver lift), and check_drc's waiver.
+- `footprint.ref_label` - Optional[RefLabel]: the Reference silkscreen text's
+  geometry (#481): `at_x/at_y` (footprint-LOCAL mm), `rotation` (the stored
+  angle, which is ABSOLUTE board angle — probed on KiCad 10, `% 360`
+  normalized), `size_h/size_w`, `thickness`, `layer`, `justify` (raw tokens;
+  `mirror` is meaningful on B-side), `hidden`, `is_property_node` (False =
+  KiCad 6/7 `fp_text` form). Both parse paths fill it identically
+  (`tests/gui_parity/test_ref_label_pcbnew_parity.py` pins that). Consumers:
+  `placement/labels.py` (beautify_labels engine), `write_label_output`.
 
 ### Pad Attributes
 

@@ -309,6 +309,37 @@ class GuidePath:
 
 
 @dataclass
+class RefLabel:
+    """The footprint's Reference-designator text (silkscreen label, #481).
+
+    Parsed from the KiCad 8+ ``(property "Reference" ...)`` sub-node (KiCad
+    6/7 ``(fp_text reference ...)`` as fallback) by BOTH parse paths -- the
+    text parser and ``build_pcb_data_from_board`` -- in the same normalized
+    form, so label geometry decisions are front-end independent (the parity
+    contract, pinned by tests/gui_parity/test_ref_label_pcbnew_parity.py).
+
+    Angle semantics (settled by a pcbnew probe, see
+    ``placement/labels.py::label_world_angle``): ``rotation`` is the label's
+    ABSOLUTE board angle, not a footprint-relative one. ``at_x``/``at_y`` are
+    the offset from the footprint origin in its UNROTATED local frame
+    (pre-mirrored for B-side parts, like pad locals) -- world position is
+    ``local_to_global(fp.x, fp.y, fp.rotation, at_x, at_y)``.
+    """
+    at_x: float          # local-frame offset from the footprint origin (mm)
+    at_y: float
+    rotation: float      # ABSOLUTE board angle, degrees, normalized to [0, 360)
+    size_h: float = 1.0  # font height/width in mm; the FILE stores
+    size_w: float = 1.0  # (size HEIGHT WIDTH) -- probed, KiCad 10 writeback
+    thickness: float = 0.15  # stroke width in mm
+    layer: str = "F.SilkS"
+    justify: str = ""    # raw (justify ...) tokens, space-joined ("left bottom
+    #                      mirror"); "" = KiCad's centered default (no token
+    #                      on any corpus Reference node)
+    hidden: bool = False  # (hide yes), or the bare `hide` token KiCad <=8 wrote
+    is_property_node: bool = True  # False only for the KiCad 6/7 fp_text form
+
+
+@dataclass
 class Footprint:
     """Represents a component footprint."""
     reference: str
@@ -348,6 +379,10 @@ class Footprint:
     # R42: the AUX_SENSE- tab sits inside AUX_VBUS_IN's pad -- treating the
     # partner as a hard obstacle seals the net forever). Obstacle builders and
     # check_drc consume this via PCBData.net_tie_exempt_pad_ids().
+    ref_label: Optional['RefLabel'] = None  # Reference-designator text geometry
+    # (#481); None for a reference-less footprint or an unparseable node.
+    # APPENDED (never mid-insert): positional Footprint(...) constructions
+    # exist across the tree and a mid-list field would silently shift them.
 
 
 @dataclass
@@ -2244,6 +2279,65 @@ def extract_nets(content: str, kicad_version: int = 0) -> Tuple[Dict[int, Net], 
     return nets, name_to_id
 
 
+def _parse_ref_label(fp_text: str, ref_start: int,
+                     is_property: bool) -> Optional[RefLabel]:
+    """Parse the Reference text sub-node at ``ref_start`` into a RefLabel (#481).
+
+    Scoped with find_matching_paren to the Reference node's OWN slice before
+    any regex runs, so a sibling property's ``(at ...)`` / ``(effects ...)``
+    can never bleed in (the same discipline the courtyard reader learned in
+    #456 item 3). Missing effects fall back to KiCad's stock label font
+    (size 1.0, thickness 0.15).
+    """
+    ref_text = fp_text[ref_start:find_matching_paren(fp_text, ref_start)]
+    at_match = re.search(r'\(at\s+([\d.-]+)\s+([\d.-]+)(?:\s+([\d.-]+))?\)',
+                         ref_text)
+    if not at_match:
+        return None
+    layer_match = re.search(r'\(layer\s+"([^"]+)"\)', ref_text)
+
+    # Visibility: KiCad 9+ writes (hide yes); KiCad <=8 (property nodes
+    # included) wrote a bare `hide` token. Strip quoted strings first so a
+    # pathological reference VALUE containing the word cannot match.
+    hidden = bool(re.search(r'\(hide\s+yes\)', ref_text))
+    if not hidden:
+        no_strings = re.sub(r'"(?:[^"\\]|\\.)*"', '""', ref_text)
+        hidden = bool(re.search(r'(?<![\w(])hide\b', no_strings))
+
+    size_h = size_w = 1.0
+    thickness = 0.15
+    justify = ""
+    eff_match = re.search(r'\(effects\b', ref_text)
+    if eff_match:
+        eff_text = ref_text[eff_match.start():
+                            find_matching_paren(ref_text, eff_match.start())]
+        size_match = re.search(r'\(size\s+([\d.-]+)\s+([\d.-]+)\)', eff_text)
+        if size_match:
+            # File order is (size HEIGHT WIDTH) -- probed via a pcbnew
+            # SetTextSize(w=2, h=1) writeback, which lands as (size 1 2).
+            size_h = float(size_match.group(1))
+            size_w = float(size_match.group(2))
+        thick_match = re.search(r'\(thickness\s+([\d.-]+)\)', eff_text)
+        if thick_match:
+            thickness = float(thick_match.group(1))
+        justify_match = re.search(r'\(justify\s+([^)]*)\)', eff_text)
+        if justify_match:
+            justify = ' '.join(justify_match.group(1).split())
+
+    return RefLabel(
+        at_x=float(at_match.group(1)),
+        at_y=float(at_match.group(2)),
+        rotation=(float(at_match.group(3)) if at_match.group(3) else 0.0) % 360,
+        size_h=size_h,
+        size_w=size_w,
+        thickness=thickness,
+        layer=layer_match.group(1) if layer_match else "F.SilkS",
+        justify=justify,
+        hidden=hidden,
+        is_property_node=is_property,
+    )
+
+
 def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: Dict[str, int] = None) -> Tuple[Dict[str, Footprint], Dict[int, List[Pad]]]:
     """Extract footprints and their pads with global coordinates."""
     footprints = {}
@@ -2287,6 +2381,7 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
         # footprint got reference "?" and collapsed onto one dict key, so a
         # whole board parsed as a single footprint (issue #78).
         ref_match = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fp_text)
+        ref_is_property = ref_match is not None
         if not ref_match:
             ref_match = re.search(r'\(fp_text\s+reference\s+"([^"]+)"', fp_text)
         if ref_match:
@@ -2362,6 +2457,12 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
         _path_m = re.search(r'\(path\s+"([^"]*)"', fp_text)
         fp_path = _path_m.group(1) if _path_m else ""
 
+        # Reference-label geometry (#481): parsed from the Reference sub-node's
+        # own slice. None for the uuid-keyed reference-less footprints above.
+        ref_label = (_parse_ref_label(fp_text, ref_match.start(),
+                                      ref_is_property)
+                     if ref_match else None)
+
         footprint = Footprint(
             reference=reference,
             footprint_name=fp_name,
@@ -2375,7 +2476,8 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
             clearance=fp_clearance,
             uuid=fp_uuid,
             sheet_path=fp_path,
-            net_tie_groups=net_tie_groups
+            net_tie_groups=net_tie_groups,
+            ref_label=ref_label
         )
 
         # Extract pads
@@ -3834,6 +3936,56 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         except Exception:
             fp_path = ""
 
+        # Reference-label geometry (#481) -- parity with the text parser's
+        # RefLabel. Probed on splitflap+ulx3s under KiCad 10:
+        # GetFPRelativePosition() IS the file's (at x y) bit-for-bit (B-side
+        # included: KiCad stores flipped children pre-mirrored), and
+        # GetTextAngle() IS the file's stored angle -- the label's ABSOLUTE
+        # board rotation (see placement/labels.py::label_world_angle for the
+        # probe record). Defensive per surrounding style: a moved accessor
+        # must not take the whole parse down.
+        fp_ref_label = None
+        try:
+            _ref = fp.Reference()
+            _rel = _ref.GetFPRelativePosition()
+            try:
+                _ref_rot = _ref.GetTextAngle().AsDegrees()
+            except AttributeError:
+                _ref_rot = _ref.GetTextAngle() / 10.0  # older: tenths of deg
+            _ref_size = _ref.GetTextSize()  # VECTOR2I: x=width, y=height
+            _just = []
+            try:
+                _hj = int(_ref.GetHorizJustify())
+                _vj = int(_ref.GetVertJustify())
+                if _hj < 0:
+                    _just.append('left')
+                elif _hj > 0:
+                    _just.append('right')
+                if _vj < 0:
+                    _just.append('top')
+                elif _vj > 0:
+                    _just.append('bottom')
+            except Exception:
+                pass
+            try:
+                if _ref.IsMirrored():
+                    _just.append('mirror')
+            except Exception:
+                pass
+            fp_ref_label = RefLabel(
+                at_x=to_mm(_rel.x),
+                at_y=to_mm(_rel.y),
+                rotation=_ref_rot % 360,
+                size_h=to_mm(_ref_size.y),  # file order is (size HEIGHT WIDTH)
+                size_w=to_mm(_ref_size.x),
+                thickness=to_mm(_ref.GetTextThickness()),
+                layer=get_layer_name(_ref.GetLayer()),
+                justify=' '.join(_just),
+                hidden=not _ref.IsVisible(),
+                is_property_node=True)
+        except Exception:
+            fp_ref_label = None
+
         footprint = Footprint(
             reference=reference,
             footprint_name=fp_name,
@@ -3847,7 +3999,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             clearance=fp_clearance,
             uuid=fp_uuid,
             sheet_path=fp_path,
-            net_tie_groups=fp_net_tie
+            net_tie_groups=fp_net_tie,
+            ref_label=fp_ref_label
         )
 
         # Extract pads
@@ -4357,16 +4510,26 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
 
 
 def _global_to_local(fp_x, fp_y, fp_rotation_deg, global_x, global_y):
-    """Reverse transform: global board coordinates to local footprint coordinates."""
-    rad = math.radians(fp_rotation_deg)  # Positive rotation to reverse the transform
+    """Reverse transform: global board coordinates to local footprint coordinates.
+
+    The exact inverse of `local_to_global` (whose forward negates the angle,
+    the KiCad rotation convention): local = R(+rotation) . (global - origin).
+    The previous body applied the TRANSPOSED rotation (both sin signs
+    flipped), so round-tripping a point through local_to_global came back
+    reflected for any rotated footprint -- measured 12.15mm off on a -90 part
+    (#481 label placement). That was latent until KiCad 7+ removed
+    pad.GetPos0(), which makes the pad-local fallback below run for EVERY pad
+    under a modern pcbnew.
+    """
+    rad = math.radians(fp_rotation_deg)  # POSITIVE angle reverses the negated forward
     cos_r = math.cos(rad)
     sin_r = math.sin(rad)
 
     dx = global_x - fp_x
     dy = global_y - fp_y
 
-    local_x = dx * cos_r + dy * sin_r
-    local_y = -dx * sin_r + dy * cos_r
+    local_x = dx * cos_r - dy * sin_r
+    local_y = dx * sin_r + dy * cos_r
 
     return local_x, local_y
 
