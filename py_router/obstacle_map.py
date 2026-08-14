@@ -1671,6 +1671,9 @@ def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     obs_clearance = config.obstacle_clearance(net_id)
 
     # Add segments - use actual segment width and the routing-side reserve width (#156)
+    # FFI batching (2026-08-14): accumulate + stamp once per layer, byte-identical.
+    _nb_cells: Dict[int, list] = {}
+    _nb_vias: list = []
     for seg in pcb_data.segments:
         if seg.net_id != net_id:
             continue
@@ -1683,7 +1686,25 @@ def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         seg_clearance = config.layer_clearance(seg.layer, obs_clearance)
         expansion_mm = reserve_width / 2 + seg_width / 2 + seg_clearance + extra_clearance
         via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance + extra_clearance
-        _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_mm, via_block_mm)
+        _c = segment_blocked_cells_array(seg.start_x, seg.start_y,
+                                         seg.end_x, seg.end_y,
+                                         expansion_mm, coord.grid_step)
+        if len(_c):
+            _nb_cells.setdefault(layer_idx, []).append(_c)
+        _v = segment_blocked_cells_array(seg.start_x, seg.start_y,
+                                         seg.end_x, seg.end_y,
+                                         via_block_mm, coord.grid_step)
+        if len(_v):
+            _nb_vias.append(_v)
+    for _li, _arrs in sorted(_nb_cells.items()):
+        _call = np.concatenate(_arrs) if len(_arrs) > 1 else _arrs[0]
+        _rows = np.empty((len(_call), 3), dtype=np.int32)
+        _rows[:, :2] = _call
+        _rows[:, 2] = _li
+        obstacles.add_blocked_cells_batch(np.ascontiguousarray(_rows))
+    if _nb_vias:
+        _vall = np.concatenate(_nb_vias) if len(_nb_vias) > 1 else _nb_vias[0]
+        obstacles.add_blocked_vias_batch(np.ascontiguousarray(_vall.astype(np.int32)))
 
 
 def add_diff_pair_own_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
@@ -2051,6 +2072,12 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
     # Add segments - use actual segment width and layer-specific routing track width.
     # Cross-class clearance (PR392): price each segment at ITS OWN net's KiCad
     # pairwise clearance; the REMOVE twin recomputes the same value from seg.net_id.
+    # FFI batching (2026-08-14): accumulate the memoized capsule arrays and
+    # stamp once per layer after the loop (byte-identical: same rows, same
+    # order, commuting inserts). The remove twin below was already batched.
+    _cells_by_layer: Dict[int, list] = {}
+    _via_arrs: list = []
+    _small_arrs: list = []
     for seg in segments:
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is not None:
@@ -2061,15 +2088,32 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
             seg.layer, config.obstacle_clearance(getattr(seg, 'net_id', 0)))
             expansion_mm = reserve_width / 2 + seg_width / 2 + seg_clearance + extra_clearance
             via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance
-            _add_segment_obstacle(obstacles, seg, coord, layer_idx, expansion_mm, via_block_mm)
+            _c = segment_blocked_cells_array(seg.start_x, seg.start_y,
+                                             seg.end_x, seg.end_y,
+                                             expansion_mm, coord.grid_step)
+            if len(_c):
+                _cells_by_layer.setdefault(layer_idx, []).append(_c)
+            _v = segment_blocked_cells_array(seg.start_x, seg.start_y,
+                                             seg.end_x, seg.end_y,
+                                             via_block_mm, coord.grid_step)
+            if len(_v):
+                _via_arrs.append(_v)
             # #568 small-map mirror (see _rung_small_armed): same via capsule
-            if _rung_small_armed():
-                _sm = segment_blocked_cells_array(
-                    seg.start_x, seg.start_y, seg.end_x, seg.end_y,
-                    via_block_mm, coord.grid_step)
-                if len(_sm):
-                    obstacles.add_blocked_vias_small_batch(
-                        np.asarray(_sm, dtype=np.int32))
+            if _rung_small_armed() and len(_v):
+                _small_arrs.append(_v)
+    for _li, _arrs in sorted(_cells_by_layer.items()):
+        _call = np.concatenate(_arrs) if len(_arrs) > 1 else _arrs[0]
+        _rows = np.empty((len(_call), 3), dtype=np.int32)
+        _rows[:, :2] = _call
+        _rows[:, 2] = _li
+        obstacles.add_blocked_cells_batch(np.ascontiguousarray(_rows))
+    if _via_arrs:
+        _vall = np.concatenate(_via_arrs) if len(_via_arrs) > 1 else _via_arrs[0]
+        obstacles.add_blocked_vias_batch(np.ascontiguousarray(_vall.astype(np.int32)))
+    if _small_arrs:
+        _sall = (np.concatenate(_small_arrs) if len(_small_arrs) > 1
+                 else _small_arrs[0])
+        obstacles.add_blocked_vias_small_batch(np.asarray(_sall, dtype=np.int32))
     _ledger_close(obstacles, _pre, "add_segments_list")
 
 
