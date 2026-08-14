@@ -1711,6 +1711,27 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # fatal -- the net then routes the normal (derivation) way.
     if oracle_links:
         _name_to_id572 = {n.name: i for i, n in pcb_data.nets.items()}
+        # Two link shapes are not merely useless as forced edges, they are
+        # ACTIVELY destructive, because route_oracle_links returns on the
+        # first failure and a refused link discards the copper of every link
+        # already routed for that net:
+        #   * ZERO-LENGTH (A == B). Nothing to route, so the A* reports
+        #     success with no copper -- which route_oracle_links must refuse
+        #     as the #572 false-weld fingerprint. Measured on storm_tracker's
+        #     final oracle payload: 113 of 400 links (62 of +3V3's 87), each
+        #     able to abort its net's whole forced-edge list. They arise when
+        #     two exact-fill clusters' nearest approach is one point.
+        #   * EXACT DUPLICATES. The first copy lands copper; the second
+        #     re-routes the now-joined pair, produces zero copper, and hits
+        #     the same refusal. 51 of the 400 were duplicate copies.
+        # Dropping them here -- the single point where oracle_links_by_net is
+        # populated, so every consumer (SE loop, rip/retry, reroute) is
+        # covered -- lands in the existing "malformed entries are dropped,
+        # not fatal" contract: a net left with no usable link simply routes
+        # the normal derivation way. Custody SCOPE is unaffected: the
+        # finalize derives it from remaining_links' net names, not from this.
+        _seen572 = set()
+        _degen572 = _dup572 = 0
         for _ol in oracle_links:
             try:
                 _onm, _oa, _ob = _ol[0], tuple(_ol[1]), tuple(_ol[2])
@@ -1718,8 +1739,23 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 continue
             _onid = _name_to_id572.get(_onm)
             if _onid is not None and len(_oa) >= 4 and len(_ob) >= 4:
+                if abs(_oa[0] - _ob[0]) < 1e-6 \
+                        and abs(_oa[1] - _ob[1]) < 1e-6:
+                    _degen572 += 1
+                    continue
+                _k572 = (_onid, round(_oa[0], 3), round(_oa[1], 3), _oa[2],
+                         round(_ob[0], 3), round(_ob[1], 3), _ob[2])
+                if _k572 in _seen572:
+                    _dup572 += 1
+                    continue
+                _seen572.add(_k572)
                 state.oracle_links_by_net.setdefault(_onid, []).append(
                     (_oa, _ob))
+        if _degen572 or _dup572:
+            print(f"  Oracle forced links (#572): dropped {_degen572} "
+                  f"zero-length and {_dup572} duplicate link(s) -- neither "
+                  f"can weld copper, and either aborts its net's remaining "
+                  f"forced edges")
         if state.oracle_links_by_net:
             print(f"  Oracle forced links (#572): "
                   f"{sum(len(v) for v in state.oracle_links_by_net.values())}"
