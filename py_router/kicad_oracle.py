@@ -1171,6 +1171,7 @@ def oracle_reconnect(board_file: str, net_names, config,
 
     names = set(net_names)
     routed = failed = rounds = cross_board = 0
+    collapsed_dups = 0  # duplicate work entries dropped (see the round loop)
     remaining = -1
     links = None
     # True when we never obtained a trustworthy link list (source failure or
@@ -1346,6 +1347,41 @@ def oracle_reconnect(board_file: str, net_names, config,
                 work.append((net_name, B, (bx_, by_, bl_, 'main')))
             else:
                 work.append((net_name, A, B))
+
+        # Collapse duplicate work entries. Canonicalizing anchors to their
+        # island's lex-min cell (above) maps MANY distinct links onto the same
+        # endpoint pair -- storm_tracker's last round: 400 links, 372 of them
+        # degenerate after snapping, collapsing onto just 24 distinct retry
+        # keys (255 GND links all became (82.50,60.25)<->(82.50,60.25)). The
+        # loop below keys its retry cap on exactly this rounded pair, so the
+        # 3rd and later copies of a key can ONLY reach the `already attempted,
+        # leaving flagged` branch: no copper, one log line, one `failed`.
+        # Dropping them here is copper-identical and makes both the progress
+        # total and `links_failed` mean something (759 was one link counted
+        # 255 times).
+        #
+        # Keep TWO per key, not one: the first drives the smart-expansion
+        # attempt and the second is what triggers the force_raw retry
+        # (`force_raw = _attempt == 1`), so collapsing to a single copy would
+        # silently delete that retry -- and its copper.
+        _dup_seen: dict = {}
+        _deduped, _collapsed = [], 0
+        for _w in work:
+            _dk = (_w[0], round(_w[1][0], 2), round(_w[1][1], 2),
+                   round(_w[2][0], 2), round(_w[2][1], 2))
+            _dc = _dup_seen.get(_dk, 0)
+            if _dc >= 2:
+                _collapsed += 1
+                continue
+            _dup_seen[_dk] = _dc + 1
+            _deduped.append(_w)
+        if _collapsed:
+            print(f"  KiCad-oracle recheck round {rnd + 1}: collapsed "
+                  f"{_collapsed} duplicate link(s) onto {len(_dup_seen)} "
+                  f"distinct endpoint pair(s)")
+            collapsed_dups += _collapsed
+        work = _deduped
+
         # Obstacle-map memo (#499). The base map is a pure function of
         # (net_id, the board's copper, config) and route_plane_connection_wide
         # CLONES it (`clone_fresh`) rather than mutating, so it is reusable
@@ -2026,6 +2062,16 @@ def oracle_reconnect(board_file: str, net_names, config,
             print(f"    {net_name}: ({ax:.2f},{ay:.2f})<->({bx:.2f},{by:.2f})"
                   f"  OK {n_segs} seg(s), {len(via_positions)} via(s), "
                   f"w={used_width:.2f}mm")
+            # Report the WELD, not just the intent. The per-link callback
+            # above fires BEFORE the route and never says what happened, so a
+            # GUI user watching a long leg sees "routing GND link (k/N)" and
+            # no evidence any copper landed -- the counter moves, the outcome
+            # never appears. This is the only place a weld is confirmed.
+            if progress_callback:
+                progress_callback(_w_idx + 1, len(work),
+                                  f"KiCad-oracle round {rnd + 1}: welded "
+                                  f"{net_name} ({n_segs} seg, "
+                                  f"{len(via_positions)} via)")
             routed += 1
             progress = True
 
@@ -2120,6 +2166,10 @@ def oracle_reconnect(board_file: str, net_names, config,
               f"unconnected per KiCad after {rounds} round(s){_xb}")
     return {'available': True, 'rounds': rounds, 'links_routed': routed,
             'links_failed': failed, 'remaining': remaining,
+            # Duplicate work entries dropped before the link loop -- disclosed
+            # rather than silently swallowed, since `links_failed` used to
+            # carry them (one link counted once per duplicate).
+            'collapsed_duplicate_links': collapsed_dups,
             # #562 order swap: the FINAL flagged links with net names, so the
             # caller can scope custody to exactly the stubborn nets and keep
             # the reconcile's hands off KiCad-verified-complete plane nets
