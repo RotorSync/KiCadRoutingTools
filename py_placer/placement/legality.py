@@ -248,8 +248,15 @@ class BoardOutlineGate:
         # interior off-board re-opens #291, where bus_pirate5 lost all 870 pads
         # and the run broke the chain. "A part may not swallow a milled ring"
         # is true for both readings, which is exactly why it is safe.
-        self._swallow_pts = ([r[0] for r in self.cutouts]
-                             + [r[0] for r in self.milled])
+        #
+        # Carries the ring's IDENTITY, not just its vertex: a part whose own
+        # pads sit inside a milled ring must be allowed to swallow THAT ring
+        # (see rings_enclosing / skip_rings below). Ids are indices into
+        # cutouts + milled, in that order.
+        self._swallow_pts = (
+            [(i, r[0][0], r[0][1]) for i, r in enumerate(self.cutouts)]
+            + [(len(self.cutouts) + i, r[0][0], r[0][1])
+               for i, r in enumerate(self.milled)])
         self.margin = margin
         self.bounds = getattr(board_info, 'board_bounds', None)
         self.usable = None
@@ -318,13 +325,46 @@ class BoardOutlineGate:
     def may_reach(self, key, seed_rect, travel: float, center=None) -> bool:
         return bool(self.edges_near(key, seed_rect, travel, center))
 
+    def rings_enclosing(self, points) -> frozenset:
+        """Ids of the MILLED rings enclosing any of `points` -- a part's OWN
+        milled relief, for the `skip_rings` argument of the two probes.
+
+        Only milled contours can be owned, by construction:
+        `drop_pad_containing_cutouts` moves every ring enclosing >= 2 pad
+        centres OUT of board_cutouts and into board_edge_contours, so no ring
+        left in `self.cutouts` encloses a pad and no cutout id can ever land in
+        a skip set. That is what keeps the genuine-cutout half of the swallow
+        probe untouchable rather than merely untouched.
+
+        >= 1 enclosed pad, not >= 2: two parts with one pad each inside a ring
+        are both partial owners and both must be exempt. Pad CENTRES and the
+        same containment test the parser used to reclassify the ring in the
+        first place (kicad_parser.drop_pad_containing_cutouts -> _pt_in_ring).
+        """
+        if not self.milled:
+            return frozenset()
+        from check_drc import _point_in_poly
+        base = len(self.cutouts)
+        owned = set()
+        for i, ring in enumerate(self.milled):
+            for (px, py) in points:
+                if _point_in_poly(px, py, ring):
+                    owned.add(base + i)
+                    break
+        return frozenset(owned)
+
     # -- level 3: the exact tests
-    def rect_blocked(self, rect, edges=None) -> bool:
+    def rect_blocked(self, rect, edges=None, skip_rings=None) -> bool:
         """True when a rect leaves the real outline, enters a cutout, or comes
         within the edge margin of either.
 
         `edges` restricts the distance test to a pre-filtered edge list from
         `edges_near`; omitted, every ring edge is measured.
+
+        `skip_rings` (from `rings_enclosing`) exempts the tested part's OWN
+        milled rings from the swallow probe -- a connector over its own milled
+        relief may swallow it, and without this it is judged board-violating at
+        its own hand-placed pose.
         """
         from check_drc import _point_on_board, _seg_seg_dist_coords
         x0, y0, x1, y1 = rect
@@ -339,7 +379,9 @@ class BoardOutlineGate:
                     return True
         # An interior ring FULLY INSIDE the rect evades both tests above -- no
         # corner is off-board and no rect edge comes near a ring edge (#628).
-        for (cx, cy) in self._swallow_pts:
+        for (rid, cx, cy) in self._swallow_pts:
+            if skip_rings and rid in skip_rings:
+                continue  # the part's own milled relief
             if x0 <= cx <= x1 and y0 <= cy <= y1:
                 return True
         return False
@@ -356,7 +398,8 @@ class BoardOutlineGate:
         return (max(0.0, u[0] - rect[0]) + max(0.0, u[1] - rect[1])
                 + max(0.0, rect[2] - u[2]) + max(0.0, rect[3] - u[3]))
 
-    def rect_outside_amount(self, rect, exact: bool = True, edges=None) -> float:
+    def rect_outside_amount(self, rect, exact: bool = True, edges=None,
+                            skip_rings=None) -> float:
         """Magnitude of a rect's board-boundary violation; 0 iff fully legal.
 
         Zero exactly when the bbox inset holds AND `rect_blocked` is False, so
@@ -368,6 +411,9 @@ class BoardOutlineGate:
         established via `may_reach` that this rect cannot come near a ring. The
         ring terms are ~100x the cost of the bbox term, and in a hot candidate
         loop most parts are nowhere near an edge.
+
+        `skip_rings` must match what `rect_blocked` is given for the same rect,
+        or the two stop agreeing on legality (see the swallow probe below).
         """
         amt = self.bbox_outside_amount(rect)
         if not (self.active and exact):
@@ -391,7 +437,9 @@ class BoardOutlineGate:
         # Swallowed interior ring (cutout or milled contour), same probe and
         # same charge as rect_blocked's -- the two must agree on legality or
         # `violation()==0` stops implying `not rect_blocked()` (#628).
-        for (cx, cy) in self._swallow_pts:
+        for (rid, cx, cy) in self._swallow_pts:
+            if skip_rings and rid in skip_rings:
+                continue  # the part's own milled relief
             if x0 <= cx <= x1 and y0 <= cy <= y1:
                 amt += self.margin
         return amt
@@ -1330,7 +1378,13 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
             ext = pp.extent(fp.x, fp.y, fp.rotation or 0.0)
             if ext is None:
                 continue
-            amt = gate.rect_outside_amount(ext)
+            # A part whose own pads sit in a milled relief may span it -- e.g. a
+            # connector with pins around its shield slot, whose pad EXTENT
+            # swallows the ring. Ownership from the FILE's own poses, which is
+            # what this function grades (#628).
+            own = gate.rings_enclosing(
+                [(p.global_x, p.global_y) for p in pads_by_ref.get(ref, ())])
+            amt = gate.rect_outside_amount(ext, skip_rings=own)
             if amt > EPS:
                 oob_count += 1
                 oob_amount += amt

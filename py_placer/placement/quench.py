@@ -558,6 +558,9 @@ class QuenchState:
         # ref -> violation of its CURRENT pose; whole-dict invalidated on any
         # move, since a move changes its neighbours' violations too.
         self._inc_violation: Dict[str, float] = {}
+        # ref -> ids of the milled rings its OWN pads sit inside (#628). Keyed
+        # on the SEED pose, so unlike _inc_violation this NEVER invalidates.
+        self._owned_rings_cache: Dict[str, frozenset] = {}
 
         # --- #548: alignment and orientation, both OFF unless asked for ------
         self.align_weight = float(align_weight)
@@ -967,7 +970,8 @@ class QuenchState:
         # one that can measures only against the edges it can actually reach.
         near = self._edges_near(ref) if self.edge_gate.active else None
         board = self.edge_gate.rect_outside_amount(
-            rects[0], exact=bool(near), edges=near)
+            rects[0], exact=bool(near), edges=near,
+            skip_rings=self._owned_rings(ref))
         overlap = 0.0
         if limit is not None and board > limit:
             return board, overlap
@@ -1035,7 +1039,8 @@ class QuenchState:
         # against only those edges.
         if legal and self.edge_gate.active:
             near = self._edges_near(ref)
-            if near and self.edge_gate.rect_blocked(rect, edges=near):
+            if near and self.edge_gate.rect_blocked(
+                    rect, edges=near, skip_rings=self._owned_rings(ref)):
                 legal = False
         if legal:
             if self._neighbors is not None and ref in self._neighbors:
@@ -1165,6 +1170,30 @@ class QuenchState:
         return self.edge_gate.edges_near(
             ref, part.rect(part.seed_x, part.seed_y, part.orig_rot), travel,
             center=(part.seed_x, part.seed_y))
+
+    def _owned_rings(self, ref) -> frozenset:
+        """Cached: the milled rings this part's OWN pads sit inside (#628).
+
+        A milled contour is reclassified out of board_cutouts precisely BECAUSE
+        it encloses >= 2 pad centres, so such a ring always has a part living on
+        it -- a connector over its own milled relief. Without this exemption the
+        swallow probe judges that part board-violating at its own hand-placed
+        pose, and because a genuinely sub-clearance edge pose then scores LOWER,
+        the unfreeze branch below walks it off the board edge.
+
+        Keyed on the SEED pose and never invalidated, like _edges_near: seed
+        ownership is what the reclassification itself was computed from, and it
+        is the anti-gaming choice -- ownership taken at the CANDIDATE pose would
+        let any part claim a ring merely by moving onto it.
+        """
+        owned = self._owned_rings_cache.get(ref)
+        if owned is None:
+            part = self.parts[ref]
+            pts = [(gx, gy) for (gx, gy, _net) in
+                   part.pad_globals(part.seed_x, part.seed_y, part.orig_rot)]
+            owned = self.edge_gate.rings_enclosing(pts) if pts else frozenset()
+            self._owned_rings_cache[ref] = owned
+        return owned
 
     def _edges_near_halo(self, ref) -> list:
         """Like _edges_near but sized to the SOFT edge_halo radius. Inflating
@@ -1303,7 +1332,11 @@ class QuenchState:
         oob_amount = 0.0
         oob_area = 0.0
         for p in parts:
-            amt = self.edge_gate.rect_outside_amount(p.rect)
+            # skip_rings: a part over its own milled relief is legal there, and
+            # this is the #456 scorecard -- without it a correct hand placement
+            # reports oob_count 1 (#628).
+            amt = self.edge_gate.rect_outside_amount(
+                p.rect, skip_rings=self._owned_rings(p.ref))
             if amt > legality.EPS:
                 oob_count += 1
                 oob_amount += amt
