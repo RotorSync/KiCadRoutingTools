@@ -5281,6 +5281,9 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
     new_segments = result['new_segments']
     if not new_segments:
         return
+    # Copper epoch (rescue map cache, 2026-08-14 profiling): every commit
+    # through this choke point invalidates cached pristine obstacle maps.
+    pcb_data._copper_epoch = getattr(pcb_data, '_copper_epoch', 0) + 1
 
     # Get all unique net_ids from new segments
     net_ids = set(s.net_id for s in new_segments)
@@ -5537,6 +5540,8 @@ def remove_route_from_pcb_data(pcb_data: PCBData, result: dict,
     to ONE removal per requested object (never every twin) and scanned
     newest-first, so this-run copper is preferred over an input original.
     """
+    # Copper epoch (rescue map cache): rips invalidate cached maps too.
+    pcb_data._copper_epoch = getattr(pcb_data, '_copper_epoch', 0) + 1
     segments_to_remove = result.get('new_segments', [])
     vias_to_remove = result.get('new_vias', [])
 

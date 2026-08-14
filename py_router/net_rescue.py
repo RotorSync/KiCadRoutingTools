@@ -158,6 +158,52 @@ def _closest_pair(points_a, points_b):
     return best
 
 
+def _pristine_rescue_map(board, parent_pcb, cfg, net_id, net_clearances,
+                         scope_key):
+    """Per-board LRU of PRISTINE rescue obstacle maps (2026-08-14 profiling:
+    826 of one orangecrab step's 830 base-map builds came from the rescue /
+    terminal-escalation ladders rebuilding the same windows and rungs across
+    rescue rounds and reconcile laps -- ~40% of the step's wall).
+
+    Key = (net_id, scope, rung geometry, copper epoch). The epoch bumps at
+    the two copper choke points (add/remove_route_to_pcb_data), so any
+    commit or rip anywhere invalidates conservatively -- and the reconcile
+    laps forward the SAME pcb_data object into the nested batch, so the
+    cache survives lap boundaries. Both a HIT and a fresh build return
+    clone_fresh() of the pristine map: per-attempt mutations (window fence,
+    free-via seeding, same-net guards, router residue) never touch the
+    cached copy, so cached-vs-built behavior is identical by construction.
+    net_clearances stays OUT of the key deliberately: within one board's
+    run (laps included) it is value-identical for a given net/rung -- the
+    rung derivation drops only the rescued net's own entry, and net_id is
+    in the key. Bounded LRU (escalation maps are board-global at fine
+    grids); build cfg fields beyond the rung-varying five are constant
+    within a pass by construction (_rescue_rungs / the escalation ladder
+    vary exactly grid/clearance/track/via geometry)."""
+    from collections import OrderedDict
+    from obstacle_map import build_base_obstacle_map
+
+    cache = getattr(parent_pcb, '_rescue_map_cache', None)
+    if cache is None:
+        cache = parent_pcb._rescue_map_cache = OrderedDict()
+    epoch = getattr(parent_pcb, '_copper_epoch', 0)
+    key = (net_id, scope_key, epoch, cfg.grid_step, cfg.clearance,
+           cfg.track_width, cfg.via_size, cfg.via_drill)
+    pristine = cache.get(key)
+    if pristine is None:
+        pristine = build_base_obstacle_map(board, cfg, [net_id],
+                                           net_clearances=net_clearances)
+        # Stale-epoch entries can never hit again; drop them first, then LRU.
+        for k in [k for k in cache if k[2] != epoch]:
+            del cache[k]
+        cache[key] = pristine
+        while len(cache) > 4:
+            cache.popitem(last=False)
+    else:
+        cache.move_to_end(key)
+    return pristine.clone_fresh()
+
+
 def _choose_grid(config, half_size):
     """Finest rescue grid whose window fits the per-layer cell budget.
 
@@ -312,9 +358,9 @@ def _attempt_edge(pcb_data, net_id, gap, config, net_clearances,
         rung_clearances = net_clearances
         if not at_nominal and net_clearances:
             rung_clearances = {k: v for k, v in net_clearances.items() if k != net_id}
-        obstacles = build_base_obstacle_map(
-            window, cfg, [net_id],
-            net_clearances=rung_clearances)
+        obstacles = _pristine_rescue_map(window, pcb_data, cfg, net_id,
+                                         rung_clearances,
+                                         ('win', cx, cy, half))
         _fence_window(obstacles, window, cfg)
         # #470: existing same-net vias/through-holes in the window are FREE
         # layer transitions. The rescue map never registered them (unlike the
@@ -774,8 +820,8 @@ def _attempt_net_at_geometry(pcb_data, net_id, cfg, net_clearances,
     from single_ended_routing import route_net_with_obstacles
     from connectivity import get_net_endpoints_anchor_split
 
-    obstacles = build_base_obstacle_map(pcb_data, cfg, [net_id],
-                                        net_clearances=net_clearances)
+    obstacles = _pristine_rescue_map(pcb_data, pcb_data, cfg, net_id,
+                                     net_clearances, ('full',))
     # Same-net barrels are free transitions, at h2h distance (the rescue's
     # #470 + custody-h2h pairing; every seeding site carries both).
     _add_free_via_positions(obstacles, pcb_data, [net_id], cfg)
