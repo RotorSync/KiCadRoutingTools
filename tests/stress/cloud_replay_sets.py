@@ -85,6 +85,32 @@ def sh(cmd, **kw):
     return subprocess.run([str(c) for c in cmd], **kw)
 
 
+# Modal rate-limits app CREATION. Launching several arms close together -- which
+# every A/B and every bisect ladder does -- gets some of them rejected outright,
+# and the run then exits non-zero while BACKGROUNDED, so a half-launched batch
+# looks exactly like a healthy one until you notice the missing apps. Six arms
+# launched ~2s apart lost three that way; a later batch of six lost three more.
+RATE_LIMIT_MARK = "rate limit exceeded"
+RATE_LIMIT_TRIES = 4
+
+
+def sh_capture(cmd, **kw):
+    """Stream a command's output AND return it, so the caller can inspect it.
+
+    sh() streams but discards; capture_output would hide a 30-minute run's
+    progress. This does both.
+    """
+    print(f"  $ {' '.join(str(c) for c in cmd)}", flush=True)
+    p = subprocess.Popen([str(c) for c in cmd], stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT, text=True, **kw)
+    out = []
+    for line in p.stdout:
+        print(line, end="", flush=True)
+        out.append(line)
+    p.wait()
+    return p.returncode, "".join(out)
+
+
 def expand_sets(spec: str) -> list:
     """'set10-set19' / 'set10,set12' / 'set10-set12,set19' -> [set10, ...]."""
     out = []
@@ -503,9 +529,19 @@ def stage_run(args, sets, stress, plan):
         if keep and not args.boards:
             cmd += ["--boards", ",".join(sorted(set(keep)))]
         print(f"  excluding {len(drop)} board(s): {', '.join(sorted(drop))}")
-    r = sh(cmd, env=env)
-    if r.returncode != 0:
-        raise SystemExit(f"cloud run failed (rc={r.returncode}); banked rows are "
+    for _try in range(1, RATE_LIMIT_TRIES + 1):
+        rc, out = sh_capture(cmd, env=env)
+        if rc == 0:
+            break
+        if RATE_LIMIT_MARK in out.lower() and _try < RATE_LIMIT_TRIES:
+            wait = _try * 90
+            print(f"  Modal app-create rate limit hit; retry {_try}/"
+                  f"{RATE_LIMIT_TRIES - 1} in {wait}s (banked rows make this cheap)",
+                  flush=True)
+            time.sleep(wait)
+            continue
+        # Any other failure is real -- do not paper over it with a retry.
+        raise SystemExit(f"cloud run failed (rc={rc}); banked rows are "
                          f"still on the volume -- re-run to resume")
 
 
