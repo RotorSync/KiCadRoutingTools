@@ -299,6 +299,15 @@ def refresh() -> None:
         # probe will trade many mm of lateral squeeze before paying a via
         # pair -- the human solution pays ~1 via/net to spread layers.
         'probe_via_cost': _i('KICAD_GLOBAL_PLAN_VIA_COST', 0),
+        # Owner attraction (#589 v2 handoff): each net's detailed route is
+        # ATTRACTED to its own rough corridor via the bus attraction
+        # machinery (set_attraction_path; bonus/radius are the config's
+        # bus_attraction_* knobs, armed by default). v1 reservations are
+        # repulsion-only -- everyone is pushed off everyone's lane but
+        # nobody is guided INTO their own, so a near-disjoint negotiated
+        # plan had no consumer. Bus corridors take precedence for bus
+        # members.
+        'attract': _opt_in('KICAD_GLOBAL_PLAN_ATTRACT'),
         # Offline-analysis dump (#589 plan-quality scoring): write the full
         # plan state (rough paths, both conflict graphs, layer prefs, the
         # order actually used + the front partition) as JSON to this path

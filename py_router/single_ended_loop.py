@@ -665,6 +665,17 @@ def route_single_ended_nets(
         # main-edge selection + attraction too (they used to route blind).
         attraction_path, reverse_direction = bus_attraction_context(
             net_id, bus_net_to_group, bus_corridors, bus_routed_paths)
+        # #589 v2 owner attraction (KICAD_GLOBAL_PLAN_ATTRACT=1): a net
+        # with a planned rough corridor and NO bus corridor is attracted
+        # to its own plan -- the global->detailed handoff the repulsion-
+        # only reservations lack. Densified like a bus corridor; the
+        # attraction bonus/radius knobs are shared with bus routing.
+        if attraction_path is None:
+            _gp = getattr(config, '_global_plan', None)
+            if (_gp is not None and net_id in _gp.rough_paths
+                    and env_knobs.GLOBAL_PLAN.get('attract')):
+                attraction_path = _sample_path(_gp.rough_paths[net_id])
+                reverse_direction = False
         # Off-lane surcharge (the stick): members with a corridor pay
         # scaled step costs everywhere EXCEPT near the lane, where the
         # attraction discount compensates -- defection costs real money.

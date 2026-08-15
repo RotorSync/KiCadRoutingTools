@@ -1705,7 +1705,11 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     # Experimental default 35% when bus routing is on; override with
     # KICAD_BUS_XLAYER_PCT (0 = legacy same-layer-only attraction).
     bus_xlayer_pct = 0
-    if getattr(config, 'bus_enabled', False) and bus_attraction_bonus > 0:
+    # #589 owner attraction: plan corridors change layers (~1 via/net in a
+    # negotiated plan), so cross-layer pull must arm for plan-attracted
+    # nets too, not only bus members.
+    if bus_attraction_bonus > 0 and (getattr(config, 'bus_enabled', False)
+                                     or env_knobs.GLOBAL_PLAN.get('attract')):
         try:
             bus_xlayer_pct = env_knobs.BUS_XLAYER_PCT
         except ValueError:
@@ -3584,7 +3588,11 @@ def route_multipoint_main(
     bus_attraction_radius_grid = coord.to_grid_dist(config.bus_attraction_radius) if config.bus_attraction_radius > 0 else 0
     bus_attraction_bonus = config.scaled_cell_units(config.bus_attraction_bonus) if config.bus_attraction_bonus > 0 else 0
     bus_xlayer_pct = 0
-    if getattr(config, 'bus_enabled', False) and bus_attraction_bonus > 0:
+    # #589 owner attraction: plan corridors change layers (~1 via/net in a
+    # negotiated plan), so cross-layer pull must arm for plan-attracted
+    # nets too, not only bus members.
+    if bus_attraction_bonus > 0 and (getattr(config, 'bus_enabled', False)
+                                     or env_knobs.GLOBAL_PLAN.get('attract')):
         try:
             bus_xlayer_pct = env_knobs.BUS_XLAYER_PCT
         except ValueError:
