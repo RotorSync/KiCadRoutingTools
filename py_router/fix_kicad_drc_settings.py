@@ -396,6 +396,45 @@ FAB_FLOOR_KEYS_MEASURABLE = frozenset({
 })
 
 
+def declared_fab_floor(pcb_path: str, key: str):
+    """The floor the board declared for ``key`` BEFORE this chain touched it, mm.
+
+    Reads ``kicad_routing_tools.fab_floor_origin`` from the sibling
+    ``.kicad_pro`` -- seeded on the FIRST writeback and carried down the chain
+    with the project, the same record :func:`_fab_floor_disclosure` compares
+    against. Returns ``None`` when there is no project, no origin (nothing has
+    written back yet, so ``design_settings.rules`` IS the original), or the key
+    is absent.
+
+    Why an ENGINE needs this and not just the disclosure: the writeback clamps
+    ``rules`` DOWN to what the step routed, so by step 2 the rules value is the
+    routed clearance and the author's declaration is gone from the place every
+    reader looks. Measured on tigard, a pour + route chain from a project
+    declaring ``min_hole_clearance`` 0.25::
+
+        step   rules.min_hole_clearance   fab_floor_origin.min_hole_clearance
+        in     0.25                       (none yet)
+        pour   0.15                       0.25
+        out    0.1375                     0.25
+
+    A consumer reading ``rules`` alone stops honouring 0.25 after step 1 --
+    silently, because 0.15 is a perfectly plausible value. The origin is the
+    durable record; prefer the LARGER of the two (see
+    :func:`obstacle_map.resolve_hole_clearance`).
+    """
+    try:
+        pro = os.path.splitext(pcb_path)[0] + '.kicad_pro'
+        if not os.path.exists(pro):
+            return None
+        with open(pro, 'r', encoding='utf-8') as fh:
+            proj = json.load(fh)
+        v = ((proj.get("kicad_routing_tools") or {})
+             .get("fab_floor_origin") or {}).get(key)
+        return float(v) if isinstance(v, (int, float)) and v > 0 else None
+    except Exception:                                            # noqa: BLE001
+        return None
+
+
 def _fab_floor_disclosure(output_pcb: str, rules_before: dict, proj: dict,
                           origin: dict = None):
     """Say out loud when the writeback relaxed a MANUFACTURING floor.

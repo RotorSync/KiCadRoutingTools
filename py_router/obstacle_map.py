@@ -1441,6 +1441,9 @@ def block_track_cells_near_override_pad_holes(obstacles: GridObstacleMap,
 
 _HOLE_CLR_CACHE = {}          # board path -> declared min_hole_clearance (mm)
 _HOLE_CLR_ANNOUNCED = set()
+_HOLE_CLR_ORIGIN = set()      # paths whose floor came from fab_floor_origin,
+                              # i.e. a later step's writeback had relaxed the
+                              # live rule below what the board declared
 
 
 def resolve_hole_clearance(pcb_data: PCBData, config) -> float:
@@ -1449,6 +1452,18 @@ def resolve_hole_clearance(pcb_data: PCBData, config) -> float:
     Resolved ENGINE-SIDE off ``PCBData.source_path`` (the #498 mechanism built
     for exactly this), so both fronts inherit it with no wiring. An explicit
     ``config.hole_clearance`` wins and stops the read.
+
+    TWO sources, and the larger wins: ``design_settings.rules`` (what the
+    project declares NOW) and ``kicad_routing_tools.fab_floor_origin`` (what it
+    declared before this chain touched it). The second is needed because the
+    first is not durable -- each writeback clamps the live rule down to the
+    clearance that step routed at, so a chain ERASES the author's declaration
+    after step 1. Measured on a tigard pour+route chain declaring 0.25: the
+    pour left ``rules`` at 0.15 and the route step read 0.15, i.e. below the
+    0.20 fab floor, and stopped honouring the board without saying anything.
+    Reading the origin too makes the declaration survive the whole chain, which
+    is the only reading under which "the board declares 0.25" means what a user
+    would expect. See :func:`fix_kicad_drc_settings.declared_fab_floor`.
 
     WHO ACTUALLY INHERITS IT, precisely -- everything routed through
     ``add_drill_hole_obstacles`` (signal, diff pairs, BGA/QFN fanout, via
@@ -1506,15 +1521,36 @@ def resolve_hole_clearance(pcb_data: PCBData, config) -> float:
         try:
             from list_nets import board_constraint
             v = board_constraint(path, 'min_hole_clearance')
-            _HOLE_CLR_CACHE[path] = float(v) if v and v > 0 else 0.0
+            v = float(v) if v and v > 0 else 0.0
+            # The DECLARED floor outranks the CURRENT rule, because the rule is
+            # not durable: every writeback clamps `rules.min_hole_clearance`
+            # down to the clearance that step routed at, so from step 2 onward
+            # the author's declaration is gone from the only place this used to
+            # look. Measured on a tigard pour+route chain declaring 0.25 -- the
+            # pour's writeback left rules at 0.15 and the route step then read
+            # 0.15, below the 0.20 fab floor, and silently stopped honouring
+            # the board. The original survives in `fab_floor_origin` (seeded at
+            # the first writeback, carried down with the project), so take the
+            # larger of the two. Raise-only, exactly like the rest of this
+            # helper: a board with no origin, or an origin at or below the
+            # rule, is bit-identical.
+            from fix_kicad_drc_settings import declared_fab_floor
+            _origin = declared_fab_floor(path, 'min_hole_clearance')
+            if _origin and _origin > v:
+                _HOLE_CLR_ORIGIN.add(path)
+                v = float(_origin)
+            _HOLE_CLR_CACHE[path] = v
         except Exception:                                       # noqa: BLE001
             _HOLE_CLR_CACHE[path] = 0.0
     v = _HOLE_CLR_CACHE[path]
     if v > defaults.NPTH_TO_TRACK_CLEARANCE and path not in _HOLE_CLR_ANNOUNCED:
         _HOLE_CLR_ANNOUNCED.add(path)
-        print(f"Copper-to-hole clearance {v:g}mm (from the board's own "
-              f"min_hole_clearance, above the {defaults.NPTH_TO_TRACK_CLEARANCE}"
-              f"mm fab floor)")
+        _src = ("the floor the board ORIGINALLY declared, which a later step's "
+                "writeback relaxed in the project"
+                if path in _HOLE_CLR_ORIGIN else "the board's own "
+                "min_hole_clearance")
+        print(f"Copper-to-hole clearance {v:g}mm (from {_src}, above the "
+              f"{defaults.NPTH_TO_TRACK_CLEARANCE}mm fab floor)")
     return v
 
 
