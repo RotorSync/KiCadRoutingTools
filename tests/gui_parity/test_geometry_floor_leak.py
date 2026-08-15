@@ -30,7 +30,6 @@ Needs wx; re-execs into KiCad's python.
     python3 tests/gui_parity/test_geometry_floor_leak.py [board.kicad_pcb]
 """
 
-import glob
 import os
 import subprocess
 import sys
@@ -42,12 +41,12 @@ sys.path.insert(0, os.path.dirname(REPO))
 sys.path.insert(0, os.path.join(REPO, 'py_router'))  # #522 layout
 sys.path.insert(0, os.path.join(REPO, 'py_tools'))
 
-KICAD_PYTHONS = [
-    "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3",
-    "/usr/bin/python3",
-    os.path.expandvars(r"C:\\Program Files\\KiCad\\bin\\python.exe"),
-    *sorted(glob.glob(r"C:\Program Files\KiCad\*\bin\python.exe"), reverse=True),
-]
+# Shared with the engine (#647): versioned Windows layouts, sorted by NUMERIC
+# version (the local `sorted(..., reverse=True)` this replaced put "9.0" above
+# "10.0"). The loop below still verifies wx+pcbnew itself.
+from kicad_exact_fill import kicad_python_candidates  # noqa: E402
+
+KICAD_PYTHONS = kicad_python_candidates()
 
 FLOORS = ('track_width', 'clearance', 'via_size', 'via_drill',
           'hole_to_hole_clearance')

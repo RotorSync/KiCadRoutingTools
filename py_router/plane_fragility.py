@@ -387,8 +387,22 @@ def _compute_cells_and_states(pcb_data: PCBData, config: GridRouteConfig,
     src = getattr(pcb_data, 'source_path', None)
     if not polys and src and os.path.isfile(src):
         try:
-            from kicad_exact_fill import refill_islands
+            from kicad_exact_fill import find_kicad_python, refill_islands
             fills = refill_islands(src)
+            if fills is None:
+                # None is refill_islands' DOCUMENTED "unavailable" return, not
+                # an error. Calling .items() on it raised an AttributeError
+                # that this except reported as a mystery "'NoneType' object
+                # has no attribute 'items'" (#647) -- which read like a quirk
+                # of one board while it was really a whole-platform capability
+                # gap (no Windows install was ever found), on every invocation.
+                why = ("no python with pcbnew found; set KICAD_PYTHON to "
+                       "KiCad's bundled interpreter"
+                       if find_kicad_python() is None
+                       else "the KiCad refill failed")
+                print(f"Plane fragility: exact fill unavailable ({why}); "
+                      f"using zone outlines")
+                fills = {}
             polys = [(name_to_id.get(_net, -1), layer, poly)
                      for (_net, layer), pp in fills.items() for poly in pp]
             if polys:

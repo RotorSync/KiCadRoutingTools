@@ -22,10 +22,16 @@ scripting segfaults when board work happens inside functions/loops.
 
 Availability: needs KiCad's bundled python (macOS/Windows) or a system
 python with pcbnew (Linux distro installs). All entry points degrade to
-None when unavailable; callers fall back to the raster model.
+None when unavailable; callers fall back to the raster model. That
+degradation is SILENT by design, so a discovery bug reads as a modelling
+quirk rather than a missing capability -- #647 shipped with the Windows
+interpreter unfindable, which cost every Windows user the exact fill in
+every consumer. Set `KICAD_PYTHON` to override the search, and print the
+reason (not just the symptom) when falling back.
 """
 from __future__ import annotations
 
+import glob
 import os
 import re
 import shutil
@@ -59,20 +65,95 @@ pcbnew.SaveBoard(dst, board, aSkipSettings=True)
 print("REFILL_OK", len(list(zones)))
 """
 
-_KICAD_PYTHONS = [
-    "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/"
-    "Versions/Current/bin/python3",
-    "/usr/bin/python3",
-    os.path.expandvars(r"C:\Program Files\KiCad\bin\python.exe"),
-]
+
+def _win_version_key(path: str):
+    """Sort key for a versioned Windows KiCad dir, NEWEST first.
+
+    `C:\\Program Files\\KiCad\\<ver>\\bin\\python.exe` -> the numeric parts of
+    <ver>. Plain string sorting orders "9.0" above "10.0", which would hand a
+    KiCad 10 user their old KiCad 9 interpreter.
+
+    Matches BOTH separators instead of using os.path: off-Windows,
+    os.path.dirname does not split a backslash path, so an os.path-based key
+    collapses to a constant -- correct on the only platform that matters, and
+    untestable everywhere else.
+    """
+    m = re.search(r'[\\/]KiCad[\\/]([0-9][0-9.]*)[\\/]', path)
+    if not m:
+        return (0,)
+    return tuple(int(p) for p in re.findall(r'\d+', m.group(1))) or (0,)
+
+
+def kicad_python_candidates() -> List[str]:
+    """Plausible pcbnew-capable interpreters, best first (unverified).
+
+    Shared with the other re-exec front-ends (`headless_plan`,
+    `py_tools/validate_pcb_data`) so a platform's install layout is described
+    ONCE. Each caller still verifies -- they want different modules (pcbnew
+    here, pcbnew + wx for the GUI launchers).
+    """
+    cands = [os.environ.get('KICAD_PYTHON') or '',
+             # THIS interpreter, when it is already KiCad's python (the GUI
+             # plugin) or a Linux system python with pcbnew installed.
+             sys.executable,
+             "/Applications/KiCad/KiCad.app/Contents/Frameworks/"
+             "Python.framework/Versions/Current/bin/python3"]
+    # Windows installs into a VERSIONED directory
+    # (C:\Program Files\KiCad\10.0\bin\python.exe). The unversioned path
+    # kept below exists on no KiCad >= 6, so globbing is the only thing that
+    # finds a real Windows install -- without it find_kicad_python() returned
+    # None for EVERY Windows user and every exact-fill consumer silently
+    # degraded to its raster approximation (#647).
+    for base in (r"C:\Program Files\KiCad", r"C:\Program Files (x86)\KiCad"):
+        base = os.path.expandvars(base)
+        cands.extend(sorted(glob.glob(os.path.join(base, '*', 'bin',
+                                                   'python.exe')),
+                            key=_win_version_key, reverse=True))
+        cands.append(os.path.join(base, 'bin', 'python.exe'))
+    cands.append("/usr/bin/python3")  # Linux distro KiCad ships pcbnew here
+    seen, out = set(), []
+    for c in cands:
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+_KICAD_PYTHON_MEMO: List[Optional[str]] = []
 
 
 def find_kicad_python() -> Optional[str]:
-    """Path of a python that can import pcbnew, or None."""
-    for cand in _KICAD_PYTHONS:
-        if cand and os.path.isfile(cand):
-            return cand
-    return None
+    """Path of a python that can import pcbnew, or None.
+
+    VERIFIES the candidate rather than trusting that the file exists: on a
+    macOS box with no KiCad, `/usr/bin/python3` exists and cannot import
+    pcbnew, so the unverified answer sent every caller down a subprocess that
+    could only fail. Memoized -- the probe is one subprocess per process.
+
+    Verification is deliberately OUT-OF-PROCESS even for sys.executable
+    (unless pcbnew is already loaded, which settles it for free): a distro
+    python that can import pcbnew is the common Linux case, and probing it
+    in-process would pull pcbnew's ~100MB into every routing run to answer a
+    question the subprocess answers anyway.
+    """
+    if _KICAD_PYTHON_MEMO:
+        return _KICAD_PYTHON_MEMO[0]
+    found = None
+    for cand in kicad_python_candidates():
+        if cand == sys.executable and 'pcbnew' in sys.modules:
+            found = cand           # the GUI plugin: already KiCad's python
+            break
+        if not os.path.isfile(cand):
+            continue
+        try:
+            if subprocess.run([cand, '-c', 'import pcbnew'],
+                              capture_output=True, timeout=120).returncode == 0:
+                found = cand
+                break
+        except Exception:
+            continue
+    _KICAD_PYTHON_MEMO.append(found)
+    return found
 
 
 def live_fill_islands(board):
