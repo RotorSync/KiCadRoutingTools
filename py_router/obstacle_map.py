@@ -1453,12 +1453,36 @@ def resolve_hole_clearance(pcb_data: PCBData, config) -> float:
     WHO ACTUALLY INHERITS IT, precisely -- everything routed through
     ``add_drill_hole_obstacles`` (signal, diff pairs, BGA/QFN fanout, via
     ``build_base_obstacle_map``), plus ``plane_obstacle_builder`` which builds
-    its own map and therefore needed the call adding separately. It is NOT a
-    universal fix: the flat ``NPTH_TO_TRACK_CLEARANCE`` still stands in
-    ``plane_region_connector`` (taps / region joins / reconnects),
-    ``pcb_modification`` and ``placement/fanout_clearance``. Those are the same
-    defect and are not yet closed; do not read this helper's existence as
-    covering them.
+    its own map and therefore needed the call adding separately. #617 added the
+    call at every site that DECIDES WHERE COPPER GOES in the three engines this
+    docstring used to name as uncovered: ``plane_region_connector``
+    (``npth_floor_ok`` seeds, ``wide_route_clear`` legs, ``build_base_obstacles``
+    stamps), ``pcb_modification`` (``_seg_worst_offender``'s shortfall ranking
+    and ``nudge_grazing_microshift``'s detector + acceptance gate) and
+    ``placement/fanout_clearance`` (``_Repair``'s NPTH keep-out rects).
+
+    STILL AT THE FLAT ``NPTH_TO_TRACK_CLEARANCE``, and deliberately so -- read
+    this before "finishing the job":
+
+    * ``pcb_modification.close_soft_joints`` and ``_connector_clear`` gate a
+      BRIDGE between two pieces of copper that already exist (a soft joint's
+      caps already overlap; a stub snap spans at most 1.5 track widths). When
+      such a bridge violates a declared floor the flanking copper almost always
+      does too, so raising the gate drops the repair without removing the
+      violation -- measured, 99.96% of the refusals it would add.
+    * ``pcb_modification.nudge_grazing_octolinear`` and
+      ``placement/fanout_clearance.nudge_vias_for_unresolved`` are all-or-
+      nothing repairs: refusing their one clearing candidate abandons the
+      defect they exist to fix (measured: a -0.1 mm net-to-net overlap left in
+      place; a #130 pad-via graze left unrelocated) rather than routing around
+      the hole.
+    * ``placement/legality.PartPads`` builds its NPTH keep-out radii from a bare
+      ``fp``/``clearance`` pair with no board pointer in hand, so it cannot call
+      this helper without a threaded parameter.
+
+    The rule the first three encode: raise this floor on passes that CHOOSE
+    where new copper goes or that MOVE copper by a measured shortfall, not on
+    passes whose only alternative to their one candidate is doing nothing.
 
     Why it exists: this keep-out was priced at a hardcoded
     ``max(clearance, NPTH_TO_TRACK_CLEARANCE)`` -- a flat 0.20 fab floor -- and

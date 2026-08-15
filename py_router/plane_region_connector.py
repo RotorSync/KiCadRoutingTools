@@ -24,7 +24,7 @@ from bresenham_utils import walk_line
 from obstacle_map import (add_board_edge_obstacles, add_user_keepout_obstacles,
                           add_rule_area_keepout_obstacles,
                           _batch_cells_one_layer, _batch_vias,
-                          block_track_cells_near_drills,
+                          block_track_cells_near_drills, resolve_hole_clearance,
                           block_track_cells_near_override_pad_holes, _pad_has_copper)
 from plane_obstacle_builder import (
     _precompute_circle_offsets,
@@ -1269,7 +1269,7 @@ def _npth_holes(pcb_data):
     return holes
 
 
-def npth_floor_ok(x, y, pcb_data, track_half: float) -> bool:
+def npth_floor_ok(x, y, pcb_data, track_half: float, config=None) -> bool:
     """False when track copper of half-width `track_half` centered at (x, y)
     would violate the NPTH-to-track fab floor of a no-copper drill (#390).
 
@@ -1277,8 +1277,15 @@ def npth_floor_ok(x, y, pcb_data, track_half: float) -> bool:
     the obstacle map's (correct) NPTH drill keep-out -- so every fill-derived
     seed must respect the floor itself. The fill-validity margin ladder must
     never relax below this: zone fill lawfully sits closer to an NPTH than
-    track copper may (crkbd GNDR strap seeded 0.15 from the rEXSW1 hole edge)."""
-    floor = defaults.NPTH_TO_TRACK_CLEARANCE + track_half
+    track copper may (crkbd GNDR strap seeded 0.15 from the rEXSW1 hole edge).
+
+    #617: the floor is raised to the BOARD's own `min_hole_clearance` when it
+    declares one above the 0.20 fab value (`resolve_hole_clearance`, raise-only
+    and cached per board path). `config` is optional -- the read is driven by
+    ``pcb_data.source_path``, so seed callers with no config in hand still get
+    the board's value; passing one only adds the explicit override."""
+    floor = max(defaults.NPTH_TO_TRACK_CLEARANCE,
+                resolve_hole_clearance(pcb_data, config)) + track_half
     for hx, hy, hdia in _npth_holes(pcb_data):
         if math.hypot(x - hx, y - hy) < hdia / 2.0 + floor:
             return False
@@ -2817,6 +2824,10 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
         return best
 
     _clr_max_by_layer = {}
+    # #617: the board's own copper-to-hole floor, resolved once per call
+    # (cached per board path inside the helper). Raise-only, so a board that
+    # declares nothing keeps this predicate's decisions bit-identical.
+    _hole_clr = resolve_hole_clearance(pcb_data, config)
 
     for (x1, y1, x2, y2, layer) in legs:
         bb = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
@@ -2861,7 +2872,8 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
         # math per leg), so both share this superset gate. NPTH's req is
         # half + hdia/2 + npth_clr with the drill inside the pad body, so
         # pext + max(local, clr_max, config.clearance, NPTH floor) bounds it.
-        _npth_bound = max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE)
+        _npth_bound = max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE,
+                          _hole_clr)
         preq = half + _pext + _pdrill + np.maximum(_plocal,
                                                    max(clr_max, _npth_bound))
         for pi in np.nonzero((bb[0] - preq <= _px) & (_px <= bb[2] + preq)
@@ -2894,7 +2906,8 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
                             return False
                 if is_th:
                     npth_clr = max(config.clearance,
-                                   defaults.NPTH_TO_TRACK_CLEARANCE) \
+                                   defaults.NPTH_TO_TRACK_CLEARANCE,
+                                   _hole_clr) \
                         if p.pad_type == 'np_thru_hole' else None
                     if npth_clr is not None:
                         for hx, hy, hdia in pad_drill_circles(p):
@@ -3149,7 +3162,10 @@ def build_base_obstacles(
     # the hard fab requirement and cell centers at >= the radius stay free, so
     # this blocks the minimum area that avoids real copper-to-hole violations.
     if npth_holes:
-        npth_clr = max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE)
+        # #617: raised to the board's own min_hole_clearance when it declares
+        # one above the fab floor (raise-only; inert on a silent board).
+        npth_clr = max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE,
+                       resolve_hole_clearance(pcb_data, config))
         block_track_cells_near_drills(obstacles, npth_holes, track_width,
                                       npth_clr, config.grid_step,
                                       list(range(num_layers)))

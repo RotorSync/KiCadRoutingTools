@@ -479,6 +479,17 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
     clr = config.clearance if clearance is None else clearance
     # NPTH holes are graded at the higher NPTH-to-track fab floor, not the
     # routing clearance (#370 B2; mirrors the microshift's #308 term).
+    #
+    # #617 deliberately does NOT raise this to the board's declared
+    # min_hole_clearance. A soft joint spans two dangling ends whose caps
+    # ALREADY overlap (`gap < (w1+w2)/2` below), so the bridge's copper sits
+    # inside copper that already exists: when the bridge violates a declared
+    # floor the flanking segments almost always do too, and refusing the
+    # bridge drops a `segment-endpoint-gap` repair without removing the
+    # violation. Measured over 12.2M bridge geometries at a declared 0.25:
+    # the raised gate refuses 44.29% of them and in 99.96% of those refusals
+    # the violation is present either way. The declared floor belongs on the
+    # passes that MOVE copper (nudge_grazing_microshift), not here.
     npth_clr = max(clr, NPTH_TO_TRACK_CLEARANCE)
 
     def rk(x, y):
@@ -1036,6 +1047,12 @@ def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance,
     # NPTH (no-copper) drill holes (#370 B2): the pad/via/segment loops below
     # all measure to COPPER, so a connector drawn straight across a mounting
     # hole passed every check. Slot/offset drills handled by the capsule.
+    #
+    # #617 deliberately leaves this at the flat fab floor, for the same reason
+    # as close_soft_joints: a stub-snap connector bridges a gap of at most
+    # 1.5 track widths between copper that already exists, so raising it to a
+    # declared min_hole_clearance drops the `snap_stub_gaps` repair without
+    # removing the violation in 99.96% of the geometries where it fires.
     npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE)
     if _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2) \
             < npth_clr + half - 1e-4:
@@ -3255,6 +3272,17 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
     # NPTH (no-copper) drill holes are graded at the higher NPTH-to-track floor,
     # and the copper distance terms don't see them (#370 B2; the microshift
     # sibling gained this term for #308, this re-bend path never did).
+    #
+    # #617 deliberately leaves this at the flat fab floor. The re-bend is
+    # all-or-nothing: when its only clearing bend runs inside a declared
+    # min_hole_clearance band, raising the gate does not move the copper
+    # elsewhere, it abandons the graze repair. Measured on a fixture whose jog
+    # overlaps a foreign pad by 0.1 mm, declaring 0.25: raised, the re-bend is
+    # refused and the -0.1000 net-to-net OVERLAP stays; flat, the re-bend fires
+    # and the overlap becomes +0.3500 at the cost of a 0.2200 hole gap. Trading
+    # a 0.1 mm short for a 0.03 mm hole shortfall is not an improvement. The
+    # sibling micro-shift, which moves copper by the measured shortfall instead
+    # of choosing among fixed bends, does carry the declared floor.
     npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE)
 
     def eff_clr(nid):
@@ -3468,7 +3496,8 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
             nets_changed, original_to_remove, added_segments)
 
 
-def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None):
+def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None,
+                        config=None):
     """The single worst foreign-copper offender below clearance of segment `s`:
     returns (shortfall_mm, t, away_x, away_y) or None. t is the parameter of the
     closest approach along `s`; (away_x, away_y) is the unit direction that
@@ -3480,11 +3509,17 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None):
     element's class EXCESS over `clearance` is subtracted from its distance, so
     the shortfall ranking and the away-shift honor KiCad's pairwise max(own,
     foreign) per offender (e.g. a signal grazing an SMA-class trace is ranked by
-    its 0.35 shortfall, not the 0.1 global)."""
+    its 0.35 shortfall, not the 0.1 global).
+
+    #617: `config` is optional and used only for `resolve_hole_clearance`'s
+    explicit `config.hole_clearance` override -- the board read itself is
+    driven by `pcb_data.source_path`, so a caller with no config in hand still
+    gets the board's declared floor."""
     import numpy as np
     from single_ended_routing import (_foreign_pad_arrays, _foreign_seg_arrays,
                                       _foreign_via_arrays, _foreign_hole_capsules)
     from routing_defaults import NPTH_TO_TRACK_CLEARANCE
+    from obstacle_map import resolve_hole_clearance
 
     def _excess(fnids):
         # per-foreign class clearance above `clearance` (the moving net's floor)
@@ -3498,7 +3533,12 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None):
     # (issue #308, urti GND vs J3's hole). Their required clearance differs from
     # the copper terms, so the worst offender is chosen by SHORTFALL, not raw
     # edge distance (a hole 0.15 away can out-rank a via 0.12 away).
-    hole_required = max(clearance, NPTH_TO_TRACK_CLEARANCE) + s.width / 2.0
+    # #617: the board's own min_hole_clearance raises this floor too, so the
+    # shortfall ranking sees the same band check_drc grades at. This is a
+    # DETECTOR -- raising it can only make a real violation visible to the
+    # micro-shift, never refuse a repair.
+    hole_required = max(clearance, NPTH_TO_TRACK_CLEARANCE,
+                        resolve_hole_clearance(pcb_data, config)) + s.width / 2.0
     x1, y1, x2, y2 = s.start_x, s.start_y, s.end_x, s.end_y
     n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.005) + 1)
     ts = np.linspace(0.0, 1.0, n + 1)
@@ -3644,7 +3684,8 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                              max_shift: float = 0.025,
                              keep_input_copper: bool = False,
                              net_clearances=None,
-                             board_edge_clearance: float = 0.0) -> Tuple[int, int, List[Segment], List[Segment]]:
+                             board_edge_clearance: float = 0.0,
+                             config=None) -> Tuple[int, int, List[Segment], List[Segment]]:
     """Micro-shift copper that still grazes after prune / re-bend / neck (#276).
 
     Complements nudge_grazing_octolinear, which keeps a jog's anchor endpoints
@@ -3675,16 +3716,36 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
     in the DRC report rather than be papered over with a wild move.
 
     Returns (segments_changed, nets_changed, original_segments_to_remove,
-    added_segments) -- same contract as nudge_grazing_octolinear."""
+    added_segments) -- same contract as nudge_grazing_octolinear.
+
+    #617: `config` is optional and only feeds `resolve_hole_clearance`'s
+    explicit `config.hole_clearance` override; the board's declared
+    min_hole_clearance is read off `pcb_data.source_path` either way."""
     from collections import defaultdict
     from check_connected import check_net_connectivity
     from single_ended_routing import (_seg_foreign_pad_dist, _seg_foreign_seg_dist,
                                       _seg_foreign_via_dist, _seg_foreign_hole_dist)
     from routing_defaults import NPTH_TO_TRACK_CLEARANCE
+    from obstacle_map import resolve_hole_clearance
 
     # NPTH (no-copper) drill holes are graded at the higher NPTH-to-track floor,
     # and the copper distance terms don't see them (issue #308, urti GND vs J3).
-    npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE)
+    # #617: raised to the board's own min_hole_clearance when it declares one
+    # above that floor. This pass MOVES copper by the measured shortfall, so
+    # raising the floor both makes it SEE a declared-band graze it used to miss
+    # and stops it "fixing" other copper INTO that band. Raise-only.
+    #
+    # DELIBERATE TRADE the raised floor makes: the same term sits in the
+    # candidate-acceptance clears() below, so on a DECLARING board a copper-
+    # graze repair whose only escape direction points at a hole is REFUSED
+    # outright when every candidate would land inside the declared band --
+    # the graze stays. That is the right side of the trade (check_drc grades
+    # the declared band as a real violation since #616, so "fixing" the graze
+    # would manufacture a counted DRC hit), but it is a trade, not a free
+    # win: on a silent board the same repair proceeds.
+    # tests/test_617_pcb_modification_hole_clearance.py pins both arms.
+    npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE,
+                   resolve_hole_clearance(pcb_data, config))
 
     def eff_clr(nid):
         # #436: the moving net's own clearance floor = max(global, its netclass).
@@ -3796,7 +3857,8 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                            or id(s) in added_ids)
                        and grazes(s)]
             offenders = [(s, _seg_worst_offender(pcb_data, net_id, s, eff_clr(net_id),
-                                                 net_clearances=net_clearances))
+                                                 net_clearances=net_clearances,
+                                                 config=config))
                          for s in grazing]
             offenders = [(s, o) for s, o in offenders if o is not None]
             if not offenders:
