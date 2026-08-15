@@ -282,6 +282,15 @@ def refresh() -> None:
         'layer': _s('KICAD_GLOBAL_PLAN_LAYER', ''),     # '' off | 'pref'
         'layer_discount': _f('KICAD_GLOBAL_PLAN_LAYER_DISCOUNT', 0.7),
         'swaps': _opt_in('KICAD_GLOBAL_PLAN_SWAPS'),
+        # Layer-assignment source: 'clique' = round-robin across each
+        # share-clique's viable layers (v1; built for BLIND probes that all
+        # pile onto one layer); 'probe' = each net's OWN rough-path
+        # majority layer -- only meaningful with SEQ probes, whose paths
+        # already spread like the human board's. 'probe' + SWAPS pays the
+        # net's first dive mechanically (stub moved before any map build),
+        # bypassing the via-economics veto that made the soft discount and
+        # attraction inert (adherence 37% attracted vs 38% not).
+        'layer_mode': _s('KICAD_GLOBAL_PLAN_LAYER_MODE', 'clique'),
         'debug': _opt_in('KICAD_GLOBAL_PLAN_DEBUG'),    # ordering forensics dump
         # Sequential-aware probing (#589 v2-lite, negotiated-congestion in
         # ONE pass): each successful probe's corridor is stamped into the

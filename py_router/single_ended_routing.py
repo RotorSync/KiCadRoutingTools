@@ -2394,11 +2394,18 @@ def _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data, net_id, 
     # through the registered free via. The free via is what lets the boxed pad
     # connect; a full via at the cell grazes a neighbouring foreign pad (only the
     # shrunk via fits) -- issue #212, glasgow_revC Z5 via vs RN4.6.
-    sizes = getattr(pcb_data, '_unblock_via_sizes', None)
-    if sizes is None:
-        sizes = {}
-        pcb_data._unblock_via_sizes = sizes
-    sizes[(vgx, vgy)] = (v['size'], v['drill'])
+    # #589 probe hygiene: plan probes route on a throwaway map and emit no
+    # copper, but this registry lives on pcb_data and steers the REAL run's
+    # via emission -- seq probes place ~10x more unblock vias than blind
+    # ones and the leak measurably changed routing (oc null-control 37 vs
+    # 33 with the plan off). Probes keep the unblock via for their own
+    # path; they just must not leave a persistent size registration.
+    if not getattr(config, 'plan_probe', False):
+        sizes = getattr(pcb_data, '_unblock_via_sizes', None)
+        if sizes is None:
+            sizes = {}
+            pcb_data._unblock_via_sizes = sizes
+        sizes[(vgx, vgy)] = (v['size'], v['drill'])
     # Off-pad rung: the tap's pad->via trace is the escape stub -- it ships
     # with the via (both kept or both dropped by the caller's used-via check).
     stub_segments = []
@@ -2549,8 +2556,11 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
                 print(f"{print_prefix}{GREEN}Boxed endpoint unblocked by "
                       f"rung-{_rp[0]}/{_rp[1]} via search (no pre-placed "
                       f"via){RESET}")
-                _register_rung_path_vias(pcb_data, obstacles, _r1[0],
-                                         _rp[0], _rp[1])
+                # #589 probe hygiene: no persistent registration from plan
+                # probes (see _place_shrunk_via_in_pad_impl).
+                if not getattr(config, 'plan_probe', False):
+                    _register_rung_path_vias(pcb_data, obstacles, _r1[0],
+                                             _rp[0], _rp[1])
                 return _r1 + ([], [])
 
     _dbg = _unblock_debug()

@@ -248,7 +248,35 @@ def _assign_clique_layers(plan: GlobalPlan, config) -> None:
     plan_layer_config (soft discount, 'layer' knob) and
     apply_plan_layer_swaps (stub moves, 'swaps' knob)."""
     k = global_plan_knobs()
-    if not (k['layer'] or k['swaps']) or not plan.share_w:
+    if not (k['layer'] or k['swaps']):
+        return
+    if k.get('layer_mode') == 'probe':
+        # #589 'probe' mode: trust each net's OWN negotiated rough path --
+        # its length-weighted majority layer IS the plan's layer choice
+        # (SEQ probes spread like the human board; the clique round-robin
+        # below exists to correct BLIND probes' one-layer pile-up).
+        # Nets whose majority is their path's start layer get no
+        # assignment (nothing to move).
+        base_costs = list(config.layer_costs or []) or [1.0] * len(config.layers)
+        while len(base_costs) < len(config.layers):
+            base_costs.append(1.0)
+        for nid, path in plan.rough_paths.items():
+            h: Dict[int, int] = {}
+            for (x1, y1, l1), (x2, y2, l2) in zip(path, path[1:]):
+                if l1 == l2:
+                    h[l1] = h.get(l1, 0) + max(abs(x2 - x1), abs(y2 - y1))
+            if not h:
+                continue
+            maj = max(sorted(h.items()), key=lambda t: t[1])[0]
+            if maj < len(base_costs) and base_costs[maj] >= 0 \
+                    and maj != path[0][2]:
+                plan.layer_pref[nid] = maj
+        if plan.layer_pref:
+            print(f"Global plan layer assignment (probe-majority): "
+                  f"{len(plan.layer_pref)} net(s) prefer a non-start "
+                  f"layer of their own rough path")
+        return
+    if not plan.share_w:
         return
     n_layers = len(config.layers)
     base_costs = list(config.layer_costs or []) or [1.0] * n_layers
