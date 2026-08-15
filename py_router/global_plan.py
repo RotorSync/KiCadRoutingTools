@@ -636,7 +636,32 @@ def apply_plan_order(net_ids: List[Tuple[str, int]], plan: GlobalPlan,
     """Apply the plan-informed order, preserving the #472 direct-first
     partition: the front block and the rest are reordered independently and
     never merged. No-op when the order knob is '' or the plan is empty."""
-    mode = global_plan_knobs()['order']
+    k = global_plan_knobs()
+    # #589 escape-risk front-load (ORDER_FILE): listed nets first within
+    # their partition block, independent of the graph-order modes below.
+    if k.get('order_file') and plan is not None:
+        try:
+            listed = [ln.strip() for ln in open(k['order_file'])
+                      if ln.strip()]
+        except OSError as e:
+            print(f"Global plan order file unreadable: {e}")
+            listed = []
+        if listed:
+            rank = {n: i for i, n in enumerate(listed)}
+            front_ids = front_ids or set()
+
+            def _front_load(block):
+                pri = [t for t in block if t[0] in rank]
+                pri.sort(key=lambda t: rank[t[0]])
+                return pri + [t for t in block if t[0] not in rank]
+            fr = [t for t in net_ids if t[1] in front_ids]
+            rest = [t for t in net_ids if t[1] not in front_ids]
+            out = _front_load(fr) + _front_load(rest)
+            n_hit = sum(1 for t in net_ids if t[0] in rank)
+            print(f"Global plan order file: front-loaded {n_hit}/"
+                  f"{len(listed)} listed net(s)")
+            return out
+    mode = k['order']
     if not mode or plan is None:
         return net_ids
     if not (plan.share_w if mode == 'contended' else plan.conflict_w):

@@ -317,6 +317,14 @@ def refresh() -> None:
         # plan had no consumer. Bus corridors take precedence for bus
         # members.
         'attract': _opt_in('KICAD_GLOBAL_PLAN_ATTRACT'),
+        # Front-load list (#589 escape-risk ordering experiment): a file of
+        # net names (one per line); listed nets move to the FRONT of their
+        # #472 partition block in file order, others keep relative order.
+        # Solo forensics: walled nets route human-style (dive early) when
+        # the board is open -- they fail only when routed late, after
+        # in-run copper consumes their via sites. Oracle test: front-load
+        # the known failure set and see if completion follows.
+        'order_file': _s('KICAD_GLOBAL_PLAN_ORDER_FILE', ''),
         # Offline-analysis dump (#589 plan-quality scoring): write the full
         # plan state (rough paths, both conflict graphs, layer prefs, the
         # order actually used + the front partition) as JSON to this path
