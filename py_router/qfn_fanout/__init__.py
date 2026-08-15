@@ -28,6 +28,17 @@ from net_queries import matches_net_filter
 from qfn_fanout.layout import analyze_qfn_layout, analyze_pad
 from qfn_fanout.geometry import calculate_fanout_stub
 
+# #621: nets whose escape was never ATTEMPTED because this run's own
+# `cancel_check` (a --deadline) stopped it. Refreshed by every
+# generate_qfn_fanout call and EMPTY unless a cancel actually fired.
+#
+# Deliberately a separate ledger from failed_nets/unescaped_nets: an unfinished
+# search has measured nothing about a pad, and folding untried pads into the
+# failure list reports a budget as a routing defect -- the exact misreading
+# krt_deadline's docstring warns about and tests/test_deadline.py pins for
+# place_reconstruct.
+LAST_DEADLINE_SKIPPED: List[str] = []
+
 
 def _snap_tip_on_grid(corner, tip, net_id, grid_step, grazes):
     """Move a shortened fan tip back ONTO the routing grid (#446).
@@ -641,7 +652,8 @@ def generate_qfn_fanout(footprint: Footprint,
                         via_size: float = 0.45,
                         via_drill: float = 0.25,
                         allow_via_in_pad: bool = False,
-                        board_edge_clearance: float = 0.0) -> Tuple[List[Dict], List[Dict], List[str]]:
+                        board_edge_clearance: float = 0.0,
+                        cancel_check=None) -> Tuple[List[Dict], List[Dict], List[str]]:
     """
     Generate QFN fanout tracks for a footprint.
 
@@ -667,7 +679,25 @@ def generate_qfn_fanout(footprint: Footprint,
         too close to another net's stub (endpoint spacing < track_width +
         extension); those tracks are still emitted but flagged as failing
         clearance so the GUI can surface them.
+
+    Cancellation (#621): `cancel_check` is the standard zero-arg cooperative
+    predicate, honoured at the head of the escape work and at the head of the
+    per-stub clearance loop -- the loop that actually costs the time (every stub
+    is checked against the obstacle map, every foreign pad and the board edge,
+    then shortened by search). It BREAKS the loop, never raises. Stubs already
+    kept ship their tracks; pads it never reached carry no copper and are NOT
+    added to failed_nets -- an unfinished search has measured nothing. The
+    untried pads' nets are published as qfn_fanout.LAST_DEADLINE_SKIPPED.
     """
+    LAST_DEADLINE_SKIPPED.clear()
+    _cancelled = [False]
+
+    def _cancel() -> bool:
+        if cancel_check is not None and cancel_check():
+            _cancelled[0] = True
+            return True
+        return False
+
     layout = analyze_qfn_layout(footprint)
     if layout is None:
         print(f"Warning: {footprint.reference} doesn't appear to be a QFN/QFP")
@@ -756,6 +786,25 @@ def generate_qfn_fanout(footprint: Footprint,
         print(f"  Sample pad geometry: {sample.pad_length:.2f} x {sample.pad_width:.2f} mm")
 
     if not pad_infos:
+        return [], [], []
+
+    def _record_skipped(tracks_, vias_, failed_):
+        """#621: the untried complement -- a candidate pad with no copper from
+        this call and no entry in failed_. Only built when a cancel fired."""
+        if not _cancelled[0]:
+            return
+        live = ({t.get('net_id') for t in tracks_}
+                | {v.get('net_id') for v in vias_})
+        done = set(failed_)
+        LAST_DEADLINE_SKIPPED.extend(sorted(
+            {pi.pad.net_name for pi in pad_infos
+             if pi.pad.net_name and pi.pad.net_id not in live
+             and pi.pad.net_name not in done}))
+
+    # #621 escape-work head: covers BOTH escape methods, so --deadline 0 stops
+    # here with nothing tried instead of running an unbounded escape.
+    if _cancel():
+        _record_skipped([], [], [])
         return [], [], []
 
     # Via-drop / underpad escape (issue #164): drop a through-via just past each
@@ -927,6 +976,10 @@ def generate_qfn_fanout(footprint: Footprint,
     n_ext_short = 0
     kept_stubs: List[FanoutStub] = []
     for stub, pad_info in zip(stubs, pad_infos):
+        if _cancel():                                   # #621
+            # Untried stubs are simply not kept: no copper, and NOT appended to
+            # qfn_dropped -- they were never checked, so they are not failures.
+            break
         nid = stub.net_id
         if _seg_grazes(stub.pad_pos, stub.corner_pos, nid):
             # #513 item 15 (ice4pi): a straight escape toward a nearby board
@@ -1064,6 +1117,7 @@ def generate_qfn_fanout(footprint: Footprint,
     else:
         print(f"  Validated: No endpoint collisions")
 
+    _record_skipped(tracks, [], failed_nets)
     return tracks, [], failed_nets
 
 
@@ -1116,6 +1170,25 @@ def main():
     # meeting a 0.25mm via pad), and this step had no way to ask for one.
     parser.add_argument('--add-teardrops', action='store_true',
                         help='Add teardrop settings to all pads and vias in the output file')
+    parser.add_argument('--deadline', type=float, default=None, metavar='SECONDS',
+                        help='Wall-clock budget for the ESCAPE PASS. Not a hard cap '
+                             'on total runtime -- the cancel is cooperative and the '
+                             'bounded tail (write, DRC audit, .kicad_pro writeback) '
+                             'still runs -- so expect to overshoot. What it '
+                             'guarantees is TERMINATION on THIS tool\'s terms: it '
+                             'stops between stubs, writes the escapes it has, and '
+                             'prints a JSON_SUMMARY carrying complete=false / '
+                             'status=deadline (with the untried pads in '
+                             'deadline_skipped, NOT in unescaped_nets; a cancel '
+                             'that lands MID-RESCUE keeps the abandoned balls in '
+                             'unescaped_nets and counts them in '
+                             'deadline_unrescued) before '
+                             'exiting 7. Without it an external kill on Windows is '
+                             'TerminateProcess, which leaves NO summary and NO exit '
+                             'code of ours. ANY harness with an external timeout '
+                             'should pass this at ~0.8x its own. Default: no budget '
+                             '(a wall-clock default would break replay '
+                             'determinism). Env: KRT_DEADLINE_S')
     from fab_tiers import (add_fab_tier_args, fab_tier_from_args, set_default_fab_tier,
                            enforce_fab_floors, count_copper_layers_in_file)
     add_fab_tier_args(parser)
@@ -1224,9 +1297,21 @@ def main():
               f"mounted layer {footprint.layer} - stubs will NOT touch the "
               f"SMD pads unless this is intentional")
 
+    # #621: the deadline is ONE closure into the plumbing the engine now has --
+    # honoured at the escape-work head and the per-stub loop head, with the
+    # write branch below still running on cancel, so a cancelled run yields a
+    # real partial fan rather than nothing. No reserve band: unlike the plane
+    # loops, this tail is bounded and short (write + DRC audit + writeback).
+    import krt_deadline
+    _dl_report = {'tool': 'qfn_fanout.py', 'board': args.pcb,
+                  'component': args.component}
+    _dl = krt_deadline.arm(args.deadline, tool='qfn_fanout',
+                           on_partial=lambda: _dl_report)
+
     tracks, vias, _failed_nets = generate_qfn_fanout(
         footprint,
         pcb_data,
+        cancel_check=(_dl.cancel_check('qfn escape') if _dl else None),
         net_filter=args.nets,
         layer=layer,
         track_width=args.width,
@@ -1268,14 +1353,30 @@ def main():
     # for the underpad method, a smaller via) toward the fab floor until it's clean.
     # Mirrors bga_fanout (#130/#122). Best-effort: a DRC hiccup must never fail the
     # fanout. drc_grazes is graded at --clearance.
-    import json as _json
     # A stub-less via-in-pad escape emits a via but no track, so vias count as
     # escapes too -- tracks alone undercounts and grades those pads as failed.
     escaped_net_ids = ({t['net_id'] for t in tracks if t.get('net_id') is not None}
                        | {v['net_id'] for v in vias if v.get('net_id') is not None})
     unescaped = sorted(set(_failed_nets))
     escaped = len(escaped_net_ids)
-    requested = escaped + len(unescaped)
+    # #621: pads the run's own budget never got to. EMPTY on every run that was
+    # not cancelled, so `requested` is unchanged there. On a cancelled run they
+    # ARE part of what was requested (they just weren't tried), which is what
+    # makes the partial ledger add up: requested == escaped + failed + skipped.
+    deadline_skipped = [n for n in LAST_DEADLINE_SKIPPED
+                        if n not in unescaped]
+    requested = escaped + len(unescaped) + len(deadline_skipped)
+    # #621: the BGA twin of this key exists because a cancel that lands
+    # mid-rescue leaves `unescaped_nets` full and `deadline_skipped` empty, and
+    # a consumer reading only the latter concludes the run tried everything.
+    # QFN's per-stub loop head does yield real partials (measured, rp2350 U6:
+    # --deadline 0.2 -> escaped 7, failed 0, skipped 28), and both shapes can
+    # coexist here (--deadline 0.3 -> escaped 33, failed 1, skipped 2,
+    # unrescued 1). The disclosure is symmetric so a consumer can apply ONE
+    # rule to both fronts: on a cancelled run, `failed` is not evidence about
+    # clearance.
+    deadline_unrescued = (len(unescaped)
+                          if (_dl is not None and _dl.stopped_in) else 0)
     drc_grazes = {}
     out_path = getattr(args, 'output', None)
     if out_path:
@@ -1335,9 +1436,50 @@ def main():
         # and check_drc grade the board at this floor.
         'min_clearance_used': eff_clearance,
     }
-    print(f"JSON_SUMMARY: {_json.dumps(summary)}")
+    # #621: only present on a run its own budget cut short. NOT merged into
+    # unescaped_nets -- these pads were never tried, so calling them escape
+    # failures would report a budget as a routing defect.
+    if deadline_skipped:
+        summary['deadline_skipped'] = deadline_skipped
+    # #621: how many of `failed` this CANCELLED run cannot vouch for. Absent on
+    # every uncancelled run. See the BGA twin for the mechanism.
+    if deadline_unrescued:
+        summary['deadline_unrescued'] = deadline_unrescued
 
+    # Emit through krt_deadline, NOT a raw print (#621): a bare print leaves
+    # krt_deadline's `_emitted` False, and the atexit flush then publishes a
+    # SECOND, contradicting `{"complete": false, "status": "incomplete"}` line
+    # after the real one -- which any consumer keying on the LAST JSON_SUMMARY
+    # reads as a failed run. (Measured in route_disconnected_planes, run 11.)
+    # Gate on `stopped_in` (a cancel actually fired), not `expired()`: with no
+    # reserve band a run whose escape pass completed can still cross the wall
+    # clock inside the bounded tail, and that run IS complete.
+    if _dl is not None and _dl.stopped_in:
+        krt_deadline.stamp(summary)
+        _dl_report.update(summary)
+        krt_deadline.emit(summary, complete=False, status='deadline',
+                          deadline=_dl)
+        # Partial-board policy, following route_planes: write the output and
+        # say loudly that it is partial. Fanout is a CHAIN step whose successor
+        # consumes the output path by name, so withholding the file breaks the
+        # chain instead of degrading it (place_reconstruct stages because its
+        # output path is a finished-placement contract).
+        # #621: "N never tried" alone is misleading whenever the cancel landed
+        # after something already dropped pads -- see the BGA twin's comment.
+        _unresc = (f", {deadline_unrescued} dropped by a pass whose RESCUE "
+                   f"never ran (NOT clearance failures)"
+                   if deadline_unrescued else "")
+        print(f"\033[91mDEADLINE: this run stopped on its own budget after "
+              f"{_dl.elapsed():.0f}s of {_dl.seconds:g}s"
+              + (f" (in {_dl.stopped_in})" if _dl.stopped_in else "")
+              + f". The board at {out_path or '(none)'} is a PARTIAL fanout: "
+              f"{escaped} pad net(s) escaped{_unresc}, {len(deadline_skipped)} "
+              f"never tried. Real, DRC-graded copper -- but the escape did not "
+              f"finish, so do not read it as complete.\033[0m")
+        return krt_deadline.DEADLINE_EXIT
 
+    _dl_report.update(summary)
+    krt_deadline.emit(summary)
     return 0
 
 
