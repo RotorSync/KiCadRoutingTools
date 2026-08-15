@@ -389,8 +389,10 @@ def apply_plan_layer_swaps(pcb_data, config, plan: GlobalPlan,
                                       revert_stub_layer_switch,
                                       validate_single_swap)
     from layer_swap_optimization import _swap_vias_fit_or_shrink
+    from collections import Counter
     swaps = 0
     declined = 0
+    decline_reasons: Counter = Counter()
     same_layer = 0
     no_stub = 0
     no_endpoints = 0
@@ -427,6 +429,7 @@ def apply_plan_layer_swaps(pcb_data, config, plan: GlobalPlan,
                 stub, target_layer, stubs_by_layer, pcb_data, config)
             if not valid:
                 declined += 1
+                decline_reasons[reason.split('(')[0].strip()[:60]] += 1
                 if verbose:
                     print(f"  [plan] swap declined {name} "
                           f"{cur_layer}->{target_layer}: {reason}")
@@ -436,6 +439,7 @@ def apply_plan_layer_swaps(pcb_data, config, plan: GlobalPlan,
             if not _swap_vias_fit_or_shrink(pcb_data, new_vias, config):
                 revert_stub_layer_switch(pcb_data, seg_mods, new_vias)
                 declined += 1
+                decline_reasons['pad via unfit'] += 1
                 if verbose:
                     print(f"  [plan] swap reverted {name} "
                           f"{cur_layer}->{target_layer}: pad via unfit")
@@ -446,6 +450,9 @@ def apply_plan_layer_swaps(pcb_data, config, plan: GlobalPlan,
             if verbose:
                 print(f"  Plan layer swap: {name} {cur_layer}->{target_layer}"
                       + (f" (+{len(new_vias)} via)" if new_vias else ""))
+    if decline_reasons:
+        print("  [plan] swap decline reasons: " + ", ".join(
+            f"{r} x{c}" for r, c in decline_reasons.most_common(8)))
     print(f"Global plan stub swaps: {swaps} applied, {declined} declined, "
           f"{no_stub} end(s) without stub copper, {same_layer} already on "
           f"the assigned layer, {no_endpoints} net(s) without derivable "
