@@ -8,7 +8,7 @@ both for free (Class 1). The drift happens when a CLI `main()` runs an extra
 pass AFTER its engine call -- clean_plane_copper, oracle_reconnect,
 fix_project_for_output, ... -- that the GUI must separately replicate (Class 2).
 That is exactly how the set11 GUI board shipped 35 plane shorts the CLI board
-didn't have: route_disconnected_planes.main() ran clean_plane_copper on its
+didn't have: repair_planes.main() ran clean_plane_copper on its
 output file and the planes tab never did.
 
 This lint has no gate-able runtime; it is a STATIC guard:
@@ -39,9 +39,11 @@ PLUGIN = REPO / "kicad_routing_plugin"
 # main') with no main() def, so scanning them saw nothing -- the fanout
 # post-passes (run_drc graze audit, fix_project_for_output) were a blind spot.
 # Point at the package __init__ where main() actually lives.
-CLI_MAINS = ["route.py", "route_diff.py", "route_planes.py",
-             "route_disconnected_planes.py",
-             "bga_fanout/__init__.py", "qfn_fanout/__init__.py"]
+# #522 layout: the CLI mains live under py_router/.
+CLI_MAINS = ["py_router/route.py", "py_router/route_diff.py",
+             "py_router/route_planes.py", "py_router/repair_planes.py",
+             "py_router/bga_fanout/__init__.py",
+             "py_router/qfn_fanout/__init__.py"]
 
 # Known post-engine passes -> GUI counterpart symbol(s). A pass is "covered" if
 # ANY listed symbol appears anywhere under kicad_routing_plugin/. Keep the RHS
@@ -49,16 +51,58 @@ CLI_MAINS = ["route.py", "route_diff.py", "route_planes.py",
 REGISTRY = {
     # plane dead-end / graze cleanup (this session's fix)
     'clean_plane_copper': ['_run_plane_copper_cleanup', 'compute_plane_copper_cleanup'],
-    # KiCad-oracle recheck after plane repair
-    'oracle_reconnect': ['_run_kicad_oracle_after_apply', 'oracle_reconnect'],
+    # KiCad-oracle recheck after plane repair AND route.py's plane-finalize
+    # oracle leg (#562). IPC: the staged-save core is the adapter's
+    # apply_oracle_reconnect (it snapshot-saves the live board, routes the
+    # links kicad-cli reports missing, and applies them in one commit); the
+    # signal tab consumes results_data['plane_finalize_oracle'] after apply.
+    # The planes tab has no oracle hook since #562 -- after plane CREATION the
+    # remaining gaps belong to the route step's finalize.
+    'oracle_reconnect': ['apply_oracle_reconnect', 'oracle_reconnect',
+                         'plane_finalize_oracle'],
+    # Plane finalize (#562): repair_planes runs INSIDE batch_route (Class 1)
+    # for both fronts -- under return_results it merges its board delta into
+    # results_data and posts the oracle spec; the plugin-side evidence is
+    # swig_gui's plane_finalize_oracle consumption.
+    'repair_planes': ['plane_finalize_oracle'],
     # DRC-floor / project-file writeback after routing
     'fix_project_for_output': ['_write_drc_floors', 'update_live_drc_floors'],
+    # #521: protected-nets record in the sibling .kicad_pro after routing.
+    # Engines NOTE candidates (matched groups, routed pairs); each front's
+    # writeback PERSISTS them: CLI mains here, GUI at plan end
+    # (ai_plan._write_drc_floors) + per manual step (update_live_drc_floors).
+    'persist_protected_nets': ['_write_drc_floors', 'update_live_drc_floors'],
+    # #521 companion: per-net impedance declarations recorded the same way.
+    'persist_impedance_specs': ['_write_drc_floors', 'update_live_drc_floors'],
     # GND return vias near signal vias
     'add_gnd_vias_to_existing_board': ['add_gnd_vias_to_existing_board'],
+    # run-6 fix 1.7: castellated-landing retract (route.py + both plane
+    # mains); GUI twin applies the shared compute core to the live board.
+    'retract_castellated_landings': ['apply_castellated_landing_retract',
+                                     'compute_castellated_landing_retract'],
 }
 # NOTE (deliberately NOT registered): move_copper_graphics_to_silkscreen runs
-# inside the shared plane WRITER (plane_io), not a main() -- Class 1, inherited
-# by both fronts. fix_kicad_drc_settings is a MODULE; the main() call is
+# inside the shared plane WRITER (plane_io), not a main() -- so this gate, which
+# discovers CLI main() post-passes, does not see it. It is NOT "inherited" by the
+# GUI though: the GUI applies copper to the live board and never calls the text
+# writers, so parity there comes from a HAND-WRITTEN twin -- on IPC that is the
+# adapter's move_copper_graphics_to_silkscreen (kipy), called from the route and
+# planes apply paths. Any new writer-level pass needs the same treatment.
+#
+# OPEN GAP (2026-07-28): kicad_writer.strip_zero_length_edge_cuts sits in exactly
+# that position -- wired into output_writer / plane_io / kicad_writer beside the
+# silkscreen movers -- and has NO GUI twin yet. Consequence: a board routed
+# through the CLI comes back with its null-length Edge.Cuts primitives dropped
+# (KiCad grades each as invalid_outline and slows to a crawl: 656s -> 2.7s on
+# pinci), while the same board routed through the GUI keeps them, because the
+# GUI mutates the user's open document rather than authoring a file. The twin
+# would be gui_utils.strip_zero_length_edge_cuts_board(board), called where
+# move_copper_graphics_to_silkscreen_board already is (swig_gui _apply path and
+# planes_gui). Not shipped blind: removing footprint-embedded Edge.Cuts items
+# through the SWIG object API killed the interpreter in every headless attempt
+# here, so it needs writing and verifying against a real running KiCad.
+#
+# fix_kicad_drc_settings is a MODULE; the main() call is
 # fix_project_for_output (above).
 
 # Modules whose public functions are ALL post-route finalization passes: a
@@ -76,6 +120,9 @@ POSTPASS_MODULES = ['kicad_oracle', 'fix_kicad_drc_settings', 'check_drc']
 DISCOVERY_EXEMPT = {'add_drc_fix_args', 'drc_fix_kwargs', 'find_kicad_cli',
                     'compute_targets', 'severity_plan',
                     'read_project_edge_clearance',
+                    # the `if __name__ == "__main__"` dispatcher calling main()
+                    # (that block is scanned as a main scope since #521).
+                    'main',
                     # #441: pre-engine helper that WARNS when an input board has no
                     # sibling .kicad_pro (dropped DRC floor). Report-only, runs before
                     # routing, no board mutation; the GUI operates on the live board and
@@ -109,28 +156,43 @@ def _main_calls(path):
         tree = ast.parse(src)
     except SyntaxError:
         return set()
+    def _is_dunder_main_if(node):
+        # `if __name__ == "__main__":` -- route.py / route_diff.py run their
+        # whole CLI there instead of a def main(), so post-passes added in
+        # that block (#521 persist_protected_nets) must be scanned too.
+        if not isinstance(node, ast.If):
+            return False
+        t = node.test
+        return (isinstance(t, ast.Compare) and isinstance(t.left, ast.Name)
+                and t.left.id == '__name__')
+
     calls = set()
+    scopes = []
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == 'main':
-            aliases = {}  # local alias -> real imported name
-            for sub in ast.walk(node):
-                if isinstance(sub, ast.ImportFrom):
-                    for a in sub.names:
-                        if a.asname:
-                            aliases[a.asname] = a.name
-            for sub in ast.walk(node):
-                if isinstance(sub, ast.Call):
-                    f = sub.func
-                    if isinstance(f, ast.Name):
-                        calls.add(aliases.get(f.id, f.id))
-                    elif isinstance(f, ast.Attribute):
-                        calls.add(f.attr)
-            break
+            scopes.append(node)
+    scopes.extend(n for n in tree.body if _is_dunder_main_if(n))
+    for scope in scopes:
+        aliases = {}  # local alias -> real imported name
+        for sub in ast.walk(scope):
+            if isinstance(sub, ast.ImportFrom):
+                for a in sub.names:
+                    if a.asname:
+                        aliases[a.asname] = a.name
+        for sub in ast.walk(scope):
+            if isinstance(sub, ast.Call):
+                f = sub.func
+                if isinstance(f, ast.Name):
+                    calls.add(aliases.get(f.id, f.id))
+                elif isinstance(f, ast.Attribute):
+                    calls.add(f.attr)
     return calls
 
 
 def _module_public_funcs(mod_name):
-    p = REPO / f"{mod_name}.py"
+    p = REPO / "py_router" / f"{mod_name}.py"     # #522 layout
+    if not p.exists():
+        p = REPO / "py_tools" / f"{mod_name}.py"
     if not p.exists():
         return set()
     tree = ast.parse(p.read_text())

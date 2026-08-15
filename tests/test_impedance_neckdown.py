@@ -14,6 +14,10 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.join(os.path.dirname(__file__), '..'), 'py_router'))  # #522
+sys.path.insert(0, os.path.join(os.path.join(os.path.dirname(__file__), '..'), 'py_tools'))  # #522
+
+import env_knobs
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'rust_router'))
 
 from grid_router import GridRouter, GridObstacleMap
@@ -55,6 +59,7 @@ def _run(config, env_value):
             os.environ.pop('KICAD_IMPEDANCE_NECKDOWN', None)
         else:
             os.environ['KICAD_IMPEDANCE_NECKDOWN'] = env_value
+        env_knobs.refresh()
         router, obstacles, pcb, sources, targets = _corridor_setup(config)
         margins = config.track_margins_for_net(1)
         res = _route_main_connection(router, obstacles, config, sources, targets,
@@ -65,6 +70,7 @@ def _run(config, env_value):
             os.environ.pop('KICAD_IMPEDANCE_NECKDOWN', None)
         else:
             os.environ['KICAD_IMPEDANCE_NECKDOWN'] = old
+        env_knobs.refresh()
 
 
 def _impedance_config():

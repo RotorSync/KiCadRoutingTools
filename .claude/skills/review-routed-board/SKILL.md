@@ -12,9 +12,9 @@ When this skill is invoked with a board file, run a full post-route review and p
 Run all three checkers, capturing output:
 
 ```bash
-python3 -X utf8 check_drc.py board.kicad_pcb 2>&1 | tee /tmp/review_drc.txt
-python3 -X utf8 check_connected.py board.kicad_pcb 2>&1 | tee /tmp/review_connectivity.txt
-python3 -X utf8 check_orphan_stubs.py board.kicad_pcb 2>&1 | tee /tmp/review_orphans.txt
+python3 -X utf8 py_router/check_drc.py board.kicad_pcb 2>&1 | tee /tmp/review_drc.txt
+python3 -X utf8 py_router/check_connected.py board.kicad_pcb 2>&1 | tee /tmp/review_connectivity.txt
+python3 -X utf8 py_tools/check_orphan_stubs.py board.kicad_pcb 2>&1 | tee /tmp/review_orphans.txt
 ```
 
 `check_drc.py` auto-grades at the clearance the routing steps wrote into the sibling
@@ -86,6 +86,45 @@ For time-matched groups use `calculate_route_propagation_time_ps()` from `impeda
 
 Report per group: the spread, the tolerance, and the worst offender net.
 
+## Step 2b: Meander Arm-Spacing Audit (#501)
+
+Serpentine arms are **same-net copper, so no DRC checker will ever flag them** —
+tightly packed arms couple to themselves, split odd/even-mode velocity, and make
+the meander add less *delay* than *length*. A group can report "PASS, spread
+0.06mm" and still be worse-matched than an untuned board. For every net in a
+length/time-matched group (and any net with visible serpentines), audit the
+arm-to-arm spacing directly:
+
+```python
+from kicad_parser import parse_kicad_pcb
+from geometry_utils import segment_to_segment_distance
+
+pcb = parse_kicad_pcb('board.kicad_pcb')
+for nid in matched_net_ids:
+    segs = [s for s in pcb.segments if s.net_id == nid]
+    worst = None
+    for i, a in enumerate(segs):
+        for b in segs[i + 1:]:
+            if a.layer != b.layer:
+                continue
+            d = segment_to_segment_distance(
+                a.start_x, a.start_y, a.end_x, a.end_y,
+                b.start_x, b.start_y, b.end_x, b.end_y)
+            # touching/chained segments (d ~ 0) are the route itself, not arms
+            gap = d - (a.width + b.width) / 2
+            if d > 1e-6 and (worst is None or gap < worst):
+                worst = gap
+    # PASS: worst edge-to-edge gap >= 1x width (= the default 2W pitch).
+    # WARN below 1W; FAIL below ~0.5W (arms tighter than the router's own default).
+```
+
+Judge the gap in **track widths**: the router's default arm pitch is
+`--meander-spacing` = 2.0 × width centre-to-centre (1W edge gap); SI practice
+prefers 3W–4W pitch for long serpentines on fast edges. Report the worst
+arm gap per net in mm and in multiples of that net's width, and — when the board
+was routed by this tool below the recommendation — the
+`--meander-spacing 3` rerun that would spread the arms.
+
 ## Step 3: GND Return Via Coverage
 
 For high-speed nets (use `/find-high-speed-nets` results if available, else the name-pattern tiers from `/plan-pcb-routing`), check each signal via has a GND via nearby:
@@ -109,14 +148,20 @@ It is not a DRC violation and ships silent, so check it explicitly:
 
 ```bash
 # every routed signal net (plane nets are skipped automatically)
-python3 check_impedance.py board.kicad_pcb --verbose
+python3 py_tools/check_impedance.py board.kicad_pcb --verbose
 
 # narrow to the controlled-impedance nets when you know them
-python3 check_impedance.py board.kicad_pcb --nets "RF*" "/DDR*"
+python3 py_tools/check_impedance.py board.kicad_pcb --nets "RF*" "/DDR*"
 
 # if the route step declared a coplanar gap, AUDIT that promise
-python3 check_impedance.py board.kicad_pcb --coplanar-gap 0.2
+python3 py_tools/check_impedance.py board.kicad_pcb --coplanar-gap 0.2
 ```
+
+Boards routed by this tool need no `--coplanar-gap`: `--impedance` steps record
+each net's declaration (ohms + coplanar gap) in the sibling `.kicad_pro`
+(#521), and `check_impedance.py` auto-reads them — every net audits against its
+OWN recorded promise (an "Auto-read N net impedance declaration(s)" line
+confirms it). Pass the flag only for boards without records.
 
 Reports per net: length over a reference-plane **void**, plane **split**
 crossings (the return current cannot follow the trace across either), the
@@ -161,6 +206,7 @@ Present a compact report — one pass/fail line per category, details only for f
 | Connectivity              | FAIL - 2 nets with disconnected pads |
 | Orphan stubs              | PASS |
 | Length match (byte_lane_0)| PASS (spread 0.06mm, tol 0.1mm) |
+| Meander arm spacing       | PASS (worst gap 1.0W on DQ3) |
 | GND return vias           | WARN - 3 high-tier signal vias lack GND via within 3mm |
 | Diff pairs                | PASS (4 pairs, gap consistent) |
 

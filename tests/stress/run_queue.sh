@@ -5,17 +5,20 @@
 # it skips finished boards and won't double-launch ones already running (incl.
 # harness Agent runs detected via the run-dir).
 #
-# Usage: run_queue.sh [concurrency] [model]   (defaults: <#cores> sonnet)
+# Usage: run_queue.sh [concurrency] [model]   (defaults: 10, backend default)
+#   Backend: STRESS_AI_BACKEND=claude (default) | opencode (#503) — inherited by
+#   every run_board.sh worker. Model defaults: claude -> sonnet; opencode -> the
+#   user's configured opencode default (or pass provider/model explicitly).
 # Watch:  tail -f ~/Documents/kicad_stress_test/QUEUE_STATUS.txt
 #
-# Concurrency defaults to the core count: a board worker is mostly *thinking*
-# (LLM latency) and only intermittently in a heavy python route step, so ~Ncore
-# boards keep the machine busy without Ncore heavy processes at once. run_limited.sh
-# caps each tool step at ~4 GB and kills it (a finding) if several heavy steps do
-# coincide, so memory can't run away. Lower the arg if you still see swapping.
+# Concurrency defaults to 10, which is deliberately ABOVE the core count: a board
+# worker is mostly *thinking* (LLM latency) and only intermittently in a heavy
+# python route step, so the machine sits idle at ~Ncore workers. 10 keeps it busy
+# without 10 heavy processes at once. run_limited.sh caps each tool step and kills
+# it (a finding) if several heavy steps do coincide, so memory can't run away.
+# Lower the arg if you see sustained swapping.
 set -u
-NCORE="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
-CONC="${1:-$NCORE}"; MODEL="${2:-sonnet}"
+CONC="${1:-10}"; MODEL="${2:-}"   # empty -> run_board.sh's per-backend default
 # Repo root is derived from this script's own location (tests/stress/run_queue.sh),
 # so the script is portable; override with STRESS_REPO if needed.
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -67,7 +70,7 @@ is_running(){  # our worker, any tool writing the run dir, or run dir touched <1
 
 log(){ echo "$(date '+%H:%M:%S') $*" | tee -a "$STATUS"; }
 : > "$STATUS"
-log "queue start: concurrency=$CONC model=$MODEL total=$total"
+log "queue start: concurrency=$CONC backend=${STRESS_AI_BACKEND:-claude} model=${MODEL:-(backend default)} total=$total"
 
 # Bounded-retry watchdog: run_board.sh writes no results JSON on failure, so a
 # board whose worker can never finish would be relaunched forever. The watchdog

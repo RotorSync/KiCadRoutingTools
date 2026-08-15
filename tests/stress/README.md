@@ -42,7 +42,7 @@ bash run_queue.sh [concurrency=4] [model=sonnet]   # from tests/stress/
 bash stress_status.sh                              # monitor: DONE/RUNNING/TODO + free slots
 ```
 
-`run_queue.sh` keeps N headless `claude -p` workers in flight until every board
+`run_queue.sh` keeps N headless agent workers (`claude -p` by default; `STRESS_AI_BACKEND=opencode` switches to `opencode run`, #503 - model arg is then `provider/model`) in flight until every board
 has a results JSON, deriving all state from disk (safe to stop and restart — it
 skips finished boards and won't double-launch running ones). Each worker
 (`run_board.sh <board> <set> [model]`) routes one board per `RUNBOOK.md`
@@ -75,7 +75,7 @@ picks parameters afresh each time — so two runs of the same board aren't
 identical, which makes it impossible to cleanly A/B an engine change.
 
 To fix this, each board-mutating tool (`route.py`, `route_diff.py`,
-`route_planes.py`, `route_disconnected_planes.py`, `bga_fanout.py`) **self-records**
+`route_planes.py`, `repair_planes.py`, `bga_fanout.py`) **self-records**
 its invocation (fully quoted argv + cwd) to a manifest via
 `redo_record.record_invocation()` at the top of `main()`. Recording is gated on
 the `REDO_MANIFEST` env var (a no-op when unset); `run_board.sh` sets it to
@@ -191,14 +191,28 @@ python3 tests/stress/ab_wave_report.py --new ~/…/ab_main_0728a \
 ```
 
 `ab_wave_driver.py` runs one **global queue** over every set (so a set's slow tail
-no longer drains the pool to idle before the next set starts), longest-job-first,
-with memory admission capping concurrent >2.5 GB boards — a blocked heavy board
-doesn't hold a worker slot, so `--jobs` stay busy. It calls
-`ab_replay_grade.do_board`, so grading and the `summary.json` schema are identical.
+no longer drains the pool to idle before the next set starts), in plain corpus
+order by default — by set, then board name — which keeps runs reproducible and
+comparable board-for-board. `--order lpt` opts into longest-job-first for a
+shorter makespan at the cost of a data-dependent order, and `--heavy-slots 1`
+opts into memory admission on a small-RAM box (off by default, since it reorders).
+It calls `ab_replay_grade.do_board`, so grading and the `summary.json` schema are
+identical.
 `ab_wave_report.py` aggregates every set against each baseline arm on
 `drc_real` / `nets_incomplete` / `kicad_connection_width` / `diff_pairs_coupled`,
 ranks per-board regressions, and flags broken chains separately (a release blocker
 that can never appear as a DRC delta).
+
+**`diff_pairs_coupled` is a TRUNK measure, not a pad-connectivity one** (#602).
+A pair whose coupled trunk routed but whose terminals were peeled to the
+single-ended follow-up counts as coupled by design — its trunk *is* coupled and
+the follow-up closes the terminals — so the coupled count alone never tells you
+a pair's member pads are open. Gate on **`diff_pairs_member_incomplete`** for
+that: it is route_diff's own member audit, carried through as
+`member_incomplete_pairs` in `JSON_SUMMARY`, and it names every pair with a
+disconnected member pad whatever bucket the pair landed in. `diff_pairs_partial`
+counts the pairs route_diff demoted out of `coupled` because they claimed a
+finished coupled route the audit contradicted (`outcome: "incomplete"`).
 
 Both are documented in depth in `RUNBOOK.md` → "Multi-set waves & release
 sign-off", including the run-for-hours checklist: detach with `nohup`, wrap in
@@ -220,6 +234,17 @@ performance can be compared across code versions:
   breakdown, and with `--timings-out PATH` writes the per-command timings as JSON.
   Timing the deterministic replay (not the LLM run, whose wall time is interleaved
   with model thinking) is the apples-to-apples measurement.
+
+The two files together also **identify attempts that DIED** (#599): the manifest
+line is written when a command *starts*, but the timings record only on a clean
+exit, so a manifest command with no matching `redo_timings.jsonl` entry was
+killed part-way — by the caller's command timeout, the memory watchdog, or a
+crash. That is the cheapest way to tell a wave's wasted attempts from its real
+work. Such an attempt does not corrupt a replay: it wrote no output, and
+`minimize_manifest.py`'s backward slice binds each read to the file's *current*
+producer, so the successful rerun's write supersedes it and the dead line drops
+out. Check `ORPHANED_STEP.txt` / `KILLED_STEP.txt` in the run dir for the
+wrapper's own account of what killed it.
 
 ### Minimizing a manifest (#132)
 
@@ -358,7 +383,7 @@ corpus works around them so routing results aren't confounded:
    (obstacle_map.py) allocates O(grid_cells × outline_vertices) float64
    broadcast arrays — a 432-vertex keyboard outline on a 222×90 mm board
    wants ~7 GB and OOMs the machine (route.py and
-   route_disconnected_planes.py affected; route_planes.py has a frugal
+   repair_planes.py affected; route_planes.py has a frugal
    board-edge path and is fine). Workaround: strip_routing.py
    Douglas-Peucker-simplifies regenerated outlines to ≤0.025 mm tolerance,
    keeping vertex counts low. Fix candidate: chunk the broadcast, or port

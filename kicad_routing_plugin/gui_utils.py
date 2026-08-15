@@ -4,6 +4,156 @@ KiCad Routing Tools - GUI Utilities
 Shared utilities for the plugin GUI.
 """
 
+# Re-entrancy latch for ui_thread_status (see below). Module-level, not
+# per-tab: a nested repaint can reach a DIFFERENT tab's helper.
+_IN_UI_STATUS = False
+
+# Secondary sink for ui_thread_status messages. The AI-tab plan executor
+# registers one while a plan runs: its own status mirror is POLL-driven
+# (wx.CallLater), so a step that runs ON the UI thread (fanout, cap
+# optimize, every tab's apply phase) blocks the poll and the AI tab froze
+# even while the working tab's label was repainting. ui_thread_status
+# pushes each message here as well, so the tab the user is actually
+# LOOKING at moves too. fn(message); None = no mirror.
+_UI_STATUS_MIRROR = None
+
+
+def set_ui_status_mirror(fn):
+    """Register (or clear, with None) the secondary ui_thread_status sink."""
+    global _UI_STATUS_MIRROR
+    _UI_STATUS_MIRROR = fn
+
+
+# Timestamp of the last UI-category event-loop pump (see ui_thread_status):
+# throttles the YieldFor so a fast message burst stays cheap.
+_LAST_UI_YIELD = 0.0
+
+
+def ui_thread_status(status_text, progress_bar, message):
+    """Show `message` for work running ON the wx main thread.
+
+    Engine-thread progress reaches the UI through wx.CallAfter, so the main
+    loop paints it. Work that runs ON the main thread (the apply phase, the
+    fanout, the plane-copper cleanup) BLOCKS that loop, so a bare SetLabel
+    would not repaint until the work finished -- the previous phase's label
+    stays on screen and reads as a hang.
+
+    Repainting from inside a KiCad ACTION PLUGIN is the delicate part, and the
+    reason this is one guarded helper rather than three hand-rolled copies:
+
+      * Only ever touch wx from the main thread. Off-thread callers are
+        marshalled with CallAfter instead (never dropped).
+      * Refresh + Update ONLY the static text. `wx.Gauge.Pulse()` starts an
+        indeterminate ANIMATION -- on macOS that schedules timers and can
+        dispatch events re-entrantly, which is exactly what corrupts the
+        thread state PYTHON_ACTION_PLUGIN::CallMethod releases on return
+        (a PyGILState_Release fatal abort takes KiCad down with it).
+      * A latch, because Update() runs the paint path and a nested call from
+        it must not recurse.
+      * Fully guarded: a status update must never break the work it reports.
+
+    macOS caveat that shaped this function: wxWindow.Update() CANNOT force a
+    synchronous repaint on wxOSX/Cocoa -- painting only happens when the run
+    loop turns (the wx docs call this out; Andy's report confirms it: labels
+    set + Refresh + Update during a blocking fanout never appeared on screen).
+    So after invalidating the label(s), this pumps the event loop for the
+    UI/paint CATEGORY ONLY, throttled: wx.EventLoopBase.YieldFor(
+    wx.EVT_CATEGORY_UI) dispatches paint/geometry events and RE-QUEUES
+    everything else -- user input (a stray click, the dialog's close button)
+    and timers (the plan executor's poll) are NOT dispatched, so nothing can
+    re-enter a handler mid-run. This is deliberately narrower than the plain
+    wx.Yield() the tabs use once at run start.
+
+    Escape hatch: KICAD_NO_UI_STATUS_REPAINT=1 sets the label but never forces
+    the paint or pumps the loop. The status then lags on blocking phases (the
+    pre-fix behaviour), which is strictly cosmetic -- so if a repaint from
+    inside the plugin ever destabilises a KiCad build, the label is the thing
+    to give up, not the run.
+    """
+    global _IN_UI_STATUS, _LAST_UI_YIELD
+    if _IN_UI_STATUS:
+        return
+    try:
+        import os
+        import time
+        import wx
+        if not wx.IsMainThread():
+            wx.CallAfter(ui_thread_status, status_text, progress_bar, message)
+            return
+        _IN_UI_STATUS = True
+        try:
+            no_repaint = os.environ.get('KICAD_NO_UI_STATUS_REPAINT', '') in \
+                ('1', 'yes', 'true')
+            if status_text:
+                status_text.SetLabel(message)
+                if not no_repaint:
+                    status_text.Refresh()
+                    status_text.Update()
+            if _UI_STATUS_MIRROR is not None:
+                # Push to the AI tab's mirror (inside the latch, so a
+                # paint-triggered nested call cannot recurse). Guarded
+                # separately: a dead mirror widget must not break the
+                # working tab's own status.
+                try:
+                    _UI_STATUS_MIRROR(message)
+                except Exception:
+                    pass
+            if not no_repaint:
+                # Actually PAINT the invalidated labels (see macOS caveat in
+                # the docstring). Throttled so a fast per-ball burst costs a
+                # bounded number of loop turns; a slow phase paints every
+                # message. Guarded: a failed pump degrades to the lagging
+                # label, never breaks the run.
+                now = time.monotonic()
+                if now - _LAST_UI_YIELD >= 0.05:
+                    _LAST_UI_YIELD = now
+                    try:
+                        loop = wx.EventLoopBase.GetActive()
+                        # IsRunning guard: only pump a loop that is actually
+                        # dispatching (KiCad's MainLoop). An activated-but-
+                        # never-run loop (synthetic harnesses) asserts inside
+                        # YieldFor's pending-event sweep.
+                        if loop is not None and loop.IsRunning():
+                            loop.YieldFor(wx.EVT_CATEGORY_UI)
+                    except Exception:
+                        pass
+        finally:
+            _IN_UI_STATUS = False
+    except Exception:
+        _IN_UI_STATUS = False
+
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def redirect_prints_to_log(append_log):
+    """Route print() output into the GUI log for the duration of a block,
+    while preserving the original stdout (StdoutRedirector tees, not swallows).
+
+    One shared helper because the audit found the coverage was accidental:
+    the route/diff/planes WORKERS redirected, but the fanout tab never did,
+    and every tab's APPLY phase runs after its worker restored stdout -- so
+    engine narration (fanout escapes, the oracle reconnect, zone refills,
+    plane cleanup) reached the terminal but never the log tab. Guarded:
+    append_log=None (or a failure) degrades to plain stdout, never breaks
+    the work.
+    """
+    import sys
+    if not append_log:
+        yield
+        return
+    original = sys.stdout
+    try:
+        sys.stdout = StdoutRedirector(append_log, original)
+    except Exception:
+        yield
+        return
+    try:
+        yield
+    finally:
+        sys.stdout = original
+
 
 def apply_drc_settings_fix(cfg, *, diff_pair=False):
     """Loosen the open project's DRC floors to the routed values (issue #160).

@@ -219,6 +219,12 @@ pub struct GridObstacleMap {
     static_via_bitmap: BlockedBitmap,
     /// Blocked via positions: packed (gx, gy) -> ref count
     pub blocked_vias: FxHashMap<u64, u16>,
+    /// #568: via blocking at the SMALL fab rung (advanced via, e.g. 0.25/0.15).
+    /// Cells here are a SUBSET of what `blocked_vias` would hold at the small
+    /// reserve; populated only by callers that stamp both rungs. EMPTY means
+    /// "not populated" and every rung>=1 query falls back to `blocked_vias`
+    /// (conservative), so existing single-rung callers behave identically.
+    pub blocked_vias_small: FxHashMap<u64, u16>,
     /// Stub proximity costs: (gx, gy) -> cost
     pub stub_proximity: FxHashMap<u64, i32>,
     /// Layer-specific proximity costs (for track proximity on same layer)
@@ -252,12 +258,6 @@ pub struct GridObstacleMap {
     /// Free via positions: positions where layer changes have zero cost
     /// (e.g., through-hole pads on the same net - reuse existing holes instead of adding vias)
     pub free_via_positions: FxHashSet<u64>,
-    /// B2 (issue #386): ledger of blocked_vias increments made by
-    /// add_stub_proximity_costs_batch(block_vias=true), one entry per
-    /// increment. clear_stub_proximity() drains it symmetrically; without
-    /// this, per-net via bans accumulated monotonically across nets under
-    /// --via-proximity-cost 0 (same refcount-leak class as #208/#309).
-    stub_via_block_cells: Vec<u64>,
 }
 
 #[pymethods]
@@ -270,6 +270,7 @@ impl GridObstacleMap {
             static_blocked_bitmap: BlockedBitmap::new(num_layers),
             static_via_bitmap: BlockedBitmap::new(1),
             blocked_vias: FxHashMap::default(),
+            blocked_vias_small: FxHashMap::default(),
             stub_proximity: FxHashMap::default(),
             layer_proximity_costs: (0..num_layers).map(|_| FxHashMap::default()).collect(),
             num_layers,
@@ -282,7 +283,6 @@ impl GridObstacleMap {
             endpoint_exempt_positions: Vec::new(),
             endpoint_exempt_radius: 0,
             free_via_positions: FxHashSet::default(),
-            stub_via_block_cells: Vec::new(),
         }
     }
 
@@ -327,6 +327,7 @@ impl GridObstacleMap {
             static_blocked_bitmap: self.static_blocked_bitmap.clone(),
             static_via_bitmap: self.static_via_bitmap.clone(),
             blocked_vias: self.blocked_vias.clone(),
+            blocked_vias_small: self.blocked_vias_small.clone(),
             stub_proximity: self.stub_proximity.clone(),
             layer_proximity_costs: self.layer_proximity_costs.clone(),
             num_layers: self.num_layers,
@@ -339,7 +340,6 @@ impl GridObstacleMap {
             endpoint_exempt_positions: self.endpoint_exempt_positions.clone(),
             endpoint_exempt_radius: self.endpoint_exempt_radius,
             free_via_positions: self.free_via_positions.clone(),
-            stub_via_block_cells: self.stub_via_block_cells.clone(),
         }
     }
 
@@ -354,6 +354,7 @@ impl GridObstacleMap {
             static_blocked_bitmap: self.static_blocked_bitmap.clone(),
             static_via_bitmap: self.static_via_bitmap.clone(),
             blocked_vias: self.blocked_vias.clone(),
+            blocked_vias_small: self.blocked_vias_small.clone(),
             stub_proximity: self.stub_proximity.clone(),
             layer_proximity_costs: self.layer_proximity_costs.clone(),
             num_layers: self.num_layers,
@@ -366,16 +367,18 @@ impl GridObstacleMap {
             endpoint_exempt_positions: self.endpoint_exempt_positions.clone(),
             endpoint_exempt_radius: self.endpoint_exempt_radius,
             free_via_positions: self.free_via_positions.clone(),
-            stub_via_block_cells: self.stub_via_block_cells.clone(),
         }
     }
 
     /// Get memory statistics for this obstacle map
     /// Returns (blocked_cells_count, blocked_vias_count, stub_proximity_count,
     ///          layer_proximity_count, cross_layer_count, source_target_count, free_vias_count)
-    pub fn get_stats(&self) -> (usize, usize, usize, usize, usize, usize, usize) {
+    pub fn get_stats(&self) -> (usize, usize, usize, usize, usize, usize, usize, usize) {
         let blocked_cells_count: usize = self.blocked_cells.iter().map(|m| m.len()).sum();
         let blocked_vias_count = self.blocked_vias.len();
+        // #568: small-rung via map appended LAST so positional consumers of the
+        // legacy 7-tuple (audit labels, dump harnesses) stay index-compatible.
+        let blocked_vias_small_count = self.blocked_vias_small.len();
         let stub_proximity_count = self.stub_proximity.len();
         let layer_proximity_count: usize = self.layer_proximity_costs.iter().map(|m| m.len()).sum();
         let cross_layer_count = self.cross_layer_tracks.len();
@@ -383,7 +386,8 @@ impl GridObstacleMap {
         let free_vias_count = self.free_via_positions.len();
 
         (blocked_cells_count, blocked_vias_count, stub_proximity_count,
-         layer_proximity_count, cross_layer_count, source_target_count, free_vias_count)
+         layer_proximity_count, cross_layer_count, source_target_count, free_vias_count,
+         blocked_vias_small_count)
     }
 
     /// #422: Promote ALL current dynamic blocked cells/vias into the permanent
@@ -413,6 +417,11 @@ impl GridObstacleMap {
             let (gx, gy) = unpack_xy(key);
             self.static_via_bitmap.set(gx, gy, 0);
         }
+        // #568: the static via bitmap is consulted by EVERY rung, so freezing
+        // the full-size cells over-blocks the small rung exactly as the
+        // pre-rung code did -- conservative, never wrong. The small map's own
+        // (subset) cells are redundant once static; drop them.
+        self.blocked_vias_small.clear();
     }
 
     /// #422 diagnostic: (distinct_cells, cells_with_refcount>=2, max_refcount,
@@ -436,21 +445,8 @@ impl GridObstacleMap {
     }
 
     /// Clear stub proximity costs and zone centers (for reuse with different stubs).
-    /// B2: also symmetrically removes the blocked_vias increments made by
-    /// add_stub_proximity_costs_batch(block_vias=true) -- the per-net
-    /// prepare/restore cycle already calls this, so the via bans now live
-    /// exactly as long as the stub costs they came with.
     pub fn clear_stub_proximity(&mut self) {
         self.stub_proximity.clear();
-        for key in std::mem::take(&mut self.stub_via_block_cells) {
-            if let Some(count) = self.blocked_vias.get_mut(&key) {
-                if *count > 1 {
-                    *count -= 1;
-                } else {
-                    self.blocked_vias.remove(&key);
-                }
-            }
-        }
     }
 
     /// Shrink all internal collections to fit their contents.
@@ -470,7 +466,6 @@ impl GridObstacleMap {
         }
         self.cross_layer_tracks.shrink_to_fit();
         self.free_via_positions.shrink_to_fit();
-        self.stub_via_block_cells.shrink_to_fit();
         self.static_blocked_bitmap.bits.shrink_to_fit();
         self.static_via_bitmap.bits.shrink_to_fit();
     }
@@ -506,6 +501,60 @@ impl GridObstacleMap {
     pub fn add_blocked_via(&mut self, gx: i32, gy: i32) {
         let key = pack_xy(gx, gy);
         *self.blocked_vias.entry(key).or_insert(0) += 1;
+    }
+
+    /// #568: add/remove a SMALL-rung blocked via (refcounted, mirrors
+    /// blocked_vias). Callers stamping a net's via blocking at both rungs
+    /// use the same cell-set discipline as the full-size map so the
+    /// obstacle audit's working==base+caches invariant holds per rung.
+    pub fn add_blocked_via_small(&mut self, gx: i32, gy: i32) {
+        let key = pack_xy(gx, gy);
+        *self.blocked_vias_small.entry(key).or_insert(0) += 1;
+    }
+
+    pub fn remove_blocked_via_small(&mut self, gx: i32, gy: i32) {
+        let key = pack_xy(gx, gy);
+        if let Some(count) = self.blocked_vias_small.get_mut(&key) {
+            if *count > 1 { *count -= 1; } else { self.blocked_vias_small.remove(&key); }
+        }
+    }
+
+    /// Batch forms (shape: N x 2, columns gx, gy).
+    pub fn add_blocked_vias_small_batch(&mut self, vias: PyReadonlyArray2<i32>) {
+        let arr = vias.as_array();
+        for row in arr.rows() {
+            let key = pack_xy(row[0], row[1]);
+            *self.blocked_vias_small.entry(key).or_insert(0) += 1;
+        }
+    }
+
+    pub fn remove_blocked_vias_small_batch(&mut self, vias: PyReadonlyArray2<i32>) {
+        let arr = vias.as_array();
+        for row in arr.rows() {
+            let key = pack_xy(row[0], row[1]);
+            if let Some(count) = self.blocked_vias_small.get_mut(&key) {
+                if *count > 1 { *count -= 1; } else { self.blocked_vias_small.remove(&key); }
+            }
+        }
+    }
+
+    /// #568: rung-aware via legality. rung 0 = the configured via (exactly
+    /// is_via_blocked); rung >= 1 = the small fab via. An UNPOPULATED small
+    /// map falls back to rung 0 -- a small via is never legal where the
+    /// caller hasn't proven it.
+    pub fn is_via_blocked_rung(&self, gx: i32, gy: i32, rung: usize) -> bool {
+        if rung >= 1 && !self.blocked_vias_small.is_empty() {
+            let key = pack_xy(gx, gy);
+            if self.blocked_vias_small.contains_key(&key) { return true; }
+            if self.static_via_bitmap.test(gx, gy, 0) { return true; }
+            for (min_gx, min_gy, max_gx, max_gy) in &self.bga_zones {
+                if gx >= *min_gx && gx <= *max_gx && gy >= *min_gy && gy <= *max_gy {
+                    return !self.allowed_cells.contains(&key);
+                }
+            }
+            return false;
+        }
+        self.is_via_blocked(gx, gy)
     }
 
     /// Batch add blocked cells from numpy array (shape: N x 3, columns: gx, gy, layer)
@@ -662,13 +711,15 @@ impl GridObstacleMap {
     /// stubs: Vec of (gx, gy) grid positions
     /// radius: proximity radius in grid units
     /// max_cost: maximum cost at stub center
-    /// block_vias: if true, also block vias in proximity zones
+    ///
+    /// (Historically also took block_vias for the via_proximity_cost=0 ban
+    /// mode; 0 now means "no extra via cost" so the ban -- and its B2
+    /// refcount ledger -- is gone.)
     pub fn add_stub_proximity_costs_batch(
         &mut self,
         stubs: Vec<(i32, i32)>,
         radius: i32,
         max_cost: i32,
-        block_vias: bool,
     ) {
         let radius_sq = radius * radius;
         let radius_f = radius as f32;
@@ -687,14 +738,71 @@ impl GridObstacleMap {
                         if cost > existing {
                             self.stub_proximity.insert(key, cost);
                         }
+                    }
+                }
+            }
+        }
+    }
 
-                        if block_vias {
-                            // Increment ref count for blocked vias, and record the
-                            // increment so clear_stub_proximity can undo it (B2)
-                            *self.blocked_vias.entry(key).or_insert(0) += 1;
-                            self.stub_via_block_cells.push(key);
+    /// Sum-composition stub proximity (KICAD_PROXIMITY_SUM): each group is one
+    /// SOURCE (a net's stubs, a ripped net's ghost vias) with its own
+    /// (radius, max_cost) falloff. Within a group the per-cell cost is the MAX
+    /// over the group's point disks (dedupe: a net's 6 connector stubs are one
+    /// source, and cost stays independent of point/sampling density); across
+    /// groups the per-cell costs ADD (a corridor threading 10 nets' stub
+    /// fields prices 10x one net's). Adds into the existing map -- callers
+    /// clear (or start from a fresh clone) before the per-route stamp
+    /// sequence, exactly like the max-mode batch above.
+    ///
+    /// max_zone_rects ('zoned' mode): inclusive grid rectangles (BGA zones
+    /// expanded by the proximity radius -- the escape fields) inside which
+    /// cells compose by MAX instead of ADD: there the stacked foreign-stub
+    /// fields price a net's MANDATORY approach, not an avoidable crowd.
+    #[pyo3(signature = (groups, max_zone_rects=None))]
+    pub fn add_stub_proximity_costs_grouped(
+        &mut self,
+        groups: Vec<(Vec<(i32, i32)>, i32, i32)>,
+        max_zone_rects: Option<Vec<(i32, i32, i32, i32)>>,
+    ) {
+        let rects = max_zone_rects.unwrap_or_default();
+        for (points, radius, max_cost) in groups {
+            if radius <= 0 || points.is_empty() {
+                continue;
+            }
+            let radius_sq = radius * radius;
+            let radius_f = radius as f32;
+            let mut field: FxHashMap<u64, i32> = FxHashMap::default();
+            for (gcx, gcy) in points {
+                for dx in -radius..=radius {
+                    for dy in -radius..=radius {
+                        let dist_sq = dx * dx + dy * dy;
+                        if dist_sq <= radius_sq {
+                            let dist = (dist_sq as f32).sqrt();
+                            let proximity = 1.0 - (dist / radius_f);
+                            let cost = (proximity * max_cost as f32) as i32;
+                            if cost > 0 {
+                                let entry = field.entry(pack_xy(gcx + dx, gcy + dy)).or_insert(0);
+                                if cost > *entry {
+                                    *entry = cost;
+                                }
+                            }
                         }
                     }
+                }
+            }
+            for (key, cost) in field {
+                let entry = self.stub_proximity.entry(key).or_insert(0);
+                let in_max_zone = !rects.is_empty() && {
+                    let (gx, gy) = unpack_xy(key);
+                    rects.iter().any(|&(x0, y0, x1, y1)|
+                        gx >= x0 && gx <= x1 && gy >= y0 && gy <= y1)
+                };
+                if in_max_zone {
+                    if cost > *entry {
+                        *entry = cost;
+                    }
+                } else {
+                    *entry += cost;
                 }
             }
         }

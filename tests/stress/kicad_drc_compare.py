@@ -47,6 +47,8 @@ import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.join(REPO, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(REPO, 'py_tools'))  # #522
 
 # Env var wins; else PATH (Windows/Linux installs put kicad-cli there, the
 # kicad_oracle.py idiom); else the macOS app-bundle default.
@@ -459,6 +461,13 @@ def _staged_copy(board: str, clearance: float):
     d = tempfile.mkdtemp(prefix="kdrc_")
     b2 = os.path.join(d, os.path.basename(board))
     shutil.copy(board, b2)
+    # #498: stage the custom-rules file too -- kicad-cli only honors rules
+    # sitting next to the staged project, and the router routes to the board's
+    # per-layer clearance rules, so grading without them manufactures phantom
+    # violations on ruled layers (or misses real ones).
+    dru = os.path.splitext(board)[0] + ".kicad_dru"
+    if os.path.exists(dru):
+        shutil.copy(dru, os.path.splitext(b2)[0] + ".kicad_dru")
     pro = os.path.splitext(board)[0] + ".kicad_pro"
     pro2 = os.path.splitext(b2)[0] + ".kicad_pro"
     try:
@@ -518,6 +527,15 @@ def _staged_copy(board: str, clearance: float):
     # to the router. Staging both sides at "error" restores symmetry and surfaces
     # real router copper run to the milled edge (graded at the pinned floor above).
     sev["copper_edge_clearance"] = "error"
+    # #526: generalize #441 to EVERY copper class this pipeline grades. The
+    # a13 corpus board's AUTHOR ships `clearance: warning` in the project, the
+    # chain preserves author settings (correctly), kicad-cli honors project
+    # severities, and the --severity-error run therefore never listed a REAL
+    # 31um track-to-pad graze -- kicad graded 0 while check_drc flagged it,
+    # which read as a check_drc-only artifact until dug into. Same
+    # baseline-symmetry argument as the edge rule: both sides staged at error.
+    for _k in sorted(KICAD_COPPER_TYPES):
+        sev[_k] = "error"
     # Min copper web (#406): KiCad's connection_width checker is OFF by default
     # (min_connection 0) and warning-severity, so routed-copper micro-webs were
     # invisible to every automated consumer in the repo -- the corpus gave NO

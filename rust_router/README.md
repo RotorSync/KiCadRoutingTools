@@ -2,7 +2,13 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.19.0**
+**Current Version: 0.20.0**
+
+> **Release note:** the 0.20.0 per-platform binaries are published as of
+> [v0.20.0](https://github.com/drandyhaas/KiCadRoutingTools/releases/tag/v0.20.0),
+> and `/VERSION` + `metadata.json` name that release. `build_router.py`
+> fetches them directly -- a plain `python build_router.py` is enough, and
+> `--from-source` is only needed when testing local Rust changes.
 
 ## Features
 
@@ -164,7 +170,7 @@ else:
 Run the full 32-net benchmark from the parent directory:
 
 ```bash
-python route.py kicad_files/fanout_starting_point.kicad_pcb kicad_files/routed.kicad_pcb \
+python py_router/route.py kicad_files/fanout_starting_point.kicad_pcb kicad_files/routed.kicad_pcb \
   "Net-(U2A-DATA_23)" "Net-(U2A-DATA_20)" ...
 ```
 
@@ -289,7 +295,6 @@ src/
 ├── types.rs         # Shared types: GridState, OpenEntry, PoseState, constants
 ├── obstacle_map.rs  # GridObstacleMap implementation
 ├── router.rs        # GridRouter A* implementation
-├── visual_router.rs # VisualRouter for debugging/visualization
 ├── dubins.rs        # Dubins path calculator for orientation heuristic
 └── pose_router.rs   # PoseRouter for orientation-aware routing
 ```
@@ -306,6 +311,55 @@ src/
 
 ## Version History
 
+- **0.20.1**: **`via_proximity_cost 0` = no extra cost, ban mode removed.**
+  0 used to hard-block vias in stub/BGA proximity zones -- the only knob whose
+  0 was its strongest setting (and a ~200x CPU hazard). 0 now means "no extra
+  via cost from proximity", matching every other knob's 0-is-off. Removed:
+  `add_stub_proximity_costs_batch`'s `block_vias` parameter (now 3 args), the
+  B2 `stub_via_block_cells` refcount ledger + its `clear_stub_proximity`
+  drain, and the pose router's `via_proximity_cost == 0` via-ban branch.
+  **Pose via-proximity penalty is now GRADED**, matching the single-ended
+  router: `(stub + dest-layer proximity) * via_proximity_cost` added to the
+  via cost, replacing the binary `via_cost * multiplier` cliff (~10x for any
+  via anywhere in the 7mm BGA ring / any stub-zone rim cell, ~a 90mm-detour
+  equivalent that effectively forbade diff-pair layer changes near escape
+  fields). BGA proximity rides the layer-proximity map, so
+  `--bga-proximity-cost 0` now truly disarms it for diff pairs too.
+- **0.20.0**: Removed `VisualRouter`/`SearchSnapshot` and `visual_router.rs` with the pygame visualizer (#569) -- the debugging workflow it served is covered by grading, manifest replay and the GUI. **#568 per-rung via legality** — `blocked_vias_small`, a second
+  refcounted via-block map at the small fab-rung reserve (subset semantics:
+  EMPTY = unpopulated, rung>=1 queries fall back to `blocked_vias`, so
+  single-rung callers are byte-identical). `is_via_blocked_rung(gx, gy, rung)`;
+  add/remove single+batch mirrors; clone/clone_fresh copy it; freeze clears it
+  (the static bitmap blocks every rung — conservative). `route_multi` /
+  `route_with_frontier` accept `via_rung=0` per search. `get_stats` appends the
+  small-map count as the 8th element (positional consumers unaffected) so the
+  #309 refcount balance audit covers the new map.
+- **0.19.3**: **#529 plateau grace** — `route_multi` / `route_with_frontier`
+  accept `grace_tranches=0`: up to N consecutive quantum-failing tranches
+  are tolerated before extension is denied, with the progress reference
+  frozen at the last real-improvement mark (so the eventual grant is judged
+  cumulatively over the plateau). Intended to emulate a wider progress
+  window without a bigger base. **MEASURED DEAD — leave at the default 0**:
+  because the streak resets on every success, searches alternating progress
+  and plateau chain grace windows indefinitely (more permissive than a true
+  wide window, not equivalent). A/B at K=4 on 200k bases: zynq7020 30 open
+  + 2 DRC (worse than the feature OFF), duodyne 3.6x the CPU. Kept as an
+  inert dial so the idea is not re-tried blind. Default 0 reproduces
+  0.19.2 exactly.
+
+- **0.19.2**: **#529 dynamic iterations (tranche-earned budget extension)** —
+  `route_multi` / `route_with_frontier` accept an optional
+  `max_iterations_ceiling` (default 0 = off, existing callers unchanged).
+  When above `max_iterations`, hitting the cap grants another
+  +1×`max_iterations` tranche iff the tranche just completed improved the
+  search's closest approach — `best_h`, the minimum cost-to-go `f − g` over
+  expanded nodes, tracked free at pop time — by a quantum:
+  `max(quantum_cells grid cells, quantum_pct% of best_h at the tranche
+  start)` — tunable via the optional `quantum_cells=2.0` / `quantum_pct=2.0`
+  kwargs. The first grant references a `best_h` snapshot taken at half the
+  base budget (improvement "vs iteration 0" is trivially satisfied).
+  Deterministic (pure search-internal state). New stats: `best_h`,
+  `iteration_tranches`.
 - **0.19.0**: **#156 fractional per-layer track_margin** — `route_multi` /
   `route_with_frontier` accept `track_margin` as a FLOAT (scalar) or a
   per-layer `list[float]`, in fractional grid cells, instead of an integer
@@ -403,7 +457,7 @@ src/
   single-goal Dubins heuristic and is untouched. cparti_fpga: failed 43→40,
   iterations +0.09% (no expansion explosion), ~35% less CPU/net; urchin
   (all nets ≤16 targets) byte-identical.
-- **0.18.0**: The rust-router-review batch (issues #384/#385/#386/#387). Verified byte-identical vs 0.17.4 on a 3-board identity gate (bitaxe_ultra / urchin / castor_pollux: `total_iterations` + `total_vias` + all JSON_SUMMARY keys EXACT) for everything except the two explicitly behavior-changing items called out below.
+- **0.18.0**: The rust-router-review batch (issues #384/#385/#386/#387). Verified byte-identical vs 0.17.4 on a 3-board identity gate (bitaxe_ultra / urchin / castor_pollux: `total_iterations` + `total_vias` + all JSON_SUMMARY keys EXACT) for everything except the two explicitly behavior-changing items called out below. (Audit note for future gates: Python-side additive JSON_SUMMARY keys — e.g. `blockers`, #409, present only on runs with attributable failures, and `pad_pairs_connected`/`pad_pairs_total`/`pad_pairs_open`, its follow-up — are not produced by the Rust router; compare them key-by-key across Python releases, absent-vs-present is not a Rust identity failure.)
   - **S1-A (#384)**: the separate `closed` FxHashSet is gone from all four search loops — the closed flag lives in the top bit of the node's parent field (`NodeMap`, then `NodeStore`; `PoseNodeMap` likewise), saving a hashset lookup + insert per expansion.
   - **S1-B (#384)**: tiled flat-array node store for the grid A* (`NodeStore`): 64x64-cell tiles per layer, per-node record 12B (`g: i32`, `parent: u32` node index carrying the closed bit, `steps: i32`). A node lookup is one small per-TILE hashmap probe + direct indexing; path reconstruction and the collinear-via ancestry walks follow u32 parent indices. The store is per-search, so peak memory scales with explored area at 12B/node (the M1 transient-blowup fix) and is freed on return. (The review's per-tile generation stamps were deliberately dropped: they only pay off with a cross-search tile cache, which would pin explored-union x 12B for a whole batch to save microseconds of tile zeroing. The pose router keeps its `PoseNodeMap` hashmap — pose keys carry theta, so a tile is 8x larger for a much sparser visit pattern.)
   - **S2 (#384)**: per-layer blocked-cell bitmap in `GridObstacleMap` — `is_blocked`'s refcount-hashmap lookup becomes a bounds check + one bit load. The bitmap is a PURE CACHE of "refcount > 0": the refcount hashmaps stay authoritative and the bitmap is written ONLY at 0->1 / 1->0 transitions inside the same four refcount-mutating functions (`add_blocked_cell`, `add_blocked_cells_batch`, `merge_blocked_from`, `remove_blocked_cells_batch`), keeping the #208/#309 desync class closed. Lazy window growth (128-cell margin); coordinates beyond a 1<<26-cell cap fall back to per-layer overflow hash sets (pathological coords degrade speed, never correctness). Also hoists a `bga_zones.is_empty()` early-out above the zone scan.

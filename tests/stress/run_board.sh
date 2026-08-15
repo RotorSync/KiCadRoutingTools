@@ -1,17 +1,24 @@
 #!/bin/bash
 # Headless per-board stress worker.
 #
-# Runs a non-interactive `claude -p` agent that follows tests/stress/RUNBOOK.md
+# Runs a non-interactive agent (`claude -p` by default, or `opencode run`
+# with STRESS_AI_BACKEND=opencode, #503) that follows tests/stress/RUNBOOK.md
 # to route ONE board, then writes the results JSON (RUNBOOK schema) and a
 # concise FINDINGS.md into the board's run dir. Decouples board execution from
 # the harness notification stream — the queue manager just watches files.
 #
 # Also captures the agent transcript (transcript.jsonl) and derives a compact
-# routing decision trail (agent_narrative.md) via extract_narrative.py.
+# routing decision trail (agent_narrative.md) via extract_narrative.py —
+# both backends' JSON event schemas are supported there.
 #
 # Usage: run_board.sh <board> <set:1|2|3...> [model]
+#   model: claude backend takes tier aliases (default: sonnet); opencode takes
+#          provider/model (e.g. anthropic/claude-sonnet-4-5; default: the
+#          user's configured opencode default model).
 set -u
-BOARD="${1:?board}"; SET="${2:?set}"; MODEL="${3:-sonnet}"
+BOARD="${1:?board}"; SET="${2:?set}"; MODEL="${3:-}"
+BACKEND="${STRESS_AI_BACKEND:-claude}"
+if [ "$BACKEND" = "claude" ] && [ -z "$MODEL" ]; then MODEL=sonnet; fi
 # Repo root is derived from this script's own location (tests/stress/run_board.sh),
 # so the script is portable; override with STRESS_REPO if needed.
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,6 +44,28 @@ rm -f "$RUNDIR/.worker_done"
 # The tools self-record when REDO_MANIFEST is set, so capture is reliable even if
 # the agent doesn't route a command through run_limited.sh. Start each run fresh.
 export REDO_MANIFEST="$RUNDIR/redo_commands.sh"
+# The run dir is the recorder's authority (redo_record._resolve_manifest): agents
+# re-export REDO_MANIFEST as "$PWD/redo_commands.sh" and also cd into the repo to
+# import kicad_parser, which would otherwise record into the CHECKOUT.
+export REDO_RUNDIR="$RUNDIR"
+# ...but NEVER by deleting the previous attempt's record. A relaunch (watchdog
+# retry after a worker routed the board yet died before writing its results JSON)
+# used to `rm -f` a COMPLETE manifest and leave the routed step*.kicad_pcb behind,
+# so the new agent either did nothing (board ships with NO manifest) or resumed
+# mid-chain (manifest starts at a step*.kicad_pcb that no step in it creates).
+# Either way the board reported success with a silently unreplayable chain --
+# measured at 8 damaged manifests over 9 relaunches in the 2026-08-06 sets-11-25
+# wave. Archive the whole prior attempt instead: the record survives, AND moving
+# the intermediates out forces the relaunched agent to route from the input.
+if [ -s "$REDO_MANIFEST" ] || ls "$RUNDIR"/step*.kicad_pcb >/dev/null 2>&1; then
+  n=1; while [ -e "$RUNDIR/attempt_$n" ]; do n=$((n+1)); done
+  mkdir -p "$RUNDIR/attempt_$n"
+  mv "$REDO_MANIFEST" "$RUNDIR/attempt_$n/" 2>/dev/null
+  # timings is append-only across attempts: COPY (keep the running log intact).
+  cp -p "$RUNDIR/redo_commands.timings.jsonl" "$RUNDIR/attempt_$n/" 2>/dev/null
+  mv "$RUNDIR"/step*.kicad_pcb "$RUNDIR"/step*.kicad_pro "$RUNDIR/attempt_$n/" 2>/dev/null
+  echo "[run_board] archived prior attempt -> attempt_$n" >> "$RUNDIR/worker.log"
+fi
 rm -f "$REDO_MANIFEST"
 
 PROMPT="Stress-test the KiCadRoutingTools autorouter on ONE board: **$BOARD** (set $SET).
@@ -44,9 +73,9 @@ PROMPT="Stress-test the KiCadRoutingTools autorouter on ONE board: **$BOARD** (s
 FIRST read $REPO/tests/stress/RUNBOOK.md and obey EVERY rule exactly. Do NOT ask
 anything (you are non-interactive) — use the skill's inline heuristics and your judgment.
 
-You ARE the one and only worker for THIS board. Any run_board.sh or 'claude -p'
-process you notice for '$BOARD' (or touching $RUNDIR) is YOUR OWN launcher and
-yourself — NOT a competing/duplicate worker. Do NOT check whether the board is
+You ARE the one and only worker for THIS board. Any run_board.sh or headless
+agent process ('claude -p' / 'opencode run') you notice for '$BOARD' (or
+touching $RUNDIR) is YOUR OWN launcher and yourself — NOT a competing/duplicate worker. Do NOT check whether the board is
 'already being routed', do NOT wait for or defer to 'another worker', and do NOT
 skip routing to avoid 'collisions'. Start routing immediately and produce the
 results JSON yourself; if you don't, the board is recorded as a failure.
@@ -59,7 +88,16 @@ Paths for THIS board:
 
 Rules that matter most:
 - Prefix EVERY routing/fanout/plane/check command with: bash $REPO/tests/stress/run_limited.sh
-- Run tools as: python3 -X utf8 $REPO/<tool>.py ...
+- Run tools as: python3 -u -X utf8 $REPO/py_router/<tool>.py ...  ('-u' is
+  REQUIRED: without it a step killed part-way leaves an EMPTY log, #599. #522 moved the
+  engine + CLIs into py_router/; a bare \$REPO/<tool>.py does not exist. The few
+  repo-root scripts -- build_router.py, install_plugin.py -- stay at \$REPO/.)
+- REDO_MANIFEST is ALREADY exported for you (the replay manifest). Do NOT re-export
+  or override it -- especially not as \"\$PWD/redo_commands.sh\": you also cd into
+  the tools repo to import kicad_parser, and from there \$PWD is the CHECKOUT, so
+  your steps get recorded into the repo instead of this board's manifest.
+- Stay in your working dir and invoke tools by ABSOLUTE path. Do not cd into
+  $REPO; write every output/log under $RUNDIR, never into the tools checkout.
 - Use the flags that 'list_nets.py <board> --design-rules' prints (working via,
   manufacturing-floor clearance, DRC floor). Grade DRC at that floor.
 - On a 4+ layer board, pass ALL inner copper layers to bga_fanout AND route_diff
@@ -68,7 +106,13 @@ Rules that matter most:
 - Keep fine (sub-Default) clearance LOCAL to fine-pitch escapes, never board-wide.
 - Run EVERY command in the FOREGROUND and BLOCK until it returns — even if a
   single route step takes an hour (hard 3-hour/command cap, ~3.5-hour board
-  budget). NEVER background a command (no trailing '&', no run_in_background, no
+  budget). PASS AN EXPLICIT timeout: 600000 (10 min, the max) ON EVERY routing/
+  fanout/plane command — the DEFAULT is only 120000 ms (2 min) and route steps
+  routinely take 3-20x that, so omitting it kills your own work and looks like a
+  hang (#599: it cost 21 of 99 boards an attempt). If run_limited.sh prints
+  'the CALLER's command timeout is too short', believe it: re-run WITH the
+  timeout instead of retrying identically or recording a router bug. NEVER
+  background a command (no trailing '&', no run_in_background, no
   'I'll wait for the background task to finish'): this is a headless run with NO
   notifications and NO scheduled wakeups, so if you background a step and pause,
   the board is recorded as a FAILURE. Do not stop until the results JSON is written.
@@ -89,10 +133,15 @@ When fully done:
      issues + suggestions.
   3. Print the single line: BOARD_DONE $BOARD"
 
+# APPEND, never truncate: a relaunch used to overwrite the previous attempt's
+# worker.log, so relaunch history was unrecoverable and the manifest-clobber bug
+# above was invisible in the logs (a retried board showed exactly one start line).
+# Note `board=` appears on BOTH the start and the exit line -- count launches with
+# `grep -c 'start='`, not `grep -c 'board='`.
 {
-  echo "[run_board] board=$BOARD set=$SET model=$MODEL start=$(date)"
+  echo "[run_board] board=$BOARD set=$SET backend=$BACKEND model=${MODEL:-(backend default)} start=$(date)"
   echo "[run_board] result=$RESULT"
-} > "$RUNDIR/worker.log"
+} >> "$RUNDIR/worker.log"
 
 # Record a per-copper route trace for each route.py / route_diff.py step the
 # agent runs (#482), so render_run.py can build a whole-run movie afterward.

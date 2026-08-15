@@ -7,7 +7,10 @@ from pathlib import Path
 import os
 STRESS = Path(os.environ.get("STRESS_DIR", str(Path.home() / "Documents/kicad_stress_test")))
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+_REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_REPO))
+sys.path.insert(0, str(_REPO / 'py_router'))  # #522
+sys.path.insert(0, str(_REPO / 'py_tools'))  # #522
 from kicad_parser import parse_kicad_pcb  # noqa: E402
 
 SRC = STRESS / "sources/github_set1"

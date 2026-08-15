@@ -10,34 +10,35 @@ The router is organized into focused modules with clear separation of concerns:
 
 ```
 KiCadRoutingTools/
-├── route.py                   # Main CLI - single-ended routing
-├── route_diff.py              # Main CLI - differential pair routing
-├── routing_config.py          # Configuration dataclasses
-├── routing_state.py           # RoutingState - tracks progress and results
-├── routing_context.py         # Helper functions for obstacle building
-├── routing_common.py          # Shared utilities for route.py and route_diff.py
-├── routing_utils.py           # Shared utilities
-├── obstacle_map.py            # Obstacle map building
-├── bresenham_utils.py         # Bresenham line-walking utilities
-│
-├── diff_pair_loop.py          # Diff pair routing main loop
-├── single_ended_loop.py       # Single-ended routing main loop
-├── reroute_loop.py            # Reroute queue processing
-├── diff_pair_routing.py       # Diff pair A* implementation
-├── single_ended_routing.py    # Single-ended A* implementation
-│
-├── layer_swap_optimization.py # Upfront layer optimization
-├── layer_swap_fallback.py     # Fallback layer swap on failure
-├── rip_up_reroute.py          # Rip-up and reroute logic
-├── blocking_analysis.py       # Analyze blocking nets
-├── target_swap.py             # Target assignment optimization
-├── length_matching.py         # Trombone meander length matching
-│
-├── kicad_parser.py            # KiCad file parsing (including stackup for via barrel length)
-├── kicad_writer.py            # KiCad S-expression output
-├── output_writer.py           # Route output and debug geometry
-├── geometry_utils.py          # Shared geometry calculations
-└── rust_router/               # Rust A* implementation
+├── py_router/                     # Python engine + CLI entry points (#522)
+│   ├── route.py                   # Main CLI - single-ended routing
+│   ├── route_diff.py              # Main CLI - differential pair routing
+│   ├── routing_config.py          # Configuration dataclasses
+│   ├── routing_state.py           # RoutingState - tracks progress and results
+│   ├── routing_context.py         # Helper functions for obstacle building
+│   ├── routing_common.py          # Shared utilities for route.py and route_diff.py
+│   ├── routing_utils.py           # Shared utilities
+│   ├── obstacle_map.py            # Obstacle map building
+│   ├── bresenham_utils.py         # Bresenham line-walking utilities
+│   │
+│   ├── diff_pair_loop.py          # Diff pair routing main loop
+│   ├── single_ended_loop.py       # Single-ended routing main loop
+│   ├── reroute_loop.py            # Reroute queue processing
+│   ├── diff_pair_routing.py       # Diff pair A* implementation
+│   ├── single_ended_routing.py    # Single-ended A* implementation
+│   │
+│   ├── layer_swap_optimization.py # Upfront layer optimization
+│   ├── layer_swap_fallback.py     # Fallback layer swap on failure
+│   ├── rip_up_reroute.py          # Rip-up and reroute logic
+│   ├── blocking_analysis.py       # Analyze blocking nets
+│   ├── target_swap.py             # Target assignment optimization
+│   ├── length_matching.py         # Trombone meander length matching
+│   │
+│   ├── kicad_parser.py            # KiCad file parsing (including stackup for via barrel length)
+│   ├── kicad_writer.py            # KiCad S-expression output
+│   ├── output_writer.py           # Route output and debug geometry
+│   └── geometry_utils.py          # Shared geometry calculations
+└── rust_router/                   # Rust A* implementation
 ```
 
 ### Module Responsibilities
@@ -419,4 +420,4 @@ See `pcb_modification.py` for implementation details.
 
 ## Visualizing the Search
 
-The optional [PyGame visualizer](../pygame_visualizer/README.md) renders the A* search in real time — open/closed sets, per-layer coloring, and completed routes — using the same Rust engine and obstacle maps as batch routing, so what you watch is exactly what gets routed. Enable it with `route.py --visualize`; it is the quickest way to see why a route takes a particular path or where a search is getting stuck.
+The interactive PyGame visualizer was removed in #569: the debugging workflow it predated (grade with `check_drc`/`check_connected`, replay a recorded chain from its `redo_commands.sh` manifest, read the per-net JSON summary and blocker report, or step a board in the GUI plugin) covers the same questions without a second rendering path to keep in sync with the engine.

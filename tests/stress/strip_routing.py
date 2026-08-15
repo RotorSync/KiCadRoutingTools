@@ -6,6 +6,7 @@ Also sets all copper layer types to 'signal' so kicad_parser sees them
 
 Run with KiCad's bundled Python.
 """
+import shutil
 import sys
 from pathlib import Path
 import os
@@ -108,8 +109,15 @@ for f in files:
                 fp_edge_items.append((fp, d))
 
     # 3. Remove tracks and vias
+    # RemoveNative, never Remove: outside a running KiCad action plugin
+    # pcbnew's Remove() sets item.thisown=1 on PCB_TRACK/PCB_VIA, which have no
+    # SWIG destructor, and freeing one corrupts the pcbnew type registry
+    # PROCESS-WIDE. This script loops over boards and rebinds `tracks` each
+    # iteration, so the previous board's proxies are freed at the top of the
+    # next one -- the first board WITH copper poisons every board after it
+    # ("'swig_runtime_data5.SwigPyObject' object has no attribute 'GetTracks'").
     for t in tracks:
-        board.Remove(t)
+        board.RemoveNative(t)
 
     # 4. Remove copper zones (pours), keep rule areas (keepouts)
     removed_zones = kept_zones = 0
@@ -117,16 +125,16 @@ for f in files:
         if z.GetIsRuleArea():
             kept_zones += 1
             continue
-        board.Remove(z)
+        board.RemoveNative(z)
         removed_zones += 1
 
     # 5. Replace Edge.Cuts with chained line segments (kicad_parser cannot
     # chain arc/line mixes or footprint-embedded outlines reliably).
     if outline_paths:
         for d in board_edge_drawings:
-            board.Remove(d)
+            board.RemoveNative(d)
         for fp, d in fp_edge_items:
-            fp.Remove(d)
+            fp.RemoveNative(d)
         for pts in outline_paths:
             n = len(pts)
             for k in range(n):
@@ -146,7 +154,7 @@ for f in files:
         lid = d.GetLayer()
         if lid == pcbnew.Edge_Cuts or lid in copper_ids:
             continue
-        board.Remove(d)
+        board.RemoveNative(d)
         removed_gfx += 1
 
     # 6. Set all enabled copper layers to signal type
@@ -154,6 +162,12 @@ for f in files:
         board.SetLayerType(lid, pcbnew.LT_SIGNAL)
 
     out = DST / f.name
-    pcbnew.SaveBoard(str(out), board)
+    # aSkipSettings + sibling copy: the implicit settings save SIGABRTs on
+    # KiCad-9-saved projects (PR #613); see normalize_boards.py.
+    pcbnew.SaveBoard(str(out), board, aSkipSettings=True)
+    for ext in ('.kicad_pro', '.kicad_dru'):
+        sib = f.with_suffix(ext)
+        if sib.exists():
+            shutil.copy(sib, out.with_suffix(ext))
     print(f"{f.stem:18s} removed {len(tracks):5d} tracks, {removed_zones:2d} zones "
           f"(kept {kept_zones} rule areas)")

@@ -42,6 +42,9 @@ def get_dialog_settings(dialog):
         'layers': [layer for layer, cb in dialog.layer_checks.items() if cb.GetValue()],
 
         # Basic options
+        # #581: via-in-pad policy (moved from the planes tab to the Basic tab)
+        'allow_via_in_pad': dialog.via_in_pad_check.GetValue(),
+        'same_net_pad_clearance': dialog.same_net_pad_clearance.GetValue(),
         'enable_layer_switch': dialog.enable_layer_switch.GetValue(),
         'move_text_check': dialog.move_text_check.GetValue(),
         'add_teardrops_check': dialog.add_teardrops_check.GetValue(),
@@ -99,6 +102,8 @@ def get_dialog_settings(dialog):
         'mps_reverse_rounds': dialog.mps_reverse_rounds.GetValue(),
         'mps_layer_swap': dialog.mps_layer_swap.GetValue(),
         'keep_input_copper': dialog.keep_input_copper.GetValue(),
+        'smoothing': dialog.smoothing.GetValue(),
+        'force_reroute': dialog.force_reroute.GetValue(),
         'mps_segment_intersection': dialog.mps_segment_intersection.GetValue(),
         'no_crossing_layer_check': dialog.no_crossing_layer_check.GetValue(),
         'can_swap_to_top': dialog.can_swap_to_top.GetValue(),
@@ -127,6 +132,7 @@ def get_dialog_settings(dialog):
         'length_match_groups': dialog.length_match_groups_ctrl.GetValue(),
         'length_match_tolerance': dialog.length_match_tolerance.GetValue(),
         'meander_amplitude': dialog.meander_amplitude.GetValue(),
+        'meander_spacing': dialog.meander_spacing.GetValue(),
         'time_matching_check': dialog.time_matching_check.GetValue(),
         'time_match_tolerance': dialog.time_match_tolerance.GetValue(),
         'debug_lines_check': dialog.debug_lines_check.GetValue(),
@@ -188,6 +194,8 @@ def get_dialog_settings(dialog):
         'fanout_bga_check_previous': dialog.fanout_tab.bga_options.check_previous.GetValue(),
         'fanout_bga_no_inner_top': dialog.fanout_tab.bga_options.no_inner_top.GetValue(),
         'fanout_bga_escape_method': dialog.fanout_tab.bga_options.get_escape_method(),
+        'fanout_bga_plane_drop': dialog.fanout_tab.bga_options.plane_drop.GetValue(),
+        'fanout_bga_plane_net_layers': dialog.fanout_tab.bga_options.plane_net_layers_ctrl.GetValue(),
         'fanout_bga_optimize_caps': dialog.fanout_tab.bga_options.optimize_caps.GetValue(),
         'fanout_bga_cap_capture_radius': dialog.fanout_tab.bga_options.cap_capture_radius.GetValue(),
         'fanout_bga_cap_near_margin': dialog.fanout_tab.bga_options.cap_near_margin.GetValue(),
@@ -207,29 +215,35 @@ def get_dialog_settings(dialog):
 
         # Planes tab settings
         'planes_net_panel_checked': list(dialog.planes_tab.net_panel.get_selected_nets()),
-        'planes_mode': dialog.planes_tab.mode_selector.GetSelection(),
         'planes_assignments': dialog.planes_tab.assignment_panel.get_assignments(),
         'planes_hide': dialog.planes_tab.net_panel.hide_check.GetValue() if dialog.planes_tab.net_panel.hide_check else False,
         'planes_filter': dialog.planes_tab.net_panel.filter_ctrl.GetValue(),
         'planes_component': dialog.planes_tab.net_panel.component_dropdown.GetSelection() if dialog.planes_tab.net_panel.component_dropdown else 0,
         # Create mode options
         'planes_zone_clearance': dialog.planes_tab.create_options.zone_clearance.GetValue(),
-        'planes_max_search_radius': dialog.planes_tab.create_options.max_search_radius.GetValue(),
-        'planes_rip_blocker_check': dialog.planes_tab.create_options.rip_blocker_check.GetValue(),
+        'planes_thermal_relief': dialog.planes_tab.create_options.thermal_relief.GetValue(),
+        'planes_thermal_vias': dialog.planes_tab.create_options.thermal_vias.GetValue(),
         'planes_add_gnd_vias': dialog.planes_tab.create_options.add_gnd_vias_check.GetValue(),
         'planes_gnd_via_distance': dialog.planes_tab.create_options.gnd_via_distance.GetValue(),
+        'planes_stitch_vias': dialog.planes_tab.create_options.stitch_vias.GetValue(),
+        'planes_stitch_pitch': dialog.planes_tab.create_options.stitch_pitch.GetValue(),
+        'planes_stitch_edge_fence': dialog.planes_tab.create_options.stitch_edge_fence.GetValue(),
+        'planes_stitch_fence_pitch': dialog.planes_tab.create_options.stitch_fence_pitch.GetValue(),
+        'planes_stitch_inset': dialog.planes_tab.create_options.stitch_inset.GetValue(),
+        'planes_stitch_max_freq': dialog.planes_tab.create_options.stitch_max_freq.GetValue(),
         'planes_gnd_via_net': dialog.planes_tab.create_options.gnd_via_net.GetValue(),
         # Repair mode options
-        'planes_repair_max_track_width': dialog.planes_tab.repair_options.max_track_width.GetValue(),
-        'planes_repair_min_track_width': dialog.planes_tab.repair_options.min_track_width.GetValue(),
-        'planes_repair_analysis_grid': dialog.planes_tab.repair_options.analysis_grid.GetValue(),
-        'planes_repair_pads': dialog.planes_tab.repair_options.repair_pads.GetValue(),
-        'planes_repair_rip_blocker_check': dialog.planes_tab.repair_options.rip_blocker_check.GetValue(),
 
-        # Claude tab settings (issue #40)
-        'claude_model': dialog.claude_tab.get_model_value(),
-        'claude_effort': dialog.claude_tab.get_effort_value(),
-        'claude_plan': dialog.claude_tab.get_plan_state(),
+        # AI tab settings (issue #40; backend selection #503). Model/effort
+        # entries are stored per backend so switching backends doesn't lose
+        # e.g. an opencode provider/model string; 'claude_model'/'claude_effort'
+        # keep their pre-#503 meaning (the Claude Code backend's entries).
+        'ai_backend': dialog.ai_tab.get_backend_value(),
+        'claude_model': dialog.ai_tab.get_model_value_for('claude'),
+        'claude_effort': dialog.ai_tab.get_effort_value_for('claude'),
+        'opencode_model': dialog.ai_tab.get_model_value_for('opencode'),
+        'opencode_effort': dialog.ai_tab.get_effort_value_for('opencode'),
+        'ai_plan': dialog.ai_tab.get_plan_state(),
 
         # Log content
         'log_content': dialog.log_text.GetValue(),
@@ -273,6 +287,14 @@ def restore_dialog_settings(dialog, settings):
         dialog.track_width.SetValue(settings['track_width'])
     if 'clearance' in settings:
         dialog.clearance.SetValue(settings['clearance'])
+    # #581: via-in-pad policy (Basic tab; absent in legacy dicts -> defaults
+    # keep via-in-pad allowed). Restore the checkbox LAST so the spin's
+    # enabled-state matches it.
+    if 'same_net_pad_clearance' in settings:
+        dialog.same_net_pad_clearance.SetValue(settings['same_net_pad_clearance'])
+    if 'allow_via_in_pad' in settings:
+        dialog.via_in_pad_check.SetValue(settings['allow_via_in_pad'])
+        dialog.same_net_pad_clearance.Enable(not settings['allow_via_in_pad'])
     if 'via_size' in settings:
         dialog.via_size.SetValue(settings['via_size'])
     if 'via_drill' in settings:
@@ -412,6 +434,10 @@ def restore_dialog_settings(dialog, settings):
         dialog.mps_layer_swap.SetValue(settings['mps_layer_swap'])
     if 'keep_input_copper' in settings:
         dialog.keep_input_copper.SetValue(settings['keep_input_copper'])
+    if 'smoothing' in settings:
+        dialog.smoothing.SetValue(settings['smoothing'])
+    if 'force_reroute' in settings:
+        dialog.force_reroute.SetValue(settings['force_reroute'])
     if 'mps_segment_intersection' in settings:
         dialog.mps_segment_intersection.SetValue(settings['mps_segment_intersection'])
     if 'no_crossing_layer_check' in settings:
@@ -455,6 +481,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.length_match_tolerance.SetValue(settings['length_match_tolerance'])
     if 'meander_amplitude' in settings:
         dialog.meander_amplitude.SetValue(settings['meander_amplitude'])
+    if 'meander_spacing' in settings:
+        dialog.meander_spacing.SetValue(settings['meander_spacing'])
     if 'time_matching_check' in settings:
         dialog.time_matching_check.SetValue(settings['time_matching_check'])
     if 'time_match_tolerance' in settings:
@@ -604,6 +632,11 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab.bga_options.no_inner_top.SetValue(settings['fanout_bga_no_inner_top'])
     if 'fanout_bga_escape_method' in settings:
         dialog.fanout_tab.bga_options.set_escape_method(settings['fanout_bga_escape_method'])
+    if 'fanout_bga_plane_drop' in settings:
+        dialog.fanout_tab.bga_options.plane_drop.SetValue(bool(settings['fanout_bga_plane_drop']))
+    if 'fanout_bga_plane_net_layers' in settings:
+        dialog.fanout_tab.bga_options.plane_net_layers_ctrl.SetValue(
+            str(settings['fanout_bga_plane_net_layers']))
     elif 'fanout_bga_underpad' in settings:
         # Migrate the pre-dropdown checkbox (#288): checked meant under-pad,
         # unchecked meant the default engine (now 'auto').
@@ -641,10 +674,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab.qfn_options.allow_via_in_pad.SetValue(settings['fanout_qfn_allow_via_in_pad'])
 
     # Restore planes tab settings
-    if 'planes_mode' in settings:
-        dialog.planes_tab.mode_selector.SetSelection(settings['planes_mode'])
-        # Trigger mode change to show/hide appropriate options
-        dialog.planes_tab._on_mode_changed(None)
+    # (No mode restore since #562: the tab is pour-creation only, so a
+    # legacy 'planes_mode' key is simply ignored.)
     if 'planes_assignments' in settings:
         dialog.planes_tab.assignment_panel.set_assignments(settings['planes_assignments'])
     if 'planes_hide' in settings and dialog.planes_tab.net_panel.hide_check:
@@ -661,37 +692,49 @@ def restore_dialog_settings(dialog, settings):
     # Create mode options
     if 'planes_zone_clearance' in settings:
         dialog.planes_tab.create_options.zone_clearance.SetValue(settings['planes_zone_clearance'])
-    if 'planes_max_search_radius' in settings:
-        dialog.planes_tab.create_options.max_search_radius.SetValue(settings['planes_max_search_radius'])
-    if 'planes_rip_blocker_check' in settings:
-        dialog.planes_tab.create_options.rip_blocker_check.SetValue(settings['planes_rip_blocker_check'])
+    if 'planes_thermal_relief' in settings:
+        dialog.planes_tab.create_options.thermal_relief.SetValue(settings['planes_thermal_relief'])
+    if 'planes_thermal_vias' in settings:
+        dialog.planes_tab.create_options.thermal_vias.SetValue(settings['planes_thermal_vias'])
     if 'planes_add_gnd_vias' in settings:
         dialog.planes_tab.create_options.add_gnd_vias_check.SetValue(settings['planes_add_gnd_vias'])
     if 'planes_gnd_via_distance' in settings:
         dialog.planes_tab.create_options.gnd_via_distance.SetValue(settings['planes_gnd_via_distance'])
+    if 'planes_stitch_vias' in settings:
+        dialog.planes_tab.create_options.stitch_vias.SetValue(settings['planes_stitch_vias'])
+    if 'planes_stitch_pitch' in settings:
+        dialog.planes_tab.create_options.stitch_pitch.SetValue(settings['planes_stitch_pitch'])
+    if 'planes_stitch_edge_fence' in settings:
+        dialog.planes_tab.create_options.stitch_edge_fence.SetValue(settings['planes_stitch_edge_fence'])
+    if 'planes_stitch_fence_pitch' in settings:
+        dialog.planes_tab.create_options.stitch_fence_pitch.SetValue(settings['planes_stitch_fence_pitch'])
+    if 'planes_stitch_inset' in settings:
+        dialog.planes_tab.create_options.stitch_inset.SetValue(settings['planes_stitch_inset'])
+    if 'planes_stitch_max_freq' in settings:
+        dialog.planes_tab.create_options.stitch_max_freq.SetValue(settings['planes_stitch_max_freq'])
     if 'planes_gnd_via_net' in settings:
         dialog.planes_tab.create_options.gnd_via_net.SetValue(settings['planes_gnd_via_net'])
     # Repair mode options
-    if 'planes_repair_max_track_width' in settings:
-        dialog.planes_tab.repair_options.max_track_width.SetValue(settings['planes_repair_max_track_width'])
-    if 'planes_repair_min_track_width' in settings:
-        dialog.planes_tab.repair_options.min_track_width.SetValue(settings['planes_repair_min_track_width'])
-    if 'planes_repair_analysis_grid' in settings:
-        dialog.planes_tab.repair_options.analysis_grid.SetValue(settings['planes_repair_analysis_grid'])
-    if 'planes_repair_pads' in settings:
-        dialog.planes_tab.repair_options.repair_pads.SetValue(settings['planes_repair_pads'])
-    if 'planes_repair_rip_blocker_check' in settings:
-        dialog.planes_tab.repair_options.rip_blocker_check.SetValue(settings['planes_repair_rip_blocker_check'])
 
-    # Restore Claude tab model/effort (issue #40). The setters validate
-    # against the current dropdown choices, so a saved model or effort
-    # level that's no longer offered reverts to Default.
+    # Restore AI tab backend/model/effort (issue #40; #503). Per-backend
+    # model/effort entries first, then the backend selection LAST so its
+    # refresh loads the right entries into the combos; an unknown saved
+    # backend id reverts to the default (Claude Code).
     if 'claude_model' in settings:
-        dialog.claude_tab.set_model_value(settings['claude_model'])
+        dialog.ai_tab.set_model_value(settings['claude_model'], backend_id='claude')
     if 'claude_effort' in settings:
-        dialog.claude_tab.set_effort_value(settings['claude_effort'])
-    if 'claude_plan' in settings:
-        dialog.claude_tab.restore_plan_state(settings['claude_plan'])
+        dialog.ai_tab.set_effort_value(settings['claude_effort'], backend_id='claude')
+    if 'opencode_model' in settings:
+        dialog.ai_tab.set_model_value(settings['opencode_model'], backend_id='opencode')
+    if 'opencode_effort' in settings:
+        dialog.ai_tab.set_effort_value(settings['opencode_effort'], backend_id='opencode')
+    if 'ai_backend' in settings:
+        dialog.ai_tab.set_backend_value(settings['ai_backend'])
+    # 'claude_plan' is the pre-rename key for the same plan state (settings
+    # files saved by older versions) - honor it when 'ai_plan' is absent.
+    plan_state = settings.get('ai_plan', settings.get('claude_plan'))
+    if plan_state is not None:
+        dialog.ai_tab.restore_plan_state(plan_state)
 
     # Restore net selections LAST - after all filters/checkboxes are set
     # This prevents the selections from being cleared by filter change events

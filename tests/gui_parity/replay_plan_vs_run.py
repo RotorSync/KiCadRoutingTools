@@ -6,18 +6,18 @@ Every stress board leaves a GUI-loadable plan next to its chain
 (`run_board.sh` -> `manifest_to_plan.py` -> `<board>_plan.json`). This driver
 does, with no buttons and no LLM, exactly what a user does with it:
 
-    open the UNROUTED input board -> Claude tab -> Load... -> Run All Selected
+    open the UNROUTED input board -> AI tab -> Load... -> Run All Selected
 
 and then grades the result against the CLI chain the corpus run recorded.
 
 WHAT MAKES THIS DIFFERENT FROM test_gui_engine_parity.py: that harness
 hand-mirrors the plan->params mapping onto shimmed dialog objects, so it proves
 the ENGINE half only (same batch_route kwargs -> same board) and is blind to
-bugs in `manifest_to_plan` (converter) or `claude_plan.apply_step_params`
+bugs in `manifest_to_plan` (converter) or `ai_plan.apply_step_params`
 (apply) -- the two layers that silently diverged in the set11 rp2350 replay
 (#361). Here the REAL `swig_gui.RoutingDialog` is constructed headless (parent
 None, no Show()) with its REAL tabs and controls, and the REAL
-`claude_plan.PlanExecutor` drives it inside a wx MainLoop -- the same
+`ai_plan.PlanExecutor` drives it inside a wx MainLoop -- the same
 parse_plan_result -> reset_params_to_defaults -> apply_step_params ->
 apply_step_selection -> tab._on_*() path the buttons run. Nothing is mirrored,
 so a converter/apply bug shows up as a board difference.
@@ -115,6 +115,26 @@ within --tol), 1 = grade parity but copper genuinely differs, 2 = grade differs,
 Needs KiCad's python (pcbnew + wx); re-execs into it automatically. Grading
 needs kicad-cli for the shared core and degrades to check_drc-only without it.
 """
+
+# ---------------------------------------------------------------------------
+# macOS: if this HANGS at ~0% CPU, it is NOT wx, machine load, or a deadlock.
+#
+# After any wx process here is killed (a pkill, a timeout, a crash), macOS
+# decides the app "quit unexpectedly", and the NEXT headless launch stops inside
+# NSApplication bootstrap showing the restore-windows alert you cannot see:
+#     -[NSPersistentUIRestorer promptToIgnorePersistentState]
+#         -> -[NSAlert runModal]
+# Headless, nobody can click it, so it waits forever: process state SN accruing
+# ~0.3s of CPU over many minutes, which reads exactly like a hang. This cost a
+# full session of ".gui-parity-checked" markers recording "wx blocked, gate NOT
+# RUN" -- the gates were fine the whole time.
+#
+#   diagnose:  sample <pid> 3 -mayDie | grep -E "NSAlert|PersistentUI"
+#   fix:       defaults write -g ApplePersistenceIgnoreState -bool YES
+#
+# A sandboxed HOME does NOT help -- cfprefsd serves that pref per-user
+# regardless of HOME. With the default set, test_gui_engine_parity.py runs ~90s.
+# ---------------------------------------------------------------------------
 import os
 import sys
 
@@ -297,7 +317,7 @@ def load_plan(info, source='saved', augment=True):
     if not augment:
         return raw, cli_names, notes
 
-    from kicad_routing_plugin.claude_plan import parse_plan_result
+    from kicad_routing_plugin.ai_plan import parse_plan_result
     steps, errors = parse_plan_result(json.dumps({'steps': raw}))
     if steps is None:
         raise RuntimeError(f"plan rejected by parse_plan_result: {errors}")
@@ -440,7 +460,7 @@ def replay(info, steps, workdir, timeout=7200, verbose=False, snapshots=True):
     log_path = os.path.join(workdir, 'replay.log')
     tee = _Tee(log_path, enabled=not verbose)
 
-    from kicad_routing_plugin.claude_plan import step_label
+    from kicad_routing_plugin.ai_plan import step_label
 
     def on_status(index, status):
         if status == 'running':
@@ -489,7 +509,7 @@ def grade_board(board, clearance, baseline):
         out['grade_core_err'] = str(e)[:150]
         try:
             o = subprocess.run([sys.executable, '-X', 'utf8',
-                                os.path.join(REPO, 'check_drc.py'), board,
+                                os.path.join(REPO, 'py_router', 'check_drc.py'), board,
                                 '-c', str(clearance)],
                                capture_output=True, text=True, timeout=1800).stdout
             m = re.search(r'FOUND (\d+) DRC', o)
@@ -499,7 +519,7 @@ def grade_board(board, clearance, baseline):
             out['drc_err'] = str(e2)[:100]
     try:
         o = subprocess.run([sys.executable, '-X', 'utf8',
-                            os.path.join(REPO, 'check_connected.py'), board],
+                            os.path.join(REPO, 'py_router', 'check_connected.py'), board],
                            capture_output=True, text=True, timeout=1800).stdout
         out['fully_connected'] = 'ALL NETS FULLY CONNECTED' in o
         m = re.search(r'(\d+)\s+net\(?s?\)?\s+.*not fully connected', o, re.I)

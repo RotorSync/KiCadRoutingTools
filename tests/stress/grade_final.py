@@ -101,6 +101,8 @@ def main():
     # this never loosens a correct project or tightens below the real copper.
     try:
         sys.path.insert(0, REPO)
+        sys.path.insert(0, os.path.join(REPO, 'py_router'))  # #522
+        sys.path.insert(0, os.path.join(REPO, 'py_tools'))  # #522
         from fix_kicad_drc_settings import fix_project_for_output
         floors = redo_floors(open(man).read()) if os.path.exists(man) else {}
         floors.setdefault('clearance', clr)

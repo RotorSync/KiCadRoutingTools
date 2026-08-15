@@ -33,8 +33,10 @@ import sys
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # #522
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # #522
 
-from route_disconnected_planes import (plane_tap_launch_layers,  # noqa: E402
+from repair_planes import (plane_tap_launch_layers,  # noqa: E402
                                        pad_floating_entries,
                                        pad_repair_made_progress,
                                        pad_repair_rejected)

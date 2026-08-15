@@ -34,6 +34,8 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522
 
 import numpy as np
 from kicad_parser import parse_kicad_pcb
@@ -106,10 +108,16 @@ def _routing_map_mismatch(inc, fresh, bbox):
     return over, under
 
 
-def run(verbose=False):
+def run(verbose=False, cross_class=False):
+    """cross_class=True (#543): give each rip net a netclass clearance above the
+    run clearance and add a .kicad_dru-style layer rule, so the builders price
+    its copper at obstacle_clearance under layer/stack rules -- the incremental
+    remove must still be byte-identical (pre-#543 it removed the plain-clearance
+    multiset and left the class ring stale/under-removed)."""
     config = _config()
     coord = GridCoord(config.grid_step)
     fails = []
+    tag = " [cross-class]" if cross_class else ""
 
     base = parse_kicad_pcb(FIXTURE)
     excl = _net_id(base, EXCLUDE_NET)
@@ -122,10 +130,14 @@ def run(verbose=False):
         if net is None:
             fails.append(f"{name}: not in fixture"); continue
         bbox = _net_bbox_grid(pcb, net, coord)
+        if cross_class:
+            config.net_clearances = {net: 0.25}
+            config.layer_clearances = {"In2.Cu": 0.18}
 
         # --- VIA placement map -------------------------------------------------
         mv = build_via_obstacle_map(pcb, config, excl)
-        cache = precompute_via_placement_obstacles(pcb, net, config, LAYERS)
+        cache = precompute_via_placement_obstacles(pcb, net, config, LAYERS,
+                                                   exclude_net_id=excl)
         if len(cache.blocked_vias):
             mv.remove_blocked_vias_batch(cache.blocked_vias)
         pcb_minus = parse_kicad_pcb(FIXTURE)
@@ -133,11 +145,11 @@ def run(verbose=False):
         mv_fresh = build_via_obstacle_map(pcb_minus, config, excl)
         over, under = _via_map_mismatch(mv, mv_fresh, bbox)
         if over:
-            fails.append(f"{name}: VIA map OVER-removed {over} cells (graze risk)")
+            fails.append(f"{name}{tag}: VIA map OVER-removed {over} cells (graze risk)")
         if under:
-            fails.append(f"{name}: VIA map UNDER-removed {under} cells (stale)")
+            fails.append(f"{name}{tag}: VIA map UNDER-removed {under} cells (stale)")
         if verbose:
-            print(f"  {name:22} VIA  over={over} under={under}")
+            print(f"  {name:22}{tag} VIA  over={over} under={under}")
 
         # --- Routing map (one representative layer the net actually uses) -------
         seg_layers = {s.layer for s in pcb.segments if s.net_id == net and s.layer in LAYERS}
@@ -150,12 +162,69 @@ def run(verbose=False):
             mr_fresh = build_routing_obstacle_map(pcb_minus, config, excl, layer)
             rover, runder = _routing_map_mismatch(mr, mr_fresh, bbox)
             if rover:
-                fails.append(f"{name}: ROUTING[{layer}] OVER-removed {rover} cells")
+                fails.append(f"{name}{tag}: ROUTING[{layer}] OVER-removed {rover} cells")
             if runder:
-                fails.append(f"{name}: ROUTING[{layer}] UNDER-removed {runder} cells")
+                fails.append(f"{name}{tag}: ROUTING[{layer}] UNDER-removed {runder} cells")
             if verbose:
-                print(f"  {name:22} ROUT[{layer}] over={rover} under={runder}")
+                print(f"  {name:22}{tag} ROUT[{layer}] over={rover} under={runder}")
 
+    return fails
+
+
+def run_own_via_add(verbose=False):
+    """#543 add-side: SharedViaMaps stamps the EXCLUDE net's OWN new tap vias
+    through precompute_via_placement_obstacles. The via-map builder prices
+    same-net vias at the plain run clearance even when the net carries a
+    TIGHTER-than-run netclass -- the incremental add must match, or a map
+    updated for a committed tap diverges from the next fresh rebuild
+    (TAP_MAP_VERIFY's assert, unusable on class boards pre-#543)."""
+    from kicad_parser import Via
+    config = _config()
+    fails = []
+    pcb = parse_kicad_pcb(FIXTURE)
+    excl = _net_id(pcb, EXCLUDE_NET)
+    if excl is None:
+        return [f"fixture missing excluded net {EXCLUDE_NET}"]
+    # The exclude net carries a class ABOVE the run clearance; a dru rule too.
+    config.net_clearances = {excl: 0.3}
+    config.layer_clearances = {"In2.Cu": 0.18}
+
+    m_before = build_via_obstacle_map(pcb, config, excl)
+    new_via = Via(x=120.0, y=100.0, size=config.via_size,
+                  drill=config.via_drill, layers=["F.Cu", "B.Cu"], net_id=excl)
+    pcb.vias.append(new_via)
+    cache = precompute_via_placement_obstacles(pcb, excl, config, [],
+                                               exclude_net_id=excl)
+    # The add-side multiset covers the whole net; isolate the NEW via's stamp by
+    # stamping into the pre-add map only cells within its own bbox instead --
+    # simplest exact form: rebuild the single-via footprint via a shim.
+    class _Shim:
+        pass
+    shim = _Shim()
+    shim.segments = []
+    shim.vias = [new_via]
+    d = precompute_via_placement_obstacles(shim, excl, config, [],
+                                           exclude_net_id=excl)
+    if len(d.blocked_vias):
+        m_before.add_blocked_vias_batch(d.blocked_vias)
+    m_fresh = build_via_obstacle_map(pcb, config, excl)
+    coord = GridCoord(config.grid_step)
+    gx, gy = coord.to_grid(new_via.x, new_via.y)
+    r = coord.to_grid_dist(2.0)
+    over = under = 0
+    for cx in range(gx - r, gx + r + 1):
+        for cy in range(gy - r, gy + r + 1):
+            a = m_before.is_via_blocked(cx, cy)
+            b = m_fresh.is_via_blocked(cx, cy)
+            if a and not b:
+                over += 1
+            elif b and not a:
+                under += 1
+    if over or under:
+        fails.append(f"own-via add [class 0.3]: incremental add diverges from "
+                     f"fresh rebuild (over={over} under={under})")
+    if verbose:
+        print(f"  own-via add [class 0.3]  over={over} under={under}")
     return fails
 
 
@@ -175,11 +244,15 @@ def main():
     args = ap.parse_args()
     print("=== plane via/routing map: incremental rip == fresh rebuild (#208) ===")
     fails = run(args.verbose)
+    print("=== cross-class + dru layer rules (#543) ===")
+    fails += run(args.verbose, cross_class=True)
+    fails += run_own_via_add(args.verbose)
     if fails:
         print("\nFAIL:\n  " + "\n  ".join(fails))
         return 1
     print(f"\nPASS: incremental removal == fresh rebuild for {len(RIP_NETS)} nets "
-          f"(via + routing maps, no over- or under-removal)")
+          f"(via + routing maps, default + cross-class/#543, no over- or "
+          f"under-removal), and own-via add parity")
     return 0
 
 

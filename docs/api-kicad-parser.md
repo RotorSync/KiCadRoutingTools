@@ -80,6 +80,9 @@ The top-level container returned by both entry points.
 | `keepout_zones` | `List[GuidePath]` | User-drawn keepout polygons from `keepout_layer` |
 | `kicad_version` | `int` | File format version (e.g. `20241229` = KiCad 9) |
 | `net_id_to_name` | `Dict[int, str]` | Net ID → name map (needed when writing KiCad 10 files) |
+| `groups` | `List` | KiCad groups (#459) — kept so writers can preserve group membership |
+| `source_path` | `str` | Absolute path this data came from (`""` = in-memory). Lets engines with no `input_file` discover sibling project files, e.g. the `.kicad_dru` per-layer clearance rules (#498) |
+| `exact_fill_provider` | `Optional[Callable]` | Zero-arg callable returning `{(net_name, layer): [island_polygon, ...]}` — KiCad-truth fill for exact-fill consumers (#424). `None` (file-parsed boards) = refill `source_path`; `build_pcb_data_from_board` sets it to a staged-save refill of the live board (live copper AND live clearances) |
 
 ### `PCBData.get_via_barrel_length`
 
@@ -114,6 +117,7 @@ section. Used for accurate length/time matching.
 | `roundrect_rratio` | float | Corner radius ratio for roundrect pads (0–0.5) |
 | `rect_rotation` | float | Residual rectangle tilt in the global frame, in (-90, 90]. `0` for axis-aligned pads (the common case); non-zero only for pads on non-orthogonal angles. |
 | `local_clearance` | float | The pad's **resolved** clearance override in mm (issue #326): its own `(clearance …)` token, else the footprint-level override, else `0` (= use the global/netclass clearance). KiCad enforces `max(the two items' clearances)` per pair; the router's obstacle stamps and `check_drc` honor this the same way. Negative (shrinking) overrides clamp to `0`. |
+| `castellated` | bool | KiCad's `(property pad_prop_castellated)`: a deliberate half-hole pad **on** the board outline. Set by both parse paths. The routing mains run a castellated-landing retract post-pass that pulls track ends landing inside such a pad's edge-clearance zone back to the pad's inner reach (`pcb_modification.retract_castellated_landings`). |
 
 Pad dimensions are resolved into board space using the pad's **absolute** angle
 (the KiCad `(at … angle)` already includes the footprint rotation; applying the
@@ -133,7 +137,7 @@ whose resolved copper overlaps a different-net neighbour (a modelling error).
 | `width` | float | Track width |
 | `layer` | str | Layer name |
 | `net_id` | int | Net ID |
-| `uuid` | str | UUID from the file (`''` for newly created segments) |
+| `uuid` | str | UUID from the file (`''` for newly created segments and for uuid-less file items — KiCad treats the token as optional, PR #534) |
 | `start_x_str`, … | str | Original coordinate strings, kept for exact file matching |
 
 ### `Via`

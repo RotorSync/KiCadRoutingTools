@@ -23,7 +23,7 @@ a `build_router.py --from-source` rebuild, and re-distributing prebuilt per-plat
 binaries via GitHub Releases — heavy overhead. When a feature seems to need a Rust
 change, surface that cost early and check for a Python-only approach first.
 
-**Important:** When making changes to the Rust router, bump the version in `rust_router/Cargo.toml` and update the version history in `rust_router/README.md`.
+**Important:** When making changes to the Rust router, bump the version in `rust_router/Cargo.toml` and update the version history in `rust_router/README.md`. The release triple is `rust_router/Cargo.toml` + `/VERSION` + `metadata.json` — keep them aligned. **The crate is 0.20.1 and the 0.20.1 binaries ARE now published, in the v0.20.2 release** (2026-08-09; verified — the published `grid_router-macos-arm64.so` reports `__version__ == 0.20.1`). v0.20.2 is a python-only release, so `Cargo.toml` correctly stayed at 0.20.1 while `/VERSION` went to 0.20.2, and the release built the crate as it stands: a plain `python3 build_router.py` now **downloads and keeps** the prebuilt instead of paying a wasted download and rebuilding from source. (The older hazard, for reference: the v0.20.1 release carried 0.20.0-built assets. `build_router.py` handles that case on its own — it skips the download when Cargo.toml is ahead of the release tag, and when the tag matches but the asset inside is stale it detects the version mismatch after install and rebuilds from source. Both checks verify in a fresh subprocess: an in-process re-import of a compiled extension reports the previously-loaded library. `--from-source` just skips the lookup. 0.20.1 removes the `block_vias` parameter from `add_stub_proximity_costs_batch`, so the 0.20.0 binary is API-incompatible with current Python besides the version gate.) **Note this is why `/VERSION` can lead `Cargo.toml`** — a python-only release still republishes the current crate binaries, which is the cheapest way to unstick a stale-asset release.
 
 ## Testing & Verification
 
@@ -51,12 +51,25 @@ Validate routed boards against the *real* spec, with the right checker — most
   project, resolves its floor from the STOCK (looser) netclass, and stamps that over
   tighter copper — so KiCad grades correct sub-floor copper as phantom clearance DRC
   (icepi_zero: a dropped 0.09 floor became 0.10 → 160 phantom grazes). Use
-  `python3 copy_board.py src.kicad_pcb dst.kicad_pcb` (copies `.kicad_pcb` + every
+  `python3 py_router/copy_board.py src.kicad_pcb dst.kicad_pcb` (copies `.kicad_pcb` + every
   sibling, self-records into the redo manifest), or copy the `.kicad_pro` too. The
   route scripts WARN when an input board has no sibling `.kicad_pro`.
 - **Routers can report false success.** A router's own "routed" tally may come from
   a local/heuristic proxy while pads stay disconnected; re-verify with the
   authoritative, zone/fill-aware `check_net_connectivity` before trusting it.
+- **Read the failure buckets by their real definitions.** `failed_single` = "no
+  result at all"; `open_single` = a KEPT result whose pads are still disconnected
+  (non-multipoint only — a multipoint shortfall is already the pad deficit). A
+  verdict is `len(failed_single) + len(open_single) + pad-deficit`, which is what
+  `place_route_loop` counts. Reading only `failed_single` + the deficit is how a
+  board shipping open copper reports `failures=0`: a NON-multipoint open net
+  contributes to neither term. `terminal_restores` names rip victims restored at
+  terminal failure with their outcome (`full` is the only success; `full_open`
+  and `stub` ship broken). `stacked_copper` discloses same-net duplicate copper
+  KiCad's DRC will never flag — the writer drops exact via re-emissions before
+  writing, and whatever still stacks (e.g. two same-net barrels at one point with
+  DIFFERENT drill/size, which is a fab question, not a bookkeeping one) is named
+  in the summary rather than shipped silently.
 - **Net classes are RESPECTED (PR392), and `--clearance` is a pure CEILING over ALL
   of them (#439).** The router honors KiCad's pairwise `max(classA, classB)` between
   nets of different classes — including copper routed earlier in the SAME call (in-run)
@@ -79,6 +92,45 @@ Validate routed boards against the *real* spec, with the right checker — most
   - `--hole-to-hole-clearance` / `--board-edge-clearance` work the same way: omitted →
     the board's own `min_hole_to_hole` / `min_copper_edge_clearance` constraint (via
     `list_nets.board_constraint`), else the fixed default.
+- **Protected nets (#521): matched groups and routed diff pairs are recorded in
+  the sibling `.kicad_pro`** (`kicad_routing_tools.protected_nets`, written next
+  to the DRC-floor writeback, carried down chains by the project copy) and later
+  steps will NOT rip them: `--rip-existing-nets` globs skip them (printed
+  exclusion) and plane-repair `--rip-blocker-nets` never picks them as blockers.
+  The override is naming the net EXACTLY (no glob) in `--nets` or
+  `--rip-existing-nets` — there is deliberately no CLI flag or GUI control.
+  Rationale: a retry step once ripped a whole DDR match group and rerouted it
+  unmatched (allwinner_h3_ddr3, 40/41 nets unmatched, one net stranded).
+  **KiCad-LOCKED copper** (`segment.locked`/`via.locked`, both parse paths) makes
+  its net never-rippable with NO override. **Impedance declarations** persist
+  the same way (`net_impedance` key: ohms/differential/pair_gap/coplanar_gap):
+  impedance nets stay rippable, but a later step touching them without
+  `--impedance` recomputes the same widths from the stackup and applies them
+  per-net (config `net_layer_widths`; route_diff reapplies call-level, one
+  spec only).
+- **Per-layer clearance comes from the board's `.kicad_dru` (#498) and OUTRANKS
+  `--clearance`.** KiCad stores layer-scoped clearance in custom rules
+  (`(rule x (layer inner) (constraint clearance (min 0.15mm)))`); netclasses can't
+  express it. **Every routing step** auto-reads the sibling `.kicad_dru`
+  (`kicad_dru.install_layer_clearances`; engines without an `input_file`
+  discover it via `PCBData.source_path`): signal, diff pairs, the pour step,
+  the route step's in-run plane finalize (taps, region joins, reconnects),
+  BGA/QFN fanout (QFN swaps
+  its single escape layer exactly; BGA floors its scalar at the largest rule
+  on its escape layers — conservative, tighten-only), the oracle sub-routes
+  (config clones carry the map), and nested reconciliation sub-runs (the
+  parent forwards its resolved map — the output's dru sibling doesn't exist
+  yet mid-run). **Replacement** semantics — a rule
+  value replaces the net/class pair clearance on its layer, tightening or
+  relaxing, exactly like KiCad's own precedence (custom rules outrank classes;
+  only the fab floor pins them up). There is deliberately **no CLI flag and no
+  GUI control** — the rules file is the single source of truth; `check_drc` and
+  the staged kicad-cli grade read the same file, `copy_board`/
+  `fix_project_for_output` carry it as a sibling, and the DRC writeback caps
+  `min_clearance` at the smallest rule so a relaxing rule isn't floored away.
+  Grade a ruled board with plain `check_drc.py` (it auto-reads); a hand-rolled
+  checker that ignores the dru will manufacture phantom flags on relaxed layers
+  and miss real ones on tightened layers.
   **Why clamp on a ceiling:** stock net classes are largely *aspirational* — corpus and
   real boards route below them, and even the human-routed references violate their own
   class (zynq: 499 clearance violations at its 0.2 class, routed ~0.1), so keeping the
@@ -97,7 +149,15 @@ Every recorded stress run leaves a `redo_commands.sh` manifest that replays the
 full chain with **no LLM**. To regression-test or A/B an engine change across the
 board corpus, use `tests/stress/ab_replay_grade.py` (whole-set replay + DRC/
 connectivity grading) or `tests/stress/redo_diff_stage.py` (diff-pair stages only).
-See `tests/stress/RUNBOOK.md` ("Replaying & A/B (no LLM)") for the recipes.
+For CORPUS-SCALE work (~$1/arm on rented cores, keeps the routed boards):
+`tests/stress/cloud_replay_sets.py` A/Bs a change over whole sets, and
+`tests/stress/corpus_bisect.sh` scores one engine commit for bisecting a
+regression. See `tests/stress/RUNBOOK.md` ("Replaying & A/B (no LLM)" and
+"Corpus-scale A/B and bisect on the cloud") for the recipes and the rules that
+make them trustworthy -- notably: the baseline is the RECORDED RUNS re-graded
+(not an archived wave), grade both sides on the same terms, compare only boards
+that replayed an IDENTICAL chain, and **a two-board result is not a default
+change** (per-board spread is +-2..3 nets).
 
 ## Keep CLI and GUI routing in sync
 
@@ -105,7 +165,9 @@ There are two front-ends to the same routing engine, and a fix to one is
 **not** automatically a fix to the other:
 
 - **CLI scripts** — `route.py`, `route_diff.py`, `route_planes.py`,
-  `route_disconnected_planes.py`, `bga_fanout.py`, etc. Their `main()`
+  `repair_planes.py` (renamed from `route_disconnected_planes.py`; the CLI
+  remains a standalone utility only — the chain step is absorbed into
+  route.py's finalize, #562), `bga_fanout.py`, etc. Their `main()`
   parses args and calls the shared engine functions (`batch_route`,
   `batch_route_diff_pairs`, `create_plane`, `generate_bga_fanout`, ...).
 - **GUI plugin** — `kicad_routing_plugin/` (`swig_gui.py`,
@@ -125,7 +187,7 @@ picked up by both for free. The gaps appear at the edges:
   options panel, and `settings_persistence.py`). A new `batch_route`
   kwarg that only `route.py` passes silently does nothing in the GUI.
   It must also stay **Claude-settable end to end**: (1) the GUI plan
-  executor (`claude_plan.py`) applies any snake_case param whose name
+  executor (`ai_plan.py`) applies any snake_case param whose name
   matches a dialog control — so name the control after the param and add
   it to `reset_params_to_defaults` (the plan executor resets through
   that, or the param leaks between steps); (2) add the `--flag` →
@@ -148,8 +210,8 @@ picked up by both for free. The gaps appear at the edges:
 - **A post-pass added to a CLI `main()`** (running *after* the shared engine
   call — cleanup, oracle recheck, DRC-floor writeback) is invisible to the
   GUI unless separately replicated (the set11 plane-shorts bug:
-  `route_disconnected_planes.main()` ran `clean_plane_copper`, the planes tab
-  didn't). Prefer putting the pass INSIDE the shared engine function; when it
+  `repair_planes.main()` (then `route_disconnected_planes`) ran
+  `clean_plane_copper`, the planes tab didn't). Prefer putting the pass INSIDE the shared engine function; when it
   must operate on the written file, refactor a **board-level core** and call
   it from both fronts (as `compute_plane_copper_cleanup` now backs both
   `clean_plane_copper` and `planes_gui._run_plane_copper_cleanup`).
@@ -166,9 +228,28 @@ through there too.
 - `tests/gui_parity/test_cli_postpass_coverage.py` — no wx; asserts every CLI
   `main()` post-engine pass has a GUI counterpart, and blocks a new CLI-only
   post-pass (Class-2 drift). Register new passes there.
+- `tests/gui_parity/test_settings_roundtrip.py` — needs KiCad python; builds
+  the REAL headless dialog and round-trips the settings dict: save (the CLOSE
+  path), restore (the reopen path), restore from a LEGACY dict whose keys a
+  newer version dropped, and re-save key parity. **Run it whenever you add,
+  rename, or REMOVE a dialog control** — deleting one without updating
+  `settings_persistence` crashes on close and loses the user's settings
+  (that shipped once; see 31f359c). Seconds to run, no routing.
+- `tests/gui_parity/test_fanout_rotated_gui.py` — needs KiCad python; the only
+  gate that runs a **fanout** step. Drives the REAL FanoutTab on a rotated
+  QFN (haasoscope U2, QFN-76 @ 90°) and compares against the CLI's text-parsed
+  engine call, replaying the tab's OWN captured kwargs so the two fronts cannot
+  differ by a parameter. Asserts side classification parity (the check that
+  catches a local-frame bug), emitted-copper parity, and outward escapes.
+  Seconds to run. Its wx-free half is `tests/test_rotated_footprint_frame.py`
+  (round-trip invariants + change detectors, ~1 s, runs under `run_all.py`).
+  **Fanout is the only routing consumer of `pad.local_x/local_y`**, and those
+  are the one PCBData field the GUI COMPUTES rather than reads — see the
+  `_global_to_local` entry in `.gui-parity-checked` for the bug that motivated
+  these.
 - `tests/gui_parity/test_gui_engine_parity.py` — needs KiCad python; runs the
   plan through the GUI engine path and grades against the CLI chain
-  (`KICAD_DUMP_BATCH_KWARGS` diffs the 76-key param set).
+  (`KICAD_DUMP_BATCH_KWARGS` diffs the full batch_route param set, ~105 keys).
 
   **How to run it (it is NOT a special-session thing — just run it):**
 
@@ -199,6 +280,29 @@ through there too.
   whole time. CHECK with the line above; only record it as not-run if that
   actually fails.
 
+  **macOS: if a wx gate hangs at ~0 CPU, it is NOT wx, load, or a deadlock — it
+  is a modal alert you cannot see.** After a wx process is killed (a `pkill`, a
+  timeout, a crash), macOS decides the app "quit unexpectedly" and the NEXT
+  headless launch stops inside `NSApplication` bootstrap showing the
+  *restore-windows* alert: `-[NSPersistentUIRestorer
+  promptToIgnorePersistentState]` → `-[NSAlert runModal]`. Headless, nobody can
+  click it, so it waits forever — the process sits in state `SN` accruing ~0.3 s
+  of CPU over many minutes, which reads exactly like a hang. Diagnose it with:
+
+  ```bash
+  sample <pid> 3 -mayDie | grep -E "NSAlert|PersistentUI"
+  ```
+
+  The fix is a one-time user default (a sandboxed `HOME` does **not** work —
+  `cfprefsd` serves the pref per-user regardless of `HOME`):
+
+  ```bash
+  defaults write -g ApplePersistenceIgnoreState -bool YES
+  ```
+
+  This cost an entire session's worth of "wx is blocked, gate not run" marker
+  entries. With it set, `test_gui_engine_parity.py` completes in ~90 s.
+
   Two caveats when reading its output:
   - It **REPORTS divergence; it is not pass/fail.** Known-deliberate divergences
     exist (the CLI mains' kicad-oracle recheck, `clean_plane_copper`, end-of-run
@@ -209,7 +313,14 @@ through there too.
     fixed in `c99ffb4`) can pass this gate untouched — cover such params with a
     diff-pair board and `check_impedance.py`.
 
-  Siblings worth running the same way: `test_gui_livechain_rp2350.py`, and
+  Siblings worth running the same way: `test_gui_livechain_rp2350.py`
+  (reshaped to the #562 chain — pour → ONE route step carrying the plane
+  nets in its `--nets`, whose in-run finalize is the weld/repair/oracle;
+  both legs stage-aligned again and PASS. Two teachings baked into it: the
+  plane nets must ride in the route step's net list or the finalize excludes
+  the pours BY PLAN, and it stages its project-less fixture with a
+  pcbnew-authored `.kicad_pro` — a project-less board makes the two fronts
+  legitimately diverge), and
   `replay_plan_vs_run.py` — the latter is the *general* harness (a real headless
   `RoutingDialog` + real `PlanExecutor`, nothing mocked; it caught #493's
   one-ULP netclass clearance bug on its first run). See
@@ -302,6 +413,10 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   bare `pad.drill > 0` (a net-tied NPTH mounting hole is not a connection, #328)
 - `pad.component_ref` - Parent component reference
 - `pad.pinfunction`, `pad.pintype` - Pin metadata
+- `pad.castellated` - KiCad `(property pad_prop_castellated)`: a deliberate
+  half-hole pad ON the outline (both parse paths). The routing mains' retract
+  post-pass (`pcb_modification.retract_castellated_landings`) pulls track ends
+  landing in its edge-clearance zone back to the pad's inner reach.
 - `pad.local_clearance` - RESOLVED per-pad clearance override in mm (#326): the
   pad's own `(clearance ...)`, else the footprint-level override (recorded raw
   in `footprint.clearance`), else 0 (= global/netclass clearance applies).
@@ -328,6 +443,8 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 - `segment.width` - Track width
 - `segment.layer` - Layer name
 - `segment.net_id` - Net ID
+- `segment.locked` - KiCad `(locked yes)`: user-pinned copper; its net is never
+  rip-eligible (#521), no override
 
 ### Via Attributes
 
@@ -336,6 +453,7 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 - `via.drill` - Drill diameter
 - `via.layers` - Layer span
 - `via.net_id` - Net ID
+- `via.locked` - KiCad `(locked yes)` (see `segment.locked`)
 - `via.tenting_attrs` - Protection spec `{token: raw inner s-expr}` for
   `tenting`/`covering`/`plugging`/`capping`/`filling` (#489 §8); `{}` = the board
   specified nothing. Read by BOTH parse paths in the same normalized form. Pass it

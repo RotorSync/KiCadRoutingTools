@@ -13,6 +13,11 @@ PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(PLUGIN_DIR)
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
+# #522 layout: the engine modules live in py_router/ under the repo root.
+# The exists() guard keeps a FLAT installed layout (PCM zip) working too.
+_ENGINE_DIR = os.path.join(ROOT_DIR, 'py_router')
+if os.path.isdir(_ENGINE_DIR) and _ENGINE_DIR not in sys.path:
+    sys.path.insert(0, _ENGINE_DIR)
 
 import routing_defaults as defaults
 from kicad_parser import mm_to_iu
@@ -62,7 +67,7 @@ class DiffPairSelectionPanel(wx.Panel):
 
     def __init__(self, parent, pcb_data, instructions=None,
                  show_hide_checkbox=True, show_component_dropdown=True,
-                 on_ask_claude=None):
+                 on_ask_ai=None):
         """
         Create a differential pair selection panel.
 
@@ -72,12 +77,12 @@ class DiffPairSelectionPanel(wx.Panel):
             instructions: Optional instruction text
             show_hide_checkbox: Whether to show the hide checkbox
             show_component_dropdown: Whether to show the component dropdown
-            on_ask_claude: Callback for the "Ask Claude" button that verifies
+            on_ask_ai: Callback for the "Ask AI" button that verifies
                 pairs by pin function (issue #40); button hidden if None.
         """
         super().__init__(parent)
         self.pcb_data = pcb_data
-        self.on_ask_claude = on_ask_claude
+        self.on_ask_ai = on_ask_ai
         self.all_pairs = []  # List of (display_name, base_name, p_net_id, n_net_id)
         self._checked_pairs = set()
         self._check_fn = None
@@ -146,13 +151,13 @@ class DiffPairSelectionPanel(wx.Panel):
         unselect_btn.Bind(wx.EVT_BUTTON, self._on_unselect)
         btn_sizer.Add(select_btn, 1, wx.RIGHT, 5)
         btn_sizer.Add(unselect_btn, 1)
-        if self.on_ask_claude is not None:
-            ask_btn = wx.Button(self, label="Ask Claude", style=wx.BU_EXACTFIT)
+        if self.on_ask_ai is not None:
+            ask_btn = wx.Button(self, label="Ask AI", style=wx.BU_EXACTFIT)
             ask_btn.SetToolTip(
-                "Run the /identify-diff-pairs skill: verifies pairs by pin "
+                "Run the identify-diff-pairs skill: verifies pairs by pin "
                 "function via datasheets, then checks confirmed pairs and "
                 "unchecks name-matching false positives. Takes a few minutes.")
-            ask_btn.Bind(wx.EVT_BUTTON, lambda event: self.on_ask_claude())
+            ask_btn.Bind(wx.EVT_BUTTON, lambda event: self.on_ask_ai())
             btn_sizer.Add(ask_btn, 0, wx.LEFT, 5)
         sizer.Add(btn_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
@@ -387,7 +392,7 @@ class DifferentialTab(wx.Panel):
     def __init__(self, parent, pcb_data, board_filename,
                  get_shared_params=None, get_connectivity_check=None,
                  get_routing_config=None, append_log=None,
-                 sync_pcb_data_callback=None, get_claude_params=None):
+                 sync_pcb_data_callback=None, get_ai_params=None):
         """
         Create the differential pair routing tab.
 
@@ -400,7 +405,7 @@ class DifferentialTab(wx.Panel):
             get_routing_config: Callback to get full routing config from main dialog
             append_log: Callback to append text to log
             sync_pcb_data_callback: Callback to sync pcb_data from board after routing
-            get_claude_params: Callback returning the Claude tab's
+            get_ai_params: Callback returning the AI tab's
                 {'model', 'effort'} selections for headless runs
         """
         super().__init__(parent)
@@ -411,7 +416,7 @@ class DifferentialTab(wx.Panel):
         self.get_routing_config = get_routing_config
         self.append_log = append_log
         self.sync_pcb_data_callback = sync_pcb_data_callback
-        self.get_claude_params = get_claude_params
+        self.get_ai_params = get_ai_params
         self._routing_thread = None
         self._cancel_requested = False
         # Called when "Hide short routes" or a param affecting it changes, so the
@@ -449,7 +454,7 @@ class DifferentialTab(wx.Panel):
             instructions="Select differential pairs to route...",
             show_hide_checkbox=True,
             show_component_dropdown=True,
-            on_ask_claude=self._on_ask_claude_diff_pairs
+            on_ask_ai=self._on_ask_ai_diff_pairs
         )
         pair_box_sizer.Add(self.pair_panel, 1, wx.EXPAND)
 
@@ -708,45 +713,28 @@ class DifferentialTab(wx.Panel):
             if self.on_hide_short_changed:
                 self.on_hide_short_changed()
 
-    def _on_ask_claude_diff_pairs(self):
-        """Run /identify-diff-pairs headless and update the pair selection
+    def _on_ask_ai_diff_pairs(self):
+        """Run identify-diff-pairs headless and update the pair selection
         from its findings (issue #40)."""
-        from .claude_gui import find_claude, ClaudeSkillDialog, board_path_for_analysis
+        from .ai_gui import run_skill_dialog, board_path_for_analysis
 
-        claude_path = find_claude()
-        if claude_path is None:
-            wx.MessageBox(
-                "Claude Code CLI not found. Install it (https://claude.com/claude-code) "
-                "and make sure `claude` is on your PATH.",
-                "Claude", wx.OK | wx.ICON_WARNING)
-            return
         board = board_path_for_analysis(self.board_filename)
         if board is None:
             return
-
-        prompt = (
-            f"/identify-diff-pairs {os.path.abspath(board)} — analysis only, do not "
-            "modify any files. After the report, end your reply with exactly one "
-            "line of the form RESULT=confirm:<pair base names verified as "
+        value = run_skill_dialog(
+            self, "AI: identify differential pairs",
+            "identify-diff-pairs", os.path.abspath(board),
+            "analysis only, do not modify any files. After the report, end "
+            "your reply with exactly one line of the form "
+            "RESULT=confirm:<pair base names verified as "
             "differential by pin function, comma-separated, P/N suffix stripped>"
             ";reject:<base names that name-matching paired but are NOT differential>"
             ";custom:<P|N net-name pairs found by pin function that do not follow "
             "P/N naming conventions>. Omit empty sections; use exact net names, "
-            "e.g. RESULT=confirm:/CLK,/DATA;custom:/TXP|/TXN"
-        )
-        model = effort = None
-        if self.get_claude_params:
-            claude_params = self.get_claude_params()
-            model = claude_params.get('model')
-            effort = claude_params.get('effort')
-        dlg = ClaudeSkillDialog(
-            self, "Claude: identify differential pairs", prompt,
-            claude_path=claude_path, model=model, effort=effort,
-            intro=f"Running /identify-diff-pairs on {os.path.basename(board)} ...\n"
-                  "(datasheet lookups; typically a few minutes)")
-        dlg.ShowModal()
-        value = dlg.result_value
-        dlg.Destroy()
+            "e.g. RESULT=confirm:/CLK,/DATA;custom:/TXP|/TXN",
+            intro=f"Running identify-diff-pairs on {os.path.basename(board)} ...\n"
+                  "(datasheet lookups; typically a few minutes)",
+            ai_params=self.get_ai_params() if self.get_ai_params else None)
         if value is not None:
             self._apply_diff_pairs_recommendation(value)
 
@@ -755,7 +743,7 @@ class DifferentialTab(wx.Panel):
         parsed, notes = parse_diff_pairs_result(value)
         for note in notes:
             if self.append_log:
-                self.append_log(f"Claude: {note}\n")
+                self.append_log(f"AI: {note}\n")
 
         display_by_base = {base: display for display, base, _p, _n
                            in self.pair_panel.all_pairs}
@@ -773,22 +761,22 @@ class DifferentialTab(wx.Panel):
 
         if self.append_log:
             if confirmed:
-                self.append_log(f"Claude confirmed diff pairs: {', '.join(confirmed)}\n")
+                self.append_log(f"AI confirmed diff pairs: {', '.join(confirmed)}\n")
             if rejected:
-                self.append_log("Claude flagged as NOT differential (unchecked): "
+                self.append_log("AI flagged as NOT differential (unchecked): "
                                 f"{', '.join(rejected)}\n")
             if unknown:
-                self.append_log(f"Claude named pairs not in the list (ignored): "
+                self.append_log(f"AI named pairs not in the list (ignored): "
                                 f"{', '.join(unknown)}\n")
             if parsed["custom"]:
                 pairs_str = ", ".join(f"{p}/{n}" for p, n in parsed["custom"])
                 self.append_log(
-                    f"Claude found pairs with unconventional names: {pairs_str} - "
+                    f"AI found pairs with unconventional names: {pairs_str} - "
                     "the GUI and router pair nets by P/N naming, so these can't be "
                     "routed as pairs yet (rename the nets, or see the explicit-pair "
                     "support issue)\n")
             if not any([confirmed, rejected, unknown, parsed["custom"]]):
-                self.append_log(f"Claude: no usable diff-pair findings in {value!r}\n")
+                self.append_log(f"AI: no usable diff-pair findings in {value!r}\n")
 
     def _on_cancel_or_close(self, event):
         """Handle cancel/close button - cancel if routing, otherwise close dialog."""
@@ -957,6 +945,8 @@ class DifferentialTab(wx.Panel):
                 input_file=self.board_filename,
                 output_file="",  # Not used when return_results=True
                 net_names=net_names,
+                # #581: the Basic tab's via-in-pad policy (shared params).
+                same_net_pad_clearance=config.get('same_net_pad_clearance', -1.0),
                 layers=config.get('layers', defaults.DEFAULT_LAYERS),
                 layer_costs=config.get('layer_costs') or None,  # per-layer bias (#193); None -> all 1.0
                 track_width=config.get('diff_pair_width', defaults.DIFF_PAIR_WIDTH),
@@ -979,9 +969,9 @@ class DifferentialTab(wx.Panel):
                 board_edge_clearance=config.get('board_edge_clearance',
                                                 defaults.BOARD_EDGE_CLEARANCE),
                 grid_step=config.get('grid_step', 0.1),
-                via_cost=config.get('via_cost', 50),
+                via_cost=config.get('via_cost', defaults.VIA_COST),
                 max_iterations=config.get('max_iterations', 200000),
-                proximity_heuristic_factor=config.get('proximity_heuristic_factor', 0.02),
+                proximity_heuristic_factor=config.get('proximity_heuristic_factor', defaults.PROXIMITY_HEURISTIC_FACTOR),
                 keepout_enabled=config.get('keepout_enabled', False),
                 keepout_layer=config.get('keepout_layer', defaults.KEEPOUT_LAYER),
                 diff_pair_gap=config.get('diff_pair_gap', 0.101),
@@ -1009,7 +999,7 @@ class DifferentialTab(wx.Panel):
                 direction_order=config.get('direction'),
                 disable_bga_zones=config.get('no_bga_zones'),
                 max_probe_iterations=config.get('max_probe_iterations', 5000),
-                heuristic_weight=config.get('heuristic_weight', 1.9),
+                heuristic_weight=config.get('heuristic_weight', defaults.HEURISTIC_WEIGHT),
                 turn_cost=config.get('turn_cost', 1000),
                 direction_preference_cost=config.get(
                     'direction_preference_cost', defaults.DIRECTION_PREFERENCE_COST),
@@ -1048,6 +1038,7 @@ class DifferentialTab(wx.Panel):
                 length_match_tolerance=config.get('length_match_tolerance',
                                                   defaults.LENGTH_MATCH_TOLERANCE),
                 meander_amplitude=config.get('meander_amplitude', defaults.MEANDER_AMPLITUDE),
+                meander_spacing=config.get('meander_spacing', defaults.MEANDER_SPACING),
                 time_matching=config.get('time_matching', False),
                 time_match_tolerance=config.get('time_match_tolerance',
                                                 defaults.TIME_MATCH_TOLERANCE),
@@ -1104,7 +1095,11 @@ class DifferentialTab(wx.Panel):
         # front let the executor start the NEXT step mid-apply (Andy's
         # 'tracks don't all appear, rerun fixes it').
         try:
-            self._on_routing_complete_body()
+            # Tee the apply phase's prints into the log tab: the worker's
+            # redirect was restored before this main-thread handler runs.
+            from .gui_utils import redirect_prints_to_log
+            with redirect_prints_to_log(self.append_log):
+                self._on_routing_complete_body()
         finally:
             self.route_btn.Enable()
             self.cancel_btn.SetLabel("Close")
@@ -1188,6 +1183,20 @@ class DifferentialTab(wx.Panel):
         # Refresh the pair list to show updated connectivity
         self.pair_panel.refresh()
 
+    def _apply_status(self, message):
+        """Status update for the apply phase, which runs ON the UI thread.
+
+        _update_progress is marshalled from the engine thread via CallAfter, so
+        the main loop paints it; the apply BLOCKS that loop, so a bare SetLabel
+        would leave the last routing message frozen on screen for the whole
+        apply. Same pattern as the route/planes/fanout tabs; see
+        gui_utils.ui_thread_status for why the repaint is deliberately narrow
+        (no Gauge.Pulse) inside an action plugin.
+        """
+        from .gui_utils import ui_thread_status
+        ui_thread_status(getattr(self, 'status_text', None),
+                         getattr(self, 'progress_bar', None), message)
+
     def _apply_results_to_board(self, results_data):
         """Apply differential-pair routing results via the IPC adapter.
 
@@ -1207,6 +1216,11 @@ class DifferentialTab(wx.Panel):
                           wx.OK | wx.ICON_ERROR)
             return 0, 0
 
+        self._apply_status("Applying diff-pair copper to the board...")
+
+        # Pad/stub net swaps (polarity fixes, target swaps) and stub layer mods
+        # are applied inside apply_routing_results below via the IPC adapter -
+        # no separate SWIG apply_swaps_to_board needed.
         try:
             counts = apply_routing_results(
                 board, results_data,
@@ -1278,25 +1292,6 @@ class DifferentialTab(wx.Panel):
                 getattr(self, name).Enable(chk.GetValue())
                 break
         event.Skip()
-
-        if use_netclass:
-            # Try to get net class from first selected pair, fall back to Default
-            class_name = self._get_selected_pair_netclass() or 'Default'
-            from .routing_dialog import _get_netclass_parameters
-            params = _get_netclass_parameters(class_name, self.pcb_data)
-            if params:
-                # Update diff pair width and gap from net class
-                if 'diff_pair_width' in params and params['diff_pair_width'] > 0:
-                    self.diff_pair_width.SetValue(params['diff_pair_width'])
-                if 'diff_pair_gap' in params and params['diff_pair_gap'] > 0:
-                    self.diff_pair_gap.SetValue(params['diff_pair_gap'])
-            # Disable manual editing
-            self.diff_pair_width.Enable(False)
-            self.diff_pair_gap.Enable(False)
-        else:
-            # Re-enable manual editing
-            self.diff_pair_width.Enable(True)
-            self.diff_pair_gap.Enable(True)
 
     def _get_selected_pair_netclass(self):
         """Get the net class name for the first selected pair, or None."""

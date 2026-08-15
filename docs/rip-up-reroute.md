@@ -10,7 +10,7 @@ Implementation: `rip_up_reroute.py` (rip/restore), `blocking_analysis.py` (who i
 |--------|---------|-------------|
 | `--max-ripup` | 3 | Maximum number of blockers ripped up at once for one failing net |
 | `--ripup-abandon-metric` | `stranded` | How a multipoint tap rip-up decides keep-retry vs abandon (see [Abandon metrics](#abandon-metrics)) |
-| `--ripup-blocker-select` | `count` | Which blocker the rip-up ladder targets first (see [Blocker selection algorithms](#blocker-selection-algorithms)). Also on `route_diff.py`, `route_planes.py`, `route_disconnected_planes.py`. Env override (route.py): `KICAD_RIPUP_BLOCKER_SELECT` |
+| `--ripup-blocker-select` | `count` | Which blocker the rip-up ladder targets first (see [Blocker selection algorithms](#blocker-selection-algorithms)). Also on `route_diff.py`, `route_planes.py`, `repair_planes.py`. Env override (route.py): `KICAD_RIPUP_BLOCKER_SELECT` |
 | `--ripped-route-avoidance-radius` | 1.0 | Soft-penalty radius around a ripped net's former corridor (mm) |
 | `--ripped-route-avoidance-cost` | 0.1 | Soft-penalty cost in the former corridor (0 disables) |
 
@@ -54,6 +54,113 @@ By default only nets routed **in the current run** are rip-up candidates; tracks
 
 One exception: the end-of-run oracle-reconnect pass may auto-grant `--rip-existing-nets` authority over pre-existing blockers that earlier failure hints named (capped at 12). That escalation always respects the run's own net filter — a net the caller excluded by pattern (`'!GND'` while planes pour in a later step) is excluded *by plan* and is never auto-ripped; only an explicit operator `--rip-existing-nets` can override that.
 
+### When to grant rip authority — and when not to
+
+`--rip-existing-nets` and `--force-reroute` are **permissions to destroy
+already-routed copper**. The router will use them, and a rip whose restore is
+refused — its corridor was taken by copper routed while it was out — leaves
+that net broken. In the sets-21-27 corpus wave this was the single largest
+source of lost connectivity, ahead of routing failure itself (#600): 7 of 99
+boards, one turning a 3-pad problem into a 20-pad one while trying to fix it,
+another losing 20 nets all of their copper.
+
+Two things that are not obvious:
+
+- **Scoping `--nets` does not protect you.** One board regressed from a retry
+  naming three nets. It is the rip *permission* that does the damage, not the
+  route *scope*, so "just retry fewer nets" is not a safety measure.
+- **You usually do not need to pass anything.** The #103 escalation above
+  already grants the reconciliation rip authority over the exact blockers the
+  failures named, under guards (never protected, negated, plane-backed, or
+  large nets). A plain retry gets targeted rip authority for free; `'*'` adds
+  only the *untargeted* part.
+
+In rough order of preference for a congestion retry:
+
+1. **Re-run the whole signal step thinner** (fab-floor `--track-width`, finer
+   `--grid-step`). Thinner is monotonically better on dense boards and destroys
+   nothing.
+2. **Plain retry of the failed nets** — the in-run escalation supplies its own
+   targeted authority.
+3. **Named authority**: `--rip-existing-nets <the blockers the log named>`. The
+   router prints exactly which pre-existing nets boxed each failure; ripping
+   those is a decision, whereas `'*'` is a hope.
+4. **`--rip-existing-nets '*'`** — last resort. Especially avoid combining it
+   with `--force-reroute` over a large net list: that is the shape that cost
+   `spartan6_4layer` 20 nets' copper.
+
+Whatever you pass, the [improvement gate](#improvement-gate-600) is the
+backstop: a run that ends net-worse is reverted rather than shipped.
+
+## Improvement gate (#600)
+
+At the end of a run `route.py` compares the board it is about to ship against
+the board it was given, per multi-pad net, with the same authoritative
+union-find `check_connected` uses:
+
+- **lost** — connected before, broken after
+- **gained** — broken (or bare) before, connected after
+
+The run is **rejected** when it ends worse on **either** axis — more nets broken
+than it connected, *or* more disconnected pads than it started with. Both must
+be non-worse to ship. A rejected run's output file is replaced by the input
+board, because in every recorded case the pre-rip board was the better
+artifact, and the chain keeps a board to continue from.
+
+**Neither axis may outvote the other**, and `spartan6_4layer` is why. Re-running
+its wave command gives `lost 36, gained 43` — a net count that looks *better* by
+7 — while the board's disconnected pads go `83 → 154`. The nets it broke were
+far larger than the ones it closed. An earlier version of this gate compared
+the two lexicographically with the net count first and shipped that board. Pad
+count is the honest measure of how much of the board is unreachable, so a run
+that raises it is worse regardless of the net tally.
+
+This is still not an "any regression" test: a pass that closes five nets and
+breaks one ships, provided the pad count did not rise — the recovered pads
+outnumber the lost ones, which is exactly when discarding the run would throw
+away more than it saves.
+
+An equal trade on both axes ships, reported with both net lists named:
+`bms_sensor`'s retry reproduced today closes the three nets it was asked to
+close, breaks three others, and leaves the pad count unchanged. The operator who
+passed `--rip-existing-nets` authorised that; what they could not do before was
+see it.
+
+```
+IMPROVEMENT GATE: this run broke 3 previously-connected net(s) and connected 3 -- ACCEPTED
+  broken by this run: /BMS.Can_L, /BMS.Enable_Out, V_+5V
+  connected by this run: /CAN.Interrupt, /SPI.Clock, /SPI.Miso
+  disconnected pads: 3 -> 3 over 43 multi-pad net(s)
+```
+
+The verdict is also emitted as a machine-readable `JSON_IMPROVEMENT_GATE:` line
+(`lost`, `gained`, `disconnected_pads_before/after`, `nets_compared`,
+`verdict`), so a chain can assert on it instead of grepping prose.
+
+**If you see `REVERTED`, the retry did not fail to run — it ran and was
+rejected.** Re-running it with *more* rip authority is the one response
+guaranteed not to help; change the approach instead (thinner, finer grid,
+different layer budget, or accept the open net and report it).
+
+`KICAD_IMPROVEMENT_GATE=0` disables the gate — for A/B measurement, or when you
+deliberately want the regressed board on disk to inspect it.
+
+**Both fronts measure and both revert**, by the same verdict from the same
+engine code. Only the spelling of the revert differs, because the artifact
+does: the file front rewrites the output as the input board; the GUI front
+returns an empty change-set, which is a true rollback rather than an un-apply
+because the plugin's applier runs *after* `batch_route` returns and therefore
+never touches the live board. The GUI also receives the verdict as
+`results_data['improvement_gate']`; diagnostics (`blockers`, `pad_pairs_open`)
+survive a rejection, since they are what the caller needs in order to try
+something different.
+
+The gate is skipped when it cannot mean anything: a run whose input board has
+no copper at all (nothing to regress), an in-place run (`output == input`,
+where no pre-run board survives to revert to), and every nested `batch_route` —
+the reconciliation sub-run and the plane finalize's reconnects all carry
+`final_reconcile=False`, and only the run that owns the artifact gates.
+
 ## Progressive N+1 Escalation
 
 For a failing net, the router escalates through rip-up rounds (`reroute_loop.py`):
@@ -88,7 +195,7 @@ end up worse off. The *abandon decision* arbitrates: keep the retry, or
 abandon it, restore the net's original tap, and re-route the whole rip tree
 around it (issues #85, #354).
 
-`--ripup-abandon-metric` (GUI: Advanced tab → "Rip-up Abandon Metric"; env
+`--ripup-abandon-metric` (GUI: Advanced options tab → "Rip-up Abandon Metric"; env
 override `KICAD_RIPUP_ABANDON_METRIC` for replay A/Bs) selects how the two
 worlds are compared. All metrics except `stranded` compare the **retry
 world** (retry kept, rip-tree victims re-routed around it) against the
@@ -117,5 +224,5 @@ Every rip-up event is recorded in the per-net history (`record_net_event()` in `
 
 ## Tuning
 
-- `--max-ripup 3` (default) resolves most single-blocker and double-blocker situations. Raise it on dense boards where failures persist — the cost is time, not correctness, since failed combinations are always rolled back.
+- `--max-ripup 3` (default) resolves most single-blocker and double-blocker situations. Raise it on dense boards where failures persist — the cost is NOT purely time: measured on a 6-board chain A/B, `--max-ripup 5` beat 10 and 20 was worse than 10, because each extra rip level risks a permanent casualty -- a ripped victim whose corridor is taken while it is out cannot be restored (see `terminal_restores` in JSON_SUMMARY: `full_open` and `stub` ship broken). Treat 3-5 as the working range and escalate only on a specific failing net.
 - Setting `--ripped-route-avoidance-cost 0` disables corridor avoidance; the triggering net will then happily occupy the freed corridor, making the ripped net's reroute more likely to fail and cascade.

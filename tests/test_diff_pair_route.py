@@ -30,6 +30,8 @@ import tempfile
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, ROOT_DIR)
+sys.path.insert(0, os.path.join(ROOT_DIR, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT_DIR, 'py_tools'))  # #522
 
 BOARD = os.path.join(ROOT_DIR, "kicad_files", "routed_output.kicad_pcb")
 # Same geometry as test_fanout_and_route.py's LVDS diff stage.
@@ -44,7 +46,7 @@ PAIRS = ["lvds_rx1_11", "lvds_rx1_10", "lvds_rx1_12"]
 
 def route_with_nets(out, nets):
     """Route with explicit --nets args *nets*; return (routed_ok, output)."""
-    cmd = [sys.executable, "route_diff.py", BOARD, out, "--nets", *nets] + GEOM
+    cmd = [sys.executable, "py_router/route_diff.py", BOARD, out, "--nets", *nets] + GEOM
     r = subprocess.run(cmd, cwd=ROOT_DIR, capture_output=True, text=True)
     txt = r.stdout + r.stderr
     return ('"successful": 1' in txt and '"failed": 0' in txt), txt
@@ -57,14 +59,14 @@ def route_pair(pattern, out):
 
 def is_connected(board, pattern):
     """True if check_connected reports the pair's nets fully connected."""
-    cmd = [sys.executable, "check_connected.py", board, "--nets", f"*{pattern}*"]
+    cmd = [sys.executable, "py_router/check_connected.py", board, "--nets", f"*{pattern}*"]
     r = subprocess.run(cmd, cwd=ROOT_DIR, capture_output=True, text=True)
     return "ALL NETS FULLY CONNECTED" in (r.stdout + r.stderr)
 
 
 def drc_clean(board, pattern):
     """True if the pair has no DRC violations (scoped to its own nets)."""
-    cmd = [sys.executable, "check_drc.py", board, "--clearance", CLEARANCE,
+    cmd = [sys.executable, "py_router/check_drc.py", board, "--clearance", CLEARANCE,
            "--nets", f"*{pattern}*", "--clearance-margin", "0.1"]
     r = subprocess.run(cmd, cwd=ROOT_DIR, capture_output=True, text=True)
     return "NO DRC VIOLATIONS" in (r.stdout + r.stderr)

@@ -1081,6 +1081,7 @@ def apply_oracle_reconnect(board, *, nets, config, pcb_data,
 
 
 def apply_plane_copper_cleanup(board, *, net_names, clearance, grid_step,
+                               progress_callback=None,
                                message: str = "KiCadRoutingTools: plane cleanup") -> dict:
     """CLI/GUI parity: apply pcb_modification.compute_plane_copper_cleanup's
     delta (the SAME core the CLI clean_plane_copper front runs) to the LIVE
@@ -1096,7 +1097,11 @@ def apply_plane_copper_cleanup(board, *, net_names, clearance, grid_step,
     if not net_names:
         return {}
     pcb = build_pcb_data_from_board(board)
-    delta = compute_plane_copper_cleanup(pcb, net_names, clearance, grid_step)
+    # progress_callback: the shared 13-pass pipeline is silent, and the GUI
+    # runs this on the UI thread during apply, so without it a slow cleanup
+    # reads as a hang.
+    delta = compute_plane_copper_cleanup(pcb, net_names, clearance, grid_step,
+                                         progress_callback=progress_callback)
     if delta.is_empty:
         return {"removed": 0, "added": 0, "snapped": 0}
 
@@ -1136,6 +1141,65 @@ def apply_plane_copper_cleanup(board, *, net_names, clearance, grid_step,
                 s.width, s.layer, net_name=name_for(s.net_id) or None))
             added += 1
     return {"removed": removed, "added": added, "snapped": delta.snapped}
+
+
+def apply_castellated_landing_retract(
+        board, *, board_edge_clearance,
+        message: str = "KiCadRoutingTools: castellated landing retract") -> int:
+    """CLI/GUI parity twin of pcb_modification.retract_castellated_landings
+    (run-6 fix 1.7): compute the shared castellated-landing retract delta on
+    PCBData built from the LIVE board, then move the matching live track
+    endpoints in one commit. Returns the number of endpoints moved.
+
+    IPC counterpart of the SWIG GUI's in-place PCB_TRACK mutation: kipy has no
+    in-place edit, so the moved tracks ride the commit's update_items channel.
+    Tracks are matched by rounded endpoint pair + net NAME (the only stable
+    identifier between PCBData's synthetic net_ids and kipy's Net objects).
+    Best-effort -- a failure never blocks an already-applied routing result."""
+    if not board_edge_clearance or board_edge_clearance <= 0:
+        return 0
+    try:
+        from kicad_parser import build_pcb_data_from_board
+        from pcb_modification import compute_castellated_landing_retract
+        from routing_utils import pos_key
+
+        pcb = build_pcb_data_from_board(board)
+        delta = compute_castellated_landing_retract(pcb, board_edge_clearance)
+        if delta.is_empty:
+            return 0
+
+        def name_for(net_id):
+            n = pcb.nets.get(net_id) if net_id is not None else None
+            return (n.name if n is not None else "") or ""
+
+        moves = {}
+        for s, end, nx, ny in delta.moves:
+            moves[(pos_key(s.start_x, s.start_y), pos_key(s.end_x, s.end_y),
+                   name_for(s.net_id))] = (end, nx, ny)
+
+        moved = 0
+        with begin_commit(board, message) as commit:
+            for t in board.get_tracks():
+                sx, sy = _vec_xy_mm(t.start)
+                ex, ey = _vec_xy_mm(t.end)
+                tname = (getattr(t.net, "name", "") or "") if t.net is not None else ""
+                mv = moves.get((pos_key(sx, sy), pos_key(ex, ey), tname))
+                if mv is None:
+                    continue
+                end, nx, ny = mv
+                if end == 'start':
+                    t.start = vec_mm(nx, ny)
+                else:
+                    t.end = vec_mm(nx, ny)
+                commit.update(t)
+                moved += 1
+        if moved:
+            print(f"  Castellated landings: {moved} track end(s) retracted "
+                  f"inside the edge-clearance zone (pad_prop_castellated)")
+        return moved
+    except Exception as e:
+        print(f"  (skipped castellated-landing retract: {e})")
+        return 0
 
 
 # --- DRC settings write-back (issue #160) -----------------------------------

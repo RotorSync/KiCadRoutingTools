@@ -21,6 +21,7 @@ For multi-point nets this happens between Phase 1 and Phase 3 of the MST-based a
 | `--length-match-group <patterns...>` | none | Define a match group by net name patterns (repeatable, one group per flag). The special value `auto` enables DDR4 auto-grouping |
 | `--length-match-tolerance` | 0.1 | Acceptable length variance within a group (mm) |
 | `--meander-amplitude` | 1.0 | Maximum meander bump height perpendicular to the trace (mm) |
+| `--meander-spacing` | 2.0 | Centre-to-centre spacing of adjacent meander arms, in multiples of the net's routed track width (2.0 = 2W pitch = 1W edge gap) |
 | `--time-matching` | false | Match propagation delay instead of physical length |
 | `--time-match-tolerance` | 1.0 | Acceptable delay variance within a group (ps) |
 | `--diff-pair-intra-match` | false | (`route_diff.py`) Match P and N lengths *within* each differential pair |
@@ -30,18 +31,18 @@ Examples:
 
 ```bash
 # Manual group: all DQ0-7 and DQS0 nets matched together
-python route.py board.kicad_pcb --length-match-group "*DQ[0-7]" "*DQS0*"
+python py_router/route.py board.kicad_pcb --length-match-group "*DQ[0-7]" "*DQS0*"
 
 # Two separate groups
-python route.py board.kicad_pcb \
+python py_router/route.py board.kicad_pcb \
     --length-match-group "*DQ[0-7]" "*DQS0*" \
     --length-match-group "*DQ1[0-5]" "*DQ[8-9]" "*DQS1*"
 
 # Auto-detect DDR4 byte lanes
-python route.py board.kicad_pcb --length-match-group auto
+python py_router/route.py board.kicad_pcb --length-match-group auto
 
 # Match propagation time instead of length
-python route.py board.kicad_pcb --length-match-group auto \
+python py_router/route.py board.kicad_pcb --length-match-group auto \
     --time-matching --time-match-tolerance 1.0
 ```
 
@@ -59,7 +60,7 @@ Each `--length-match-group` flag defines one group; nets matching *any* pattern 
 
 ## The Trombone Meander
 
-Meanders are rectangular bumps perpendicular to the trace, with 45° chamfered corners (chamfer size 0.1mm), alternating up/down along the run:
+Meanders are rectangular bumps perpendicular to the trace, with 45° chamfered corners, alternating up/down along the run. The chamfer is half the arm pitch: adjacent risers sit `--meander-spacing` × the net's routed track width apart centre-to-centre (#501), so wider (impedance/power) nets automatically spread their arms; the chamfer never drops below 0.1mm, which reproduces the historical geometry exactly at the default 0.1mm track width. Same-net copper is exempt from every clearance check by design, so this pitch arithmetic — not DRC — is what keeps the arms from forming a tightly coupled comb that would add less *delay* than *length*:
 
 ```
 Original:  ────────────────────────>
@@ -69,7 +70,7 @@ Meander:   ──╮╭──╮╭──╮╭──>
              ╰╯  ╰╯  ╰╯
 ```
 
-`apply_meanders_to_route()` finds all straight runs in the route (minimum length 2× amplitude) and tries them longest-first until one accepts the required extra length. Within a run, `generate_trombone_meander()` distributes bumps with alternating direction. Each bump of amplitude *A* adds roughly `2A − 2.34 × chamfer` of extra length (≈1.77mm at the default 1.0mm amplitude).
+`apply_meanders_to_route()` finds all straight runs in the route (minimum length 2× amplitude) and tries them longest-first. If the best run cannot absorb the whole target — common at wider pitches, which fit fewer bumps per run — the remainder **spills across further straight runs**: after each run is meandered, the straight runs are re-derived from the modified segment list and the next-best run takes the rest, until the target is met, progress stalls, or a round cap is hit. Within a run, `generate_trombone_meander()` distributes bumps with alternating direction. Each bump of amplitude *A* adds roughly `2A − 2.34 × chamfer` of extra length (≈1.77mm at the default 1.0mm amplitude and 0.1mm chamfer).
 
 ### Per-Bump Clearance Checking
 
@@ -101,7 +102,7 @@ Routes containing vias are supported, with restrictions:
 
 Two forms of matching exist for differential pairs (`route_diff.py`):
 
-- **Group matching** — multiple pairs in a `--length-match-group` are matched pair-to-pair by meandering each pair's *centerline*; both P and N are regenerated from the modified centerline so the pair stays symmetric.
+- **Group matching** — multiple pairs in a `--length-match-group` are matched pair-to-pair by meandering each pair's *centerline*; both P and N are regenerated from the modified centerline so the pair stays symmetric. A **multipoint pair** (3+ terminals routed as a chain of coupled legs) is measured and meandered on its **longest MST leg** (#520): that leg's single-leg length is the pair's matching span, the centerline meanders are applied to that leg, and the result is spliced back into the chain.
 - **Intra-pair matching** (`--diff-pair-intra-match`) — within one pair, meanders are added to the shorter of P/N to equalize them (`apply_intra_pair_length_matching()`). Bumps here are smaller (minimum amplitude 0.1mm) since they must fit between the pair and its surroundings; stub barrel lengths and polarity swaps are accounted for.
 - **End-to-end AC-coupled matching** (`--ac-couple-match`) — a pair split into two base-named pairs by series DC-blocking caps (the common PCIe/USB3/SATA TX case) is auto-detected as one *extended net* / XNet: a 2-pad cap bridging `A_P↔B_P` plus another bridging `A_N↔B_N`. Its concatenated P path (`A_P+B_P`) is matched against the concatenated N path (`A_N+B_N`) — the skew the receiver actually sees — with the compensating meander placed on whichever segment has room (`apply_ac_coupled_length_matching()`, sharing the meander engine with intra-pair via `_lengthen_net_with_meanders()`). This **supersedes** per-side intra-pair matching for the member pairs, reports the end-to-end skew in the JSON summary (`ac_coupled_xnets`), and is off by default. No-pop (DNP) caps are open circuits and are not stitched; only symmetric cap pairs (both polarities bridged) are joined. Detection requires the pair halves to be found first (so it inherits the `_P`/`_N` naming rules above).
 
@@ -121,7 +122,22 @@ To size the meanders, the required extra delay is converted to extra length usin
 
 ## Limitations
 
-- Meanders are added to one straight run per route; if no run can absorb the required extra length within clearance limits, the route may end outside tolerance (a warning is printed).
+- Meanders spill across multiple straight runs when one run cannot absorb the required extra length; if the runs together still cannot absorb it within clearance limits, the route may end outside tolerance (a warning is printed).
+
+## Protected Nets (#521)
+
+Matching is a per-step feature but chains are multi-step: a later retry that runs `--rip-existing-nets` over matched nets would rip the meanders and reroute at natural length, silently voiding the group. To prevent that, **every matched group member and every routed diff-pair member is recorded as a *protected net*** in the sibling `.kicad_pro` (under `kicad_routing_tools.protected_nets`, next to the DRC-floor writeback — so the list flows down the chain automatically and `copy_board.py` carries it):
+
+- `route.py --rip-existing-nets` **excludes protected nets from collateral rips** (a printed line lists the exclusions);
+- `repair_planes.py --rip-blocker-nets` never selects a protected net as a blocker to rip;
+- **override**: naming a net *exactly* (no glob) in `--nets` or `--rip-existing-nets` is the deliberate signal and lifts its protection for that step. There is no flag; edit the `.kicad_pro` to remove entries permanently.
+- **KiCad-locked copper**: a net with any `(locked yes)` segment or via is never rip-eligible, **with no override** — locked means never. This is read straight from the board (both parse paths), not from the `.kicad_pro`.
+
+The GUI inherits the same behavior (engine-side reads via the board's sibling project file; the AI-plan executor and per-step floor updates persist new entries).
+
+### Impedance declarations survive redos
+
+Impedance-routed nets stay *rippable* — but a step run with `--impedance` records each targeted net's declaration (`ohms`, `differential`, `pair_gap`, `coplanar_gap`) in the `.kicad_pro` (`kicad_routing_tools.net_impedance`). A later step that touches those nets **without** `--impedance` recomputes the same widths from the stackup and applies them per-net (`route.py`; the declaration — not the widths — is stored, so a stackup change recomputes correctly). `route_diff.py` reapplies call-level when every targeted pair shares one stored differential spec (the diff engine's obstacle stamps carry one width map), and warns when specs are mixed. `check_impedance.py` auto-reads the same records and audits every net against **its own** declared coplanar gap — no `--coplanar-gap` flag needed on boards routed by this tool.
 - Very tight surroundings can force the amplitude to its 0.2mm minimum, limiting how much length a run can add.
 - Meanders are not placed across layer changes.
 - `--ac-couple-match` runs after `--length-match-group`; a pair that is both an XNet member and in a match group may be meandered again by the end-to-end pass, perturbing its group-matched length. Keep AC-coupled pairs out of match groups.

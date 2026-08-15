@@ -16,7 +16,7 @@ def run(cmd: str, unbuffered: bool = False) -> None:
     """Run a command string and print output.
 
     Commands are executed from the project root directory, so paths like
-    'python3 route.py' and 'kicad_files/...' work correctly.
+    'python3 py_router/route.py' and 'kicad_files/...' work correctly.
 
     Args:
         cmd: Command string to run (will be parsed using shell-style splitting)

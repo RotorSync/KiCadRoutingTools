@@ -22,6 +22,8 @@ import sys
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, ROOT_DIR)
+sys.path.insert(0, os.path.join(ROOT_DIR, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT_DIR, 'py_tools'))  # #522
 
 from kicad_parser import PCBData, Segment, Via, Pad, Net
 from routing_config import GridRouteConfig
@@ -89,9 +91,12 @@ def main():
     stub = get_stub_info(pcb, 1, 2.0, 0.0, 'F.Cu')
     check("through via still credited", stub is not None and stub.has_pad_via)
 
-    # -- A13: vis base map matches the non-vis twin on BGA zones -------------
-    print("\nA13: --visualize obstacle map parity on BGA zones")
-    from obstacle_map import build_base_obstacle_map, build_base_obstacle_map_with_vis
+    # -- A13: allowed-cells window works inside a BGA exclusion zone --------
+    # (Was a vis-vs-plain map comparison; the --visualize map builder was
+    # removed with the pygame visualizer in #569, so only the real map is
+    # left to check -- which is the half that guards shipped routing.)
+    print("\nA13: allowed-cells window inside a BGA exclusion zone")
+    from obstacle_map import build_base_obstacle_map
     from kicad_parser import BoardInfo
     cfg = GridRouteConfig()
     cfg.layers = ['F.Cu', 'B.Cu']
@@ -102,15 +107,9 @@ def main():
     pcb = PCBData(board_info=bi, nets={}, footprints={}, vias=[], segments=[],
                   pads_by_net={})
     plain = build_base_obstacle_map(pcb, cfg, [])
-    vis, _visdata = build_base_obstacle_map_with_vis(pcb, cfg, [])
-    # An allowed-cells window inside the zone must unblock cells on BOTH maps
-    # (the vis map's hard stamp used to take precedence and keep them blocked).
-    for m in (plain, vis):
-        m.add_allowed_cell(20, 20)
-    check("allowed-cells window works on the plain map",
+    plain.add_allowed_cell(20, 20)
+    check("allowed-cells window unblocks a cell inside the BGA zone",
           not plain.is_blocked(20, 20, 0))
-    check("allowed-cells window works on the VIS map (was dead)",
-          not vis.is_blocked(20, 20, 0))
 
     # -- A15: pad-edge windows in the swap validators -------------------------
     print("\nA15: swap validators see large pads with far centers")

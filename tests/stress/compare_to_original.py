@@ -22,8 +22,15 @@ from collections import Counter, defaultdict
 _here = os.path.dirname(os.path.abspath(__file__))
 for _cand in (os.path.abspath(os.path.join(_here, "..", "..")),
               os.path.expanduser("~/Documents/KiCadRoutingTools")):
-    if os.path.exists(os.path.join(_cand, "kicad_parser.py")):
+    if os.path.exists(os.path.join(_cand, "py_router/kicad_parser.py")):
+        # #522 half-migration guard: the probe above was updated to the new
+        # py_router/ path but the insert below was not, so the check passed while
+        # `import kicad_parser` still failed -- this script died on import. The
+        # engine modules are IN py_router/py_tools, so those dirs (not just the
+        # repo root) have to go on sys.path, as grade_final.py does.
         sys.path.insert(0, _cand)
+        sys.path.insert(0, os.path.join(_cand, "py_router"))
+        sys.path.insert(0, os.path.join(_cand, "py_tools"))
         break
 from kicad_parser import parse_kicad_pcb
 from list_nets import read_design_rules
@@ -46,6 +53,16 @@ def profile(path):
     via_count = Counter()
     for v in pcb.vias:
         via_count[(round(v.size, 3), round(v.drill, 3))] += 1
+        if v.net_id:
+            seg_nets.add(v.net_id)
+    # A net realized as a zone/plane pour (or via-only stitching) has copper
+    # too -- counting only track segments reported a phantom 1-net completion
+    # gap on every plane board (#513 item 13).
+    for z in (getattr(pcb, 'zones', []) or []):
+        if getattr(z, 'net_id', 0):
+            seg_nets.add(z.net_id)
+    n_multi_pad = sum(1 for nid, net in pcb.nets.items()
+                      if len(pcb.pads_by_net.get(nid, [])) >= 2)
     return {
         "layers": list(pcb.board_info.copper_layers),
         "n_segments": len(pcb.segments),
@@ -56,8 +73,23 @@ def profile(path):
         "via_count": {f"{s}/{d}": c for (s, d), c in via_count.items()},
         "distinct_widths": len(width_count),
         "nets_with_copper": len(seg_nets),
+        "n_multi_pad_nets": n_multi_pad,
         "n_nets": len(pcb.nets),
     }
+
+
+def original_degeneracy(orig: dict):
+    """Classify a 'human-routed original' whose copper cannot serve as ground
+    truth (#513 item 11): 7/75 wave references had NO copper at all, so every
+    DRC-delta / via / width / layer-balance comparison silently meant nothing.
+    Returns 'empty' (0 segments and 0 vias), 'incomplete' (under half of the
+    multi-pad nets have any copper), or None (usable)."""
+    if orig["n_segments"] == 0 and orig["n_vias"] == 0:
+        return "empty"
+    if orig["n_multi_pad_nets"] and \
+            orig["nets_with_copper"] < 0.5 * orig["n_multi_pad_nets"]:
+        return "incomplete"
+    return None
 
 
 def design_clearance(orig_path):
@@ -86,6 +118,21 @@ def main():
         return round(a / b, 2) if b else None
 
     suggestions = []
+
+    # #513 item 11: 7/75 wave 'human originals' had no (or materially
+    # incomplete) copper, so every comparison below silently meant nothing.
+    # Flag it FIRST so aggregators skip the comparison instead of reading 0s.
+    degenerate = original_degeneracy(orig)
+    if degenerate:
+        print(f"\nWARNING: the ORIGINAL board is {degenerate.upper()} as a "
+              f"routing reference ({orig['n_segments']} segments, "
+              f"{orig['n_vias']} vias; {orig['nets_with_copper']}/"
+              f"{orig['n_multi_pad_nets']} multi-pad nets have copper). "
+              f"DRC-delta and via/width/layer comparisons against it are "
+              f"MEANINGLESS -- skip them for this board (#513 item 11).")
+        suggestions.append(
+            f"REFERENCE-{degenerate.upper()}: the original board is not a "
+            f"usable routing reference; ignore the comparison metrics.")
 
     # 1. Via usage
     if orig["n_vias"] and ours["n_vias"] > 1.3 * orig["n_vias"]:
@@ -155,6 +202,8 @@ def main():
 
     if args.json:
         blob = {"design_clearance": cl, "ours": ours, "original": orig, "suggestions": suggestions}
+        if degenerate:
+            blob["original_degenerate"] = degenerate
         print("\nJSON_COMPARISON: " + json.dumps(blob))
 
 

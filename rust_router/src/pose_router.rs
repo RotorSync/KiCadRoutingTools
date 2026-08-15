@@ -129,7 +129,7 @@ pub struct PoseRouter {
     h_weight: f32,
     turn_cost: i32,  // Cost per 45° turn
     min_radius_grid: f64,  // Minimum turning radius in grid units
-    via_proximity_cost: i32,  // Multiplier for stub proximity cost when placing vias (0 = block vias near stubs)
+    via_proximity_cost: i32,  // Multiplier on graded proximity cost when placing vias (0 = no extra cost)
     straight_after_via: i32,  // Required straight steps after via (derived from min_radius_grid)
     diff_pair_spacing: i32,  // P/N spacing in grid units (0 = not a diff pair)
     max_turn_units: i32,  // Max cumulative turn in 45° units before reset (default 6 = 270°)
@@ -542,17 +542,15 @@ impl PoseRouter {
                 }
             }
 
-            // Block or penalize vias within stub proximity or BGA proximity (for diff pairs)
-            // If via_proximity_cost is 0, block vias in these areas; otherwise multiply via cost
-            let in_stub_proximity = obstacles.get_stub_proximity_cost(current.gx, current.gy) > 0;
-            let in_bga_proximity = obstacles.is_in_bga_proximity(current.gx, current.gy);
-            let in_proximity_zone = in_stub_proximity || in_bga_proximity;
-
-            if via_positions_clear && diff_pair_via_spacing.is_some() && self.via_proximity_cost == 0 {
-                if in_proximity_zone {
-                    via_positions_clear = false;
-                }
-            }
+            // Graded via-proximity penalty, matching the single-ended router:
+            // (stub + dest-layer proximity) x via_proximity_cost, ADDED to the
+            // via cost. BGA proximity rides the layer-proximity map, so its
+            // gradient -- and its cost knob's 0 = off -- apply here identically.
+            // (Historically this was a binary via_cost x multiplier cliff for
+            // any via anywhere in the stub/BGA proximity zones -- ~10x, a
+            // ~90mm-detour equivalent across the whole 7mm BGA ring, which
+            // effectively forbade diff-pair layer changes near escape fields.)
+            let stub_prox_at_via = obstacles.get_stub_proximity_cost(current.gx, current.gy);
 
             if can_place_via && via_positions_clear {
                 for layer in 0..obstacles.num_layers as u8 {
@@ -572,16 +570,13 @@ impl PoseRouter {
                     let neighbor_key = neighbor.as_key();
 
                     if !nodes.is_closed(neighbor_key) {
-                        // Multiply via cost by via_proximity_cost in stub/BGA proximity zones
-                        let via_cost = if in_proximity_zone {
-                            self.via_cost * self.via_proximity_cost
-                        } else {
-                            self.via_cost
-                        };
+                        let proximity_penalty = (stub_prox_at_via
+                            + obstacles.get_layer_proximity_cost(current.gx, current.gy, layer as usize))
+                            * self.via_proximity_cost;
                         // Layer transition: penalize a via INTO a costlier layer, discount into a cheaper one (issue #193)
                         let layer_transition = self.layer_cost_or_default(layer as usize)
                             - self.layer_cost_or_default(current.layer as usize);
-                        let new_g = g + (via_cost + layer_transition).max(0);
+                        let new_g = g + (self.via_cost + layer_transition).max(0) + proximity_penalty;
 
                         if new_g < nodes.g(neighbor_key) {
                             // Via doesn't count as a step, but sets the straight

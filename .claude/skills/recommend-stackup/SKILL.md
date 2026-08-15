@@ -30,7 +30,7 @@ Report the verdict explicitly: "stackup appears to be KiCad's default — impeda
 
 ## Step 3: Recommend and Validate
 
-Propose: layer assignment (e.g. 4-layer: F.Cu signal / In1.Cu GND plane / In2.Cu power plane / B.Cu signal), dielectric thicknesses and ε_r per the fab's standard stackup, and copper weights.
+Propose: layer assignment (e.g. 4-layer: F.Cu signal / In1.Cu GND plane / In2.Cu power-or-routable / B.Cu signal), dielectric thicknesses and ε_r per the fab's standard stackup, and copper weights. For impedance, what matters is the solid GND reference ADJACENT to each impedance-carrying layer — the other inner layer need not be a solid plane (on dense/BGA boards `/recommend-plane-mappings` will usually keep it split or routable; making BOTH inners solid planes is a minority human practice and starves dense boards of routing layers).
 
 Validate with the project's own formulas so the recommendation matches what the router will compute:
 
@@ -51,7 +51,7 @@ Warn when a target is unachievable with manufacturable geometry (e.g. 50Ω micro
    --layers F.Cu In1.Cu In2.Cu B.Cu
    --impedance 50                      # route.py, single-ended
    --impedance 100                     # route_diff.py, differential
-   route_planes.py --nets GND --plane-layers In1.Cu
+   py_router/route_planes.py --nets GND --plane-layers In1.Cu
    ```
 3. Optionally, the KiCad `(stackup ...)` s-expression block for the user to apply via Board Setup → Physical Stackup. **Do not modify the board file directly** — stackup is a fab-facing decision the user must own.
 4. If the stackup was changed, remind the user to re-run any impedance-based routing, since previously computed widths are now stale.

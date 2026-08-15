@@ -41,7 +41,7 @@ Open Claude Code in the repository and point the planning skill at your board:
 The skill analyzes the board (fanout needs, differential pairs, power nets,
 plane candidates), proposes a step-by-step plan, runs the commands, and
 verifies the result. The same flow is available inside KiCad via the plugin's
-**Claude tab** (*Plan Routing* → *Run Selected Steps*) — see
+**AI tab** (*Plan Routing* → *Run Selected Steps*) — see
 [docs/claude-skills.md](docs/claude-skills.md).
 
 Prefer driving it by hand? The full CLI workflow is in the
@@ -54,8 +54,8 @@ This is where contributions become valuable. Whatever routed, verify it —
 the two checks are independent and **both** are required:
 
 ```bash
-python3 check_drc.py your_board_routed.kicad_pcb        # clearances / shorts
-python3 check_connected.py your_board_routed.kicad_pcb  # every pad actually reached
+python3 py_router/check_drc.py your_board_routed.kicad_pcb        # clearances / shorts
+python3 py_router/check_connected.py your_board_routed.kicad_pcb  # every pad actually reached
 ```
 
 - A DRC-clean board can still be disconnected (floating copper has no
@@ -95,7 +95,7 @@ A reproducible issue gets fixed ten times faster. Include:
    repro, is the next best thing. Issues without a board are still welcome,
    just slower to act on.
 2. **The exact commands you ran**, in order, with all flags (copy-paste from
-   your shell history), or the plan the Claude tab executed. Routing output
+   your shell history), or the plan the AI tab executed. Routing output
    depends heavily on the parameter chain, and re-running the same board at
    different clearances is a different experiment.
 3. **The full output** — the router's summary plus `check_drc.py` /

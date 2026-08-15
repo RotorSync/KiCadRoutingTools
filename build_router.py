@@ -6,6 +6,13 @@ GitHub Releases page, so users do NOT need to install a Rust toolchain. If the
 download fails (no network, no matching release, etc.) it falls back to a local
 `cargo build --release`. Pass --from-source to skip the download and build
 locally; pass --tag vX.Y.Z to pin a specific release.
+
+In a git checkout whose rust_router/ differs from main (a branch carrying crate
+changes, or uncommitted crate edits), the prebuilt is skipped and the build goes
+straight to source: release assets are built from main's crate, so a downloaded
+binary can agree on the version string yet carry a different ABI (#615 -- the
+`placement` branch's Python passed `block_vias`, the downloaded binary didn't
+take it). An explicit --tag overrides this and is honored as-given.
 """
 
 import sys
@@ -177,6 +184,29 @@ def try_download_prebuilt(script_dir, rust_dir, tag):
             print("ERROR: Could not reach GitHub: %s" % e)
         return False
 
+    # If this checkout's Cargo.toml is AHEAD of the published release (a crate
+    # bump whose binaries haven't shipped yet), the asset cannot satisfy the
+    # startup version guard -- skip the pointless download and let the caller
+    # fall back to a source build directly. An explicit --tag is honored
+    # as-given (the post-install version check below still self-heals it).
+    if tag is None:
+        want = _cargo_version(rust_dir)
+        rel_ver = (release.get('tag_name') or '').lstrip('v')
+        # Skip ONLY when Cargo.toml is genuinely AHEAD of the newest release: no
+        # published asset can satisfy the startup version guard, so the download
+        # is pointless. Cargo.toml BEHIND the release tag is normal and the asset
+        # is usually exactly right -- /VERSION may lead Cargo.toml, and a
+        # python-only release republishes the CURRENT crate binaries (v0.20.2
+        # ships crate 0.20.1). This used to be a plain `!=`, which also skipped
+        # the behind case and sent every such user to a source build -- the
+        # normal state right after any python-only release. Whatever we download
+        # is still verified by the post-install version check in main(), which
+        # self-heals a stale asset, so trying is cheap and never wrong.
+        if want and rel_ver and _ver_tuple(rel_ver) < _ver_tuple(want):
+            print("Latest release is v%s but rust_router/Cargo.toml is %s -- "
+                  "no matching prebuilt exists yet." % (rel_ver, want))
+            return False
+
     assets = release.get('assets', [])
     asset = next((a for a in assets if a.get('name') == asset_name), None)
     if asset is None:
@@ -299,18 +329,94 @@ def _remove_stale_copies(script_dir):
 
 
 def _verify_import(rust_dir):
-    """Import grid_router from rust_dir and print its version. Returns True on success."""
-    if rust_dir not in sys.path:
-        sys.path.insert(0, rust_dir)
-    if 'grid_router' in sys.modules:
-        del sys.modules['grid_router']
-    try:
-        import grid_router
-    except ImportError as e:
-        print("Import failed: %s" % e)
+    """Import grid_router from rust_dir in a FRESH interpreter and print its
+    version. Returns True on success.
+
+    Must be a subprocess: a compiled extension module cannot be re-imported
+    in-process (del sys.modules just hands back the cached extension), so
+    when the download path installs one binary and the source fallback then
+    replaces it, an in-process re-import would verify -- and report -- the
+    OLD library (the "v0.20.0 ready" line after a 0.20.1 source build).
+    """
+    ver = _import_version_subprocess(rust_dir)
+    if ver is None:
         return False
-    print("grid_router v%s ready." % getattr(grid_router, '__version__', 'unknown'))
+    print("grid_router v%s ready." % ver)
     return True
+
+
+def _import_version_subprocess(rust_dir):
+    """__version__ of rust_dir's grid_router, read in a fresh interpreter
+    (None on import failure)."""
+    code = ("import sys; sys.path.insert(0, {!r}); import grid_router; "
+            "print(getattr(grid_router, '__version__', 'unknown'))"
+            ).format(rust_dir)
+    try:
+        out = subprocess.run([sys.executable, '-c', code],
+                             capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        print("Import check failed to run: %s" % e)
+        return None
+    if out.returncode != 0:
+        print("Import failed: %s" % (out.stderr.strip() or out.stdout.strip()))
+        return None
+    return out.stdout.strip() or 'unknown'
+
+
+def _ver_tuple(v):
+    """'0.20.10' -> (0, 20, 10) for ORDERED comparison.
+
+    Not a string compare: '0.20.10' < '0.20.9' lexically but is newer. Unparsable
+    components sort as 0, which makes an odd version compare as older and so
+    merely attempts a download the post-install check would reject anyway.
+    """
+    out = []
+    for part in str(v).split('.'):
+        digits = ''.join(c for c in part if c.isdigit())
+        out.append(int(digits) if digits else 0)
+    return tuple(out)
+
+
+def _crate_matches_release_source(script_dir):
+    """Does the working tree's rust_router/ match main -- the source the release
+    assets are built from?
+
+    Returns True when it matches (a prebuilt is trustworthy), False when it
+    differs (committed branch changes or local edits, tracked or untracked --
+    a prebuilt could agree on the version string yet carry a different ABI,
+    #615), and None when it cannot be determined (git missing, not a git
+    checkout -- e.g. a release-zip install -- or no main ref to compare
+    against). None callers keep the download path: the post-install version
+    check still self-heals a version mismatch, which is the pre-#615 behavior.
+    """
+    def _git(*argv):
+        return subprocess.run(['git', '-C', script_dir] + list(argv),
+                              capture_output=True, text=True, timeout=30)
+
+    try:
+        if _git('rev-parse', '--git-dir').returncode != 0:
+            return None
+        # Prefer origin/main (current even when the local main branch is stale
+        # or absent, as in a clone that checked out another branch).
+        ref = next((r for r in ('origin/main', 'main')
+                    if _git('rev-parse', '--verify', '--quiet',
+                            r + '^{commit}').returncode == 0), None)
+        if ref is None:
+            return None
+        # Worktree (staged + unstaged) vs main for tracked files...
+        diff = _git('diff', '--quiet', ref, '--', 'rust_router')
+        if diff.returncode == 1:
+            return False
+        if diff.returncode != 0:
+            return None
+        # ...plus untracked files (a new .rs file never diffs). Build outputs
+        # (grid_router.so/.pyd, target/) are gitignored, so they don't trip this.
+        status = _git('status', '--porcelain', '--', 'rust_router')
+        if status.returncode != 0:
+            return None
+        return not any(line.startswith('??') for line in status.stdout.splitlines())
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def _cargo_version(rust_dir):
@@ -332,16 +438,9 @@ def _cargo_version(rust_dir):
 
 
 def _installed_version(rust_dir):
-    """__version__ of the currently-importable grid_router (None if absent)."""
-    if rust_dir not in sys.path:
-        sys.path.insert(0, rust_dir)
-    if 'grid_router' in sys.modules:
-        del sys.modules['grid_router']
-    try:
-        import grid_router
-    except ImportError:
-        return None
-    return getattr(grid_router, '__version__', None)
+    """__version__ of the on-disk grid_router (None if absent). Subprocess
+    for the same extension-reload reason as _verify_import."""
+    return _import_version_subprocess(rust_dir)
 
 
 def main():
@@ -365,6 +464,23 @@ def main():
         return
 
     if args.from_source:
+        build_from_source(script_dir, rust_dir)
+        return
+
+    # Release assets are built from main's crate. On a checkout whose
+    # rust_router/ differs from main, a prebuilt can pass the startup version
+    # gate yet carry the wrong ABI (#615: the `placement` branch at crate
+    # 0.20.0 downloaded the 0.20.1 asset, and even a hand-bumped Cargo.toml
+    # just traded the startup rejection for TypeErrors at run time). Go
+    # straight to source. An explicit --tag is honored as-given, same as the
+    # skip logic in try_download_prebuilt.
+    if args.tag is None and _crate_matches_release_source(script_dir) is False:
+        print("This checkout's rust_router/ differs from main, and prebuilt "
+              "release binaries are built from main's crate --")
+        print("a downloaded binary could match the version string yet carry a "
+              "different ABI. Building from source instead.")
+        print("(Pass --tag vX.Y.Z to force a specific prebuilt release.)")
+        print()
         build_from_source(script_dir, rust_dir)
         return
 

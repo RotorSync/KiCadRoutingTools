@@ -172,7 +172,7 @@ parity; closing it to ~98% is the order-canonicalization follow-up.
 ### Plane engines + diff_engine_kwargs.py (the #362 sweep)
 
 The dump now also covers the PLANE engines: `create_plane` (route_planes.py)
-and the repair `route_planes` (route_disconnected_planes.py) each write a line
+and the repair `route_planes` (repair_planes.py) each write a line
 via `route._dump_engine_config` in CONTINUE mode, INCLUDING `all_layers` /
 `plane_layers` (layer content/order is a live divergence class). So one
 `KICAD_DUMP_BATCH_KWARGS_CONTINUE=1` run of a whole plan captures every engine
@@ -207,7 +207,7 @@ step). Post-fix: every plane call MATCHes, GUI board 0 DRC / plane-copper delta
 
 The harness above proves the ENGINE half (same batch_route kwargs -> same
 board) but hand-mirrors the plan->params mapping, so it can't catch a bug in
-`manifest_to_plan` (converter) or `claude_plan.apply_step_params` (apply).
+`manifest_to_plan` (converter) or `ai_plan.apply_step_params` (apply).
 Those two translation layers are where the set11 rp2350_fpga_eensy GUI replay
 silently diverged from its CLI board (242 DRC violations vs 0; issue #361).
 
@@ -223,7 +223,7 @@ a converter that drops a flag fails even though it agrees with itself).
 Current: 0 mismatches over ~6200 flag-checks / 157 corpus manifests. Catches
 all three converter-side gaps from the set11 regression (--no-bga-zones drop,
 diff pairs emitted as net names, layerless repair_planes). The apply-side
-gaps (escape_method value->index, no_gnd_vias inversion) are claude_plan.py's
+gaps (escape_method value->index, no_gnd_vias inversion) are ai_plan.py's
 job and belong to the wx harness / a future stub-dialog apply test.
 
 ## Class-2 post-pass coverage (test_cli_postpass_coverage.py)
@@ -232,7 +232,7 @@ The converter gate above covers the plan->params translation; this one covers
 the OTHER drift axis: a CLI `main()` running a finalization pass AFTER its
 shared engine call that the GUI must separately replicate (Class 2). That is
 how the set11 GUI board shipped 35 plane shorts the CLI board didn't have --
-route_disconnected_planes.main() ran clean_plane_copper and the planes tab
+repair_planes.main() ran clean_plane_copper and the planes tab
 never did.
 
 Static, no wx/pcbnew. It AST-scans each CLI main() for post-engine passes,
@@ -252,11 +252,18 @@ the pass + its GUI counterpart here.
 
 The copper-identity harness measures overlap %, which diverges even when both
 fronts grade clean (rip-up routing is chaotic; #362). The invariant that
-matters is GRADE parity. This gate chains the rp2350 PLANE sub-chain (create →
-repair → reconnect route → repair2) on ONE live board -- as the Claude-tab plan
-executor does, in-memory across steps -- and asserts every stage grades 0 DRC
-like the CLI. It caught the swig_gui route-apply width-rounding bug (0.0762 →
-0.076 fab-floor violations, #362) that per-step isolation on file inputs missed.
+matters is GRADE parity. This gate chains the rp2350 PLANE sub-chain in its
+#562 shape — pour → ONE route step carrying the plane nets in its net list,
+whose in-run finalize is the weld/repair/oracle — on ONE live board, as the
+Claude-tab plan executor does, in-memory across steps, and asserts every
+stage grades 0 DRC like the CLI. (It was reshaped 2026-08-04: the old
+create → repair → reconnect → repair2 plan had rotted into comparing
+different chains, because the executor skips `repair_planes` steps as #562
+no-ops while the CLI leg still shelled the old repair script.) The fixture
+is staged WITH a pcbnew-authored .kicad_pro — a project-less board makes
+the fronts legitimately diverge. It caught the swig_gui route-apply
+width-rounding bug (0.0762 → 0.076 fab-floor violations, #362) that
+per-step isolation on file inputs missed.
 
     python3 tests/gui_parity/test_gui_livechain_rp2350.py
 
@@ -268,15 +275,18 @@ skip cleanly without KiCad python). Run any directly:
 - `test_footprint_position_sync.py` -- `_sync_pcb_data_from_board` refreshes
   footprint/pad positions after optimize_caps (matched by iteration ORDER, not
   pad number -- U6 has 11 pads numbered "61"); a no-op sync moves ZERO pads.
-- `test_plane_rip_blocker_panel.py` -- the plan executor sets `rip_blocker_nets`
-  on the CORRECT plane options panel per action (repair vs create), not the
-  first panel sharing the control name.
+- `test_settings_roundtrip.py` -- save/restore of the dialog's settings dict
+  against the REAL headless dialog: the close path (`get_dialog_settings`),
+  the reopen path (`restore_dialog_settings`), restore from a LEGACY dict
+  carrying keys a newer version dropped, and re-save key parity. Deleting or
+  renaming a control without updating persistence crashes on CLOSE and loses
+  the user's settings -- this gate is what catches that.
 - `test_plane_all_layers_parity.py` -- GUI create passes `all_layers` =
   outer+pour (the route_planes default), not all 6 copper layers (mocks
   create_plane to capture the kwarg).
 - `test_movie_recorder.py` -- the Advanced tab's **Make routing movie** debug
   checkbox (#506): default OFF and inert while off; one routing step renders
-  ONE movie; a plan run (`begin_group`/`end_group`, what the Claude tab's Run
+  ONE movie; a plan run (`begin_group`/`end_group`, what the AI tab's Run
   Selected Steps brackets) renders ONE movie for ALL its steps; the path is
   logged in GREEN; and `reset_params_to_defaults` must NOT untick it (the plan
   executor calls that before every step, so a reset there would abandon the
@@ -293,7 +303,7 @@ skip cleanly without KiCad python). Run any directly:
 Every stress board leaves a GUI-loadable plan beside its chain (`run_board.sh`
 → `manifest_to_plan.py` → `<board>_plan.json`; `make_plan.py` builds the same
 file from any recorded manifest). This driver does what a user does with it —
-open the unrouted board, Claude tab → **Load...** → **Run All Selected Steps** —
+open the unrouted board, AI tab → **Load...** → **Run All Selected Steps** —
 with no buttons and no LLM, then diffs the result against the CLI chain.
 
 The headless driving itself lives in the repo-root **`headless_plan.py`**, which
@@ -309,7 +319,7 @@ Unlike `test_gui_engine_parity.py`, **nothing is mirrored**. The real
 `swig_gui.RoutingDialog` is constructed headless (`parent=None`, never shown —
 wx needs `WXSUPPRESS_SIZER_FLAGS_CHECK=1`, which the script sets, because
 `about_tab`'s `wxEXPAND|wxALIGN_*` sizer flags trip a debug assert) with its
-real tabs and controls, and the real `claude_plan.PlanExecutor` drives it inside
+real tabs and controls, and the real `ai_plan.PlanExecutor` drives it inside
 a `wx.MainLoop`. So the whole `parse_plan_result` → `reset_params_to_defaults` →
 `apply_step_params` → `apply_step_selection` → `tab._on_*()` path is under test,
 including the two translation layers the engine harness cannot see (the
@@ -369,7 +379,7 @@ surface as a failing DRC or connectivity number. All five are now fixed.
    fix. Now a pattern naming no path also matches the trailing component
    (`net_pattern_matches`), shared by the CLI, engine and GUI matchers.
 2. **The GUI's fanout ignored "!" exclusions outright** —
-   `claude_plan._component_net_names` tested `any(glob matches)` over the whole
+   `ai_plan._component_net_names` tested `any(glob matches)` over the whole
    list, so `'*'` always won. It only looked right where `_drop_plane_nets`
    happened to remove the same nets.
 3. **The GUI routed against a slightly different clearance.** `swig_gui` read

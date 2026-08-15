@@ -9,7 +9,7 @@ Checks a routed PCB for Design Rule Check violations.
 ### Usage
 
 ```bash
-python check_drc.py output.kicad_pcb [OPTIONS]
+python py_router/check_drc.py output.kicad_pcb [OPTIONS]
 
 Options:
   --clearance FLOAT    Track-to-track clearance in mm. Default: auto-detected from
@@ -53,16 +53,16 @@ the listing is never silently truncated relative to the header count. Use
 
 ```bash
 # Auto-grade at the clearance the board was routed to (read from its .kicad_pro)
-python check_drc.py routed.kicad_pcb
+python py_router/check_drc.py routed.kicad_pcb
 
 # Override the grading clearance explicitly
-python check_drc.py routed.kicad_pcb --clearance 0.15
+python py_router/check_drc.py routed.kicad_pcb --clearance 0.15
 
 # Override clearance and hole-to-hole explicitly (hole-to-hole defaults to the 0.20 fab floor)
-python check_drc.py routed.kicad_pcb --clearance 0.2 --hole-to-hole-clearance 0.2
+python py_router/check_drc.py routed.kicad_pcb --clearance 0.2 --hole-to-hole-clearance 0.2
 
 # Check specific nets only
-python check_drc.py routed.kicad_pcb --nets "*DATA*"
+python py_router/check_drc.py routed.kicad_pcb --nets "*DATA*"
 ```
 
 ### Checks Performed
@@ -93,7 +93,7 @@ The DRC checker uses a 5% clearance margin by default to ignore tiny geometric a
 With `--debug-lines`, the checker outputs debug lines on the `User.7` layer in the PCB file, showing the closest points between violating segments:
 
 ```bash
-python check_drc.py routed.kicad_pcb --debug-lines
+python py_router/check_drc.py routed.kicad_pcb --debug-lines
 ```
 
 Output includes the distance of each violation:
@@ -142,7 +142,7 @@ connected even with no track between them.
 ### Usage
 
 ```bash
-python check_connected.py output.kicad_pcb [OPTIONS]
+python py_router/check_connected.py output.kicad_pcb [OPTIONS]
 
 Options:
   --nets PATTERN       Only check nets matching pattern
@@ -157,22 +157,22 @@ Options:
 
 ```bash
 # Check all nets (detects both unrouted and broken routes)
-python check_connected.py routed.kicad_pcb
+python py_router/check_connected.py routed.kicad_pcb
 
 # Check specific nets
-python check_connected.py routed.kicad_pcb --nets "*lvds*"
+python py_router/check_connected.py routed.kicad_pcb --nets "*lvds*"
 
 # Check all nets on a component
-python check_connected.py routed.kicad_pcb --component U102
+python py_router/check_connected.py routed.kicad_pcb --component U102
 
 # Check specific patterns on a component
-python check_connected.py routed.kicad_pcb --component U1 --nets "*DATA*"
+python py_router/check_connected.py routed.kicad_pcb --component U1 --nets "*DATA*"
 
 # Only check connectivity of routed nets (skip unrouted detection)
-python check_connected.py routed.kicad_pcb --routed-only
+python py_router/check_connected.py routed.kicad_pcb --routed-only
 
 # Verbose output with break locations
-python check_connected.py routed.kicad_pcb --verbose
+python py_router/check_connected.py routed.kicad_pcb --verbose
 ```
 
 ### Output
@@ -212,7 +212,7 @@ Detects trace endpoints that end without a proper connection point (via or pad).
 ### Usage
 
 ```bash
-python check_orphan_stubs.py input.kicad_pcb [OPTIONS]
+python py_tools/check_orphan_stubs.py input.kicad_pcb [OPTIONS]
 
 Options:
   --net NET_NAME       Only check this net
@@ -224,13 +224,13 @@ Options:
 
 ```bash
 # Check all nets
-python check_orphan_stubs.py board.kicad_pcb
+python py_tools/check_orphan_stubs.py board.kicad_pcb
 
 # Check specific net and layer
-python check_orphan_stubs.py board.kicad_pcb --net "+3.3V" --layer F.Cu
+python py_tools/check_orphan_stubs.py board.kicad_pcb --net "+3.3V" --layer F.Cu
 
 # Compare before/after to find new orphans
-python check_orphan_stubs.py original.kicad_pcb modified.kicad_pcb --compare
+python py_tools/check_orphan_stubs.py original.kicad_pcb modified.kicad_pcb --compare
 ```
 
 ### What It Detects
@@ -295,7 +295,7 @@ it automatically on their component and warn).
 ### Usage
 
 ```bash
-python check_pads.py board.kicad_pcb [OPTIONS]
+python py_router/check_pads.py board.kicad_pcb [OPTIONS]
 
 Options:
   --component, -c REF   Restrict the check to one footprint reference
@@ -314,13 +314,13 @@ pairs (0 = clean), so it gates a pipeline.
 
 ```bash
 # Whole board, checked per footprint
-python check_pads.py board.kicad_pcb
+python py_router/check_pads.py board.kicad_pcb
 
 # One footprint (e.g. before fanning it out)
-python check_pads.py board.kicad_pcb --component U23
+python py_router/check_pads.py board.kicad_pcb --component U23
 
 # Broader board-level short check across all footprints
-python check_pads.py board.kicad_pcb --cross-footprint
+python py_router/check_pads.py board.kicad_pcb --cross-footprint
 ```
 
 ### Output
@@ -343,7 +343,7 @@ Analyzes nets in a PCB file. Can list nets on a component, detect differential p
 ### Usage
 
 ```bash
-python list_nets.py input.kicad_pcb [OPTIONS]
+python py_router/list_nets.py input.kicad_pcb [OPTIONS]
 
 Options:
   --component, -c REF   Component reference (e.g., U1)
@@ -352,7 +352,7 @@ Options:
                         suppressed when both nets land on a single
                         crystal/oscillator footprint, since a 2-terminal
                         resonator is not a differential signal — issue #145)
-  --power, -p           Show power/ground nets with pad counts
+  --power, -p           Show power/ground nets with pad counts, plus each net's per-layer SMD/TH pad profile `(F.Cu n SMD, B.Cu n SMD, TH n)` and the outer-layer flood hint the plane-mapping skill reads
   --design-rules, -r    Show net-class clearance/track/via/diff-pair rules
                         and the CLI flags to pass them to the routing tools
   --top N               Show top N most-connected nets (default: 10)
@@ -371,7 +371,7 @@ constraint (#439). They do **not** infer per-net track/via nominals on their own
 so `--design-rules` reads the real rules for you to pass explicitly:
 
 ```bash
-python list_nets.py board.kicad_pcb --design-rules
+python py_router/list_nets.py board.kicad_pcb --design-rules
 ```
 
 It reads two tiers of rules and combines them with the JLCPCB fab floor:
@@ -387,7 +387,19 @@ It reads two tiers of rules and combines them with the JLCPCB fab floor:
   nominal and still pass DRC (issues #111/#115).
 
 From these it prints a **manufacturing floor** (the Constraint or the JLC fab
-minimum for the board's layer count, whichever is larger). The floor spells out
+minimum for the board's layer count, whichever is larger — for **hole-to-hole**
+and **board-edge**, which the rest of the toolchain pins up from the board's own
+constraint). **Copper clearance is the deliberate exception:** it prints the fab
+minimum alone, because `min_clearance` is an unreliable edit-floor (often 0,
+sometimes stale-large), nothing downstream enforces it, and grading above what
+was routed manufactures phantom violations (#439). A board minimum that raised
+the hole-to-hole floor above the JLC figure is named on its own line, since that
+is the value to route *and* grade at (#603 — printing the bare fab 0.2 while
+`check_drc` graded at the board's 0.25 sent a value into every command that the
+toolchain would not honour). Where an explicit `--hole-to-hole-clearance` /
+`--board-edge-clearance` is below such a minimum, `check_drc` now says it is
+being clamped (on stderr, so it survives `--quiet`) instead of substituting
+silently. The floor spells out
 two distinct rules the router honours: **hole-to-hole** (drill-to-drill) is
 net-INDEPENDENT and applies to via/via, via/pad-drill and pad-drill/pad-drill on
 *all* nets including same-net; **copper clearance** applies to via/pad and
@@ -412,25 +424,25 @@ Constraints exist, it falls back to the JLC fab floor for the layer count.
 
 ```bash
 # Board summary with top connected nets
-python list_nets.py board.kicad_pcb
+python py_router/list_nets.py board.kicad_pcb
 
 # Detect differential pairs
-python list_nets.py board.kicad_pcb --diff-pairs
+python py_router/list_nets.py board.kicad_pcb --diff-pairs
 
 # Show power/ground nets
-python list_nets.py board.kicad_pcb --power
+python py_router/list_nets.py board.kicad_pcb --power
 
 # Full board analysis
-python list_nets.py board.kicad_pcb --diff-pairs --power
+python py_router/list_nets.py board.kicad_pcb --diff-pairs --power
 
 # List all nets on U2A
-python list_nets.py board.kicad_pcb --component U2A
+python py_router/list_nets.py board.kicad_pcb --component U2A
 
 # Show pad-to-net assignments
-python list_nets.py board.kicad_pcb --component U2A --pads
+python py_router/list_nets.py board.kicad_pcb --component U2A --pads
 
 # List only DATA nets on a component
-python list_nets.py board.kicad_pcb --component U2A --pattern "*DATA*"
+python py_router/list_nets.py board.kicad_pcb --component U2A --pattern "*DATA*"
 ```
 
 ### Output Examples
@@ -493,7 +505,7 @@ Generates escape routing for BGA packages with support for differential pairs.
 ### Usage
 
 ```bash
-python bga_fanout.py input.kicad_pcb --component REFERENCE --output output.kicad_pcb [OPTIONS]
+python py_router/bga_fanout.py input.kicad_pcb --component REFERENCE --output output.kicad_pcb [OPTIONS]
 
 Options:
   --component, -c     Component reference (auto-detect BGA if not specified)
@@ -536,6 +548,17 @@ Options:
                       soon-to-be-plane inner layer), otherwise a weight in
                       [1.0, 1000] - cheaper layers are filled first and costly
                       layers keep only overflow escapes
+  --plane-drop        auto (default) or off. After the signal escape (any
+                      method), every SMD ball on a plane net - a net excluded
+                      from --nets with >= 6 balls on the part, or an excluded
+                      net that already owns a copper zone - gets a via
+                      immediately: a dog-bone via in a free inter-ball gap,
+                      else an exact-checked via-in-pad tap. The plane poured
+                      later picks these vias up at fill, so the plane step
+                      never has to push a tap through the finished ball field
+                      (#360/#424). Per-net counts land in
+                      JSON_SUMMARY.plane_drop; KICAD_FANOUT_PLANE_DROP=0/1
+                      overrides the flag (the recorded-manifest A/B switch)
   --fab-tier {standard,advanced}  JLC fab capability floor (default: standard)
   --fab-overrides FILE  Fab-floor override file overlaying the selected --fab-tier
                       (see [Fab Tier Options](configuration.md#fab-tier-options))
@@ -550,11 +573,11 @@ on-grid stub end the router can launch from (issue #149).
 
 ```bash
 # Generate fanout for LVDS differential pairs on IC1
-python bga_fanout.py board.kicad_pcb --component IC1 --output fanout.kicad_pcb \
+python py_router/bga_fanout.py board.kicad_pcb --component IC1 --output fanout.kicad_pcb \
     --nets "*lvds*" --diff-pairs "*lvds*" --primary-escape vertical
 
 # Generate fanout for data nets on U3 with 4 layers
-python bga_fanout.py board.kicad_pcb --component U3 --output fanout.kicad_pcb \
+python py_router/bga_fanout.py board.kicad_pcb --component U3 --output fanout.kicad_pcb \
     --nets "*DATA*" --layers F.Cu In1.Cu In2.Cu B.Cu
 ```
 
@@ -569,7 +592,7 @@ Before:        After:
   o o o          o── o── o──
 ```
 
-See [bga_fanout/README.md](../bga_fanout/README.md) for detailed documentation.
+See [bga_fanout/README.md](../py_router/bga_fanout/README.md) for detailed documentation.
 
 ## QFN/QFP Fanout Generator (`qfn_fanout.py`)
 
@@ -578,7 +601,7 @@ Generates stub tracks for QFN/QFP package fanout.
 ### Usage
 
 ```bash
-python qfn_fanout.py input.kicad_pcb --output output.kicad_pcb --component REFERENCE [OPTIONS]
+python py_router/qfn_fanout.py input.kicad_pcb --output output.kicad_pcb --component REFERENCE [OPTIONS]
 
 Options:
   --component, -c     Component reference (auto-detected if not specified)
@@ -614,7 +637,7 @@ would extend into a foreign obstacle the fan is shortened instead (issue #149).
 
 ```bash
 # Generate fanout stubs for all signal nets on U3
-python qfn_fanout.py board.kicad_pcb fanout.kicad_pcb U3
+python py_router/qfn_fanout.py board.kicad_pcb fanout.kicad_pcb U3
 ```
 
 ## Build Script (`build_router.py`)
@@ -637,8 +660,15 @@ Options:
 
 By default it downloads a prebuilt binary for the current platform from the
 GitHub Release and installs it, verifying the version. With `--from-source` it
-skips the download and builds locally with `cargo` instead. Either way it copies
-the resulting library to the correct location:
+skips the download and builds locally with `cargo` instead.
+
+In a git checkout whose `rust_router/` differs from main (a branch carrying
+crate changes, or uncommitted crate edits), it skips the download and builds
+from source automatically: release binaries are built from main's crate, so a
+prebuilt can match the version string yet carry a different ABI (#615). An
+explicit `--tag` overrides this. Release-zip installs (no git) are unaffected.
+
+Either way it copies the resulting library to the correct location:
    - Windows: `grid_router.pyd`
    - Linux/Mac: `grid_router.so`
 
@@ -654,7 +684,7 @@ Extracts PCB geometry data into a simple JSON format for analysis or debugging.
 ### Usage
 
 ```bash
-python extract_pcb_geometry.py input.kicad_pcb [output.json] [OPTIONS]
+python py_tools/extract_pcb_geometry.py input.kicad_pcb [output.json] [OPTIONS]
 
 Options:
   --output FILE    Output JSON file
@@ -666,13 +696,13 @@ Options:
 
 ```bash
 # Extract all geometry to JSON
-python extract_pcb_geometry.py board.kicad_pcb geometry.json
+python py_tools/extract_pcb_geometry.py board.kicad_pcb geometry.json
 
 # Extract specific nets
-python extract_pcb_geometry.py board.kicad_pcb --nets "*lvds*" --output lvds.json
+python py_tools/extract_pcb_geometry.py board.kicad_pcb --nets "*lvds*" --output lvds.json
 
 # Print summary without writing file
-python extract_pcb_geometry.py board.kicad_pcb --summary
+python py_tools/extract_pcb_geometry.py board.kicad_pcb --summary
 ```
 
 ### Output Format
@@ -703,17 +733,17 @@ Runs a complete integration test: fanout generation followed by routing and veri
 
 ```bash
 # Run all stages
-python test_fanout_and_route.py --all
+python tests/test_fanout_and_route.py --all
 
 # Quick mode (reduced scope)
-python test_fanout_and_route.py --all --quick
+python tests/test_fanout_and_route.py --all --quick
 
 # Run specific stages only
-python test_fanout_and_route.py --fanout --ftdi
-python test_fanout_and_route.py --ram --planes
+python tests/test_fanout_and_route.py --fanout --ftdi
+python tests/test_fanout_and_route.py --ram --planes
 
 # Run only checks (no routing)
-python test_fanout_and_route.py --onlychecks --ftdi --lvds --ram
+python tests/test_fanout_and_route.py --onlychecks --ftdi --lvds --ram
 ```
 
 #### Options
@@ -770,7 +800,7 @@ fanout/route overlapping on the same line). Overlapping via pads (centre distanc
 ### Usage
 
 ```bash
-python3 check_cycles.py board.kicad_pcb [OPTIONS]
+python3 py_tools/check_cycles.py board.kicad_pcb [OPTIONS]
 
 Options:
   --net NAME       Check one net by exact name (always shown, even if clean)
@@ -785,13 +815,13 @@ Exits non-zero if any signal net has loops or overlapping vias (usable in CI).
 
 ```bash
 # Whole board: list every signal net with loops or overlapping vias
-python3 check_cycles.py routed.kicad_pcb
+python3 py_tools/check_cycles.py routed.kicad_pcb
 
 # Focus one net (the wandering loop you saw in the layout)
-python3 check_cycles.py routed.kicad_pcb --net RAM_D8
+python3 py_tools/check_cycles.py routed.kicad_pcb --net RAM_D8
 
 # All RAM data lines, with via-overlap coordinates
-python3 check_cycles.py routed.kicad_pcb --nets 'RAM_D*' --verbose
+python3 py_tools/check_cycles.py routed.kicad_pcb --nets 'RAM_D*' --verbose
 ```
 
 ### Output
@@ -824,7 +854,7 @@ a triage pass before or after the other checkers.
 ### Usage
 
 ```bash
-python3 check_weird.py board.kicad_pcb [OPTIONS]
+python3 py_router/check_weird.py board.kicad_pcb [OPTIONS]
 
 Options:
   --nets, -n PATTERN [PATTERN ...]  Net name patterns to check (fnmatch wildcards,
@@ -841,13 +871,13 @@ Options:
 
 ```bash
 # Whole board, default 0.1mm tolerance
-python3 check_weird.py routed.kicad_pcb
+python3 py_router/check_weird.py routed.kicad_pcb
 
 # Only the LVDS nets, report every finding regardless of size
-python3 check_weird.py routed.kicad_pcb --nets "*lvds*" --tolerance 0
+python3 py_router/check_weird.py routed.kicad_pcb --nets "*lvds*" --tolerance 0
 
 # Include the slow removable-segment scan on large nets
-python3 check_weird.py routed.kicad_pcb --thorough
+python3 py_router/check_weird.py routed.kicad_pcb --thorough
 ```
 
 ## Non-Orthonormal Segment Checker (`check_orthonormal.py`)
@@ -864,7 +894,7 @@ output, independent of DRC.
 ### Usage
 
 ```bash
-python3 check_orthonormal.py board.kicad_pcb [OPTIONS]
+python3 py_tools/check_orthonormal.py board.kicad_pcb [OPTIONS]
 
 Options:
   --grid-step FLOAT     Router grid step in mm (default: 0.05)
@@ -883,10 +913,10 @@ Options:
 
 ```bash
 # Default (0.05mm grid)
-python3 check_orthonormal.py routed.kicad_pcb
+python3 py_tools/check_orthonormal.py routed.kicad_pcb
 
 # Match a 0.1mm routing grid
-python3 check_orthonormal.py routed.kicad_pcb --grid-step 0.1
+python3 py_tools/check_orthonormal.py routed.kicad_pcb --grid-step 0.1
 ```
 
 ## Parser-Parity Validator (`validate_pcb_data.py`)
@@ -899,7 +929,7 @@ two parsers mis-models the board (pad geometry, arc tracks, zones, bounds,
 ...) and the CLI and GUI would route against different worlds.
 
 ```bash
-python3 validate_pcb_data.py board.kicad_pcb [more.kicad_pcb ...]
+python3 py_tools/validate_pcb_data.py board.kicad_pcb [more.kicad_pcb ...]
 ```
 
 Needs the pcbnew Python module; when run with a plain `python3` it re-execs
@@ -975,7 +1005,7 @@ do not appear in the GUI.)
 ### Usage
 
 ```bash
-python3 fix_kicad_drc_settings.py board.kicad_pcb [OPTIONS]
+python3 py_router/fix_kicad_drc_settings.py board.kicad_pcb [OPTIONS]
 
 Options:
   --clearance MM        Copper clearance floor (default: project Default net-class clearance)
@@ -1004,7 +1034,7 @@ then re-run. The script is idempotent and accepts either the `.kicad_pcb` or the
 ### Runs automatically after routing
 
 You normally don't run this by hand: **`route.py`, `route_diff.py`,
-`route_planes.py`, and `route_disconnected_planes.py` invoke it as their final
+`route_planes.py`, and `repair_planes.py` invoke it as their final
 step** (issue #160), pinning the floors to the clearances/sizes they just routed
 with, so the written project is DRC-consistent by default. If the output is a new
 file with no project yet, they copy the input board's `.kicad_pro` (or seed a
@@ -1023,10 +1053,10 @@ override box is the equivalent (unchecked = honor classes, checked = clamp).
 The **GUI plugin** does the equivalent on the live board via the pcbnew API
 (`BOARD_DESIGN_SETTINGS` + the Default net class + severities) after routing, and
 marks the board modified so your next save keeps it. A single **"Fix DRC settings
-after routing"** checkbox on the **Basic tab** controls this for every routing
+after routing"** checkbox on the **Route tab** controls this for every routing
 action in the dialog — single-ended routing, differential pairs, and plane
 create/repair all read that one shared toggle (it is on by default); a **"Keep
-thermal-relief DRC severity"** checkbox on the **Advanced tab** is the GUI
+thermal-relief DRC severity"** checkbox on the **Advanced options tab** is the GUI
 counterpart of `--keep-thermal` (off by default). Both front-ends share the same
 target-computing logic (`compute_targets` / `severity_plan` in
 `fix_kicad_drc_settings.py`) and differ only in how they apply it (`.kicad_pro`
@@ -1037,24 +1067,24 @@ file vs. pcbnew API).
 ```bash
 # Default: derive floors from the board's own minima + project clearance; ignore
 # courtyard, solder-mask and footprint/library (annular_width, lib_footprint_*) noise
-python3 fix_kicad_drc_settings.py routed.kicad_pcb
+python3 py_router/fix_kicad_drc_settings.py routed.kicad_pcb
 
 # Pin every floor to the routing parameters you gave route.py (recommended)
-python3 fix_kicad_drc_settings.py routed.kicad_pcb \
+python3 py_router/fix_kicad_drc_settings.py routed.kicad_pcb \
     --clearance 0.15 --track-width 0.15 --via-size 0.4 --via-drill 0.3 \
     --hole-to-hole 0.2 --edge-clearance 0.0
 
 # Preview without writing
-python3 fix_kicad_drc_settings.py routed.kicad_pcb --dry-run
+python3 py_router/fix_kicad_drc_settings.py routed.kicad_pcb --dry-run
 
 # Pin the hole-clearance floor explicitly
-python3 fix_kicad_drc_settings.py routed.kicad_pcb --hole-clearance 0.1
+python3 py_router/fix_kicad_drc_settings.py routed.kicad_pcb --hole-clearance 0.1
 
 # Also silence every warning-severity marker (track_dangling, silk_*, etc.)
-python3 fix_kicad_drc_settings.py routed.kicad_pcb --ignore-warnings
+python3 py_router/fix_kicad_drc_settings.py routed.kicad_pcb --ignore-warnings
 
 # Keep courtyard checks, ignore only the mask bridges plus one extra category
-python3 fix_kicad_drc_settings.py routed.kicad_pcb --keep-courtyards --ignore starved_thermal
+python3 py_router/fix_kicad_drc_settings.py routed.kicad_pcb --keep-courtyards --ignore starved_thermal
 ```
 
 ### Output
@@ -1071,7 +1101,7 @@ manufacturing **floor ladder** every routing/DRC CLI shrinks tracks, vias and
 clearances *down toward*. It is stdlib-only so the lightweight DRC-settings
 script can import it without the PCB parser, and it exposes the two flags
 (`--fab-tier` / `--fab-overrides`) that `route.py`, `route_diff.py`,
-`route_planes.py`, `route_disconnected_planes.py`, `bga_fanout.py`,
+`route_planes.py`, `repair_planes.py`, `bga_fanout.py`,
 `qfn_fanout.py`, `check_drc.py`, `fix_kicad_drc_settings.py` and `list_nets.py`
 all add through its `add_fab_tier_args()` helper (so the flag is identical
 everywhere).
@@ -1094,13 +1124,13 @@ template listing every key and the built-in tier values ships as
 
 ```bash
 # Route to the cheap floor (default); dense fan-outs warn when they escalate
-python3 route.py in.kicad_pcb out.kicad_pcb --nets "Net*"
+python3 py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net*"
 
 # Opt the whole board into the tighter, more-costly floor
-python3 route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-tier advanced
+python3 py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-tier advanced
 
 # Declare your own fab capability (pins the floor, no escalation)
-python3 route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-overrides my_fab.txt
+python3 py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-overrides my_fab.txt
 ```
 
 See [Fab Tier Options](configuration.md#fab-tier-options) for the full floor
@@ -1113,43 +1143,43 @@ param is set below the active floor).
 
 ```bash
 # Route the nets
-python route.py input.kicad_pcb routed.kicad_pcb "Net-*" --ordering mps
+python py_router/route.py input.kicad_pcb routed.kicad_pcb "Net-*" --ordering mps
 
 # Check for DRC violations
-python check_drc.py routed.kicad_pcb
+python py_router/check_drc.py routed.kicad_pcb
 
 # Verify connectivity (all routed nets)
-python check_connected.py routed.kicad_pcb
+python py_router/check_connected.py routed.kicad_pcb
 
 # Or verify connectivity for a specific component
-python check_connected.py routed.kicad_pcb --component U1
+python py_router/check_connected.py routed.kicad_pcb --component U1
 ```
 
 ### BGA Differential Pair Flow
 
 ```bash
 # 1. Generate fanout stubs
-python bga_fanout.py board.kicad_pcb --component U2A --output fanout.kicad_pcb \
+python py_router/bga_fanout.py board.kicad_pcb --component U2A --output fanout.kicad_pcb \
     --nets "*lvds*" --diff-pairs "*lvds*"
 
 # 2. Route differential pairs
-python route.py fanout.kicad_pcb routed.kicad_pcb --nets "*lvds*" \
+python py_router/route.py fanout.kicad_pcb routed.kicad_pcb --nets "*lvds*" \
     --diff-pairs "*lvds*" \
     --ordering inside_out
 
 # 3. Verify results
-python check_drc.py routed.kicad_pcb
-python check_connected.py routed.kicad_pcb --nets "*lvds*"
+python py_router/check_drc.py routed.kicad_pcb
+python py_router/check_connected.py routed.kicad_pcb --nets "*lvds*"
 ```
 
 ### Debug Routing Issues
 
 ```bash
 # List nets on problematic component
-python list_nets.py board.kicad_pcb U2A --pads
+python py_router/list_nets.py board.kicad_pcb U2A --pads
 
 # Route with debug lines enabled
-python route.py input.kicad_pcb debug.kicad_pcb "Net-(*)" --debug-lines
+python py_router/route.py input.kicad_pcb debug.kicad_pcb "Net-(*)" --debug-lines
 
 # Open debug.kicad_pcb in KiCad, check User.3/4/5/6/8/9 layers
 ```

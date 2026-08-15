@@ -12,7 +12,10 @@ that helper with a mock board (real kipy Vector2/Angle), no running KiCad.
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _REPO)
+# #522: the engine modules the adapter imports live under py_router/ now.
+sys.path.insert(0, os.path.join(_REPO, 'py_router'))
 
 import kicad_ipc_adapter as adapter
 

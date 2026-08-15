@@ -8,12 +8,12 @@ This document describes all configuration options for the KiCad Grid Router.
 
 ```bash
 # Single-ended routing (all nets by default)
-python route.py input.kicad_pcb [output.kicad_pcb] [OPTIONS]  # Default output: input_routed.kicad_pcb
-python route.py input.kicad_pcb --overwrite [OPTIONS]         # Overwrite input file
+python py_router/route.py input.kicad_pcb [output.kicad_pcb] [OPTIONS]  # Default output: input_routed.kicad_pcb
+python py_router/route.py input.kicad_pcb --overwrite [OPTIONS]         # Overwrite input file
 
 # Differential pair routing (all nets by default)
-python route_diff.py input.kicad_pcb [output.kicad_pcb] [OPTIONS]  # Default output: input_routed.kicad_pcb
-python route_diff.py input.kicad_pcb --overwrite [OPTIONS]         # Overwrite input file
+python py_router/route_diff.py input.kicad_pcb [output.kicad_pcb] [OPTIONS]  # Default output: input_routed.kicad_pcb
+python py_router/route_diff.py input.kicad_pcb --overwrite [OPTIONS]         # Overwrite input file
 ```
 
 Use `route.py` for single-ended nets and `route_diff.py` for differential pairs. By default, all nets are routed. Use `--nets` to filter specific patterns.
@@ -28,17 +28,27 @@ Net names support glob wildcards. Use `--nets` (or `-n`) to specify patterns:
 
 ```bash
 # Exact net names
-python route.py in.kicad_pcb out.kicad_pcb --nets "Net-(U2A-DATA_0)" "Net-(U2A-DATA_1)"
+python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net-(U2A-DATA_0)" "Net-(U2A-DATA_1)"
 
 # Wildcard patterns
-python route.py in.kicad_pcb out.kicad_pcb --nets "Net-(U2A-DATA_*)"
+python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net-(U2A-DATA_*)"
 
 # Multiple patterns
-python route.py in.kicad_pcb out.kicad_pcb --nets "Net-(*CLK*)" "Net-(*DATA*)"
+python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net-(*CLK*)" "Net-(*DATA*)"
 
 # Route all nets on a component (auto-excludes GND/VCC/VDD/unconnected)
-python route.py in.kicad_pcb out.kicad_pcb --component U1
+python py_router/route.py in.kicad_pcb out.kicad_pcb --component U1
+
+# Several components at once, with fnmatch globs. A BARE reference is exact,
+# so U1 does not also select U10; write U1* if that is what you want.
+python py_router/route.py in.kicad_pcb out.kicad_pcb --component U3 U4 "J1*"
 ```
+
+`--component` takes one or more references and errors out (naming the offender,
+with a did-you-mean) if any of them matches no footprint — routing the remaining
+subset after a typo would quietly do the wrong thing. Because it accepts several
+values it consumes the tokens after it, so pass the output via `--output` or put
+`--component` last.
 
 ### Ripping Pre-Existing Routes
 
@@ -56,10 +66,43 @@ non-plane net.
 
 ```bash
 # Let the router rip and re-route any pre-existing DATA net that gets in the way
-python route.py in.kicad_pcb out.kicad_pcb --nets "*CLK*" --rip-existing-nets "*DATA*"
+python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "*CLK*" --rip-existing-nets "*DATA*"
 
 # Allow ripping any pre-existing (non-plane) net
-python route.py in.kicad_pcb out.kicad_pcb --nets "*" --rip-existing-nets "*"
+python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "*" --rip-existing-nets "*"
+```
+
+### Forcing a Re-Route
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--force-reroute` | off | Rip and re-route **from scratch** every net selected by `--nets`, even if it is already fully connected |
+
+`--rip-existing-nets` only rips nets that *block* another route, so an
+already-connected net named in `--nets` is normally skipped ("already fully
+connected") — there is no way to make the router replace a
+connected-but-unwanted route (e.g. one that squeaked through a corridor you
+want cleared). `--force-reroute` is that way: every selected net has its
+copper stripped and is replanned from scratch. In the GUI it is the
+**Force re-route selected nets** checkbox on the Route tab.
+
+Safety rails:
+
+- Requires an explicit net scope (`--nets`, positional patterns, or
+  `--component`) — without one the run is rejected rather than silently
+  ripping the whole board.
+- Protected nets (length-matched groups, routed diff pairs — see
+  [Length Matching](length-matching.md)) are skipped unless named **exactly**
+  (a glob is not an override); KiCad-**locked** copper is never ripped.
+- Plane (zone-owning) nets are skipped — use `route_planes.py` for those.
+- If the re-route produces no copper at all, the net's original copper is
+  restored, so a failed replan never trades a working route for nothing.
+- The net re-routes at its original dominant track width unless this run
+  specifies one (same width-preservation as ripped pre-existing nets).
+
+```bash
+# Replace the existing /CLK route with a fresh from-scratch plan
+python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "/CLK" --force-reroute
 ```
 
 ### Geometry Options
@@ -79,9 +122,9 @@ python route.py in.kicad_pcb out.kicad_pcb --nets "*" --rip-existing-nets "*"
 
 The **fab tier** is the JLCPCB manufacturing floor every routing step shrinks tracks,
 vias and clearances *down toward* when it needs to. It is shared by every CLI
-(`route.py`, `route_diff.py`, `route_planes.py`, `route_disconnected_planes.py`,
+(`route.py`, `route_diff.py`, `route_planes.py`, `repair_planes.py`,
 `bga_fanout.py`, `qfn_fanout.py`, `check_drc.py`, `fix_kicad_drc_settings.py`,
-`list_nets.py`) and the GUI (one selector on the Basic tab). Values are sourced from
+`list_nets.py`) and the GUI (one selector on the Route tab). Values are sourced from
 [jlcpcb.com/capabilities](https://jlcpcb.com/capabilities).
 
 | Option | Default | Description |
@@ -125,13 +168,13 @@ override sets one fixed value for every board — override them only if you want
 
 ```bash
 # Route to the cheap floor (default); dense fan-outs warn when they escalate
-python route.py in.kicad_pcb out.kicad_pcb --nets "Net*"
+python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net*"
 
 # Opt the whole board into the tighter, more-costly floor
-python route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-tier advanced
+python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-tier advanced
 
 # Declare your own fab capability
-python route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-overrides my_fab.txt
+python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-overrides my_fab.txt
 ```
 
 **Floor enforcement.** The CLI **errors** if `--track-width`, `--clearance`,
@@ -144,7 +187,7 @@ legitimately-escalated fine geometry is not flagged.
 ### Post-Route DRC Settings
 
 As their final step, all four routing CLIs (`route.py`, `route_diff.py`,
-`route_planes.py`, `route_disconnected_planes.py`) rewrite the output's sibling
+`route_planes.py`, `repair_planes.py`) rewrite the output's sibling
 `.kicad_pro` so KiCad's Board Setup floors match the clearances/sizes just routed
 — a manual DRC in KiCad then flags only genuine problems instead of stock-default
 noise (issue #160). The [DRC Settings Fixer](utilities.md#drc-settings-fixer-fix_kicad_drc_settingspy)
@@ -169,7 +212,7 @@ live board via the pcbnew API.
 
 ```bash
 # Route with wider tracks for power nets
-python route.py input.kicad_pcb output.kicad_pcb --nets "Net*" \
+python py_router/route.py input.kicad_pcb output.kicad_pcb --nets "Net*" \
   --power-nets "*GND*" "*VCC*" "+3.3V" \
   --power-nets-widths 0.4 0.5 0.3
   # default track-width is 0.3 for non-power nets
@@ -215,7 +258,7 @@ See [Rip-Up and Reroute](rip-up-reroute.md) for how failed routes trigger rip-up
 |--------|---------|-------------|
 | `--stub-proximity-radius` | 2.0 | Radius around stubs to penalize (mm) |
 | `--stub-proximity-cost` | 0.2 | Cost penalty at stub center (mm equivalent) |
-| `--via-proximity-cost` | 10.0 | Via cost multiplier in stub proximity zones (0 = block vias) |
+| `--via-proximity-cost` | 10.0 | Via cost multiplier in stub proximity zones (0 = no extra cost) |
 | `--bga-proximity-radius` | 7.0 | Radius around BGA edges to penalize (mm) |
 | `--bga-proximity-cost` | 0.2 | Cost penalty at BGA edge (mm equivalent) |
 | `--track-proximity-distance` | 2.0 | Radius around routed tracks to penalize on same layer (mm) |
@@ -256,7 +299,7 @@ or `route_planes.py`.
 
 ```bash
 # Route two nets so they follow a corridor drawn on User.1
-python route.py in.kicad_pcb out.kicad_pcb --nets "Net-(A)" "Net-(B)" --guide-corridor
+python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net-(A)" "Net-(B)" --guide-corridor
 ```
 
 Notes:
@@ -295,7 +338,7 @@ routed in the run.
 
 ```bash
 # Route a net so it avoids keepout polygons drawn on User.2
-python route.py in.kicad_pcb out.kicad_pcb --nets "Net-(A)" --keepout
+python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net-(A)" --keepout
 ```
 
 Notes:
@@ -315,7 +358,7 @@ Notes:
   meant for open board area.
 - Unlike a guide corridor (which is best-effort), a keepout is absolute — if a zone walls off the
   only path to a pad, that net will fail to route. With the flag off, routing is unchanged.
-- **Plugin only:** the Basic tab has optional "Clear guide layer after routing" / "Clear keepout
+- **Plugin only:** the Route tab has optional "Clear guide layer after routing" / "Clear keepout
   layer after routing" checkboxes (unchecked by default). When ticked, a *successful* route deletes
   the drawn guide/keepout graphics from that User layer so you can draw fresh ones — it only acts
   for the feature it pairs with, and never runs if nothing routed.
@@ -436,23 +479,13 @@ Time matching is an alternative to length matching that matches propagation dela
 
 **Example:**
 ```bash
-python route.py input.kicad_pcb output.kicad_pcb --nets "*DQ*" \
+python py_router/route.py input.kicad_pcb output.kicad_pcb --nets "*DQ*" \
     --length-match-group auto \
     --time-matching \
     --time-match-tolerance 1.0
 ```
 
 See [Length Matching](length-matching.md#time-matching) for how propagation delay is computed from the stackup, including via barrel delays.
-
-### Visualization Options
-
-Available in `route.py` only (not `route_diff.py` or `route_planes.py`). See the [PyGame visualizer documentation](../pygame_visualizer/README.md) for the full list of interactive controls (pause/step, zoom/pan, layer filtering, speed). Requires pygame (`pip install pygame-ce`); without it, routing falls back to normal batch mode.
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--visualize` / `-V` | false | Show real-time visualization of routing (requires pygame) |
-| `--auto` | false | Auto-advance to next net without waiting (with `--visualize`) |
-| `--display-time` | 0.0 | Seconds to display completed route before advancing (with `--visualize --auto`) |
 
 ### Debug Options
 
@@ -463,7 +496,7 @@ Available in `route.py` only (not `route_diff.py` or `route_planes.py`). See the
 | `--skip-routing` | false | Skip actual routing, only do swaps and write debug info |
 | `--debug-memory` | false | Print memory usage statistics at key points during routing |
 | `--stats` | false | Print A* search statistics (cells expanded, heuristic efficiency) |
-| `--add-teardrops` | false | Add teardrop settings to all pads **and vias** in the output file. Available on every step that writes pad/via copper: `route.py`, `route_diff.py`, `route_planes.py`, `route_disconnected_planes.py`, `bga_fanout.py`, `qfn_fanout.py` (#489 §9). In the GUI it is the one shared "Add teardrops" checkbox, which now reaches the fanout and planes tabs too. |
+| `--add-teardrops` | false | Add teardrop settings to all pads **and vias** in the output file. Available on every step that writes pad/via copper: `route.py`, `route_diff.py`, `route_planes.py`, `repair_planes.py`, `bga_fanout.py`, `qfn_fanout.py` (#489 §9). In the GUI it is the one shared "Add teardrops" checkbox, which now reaches the fanout and planes tabs too. |
 
 ## GridRouteConfig Class
 
@@ -648,7 +681,7 @@ This encourages routes to avoid blocking future routing paths.
 ### BGA Fanout (Dense, Many Vias)
 
 ```bash
-python route.py input.kicad_pcb output.kicad_pcb --nets "Net-(*)" \
+python py_router/route.py input.kicad_pcb output.kicad_pcb --nets "Net-(*)" \
     --ordering inside_out \
     --via-cost 10 \
     --heuristic-weight 1.2 \
@@ -659,7 +692,7 @@ python route.py input.kicad_pcb output.kicad_pcb --nets "Net-(*)" \
 ### Long Routes (Few Vias)
 
 ```bash
-python route.py input.kicad_pcb output.kicad_pcb --nets "Net-(*)" \
+python py_router/route.py input.kicad_pcb output.kicad_pcb --nets "Net-(*)" \
     --ordering mps \
     --via-cost 50 \
     --heuristic-weight 2.0
@@ -668,7 +701,7 @@ python route.py input.kicad_pcb output.kicad_pcb --nets "Net-(*)" \
 ### Differential Pairs (LVDS)
 
 ```bash
-python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
+python py_router/route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
     --diff-pair-gap 0.1 \
     --track-width 0.1 \
     --clearance 0.1 \
@@ -678,7 +711,7 @@ python route_diff.py input.kicad_pcb output.kicad_pcb --nets "*lvds*" \
 ### Fast Routing (Large Boards)
 
 ```bash
-python route.py input.kicad_pcb output.kicad_pcb --nets "Net-(*)" \
+python py_router/route.py input.kicad_pcb output.kicad_pcb --nets "Net-(*)" \
     --grid-step 0.2 \
     --heuristic-weight 2.0 \
     --max-iterations 50000
@@ -687,7 +720,7 @@ python route.py input.kicad_pcb output.kicad_pcb --nets "Net-(*)" \
 ### Fine-Pitch BGA
 
 ```bash
-python route.py input.kicad_pcb output.kicad_pcb --nets "Net-(*)" \
+python py_router/route.py input.kicad_pcb output.kicad_pcb --nets "Net-(*)" \
     --grid-step 0.05 \
     --track-width 0.075 \
     --clearance 0.075 \
@@ -698,7 +731,7 @@ python route.py input.kicad_pcb output.kicad_pcb --nets "Net-(*)" \
 ### Power and Signal Mixed (Wider Power Tracks)
 
 ```bash
-python route.py input.kicad_pcb output.kicad_pcb --nets "*" \
+python py_router/route.py input.kicad_pcb output.kicad_pcb --nets "*" \
     --power-nets "*GND*" "*VCC*" "*VDD*" "+*V" \
     --power-nets-widths 0.5 0.4 0.4 0.3 \
     --track-width 0.2 \

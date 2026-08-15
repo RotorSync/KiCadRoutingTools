@@ -26,16 +26,16 @@ def main():
     POWER = '--power-nets "GND" "VCC" "VCC_PIC" "VPP" "Net-(D1-A)" "Net-(D1-K)" --power-nets-widths 1.0 1.0 0.7 0.7 1.0 1.0'
 
     # Step 1: Create GND plane on B.Cu
-    run(f"python3 route_planes.py kicad_files/flat_hierarchy.kicad_pcb --nets GND --plane-layers B.Cu {GEOMETRY} {POWER}", unbuffered)
+    run(f"python3 py_router/route_planes.py kicad_files/flat_hierarchy.kicad_pcb --nets GND --plane-layers B.Cu {GEOMETRY} {POWER}", unbuffered)
 
     # Step 2: Route all signals
-    run(f"python3 route.py kicad_files/flat_hierarchy_routed.kicad_pcb --overwrite {GEOMETRY} {LAYERS_4} {POWER}", unbuffered)
+    run(f"python3 py_router/route.py kicad_files/flat_hierarchy_routed.kicad_pcb --overwrite {GEOMETRY} {LAYERS_4} {POWER}", unbuffered)
 
     if args.checks:
         # Check for DRC errors
-        run("python3 check_drc.py kicad_files/flat_hierarchy_routed.kicad_pcb --clearance 0.4", unbuffered)
+        run("python3 py_router/check_drc.py kicad_files/flat_hierarchy_routed.kicad_pcb --clearance 0.4", unbuffered)
         # Check connectivity
-        run("python3 check_connected.py kicad_files/flat_hierarchy_routed.kicad_pcb", unbuffered)
+        run("python3 py_router/check_connected.py kicad_files/flat_hierarchy_routed.kicad_pcb", unbuffered)
 
     print("\n=== Test completed ===")
 

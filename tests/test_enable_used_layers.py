@@ -11,6 +11,8 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522
 
 from fix_kicad_drc_settings import enable_used_layers, _canonical_layer  # noqa: E402
 from kicad_parser import parse_kicad_pcb  # noqa: E402

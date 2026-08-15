@@ -4,7 +4,7 @@
 Replaces the old kicad-cli + headless-Chrome renderer (board_image.py /
 board_layer_images.py) with the fast geometry renderer (route_render), and
 adds an animated movie of the whole routing run (make_movie -> animate_route;
-``python3 make_movie.py RUNDIR`` makes the same movie by hand). Drops, next
+``python3 py_router/make_movie.py RUNDIR`` makes the same movie by hand). Drops, next
 to the final board / in the run dir:
 
   * ``<board>.png``            -- combined final snapshot (all copper layers)
@@ -27,7 +27,10 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+_REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, _REPO)
+sys.path.insert(0, os.path.join(_REPO, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(_REPO, 'py_tools'))  # #522
 
 
 def render_final_snapshot(board_path, size=1600, per_layer=True, quiet=False):

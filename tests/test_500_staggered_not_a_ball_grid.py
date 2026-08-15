@@ -25,6 +25,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # #522
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # #522
 
 from bga_fanout.grid import analyze_bga_grid, staggered_lattice_diagnosis
 
@@ -43,6 +45,9 @@ class _Pad:
     def __init__(self, x, y):
         self.global_x, self.global_y = float(x), float(y)
         self.local_x, self.local_y = float(x), float(y)
+        # analyze_bga_grid filters mechanical NPTH pads out of the pitch vote
+        # (#513 item 3); these synthetic balls are copper pads.
+        self.pad_type = 'smd'
 
 
 class _FP:
@@ -95,7 +100,8 @@ def main():
     check("env override honoured (documented)",
           'KICAD_ALLOW_STAGGERED_BGA' in open(
               os.path.join(os.path.dirname(os.path.dirname(
-                  os.path.abspath(__file__))), 'bga_fanout', '__init__.py')).read(),
+                  os.path.abspath(__file__))), 'py_router',
+                  'bga_fanout', '__init__.py')).read(),
           True)
 
     print()

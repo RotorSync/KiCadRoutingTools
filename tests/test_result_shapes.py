@@ -13,6 +13,8 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # #522
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # #522
 
 import route
 import route_planes
@@ -26,7 +28,8 @@ def _ok(name, cond):
 def _full_path_keys():
     """Keys of the dict batch_route builds under `if return_results:` (full path),
     scraped from source so this test fails if the two drift apart."""
-    src = open(os.path.join(os.path.dirname(__file__), '..', 'route.py'),
+    src = open(os.path.join(os.path.dirname(__file__), '..', 'py_router',
+                            'route.py'),
                encoding='utf-8').read()
     # The full-path dict is the one assigned to `results_data = {` with the
     # long comment about "Return results data for direct application".

@@ -4,7 +4,7 @@ routing-affecting CLI flag into the GUI plan step it emits.
 
 A recorded stress `redo_commands.sh` is the source of truth for the CLI
 routing chain. `tests/stress/manifest_to_plan.py` turns each kept command into
-the plan step the Claude tab loads. If a flag is dropped or renamed in that
+the plan step the AI tab loads. If a flag is dropped or renamed in that
 translation, the GUI "replay" silently diverges from the CLI board it claims to
 reproduce -- exactly how set11 rp2350_fpga_eensy came out with 242 DRC
 violations vs the CLI's 0 (issue #361).
@@ -14,7 +14,7 @@ kept command 1:1 with its plan step (so there is no fragile positional
 matching), then asserts each flag with an INDEPENDENT expectation table --
 a converter that drops --no-bga-zones fails even though it "agrees with
 itself". This is the converter half of GUI/CLI parity; the apply half
-(claude_plan.apply_step_params control mapping) is covered by
+(ai_plan.apply_step_params control mapping) is covered by
 test_gui_engine_parity.py under KiCad's python.
 
 Run:  python3 tests/gui_parity/test_manifest_plan_parity.py [manifest ...]
@@ -227,14 +227,14 @@ FIXTURE = str(Path(__file__).resolve().parent / "fixtures" / "sample_redo_comman
 
 
 # --- #381 D5: param -> control resolution gate --------------------------------
-# claude_plan.py imports wx at module level, so we can't import it here (no-wx
+# ai_plan.py imports wx at module level, so we can't import it here (no-wx
 # gate). Extract its resolution tables and the GUI control attribute names by
 # AST instead, then assert every param that MUST reach a control actually does
 # (via same-name control, alias->control, or a _apply_special handler). This is
 # what blocks a new "no control, ignored" fallthrough (the D5 regression class).
 import ast  # noqa: E402
 
-# Params claude_plan resolves through action-specific blocks (not the generic
+# Params ai_plan resolves through action-specific blocks (not the generic
 # alias/special path): composites / same-name-but-formatted controls. Kept
 # explicit so the gate credits them without re-parsing every action block.
 _ACTION_BLOCK_HANDLED = {
@@ -253,10 +253,10 @@ _MUST_RESOLVE = {
 }
 
 
-def _claude_plan_tables():
+def _ai_plan_tables():
     """AST-extract _PARAM_CONTROL_ALIASES (dict) and _PARAM_SPECIAL (set) from
-    claude_plan.py without importing it (it imports wx)."""
-    src = (REPO / "kicad_routing_plugin" / "claude_plan.py").read_text()
+    ai_plan.py without importing it (it imports wx)."""
+    src = (REPO / "kicad_routing_plugin" / "ai_plan.py").read_text()
     tree = ast.parse(src)
     aliases, special = {}, set()
     for node in tree.body:
@@ -296,7 +296,7 @@ def _gui_control_attrs():
 
 def check_param_resolution():
     """Return list of (param, reason) for MUST-resolve params that don't."""
-    aliases, special = _claude_plan_tables()
+    aliases, special = _ai_plan_tables()
     controls = _gui_control_attrs()
     bad = []
     for p in sorted(_MUST_RESOLVE):

@@ -12,7 +12,9 @@ with mock kipy objects mirroring the PolygonWithHoles / PolyLine / node shape.
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _REPO)
+sys.path.insert(0, os.path.join(_REPO, 'py_router'))  # #522
 
 from kicad_parser import (
     _kipy_pad_polygon_points, _attach_custom_pad_polygons, Pad,

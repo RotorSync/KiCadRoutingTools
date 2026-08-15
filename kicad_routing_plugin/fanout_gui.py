@@ -13,6 +13,11 @@ PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(PLUGIN_DIR)
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
+# #522 layout: the engine modules live in py_router/ under the repo root.
+# The exists() guard keeps a FLAT installed layout (PCM zip) working too.
+_ENGINE_DIR = os.path.join(ROOT_DIR, 'py_router')
+if os.path.isdir(_ENGINE_DIR) and _ENGINE_DIR not in sys.path:
+    sys.path.insert(0, _ENGINE_DIR)
 
 import routing_defaults as defaults
 from kicad_parser import mm_to_iu
@@ -337,18 +342,20 @@ class NetSelectionPanel(wx.Panel):
         if sync_from_visible:
             self._sync_checked_state_from_view()
 
-        # Build set of nets connected to the filtered component
+        # Build set of nets connected to the filtered component. Shared with the
+        # CLI via net_queries (#537) so the same reference cannot select
+        # different nets here than it does in route.py. 'substring' keeps this
+        # box's long-standing behaviour -- a bare "U1" still narrows to U1, U10,
+        # U100 as you type -- while a token carrying * ? or [ is now honoured as
+        # a glob instead of being searched for literally.
         component_nets = set()
         component_net_ids = set()
         if component_filter:
-            for net_id, pads in self.pcb_data.pads_by_net.items():
-                for pad in pads:
-                    if pad.component_ref and component_filter.lower() in pad.component_ref.lower():
-                        net_info = self.pcb_data.nets.get(net_id)
-                        if net_info and net_info.name:
-                            component_nets.add(net_info.name)
-                            component_net_ids.add(net_id)
-                        break
+            from net_queries import nets_for_components
+            _sel = nets_for_components(self.pcb_data, [component_filter],
+                                       match='substring')
+            component_nets = set(_sel.net_names)
+            component_net_ids = set(_sel.net_ids)
 
         # Filter by text and component
         filtered_nets = []
@@ -830,6 +837,35 @@ class BGAOptionsPanel(wx.ScrolledWindow):
         esc_method_row.Add(self.escape_method_choice, 1)
         options_sizer.Add(esc_method_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
+        self.plane_drop = wx.CheckBox(self, label="Drop plane-net balls to vias")
+        self.plane_drop.SetValue(True)
+        self.plane_drop.SetToolTip(
+            "After the signal escape, give every plane-net ball (a net excluded "
+            "from the fanout with >= 6 balls, or one that already owns a zone) "
+            "a via now: a dog-bone via in a free inter-ball gap, else "
+            "via-in-pad. The plane poured later picks the via up at fill, "
+            "instead of the plane step pushing a tap through the finished ball "
+            "field (#360/#424). On by default; matches the CLI --plane-drop.")
+        options_sizer.Add(self.plane_drop, 0, wx.LEFT | wx.BOTTOM, 5)
+
+        # Future-pour declaration (review parity finding 5: --plane-net-layers
+        # was CLI-only, so a manifest-converted plan silently dropped it).
+        # Named after the engine param so the plan executor's generic loop
+        # fills it; empty = None, same as the CLI omitting the flag.
+        pnl_row = wx.BoxSizer(wx.HORIZONTAL)
+        pnl_row.Add(wx.StaticText(self, label="Plane net layers:"), 0,
+                    wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        self.plane_net_layers_ctrl = wx.TextCtrl(self, value="")
+        self.plane_net_layers_ctrl.SetToolTip(
+            "Declare the FUTURE plane plan for the plane-drop decision: for "
+            "each plane net, the layer(s) it will be poured on, "
+            "space-separated NET:LAYER[,LAYER...] specs, e.g. "
+            "'GND:In1.Cu,In4.Cu P3.3V:In2.Cu'. Empty = none declared "
+            "(matches the CLI --plane-net-layers).")
+        pnl_row.Add(self.plane_net_layers_ctrl, 1)
+        options_sizer.Add(pnl_row, 0,
+                          wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+
         self.optimize_caps = wx.CheckBox(self, label="Optimize decoupling cap placement")
         self.optimize_caps.SetValue(False)
         self.optimize_caps.SetToolTip(
@@ -941,6 +977,12 @@ class BGAOptionsPanel(wx.ScrolledWindow):
             # Dropdown: auto (default, channel + under-pad retry, #288) /
             # channel / underpad - same choices and default as the CLI.
             'escape_method': self.get_escape_method(),
+            # #424 plane-ball drops; checkbox bool -> engine 'auto'/'off'.
+            'plane_drop': self.plane_drop.GetValue(),
+            # Future-pour declaration: raw NET:LAYER[,LAYER...] spec strings
+            # (space separated), parsed at the call site like the CLI main.
+            'plane_net_layers': self.plane_net_layers_ctrl.GetValue().split()
+                                or None,
             'optimize_caps': self.optimize_caps.GetValue(),
             # Decoupling-cap placement (advanced) knobs (#130)
             'cap_capture_radius': self.cap_capture_radius.GetValue(),
@@ -989,7 +1031,7 @@ class QFNOptionsPanel(wx.ScrolledWindow):
         # QFN-tuned 0.1/0.1 (qfn_fanout.py --width/--clearance) instead of
         # inheriting the Basic-tab 0.3/0.25. Fine-pitch QFN/QFP fanouts fail at
         # 0.3 where they succeed at 0.1. Own controls so QFN doesn't inherit the
-        # BGA/route width and a plan can still set them (claude_plan routes a QFN
+        # BGA/route width and a plan can still set them (ai_plan routes a QFN
         # fanout step's width/clearance here).
         rw = defaults.PARAM_RANGES['track_width']
         grid.Add(wx.StaticText(self, label="Track width (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
@@ -1057,7 +1099,8 @@ class FanoutTab(wx.Panel):
 
     def __init__(self, parent, pcb_data, board_filename,
                  get_shared_params=None, on_fanout_complete=None,
-                 get_connectivity_check=None, sync_pcb_data_callback=None):
+                 get_connectivity_check=None, sync_pcb_data_callback=None,
+                 append_log=None):
         """
         Create the fanout tab.
 
@@ -1079,6 +1122,10 @@ class FanoutTab(wx.Panel):
         # Keeps the dialog's in-memory pcb_data in step with the board after a
         # fanout applies copper (see _apply_fanout_results).
         self.sync_pcb_data_callback = sync_pcb_data_callback
+        # Dialog log sink: the fanout engines narrate through print(), and
+        # without this tee that narration reached the terminal but never the
+        # log tab (the route/diff/planes workers already redirected).
+        self.append_log = append_log
 
         self._create_ui()
 
@@ -1249,6 +1296,19 @@ class FanoutTab(wx.Panel):
             config = self.qfn_options.get_config()
             self._run_qfn_fanout(footprint, selected_nets, config)
 
+    def _fanout_status(self, message):
+        """Status update for the fanout, which runs ON the UI thread.
+
+        A bare SetLabel cannot repaint while the main thread is blocked, so
+        force it -- otherwise the tab shows one frozen label for the whole run.
+        Guarded: reporting must never break the fanout. See
+        gui_utils.ui_thread_status for why the repaint is deliberately narrow
+        (no Gauge.Pulse) inside an action plugin.
+        """
+        from .gui_utils import ui_thread_status
+        ui_thread_status(getattr(self, 'status_text', None),
+                         getattr(self, 'progress_bar', None), message)
+
     def _run_bga_fanout(self, footprint, net_patterns, config):
         """Run BGA fanout."""
         self.fanout_btn.Disable()
@@ -1276,12 +1336,21 @@ class FanoutTab(wx.Panel):
             self.progress_bar.SetValue(0)
             return
 
+        # Tee engine narration into the log tab (placed AFTER the no-layers
+        # early return above so stdout is never left redirected).
+        import sys
+        from .gui_utils import StdoutRedirector
+        _orig_stdout = sys.stdout
+        if self.append_log:
+            sys.stdout = StdoutRedirector(self.append_log, _orig_stdout)
         try:
             from bga_fanout import generate_bga_fanout
 
             tracks, vias_to_add, vias_to_remove, failed_nets = generate_bga_fanout(
                 footprint,
                 self.pcb_data,
+                # #581: Basic-tab via-in-pad policy -- > 0 forces dog-bone.
+                same_net_pad_clearance=shared.get('same_net_pad_clearance', -1.0),
                 net_filter=net_patterns,
                 diff_pair_patterns=config['diff_pair_patterns'] or None,
                 layers=layers,
@@ -1313,12 +1382,28 @@ class FanoutTab(wx.Panel):
                 check_for_previous=config['check_for_previous'],
                 no_inner_top_layer=config['no_inner_top_layer'],
                 escape_method=config.get('escape_method', 'auto'),
+                # #424 plane-ball drops -- checkbox bool -> engine token, same
+                # default (on/'auto') as the CLI's --plane-drop.
+                plane_drop=('auto' if config.get('plane_drop', True) else 'off'),
+                # Same NET:LAYER[,...] spec parse as bga_fanout's main()
+                # (review parity finding 5: this kwarg was CLI-only).
+                plane_net_layers=(
+                    {spec.split(':', 1)[0]: spec.split(':', 1)[1].split(',')
+                     for spec in config['plane_net_layers']
+                     if ':' in spec}
+                    if config.get('plane_net_layers') else None),
                 grid_step=shared.get('grid_step', defaults.GRID_STEP),
                 # Shared Basic-tab per-layer costs (issue #288), same values the
                 # route/diff tabs use; None when the control is empty/invalid.
                 layer_costs=shared.get('layer_costs') or None,
                 same_net_escapes=config.get('same_net_escapes',
                                             defaults.BGA_SAME_NET_ESCAPES),
+                # The fanout runs ON the UI thread, so it reports through
+                # _fanout_status (which forces the repaint). Without this the
+                # tab pulsed one static "Running BGA fanout..." for the whole
+                # run -- minutes on a large ball field.
+                progress_callback=(lambda c, t, m:
+                                   self._fanout_status(f"{m} ({c}/{t})" if t else m)),
             )
 
             self._apply_fanout_results(
@@ -1350,6 +1435,7 @@ class FanoutTab(wx.Panel):
                 wx.OK | wx.ICON_ERROR
             )
         finally:
+            sys.stdout = _orig_stdout
             self.fanout_btn.Enable()
             self.progress_bar.SetValue(0)
 
@@ -1379,6 +1465,12 @@ class FanoutTab(wx.Panel):
         via_size = shared.get('via_size', defaults.BGA_VIA_SIZE)
         via_drill = shared.get('via_drill', defaults.BGA_VIA_DRILL)
 
+        # Tee engine narration into the log tab (same as the BGA path).
+        import sys
+        from .gui_utils import StdoutRedirector
+        _orig_stdout = sys.stdout
+        if self.append_log:
+            sys.stdout = StdoutRedirector(self.append_log, _orig_stdout)
         try:
             from qfn_fanout import generate_qfn_fanout
 
@@ -1399,6 +1491,10 @@ class FanoutTab(wx.Panel):
                 via_drill=via_drill,
                 allow_via_in_pad=allow_via_in_pad,
                 board_edge_clearance=shared.get('board_edge_clearance', 0.0),
+                # #581: Basic-tab policy overrides allow_via_in_pad when > 0.
+                same_net_pad_clearance=shared.get('same_net_pad_clearance', -1.0),
+                progress_callback=(lambda c, t, m:
+                                   self._fanout_status(f"{m} ({c}/{t})" if t else m)),
             )
 
             self._apply_fanout_results(
@@ -1421,6 +1517,7 @@ class FanoutTab(wx.Panel):
                 wx.OK | wx.ICON_ERROR
             )
         finally:
+            sys.stdout = _orig_stdout
             self.fanout_btn.Enable()
             self.progress_bar.SetValue(0)
 
@@ -1460,6 +1557,8 @@ class FanoutTab(wx.Panel):
             wx.MessageBox("Board is no longer open", "Error",
                           wx.OK | wx.ICON_ERROR)
             return
+
+        self._fanout_status("Applying fanout copper to the board...")
 
         # net_id → name lookup uses the dialog's pcb_data, which is the
         # canonical source for the synthetic ids used everywhere.
@@ -1548,9 +1647,12 @@ class FanoutTab(wx.Panel):
         # Measured on eth_tap (SWIG): each fanout step's BOARD matched the CLI
         # bit-exactly, yet by step 11 the GUI laid 3514 segments / 366 vias
         # against the CLI's 3428 / 334 -- more copper, because the router saw
-        # fewer obstacles. The IPC front caches pcb_data across plan steps the
-        # same way, so it needs the same re-read. Runs AFTER the cap repair so
-        # the rebuilt model also carries the moved footprints.
+        # fewer obstacles. A 2-step chain (route_diff -> route, pcb_data built
+        # fresh) was bit-identical, which is what localized it to the carry
+        # rather than to the router. The IPC front caches pcb_data across plan
+        # steps the same way, so it needs the same re-read. Runs AFTER the cap
+        # repair so the rebuilt model also carries the moved footprints.
+        self._fanout_status("Syncing board data...")
         if self.sync_pcb_data_callback:
             self.sync_pcb_data_callback()
 
@@ -1641,6 +1743,10 @@ class FanoutTab(wx.Panel):
                 max_passes=int(cfg.get('cap_max_passes', 30)),
                 cap_prefix=cfg.get('cap_prefix', 'C,R'),
                 allow_rotations=cfg.get('cap_allow_rotation', True),
+                # Runs ON the UI thread; _fanout_status forces the repaint so
+                # the label moves per cap visit instead of freezing (#130).
+                progress_callback=(lambda c, t, m:
+                                   self._fanout_status(f"{m} ({c}/{t})" if t else m)),
             )
 
             # Via nudge with reconnect (#313): the shared engine also moves a
@@ -1671,7 +1777,7 @@ class FanoutTab(wx.Panel):
     def run_cap_optimization(self, log=None):
         """Standalone decoupling-cap optimization on the live board (#130, IPC).
 
-        Entry point for the Claude-plan executor's "optimize_caps" step (and any
+        Entry point for the AI-plan executor's "optimize_caps" step (and any
         caller that wants the repair without running a fanout). Reads the
         clearance/grid/via from the Basic tab and the advanced cap knobs from the
         BGA options panel, runs the shared engine, and applies the moves through
@@ -1689,7 +1795,13 @@ class FanoutTab(wx.Panel):
             'grid_step': shared.get('grid_step', defaults.GRID_STEP),
             'via_size': shared.get('via_size', defaults.BGA_VIA_SIZE),
         })
-        summary = self._optimize_decoupling_caps(board, cfg)
+        # Log tee: this runs on the main thread with no worker stdout redirect
+        # in place, so without it the repair narration reaches the terminal but
+        # never the log tab. No BuildConnectivity/Refresh under IPC: KiCad
+        # rebuilds and repaints server-side on each commit.
+        from .gui_utils import redirect_prints_to_log
+        with redirect_prints_to_log(self.append_log):
+            summary = self._optimize_decoupling_caps(board, cfg)
         if summary:
             self.status_text.SetLabel(summary)
             if log:

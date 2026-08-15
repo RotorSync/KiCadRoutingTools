@@ -104,29 +104,33 @@ def test_plugin_sources_do_not_multiply_by_1e_minus_6():
 
 
 def test_helper_divides():
-    """The shared helper exists and divides (source-level; importing swig_gui
-    would require wx + pcbnew, which the plain suite does not have)."""
-    print("3. swig_gui._nm_to_mm exists and divides by 1e6")
-    src = open(os.path.join(PLUGIN_DIR, 'swig_gui.py'), encoding='utf-8').read()
+    """The shared helper exists and divides (source-level; importing the dialog
+    would require wx + kipy, which the plain suite does not have)."""
+    print("3. routing_dialog._nm_to_mm exists and divides by 1e6")
+    src = open(os.path.join(PLUGIN_DIR, 'routing_dialog.py'), encoding='utf-8').read()
     if 'def _nm_to_mm(' not in src:
-        failures.append("swig_gui._nm_to_mm helper missing")
+        failures.append("routing_dialog._nm_to_mm helper missing")
         print("  FAIL helper not found")
         return
     body = src.split('def _nm_to_mm(', 1)[1].split('\ndef ', 1)[0]
     if '/ 1e6' not in body:
-        failures.append("swig_gui._nm_to_mm does not divide by 1e6")
+        failures.append("routing_dialog._nm_to_mm does not divide by 1e6")
         print("  FAIL helper does not divide by 1e6")
     else:
         print("  ok   helper divides")
-    # And it is actually used for the netclass / constraint reads.
-    for needle in ("_nm_to_mm(netclass.GetClearance())",
-                   "_nm_to_mm(netclass.GetViaDiameter())",
-                   "_nm_to_mm(ds.m_MinClearance)"):
-        if needle in src:
-            print(f"  ok   used: {needle}")
-        else:
-            failures.append(f"helper not used at: {needle}")
-            print(f"  FAIL not used: {needle}")
+    # IPC branch: the SWIG call sites this used to pin
+    # (_nm_to_mm(netclass.GetClearance()) etc.) do not exist -- kipy's
+    # BoardDesignRules exposes no per-class values, so _get_netclass_parameters
+    # reads pcb_data.netclass_params, populated from the sibling .kicad_pro in
+    # MILLIMETRES. There is therefore no nm->mm step to get wrong on that path.
+    # Pin THAT instead, so a future change back to an nm read has to come with
+    # the helper (the #493 ULP class this test exists to prevent).
+    if 'pcb_data.netclass_params' in src:
+        print("  ok   netclass params read from .kicad_pro (mm, no nm convert)")
+    else:
+        failures.append("netclass params no longer read from pcb_data.netclass_params "
+                        "- if this became an nm read, it must go through _nm_to_mm")
+        print("  FAIL netclass params not read from pcb_data.netclass_params")
 
 
 def test_plugin_sources_do_not_use_FromMM():

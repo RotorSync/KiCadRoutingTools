@@ -12,8 +12,20 @@ thousands of unconnected-net "violations". Validation is a STRUCTURAL load: copp
 layers, footprints INSIDE the board outline, and routable nets.
 
 Usage: python3 validate_candidate.py <file.kicad_pcb>
-PASS: pcbnew loads; 2<=copper_layers<=8; footprints>=10; routable_nets>=20; has a
-board outline with <= max(2, 10%) footprints outside it (off-board = curation defect).
+PASS: pcbnew loads; copper_layers>=2; footprints>=10; routable_nets>=20; KiCad >= 6
+file format; has a board outline with <= max(2, 10%) footprints outside it
+(off-board = curation defect).
+
+There is deliberately no UPPER layer bound: 10-14 layer boards are legitimate
+corpus material (they route, just expensively). Steer them by TIER, not by the
+pass gate -- `tier == "monster"` means "belongs in a boards_setNmonster/ set,
+not a regular one".
+
+Pre-KiCad-6 sources (format < 20211014) are rejected. They are technically
+rescuable -- kicad_parser reads 0 footprints / no outline from a v5 file, but the
+prep pcbnew round-trip normalizes them and they come back whole -- yet they carry
+no sibling `.kicad_pro` (that file did not exist before KiCad 6), so every one
+would need a hand-generated netclass floor.
 """
 import json, sys, subprocess, os, re
 KPY = "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3"
@@ -49,7 +61,16 @@ print(json.dumps({"copper_layers": layers, "footprints": len(fps), "off_board_fp
 '''
 
 
+# KiCad 6.0's board format. Older files have no sibling .kicad_pro.
+MIN_KICAD_VERSION = 20211014
+
+
 def classify(layers, fps, routable, big_bga):
+    # "monster" = routes, but slowly enough that it belongs in a boards_setNmonster/
+    # set rather than a regular one. Calibrated on the 2026-08-09 corpus: catches 15
+    # of 406 boards, 11 of them already living in set1monster/set2monster.
+    if layers > 8 or fps >= 500:
+        return "monster"
     if big_bga or layers >= 6 or fps >= 120 or routable >= 250:
         return "hard"
     if layers >= 4 or fps >= 45 or routable >= 80:
@@ -79,11 +100,14 @@ def main():
     v["tier"] = classify(v["copper_layers"], v["footprints"], v["routable_nets"], v["max_pads"] >= 200)
     off = v["off_board_fps"]
     off_ok = v["has_outline"] and off <= max(2, 0.1 * v["footprints"])
+    kv_ok = v["kicad_version"] is not None and v["kicad_version"] >= MIN_KICAD_VERSION
     if not off_ok:
         v["reject_reason"] = ("no board outline" if not v["has_outline"]
                               else f"{off} footprints off-board (curation defect)")
-    v["pass"] = (2 <= v["copper_layers"] <= 8 and v["footprints"] >= 10
-                 and v["routable_nets"] >= 20 and off_ok)
+    elif not kv_ok:
+        v["reject_reason"] = f"pre-KiCad-6 format ({v['kicad_version']}), no sibling .kicad_pro"
+    v["pass"] = (v["copper_layers"] >= 2 and v["footprints"] >= 10
+                 and v["routable_nets"] >= 20 and off_ok and kv_ok)
     print(json.dumps(v))
 
 

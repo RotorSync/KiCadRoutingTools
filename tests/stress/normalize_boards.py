@@ -4,6 +4,7 @@
 Run with KiCad's bundled Python:
 /Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3
 """
+import shutil
 import sys
 from pathlib import Path
 import os
@@ -41,7 +42,15 @@ for frag, name in BOARDS.items():
     dst = DST / f"{name}.kicad_pcb"
     try:
         board = pcbnew.LoadBoard(str(src))
-        pcbnew.SaveBoard(str(dst), board)
+        # aSkipSettings: the implicit project-settings save SIGABRTs KiCad-10
+        # python on KiCad-9-saved projects (uncaught type_error merging the
+        # pre-migration .kicad_pro; PR #613). The project travels as a file
+        # copy instead, which also keeps the source's own netclasses.
+        pcbnew.SaveBoard(str(dst), board, aSkipSettings=True)
+        for ext in ('.kicad_pro', '.kicad_dru'):
+            sib = src.with_suffix(ext)
+            if sib.exists():
+                shutil.copy(sib, dst.with_suffix(ext))
         print(f"OK   {name}  <- {src.name[:70]}")
     except Exception as e:
         print(f"FAIL {name}: {type(e).__name__}: {e}")

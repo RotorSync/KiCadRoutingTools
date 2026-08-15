@@ -10,7 +10,7 @@ on a real board without pressing buttons:
                exactly like a stress replay.
   GUI leg   -- GUI_PLAN below, run through the REAL headless
                swig_gui.RoutingDialog driven by the REAL
-               claude_plan.PlanExecutor (via replay_plan_vs_run.replay), on ONE
+               ai_plan.PlanExecutor (via replay_plan_vs_run.replay), on ONE
                live board carried in memory across steps -- the same
                parse_plan_result -> reset_params_to_defaults ->
                apply_step_params -> tab._on_*() path the buttons run.
@@ -37,6 +37,26 @@ Needs pcbnew; re-execs into KiCad's python automatically.
 
     python3 tests/gui_parity/test_gui_engine_parity.py [board.kicad_pcb] [--workdir DIR]
 """
+
+# ---------------------------------------------------------------------------
+# macOS: if this HANGS at ~0% CPU, it is NOT wx, machine load, or a deadlock.
+#
+# After any wx process here is killed (a pkill, a timeout, a crash), macOS
+# decides the app "quit unexpectedly", and the NEXT headless launch stops inside
+# NSApplication bootstrap showing the restore-windows alert you cannot see:
+#     -[NSPersistentUIRestorer promptToIgnorePersistentState]
+#         -> -[NSAlert runModal]
+# Headless, nobody can click it, so it waits forever: process state SN accruing
+# ~0.3s of CPU over many minutes, which reads exactly like a hang. This cost a
+# full session of ".gui-parity-checked" markers recording "wx blocked, gate NOT
+# RUN" -- the gates were fine the whole time.
+#
+#   diagnose:  sample <pid> 3 -mayDie | grep -E "NSAlert|PersistentUI"
+#   fix:       defaults write -g ApplePersistenceIgnoreState -bool YES
+#
+# A sandboxed HOME does NOT help -- cfprefsd serves that pref per-user
+# regardless of HOME. With the default set, test_gui_engine_parity.py runs ~90s.
+# ---------------------------------------------------------------------------
 import os
 import shutil
 import subprocess
@@ -44,13 +64,33 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.join(REPO, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(REPO, 'py_tools'))  # #522
 sys.path.insert(0, os.path.join(REPO, 'tests', 'gui_parity'))  # replay_plan_vs_run
 
-KICAD_PYTHONS = [
-    "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3",
-    "/usr/bin/python3",
-    os.path.expandvars(r"C:\\Program Files\\KiCad\\bin\\python.exe"),
-]
+# KiCad 9/10 install under a VERSIONED directory on Windows
+# (C:\Program Files\KiCad\10.0\bin), which a bare .../KiCad/bin path misses.
+# Shared with the engine (#647) so the layouts are described once -- and so
+# this list gets the NUMERIC version sort: the local `sorted(..., reverse=True)`
+# this replaced ordered "9.0" above "10.0" and handed a dual-install machine
+# its older KiCad. The loop below still does its own pcbnew verification.
+from kicad_exact_fill import kicad_python_candidates  # noqa: E402
+
+KICAD_PYTHONS = kicad_python_candidates()
+
+
+def _host_env():
+    """Environment for the CLI subprocesses, with KiCad's python wiring removed.
+
+    KiCad's bundled interpreter exports PYTHONUSERBASE (its own 3rdparty tree).
+    Once this gate re-execs into it, a plain `python3 py_router/route.py` child inherits
+    that and resolves USER site-packages inside KiCad's tree instead of its own,
+    so the host interpreter reports numpy/scipy/shapely missing and every CLI
+    step fails -- which reads as "no wx/pcbnew in this session" when in fact both
+    are present and working.
+    """
+    return {k: v for k, v in os.environ.items()
+            if k not in ('PYTHONUSERBASE', 'PYTHONHOME', 'PYTHONPATH')}
 
 DEFAULT_BOARD = os.path.join(REPO, "kicad_files", "splitflap_driver.kicad_pcb")
 
@@ -67,42 +107,87 @@ def _reexec_into_kicad():
             r = subprocess.run([cand, '-c', 'import wx, kipy'],
                                capture_output=True)
             if r.returncode == 0:
-                os.execv(cand, [cand, os.path.abspath(__file__)] + sys.argv[1:])
+                argv = [cand, os.path.abspath(__file__)] + sys.argv[1:]
+                if os.name == 'nt':
+                    # os.execv goes through the CRT on Windows and re-splits the
+                    # argument vector on spaces, so a path like
+                    # "C:\Program Files\KiCad\10.0\bin\python.exe" is torn in two.
+                    # subprocess quotes it correctly.
+                    sys.exit(subprocess.run(argv).returncode)
+                os.execv(cand, argv)
     print("ERROR: no python with wx + kipy found")
     sys.exit(2)
+
+
+def stage_board(board, workdir):
+    """Copy the board into the workdir, ENSURING it has a sibling .kicad_pro.
+
+    A board with no project is the one input that makes these two fronts
+    legitimately disagree, and it is not a product bug -- it is the #441
+    hazard CLAUDE.md warns about, landing on a test fixture:
+
+      * the CLI has no project to read, so fix_project_for_output SEEDS a
+        minimal one and pins the fab floors into it (copper-to-edge 0.2);
+      * the GUI works on a live pcbnew board, which always carries KiCad's
+        own defaults (copper-to-edge 0.5), and its write-back only ever
+        LOOSENS, so it never tightens to the fab floor.
+
+    A 0.3mm difference in the copper-to-edge rule is not cosmetic: the plane
+    step insets the pour OUTLINE by it, which changes the exact fill, which
+    feeds the plane-fragility cost field, which re-prices the A* -- measured
+    on splitflap_driver as 12 cli-only / 8 gui-only GND segments and a
+    relocated via, with both boards still DRC- and connectivity-clean.
+    Give the same board a project and the copper sets are IDENTICAL.
+
+    Every real board (and every corpus board) carries a project, so grading
+    the project-less case measured the fixture, not the engines. pcbnew
+    authors the project itself -- KiCad's own defaults, nothing hardcoded
+    here.
+    """
+    dst = os.path.join(workdir, 'src_' + os.path.basename(board))
+    src_pro = os.path.splitext(board)[0] + '.kicad_pro'
+    if os.path.isfile(src_pro):
+        shutil.copy(board, dst)
+        shutil.copy(src_pro, os.path.splitext(dst)[0] + '.kicad_pro')
+        for ext in ('.kicad_dru',):
+            s = os.path.splitext(board)[0] + ext
+            if os.path.isfile(s):
+                shutil.copy(s, os.path.splitext(dst)[0] + ext)
+        return dst
+    import pcbnew
+    pcbnew.SaveBoard(dst, pcbnew.LoadBoard(board))
+    print(f"  staged {os.path.basename(board)} WITH a KiCad-authored "
+          f".kicad_pro (the source had none -- see stage_board)")
+    return dst
 
 
 def run_cli_leg(board, workdir):
     py = shutil.which('python3') or sys.executable
     steps = []
     s1 = os.path.join(workdir, 'cli_step1.kicad_pcb')
-    steps.append([py, '-X', 'utf8', os.path.join(REPO, 'route.py'), board, s1,
+    steps.append([py, '-X', 'utf8', os.path.join(REPO, 'py_router', 'route.py'), board, s1,
                   '--nets', '*', '!GND', '--clearance', '0.15',
                   '--track-width', '0.127', '--via-size', '0.45',
                   '--via-drill', '0.2', '--power-nets', '+3V3', '+12V',
                   '--power-nets-widths', '0.4', '0.4',
                   '--max-ripup', '10', '--max-iterations', '1000000'])
     s2 = os.path.join(workdir, 'cli_step2.kicad_pcb')
-    steps.append([py, '-X', 'utf8', os.path.join(REPO, 'route_planes.py'), s1, s2,
+    steps.append([py, '-X', 'utf8', os.path.join(REPO, 'py_router', 'route_planes.py'), s1, s2,
                   '--nets', 'GND', '--plane-layers', 'B.Cu',
                   '--clearance', '0.15', '--via-size', '0.45',
                   '--via-drill', '0.2'])
-    s3 = os.path.join(workdir, 'cli_step3.kicad_pcb')
-    steps.append([py, '-X', 'utf8',
-                  os.path.join(REPO, 'route_disconnected_planes.py'), s2, s3,
-                  '--clearance', '0.15', '--via-size', '0.45',
-                  '--via-drill', '0.2', '--track-width', '0.127',
-                  '--grid-step', '0.1', '--power-nets', '+3V3', '+12V',
-                  '--power-nets-widths', '0.4', '0.4', '--rip-blocker-nets'])
+    # (No standalone repair step since #562: the final route step's in-run
+    # plane finalize runs the repair engine + cleanup + kicad-oracle verify.)
     s4 = os.path.join(workdir, 'cli_final.kicad_pcb')
-    steps.append([py, '-X', 'utf8', os.path.join(REPO, 'route.py'), s3, s4,
+    steps.append([py, '-X', 'utf8', os.path.join(REPO, 'py_router', 'route.py'), s2, s4,
                   '--nets', 'GND', '--clearance', '0.127',
                   '--track-width', '0.127', '--via-size', '0.45',
                   '--via-drill', '0.2', '--max-ripup', '10',
                   '--max-iterations', '1000000'])
     for i, cmd in enumerate(steps):
-        print(f"[cli] step {i + 1}/4 ...", flush=True)
-        r = subprocess.run(cmd, capture_output=True, text=True, cwd=workdir)
+        print(f"[cli] step {i + 1}/{len(steps)} ...", flush=True)
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=workdir,
+                           env=_host_env())
         if r.returncode != 0:
             print(r.stdout[-3000:])
             print(r.stderr[-2000:])
@@ -133,12 +218,6 @@ GUI_PLAN = [
     {'action': 'route_planes',
      'params': dict(clearance=0.15, via_size=0.45, via_drill=0.2),
      'assignments': [{'nets': ['GND'], 'layer': 'B.Cu'}]},
-    {'action': 'repair_planes',
-     'params': dict(clearance=0.15, via_size=0.45, via_drill=0.2,
-                    track_width=0.127, grid_step=0.1,
-                    power_nets=['+3V3', '+12V'], power_nets_widths=[0.4, 0.4],
-                    rip_blocker_nets=True),
-     'assignments': [{'nets': ['GND'], 'layer': 'B.Cu'}]},
     {'action': 'route',
      'params': dict(clearance=0.127, track_width=0.127, via_size=0.45,
                     via_drill=0.2, max_ripup=10, max_iterations=1000000),
@@ -168,13 +247,13 @@ def run_gui_leg(board_path, workdir):
 def grade(pcb, label):
     py = shutil.which('python3') or sys.executable
     conn = subprocess.run([py, '-X', 'utf8',
-                           os.path.join(REPO, 'check_connected.py'), pcb],
+                           os.path.join(REPO, 'py_router', 'check_connected.py'), pcb],
                           capture_output=True, text=True)
     conn_full = 'ALL NETS FULLY CONNECTED' in conn.stdout
     import re
     m = re.search(r'FOUND (\d+) ISSUES', conn.stdout)
     conn_issues = int(m.group(1)) if m else 0
-    drc = subprocess.run([py, '-X', 'utf8', os.path.join(REPO, 'check_drc.py'),
+    drc = subprocess.run([py, '-X', 'utf8', os.path.join(REPO, 'py_router', 'check_drc.py'),
                           pcb, '--clearance-margin', '0.1', '-c', '0.127'],
                          capture_output=True, text=True)
     m = re.search(r'FOUND (\d+) DRC', drc.stdout)
@@ -261,6 +340,24 @@ def main():
         shutil.rmtree(workdir)
     os.makedirs(workdir, exist_ok=True)
 
+    board = stage_board(board, workdir)
+    # KICAD_SAVELOG=<path>: log every in-process SaveBoard call + stack.
+    # Ground truth for "which snapshot sites actually run in this gate" --
+    # #627's mechanism hunt stalled on instrumentation that concluded
+    # _live_fill/_stage_live_board never execute here; this hook shows both
+    # do (via plane_fragility and the in-run finalize oracle staging).
+    if os.environ.get('KICAD_SAVELOG'):
+        import pcbnew as _pn
+        import traceback as _tb
+        _orig_save = _pn.SaveBoard
+
+        def _logged_save(*a, **k):
+            with open(os.environ['KICAD_SAVELOG'], 'a') as _f:
+                _f.write(f"SaveBoard args={a[:1]} kwargs={k}\n")
+                _tb.print_stack(file=_f)
+                _f.write('---\n')
+            return _orig_save(*a, **k)
+        _pn.SaveBoard = _logged_save
     cli_final = run_cli_leg(board, workdir)
     gui_final = run_gui_leg(board, workdir)
 

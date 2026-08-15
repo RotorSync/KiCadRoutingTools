@@ -90,16 +90,83 @@ def _conn_count(text):
 def _completion(text):
     """Routing completion from check_connected output: a net is complete if it is
     neither unrouted nor has a connectivity issue. Returns (total, incomplete, pct)
-    or (None, None, None) if the net total can't be parsed."""
+    or (None, None, None) if the net total can't be parsed.
+
+    The total is `Checking N ... nets` PLUS the unrouted ones, and the two must be
+    added or the denominator moves with the result. check_connected's "Checking N
+    routed nets" counts only nets that ended up with copper -- its net selection is
+    literally `(net_id in segments_by_net or net_id in vias_by_net) and net_id in
+    pads_by_net`. A net an arm fails to route at all therefore has no copper, drops
+    OUT of that count, and is then reported separately under "Unrouted nets (M)".
+
+    Two consequences, both of which have already cost real analysis time:
+
+    * The same board reports a DIFFERENT net total per arm, which reads as
+      nondeterminism in a checker that is deterministic (butterstick: 310 / 314 /
+      316 / 316 across four arms of an identical 16-step chain -- all of them 317
+      once the unrouted nets are added back). An A/B that pairs boards on "same
+      net total" then discards exactly the congested boards, because those are the
+      ones with unrouted nets. On the #590 sets 1-10 wave that dropped 40 of 103
+      boards, which carried ~85% of all the incompleteness.
+    * The failing nets were subtracted from the numerator while being excluded
+      from the denominator, so completion % was computed over the wrong base and
+      the old `min(total, ...)` clamp existed only to stop that inconsistency from
+      producing a negative percentage.
+
+    Residual: a ONE-pad net counts in `Checking` when it happens to pick up copper
+    (a plane tap) but never appears under "Unrouted nets", which grades nets of >=2
+    pads. That leaves a rare +-1 that no arithmetic here can recover -- it needs a
+    census emitted by check_connected itself.
+    """
     tm = re.search(r"Checking (\d+) [\w ]*nets", text)
     if not tm:
         return None, None, None
-    total = int(tm.group(1))
     um = re.search(r"Unrouted nets \((\d+)\)", text)
     im = re.search(r"Connectivity issues \((\d+)\)", text)
-    incomplete = min(total, (int(um.group(1)) if um else 0) + (int(im.group(1)) if im else 0))
+    unrouted = int(um.group(1)) if um else 0
+    total = int(tm.group(1)) + unrouted
+    incomplete = unrouted + (int(im.group(1)) if im else 0)
     pct = round(100.0 * (total - incomplete) / total, 1) if total else None
     return total, incomplete, pct
+
+
+def rescue_steps(manifest_txt):
+    """How many route.py steps name SPECIFIC nets rather than a wildcard.
+
+    A recorded chain often ends with a rescue: `route.py ... --nets '/CM4
+    GPIO/GPIO22' '/CM4 GPIO/GPIO24' ...`, naming the nets that failed IN THE
+    RUN BEING RECORDED, usually at a tighter clearance or width. That makes the
+    board a biased A/B subject, and the bias runs one way -- against change:
+
+      * the BASELINE replays the recorded run deterministically, so the rescue
+        lands exactly on its failures and the board finishes clean;
+      * any arm that routes differently fails a DIFFERENT net, which the frozen
+        list never retries, so its failure ships while nets that are fine get
+        retried.
+
+    Nothing about that measures routing quality. In production the retry is
+    authored AFTER seeing what failed; only in replay is it pinned to one arm's
+    failure set. Measured on the #590 sweeps, boards that are nearly clean at
+    baseline BECAUSE of such a rescue punish every arm (sets 11-20: +2..+8 per
+    arm across 22 boards holding 2 baseline failures; sets 1-10: +3..+6), while
+    congested boards keep showing real, arm-ordered differences.
+
+    Consumers should report that cell separately rather than fold it into a
+    verdict -- see rank_arms.py. 25% of the corpus carries one.
+    """
+    n = 0
+    for line in manifest_txt.splitlines():
+        if "route.py" not in line or "--help" in line:
+            continue
+        if "route_planes" in line or "route_diff" in line:
+            continue
+        m = re.search(r"--nets\s+(.*?)(?:--\w|$)", line)
+        if not m:
+            continue
+        names = [a.strip("'\"") for a in m.group(1).split()]
+        if names and not any(a == "*" for a in names):
+            n += 1
+    return n
 
 
 def _tool_of(argv):
@@ -119,6 +186,7 @@ def _diff_pair_stats(log_text):
     routed as coupled diff pairs (single-ended fallback does NOT count). Returns
     None pct when the board has no diff pairs."""
     status = {}
+    incomplete = set()
     for m in re.finditer(r"JSON_SUMMARY:\s*(\{.*\})", log_text):
         try:
             d = json.loads(m.group(1))
@@ -129,12 +197,27 @@ def _diff_pair_stats(log_text):
         for p in d.get("routed_diff_pairs", []):       status[p] = "coupled"
         for p in d.get("single_ended_diff_pairs", []): status[p] = "single_ended"
         for p in d.get("failed_diff_pairs", []):       status[p] = "failed"
+        # #602: partial_diff_pairs was NOT consumed here, so "final status
+        # wins" quietly failed for the one demotion that matters. A pair
+        # reported coupled by call 1 and demoted to partial by a later call
+        # kept its stale "coupled" -- the member-audit demotion route_diff had
+        # already made was invisible to the very metric this computes.
+        for p in d.get("partial_diff_pairs", []):      status[p] = "partial"
+        # Pairs the audit found with disconnected member pads, in ANY bucket.
+        for p in d.get("member_incomplete_pairs", []): incomplete.add(p)
+        for p in d.get("routed_diff_pairs", []):
+            if p not in d.get("member_incomplete_pairs", []):
+                incomplete.discard(p)   # a later call closed it
     total = len(status)
     coupled = sum(1 for v in status.values() if v == "coupled")
     return {"diff_pairs_total": total,
             "diff_pairs_coupled": coupled,
             "diff_pairs_single_ended": sum(1 for v in status.values() if v == "single_ended"),
             "diff_pairs_failed": sum(1 for v in status.values() if v == "failed"),
+            "diff_pairs_partial": sum(1 for v in status.values() if v == "partial"),
+            # Gate on this for "member pads actually connected" -- it is the
+            # audit's verdict, not an inference from the coupled count.
+            "diff_pairs_member_incomplete": len(incomplete),
             "diff_coupled_pct": round(100.0 * coupled / total, 1) if total else None}
 
 
@@ -227,7 +310,7 @@ def grade(pcb, clearance, baseline=None):
     # (#347 A/B). The manifest clearance stays as the fallback for finals
     # shipped without a .kicad_pro (the daisho gap, #217).
     pro = Path(pcb).with_suffix(".kicad_pro")
-    drc_args = [sys.executable, "-X", "utf8", str(REPO / "check_drc.py"), pcb, "--quiet"]
+    drc_args = [sys.executable, "-X", "utf8", str(REPO / 'py_router' / 'check_drc.py'), pcb, "--quiet"]
     # Auto-grade only when the .kicad_pro actually RECORDS a clearance: a
     # stock/minimal project copied through the chain has none, and check_drc
     # would silently fall back to 0.2 -- manufacturing phantom sub-clearance
@@ -237,6 +320,7 @@ def grade(pcb, clearance, baseline=None):
         try:
             import json as _json
             sys.path.insert(0, str(REPO))
+            sys.path.insert(0, str(REPO / 'py_router'))  # #522
             from fix_kicad_drc_settings import project_copper_clearance
             with open(pro) as _f:
                 _recorded = project_copper_clearance(_json.load(_f))
@@ -248,12 +332,21 @@ def grade(pcb, clearance, baseline=None):
     # NOT --quiet: the "Checking N routed nets" total (needed for completion %)
     # only prints in non-quiet mode; the unrouted/connectivity-issue counts print
     # either way.
-    conn = subprocess.run([sys.executable, "-X", "utf8", str(REPO / "check_connected.py"), pcb],
+    conn = subprocess.run([sys.executable, "-X", "utf8", str(REPO / 'py_router' / 'check_connected.py'), pcb],
                           capture_output=True, text=True)
     ctext = conn.stdout + conn.stderr
     total, incomplete, pct = _completion(ctext)
     out = {"drc": _drc_count(drc.stdout + drc.stderr), "conn": _conn_count(ctext),
-           "nets_total": total, "nets_incomplete": incomplete, "completion_pct": pct}
+           "nets_total": total, "nets_incomplete": incomplete, "completion_pct": pct,
+           # Which BASIS nets_total is on, so a consumer never has to guess (or
+           # sniff the commit) when a result set spans a grader change. It cost
+           # two boards to learn: a sweep whose rows were graded partly before
+           # and partly after the census fix had consumers reconstruct the
+           # corrected total from rows that already carried it, double-counting
+           # the unrouted nets and dropping those boards as "different chains".
+           # "routed" (the pre-fix basis) never appears here -- only a legacy
+           # row lacking the key is on it.
+           "nets_total_basis": "gradeable"}
     out.update(_kicad_grade(pcb, clearance, baseline=baseline))
     # raw `drc` is the full check_drc count (NOT baseline-subtracted -- it counts
     # pre-existing input copper like edge-connector pads and chassis-ground pours).
@@ -313,11 +406,13 @@ def do_board(set_dir, out_dir, label, board):
     # list and a per-tool sum (route.py / route_planes.py / ... -- where the
     # vectorization speedups land), plus the total.
     steps, time_by_tool, peak_by_tool, total_s, peak_board = [], {}, {}, 0.0, 0.0
+    total_cpu = 0.0
     peak_fp_by_tool, peak_fp_board = {}, 0.0
     if os.path.exists(timings_path):
         for c in json.loads(Path(timings_path).read_text()).get("commands", []):
             tool = _tool_of(c.get("argv", []))
             sec = c.get("seconds", 0.0)
+            cpu = c.get("cpu_seconds", 0.0)
             pk = c.get("peak_rss_mb", 0.0)
             # peak_footprint_mb (darwin only): the authoritative memory number
             # RSS under-reports -- mimalloc-retained + IOAccelerator-tagged pages
@@ -332,6 +427,7 @@ def do_board(set_dir, out_dir, label, board):
             if fp:
                 peak_fp_by_tool[tool] = round(max(peak_fp_by_tool.get(tool, 0.0), fp), 1)
             total_s += sec
+            total_cpu += cpu
             peak_board = max(peak_board, pk)
             peak_fp_board = max(peak_fp_board, fp)
     # Coupled diff-pair completion is parsed from route_diff's JSON_SUMMARY in the
@@ -339,6 +435,16 @@ def do_board(set_dir, out_dir, label, board):
     log_path = f"{dst}/_replay.log"
     log_text = Path(log_path).read_text(errors="replace") if os.path.exists(log_path) else ""
     dp = _diff_pair_stats(log_text)
+    # Deterministic search effort, summed over every JSON_SUMMARY in the
+    # chain: wall/CPU comparisons across waves run at different times are
+    # load-confounded (cloud hosts, local pools); iterations are byte-stable
+    # per config and the only honest cross-run effort metric.
+    total_iters = 0
+    for m in re.finditer(r"JSON_SUMMARY:\s*(\{.*\})", log_text):
+        try:
+            total_iters += json.loads(m.group(1)).get("total_iterations", 0)
+        except Exception:
+            pass
     fname = final_output_name(txt)
     final = os.path.join(dst, fname) if fname else None
     done = bool(final) and os.path.exists(final)
@@ -346,8 +452,13 @@ def do_board(set_dir, out_dir, label, board):
            "final": fname if done else None, "chain_complete": done,
            "drc": None, "conn": None, "nets_total": None, "nets_incomplete": None,
            "completion_pct": None,
-           "total_seconds": round(total_s, 3), "peak_rss_mb": round(peak_board, 1),
+           "total_seconds": round(total_s, 3), "cpu_seconds": round(total_cpu, 3),
+           "total_iterations": total_iters,
+           "peak_rss_mb": round(peak_board, 1),
            "time_by_tool": time_by_tool, "peak_by_tool": peak_by_tool, "steps": steps,
+           # Chain shape, so a consumer can tell a routing result from a replay
+           # artifact without re-reading the manifest (see rescue_steps).
+           "rescue_steps": rescue_steps(txt),
            **dp}
     # Footprint (darwin) is the memory number that actually caught issue #419;
     # keep it additive so non-darwin records are unchanged.

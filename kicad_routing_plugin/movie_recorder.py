@@ -11,7 +11,7 @@ Two scopes, which is the whole point of the design:
 * **One routing step** (Route / Route Diff Pairs / Create Planes / Repair Planes
   / Fanout pressed on its own tab) -> that step gets its OWN movie, rendered as
   soon as it completes: baseline board -> the board it produced.
-* **A plan run** (the Claude tab's *Run Selected Steps* / *Run All Selected
+* **A plan run** (the AI tab's *Run Selected Steps* / *Run All Selected
   Steps*) -> ONE movie for all of the steps combined. ``begin_group()`` /
   ``end_group()`` bracket the run, so the per-step renders are held back and a
   single movie spans the whole plan.
@@ -37,6 +37,11 @@ PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(PLUGIN_DIR)
 if ROOT_DIR not in sys.path:      # make_movie lives at the repo/plugin root
     sys.path.insert(0, ROOT_DIR)
+
+# #522 layout: engine/tool modules live in py_router/ (flat-install safe)
+_ENGINE_DIR = os.path.join(ROOT_DIR, 'py_router')
+if os.path.isdir(_ENGINE_DIR) and _ENGINE_DIR not in sys.path:
+    sys.path.insert(0, _ENGINE_DIR)
 
 GREEN = '\033[92m'
 YELLOW = '\033[93m'
@@ -210,6 +215,10 @@ class MovieRecorder:
         try:
             from kicad_ipc_adapter import save_board_snapshot
             path = os.path.join(self._temp_dir(), f"{name}.kicad_pcb")
+            # Frames only need copper; save_as(include_project=False) is the
+            # IPC equivalent of the SWIG call's aSkipSettings=True (the
+            # settings save aborts KiCad on worker threads for pre-KiCad-10
+            # projects -- uncaught C++ type_error in the .kicad_pro merge).
             save_board_snapshot(path)
             return path
         except Exception as e:

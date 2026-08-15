@@ -74,15 +74,27 @@ machine before):
   (LLM latency) and only intermittently in a heavy python route step, so ~Ncore
   boards keep the cores busy without Ncore heavy processes at once. The real guard
   is per-step memory, not the worker count — `run_limited.sh` kills any single step
-  that exceeds ~4 GB. Lower the arg only if you actually see swapping.
-- **Every tool command runs through `tests/stress/run_limited.sh`** (~4 GB RSS
-  watchdog). An OOM kill is a finding, not noise.
+  that exceeds **12 GB**. Lower the arg only if you actually see swapping.
+- **Every tool command runs through `tests/stress/run_limited.sh`** (**12 GB** RSS
+  watchdog — raised from 4 GB in #422; a legitimate fine-grid run on a big sparse
+  board can still peak several GB, so 4 GB killed real work). An OOM kill is a
+  finding, not noise.
+  **Size a machine from 12 GB, not 4** — this is the figure people provision
+  from, and 4 GB under-provisions by 3x.
+- **Give every routing command an explicit long timeout.** The runbook tells the
+  worker to block for up to the 3-hour per-command cap, but a driving harness's
+  *default* is often ~120 s — two orders of magnitude smaller. In the sets-21-27
+  wave that killed at least one route attempt on **21 of 99 boards** (steps that
+  legitimately take 141-316 s), and the orphan guard then reaped the reparented
+  child. Worse, the killed step's log is usually **empty** (stdout fully buffered,
+  nothing flushed before SIGTERM), so it looks like a hang rather than a timeout —
+  pass `python3 -u` if you want a diagnosable partial log. See #599.
 - On 4+ layer boards, BGA/PGA fanout must pass the inner copper layers to
   `bga_fanout.py` (`--layers F.Cu In1.Cu In2.Cu B.Cu`); its default is the two
   outer layers only, which silently caps deep-ball escape (RUNBOOK rule 5).
   `route_diff.py` has the same F.Cu/B.Cu default and the same trap: pass the
   full copper-layer list or pairs are silently stranded (issue #116,
-  butterstick 8/40 -> 22/40).
+  measured on an 8-layer corpus board: 8/40 -> 22/40).
 - **Check the fanout `JSON_SUMMARY` and retry on dropped balls (issue #122).**
   `bga_fanout.py` ends with `JSON_SUMMARY: {"requested","escaped","failed",
   "unescaped_nets",...}`. Dropped balls are removed from the output and resurface
@@ -93,12 +105,15 @@ machine before):
   track won't fit the ~0.45 mm inter-ball gap) but escapes all of them at 0.1.
   If still short, add the fine-pitch escape via / smaller `--track-width`. If a
   **dense, fully-populated array** still drops balls at the floor (the channel
-  router over-subscribes the between-row channels — e.g. ulx3s 22×22 drops ~20),
-  re-run with **`--escape-method underpad`** and a small via/track (e.g.
-  `--via-size 0.35 --track-width 0.12 --clearance 0.1`): it routes each ball under
-  the pad field on inner layers and escapes what `channel` can't (→ 0). It routes
-  diff pairs single-ended and skips power/plane nets (plane them first), so reach
-  for it specifically when `channel` floors out on a dense array. Don't start
+  router over-subscribes the between-row channels — e.g. a fully-populated 22×22
+  array drops ~20),
+  re-run with **`--escape-method dogbone`** and a small via/track (e.g.
+  `--via-size 0.35 --track-width 0.12 --clearance 0.1`): each ball vias in a free
+  inter-ball gap (the dominant method on human-routed BGAs) and falls back
+  per-ball to via-in-pad, so it escapes everything `underpad` can (→ 0) while
+  keeping the inner-layer streets clear of barrels. Both dogbone and underpad
+  route diff pairs single-ended and skip power/plane nets (plane them first), so
+  reach for them specifically when `channel` floors out on a dense array. Don't start
   signal routing with balls still dropped.
 - Track liveness from disk (results JSON + run-dir activity) via
   `stress_status.sh` — NOT the notification stream, which drops and duplicates.

@@ -26,6 +26,7 @@ stripline_z0(w, h, t, er) -> float             # symmetric inner layer
 stripline_z0_asymmetric(w, h1, h2, t, er) -> float
 differential_microstrip_z0(w, s, h, t, er) -> (zdiff, zodd)
 differential_stripline_z0(w, s, h, t, er) -> (zdiff, zodd)
+differential_stripline_z0_asymmetric(w, s, h1, h2, t, er) -> (zdiff, zodd)
 ```
 
 - `w` — trace width
@@ -97,15 +98,15 @@ Because the pour does not exist when `route.py` runs, the gap is a
 
 ```bash
 # 1. route, declaring the intended gap (narrower trace than microstrip)
-python3 route.py board.kicad_pcb routed.kicad_pcb \
+python3 py_router/route.py board.kicad_pcb routed.kicad_pcb \
     --impedance 50 --coplanar-gap 0.2 --coplanar-nets "RF_*"
 
 # 2. pour the plane with a MATCHING zone clearance
-python3 route_planes.py routed.kicad_pcb poured.kicad_pcb \
+python3 py_router/route_planes.py routed.kicad_pcb poured.kicad_pcb \
     --nets GND GND --plane-layers F.Cu B.Cu --zone-clearance 0.2
 
 # 3. verify the declaration actually held
-python3 check_impedance.py poured.kicad_pcb --coplanar-gap 0.2
+python3 py_tools/check_impedance.py poured.kicad_pcb --coplanar-gap 0.2
 ```
 
 Omitting `--coplanar-nets` treats every net in the call as coplanar.
@@ -133,6 +134,8 @@ differential_stripline_width_for_z0(zdiff_target, s, h, t, er,
                                     tolerance=0.5, max_iterations=50) -> float
 stripline_asymmetric_width_for_z0(z0_target, h1, h2, t, er,
                                   tolerance=0.1, max_iterations=50) -> float
+differential_stripline_asymmetric_width_for_z0(zdiff_target, s, h1, h2, t, er,
+                                               tolerance=0.5, max_iterations=50) -> float
 cpwg_width_for_z0(z0_target, s, h, t, er,
                   tolerance=0.1, max_iterations=50) -> float
 differential_cpwg_width_for_z0(zdiff_target, s_pair, s_gnd, h, t, er,
@@ -196,12 +199,31 @@ Inverse: returns `{'calculated_width_mm', 'calculated_width_mils',
 calculate_layer_widths_for_impedance(pcb, layers, target_z0,
                                      spacing=0.0, is_differential=False,
                                      fallback_width=0.1,
-                                     min_width=0.0) -> Dict[str, float]
+                                     min_width=0.0,
+                                     coplanar_gap=0.0,
+                                     floor_desc="--track-width; ...",
+                                     clamp_report=None) -> Dict[str, float]
 ```
 
 The function impedance-controlled routing actually uses: width per layer
-(0.90-scaled, clamped to `min_width`, `fallback_width` on failure), ready to
-assign to `GridRouteConfig.layer_widths`.
+(`IMPEDANCE_WIDTH_SCALE`-scaled, clamped to `min_width`, `fallback_width` on
+failure), ready to assign to `GridRouteConfig.layer_widths`. Pass a dict as
+`clamp_report` to collect `{layer: [solved_mm, floor_mm]}` for every clamped
+layer — the routing engines forward it to `JSON_SUMMARY` as
+`impedance_width_clamped` (#610). `floor_desc` names `min_width`'s source in
+the clamp warning.
+
+```python
+impedance_width_floor(track_width, width_from_class,
+                      copper_layer_count) -> Tuple[float, str]
+```
+
+The `min_width` the engines pass (#610): an explicit `--track-width`
+(`width_from_class=False`) is honored verbatim; with the flag omitted the
+impedance request sets the floor it implies, bounded below only by the active
+fab tier's track minimum — so `--impedance 90` alone yields 90 Ω geometry
+instead of being silently clamped to the 0.3 mm default width. Returns
+`(floor_mm, floor_desc)`.
 
 ```python
 from kicad_parser import parse_kicad_pcb
@@ -296,17 +318,34 @@ because two of them were silently wrong on real boards.
   copper-roughness loss, no resin-content variation across the panel.
 - **Asymmetric stripline uses the harmonic mean** of the two plane distances,
   and the solver and the verifier now agree on that choice
-  (`is_asymmetric_stripline` is the single source of truth). Before #486 the
+  (`is_asymmetric_stripline` is the single source of truth) on the
+  single-ended **and** the differential path. Before #486 the
   solver bisected the *symmetric* model at the averaged height while the
   verifier scored the asymmetric one, so a solved width did not reproduce its
   own target — on hackrf_one's In1.Cu, 0.543 mm solved for 50 Ω verified at
-  31 Ω. The correct width there is 0.287 mm.
+  31 Ω. The correct width there is 0.287 mm. #607 was the same bug surviving on
+  the *differential* path: on a 6-layer stack (0.1 mm prepreg, 0.55 mm core),
+  `--impedance 90` returned 0.2385 mm on every inner layer and scored it 89.8 Ω
+  when a field solver measured 67 Ω — and it erred *wide*, though a trace with
+  planes on both sides must be narrower than the equivalent microstrip. It now
+  solves 0.135 mm there, within ~3% of the solver-correct 0.131 mm.
+- **The differential coupling factor is still calibrated for *symmetric*
+  stripline.** The harmonic-mean substitution fixes the first-order error, not
+  all of it: at a fixed width the asymmetric Zdiff prediction runs ~10% low
+  against a method-of-moments solve. Because Zdiff is steep in `w`, the solved
+  *width* is much closer (~3%), which is what routing consumes. Closing the rest
+  needs a two-plane closed form or fab-calibrated tables. Deriving the coupling
+  from the true plate separation `h1+h2+t` was tried and measured *worse*
+  (~18% low), so the near plane appears to govern coupling as well as
+  capacitance. Treat inner-layer differential targets on strongly asymmetric
+  stacks as ~5% figures, and confirm against your fab's coupon data when the
+  window is tight.
 
 Post-route verification lives in `check_impedance.py`:
 
 ```bash
-python3 check_impedance.py routed.kicad_pcb            # reference-plane + side-gap audit
-python3 check_impedance.py routed.kicad_pcb --json report.json
+python3 py_tools/check_impedance.py routed.kicad_pcb            # reference-plane + side-gap audit
+python3 py_tools/check_impedance.py routed.kicad_pcb --json report.json
 ```
 
 It reports, per net: length over a reference-plane void, plane-split crossings,

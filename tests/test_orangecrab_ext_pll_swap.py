@@ -46,7 +46,7 @@ def _run(args, verbose):
 
 
 def _ext_pll_violations(board, verbose):
-    return len(VIOL.findall(_run(["check_drc.py", "-c", CLR, board], verbose)))
+    return len(VIOL.findall(_run(["py_router/check_drc.py", "-c", CLR, board], verbose)))
 
 
 def main():
@@ -62,7 +62,7 @@ def main():
     fd, out = tempfile.mkstemp(suffix=".kicad_pcb", prefix="oc_ext_pll_")
     os.close(fd)
     try:
-        txt = _run(["route_diff.py", BOARD, "--nets", "EXT_PLL+", "EXT_PLL-",
+        txt = _run(["py_router/route_diff.py", BOARD, "--nets", "EXT_PLL+", "EXT_PLL-",
                     *GEOM, "--output", out], args.verbose)
         # The harmful swap must be rejected (no layer swap applied here).
         m = re.search(r'"layer_swaps":\s*(\d+)', txt)

@@ -33,6 +33,8 @@ import tempfile
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, ROOT_DIR)
+sys.path.insert(0, os.path.join(ROOT_DIR, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT_DIR, 'py_tools'))  # #522
 
 import list_nets
 
@@ -76,13 +78,13 @@ def _drc_clean(board, verbose):
     # grazes on copper that is legal at its routed 0.1 floor (#491).
     floor = list_nets.board_default_netclass_clearance(board)
     clearance = str(min(float(CLEARANCE), floor)) if floor else CLEARANCE
-    txt = _run(["check_drc.py", board, "--clearance", clearance,
+    txt = _run(["py_router/check_drc.py", board, "--clearance", clearance,
                 "--nets", *NETS, "--clearance-margin", "0.1"], verbose)
     return "NO DRC VIOLATIONS" in txt
 
 
 def _connected(board, verbose):
-    txt = _run(["check_connected.py", board, "--nets", *NETS], verbose)
+    txt = _run(["py_router/check_connected.py", board, "--nets", *NETS], verbose)
     return "ALL NETS FULLY CONNECTED" in txt
 
 
@@ -99,11 +101,11 @@ def run_variant(name, fanout_args, verbose, check):
         board = BOARD
         if fanout_args is not None:
             board = _tmp(f"tigard_{name}_fan_")
-            _run(["qfn_fanout.py", BOARD, *fanout_args, "--output", board], verbose)
+            _run(["py_router/qfn_fanout.py", BOARD, *fanout_args, "--output", board], verbose)
 
         # Step 1: route_diff must COUPLED-route the pair (not defer/float/graze).
         diff_out = _tmp(f"tigard_{name}_diff_")
-        txt = _run(["route_diff.py", board, diff_out, "--nets", *NETS, *DIFF_GEOM], verbose)
+        txt = _run(["py_router/route_diff.py", board, diff_out, "--nets", *NETS, *DIFF_GEOM], verbose)
         coupled = '"routed_diff_pairs": ["/USB_D"]' in txt and '"failed": 0' in txt
         check(f"[{name}] route_diff coupled-routes the USB pair", coupled,
               "" if coupled else "pair deferred to single-ended or failed")
@@ -111,7 +113,7 @@ def run_variant(name, fanout_args, verbose, check):
 
         # Step 2: single-ended follow-up connects the redundant J1 row.
         final_out = _tmp(f"tigard_{name}_final_")
-        _run(["route.py", diff_out, final_out, "--nets", *NETS, *SE_GEOM], verbose)
+        _run(["py_router/route.py", diff_out, final_out, "--nets", *NETS, *SE_GEOM], verbose)
         check(f"[{name}] all USB pads connected after single-ended follow-up",
               _connected(final_out, verbose))
         check(f"[{name}] final board is DRC-clean", _drc_clean(final_out, verbose))

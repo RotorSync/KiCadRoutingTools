@@ -77,14 +77,14 @@ def main():
     try:
         # 1) surface fanout of the QFN -> bare F.Cu USB_D stubs, no escape vias.
         fan = _tmp("watchy_fan_")
-        ftxt = _run(["qfn_fanout.py", BOARD, *FAN, "--output", fan], args.verbose)
+        ftxt = _run(["py_router/qfn_fanout.py", BOARD, *FAN, "--output", fan], args.verbose)
         if not (os.path.exists(fan) and os.path.getsize(fan) > 0):
             print("FAIL: qfn_fanout produced no board\n" + ftxt)
             return 1
 
         # 2) coupled route -> the hybrid escape must take the boxed pair to 1/1.
         diff = _tmp("watchy_diff_")
-        dtxt = _run(["route_diff.py", fan, "--nets", *NETS, *DIFF_GEOM, "--output", diff], args.verbose)
+        dtxt = _run(["py_router/route_diff.py", fan, "--nets", *NETS, *DIFF_GEOM, "--output", diff], args.verbose)
         m = re.search(r"JSON_SUMMARY:\s*(\{.*\})", dtxt)
         summary = json.loads(m.group(1)) if m else {}
         if summary.get("successful") != 1 or summary.get("failed"):
@@ -94,10 +94,10 @@ def main():
 
         # 3) the routed pair must connect end to end and be DRC-clean.
         if os.path.exists(diff) and os.path.getsize(diff) > 0:
-            conn = _run(["check_connected.py", diff, "--nets", *NETS], args.verbose)
+            conn = _run(["py_router/check_connected.py", diff, "--nets", *NETS], args.verbose)
             if "ALL NETS FULLY CONNECTED" not in conn:
                 fails.append("USB_D not fully connected after hybrid escape")
-            drc = _run(["check_drc.py", diff, "--clearance", CLEARANCE], args.verbose)
+            drc = _run(["py_router/check_drc.py", diff, "--clearance", CLEARANCE], args.verbose)
             if "NO DRC VIOLATIONS" not in drc:
                 fails.append("hybrid-escaped USB_D has DRC violations")
         else:

@@ -32,6 +32,8 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522
 
 from kicad_parser import parse_kicad_pcb
 from bga_fanout import generate_bga_fanout
@@ -109,7 +111,7 @@ def main():
 
     try:
         fan = _tmp("glasgow_fan_")
-        _run(["bga_fanout.py", BOARD, "--component", COMPONENT,
+        _run(["py_router/bga_fanout.py", BOARD, "--component", COMPONENT,
               "--escape-method", "underpad", "--diff-pairs", "*",
               "--track-width", "0.12", "--via-size", "0.35", "--via-drill", "0.2",
               "--clearance", "0.1", "--diff-pair-gap", "0.101",
@@ -122,9 +124,9 @@ def main():
         # the intermediate overlaps are visible and the test must mirror the
         # real pipeline before asserting cleanliness.
         capopt = _tmp("glasgow_cap_")
-        _run(["place_fanout_clearance.py", fan, capopt, "--clearance", "0.1"],
+        _run(["py_router/place_fanout_clearance.py", fan, capopt, "--clearance", "0.1"],
              verbose)
-        drc = _run(["check_drc.py", capopt, "--clearance", "0.1"], verbose)
+        drc = _run(["py_router/check_drc.py", capopt, "--clearance", "0.1"], verbose)
         check("under-pad escape + cap-opt is DRC-clean", "NO DRC VIOLATIONS" in drc)
         fan = capopt  # route_diff consumes the pipeline state, as in production
 
@@ -136,7 +138,7 @@ def main():
         # FPGA generic-I/O pairs are the polarity-swappable class (#279):
         # the pin functions are reassigned in gateware, so allow swaps here
         # as the planner would.
-        out = _run(["route_diff.py", fan, routed, "--nets", *nets,
+        out = _run(["py_router/route_diff.py", fan, routed, "--nets", *nets,
                     "--track-width", "0.12", "--diff-pair-gap", "0.101",
                     "--clearance", "0.1", "--layers", *LAYERS, "--no-gnd-vias",
                     "--polarity-swap-nets", "*"],

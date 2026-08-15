@@ -14,7 +14,7 @@ ways, plus a latent unbound-local bug it exposed:
    any pad outside a real polygon outline raised UnboundLocalError.
 
 3. REPAIR (the `route_planes` crash -- INDEPENDENT of the outline):
-   `route_disconnected_planes.route_planes` did not resolve `zone_clearance=None`
+   `repair_planes.route_planes` did not resolve `zone_clearance=None`
    (the GUI zone-clearance "auto" value), so None threaded into
    find_disconnected_zone_regions' layer_clearance and detonated pad_rect_halfspan
    as `float + None`.
@@ -26,6 +26,8 @@ import sys
 import types
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # #522
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # #522
 
 fails = []
 
@@ -74,83 +76,48 @@ def test_routing_common_polygon_off_board_pad():
 
 
 # --------------------------------------------------------------------------
-# 2. _extract_board_contours_from_pcbnew: a SHAPE_T_POLY Edge.Cuts drawing must
-#    yield the polygon outline. Runs with an INJECTED fake `pcbnew` so it does
-#    not need KiCad's bundled python.
+# 2. _extract_board_contours_kipy: a BoardPolygon Edge.Cuts drawing must yield
+#    the polygon outline. IPC twin of the SWIG test's SHAPE_T_POLY case -- the
+#    live-board extractor here consumes kipy shapes, not pcbnew ones, so the
+#    fake is a BoardPolygon (.polygons -> .outline -> PolyLine nodes) rather
+#    than an injected fake `pcbnew` module. Same guarantee: a gr_poly outline
+#    reaches the router as a ring (#475).
 # --------------------------------------------------------------------------
 def test_shape_t_poly_extractor():
     import kicad_parser
 
     ring_pts = [(0.0, 0.0), (30.0, 0.0), (30.0, 20.0), (15.0, 25.0), (0.0, 20.0)]
+    EDGE_CUTS = 44
 
-    class _Pt:
-        def __init__(self, x, y):
-            self.x, self.y = x, y
+    class _Node:
+        """PolyLineNode wrapping a Vector2 exposed as integer nanometres."""
+        def __init__(self, x_mm, y_mm):
+            self.point = type('V', (), {'x': int(round(x_mm * 1e6)),
+                                        'y': int(round(y_mm * 1e6))})()
 
-    class _Ring:
-        def PointCount(self):
-            return len(ring_pts)
+    class _PolyWithHoles:
+        outline = [_Node(x, y) for x, y in ring_pts]
 
-        def CPoint(self, i):
-            return _Pt(*ring_pts[i])
+    class _BoardPolygon:
+        layer = EDGE_CUTS
+        polygons = [_PolyWithHoles()]
 
-    class _PolySet:
-        def OutlineCount(self):
-            return 1
+    # NOTE the shape difference from the SWIG extractor: this one returns
+    # (outline, cutouts) -- ONE ring plus its holes -- not a list of rings.
+    outline, cutouts = kicad_parser._extract_board_contours_kipy(
+        [_BoardPolygon()], EDGE_CUTS)
 
-        def Outline(self, i):
-            return _Ring()
-
-    class _PolyDrawing:
-        def GetLayer(self):
-            return 44
-
-        def GetClass(self):
-            return "PCB_SHAPE"
-
-        def GetShape(self):
-            return 4  # matches fake pcbnew.SHAPE_T_POLY
-
-        def GetPolyShape(self):
-            return _PolySet()
-
-    class _Board:
-        def GetDrawings(self):
-            return [_PolyDrawing()]
-
-        def GetFootprints(self):
-            return []
-
-    fake = types.ModuleType('pcbnew')
-    fake.Edge_Cuts = 44
-    fake.SHAPE_T_SEGMENT = 0
-    fake.SHAPE_T_RECT = 1
-    fake.SHAPE_T_ARC = 2
-    fake.SHAPE_T_CIRCLE = 3
-    fake.SHAPE_T_POLY = 4
-    fake.SHAPE_T_BEZIER = 5
-    saved = sys.modules.get('pcbnew')
-    sys.modules['pcbnew'] = fake
-    try:
-        outers, cutouts = kicad_parser._extract_board_contours_from_pcbnew(
-            _Board(), to_mm=lambda v: v)
-    finally:
-        if saved is None:
-            del sys.modules['pcbnew']
-        else:
-            sys.modules['pcbnew'] = saved
-
-    check("SHAPE_T_POLY extractor: one outer ring", len(outers) == 1)
-    got = outers[0] if outers else []
+    check("BoardPolygon extractor: outer ring recovered", bool(outline))
+    check("BoardPolygon extractor: no spurious cutouts", not cutouts)
     # The chainer may rotate the start vertex / drop a closing duplicate, so
     # compare as a vertex SET at the given precision.
-    check("SHAPE_T_POLY extractor: all polygon vertices recovered",
-          set((round(x, 3), round(y, 3)) for x, y in got) ==
+    check("BoardPolygon extractor: all polygon vertices recovered",
+          set((round(x, 3), round(y, 3)) for x, y in outline) ==
           set((round(x, 3), round(y, 3)) for x, y in ring_pts))
 
 
 # --------------------------------------------------------------------------
-# 3. route_disconnected_planes.route_planes: zone_clearance=None (the GUI "auto"
+# 3. repair_planes.route_planes: zone_clearance=None (the GUI "auto"
 #    value) must be resolved, not threaded into a `float + None` crash. Needs the
 #    Rust router; skipped (not failed) when it is unavailable.
 # --------------------------------------------------------------------------
@@ -166,7 +133,7 @@ def test_repair_zone_clearance_none():
 
     import tempfile
     import route_planes
-    import route_disconnected_planes as rdp
+    import repair_planes as rdp
     from kicad_parser import parse_kicad_pcb
 
     # A minimal 2-net, 4-layer board with two GND pads and two +3V3 pads far

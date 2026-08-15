@@ -22,13 +22,19 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522
 
 from kicad_parser import parse_kicad_pcb
 from bga_fanout import generate_bga_fanout
 
 BOARD = os.path.join(ROOT, "kicad_files", "ulx3s.kicad_pcb")
 LAYERS = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
-PARAMS = dict(track_width=0.12, clearance=0.1, via_size=0.35, via_drill=0.2)
+# plane_drop off: the every-via-in-a-gap and stub-per-via checks below are
+# SIGNAL-escape geometry (a #424 plane drop may legally fall back to a bare
+# via-in-pad tap); drops are covered by test_bga_fanout_plane_drop.
+PARAMS = dict(track_width=0.12, clearance=0.1, via_size=0.35, via_drill=0.2,
+              plane_drop='off')
 H2H = 0.2
 
 

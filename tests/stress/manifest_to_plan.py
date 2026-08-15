@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Convert a stress-test redo_commands.sh manifest into a GUI plan JSON.
 
-The Claude tab's Load button accepts the output, so a recorded stress chain
+The AI tab's Load button accepts the output, so a recorded stress chain
 can be replayed through the GUI plan executor without any LLM run:
 
     python3 tests/stress/manifest_to_plan.py runs_set1/<board>/redo_commands.sh plan.json
@@ -24,7 +24,10 @@ TOOL_ACTIONS = {
     'route.py': 'route',
     'route_diff.py': 'route_diff',
     'route_planes.py': 'route_planes',
+    # BOTH names: recorded manifests carry the historical spelling forever;
+    # the module (CLI remains a standalone utility) is repair_planes.py now.
     'route_disconnected_planes.py': 'repair_planes',
+    'repair_planes.py': 'repair_planes',
     'bga_fanout.py': 'fanout',
     'qfn_fanout.py': 'fanout',
 }
@@ -61,8 +64,16 @@ FLAG_PARAMS = {
     '--impedance': 'impedance',
     '--coplanar-gap': 'coplanar_gap',
     '--gnd-via-distance': 'gnd_via_distance',
+    # #485: route_planes area via stitching -- value flags.
+    '--stitch-pitch': 'stitch_pitch',
+    '--stitch-fence-pitch': 'stitch_fence_pitch',
+    '--stitch-inset': 'stitch_inset',
+    '--stitch-max-freq': 'stitch_max_freq',
     '--exit-margin': 'exit_margin',
     '--extension': 'extension',
+    # #581: same-net pad via clearance -- valid on planes, route, route_diff,
+    # bga/qfn fanout and repair steps; the GUI control lives on the Basic tab.
+    '--same-net-pad-clearance': 'same_net_pad_clearance',
     '--max-track-width': 'max_track_width',
     '--min-track-width': 'min_track_width',
     '--analysis-grid-step': 'analysis_grid_step',
@@ -74,19 +85,32 @@ LIST_FLAGS = {
     '--layer-costs': 'layer_costs',
     # #381 D3: route_diff's polarity-swap allowlist (nargs='+' globs). Carried
     # explicitly (not via the generic unknown-flag fallthrough) so a scoped
-    # allowlist survives as a list param that claude_plan's alias routes to the
+    # allowlist survives as a list param that ai_plan's alias routes to the
     # diff tab's polarity_swap_nets_text field.
     '--polarity-swap-nets': 'polarity_swap_nets',
     # #486: route.py's coplanar-waveguide net allowlist (nargs='+' globs).
     # LIST, not FLAG_PARAMS -- as a scalar flag only the FIRST pattern survived.
     '--coplanar-nets': 'coplanar_nets',
+    # bga_fanout's future-pour declaration (NET:LAYER[,LAYER...] specs,
+    # nargs='+'). Review parity finding 5: a recorded manifest carrying the
+    # flag used to convert to a plan that silently dropped it. The GUI/plan
+    # side accepts the same raw spec strings (fanout_gui parses them like
+    # the CLI main does).
+    '--plane-net-layers': 'plane_net_layers',
     '--nets': None,  # handled per action
     '--pairs': None,
     '--plane-layers': None,
 }
 BOOL_FLAGS = {
     '--rip-blocker-nets': 'rip_blocker_nets',
+    '--smoothing': 'smoothing',      # #536 octolinear smoothing (default ON)
+    '--no-smoothing': 'no_smoothing',  # the negative must survive a replay
     '--add-gnd-vias': 'add_gnd_vias',
+    # #485: route_planes area via stitching toggles (planes-tab checkboxes
+    # stitch_vias / stitch_edge_fence, applied by the plan executor's
+    # generic loop).
+    '--stitch-vias': 'stitch_vias',
+    '--stitch-edge-fence': 'stitch_edge_fence',
     '--no-gnd-vias': 'no_gnd_vias',
     # route.py spells it --no-bga-zones (plural, nargs='*'); bga_fanout uses the
     # singular. Both map to the GUI's no_bga_zone special (bare = exclude ALL).
@@ -95,6 +119,20 @@ BOOL_FLAGS = {
     # #489 section 9: now on every step that writes pad/via copper (route,
     # route_diff, route_planes, route_disconnected_planes, bga/qfn fanout).
     '--add-teardrops': 'add_teardrops',
+    # #487: route_planes' default-on thermal-via arrays; the NEGATIVE flag
+    # must survive conversion or a replay re-enables what the run disabled
+    # (ai_plan's no_thermal_vias alias unchecks the planes checkbox).
+    '--no-thermal-vias': 'no_thermal_vias',
+    # The POSITIVE spellings must survive too: ai_plan already consumes
+    # both params (thermal_relief checkbox; thermal_vias with the
+    # default-ON absent-means-default rule), but a converted manifest that
+    # DROPPED the flag would replay a --thermal-relief run without relief
+    # spokes (found by the ef4c19a..4db8c18 parity audit).
+    '--thermal-relief': 'thermal_relief',
+    '--thermal-vias': 'thermal_vias',
+    # #515 / PR #533: rip+re-route the selected nets from scratch. Same-named
+    # basic-tab checkbox; applied by the plan executor's generic loop.
+    '--force-reroute': 'force_reroute',
 }
 
 # Flags whose values are file paths / bookkeeping -- consumed, never params.
@@ -184,8 +222,24 @@ def parse_command(argv):
                 i += 1
             lists[a] = vals
         elif a == '--component':
-            step['component'] = argv[i + 1]
-            i += 2
+            # #537: --component now takes one or more references. One converts
+            # to the `component` key the plan executor already understands;
+            # several are kept under `components` so the step is not silently
+            # narrowed to the first footprint (the GUI list control that
+            # consumes them is still to come -- see the issue's Tier 2).
+            # Stop at a positional board file: bga_fanout/qfn_fanout still take
+            # a SINGLE --component, and `--component U9 out.kicad_pcb` must not
+            # swallow the output path out of step['_files'] (which pruning uses).
+            vals = []
+            i += 1
+            while (i < len(argv) and not argv[i].startswith('--')
+                   and not argv[i].endswith('.kicad_pcb')):
+                vals.append(argv[i])
+                i += 1
+            if len(vals) == 1:
+                step['component'] = vals[0]
+            elif vals:
+                step['components'] = vals
         elif a.startswith('--'):
             # unknown flag: skip it and any non-flag values (still carried
             # generically when it maps to a control name)
@@ -266,7 +320,7 @@ def parse_command(argv):
 
 
 # place_fanout_clearance.py has no standalone CLI-tool action, but in the GUI it
-# IS a plan step in its own right: the live Claude-plan format (claude_plan.py's
+# IS a plan step in its own right: the live Claude-plan format (ai_plan.py's
 # KNOWN_ACTIONS + _insert_cap_optimization) represents "Optimize decoupling cap
 # placement" (#130) as a SEPARATE `optimize_caps` step placed right after the last
 # BGA fanout, run via fanout_tab.run_cap_optimization() -- NOT as a param on the
@@ -288,7 +342,7 @@ CAP_BOOL_FLAGS = {'--no-rotate': ('cap_allow_rotation', False)}  # inverted sens
 
 def cap_optimization_step(argv):
     """A place_fanout_clearance.py invocation -> a standalone `optimize_caps` plan
-    step (matching claude_plan.py's live format), carrying the non-default cap_*
+    step (matching ai_plan.py's live format), carrying the non-default cap_*
     knobs so a loaded plan optimizes caps the way the recorded run did."""
     params = {}
     i = 0
@@ -401,7 +455,7 @@ def main():
         json.dump({'steps': steps}, f, indent=2)
     print(f"{len(steps)} step(s) written to {out} "
           f"({skipped} kept-but-non-GUI command(s) skipped)")
-    print("Load it in the Claude tab (Load... next to 'Parsed result') and "
+    print("Load it in the AI tab (Load... next to 'Parsed result') and "
           "press 'Run Selected Steps'.")
     return 0
 

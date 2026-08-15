@@ -10,6 +10,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # #522
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # #522
 
 import clearance_ledger
 import single_ended_routing as ser
@@ -23,21 +25,34 @@ def _ok(name, cond):
 def main():
     r = []
 
-    # --- _unblock_debug per-call read ---
+    # --- _unblock_debug through the read-once env_knobs cache ---
+    # #382 E10 made this a per-call os.environ read; the env_knobs sweep
+    # replaced per-call reads with a read-once cache + refresh(). The contract
+    # now: an in-process mutation is seen after refresh(), and NOT before
+    # (that non-visibility is the point of the cache -- hot paths never touch
+    # os.environ).
+    import env_knobs
     prev = os.environ.get('KICAD_UNBLOCK_DEBUG')
     try:
         os.environ.pop('KICAD_UNBLOCK_DEBUG', None)
+        env_knobs.refresh()
         r.append(_ok("_unblock_debug False when env unset", ser._unblock_debug() is False))
         os.environ['KICAD_UNBLOCK_DEBUG'] = '1'
-        r.append(_ok("_unblock_debug True after env set (no reimport)",
+        r.append(_ok("_unblock_debug still False before refresh (cached)",
+                     ser._unblock_debug() is False))
+        env_knobs.refresh()
+        r.append(_ok("_unblock_debug True after refresh (no reimport)",
                      ser._unblock_debug() is True))
         os.environ.pop('KICAD_UNBLOCK_DEBUG', None)
-        r.append(_ok("_unblock_debug False again after unset", ser._unblock_debug() is False))
+        env_knobs.refresh()
+        r.append(_ok("_unblock_debug False again after unset+refresh",
+                     ser._unblock_debug() is False))
     finally:
         if prev is None:
             os.environ.pop('KICAD_UNBLOCK_DEBUG', None)
         else:
             os.environ['KICAD_UNBLOCK_DEBUG'] = prev
+        env_knobs.refresh()
 
     # --- fresh_run() context manager ---
     clearance_ledger.reset()

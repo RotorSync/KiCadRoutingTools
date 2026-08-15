@@ -41,7 +41,7 @@ import sys
 # repo root = two levels up from this file (tests/stress/redo_diff_stage.py)
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 REDO = os.path.join(REPO, "tests", "stress", "redo_stress_test.py")
-CHECK_DRC = os.path.join(REPO, "check_drc.py")
+CHECK_DRC = os.path.join(REPO, 'py_router', 'check_drc.py')
 DEFAULT_ROOT = os.path.expanduser("~/Documents/kicad_stress_test")
 DEFAULT_OUT = os.path.expanduser("~/Documents/diff2")
 
@@ -194,8 +194,13 @@ def process_board(set_board, manifest, work_root, out_dir, drc_size_checks):
         print(f"  (seeded unrecorded inputs: {', '.join(seeded)})")
 
     rd_argv = shlex.split(lines[last])
-    # strip leading interpreter tokens so resolve_diff_output sees the route_diff argv
-    while rd_argv and (rd_argv[0].endswith(("python", "python3")) or rd_argv[0] in ("-X", "utf8")):
+    # Strip leading interpreter tokens so resolve_diff_output sees the route_diff
+    # argv. Matched by SHAPE (interpreter, any -flag, and -X's `utf8` value)
+    # rather than by an allow-list of the flags we happen to record today: the
+    # list missed `-u` the moment recordings gained it (#599), leaving `-u -X
+    # utf8 ...` in front of the argv.
+    while rd_argv and (rd_argv[0].endswith(("python", "python3"))
+                       or rd_argv[0].startswith("-") or rd_argv[0] == "utf8"):
         rd_argv.pop(0)
     out_board, _rd_clearance = resolve_diff_output(rd_argv)
     # grade DRC at the floor the board must meet (min --clearance over the whole

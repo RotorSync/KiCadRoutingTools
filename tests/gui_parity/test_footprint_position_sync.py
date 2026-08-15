@@ -59,6 +59,8 @@ def main():
         _reexec_into_kicad()
 
     sys.path.insert(0, REPO)
+    sys.path.insert(0, os.path.join(REPO, 'py_router'))  # #522
+    sys.path.insert(0, os.path.join(REPO, 'py_tools'))  # #522
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import kicad_ipc_adapter
     from fake_ipc_board import install as _install_fake_board, build_pcb_data_like_ipc

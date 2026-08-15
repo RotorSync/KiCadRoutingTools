@@ -70,18 +70,31 @@ OPERATIONAL NOTES -- read before starting a wave
 SCHEDULING
 ===============================================================================
 
-*   **Longest-processing-time-first**, using a prior wave's `total_seconds` via
-    `--cost-baseline`. Without it the corpus's 2h board can start last and hold
-    4 idle cores to the end; with it that board starts at t=0. Boards with no
-    prior cost fall back to a median guess.
+*   **Order: `--order name` is the DEFAULT** -- plain corpus order, by set then
+    board name (numeric sets sort 9 before 10). This is the reproducible one and
+    what you want almost always: the Nth board of a wave is the same board every
+    run, two waves' logs interleave comparably, and a wave killed half way
+    through covers a predictable prefix instead of an arbitrary subset. Nothing
+    about grading depends on order -- routing is deterministic and each board is
+    independent -- so this costs only wall-clock, never correctness.
 
-*   **Memory admission.** At most `--heavy-slots` boards whose prior peak
-    footprint exceeds `--heavy-mb` run concurrently. The corpus has ~11 boards
-    over 2.5GB and one that peaks at 6.6GB; five of those at once on an 8GB
-    machine thrashes swap and gets workers OOM-killed, which surfaces as
-    NORESULT rows hours in. A blocked heavy board does NOT hold a worker slot --
-    the scheduler skips it and starts the next ELIGIBLE board -- so `--jobs`
-    boards stay in flight regardless. Set `--heavy-slots 99` to disable.
+*   **`--order lpt`** is the opt-in alternative: longest-processing-time-first
+    from a prior wave's `total_seconds` (`--cost-baseline`). It shortens the
+    makespan, because the corpus's multi-hour board starts at t=0 instead of
+    stranding 4 idle cores at the end. The cost is that run order becomes
+    data-dependent: it changes whenever the cost baseline changes, so two waves
+    are no longer directly comparable board-for-board. Reach for it only when
+    wall-clock genuinely matters.
+
+*   **Memory admission is OFF by default** (`--heavy-slots 0` = no limit), so
+    the chosen order is honoured strictly. Set `--heavy-slots 1` on a small-RAM
+    box: it caps how many boards whose prior peak exceeds `--heavy-mb` run at
+    once. The corpus has ~11 boards over 2.5GB and one peaking at 6.6GB, and
+    several of those together on an 8GB machine thrash swap and get workers
+    OOM-killed -- surfacing as NORESULT rows hours in. When enabled, a blocked
+    heavy board does NOT hold a worker slot (the scheduler starts the next
+    ELIGIBLE board), so `--jobs` stay in flight -- but that IS a reordering, so
+    it trades some of the reproducibility above for safety.
 
 *   **A board never kills the wave**: a worker exception degrades to a NORESULT
     row. Per-set `summary.json` is flushed after every completion, so killing
@@ -142,8 +155,25 @@ def regrade_board(set_dir, out_dir, label, board):
     return res
 
 
-def build_tasks(mode, corpus, out_root, sets, costs, heavy_mb):
-    """Global task list across every set, longest-first."""
+def _set_key(s):
+    """Numeric set order where possible ('9' before '10'), name order otherwise
+    (so 'set1monster' still sorts deterministically)."""
+    return (0, int(s), "") if s.isdigit() else (1, 0, s)
+
+
+def build_tasks(mode, corpus, out_root, sets, costs, heavy_mb, order="name"):
+    """Global task list across every set.
+
+    order='name' (DEFAULT): plain corpus order -- by set, then board name. This
+    is the reproducible one: the Nth board of a wave is the same board every
+    run, two waves interleave their logs comparably, and a partial wave covers a
+    predictable prefix. Prefer it.
+
+    order='lpt': longest-processing-time-first from --cost-baseline. Shorter
+    wall-clock (the multi-hour board starts at t=0 instead of stranding idle
+    cores at the end) but the run order is data-dependent, so it changes
+    whenever the cost baseline changes.
+    """
     tasks = []
     for s in sets:
         set_dir = corpus / f"runs_set{s}"
@@ -168,7 +198,10 @@ def build_tasks(mode, corpus, out_root, sets, costs, heavy_mb):
             sec, mb = costs.get(b, FALLBACK_COST)
             tasks.append({"set": s, "board": b, "set_dir": set_dir, "out_dir": out_dir,
                           "sec": sec, "mb": mb, "heavy": mb > heavy_mb})
-    tasks.sort(key=lambda t: -t["sec"])  # longest-processing-time-first
+    if order == "lpt":
+        tasks.sort(key=lambda t: -t["sec"])          # longest-processing-time-first
+    else:
+        tasks.sort(key=lambda t: (_set_key(t["set"]), t["board"]))   # corpus order
     return tasks
 
 
@@ -182,10 +215,19 @@ def main():
     ap.add_argument("--sets", default="1,2,3,4,5,6,7,8,9,10,11")
     ap.add_argument("--label", default="head", help="provenance label recorded in git_version")
     ap.add_argument("--jobs", type=int, default=5, help="boards in flight at all times")
+    ap.add_argument("--order", choices=("name", "lpt"), default="name",
+                    help="board order: 'name' (DEFAULT) = by set then board name, "
+                         "reproducible; 'lpt' = longest-first, shorter wall-clock "
+                         "but data-dependent")
     ap.add_argument("--heavy-mb", type=float, default=2500.0,
-                    help="a board whose prior peak exceeds this is 'heavy'")
-    ap.add_argument("--heavy-slots", type=int, default=1,
-                    help="max heavy boards concurrent (99 to disable)")
+                    help="a board whose prior peak exceeds this is 'heavy' "
+                         "(only used with --heavy-slots)")
+    ap.add_argument("--heavy-slots", type=int, default=4,
+                    help="max heavy boards concurrent (DEFAULT 4); 0 = no limit. "
+                         "A LOW value serialises the tail: a corpus wave ends with "
+                         "its heavy boards, so --heavy-slots 1 drains them one at a "
+                         "time and the last 6 boards can take longer than the first "
+                         "159. 4 keeps the pool busy while still capping peak RAM")
     ap.add_argument("--cost-baseline", default=None,
                     help="prior wave dir supplying per-board time/memory for scheduling")
     ap.add_argument("--extra-remap", action="append", default=[], metavar="OLD:NEW",
@@ -198,7 +240,8 @@ def main():
     A.EXTRA_REMAPS = list(args.extra_remap)  # honoured by ab_replay_grade.do_board
 
     costs = load_costs(args.cost_baseline)
-    tasks = build_tasks(args.mode, corpus, out_root, sets, costs, args.heavy_mb)
+    tasks = build_tasks(args.mode, corpus, out_root, sets, costs, args.heavy_mb,
+                        order=args.order)
     if not tasks:
         sys.exit("nothing to do")
 
@@ -211,9 +254,10 @@ def main():
         if ver:
             print(f"[{args.label}] code under test: {format_version(ver)} "
                   f"(commit {ver.get('commit')})", flush=True)
+    _adm = (f"<={args.heavy_slots} heavy(>{args.heavy_mb:.0f}MB) concurrent"
+            if args.heavy_slots else "no memory admission")
     print(f"[{args.label}] {args.mode}: {len(tasks)} boards over sets {','.join(sets)}; "
-          f"{args.jobs} in flight, <={args.heavy_slots} heavy(>{args.heavy_mb:.0f}MB) concurrent",
-          flush=True)
+          f"{args.jobs} in flight, order={args.order}, {_adm}", flush=True)
     if costs:
         est = sum(t["sec"] for t in tasks)
         print(f"[{args.label}] est serial cpu {est/3600:.1f}h -> ~{est/3600/args.jobs:.1f}h "
@@ -242,7 +286,8 @@ def main():
             while len(running) < args.jobs:
                 pick = None
                 for i, t in enumerate(pending):
-                    if t["heavy"] and heavy_running >= args.heavy_slots:
+                    if (t["heavy"] and args.heavy_slots
+                            and heavy_running >= args.heavy_slots):
                         continue  # skip it -- a lighter board takes the slot instead
                     pick = pending.pop(i)
                     break

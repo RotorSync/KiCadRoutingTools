@@ -47,7 +47,7 @@ def main():
 
         # 3) a routing command (not cp/mv) is a no-op even when both args are boards.
         _mk(d, "x.kicad_pcb")
-        mirror_project_sibling(["route.py", "x.kicad_pcb", "y.kicad_pcb"], d)
+        mirror_project_sibling(["py_router/route.py", "x.kicad_pcb", "y.kicad_pcb"], d)
         if os.path.isfile(os.path.join(d, "y.kicad_pro")):
             print("FAIL: non-cp command mirrored a .kicad_pro"); fails += 1
         else:

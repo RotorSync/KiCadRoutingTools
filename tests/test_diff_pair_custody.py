@@ -9,6 +9,8 @@ import sys
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # #522
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # #522
 
 from diff_pair_custody import (classify_diff_pair_failure, record_casualty,
                                record_pair_diag, build_pair_reports)
@@ -99,8 +101,11 @@ def test_pair_reports():
           reps['A']['outcome'] == 'coupled'
           and not reps['A']['member_audit_mismatch']
           and reps['A']['failure_reason'] is None)
-    check("B coupled but N incomplete -> mismatch flagged",
-          reps['B']['outcome'] == 'coupled'
+    # #602: a contradicted 'coupled' claim is demoted to 'incomplete' in the
+    # record itself -- one pair report must not say 'coupled' next to its own
+    # list of disconnected member pads.
+    check("B coupled but N incomplete -> mismatch flagged, outcome demoted",
+          reps['B']['outcome'] == 'incomplete'
           and reps['B']['member_audit_mismatch']
           and reps['B']['incomplete_members'] == ['/B_N'])
     check("C failed with reason+stage+blockers",
