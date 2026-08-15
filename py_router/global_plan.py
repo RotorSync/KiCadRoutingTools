@@ -145,7 +145,9 @@ def plan_global_routes(pcb_data, config, net_ids: List[Tuple[str, int]],
                         heuristic_weight=k['hweight'],
                         max_iterations=max(1, int(k['iters'])),
                         power_tap_neckdown=False,
-                        plan_probe=True)
+                        plan_probe=True,
+                        **({'via_cost': int(k['probe_via_cost'])}
+                           if k['probe_via_cost'] > 0 else {}))
     # The reservation stamp reuses the ripped-ghost machinery at the plan's
     # own knobs (a replace clone, never a shared-config mutation).
     res_cfg = replace(config,
@@ -153,6 +155,20 @@ def plan_global_routes(pcb_data, config, net_ids: List[Tuple[str, int]],
                       ripped_route_avoidance_radius=k['radius'])
     collar_rects = (_escape_collar_rects(config)
                     if k['zone_scale'] != 1.0 else None)
+
+    # #589 v2-lite (KICAD_GLOBAL_PLAN_SEQ=1): stamp each successful probe's
+    # corridor into the SHARED probe map as a soft ghost before the next
+    # probe runs -- one sequential negotiated-congestion pass. Blind probes
+    # all pick the same cheapest layer (glasgow: 98.7% of probe length on
+    # F.Cu vs the human board's 50%), so the demand map every downstream
+    # signal (conflict graphs, cliques, layer assignment) consumes is fake;
+    # sequential awareness makes probes spread the way real routing must.
+    seq_cfg = (replace(config,
+                       ripped_route_avoidance_cost=k['seq_cost'],
+                       ripped_route_avoidance_radius=k['seq_radius'])
+               if k['seq'] else None)
+    if seq_cfg is not None:
+        from obstacle_costs import merge_track_proximity_costs
 
     plan = GlobalPlan()
     max_iters = 0
@@ -165,6 +181,13 @@ def plan_global_routes(pcb_data, config, net_ids: List[Tuple[str, int]],
             plan.probe_failures += 1
             continue
         plan.rough_paths[nid] = result['path']
+        if seq_cfg is not None:
+            seq_rows, _ = compute_ripped_route_costs(result, seq_cfg,
+                                                     layer_map)
+            if len(seq_rows):
+                merge_track_proximity_costs(probe_map, {},
+                                            ghost_costs={nid: seq_rows},
+                                            config=rough_cfg)
         if k['cost'] > 0:
             rows, via_pos = compute_ripped_route_costs(result, res_cfg,
                                                        layer_map)
@@ -604,6 +627,43 @@ def apply_plan_order(net_ids: List[Tuple[str, int]], plan: GlobalPlan,
         print("  [plan] order tail: "
               + ", ".join(nm for nm, _ in reordered[-10:]))
     return reordered
+
+
+def dump_plan(path: str, plan: GlobalPlan, nets_in, nets_ordered,
+              front_ids, config) -> None:
+    """#589 offline-analysis dump (KICAD_GLOBAL_PLAN_DUMP): everything the
+    plan-quality scorer needs to evaluate orders/layers WITHOUT re-running
+    the route step -- rough paths, both conflict graphs, layer prefs, the
+    order actually applied, the #472 front partition, and the config
+    scalars the bucket geometry depends on. JSON keys become strings;
+    consumers must int() net ids."""
+    import json
+    doc = {
+        'nets_input': [[n, i] for n, i in nets_in],
+        'order_used': [[n, i] for n, i in nets_ordered],
+        'front_ids': sorted(front_ids or ()),
+        'rough_paths': {str(nid): p for nid, p in plan.rough_paths.items()},
+        'share_w': {str(a): {str(b): w for b, w in ws.items()}
+                    for a, ws in plan.share_w.items()},
+        'conflict_w': {str(a): {str(b): w for b, w in ws.items()}
+                       for a, ws in plan.conflict_w.items()},
+        'layer_pref': {str(nid): l for nid, l in plan.layer_pref.items()},
+        'via_sites': {str(nid): v for nid, v in plan.via_sites.items()},
+        'probe_iterations': plan.probe_iterations,
+        'probe_failures': plan.probe_failures,
+        'config': {
+            'grid_step': config.grid_step,
+            'track_width': config.track_width,
+            'clearance': config.clearance,
+            'layers': list(config.layers),
+            'layer_costs': list(config.layer_costs or []),
+            'via_size': config.via_size,
+        },
+        'knobs': global_plan_knobs(),
+    }
+    with open(path, 'w') as f:
+        json.dump(doc, f)
+    print(f"Global plan dump: wrote {path}")
 
 
 def add_plan_source(ghosts, config, net_id, routed_net_ids):

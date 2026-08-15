@@ -1340,8 +1340,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
               if final_reconcile else None)
     if _gplan is not None:
         config._global_plan = _gplan
+        _gp_nets_in = list(single_ended_nets)
         single_ended_nets = apply_plan_order(single_ended_nets, _gplan,
                                              front_ids=_direct_front_ids)
+        # #589 scorer dump: plan state as JSON for offline order/layer
+        # evaluation; _DUMP_EXIT stops here (before swaps mutate copper)
+        # so a dump run costs probe-time only.
+        if env_knobs.GLOBAL_PLAN.get('dump'):
+            from global_plan import dump_plan
+            dump_plan(env_knobs.GLOBAL_PLAN['dump'], _gplan, _gp_nets_in,
+                      single_ended_nets, _direct_front_ids, config)
+            if env_knobs.GLOBAL_PLAN.get('dump_exit'):
+                import sys as _sys
+                _sys.exit(0)
         total_iterations += _gplan.probe_iterations
         total_layer_swaps += apply_plan_layer_swaps(
             pcb_data, config, _gplan, single_ended_nets,

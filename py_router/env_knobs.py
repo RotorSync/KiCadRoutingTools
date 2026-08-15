@@ -283,6 +283,29 @@ def refresh() -> None:
         'layer_discount': _f('KICAD_GLOBAL_PLAN_LAYER_DISCOUNT', 0.7),
         'swaps': _opt_in('KICAD_GLOBAL_PLAN_SWAPS'),
         'debug': _opt_in('KICAD_GLOBAL_PLAN_DEBUG'),    # ordering forensics dump
+        # Sequential-aware probing (#589 v2-lite, negotiated-congestion in
+        # ONE pass): each successful probe's corridor is stamped into the
+        # shared probe map as a soft ghost (compute_ripped_route_costs rows
+        # at _SEQ_COST/_SEQ_RADIUS), so later probes SEE earlier probes and
+        # spread laterally/across layers instead of all piling onto the
+        # cheapest layer (the human-anchor finding: probes 98.7% F.Cu vs
+        # human 50% on glasgow -- mutually-blind probes fake the demand map
+        # the ordering/layer levers consume).
+        'seq': _opt_in('KICAD_GLOBAL_PLAN_SEQ'),
+        'seq_cost': _f('KICAD_GLOBAL_PLAN_SEQ_COST', 0.15),
+        'seq_radius': _f('KICAD_GLOBAL_PLAN_SEQ_RADIUS', 1.0),
+        # Probe-only via cost override (grid steps; 0 = keep config's).
+        # config.via_cost 75 =~ 3.75mm-equiv means a blind/soft-ghosted
+        # probe will trade many mm of lateral squeeze before paying a via
+        # pair -- the human solution pays ~1 via/net to spread layers.
+        'probe_via_cost': _i('KICAD_GLOBAL_PLAN_VIA_COST', 0),
+        # Offline-analysis dump (#589 plan-quality scoring): write the full
+        # plan state (rough paths, both conflict graphs, layer prefs, the
+        # order actually used + the front partition) as JSON to this path
+        # right after apply_plan_order; '_EXIT' stops the run there so a
+        # dump costs seconds, not a route step.
+        'dump': _s('KICAD_GLOBAL_PLAN_DUMP', ''),
+        'dump_exit': _opt_in('KICAD_GLOBAL_PLAN_DUMP_EXIT'),
     }
 
     # --- strings -------------------------------------------------------------
