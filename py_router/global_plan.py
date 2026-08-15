@@ -460,6 +460,129 @@ def apply_plan_layer_swaps(pcb_data, config, plan: GlobalPlan,
     return swaps
 
 
+def apply_plan_escape_fanout(pcb_data, config, plan: GlobalPlan,
+                             net_ids: List[Tuple[str, int]],
+                             all_swap_vias: List,
+                             all_swap_segments: List,
+                             verbose: bool = False) -> int:
+    """#589 escape fanout (KICAD_GLOBAL_PLAN_ESCAPE=1): dogbone each
+    plan-assigned end that is still stuck on a non-assigned layer --
+    an OFFSET via + pad->via trace found by tap_pad_with_escalation
+    (via-in-pad clamp, fab-ladder rungs, fine-pitch escalation), placed
+    BEFORE any obstacle map exists so every later build sees the copper.
+    This is the human's escape-first idiom, and it reaches exactly the
+    two buckets the stub-swap path cannot: bare pads (no stub to move)
+    and pads where no via size fits at the pad CENTER (wave26: 53 of 66
+    declines). Runs AFTER apply_plan_layer_swaps -- an end the swap
+    already moved shows target-layer copper and is skipped.
+
+    Commit protocol (the #292/#508 write-list lesson): via/segment
+    OBJECTS append to pcb_data (obstacle maps + endpoint derivation) AND
+    ride all_swap_vias / all_swap_segments (the writer and the oracle
+    gate's model read those; nothing else carries this copper).
+    A dogbone whose net later fails ships as connected same-net copper
+    (pad-attached stub+via) -- visible, DRC-checked, and a candidate for
+    a future unused-dogbone sweep; deliberately not silently removed."""
+    k = global_plan_knobs()
+    if not k['escape'] or plan is None or not plan.layer_pref:
+        return 0
+    from connectivity import get_net_endpoints
+    from kicad_parser import Segment, Via
+    from plane_pad_tap import tap_pad_with_escalation
+
+    placed = 0
+    no_pad = 0
+    failed = 0
+    already = 0
+    thru = 0
+    placed_via_dicts: List[dict] = []
+    placed_seg_dicts: List[dict] = []
+    for name, nid in net_ids:
+        li = plan.layer_pref.get(nid)
+        if li is None or li >= len(config.layers):
+            continue
+        target_layer = config.layers[li]
+        sources, targets, error = get_net_endpoints(pcb_data, nid, config)
+        if error or not sources or not targets:
+            continue
+        net = pcb_data.nets.get(nid)
+        net_pads = net.pads if net else []
+        for end in (sources, targets):
+            cur_layer = config.layers[end[0][2]]
+            if cur_layer == target_layer:
+                already += 1
+                continue
+            ex, ey = end[0][3], end[0][4]
+            # Skip ends that already own copper on the target layer nearby
+            # (a stub swap or existing routing did the job).
+            near = False
+            for s in pcb_data.segments:
+                if s.net_id != nid or s.layer != target_layer:
+                    continue
+                if (min(abs(s.start_x - ex), abs(s.end_x - ex)) < 2.0
+                        and min(abs(s.start_y - ey),
+                                abs(s.end_y - ey)) < 2.0):
+                    near = True
+                    break
+            if near:
+                already += 1
+                continue
+            pad = None
+            for p in net_pads:
+                if abs(p.global_x - ex) < 0.05 and abs(p.global_y - ey) < 0.05:
+                    pad = p
+                    break
+            if pad is None:
+                no_pad += 1
+                continue
+            if pad.drill > 0:
+                thru += 1  # a barrel already reaches every layer
+                continue
+            res = tap_pad_with_escalation(
+                pad, cur_layer, nid, pcb_data, config,
+                max_search_radius=k['escape_radius'],
+                via_size=config.via_size, via_drill=config.via_drill,
+                extra_vias=placed_via_dicts,
+                extra_segments=placed_seg_dicts,
+                verbose=verbose, fine_for_all=True)
+            if not res.success:
+                failed += 1
+                if verbose:
+                    print(f"  [plan] escape declined {name} @{cur_layer} "
+                          f"({ex:.2f},{ey:.2f}): via_blocked="
+                          f"{res.via_blocked}")
+                continue
+            if res.via is not None:
+                v = res.via
+                via_obj = Via(x=v['x'], y=v['y'], size=v['size'],
+                              drill=v['drill'],
+                              layers=v.get('layers', ['F.Cu', 'B.Cu']),
+                              net_id=nid)
+                pcb_data.vias.append(via_obj)
+                all_swap_vias.append(via_obj)
+                placed_via_dicts.append(dict(v, net_id=nid))
+            for s in res.segments:
+                seg_obj = Segment(start_x=s['start'][0],
+                                  start_y=s['start'][1],
+                                  end_x=s['end'][0], end_y=s['end'][1],
+                                  width=s['width'], layer=s['layer'],
+                                  net_id=nid)
+                pcb_data.segments.append(seg_obj)
+                all_swap_segments.append(seg_obj)
+                placed_seg_dicts.append(dict(s, net_id=nid))
+            placed += 1
+            if verbose:
+                where = (f"via ({res.via['x']:.2f},{res.via['y']:.2f})"
+                         if res.via else "reused via")
+                print(f"  Plan escape fanout: {name} {cur_layer} pad "
+                      f"({ex:.2f},{ey:.2f}) -> {where} "
+                      f"[{res.params_label}]")
+    print(f"Global plan escape fanout: {placed} dogbone(s) placed, "
+          f"{failed} declined, {already} end(s) already served, "
+          f"{thru} through-hole end(s), {no_pad} end(s) without a pad")
+    return placed
+
+
 def _escape_collar_rects(config):
     """Inclusive grid rects of the BGA escape collars (zone expanded by
     bga_proximity_radius) -- same geometry as obstacle_costs.

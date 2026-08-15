@@ -1359,6 +1359,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             all_segment_modifications, all_swap_vias,
             all_stubs_by_layer=all_stubs_by_layer,
             can_swap_to_top_layer=can_swap_to_top_layer, verbose=verbose)
+        # #589 escape fanout: dogbone the plan-assigned ends the swap path
+        # could not serve (bare pads / no pad-center via fit) -- still
+        # BEFORE the base map build, so all downstream maps see the copper.
+        from global_plan import apply_plan_escape_fanout
+        apply_plan_escape_fanout(pcb_data, config, _gplan,
+                                 single_ended_nets, all_swap_vias,
+                                 all_swap_segments, verbose=verbose)
 
     # Build base obstacle map once (excludes all nets we're routing)
     all_net_ids_to_route = [nid for _, nid in net_ids]

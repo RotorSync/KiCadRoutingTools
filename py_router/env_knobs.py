@@ -325,6 +325,15 @@ def refresh() -> None:
         # in-run copper consumes their via sites. Oracle test: front-load
         # the known failure set and see if completion follows.
         'order_file': _s('KICAD_GLOBAL_PLAN_ORDER_FILE', ''),
+        # Plan-directed escape fanout (#589): for a plan-assigned end still
+        # on a non-assigned layer with no swappable stub and no fitting
+        # pad-center via, place a DOGBONE (offset via + pad->via trace,
+        # tap_pad_with_escalation) BEFORE any obstacle map exists -- the
+        # human's escape-first move (0.4-1.8mm surface stub + one via +
+        # inner-layer run on exactly the nets our chains fail; wave26: 53
+        # of 66 swap declines were 'no via fits at the pad CENTER').
+        'escape': _opt_in('KICAD_GLOBAL_PLAN_ESCAPE'),
+        'escape_radius': _f('KICAD_GLOBAL_PLAN_ESCAPE_RADIUS', 1.5),
         # Offline-analysis dump (#589 plan-quality scoring): write the full
         # plan state (rough paths, both conflict graphs, layer prefs, the
         # order actually used + the front partition) as JSON to this path
