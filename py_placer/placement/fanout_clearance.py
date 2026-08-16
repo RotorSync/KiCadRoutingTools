@@ -805,7 +805,12 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
                             max_passes: int = 30,
                             via_clear_fallback: bool = True,
                             verbose: bool = False,
-                            on_move=None) -> Dict:
+                            on_move=None,
+                            # progress_callback(current, total, label): the
+                            # candidate-position sweep per cap x up to 30
+                            # passes is the slow part, so each cap visit
+                            # reports (GUI status line). None = silent.
+                            progress_callback=None) -> Dict:
     """Nudge near-BGA decoupling caps off foreign-net fanout copper (vias
     #130, escape tracks #278, component pads #275) and toward same-net balls.
     Run AFTER bga_fanout.py.
@@ -895,7 +900,11 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
 
     for pass_num in range(1, max_passes + 1):
         moves = 0
-        for ref in order:
+        for _oi, ref in enumerate(order):
+            if progress_callback:
+                progress_callback(
+                    _oi + 1, len(order),
+                    f"Cap optimize pass {pass_num}: {ref}")
             cap = st.caps[ref]
             current = st.cost(ref, cap, cap.x, cap.y, cap.rot)
             rots = ROTATIONS if (allow_rotations and rotate[ref]) else [cap.rot]
@@ -957,7 +966,11 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
                  if st.graze_penalty(r, st.caps[r], st.caps[r].x, st.caps[r].y,
                                      st.caps[r].rot) > EPS]
         rots_all = ROTATIONS if allow_rotations else None
-        for ref in stuck:
+        for _fi, ref in enumerate(stuck):
+            if progress_callback:
+                progress_callback(
+                    _fi + 1, len(stuck),
+                    f"Cap optimize: via-clear fallback for {ref}")
             cap = st.caps[ref]
             rots = rots_all if rots_all is not None else [cap.rot]
             best = None  # (cost, x, y, rot)

@@ -1136,7 +1136,8 @@ class FanoutTab(wx.Panel):
 
     def __init__(self, parent, pcb_data, board_filename,
                  get_shared_params=None, on_fanout_complete=None,
-                 get_connectivity_check=None, sync_pcb_data_callback=None):
+                 get_connectivity_check=None, sync_pcb_data_callback=None,
+                 append_log=None):
         """
         Create the fanout tab.
 
@@ -1158,6 +1159,9 @@ class FanoutTab(wx.Panel):
         # Keeps the dialog's in-memory pcb_data in step with the board after a
         # fanout applies copper (see _apply_fanout_results).
         self.sync_pcb_data_callback = sync_pcb_data_callback
+        # Engine narration sink (thread-safe: _append_log marshals via
+        # wx.CallAfter). None = stdout only.
+        self.append_log = append_log
 
         # #621 cancel state. `_cancel_requested` is the flag the plan executor
         # sets through PlanExecutor.stop() (ai_plan._action_owner already maps
@@ -1312,22 +1316,29 @@ class FanoutTab(wx.Panel):
         to the board -- pcbnew mutation happens in `_on_operation_complete`, on
         the UI thread.
         """
+        from .gui_utils import redirect_prints_to_log
+        # The tee lives INSIDE the worker: `_run_*_fanout` returns as soon as
+        # the thread starts, so a redirect installed on the UI thread would be
+        # restored while the engine was still printing (and sys.stdout is
+        # process-global). Same placement as the planes tab's worker.
+        # `append_log` marshals with wx.CallAfter, so this is thread-safe.
         try:
-            if kind == 'bga':
-                import bga_fanout
-                tracks, vias, vias_to_remove, failed = \
-                    bga_fanout.generate_bga_fanout(footprint, self.pcb_data,
-                                                   **kwargs)
-                skipped = list(bga_fanout.LAST_CANCEL_SKIPPED)
-            else:
-                import qfn_fanout
-                tracks, vias, failed = qfn_fanout.generate_qfn_fanout(
-                    footprint, self.pcb_data, **kwargs)
-                vias_to_remove = None
-                skipped = list(qfn_fanout.LAST_CANCEL_SKIPPED)
-            self._operation_result = {
-                'tracks': tracks, 'vias': vias, 'failed': failed,
-                'vias_to_remove': vias_to_remove, 'skipped': skipped}
+            with redirect_prints_to_log(self.append_log):
+                if kind == 'bga':
+                    import bga_fanout
+                    tracks, vias, vias_to_remove, failed = \
+                        bga_fanout.generate_bga_fanout(
+                            footprint, self.pcb_data, **kwargs)
+                    skipped = list(bga_fanout.LAST_CANCEL_SKIPPED)
+                else:
+                    import qfn_fanout
+                    tracks, vias, failed = qfn_fanout.generate_qfn_fanout(
+                        footprint, self.pcb_data, **kwargs)
+                    vias_to_remove = None
+                    skipped = list(qfn_fanout.LAST_CANCEL_SKIPPED)
+                self._operation_result = {
+                    'tracks': tracks, 'vias': vias, 'failed': failed,
+                    'vias_to_remove': vias_to_remove, 'skipped': skipped}
         except Exception as exc:                                # noqa: BLE001
             import traceback
             traceback.print_exc()
@@ -1359,11 +1370,16 @@ class FanoutTab(wx.Panel):
                     res.get('skipped') or [],
                     kind='ball' if kind == 'bga' else 'pad net')
                 return
-            self._apply_fanout_results(
-                res.get('tracks') or [], res.get('vias') or [],
-                failed_nets=res.get('failed'),
-                vias_to_remove=res.get('vias_to_remove'),
-                **apply_kw)
+            # The APPLY phase narrates too -- gui_utils.redirect_prints_to_log
+            # exists because every tab's apply ran after its worker restored
+            # stdout, so its output reached the terminal but never the log tab.
+            from .gui_utils import redirect_prints_to_log
+            with redirect_prints_to_log(self.append_log):
+                self._apply_fanout_results(
+                    res.get('tracks') or [], res.get('vias') or [],
+                    failed_nets=res.get('failed'),
+                    vias_to_remove=res.get('vias_to_remove'),
+                    **apply_kw)
         finally:
             self._end_run()
 
@@ -1424,6 +1440,19 @@ class FanoutTab(wx.Panel):
     def _on_bga_differential_changed(self, is_differential):
         """Handle BGA differential checkbox change - switch net panel mode."""
         self.net_panel.set_differential_mode(is_differential)
+
+    def _fanout_status(self, message):
+        """Status update for a fanout phase.
+
+        Engine-thread progress reaches the UI through gui_utils.ui_thread_status,
+        which marshals off-thread callers with wx.CallAfter and repaints
+        narrowly (no Gauge.Pulse) -- see its docstring for why that matters
+        inside a KiCad action plugin. Guarded: reporting must never break the
+        fanout.
+        """
+        from .gui_utils import ui_thread_status
+        ui_thread_status(getattr(self, 'status_text', None),
+                         getattr(self, 'progress_bar', None), message)
 
     def _on_fanout(self, event):
         """Handle fanout button click."""
@@ -1556,6 +1585,10 @@ class FanoutTab(wx.Panel):
             # Shared Basic-tab per-layer costs (issue #288), same values the
             # route/diff tabs use; None when the control is empty/invalid.
             layer_costs=shared.get('layer_costs') or None,
+            # Per-ball/phase progress into the status line. Safe from the
+            # worker: ui_thread_status marshals off-thread callers.
+            progress_callback=(lambda c, t, m:
+                               self._fanout_status(f"{m} ({c}/{t})" if t else m)),
         )
         apply_kw = dict(
             fanout_config={
@@ -1616,6 +1649,9 @@ class FanoutTab(wx.Panel):
             via_drill=via_drill,
             allow_via_in_pad=allow_via_in_pad,
             board_edge_clearance=shared.get('board_edge_clearance', 0.0),
+            # See the BGA path: safe from the worker via ui_thread_status.
+            progress_callback=(lambda c, t, m:
+                               self._fanout_status(f"{m} ({c}/{t})" if t else m)),
         )
         apply_kw = dict(
             fanout_config={
@@ -1662,6 +1698,8 @@ class FanoutTab(wx.Panel):
         if board is None:
             wx.MessageBox("Board is no longer open", "Error", wx.OK | wx.ICON_ERROR)
             return
+
+        self._fanout_status("Applying fanout copper to the board...")
 
         # Get layer mappings
         name_to_id, _ = _build_layer_mappings()
@@ -1729,6 +1767,7 @@ class FanoutTab(wx.Panel):
             vias_added += 1
 
         # Build connectivity to register new items properly
+        self._fanout_status("Rebuilding board connectivity...")
         board.BuildConnectivity()
 
         # Teardrops, if the shared "Add teardrops" checkbox is on (#489 §9). The
@@ -1759,6 +1798,7 @@ class FanoutTab(wx.Panel):
         # fewer obstacles. A 2-step chain (route_diff -> route, pcb_data built
         # fresh) was bit-identical, which is what localized it to the carry
         # rather than to the router.
+        self._fanout_status("Syncing board data...")
         if self.sync_pcb_data_callback:
             self.sync_pcb_data_callback()
 
@@ -1876,6 +1916,10 @@ class FanoutTab(wx.Panel):
                 max_passes=int(fanout_config.get('cap_max_passes', 30)),
                 cap_prefix=fanout_config.get('cap_prefix', 'C,R'),
                 allow_rotations=fanout_config.get('cap_allow_rotation', True),
+                # Runs ON the UI thread; _fanout_status forces the repaint so
+                # the label moves per cap visit instead of freezing (#130).
+                progress_callback=(lambda c, t, m:
+                                   self._fanout_status(f"{m} ({c}/{t})" if t else m)),
             )
 
             for p in result.get('placements', []):

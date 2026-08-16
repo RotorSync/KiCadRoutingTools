@@ -256,7 +256,8 @@ def run_output_conflict(vx, vy, net_id, placed, px=None, py=None, *,
 
 def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                          track_width, clearance, via_size, via_drill, grid_step,
-                         allow_via_in_pad=False, board_edge_clearance=0.0):
+                         allow_via_in_pad=False, board_edge_clearance=0.0,
+                         progress_callback=None):
     """Via-drop escape (issue #164): instead of a surface 45-degree fan, run a
     short stub from each pad to a through-via just past the pad edge and let
     signal routing pick the net up on an inner/back layer. This escapes a
@@ -310,9 +311,16 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     fanned_nets = {pi.pad.net_id for pi in pad_infos}
     cfg = GridRouteConfig(layers=list(pcb_data.board_info.copper_layers or [layer]),
                           track_width=track_width, clearance=clearance)
+    _ref = getattr(footprint, 'reference', '?')
+
+    def _prog(cur, tot, what):
+        if progress_callback:
+            progress_callback(cur, tot, f"QFN via-drop {_ref}: {what}")
+
     from kicad_dru import install_layer_clearances
     install_layer_clearances(cfg, None, None, pcb_data)  # #498
     layer_map = build_layer_map(cfg.layers)
+    _prog(0, 0, "building obstacle map...")
     obstacles = build_base_obstacle_map(pcb_data, cfg, nets_to_route=list(fanned_nets),
                                         extra_clearance=track_width / 2)
     obs_layer_idx = layer_map.get(layer)
@@ -561,7 +569,9 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
         by_side[pi.side].append(pi)
 
     n_alt = 0
-    for side, pis in by_side.items():
+    for _si, (side, pis) in enumerate(by_side.items()):
+        _prog(_si + 1, len(by_side),
+              f"placing via drops, side {side} ({len(pis)} pin(s))")
         pis.sort(key=lambda pi: (pi.pad.global_x, pi.pad.global_y))
         order_fwd = list(range(len(pis)))
         best, best_n, best_ci = None, -1, 0
@@ -654,6 +664,9 @@ def generate_qfn_fanout(footprint: Footprint,
                         via_drill: float = 0.25,
                         allow_via_in_pad: bool = False,
                         board_edge_clearance: float = 0.0,
+                        # progress_callback(current, total, label); the fanout
+                        # tab otherwise shows one static label for the run.
+                        progress_callback=None,
                         cancel_check=None) -> Tuple[List[Dict], List[Dict], List[str]]:
     """
     Generate QFN fanout tracks for a footprint.
@@ -753,6 +766,11 @@ def generate_qfn_fanout(footprint: Footprint,
     pad_infos: List[PadInfo] = []
     side_counts = defaultdict(int)
 
+    if progress_callback:
+        progress_callback(
+            0, 0, f"QFN fanout {getattr(footprint, 'reference', '?')}: "
+                  f"analyzing {len(footprint.pads)} pad(s)...")
+
     for pad in footprint.pads:
         if not pad.net_name or pad.net_id == 0:
             continue
@@ -818,7 +836,8 @@ def generate_qfn_fanout(footprint: Footprint,
         return _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                                     track_width, clearance, via_size, via_drill, grid_step,
                                     allow_via_in_pad=allow_via_in_pad,
-                                    board_edge_clearance=board_edge_clearance)
+                                    board_edge_clearance=board_edge_clearance,
+                                    progress_callback=progress_callback)
 
     # Build stubs
     stubs: List[FanoutStub] = []
@@ -878,8 +897,11 @@ def generate_qfn_fanout(footprint: Footprint,
     install_layer_clearances(_obs_cfg, None, None, pcb_data)  # #498
     _obs_layer_map = build_layer_map(_obs_cfg.layers)
     _fanned_net_ids = [p.net_id for p in footprint.pads if p.net_id]
+    if progress_callback:
+        progress_callback(0, 0, "QFN fanout: building obstacle map...")
     _obstacles = build_base_obstacle_map(pcb_data, _obs_cfg, nets_to_route=_fanned_net_ids,
-                                         extra_clearance=track_width / 2)
+                                         extra_clearance=track_width / 2,
+                                         progress_callback=progress_callback)
     _obs_layer_idx = _obs_layer_map.get(layer)
     # Window the foreign-pad scan by the actual STUB extent (every stub endpoint),
     # not the part's pad bbox: on large packages (LQFP) a straight escape runs
@@ -977,11 +999,18 @@ def generate_qfn_fanout(footprint: Footprint,
     n_short = 0
     n_ext_short = 0
     kept_stubs: List[FanoutStub] = []
-    for stub, pad_info in zip(stubs, pad_infos):
+    # The per-stub graze test scans every foreign pad; on a crowded board this
+    # loop is where the QFN seconds go, so count it out to the status line.
+    for _sti, (stub, pad_info) in enumerate(zip(stubs, pad_infos)):
         if _cancel():                                   # #621
             # Untried stubs are simply not kept: no copper, and NOT appended to
             # qfn_dropped -- they were never checked, so they are not failures.
             break
+        if progress_callback:
+            progress_callback(
+                _sti + 1, len(stubs),
+                f"QFN fanout {getattr(footprint, 'reference', '?')}: "
+                f"clearing stub {stub.pad.net_name or stub.net_id}")
         nid = stub.net_id
         if _seg_grazes(stub.pad_pos, stub.corner_pos, nid):
             # #513 item 15 (ice4pi): a straight escape toward a nearby board
