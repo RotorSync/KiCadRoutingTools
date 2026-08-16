@@ -219,7 +219,7 @@ def plan_global_routes(pcb_data, config, net_ids: List[Tuple[str, int]],
 
     plan.conflict_w, plan.share_w = _conflict_graphs(plan.rough_paths,
                                                      config)
-    _assign_clique_layers(plan, config)
+    _assign_clique_layers(plan, config, pcb_data)
     n_cross = sum(1 for w in plan.conflict_w.values() if w)
     n_share = sum(1 for w in plan.share_w.values() if w)
     res_cells = sum(len(r) for r in plan.reservations.values())
@@ -252,7 +252,7 @@ def plan_global_routes(pcb_data, config, net_ids: List[Tuple[str, int]],
 MIN_SHARE_FOR_CLIQUE = 3
 
 
-def _assign_clique_layers(plan: GlobalPlan, config) -> None:
+def _assign_clique_layers(plan: GlobalPlan, config, pcb_data=None) -> None:
     """#589 layer assignment: spread each corridor clique's members across
     the clique's viable layers, round-robin, so the corridor packs N layers
     deep instead of every member fighting for the probes' shared favorite
@@ -295,6 +295,83 @@ def _assign_clique_layers(plan: GlobalPlan, config) -> None:
             print(f"Global plan layer assignment (probe-majority): "
                   f"{len(plan.layer_pref)} net(s) prefer a non-start "
                   f"layer of their own rough path")
+        return
+    if k.get('layer_mode') == 'bus':
+        # #589/#658 'bus' mode -- HOME-LAYER PACKING (the measured human
+        # discipline). Share-graph cliques starve under SEQ-negotiated
+        # probes (corridors are near-disjoint BY DESIGN, so overlap never
+        # reaches MIN_SHARE), and round-robin spread is the measured bus
+        # smear (one member per layer = the last arrivals starve). Instead:
+        # cliques = 2-pad nets sharing the same endpoint FOOTPRINT PAIR
+        # (the structural definition of a bus); each bus gets 1-2 HOME
+        # layers whose direction preference matches the corridor axis
+        # (capacity-capped members per layer, KICAD_GLOBAL_PLAN_BUS_CAP),
+        # and members are sliced into contiguous-by-lateral-offset groups
+        # so parallel neighbours share a home -- lanes pack side by side
+        # like the human board (A-bus: In2 x12 + F x7). Consumers are the
+        # existing soft levers (discount / swaps): still never forcing.
+        if pcb_data is None:
+            return
+        import os as _os
+        cap = int(_os.environ.get('KICAD_GLOBAL_PLAN_BUS_CAP', '10') or 10)
+        n_layers = len(config.layers)
+        base_costs = list(config.layer_costs or []) or [1.0] * n_layers
+        while len(base_costs) < n_layers:
+            base_costs.append(1.0)
+        groups: Dict[Tuple[str, str], List[int]] = {}
+        for nid in plan.rough_paths:
+            net = pcb_data.nets.get(nid)
+            if net is None or len(net.pads) != 2:
+                continue
+            refs = tuple(sorted(p.component_ref or '?' for p in net.pads))
+            groups.setdefault(refs, []).append(nid)
+        prefs = config.get_layer_direction_preferences()
+        n_assigned = n_bus = 0
+        for refs, comp in sorted(groups.items()):
+            if len(comp) < 3:
+                continue
+            # corridor axis + per-layer probe usage
+            dx = dy = 0.0
+            totals: Dict[int, float] = {}
+            lat = {}          # nid -> lateral centroid (perpendicular coord)
+            for nid in comp:
+                path = plan.rough_paths.get(nid) or []
+                xs = ys = 0.0
+                for (x1, y1, l1), (x2, y2, l2) in zip(path, path[1:]):
+                    dx += abs(x2 - x1)
+                    dy += abs(y2 - y1)
+                    if l1 == l2:
+                        totals[l1] = totals.get(l1, 0) + max(
+                            abs(x2 - x1), abs(y2 - y1))
+                if path:
+                    xs = sum(p[0] for p in path) / len(path)
+                    ys = sum(p[1] for p in path) / len(path)
+                lat[nid] = ys if dx >= dy else xs
+            axis = 0 if dx >= dy else 1   # 0=H, 1=V (matches pref encoding)
+            # homes: cheap (base cost <= 1.0) layers, axis-matching pref
+            # first, then by probe usage; expensive overflow layers (In1/
+            # In3-class) are never homes.
+            cheap = [i for i in range(n_layers) if 0 <= base_costs[i] <= 1.0]
+            def _rank(i):
+                axis_match = 0 if (prefs and i < len(prefs)
+                                   and prefs[i] == axis) else 1
+                return (axis_match, -totals.get(i, 0), i)
+            homes_all = sorted(cheap, key=_rank)
+            if not homes_all:
+                continue
+            import math as _m
+            n_home = min(len(homes_all), max(1, _m.ceil(len(comp) / cap)))
+            homes = homes_all[:n_home]
+            members = sorted(comp, key=lambda n: lat.get(n, 0.0))
+            per = _m.ceil(len(members) / n_home)
+            for i, nid in enumerate(members):
+                plan.layer_pref[nid] = homes[min(i // per, n_home - 1)]
+                n_assigned += 1
+            n_bus += 1
+        if n_assigned:
+            print(f"Global plan layer assignment (bus home-packing): "
+                  f"{n_assigned} net(s) in {n_bus} bus(es), <= {cap} "
+                  f"members/home-layer, axis-matched homes")
         return
     if not plan.share_w:
         return
