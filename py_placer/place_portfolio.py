@@ -182,15 +182,6 @@ Examples:
                         "verdict outranks the window one (a candidate can "
                         "win its window while losing the board). Costs two "
                         "extra full routes.")
-    p.add_argument("--deadline", type=float, default=None, metavar="SECONDS",
-                   help="Wall-clock budget for candidate GENERATION (the "
-                        "quench inside each candidate, and the candidate loop "
-                        "itself). Scoring is bounded separately by "
-                        "--plane-score-budget and --route-timeout. Without "
-                        "one the quench inside every candidate has no clock: "
-                        "--plane-score-budget and --route-timeout bound the "
-                        "PROBE subprocesses, not the search. Env: "
-                        "KRT_DEADLINE_S")
     p.add_argument("--route-timeout", type=float, default=900,
                    help="Seconds per probe route (default: 900)")
     # Presentation & provenance
@@ -399,42 +390,28 @@ def main():
     else:
         swap_blocks = derive_groups(pcb, sources) if sources else {}
 
-    import krt_deadline
-    # `_pf_partial` is MUTATED, never rebound, so the atexit hook reports the
-    # stage that was actually running rather than a frozen string.
-    _pf_partial = {'stage': 'portfolio.generate'}
-    _dl = krt_deadline.arm(args.deadline, tool='place_portfolio',
-                           on_partial=lambda: _pf_partial)
     result = portfolio.generate(
         args.input_file, args.out_dir, seed=args.seed,
         n_candidates=args.candidates, strategies=args.strategy,
         radius=args.radius, lock_globs=args.lock,
         ignore_nets=args.ignore_nets, swap_blocks=swap_blocks,
-        quench_kw=_quench_kw(args, intent), only=args.only,
-        cancel_check=(_dl.cancel_check('portfolio') if _dl else None),
-        progress_callback=(krt_deadline.stdout_progress(deadline=_dl)
-                           if _dl else None))
+        quench_kw=_quench_kw(args, intent), only=args.only)
     baseline = result['baseline']
     cands = result['candidates']
     free = result['free']
 
     if args.only is not None:
         if not cands:
-            # The candidate loop can stop on a spent budget before producing
-            # anything, and --only is the REPLAY path: `_replay_argv` strips
-            # --ledger/--montage/--only but keeps an absolute --deadline, so a
-            # recorded replay inherits the original run's clock and lands here
-            # with an empty list. Exit like a spent budget, not an IndexError.
-            krt_deadline.seal()
+            # --only is the REPLAY path and can land here with an empty list
+            # when the candidate it names was never generated. Report it as
+            # such rather than raising an IndexError.
             print('JSON_SUMMARY: ' + json.dumps(
                 {'only': args.only, 'candidates': 0, 'complete': False,
-                 'status': 'deadline' if (_dl and _dl.expired()) else 'empty',
-                 'reason': 'the candidate was never generated -- the budget '
-                           'was spent before the loop reached it'},
+                 'status': 'empty',
+                 'reason': 'the candidate was never generated'},
                 sort_keys=True))
-            return krt_deadline.DEADLINE_EXIT if (_dl and _dl.expired()) else 4
+            return 4
         c = cands[0]
-        krt_deadline.seal()
         print("JSON_SUMMARY: " + json.dumps(
             {'only': args.only, 'strategy': c.strategy, 'board': c.board,
              'seed_board': c.seed_board, 'perturbed': len(c.poses),
@@ -717,7 +694,6 @@ def main():
               "than the baseline) -- best falls back to the baseline; read "
               "portfolio.json before adopting a violator deliberately")
     best_c = by_index.get(best, baseline) if best is not None else None
-    krt_deadline.seal()
     print("JSON_SUMMARY: " + json.dumps({
         'candidates': len(cands) + 1, 'viable': len(viable),
         'kept': len(kept), 'best': best,

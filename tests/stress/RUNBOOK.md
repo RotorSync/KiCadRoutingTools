@@ -817,10 +817,10 @@ placement run can succeed at all:
 
 ```bash
 # the original must route ...
-python3 -X utf8 py_router/route.py <control>.kicad_pcb /tmp/ctl.kicad_pcb --nets "*" --deadline 900
+python3 -X utf8 py_router/route.py <control>.kicad_pcb /tmp/ctl.kicad_pcb --nets "*"
 python3 -X utf8 py_router/check_connected.py /tmp/ctl.kicad_pcb
 # ... and the damaged one must NOT
-python3 -X utf8 py_router/route.py <staged>.kicad_pcb  /tmp/dmg.kicad_pcb --nets "*" --deadline 900
+python3 -X utf8 py_router/route.py <staged>.kicad_pcb  /tmp/dmg.kicad_pcb --nets "*"
 python3 -X utf8 py_router/check_connected.py /tmp/dmg.kicad_pcb
 ```
 

@@ -56,7 +56,7 @@ the displacement cap. **Prefer RE-SEATING such a part over nudging it** — lift
 it and search from its net centroid instead, holding everything else fixed:
 
     python3 -X utf8 py_placer/place_seed.py <board> <out> --intent fp.json --reseat \
-        --clearance <floor> --deadline 600      # bare --reseat = auto scope
+        --clearance <floor>                     # bare --reseat = auto scope
 
 The auto scope is the off-outline pad-CENTRE census, which is zero on all 33
 corpus boards, so this is a no-op with exit 0 on a healthy board. It composes

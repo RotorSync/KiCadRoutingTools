@@ -70,14 +70,6 @@ Examples:
                         help="Hard clearance from board edge in mm (default: "
                              "the board's own min_copper_edge_clearance, else "
                              "0.55)")
-    parser.add_argument("--deadline", type=float, default=None,
-                        metavar="SECONDS",
-                        help="Wall-clock budget for the quench. Without one "
-                             "this tool has no clock at all: it is silent "
-                             "between its 'Pad legality before' line and its "
-                             "'N parts moved' line, so a long run and a hung "
-                             "one are indistinguishable, and killing it "
-                             "produces no JSON_SUMMARY. Env: KRT_DEADLINE_S")
     parser.add_argument("--crossing-penalty", type=float, default=10.0,
                         help="Cost in mm per airwire crossing (default: 10)")
     parser.add_argument("--length-weight", type=float, default=1.0,
@@ -223,14 +215,7 @@ Examples:
                  if _oob_clause(legality_before) else ""))
 
     ratsnest = {}
-    import krt_deadline
-    # Bound BEFORE arming: the atexit hook resolves this name when the process
-    # dies, and a kill between arm() and the summary build would otherwise
-    # raise inside the hook and print nothing at all -- the exact silence this
-    # is here to remove. place_seed.py does the same for the same reason.
     summary = {'parts_moved': 0}
-    _dl = krt_deadline.arm(args.deadline, tool='place_optimize',
-                           on_partial=lambda: summary)
     placements = quench(
         pcb_data,
         pcb_file=args.input_file,
@@ -262,9 +247,6 @@ Examples:
         pad_legality=not args.courtyard_only,
         min_gain_per_mm=args.min_gain_per_mm,
         move_unconnected=args.move_unconnected,
-        cancel_check=(_dl.cancel_check('quench') if _dl else None),
-        progress_callback=(krt_deadline.stdout_progress(deadline=_dl)
-                           if _dl else None),
     )
 
     print(f"{len(placements)} parts moved")
@@ -328,11 +310,8 @@ Examples:
                       f"the legality gate should have prevented this")
         summary['pad_shortfall_before'] = legality_before['pad_shortfall']
         summary['pad_shortfall_after'] = legality_after['pad_shortfall']
-    if _dl is not None and _dl.expired():
-        krt_deadline.mark(summary, _dl)
-        krt_deadline.emit(summary, deadline=_dl)
-        return krt_deadline.DEADLINE_EXIT
-    krt_deadline.emit(summary, deadline=_dl)
+    print('JSON_SUMMARY: ' + json.dumps(summary, sort_keys=True, default=str),
+          flush=True)
 
 
 if __name__ == "__main__":

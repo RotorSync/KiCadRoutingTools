@@ -260,13 +260,13 @@ R3  Apply with the repair tools, never the from-scratch seeder:
       python3 -X utf8 py_placer/place_seed.py {a.board} r.kicad_pcb --intent fp.json --repair
       python3 -X utf8 py_placer/place_reconstruct.py {a.board} r.kicad_pcb [--intent fp.json]
     Both take --dry-run and report what they WOULD do, and both take
-    --deadline SECONDS -- BELOW THE SMALLEST CAP IN THE STACK, your harness's included. A 2400s deadline inside a 600s window can never fire: the harness SIGTERMs, the tool's own shutdown never runs, and you get exit 143 with no partial board and no summary. 143 and 124 are the SHELL's codes, not a tool's. Run long steps detached instead.
+    NO STEP HAS A WALL-CLOCK BUDGET -- `--deadline` was removed everywhere (no result may depend on timing), so passing it is an argparse error. A harness timeout SIGTERMs the tool, its shutdown never runs, and you get exit 143 with no partial board and no summary. 143 and 124 are the SHELL's codes, not a tool's. Run long steps DETACHED, and bound them by scope rather than by a clock.
 R3b A part whose pad CENTRES are off the outline is not repairable by a
     minimal-move sweep, whatever cap you give it: every repair search starts
     from the part's current pose, and that pose carries no information once
     the part is tens of millimetres out. LIFT it instead --
       python3 -X utf8 py_placer/place_seed.py {a.board} r.kicad_pcb --intent fp.json \\
-          --reseat --clearance <floor> --deadline 600
+          --reseat --clearance <floor>
     (bare --reseat = auto scope = exactly those parts; name refs/globs to
     scope it yourself). Or as a ladder rung: place_reconstruct --stages
     classify,fit,vector,assign,exchange,reseat,legalize.

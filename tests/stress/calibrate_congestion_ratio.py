@@ -164,8 +164,7 @@ def run_board(name, out_dir, quick=False):
     t0 = time.time()
     rc, log = sh([sys.executable, '-X', 'utf8',
                   os.path.join(ROOT, 'py_placer', 'place_reconstruct.py'), dmg, full,
-                  '--clearance', str(floor),
-                  '--deadline', '300' if quick else '900'],
+                  '--clearance', str(floor)],
                  timeout=400 if quick else 1200)
     row['repair_rc'] = rc
     row['repair_seconds'] = round(time.time() - t0, 1)
@@ -183,8 +182,7 @@ def run_board(name, out_dir, quick=False):
     t0 = time.time()
     rc, log = sh([sys.executable, '-X', 'utf8',
                   os.path.join(ROOT, 'py_placer', 'place_reconstruct.py'), dmg, lego,
-                  '--stages', 'classify,legalize', '--clearance', str(floor),
-                  '--deadline', '300' if quick else '900'],
+                  '--stages', 'classify,legalize', '--clearance', str(floor)],
                  timeout=400 if quick else 1200)
     row['legality_rc'] = rc
     row['legality_seconds'] = round(time.time() - t0, 1)
@@ -216,7 +214,7 @@ def main():
     ap.add_argument('--ratio', type=float, default=0.25,
                     help='the ratio to REPORT against (default: the shipped 0.25)')
     ap.add_argument('--quick', action='store_true',
-                    help='shorter deadlines; for a smoke run, not for a verdict')
+                    help='shorter subprocess timeouts; for a smoke run, not a verdict')
     a = ap.parse_args()
 
     out = os.path.join(ROOT, a.out) if not os.path.isabs(a.out) else a.out

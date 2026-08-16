@@ -70,8 +70,7 @@ def _rect_inside(rect, outer, tol: float) -> bool:
 def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
                constraint=None, tol: float = 0.5,
                max_disp: Optional[float] = None,
-               info: Optional[Dict] = None,
-               deadline=None) -> Optional[float]:
+               info: Optional[Dict] = None) -> Optional[float]:
     """Nearest FULLY-CONTAINED legal pose to (tx, ty); applies the move and
     returns True.
 
@@ -159,15 +158,6 @@ def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
                     # the `for dx, dy in _offsets(...)` loop below: that is the
                     # innermost loop and _offsets already materialises ~3700
                     # tuples per call, so the band check bounds it adequately.
-                    # Returns None rather than raising, so the caller's existing
-                    # "no legal pose" path handles it with no new control flow --
-                    # but `info` records WHY, because reporting an unfinished
-                    # search as a measured failure is the same silent lie this
-                    # whole change exists to remove.
-                    if deadline is not None and deadline.expired():
-                        if info is not None:
-                            info['deadline'] = True
-                        return None
                     for dx, dy in _offsets(radius, step):
                         if (max_disp is not None
                                 and math.hypot(dx, dy) > max_disp + 1e-9):
@@ -342,8 +332,7 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                      grid_step: float = 0.1,
                      seed_refs: Optional[Set[str]] = None,
                      anchors_first: bool = False,
-                     anchor_rounds: int = 1,
-                     deadline=None, progress=None) -> Dict:
+                     anchor_rounds: int = 1) -> Dict:
     """Compute a full placement for an unplaced board from its intent.
 
     Returns {'placements': [...], 'lock_refs': [...], 'unseated': [...],
@@ -357,13 +346,6 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
     re-deriving the placed parts would discard someone's work, and the
     LIFT-AND-RE-SEAT case -- see `reseat_scope`).
 
-    `deadline` is an optional `krt_deadline.Deadline`, checked between parts in
-    the connectivity-centroid stage (the only unbounded one -- stages 1/1.5/2
-    are O(declared entries)). The partial is coherent by construction: a part
-    is either fully seated, and in `placements`, or untouched. Untouched parts
-    are named in `deadline_skipped` and are NOT `unseated` -- a search that ran
-    out of clock has measured nothing. `progress` is an optional
-    `(current, total, label)` callback.
     """
     import pose_score
     from placement import floorplan
@@ -682,21 +664,7 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                      f"{thr:.2f}mm) seed before {len(unplaced) - len(anchors)}"
                      f" small(s): {', '.join(anchors)}")
         queue = anchors + [r for r in queue if r not in set(anchors)]
-    deadline_skipped: List[str] = []
-    for _qi, ref in enumerate(queue):
-        if deadline is not None and deadline.check('seed'):
-            deadline_skipped = list(queue[_qi:])
-            notes.append(
-                f"deadline reached after {_qi}/{len(queue)} part(s); "
-                f"{len(deadline_skipped)} left at their input poses and "
-                f"reported in deadline_skipped (NOT unseated -- they were "
-                f"never tried)")
-            break
-        if progress is not None:
-            try:
-                progress(_qi, len(queue), f'seat {ref}')
-            except Exception:                                   # noqa: BLE001
-                pass
+    for ref in queue:
         target = _partner_centroid(state, ref, placed) or center
         jx, jy = _jitter()
         rot_before = state.parts[ref].rot
@@ -764,9 +732,7 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                    'new_rotation': state.parts[ref].rot}
                   for ref in sorted(placed)]
     return {'placements': placements, 'lock_refs': lock_refs,
-            'unseated': sorted(unseated), 'notes': notes,
-            'deadline_skipped': deadline_skipped,
-            'complete': not deadline_skipped}
+            'unseated': sorted(unseated), 'notes': notes}
 
 
 def stamp_locked(board_file: str, refs: Sequence[str]) -> int:
@@ -822,8 +788,7 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
                      clearance: float = 0.25,
                      board_edge_clearance: float = 0.55,
                      grid_step: float = 0.1,
-                     caps: Sequence[float] = REPAIR_CAPS_MM,
-                     deadline=None, progress=None) -> Dict:
+                     caps: Sequence[float] = REPAIR_CAPS_MM) -> Dict:
     """Violation-driven minimal-move repair of a PLACED board (#place_seed
     --repair). Everything clean freezes; only violators move, worst first,
     each seated by the seeder's own search targeted at its CURRENT pose with
@@ -840,17 +805,9 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
     re-stamping is needed). A file-locked ref OUTSIDE must_lock is not this
     tool's to move: reported in `unrepairable`.
 
-    `deadline` is an optional `krt_deadline.Deadline`. This sweep has no
-    internal bound -- its cost is violators x caps x 36 ring sweeps x O(parts)
-    per candidate -- and on a 217-part board it ran 46 minutes without
-    terminating (run 9). When a budget is supplied the loop stops between
-    violators, keeps every seat it already made, and reports the untouched ones
-    in `deadline_skipped`. Those are NOT `unrepairable`: a search that ran out
-    of clock has measured nothing, and filing it as a failure is the same class
-    of lie as the silent hang.
-
-    `progress` is an optional `(current, total, label)` callback -- the sweep is
-    otherwise completely silent between its census line and its final line.
+    NOTE this sweep has no internal bound -- its cost is violators x caps x 36
+    ring sweeps x O(parts) per candidate, and on a 217-part board it ran 46
+    minutes (run 9). Scope it with the violator set, not with a clock.
     """
     import pose_score
     from placement import floorplan, legality as _leg
@@ -1057,24 +1014,7 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
     failed: List[str] = []
     zero_move: List[str] = []   # run-7 A2: honesty re-grade candidates
     moves: List[Dict] = []
-    deadline_skipped: List[str] = []
-    for _vi, ref in enumerate(violators):
-        # Budget check at the VIOLATOR head: one monotonic read per violator,
-        # and each violator costs seconds (caps x 36 ring sweeps x O(parts)).
-        # The partial is coherent by construction -- a violator is either fully
-        # seated, with its move in `moves`, or untouched.
-        if deadline is not None and deadline.check('legalize'):
-            deadline_skipped = list(violators[_vi:])
-            notes.append(
-                f"deadline reached after {_vi}/{len(violators)} violator(s); "
-                f"{len(deadline_skipped)} left untouched and reported in "
-                f"deadline_skipped (NOT unrepairable -- they were never tried)")
-            break
-        if progress is not None:
-            try:
-                progress(_vi, len(violators), f'repair {ref}')
-            except Exception:                                  # noqa: BLE001
-                pass
+    for ref in violators:
         part = state.parts[ref]
         was_locked = part.locked      # always False here: locked refs are
                                       # already in `unrepairable` (see above)
@@ -1122,8 +1062,7 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
         for cap in caps:
             info: Dict = {}
             clr = _try_place(state, ref, ox, oy, set(), constraint=rect,
-                             tol=tol, max_disp=cap, info=info,
-                             deadline=deadline)
+                             tol=tol, max_disp=cap, info=info)
             if clr is not None:
                 placed_at = cap
                 if info.get('anchor_zone'):
@@ -1135,7 +1074,7 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
             zx = (z.rect[0] + z.rect[2]) / 2.0
             zy = (z.rect[1] + z.rect[3]) / 2.0
             clr = _try_place(state, ref, zx, zy, set(), constraint=rect,
-                             tol=tol, deadline=deadline)
+                             tol=tol)
             if clr is not None:
                 placed_at = 'zone'
         part.locked = was_locked
@@ -1151,8 +1090,7 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
                 pox, poy, porot = pp.x, pp.y, pp.rot
                 for cap in caps:
                     if _try_place(state, partner, pox, poy, set(),
-                                  max_disp=cap,
-                                  deadline=deadline) is not None:
+                                  max_disp=cap) is not None:
                         pd = math.hypot(pp.x - pox, pp.y - poy)
                         if pd > 1e-9:
                             seated_partner = (partner, pd)
@@ -1212,13 +1150,7 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
     # board whose pad/body census did not move are UNRESOLVED, so the fix
     # loop can see it stalled instead of believing "repaired" forever.
     unresolved = []
-    if deadline_skipped:
-        # Skip the honesty re-grade on a partial run. It is O(zero_move x parts)
-        # with pair_shortfall, it can only DOWNGRADE `repaired`, and a partial
-        # run's `repaired` is already qualified by complete:false -- so paying
-        # for it here would just spend the clock we already ran out of.
-        notes.append("unresolved re-grade skipped: run stopped on its deadline")
-    elif zero_move and state.legality_ctx is not None:
+    if zero_move and state.legality_ctx is not None:
         # Post-repair poses live on the STATE (pcb_data still holds the
         # file's input poses), so the re-grade uses the state's own pair
         # machinery in the gate currency.
@@ -1242,8 +1174,6 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
     return {'moves': moves, 'repaired': repaired, 'unrepairable':
             unrepairable + failed, 'unresolved': unresolved,
             'violators': violators, 'notes': notes,
-            'deadline_skipped': deadline_skipped,
-            'complete': not deadline_skipped,
             'pad_report_before': {k: pads[k] for k in
                                   ('pad_conflicts', 'hole_conflicts',
                                    'oob_pad_count')},
@@ -1258,8 +1188,7 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
                  board_edge_clearance: float = 0.55,
                  grid_step: float = 0.1,
                  seed: int = 0,
-                 edge_bands: Optional[Dict[str, float]] = None,
-                 deadline=None, progress=None) -> Dict:
+                 edge_bands: Optional[Dict[str, float]] = None) -> Dict:
     """LIFT a subset of parts and re-seat them FROM SCRATCH at their net
     centroids, holding every other part fixed as an obstacle.
 
@@ -1324,8 +1253,7 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
 
     Returns `{'moves', 'reseated', 'refused', 'unseated', 'scope',
     'scope_source', 'notes', 'gate_before', 'gate_after', 'accepted',
-    'witnesses_before', 'witnesses_after', 'edge_bands_dropped', 'pruned',
-    'deadline_skipped', 'complete'}`.
+    'witnesses_before', 'witnesses_after', 'edge_bands_dropped', 'pruned'}`.
 
     NOT `placement/reseat.py`, which is a different mechanism for a different
     problem (Hungarian re-assignment of a proximity-tethered decap cluster onto
@@ -1402,8 +1330,7 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
                 'accepted': True, 'pruned': [],
                 'witnesses_before': sorted(witnesses_before),
                 'witnesses_after': sorted(witnesses_before),
-                'edge_bands_dropped': {}, 'deadline_skipped': [],
-                'complete': True}
+                'edge_bands_dropped': {}}
 
     if not scope:
         # A no-op is a RESULT. On a healthy board the auto scope is empty by
@@ -1456,7 +1383,7 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
         pcb_data, pcb_file, intent2, random.Random(f"{seed}"),
         group_sources=group_sources, clearance=clearance,
         board_edge_clearance=board_edge_clearance, grid_step=grid_step,
-        seed_refs=set(scope), deadline=deadline, progress=progress)
+        seed_refs=set(scope))
     notes.extend(res['notes'])
 
     # `placements` covers every PLACED ref -- 101 of 107 on the measured board
@@ -1520,8 +1447,4 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
             'accepted': accepted, 'pruned': sorted(pruned),
             'witnesses_before': sorted(witnesses_before),
             'witnesses_after': sorted(witnesses_after),
-            'edge_bands_dropped': {r: m for r, m in sorted(dropped.items())},
-            'deadline_skipped': sorted(r for r in
-                                       res.get('deadline_skipped') or ()
-                                       if r in scope),
-            'complete': res.get('complete', True)}
+            'edge_bands_dropped': {r: m for r, m in sorted(dropped.items())}}

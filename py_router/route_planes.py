@@ -3888,22 +3888,6 @@ Examples:
                              "-1 (default) allows via-in-pad placement; any value >= 0 forces vias "
                              "outside same-net pads with that clearance.")
 
-    parser.add_argument("--deadline", type=float, default=None, metavar="SECONDS",
-                        help="Wall-clock budget for the PLANE LOOPS. Not a hard cap "
-                             "on total runtime -- the cancel is cooperative and the "
-                             "bounded tail (fills, write, cleanup, DRC writeback) "
-                             "still runs -- so expect to overshoot. What it "
-                             "guarantees is TERMINATION on THIS tool's terms: it "
-                             "stops between regions, writes the copper it has, and "
-                             "prints a JSON_SUMMARY carrying complete=false / "
-                             "status=deadline before exiting 7. Without it an "
-                             "external kill on Windows is TerminateProcess, which "
-                             "leaves NO summary and NO exit code of ours. ANY "
-                             "harness with an external timeout should pass this at "
-                             "~0.8x its own. Default: no budget (a wall-clock "
-                             "default would break replay determinism). "
-                             "Env: KRT_DEADLINE_S")
-
     # Debug options
     parser.add_argument("--dry-run", action="store_true", help="Analyze without writing output")
     parser.add_argument("--skip-existing-zones", action="store_true",
@@ -4080,27 +4064,11 @@ Examples:
     _out_before = (os.path.getmtime(args.output_file)
                    if args.output_file and os.path.isfile(args.output_file) else None)
 
-    # The deadline is ONE closure into plumbing this engine already has:
-    # `cancel_check` is honoured at every region/pad/route loop head and the
-    # write branch still runs on cancel, so a cancelled run yields a real,
-    # gated, partial pour rather than nothing.
-    #
-    # RESERVE BAND, same correctness reason as route_disconnected_planes': the
-    # bounded tail after the engine (GND return vias, plane copper cleanup, the
-    # DRC-floor writeback) is what makes the partial board readable, and the
-    # KiCad-exact-fill validation inside the engine can itself burn minutes. So
-    # the region loops trip early, leaving clock for the tail.
-    import krt_deadline
-    _rp_report = {'tool': 'route_planes.py', 'board': args.input_file}
-    _dl = krt_deadline.arm(args.deadline, tool='route_planes',
-                           on_partial=lambda: _rp_report)
-    _reserve = max(30.0, (args.deadline or 0) * 0.2) if _dl else 0.0
-
+    # The engine's cooperative `cancel_check` / `progress_callback` are the
+    # GUI's (the planes tab's Cancel button); the CLI passes neither. There is
+    # deliberately no wall-clock budget -- no result this tool produces may
+    # depend on timing.
     create_plane(
-        cancel_check=(_dl.cancel_check('plane create', reserve=_reserve)
-                      if _dl else None),
-        progress_callback=(krt_deadline.stdout_progress(deadline=_dl)
-                           if _dl else None),
         input_file=args.input_file,
         output_file=args.output_file,
         ripup_blocker_select=args.ripup_blocker_select,
@@ -4353,41 +4321,22 @@ Examples:
     except Exception:
         pass
 
-    # Emit through krt_deadline, NOT a raw print. `_emitted` is set only inside
-    # krt_deadline.emit(), so a bare print leaves it False and the atexit flush
-    # then publishes the contentless partial report armed at --deadline time --
-    # a SECOND, contradicting `{"complete": false, "status": "incomplete"}` line
-    # after the real one, which any consumer keying on the LAST JSON_SUMMARY
-    # reads as a failed run. (Measured in route_disconnected_planes, run 11.)
-    # `stopped_in`, not just `expired()`. The reserve band means the region
-    # loops trip at `deadline - reserve`, so a run whose bounded tail then
-    # finishes BEFORE the wall clock runs out is past its cancel and not past
-    # its deadline -- `expired()` alone would report a partial pour as
-    # complete, which is the exact confusion this whole mechanism removes.
-    # `stopped_in` is set by `Deadline.check` at the moment the cancel fires,
-    # so it is the durable record that the loops were cut short.
-    if _dl is not None and (_dl.stopped_in or _dl.expired()):
-        krt_deadline.stamp(_summary)
-        _rp_report.update(_summary)
-        krt_deadline.emit(_summary, complete=False, status='deadline',
-                          deadline=_dl)
-        print(f"{RED}DEADLINE: this run stopped on its own budget after "
-              f"{_dl.elapsed():.0f}s of {_dl.seconds:g}s"
-              + (f" (in {_dl.stopped_in})" if _dl.stopped_in else "")
-              + f". The board at {args.output_file or '(none)'} is a PARTIAL "
-              f"pour -- real copper, fully gated, but the plane work did not "
-              f"finish. Do not read it as clean.{RESET}")
-        return krt_deadline.DEADLINE_EXIT
-    _rp_report.update(_summary)
-    krt_deadline.emit(_summary)
+    # The run either finished or raised; there is no partial shape to report
+    # (the CLI has no cancel source). `complete`/`status` are kept because
+    # consumers read them -- see route_summary's sticky-incompleteness merge.
+    import json as _json
+    _summary.setdefault('complete', True)
+    _summary.setdefault('status', 'ok')
+    print('JSON_SUMMARY: ' + _json.dumps(_summary, sort_keys=True, default=str),
+          flush=True)
     return 0
 
 
 if __name__ == "__main__":
     from console_encoding import enable_utf8_console
     enable_utf8_console()  # cp1252-safe non-ASCII prints (issue #152)
-    # CMD/EXIT self-echo (run-3 B1); see route.py for why this waited for
-    # --deadline. CLI-`__main__`-only: the GUI imports create_plane.
+    # CMD/EXIT self-echo (run-3 B1); see route.py for the external-kill caveat.
+    # CLI-`__main__`-only: the GUI imports create_plane.
     import cli_banner
     cli_banner.install()
     # `or 0`: main() has one early `return` (the net/plane-layer count

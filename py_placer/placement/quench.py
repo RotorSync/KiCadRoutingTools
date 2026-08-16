@@ -1867,7 +1867,7 @@ def quench(pcb_data: PCBData, pcb_file: str,
         # --- single-part moves (nudge + rotate) ---
         for _mi, ref in enumerate(movable):
             # Per PART, not per candidate pose: one monotonic read per
-            # violator is the granularity krt_deadline documents, and a part
+            # violator is the right granularity, and a part
             # costs O(candidates x rotations x parts) so it is a real unit.
             if cancel_check is not None and cancel_check():
                 print(f"  quench: stopping mid-pass {pass_num} at "

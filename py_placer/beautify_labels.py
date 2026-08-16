@@ -37,7 +37,6 @@ Exit codes:
   2  argument error
   3  board-state gate refused (see --allow-unplaced)
   4  completed, but >= 1 label could not be placed (left unchanged, reported)
-  7  deadline expired (partial JSON_SUMMARY emitted)
 """
     )
     parser.add_argument("input_file", help="Input KiCad PCB file")
@@ -90,11 +89,6 @@ Exit codes:
                              "act as obstacles (default: all)")
     parser.add_argument("--report-json", metavar="PATH",
                         help="Write the full per-label results as JSON")
-    parser.add_argument("--deadline", type=float, default=None,
-                        metavar="SECONDS",
-                        help="Wall-clock budget; on expiry a partial "
-                             "JSON_SUMMARY is emitted and the exit code is 7. "
-                             "Env: KRT_DEADLINE_S")
     parser.add_argument("--allow-unplaced", action="store_true",
                         help="Run even when the board does not look placed "
                              "(parts stacked at one coordinate) -- labels "
@@ -145,19 +139,8 @@ Exit codes:
         refs=args.refs,
     )
 
-    import krt_deadline
-    # Bound BEFORE arming: the atexit hook resolves this name when the
-    # process dies (see place_optimize.py for the measured silence this
-    # removes).
     summary = {'labels_total': 0}
-    _dl = krt_deadline.arm(args.deadline, tool='beautify_labels',
-                           on_partial=lambda: summary)
-    out = beautify_labels(
-        pcb_data, args.input_file, config,
-        cancel_check=(_dl.cancel_check('labels') if _dl else None),
-        progress_callback=(krt_deadline.stdout_progress(deadline=_dl)
-                           if _dl else None),
-    )
+    out = beautify_labels(pcb_data, args.input_file, config)
     results = out['results']
     summary.update(out['summary'])
 
@@ -187,11 +170,8 @@ Exit codes:
                       sort_keys=True)
         print(f"Wrote {args.report_json}")
 
-    if _dl is not None and _dl.expired():
-        krt_deadline.mark(summary, _dl)
-        krt_deadline.emit(summary, deadline=_dl)
-        return krt_deadline.DEADLINE_EXIT
-    krt_deadline.emit(summary, deadline=_dl)
+    print('JSON_SUMMARY: ' + json.dumps(summary, sort_keys=True, default=str),
+          flush=True)
     # Documented in the epilog: 4 = completed but >= 1 label unplaceable, so
     # a caller can tell "tidy board" from "tidy board with leftovers" without
     # parsing the summary.

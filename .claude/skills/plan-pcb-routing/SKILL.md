@@ -1349,7 +1349,6 @@ only in `check_floorplan`'s `outline` block.
   | a probe calling `check_connectivity(...)` | that function does not exist | "the branch never fires" |
   | evidence passed as `<(echo '{...}')` | fd gone before a Windows child opened it | "the stage never mentions it" |
   | an `awk` section splitter | matched the first of two `===== L5 =====` | "zero render mentions" |
-  | `--deadline 0` must yield a partial | a board with no work correctly completes | "the deadline is broken" |
 
   Four rules, and the first one is most of it:
 
@@ -1361,7 +1360,7 @@ only in `check_floorplan`'s `outline` block.
      refuses a path that is not a real non-empty file. A check whose input is
      missing tests nothing — and process substitution is not a file on Windows.
   3. **Test both directions.** "It refuses when X" is half a test; "it accepts
-     when not-X" is the half that catches a gate wedged shut. The deadline case
+     when not-X" is the half that catches a gate wedged shut. One of the five
      above was a spec error, and only the accepting direction exposed it.
   4. **When a check reports something surprising, suspect the check first.**
      Every one of the five looked like a real finding. The tell is always the
@@ -1376,11 +1375,7 @@ only in `check_floorplan`'s `outline` block.
 
   | where | limit | on expiry | what you see |
   |---|---|---|---|
-  | `place_reconstruct --stages legalize` | `--deadline` | stops between violators, keeps the seats | `JSON_SUMMARY` `status: deadline`, exit `7` |
-  | `place_seed --repair/--reseat` | `--deadline` | the same | the same |
-  | `route.py` / `route_diff.py` / `route_planes.py` | `--deadline` | stops between nets/pairs/regions, writes the copper it has | the same |
-  | `route_disconnected_planes` (either form) | `--deadline` | partial repair, fully gated | the same |
-  | *any of the above WITHOUT `--deadline`* | none | runs forever | shell `124`, no output, no `JSON_SUMMARY` |
+  | **every searching tool** (`route*.py`, `repair_planes`, `place_seed --repair/--reseat`, `place_reconstruct --stages legalize`, the fanouts) | **none** | runs to completion, however long | shell `124`/`143` on an external kill, no output, no `JSON_SUMMARY` |
   | `EXACT_FILL_TIMEOUT` (`kicad_exact_fill.py`) | 300 s | returns `None` | ONE misattributed line |
   | `ORACLE_DRC_TIMEOUT` (`kicad_oracle.py`) | 240 s | `None`, and **memoises the board so every later step skips the oracle too** | nothing at all |
   | `converge record` argv | ~32 kB | never execs | shell `126`, **no ledger row** |
@@ -1388,21 +1383,22 @@ only in `check_floorplan`'s `outline` block.
   The last three degrade to a fallback with no failure signal and no effect on
   the exit code. Two consequences you must build into how you run:
 
-  1. **Pass `--deadline` on any step with an external timeout**, set well below
-     it (~0.8×). It is the only mechanism that works: on Windows a harness kill
-     is `TerminateProcess`, which no handler, `atexit` or flush can catch, so
-     the tool must stop ITSELF. **The routing tools have it too now** — run 11
-     lost a full lap because `route.py` did not, and only a re-parse of the
-     output board established that the engine had in fact finished. A log with
-     no `DEADLINE:` line is proof no budget was set. `KRT_DEADLINE_S` budgets a
-     whole chain with one export. Note the cancel is cooperative — measured
-     109 s against a 45 s budget — so it guarantees TERMINATION, not a
-     wall-clock cap.
+  1. **There is no `--deadline`, and asking for one is an argparse error.**
+     The budgets these tools once carried were REMOVED deliberately: no result
+     may depend on a wall clock, or the same command stops producing the same
+     board. The only cancel in the system is the GUI's own Cancel button (and
+     the AI tab's Stop), which reaches the engines' cooperative `cancel_check`.
 
-     **Read `complete` before you read any tally.** A partial run's
-     `JSON_SUMMARY` parses perfectly and its numbers are not a whole board's;
-     `place_route_loop` already refuses one, and a hand-read must too
-     (`.get('complete', True)`, so pre-deadline logs are unaffected).
+     So **run long steps detached rather than under a timeout**, and budget
+     them by scoping the work — fewer nets per step, a tighter `--max-ripup`,
+     a smaller violator set — not by a clock. A harness that kills a step owns
+     what it loses: on Windows a kill is `TerminateProcess`, which no handler,
+     `atexit` or flush can catch, so there is no partial board and no summary.
+
+     **Read `complete` before you read any tally.** Nothing emits
+     `complete: false` today, but the guard is still live in
+     `place_route_loop` and a hand-read should match it
+     (`.get('complete', True)`).
   2. **Check the row count after every `converge.py record`.** The 126 is the
      shell's, so a caller that does not re-count sees no error and the lap is
      gone. Prefer `--score-file` over `--score "$(cat …)"`.
@@ -3348,16 +3344,13 @@ silently deletes the record and re-exposes the pair. The tell is that log
 line: if it is absent or its count dropped, the protection is gone and only
 your `--power-nets` width carries it.
 
-**Pass `--deadline` on that call too, set BELOW the smallest cap in your
-stack.** The silent-timeout table above lists this tool WITHOUT a deadline as
-*runs forever → shell 124, no output, no `JSON_SUMMARY`*, and that is what
-happened: 40 min with `--rip-blocker-nets` and 25 min plain on a 217-part
-board, no board written either time (run 9), and it fired again on a
-**113**-part board (run 15) — so do not assume a small board is safe. The
-cancel is cooperative, so the tool overshoots the number; give it room under
-your real cap rather than matching it. With it you get a partial repair,
-`status: deadline`, and exit 7 — all three are results. Without it you get a
-shell code and nothing to read.
+**This call can run a very long time, and has no self-budget** (there is no
+`--deadline` — see the silent-timeout section). Measured: 40 min with
+`--rip-blocker-nets` and 25 min plain on a 217-part board, no board written
+either time (run 9), and it fired again on a **113**-part board (run 15) — so
+do not assume a small board is safe. Run it detached rather than under a
+timeout, and bound it by SCOPE (fewer nets, a smaller blocker set). A kill
+gives you a shell code and nothing to read.
 
 > **Never `cp` a board without its `.kicad_pro`.** A bare `cp a.kicad_pcb
 > b.kicad_pcb` copies only the board and strands the sibling `.kicad_pro`, which

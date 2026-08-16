@@ -1423,14 +1423,6 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     }
     if ac_coupled_summary:
         summary['ac_coupled_xnets'] = ac_coupled_summary
-    # See route.py's identical stamp: a budget armed by the CLI must reach the
-    # one summary this engine prints, because the cancel path still writes.
-    # Inert with no budget armed (every GUI call) or a budget not spent.
-    try:
-        import krt_deadline as _kdl
-        _kdl.stamp(summary)
-    except Exception:
-        pass
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
 
     # Write output file or return results for direct application
@@ -1590,8 +1582,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
 if __name__ == "__main__":
     from console_encoding import enable_utf8_console
     enable_utf8_console()  # cp1252-safe non-ASCII prints (issue #152)
-    # CMD/EXIT self-echo (run-3 B1); see route.py for why this waited for
-    # --deadline. CLI-`__main__`-only: the GUI imports the engine function.
+    # CMD/EXIT self-echo (run-3 B1); see route.py for the external-kill caveat.
+    # CLI-`__main__`-only: the GUI imports the engine function.
     import cli_banner
     cli_banner.install()
     import argparse
@@ -1831,21 +1823,6 @@ Examples:
     parser.add_argument("--ripped-route-avoidance-cost", type=float, default=defaults.RIPPED_ROUTE_AVOIDANCE_COST,
                         help=f"Soft penalty cost for routing through ripped corridors (0 = disabled, default: {defaults.RIPPED_ROUTE_AVOIDANCE_COST})")
 
-    parser.add_argument("--deadline", type=float, default=None, metavar="SECONDS",
-                        help="Wall-clock budget for the ROUTING LOOPS. Not a hard "
-                             "cap on total runtime -- the cancel is cooperative and "
-                             "the bounded tail (write, DRC writeback) still runs -- "
-                             "so expect to overshoot. What it guarantees is "
-                             "TERMINATION on THIS tool's terms: it stops between "
-                             "pairs, writes the copper it has, and prints a "
-                             "JSON_SUMMARY carrying complete=false / status=deadline "
-                             "before exiting 7. Without it an external kill on "
-                             "Windows is TerminateProcess, which leaves NO summary "
-                             "and NO exit code of ours. ANY harness with an external "
-                             "timeout should pass this at ~0.8x its own. Default: no "
-                             "budget (a wall-clock default would break replay "
-                             "determinism). Env: KRT_DEADLINE_S")
-
     # Debug options
     parser.add_argument("--debug-lines", action="store_true",
                         help="Output debug geometry on User.3 (connectors), User.4 (stub dirs), User.8 (simplified), User.9 (raw A*)")
@@ -2046,22 +2023,8 @@ Examples:
                   f"(mm: {_classes}); diff-pair routing respects cross-class max(A,B). "
                   f"Override with --net-clearances.")
 
-    # See route.py: the deadline is ONE closure into plumbing this engine
-    # already has. `cancel_check` breaks the pair/reroute/cleanup loops rather
-    # than raising, so the write and the summary still happen and a cancelled
-    # run yields real, gated copper. The atexit hook armed here is what makes a
-    # JSON_SUMMARY land on the paths that never reach the engine at all.
-    import krt_deadline
-    _rd_report = {'tool': 'route_diff.py', 'board': args.input_file}
-    _dl = krt_deadline.arm(args.deadline, tool='route_diff',
-                           on_partial=lambda: _rd_report)
-
     batch_route_diff_pairs(args.input_file, args.output_file, net_names,
                 net_clearances=_net_clearances_map,
-                cancel_check=(_dl.cancel_check('diff-pair routing')
-                              if _dl else None),
-                progress_callback=(krt_deadline.stdout_progress(deadline=_dl)
-                                   if _dl else None),
                 direction_order=args.direction,
                 ordering_strategy=args.ordering,
                 disable_bga_zones=args.no_bga_zones,
@@ -2138,22 +2101,6 @@ Examples:
                 schematic_dir=args.schematic_dir,
                 add_teardrops=args.add_teardrops)
 
-    # The engine printed the authoritative JSON_SUMMARY (stamped by
-    # krt_deadline.stamp when the budget was spent). Seal so the atexit flush
-    # does not publish a second, contradicting `incomplete` line after it.
-    krt_deadline.seal()
-    # `stopped_in or expired()`: the durable record that the cancel fired, not
-    # just "the wall clock has since passed". See krt_deadline.stamp.
-    _deadline_hit = bool(_dl and (_dl.stopped_in or _dl.expired()))
-    if _deadline_hit:
-        print(f"{RED}DEADLINE: this run stopped on its own budget after "
-              f"{_dl.elapsed():.0f}s of {_dl.seconds:g}s"
-              + (f" (in {_dl.stopped_in})" if _dl.stopped_in else "")
-              + f". The board at {args.output_file or '(none)'} is a PARTIAL "
-              f"route -- real, gated copper, but pairs were left unattempted. "
-              f"Do not read it as clean; the JSON_SUMMARY above carries "
-              f"complete=false.{RESET}")
-
     # Make the output project's DRC design rules consistent with the floors we
     # just routed to (issue #160), mirroring route.py, so a manual DRC in KiCad
     # flags only genuine problems instead of stock-default noise.
@@ -2190,14 +2137,7 @@ Examples:
         except Exception as e:
             print(f"  (skipped protected-nets record: {e})")
 
-    # LAST, and non-zero: the bounded post-passes above belong to the partial
-    # board (skipping the DRC writeback would strand the output without its
-    # floor -- the #441 hazard), but a caller reading exit 0 would treat an
-    # unfinished route as a finished one.
-    if _deadline_hit:
-        sys.exit(krt_deadline.DEADLINE_EXIT)
-    # AFTER the deadline: a run that ran out of clock exits 7, and that is the
-    # more specific fact. This is the other false success -- the patterns
+    # The other false success -- the patterns
     # matched no pair at all, which used to print `Error:` and exit 0 because
     # main called the router as a bare statement. Measured: a shell rewrote
     # every `/IO_Banks/Z*` argument into a Windows path and 14 patterns matched

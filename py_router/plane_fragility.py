@@ -372,26 +372,13 @@ def _compute_cells_and_states(pcb_data: PCBData, config: GridRouteConfig,
     if not polys and src and os.path.isfile(src):
         try:
             from kicad_exact_fill import refill_islands, EXACT_FILL_TIMEOUT
-            # BOUND THE FILL BY THE RUN'S REMAINING BUDGET. This call is reached
-            # from route.py:batch_route, so it runs on EVERY batch_route -- and
-            # on a board KiCad's ZONE_FILLER cannot fill (measured: a 217-part
-            # 4-layer board) each one pays the full 300s EXACT_FILL_TIMEOUT.
-            # The plane repair issues many batch_route calls, which is the root
-            # cause of both non-terminations measured in run 9. No signature
-            # between the CLI and here carries a budget, hence the global.
+            # NOTE this call is reached from route.py:batch_route, so it runs
+            # on EVERY batch_route -- and on a board KiCad's ZONE_FILLER cannot
+            # fill (measured: a 217-part 4-layer board) each one pays the full
+            # EXACT_FILL_TIMEOUT. That subprocess timeout is a hang guard on a
+            # child process, not a budget on our own search, so it does not
+            # make any result depend on our wall clock.
             _t = EXACT_FILL_TIMEOUT
-            try:
-                import krt_deadline
-                _dl = krt_deadline.current()
-            except Exception:                                  # noqa: BLE001
-                _dl = None
-            if _dl is not None:
-                _left = _dl.remaining()
-                if _dl.expired() or (_left is not None and _left < 5.0):
-                    raise TimeoutError(
-                        'run budget spent; not starting a KiCad refill')
-                # Never let one fill eat the whole remaining budget.
-                _t = max(5, int(min(_t, (_left or _t) * 0.5)))
             fills = refill_islands(src, timeout=_t, verbose=True)
             if fills is None:
                 # refill_islands documents a None return, and this was the ONE

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run-12 tool fixes: the fence, the routing deadline/banner, and two disclosures.
+"""Run-12 tool fixes: the fence, the routing banner, and two disclosures.
 
 Five findings, each pinned by the behaviour it changed rather than by the code
 that changed:
@@ -13,14 +13,17 @@ that changed:
           `perturb(control_out=...)` puts the control AND the record (it embeds
           `original_poses`) outside the fence in one call.
 
-  1       No routing tool had `--deadline`, so an external kill left no
-          JSON_SUMMARY and no exit code of ours. Now each of the three stops on
-          its own budget, publishes `complete: false / status: deadline`, and
-          exits 7.
+  1       Every routing tool publishes exactly ONE JSON_SUMMARY, and never a
+          second contradicting `incomplete` line after it (run 11). The
+          `--deadline` budgets these tools once carried are GONE: no result may
+          depend on a wall clock, and the only cancel in the system is the
+          GUI's own Cancel button, which reaches the engines' cooperative
+          `cancel_check`.
 
-  2       ...and only THEN may they carry the CMD:/EXIT= banner, because
-          `cli_banner` promises an `EXIT=` that an external kill never
-          delivers. Exactly one of each per log.
+  2       The CMD:/EXIT= banner: exactly one of each per log. `cli_banner`
+          promises an `EXIT=` that an EXTERNAL kill never delivers -- a gap the
+          harness doing the killing owns, since the tools have no self-budget
+          to fall back on.
 
   3       No grader said anything when a board declared NO floor at all
           (tigard ships no .kicad_pro), so a whole baseline could be measured
@@ -56,20 +59,6 @@ DIFF_BOARD = os.path.join(ROOT, 'kicad_files', 'lvds_converter_dualclk.kicad_pcb
 NO_FLOOR_BOARD = os.path.join(ROOT, 'kicad_files', 'tigard.kicad_pcb')
 AUDIT = os.path.join(ROOT, 'tests', 'stress', 'fence_audit.py')
 
-DEADLINE_EXIT = 7
-
-# A budget that is SPENT BY CONSTRUCTION, on any machine. The original 0.4 s
-# encoded "surely less than a route takes", which is a claim about the HOST,
-# not about the tool: route_diff.py on lvds_converter_dualclk finishes its work
-# in well under 0.4 s on a 2026 Mac, exited 0, and failed four checks that have
-# nothing to do with wall time. A millisecond is already gone by the first
-# deadline check anywhere, and a SLOWER host only trips it more surely -- so
-# the assertion is one-directional instead of resting on a speed guess.
-# (Verified: all three routing mains exit 7 with a landed
-# complete=false/status=deadline summary at this value.)
-SPENT_DEADLINE_S = 0.001
-# The mirror case: a budget the run must NEVER reach, so it has to stay large.
-UNSPENT_DEADLINE_S = 600
 
 _failures = []
 
@@ -176,7 +165,7 @@ def test_fence(tmp):
 
 
 # --------------------------------------------------------------------------
-# 1 + 2 -- the deadline, then the banner
+# 1 + 2 -- one summary per run, and the banner
 # --------------------------------------------------------------------------
 ROUTING_TOOLS = (
     # (label, argv-builder, needs a board with diff pairs)
@@ -190,159 +179,72 @@ ROUTING_TOOLS = (
 )
 
 
-def test_deadline_and_banner(tmp):
-    print('\n1+2: every routing tool stops on its own budget, and says how it '
-          'was invoked')
+def test_banner_and_one_complete_summary(tmp):
+    """Every routing tool says how it was invoked, and reports exactly once.
+
+    The second half is a measured defect, not a hypothetical: it shipped in
+    route_disconnected_planes (run 11), where every successful run printed
+    `complete: true` and then a contradicting
+    `{"complete": false, "status": "incomplete"}` line, and any consumer keying
+    on the LAST JSON_SUMMARY read a good run as a failed one.
+
+    NOTE these tools have no self-budget: no result they produce may depend on
+    a wall clock, so there is no in-tool cancel for a CLI run to trip. An
+    EXTERNAL kill still skips `atexit` and loses the EXIT= line -- a gap the
+    harness that does the killing owns.
+    """
+    print('\n1+2: every routing tool says how it was invoked, and reports once')
     for label, argv in ROUTING_TOOLS:
-        out = os.path.join(tmp, label.replace('.py', '') + '_dl.kicad_pcb')
-        rc, log = run(argv(out) + ['--deadline', str(SPENT_DEADLINE_S)])
-
-        check(f'{label}: a spent budget exits {DEADLINE_EXIT}, not the shell\'s',
-              rc == DEADLINE_EXIT, f'rc={rc}\n' + log[-600:])
+        out = os.path.join(tmp, label.replace('.py', '') + '_run.kicad_pcb')
+        rc, log = run(argv(out))
         subs = summaries(log)
-        check(f'{label}: a JSON_SUMMARY still lands', bool(subs), log[-600:])
-        # `complete` is the machine gate consumers read
-        # (place_route_loop.py:162); `status` is the discriminator.
-        check(f'{label}: it carries complete=false / status=deadline',
-              bool(subs) and all(s.get('complete') is False
-                                 and s.get('status') == 'deadline'
-                                 for s in subs),
-              [{k: s.get(k) for k in ('complete', 'status')} for s in subs])
-        check(f'{label}: ...and names the budget it spent',
-              bool(subs) and all(s.get('deadline_s') == SPENT_DEADLINE_S
-                                 and s.get('elapsed_s') is not None
-                                 for s in subs),
-              [{k: s.get(k) for k in ('deadline_s', 'elapsed_s', 'stopped_in')}
-               for s in subs])
 
-        # THE ORDERING CONSTRAINT (finding 2): the banner may only exist
-        # because the tool now exits on its own terms.
+        check(f'{label}: exit 0, at least one summary, none of them partial',
+              rc == 0 and len(subs) >= 1
+              and not any(s.get('status') in ('deadline', 'incomplete')
+                          for s in subs)
+              and '"incomplete"' not in log and 'DEADLINE:' not in log,
+              f'rc={rc} n={len(subs)} '
+              + str([s.get('status') for s in subs]))
+
         check(f'{label}: exactly one CMD: and one EXIT= line',
               log.count('\nCMD: ') + log.startswith('CMD: ') == 1
               and sum(1 for ln in log.splitlines()
                       if ln.startswith('EXIT=')) == 1,
               log[:200])
         check(f'{label}: EXIT= reports the tool\'s own code',
-              f'EXIT={DEADLINE_EXIT}' in log, log[-300:])
-
-
-def test_no_deadline_unchanged(tmp):
-    """A run with NO budget must be untouched -- and a budget that is NOT spent
-    must not publish a second, contradicting summary.
-
-    That second line is a measured defect, not a hypothetical: it shipped in
-    route_disconnected_planes (run 11), where every successful run printed
-    `complete: true` and then `{"complete": false, "status": "incomplete"}`
-    from the atexit flush, and any consumer keying on the LAST JSON_SUMMARY
-    read a good run as a failed one.
-    """
-    print('\n1: an unspent budget publishes nothing extra')
-    for label, argv in ROUTING_TOOLS:
-        base = os.path.join(tmp, label.replace('.py', ''))
-
-        rc, log = run(argv(base + '_none.kicad_pcb'))
-        subs = summaries(log)
-        check(f'{label}: no --deadline -> exit 0, one summary, no deadline keys',
-              rc == 0 and len(subs) >= 1
-              and not any(s.get('status') == 'deadline' for s in subs)
-              and 'DEADLINE:' not in log,
-              f'rc={rc} n={len(subs)}')
-
-        rc, log = run(argv(base + '_big.kicad_pcb')
-                      + ['--deadline', str(UNSPENT_DEADLINE_S)])
-        subs = summaries(log)
-        check(f'{label}: a budget that is not spent -> exit 0 and no '
-              f'"incomplete" line',
-              rc == 0 and not any(s.get('status') == 'incomplete'
-                                  for s in subs)
-              and '"incomplete"' not in log,
-              f'rc={rc} ' + str([s.get('status') for s in subs]))
-
-
-def test_deadline_env(tmp):
-    """One export must budget a whole chain -- that is how a harness uses it."""
-    print('\n1: KRT_DEADLINE_S budgets a chain without touching its commands')
-    out = os.path.join(tmp, 'env.kicad_pcb')
-    rc, log = run(['py_router/route.py', BOARD, out, '--nets', '*', '--clearance', '0.1'],
-                  env={'KRT_DEADLINE_S': str(SPENT_DEADLINE_S)})
-    check('route.py honours KRT_DEADLINE_S', rc == DEADLINE_EXIT,
-          f'rc={rc}\n' + log[-400:])
-
-
-def test_reserve_band_is_still_partial():
-    """A budget with a RESERVE band cuts the loops short at `deadline -
-    reserve`; if the bounded tail then finishes before the wall clock runs out,
-    the run is past its CANCEL and not past its DEADLINE.
-
-    `expired()` alone is False there, so a summary tested that way would report
-    a partial board as complete -- which is exactly the confusion the whole
-    mechanism exists to remove. `route_planes` needs the reserve (the tail
-    writes the board and its DRC floor), so this is reachable, not theoretical.
-    """
-    print('\n1: a reserve-band cancel still reports a partial')
-    import time
-    import krt_deadline as K
-    K.reset_for_test()
-    try:
-        dl = K.arm(30.0, tool='probe')
-        cancel = dl.cancel_check('plane create', reserve=29.5)
-        time.sleep(0.6)
-        fired = cancel()
-        summary = {'total_regions': 3}
-        K.stamp(summary)
-        check('the cancel fires while the wall clock has NOT run out',
-              fired and not dl.expired() and dl.stopped_in == 'plane create',
-              f'fired={fired} expired={dl.expired()} stopped_in={dl.stopped_in}')
-        check('...and stamp() still marks the summary partial',
-              summary.get('complete') is False
-              and summary.get('status') == 'deadline'
-              and summary.get('stopped_in') == 'plane create',
-              summary)
-    finally:
-        K.reset_for_test()
-        K._current = None
+              'EXIT=0' in log, log[-300:])
 
 
 def test_merge_keeps_incompleteness(tmp):
-    """route.py can print TWO summaries (the reconciliation self-invoke). The
-    merged tally a consumer actually reads must stay incomplete."""
+    """route.py can print TWO summaries (the reconciliation self-invoke). If
+    either is partial, the merged tally a consumer actually reads must stay
+    partial -- last-wins would otherwise let a complete second pass erase the
+    first's disclosure.
+
+    Driven from a SYNTHETIC log: no tool emits `complete: false` today (none of
+    them can stop itself on a clock), but the stickiness is the guard that
+    makes a partial safe if one ever appears, so it is tested directly rather
+    than deleted along with the mechanism that used to produce one.
+    """
     print('\n1: the merged tally stays incomplete')
     from route_summary import merge_route_summaries
-    out = os.path.join(tmp, 'merge.kicad_pcb')
-    _rc, log = run(['py_router/route.py', BOARD, out, '--nets', '*', '--clearance', '0.1',
-                    '--deadline', str(SPENT_DEADLINE_S)])
+    log = ('JSON_SUMMARY: ' + json.dumps(
+               {'nets_routed': 3, 'complete': False, 'status': 'partial',
+                'stopped_in': 'routing'}) + '\n'
+           'Note: the line above is the whole-board pass\n'
+           'JSON_SUMMARY: ' + json.dumps(
+               {'nets_routed': 1, 'complete': True, 'status': 'ok'}) + '\n')
     m = merge_route_summaries(log)
     check('merge_route_summaries reports the run as partial',
           m is not None and m.get('complete') is False
-          and m.get('status') == 'deadline',
+          and m.get('status') == 'partial',
           m and {k: m.get(k) for k in ('complete', 'status', 'stopped_in')})
 
 
 # --------------------------------------------------------------------------
 # 3 -- a board that declares no floor at all
 # --------------------------------------------------------------------------
-def test_loop_diagnoses_the_deadline(tmp):
-    """route.py can now exit 7, and `place_route_loop`'s generic `rc != 0`
-    raise would have preempted the diagnosis with "route.py exited 7" -- a
-    number that tells the operator nothing and hides the one message that says
-    what to do (raise the budget). The loop already had that message for the
-    `complete: false` case; it was simply unreachable once a deadline exit
-    existed. This is the check that the two stay wired together.
-    """
-    print('\n1: place_route_loop names the deadline, not the exit code')
-    wk = os.path.join(tmp, 'loop')
-    rc, log = run(['py_placer/place_route_loop.py', BOARD,
-                   os.path.join(wk, 'out.kicad_pcb'),
-                   '--route-args', '--nets "/LED_A" --clearance 0.1 '
-                                   '--deadline 0.001',
-                   '--work-dir', os.path.join(wk, 'wk'),
-                   '--rounds', '1', '--no-movie'], timeout=600)
-    check('the loop reports a PARTIAL summary, not a bare exit code',
-          'PARTIAL JSON_SUMMARY' in log and "status='deadline'" in log
-          and 'route.py exited 7' not in log,
-          log[-700:])
-
-
 def test_undeclared_floor(tmp):
     print('\n3: the graders name the fallback on a board that declares nothing')
     from list_nets import board_floor_declaration
@@ -629,12 +531,8 @@ def test_stacked_suspect(tmp):
 def main():
     with tempfile.TemporaryDirectory(prefix='run12_') as tmp:
         test_fence(os.path.join(tmp, 'fence'))
-        test_deadline_and_banner(tmp)
-        test_no_deadline_unchanged(tmp)
-        test_deadline_env(tmp)
-        test_reserve_band_is_still_partial()
+        test_banner_and_one_complete_summary(tmp)
         test_merge_keeps_incompleteness(tmp)
-        test_loop_diagnoses_the_deadline(tmp)
         test_undeclared_floor(tmp)
         test_deficit_faces(tmp)
         test_stacked_suspect(tmp)

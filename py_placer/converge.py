@@ -371,16 +371,9 @@ def cmd_poses(a):
                                    board_edge_clearance=board_edge_clearance)
     diag = {}
     with _StdoutToStderr():
-        # Armed INSIDE the guard: this verb's stdout is a JSON document, and
-        # krt_deadline's DEADLINE:/PROGRESS: lines would land in the middle of
-        # it. The guard sends them to stderr, where they belong.
-        import krt_deadline
-        _dl = krt_deadline.arm(a.deadline, tool='converge poses')
         poses = pose_score.rank_poses(pcb, a.board, a.ref, radius=a.radius,
                                       step=a.step, limit=a.limit, state=st,
-                                      diagnostics=diag,
-                                      cancel_check=(_dl.cancel_check('sweep')
-                                                    if _dl else None))
+                                      diagnostics=diag)
     if not poses:
         # The dropped-pose census is the difference between "this part has
         # nowhere to go" and "your knobs veto even staying put" (run-7 S4:
@@ -391,13 +384,10 @@ def cmd_poses(a):
                           'dropped_in_place': diag.get('dropped_in_place', []),
                           'stopped_early': _cut,
                           # "no legal pose" is a VERDICT about the part. A cut
-                          # sweep has not earned it: with --deadline 0 the
-                          # check fires before even the identity offset, so the
-                          # old text diagnosed a part whose poses were never
-                          # enumerated.
-                          'note': ('the sweep was cut by --deadline before it '
-                                   'finished -- this is NOT a verdict about '
-                                   'the part' if _cut else
+                          # sweep has not earned it -- it diagnoses a part whose
+                          # poses were never enumerated.
+                          'note': ('the sweep stopped early -- this is NOT a '
+                                   'verdict about the part' if _cut else
                                    'no legal pose, including staying put')},
                          indent=1))
         return 2 if _cut else 1
@@ -423,9 +413,9 @@ def cmd_poses(a):
                               'iterations': res['summary'].get('total_iterations'),
                               'vias': res['summary'].get('total_vias')}
     # A cut sweep returns a DIFFERENT best pose with a byte-identical document
-    # shape -- measured, r=3/s=0.25: full ran 176s and chose rot 0; the same
-    # call with --deadline 4 ran 7s and chose rot 90, with no key marking it
-    # partial. A ranking nobody can tell is partial is worse than a slow one.
+    # shape -- measured, r=3/s=0.25: a full sweep chose rot 0 where a truncated
+    # one chose rot 90, with no key marking it partial. A ranking nobody can
+    # tell is partial is worse than a slow one, hence `stopped_early`.
     print(json.dumps({'ref': a.ref, 'stopped_early': bool(diag.get('stopped_early')),
                       'base_cost': poses[0]['cost'] - poses[0]['delta'],
                       'knobs': knobs,
@@ -1287,13 +1277,8 @@ def build_parser():
     q.add_argument('--step', type=float, default=0.5)
     q.add_argument('--limit', type=int, default=12,
                    help='how many ranked poses to RETURN. It does not bound '
-                        'the sweep: every candidate is still evaluated. Use '
-                        '--deadline for that.')
-    q.add_argument('--deadline', type=float, default=None, metavar='SECONDS',
-                   help='wall-clock budget for the candidate sweep. The sweep '
-                        'is radius/step rings x rotations and each candidate '
-                        'pays a full cost evaluation; --limit only truncates '
-                        'the result. Env: KRT_DEADLINE_S')
+                        'the sweep: every candidate is still evaluated. Bound '
+                        'the work with --radius / --step instead.')
     q.add_argument('--clearance', type=float, default=None,
                    help='pose-legality clearance (default: the board\'s own '
                         'Default netclass, else 0.25; run-7 S4 -- a fixed '

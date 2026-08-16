@@ -1086,11 +1086,12 @@ hole-conflicting will still be there after the route, and no router setting
 removes it. Keep that board: it is the baseline `check_channels --baseline`
 needs, and you return its path below.
 
-Set `--deadline` on every searching step, BELOW THE SMALLEST CAP IN THE STACK,
-your harness's included. A 2400s deadline inside a 600s window can never fire:
-the harness SIGTERMs, the tool's own shutdown never runs, and you get exit 143
+No step has a wall-clock budget -- `--deadline` was removed everywhere (no
+result may depend on timing), so passing it is an argparse error. A harness
+timeout SIGTERMs the tool, its own shutdown never runs, and you get exit 143
 with no partial board and no summary. 143 and 124 are the SHELL's codes, not a
-tool's. Run long steps detached rather than raising the number.
+tool's. Run long steps DETACHED, and bound them by SCOPE -- fewer nets, a
+tighter --max-ripup, a smaller violator set -- rather than by a clock.
 
 Record EVERY accepted iteration into the ledger above with converge.py, and
 every rejected one with --rejected before stepping back. The stage after this
@@ -1163,11 +1164,12 @@ only ones in front of you:
 Its Step 0 placement gate will pass: you just did that work, and the close-out
 is the evidence -- so it drops straight through to the routing stages.
 
-Set `--deadline` on every searching step, BELOW THE SMALLEST CAP IN THE STACK
--- your harness's included. A 2400s deadline inside a 600s window can never
-fire: the harness SIGTERMs, the tool's own shutdown never runs, and you get
-exit 143 with no partial board and no summary. 143 and 124 are the SHELL's
-codes, not a tool's. Run long steps detached rather than raising the number.
+No step has a wall-clock budget -- `--deadline` was removed everywhere (no
+result may depend on timing), so passing it is an argparse error. A harness
+timeout SIGTERMs the tool, its own shutdown never runs, and you get exit 143
+with no partial board and no summary. 143 and 124 are the SHELL's codes, not a
+tool's. Run long steps DETACHED, and bound them by SCOPE -- fewer nets, a
+tighter --max-ripup, a smaller violator set -- rather than by a clock.
 
 Two rules that are only true HERE, where the halves meet:
   - copper is not evidence about placement. A route that completed does not

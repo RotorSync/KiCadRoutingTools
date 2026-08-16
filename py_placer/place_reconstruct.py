@@ -120,15 +120,6 @@ Examples:
     p.add_argument("--grid-step", type=float, default=defaults.GRID_STEP)
     p.add_argument("--dry-run", action="store_true",
                    help="Print the stage reports and move list; write nothing")
-    p.add_argument("--deadline", type=float, default=None, metavar="SECONDS",
-                   help="Wall-clock budget. The legalize sweep has no internal "
-                        "bound and ran 46 min without terminating on a 217-part "
-                        "board (run 9); with a budget it stops between "
-                        "violators, keeps the seats it made, reports the rest "
-                        "in deadline_skipped, and exits 7. Default: no budget "
-                        "(a wall-clock default would break replay "
-                        "determinism). ANY harness with an external timeout "
-                        "should pass this at ~0.8x its own. Env: KRT_DEADLINE_S")
     args = p.parse_args()
 
     # Run-7 S1 / run-13 F6: unset floors come from the BOARD, not a constant.
@@ -156,9 +147,6 @@ Examples:
     # scraping the summary could not tell a refusal from a kill. `report` is
     # mutated in place from here on and the flush hook sees whatever it holds.
     report = {}
-    import krt_deadline
-    _dl = krt_deadline.arm(args.deadline, tool='place_reconstruct',
-                           on_partial=lambda: report)
     report['stages_requested'] = sorted(stages)
 
     if not args.dry_run:
@@ -400,18 +388,6 @@ Examples:
     xmoved_all = []
     if 'assign' in stages and (vectors or proposals):
         for rnd in range(max(1, args.assign_rounds)):
-            # BETWEEN ROUNDS. `--deadline` used to reach only reseat and
-            # legalize, so parse, state build, classify, fit, vector, every
-            # assign round (each one a scipy ILP) and exchange all ran outside
-            # it, so `--deadline 0` could run a board to COMPLETION and still
-            # report `complete: true` -- measured on tigard__swap: 7s, assign
-            # and exchange both ran, exit 0. A round is the right unit:
-            # the ILP inside one is not interruptible, and the partial is the
-            # previous round's board, which is coherent.
-            if _dl is not None and _dl.check('assign'):
-                notes.append(f"assign: stopped after {rnd} round(s) (budget)")
-                print(f"  assign: stopping after {rnd} round(s) (budget)")
-                break
             cands, pattern = reconstruct.build_candidates(
                 state, tiers, vectors, proposals, edge_bands=edge_bands)
             n_multi = sum(1 for c in cands.values() if len(c) > 1)
@@ -504,13 +480,6 @@ Examples:
     report['assign_pruned'] = sorted(set(all_pruned))
     report['assign_moved'] = sorted(moved)
     report['gate_after_assign'] = list(base)
-    # Membership FIRST: `check()` latches `stopped_in` on its first call, so
-    # testing the clock before the stage set made a run report it stopped in
-    # `exchange` when exchange was never requested.
-    if 'exchange' in stages and _dl is not None and _dl.check('exchange'):
-        notes.append('exchange: skipped (budget)')
-        print('  exchange: skipped (budget)')
-        stages = stages - {'exchange'}
     if 'exchange' in stages:
         report['exchange'] = {
             'attempts': xrep_all['attempts'],
@@ -559,8 +528,7 @@ Examples:
             # re-seated has forfeited its declared band (the band was measured
             # off the pose being discarded), and leaving it in makes the gate
             # read `oob 4.348` on a board with parts 158mm off the outline.
-            edge_bands=edge_bands, deadline=_dl,
-            progress=krt_deadline.stdout_progress(deadline=_dl))
+            edge_bands=edge_bands)
         for n in rep['notes']:
             print(f"  NOTE: {n}")
         if rep['edge_bands_dropped']:
@@ -592,9 +560,7 @@ Examples:
              # `witnesses_after` is the number that predicts routability --
              # NOT `reseated`, which counts effort.
              'witnesses_before': rep['witnesses_before'],
-             'witnesses_after': rep['witnesses_after'],
-             'deadline_skipped': rep.get('deadline_skipped', []),
-             'complete': rep.get('complete', True)}
+             'witnesses_after': rep['witnesses_after']}
         if preview:
             d['preview'] = True
         return d
@@ -610,8 +576,7 @@ Examples:
             lock_globs=args.lock,
             clearance=args.clearance,
             board_edge_clearance=args.board_edge_clearance,
-            grid_step=args.grid_step, caps=caps, deadline=_dl,
-            progress=krt_deadline.stdout_progress(deadline=_dl))
+            grid_step=args.grid_step, caps=caps)
         for n in rep['notes']:
             print(f"  NOTE: {n}")
         if rep['moves']:
@@ -653,7 +618,10 @@ Examples:
                         'would_move': sorted(m['reference']
                                              for m in _rep['moves']),
                     }
-        krt_deadline.emit(report, deadline=_dl)
+        report.setdefault('complete', True)
+        report.setdefault('status', 'ok')
+        print('JSON_SUMMARY: ' + json.dumps(report, sort_keys=True,
+                                            default=str), flush=True)
         return 0
 
     # Run-7 A11: the output used to be written BEFORE legalize ran, so a run
@@ -668,58 +636,11 @@ Examples:
     if 'reseat' in stages:
         _rs = _run_reseat(staged)
         report['reseat'] = _reseat_report(_rs)
-        if not _rs.get('complete', True):
-            krt_deadline.mark(
-                report, _dl,
-                staged_board=staged, output=None,
-                board_stage='pre-legalize + %d reseat(s)'
-                            % len(_rs['reseated']),
-                deadline_skipped=_rs.get('deadline_skipped', []))
-            print(f"  DEADLINE: reseat stopped with "
-                  f"{len(_rs.get('deadline_skipped', []))} part(s) untried. "
-                  f"The output path was NOT written; the partial board is "
-                  f"at:\n    {staged}", file=sys.stderr)
-            krt_deadline.emit(report, deadline=_dl)
-            return krt_deadline.DEADLINE_EXIT
 
     if 'legalize' in stages:
         rep = _run_legalize(staged)
         report['legalize'] = {'repaired': rep['repaired'],
-                              'unrepairable': rep['unrepairable'],
-                              'deadline_skipped': rep.get('deadline_skipped', []),
-                              'complete': rep.get('complete', True)}
-        if not rep.get('complete', True):
-            # Run-7 A11's invariant, kept verbatim: the OUTPUT path only ever
-            # holds a complete board. So on a deadline hit we promote NOTHING
-            # and simply name the staged board, which already exists, already
-            # has a distinguishing name, and already survives a kill -- the only
-            # defect today is that nobody is told it is there.
-            #
-            # Deliberately NOT a --promote-partial flag: that re-creates the
-            # exact defect A11 fixed, behind a switch a harness author will
-            # turn on without reading the rationale. A caller who genuinely
-            # wants the pre-legalize board can copy_board the staged path AFTER
-            # reading a summary that says complete:false -- an explicit act by
-            # someone who has seen the warning.
-            krt_deadline.mark(
-                report, _dl,
-                staged_board=staged,
-                output=None,
-                board_stage='pre-legalize + %d of %d legalize seat(s)'
-                            % (len(rep['repaired']),
-                               len(rep['repaired']) + len(rep.get(
-                                   'deadline_skipped', []))),
-                legalize_repaired=len(rep['repaired']),
-                deadline_skipped=rep.get('deadline_skipped', []))
-            print(f"  DEADLINE: legalize stopped with "
-                  f"{len(rep.get('deadline_skipped', []))} violator(s) "
-                  f"untried. The output path was NOT written; the partial "
-                  f"board is at:\n    {staged}\n  It carries the assign/"
-                  f"exchange result plus {len(rep['repaired'])} legalize "
-                  f"seat(s). Copy it with copy_board.py if you want it.",
-                  file=sys.stderr)
-            krt_deadline.emit(report, deadline=_dl)
-            return krt_deadline.DEADLINE_EXIT
+                              'unrepairable': rep['unrepairable']}
 
     _promote_staged(staged, args.output_file)
 
@@ -758,7 +679,10 @@ Examples:
         print("  (off-board residue that no cap could repair: if it is a "
               "by-design overhang -- a card edge, a switch actuator -- "
               "declare it in an intent's edge_connectors; it is then exempt)")
-    krt_deadline.emit(report, deadline=_dl)
+    report.setdefault('complete', True)
+    report.setdefault('status', 'ok')
+    print('JSON_SUMMARY: ' + json.dumps(report, sort_keys=True, default=str),
+          flush=True)
     # Exit 4 = residual PAD/HOLE conflicts or a blocking BODY pair -- the
     # defect classes this tool exists to remove. Off-board residue is
     # reported (and by-design overhang is indistinguishable from defect

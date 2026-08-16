@@ -183,7 +183,7 @@ class PlaneZoneChannelTest(unittest.TestCase):
                 [sys.executable, '-X', 'utf8',
                  os.path.join(ROOT, 'py_router', 'route_planes.py'), BOARD, out,
                  '--nets', 'GND', 'GND',
-                 '--plane-layers', 'F.Cu', 'B.Cu', '--deadline', '240'],
+                 '--plane-layers', 'F.Cu', 'B.Cu'],
                 capture_output=True, text=True, timeout=900)
             line = [l for l in (r.stdout + r.stderr).splitlines()
                     if l.startswith('JSON_SUMMARY:')]

@@ -109,17 +109,6 @@ Examples:
                         "pose being discarded). Composes with --repair and "
                         "runs BEFORE it. Judge it on witnesses_after, not on "
                         "how far anything moved")
-    p.add_argument("--deadline", type=float, default=None, metavar="SECONDS",
-                   help="Wall-clock budget for --repair/--reseat. The repair "
-                        "sweep has no internal bound (violators x caps x 36 "
-                        "ring sweeps x O(parts)); with a budget it stops "
-                        "between violators, keeps the seats it made, reports "
-                        "the rest in deadline_skipped and exits 7. Default: "
-                        "no budget (a wall-clock default would break replay "
-                        "determinism). ANY harness with an external timeout "
-                        "should pass this at ~0.8x its own -- on Windows an "
-                        "external kill is TerminateProcess and leaves NO "
-                        "output at all. Env: KRT_DEADLINE_S")
     p.add_argument("--dry-run", action="store_true",
                    help="With --repair/--reseat: print the move list and "
                         "grades, write nothing")
@@ -182,19 +171,12 @@ Examples:
     if args.repair or args.reseat is not None:
         import math as _math
         import tempfile
-        import krt_deadline
         if st.unplaced:
             print("place_seed: --repair/--reseat need a PLACED board (this "
                   "one is unplaced -- seed it instead).", file=sys.stderr)
             return UNPLACED_EXIT
         summary = {'dry_run': args.dry_run,
                    'output': None if args.dry_run else args.output_file}
-        # Armed BEFORE the passes, so the flush hook covers every return
-        # below -- the refusals above print no summary at all today, which is
-        # how a killed run and a refused one look identical to a scraper.
-        _dl = krt_deadline.arm(args.deadline, tool='place_seed',
-                               on_partial=lambda: summary)
-        _prog = krt_deadline.stdout_progress(deadline=_dl)
 
         # Both passes stage into a temp dir and the finished board is copied
         # to the output path once, at the end. That keeps --dry-run honest
@@ -225,8 +207,7 @@ Examples:
                 refs=(args.reseat or None), group_sources=sources,
                 clearance=args.clearance,
                 board_edge_clearance=args.board_edge_clearance,
-                grid_step=args.grid_step, seed=args.seed,
-                deadline=_dl, progress=_prog)
+                grid_step=args.grid_step, seed=args.seed)
             for note in reseat['notes']:
                 print(f"  NOTE: {note}")
             _rmax = 0.0
@@ -284,7 +265,7 @@ Examples:
                 cur_pcb, cur, intent, group_sources=sources,
                 clearance=args.clearance,
                 board_edge_clearance=args.board_edge_clearance,
-                grid_step=args.grid_step, deadline=_dl, progress=_prog)
+                grid_step=args.grid_step)
             for note in result['notes']:
                 print(f"  NOTE: {note}")
             max_move = 0.0
@@ -303,7 +284,6 @@ Examples:
                 'unrepairable': len(result['unrepairable']),
                 'moved_refs': [m['reference'] for m in result['moves']],
                 'max_move_mm': round(max_move, 3),
-                'deadline_skipped': result.get('deadline_skipped') or [],
             })
             summary.update({f'{k}_before': v
                             for k, v in result['pad_report_before'].items()})
@@ -311,19 +291,6 @@ Examples:
             if result['unrepairable']:
                 exit_rc = 4
 
-        summary['complete'] = ((result or {}).get('complete', True)
-                               and (reseat or {}).get('complete', True))
-        if not summary['complete'] and _dl is not None:
-            # Unlike place_reconstruct, the output IS written on expiry: the
-            # partial is coherent by construction here (a part is either fully
-            # seated, with every seat legality-checked before it was taken, or
-            # untouched), so there is no pre-legalize staging step whose result
-            # would be invalid to hand on.
-            krt_deadline.mark(
-                summary, _dl,
-                reseat_skipped=(reseat or {}).get('deadline_skipped') or [],
-                repair_skipped=(result or {}).get('deadline_skipped') or [],
-                output=None if args.dry_run else args.output_file)
         if not args.dry_run:
             # A no-op still writes a board: the next step in a chain is handed
             # a path, and "nothing needed doing" must not look like "the tool
@@ -346,9 +313,10 @@ Examples:
             if graded.errors:
                 exit_rc = 4
         _stage.cleanup()
-        krt_deadline.emit(summary, deadline=_dl)
-        if not summary['complete']:
-            return krt_deadline.DEADLINE_EXIT
+        summary.setdefault('complete', True)
+        summary.setdefault('status', 'ok')
+        print('JSON_SUMMARY: ' + json.dumps(summary, sort_keys=True,
+                                            default=str), flush=True)
         return exit_rc
 
     if not st.unplaced and not st.partially_unplaced and not args.force:
