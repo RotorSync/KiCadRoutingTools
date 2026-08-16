@@ -211,7 +211,8 @@ def plan_global_routes(pcb_data, config, net_ids: List[Tuple[str, int]],
           f"({res_cells} cells at {k['cost']}mm-equiv), "
           f"{n_cross} net(s) with predicted crossings, "
           f"{n_share} sharing corridors; heaviest probe {max_iters} "
-          f"iters (cap {int(k['iters'])})")
+          f"iters summed over its legs/directions (per-leg cap "
+          f"{int(k['iters'])})")
     if verbose or env_knobs.GLOBAL_PLAN.get('debug'):
         name_of = {nid: nm for nm, nid in net_ids}
         hot = sorted(((sum(w.values()), nid)
