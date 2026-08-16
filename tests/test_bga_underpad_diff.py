@@ -124,7 +124,7 @@ def main():
         # the intermediate overlaps are visible and the test must mirror the
         # real pipeline before asserting cleanliness.
         capopt = _tmp("glasgow_cap_")
-        _run(["py_router/place_fanout_clearance.py", fan, capopt, "--clearance", "0.1"],
+        _run(["py_placer/place_fanout_clearance.py", fan, capopt, "--clearance", "0.1"],
              verbose)
         drc = _run(["py_router/check_drc.py", capopt, "--clearance", "0.1"], verbose)
         check("under-pad escape + cap-opt is DRC-clean", "NO DRC VIOLATIONS" in drc)

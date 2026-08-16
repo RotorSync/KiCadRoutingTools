@@ -30,6 +30,7 @@ import sys
 import os
 import math
 import argparse
+import json
 from dataclasses import replace
 from typing import List, Tuple, Dict, Optional, Set
 
@@ -61,6 +62,15 @@ import re
 # Outcome of the end-of-run self-reconnect of rip-blocker-nets casualties
 # (#347); read by main() for the JSON_SUMMARY. None = no reconnect ran.
 LAST_RIPPED_RECONNECT: Optional[Dict] = None
+
+# Casualty nets that ship STILL OPEN -- ripped to clear a corridor, not
+# reconnected, and not restorable. Run-7 finding A10: this state reached a red
+# log line and nothing else. The JSON_SUMMARY carried counts without names, and
+# main() returned None so the process exited 0 -- a chain step that silently
+# consumed two nets was caught only because a later board_score happened to be
+# read by a human. Names here, and an exit code from main().
+LAST_RIPPED_STILL_OPEN: List[str] = []
+LAST_RIPPED_CUSTODY: Optional[Dict] = None
 
 
 def plane_tap_launch_layers(pad, zone_layers, routing_layers) -> List[str]:
@@ -700,6 +710,8 @@ def auto_detect_zones(
     return zone_pairs
 
 
+
+
 def repair_planes(
     input_file: str,
     output_file: str,
@@ -1006,6 +1018,10 @@ def repair_planes(
     if corridor_ghosts is not None:
         print(f"  (#517 corridor ghosts armed: {_sb_mode} mode)")
 
+    # #549 B: SEPARATE seed registry from COMMITTED copper of path-critical
+    # nets (auto: the board's protected/impedance records). Soft via-site
+    # preference only; independent of KICAD_PLANE_RIP_SOFTBLOCK.
+
     # #517 instrumentation: which PASS placed each piece of this run's new
     # copper (pad-tap, region-join, partial-restore, reconnect, custody
     # restore), so a custody REFUSED-restore can name the occupier class
@@ -1074,6 +1090,27 @@ def repair_planes(
         if net_id not in unique_nets:
             unique_nets[net_id] = (net_name, set())
         unique_nets[net_id][1].add(plane_layer)
+
+    # Run-6 A5, warn-only here (MOVED: this ran BEFORE unique_nets existed,
+    # so it raised NameError into the bare `except` below on every call and
+    # the warning never once fired) (the repair legitimately runs mid-loop on
+    # boards with known opens): every tap via this step adds shrinks a bare
+    # pad's escape channel further, and tap fields are not rippable copper.
+    try:
+        from check_connected import bare_pad_nets
+        _bare = bare_pad_nets(pcb_data, exclude_net_ids=set(unique_nets))
+        if _bare:
+            _bn = sorted(pcb_data.nets[i].name for i in _bare
+                         if i in pcb_data.nets)
+            print(f"  WARNING: {len(_bare)} net(s) still have >=2 pads and "
+                  f"ZERO copper ({', '.join(_bn[:6])}"
+                  f"{', ...' if len(_bn) > 6 else ''}) -- this step's tap "
+                  f"vias will crowd their escape channels; route them first "
+                  f"if their pads must connect (the pour is a one-way door "
+                  f"for bare pads).")
+    except Exception:
+        pass
+
 
     # --reroute-ripped-nets is deprecated (issue #141 reverted). This step used to
     # rip signal blockers, route plane/pad repairs into the freed space, then
@@ -1167,8 +1204,8 @@ def repair_planes(
         their vacated corridors (the window-shrink half of the #480 knob).
         Successes leave ripped_net_ids -- their new copper enters the write
         list here; failures stay queued for the end-of-run reconnect and its
-        custody. Mirrors the end-of-run batch (same batch_route call, same
-        #513 width preservation, same #338/#441 edge floor)."""
+        custody. Mirrors the end-of-run batch: same batch_route call, same
+        #513 width preservation, and same #338/#441 edge floor."""
         _names = [pcb_data.nets[_n].name for _n in _rip_ids
                   if _n in pcb_data.nets]
         if not _names:
@@ -1217,6 +1254,7 @@ def repair_planes(
                 # sub-run is a repair DETAIL, not a chain step -- never finalize.
                 final_reconcile=False,
                 **_ghost_kwargs(corridor_ghosts, _rip_ids))
+
             for _r in _rdata.get('results', []):
                 for _s in (_r.get('new_segments') or []):
                     all_new_segments.append(
@@ -1246,7 +1284,6 @@ def repair_planes(
                      'net_id': _s.net_id})
                 _prov_seg(_s.net_id, _s.layer, _s.start_x, _s.start_y,
                           _s.end_x, _s.end_y, 'reconnect')
-            _consume_inner_strips(_rdata, "immediate-reconnect")
             # A net is done only if it is CONNECTED now (batch_route's own
             # success flag is not the arbiter -- #479's lesson).
             from check_connected import check_net_connectivity as _cnc517
@@ -1402,8 +1439,7 @@ def repair_planes(
                         distant_trace_radius=distant_radius,
                         shared_via_maps=shared_maps,
                         plane_oracle=plane_oracle,
-                        corridor_ghosts=corridor_ghosts
-                    )
+                        corridor_ghosts=corridor_ghosts)
                     _rips_before = len(ripped_net_ids)
                     if not result.success and rip_blocker_nets:
                         if not _allow_rip:
@@ -2027,8 +2063,18 @@ def repair_planes(
                 print(f"  custody: {_cust['restored']} restored, "
                       f"{_cust['refused']} refused, {_cust['errored']} errored "
                       f"of {len(_casualties)} casualty net(s)")
+                global LAST_RIPPED_CUSTODY
+                LAST_RIPPED_CUSTODY = dict(_cust,
+                                           casualties=len(_casualties))
             if _still_open:
                 _report_unrouted_ripped_nets(pcb_data, _still_open)
+            # A10: the still-open set is the run's real damage. Publish the
+            # NAMES so the summary, the exit code and the ledger can all carry
+            # it -- a count in a log line is not a verdict channel.
+            global LAST_RIPPED_STILL_OPEN
+            LAST_RIPPED_STILL_OPEN = [
+                (pcb_data.nets[_cid].name if _cid in pcb_data.nets
+                 else f"net_{_cid}") for _cid in _still_open]
             if corridor_ghosts is not None:
                 # #517 arm 2: custody-defined lifetime -- a casualty that is
                 # connected again (reconnected, or custody-restored) has real
@@ -2240,6 +2286,20 @@ def repair_planes(
 
         def _gate_oracle_query():
             import tempfile
+            # A cancelled run does not get to spend another 300s here. Both
+            # branches below shell out -- exact_unconnected via pcbnew's
+            # ZONE_FILLER (EXACT_FILL_TIMEOUT 300s) and the kicad-cli fallback
+            # via ORACLE_DRC_TIMEOUT (240s) -- and neither honours cancel_check,
+            # because neither existed as a cancellation point. Measured: a
+            # repair that cancelled cleanly at 45s then sat in a KiCad
+            # exact_fill child until the EXTERNAL timeout killed it at 200s,
+            # which handed back exactly the race the budget just won. The gate
+            # is a verification pass, not a correctness one; skipping it leaves
+            # the partial board written and gated by everything upstream.
+            if cancel_check is not None and cancel_check():
+                print("  guaranteed-join gate: SKIPPED (cancelled; the gate "
+                      "oracle shells out and would overrun the budget)")
+                return None
             try:
                 _tmp = tempfile.NamedTemporaryFile(
                     suffix='.kicad_pcb', delete=False)
@@ -2816,7 +2876,49 @@ def repair_planes(
     if repair_pads:
         print(f"  Pad repair: {total_pads_repaired}/{total_pads_unconnected} unconnected pad(s) reconnected")
         if failed_repair_pads:
-            print(f"  Pads still unconnected: {', '.join(failed_repair_pads)}")
+            # Run-6 fix: failed_repair_pads is a historical accumulator graded
+            # by the KRT fill model, which under-credits narrow real fill
+            # corridors (~0.05mm raster floor) -- it claimed pads unconnected
+            # that KiCad's refilled pour connects (C16.2 class). Re-grade the
+            # list against the exact/kicad oracle before printing; entries the
+            # oracle proves connected are reported separately, not as opens.
+            _confirmed, _cleared = list(failed_repair_pads), []
+            try:
+                if _gate_oracle_links[0] is None:
+                    _gate_oracle_links[0] = _gate_oracle_query()
+                _olinks = _gate_oracle_links[0]
+                if _olinks is not False and _olinks is not None:
+                    def _pad_open_per_oracle(entry):
+                        # entry format: "REF.PAD (NET)"
+                        try:
+                            _refpad = entry.split(' ')[0]
+                            _ref, _pn = _refpad.rsplit('.', 1)
+                            _fp = pcb_data.footprints.get(_ref)
+                            _pad = next(p for p in (_fp.pads if _fp else [])
+                                        if p.pad_number == _pn)
+                        except Exception:
+                            return True     # unparseable: keep as open
+                        for _net, _a, _b in _olinks:
+                            for _e in (_a, _b):
+                                if (abs(_e[0] - _pad.global_x) < 0.1
+                                        and abs(_e[1] - _pad.global_y) < 0.1):
+                                    return True
+                        return False
+                    _confirmed = [e for e in failed_repair_pads
+                                  if _pad_open_per_oracle(e)]
+                    _cleared = [e for e in failed_repair_pads
+                                if e not in _confirmed]
+            except Exception:
+                pass    # incl. NameError when the gate closure never built
+            if _cleared:
+                print(f"  {len(_cleared)} reported-unconnected pad(s) are "
+                      f"CONNECTED per KiCad's exact fill (model quantization): "
+                      f"{', '.join(_cleared)}")
+            if _confirmed:
+                print(f"  Pads still unconnected: {', '.join(_confirmed)}")
+            else:
+                print("  Pads still unconnected: none (all model-only; "
+                      "confirmed connected by the oracle)")
     if debug_lines and all_debug_lines:
         print(f"  Debug lines on User.4: {len(all_debug_lines)}")
 
@@ -3273,7 +3375,7 @@ Examples:
     # keep their larger PLANE_EDGE_CLEARANCE fallback when the board declares none.
     # Resolved here, before enforce_fab_floors and every downstream use.
     from list_nets import (board_default_netclass_clearance, board_default_netclass_param,
-                           board_constraint)
+                           resolve_cli_floor)
     for _pname, _nckey, _fallback in (('track_width', 'track_width', defaults.TRACK_WIDTH),
                                       ('via_size', 'via_diameter', defaults.VIA_SIZE),
                                       ('via_drill', 'via_drill', defaults.VIA_DRILL)):
@@ -3296,20 +3398,16 @@ Examples:
               f"clearance {args.clearance}mm.")
     else:
         args.clearance = min(_dflt_clr, _ceiling) if _dflt_clr is not None else _ceiling
-    if args.hole_to_hole_clearance is None:
-        _h2h = board_constraint(args.input_file, 'min_hole_to_hole')
-        args.hole_to_hole_clearance = _h2h if _h2h is not None else defaults.HOLE_TO_HOLE_CLEARANCE
-        print(f"--hole-to-hole-clearance not given; using "
-              f"{'the board min_hole_to_hole' if _h2h is not None else 'the fallback'} "
-              f"{args.hole_to_hole_clearance}mm.")
-    if args.board_edge_clearance is None:
-        # Planes keep their larger edge keep-out (PLANE_EDGE_CLEARANCE) only when
-        # the board declares no edge rule of its own.
-        _edge = board_constraint(args.input_file, 'min_copper_edge_clearance')
-        args.board_edge_clearance = _edge if _edge is not None else defaults.PLANE_EDGE_CLEARANCE
-        print(f"--board-edge-clearance not given; using "
-              f"{'the board min_copper_edge_clearance' if _edge is not None else 'the fallback'} "
-              f"{args.board_edge_clearance}mm.")
+    # Shared resolver (list_nets.resolve_cli_floor); see route_planes.py -- a
+    # DECLARED 0.0 is "no edge rule of its own", not a rule of zero, so the
+    # plane inset stays PLANE_EDGE_CLEARANCE as the GUI's plane tab already had
+    # it.
+    args.hole_to_hole_clearance = resolve_cli_floor(
+        args.input_file, 'hole_to_hole', args.hole_to_hole_clearance,
+        defaults.HOLE_TO_HOLE_CLEARANCE, '--hole-to-hole-clearance')
+    args.board_edge_clearance = resolve_cli_floor(
+        args.input_file, 'board_edge_clearance', args.board_edge_clearance,
+        defaults.PLANE_EDGE_CLEARANCE, '--board-edge-clearance')
     set_default_fab_tier(*fab_tier_from_args(args))
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.input_file),
@@ -3372,9 +3470,14 @@ Examples:
         for net, layer in zone_pairs:
             print(f"  {net} on {layer}")
 
+    # The engine's cooperative `cancel_check` / `progress_callback` are the
+    # GUI's (the planes tab's Cancel button); the CLI passes neither. There is
+    # deliberately no wall-clock budget -- no result this tool produces may
+    # depend on timing.
     _rdp_result = repair_planes(
         input_file=args.input_file,
         output_file=args.output_file,
+
         net_names=net_names,
         plane_layers=plane_layers,
         track_width=args.track_width,
@@ -3433,7 +3536,7 @@ Examples:
     # KiCad's REAL fill produces can survive every model-based pass (castor
     # +3.3VA bare island, lumenpnp U5 pocket). Ask kicad-cli for the exact
     # missing links on the processed nets and route precisely those.
-    if not args.dry_run and not args.no_kicad_recheck and args.output_file:
+    if (not args.dry_run and not args.no_kicad_recheck and args.output_file):
         from kicad_oracle import oracle_reconnect
         from routing_config import GridRouteConfig
         # #338: the oracle pass runs on OUTPUT_FILE, whose sibling .kicad_pro
@@ -3516,17 +3619,51 @@ Examples:
     }
     if LAST_RIPPED_RECONNECT is not None:
         _summary["ripped_reconnect"] = LAST_RIPPED_RECONNECT
-    print("JSON_SUMMARY: " + _json.dumps(_summary))
+    if LAST_RIPPED_CUSTODY is not None:
+        _summary["ripped_custody"] = LAST_RIPPED_CUSTODY
+    # A10: nets this step ripped and could neither reconnect nor restore. They
+    # ship OPEN, so they belong in the summary by name and in the exit code.
+    _summary["ripped_still_open"] = list(LAST_RIPPED_STILL_OPEN)
+    # `complete`/`status` are kept because consumers read them -- see
+    # route_summary's sticky-incompleteness merge. The CLI has no cancel
+    # source, so the run either finished or raised.
+    _summary.setdefault("complete", True)
+    _summary.setdefault("status", "ok")
+    print('JSON_SUMMARY: ' + json.dumps(_summary, sort_keys=True, default=str),
+          flush=True)
 
-
-if __name__ == "__main__":
-    from console_encoding import enable_utf8_console
-    enable_utf8_console()  # cp1252-safe non-ASCII prints (issue #152)
-    main()
+    if LAST_RIPPED_STILL_OPEN:
+        print(f"{RED}RIP CASUALTIES SHIP OPEN ({len(LAST_RIPPED_STILL_OPEN)}): "
+              f"{', '.join(LAST_RIPPED_STILL_OPEN)}{RESET}")
+        print("  These nets were ripped to clear a plane corridor and are not "
+              "connected on the written board. Reconnect them (the chain's "
+              "reconnect step) or re-run without --rip-blocker-nets; do not "
+              "read this run as clean.")
+        return 4
+    return 0
 
 
 # Naming (#562): this module's engine used to be called route_planes,
 # colliding with route_planes.py (the pours-CREATION script) -- the GUI
 # already imported it 'as repair_planes'. The old name stays as an alias
-# for external callers; new code should import repair_planes.
+# for external callers; new code should import repair_planes. Defined BEFORE
+# the __main__ block: run-8 made that block sys.exit(), which would otherwise
+# never reach a trailing assignment.
 route_planes = repair_planes
+
+
+if __name__ == "__main__":
+    from console_encoding import enable_utf8_console
+    enable_utf8_console()  # cp1252-safe non-ASCII prints (issue #152)
+    # CMD/EXIT self-echo (run-3 B1). Caveat, same as route.py's: an EXTERNAL
+    # kill skips `atexit`, so the promised EXIT= line never arrives. This tool
+    # has no self-budget to fall back on -- deliberately, since no result it
+    # produces may depend on a wall clock -- so a harness that kills it owns
+    # that gap. It is also the script whose exit code was hardest to tell from
+    # the shell's, which is why the banner is here at all.
+    import cli_banner
+    cli_banner.install()
+    # run-8: propagate main()'s verdict -- it returns 4 when plane repair
+    # leaves rip casualties unconnected, which used to be one red line and
+    # exit 0.
+    sys.exit(main())

@@ -12,13 +12,8 @@ copper (run-7: failed_single [] while the oracle listed six opens).
 The contract under test:
   * route.py emits `open_single` (always present; multipoint nets excluded --
     their shortfall is already the pad deficit, so verdicts may add the terms).
-  * the failure count that drives the place/route loop adds it.
+  * route_verdict and metrics_from_summary count it.
   * Summaries WITHOUT the key (older logs) degrade to the old arithmetic.
-
-Note: this branch computes that failure count inline in
-`place_route_loop.run_route` rather than in an importable
-`metrics_from_summary`/`converge.route_verdict` pair, so the consumer side is
-asserted over the source rather than by calling it.
 """
 import inspect
 import json
@@ -31,27 +26,55 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # placement split
 sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522
 
 
-def test_failure_count_adds_open_single():
-    """The place/route loop's failure count must include open_single, and a
-    summary WITHOUT the key must degrade to the old arithmetic."""
-    import place_route_loop
-    src = inspect.getsource(place_route_loop).replace('\n', ' ')
-    m = re.search(r"failures\s*=\s*\(?([^\n]{0,240}?mp_deficit)", src)
-    assert m, "could not find the failures computation in place_route_loop"
-    expr = m.group(1)
-    assert 'open_single' in expr, (
-        "the failure count ignores open_single, so a non-multipoint open net "
-        f"still counts 0: {expr}")
-    assert ("get('open_single', [])" in expr
-            or 'get("open_single", [])' in expr), (
-        "open_single must be read with a default so pre-key summaries degrade "
-        f"to the old arithmetic instead of raising: {expr}")
-    assert 'failed_single' in expr and 'mp_deficit' in expr, (
-        f"the other two terms must survive: {expr}")
-    print("  PASS: the loop's failure count adds open_single (and degrades)")
+def test_route_verdict_counts_open_single():
+    from converge import route_verdict
+    base = {'failed_single': ['A'], 'open_single': ['B'],
+            'failed_multipoint': [{'net_name': 'B', 'failed_pads': []}],
+            'multipoint_pads_total': 0, 'multipoint_pads_connected': 0}
+    n, note = route_verdict(base)
+    assert n == 2, f"failed A + open B must count 2, got {n} ({note})"
+    assert 'B' in note, "the open net's name must reach the note"
+
+    legacy = dict(base)
+    legacy.pop('open_single')
+    n_legacy, _ = route_verdict(legacy)
+    assert n_legacy == 1, (
+        "a summary without the key must degrade to the old arithmetic")
+    print("  PASS: route_verdict counts open_single (and degrades without it)")
+
+
+def test_route_verdict_no_double_count_with_pad_deficit():
+    """Multipoint opens are priced by the deficit; open_single excludes them by
+    contract, so a summary carrying both terms adds cleanly."""
+    from converge import route_verdict
+    s = {'failed_single': [], 'open_single': ['B'],
+         'failed_multipoint': [{'net_name': 'B', 'failed_pads': []},
+                               {'net_name': 'MP', 'failed_pads': []}],
+         'multipoint_pads_total': 10, 'multipoint_pads_connected': 7}
+    n, _ = route_verdict(s)
+    assert n == 4, f"open B (1) + pad deficit (3) must count 4, got {n}"
+    print("  PASS: open_single adds to the pad deficit without double-count")
+
+
+def test_metrics_from_summary_counts_open_single():
+    from place_route_loop import metrics_from_summary
+    s = {'failed_single': ['A'], 'open_single': ['B'],
+         'failed_multipoint': [{'net_name': 'B', 'failed_pads': []}],
+         'multipoint_pads_total': 0, 'multipoint_pads_connected': 0,
+         'blockers': []}
+    m = metrics_from_summary(s)
+    assert m['failures'] == 2, f"expected 2 failures, got {m['failures']}"
+    assert m['failed_nets'].count('B') == 1, (
+        "the open net is a target exactly once (via failed_multipoint)")
+
+    legacy = dict(s)
+    legacy.pop('open_single')
+    assert metrics_from_summary(legacy)['failures'] == 1
+    print("  PASS: metrics_from_summary counts open_single")
 
 
 def test_route_py_classification_has_the_third_bucket():
@@ -80,20 +103,15 @@ def test_end_to_end_key_present_and_clean():
         print("  SKIP: fixture missing")
         return
     with tempfile.TemporaryDirectory() as td:
+        js = os.path.join(td, 's.json')
         out = os.path.join(td, 's.kicad_pcb')
-        # The summary is read off the run's own JSON_SUMMARY stdout line --
-        # every route.py emits it, whereas the --json-out file flag does not
-        # exist on every branch. Same data, one interface older.
         r = subprocess.run([sys.executable, '-X', 'utf8',
                             os.path.join(ROOT, 'py_router', 'route.py'), board, out,
-                            '--nets', 'GND'],
+                            '--nets', 'GND', '--json-out', js],
                            capture_output=True, text=True, encoding='utf-8',
                            errors='replace', cwd=ROOT)
         assert r.returncode == 0, r.stdout[-2000:]
-        lines = [l for l in r.stdout.splitlines()
-                 if l.startswith('JSON_SUMMARY: ')]
-        assert lines, f"no JSON_SUMMARY line in the run output: {r.stdout[-2000:]}"
-        summary = json.loads(lines[-1][len('JSON_SUMMARY: '):])
+        summary = json.load(open(js, encoding='utf-8'))
         assert 'open_single' in summary, (
             "open_single must always be present so verdict consumers can "
             "rely on it (absent = pre-key log, not 'clean')")

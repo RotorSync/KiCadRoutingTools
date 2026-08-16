@@ -394,10 +394,24 @@ def get_terminal_component_info(
     # that bridges two islands (e.g. both escapes land in one connector pad).
     net_pads = pcb_data.pads_by_net.get(net_id, [])
 
+    # #549 A-2: the PLANNER rides the strict-fragment view -- the permissive
+    # grading credits (flat pad radius, epsilon caps, legacy zone blob) are
+    # exactly what collapsed 7 true islands into <=2 components and made the
+    # MST emit nothing (run 6, VCC3V3 25/27 phantom). Every planner-domain
+    # consumer (phase-1 grouping, exhausted-base pick, phase-3 island maps,
+    # _reconcile_multipoint_connectivity) flips atomically through this call.
     res = check_net_connectivity(net_id, net_segments, net_vias, net_pads,
                                  net_zones, return_graph=True,
-                                 pcb_data=pcb_data)
+                                 pcb_data=pcb_data, strict_fragments=True)
     graph = res.get('graph') or {}
+    if graph.get('zone_blob_fallback'):
+        # No fill model existed for a zone here -- the strict view degraded
+        # to outline-blob credit. Stash for the callers' disclosure prints.
+        _zbf = getattr(pcb_data, '_zone_blob_fallback_nets', None)
+        if _zbf is None:
+            _zbf = set()
+            pcb_data._zone_blob_fallback_nets = _zbf
+        _zbf.add(net_id)
     uf = UnionFind()
     for a, b in graph.get('edges', []):
         uf.union(a, b)
@@ -1513,6 +1527,12 @@ def _get_multipoint_net_pads_unordered(
                 unconnected_pads.append(pad)
 
         endpoint_info = []
+        # `units` counts CLASSIFICATION units -- islands plus copperless pads
+        # -- not terminals. Islands may now contribute several terminals (all
+        # their free ends), and gating multipoint-ness on len(endpoint_info)
+        # would silently reclassify a 2-island net as multipoint the moment
+        # both islands have two dangling ends.
+        units = 0
         for gi, group in enumerate(groups):
             # #545 F4: prefer a VIA of the group as its representative
             # terminal. The old choice, free_ends[0], is the SORTED-SMALLEST
@@ -1547,12 +1567,29 @@ def _get_multipoint_net_pads_unordered(
                     endpoint_info.append((gx, gy, layer_idx, _gv.x, _gv.y,
                                           _make_endpoint_stub(_gv.x, _gv.y,
                                                               _vlayer, net_id)))
+                    units += 1
                     continue
             free_ends = find_stub_free_ends(group, net_pads)
             if free_ends:
-                x, y, layer = free_ends[0]
-                layer_idx = layer_map.get(layer)
-                if layer_idx is not None:
+                # Emit EVERY free end of the island as a terminal, not just
+                # free_ends[0]. compute_component_mst_edges is component-keyed
+                # (#317): all of an island's terminals resolve to one
+                # component through the connectivity graph, intra-component
+                # edges never appear, and the inter-island MST edge is
+                # realized at the true CLOSEST terminal pair. With a single
+                # representative, a 0.6mm island-to-island gap between two
+                # non-representative stub ends was structurally invisible --
+                # the edge got realized at a walled far pad instead, and the
+                # join had to be hand-authored (test-board run 5, journal
+                # [9]: "the MST simply never asked stub-to-stub").
+                # Position-sorted for GUI/CLI order-independence; capped so a
+                # degenerate many-stub island cannot make the component MST's
+                # pairwise relaxation quadratic in free ends.
+                _added = False
+                for x, y, layer in sorted(free_ends)[:8]:
+                    layer_idx = layer_map.get(layer)
+                    if layer_idx is None:
+                        continue
                     endpoint_info.append((
                         coord.to_grid(x, y)[0],
                         coord.to_grid(x, y)[1],
@@ -1561,11 +1598,15 @@ def _get_multipoint_net_pads_unordered(
                         y,
                         _make_endpoint_stub(x, y, layer, net_id)
                     ))
+                    _added = True
+                if _added:
+                    units += 1
                     continue
             # No usable free end: represent the island by one of its pads,
             # else by any segment endpoint, so it still gets tied in.
             if pads_on_group[gi]:
                 _append_pad(endpoint_info, pads_on_group[gi][0])
+                units += 1
             else:
                 seg = group[0]
                 layer_idx = layer_map.get(seg.layer)
@@ -1574,11 +1615,13 @@ def _get_multipoint_net_pads_unordered(
                     endpoint_info.append((gx, gy, layer_idx, seg.start_x, seg.start_y,
                                           _make_endpoint_stub(seg.start_x, seg.start_y,
                                                               seg.layer, net_id)))
+                    units += 1
 
         for pad in unconnected_pads:
             _append_pad(endpoint_info, pad)
+            units += 1
 
-        return endpoint_info if len(endpoint_info) >= 3 else None
+        return endpoint_info if units >= 3 else None
 
     return None
 

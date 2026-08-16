@@ -359,6 +359,19 @@ def generate_underpad_escape(footprint: Footprint,
     failures are reported there, never in the returned failed list (plane nets
     are not part of the requested/escaped ledger; the plane step's tap search
     remains the fallback).
+
+    Cancellation (#621): `cancel_check` is a zero-arg predicate honoured at the
+    head of the four escape loops (top-layer coupled pairs, the outside-in
+    surface phase, the inner coupled pairs, the inner single balls) -- the same
+    contract `batch_route` / `create_plane` already take, so the GUI's Cancel
+    button reaches this and nothing new is needed. It BREAKS the loop; it never
+    raises (an exception dies in this package's `except Exception` swallowers,
+    which is the silent failure the cooperative contract exists to remove).
+    Balls already escaped keep their copper; balls the cancel never got
+    to are simply absent from BOTH the emitted copper and the returned failed
+    list -- an unfinished search has measured nothing, so reporting it as a
+    routing failure is exactly the misreading to avoid. The
+    caller names that complement (`bga_fanout.LAST_CANCEL_SKIPPED`).
     """
     ref = footprint.reference
     fp_pads = [p for p in footprint.pads if p.net_id]
@@ -451,6 +464,12 @@ def generate_underpad_escape(footprint: Footprint,
     # single-track channels and F.Cu corridors cleanly (coarser leaves a few
     # sub-clearance corridor clips), scaled to the array so big/fine boards stay
     # fast.
+    if grid is None:
+        # Run-6 defensive entry guard: a None grid (perimeter package) used
+        # to crash on grid.pitch_x below; fail the escape cleanly instead.
+        print("  ERROR: underpad escape aborted - no BGA grid (perimeter "
+              "package? use qfn_fanout.py)")
+        return [], [], [p.net_name for p in signal_pads]
     if res is None:
         res = min(grid.pitch_x, grid.pitch_y) / 32.0
     if res <= 0:
@@ -554,6 +573,32 @@ def generate_underpad_escape(footprint: Footprint,
     _copper = len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 4
     floors = fab_floor_ladder(_copper)
     clamp_stats = {'clamped': 0, 'floor': 0, 'escalated': 0}
+
+    # DRILL FLOOR, board-first and raise-only. `_via_site_conflict` below spaced
+    # every drill it places at the flat routing_defaults.HOLE_TO_HOLE_CLEARANCE
+    # and this module never read the board at all -- grepping it for
+    # board_floor / board_constraint / min_hole_to_hole / resolve_hole_clearance
+    # returned nothing. So a board declaring min_hole_to_hole 0.3 got its BGA
+    # underpad drills spaced at 0.2: the D9/D11 substitute-a-constant class,
+    # in the direction that IGNORES a board asking for MORE.
+    #
+    # RAISE-ONLY IN THE CODE, not only in this comment (the Q4 lesson):
+    # board_floor is board-authoritative and will happily return a declared
+    # 0.10, so the fab floor is wrapped in explicitly. check_join.py:118-122 is
+    # the same shape and was the correct model. qfn_fanout does this too; this
+    # is its sibling engine and was the one still ignoring the board.
+    from list_nets import board_floor as _board_floor
+    _h2h_decl, _h2h_src = _board_floor(
+        getattr(pcb_data, 'source_path', "") or "", 'hole_to_hole',
+        None, HOLE_TO_HOLE_CLEARANCE)
+    _h2h_fab = fab_floor_min(_copper).get('hole_to_hole', 0.0)
+    _h2h = max(_h2h_decl, _h2h_fab)
+    if _h2h_src == 'board constraint' and _h2h_decl > HOLE_TO_HOLE_CLEARANCE:
+        print(f"  Hole-to-hole {_h2h:g}mm (from the board's own "
+              f"min_hole_to_hole)")
+    elif _h2h_src == 'board constraint' and _h2h_decl < _h2h_fab:
+        print(f"  Board min_hole_to_hole {_h2h_decl:g}mm is below the "
+              f"{_h2h_fab:g}mm fab hole-to-hole floor; using {_h2h:g}mm.")
 
     def via_for_pad(p):
         """Clamped (size, drill, keepout_radius) for a via dropped in pad p."""
@@ -905,19 +950,19 @@ def generate_underpad_escape(footprint: Footprint,
             vdr = (via_drill or 0.0) / 2.0
         for (ox, oy, orr, odr, onid) in ctx['vias']:
             d = math.hypot(ox - x, oy - y)
-            if d < vdr + odr + HOLE_TO_HOLE_CLEARANCE - 1e-6:
+            if d < vdr + odr + _h2h - 1e-6:
                 return "drill hole-to-hole vs a via"
             if onid != net_id and d < vr + orr + clearance - 1e-6:
                 return "via ring vs a foreign via"
         for (ox, oy, orr, odr, onid) in ([] if skip_resv else ctx['resv']):
             d = math.hypot(ox - x, oy - y)
-            if d < vdr + odr + HOLE_TO_HOLE_CLEARANCE - 1e-6:
+            if d < vdr + odr + _h2h - 1e-6:
                 return "drill hole-to-hole vs a reserved via site"
             if onid != net_id and d < vr + orr + clearance - 1e-6:
                 return "via ring vs a reserved via site"
         for (px, py, half, pdr, pnid, has_cu) in ctx['pads']:
             d = math.hypot(px - x, py - y)
-            if pdr and d < vdr + pdr + HOLE_TO_HOLE_CLEARANCE - 1e-6:
+            if pdr and d < vdr + pdr + _h2h - 1e-6:
                 return "drill hole-to-hole vs a pad drill"
             if has_cu and pnid != net_id and d < vr + half + clearance - 1e-6:
                 return "via ring vs a foreign pad"

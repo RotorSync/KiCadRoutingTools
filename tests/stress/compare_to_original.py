@@ -29,8 +29,9 @@ for _cand in (os.path.abspath(os.path.join(_here, "..", "..")),
         # engine modules are IN py_router/py_tools, so those dirs (not just the
         # repo root) have to go on sys.path, as grade_final.py does.
         sys.path.insert(0, _cand)
-        sys.path.insert(0, os.path.join(_cand, "py_router"))
-        sys.path.insert(0, os.path.join(_cand, "py_tools"))
+        sys.path.insert(0, os.path.join(_cand, 'py_router'))  # #522/py_placer layout
+        sys.path.insert(0, os.path.join(_cand, 'py_placer'))  # #522/py_placer layout
+        sys.path.insert(0, os.path.join(_cand, 'py_tools'))  # #522/py_placer layout
         break
 from kicad_parser import parse_kicad_pcb
 from list_nets import read_design_rules

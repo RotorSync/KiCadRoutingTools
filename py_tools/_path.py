@@ -14,3 +14,12 @@ import sys
 _ENGINE = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'py_router'))
 if _ENGINE not in sys.path:
     sys.path.insert(0, _ENGINE)
+
+# The placement instruments that live here (check_floorplan, check_assembly,
+# render_placement, ...) grade a PLACEMENT, so they import the placement
+# package and its scorers from ../py_placer. Added after the engine so a
+# basename clash still resolves to py_router, as it does for a py_router
+# script itself.
+_PLACER = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'py_placer'))
+if _PLACER not in sys.path:
+    sys.path.append(_PLACER)

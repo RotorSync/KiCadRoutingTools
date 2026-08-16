@@ -24,6 +24,11 @@ from net_queries import expand_pad_layers
 # tests/test_component_multipoint.py) and > ~0.02 (COINCIDENCE_TOL).
 STRICT_JOINT_OVERLAP = 0.05
 
+# Zone layers already reported as not-a-copper-layer-of-this-board.
+# check_net_connectivity runs once PER NET, so without this the same phantom
+# layer would be announced fifty-odd times on one board.
+_WARNED_PHANTOM_ZONE_LAYERS: Set[str] = set()
+
 
 def point_in_polygon(x: float, y: float, polygon: List[Tuple[float, float]]) -> bool:
     """Check if a point (x, y) is inside a polygon using ray casting algorithm.
@@ -213,6 +218,36 @@ def _pad_bounding_radius(pad) -> float:
     return math.hypot(pad.size_x, pad.size_y) / 2
 
 
+def _pad_credit_disc(pad):
+    """(cx, cy, reach): the disc inside which a track counts as landing on this
+    pad's copper.
+
+    Run-7 finding, and the reason this is not just `min(size)/4` about the
+    anchor: a CUSTOM pad is stored as a symmetric box around its anchor big
+    enough to enclose the real primitives, and the anchor is frequently a
+    corner of them rather than their centre. One MOSFET tab measured 4.57 x
+    5.01mm of real copper modelled as a 9.13 x 10.01mm box whose centre sat
+    3.4mm away from it -- so a 2.28mm credit disc sat in empty space, and any
+    track passing near it was unioned onto the pad. Two islands of that net
+    each "reached" the phantom disc, and the net graded CONNECTED while its
+    copper was in two pieces. The router then skipped it as already routed.
+
+    When the real primitive polygons are available, use their bbox. They are
+    the actual copper.
+    """
+    polys = getattr(pad, 'polygons', None)
+    if polys:
+        xs = [pt[0] for poly in polys for pt in poly]
+        ys = [pt[1] for poly in polys for pt in poly]
+        if xs and ys:
+            w, h = max(xs) - min(xs), max(ys) - min(ys)
+            return ((max(xs) + min(xs)) / 2.0, (max(ys) + min(ys)) / 2.0,
+                    (min(w, h) / 4.0) if (w > 0 and h > 0) else 0.05)
+    if pad.size_x and pad.size_y:
+        return pad.global_x, pad.global_y, min(pad.size_x, pad.size_y) / 4.0
+    return pad.global_x, pad.global_y, 0.05
+
+
 def _pads_copper_touch(pi: Pad, pj: Pad, tolerance: float = 0.05) -> bool:
     """Shape-accurate test that two pads' copper physically touches/overlaps
     (edge-to-edge gap <= tolerance).
@@ -303,14 +338,100 @@ def _net_pads_connected_by_overlap(pads: List[Pad], copper_layers, tolerance: fl
     return len({find(i) for i in range(len(pads))}) == 1
 
 
+def bare_pad_nets(pcb_data, exclude_net_ids=None,
+                  include_partial: bool = True) -> Dict[int, List[Pad]]:
+    """Pads that would enter a pour BARE: nets with >=2 pads and ZERO copper
+    (all their pads), plus -- with ``include_partial`` -- the stranded pads of
+    partially-routed zone-less nets (per check_net_connectivity's
+    disconnected_pads). Hardened against the false positives
+    run_connectivity_check already handles: overlap-connected pad stacks
+    (castellated modules, issue #92), KiCad auto-named 'unconnected-*'
+    no-connects, and multi-board outlines where no single outline holds two
+    of the net's pads.
+
+    Consumer (run-6 A5): the plane scripts' pour gate. A pad that enters the
+    pour unconnected has its escape channel consumed by the tap-via carpet,
+    which is not rippable copper -- measured on test-board run 6, five bare
+    QFN rail pads (on PARTIALLY-routed rails) oscillated 6-9 oracle joins
+    across five post-pour repair attempts and never closed.
+    Returns {net_id: bare pads}.
+    """
+    exclude = set(exclude_net_ids or ())
+    pads_by_net = pcb_data.pads_by_net
+    segments_by_net: Dict[int, list] = {}
+    for s in pcb_data.segments:
+        segments_by_net.setdefault(s.net_id, []).append(s)
+    vias_by_net: Dict[int, list] = {}
+    for v in pcb_data.vias:
+        vias_by_net.setdefault(v.net_id, []).append(v)
+    zones_by_net: Dict[int, list] = {}
+    for z in (getattr(pcb_data, 'zones', None) or []):
+        if getattr(z, 'net_id', None) is not None:
+            zones_by_net.setdefault(z.net_id, []).append(z)
+    copper_layers = pcb_data.board_info.copper_layers or ['F.Cu', 'B.Cu']
+    outlines = getattr(pcb_data.board_info, 'board_outlines', None) or []
+    bare: Dict[int, List[Pad]] = {}
+    for net_id, net_info in pcb_data.nets.items():
+        if not net_info.name or net_id in exclude:
+            continue
+        pads = pads_by_net.get(net_id) or []
+        if len(pads) < 2:
+            continue
+        if net_id in zones_by_net:
+            continue        # zone-owning nets are the pour's own business
+        if net_info.name.lower().startswith('unconnected-'):
+            continue
+        has_copper = net_id in segments_by_net or net_id in vias_by_net
+        if not has_copper:
+            if _net_pads_connected_by_overlap(pads, copper_layers):
+                continue
+            if len(outlines) > 1:
+                counts: Dict[int, int] = {}
+                for p in pads:
+                    for i, poly in enumerate(outlines):
+                        if point_in_polygon(p.global_x, p.global_y, poly):
+                            counts[i] = counts.get(i, 0) + 1
+                            break
+                if not any(c >= 2 for c in counts.values()):
+                    continue
+            bare[net_id] = list(pads)
+            continue
+        if not include_partial:
+            continue
+        # Partially-routed net: its STRANDED pads are just as bare to the
+        # pour (the run-6 case -- rails with copper elsewhere, five pads
+        # never reached).
+        try:
+            res = check_net_connectivity(
+                net_id, segments_by_net.get(net_id, []),
+                vias_by_net.get(net_id, []), pads, [], pcb_data=pcb_data)
+        except Exception:
+            continue
+        locs = res.get('disconnected_pads') or []
+        if not locs:
+            continue
+        stranded = []
+        for loc in locs:
+            lx, ly = loc[0], loc[1]
+            for p in pads:
+                if abs(p.global_x - lx) < 1e-3 and abs(p.global_y - ly) < 1e-3:
+                    if p not in stranded:
+                        stranded.append(p)
+                    break
+        if stranded:
+            bare[net_id] = stranded
+    return bare
+
+
 def net_copper_fragments(net_id, segments, vias, pads, zones=None,
                          pcb_data=None, tolerance: float = 0.02) -> Dict:
     """Strict-fragment census (#549): one strict_fragments=True graph build +
     UnionFind replay. A fragment = a connected component owning >=1 track
     segment (graphic=False) or via; pads ride along (a pad-only component is
-    not a fragment -- that is `unrouted`'s domain). Consumer: the
-    filter_already_routed fragment gate (#578), which is how a plain --nets
-    call finally SEES a net KiCad holds in pieces.
+    not a fragment -- that is `unrouted`'s domain). Consumers: the
+    filter_already_routed fragment gate (#549 A-2, ported to main as #578)
+    and route.py's summary sweep -- which is how a plain --nets call finally
+    SEES a net KiCad holds in pieces.
 
     Returns {'fragments': int, 'padless_fragments': int,
              'fragment_anchors': [(x, y)], 'zone_blob_fallback': bool}.
@@ -611,9 +732,32 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             # Skip wildcards like "*.Cu" - they don't represent actual layers
             if layer.endswith('.Cu') and not layer.startswith('*'):
                 copper_layer_set.add(layer)
+    # A zone layer is cross-checked against the board's OWN copper layers, not
+    # merely tested for a '.Cu' suffix (#run11). route_planes once accepted a
+    # net:layer pair as a layer name and wrote (layer "GND:B.Cu") into the zone:
+    # KiCad refuses such a file outright, but "GND:B.Cu".endswith('.Cu') is
+    # True, so the phantom layer joined this census, expand_pad_layers spread
+    # through-hole pads onto it, and the pour was credited 70/70 when the honest
+    # figure was 69/70. Every checker downstream of this function inherited that
+    # lie. GUARD: only when the board declares copper layers -- a board whose
+    # stackup failed to parse degrades to the old behaviour rather than having
+    # every zone rejected.
+    _board_copper = set(getattr(getattr(pcb_data, 'board_info', None),
+                                'copper_layers', None) or ())
     for zone in zones:
-        if zone.layer.endswith('.Cu'):
-            copper_layer_set.add(zone.layer)
+        if not zone.layer.endswith('.Cu'):
+            continue
+        if _board_copper and zone.layer not in _board_copper:
+            if zone.layer not in _WARNED_PHANTOM_ZONE_LAYERS:
+                _WARNED_PHANTOM_ZONE_LAYERS.add(zone.layer)
+                print(f"WARNING: zone on layer '{zone.layer}', which is NOT a "
+                      f"copper layer of this board "
+                      f"({', '.join(sorted(_board_copper))}). KiCad cannot open "
+                      f"this file; its copper is NOT credited here. A net:layer "
+                      f"pair passed to route_planes --plane-layers writes exactly "
+                      f"this.")
+            continue
+        copper_layer_set.add(zone.layer)
 
     # Sort layers: F.Cu first, then In*.Cu in order, then B.Cu last
     def layer_sort_key(layer):
@@ -968,11 +1112,7 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
     if pad_repr_id and segments:
         for pad_idx in pad_repr_id:
             pad = pads[pad_idx]
-            if pad.size_x and pad.size_y:
-                reach_pad = min(pad.size_x, pad.size_y) / 4
-            else:
-                reach_pad = 0.05
-            px, py = pad.global_x, pad.global_y
+            px, py, reach_pad = _pad_credit_disc(pad)
             for layer in pad_copper_layers[pad_idx]:
                 for seg, seg_start_id in seg_index.query_near(
                         px, py, layer, radius=max_seg_width / 2 + reach_pad):
@@ -1469,6 +1609,34 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                         continue
                 unrouted_nets.append((net_id, net_info.name, len(pads_by_net[net_id])))
 
+    # A scope that matched NOTHING is not a clean board. This printed
+    # `Checking 0 nets matching: [...]` and then went on to
+    # `ALL NETS FULLY CONNECTED!` and exit 0 -- so a typo'd or shell-mangled
+    # --nets turned the instrument the project says to always run before
+    # calling a route clean into a rubber stamp, invisible to `&&` and to
+    # `set -e`. Found live when a shell rewrote `/IO_Banks/Z0` into a Windows
+    # path. Same failure mode as the oracle branch ~200 lines below, which was
+    # already fixed there.
+    if (net_patterns or component) and not nets_to_check:
+        _what = []
+        if net_patterns:
+            _what.append(f"--nets {net_patterns}")
+        if component:
+            _what.append(f"component {component}")
+        print(f"ERROR: {' and '.join(_what)} matched NO nets on this board. "
+              f"That is a scope that selected nothing, not a board that is "
+              f"connected -- refusing to report a result. Check the pattern "
+              f"(a leading '/' is rewritten by some shells; MSYS_NO_PATHCONV=1 "
+              f"on Git Bash), or drop the flag to check every net.",
+              file=sys.stderr)
+        # Returned as an issue rather than an exit code: this function's
+        # contract is List[Dict] and library callers unpack it. main() maps
+        # `scope_error` to exit 2, which is distinct from 1 ("found real
+        # problems") so a caller can tell a bad scope from a bad board.
+        return [{'scope_error': True, 'net_patterns': net_patterns,
+                 'component': component,
+                 'description': 'the requested scope matched no nets'}]
+
     if not quiet:
         if net_patterns and component:
             print(f"Checking {len(nets_to_check)} nets on {component} matching: {net_patterns}")
@@ -1583,6 +1751,19 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
             from kicad_oracle import find_kicad_cli, kicad_unconnected
             _cli = find_kicad_cli()
             _links = kicad_unconnected(pcb_file, _cli) if _cli else None
+            if _links is None and not quiet:
+                # There was no `else` here, so "the oracle ran and agreed" and
+                # "the oracle never ran" printed identically -- i.e. nothing --
+                # and the run still ended `ALL NETS FULLY CONNECTED!` / exit 0.
+                # On a board with zones that is the difference between a graded
+                # result and an ungraded one, and the reader could not tell.
+                # kicad_unconnected() returns None for a missing CLI, a DRC
+                # timeout (ORACLE_DRC_TIMEOUT 240s), a bad return code, or
+                # unreadable JSON; only the timeout prints anything of its own.
+                print(f"  NOTE: the KiCad grade reconciliation did NOT run "
+                      f"({'kicad-cli not found' if not _cli else 'the oracle returned nothing -- DRC timeout, bad exit, or unreadable output'})."
+                      f" Zone-covered nets below are graded by the copper model "
+                      f"ALONE; KiCad has not agreed with them.")
             if _links is not None:
                 _linked_nets = {lk[0] for lk in _links}
                 _reclass = [i for i in issues
@@ -1777,6 +1958,7 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
 
 
 if __name__ == "__main__":
+    import cli_banner; cli_banner.install()  # CMD/EXIT self-echo (run-3 B1)
     from console_encoding import enable_utf8_console
     enable_utf8_console()  # cp1252-safe non-ASCII prints (issue #152)
     parser = argparse.ArgumentParser(description='Check PCB for track connectivity (disconnected routes)')
@@ -1797,4 +1979,9 @@ if __name__ == "__main__":
     args = __import__("cli_nets").pin_dash_digit_values(parser).parse_args()
 
     issues = run_connectivity_check(args.pcb, args.nets, args.tolerance, args.quiet, args.verbose, args.component, args.routed_only)
+    # 2 = the scope selected nothing, so no board was graded. Deliberately not
+    # 1: a caller must be able to tell "your pattern is wrong" from "this board
+    # has unconnected nets", and must never read either as success.
+    if any(i.get('scope_error') for i in issues):
+        sys.exit(2)
     sys.exit(1 if issues else 0)

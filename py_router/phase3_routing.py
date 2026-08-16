@@ -766,11 +766,35 @@ def run_phase3_tap_routing(
 
         # #444 in-loop seam re-ask: polish THIS net's completed tree now,
         # so the reclaimed copper frees room for every net tapped after it.
-        seam_reask_one_net(net_id, pcb_data, config, state, base_obstacles,
-                           gnd_net_id, all_unrouted_net_ids, routed_net_ids,
-                           remaining_net_ids, routed_net_paths, routed_results,
-                           diff_pair_by_net_id, results, track_proximity_cache,
-                           layer_map)
+        # Damped (run-6 fix): once per net per run, and never for a PROTECTED
+        # net. The re-ask gates on tree-length/MST-bound >= 1.3 over PADS
+        # only, so a net with a legitimately long branch (a BOOTSEL strap off
+        # a bus net) is a PERMANENT candidate -- whole-net rip, usually
+        # failing re-route, rip again and restore, twice per call, zero gain
+        # (test-board run 5: QSPI_SS churned until every call was made
+        # single-net just to starve this path of siblings).
+        from protected_nets import cached_protection_map, rip_override_names
+        _seam_done = getattr(state, '_seam_reask_done', None)
+        if _seam_done is None:
+            _seam_done = set()
+            state._seam_reask_done = _seam_done
+        _net_nm = (pcb_data.nets[net_id].name
+                   if net_id in pcb_data.nets else None)
+        _prot = cached_protection_map(pcb_data)
+        if net_id in _seam_done:
+            pass
+        elif (_net_nm and _net_nm in _prot
+                and (_prot[_net_nm] == 'locked'
+                     or _net_nm not in rip_override_names(pcb_data))):
+            print(f"  (seam re-ask skipped: {_net_nm} is protected)")
+        else:
+            _seam_done.add(net_id)
+            seam_reask_one_net(net_id, pcb_data, config, state, base_obstacles,
+                               gnd_net_id, all_unrouted_net_ids,
+                               routed_net_ids, remaining_net_ids,
+                               routed_net_paths, routed_results,
+                               diff_pair_by_net_id, results,
+                               track_proximity_cache, layer_map)
 
         net_elapsed = time.time() - net_start_time
         net_iterations = completed_result.get('iterations', 0) if completed_result else 0
@@ -870,8 +894,17 @@ def try_phase3_ripup(
     # Feed the exact identities as validator-named blockers instead -- they
     # sort ahead of every frontier-inferred tier under all select algorithms.
     _blame = getattr(pcb_data, '_via_unblock_blame', None)
-    _blame_ids = _blame.pop(net_id, None) if _blame else None
-    _known = [(nid, 1) for nid in _blame_ids] if _blame_ids else None
+    _blame_ids = set(_blame.pop(net_id, None) or ()) if _blame else set()
+    # Same channel, second producer (run-6 fix): the stuck-probe wall cells.
+    # A probe that exhausts below its limit proves the endpoint is walled, and
+    # the wall's TRACK owners are recorded by _identify_blocking_obstacles --
+    # often a 1-3 cell decisive net that count-ranking buries under
+    # large-perimeter bystanders (test-board run 5: GPIO7 at "1 cell, near
+    # tgt" under whole rails, N=3 exhausted on the wrong victims).
+    _wall = getattr(pcb_data, '_stuck_wall_blame', None)
+    _wall_ids = set(_wall.pop(net_id, None) or ()) if _wall else set()
+    _known_ids = (_blame_ids | _wall_ids) - exclude_ids
+    _known = [(nid, 1) for nid in sorted(_known_ids)] or None
 
     # PER-EDGE attribution (audit #2i): three tap edges failing in three
     # corners used to become one merged cell soup ranked by whichever net
@@ -900,7 +933,8 @@ def try_phase3_ripup(
 
     # Filter to rippable blockers
     rippable_blockers, seen_canonical_ids = filter_rippable_blockers(
-        blockers, routed_results, diff_pair_by_net_id, get_canonical_net_id
+        blockers, routed_results, diff_pair_by_net_id, get_canonical_net_id,
+        pcb_data=pcb_data, context="phase3 tap cascade"
     )
 
     if not rippable_blockers:
@@ -1378,7 +1412,8 @@ def _retry_victim_main_with_ripup(
     if not blockers:
         return None, []
     rippable_blockers, seen_canonical_ids = filter_rippable_blockers(
-        blockers, routed_results, diff_pair_by_net_id, get_canonical_net_id)
+        blockers, routed_results, diff_pair_by_net_id, get_canonical_net_id,
+        pcb_data=pcb_data, context="phase3 victim reroute")
     if not rippable_blockers:
         print(f"    {victim_name}: main re-route blocked, no rippable blockers")
         return None, []

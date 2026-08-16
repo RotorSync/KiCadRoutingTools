@@ -9,13 +9,22 @@ When this skill is invoked with a board file, run a full post-route review and p
 
 ## Step 1: Mechanical Checks
 
-Run all three checkers, capturing output:
+Run all four checkers, capturing output:
 
 ```bash
 python3 -X utf8 py_router/check_drc.py board.kicad_pcb 2>&1 | tee /tmp/review_drc.txt
 python3 -X utf8 py_router/check_connected.py board.kicad_pcb 2>&1 | tee /tmp/review_connectivity.txt
 python3 -X utf8 py_tools/check_orphan_stubs.py board.kicad_pcb 2>&1 | tee /tmp/review_orphans.txt
+python3 -X utf8 py_router/check_weird.py board.kicad_pcb 2>&1 | tee /tmp/review_weird.txt
 ```
+
+`check_weird.py` is here because the other three cannot see its classes.
+`check_orphan_stubs` iterates SEGMENT endpoints and treats a via as an anchor,
+so it structurally cannot report a bad via; `check_weird` owns `dangling-via`
+(same-net copper on only one of the layers the barrel spans -- KiCad's
+`via_dangling`), `unsupported-via`, `stacked-copper` and `orphan-island`.
+Measured on run 11's final board: `check_orphan_stubs` none, `check_weird`
+**3 dangling vias**, each independently confirmed.
 
 `check_drc.py` auto-grades at the clearance the routing steps wrote into the sibling
 `.kicad_pro` (the smallest clearance any step actually used, including auto-stepped
@@ -33,6 +42,15 @@ kicad-cli pcb drc board.kicad_pcb --refill-zones --format json -o /tmp/drc.json
 routing/connectivity defects and are excluded by the harness graders
 (`kicad_drc_compare.py`, `kicad_oracle.py`) for exactly this reason. Filter them
 out before counting:
+
+Why `via_dangling` in particular, measured on run 11's final board: KiCad
+reported **66** of them, all severity `warning`, while only **3** vias on the
+board are genuinely supported on one layer. The other ~63 are plane-tap vias on
+the two poured nets whose zone copper KiCad has not filled — the pour is real in
+the file, but a via's second-layer connection is the zone, and an unfilled zone
+connects nothing. Drop the flag from the *count*, and get the true number from
+`check_weird.py`'s `dangling-via`, which credits the zone polygon directly. Do
+NOT chase parity with KiCad's figure here; you would be chasing a fill artifact.
 
 ```bash
 python3 -c "import json;v=json.load(open('/tmp/drc.json'))['violations'];\
@@ -194,10 +212,33 @@ For each differential pair (from `list_nets.py --diff-pairs`):
 
 ## Step 5: The Sign-Off Report
 
-Present a compact report — one pass/fail line per category, details only for failures, ending with next actions:
+**Lead with the score, so this review and `/plan-pcb-routing` agree on what
+"done" means.** One command produces it, and it is the same number Step 9 of the
+routing skill loops on:
+
+```bash
+python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/board_score.py \
+    board.kicad_pcb --intent wk/floorplan.json \
+    --min-track-width <spec> --min-via-diameter <spec> --min-via-drill <spec>
+```
+
+`blocking == 0` is the only state in which this report may say the board is
+ready. Anything else is **not done** — hand it back to `/plan-pcb-routing`
+Step 9 rather than signing off with caveats. Two traps this closes:
+
+- **`ungraded` is not `passed`.** Components with no intent, no impedance nets
+  and no length groups were *unexamined*; list them as such.
+- **The size floors default to the FAB minimum, not the spec.** Pass the spec's
+  numbers, or copper that meets the fab and violates the board's own tighter
+  requirement signs off clean.
+
+Then present a compact report — one pass/fail line per category, details only for failures, ending with next actions:
 
 ```
 ## Board Review: board.kicad_pcb
+
+BLOCKING=0  (unrouted=0 broken=0 drc=0 undersized=0 floorplan=0)
+UNGRADED: impedance, length          <- unexamined, NOT passed
 
 | Check | Result |
 |-------|--------|

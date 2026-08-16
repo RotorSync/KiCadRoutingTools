@@ -7,6 +7,18 @@ Linux distros). On Windows, if `python3` is missing, fall back to `py -3`
 or `python` — don't retry blindly. Add `-X utf8` when a script prints
 special characters (Ω etc.) to avoid Windows encoding errors.
 
+**On Windows/Git Bash, `export MSYS2_ARG_CONV_EXCL='*'` before any command
+carrying NET NAMES.** MSYS2 rewrites any argument starting with `/` into a
+Windows path, and **every KiCad net name is `/`-prefixed**: `/+1V1` reaches the
+tool as `C:/Program Files/Git/+1V1`. Nothing warns, because a tool cannot tell a
+mangled net name from a net that does not exist. Measured: 61 nets passed to
+`--ignore-nets`, 4 survived (the four not starting with `/`), and the resulting
+render reported 1315 crossings where the truth was 357. It hits `--nets`,
+`--ignore-nets`, `--power-nets`, `--rip-existing-nets` — every net-name argument.
+**The variable is not free**: it also disables conversion for legitimate paths,
+so `~/Documents/...` then arrives as an unusable `/c/Users/...`. Pass
+Windows-style paths (`C:/Users/...`) in the same command.
+
 ## Building the Rust Router
 
 Use `build_router.py` to build the Rust router:
@@ -143,6 +155,55 @@ Validate routed boards against the *real* spec, with the right checker — most
   both; `--net-clearances <json>` gives explicit per-net control). Grade multi-class
   boards at the netclasses that survived (`kicad_drc_compare._staged_copy`).
 
+## What a placement run is FOR (read before grading one)
+
+**The objective is a board that ROUTES: parts arranged so they work together,
+and zero `unrouted` and zero `broken` nets at the end. It is NOT restoring
+parts to the poses they had before.**
+
+This is stated here because the perturbed-corpus rig (#411) grades on
+`recovery` and `home /N`, which measure **distance to the original pose** —
+and those are the wrong headline for this goal. A placement that is
+electrically excellent but arranged differently scores ~0 recovery. Measured,
+run 10: `recovery` **−0.0014** and `home` **0/30** on a run that took
+copper-free DRC 9 → 0, assembly blocking 4 → 0, and `check_assembly` from NOT
+BUILDABLE to **buildable**. The headline said failure about a board that had
+become strictly more buildable.
+
+So, when grading a placement:
+
+- **Lead with the routed outcome** — `board_score`'s `blocking`
+  (`unrouted + broken` first, then the rest), with `quality` (vias,
+  copper_mm, segments) as the tie-break once `blocking` is 0.
+- **Keep `recovery` as a DIAGNOSTIC, never the score.** It is how you catch a
+  run that wandered — `collateral_pad_rms` rising (run 10: 0.000 → 3.670 mm)
+  means parts nothing had damaged were moved, which is a real defect. But a
+  negative recovery on a board that got more buildable is not a failure of
+  the run.
+- **The human original is a BENCHMARK TO APPROACH, not a pose to match**
+  (its vias / copper_mm / segments), because a human layout is one solution,
+  not the only one.
+
+**A part whose pad copper lies outside the outline is the top-priority
+placement defect**, ahead of every clearance graze: its nets cannot be routed
+at all, so it converts one-for-one into `unrouted` and `broken`. Measured, run
+10: 11 such parts produced ALL 13 unrouted nets and most of the 37 broken ones.
+Read it off `render_placement --json-out`'s
+`checklist.a_off_outline.pad_copper` — a whole-board pass/fail verdict is the
+wrong channel for it.
+
+**Scope a placement search to the refs the gate names.** When a gate names
+specific parts, free exactly those and lock everything else. A global sweep
+orders its violators by its own priority — usually worst-off-board first — and
+may never reach the ones actually blocking you. Measured: freeing 2 parts and
+locking the other 105 cleared both blocking pairs in **63 seconds**, where
+whole-board sweeps ran 10+ minutes without touching them.
+
+**Repair searches start from the part's CURRENT pose**, which carries no
+information once a part is tens of millimetres from where it belongs. Expect
+cost to grow sharply with the displacement cap, and prefer re-seating such a
+part over nudging it.
+
 ## Stress testing & A/B replay
 
 Every recorded stress run leaves a `redo_commands.sh` manifest that replays the
@@ -158,6 +219,35 @@ make them trustworthy -- notably: the baseline is the RECORDED RUNS re-graded
 (not an archived wave), grade both sides on the same terms, compare only boards
 that replayed an IDENTICAL chain, and **a two-board result is not a default
 change** (per-board spread is +-2..3 nets).
+
+**A new PLACEMENT objective term goes through `tests/test_placement_ab.py`
+before it ships on.** It runs the same board twice (flag off, flag on), writes
+both, and grades both with an *independent* check — `floorplan.grade(...,
+with_health=True)` re-derives its corridors from the FINAL poses, so a term that
+only improves the model it is computed from shows up as "improved nothing". Add
+a row to `ROWS`, do not add a file. Three rules the table encodes and that are
+easy to get wrong:
+
+- **Judge on ≥3 boards, paired and directional** (improve on ≥ N−1, regress on
+  none), never a per-board absolute. Neutral boards are printed, not dropped.
+- **Keep the row that disagrees.** A term that helps on one board of three is
+  not a term, and deleting the dissenting row is how that becomes folklore.
+- **A rejected term keeps its rows**, marked `rejected` with its measured
+  `expect`, so it stays a change detector instead of a permanent red mark that
+  someone eventually deletes along with the finding.
+
+Two traps measured the hard way: the first run of that harness reported the
+corridor term inert because it had been pointed at a **merged** net glob whose
+`cover` was 0.46 — a phantom corridor (declare sub-buses separately; `SDRAM_A*`
+scores 0.81, `SDRAM_*` 0.46). And grade intent errors **paired**, not against
+zero: both arms quench the board, so both walk parts out of the emitted intent's
+zones for reasons the flag did not cause.
+
+Every metric in that harness is still a **proxy**, so `tests/test_placement_probe.py`
+(opt-in, slower) actually routes. It scopes the route **causally, not by which
+parts moved** — the nets `net_affinity` flagged plus the declared corridor nets,
+fixed from the OFF board and identical on both. Scoping by moved parts is
+circular: a term that moves nothing would score a perfect null.
 
 ## Keep CLI and GUI routing in sync
 
@@ -384,6 +474,14 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   the tied net's copper may contact the partner pad only where the contact
   lies on its own pad. Consumers: `PCBData.net_tie_exempt_pad_ids(net_id)`,
   the obstacle builders (own-pad-sliver lift), and check_drc's waiver.
+- `footprint.ref_label` - Optional[RefLabel]: the Reference silkscreen text's
+  geometry (#481): `at_x/at_y` (footprint-LOCAL mm), `rotation` (the stored
+  angle, which is ABSOLUTE board angle — probed on KiCad 10, `% 360`
+  normalized), `size_h/size_w`, `thickness`, `layer`, `justify` (raw tokens;
+  `mirror` is meaningful on B-side), `hidden`, `is_property_node` (False =
+  KiCad 6/7 `fp_text` form). Both parse paths fill it identically
+  (`tests/gui_parity/test_ref_label_pcbnew_parity.py` pins that). Consumers:
+  `placement/labels.py` (beautify_labels engine), `write_label_output`.
 
 ### Pad Attributes
 

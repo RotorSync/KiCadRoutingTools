@@ -29,11 +29,12 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # #522
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_placer'))  # placement split
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # placement split
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # #522
 
 from kicad_parser import parse_kicad_pcb  # noqa: E402
-from placement.legality import BoardOutlineGate  # noqa: E402
+from placement.legality import BoardOutlineGate, grade_pad_legality  # noqa: E402
 from placement.quench import QuenchState  # noqa: E402
 
 fails = []
@@ -254,13 +255,142 @@ def test_milled_interior_is_not_declared_off_board():
         os.unlink(path)
 
 
+# --------------------------------------------------------------------------
+# 7-10. The OWNER half. A milled contour is reclassified out of board_cutouts
+#    precisely BECAUSE it encloses >= 2 pad centres, so such a ring ALWAYS has
+#    a part living on it -- the shape below is a connector with a milled relief
+#    in its middle and pins around it. Charging that part for swallowing its
+#    own relief is what the first cut of this fix did, and it is worse than
+#    noise: a genuinely sub-clearance edge pose scores LOWER than the seed, so
+#    candidate_valid's unfreeze branch (quench.py, "moves strictly back toward
+#    the board") ACCEPTS walking the connector off the board edge.
+# --------------------------------------------------------------------------
+def _owner_board() -> str:
+    """J1 owns the relief: two pads INSIDE it (which is what reclassifies the
+    ring) and four pins AROUND it, so BOTH its courtyard (17.5..26.5 x
+    16.5..23.5) and its pad extent (17.7..26.3 x 16.7..23.3) swallow the ring
+    20..24 x 19..21. SW17 is the control, seeded clear at (40, 20) and owning
+    nothing."""
+    pads = "\n".join(
+        f'  (pad "{n}" smd rect (at {dx} {dy}) (size 0.6 0.6) '
+        f'(layers "F.Cu") (net 1 "NA") (uuid "pJ1{n}"))'
+        for n, dx, dy in ((1, -0.5, 0), (2, 0.5, 0),      # inside the relief
+                          (3, -4, 0), (4, 4, 0),          # pins around it
+                          (5, 0, -3), (6, 0, 3)))
+    return f'''(kicad_pcb
+ (version 20241229)
+ (net 0 "")
+ (net 1 "NA")
+ (net 2 "NB")
+{_rect_edge(0, 0, 60, 40, 'o')}
+{_rect_edge(20, 19, 24, 21, 'm')}
+ (footprint "test:conn" (layer "F.Cu") (at 22 20)
+  (property "Reference" "J1" (at 0 -5) (layer "F.SilkS"))
+  (fp_rect (start -4.5 -3.5) (end 4.5 3.5) (layer "F.CrtYd") (uuid "cyJ1"))
+{pads}
+ )
+ (footprint "test:sw" (layer "F.Cu") (at 40 20)
+  (property "Reference" "SW17" (at 0 -2) (layer "F.SilkS"))
+  (fp_rect (start -4 -4) (end 4 4) (layer "F.CrtYd") (uuid "cySW"))
+  (pad "1" smd rect (at -1 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "NB") (uuid "pSWa"))
+  (pad "2" smd rect (at 1 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "NB") (uuid "pSWb"))
+ )
+)
+'''
+
+
+def _write_owner():
+    fd, path = tempfile.mkstemp(suffix='.kicad_pcb')
+    with os.fdopen(fd, 'w') as f:
+        f.write(_owner_board())
+    return path
+
+
+OWNER_SEED = (17.5, 16.5, 26.5, 23.5)   # J1's courtyard at its own (22, 20)
+
+
+def test_owner_fixture_and_gate_scoping():
+    """The gate charges the owner's rect WITHOUT skip_rings and clears it WITH
+    -- so the exemption is what does it, not a fixture accident."""
+    path = _write_owner()
+    try:
+        pcb = parse_kicad_pcb(path)
+        gate = BoardOutlineGate(pcb.board_info, MARGIN)
+        check("owner fixture: the ring is a milled contour", len(gate.milled) == 1)
+        own = gate.rings_enclosing([(21.5, 20.0), (22.5, 20.0)])
+        check("rings_enclosing names the ring the pads sit in", len(own) == 1)
+        check("a part that owns NOTHING gets an empty set",
+              gate.rings_enclosing([(40.0, 20.0)]) == frozenset())
+        check("unscoped: the owner's rect is still charged (guard intact)",
+              gate.rect_blocked(OWNER_SEED) is True
+              and gate.rect_outside_amount(OWNER_SEED) > 0.0)
+        check("scoped: its own relief is exempt",
+              gate.rect_blocked(OWNER_SEED, skip_rings=own) is False
+              and gate.rect_outside_amount(OWNER_SEED, skip_rings=own) == 0.0)
+        check("the exemption is per-RING: a foreign rect is still charged",
+              gate.rect_blocked(SWALLOW, skip_rings=frozenset()) is True)
+    finally:
+        os.unlink(path)
+
+
+def test_owner_is_legal_at_its_own_seed_pose():
+    path = _write_owner()
+    try:
+        pcb = parse_kicad_pcb(path)
+        st = QuenchState(pcb, path, **KNOBS)
+        check("the ring owner is legal at its own hand-placed pose",
+              st.violation('J1') == 0.0)
+        check("...and the control part is too", st.violation('SW17') == 0.0)
+    finally:
+        os.unlink(path)
+
+
+def test_owner_is_not_walked_off_the_board_edge():
+    """THE regression. With the owner falsely scored 0.55 at its seed, a pose
+    0.45mm from a board edge that requires 0.55 scores LOWER (0.40), and the
+    unfreeze branch accepts the move."""
+    path = _write_owner()
+    try:
+        pcb = parse_kicad_pcb(path)
+        st = QuenchState(pcb, path, **KNOBS)
+        walk_x = 0.45 + 4.5          # courtyard half-width 4.5 -> x0 = 0.45
+        check("a sub-clearance edge pose IS a violation",
+              st.violation('J1', walk_x, 20.0, 0.0) > 0.0)
+        check("candidate_valid refuses to walk the owner to the board edge",
+              not st.candidate_valid('J1', walk_x, 20.0, 0.0))
+    finally:
+        os.unlink(path)
+
+
+def test_owner_scores_clean_on_both_scorecards():
+    """#456: a correct hand placement must not report oob. Two INDEPENDENT
+    paths reach it -- quench's legality_metrics (courtyard) and
+    grade_pad_legality (pad extent) -- and both must be scoped."""
+    path = _write_owner()
+    try:
+        pcb = parse_kicad_pcb(path)
+        st = QuenchState(pcb, path, **KNOBS)
+        lm = st.legality_metrics()
+        check("legality_metrics: no phantom oob_count",
+              lm['oob_count'] == 0 and lm['oob_amount'] == 0.0)
+        g = grade_pad_legality(pcb, KNOBS['clearance'], edge_margin=MARGIN)
+        check("grade_pad_legality: no phantom oob_pad_count",
+              g['oob_pad_count'] == 0 and not g['oob_pad_refs'])
+    finally:
+        os.unlink(path)
+
+
 def run():
     for t in (test_fixture_is_a_milled_contour_not_a_cutout,
               test_swallowed_milled_contour_is_illegal,
               test_crossing_and_clear_rects_are_unchanged,
               test_genuine_cutout_swallow_still_detected,
               test_quench_candidate_over_a_milled_slot_is_refused,
-              test_milled_interior_is_not_declared_off_board):
+              test_milled_interior_is_not_declared_off_board,
+              test_owner_fixture_and_gate_scoping,
+              test_owner_is_legal_at_its_own_seed_pose,
+              test_owner_is_not_walked_off_the_board_edge,
+              test_owner_scores_clean_on_both_scorecards):
         print(f"--- {t.__name__}")
         t()
     print()

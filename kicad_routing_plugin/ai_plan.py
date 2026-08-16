@@ -787,6 +787,11 @@ def apply_step_selection(step, dialog, all_steps=None):
         # the plane steps left disconnected (#479).
         if _precedes_first_plane_step(step, all_steps):
             names = _drop_plane_nets(names, globs, plane_nets, notes, "route")
+        # #459: a recorded `--group BLOCK` scopes the step to one placement
+        # block. Without this the block is lost and `globs` falls back to ["*"],
+        # so the GUI routes the WHOLE BOARD where the CLI routed one block.
+        if step.get("group"):
+            names = _group_net_names(dialog.pcb_data, step, names, notes)
         if not names:
             notes.append(f"route: no nets match {globs}")
         dialog.net_panel.set_selected_nets(names)
@@ -887,6 +892,39 @@ def _match_net_names(pcb_data, globs):
                 not any(net_pattern_matches(net.name, g) for g in excludes):
             names.append(net.name)
     return names
+
+
+def _group_net_names(pcb_data, step, names, notes):
+    """Narrow an already-glob-matched net list to one placement block (#459).
+
+    Mirrors route.py's composition rule exactly: the block's nets INTERSECTED
+    with whatever the step's patterns selected. The CLI's default scope is
+    'touching' and its default source set is 'auto', so the same defaults apply
+    here -- a plan that omitted them means the CLI used them too.
+
+    On any failure this returns the unnarrowed list and NOTES it rather than
+    raising: a plan step that silently widened to the whole board is exactly the
+    divergence this function exists to prevent, so it must be visible.
+    """
+    block = step.get("group")
+    try:
+        import sys as _sys, os as _os
+        _sys.path.insert(0, _os.path.dirname(_os.path.dirname(
+            _os.path.abspath(__file__))))
+        from group_routing import block_net_names, block_refs
+        from placement.groups import parse_sources
+        refs = block_refs(pcb_data, block,
+                          parse_sources(step.get("group_by") or "auto"))
+        scope = step.get("group_scope") or "touching"
+        in_block = set(block_net_names(pcb_data, refs, scope))
+    except Exception as e:
+        notes.append(f"route: could not resolve --group {block!r} ({e}); "
+                     f"this step is NOT scoped to the block")
+        return names
+    narrowed = [n for n in names if n in in_block]
+    if not narrowed:
+        notes.append(f"route: --group {block!r} ({scope}) selected no nets")
+    return narrowed
 
 
 def _component_net_names(pcb_data, ref, globs):
@@ -1060,7 +1098,8 @@ class PlanExecutor:
         import threading
         me = threading.current_thread()
         owners = [self.dialog]
-        for attr in ('differential_tab', 'planes_tab', 'fanout_tab'):
+        for attr in ('differential_tab', 'planes_tab', 'fanout_tab',
+                     'placement_tab'):
             owner = getattr(self.dialog, attr, None)
             if owner is not None:
                 owners.append(owner)

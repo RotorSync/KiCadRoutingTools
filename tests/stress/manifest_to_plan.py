@@ -32,6 +32,45 @@ TOOL_ACTIONS = {
     'qfn_fanout.py': 'fanout',
 }
 
+# Board-mutating tools with NO plan representation (#431). They are RECORDED in
+# the manifest (#132) so the file-dependency chain stays intact -- a
+# refused-but-PRESENT command keeps compute_prune_keep linking
+# board -> board_placed, whereas a missing one leaves the next step's input
+# produced by nothing and the pruner drops legitimate upstream steps.
+#
+# Refused rather than mapped, because there is nothing to map TO: the plan
+# format has no placement step. (The GUI's Placement sub-tab drives the
+# placement SKILLS headless - it is not a plan action, so a plan step's
+# max_displacement/crossing_penalty/halo_* would still resolve to nonexistent
+# dialog attributes and silently run at hardcoded defaults while the plan JSON
+# claims otherwise.) And refused rather than DROPPED, because the unknown-tool path
+# only bumps a `skipped` counter -- a number, not a name -- so the converted
+# plan looks complete when it is not.
+REFUSED_TOOLS = {
+    'place_optimize.py': (
+        'moves footprints; the plan format has no placement step. Run it BEFORE '
+        'the plan and start the plan from the placed board'),
+    'place_route_loop.py': (
+        'routes and moves footprints in a loop; the plan format has no placement '
+        'step. Run it on the CLI'),
+    'place_seed.py': (
+        'seeds/repairs a placement from an intent; the plan format has no '
+        'placement step. Run it BEFORE the plan and start the plan from the '
+        'seeded board'),
+    'place_reconstruct.py': (
+        'reconstructs a damaged placement; the plan format has no placement '
+        'step. Run it BEFORE the plan and start the plan from its output'),
+    'place_portfolio.py': (
+        'generates a SLATE of placements to choose between; the plan format has '
+        'no placement step, and picking one is a decision, not a replayable '
+        'step. Run it on the CLI and start the plan from the adopted board'),
+    'render_placement.py': (
+        'renders a PNG; it changes no board and has nothing to replay'),
+    'beautify_labels.py': (
+        'tidies reference-designator silkscreen; no plan step yet -- run it '
+        'before/after the plan'),
+}
+
 # CLI flag -> plan params key (numbers parsed; lists collected).
 FLAG_PARAMS = {
     '--track-width': 'track_width',
@@ -91,6 +130,9 @@ LIST_FLAGS = {
     # #486: route.py's coplanar-waveguide net allowlist (nargs='+' globs).
     # LIST, not FLAG_PARAMS -- as a scalar flag only the FIRST pattern survived.
     '--coplanar-nets': 'coplanar_nets',
+    # #284/#521: rip-existing and protect allowlists (nargs='+' globs). Both
+    # route to TextCtrls via ai_plan's alias table.
+    '--rip-existing-nets': 'rip_existing_nets',
     # bga_fanout's future-pour declaration (NET:LAYER[,LAYER...] specs,
     # nargs='+'). Review parity finding 5: a recorded manifest carrying the
     # flag used to convert to a plan that silently dropped it. The GUI/plan
@@ -139,8 +181,17 @@ BOOL_FLAGS = {
 # --output still feeds the chain-pruning file list. --net-clearances is a
 # board-specific JSON path; the GUI derives the same map from the board's live
 # net classes, so a replayed plan carries no param for it.
+#
+# --deadline is a HARNESS budget, not a routing parameter: it changes nothing
+# about the copper, only how long the process is allowed to spend making it, and
+# the recorded number belongs to whatever external timeout the recording harness
+# had. The GUI has no equivalent and needs none -- it has a live Cancel button
+# driving the same `cancel_check`. Without this entry it falls through to the
+# unknown-flag branch and lands in the plan as a `deadline` param that no dialog
+# control matches, which the executor then drops silently; consuming it here
+# says so on purpose instead.
 IGNORE_FLAGS = {'--output', '--summary-json', '--schematic-dir', '--report',
-                '--net-clearances'}
+                '--net-clearances', '--deadline'}
 
 # Per-tool flag renames: bga_fanout calls the trace width --width (routed to the
 # Basic-tab track_width, which BGA fanout reads). qfn_fanout also uses --width
@@ -179,12 +230,29 @@ def parse_command(argv):
         if base in TOOL_ACTIONS:
             tool = base
             break
+        if base in REFUSED_TOOLS:
+            # Named and reported, not silently tallied into `skipped`.
+            return {'_refused': f"{base}: {REFUSED_TOOLS[base]}"}
     if tool is None:
         return None
     # A `--help` invocation (the agent inspecting a tool during the run) is not a
     # routing step -- skip it so the plan doesn't carry no-op `help: true` steps.
     if '--help' in argv or '-h' in argv:
         return None
+    # #459: --preview writes no board and --undo REMOVES copper. The plan format
+    # has no way to say either, and the unknown-flag fallthrough turns both into
+    # an ordinary route step with nets ['*'] -- so a replayed --undo would ROUTE
+    # the whole board where the CLI unrouted a block, the exact inverse. There is
+    # no faithful conversion, so refuse loudly rather than emit a wrong one; the
+    # caller prints these so a dropped step is never silent.
+    for _flag, _why in (('--preview', 'writes no board; nothing to replay'),
+                        ('--list-groups', 'prints a listing and exits; '
+                                          'converting it would ROUTE the board'),
+                        ('--undo', 'removes copper; the plan format cannot '
+                                   'express an unroute, and converting it '
+                                   'would ROUTE those nets instead')):
+        if _flag in argv:
+            return {'_refused': f"{tool} {_flag}: {_why}"}
     action = TOOL_ACTIONS[tool]
     step = {'action': action, 'params': {}}
     step['_files'] = []  # positional .kicad_pcb args (input/output), for pruning
@@ -313,7 +381,8 @@ def parse_command(argv):
         step['kind'] = 'bga' if tool == 'bga_fanout.py' else 'qfn'
         step['nets'] = [str(n) for n in nets] or ['*']
     for k in ('--power-nets', '--power-nets-widths', '--layer-costs',
-              '--layers', '--polarity-swap-nets', '--coplanar-nets'):
+              '--layers', '--polarity-swap-nets', '--coplanar-nets',
+              '--rip-existing-nets', '--protect-nets'):
         if k in lists:
             step['params'][LIST_FLAGS[k]] = lists[k]
     return step
@@ -381,6 +450,9 @@ def plan_steps_from_manifest(manifest, keep_files=False):
     # skipped intermediate (e.g. place_fanout_clearance) BROKE the chain and
     # silently dropped legitimate upstream steps (e.g. the whole bga_fanout).
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'py_router'))  # #522/py_placer layout
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'py_placer'))  # #522/py_placer layout
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'py_tools'))  # #522/py_placer layout
     from redo_stress_test import parse_manifest, compute_prune_keep, is_check_cmd
 
     cmds = parse_manifest(manifest)
@@ -388,6 +460,7 @@ def plan_steps_from_manifest(manifest, keep_files=False):
 
     steps = []
     skipped = 0
+    refused = []
     for i, (_cwd, argv) in enumerate(cmds):
         if i not in keep or is_check_cmd(argv):
             continue  # pruned out, or a check/grade command (no GUI step)
@@ -403,6 +476,14 @@ def plan_steps_from_manifest(manifest, keep_files=False):
             # --help, ...): pruning already accounted for it -- just emit no step.
             skipped += 1
             continue
+        if '_refused' in step:
+            # A command with no faithful plan representation (#459 --undo /
+            # --preview). Emitting nothing is the safe half; the caller MUST
+            # report these, because an unroute silently missing from a replay
+            # leaves copper the recorded chain had removed.
+            refused.append(step['_refused'])
+            skipped += 1
+            continue
         if step['action'] == 'repair_planes' and 'assignments' not in step:
             # The repair CLI auto-detects zones; the GUI repair needs
             # explicit assignments -- inherit the last plane step's.
@@ -415,6 +496,14 @@ def plan_steps_from_manifest(manifest, keep_files=False):
     if not keep_files:
         for s in steps:
             s.pop('_files', None)
+    if refused:
+        # Loud, on stderr, every time -- never a silent drop.
+        print(f"WARNING: {len(refused)} command(s) have NO faithful plan "
+              f"representation and were NOT converted:", file=sys.stderr)
+        for r in refused:
+            print(f"  - {r}", file=sys.stderr)
+        print("  The replayed plan will DIVERGE from the recorded chain at "
+              "these steps. Run them on the CLI.", file=sys.stderr)
     return steps, skipped
 
 

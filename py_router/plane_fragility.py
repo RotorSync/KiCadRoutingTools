@@ -403,6 +403,26 @@ def _compute_cells_and_states(pcb_data: PCBData, config: GridRouteConfig,
                 print(f"Plane fragility: exact fill unavailable ({why}); "
                       f"using zone outlines")
                 fills = {}
+            from kicad_exact_fill import refill_islands, EXACT_FILL_TIMEOUT
+            # NOTE this call is reached from route.py:batch_route, so it runs
+            # on EVERY batch_route -- and on a board KiCad's ZONE_FILLER cannot
+            # fill (measured: a 217-part 4-layer board) each one pays the full
+            # EXACT_FILL_TIMEOUT. That subprocess timeout is a hang guard on a
+            # child process, not a budget on our own search, so it does not
+            # make any result depend on our wall clock.
+            _t = EXACT_FILL_TIMEOUT
+            fills = refill_islands(src, timeout=_t, verbose=True)
+            if fills is None:
+                # refill_islands documents a None return, and this was the ONE
+                # call site in the repo that dereferenced it anyway. The
+                # resulting `'NoneType' object has no attribute 'items'` was
+                # printed as if it were the diagnosis, while the real reason --
+                # a 300s timeout, or pcbnew missing -- was computed inside
+                # refill_islands and discarded. verbose=True above makes it say
+                # so; this branch stops the AttributeError masquerading as one.
+                raise RuntimeError(
+                    f'KiCad refill returned nothing within {_t}s '
+                    f'(fill timed out, or pcbnew unavailable)')
             polys = [(name_to_id.get(_net, -1), layer, poly)
                      for (_net, layer), pp in fills.items() for poly in pp]
             if polys:

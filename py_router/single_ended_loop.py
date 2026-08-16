@@ -827,7 +827,8 @@ def route_single_ended_nets(
                     # Filter to only rippable blockers (those in routed_results)
                     # and deduplicate by diff pair (P and N count as one)
                     rippable_blockers, seen_canonical_ids = filter_rippable_blockers(
-                        blockers, routed_results, diff_pair_by_net_id, get_canonical_net_id
+                        blockers, routed_results, diff_pair_by_net_id, get_canonical_net_id,
+                        pcb_data=pcb_data, context="SE rip ladder"
                     )
                     # Blocker-selection algorithm (#424 audit; --ripup-blocker-select).
                     _bsel = getattr(config, 'ripup_blocker_select', 'count')

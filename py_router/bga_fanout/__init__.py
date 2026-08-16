@@ -628,6 +628,27 @@ def manage_vias(
 
     Returns:
         Tuple of (vias_to_add, vias_to_remove)
+
+    KNOWN GAP, NOT FIXED HERE -- D10's self-blindness, in this function.
+    `vias_to_add` is appended to below and never read back, and BOTH guards
+    that gate an append iterate `pcb_data.vias` only: `would_overlap_existing_via`
+    and `via_in_pad_conflict`'s drill loop. So two vias added in ONE call are
+    never tested against each other -- the same shape as the qfn underpad
+    escape's, where the fix was to test each candidate against this run's own
+    output as well as the input board (`qfn_fanout.run_output_conflict`, which
+    is reusable and would be this code's second caller).
+
+    Structurally verified by reading; the IMPACT is UNMEASURED, deliberately
+    stated as such. A 0.5mm-pitch BGA taking via 0.45 + clearance 0.1 needs
+    0.55mm between adjacent ball centres and has 0.50 -- but `clamp_via_to_pad`
+    shrinks a via to fit its pad first, and on that pitch it may clamp far
+    enough to make the pair legal anyway. Whether this bites needs measuring
+    on a real fine-pitch BGA before anyone claims it does.
+
+    `via_in_pad_conflict` also prices its drill floor at the flat
+    `routing_defaults.HOLE_TO_HOLE_CLEARANCE` rather than the board's own
+    `min_hole_to_hole` -- the D9/D11 substitute-a-constant class, unclosed
+    here (qfn_fanout resolves it board-first, wrapped at the fab floor).
     """
     def find_nearby_via(x: float, y: float, net_id: int, max_dist: float):
         """Find an existing via on the same net within max_dist of position."""
@@ -1920,6 +1941,17 @@ def _generate_bga_fanout_core(footprint: Footprint,
     Returns:
         Tuple of (tracks, vias_to_add, vias_to_remove, failed_nets)
     """
+    # #621 escape-pass head. EVERY escape pass -- the rotated-frame recursion,
+    # both escape-priority passes, the single-pass coverage probe and the
+    # under-pad auto-fallback -- is a call to THIS function, so one check here
+    # is the head of all of them. It returns an empty result rather than
+    # raising: an exception here would be eaten by the `except Exception`
+    # swallowers this package is full of -- which is the reason the cancel
+    # contract is cooperative. Nothing is added to
+    # failed_nets: no ball was tried, so nothing failed.
+    if cancel_check and cancel_check():
+        return [], [], [], []
+
     if layers is None:
         layers = ["F.Cu", "B.Cu"]
 
@@ -1992,6 +2024,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
             no_inner_top_layer=no_inner_top_layer, escape_method=escape_method,
             grid_step=grid_step, layer_costs=layer_costs,
             same_net_pad_clearance=same_net_pad_clearance,
+            cancel_check=cancel_check,
             progress_callback=progress_callback)
         back_transform_results(tracks, vias_to_add, vias_to_remove, back)
         return tracks, vias_to_add, vias_to_remove, failed_nets
@@ -2089,6 +2122,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
                 escape_method=escape_method, grid_step=grid_step,
                 layer_costs=layer_costs,
                 same_net_pad_clearance=same_net_pad_clearance,
+                cancel_check=cancel_check,
                 progress_callback=progress_callback)
             # Coverage gate (issue #367): the legacy single pass runs FIRST.
             # When it escapes every ball there is nothing for prioritization
@@ -2106,6 +2140,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
                   f"{len(f0)} ball(s) and {_n_nets} multi-ball net(s) have "
                   f"{len(_extras)} extra ball(s) -- retrying with one escape "
                   f"per net first, extra escapes second")
+            _prog("escape priority pass 1 (one ball per net)...")
             # The fab-floor track clamp (issue #223) lives below this block;
             # the strap helper and cross-pass guard must use the CLAMPED width
             # (each recursive pass clamps its own escape copper internally).
@@ -2285,6 +2320,23 @@ def _generate_bga_fanout_core(footprint: Footprint,
                       f"escape room; strapped {_n_strap} to their net's fanout "
                       f"inside the BGA ({len(_still)} left for the router)"
                       + (f": {', '.join(_still)}" if _still else ""))
+            # #621: a CANCELLED pass has not measured anything, so it must
+            # never win this comparison. Its loops broke early, which makes
+            # `failed_nets` artificially SHORT (untried balls are not failures)
+            # -- so "fewer dropped balls" would read a truncated pass as the
+            # better result and throw away the completed single pass's copper.
+            # Measured by neutering this guard and re-running ulx3s U1 with a
+            # cancel fired ~4s in: the truncated pass WINS (`Under-pad escape wins:
+            # 185 -> 0 dropped ball(s)`) and the run ships 0 signal escapes;
+            # with the guard it ships 26. Keep the incumbent.
+            if cancel_check and cancel_check():
+                print(f"  Escape priority: cancelled mid-pass -- keeping the "
+                      f"single-pass result ({len(f0)} dropped ball(s)); a "
+                      f"truncated pass has measured nothing to compare. Those "
+                      f"balls are UNRESCUED, not clearance failures -- and this "
+                      f"copper is kept on the strength of a comparison that "
+                      f"never ran, so a completed run may ship a different set.")
+                return t0, v0, vr0, f0
             # Keep whichever result covers more nets; ties keep the single
             # pass (issue #367 -- mirror the channel/underpad auto-retry's
             # "ties keep the incumbent").
@@ -3064,22 +3116,33 @@ def _generate_bga_fanout_core(footprint: Footprint,
             same_net_pad_clearance=same_net_pad_clearance,
             progress_callback=progress_callback,
             cancel_check=cancel_check)
-        # #621: same guard as the escape-priority compare above -- a cancelled
-        # under-pad pass reports a short failed list because its loops broke
-        # early. Measured on ulx3s U1 (cancel ~4s in) by neutering it: with the
-        # guard 26 balls escape (96 segments, 10 vias); without it the truncated
-        # pass wins and 0 do (29 segments, 144 plane barrels).
+        # #621: same rule as the escape-priority comparison above -- a retry the
+        # budget cut short reports a short failed list because untried balls are
+        # not failures, so it must not be allowed to displace the completed
+        # channel result on that basis.
         if cancel_check and cancel_check():
-            # No fall-through "did not improve (0 dropped)" line here: that
-            # reads as the under-pad pass having succeeded perfectly, which is
-            # the opposite of what a truncated pass measured. The guard prefers
-            # the incumbent's copper over a truncated pass's silence -- and
-            # says so, because the copper is kept on a comparison that never
-            # ran, so a completed run may legitimately ship less of it.
+            # No fall-through print here: the "did not improve (0 dropped)"
+            # line reads as the under-pad pass having succeeded perfectly,
+            # which is the opposite of what a truncated pass measured.
+            #
+            # The guard prefers the incumbent's copper over a truncated pass's
+            # silence. Measured on ulx3s U1 (cancel ~4s in) by neutering it: with
+            # the guard 26 balls escape (96 segments, 10 vias); without it the
+            # truncated pass wins and 0 do (29 segments, 144 plane barrels).
+            # It is WRONG when the completed engine would itself have discarded
+            # the incumbent -- orangecrab_ext_pll U4, where the under-pad pass
+            # legitimately concludes "0/0 signals escaped, 54 already-fanned
+            # skipped" and its EMPTY result wins, so the finished run ships no
+            # signal escape at all (drc total 937, matching this guard turned
+            # OFF) while a cancelled run keeps 22 channel escapes (1108). A
+            # cancelled pass and a legitimately-empty one return the same
+            # ([], []) from here, so the divergence is DISCLOSED, not guessed.
             print(f"  Under-pad escape: cancelled mid-pass -- keeping the "
                   f"channel result and its {len(failed_nets)} dropped ball(s); "
                   f"a truncated pass has measured nothing. Those balls are "
-                  f"UNRESCUED, not clearance failures.")
+                  f"UNRESCUED, not clearance failures -- and this copper is "
+                  f"kept on the strength of a comparison that never ran, so a "
+                  f"completed run may legitimately ship less of it.")
         elif len(up_failed) < len(failed_nets):
             print(f"  Under-pad escape wins: {len(failed_nets)} -> "
                   f"{len(up_failed)} dropped ball(s); using it")
@@ -3219,6 +3282,15 @@ def generate_plane_drops(footprint: Footprint,
         if verbose:
             print(f"  Plane drops skipped: grid analysis failed ({e})")
         return [], [], {}
+    if grid is None:
+        # Run-6: analyze_bga_grid returns None (not raises) for perimeter
+        # packages -- a QFN's corner gap fails the dominant-pitch vote --
+        # and the None then crashed generate_underpad_escape at
+        # underpad grid.pitch_x. Same advisory as the escape path.
+        print(f"  Plane drops skipped: {footprint.reference} has no BGA "
+              f"grid (perimeter package?). For a QFN/QFP use "
+              f"qfn_fanout.py --component {footprint.reference}")
+        return [], [], {}
     from bga_fanout.underpad import generate_underpad_escape
     net_filter_fn = None
     if net_filter:
@@ -3346,6 +3418,12 @@ def generate_bga_fanout(footprint: Footprint,
     # plane_drop is part of the compared set; core-internal recursions
     # (escape priority, auto retry, rotation) no longer dump -- symmetrically
     # on both fronts, so pairing is unaffected.
+    # cancel_check is dropped alongside the board payload (#621): it is a live
+    # closure, not a routing parameter -- it cannot serialise, and the two
+    # fronts legitimately hold DIFFERENT objects there (None on the CLI vs the
+    # GUI's Cancel button), so comparing it would report a permanent phantom
+    # divergence. Dropping it also keeps the dumped key set byte-identical to
+    # before this change.
     try:
         from route import _dump_engine_config as _dump
         # cancel_check is dropped alongside the board payload (#621): it is a
@@ -3355,7 +3433,8 @@ def generate_bga_fanout(footprint: Footprint,
         # phantom divergence. Dropping it also keeps the dumped key set
         # byte-identical to before this change.
         _cfg = {k: v for k, v in locals().items()
-                if k not in ('footprint', 'pcb_data', '_dump', 'cancel_check')}
+                if k not in ('footprint', 'pcb_data', '_dump', 'cancel_check',
+                             'progress_callback')}
         _cfg['component'] = getattr(footprint, 'reference', None)
         _dump('bga_fanout', _cfg)
     except Exception as _e:
@@ -3398,11 +3477,27 @@ def generate_bga_fanout(footprint: Footprint,
         via_size=via_size, via_drill=via_drill,
         check_for_previous=check_for_previous,
         no_inner_top_layer=no_inner_top_layer, escape_method=escape_method,
-        grid_step=grid_step, layer_costs=layer_costs,
+        grid_step=grid_step, layer_costs=layer_costs, cancel_check=_cc,
+        progress_callback=progress_callback,
         _pad_filter=_pad_filter, _ignore_prefanned=_ignore_prefanned,
         _single_pass=_single_pass,
-        same_net_pad_clearance=same_net_pad_clearance,
-        progress_callback=progress_callback, cancel_check=_cc)
+        same_net_pad_clearance=same_net_pad_clearance)
+
+    # #621 partial ledger, computed ONLY when a cancel actually fired (so an
+    # ordinary run does not even build the sets). A candidate ball that carries
+    # no copper from this call AND is not in failed_nets was never concluded:
+    # that complement is the untried set, and it is published separately so an
+    # unfinished search is never counted as a measured escape failure.
+    LAST_CANCEL_SKIPPED.clear()
+    if _fired[0]:
+        _live_ids = ({t.get('net_id') for t in tracks}
+                     | {v.get('net_id') for v in vias_to_add})
+        _live_names = {n.name for nid, n in pcb_data.nets.items()
+                       if nid in _live_ids}
+        _failed_names = set(failed_nets)
+        LAST_CANCEL_SKIPPED.extend(
+            n for n in fanout_candidate_nets(footprint, pcb_data, net_filter)
+            if n not in _live_names and n not in _failed_names)
 
     # #621 partial ledger, computed ONLY when a cancel actually fired (so an
     # ordinary run does not even build the sets). A candidate ball that carries
@@ -3549,7 +3644,6 @@ def main():
     # meeting a 0.25mm via pad), and this step had no way to ask for one.
     parser.add_argument('--add-teardrops', action='store_true',
                         help='Add teardrop settings to all pads and vias in the output file')
-
     from fab_tiers import (add_fab_tier_args, fab_tier_from_args, set_default_fab_tier,
                            enforce_fab_floors, count_copper_layers_in_file)
     add_fab_tier_args(parser)
@@ -3628,6 +3722,10 @@ def main():
         print("  Set KICAD_ALLOW_STAGGERED_BGA=1 to run anyway.")
         return 1
 
+    # #621: the CLI passes no cancel_check. The engine's cooperative cancel is
+    # the GUI's (its Cancel button / the plan executor's Stop); a CLI-side
+    # wall-clock budget was removed deliberately -- no result this tool produces
+    # may depend on timing, or the same command stops producing the same board.
     tracks, vias_to_add, vias_to_remove, _failed_nets = generate_bga_fanout(
         footprint,
         pcb_data,
@@ -3694,6 +3792,10 @@ def main():
                        and t['net_id'] not in _drop_ids}
     unescaped = sorted(set(_failed_nets))
     escaped = len(escaped_net_ids)
+    # The CLI never cancels (#621: no --deadline, no other CLI cancel source),
+    # so LAST_CANCEL_SKIPPED is empty here by construction and every ball was
+    # concluded one way or the other. The partial-ledger arithmetic lives in the
+    # engine for the GUI, which does have a cancel.
     requested = escaped + len(unescaped)
     if unescaped:
         print(f"\n  {len(unescaped)} of {requested} requested ball(s) could NOT be "
@@ -3786,8 +3888,6 @@ def main():
         'plane_drop': dict(LAST_PLANE_DROP_REPORT),
     }
     print(f"JSON_SUMMARY: {_json.dumps(summary)}")
-
-
     return 0
 
 
