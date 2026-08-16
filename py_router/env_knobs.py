@@ -330,6 +330,11 @@ def refresh() -> None:
         # in-run copper consumes their via sites. Oracle test: front-load
         # the known failure set and see if completion follows.
         'order_file': _s('KICAD_GLOBAL_PLAN_ORDER_FILE', ''),
+        # #658: probe power/plane nets FIRST so (with SEQ ghosts) every
+        # signal probe sees their approximate corridors -- the measured
+        # origin of the first plan divergences is the unmodeled power
+        # trees' early copper.
+        'power_first': _opt_in('KICAD_GLOBAL_PLAN_POWER_FIRST'),
         # Plan-directed escape fanout (#589): for a plan-assigned end still
         # on a non-assigned layer with no swappable stub and no fitting
         # pad-center via, place a DOGBONE (offset via + pad->via trace,

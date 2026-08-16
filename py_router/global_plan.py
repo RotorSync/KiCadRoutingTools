@@ -172,7 +172,26 @@ def plan_global_routes(pcb_data, config, net_ids: List[Tuple[str, int]],
 
     plan = GlobalPlan()
     max_iters = 0
-    for _name, nid in net_ids:
+    # #658 power-first probing (KICAD_GLOBAL_PLAN_POWER_FIRST=1): the
+    # measured origin of the first plan divergences is the power/GND
+    # multipoint trees -- routed early, never modeled by the plan, so
+    # every signal negotiates against a world missing ~300mm of the
+    # earliest copper (QSPI_D3 ablation: solo 5.2mm invariant to all
+    # cost knobs; the 10.6mm full-run detour was this copper). With SEQ
+    # ghosts on, probing power nets FIRST stamps their approximate
+    # corridors into every signal probe's world. 2-endpoint probes only
+    # approximate a multipoint tree's main trunk -- partial credit, not
+    # the full weld model.
+    _probe_order = list(net_ids)
+    if env_knobs.GLOBAL_PLAN.get('power_first') and k['seq']:
+        _pw = set(getattr(config, 'power_net_widths', None) or {})
+        if _pw:
+            _probe_order = ([t for t in _probe_order if t[1] in _pw]
+                            + [t for t in _probe_order if t[1] not in _pw])
+            print(f"  [plan] power-first probing: "
+                  f"{sum(1 for t in _probe_order if t[1] in _pw)} power "
+                  f"net(s) probed ahead of signals")
+    for _name, nid in _probe_order:
         result = route_net_with_obstacles(pcb_data, nid, rough_cfg, probe_map)
         _it = int((result or {}).get('iterations', 0) or 0)
         plan.probe_iterations += _it
