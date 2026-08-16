@@ -312,6 +312,14 @@ src/
 ## Version History
 
 
+### 0.21.1 (2026-08-16)
+
+- PoseRouter (diff pairs): `layer_direction_preferences` +
+  `direction_preference_cost` -- the same per-layer H/V off-axis penalty
+  GridRouter has had, previously never forwarded to the diff engine
+  (#658 diff-step parity; measured 26mm of off-axis diff legs on
+  orangecrab walling single-ended corridors).
+
 ### 0.21.0 (2026-08-16)
 - #656: `attraction_potential` parameter on `GridRouter` -- potential-based
   path-attraction shaping. phi(x, y, layer) peaks at the lane on its layer,

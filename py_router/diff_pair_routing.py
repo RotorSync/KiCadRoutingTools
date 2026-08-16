@@ -1983,6 +1983,13 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     _layer_costs = config.get_layer_costs()
     if any(c != 1000 for c in _layer_costs):
         pose_kwargs['layer_costs'] = _layer_costs
+    # #658 diff parity: forward the per-layer H/V direction preference the
+    # single-ended router has always applied. Only passed when armed, so an
+    # older grid_router binary (pre-0.21.1) still constructs.
+    _dirs = config.get_layer_direction_preferences()
+    if _dirs and config.direction_preference_cost > 0:
+        pose_kwargs['layer_direction_preferences'] = _dirs
+        pose_kwargs['direction_preference_cost'] =             config.direction_preference_cost
     pose_router = PoseRouter(**pose_kwargs)
 
     # Route using pose-based A* with Dubins heuristic
@@ -2559,6 +2566,10 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
     _lc = config.get_layer_costs()
     if any(c != 1000 for c in _lc):
         pose_kwargs['layer_costs'] = _lc
+    _dirs2 = config.get_layer_direction_preferences()
+    if _dirs2 and config.direction_preference_cost > 0:
+        pose_kwargs['layer_direction_preferences'] = _dirs2
+        pose_kwargs['direction_preference_cost'] =             config.direction_preference_cost
     pr = PoseRouter(**pose_kwargs)
     via_spacing_grid = max(1, int(max(spacing_mm, (config.via_size + config.clearance) / 2)
                                   / config.grid_step + 0.5))
