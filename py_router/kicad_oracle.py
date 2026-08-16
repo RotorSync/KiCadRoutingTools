@@ -1862,6 +1862,22 @@ def oracle_reconnect(board_file: str, net_names, config,
                           f"(emitted copper outside the link corridor -- "
                           f"#570 false-claim guard)")
                     _esc = None
+                # #649: the scoped-window escalation is LAYER-BLIND (its
+                # gap is xy-only), so it can "close" a cross-layer link --
+                # e.g. an F.Cu island <-> an In1 zone -- with same-layer
+                # copper and no via, satisfying its own model while KiCad
+                # re-reports the identical link every round (measured:
+                # three rounds re-welding one GND link with 1 seg / 0
+                # vias). A weld for a link whose endpoint layers differ
+                # must carry at least one via; otherwise fail the link
+                # honestly so the rip/custody ladders engage.
+                if (_esc and not _esc.get('failed') and al and bl
+                        and al != bl and not (_esc.get('new_vias') or [])):
+                    print(f"    {net_name}: weld escalation REJECTED "
+                          f"(link spans {al}<->{bl} but the weld has no "
+                          f"via -- same-layer copper cannot join them, "
+                          f"#649)")
+                    _esc = None
                 if _esc and not _esc.get('failed'):
                     _esegs = _esc.get('new_segments') or []
                     _evias = _esc.get('new_vias') or []
