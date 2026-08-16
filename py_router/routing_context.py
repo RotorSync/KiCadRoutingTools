@@ -283,6 +283,16 @@ def build_single_ended_obstacles(
     # Add stub proximity costs (includes chip pads as pseudo-stubs)
     stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
                                if nid != net_id and nid not in routed_net_ids]
+    # #658 river: same-bus siblings exert NO soft proximity on a member --
+    # hard clearance stays (obstacle stamps), so members can pack to the
+    # legal minimum pitch instead of being repelled from the hug zone the
+    # follow-the-leader lane points into (measured: hug 0% with the
+    # repulsion active -- the proximity field outbids any attraction dose).
+    from global_plan import river_sibling_ids
+    _sibs = river_sibling_ids(config, net_id)
+    if _sibs:
+        stub_proximity_net_ids = [nid for nid in stub_proximity_net_ids
+                                  if nid not in _sibs]
     unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
     chip_pads = get_chip_pad_positions(pcb_data, stub_proximity_net_ids)
     all_stubs = unrouted_stubs + chip_pads
@@ -299,7 +309,9 @@ def build_single_ended_obstacles(
     from global_plan import add_plan_source
     _c2 = congestion2_rows(config, net_id, routed_net_ids)
     merge_track_proximity_costs(
-        obstacles, track_proximity_cache,
+        obstacles,
+        ({k: v for k, v in track_proximity_cache.items() if k not in _sibs}
+         if _sibs else track_proximity_cache),
         ghost_costs=add_plan_source(add_history_source(
             {**filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids),
              **(_stub_surplus or {}),

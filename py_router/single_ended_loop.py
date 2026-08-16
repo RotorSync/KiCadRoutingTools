@@ -674,7 +674,14 @@ def route_single_ended_nets(
             _gp = getattr(config, '_global_plan', None)
             if (_gp is not None and net_id in _gp.rough_paths
                     and env_knobs.GLOBAL_PLAN.get('attract')):
-                attraction_path = _sample_path(_gp.rough_paths[net_id])
+                # #658 river: predecessor's realized copper outranks the
+                # net's own probe corridor (follow-the-leader packing).
+                _riv = None
+                if env_knobs.GLOBAL_PLAN.get('river'):
+                    from global_plan import river_attraction_path
+                    _riv = river_attraction_path(config, net_id, pcb_data)
+                attraction_path = (_sample_path(_riv) if _riv is not None
+                                   else _sample_path(_gp.rough_paths[net_id]))
                 reverse_direction = False
         # Off-lane surcharge (the stick): members with a corridor pay
         # scaled step costs everywhere EXCEPT near the lane, where the
@@ -1160,7 +1167,8 @@ def route_single_ended_nets(
                         if retry_attraction_path is None:
                             # #656: keep the plan lane through rip retries
                             from global_plan import plan_attraction_path
-                            retry_attraction_path = plan_attraction_path(config, net_id)
+                            retry_attraction_path = plan_attraction_path(
+                                config, net_id, pcb_data)
                             retry_reverse_direction = False
                         retry_cfg = bus_stick_config(config, retry_attraction_path)
                         # #572: a forced-link net retries its EXACT links

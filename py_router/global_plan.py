@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import heapq
 import time
+import math
 from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
 
@@ -88,6 +89,10 @@ class GlobalPlan:
     conflict_w: Dict[int, Dict[int, int]] = field(default_factory=dict)  # crossings
     share_w: Dict[int, Dict[int, int]] = field(default_factory=dict)     # corridor share
     layer_pref: Dict[int, int] = field(default_factory=dict)  # nid -> layer idx
+    # #658 river mode: nid -> (group_id, rank); rank = lateral order across
+    # the bus corridor. river_order holds each group's rank-ordered nids.
+    river: Dict[int, Tuple[int, int]] = field(default_factory=dict)
+    river_order: Dict[int, List[int]] = field(default_factory=dict)
     probe_iterations: int = 0
     probe_failures: int = 0
 
@@ -220,6 +225,7 @@ def plan_global_routes(pcb_data, config, net_ids: List[Tuple[str, int]],
     plan.conflict_w, plan.share_w = _conflict_graphs(plan.rough_paths,
                                                      config)
     _assign_clique_layers(plan, config, pcb_data)
+    _build_river_groups(plan, config, pcb_data)
     n_cross = sum(1 for w in plan.conflict_w.values() if w)
     n_share = sum(1 for w in plan.share_w.values() if w)
     res_cells = sum(len(r) for r in plan.reservations.values())
@@ -865,12 +871,153 @@ def _order_block(block: List[Tuple[str, int]], plan: GlobalPlan,
     return [(name_of[nid], nid) for nid in order]
 
 
+def _build_river_groups(plan: GlobalPlan, config, pcb_data) -> None:
+    """#658 river mode (KICAD_GLOBAL_PLAN_RIVER=1): group 2-pad nets by
+    endpoint footprint pair (>= 4 members = a bus) and rank members by
+    their lateral position across the corridor. Consumers: apply_plan_order
+    pulls each group CONSECUTIVE in rank order, and plan_attraction_path
+    hands each member the REALIZED copper of its predecessor as the
+    attraction lane -- follow-the-leader. The leader routes free (the
+    measured meta-verdict: constraints lose on frontier boards; structure
+    comes from following, not forcing). The human reference measures as a
+    true river: 0 member-x-member crossings on every bus layer, members
+    packed at ~0.22-0.29mm gaps."""
+    if not env_knobs.GLOBAL_PLAN.get('river'):
+        return
+    if pcb_data is None:
+        return
+    groups: Dict[Tuple[str, str], List[int]] = {}
+    for nid in plan.rough_paths:
+        net = pcb_data.nets.get(nid)
+        if net is None or len(net.pads) != 2:
+            continue
+        refs = tuple(sorted(p.component_ref or '?' for p in net.pads))
+        groups.setdefault(refs, []).append(nid)
+    gid = 0
+    for refs, comp in sorted(groups.items()):
+        if len(comp) < 4:
+            continue
+        # corridor axis from endpoint centroids; rank by the FIRST
+        # footprint's pad coordinate perpendicular to the axis.
+        pads0 = {}
+        cx = cy = 0.0
+        for nid in comp:
+            net = pcb_data.nets[nid]
+            a, b = net.pads[0], net.pads[1]
+            first = a if (a.component_ref or '?') == refs[0] else b
+            other = b if first is a else a
+            pads0[nid] = first
+            cx += abs(first.global_x - other.global_x)
+            cy += abs(first.global_y - other.global_y)
+        horiz = cx >= cy
+        members = sorted(comp, key=lambda n: (pads0[n].global_y if horiz
+                                              else pads0[n].global_x))
+        for r, nid in enumerate(members):
+            plan.river[nid] = (gid, r)
+        plan.river_order[gid] = members
+        gid += 1
+    if plan.river:
+        sizes = sorted((len(v) for v in plan.river_order.values()),
+                       reverse=True)
+        print(f"Global plan river groups (#658): {len(plan.river)} net(s) "
+              f"in {len(plan.river_order)} bus(es) (sizes {sizes[:6]}) -- "
+              f"follow-the-leader lanes, consecutive order")
+
+
+def river_attraction_path(config, net_id, pcb_data):
+    """The realized copper of this river member's nearest ROUTED
+    predecessor, densified as a (gx, gy, layer) lane -- or None (not a
+    river member / leader / no predecessor copper yet). The potential
+    field is order-insensitive, so raw segments walked per-segment are a
+    valid lane; the follower hugs as close as legality allows, which IS
+    the packing."""
+    if pcb_data is None or not env_knobs.GLOBAL_PLAN.get('river'):
+        return None
+    plan = getattr(config, '_global_plan', None)
+    if plan is None or net_id not in plan.river:
+        return None
+    gid, rank = plan.river[net_id]
+    if rank == 0:
+        return None
+    members = plan.river_order.get(gid) or []
+    layer_idx = {name: i for i, name in enumerate(config.layers)}
+    gs = config.grid_step or 0.1
+    for pred in reversed(members[:rank]):
+        segs = [s for s in pcb_data.segments if s.net_id == pred
+                and s.layer in layer_idx]
+        # stubs alone are not a lane; demand some real trunk length
+        total = sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+                    for s in segs)
+        if total < 3.0:
+            continue
+        dense = []
+        for s in segs:
+            li = layer_idx[s.layer]
+            x1, y1 = int(round(s.start_x / gs)), int(round(s.start_y / gs))
+            x2, y2 = int(round(s.end_x / gs)), int(round(s.end_y / gs))
+            dense.append((x1, y1, li))
+            dense.extend((gx, gy, li)
+                         for gx, gy in walk_line(x1, y1, x2, y2))
+            dense.append((x2, y2, li))
+        if dense:
+            if env_knobs.GLOBAL_PLAN.get('river_debug'):
+                print(f"    [river] net {net_id} hugging predecessor "
+                      f"{pred} ({total:.1f}mm of lane)")
+            return dense
+    return None
+
+
+def river_sibling_ids(config, net_id):
+    """Same-river-group net ids for `net_id` (empty set when river mode is
+    off / not a member). Consumers exempt siblings from SOFT proximity
+    fields only -- hard clearance obstacles stay, so members may pack to
+    the legal minimum pitch (the human's 0.22-0.29mm) without paying the
+    spread-out penalty the proximity system exists to charge strangers."""
+    if not env_knobs.GLOBAL_PLAN.get('river'):
+        return frozenset()
+    plan = getattr(config, '_global_plan', None)
+    if plan is None:
+        return frozenset()
+    g = plan.river.get(net_id)
+    if g is None:
+        return frozenset()
+    return frozenset(n for n in plan.river_order.get(g[0], ())
+                     if n != net_id)
+
+
 def apply_plan_order(net_ids: List[Tuple[str, int]], plan: GlobalPlan,
                      front_ids=None) -> List[Tuple[str, int]]:
     """Apply the plan-informed order, preserving the #472 direct-first
     partition: the front block and the rest are reordered independently and
     never merged. No-op when the order knob is '' or the plan is empty."""
     k = global_plan_knobs()
+    # #658 river mode: pull each river group's members CONSECUTIVE (at the
+    # position of the group's earliest member, in lateral rank order) so
+    # each member routes right after its predecessor and the follow-the-
+    # leader lane always has fresh copper to hug. Front-partition members
+    # are left where #472 put them.
+    if plan is not None and plan.river and env_knobs.GLOBAL_PLAN.get('river'):
+        _fids = front_ids or set()
+        by_gid: Dict[int, List[Tuple[str, int]]] = {}
+        for t in net_ids:
+            g = plan.river.get(t[1])
+            if g is not None and t[1] not in _fids:
+                by_gid.setdefault(g[0], []).append(t)
+        out: List[Tuple[str, int]] = []
+        emitted = set()
+        for t in net_ids:
+            if t[1] in emitted:
+                continue
+            g = plan.river.get(t[1])
+            if g is not None and t[1] not in _fids:
+                grp = by_gid.get(g[0], [])
+                grp_sorted = sorted(grp, key=lambda x: plan.river[x[1]][1])
+                out.extend(grp_sorted)
+                emitted.update(x[1] for x in grp_sorted)
+            else:
+                out.append(t)
+                emitted.add(t[1])
+        net_ids = out
     # #589 escape-risk front-load (ORDER_FILE): listed nets first within
     # their partition block, independent of the graph-order modes below.
     if k.get('order_file') and plan is not None:
@@ -916,7 +1063,7 @@ def apply_plan_order(net_ids: List[Tuple[str, int]], plan: GlobalPlan,
     return reordered
 
 
-def plan_attraction_path(config, net_id):
+def plan_attraction_path(config, net_id, pcb_data=None):
     """#656/#589: the net's own plan corridor as a DENSIFIED attraction
     path, or None (knob off / no plan / no path). Reroute/retry sites call
     this when bus_attraction_context returned None -- a plan-attracted
@@ -929,6 +1076,11 @@ def plan_attraction_path(config, net_id):
     plan = getattr(config, '_global_plan', None)
     if plan is None:
         return None
+    # #658 river: the predecessor's realized copper outranks the net's own
+    # probe corridor (follow-the-leader; falls through when leader/no lane).
+    r = river_attraction_path(config, net_id, pcb_data)
+    if r is not None:
+        return r
     path = plan.rough_paths.get(net_id)
     if not path or len(path) < 2:
         return None

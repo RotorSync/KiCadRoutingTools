@@ -310,6 +310,11 @@ def refresh() -> None:
         # nets (defection tax; 1.0 = off). The discount alone is proven
         # too weak to pack buses.
         'layer_tax': _f('KICAD_GLOBAL_PLAN_LAYER_TAX', 1.0),
+        # #658 river mode: buses (endpoint-pair groups >= 4) route
+        # consecutively in lateral order; each member's attraction lane is
+        # its predecessor's REALIZED copper (follow-the-leader packing).
+        'river': _opt_in('KICAD_GLOBAL_PLAN_RIVER'),
+        'river_debug': _opt_in('KICAD_GLOBAL_PLAN_RIVER_DEBUG'),
         'swaps': _opt_in('KICAD_GLOBAL_PLAN_SWAPS'),
         # Layer-assignment source: 'clique' = round-robin across each
         # share-clique's viable layers (v1; built for BLIND probes that all
