@@ -5262,7 +5262,9 @@ For differential pair routing, use route_diff.py:
         from krt_capabilities import capabilities as _caps
         print(json.dumps(_caps(), indent=1, sort_keys=True))
         sys.exit(0)
-    args = parser.parse_args()
+    # #597: pin the dash-digit matcher BEFORE parsing, or a net named like a
+    # negative rail (-12V, -5V) is read as an unknown option and argparse exits
+    # 2 before this line's result is ever used.
     args = __import__("cli_nets").pin_dash_digit_values(parser).parse_args()
     # #439: the PRESENCE of --clearance is the clamp switch. Given -> it is the
     # ceiling: non-Default classes are capped at min(class, --clearance) and the
