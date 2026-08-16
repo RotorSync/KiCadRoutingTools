@@ -3579,6 +3579,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         rip_blocker_nets=_finalize_rip9,
                         power_nets=power_nets,
                         power_nets_widths=power_nets_widths,
+                        # #658: the chain's layer economics reach the
+                        # finalize legs (previously uniform 1.0 -- welds
+                        # traveled priced-up layers for free).
+                        layer_costs=list(config.layer_costs or []) or None,
                         pcb_data=pcb_data, return_results=True,
                         progress_callback=_pcb9)
                     _cursid9 = {id(s) for s in pcb_data.segments}

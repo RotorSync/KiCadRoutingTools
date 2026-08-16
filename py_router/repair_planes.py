@@ -388,6 +388,12 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
     non-colliding copper is still given back, so #329's zero-copper nets do
     not come back either.
     Returns a successful TapResult, or None."""
+    # #658 power discipline: taps for power nets honor the per-net layer
+    # economics (KICAD_POWER_LAYER_COSTS); no-op when the knob is off or
+    # the net is not a power net.
+    from global_plan import power_layer_config
+    tap_config = power_layer_config(tap_config, tap_config, net_id)
+
     failure = first_failure
     ripped_local = []  # (net_id, segments, vias) in rip order
     ripped_ids_local = set()
@@ -732,6 +738,7 @@ def repair_planes(
     reroute_ripped_nets: bool = False,
     power_nets: Optional[List[str]] = None,
     power_nets_widths: Optional[List[float]] = None,
+    layer_costs: Optional[List[float]] = None,
     no_bga_zone: bool = False,
     progress_callback=None,
     cancel_check=None,
@@ -890,6 +897,20 @@ def repair_planes(
         board_edge_clearance=board_edge_clearance,
         ripup_blocker_select=ripup_blocker_select
     )
+    # #658: the finalize/repair legs previously routed with UNIFORM layer
+    # costs -- the chain's --layer-costs never reached this engine, so
+    # welds/taps freely traveled layers the whole run priced up (measured:
+    # 100+mm of rail copper on the GND plane layer at an effective 36x
+    # main-pass price). Forward the chain's costs; power nets additionally
+    # get the KICAD_POWER_LAYER_COSTS per-net override at the tap sites.
+    if layer_costs:
+        config.layer_costs = list(layer_costs)
+    if power_nets and power_nets_widths:
+        _name2id = {n.name: n.net_id for n in pcb_data.nets.values()} \
+            if pcb_data is not None else {}
+        config.power_net_widths = {
+            _name2id[nm]: w for nm, w in zip(power_nets, power_nets_widths)
+            if nm in _name2id}
     # #581: keep repair vias (pad taps, region joins, reconnects) off same-net
     # pads when the constraint is active. Explicit kwarg wins (route.py's #562
     # finalize forwards its resolved value -- the output's .kicad_pro sibling
