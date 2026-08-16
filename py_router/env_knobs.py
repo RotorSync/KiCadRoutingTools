@@ -164,6 +164,13 @@ def refresh() -> None:
     # '0' reverts the surface-pour direct connect (plane-drop balls whose own-
     # layer same-net pour provably fills to the pad get NO via). Default ON.
     g['FANOUT_POUR_DIRECT'] = _s('KICAD_FANOUT_POUR_DIRECT', '1') != '0'
+    # Near-miss companion to pour-direct (#652): a plane-drop ball whose own-
+    # layer pour's MAIN component stops just short of the pad (within
+    # KICAD_FANOUT_POUR_TRACK_R mm, default 2.0) gets a short surface track
+    # into the fill instead of a via -- the other half of the human dog-bone
+    # economy. '0' reverts. Default ON.
+    g['FANOUT_POUR_TRACK'] = _s('KICAD_FANOUT_POUR_TRACK', '1') != '0'
+    g['FANOUT_POUR_TRACK_R'] = float(_s('KICAD_FANOUT_POUR_TRACK_R', '2.0') or 2.0)
     g['STOP_CLEANUP'] = _opt_in('KICAD_STOP_CLEANUP')
     g['TAP_RELOCATION'] = _opt_in('KICAD_TAP_RELOCATION')  # phase-3 tap pocket moves
     # #536 octolinear route smoothing (cleanup_pipeline pass 9b): collapse

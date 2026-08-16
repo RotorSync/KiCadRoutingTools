@@ -1965,6 +1965,7 @@ def generate_underpad_escape(footprint: Footprint,
         _rep_nets: Dict[str, Dict[str, int]] = {}
         n_gap = n_ctr = n_exist = n_fail = n_pour = 0
         n_trk = [0]
+        n_ptrk = [0]
         for p in drop_pads:
             r = _rep_nets.setdefault(p.net_name,
                                      {'gap': 0, 'in_pad': 0, 'existing': 0,
@@ -1986,6 +1987,57 @@ def generate_underpad_escape(footprint: Footprint,
                 n_pour += 1
                 r['pour'] += 1
                 continue
+            # POUR-TRACK near-miss (#652): the pour's MAIN component stops
+            # just short of this ball (fill eroded around a neighbouring
+            # obstacle). A short track on the ball's own layer into the fill
+            # connects it with NO via -- the other half of the human dog-bone
+            # economy. KICAD_FANOUT_POUR_TRACK=0 reverts.
+            if env_knobs.FANOUT_POUR_TRACK and _pour_models:
+                _lay = next((l for l in (p.layers or [])
+                             if l.endswith('.Cu')), None)
+                _li = layers.index(_lay) if _lay in layers else None
+                _hit = None
+                if _li is not None:
+                    for _m in _pour_models.get((p.net_id, _lay), ()):
+                        _c = _m.largest_component()
+                        if not _c:
+                            continue
+                        _pt = _m.nearest_component_point(
+                            gx, gy, _c, env_knobs.FANOUT_POUR_TRACK_R)
+                        if _pt is not None and (_hit is None
+                                                or _pt[2] < _hit[2]):
+                            _hit = _pt
+                if _hit is not None:
+                    _tx, _ty, _d = _hit
+                    # Overshoot one track-width INTO the fill so the contact
+                    # is solid copper, not a cell-edge graze.
+                    if _d > 1e-6:
+                        _ux, _uy = (_tx - gx) / _d, (_ty - gy) / _d
+                        _tx += _ux * track_width
+                        _ty += _uy * track_width
+                    _n = max(2, int((_d + track_width) / max(occ.res, 1e-3)))
+                    _free = True
+                    for _t in range(_n + 1):
+                        _sx = gx + (_tx - gx) * _t / _n
+                        _sy = gy + (_ty - gy) * _t / _n
+                        if math.hypot(_sx - gx, _sy - gy) < pad_half:
+                            continue
+                        _ix, _iy = occ.cell(_sx, _sy)
+                        if not occ.inside(_ix, _iy) or \
+                                occ.blocked(_li, _ix, _iy):
+                            _free = False
+                            break
+                    if _free:
+                        tracks.append({'start': (gx, gy), 'end': (_tx, _ty),
+                                       'width': track_width, 'layer': _lay,
+                                       'net_id': p.net_id})
+                        occ.block_segment(_li, (gx, gy), (_tx, _ty),
+                                          track_width / 2.0 + clearance)
+                        _net_seg_ends.setdefault(p.net_id, []).extend(
+                            [(gx, gy), (_tx, _ty)])
+                        n_ptrk[0] += 1
+                        r['pour_track'] = r.get('pour_track', 0) + 1
+                        continue
             # TRACK-CONNECT (env-gated, KICAD_FANOUT_TRACK_CONNECT=1 arms): a through-barrel here
             # perforates EVERY foreign pour whose fill covers this (x,y) --
             # the mechanism that shreds middle-layer rail planes. When it
@@ -2093,7 +2145,8 @@ def generate_underpad_escape(footprint: Footprint,
             plane_drop_report.update(
                 {'nets': _rep_nets, 'gap_vias': n_gap, 'pad_vias': n_ctr,
                  'skipped_existing': n_exist, 'skipped_pour': n_pour,
-                 'track_connects': n_trk[0], 'failed': n_fail})
+                 'track_connects': n_trk[0],
+                 'pour_tracks': n_ptrk[0], 'failed': n_fail})
         if verbose and drop_pads:
             per = ", ".join(f"{n} {c['gap']}+{c['in_pad']}"
                             for n, c in sorted(_rep_nets.items()))
@@ -2102,6 +2155,8 @@ def generate_underpad_escape(footprint: Footprint,
                       if n_pour else "")
             extra += (f", {n_trk[0]} track-connected (shared barrel)"
                       if n_trk[0] else "")
+            extra += (f", {n_ptrk[0]} pour-tracked (near-miss, no via)"
+                      if n_ptrk[0] else "")
             extra += f", {n_fail} FAILED (left for the plane tap)" if n_fail else ""
             print(f"  Plane drops (#424): {n_gap} gap + {n_ctr} in-pad vias "
                   f"[{per}]{extra}")
