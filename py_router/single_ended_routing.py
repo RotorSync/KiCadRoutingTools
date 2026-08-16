@@ -4088,6 +4088,13 @@ def _route_multipoint_taps_impl(
         print("  GridRouter not available")
         return None
 
+    # #658 power discipline: Phase-3 tap/MST-edge routing is the bulk of a
+    # power net's copper (measured: 65 of 82 segments) and previously
+    # bypassed the SE loop's per-net config chain -- the leak that kept
+    # power trunks on forbidden layers. Same soft override as the loop.
+    from global_plan import power_layer_config
+    config = power_layer_config(config, config, net_id)
+
     pad_info = main_result['multipoint_pad_info']
     routed_indices = set(main_result['routed_pad_indices'])
     mst_edges = main_result.get('mst_edges', [])
