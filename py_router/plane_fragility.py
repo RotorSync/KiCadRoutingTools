@@ -78,6 +78,30 @@ def fragility_cost_mm() -> float:
         return 2.0
 
 
+_LAYER_SCALE_CACHE = None
+
+
+def fragility_layer_scale(layer: str) -> float:
+    """Per-layer fragility multiplier (#658 pour-from-birth regime):
+    KICAD_PLANE_FRAGILITY_LAYERS='F.Cu=0,B.Cu=0.3' -- unlisted layers 1.0.
+    Scale 0 = a pour that signals may carve FREELY (an outer GND flood
+    whose fill reflows around routes costs nothing to cross); the sacred
+    planes keep full price. Parsed once per process."""
+    global _LAYER_SCALE_CACHE
+    if _LAYER_SCALE_CACHE is None:
+        m = {}
+        raw = os.environ.get('KICAD_PLANE_FRAGILITY_LAYERS', '')
+        for part in raw.split(','):
+            if '=' in part:
+                k, _, v = part.partition('=')
+                try:
+                    m[k.strip()] = max(0.0, float(v))
+                except ValueError:
+                    pass
+        _LAYER_SCALE_CACHE = m
+    return _LAYER_SCALE_CACHE.get(layer, 1.0)
+
+
 def _rasterize_polygon(poly, coord, gx0, gy0, W, H) -> np.ndarray:
     """Boolean (H, W) fill mask of a polygon via even-odd crossing test,
     vectorized one scanline row at a time (grid rows are few thousand)."""
@@ -224,7 +248,8 @@ class FragilityField:
             return
         jj, ii = np.nonzero(emitted)
         frag = 1.0 - (st.dist[jj, ii].astype(np.float64) - 1) / self.depth
-        costs = np.maximum(1, (frag * self.cell_cost).astype(np.int32))
+        costs = np.maximum(1, (frag * self.cell_cost
+                                * fragility_layer_scale(st.layer)).astype(np.int32))
         st.rows = np.column_stack([
             np.full(len(jj), st.li, dtype=np.int32),
             (ii + st.gx0).astype(np.int32),
@@ -447,7 +472,10 @@ def _compute_cells_and_states(pcb_data: PCBData, config: GridRouteConfig,
             continue
         jj, ii = np.nonzero(emitted)
         frag = 1.0 - (dist[jj, ii].astype(np.float64) - 1) / depth  # 1 at edge -> ~0 deep
-        cell_cost = config.cell_cost(cost_mm)
+        _lscale = fragility_layer_scale(zlayer)
+        if _lscale <= 0:
+            continue  # freely-carvable pour: no fragility rows, no state
+        cell_cost = config.cell_cost(cost_mm) * _lscale
         costs = np.maximum(1, (frag * cell_cost).astype(np.int32))
         zone_rows = np.column_stack([
             np.full(len(jj), li, dtype=np.int32),
