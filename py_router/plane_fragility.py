@@ -81,12 +81,14 @@ def fragility_cost_mm() -> float:
 _LAYER_SCALE_CACHE = None
 
 
-def fragility_layer_scale(layer: str) -> float:
-    """Per-layer fragility multiplier (#658 pour-from-birth regime):
-    KICAD_PLANE_FRAGILITY_LAYERS='F.Cu=0,B.Cu=0.3' -- unlisted layers 1.0.
-    Scale 0 = a pour that signals may carve FREELY (an outer GND flood
-    whose fill reflows around routes costs nothing to cross); the sacred
-    planes keep full price. Parsed once per process."""
+def fragility_layer_scale(layer: str, net_name: str = None) -> float:
+    """Per-zone-per-layer fragility multiplier (#658 pour-from-birth):
+    KICAD_PLANE_FRAGILITY_LAYERS='GND@F.Cu=0,B.Cu=0.3' -- entries are
+    either 'NET@LAYER=v' (that net's pours on that layer) or 'LAYER=v'
+    (every pour on the layer); most specific wins, unlisted = 1.0.
+    Scale 0 = a pour signals may carve FREELY (fill reflows around
+    routes, crossing costs nothing); sacred planes keep full price.
+    Parsed once per process."""
     global _LAYER_SCALE_CACHE
     if _LAYER_SCALE_CACHE is None:
         m = {}
@@ -99,6 +101,10 @@ def fragility_layer_scale(layer: str) -> float:
                 except ValueError:
                     pass
         _LAYER_SCALE_CACHE = m
+    if net_name is not None:
+        hit = _LAYER_SCALE_CACHE.get(f"{net_name}@{layer}")
+        if hit is not None:
+            return hit
     return _LAYER_SCALE_CACHE.get(layer, 1.0)
 
 
@@ -155,11 +161,13 @@ def _erode_depth(mask: np.ndarray, depth: int) -> np.ndarray:
 
 class _PourState:
     """Live raster of one filled pour island (dynamic mode)."""
-    __slots__ = ('li', 'layer', 'net_id', 'gx0', 'gy0', 'W', 'H',
+    __slots__ = ('li', 'layer', 'net_id', 'net_name', 'gx0', 'gy0', 'W', 'H',
                  'orig', 'mask', 'dist', 'rows')
 
-    def __init__(self, li, layer, net_id, gx0, gy0, mask, dist, rows):
+    def __init__(self, li, layer, net_id, gx0, gy0, mask, dist, rows,
+                 net_name=None):
         self.li, self.layer, self.net_id = li, layer, net_id
+        self.net_name = net_name
         self.gx0, self.gy0 = gx0, gy0
         self.H, self.W = mask.shape
         self.orig = mask            # fill as of batch start (never mutated)
@@ -249,7 +257,8 @@ class FragilityField:
         jj, ii = np.nonzero(emitted)
         frag = 1.0 - (st.dist[jj, ii].astype(np.float64) - 1) / self.depth
         costs = np.maximum(1, (frag * self.cell_cost
-                                * fragility_layer_scale(st.layer)).astype(np.int32))
+                                * fragility_layer_scale(
+                                    st.layer, st.net_name)).astype(np.int32))
         st.rows = np.column_stack([
             np.full(len(jj), st.li, dtype=np.int32),
             (ii + st.gx0).astype(np.int32),
@@ -472,7 +481,8 @@ def _compute_cells_and_states(pcb_data: PCBData, config: GridRouteConfig,
             continue
         jj, ii = np.nonzero(emitted)
         frag = 1.0 - (dist[jj, ii].astype(np.float64) - 1) / depth  # 1 at edge -> ~0 deep
-        _lscale = fragility_layer_scale(zlayer)
+        _zname = getattr(pcb_data.nets.get(znet), 'name', None)
+        _lscale = fragility_layer_scale(zlayer, _zname)
         if _lscale <= 0:
             continue  # freely-carvable pour: no fragility rows, no state
         cell_cost = config.cell_cost(cost_mm) * _lscale
@@ -486,7 +496,8 @@ def _compute_cells_and_states(pcb_data: PCBData, config: GridRouteConfig,
         rows.append(zone_rows)
         if want_states:
             states.append(_PourState(li, zlayer, znet, gx0, gy0,
-                                     mask, dist, zone_rows))
+                                     mask, dist, zone_rows,
+                                     net_name=_zname))
 
     if not rows:
         return np.empty((0, 4), dtype=np.int32), []
