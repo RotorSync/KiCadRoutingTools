@@ -1933,8 +1933,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
     # under-pad auto-fallback -- is a call to THIS function, so one check here
     # is the head of all of them. It returns an empty result rather than
     # raising: an exception here would be eaten by the `except Exception`
-    # swallowers this package is full of (krt_deadline's docstring names that
-    # as the reason for the cooperative contract). Nothing is added to
+    # swallowers this package is full of -- which is the reason the cancel
+    # contract is cooperative. Nothing is added to
     # failed_nets: no ball was tried, so nothing failed.
     if cancel_check and cancel_check():
         return [], [], [], []
@@ -2271,8 +2271,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
             # `failed_nets` artificially SHORT (untried balls are not failures)
             # -- so "fewer dropped balls" would read a truncated pass as the
             # better result and throw away the completed single pass's copper.
-            # Measured by neutering this guard and re-running ulx3s U1 at
-            # --deadline 4: the truncated pass WINS (`Under-pad escape wins:
+            # Measured by neutering this guard and re-running ulx3s U1 with a
+            # cancel fired ~4s in: the truncated pass WINS (`Under-pad escape wins:
             # 185 -> 0 dropped ball(s)`) and the run ships 0 signal escapes;
             # with the guard it ships 26. Keep the incumbent.
             if cancel_check and cancel_check():
@@ -3049,7 +3049,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
             # which is the opposite of what a truncated pass measured.
             #
             # The guard prefers the incumbent's copper over a truncated pass's
-            # silence. Measured on ulx3s U1 --deadline 4 by neutering it: with
+            # silence. Measured on ulx3s U1 (cancel ~4s in) by neutering it: with
             # the guard 26 balls escape (96 segments, 10 vias); without it the
             # truncated pass wins and 0 do (29 segments, 144 plane barrels).
             # It is WRONG when the completed engine would itself have discarded
@@ -3103,16 +3103,17 @@ def _generate_bga_fanout_core(footprint: Footprint,
 LAST_PLANE_DROP_REPORT: Dict = {}
 
 # #621: balls whose escape was never ATTEMPTED because this run's own
-# `cancel_check` (a --deadline) stopped it. Refreshed by every top-level
-# generate_bga_fanout call and EMPTY unless a cancel actually fired, so it is
-# published the same way LAST_PLANE_DROP_REPORT is.
+# `cancel_check` stopped it -- in practice the GUI's Cancel button or the plan
+# executor's Stop, the only cancel sources there are (the CLI passes None).
+# Refreshed by every top-level generate_bga_fanout call and EMPTY unless a
+# cancel actually fired, so it is published the same way LAST_PLANE_DROP_REPORT
+# is.
 #
 # Deliberately a separate ledger from failed_nets/unescaped_nets: an unfinished
 # search has measured nothing about a ball, and folding untried balls into the
-# failure list reports a budget as a routing defect -- the exact misreading
-# krt_deadline's docstring warns about and tests/test_deadline.py pins for
-# place_reconstruct.
-LAST_DEADLINE_SKIPPED: List[str] = []
+# failure list reports a cancel as a routing defect -- which would send the
+# planner (or the user) into a pointless tighter-clearance retry.
+LAST_CANCEL_SKIPPED: List[str] = []
 
 
 def fanout_candidate_nets(footprint: Footprint, pcb_data: PCBData,
@@ -3317,7 +3318,7 @@ def generate_bga_fanout(footprint: Footprint,
     (`batch_route` / `create_plane` take the same one). It is honoured at every
     escape pass head and at the under-pad engine's four escape loop heads. Balls
     escaped before it fired keep their tracks and vias; balls it never got to are
-    published as bga_fanout.LAST_DEADLINE_SKIPPED and are NOT in failed_nets.
+    published as bga_fanout.LAST_CANCEL_SKIPPED and are NOT in failed_nets.
     Passing None (the default, and what the GUI passes) is fully inert.
     """
     # Config-parity probe (#493). The plane engines have dumped their kwargs
@@ -3331,7 +3332,7 @@ def generate_bga_fanout(footprint: Footprint,
     # on both fronts, so pairing is unaffected.
     # cancel_check is dropped alongside the board payload (#621): it is a live
     # closure, not a routing parameter -- it cannot serialise, and the two
-    # fronts legitimately hold DIFFERENT objects there (a CLI deadline vs the
+    # fronts legitimately hold DIFFERENT objects there (None on the CLI vs the
     # GUI's Cancel button), so comparing it would report a permanent phantom
     # divergence. Dropping it also keeps the dumped key set byte-identical to
     # before this change.
@@ -3383,14 +3384,14 @@ def generate_bga_fanout(footprint: Footprint,
     # no copper from this call AND is not in failed_nets was never concluded:
     # that complement is the untried set, and it is published separately so an
     # unfinished search is never counted as a measured escape failure.
-    LAST_DEADLINE_SKIPPED.clear()
+    LAST_CANCEL_SKIPPED.clear()
     if _fired[0]:
         _live_ids = ({t.get('net_id') for t in tracks}
                      | {v.get('net_id') for v in vias_to_add})
         _live_names = {n.name for nid, n in pcb_data.nets.items()
                        if nid in _live_ids}
         _failed_names = set(failed_nets)
-        LAST_DEADLINE_SKIPPED.extend(
+        LAST_CANCEL_SKIPPED.extend(
             n for n in fanout_candidate_nets(footprint, pcb_data, net_filter)
             if n not in _live_names and n not in _failed_names)
 
@@ -3403,7 +3404,7 @@ def generate_bga_fanout(footprint: Footprint,
     # escape so signals keep first claim (the measured F-plan ordering). On a
     # cancelled run there is no finished signal escape for it to come after, so
     # running it anyway inverts that ordering and ships a board of plane barrels
-    # with no escapes -- measured on ulx3s U1 at --deadline 4: 115 via-in-pad
+    # with no escapes -- measured on ulx3s U1 (cancel ~4s in): 115 via-in-pad
     # drops, 0 escapes, 47 pad-via grazes. Skip it and say so.
     if _enabled and _fired[0]:
         print("  Plane drops (#424): SKIPPED -- the signal escape was "
@@ -3512,26 +3513,6 @@ def main():
     # meeting a 0.25mm via pad), and this step had no way to ask for one.
     parser.add_argument('--add-teardrops', action='store_true',
                         help='Add teardrop settings to all pads and vias in the output file')
-    parser.add_argument('--deadline', type=float, default=None, metavar='SECONDS',
-                        help='Wall-clock budget for the ESCAPE PASSES. Not a hard '
-                             'cap on total runtime -- the cancel is cooperative and '
-                             'the bounded tail (write, DRC audit, .kicad_pro '
-                             'writeback) still runs -- so expect to overshoot. What '
-                             'it guarantees is TERMINATION on THIS tool\'s terms: it '
-                             'stops between balls, writes the escapes it has, and '
-                             'prints a JSON_SUMMARY carrying complete=false / '
-                             'status=deadline (with the untried balls in '
-                             'deadline_skipped, NOT in unescaped_nets; a cancel '
-                             'that lands MID-RESCUE keeps the abandoned balls in '
-                             'unescaped_nets and counts them in '
-                             'deadline_unrescued) before '
-                             'exiting 7. Without it an external kill on Windows is '
-                             'TerminateProcess, which leaves NO summary and NO exit '
-                             'code of ours. ANY harness with an external timeout '
-                             'should pass this at ~0.8x its own. Default: no budget '
-                             '(a wall-clock default would break replay '
-                             'determinism). Env: KRT_DEADLINE_S')
-
     from fab_tiers import (add_fab_tier_args, fab_tier_from_args, set_default_fab_tier,
                            enforce_fab_floors, count_copper_layers_in_file)
     add_fab_tier_args(parser)
@@ -3610,23 +3591,13 @@ def main():
         print("  Set KICAD_ALLOW_STAGGERED_BGA=1 to run anyway.")
         return 1
 
-    # #621: the deadline is ONE closure into plumbing the engine now has --
-    # `cancel_check` is honoured at every escape pass head and at the under-pad
-    # engine's four escape loop heads, and the write branch below still runs on
-    # cancel, so a cancelled run yields a real partial escape rather than
-    # nothing. No reserve band: unlike the plane loops, this tail is bounded and
-    # short (write + DRC audit + writeback), and a 0.2x reserve on the small
-    # budgets a fanout gets would just cancel every run before it started.
-    import krt_deadline
-    _dl_report = {'tool': 'bga_fanout.py', 'board': args.pcb,
-                  'component': args.component}
-    _dl = krt_deadline.arm(args.deadline, tool='bga_fanout',
-                           on_partial=lambda: _dl_report)
-
+    # #621: the CLI passes no cancel_check. The engine's cooperative cancel is
+    # the GUI's (its Cancel button / the plan executor's Stop); a CLI-side
+    # wall-clock budget was removed deliberately -- no result this tool produces
+    # may depend on timing, or the same command stops producing the same board.
     tracks, vias_to_add, vias_to_remove, _failed_nets = generate_bga_fanout(
         footprint,
         pcb_data,
-        cancel_check=(_dl.cancel_check('bga escape') if _dl else None),
         net_filter=args.nets,
         diff_pair_patterns=args.diff_pairs,
         layers=args.layers,
@@ -3678,6 +3649,7 @@ def main():
     # retry at a tighter clearance - instead of scraping per-net FAILED lines.
     # `requested` = balls actually attempted (escaped + dropped); skipped power
     # balls and already-fanned nets are not counted. (issue #122)
+    import json as _json
     # #424 D2: plane-drop stubs are taps, not escapes -- keep their nets out
     # of the requested/escaped ledger (they were never requested).
     _drop_names = set((LAST_PLANE_DROP_REPORT.get('nets') or {}).keys())
@@ -3688,35 +3660,12 @@ def main():
                        and t['net_id'] not in _drop_ids}
     unescaped = sorted(set(_failed_nets))
     escaped = len(escaped_net_ids)
-    # #621: balls the run's own budget never got to. EMPTY on every run that was
-    # not cancelled, so `requested` is unchanged there. On a cancelled run they
-    # ARE part of what was requested (they just weren't tried), which is what
-    # makes the partial ledger add up: requested == escaped + failed + skipped.
-    deadline_skipped = list(LAST_DEADLINE_SKIPPED)
-    requested = escaped + len(unescaped) + len(deadline_skipped)
-    # #621: on a CANCELLED run `unescaped_nets` is NOT a measured escape-failure
-    # list, and the tighter-clearance advice below would be exactly the
-    # misdiagnosis this flag exists to prevent. The channel pass is
-    # UNINTERRUPTIBLE -- once it starts it runs to completion and files every
-    # ball it could not route into failed_nets -- while the passes that actually
-    # RECOVER those balls (the under-pad rescue, escape priority) are cancelled
-    # at their heads. Measured on ulx3s U1: the completed run goes
-    # `Channel escape dropped 185` -> `Under-pad escape wins: 185 -> 104` ->
-    # `Escape priority wins: 104 -> 5`, so `--deadline 4` ships 185 "failures"
-    # of which 180 the finished engine rescues. They STAY in unescaped_nets (a
-    # pass really did drop them -- moving them to deadline_skipped would erase
-    # that measurement), but the count is disclosed as `deadline_unrescued` and
-    # the advice is replaced by the one a cancelled run can honestly give.
-    deadline_unrescued = (len(unescaped)
-                          if (_dl is not None and _dl.stopped_in) else 0)
-    if deadline_unrescued:
-        print(f"\n  {deadline_unrescued} ball(s) are listed in unescaped_nets "
-              f"because a pass whose RESCUE never ran dropped them -- this run "
-              f"was cut short by --deadline. They are NOT measured clearance "
-              f"failures: do not retry at a smaller --clearance on this "
-              f"evidence. Re-run with a larger budget (or none) to find out "
-              f"what they really are.")
-    elif unescaped:
+    # The CLI never cancels (#621: no --deadline, no other CLI cancel source),
+    # so LAST_CANCEL_SKIPPED is empty here by construction and every ball was
+    # concluded one way or the other. The partial-ledger arithmetic lives in the
+    # engine for the GUI, which does have a cancel.
+    requested = escaped + len(unescaped)
+    if unescaped:
         print(f"\n  {len(unescaped)} of {requested} requested ball(s) could NOT be "
               f"escaped at --clearance {args.clearance}mm / --track-width "
               f"{args.track_width}mm and were DROPPED from the output. Retry the "
@@ -3795,66 +3744,7 @@ def main():
         # empty when the pass is off or the part has no plane balls.
         'plane_drop': dict(LAST_PLANE_DROP_REPORT),
     }
-    # #621: only present on a run its own budget cut short. NOT merged into
-    # unescaped_nets -- these balls were never tried, so calling them escape
-    # failures would report a budget as a routing defect and send the planner
-    # into a pointless tighter-clearance retry.
-    if deadline_skipped:
-        summary['deadline_skipped'] = deadline_skipped
-    # #621: how many of `failed` / `unescaped_nets` this CANCELLED run cannot
-    # vouch for -- balls a pass dropped whose rescue pass never ran. Absent on
-    # every uncancelled run, and on a cancelled run it equals `failed` (the
-    # dominant cancel lands mid-rescue, not at the first pass head). This is the
-    # key a consumer must read before treating `unescaped_nets` as evidence
-    # about clearance: `deadline_skipped` alone is 0 on exactly the runs that
-    # abandoned the most work.
-    if deadline_unrescued:
-        summary['deadline_unrescued'] = deadline_unrescued
-
-    # Emit through krt_deadline, NOT a raw print (#621). `_emitted` is set only
-    # inside krt_deadline.emit(), so a bare print leaves it False and the atexit
-    # flush then publishes the contentless partial report armed at --deadline
-    # time -- a SECOND, contradicting `{"complete": false, "status":
-    # "incomplete"}` line after the real one, which any consumer keying on the
-    # LAST JSON_SUMMARY reads as a failed run. (Measured in
-    # route_disconnected_planes, run 11.)
-    #
-    # The gate is `stopped_in`, i.e. "a cancel actually fired", NOT `expired()`.
-    # There is no reserve band here, so a run whose escape passes all completed
-    # can still cross the wall clock inside the bounded tail (write, DRC audit,
-    # writeback). That run is COMPLETE -- every requested ball was concluded --
-    # and reporting it as a deadline partial would be the same confusion in the
-    # opposite direction.
-    if _dl is not None and _dl.stopped_in:
-        krt_deadline.stamp(summary)
-        _dl_report.update(summary)
-        krt_deadline.emit(summary, complete=False, status='deadline',
-                          deadline=_dl)
-        # Partial-board policy, following route_planes rather than
-        # place_reconstruct: WRITE the output and say loudly that it is partial.
-        # place_reconstruct stages its board because its output path is a
-        # finished-placement contract; fanout is a CHAIN step whose successor
-        # (route.py) consumes the output path by name, so withholding the file
-        # breaks the chain at a different point instead of degrading it.
-        # #621: "N never tried" ALONE is a misleading headline. The dominant
-        # cancel lands mid-rescue, where deadline_skipped is 0 and every
-        # abandoned ball sits in unescaped_nets -- ulx3s U1 at --deadline 4
-        # rendered as "26 escaped, 0 never tried" while the summary carried 185
-        # failures. Name the unrescued balls in the same breath.
-        _unresc = (f", {deadline_unrescued} dropped by a pass whose RESCUE "
-                   f"never ran (NOT clearance failures)"
-                   if deadline_unrescued else "")
-        print(f"\033[91mDEADLINE: this run stopped on its own budget after "
-              f"{_dl.elapsed():.0f}s of {_dl.seconds:g}s"
-              + (f" (in {_dl.stopped_in})" if _dl.stopped_in else "")
-              + f". The board at {out_path or '(none)'} is a PARTIAL fanout: "
-              f"{escaped} ball(s) escaped{_unresc}, {len(deadline_skipped)} "
-              f"never tried. Real, DRC-graded copper -- but the escape did not "
-              f"finish, so do not read it as complete.\033[0m")
-        return krt_deadline.DEADLINE_EXIT
-
-    _dl_report.update(summary)
-    krt_deadline.emit(summary)
+    print(f"JSON_SUMMARY: {_json.dumps(summary)}")
     return 0
 
 

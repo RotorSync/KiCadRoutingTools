@@ -1015,10 +1015,14 @@ class PlanExecutor:
     def stop(self):
         """Stop before the next step starts AND cancel the step running right
         now: the owning tab's _cancel_requested flag feeds the engines'
-        cancel_check (plane create/repair, batch_route, route_diff), so the
-        running operation aborts at its next safe boundary instead of being
-        waited out (#364 follow-up). Tabs without a cancel flag (fanout) just
-        run their step to completion as before."""
+        cancel_check (plane create/repair, batch_route, route_diff, and since
+        #621 both fanout engines), so the running operation aborts at its next
+        safe boundary instead of being waited out (#364 follow-up).
+
+        Every tab this executor drives now carries the flag. The fanout tab is
+        the one whose step runs SYNCHRONOUSLY on the UI thread, so its own
+        cancel_check pumps the event loop to make this reachable -- see
+        FanoutTab._make_cancel_check."""
         self._stop_requested = True
         owner = self._action_owner(self._current_action) \
             if self._current_action else None

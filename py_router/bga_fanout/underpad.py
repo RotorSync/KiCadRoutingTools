@@ -354,15 +354,15 @@ def generate_underpad_escape(footprint: Footprint,
     Cancellation (#621): `cancel_check` is a zero-arg predicate honoured at the
     head of the four escape loops (top-layer coupled pairs, the outside-in
     surface phase, the inner coupled pairs, the inner single balls) -- the same
-    contract `batch_route` / `create_plane` already take, so a deadline here is
-    `krt_deadline.Deadline.cancel_check(...)` and nothing new. It BREAKS the
-    loop; it never raises (an exception dies in this package's `except
-    Exception` swallowers, which is the silent failure the deadline exists to
-    remove). Balls already escaped keep their copper; balls the cancel never got
+    contract `batch_route` / `create_plane` already take, so the GUI's Cancel
+    button reaches this and nothing new is needed. It BREAKS the loop; it never
+    raises (an exception dies in this package's `except Exception` swallowers,
+    which is the silent failure the cooperative contract exists to remove).
+    Balls already escaped keep their copper; balls the cancel never got
     to are simply absent from BOTH the emitted copper and the returned failed
     list -- an unfinished search has measured nothing, so reporting it as a
-    routing failure is exactly the misreading `krt_deadline` warns about. The
-    caller names that complement (`bga_fanout.LAST_DEADLINE_SKIPPED`).
+    routing failure is exactly the misreading to avoid. The
+    caller names that complement (`bga_fanout.LAST_CANCEL_SKIPPED`).
     """
     ref = footprint.reference
     fp_pads = [p for p in footprint.pads if p.net_id]
