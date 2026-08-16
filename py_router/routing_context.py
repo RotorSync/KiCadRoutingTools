@@ -296,9 +296,6 @@ def build_single_ended_obstacles(
         print(f"    [river-prox] net {net_id}: {len(_sibs)} sibs, "
               f"cache={len(track_proximity_cache)} entries "
               f"({_in_cache} sib entries filtered)")
-    if _sibs:
-        stub_proximity_net_ids = [nid for nid in stub_proximity_net_ids
-                                  if nid not in _sibs]
     unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
     chip_pads = get_chip_pad_positions(pcb_data, stub_proximity_net_ids)
     all_stubs = unrouted_stubs + chip_pads
@@ -396,8 +393,6 @@ def build_incremental_obstacles(
     from global_plan import river_sibling_ids
     _sibs = river_sibling_ids(config, net_id)
     if _sibs:
-        stub_proximity_net_ids = [nid for nid in stub_proximity_net_ids
-                                  if nid not in _sibs]
         import os as _ros
         if _ros.environ.get('KICAD_RIVER_PROX_DEBUG'):
             _hit = sum(1 for k in track_proximity_cache if k in _sibs)
@@ -512,8 +507,6 @@ def prepare_obstacles_inplace(
     from global_plan import river_sibling_ids
     _sibs = river_sibling_ids(config, net_id)
     if _sibs:
-        stub_proximity_net_ids = [nid for nid in stub_proximity_net_ids
-                                  if nid not in _sibs]
         import os as _ros
         if _ros.environ.get('KICAD_RIVER_PROX_DEBUG'):
             _hit = sum(1 for k in track_proximity_cache if k in _sibs)
