@@ -315,6 +315,9 @@ def refresh() -> None:
         # its predecessor's REALIZED copper (follow-the-leader packing).
         'river': _opt_in('KICAD_GLOBAL_PLAN_RIVER'),
         'river_debug': _opt_in('KICAD_GLOBAL_PLAN_RIVER_DEBUG'),
+        # #658 power discipline: per-layer cost MULTIPLIERS for power nets
+        # (space list aligned with --layers; -1 forbids; '' = off).
+        'power_layer_costs': _s('KICAD_POWER_LAYER_COSTS', ''),
         'swaps': _opt_in('KICAD_GLOBAL_PLAN_SWAPS'),
         # Layer-assignment source: 'clique' = round-robin across each
         # share-clique's viable layers (v1; built for BLIND probes that all

@@ -477,6 +477,40 @@ def plan_layer_config(cfg_route, config, net_id):
     return replace(cfg_route, layer_costs=base)
 
 
+def power_layer_config(cfg_route, config, net_id):
+    """#658 power discipline (KICAD_POWER_LAYER_COSTS): per-net layer-cost
+    override for POWER nets (config.power_net_widths members). The human
+    reference keeps power tracks OFF the signal highways and the plane
+    layer (In1/In2/In4 carry 14/16/14mm vs our 111/48/103) and pays vias
+    to dive instead; our main-pass power trunks squat exactly the
+    corridors the last signals die in, and carve the GND plane. The knob
+    is a space-separated per-layer multiplier list aligned with --layers
+    (applied ON TOP of the base costs; -1 forbids). Empty/off = no change.
+    Applies only to the MAIN-pass routing config -- finalize weld/tap legs
+    build their own configs and still reach plane layers for taps."""
+    k = env_knobs.GLOBAL_PLAN.get('power_layer_costs')
+    if not k:
+        return cfg_route
+    pw = getattr(config, 'power_net_widths', None) or {}
+    if net_id not in pw:
+        return cfg_route
+    try:
+        mults = [float(x) for x in k.split()]
+    except ValueError:
+        return cfg_route
+    base = list(cfg_route.layer_costs or []) or [1.0] * len(cfg_route.layers)
+    while len(base) < len(cfg_route.layers):
+        base.append(1.0)
+    out = []
+    for i in range(len(base)):
+        m = mults[i] if i < len(mults) else 1.0
+        if m < 0 or base[i] < 0:
+            out.append(-1.0)
+        else:
+            out.append(base[i] * m)
+    return replace(cfg_route, layer_costs=out)
+
+
 def apply_plan_layer_swaps(pcb_data, config, plan: GlobalPlan,
                            net_ids: List[Tuple[str, int]],
                            all_segment_modifications: List,

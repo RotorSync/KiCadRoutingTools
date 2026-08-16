@@ -692,8 +692,11 @@ def route_single_ended_nets(
         # instead of all fighting for the probes' shared favorite layer.
         # Unchanged cfg_route when the plan/knob is off or the net has no
         # assignment.
-        from global_plan import plan_layer_config
+        from global_plan import plan_layer_config, power_layer_config
         cfg_route = plan_layer_config(cfg_route, config, net_id)
+        # #658 power discipline: power nets get their own layer economics
+        # (off the highways, dive-fast) -- see power_layer_config.
+        cfg_route = power_layer_config(cfg_route, config, net_id)
         # #572: oracle forced links outrank endpoint derivation -- the
         # model's zone credit merges the exact-fill clusters, so both the
         # multipoint and plain derivations "see" no gap and succeed with
