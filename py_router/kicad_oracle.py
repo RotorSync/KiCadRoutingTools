@@ -1825,9 +1825,46 @@ def oracle_reconnect(board_file: str, net_names, config,
                     # itself unconnected AND violates edge clearance). Walk
                     # toward a point BOTH fills actually cover.
                     try:
-                        from plane_fill_model import get_fill_models
-                        _ma = get_fill_models(pcb_data, net_id).get(al, [])
-                        _mb = get_fill_models(pcb_data, net_id).get(bl, [])
+                        # #648: KiCad's EXACT fill islands are the truth --
+                        # the raster model covers corner slivers the real
+                        # fill (pullback/clearance rules) does not
+                        # (measured: a both-models-covered point whose via
+                        # still missed the F.Cu fill). Use the oracle's
+                        # already-fetched exact map; raster is the fallback.
+                        _exm649 = None
+                        try:
+                            _exm649 = _exact_islands_map()
+                        except Exception:
+                            _exm649 = None
+                        if _exm649 is not None:
+                            from kicad_exact_fill import point_in_poly \
+                                as _pip649
+                            _pa649 = [pp for (nn, ll), ps in _exm649.items()
+                                      if nn == net_name and ll == al
+                                      for pp in ps]
+                            _pb649 = [pp for (nn, ll), ps in _exm649.items()
+                                      if nn == net_name and ll == bl
+                                      for pp in ps]
+
+                            class _PolyProbe:
+                                def __init__(self, polys):
+                                    self._p = polys
+
+                                def query_component(self, x, y, size=0.0):
+                                    r = size / 2.0 * 0.8
+                                    pts = [(x, y), (x + r, y), (x - r, y),
+                                           (x, y + r), (x, y - r)]
+                                    for i, poly in enumerate(self._p):
+                                        if all(_pip649(px, py, poly)
+                                               for px, py in pts):
+                                            return i + 1
+                                    return 0
+                            _ma = [_PolyProbe(_pa649)] if _pa649 else []
+                            _mb = [_PolyProbe(_pb649)] if _pb649 else []
+                        else:
+                            from plane_fill_model import get_fill_models
+                            _ma = get_fill_models(pcb_data, net_id).get(al, [])
+                            _mb = get_fill_models(pcb_data, net_id).get(bl, [])
                         _bb = pcb_data.board_info.board_bounds
                         _bec = getattr(config, 'board_edge_clearance', 0.3) \
                             + config.via_size / 2.0
