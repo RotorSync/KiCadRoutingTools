@@ -101,10 +101,22 @@ def _foreign_pad_arrays(pcb_data, layer):
     the nudge passes re-bent tracks INTO the pad). `ext_x`/`ext_y` are the
     global-axis half-extents of the (possibly tilted) rect for windowing; equal
     to half_x/half_y for axis-aligned pads. Returns ten parallel arrays."""
+    # #665: version the cache on the pads_by_net IDENTITY (+ pad count).
+    # The docstring's "pads never change" was true of the FULL board, but a
+    # windowed shallow copy (plane_pad_tap) REBINDS pads_by_net to a subset
+    # while SHARING this cache dict -- its per-layer rebuild then poisoned
+    # the parent's cache with window-only pad arrays, and later full-board
+    # clearance checks (the cleanup passes' clears()) accepted copper
+    # STRAIGHT THROUGH the invisible pads (the 24 pad-segment violations on
+    # the iteration boards). Mirror the seg/via caches: signature tuple +
+    # setattr REBIND on mismatch, so each pcb_data view owns its arrays.
+    _sig = (id(pcb_data.pads_by_net),
+            sum(len(v) for v in pcb_data.pads_by_net.values()))
     cache = getattr(pcb_data, '_foreign_pad_arr_cache', None)
-    if cache is None:
-        cache = {}
+    if cache is None or not isinstance(cache, tuple) or cache[0] != _sig:
+        cache = (_sig, {})
         pcb_data._foreign_pad_arr_cache = cache
+    cache = cache[1]
     arr = cache.get(layer)
     if arr is None:
         nids, cx, cy, hx, hy, cr = [], [], [], [], [], []
