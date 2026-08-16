@@ -303,6 +303,13 @@ def refresh() -> None:
         # layers).
         'layer': _s('KICAD_GLOBAL_PLAN_LAYER', ''),     # '' off | 'pref'
         'layer_discount': _f('KICAD_GLOBAL_PLAN_LAYER_DISCOUNT', 0.7),
+        # #658: emit each assigned net's ATTRACTION lane on its home layer
+        # (the #656 potential does the pulling the soft discount cannot).
+        'attract_home': _opt_in('KICAD_GLOBAL_PLAN_ATTRACT_HOME'),
+        # #658: multiply NON-home cheap layers' step costs for assigned
+        # nets (defection tax; 1.0 = off). The discount alone is proven
+        # too weak to pack buses.
+        'layer_tax': _f('KICAD_GLOBAL_PLAN_LAYER_TAX', 1.0),
         'swaps': _opt_in('KICAD_GLOBAL_PLAN_SWAPS'),
         # Layer-assignment source: 'clique' = round-robin across each
         # share-clique's viable layers (v1; built for BLIND probes that all

@@ -459,6 +459,13 @@ def plan_layer_config(cfg_route, config, net_id):
     if base[li] < 0:
         return cfg_route
     base[li] = base[li] * d
+    # #658 defection tax: non-home CHEAP layers get more expensive for this
+    # net (never touches forbidden or already-expensive overflow layers).
+    tax = env_knobs.GLOBAL_PLAN.get('layer_tax', 1.0)
+    if tax and tax != 1.0:
+        for i in range(len(base)):
+            if i != li and 0 <= base[i] <= 1.0:
+                base[i] = base[i] * tax
     return replace(cfg_route, layer_costs=base)
 
 
@@ -925,13 +932,26 @@ def plan_attraction_path(config, net_id):
     path = plan.rough_paths.get(net_id)
     if not path or len(path) < 2:
         return None
+    # #658 attract-home (KICAD_GLOBAL_PLAN_ATTRACT_HOME=1): when the net
+    # has a plan layer assignment (bus home-packing / clique), emit the
+    # attraction lane ON THE HOME LAYER regardless of the probe's layers --
+    # the #656 potential then peaks there and its via edges collect the
+    # dive bonus onto the home. This is the STRONG pull the soft step-cost
+    # discount is not: three independent measurements show the discount
+    # losing to congestion economics (members settle on non-home layers),
+    # while #656 shaping demonstrably wins contested tails.
+    home = None
+    if env_knobs.GLOBAL_PLAN.get('attract_home'):
+        home = plan.layer_pref.get(net_id)
     dense = []
     for (x1, y1, l1), (x2, y2, l2) in zip(path, path[1:]):
-        dense.append((x1, y1, l1))
+        L1 = home if home is not None else l1
+        dense.append((x1, y1, L1))
         if l1 == l2 and (x1, y1) != (x2, y2):
-            dense.extend((gx, gy, l1)
+            dense.extend((gx, gy, L1)
                          for gx, gy in walk_line(x1, y1, x2, y2))
-    dense.append(path[-1])
+    lx, ly, ll = path[-1]
+    dense.append((lx, ly, home if home is not None else ll))
     return dense
 
 
