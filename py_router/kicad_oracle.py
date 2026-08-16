@@ -1809,61 +1809,97 @@ def oracle_reconnect(board_file: str, net_names, config,
                           f"via -- same-layer copper cannot join them, "
                           f"#649)")
                     _esc = None
-                    # #649b: an xy-coincident cross-layer ZONE link is the
-                    # stitching-via case -- both fills cover this point, so
-                    # ONE legal through-via joins them (measured: the last
-                    # GND splits on the campaign boards were exactly this,
-                    # re-reported every round while the guard correctly
-                    # refused the vialess weld and nothing tried the via).
-                    if abs(ax - bx) < 0.2 and abs(ay - by) < 0.2:
-                        _vx, _vy = (ax + bx) / 2.0, (ay + by) / 2.0
-                        _vr = config.via_size / 2.0
-                        _vdr = config.via_drill / 2.0
-                        _h2h = getattr(config, 'hole_to_hole_clearance', 0.2)
-                        from geometry_utils import (
-                            point_to_segment_distance as _p2s649)
-                        _ok649 = True
-                        for _s2 in pcb_data.segments:
-                            if _s2.net_id != net_id and _p2s649(
-                                    _vx, _vy, _s2.start_x, _s2.start_y,
-                                    _s2.end_x, _s2.end_y) <                                     _vr + _s2.width / 2 + config.clearance:
+                # #649b: an xy-coincident cross-layer ZONE link is the
+                # stitching-via case -- both fills cover this point, so
+                # ONE legal through-via joins them (measured: the last
+                # GND splits on the campaign boards were exactly this,
+                # re-reported every round while the guard correctly
+                # refused the vialess weld and nothing tried the via).
+                if ((_esc is None or _esc.get('failed')) and al and bl
+                        and al != bl and abs(ax - bx) < 0.2
+                        and abs(ay - by) < 0.2):
+                    _vx, _vy = (ax + bx) / 2.0, (ay + by) / 2.0
+                    # The coincident endpoint is the islands' NEAREST-
+                    # APPROACH anchor (often the board corner) -- neither
+                    # fill necessarily covers it (measured: a via there is
+                    # itself unconnected AND violates edge clearance). Walk
+                    # toward a point BOTH fills actually cover.
+                    try:
+                        from plane_fill_model import get_fill_models
+                        _ma = get_fill_models(pcb_data, net_id).get(al, [])
+                        _mb = get_fill_models(pcb_data, net_id).get(bl, [])
+                        _bb = pcb_data.board_info.board_bounds
+                        _bec = getattr(config, 'board_edge_clearance', 0.3) \
+                            + config.via_size / 2.0
+                        _found = None
+                        for _r in [0.0, 0.3, 0.6, 1.0, 1.5, 2.0, 3.0]:
+                            for _th in range(0, 360, 30):
+                                _px = _vx + _r * math.cos(math.radians(_th))
+                                _py = _vy + _r * math.sin(math.radians(_th))
+                                if _bb and not (_bb[0] + _bec <= _px <= _bb[2] - _bec
+                                                and _bb[1] + _bec <= _py <= _bb[3] - _bec):
+                                    continue
+                                if any((m.query_component(_px, _py,
+                                                          size=config.via_size) or 0) > 0
+                                       for m in _ma) and \
+                                   any((m.query_component(_px, _py,
+                                                          size=config.via_size) or 0) > 0
+                                       for m in _mb):
+                                    _found = (_px, _py)
+                                    break
+                            if _found:
+                                break
+                        if _found:
+                            _vx, _vy = _found
+                    except Exception:
+                        pass
+                    _vr = config.via_size / 2.0
+                    _vdr = config.via_drill / 2.0
+                    _h2h = getattr(config, 'hole_to_hole_clearance', 0.2)
+                    from geometry_utils import (
+                        point_to_segment_distance as _p2s649)
+                    _ok649 = True
+                    for _s2 in pcb_data.segments:
+                        if _s2.net_id != net_id and _p2s649(
+                                _vx, _vy, _s2.start_x, _s2.start_y,
+                                _s2.end_x, _s2.end_y) <                                     _vr + _s2.width / 2 + config.clearance:
+                            _ok649 = False
+                            break
+                    if _ok649:
+                        for _v2 in pcb_data.vias:
+                            _d2 = math.hypot(_v2.x - _vx, _v2.y - _vy)
+                            if _d2 < _vdr + (_v2.drill or 0) / 2 + _h2h:
                                 _ok649 = False
                                 break
-                        if _ok649:
-                            for _v2 in pcb_data.vias:
-                                _d2 = math.hypot(_v2.x - _vx, _v2.y - _vy)
-                                if _d2 < _vdr + (_v2.drill or 0) / 2 + _h2h:
+                            if _v2.net_id != net_id and _d2 <                                         _vr + _v2.size / 2 + config.clearance:
+                                _ok649 = False
+                                break
+                    if _ok649:
+                        for _fp2 in pcb_data.footprints.values():
+                            for _pd2 in _fp2.pads:
+                                _d2 = math.hypot(_pd2.global_x - _vx,
+                                                 _pd2.global_y - _vy)
+                                if _pd2.net_id != net_id and _d2 < _vr +                                             max(_pd2.size_x, _pd2.size_y) / 2                                             + config.clearance:
                                     _ok649 = False
                                     break
-                                if _v2.net_id != net_id and _d2 <                                         _vr + _v2.size / 2 + config.clearance:
+                                if _pd2.drill and _pd2.drill > 0 and                                             _d2 < _vdr + _pd2.drill / 2 + _h2h:
                                     _ok649 = False
                                     break
-                        if _ok649:
-                            for _fp2 in pcb_data.footprints.values():
-                                for _pd2 in _fp2.pads:
-                                    _d2 = math.hypot(_pd2.global_x - _vx,
-                                                     _pd2.global_y - _vy)
-                                    if _pd2.net_id != net_id and _d2 < _vr +                                             max(_pd2.size_x, _pd2.size_y) / 2                                             + config.clearance:
-                                        _ok649 = False
-                                        break
-                                    if _pd2.drill and _pd2.drill > 0 and                                             _d2 < _vdr + _pd2.drill / 2 + _h2h:
-                                        _ok649 = False
-                                        break
-                                if not _ok649:
-                                    break
-                        if _ok649:
-                            from kicad_parser import Via as _Via649
-                            _esc = {'failed': False, 'new_segments': [],
-                                    'new_vias': [_Via649(
-                                        x=_vx, y=_vy, size=config.via_size,
-                                        drill=config.via_drill,
-                                        layers=[routing_layers[0],
-                                                routing_layers[-1]],
-                                        net_id=net_id)]}
-                            _esc_cfg = config
-                            print(f"    {net_name}: stitching via placed at "
-                                  f"({_vx:.2f},{_vy:.2f}) joining "
-                                  f"{al}<->{bl} (#649b)")
+                            if not _ok649:
+                                break
+                    if _ok649:
+                        from kicad_parser import Via as _Via649
+                        _esc = {'failed': False, 'new_segments': [],
+                                'new_vias': [_Via649(
+                                    x=_vx, y=_vy, size=config.via_size,
+                                    drill=config.via_drill,
+                                    layers=[routing_layers[0],
+                                            routing_layers[-1]],
+                                    net_id=net_id)]}
+                        _esc_cfg = config
+                        print(f"    {net_name}: stitching via placed at "
+                              f"({_vx:.2f},{_vy:.2f}) joining "
+                              f"{al}<->{bl} (#649b)")
                 if _esc and not _esc.get('failed'):
                     _esegs = _esc.get('new_segments') or []
                     _evias = _esc.get('new_vias') or []
