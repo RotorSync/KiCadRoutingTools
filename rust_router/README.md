@@ -311,6 +311,16 @@ src/
 
 ## Version History
 
+
+### 0.21.0 (2026-08-16)
+- #656: `attraction_potential` parameter on `GridRouter` -- potential-based
+  path-attraction shaping. phi(x, y, layer) peaks at the lane on its layer,
+  quadratic falloff over `attraction_radius`, cross-layer states hold
+  `attraction_cross_layer_pct` percent. Lateral and VIA edges are charged
+  `cost - (phi(next) - phi(prev))` with positive floors: cycles always cost
+  > 0 (no loop farming), constant-potential travel earns nothing (no meander
+  reward), and a via onto the lane's layer collects a one-time jump that can
+  compete with `via_cost`. 0 (default) = bit-identical legacy behavior.
 - **0.20.1**: **`via_proximity_cost 0` = no extra cost, ban mode removed.**
   0 used to hard-block vias in stub/BGA proximity zones -- the only knob whose
   0 was its strongest setting (and a ~200x CPU hazard). 0 now means "no extra

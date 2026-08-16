@@ -317,6 +317,11 @@ def refresh() -> None:
         # plan had no consumer. Bus corridors take precedence for bus
         # members.
         'attract': _opt_in('KICAD_GLOBAL_PLAN_ATTRACT'),
+        # #656 potential-based attraction strength (cost units of the
+        # potential's PEAK; 0 = legacy discount-only). Loop-proof by
+        # construction (see rust GridRouter.attraction_potential). Sized
+        # against via_cost: ~60-70 lets a planned dive outbid a 75 via.
+        'attract_potential': _i('KICAD_ATTRACT_POTENTIAL', 0),
         # Front-load list (#589 escape-risk ordering experiment): a file of
         # net names (one per line); listed nets move to the FRONT of their
         # #472 partition block in file order, others keep relative order.
