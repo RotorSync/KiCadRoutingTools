@@ -316,7 +316,8 @@ def generate_underpad_escape(footprint: Footprint,
                              # per-ball A* is where a large array's minutes go,
                              # so each escape loop reports its count through
                              # here (GUI status line). None = silent (CLI).
-                             progress_callback=None
+                             progress_callback=None,
+                             cancel_check=None
                              ) -> Tuple[List[Dict], List[Dict], List[str]]:
     """Route BGA signal balls to the boundary under the pad field.
 
@@ -1550,6 +1551,8 @@ def generate_underpad_escape(footprint: Footprint,
     coupled_targets.sort(key=lambda t: depth(t[1]) + depth(t[2]))
     remaining_pairs = []
     for _ci, (base, pp, nn) in enumerate(coupled_targets):
+        if cancel_check and cancel_check():    # #621
+            break
         _prog(_ci + 1, len(coupled_targets), f"coupled pair {base}")
         if (try_coupled(pp, nn, [(top_idx, False)])
                 or try_coupled_endon(pp, nn, [(top_idx, False)])):
@@ -1573,6 +1576,10 @@ def generate_underpad_escape(footprint: Footprint,
         inner_pads = []
         _order = sorted(single_pads, key=depth)
         for _si, p in enumerate(_order):
+            if cancel_check and cancel_check():    # #621
+                # Untried balls are NOT pushed into inner_pads: they were never
+                # attempted, so they must not reach the failure ledger either.
+                break
             if depth(p) > outer_depth:
                 inner_pads.append(p)
                 continue
@@ -1740,6 +1747,8 @@ def generate_underpad_escape(footprint: Footprint,
     remaining_pairs.sort(key=lambda t: depth(t[1]) + depth(t[2]), reverse=True)
     inner_cands = [(L, True) for L in range(nl) if L != top_idx]
     for _ci, (base, pp, nn) in enumerate(remaining_pairs):
+        if cancel_check and cancel_check():    # #621
+            break
         _prog(_ci + 1, len(remaining_pairs), f"inner coupled pair {base}")
         if (try_coupled(pp, nn, inner_cands)
                 or try_coupled_endon(pp, nn, inner_cands)):
@@ -1783,6 +1792,8 @@ def generate_underpad_escape(footprint: Footprint,
     n_db_esc = 0
     inner_pads.sort(key=depth, reverse=True)
     for _ii, p in enumerate(inner_pads):
+        if cancel_check and cancel_check():    # #621
+            break
         _prog(_ii + 1, len(inner_pads), f"inner escape {p.net_name}")
         # Dog-bone route (#128): the via already has a reserved gap site; the
         # inner run starts AT the via, so the ball-grid position stays free.
