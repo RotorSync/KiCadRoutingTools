@@ -4441,10 +4441,34 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             and os.environ.get('KICAD_FINALIZE_REAUDIT', '0') == '1'):
         try:
             from kicad_oracle import oracle_reconnect as _orc_fn10
-            print("\nPost-reconciliation oracle re-audit (#589): "
-                  "re-checking plane nets on the final board...")
+            # #659: widen the re-audit scope from zone nets to EVERY net
+            # KiCad reports unconnected within this run's scope -- signal
+            # micro-gap opens (the IO_SDA class: model-credited, KiCad-
+            # rejected) previously had no in-run owner. Full-airwire links
+            # on failed nets will fail the weld honestly (bounded rounds);
+            # the sub-mm gap class is exactly what the weld router closes.
+            _scope10 = set(_reaudit9[0])
+            try:
+                from kicad_oracle import find_kicad_cli as _fkc10, \
+                    kicad_unconnected as _ku10
+                _cli10 = _fkc10()
+                _links10 = _ku10(output_file, _cli10) if _cli10 else None
+                if _links10:
+                    _run_names10 = {n for n, _i in net_ids}
+                    _extra10 = sorted({lk[0] for lk in _links10}
+                                      & _run_names10 - _scope10)
+                    if _extra10:
+                        print(f"  re-audit scope +{len(_extra10)} "
+                              f"KiCad-flagged signal net(s) (#659): "
+                              f"{', '.join(_extra10[:12])}"
+                              + ("..." if len(_extra10) > 12 else ""))
+                        _scope10 |= set(_extra10)
+            except Exception as _se10:
+                print(f"  (#659 scope widen failed: {_se10})")
+            print("\nPost-reconciliation oracle re-audit (#589/#659): "
+                  "re-checking flagged nets on the final board...")
             _orc10 = _orc_fn10(
-                output_file, _reaudit9[0], _reaudit9[1],
+                output_file, sorted(_scope10), _reaudit9[1],
                 track_via_clearance=defaults.PLANE_TRACK_VIA_CLEARANCE,
                 hole_to_hole_clearance=config.hole_to_hole_clearance,
                 project_from=input_file)
