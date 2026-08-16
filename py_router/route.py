@@ -4009,6 +4009,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # reroute-or-restore custody). Existing patterns are kept.
             _rec_ids = {nid for nid, net in pcb_data.nets.items()
                         if net.name in set(_rec_names)}
+            # #651 kill switch: on a nearly-complete board the escalation's
+            # hinted blockers are THIS RUN's successes (the RAM-bus
+            # massacre: 3 failures in, 13 zero-copper ships out).
+            # KICAD_RECONCILE_RIP_ESCALATION=0 disables the self-grant.
+            _esc_on = os.environ.get('KICAD_RECONCILE_RIP_ESCALATION',
+                                     '1') != '0'
             _hinted = []
             for _nid in _rec_ids:
                 for _ev in (state.net_history.get(_nid) or []):
@@ -4122,6 +4128,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                       f"{', '.join(_fresh)} -- one more lap")
                 return True
 
+            if not _esc_on and _hinted:
+                print(f"  Reconciliation rip-escalation DISABLED "
+                      f"(KICAD_RECONCILE_RIP_ESCALATION=0): dropping "
+                      f"{len(_hinted)} hinted blocker(s)")
+                _hinted = []
             if _hinted and '*' not in (rip_existing_nets or []):
                 _hinted = _hinted[:_RIP_ESCALATION_CAP]
                 _rk['rip_existing_nets'] = list(dict.fromkeys(
