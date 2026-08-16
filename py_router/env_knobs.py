@@ -171,6 +171,13 @@ def refresh() -> None:
     # economy. '0' reverts. Default ON.
     g['FANOUT_POUR_TRACK'] = _s('KICAD_FANOUT_POUR_TRACK', '1') != '0'
     g['FANOUT_POUR_TRACK_R'] = float(_s('KICAD_FANOUT_POUR_TRACK_R', '2.0') or 2.0)
+    # #652 directive 2: rip-swap rescue for terminally dropped fanout balls
+    # (evict the nearest committed neighbour escape, re-escape both as a pair
+    # at the fab floor; strict-win only). '0' reverts. Default ON.
+    g['FANOUT_RIP_RESCUE'] = _s('KICAD_FANOUT_RIP_RESCUE', '1') != '0'
+    # #652 directive 1: surface (channel-engine) rescue for balls the via
+    # floor cannot serve at the array pitch. '0' reverts. Default ON.
+    g['FANOUT_SURFACE_RESCUE'] = _s('KICAD_FANOUT_SURFACE_RESCUE', '1') != '0'
     g['STOP_CLEANUP'] = _opt_in('KICAD_STOP_CLEANUP')
     g['TAP_RELOCATION'] = _opt_in('KICAD_TAP_RELOCATION')  # phase-3 tap pocket moves
     # #536 octolinear route smoothing (cleanup_pipeline pass 9b): collapse
