@@ -178,6 +178,14 @@ def refresh() -> None:
     # #652 directive 1: surface (channel-engine) rescue for balls the via
     # floor cannot serve at the array pitch. '0' reverts. Default ON.
     g['FANOUT_SURFACE_RESCUE'] = _s('KICAD_FANOUT_SURFACE_RESCUE', '1') != '0'
+    # #652 human-survey escapes: lane-walked dog-bones (gap sites are a POOL
+    # reached by riding the inter-row lane; k = max gaps walked) and pair
+    # dive-first (diff pairs drop coupled vias at the first gap row instead
+    # of running surface legs that wall the single-ended corridors). '0'
+    # reverts each. Defaults ON.
+    g['FANOUT_LANE_WALK'] = _s('KICAD_FANOUT_LANE_WALK', '1') != '0'
+    g['FANOUT_LANE_WALK_MAX'] = _i('KICAD_FANOUT_LANE_WALK_MAX', 3)
+    g['FANOUT_PAIR_DIVE'] = _s('KICAD_FANOUT_PAIR_DIVE', '1') != '0'
     g['STOP_CLEANUP'] = _opt_in('KICAD_STOP_CLEANUP')
     g['TAP_RELOCATION'] = _opt_in('KICAD_TAP_RELOCATION')  # phase-3 tap pocket moves
     # #536 octolinear route smoothing (cleanup_pipeline pass 9b): collapse
