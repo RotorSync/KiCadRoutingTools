@@ -3677,19 +3677,40 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                     return False
         return True
 
+    import os as _665os
+    _665trace = bool(_665os.environ.get('KICAD_665_TRACE'))
+
     def clears(x1, y1, x2, y2, layer, net_id, w):
         eff = pair_base(net_id, layer)
-        d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      base_clearance=eff, net_clearances=net_clearances),
+        pd = _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                                   base_clearance=eff, net_clearances=net_clearances)
+        d = min(pd,
                 _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                                       net_clearances=net_clearances, base_clearance=eff),
                 _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                                       net_clearances=net_clearances, base_clearance=eff))
         hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2)
-        return (d >= eff + w / 2.0 - 1e-4 and
-                hd >= npth_clr + w / 2.0 - 1e-4 and
-                edge_clears(x1, y1, x2, y2, w) and
-                keepout_clears(x1, y1, x2, y2, layer, w))
+        ok = (d >= eff + w / 2.0 - 1e-4 and
+              hd >= npth_clr + w / 2.0 - 1e-4 and
+              edge_clears(x1, y1, x2, y2, w) and
+              keepout_clears(x1, y1, x2, y2, layer, w))
+        if _665trace and ok:
+            # #665 forensics: re-check the pad distance with a FRESH pad
+            # array (cache detached); a disagreement = a stale/poisoned
+            # cache at the exact acceptance moment.
+            _saved = getattr(pcb_data, '_foreign_pad_arr_cache', None)
+            if _saved is not None:
+                del pcb_data._foreign_pad_arr_cache
+            pd_fresh = _seg_foreign_pad_dist(
+                pcb_data, net_id, x1, y1, x2, y2, layer,
+                base_clearance=eff, net_clearances=net_clearances)
+            if _saved is not None:
+                pcb_data._foreign_pad_arr_cache = _saved
+            if abs(pd_fresh - pd) > 1e-6:
+                print(f"    [665] STALE PAD CACHE: net {net_id} "
+                      f"({x1:.2f},{y1:.2f})-({x2:.2f},{y2:.2f}) {layer} "
+                      f"w={w} cached_d={pd:.3f} fresh_d={pd_fresh:.3f}")
+        return ok
 
     def vk(x, y):
         return (round(x, 3), round(y, 3))
