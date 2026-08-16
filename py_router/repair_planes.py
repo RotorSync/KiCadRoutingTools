@@ -1227,6 +1227,7 @@ def repair_planes(
                 board_edge_clearance=_edge,
                 disable_bga_zones=([] if no_bga_zone else None),
                 net_clearances=net_clearances,
+                layer_costs=(list(layer_costs) if layer_costs else None),  # #658 finalize sub-runs honor chain layer economics
                 hole_to_hole_clearance=hole_to_hole_clearance,
                 return_results=True, pcb_data=pcb_data,
                 # #540 item 2: price the OTHER pending casualties' corridors
@@ -1835,6 +1836,7 @@ def repair_planes(
                     # project (batch_route's own auto-read would find no
                     # netclasses next to a not-yet-written output).
                     net_clearances=net_clearances,
+                    layer_costs=(list(layer_costs) if layer_costs else None),  # #658 finalize sub-runs honor chain layer economics
                     hole_to_hole_clearance=hole_to_hole_clearance,
                     # #527: forward progress/cancel -- a multi-net reconnect
                     # used to run minutes behind one static message.
@@ -2411,6 +2413,7 @@ def repair_planes(
                     power_nets=power_nets, power_nets_widths=power_nets_widths,
                     disable_bga_zones=([] if no_bga_zone else None),
                     net_clearances=net_clearances,
+                    layer_costs=(list(layer_costs) if layer_costs else None),  # #658 finalize sub-runs honor chain layer economics
                     # #539: without this the gate's plane-net vias were placed
                     # at batch_route's 0.2 default on a 0.25-h2h board (muzy_
                     # zynq2's residual drill grazes -- same forwarding-gap
