@@ -1989,7 +1989,12 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
     _dirs = config.get_layer_direction_preferences()
     if _dirs and config.direction_preference_cost > 0:
         pose_kwargs['layer_direction_preferences'] = _dirs
-        pose_kwargs['direction_preference_cost'] =             config.direction_preference_cost
+        pose_kwargs['direction_preference_cost'] = \
+            config.direction_preference_cost
+    import os as _dbgos
+    if _dbgos.environ.get('KICAD_DIFF_DIRS_DEBUG'):
+        print(f"  [dirs-debug] PoseRouter site1: dirs={_dirs} "
+              f"cost={config.direction_preference_cost}")
     pose_router = PoseRouter(**pose_kwargs)
 
     # Route using pose-based A* with Dubins heuristic
