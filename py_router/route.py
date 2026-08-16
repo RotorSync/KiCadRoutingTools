@@ -4408,7 +4408,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 track_via_clearance=defaults.PLANE_TRACK_VIA_CLEARANCE,
                 hole_to_hole_clearance=config.hole_to_hole_clearance,
                 project_from=input_file)
-            results_data['post_reconcile_oracle'] = _orc10
+            try:
+                results_data['post_reconcile_oracle'] = _orc10
+            except (NameError, UnboundLocalError):
+                pass  # results_data only exists on the GUI path
         except Exception as _e10:
             print(f"  post-reconciliation re-audit failed: {_e10}")
 
