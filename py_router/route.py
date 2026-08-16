@@ -3384,6 +3384,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     #       x.prefinalize.kicad_pcb --output dbg.kicad_pcb --skip-routing \
     #       --nets <same> <same params>
     _fin_only = os.environ.get('KICAD_FINALIZE_ONLY', '0') == '1'
+    _reaudit9 = None  # #589: post-reconcile oracle re-audit context
     if (os.environ.get('KICAD_CKPT_PREFINALIZE', '0') == '1'
             and output_file and not return_results and not skip_routing):
         try:
@@ -3822,6 +3823,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     project_from=input_file)
                 print(f"  [finalize timing] oracle leg: "
                       f"{_time9.time() - _t9:.1f}s")
+                if not _gui9:
+                    # #589: keep the oracle's net list + config for the
+                    # post-reconciliation re-audit (CLI file mode only).
+                    _reaudit9 = (list(_zna), _ocfg)
                 if _gui9:
                     # The staged file is a throwaway: hand the oracle's copper
                     # back through the SAME channels the engine leg uses.
@@ -4381,6 +4386,31 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             print(f"{RED}  final reconciliation pass failed: {_e}{RESET}")
 
 
+
+    # #589 post-reconciliation oracle RE-AUDIT (KICAD_FINALIZE_REAUDIT=1,
+    # experiment): the finalize's oracle leg audits BEFORE the final
+    # reconciliation lays its forced-link/rescue copper WITH RIP AUTHORITY,
+    # so rip-restore damage to plane nets lands after the audit stopped
+    # looking (measured on orangecrab: GND had 3 links at audit time and 7
+    # at ship -- the P-rail tap retries ripped GND mid-finalize and the
+    # restores were incomplete). One bounded extra oracle pass over the
+    # SAME nets on the final written board welds exactly that damage; on a
+    # healthy board it costs one refill and exits at round 0.
+    if (_reaudit9 is not None and output_file and not return_results
+            and not skip_routing
+            and os.environ.get('KICAD_FINALIZE_REAUDIT', '0') == '1'):
+        try:
+            from kicad_oracle import oracle_reconnect as _orc_fn10
+            print("\nPost-reconciliation oracle re-audit (#589): "
+                  "re-checking plane nets on the final board...")
+            _orc10 = _orc_fn10(
+                output_file, _reaudit9[0], _reaudit9[1],
+                track_via_clearance=defaults.PLANE_TRACK_VIA_CLEARANCE,
+                hole_to_hole_clearance=config.hole_to_hole_clearance,
+                project_from=input_file)
+            results_data['post_reconcile_oracle'] = _orc10
+        except Exception as _e10:
+            print(f"  post-reconciliation re-audit failed: {_e10}")
 
     # Per-net story dump (KICAD_NET_STORY=1): the complete journey of every
     # net -- bus membership, ordering, failures with named blockers, rips,
