@@ -1157,6 +1157,11 @@ def route_single_ended_nets(
                         # Bus attraction for the retry, multipoint included
                         retry_attraction_path, retry_reverse_direction = bus_attraction_context(
                             net_id, bus_net_to_group, bus_corridors, bus_routed_paths)
+                        if retry_attraction_path is None:
+                            # #656: keep the plan lane through rip retries
+                            from global_plan import plan_attraction_path
+                            retry_attraction_path = plan_attraction_path(config, net_id)
+                            retry_reverse_direction = False
                         retry_cfg = bus_stick_config(config, retry_attraction_path)
                         # #572: a forced-link net retries its EXACT links
                         # against the post-rip board (same reason as the

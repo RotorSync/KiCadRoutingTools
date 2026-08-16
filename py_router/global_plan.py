@@ -813,6 +813,32 @@ def apply_plan_order(net_ids: List[Tuple[str, int]], plan: GlobalPlan,
     return reordered
 
 
+def plan_attraction_path(config, net_id):
+    """#656/#589: the net's own plan corridor as a DENSIFIED attraction
+    path, or None (knob off / no plan / no path). Reroute/retry sites call
+    this when bus_attraction_context returned None -- a plan-attracted
+    victim must keep its lane THROUGH churn, or every rip cycle erodes
+    adherence exactly where guidance decides the outcome (the #655 churn
+    is concentrated on contested nets). Bus corridors keep precedence at
+    every call site."""
+    if not env_knobs.GLOBAL_PLAN.get('attract'):
+        return None
+    plan = getattr(config, '_global_plan', None)
+    if plan is None:
+        return None
+    path = plan.rough_paths.get(net_id)
+    if not path or len(path) < 2:
+        return None
+    dense = []
+    for (x1, y1, l1), (x2, y2, l2) in zip(path, path[1:]):
+        dense.append((x1, y1, l1))
+        if l1 == l2 and (x1, y1) != (x2, y2):
+            dense.extend((gx, gy, l1)
+                         for gx, gy in walk_line(x1, y1, x2, y2))
+    dense.append(path[-1])
+    return dense
+
+
 def dump_plan(path: str, plan: GlobalPlan, nets_in, nets_ordered,
               front_ids, config) -> None:
     """#589 offline-analysis dump (KICAD_GLOBAL_PLAN_DUMP): everything the
