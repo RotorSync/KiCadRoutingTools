@@ -4217,10 +4217,23 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 except OSError:
                     pass
 
+    # #655: the zero-copper scan must run BEFORE the reconcile gate --
+    # when the only casualties are phase-3 victims outside every bucket,
+    # the buckets alone would skip the reconcile entirely.
+    _zero_pre9 = []
+    if final_reconcile and not skip_routing and not _ckpt_stop:
+        _copper_pre9 = ({s.net_id for s in pcb_data.segments}
+                        | {v.net_id for v in pcb_data.vias})
+        _zone_pre9 = {z.net_id for z in (pcb_data.zones or [])}
+        _scope_pre9 = {nid for _n, nid in net_ids}
+        _zero_pre9 = sorted(
+            net.name for nid, net in pcb_data.nets.items()
+            if nid in _scope_pre9 and nid not in _copper_pre9
+            and nid not in _zone_pre9 and len(net.pads) >= 2)
     if (final_reconcile and not skip_routing and not _ckpt_stop
             and (output_file or return_results)
             and (failed_single or failed_multipoint or _custody_nets9
-                 or _victim_retry_names or open_single)):
+                 or _victim_retry_names or open_single or _zero_pre9)):
         # #562 order swap: stubborn-oracle-link plane nets (custody) merge
         # into THIS sub-run instead of a second self-invocation -- one
         # parse/base-build serves both, and signal retries now run against
@@ -4238,6 +4251,22 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         # audit; same nobody's-responsibility shape).
                         + open_single)
             if n not in _zone_complete9))
+        # #655 zero-copper backstop: a phase-3 tap-rip victim whose FINAL
+        # reroute never landed ships with NO copper while every ledger
+        # still says 'routed' (terminal_restores empty, failed_single
+        # empty, story status stale) -- the nobody's-responsibility
+        # bucket. Catch it by MEASUREMENT, not bookkeeping: any in-scope
+        # multi-pad net with zero segments AND zero vias at reconcile
+        # time gets enrolled. Zone-owning nets are exempt (a pour-served
+        # plane net is legitimately trackless).
+        _known9 = set(_rec_names)
+        _zero9 = [n for n in _zero_pre9
+                  if n not in _known9 and n not in _zone_complete9]
+        if _zero9:
+            print(f"  Zero-copper backstop (#655): {len(_zero9)} net(s) "
+                  f"with NO copper yet absent from every failure bucket "
+                  f"-- enrolling: {', '.join(_zero9)}")
+            _rec_names.extend(_zero9)
         print(f"\nFinal reconciliation: retrying {len(_rec_names)} "
               f"incomplete/custody net(s) against the finished board: "
               f"{', '.join(_rec_names)}")
