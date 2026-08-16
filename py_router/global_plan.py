@@ -226,6 +226,8 @@ def plan_global_routes(pcb_data, config, net_ids: List[Tuple[str, int]],
                                                      config)
     _assign_clique_layers(plan, config, pcb_data)
     _build_river_groups(plan, config, pcb_data)
+    global _ACTIVE_PLAN
+    _ACTIVE_PLAN = plan
     n_cross = sum(1 for w in plan.conflict_w.values() if w)
     n_share = sum(1 for w in plan.share_w.values() if w)
     res_cells = sum(len(r) for r in plan.reservations.values())
@@ -967,6 +969,15 @@ def river_attraction_path(config, net_id, pcb_data):
     return None
 
 
+# #658 river: the active plan, module-level. build_single_ended_obstacles
+# receives a replace() clone that drops the ad-hoc config._global_plan
+# attribute (measured: every call saw plan=None), so the sibling-exemption
+# lookup falls back here. Set by plan_global_routes; river mode is opt-in
+# and top-level-gated, so a nested sub-run (no plan of its own) simply
+# finds stale groups whose net ids it never routes.
+_ACTIVE_PLAN = None
+
+
 def river_sibling_ids(config, net_id):
     """Same-river-group net ids for `net_id` (empty set when river mode is
     off / not a member). Consumers exempt siblings from SOFT proximity
@@ -975,11 +986,16 @@ def river_sibling_ids(config, net_id):
     spread-out penalty the proximity system exists to charge strangers."""
     if not env_knobs.GLOBAL_PLAN.get('river'):
         return frozenset()
-    plan = getattr(config, '_global_plan', None)
+    plan = getattr(config, '_global_plan', None) or _ACTIVE_PLAN
+    import os as _ros
+    _dbg = _ros.environ.get('KICAD_RIVER_PROX_DEBUG')
     if plan is None:
         return frozenset()
     g = plan.river.get(net_id)
     if g is None:
+        if _dbg:
+            print(f"    [river-sibs] net {net_id}: not in river "
+                  f"({len(plan.river)} members known)")
         return frozenset()
     return frozenset(n for n in plan.river_order.get(g[0], ())
                      if n != net_id)

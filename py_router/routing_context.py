@@ -290,6 +290,12 @@ def build_single_ended_obstacles(
     # repulsion active -- the proximity field outbids any attraction dose).
     from global_plan import river_sibling_ids
     _sibs = river_sibling_ids(config, net_id)
+    import os as _ros
+    if _ros.environ.get('KICAD_RIVER_PROX_DEBUG') and _sibs:
+        _in_cache = sum(1 for k in track_proximity_cache if k in _sibs)
+        print(f"    [river-prox] net {net_id}: {len(_sibs)} sibs, "
+              f"cache={len(track_proximity_cache)} entries "
+              f"({_in_cache} sib entries filtered)")
     if _sibs:
         stub_proximity_net_ids = [nid for nid in stub_proximity_net_ids
                                   if nid not in _sibs]
@@ -383,6 +389,20 @@ def build_incremental_obstacles(
     # Add stub proximity costs (includes chip pads as pseudo-stubs)
     stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
                                if nid != net_id and nid not in routed_net_ids]
+    # #658 river: same-bus siblings exert NO soft proximity (hard clearance
+    # stays) -- this is the FAST main-loop builder, the path that actually
+    # prices the hug zone (measured: the exemption in the slow builder was
+    # unreachable; only reconcile sub-runs go through it).
+    from global_plan import river_sibling_ids
+    _sibs = river_sibling_ids(config, net_id)
+    if _sibs:
+        stub_proximity_net_ids = [nid for nid in stub_proximity_net_ids
+                                  if nid not in _sibs]
+        import os as _ros
+        if _ros.environ.get('KICAD_RIVER_PROX_DEBUG'):
+            _hit = sum(1 for k in track_proximity_cache if k in _sibs)
+            print(f"    [river-prox] net {net_id}: {len(_sibs)} sibs, "
+                  f"{_hit} sib cache entr(ies) exempted")
     unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
     chip_pads = get_chip_pad_positions(pcb_data, stub_proximity_net_ids)
     all_stubs = unrouted_stubs + chip_pads
@@ -394,7 +414,9 @@ def build_incremental_obstacles(
     from history_congestion import add_history_source
     from global_plan import add_plan_source
     merge_track_proximity_costs(
-        obstacles, track_proximity_cache,
+        obstacles,
+        ({k: v for k, v in track_proximity_cache.items() if k not in _sibs}
+         if _sibs else track_proximity_cache),
         ghost_costs=add_plan_source(
             add_history_source(_stub_surplus or None, config),
             config, net_id, routed_net_ids) or None,
@@ -483,6 +505,20 @@ def prepare_obstacles_inplace(
     # Add stub proximity costs (includes chip pads as pseudo-stubs)
     stub_proximity_net_ids = [nid for nid in all_unrouted_net_ids
                                if nid != net_id and nid not in routed_net_ids]
+    # #658 river: same-bus siblings exert NO soft proximity on a member
+    # (hard clearance stays). THIS is the hot in-place path the main loop
+    # actually uses -- the slow/incremental builders only serve fallbacks
+    # and reconcile sub-runs.
+    from global_plan import river_sibling_ids
+    _sibs = river_sibling_ids(config, net_id)
+    if _sibs:
+        stub_proximity_net_ids = [nid for nid in stub_proximity_net_ids
+                                  if nid not in _sibs]
+        import os as _ros
+        if _ros.environ.get('KICAD_RIVER_PROX_DEBUG'):
+            _hit = sum(1 for k in track_proximity_cache if k in _sibs)
+            print(f"    [river-prox] net {net_id}: {len(_sibs)} sibs, "
+                  f"{_hit} sib cache entr(ies) exempted")
     unrouted_stubs = get_stub_endpoints(pcb_data, stub_proximity_net_ids)
     chip_pads = get_chip_pad_positions(pcb_data, stub_proximity_net_ids)
     all_stubs = unrouted_stubs + chip_pads
@@ -499,7 +535,9 @@ def prepare_obstacles_inplace(
     from global_plan import add_plan_source
     _c2 = congestion2_rows(config, net_id, routed_net_ids)
     merge_track_proximity_costs(
-        working_obstacles, track_proximity_cache,
+        working_obstacles,
+        ({k: v for k, v in track_proximity_cache.items() if k not in _sibs}
+         if _sibs else track_proximity_cache),
         ghost_costs=add_plan_source(add_history_source(
             {**filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids),
              **(_stub_surplus or {}),
