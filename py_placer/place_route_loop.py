@@ -474,7 +474,10 @@ def main():
     add_lock_advisor_args(parser)
     add_tidiness_args(parser)
 
-    args = parser.parse_args()
+    # #597: nets named like negative rails (-3V3) must parse as VALUES.
+    # argparse's negative-number matcher differs by CPython version, so a
+    # manifest that replays on a dev machine dies in a 3.12 container.
+    args = __import__("cli_nets").pin_dash_digit_values(parser).parse_args()
 
     # --suggest-locks is report-only, so it must not demand a route spec it
     # never uses. Every other run still requires one.
