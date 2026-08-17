@@ -387,42 +387,70 @@ def _compute_cells_and_states(pcb_data: PCBData, config: GridRouteConfig,
     src = getattr(pcb_data, 'source_path', None)
     if not polys and src and os.path.isfile(src):
         try:
-            from kicad_exact_fill import find_kicad_python, refill_islands
-            fills = refill_islands(src)
-            if fills is None:
-                # None is refill_islands' DOCUMENTED "unavailable" return, not
-                # an error. Calling .items() on it raised an AttributeError
-                # that this except reported as a mystery "'NoneType' object
-                # has no attribute 'items'" (#647) -- which read like a quirk
-                # of one board while it was really a whole-platform capability
-                # gap (no Windows install was ever found), on every invocation.
-                why = ("no python with pcbnew found; set KICAD_PYTHON to "
-                       "KiCad's bundled interpreter"
-                       if find_kicad_python() is None
-                       else "the KiCad refill failed")
-                print(f"Plane fragility: exact fill unavailable ({why}); "
-                      f"using zone outlines")
-                fills = {}
-            from kicad_exact_fill import refill_islands, EXACT_FILL_TIMEOUT
-            # NOTE this call is reached from route.py:batch_route, so it runs
-            # on EVERY batch_route -- and on a board KiCad's ZONE_FILLER cannot
+            from kicad_exact_fill import (find_kicad_python, refill_islands,
+                                          EXACT_FILL_TIMEOUT)
+            # ONE refill, not two. The merge (b3d720be) left both parents' calls
+            # here, so every batch_route paid the KiCad refill TWICE and main's
+            # #647 handling below became dead code -- the second call's result
+            # overwrote it. Invisible with KiCad installed (both calls succeed
+            # identically); without it the two None-policies differ and the
+            # board diverges, which is exactly how it showed up: 7 DRC on
+            # lora_v3 in the no-KiCad container, 0 with KiCad present.
+            #
+            # This call is reached from route.py:batch_route, so it runs on
+            # EVERY batch_route -- and on a board KiCad's ZONE_FILLER cannot
             # fill (measured: a 217-part 4-layer board) each one pays the full
             # EXACT_FILL_TIMEOUT. That subprocess timeout is a hang guard on a
             # child process, not a budget on our own search, so it does not
-            # make any result depend on our wall clock.
-            _t = EXACT_FILL_TIMEOUT
-            fills = refill_islands(src, timeout=_t, verbose=True)
+            # make any result depend on our wall clock. verbose=True makes
+            # refill_islands say WHY it returned nothing.
+            fills = refill_islands(src, timeout=EXACT_FILL_TIMEOUT, verbose=True)
             if fills is None:
-                # refill_islands documents a None return, and this was the ONE
-                # call site in the repo that dereferenced it anyway. The
-                # resulting `'NoneType' object has no attribute 'items'` was
-                # printed as if it were the diagnosis, while the real reason --
-                # a 300s timeout, or pcbnew missing -- was computed inside
-                # refill_islands and discarded. verbose=True above makes it say
-                # so; this branch stops the AttributeError masquerading as one.
-                raise RuntimeError(
-                    f'KiCad refill returned nothing within {_t}s '
-                    f'(fill timed out, or pcbnew unavailable)')
+                # None is refill_islands' DOCUMENTED "unavailable" return, not
+                # an error. Calling .items() on it raised an AttributeError
+                # that the except below reported as a mystery "'NoneType'
+                # object has no attribute 'items'" (#647) -- which read like a
+                # quirk of one board while it was really a whole-platform
+                # capability gap (no Windows install was ever found), on every
+                # invocation. Fall back to zone outlines rather than raising:
+                # raising lands in the generic handler and throws away this
+                # diagnosis, which is the specific one a user can act on.
+                why = ("no python with pcbnew found; set KICAD_PYTHON to "
+                       "KiCad's bundled interpreter"
+                       if find_kicad_python() is None
+                       else f"the KiCad refill returned nothing within "
+                            f"{EXACT_FILL_TIMEOUT}s (fill timed out, or "
+                            f"pcbnew unavailable)")
+                print(f"Plane fragility: exact fill unavailable ({why}); "
+                      f"using zone outlines")
+                fills = {}
+            polys = [(name_to_id.get(_net, -1), layer, poly)
+                     for (_net, layer), pp in fills.items() for poly in pp]
+            if polys:
+                print(f"Plane fragility: exact-fill geometry "
+                      f"({len(polys)} filled island(s) from the LIVE board)")
+        except Exception as e:
+            print(f"Plane fragility: live-board fill unavailable ({e}); "
+                  f"trying the source file")
+            polys = []
+    src = getattr(pcb_data, 'source_path', None)
+    if not polys and src and os.path.isfile(src):
+        try:
+            from kicad_exact_fill import (find_kicad_python, refill_islands,
+                                          EXACT_FILL_TIMEOUT)
+            # ONE refill -- see the identical note above; the merge left both
+            # parents' calls at BOTH of this function's fill sites.
+            fills = refill_islands(src, timeout=EXACT_FILL_TIMEOUT, verbose=True)
+            if fills is None:
+                why = ("no python with pcbnew found; set KICAD_PYTHON to "
+                       "KiCad's bundled interpreter"
+                       if find_kicad_python() is None
+                       else f"the KiCad refill returned nothing within "
+                            f"{EXACT_FILL_TIMEOUT}s (fill timed out, or "
+                            f"pcbnew unavailable)")
+                print(f"Plane fragility: exact fill unavailable ({why}); "
+                      f"using zone outlines")
+                fills = {}
             polys = [(name_to_id.get(_net, -1), layer, poly)
                      for (_net, layer), pp in fills.items() for poly in pp]
             if polys:

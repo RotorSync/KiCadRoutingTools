@@ -1284,6 +1284,7 @@ def repair_planes(
                      'net_id': _s.net_id})
                 _prov_seg(_s.net_id, _s.layer, _s.start_x, _s.start_y,
                           _s.end_x, _s.end_y, 'reconnect')
+            _consume_inner_strips(_rdata, "immediate-reconnect")
             # A net is done only if it is CONNECTED now (batch_route's own
             # success flag is not the arbiter -- #479's lesson).
             from check_connected import check_net_connectivity as _cnc517
