@@ -106,17 +106,6 @@ def main():
     def run_one(f):
         name = os.path.basename(f)
         try:
-            subprocess.run([sys.executable,
-                            os.path.join(TESTS_DIR, 'fixture_boards.py')],
-                           cwd=ROOT, capture_output=True, text=True,
-                           timeout=args.timeout)
-        except subprocess.TimeoutExpired:
-            return name, None, f'FAIL  {name}  (timeout after {args.timeout:.0f}s)'
-            print('WARN  fixture pre-build timed out; continuing')
-
-    def run_one(f):
-        name = os.path.basename(f)
-        try:
             # `text=True` alone decodes with the LOCALE default (cp1252 on
             # Windows) and raises UnicodeDecodeError in the reader thread the
             # moment any child prints a byte it cannot decode -- a degree sign,
