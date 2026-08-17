@@ -277,7 +277,7 @@ via_drill  = max(min_via_drill, via - 2*min_annular_ring)  # hold the annular ri
 
 Pass the computed `--via-size via --via-drill via_drill --track-width track
 --clearance C` to the fanout step. If `infeasible`, the pitch can't take a channel
-escape even at the fab floor → switch to `--escape-method underpad` and/or add
+escape even at the fab floor → for a POPULATED array prefer `--escape-method dogbone` (it never escapes fewer balls than underpad and matches the human idiom; this supersedes older underpad advice), else `--escape-method underpad`, and/or add
 escape layers; don't ship the graze.
 
 **Plan params can set ANY GUI option:** in the GUI's RESULT schema, each
@@ -1001,7 +1001,7 @@ RF feed on an outer layer over the GND plane; recommend a `User.2` keepout +
 
 python3 -X utf8 py_router/route.py board_diff.kicad_pcb board_step2b.kicad_pcb \
     --nets RF --impedance 50 --layers F.Cu \
-    --clearance <floor> --no-bga-zone \
+    --clearance <floor> --no-bga-zones \
     2>&1 | tee /tmp/step2b_impedance.txt
 
 ### Step 2: Route ALL Nets — plane nets included (#562)
@@ -2066,3 +2066,29 @@ next to the board, so the exact tuned choices replay with no LLM:
 A per-board plan file that ever gets improved (a better recipe found on a
 later pass) should be REGENERATED through this skill, not hand-patched —
 the skill is the tuner; the plan file is its output.
+
+## Step 10: Plan-authoring precedence rules (resolve these conflicts explicitly)
+
+Lessons from a dry-run audit (an agent following this skill end-to-end):
+
+1. **No stackup ⇒ no impedance passes, period.** When the board has KiCad's
+   default stackup, SKIP every `--impedance` step (including the DDR SSTL
+   40Ω pass) and lead the plan with the /recommend-stackup warning. The
+   no-stackup rule OUTRANKS every interface-specific impedance
+   recommendation.
+2. **Populated-array escape:** `dogbone` supersedes the older
+   "channel-infeasible → underpad" advice for populated BGAs; underpad is
+   for WLCSP/inner-row cases where no inter-pad gap exists at all.
+3. **Fanout `--layers` must EXCLUDE any layer carrying a solid plane**
+   (e.g. the In1 GND plane) — escapes on the solid plane shred it, and
+   the fanout does not avoid poured layers on its own.
+4. **The route flag is `--no-bga-zones` (plural).** The singular spelling
+   fails argparse.
+5. **No pipes in the emitted plan.sh.** `2>&1 | tee ...` is for
+   interactive runs only — `manifest_to_plan.py` tokenizes pipe segments
+   into net globs and corrupts the JSON. Plain redirects or nothing.
+6. **`--max-ripup`: 5 on dense boards** (any fine-pitch BGA present or
+   >150 nets), else leave the default 3.
+7. **A "pair" whose far end is bare test points** may stay in the diff
+   step (the peel machinery degrades gracefully) — note it in the plan
+   rather than agonizing.
