@@ -846,8 +846,12 @@ enclosed by other pads on all four sides; plan an escape for every hit.
 If netclass names carry length-match hints (`*_LM<tol>`, `*length*`,
 DDR-class groupings), wire them into the route step:
 `--length-match-group auto --length-match-tolerance <tol>` and
-`--time-matching` when the bus spans layers. The board's classes are the
-author's spec — honor them even when the recorded chains never did.
+`--time-matching` when the bus spans layers — but `--time-matching` ONLY
+on a board with a real stackup (it converts length to delay through the
+dielectrics; on KiCad's default stackup it computes garbage — the Step 10
+rule-1 no-stackup precedence applies to it exactly as to `--impedance`).
+The board's classes are the author's spec — honor them even when the
+recorded chains never did.
 
 ## Step 5b: Net-Coverage Reconciliation (mandatory — do not skip)
 
