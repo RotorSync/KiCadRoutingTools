@@ -2117,6 +2117,12 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
         for nm, vlist in escaped_via_nets.items():
             if nm == fnet or nm in dp_nets or nm in failed_nets:
                 continue
+            if not vlist:
+                # A net can be enrolled with an EMPTY via list (a vialess
+                # surface escape, or a drop recorded before its via
+                # landed) -- min() over it crashed the whole fanout on
+                # daisho + orangecrab in the set3 screen.
+                continue
             d = min(math.hypot(vx - fx, vy - fy) for (vx, vy) in vlist)
             cand_d[nm] = min(cand_d.get(nm, 9e9), d)
         for t in tracks:
