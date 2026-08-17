@@ -1205,10 +1205,18 @@ fine.
    lane pitch is quantized by track+clearance, and a 0.1 grid cannot
    express a 0.28 pitch at fat features):
    `--track-width 0.0762 --clearance 0.0889 --via-size 0.25
-   --via-drill 0.15 --hole-to-hole-clearance 0.2`
-   The fab-floor clamps pin these UP automatically on boards whose layer
-   count or fab tier can't take them — passing them is always safe.
-   Grading stays honest via the `.kicad_pro` floor writeback.
+   --via-drill 0.15`
+   The fab-floor clamps pin track/clearance/via UP automatically on
+   boards whose layer count or fab tier can't take them — passing those
+   four is always safe. Grading stays honest via the `.kicad_pro` floor
+   writeback.
+   **EXCEPTION — `--hole-to-hole-clearance` does NOT clamp**: route.py
+   board-derives h2h only when the flag is OMITTED and honors an explicit
+   value verbatim, while `check_drc` pins its grade UP to the board's
+   `min_hole_to_hole` — so an explicit 0.2 on a 0.25-constraint board
+   routes real, graded drill-pair violations (verified in code by two
+   independent plan audits). Pass the BOARD's own `min_hole_to_hole`
+   (from `--design-rules`), or omit the flag and let route.py derive it.
 2. **Direction preference**: `--direction-preference-cost 5`. The old 250
    default was measured far off-optimum (dose curve 0→19, 5→9, 250→15 —
    a weak nudge organizes layers; more over-taxes, #663).
