@@ -3286,6 +3286,53 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # in-memory contract checked before the write.
             verify_written_file_parity(output_file, pcb_data, sweep_scope_ids,
                                        label=' route')
+        if wrote and output_file:
+            # #666 always-on write-divergence repair: a rip/restore cycle can
+            # leave a net's copper in the MODEL while the write lists dropped
+            # it -- the file ships the net bare while every ledger says
+            # 'routed' (measured: IO_9 in routed_single with 0 segs written;
+            # RAM_D9's restored pre-existing copper stripped by the next
+            # pass). Measurement over bookkeeping: re-emit any in-scope
+            # net's model copper that the WRITTEN FILE lost entirely.
+            try:
+                from kicad_parser import parse_kicad_pcb as _pk666
+                from kicad_writer import add_tracks_and_vias_to_pcb as _aw666
+                _out666 = _pk666(output_file)
+                _fs666 = {s.net_id for s in _out666.segments}
+                _fv666 = {v.net_id for v in _out666.vias}
+                _scope666 = {nid for _n, nid in net_ids}
+                _lost666 = []
+                for _nid in _scope666:
+                    _ms = [s for s in pcb_data.segments if s.net_id == _nid]
+                    _mv = [v for v in pcb_data.vias if v.net_id == _nid]
+                    if (_ms or _mv) and _nid not in _fs666 \
+                            and _nid not in _fv666:
+                        _lost666.append((_nid, _ms, _mv))
+                if _lost666:
+                    _names666 = [pcb_data.nets[n].name
+                                 for n, _, _ in _lost666]
+                    print(f"  WARNING (#666): the written file LOST all "
+                          f"copper of {len(_lost666)} routed net(s) the "
+                          f"model still holds -- re-emitting: "
+                          f"{', '.join(_names666)}")
+                    _tr666 = [
+                        {'start': (s.start_x, s.start_y),
+                         'end': (s.end_x, s.end_y), 'width': s.width,
+                         'layer': s.layer, 'net_id': s.net_id}
+                        for _, _ms, _ in _lost666 for s in _ms]
+                    _vi666 = [
+                        {'x': v.x, 'y': v.y, 'size': v.size,
+                         'drill': v.drill, 'layers': v.layers,
+                         'net_id': v.net_id}
+                        for _, _, _mv in _lost666 for v in _mv]
+                    import tempfile as _tf666, shutil as _sh666
+                    _fd666, _tmp666 = _tf666.mkstemp(suffix='.kicad_pcb')
+                    import os as _os666
+                    _os666.close(_fd666)
+                    if _aw666(output_file, _tmp666, _tr666, _vi666):
+                        _sh666.move(_tmp666, output_file)
+            except Exception as _e666:
+                print(f"  (write-divergence repair unavailable: {_e666})")
 
     # Update schematics with swap info if directory specified
     if schematic_dir and single_ended_target_swap_info:
