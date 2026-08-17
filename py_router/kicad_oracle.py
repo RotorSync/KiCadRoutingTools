@@ -1446,6 +1446,67 @@ def oracle_reconnect(board_file: str, net_names, config,
                 print(f"  (exact link source failed: {_xe}; falling back "
                       f"to kicad-cli)")
                 links = None
+        # SOURCE UNION (#648): kicad-cli DRC is the DEMAND gate, the exact
+        # source the deterministic GEOMETRY. Measured divergences, one in
+        # each direction: (a) blindness -- the island-derived source saw 6
+        # links where kicad-cli saw 66 (7 on GND alone, sub-mm surface
+        # gaps), and every unseen link survived a whole repair pass
+        # untouched; (b) over-report -- at HEAD the exact clusters split
+        # thermal-spoke-bonded pads KiCad grades connected (champ: 4 links
+        # on P1.1V/RAM_VDD that KiCad never demanded -> junk welds).
+        # Reconciliation per processed net: KiCad demands nothing -> emit
+        # nothing; exact has links -> they carry the true-gap geometry,
+        # plus any cli link the exact enumeration doesn't cover (both
+        # endpoints >=2mm from every exact link -- a bonding disagreement,
+        # not a cluster split; coincident zone|zone cli anchors are
+        # outline-vertex artifacts and count as covered whenever the net
+        # has any exact link); exact has none -> the cli links stand.
+        # KICAD_ORACLE_UNION=0 restores the pure exact source for A/B.
+        if links is not None and _links_from_exact \
+                and env_knobs.ORACLE_UNION:
+            _cli648 = kicad_unconnected(board_file, kicad_cli)
+            if _cli648 is not None:
+                _out648 = [l for l in links if l[0] not in names]
+                _dropped648 = _added648 = 0
+                for _net648 in sorted(names):
+                    _exn = [l for l in links if l[0] == _net648]
+                    _cln = [l for l in _cli648 if l[0] == _net648]
+                    if not _cln:
+                        _dropped648 += len(_exn)
+                        continue
+                    if not _exn:
+                        _out648.extend(_cln)
+                        _added648 += len(_cln)
+                        continue
+                    _out648.extend(_exn)
+                    for _c648 in _cln:
+                        _n_, (_cax, _cay, *_r1), (_cbx, _cby, *_r2) = _c648
+                        _coinc = (abs(_cax - _cbx) < 1e-6
+                                  and abs(_cay - _cby) < 1e-6)
+                        if _coinc:
+                            continue  # artifact anchors: cluster
+                            # enumeration owns zone splits
+                        _cov = False
+                        for _e648 in _exn:
+                            _n2_, (_eax, _eay, *_s1), (_ebx, _eby, *_s2) \
+                                = _e648
+                            if (math.hypot(_cax - _eax, _cay - _eay) < 2.0
+                                    and math.hypot(_cbx - _ebx,
+                                                   _cby - _eby) < 2.0) or \
+                               (math.hypot(_cax - _ebx, _cay - _eby) < 2.0
+                                    and math.hypot(_cbx - _eax,
+                                                   _cby - _eay) < 2.0):
+                                _cov = True
+                                break
+                        if not _cov:
+                            _out648.append(_c648)
+                            _added648 += 1
+                if _dropped648 or _added648:
+                    print(f"  KiCad-oracle recheck: source union -- "
+                          f"{_dropped648} exact link(s) dropped (KiCad "
+                          f"does not demand them), {_added648} kicad-cli "
+                          f"link(s) added (unseen by the exact source)")
+                links = _out648
         if links is None:
             links = kicad_unconnected(board_file, kicad_cli)
         if links is None:

@@ -71,6 +71,10 @@ def refresh() -> None:
     g['DIRECT_FIRST'] = _on_default('KICAD_DIRECT_FIRST')
     g['IMPEDANCE_NECKDOWN'] = (_s('KICAD_IMPEDANCE_NECKDOWN', '1').strip().lower()
                                not in ('0', 'false', 'no', 'off'))
+    # #648 oracle source union: kicad-cli DRC gates the demand set, the
+    # exact-fill source carries the geometry. =0 restores the pure exact
+    # source for A/B.
+    g['ORACLE_UNION'] = _s('KICAD_ORACLE_UNION', '1') != '0'
     g['NET_RESCUE'] = _s('KICAD_NET_RESCUE', '1') != '0'
     # #658 in-run river packing: pack each routed bus member's runs against
     # already-committed sibling runs at the copper choke point, BEFORE the
