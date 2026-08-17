@@ -3834,11 +3834,23 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _oedge = effective_board_edge_clearance(input_file, 0.0)
                 except Exception:
                     _oedge = 0.0
+                # #658 fifth power path: this config used to be BARE (no
+                # layers/layer_costs), so the oracle's weld router ran at
+                # UNIFORM layer economics -- on the #589 champion 86% of the
+                # In1 power residue (62mm at the 0.2/0.4/0.8 width-upgrade
+                # rungs) was weld copper laid straight across the GND plane
+                # layer while --layer-costs priced it 6x for everyone else.
+                # Costs are soft, so a weld that must touch a plane layer
+                # (a GND link onto In1) still can.
                 _ocfg = GridRouteConfig(
                     clearance=config.clearance,
                     track_width=config.track_width,
                     via_size=config.via_size, via_drill=config.via_drill,
                     grid_step=config.grid_step,
+                    layers=list(config.layers),
+                    layer_costs=(list(config.layer_costs)
+                                 if getattr(config, 'layer_costs', None)
+                                 else []),
                     board_edge_clearance=_oedge)
                 from kicad_dru import install_layer_clearances
                 install_layer_clearances(_ocfg, None, input_file, None)
