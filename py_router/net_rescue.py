@@ -593,6 +593,144 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
         summary['attempted'] += 1
         print(f"  Rescuing {net_name} ({kind}, {num0} disconnected parts)")
 
+        # #666 bare-ball escape rung: a stripped or never-fanned SMD ball
+        # owns ZERO copper, and no scoped window enters its fenced BGA
+        # pocket at nominal geometry -- the recorded signature is 'no
+        # rippable blockers found' with a bare pad. Give each such pad a
+        # dogbone escape (offset via + pad->via trace; the #589 wave-27
+        # escape engine with via-in-pad clamp and fab-ladder rungs) BEFORE
+        # gap routing, so the gap route / terminal escalation starts from a
+        # via with full layer access instead of a fenced surface pad. The
+        # cap-clearance step is deliberately NOT rerun (pre-route only,
+        # #666: post-route it strands moved caps' joints, measured 6->13).
+        tap_results = []
+        if env_knobs.BARE_PAD_ESCAPE:
+            from plane_pad_tap import tap_pad_with_escalation
+            from kicad_parser import Segment as _Seg, Via as _Via
+            _tapped = 0
+            for _pad in pcb_data.pads_by_net.get(net_id, []):
+                if _tapped >= 4:
+                    break
+                if _pad.drill and _pad.drill > 0:
+                    continue  # a barrel already reaches every layer
+                _px, _py = _pad.global_x, _pad.global_y
+                _reach = max(_pad.size_x, _pad.size_y) / 2.0 + 0.35
+                _bare = not any(
+                    v.net_id == net_id and abs(v.x - _px) < _reach
+                    and abs(v.y - _py) < _reach
+                    for v in pcb_data.vias) and not any(
+                    s.net_id == net_id
+                    and (abs(s.start_x - _px) < _reach
+                         and abs(s.start_y - _py) < _reach
+                         or abs(s.end_x - _px) < _reach
+                         and abs(s.end_y - _py) < _reach)
+                    for s in pcb_data.segments)
+                if not _bare:
+                    continue
+                _cu = [l for l in _pad.layers if l.endswith('.Cu')]
+                try:
+                    _tr = tap_pad_with_escalation(
+                        _pad, _cu[0] if _cu else None, net_id, pcb_data,
+                        config, max_search_radius=1.5,
+                        via_size=config.via_size,
+                        via_drill=config.via_drill,
+                        verbose=False, fine_for_all=True)
+                except Exception:
+                    _tr = None
+                if not _tr or not _tr.success:
+                    # FANOUT-RESCUE rung: on a fine-pitch array where the
+                    # fab-floor via cannot fit between balls AT ALL (U3's
+                    # 0.5mm pitch busts the half-pitch budget by 3um -- the
+                    # RAM_LDM root cause) a plain dogbone tap can never
+                    # succeed, and on ROUTED terrain the vialess pad-gap
+                    # corridors are consumed too. The full fanout escape
+                    # ladder (dogbone + lane-walk + via-in-pad clamp +
+                    # surface rescue, net-scoped) is the machinery that
+                    # validated 2/2 on exactly this class (#666/#652).
+                    _fp = pcb_data.footprints.get(_pad.component_ref)
+                    _gsegs, _gvias = [], []
+                    if _fp is not None and len(_fp.pads) >= 12:
+                        try:
+                            from bga_fanout import generate_bga_fanout
+                            # Post-route: nothing will move a cap off a
+                            # rescue via -- every foreign passive is
+                            # immovable for via legality (see
+                            # immovable_foreign_pads).
+                            pcb_data._fanout_all_foreign_immovable = True
+                            try:
+                                _ft, _fv, *_ = generate_bga_fanout(
+                                    _fp, pcb_data, net_filter=[net_name],
+                                    layers=list(config.layers),
+                                    track_width=config.track_width,
+                                    clearance=config.clearance,
+                                    via_size=config.via_size,
+                                    via_drill=config.via_drill,
+                                    escape_method='dogbone',
+                                    layer_costs=getattr(config,
+                                                        'layer_costs',
+                                                        None),
+                                    plane_drop='off')
+                            finally:
+                                pcb_data._fanout_all_foreign_immovable = \
+                                    False
+                        except Exception as _fe:
+                            print(f"    (fanout-rescue error for "
+                                  f"{_pad.component_ref}.{_pad.pad_number}:"
+                                  f" {_fe})")
+                            _ft, _fv = [], []
+                        _gsegs = [_Seg(
+                            start_x=t['start'][0], start_y=t['start'][1],
+                            end_x=t['end'][0], end_y=t['end'][1],
+                            width=t['width'], layer=t['layer'],
+                            net_id=net_id) for t in (_ft or [])
+                            if t.get('net_id') == net_id]
+                        _gvias = [_Via(
+                            x=v['x'], y=v['y'], size=v['size'],
+                            drill=v['drill'],
+                            layers=v.get('layers', ['F.Cu', 'B.Cu']),
+                            net_id=net_id) for v in (_fv or [])
+                            if v.get('net_id') == net_id]
+                    if not _gsegs and not _gvias:
+                        continue
+                    pcb_data.segments.extend(_gsegs)
+                    pcb_data.vias.extend(_gvias)
+                    tap_results.append({'new_segments': _gsegs,
+                                        'new_vias': _gvias,
+                                        'iterations': 0})
+                    _tapped += 1
+                    print(f"    bare-ball escape: {_pad.component_ref}."
+                          f"{_pad.pad_number} fanout-rescue escape "
+                          f"({len(_gsegs)} seg(s), {len(_gvias)} via(s)) "
+                          f"(#666)")
+                    continue
+                _tsegs, _tvias = [], []
+                if _tr.via is not None:
+                    _v = _tr.via
+                    _tvias.append(_Via(
+                        x=_v['x'], y=_v['y'], size=_v['size'],
+                        drill=_v['drill'],
+                        layers=_v.get('layers', ['F.Cu', 'B.Cu']),
+                        net_id=net_id))
+                for _s in (_tr.segments or []):
+                    _tsegs.append(_Seg(
+                        start_x=_s['start'][0], start_y=_s['start'][1],
+                        end_x=_s['end'][0], end_y=_s['end'][1],
+                        width=_s['width'], layer=_s['layer'],
+                        net_id=net_id))
+                if not _tsegs and not _tvias:
+                    continue
+                pcb_data.segments.extend(_tsegs)
+                pcb_data.vias.extend(_tvias)
+                tap_results.append({'new_segments': _tsegs,
+                                    'new_vias': _tvias, 'iterations': 0})
+                _tapped += 1
+                print(f"    bare-ball escape: {_pad.component_ref}."
+                      f"{_pad.pad_number} dogbone ({len(_tsegs)} seg(s), "
+                      f"{len(_tvias)} via(s)) (#666)")
+            if tap_results:
+                num0, comp_points, comp_pads = _net_component_info(
+                    pcb_data, net_id)
+
         edge_results = []
         failed_gaps = set()
         attempts = 0
@@ -655,7 +793,7 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                   f"{result.get('iterations', 0)} iters)")
 
         elapsed = time.time() - net_start
-        if not edge_results:
+        if not edge_results and not tap_results:
             summary['unchanged'].append(net_name)
             record_net_event(state, net_id, "rescue_failed",
                              {"components": num0, "attempts": attempts,
@@ -663,11 +801,18 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
             print(f"    {RED}rescue failed{RESET} ({elapsed:.1f}s)")
             continue
 
+        # tap_results ride the same write path as edge copper (#292/#508:
+        # copper in pcb_data but absent from state.results is orphan-stripped
+        # or ships only via the #666 write-boundary guard). A tap-only
+        # outcome ships the dogbone even when the gap route failed -- the
+        # terminal escalation and later passes start from escaped terrain.
         merged = {
             'net_name': net_name,
             'net_id': net_id,
-            'new_segments': [s for r in edge_results for s in r['new_segments']],
-            'new_vias': [v for r in edge_results for v in r.get('new_vias', [])],
+            'new_segments': [s for r in (tap_results + edge_results)
+                             for s in r['new_segments']],
+            'new_vias': [v for r in (tap_results + edge_results)
+                         for v in r.get('new_vias', [])],
             'iterations': sum(r.get('iterations', 0) for r in edge_results),
             'is_rescue': True,
         }
@@ -711,6 +856,7 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
         record_net_event(state, net_id, "rescue_succeeded",
                          {"fully_connected": fully,
                           "edges_routed": len(edge_results),
+                          "bare_ball_escapes": len(tap_results),
                           "components_before": num0, "components_after": num,
                           "time_s": round(elapsed, 2)})
         bucket = 'recovered' if fully else 'improved'

@@ -23,7 +23,15 @@ def immovable_foreign_pads(pcb_data, exclude_ref: str) -> List:
     locked footprints, and any part place_fanout_clearance won't relocate
     (i.e. not an unlocked 2-pad C*/R*/FB* passive). A through via placed by the
     fanout must clear these on every copper layer; movable caps are deliberately
-    NOT included (cap-opt moves them off the vias afterwards)."""
+    NOT included (cap-opt moves them off the vias afterwards).
+
+    POST-ROUTE callers (the #666 in-chain bare-ball rescue) set
+    `pcb_data._fanout_all_foreign_immovable = True`: the clearance step is
+    pre-route only, so at rescue time NOTHING will move a cap off a via --
+    a B-side decap pad under the ball field must then be cleared like any
+    locked part (measured: a rescue via-in-pad landed 0.29mm from C59.1's
+    B.Cu pad, 0.187mm overlap)."""
+    all_immovable = getattr(pcb_data, '_fanout_all_foreign_immovable', False)
     out = []
     for fp in pcb_data.footprints.values():
         if fp.reference == exclude_ref:
@@ -32,7 +40,8 @@ def immovable_foreign_pads(pcb_data, exclude_ref: str) -> List:
                        if any(str(l).endswith('.Cu') for l in p.layers)]
         if not copper_pads:
             continue
-        movable = (not getattr(fp, 'locked', False)
+        movable = (not all_immovable
+                   and not getattr(fp, 'locked', False)
                    and fp.reference.startswith(MOVABLE_PASSIVE_PREFIXES)
                    and len(copper_pads) <= 2)
         if movable:
