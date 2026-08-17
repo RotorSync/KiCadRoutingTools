@@ -327,6 +327,11 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     # lifted only during the tied net's own route).
     pcb_data._net_tie_lift = _assemble_net_tie_lifts(
         _tie_corridors, _tie_recorded, layer_map)
+    # #667: the priced band = corridor cells OFF the own pad (the waived
+    # own-pad approach stays free -- the gradient IS the steering).
+    pcb_data._net_tie_price = {
+        nid: sorted(e['cells'] - e.get('safe_cells', set()))
+        for nid, e in _tie_corridors.items()}
     if len(nets_to_route_set) == 1:
         for _arr in pcb_data._net_tie_lift.get(next(iter(nets_to_route_set)), []):
             if len(_arr):
@@ -2804,7 +2809,8 @@ def _compute_net_tie_corridors(pcb_data, config, coord):
                           if hasattr(config, 'get_net_track_width')
                           else config.track_width / 2)
                 entry = corridors.setdefault(
-                    own.net_id, {'cells': set(), 'partner_pad_ids': set(),
+                    own.net_id, {'cells': set(), 'safe_cells': set(),
+                                 'partner_pad_ids': set(),
                                  'partner_net_ids': set()})
                 for partner in partners:
                     pex = partner.size_x / 2 + partner.size_y / 2
@@ -2893,6 +2899,16 @@ def _compute_net_tie_corridors(pcb_data, config, coord):
                         continue
                     entry['cells'].update(
                         zip(GX.ravel()[ok].tolist(), GY.ravel()[ok].tolist()))
+                    # #667: cells whose CENTER lies on the OWN pad are the
+                    # KiCad-waived approach (contact on the own pad); the
+                    # rest of the corridor is the segment-level hazard band
+                    # the #667 pricing steers away from. Uniform pricing was
+                    # measured INERT (no gradient = no steering).
+                    _on_own = _pad_dist_le_batch(cxm[ok], cym[ok], own, 1e-9)
+                    if _on_own.any():
+                        entry['safe_cells'].update(
+                            zip(GX.ravel()[ok][_on_own].tolist(),
+                                GY.ravel()[ok][_on_own].tolist()))
                     entry['partner_pad_ids'].add(id(partner))
                     entry['partner_net_ids'].add(partner.net_id)
     return {n: e for n, e in corridors.items() if e['cells']}

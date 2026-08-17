@@ -75,6 +75,17 @@ def refresh() -> None:
     # exact-fill source carries the geometry. =0 restores the pure exact
     # source for A/B.
     g['ORACLE_UNION'] = _s('KICAD_ORACLE_UNION', '1') != '0'
+    # #667 net-tie band pricing (mm-equivalent cost per band cell,
+    # DIFFERENTIAL: the own-pad approach stays free, off-pad corridor
+    # cells are priced). Measured INERT on cynthion at 0.5 and 5.0 --
+    # the residual violations are the no-legal-landing footprint class
+    # (a tab flush inside the partner outline admits NO flag-free tip
+    # position, bisected to 5um), which no cost can steer. Default OFF;
+    # kept for corpus A/B on boards with mid-route plough-throughs.
+    try:
+        g['TIE_BAND_COST'] = float(_s('KICAD_TIE_BAND_COST', '0') or 0)
+    except ValueError:
+        g['TIE_BAND_COST'] = 0.0
     g['NET_RESCUE'] = _s('KICAD_NET_RESCUE', '1') != '0'
     # #658 in-run river packing: pack each routed bus member's runs against
     # already-committed sibling runs at the copper choke point, BEFORE the

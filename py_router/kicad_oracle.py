@@ -1796,10 +1796,13 @@ def oracle_reconnect(board_file: str, net_names, config,
                                  (0.45, 0.2)):
                     if _vs > config.via_size:
                         continue
-                    _ecfg = config if _vs == config.via_size else \
-                        replace(config, via_size=_vs, via_drill=_vd)
+                    # #658: the tier routes with the same per-net power
+                    # layer discipline as the main ladder (closure over
+                    # _pw_cfg, bound per link before any tier call).
+                    _ecfg = _pw_cfg if _vs == config.via_size else \
+                        replace(_pw_cfg, via_size=_vs, via_drill=_vd)
                     _eobst = base_obstacles
-                    if _ecfg is not config:
+                    if _vs != config.via_size:
                         _eobst, _ = build_base_obstacles(
                             exclude_net_ids={net_id},
                             routing_layers=routing_layers,
@@ -1832,6 +1835,17 @@ def oracle_reconnect(board_file: str, net_names, config,
                         strict_endpoints=True)
                 except Exception:
                     _esc2 = None
+                if _esc2 and not _esc2.get('failed'):
+                    _fl2 = {i for i, _c in
+                            enumerate(_pw_cfg.layer_costs or [])
+                            if _c is not None and _c < 0}
+                    if _fl2 and any(
+                            layer_map.get(_s.layer) in _fl2
+                            for _s in (_esc2.get('new_segments') or [])):
+                        print(f"    {net_name}: exact-fill strap REJECTED "
+                              f"(copper on a layer forbidden for this "
+                              f"net, #658)")
+                        _esc2 = None
                 if _esc2 and not _esc2.get('failed') \
                         and (not _copper_in_corridor(
                             _esc2.get('new_segments') or [],
@@ -2033,6 +2047,19 @@ def oracle_reconnect(board_file: str, net_names, config,
                                     routing_layers, (ax, ay),
                                     track_half=config.track_width / 2)
             anchor_layer = layer_map.get(al or bl or routing_layers[0], 0)
+            # #658: per-net POWER layer discipline reaches the weld leg --
+            # the oracle config carries the chain's base layer costs
+            # (73a1b15b); a power net's KICAD_POWER_LAYER_COSTS multipliers
+            # apply on top here, exactly as at the four routing hook sites.
+            # Helper lives in the plan module; guarded for trees without it.
+            # Layer costs are router-side only, so the obstacle-map memo and
+            # rung rebuilds key off the VIA SIZE as before.
+            _pw_cfg = config
+            try:
+                from global_plan import power_layer_config
+                _pw_cfg = power_layer_config(config, config, net_id)
+            except Exception:
+                _pw_cfg = config
             result = None
             used_via_size, used_via_drill = config.via_size, config.via_drill
             # Via-size ladder: a 0.5 via has nowhere to drop in a QFN pocket
@@ -2041,10 +2068,10 @@ def oracle_reconnect(board_file: str, net_names, config,
             for vs, vd in ((config.via_size, config.via_drill), (0.45, 0.2)):
                 if vs > config.via_size:
                     continue
-                rung_cfg = config if vs == config.via_size else \
-                    replace(config, via_size=vs, via_drill=vd)
+                rung_cfg = _pw_cfg if vs == config.via_size else \
+                    replace(_pw_cfg, via_size=vs, via_drill=vd)
                 rung_obstacles = base_obstacles
-                if rung_cfg is not config:
+                if vs != config.via_size:
                     rung_obstacles, _ = build_base_obstacles(
                         exclude_net_ids={net_id},
                         routing_layers=routing_layers,
@@ -2145,6 +2172,23 @@ def oracle_reconnect(board_file: str, net_names, config,
                           f"(copper reaches neither/only one gap endpoint "
                           f"-- unrelated fragment join, #648)")
                     _esc = None
+                # #658: the rescue's scoped fine router has no layer-cost
+                # plumbing, so a FORBIDDEN layer (cost -1, e.g. power
+                # discipline banning the GND plane layer) is enforced on
+                # its output instead. Soft multipliers stay advisory here
+                # -- escalated welds are sub-mm and the discipline concern
+                # is trunk-scale copper, which the main ladder now prices.
+                if _esc and not _esc.get('failed'):
+                    _fl658 = {i for i, _c in
+                              enumerate(_pw_cfg.layer_costs or [])
+                              if _c is not None and _c < 0}
+                    if _fl658 and any(
+                            layer_map.get(_s.layer) in _fl658
+                            for _s in (_esc.get('new_segments') or [])):
+                        print(f"    {net_name}: weld escalation REJECTED "
+                              f"(copper on a layer forbidden for this "
+                              f"net, #658)")
+                        _esc = None
                 # #649: the scoped-window escalation is LAYER-BLIND (its
                 # gap is xy-only), so it can "close" a cross-layer link --
                 # e.g. an F.Cu island <-> an In1 zone -- with same-layer
@@ -2293,6 +2337,10 @@ def oracle_reconnect(board_file: str, net_names, config,
                 # ladder could not thread -- the corridor is off-grid (#589
                 # champion: a 0.092mm lane between 0.5mm-pitch BGA pads).
                 # Lay the direct exact-checked weld segment across the gap.
+                # Deliberately EXEMPT from the #658 forbidden-layer guard:
+                # an island join has no layer freedom (the gap dictates it,
+                # like the #649b via), so a forbid here could only strand
+                # the island, never redirect the copper.
                 if ((_esc is None or _esc.get('failed')) and al and bl
                         and al == bl
                         and math.hypot(bx - ax, by - ay) < 1.0):

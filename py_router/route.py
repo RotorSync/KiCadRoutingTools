@@ -3871,6 +3871,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     layer_costs=(list(config.layer_costs)
                                  if getattr(config, 'layer_costs', None)
                                  else []),
+                    # #658: power-net membership rides along so the weld
+                    # leg's per-net KICAD_POWER_LAYER_COSTS multipliers
+                    # (power_layer_config in oracle_reconnect) can fire.
+                    power_net_widths=dict(
+                        getattr(config, 'power_net_widths', None) or {}),
                     board_edge_clearance=_oedge)
                 from kicad_dru import install_layer_clearances
                 install_layer_clearances(_ocfg, None, input_file, None)
