@@ -25,11 +25,12 @@ import sys
 # Non-fatal pcbnew asserts (PCB_VIA::GetWidth layer arg, wxApp traits) spam
 # stderr on some KiCad builds; they do not affect the extracted data.
 
-KICAD_PYTHONS = [
-    "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3",
-    "/usr/bin/python3",  # Linux distro KiCad installs pcbnew for system python
-    os.path.expandvars(r"C:\Program Files\KiCad\bin\python.exe"),
-]
+# Shared with kicad_exact_fill so the install layouts -- notably Windows'
+# VERSIONED directory, which the bare C:\Program Files\KiCad\bin path missed
+# for every KiCad >= 6 (#647) -- are described in exactly one place.
+from kicad_exact_fill import kicad_python_candidates  # noqa: E402
+
+KICAD_PYTHONS = kicad_python_candidates()
 
 
 def _reexec_with_kicad_python():

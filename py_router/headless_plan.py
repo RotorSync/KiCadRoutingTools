@@ -42,12 +42,12 @@ if _REPO_DIR not in sys.path:
     sys.path.insert(0, _REPO_DIR)
 
 # Where KiCad's bundled python (the one with pcbnew + wx) lives per platform.
-KICAD_PYTHONS = [
-    "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3",
-    "/usr/bin/python3",
-    os.path.expandvars(r"C:\Program Files\KiCad\bin\python.exe"),
-    os.path.expandvars(r"C:\Program Files\KiCad\9.0\bin\python.exe"),
-]
+# Shared with kicad_exact_fill so the install layouts -- notably Windows'
+# VERSIONED directory, which the bare C:\Program Files\KiCad\bin path missed
+# for every KiCad >= 6 (#647) -- are described in exactly one place.
+from kicad_exact_fill import kicad_python_candidates  # noqa: E402
+
+KICAD_PYTHONS = kicad_python_candidates()
 
 
 def have_kicad_python() -> bool:

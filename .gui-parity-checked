@@ -1,3 +1,86 @@
+b2d8074b 2026-08-14 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit 61e56a0..b2d8074b: NO GAPS; one LATENT hazard hardened (below). Twenty
+upstream commits plus the hardening commit b2d8074b that closes this audit.
+The mechanical sweep is clean in all three dimensions CLAUDE.md names:
+NO new argparse flags on any of the six routing CLIs, NO added/removed
+batch_route or batch_route_diff_pairs kwargs, and exactly one new env knob
+(KICAD_RASTER_CACHE_MB, env_knobs.RASTER_CACHE_MB) which is read through the
+shared engine -- no flag, no control, no argparse default, so both fronts
+inherit it identically. Same env-knob-only class as the 61e56a0 audit.
+
+  * e9523f23 PROXIMITY_HEURISTIC_FACTOR 0 -> 0.02. A DEFAULT CHANGE, the class
+    CLAUDE.md warns must match on both fronts. It does: route.py/route_diff.py
+    argparse and the batch_route signature all read
+    defaults.PROXIMITY_HEURISTIC_FACTOR, and the GUI reads it in all three
+    places that matter (swig_gui SpinCtrlDouble `initial=`, its entry in
+    reset_params_to_defaults, and differential_gui's engine call).
+    HARDENED: swig_gui's engine call had a HARDCODED `config.get(
+    'proximity_heuristic_factor', 0.02)` fallback where its neighbours use
+    `defaults.*`. Dead code today (the dialog always supplies the key, and
+    0.02 is currently correct), but this is precisely the drift that caused
+    the regression e9523f23 fixes -- 1af3096 changed the module constant while
+    an explicit argparse default kept overriding it, and the corpus routed at
+    the old value for two more commits before b50fc86 exposed it (-17 nets on
+    a 5-board probe; restoring 0.02 recovered 14). Now reads defaults.*.
+  * 83b947bb #572 zero-length/duplicate forced-edge drop is INSIDE batch_route
+    (route.py:1711), i.e. the shared engine -- NOT a CLI main() post-pass, so
+    no Class-2 drift and gate 2 stays at 8 registered passes.
+  * 03b93453 per-WELD status reporting rides the EXISTING progress_callback
+    parameter inside kicad_oracle (shared), so whichever front supplies the
+    callback gets the new updates. Nothing to thread.
+  * 301ee1b3 _global_to_local sign fix is a kicad_parser change -- the one
+    class CLAUDE.md flags as NOT automatically shared, because the GUI COMPUTES
+    pad.local_x/local_y in build_pcb_data_from_board rather than reading them.
+    It is now covered by real gates (0c18db9c): test_fanout_rotated_gui (the
+    only gate that runs FANOUT, the sole routing consumer of local_x/local_y)
+    and the wx-free test_rotated_footprint_frame. Both run below. This
+    supersedes the 2026-08-14 ADDENDUM recorded under the de944ce entry.
+  * The nine perf commits (60b89202, d53c3ee8, 02f5375a, 14df3a67, b8da958b,
+    c45e8097, 15b718ce, b85436db, and 03b93453's dedup half) are memos and
+    batching INSIDE shared engine / low-level modules, each landed as
+    output-identical. Shared by construction.
+  * b9d201bc (AI-tab Save Plan filename) and the harness commits (a5efb461,
+    bfbde076, d3f6bd2c, 9097af39, 0c18db9c) touch no engine surface.
+
+SURVEYED, so the next audit need not re-derive it: the GUI's hardcoded numeric
+`config.get(key, <literal>)` fallbacks. 34 of them across swig_gui and
+differential_gui; 30 are value-identical to their shared constant and 4 only
+LOOK divergent -- differential_gui's clearance (0.1 vs defaults.CLEARANCE 0.25),
+via_size (0.3 vs 0.5) and via_drill (0.2 vs 0.3). Those are FALSE POSITIVES of
+a name->CONSTANT comparison: route_diff's argparse defaults for all three are
+None, meaning "resolve from the board's own net class" (#439), so
+defaults.CLEARANCE is not the value the CLI uses either -- and the GUI's config
+dict always supplies these keys from _effective_clearance/_via_size/_via_drill,
+making the fallbacks unreachable. No live divergence. They remain a latent
+class: a fallback literal cannot follow a changed constant.
+
+Parity evidence at b2d8074b (2026-08-14), all gates run, none skipped:
+  * gate 1 test_manifest_plan_parity: 9108 flag-checks / 402 manifests, 0
+    mismatches; 12 params resolved, 0 unresolved. PASS
+  * gate 2 test_cli_postpass_coverage: 8 registered / 15 active / 1
+    acknowledged CLI-only (fanout DRC graze audit, report-only), 0 unreachable,
+    0 failures, 0 warnings. PASS
+  * gate 3 test_settings_roundtrip: 181 keys; save, restore, legacy-dict
+    restore and re-save key parity all clean. PASS
+  * gate 4 test_gui_engine_parity: 3-step chain on splitflap_driver. Run
+    TWICE -- once at c45e8097 and again AT b2d8074b after the hardening
+    commit, so the SHA on line 1 is a measured result, not an inference
+    from 'the changed line was dead code'. Identical both times.
+    CLI conn_full=True issues=0 drc=0 kicad_unconnected=0; GUI identical.
+    COPPER SETS IDENTICAL -- segments 1267/1267, vias 128/128, 0 cli-only,
+    0 gui-only. PASS
+  * gate 5 test_cli_defaults_parity: 100 defaults across 6 CLIs, 0
+    disagreements. PASS
+  * fanout gate test_fanout_rotated_gui (U2 QFN-76 @ 90 deg): side
+    classification 78 pads 0 differing, copper 104/104 tracks identical, all
+    104 escapes outward on both fronts. 10/10. PASS
+  * test_rotated_footprint_frame (wx-free): 28/28. PASS
+
+Environment note: pcbnew 10.0.0-103-gacbf1898e0, wx 4.2.2a1 (wxWidgets 3.2.8),
+ApplePersistenceIgnoreState=1. The wx gates were PROBED, not assumed -- see the
+standing warning further down about markers carrying "pending a KiCad-python
+session" while the prerequisites worked the whole time.
+
 61e56a0 2026-08-13 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit de944ce..61e56a0: NO GAPS. Five commits, of which two touch the engine and
 both are ENV-KNOB-ONLY changes read through the shared engine -- no CLI flag, no
@@ -671,3 +754,83 @@ HEAD 2026-07-30 parity audit 191abc4..d73b1d6 (3 commits). Outcome: no gaps.
     gate runs a fanout step; ea992d9), its stale _path bootstrap
     (3c4fc48), and the #562 rename breaking every recorded manifest's
     repair step (relocate_moved_scripts rename table, 89914ce).
+
+ADDENDUM 2026-08-14 (301ee1b3, _global_to_local sign fix cherry-picked from
+the placement branch / PR #633 commit a2e96995) -- scope: that ONE hunk. The
+SHA at the top of this file is NOT bumped: no full audit ran, only this
+change was analysed.
+
+  * The bug: py_router/kicad_parser._global_to_local computed
+    R(-theta).(g - f), which IS local_to_global's forward map, not its
+    inverse. Correct inverse is R(+theta).(g - f). Round-trip over
+    kicad_files/ puts the OLD body wrong for roughly half the pads on every
+    board with rotated footprints -- glasgow_revC 612/1149 (worst 46.0mm),
+    kit-dev-coldfire 437/825 (worst 147.4mm), interf_u 156/379 (worst
+    82.1mm). Boards with no rotated footprint (cap_chain) were unaffected
+    either way. The NEW body round-trips to float noise (<=3e-7mm, which is
+    local_to_global's nm snap).
+  * Reach: ONE caller -- build_pcb_data_from_board's pad-local fallback, so
+    the GUI/pcbnew front only. The text parser reads pad locals verbatim
+    from the file, so the CLI never executed this and CLI routing cannot
+    change. It was NOT dormant on the GUI side: KiCad 7+ removed
+    pad.GetPos0() (verified absent on KiCad 10.0.0-103), so every pad in a
+    GUI-built PCBData went through the fallback.
+  * What actually consumes pad.local_x/local_y, and what the fix changes:
+      - qfn_fanout/layout.py (side classification, escape direction).
+        MEASURED, not reasoned: the real FanoutTab on a real headless
+        RoutingDialog, haasoscope_pro_max_test.kicad_pcb U2 (QFN-76 @ 90deg,
+        72 nets), run twice with only the formula swapped. Side labels flip
+        as predicted (bottom 17/top 3 -> bottom 3/top 17) but the emitted
+        copper is IDENTICAL: 104 tracks each way, 0 failed, all 104 escapes
+        outward, track sets equal. Escape geometry is built from pad
+        GLOBALS, so a 180deg relabel of a centre-symmetric package moves
+        nothing. QFN fanout output is UNCHANGED for orthogonal parts -- the
+        fix corrects wrong data that this consumer does not turn into
+        different copper.
+      - bga_fanout/rotate_frame.py:88 overwrites pad.global_x/y with
+        (cx + local_x, cy + local_y). This one WOULD move copper, but it is
+        gated behind is_orthogonal() and kicad_files/ holds ZERO
+        non-orthogonal multi-pad footprints, so it is unexercised here. At a
+        hypothetical 45deg/30deg placement of U3 (BGA-529) the old locals
+        misplace balls by up to 17.6mm/12.4mm -- load-bearing whenever
+        #137's frame transform actually runs.
+      - placement/utility.py (footprint bbox) and placement/quench.py
+        (pads_local): placement only, no routing consequence.
+    Signal routing, diff pairs and planes read global_x/global_y throughout
+    and are untouched.
+  * Gate on main WITH the fix: test_gui_engine_parity VERDICT PARITY, copper
+    sets IDENTICAL (segments 1267=1267, vias 128=128, 0 one-sided, drc 0/0,
+    kicad_unconnected 0/0).
+  * Standing gap this exposed: no gate runs a fanout step (same blind spot
+    ea992d9 hit above), so nothing in the suite would have caught this
+    either way. The QFN before/after above was a one-off harness, not a
+    committed gate. -- CLOSED, see below.
+
+  * GAP CLOSED, same day: two gates now cover it, both verified to go RED
+    with the transposed body restored and green with it fixed.
+      - tests/test_rotated_footprint_frame.py (wx-free, ~1s, under run_all):
+        round-trip identity over 4 real boards; the rotate_frame ball
+        round-trip at 35/45/-20 deg (the non-orthogonal regime NO in-repo
+        board reaches, and the only consumer that turns a wrong local into
+        moved copper); and QFN side classification from file-true vs
+        GUI-recomputed locals. Each check is paired with a CHANGE DETECTOR
+        asserting the OLD body still fails it, so the file cannot go vacuous;
+        it also asserts the corpus still HAS rotated footprints, since a board
+        set that lost them would make the detectors unfalsifiable.
+      - tests/gui_parity/test_fanout_rotated_gui.py (KiCad python, seconds):
+        the first gate to run a FANOUT step. Real FanoutTab on a real headless
+        RoutingDialog vs the CLI's text-parsed engine call, on haasoscope U2
+        (QFN-76 @ 90deg). It replays the tab's OWN captured generate_qfn_fanout
+        kwargs on the CLI leg rather than rebuilding them -- the tab resolves
+        arguments from the QFN panel + Basic-tab shared params + defaults, and
+        mirroring that is the drift the plane gate's `Shim` already taught us
+        about.
+    Calibration worth recording: with the bug restored, the SIDE
+    CLASSIFICATION check fails (76/78 pads, "pad 1: CLI=left GUI=right") while
+    copper parity stays GREEN. That is not a weak gate -- it is the measured
+    truth that this bug does not move QFN copper. Anything asserting only on
+    copper would have shipped the bug twice.
+  * Deliberately NOT covered: an asymmetric or non-orthogonal package through
+    the real GUI fanout tab, because no in-repo board has one. That regime is
+    covered only synthetically (item 4 above). A corpus board with a
+    non-orthogonal multi-pad part would be the thing to add.

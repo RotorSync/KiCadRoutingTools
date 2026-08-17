@@ -235,6 +235,18 @@ through there too.
   rename, or REMOVE a dialog control** — deleting one without updating
   `settings_persistence` crashes on close and loses the user's settings
   (that shipped once; see 31f359c). Seconds to run, no routing.
+- `tests/gui_parity/test_fanout_rotated_gui.py` — needs KiCad python; the only
+  gate that runs a **fanout** step. Drives the REAL FanoutTab on a rotated
+  QFN (haasoscope U2, QFN-76 @ 90°) and compares against the CLI's text-parsed
+  engine call, replaying the tab's OWN captured kwargs so the two fronts cannot
+  differ by a parameter. Asserts side classification parity (the check that
+  catches a local-frame bug), emitted-copper parity, and outward escapes.
+  Seconds to run. Its wx-free half is `tests/test_rotated_footprint_frame.py`
+  (round-trip invariants + change detectors, ~1 s, runs under `run_all.py`).
+  **Fanout is the only routing consumer of `pad.local_x/local_y`**, and those
+  are the one PCBData field the GUI COMPUTES rather than reads — see the
+  `_global_to_local` entry in `.gui-parity-checked` for the bug that motivated
+  these.
 - `tests/gui_parity/test_gui_engine_parity.py` — needs KiCad python; runs the
   plan through the GUI engine path and grades against the CLI chain
   (`KICAD_DUMP_BATCH_KWARGS` diffs the full batch_route param set, ~105 keys).
