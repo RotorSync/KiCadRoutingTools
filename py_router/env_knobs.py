@@ -99,6 +99,10 @@ def refresh() -> None:
     # gets a dogbone escape (offset via + pad->via trace, via-in-pad clamp)
     # before gap routing / terminal escalation. =0 disables for A/B.
     g['BARE_PAD_ESCAPE'] = _s('KICAD_BARE_PAD_ESCAPE', '1') != '0'
+    # #666/IO_9: when the strict bare-ball escape fails, allow a MOVABLE-cap
+    # conflict IF the cap has a verified relocation -- the scoped post-write
+    # cap move + oracle re-weld then clears the conflict. =0 disables.
+    g['RESCUE_CAP_MOVE'] = _s('KICAD_RESCUE_CAP_MOVE', '1') != '0'
     # Terminal geometry escalation ("better than shipping opens", 2026-08-05):
     # post-rescue whole-net retry with track width + via size marching down
     # together toward the fab floor. =0 disables for A/B debugging.

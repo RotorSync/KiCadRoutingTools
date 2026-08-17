@@ -3353,6 +3353,69 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         _sh666.move(_tmp666, output_file)
             except Exception as _e666:
                 print(f"  (write-divergence repair unavailable: {_e666})")
+            # #666/IO_9 scoped cap move (CLI file mode, like the reaudit):
+            # the bare-ball rescue shipped an escape via that conflicts
+            # with a MOVABLE cap, with a relocation verified at rescue
+            # time. Apply the move to the written file, mirror it into
+            # pcb_data, and re-weld the moved cap's nets with the oracle
+            # (union source: KiCad decides what needs welding). The full
+            # clearance step must NOT rerun post-route (strands every
+            # moved cap's joints, measured 6->13); this moves ONLY the
+            # conflicting cap(s).
+            _capmv = getattr(pcb_data, '_pending_cap_moves', None)
+            if _capmv:
+                try:
+                    from placement.writer import write_placed_output
+                    print(f"  #666 scoped cap move: relocating "
+                          f"{len(_capmv)} cap(s) off rescue via(s): "
+                          + ', '.join(m['reference'] for m in _capmv))
+                    if write_placed_output(output_file, output_file,
+                                           _capmv):
+                        _mvnets = set()
+                        for _mv in _capmv:
+                            _fpmv = pcb_data.footprints.get(
+                                _mv['reference'])
+                            if _fpmv is not None:
+                                _dxm = _mv['new_x'] - _fpmv.x
+                                _dym = _mv['new_y'] - _fpmv.y
+                                _fpmv.x = _mv['new_x']
+                                _fpmv.y = _mv['new_y']
+                                for _pmv in _fpmv.pads:
+                                    _pmv.global_x += _dxm
+                                    _pmv.global_y += _dym
+                            _mvnets.update(_mv.get('net_ids') or [])
+                        _mvnames = sorted(
+                            pcb_data.nets[n].name for n in _mvnets
+                            if n in pcb_data.nets)
+                        if _mvnames:
+                            from kicad_oracle import oracle_reconnect
+                            _cap_cfg = GridRouteConfig(
+                                clearance=config.clearance,
+                                track_width=config.track_width,
+                                via_size=config.via_size,
+                                via_drill=config.via_drill,
+                                grid_step=config.grid_step,
+                                layers=list(config.layers),
+                                layer_costs=(list(config.layer_costs)
+                                             if getattr(config,
+                                                        'layer_costs',
+                                                        None) else []),
+                                power_net_widths=dict(
+                                    getattr(config, 'power_net_widths',
+                                            None) or {}))
+                            _orc_cap = oracle_reconnect(
+                                output_file, _mvnames, _cap_cfg,
+                                track_via_clearance=config.clearance,
+                                hole_to_hole_clearance=(
+                                    config.hole_to_hole_clearance),
+                                project_from=input_file)
+                            print(f"  #666 cap-move re-weld: "
+                                  f"{_orc_cap.get('links_routed', 0)} "
+                                  f"link(s) welded, "
+                                  f"{_orc_cap.get('remaining', -1)} "
+                                  f"remaining")
+                except Exception as _ecap:
+                    print(f"  (scoped cap move failed: {_ecap})")
 
     # Update schematics with swap info if directory specified
     if schematic_dir and single_ended_target_swap_info:

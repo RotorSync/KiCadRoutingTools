@@ -534,6 +534,72 @@ def _unconnected_pads_info(comp_pads):
     return out
 
 
+def _find_cap_relocation(pcb_data, fp, extra_avoid_vias, extra_avoid_segs,
+                         clearance, max_disp=3.0):
+    """#666/IO_9: nearest legal position for a 2-pad movable passive whose
+    pad conflicts with a rescue via -- minimal displacement, rotation kept,
+    exact-checked (pads vs all foreign copper incl. the pending escape
+    copper, other footprints' pads, and drills). Returns (new_x, new_y) or
+    None. The caller ships the cap-conflicting escape ONLY when this
+    relocation exists, so the post-write move can never strand the board
+    in a known-illegal state."""
+    import math as _m
+    from geometry_utils import point_to_segment_distance as _p2s
+
+    own_ids = {p.net_id for p in fp.pads}
+    cands = []
+    step = 0.1
+    r = step
+    while r <= max_disp + 1e-9:
+        n = max(8, int(2 * _m.pi * r / step))
+        for k in range(n):
+            th = 2 * _m.pi * k / n
+            cands.append((r, fp.x + r * _m.cos(th), fp.y + r * _m.sin(th)))
+        r += step
+    cands.sort(key=lambda c: c[0])
+
+    def _pad_ok(px, py, pad):
+        half = max(pad.size_x, pad.size_y) / 2.0
+        for s in pcb_data.segments + list(extra_avoid_segs or []):
+            if s.net_id in own_ids and s.net_id == pad.net_id:
+                continue
+            if s.layer not in pad.layers and not (pad.drill and pad.drill > 0):
+                continue
+            if _p2s(px, py, s.start_x, s.start_y, s.end_x, s.end_y) \
+                    < half + s.width / 2.0 + clearance:
+                return False
+        for v in list(pcb_data.vias) + list(extra_avoid_vias or []):
+            if v.net_id == pad.net_id:
+                continue
+            if _m.hypot(v.x - px, v.y - py) < half + v.size / 2.0 + clearance:
+                return False
+        for fp2 in pcb_data.footprints.values():
+            if fp2.reference == fp.reference:
+                continue
+            for p2 in fp2.pads:
+                if p2.net_id == pad.net_id and p2.net_id != 0 \
+                        and not (p2.drill and p2.drill > 0):
+                    continue
+                # Axis-aligned rect-rect gap (a circumscribed-radius test
+                # over-blocks the whole under-BGA decap field: two 0.46mm
+                # pads at 0.5mm pitch read as grazing when 0.24mm apart).
+                _gx = abs(p2.global_x - px) - (p2.size_x + pad.size_x) / 2.0
+                _gy = abs(p2.global_y - py) - (p2.size_y + pad.size_y) / 2.0
+                if _m.hypot(max(_gx, 0.0), max(_gy, 0.0)) < clearance:
+                    return False
+        bb = pcb_data.board_info.board_bounds
+        if bb and not (bb[0] + 0.55 <= px <= bb[2] - 0.55
+                       and bb[1] + 0.55 <= py <= bb[3] - 0.55):
+            return False
+        return True
+
+    for _r, nx, ny in cands:
+        dx, dy = nx - fp.x, ny - fp.y
+        if all(_pad_ok(p.global_x + dx, p.global_y + dy, p) for p in fp.pads):
+            return nx, ny
+    return None
+
+
 def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                        progress_callback=None, cancel_check=None):
     """Scoped fine-parameter rescue for every still-failed/partial net.
@@ -678,6 +744,118 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                                   f"{_pad.component_ref}.{_pad.pad_number}:"
                                   f" {_fe})")
                             _ft, _fv = [], []
+                        # PERMISSIVE retry (#666/IO_9): the strict attempt
+                        # treats every passive as immovable; when it fails,
+                        # allow a MOVABLE cap conflict -- but ship it ONLY
+                        # with a verified relocation for the cap, recorded
+                        # for the post-write scoped cap move + re-weld
+                        # (route.py applies it; the full clearance step is
+                        # pre-route only, the scoped move is not). Gate on
+                        # NET-FILTERED emptiness: the raw lists can carry
+                        # partial copper of a failed escape.
+                        _got_own = any(
+                            t.get('net_id') == net_id
+                            for t in (_ft or [])) or any(
+                            v.get('net_id') == net_id
+                            for v in (_fv or []))
+                        if not _got_own \
+                                and env_knobs.RESCUE_CAP_MOVE:
+                            try:
+                                _ft, _fv, *_ = generate_bga_fanout(
+                                    _fp, pcb_data, net_filter=[net_name],
+                                    layers=list(config.layers),
+                                    track_width=config.track_width,
+                                    clearance=config.clearance,
+                                    via_size=config.via_size,
+                                    via_drill=config.via_drill,
+                                    escape_method='dogbone',
+                                    layer_costs=getattr(
+                                        config, 'layer_costs', None),
+                                    plane_drop='off')
+                            except Exception:
+                                _ft, _fv = [], []
+                            if _ft or _fv:
+                                from bga_fanout.geometry import \
+                                    MOVABLE_PASSIVE_PREFIXES
+                                import math as _m666
+                                _conf = {}
+                                for _v666 in (_fv or []):
+                                    for _f2 in pcb_data.footprints.values():
+                                        _cu2 = [p for p in _f2.pads if any(
+                                            str(l).endswith('.Cu')
+                                            for l in p.layers)]
+                                        if (getattr(_f2, 'locked', False)
+                                                or not _f2.reference
+                                                .startswith(
+                                                    MOVABLE_PASSIVE_PREFIXES)
+                                                or len(_cu2) > 2):
+                                            continue
+                                        for _p2 in _cu2:
+                                            _d2 = _m666.hypot(
+                                                _p2.global_x - _v666['x'],
+                                                _p2.global_y - _v666['y'])
+                                            if _p2.net_id != net_id and _d2 < (
+                                                    _v666['size'] / 2.0
+                                                    + max(_p2.size_x,
+                                                          _p2.size_y) / 2.0
+                                                    + config.clearance):
+                                                _conf[_f2.reference] = _f2
+                                if _conf:
+                                    _av_v = [_Via(
+                                        x=v['x'], y=v['y'], size=v['size'],
+                                        drill=v['drill'],
+                                        layers=v.get('layers',
+                                                     ['F.Cu', 'B.Cu']),
+                                        net_id=net_id) for v in (_fv or [])]
+                                    _av_s = [_Seg(
+                                        start_x=t['start'][0],
+                                        start_y=t['start'][1],
+                                        end_x=t['end'][0],
+                                        end_y=t['end'][1],
+                                        width=t['width'], layer=t['layer'],
+                                        net_id=net_id) for t in (_ft or [])]
+                                    _moves = []
+                                    for _cf in _conf.values():
+                                        _np = _find_cap_relocation(
+                                            pcb_data, _cf, _av_v, _av_s,
+                                            config.clearance)
+                                        if _np is None:
+                                            _moves = None
+                                            break
+                                        _moves.append(
+                                            {'reference': _cf.reference,
+                                             'new_x': _np[0],
+                                             'new_y': _np[1],
+                                             'new_rotation': _cf.rotation,
+                                             'net_ids': sorted(
+                                                 {p.net_id
+                                                  for p in _cf.pads
+                                                  if p.net_id})})
+                                    if _moves is None:
+                                        print(f"    bare-ball escape: "
+                                              f"{_pad.component_ref}."
+                                              f"{_pad.pad_number} declined "
+                                              f"(cap conflict, no legal "
+                                              f"relocation)")
+                                        _ft, _fv = [], []
+                                    else:
+                                        _pend = getattr(
+                                            pcb_data,
+                                            '_pending_cap_moves', None)
+                                        if _pend is None:
+                                            _pend = []
+                                            pcb_data._pending_cap_moves = \
+                                                _pend
+                                        _pend.extend(_moves)
+                                        for _mv in _moves:
+                                            print(
+                                                f"    bare-ball escape: "
+                                                f"cap {_mv['reference']} "
+                                                f"conflicts -- relocation "
+                                                f"to ({_mv['new_x']:.2f},"
+                                                f"{_mv['new_y']:.2f}) "
+                                                f"verified, move queued "
+                                                f"for post-write (#666)")
                         _gsegs = [_Seg(
                             start_x=t['start'][0], start_y=t['start'][1],
                             end_x=t['end'][0], end_y=t['end'][1],
