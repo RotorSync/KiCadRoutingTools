@@ -1060,13 +1060,79 @@ The `--layer-costs` line is NOT optional when Step 1 poured any solid plane:
 without it signals cross the pours at cost 1.0 and shred them (measured: split
 power pours at 0–2% connected under a BGA on a chain that omitted it). Order
 matches `--layers`; 3.0 on solid-plane layers, 1.0–1.5 on split/route+pour and
-highway layers, 1.0 on F/B.
+highway layers, 1.0 on F/B. On dense boards use the measured-optimal pricing
+from Step 2c instead (GND plane 6.0, rail pours 2.5, bus highway FREE).
 
 (When Step 2b ran, exclude its impedance nets, e.g. `--nets "*" "!RF"`, and
 route from `board_step2b.kicad_pcb`.)
 
 This produces the **canonical final board** — the finalize's `JSON_ORACLE`
 line reports the KiCad-verified plane-completion verdict for the run.
+
+### Step 2c: Tuned route parameters (the measured-optimal set)
+
+A 15-board screen (2026-08-17) measured the following parameter set as
+STRICTLY DOMINANT over each board's naive parameters — total KiCad
+post-refill unconnected 62 → 23 across the corpus at **equal total wall
+time** (better first-pass arrangement repays the extra search in saved
+rip/retry churn). Apply it whenever the board is dense enough that any
+fanout or escape is contested; on trivially-open boards the defaults are
+fine.
+
+1. **Strict small features** (the single biggest lever on packed boards —
+   lane pitch is quantized by track+clearance, and a 0.1 grid cannot
+   express a 0.28 pitch at fat features):
+   `--track-width 0.0762 --clearance 0.0889 --via-size 0.25
+   --via-drill 0.15 --hole-to-hole-clearance 0.2`
+   The fab-floor clamps pin these UP automatically on boards whose layer
+   count or fab tier can't take them — passing them is always safe.
+   Grading stays honest via the `.kicad_pro` floor writeback.
+2. **Direction preference**: `--direction-preference-cost 5`. The old 250
+   default was measured far off-optimum (dose curve 0→19, 5→9, 250→15 —
+   a weak nudge organizes layers; more over-taxes, #663).
+3. **Layer pricing** (order matches `--layers`): GND solid-plane layer
+   **6.0**; rail/split pour layers **2.5**; F/B and free routing layers
+   **1.0**; and leave the board's **bus-highway layer at 1.0 even if it
+   carries pours** — the inner layer adjacent to the largest BGA that its
+   widest bus needs (orangecrab: In2, the RAM highway; pricing it cost
+   completions every time it was tried).
+4. **The plan/attraction environment** (route step only, as env-var
+   prefixes on the command line so the manifest replays them):
+   `KICAD_GLOBAL_PLAN=1 KICAD_GLOBAL_PLAN_SEQ=1
+   KICAD_GLOBAL_PLAN_SEQ_COST=1.5 KICAD_GLOBAL_PLAN_VIA_COST=20
+   KICAD_GLOBAL_PLAN_ITERS=50000 KICAD_GLOBAL_PLAN_ATTRACT=1
+   KICAD_ATTRACT_POTENTIAL=65 KICAD_GLOBAL_PLAN_RIVER=1
+   KICAD_FINALIZE_REAUDIT=1 KICAD_PACK_INLINE=1`
+   (SEQ-negotiated global plan + potential attraction + river packing +
+   finalize re-audit. These are env knobs today, so they ride the
+   redo-manifest form of the plan but NOT the GUI plan JSON — see the
+   promotion note in Step 9.)
+
+### Step 2d: Guided iteration + endgame (dense boards)
+
+When Step 2 leaves failures on a dense board, do NOT hand-tune — iterate:
+
+```bash
+# each pass re-attempts only the failed/open tail (connected nets
+# gate-skip), with rip authority against the settled board; the plan
+# guidance persists through rips, which is what makes iteration
+# CONVERGE instead of plateauing
+python3 -X utf8 py_router/route.py board_step2.kicad_pcb board_iter1.kicad_pcb --nets "*" <same flags+env>
+python3 -X utf8 py_router/route.py board_iter1.kicad_pcb board_iter2.kicad_pcb --nets "*" <same flags+env>
+```
+
+Two iterations are near-free (measured: the tuned corpus run with 2
+iterations baked in cost +1.5% total time) and historically descend
+frontier boards 25→15 over 3–5 passes. Then two endgame signatures:
+
+- **A net walled by its own protected diff partner** (`no rippable
+  blockers` naming the partner): the #521 override — name BOTH members
+  EXACTLY with `--nets P N --force-reroute`, then one more all-nets
+  iteration (override passes may pay off one pass late).
+- **Bare-ball / island signatures** are now handled automatically
+  in-engine (bare-ball fanout rescue incl. the cap-move, per-island
+  stitcher) — if a net still ships bare, check the rescue log lines
+  before reaching for manual surgery.
 
 #### Octolinear smoothing is ON by default -- leave it alone
 
@@ -1972,3 +2038,31 @@ Example cleanup prompt:
 > The final routed board is: board_step2.kicad_pcb (or board_step4 if GND vias ran)
 >
 > Would you like me to delete the intermediate files?"
+
+## Step 9: Emit the plan as an executable artifact (always)
+
+The plan is not finished as prose — it ships as TWO machine-loadable files
+next to the board, so the exact tuned choices replay with no LLM:
+
+1. **`<board>_plan.sh`** — every board-mutating command from the plan, one
+   per line, fully quoted, in execution order, env-knob prefixes included
+   (the redo_commands.sh format; `tests/stress/redo_stress_test.py` replays
+   it verbatim). This is the authoritative form: it carries EVERYTHING,
+   including the Step 2c environment block and iteration passes.
+2. **`<board>_plan.json`** — the GUI AI-tab form:
+
+   ```bash
+   python3 tests/stress/manifest_to_plan.py <board>_plan.sh -o <board>_plan.json
+   ```
+
+   The AI tab's Load button accepts this file and the plan executor runs
+   the same chain through the GUI engine path. KNOWN LIMITATION: env-only
+   knobs (the Step 2c plan/attraction stack) do not survive into the JSON —
+   only `--flag` params map to plan params. Until those knobs are promoted
+   to first-class engine params + dialog controls (the #513 discipline),
+   the `.sh` form is the one that reproduces the tuned result exactly; say
+   so in the summary when the two forms differ.
+
+A per-board plan file that ever gets improved (a better recipe found on a
+later pass) should be REGENERATED through this skill, not hand-patched —
+the skill is the tuner; the plan file is its output.
