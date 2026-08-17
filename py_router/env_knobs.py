@@ -72,6 +72,13 @@ def refresh() -> None:
     g['IMPEDANCE_NECKDOWN'] = (_s('KICAD_IMPEDANCE_NECKDOWN', '1').strip().lower()
                                not in ('0', 'false', 'no', 'off'))
     g['NET_RESCUE'] = _s('KICAD_NET_RESCUE', '1') != '0'
+    # #658 in-run river packing: pack each routed bus member's runs against
+    # already-committed sibling runs at the copper choke point, BEFORE the
+    # route becomes an obstacle -- the vacated lane is then free for every
+    # later net in the SAME pass (the pack_river post-pass frees it only
+    # for the next chain step). Experimental; default off pending the
+    # multi-board screen.
+    g['PACK_INLINE'] = _s('KICAD_PACK_INLINE', '0') != '0'
     # #666 bare-ball escape rung inside the net rescue: a stripped or
     # never-fanned SMD ball (zero own copper, 'no rippable blockers found')
     # gets a dogbone escape (offset via + pad->via trace, via-in-pad clamp)

@@ -970,6 +970,26 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         config.net_clearances = {nid: c for nid, c in net_clearances.items()
                                  if c and c > 0}
 
+    # #658 in-run river packing (KICAD_PACK_INLINE=1): each routed bus
+    # member's runs are packed against already-committed sibling runs at
+    # the copper choke point (add_route_to_pcb_data), BEFORE the route
+    # becomes an obstacle -- the vacated lane is free for every LATER net
+    # in this same pass, where the pack_river post-pass frees it only for
+    # the next chain step. Groups precomputed once here.
+    if env_knobs.PACK_INLINE:
+        from pack_river import bus_groups
+        _pg658 = bus_groups(pcb_data)
+        _member658 = {}
+        for _refs658, _mem658 in _pg658.items():
+            for _nid658 in _mem658:
+                _member658[_nid658] = set(_mem658) - {_nid658}
+        pcb_data._pack_inline = {
+            'clearance': config.clearance,
+            'net_clearances': dict(config.net_clearances or {}),
+            'members': _member658}
+        print(f"In-run river packing: {len(_member658)} bus member net(s) "
+              f"in {len(_pg658)} group(s)")
+
     # #435 companion: per-net netclass track widths (auto-read above when
     # --track-width was omitted). get_net_track_width() routes each net at its own
     # class width; a manual --power-nets-widths override below still wins.
