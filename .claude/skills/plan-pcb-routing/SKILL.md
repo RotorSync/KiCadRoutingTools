@@ -738,6 +738,63 @@ Report to user:
 - Identified power nets and pad counts
 - Recommended strategy (plane vs wide traces) with layer assignments
 
+### Step 5a-tuned: Plane-map derivation rules (measured-optimal; refine the delegate's output with these)
+
+A plan built with these rules beat both the board's recorded plane map and
+the hand-tuned recipe on the 2026-08-17 from-scratch benchmark (orangecrab:
+14 vs 15 vs 22 KiCad-unconnected). Every rule keys on a MEASURED board
+property — derive, don't copy the example:
+
+1. **Outer-layer GND floods (pour-direct service).** Count GND SMD pads
+   per outer layer. Any outer layer with a substantial GND SMD population
+   (≳20 pads, or a fine-pitch BGA's GND balls on it) gets a GND flood:
+   pads and balls are then served by FILL CONTACT with zero vias
+   (measured: 124 balls pour-served, the first 100% fanout escapes).
+   Floods must be carve-free — per-zone fragility `GND@<layer>=0` — or
+   later routing fragments them into weld debt.
+2. **One solid inner GND plane, adjacent to the highway.** The unsplit
+   reference layer. Price it 6.0 in `--layer-costs`.
+3. **Bus-highway layer: derive it, keep it EMPTY and FREE.** Find the
+   board's widest bus (largest same-endpoint-footprint-pair net group, or
+   the dominant netclass family — DDR data/address, ≥8 nets). The highway
+   is the inner layer adjacent to the GND reference spanning the bus's
+   endpoints. NO pours on it, cost 1.0 — pricing or pouring the highway
+   cost completions every time it was measured.
+4. **A rail whose pads live overwhelmingly on one outer layer shares
+   that layer's flood.** ≥~80% of the rail's pads SMD on outer layer L
+   (termination arrays, e.g. VTT on B.Cu) → co-pour on L by Voronoi/
+   grammar partition; the pads connect by fill contact and the rail needs
+   no inner-layer real estate at all.
+5. **Remaining rails: split across ALL remaining inner layers, grouped
+   by pad geography.** Don't stack every rail on one split layer when
+   two are free — cluster rails geographically (the grammar-pour
+   clustering) and assign clusters per layer so each partition stays
+   compact (#662 shape targets: sheet compactness ≥0.6, islands ≥0.5).
+   Price rail layers 2.5.
+6. **Carry the SAME `--layer-costs` vector into `route_diff`** — the
+   diff step is otherwise plane-blind and its pairs squat the priced
+   layers.
+
+### Step 5a-tuned-ii: Escape completeness sweep (all interior-pad parts)
+
+COMPLETE FANOUT IS THE INVARIANT — never trade an escaped ball for a
+routing score. Beyond the big BGAs, enumerate EVERY component with
+interior pads the surface router cannot reach (WLCSP/CSP at ≤0.5mm pitch,
+staggered no-lead arrays — the issue-#144 class) and give each its own
+fanout step (`underpad` + via-in-pad at the pitch-derived fab-floor via)
+BEFORE the route step. On the benchmark, three 0.4mm WLCSP regulators
+nobody had ever fanned were part of the winning plan. A board-wide sweep:
+for every footprint, compute min pad pitch and whether any pad is
+enclosed by other pads on all four sides; plan an escape for every hit.
+
+### Step 5a-tuned-iii: Length matching from the board's own classes
+
+If netclass names carry length-match hints (`*_LM<tol>`, `*length*`,
+DDR-class groupings), wire them into the route step:
+`--length-match-group auto --length-match-tolerance <tol>` and
+`--time-matching` when the bus spans layers. The board's classes are the
+author's spec — honor them even when the recorded chains never did.
+
 ## Step 5b: Net-Coverage Reconciliation (mandatory — do not skip)
 
 The stages partition every routable net by glob pattern, and the patterns are
@@ -2049,6 +2106,9 @@ next to the board, so the exact tuned choices replay with no LLM:
    (the redo_commands.sh format; `tests/stress/redo_stress_test.py` replays
    it verbatim). This is the authoritative form: it carries EVERYTHING,
    including the Step 2c environment block and iteration passes.
+   **Begin the file with an explicit `cd <repo>` line** (not just a
+   `# cwd=` comment) so a bare `bash <board>_plan.sh` works — relative
+   `py_router/` tool paths fail from any other directory.
 2. **`<board>_plan.json`** — the GUI AI-tab form:
 
    ```bash
