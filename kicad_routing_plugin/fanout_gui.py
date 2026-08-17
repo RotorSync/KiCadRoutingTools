@@ -1516,19 +1516,6 @@ class FanoutTab(wx.Panel):
             config = self.qfn_options.get_config()
             self._run_qfn_fanout(footprint, selected_nets, config)
 
-    def _fanout_status(self, message):
-        """Status update for the fanout, which runs ON the UI thread.
-
-        A bare SetLabel cannot repaint while the main thread is blocked, so
-        force it -- otherwise the tab shows one frozen label for the whole run.
-        Guarded: reporting must never break the fanout. See
-        gui_utils.ui_thread_status for why the repaint is deliberately narrow
-        (no Gauge.Pulse) inside an action plugin.
-        """
-        from .gui_utils import ui_thread_status
-        ui_thread_status(getattr(self, 'status_text', None),
-                         getattr(self, 'progress_bar', None), message)
-
     def _run_bga_fanout(self, footprint, net_patterns, config):
         """Run BGA fanout."""
         self._begin_run("Running BGA fanout...")
