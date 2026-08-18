@@ -673,12 +673,23 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
         if env_knobs.BARE_PAD_ESCAPE:
             from plane_pad_tap import tap_pad_with_escalation
             from kicad_parser import Segment as _Seg, Via as _Via
+            try:
+                from check_drc import make_off_board_test
+                _off_board = make_off_board_test(pcb_data.board_info)
+            except Exception:
+                _off_board = None
             _tapped = 0
             for _pad in pcb_data.pads_by_net.get(net_id, []):
                 if _tapped >= 4:
                     break
                 if _pad.drill and _pad.drill > 0:
                     continue  # a barrel already reaches every layer
+                if _off_board is not None and _off_board(_pad.global_x,
+                                                        _pad.global_y):
+                    # #291: an off-board pad is unreachable by definition --
+                    # an escape via drawn for it lands outside the outline
+                    # and can only end as board-edge DRC.
+                    continue
                 _px, _py = _pad.global_x, _pad.global_y
                 _reach = max(_pad.size_x, _pad.size_y) / 2.0 + 0.35
                 _bare = not any(
@@ -996,6 +1007,16 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
         }
         fully = num <= 1
         if kind == 'failed':
+            # Tap-only copper with ZERO connectivity progress (no gap edge
+            # routed, part count unchanged) is escape TERRAIN, not a result:
+            # the net is still entirely unrouted, and classifying it as a
+            # kept-but-open result moved it from failed_single to
+            # open_single in the run summary (test_409/432 contract). The
+            # copper still ships via state.results (later passes start from
+            # the escaped terrain, the #666 design), but summary
+            # classification treats a terrain-only net as a clean failure.
+            if not edge_results and not fully and num >= num0:
+                merged['rescue_terrain'] = True
             state.results.append(merged)
             if not fully:
                 merged['failed_pads_info'] = _unconnected_pads_info(comp_pads)

@@ -2966,7 +2966,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     for net_name, net_id in single_ended_nets:
         if net_id in fully_routed_ids:
             routed_single.append(net_name)
-        elif net_id not in routed_results:
+        elif net_id not in routed_results \
+                or routed_results[net_id].get('rescue_terrain'):
+            # rescue_terrain = tap-only escape copper with zero connectivity
+            # progress (net_rescue): the net is still entirely unrouted, so
+            # it stays a clean failure -- the terrain copper is disclosed by
+            # the rescue summary, not by reclassifying the net as open.
             failed_single.append(net_name)
             failed_single_ids.append(net_id)
         elif not routed_results[net_id].get('is_multipoint'):
@@ -3201,7 +3206,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 _sub = 'collision_refused'
             elif _nid in failed_multipoint_ids and _nid not in routed_results:
                 _sub = 'coverage_gate'
-            elif _nid not in routed_results:
+            elif _nid not in routed_results \
+                    or routed_results[_nid].get('rescue_terrain'):
                 _sub = 'unrouted'
             else:
                 _sub = 'partial'
