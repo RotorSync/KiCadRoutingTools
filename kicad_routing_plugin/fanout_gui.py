@@ -1580,8 +1580,11 @@ class FanoutTab(wx.Panel):
             layer_costs=shared.get('layer_costs') or None,
             # Per-ball progress into the status line. Safe from the worker:
             # ui_thread_status marshals off-thread callers with CallAfter.
+            # Only the counted x/N lines reach the status feed -- the
+            # uncounted phase chatter (gridding, staging, ...) is log-only.
             progress_callback=(lambda c, t, m:
-                               self._fanout_status(f"{m} ({c}/{t})" if t else m)),
+                               self._fanout_status(f"{m} ({c}/{t})")
+                               if t else None),
         )
         apply_kw = dict(
             fanout_config={
@@ -1643,8 +1646,11 @@ class FanoutTab(wx.Panel):
             allow_via_in_pad=allow_via_in_pad,
             board_edge_clearance=shared.get('board_edge_clearance', 0.0),
             # See the BGA path: safe from the worker via ui_thread_status.
+            # Only the counted x/N lines reach the status feed -- the
+            # uncounted phase chatter (gridding, staging, ...) is log-only.
             progress_callback=(lambda c, t, m:
-                               self._fanout_status(f"{m} ({c}/{t})" if t else m)),
+                               self._fanout_status(f"{m} ({c}/{t})")
+                               if t else None),
         )
         apply_kw = dict(
             fanout_config={
@@ -1915,8 +1921,10 @@ class FanoutTab(wx.Panel):
                 allow_rotations=fanout_config.get('cap_allow_rotation', True),
                 # Runs ON the UI thread; _fanout_status forces the repaint so
                 # the label moves per cap visit instead of freezing (#130).
+                # x/N lines only (see the fanout call sites).
                 progress_callback=(lambda c, t, m:
-                                   self._fanout_status(f"{m} ({c}/{t})" if t else m)),
+                                   self._fanout_status(f"{m} ({c}/{t})")
+                                   if t else None),
             )
 
             for p in result.get('placements', []):
