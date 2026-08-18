@@ -5379,14 +5379,11 @@ hunt for.
    - If yes, ask for the KiCad project directory path
    - Re-run the routing command with `--schematic-dir` added
 4. Run verification: invoke `/review-routed-board` (falls back to the raw DRC and connectivity checks)
-4b. **Apply the score gate (Step 6):** run `scripts/board_score.py`. If
-   `blocking > 0` the board is NOT done — go to **Step 9**, spend an iteration,
-   and re-score. A fully-unrouted multi-pad net, a DRC violation, or copper below
-   the spec's sizes is a **defect to fix**, never an accepted shortfall.
-4c. **Run the three routed-board verifier lenses** (`connectivity`, `drc`,
-   `spec`). A `VERDICT=FAIL` re-enters the loop at its `route=` step.
-5. Summarize the final state of the board — quoting `blocking`, the stop
-   condition by number, and everything in `ungraded` as **unexamined**
+4b. **Apply the coverage gate (Step 6):** if `check_connected.py` lists any
+   fully-unrouted multi-pad net, the board is NOT done — handle each (route or
+   pour it) and re-verify before summarizing. Do not present an unrouted net as
+   an accepted shortfall.
+5. Summarize the final state of the board
 6. **Offer to clean up intermediate files**:
    - List the intermediate `.kicad_pcb` files created (e.g., `board_step1.kicad_pcb`, `board_step2.kicad_pcb`, etc.)
    - Ask if the user wants to delete them, keeping only the final output
