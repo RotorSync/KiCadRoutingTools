@@ -2179,7 +2179,9 @@ hunt for.
        --no-bga-zone --max-ripup 5 \
        2>&1 | tee /tmp/route_signal.txt
    ```
-   A finer `--grid-step` (0.05, or 0.025 for sub-0.4 mm pitch) is the complementary
+   A finer `--grid-step` (0.05, or 0.025 AT ≤0.4 mm pitch — a part *at* 0.4 mm
+   needs 0.025: "sub-0.4" reads as excluding it, and measurement says otherwise)
+   is the complementary
    lever — a corridor that exists geometrically still needs a grid line on it to be
    found; pair it with the thin width at fine-pitch escapes ("boxed in by static
    obstacles"). If still congested, step the width down further toward the fab
