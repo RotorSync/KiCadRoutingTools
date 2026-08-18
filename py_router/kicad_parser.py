@@ -3739,7 +3739,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
     # All board.* reads share one ipc_lock acquisition so the snapshot is
     # consistent and we don't interleave with a concurrent apply commit.
     with ipc_lock():
-        return _build_pcb_data_from_board_impl(board)
+        return _build_pcb_data_from_board_impl(
+            board, guide_layer, keepout_layer)
 
 
 def _kipy_pad_polygon_points(pwh):
@@ -3809,8 +3810,16 @@ def _attach_custom_pad_polygons(board, custom_pads):
                 pad_objs[i].polygons = pts
 
 
-def _build_pcb_data_from_board_impl(board) -> PCBData:
-    """Inner impl — caller is responsible for holding ipc_lock."""
+def _build_pcb_data_from_board_impl(board, guide_layer: str = "User.1",
+                                    keepout_layer: str = "User.2") -> PCBData:
+    """Inner impl — caller is responsible for holding ipc_lock.
+
+    guide_layer/keepout_layer MUST be threaded in from the public wrapper.
+    They used to be read as free variables here, which raised NameError inside
+    the best-effort try/except below -- so guide corridors (#7) and keepout
+    polygons (#27) were silently never read from the live board, on every run,
+    while the wrapper's docstring promised they were.
+    """
     from kicad_ipc_adapter import layer_maps, layer_name_for
 
     name_to_bl, bl_to_name = layer_maps()
