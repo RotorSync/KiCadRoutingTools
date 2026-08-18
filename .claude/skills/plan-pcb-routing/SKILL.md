@@ -643,9 +643,12 @@ Report to user when presenting the plan:
 - If high-speed nets found: "**GND Return Vias:** This board has [tier] signals ([examples]).
   GND return vias are included in Step N with `--gnd-via-distance [X]mm`. Let me know if
   you'd like to skip this step."
-- If no high-speed nets found: "**GND Return Vias:** No high-speed signals detected (only
-  low-frequency I2C/UART/GPIO). GND return vias are included in the plan but are optional
-  for this board. Want me to remove the step?"
+- If no high-speed nets found: "**GND Return Vias:** The high-speed scan found
+  no nets that need them (only low-frequency I2C/UART/GPIO). The step is
+  included; it is cheap and harmless here. Want me to remove it?"
+  Say what the SCAN found, not that the vias are "optional" -- optional invites
+  dropping them on a board where the scan simply was not run, and a missing
+  return path is not visible in any DRC.
 
 `/find-high-speed-nets` ALSO reports **controlled-impedance nets** (its Step 4.5):
 RF/antenna feeds (radio/PA/LNA -> SMA/U.FL/chip-antenna = **50 ohm single-ended**,
