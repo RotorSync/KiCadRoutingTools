@@ -354,8 +354,11 @@ harmless.
    UNDER the pad field on inner layers and escapes what channel can't (-> 0). It
    routes diff pairs single-ended and skips power/plane nets (plane them first).
    Do not start signal routing while balls are dropped.
-   DECOUPLING-CAP OPTIMIZE (issue #130): after EACH BGA/PGA fanout completes
-   (escaped == requested) and BEFORE signal routing, run
+   DECOUPLING-CAP OPTIMIZE (issue #130): ONCE after ALL BGA/PGA fanouts have
+   completed (escaped == requested) and BEFORE signal routing -- not after each
+   one: the pass is board-global, and per-BGA runs compound cap displacement
+   (each run re-seeds at the moved position) and change what later fanouts
+   route around (cap pads are escape obstacles). Run
    `python3 py_placer/place_fanout_clearance.py <fanned>.kicad_pcb <out>.kicad_pcb
    --clearance <floor>` (same clearance as the fanout). A foreign-net fanout via
    landing under a decoupling cap is a real PAD-VIA at the floor; this nudges

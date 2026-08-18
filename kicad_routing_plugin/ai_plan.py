@@ -50,21 +50,29 @@ PLAN_RESULT_SCHEMA = (
     '(e.g. max_iterations, max_ripup, ripup_abandon_metric, grid_step, board_edge_clearance, '
     'hole_to_hole_clearance, via_cost, heuristic_weight, turn_cost, '
     'ordering_strategy) - unknown names are ignored with a note. '
-    'List steps in execution order (#562 pours-first chain): fanout first '
-    '(exclude the plane nets there - the exclusion marks them for plane-drop '
-    'vias), then route_planes (the bare pour - no routing happens in it), '
-    'then route_diff, then ONE route step with nets ["*"] INCLUDING the '
-    'plane nets: pour-launch welds their pads into the pours and the run '
-    'finishes with the in-run plane finalize (taps + region joins + cleanup '
-    '+ KiCad-oracle verify). There is NO repair step - plane repair is a '
-    'default part of every route step. Put the plane nets in the route '
-    'step\'s power_nets with widths so finalize copper is sized right. '
-    'A route_planes step placed AFTER routing (GND return vias / stitching '
-    'via add_gnd_vias or stitch_vias) replaces the same-net zone in place '
-    'and its vias adapt around the finished signals. '
+    'List the steps in execution order - the executor runs the array in that '
+    'order. Take the routing order and step composition from the skill you '
+    'just ran; do not re-derive them here. '
     'Use only these actions; omit any parameter you have no recommendation for; '
     'all params are optional.'
 )
+
+# NOTE: this string is the GUI's MACHINE CONTRACT only -- the RESULT= line, the
+# action/param schema, and the tab-control passthrough rule. It must NOT restate
+# routing doctrine. It used to, and the copy drifted: it said "fanout first ...
+# then route_planes" while calling itself "the #562 pours-first chain", and
+# because it is appended AFTER the skill's own text it WON. The plans the GUI
+# produced therefore fanned out before pouring -- the opposite of what the skill
+# says in four places ("Pour the planes FIRST - before fanout, before any
+# routing") -- so the GUI and the CLI generated different chains from the same
+# skill. On an 8-layer board (mez_rx) that cost every GND ball its pour-direct
+# skip (#424 prints "N pour-covered (no via needed)"; measured 104 of 127 balls
+# on a 285-ball BGA), left the plane-drop vias with no pour to land on, and
+# handed the pour a fanout-shredded board to flood around.
+#
+# Anything about ORDER, step composition, or which nets go where belongs in
+# .claude/skills/plan-pcb-routing/SKILL.md, which both fronts read. Only add
+# text here when the GUI executor genuinely cannot act without it.
 
 
 def _join_nets(values):
@@ -116,8 +124,15 @@ def _insert_cap_optimization(steps):
     """Insert one decoupling-cap optimization step right after the last BGA
     fanout (issue #130), unless the plan already has one. The cap engine is
     board-global, so running it once after every BGA's vias are placed clears
-    all cap/fanout-via collisions; placing it after the LAST bga fanout (the
-    plan lists fanouts first) is exactly that timing. QFN fanouts don't need it.
+    all cap/fanout-via collisions; placing it after the LAST bga fanout is
+    exactly that timing (found by scan, so it does not care where the fanouts
+    sit relative to the pour). QFN fanouts don't need it.
+
+    Once-after-all is the skill's DEFAULT cadence (Step 1c), not a choice
+    between two: per-BGA runs compound cap displacement (each run re-seeds at
+    the already-moved position) and change what later fanouts route around
+    (cap pads are escape obstacles). A plan that already carries its own
+    optimize_caps step(s) is left exactly as the skill produced it.
     """
     if any(s["action"] == "optimize_caps" for s in steps):
         return
