@@ -71,15 +71,46 @@ def main():
     checks.append(("no more failures than under-pad",
                    len(failed) <= len(u_failed)))
 
-    # Every via sits in a gap: its CENTER is off every ball pad (#267 kill --
-    # a via-in-pad would be ~0 from its own ball's centre).
-    min_center = min(
-        (min(math.hypot(v['x'] - p.global_x, v['y'] - p.global_y)
-             for p in balls) for v in vias),
-        default=1e9)
-    checks.append(("every via centre is off the ball grid "
-                   f"(min ball-centre dist {min_center:.3f} > ball r {ball_r:.3f})",
-                   min_center > ball_r))
+    # Vias sit in gaps: centres off the ball pads (#267 kill). The engine's
+    # documented via-in-pad FALLBACK (no clean gap site exists) is permitted,
+    # but only AT a ball centre (never a misplaced gap via) and only rarely.
+    # (Before the #652 emission fix this fixture showed 0 fallbacks -- but
+    # only because the hypotenuse stubs blocked cells illegally, 7 of them
+    # grazing foreign balls up to 0.085mm; the honest layout trades one
+    # in-pad fallback for clean stubs, which the check below now enforces.)
+    on_grid = [min(math.hypot(v['x'] - p.global_x, v['y'] - p.global_y)
+                   for p in balls) for v in vias]
+    inpad = [d for d in on_grid if d <= ball_r]
+    stray = [d for d in inpad if d > 0.01]   # on a ball but off its centre
+    checks.append((f"gap vias off the ball grid ({len(inpad)} in-pad "
+                   f"fallback(s), {len(stray)} stray, of {len(vias)})",
+                   len(stray) == 0 and len(inpad) <= 2))
+
+    # Stub copper clears foreign ball pads (#652): the pad->via stubs must
+    # not cut across the ball field (the old direct-hypotenuse emission
+    # grazed intermediate balls by up to 0.085mm on this fixture). A few-um
+    # shortfall is the lane-walk design margin (the inter-row lane clears by
+    # ~10um), so only grazes deeper than 0.02mm count.
+    def _seg_d(px, py, x1, y1, x2, y2):
+        dx, dy = x2 - x1, y2 - y1
+        L2 = dx * dx + dy * dy
+        t = 0.0 if L2 <= 0 else max(0.0, min(1.0, ((px - x1) * dx
+                                                   + (py - y1) * dy) / L2))
+        return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+    deep = 0
+    for t in tracks:
+        if t['layer'] != LAYERS[0]:
+            continue
+        (x1, y1), (x2, y2) = t['start'], t['end']
+        for p in balls:
+            if p.net_id == t['net_id']:
+                continue
+            pr = max(p.size_x, p.size_y) / 2.0
+            need = pr + t['width'] / 2.0 + PARAMS['clearance']
+            if _seg_d(p.global_x, p.global_y, x1, y1, x2, y2) < need - 0.02:
+                deep += 1
+    checks.append((f"stubs clear foreign ball pads ({deep} grazes > 0.02mm)",
+                   deep == 0))
 
     # Every via ring clears every FOREIGN ball pad by the clearance.
     viol = 0
