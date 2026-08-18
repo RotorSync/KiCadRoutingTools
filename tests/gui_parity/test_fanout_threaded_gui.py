@@ -73,14 +73,20 @@ def _ok(name, cond):
 def main():
     import threading
     import wx
-    import pcbnew
-    from kicad_parser import build_pcb_data_from_board
-    from kicad_routing_plugin import swig_gui
+    # This gate came over from main, where the GUI builds PCBData from pcbnew.
+    # On ipc-migration there is no swig_gui (renamed routing_dialog.py) and
+    # build_pcb_data_from_board takes a KIPY board -- handed a pcbnew one it
+    # returns an EMPTY PCBData (0 nets, 0 footprints) rather than failing, so
+    # the port must go through the branch's fake-IPC harness like every other
+    # ported gate here.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from fake_ipc_board import (install as _install_fake_board,
+                                build_pcb_data_like_ipc)
+    from kicad_routing_plugin import routing_dialog as swig_gui
 
     app = wx.App(False)                                          # noqa: F841
-    board = pcbnew.LoadBoard(BOARD)
-    pcbnew.GetBoard = lambda: board
-    pcb_data = build_pcb_data_from_board(board)
+    _install_fake_board(BOARD)
+    pcb_data = build_pcb_data_like_ipc(BOARD)
     dialog = swig_gui.RoutingDialog(None, pcb_data, BOARD)
 
     try:

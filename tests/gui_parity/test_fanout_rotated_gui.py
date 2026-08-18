@@ -154,13 +154,18 @@ def run_gui(pcbnew):
     gate learned this the hard way with its `Shim`.
     """
     import qfn_fanout
-    from kicad_parser import build_pcb_data_from_board
     # routing_dialog.py is this branch's swig_gui.py (renamed by the IPC port).
     from kicad_routing_plugin import routing_dialog as swig_gui
+    # build_pcb_data_from_board takes a KIPY board on this branch. Handed a
+    # pcbnew one it does not raise -- it returns an EMPTY PCBData (0 nets, 0
+    # footprints), so the old SWIG setup failed later and obscurely, as
+    # KeyError: 'U2'. Use the fake-IPC harness the other ported gates use.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from fake_ipc_board import (install as _install_fake_board,
+                                build_pcb_data_like_ipc)
 
-    board = pcbnew.LoadBoard(BOARD)
-    pcbnew.GetBoard = lambda: board
-    pcb_data = build_pcb_data_from_board(board)
+    _install_fake_board(BOARD)
+    pcb_data = build_pcb_data_like_ipc(BOARD)
     dialog = swig_gui.RoutingDialog(None, pcb_data, BOARD)
 
     real_engine = qfn_fanout.generate_qfn_fanout
