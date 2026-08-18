@@ -2510,8 +2510,6 @@ class RoutingDialog(wx.Dialog):
         try:
             # BGA options live on the fanout tab's bga_options panel.
             _bo = getattr(self.fanout_tab, 'bga_options', None)
-            if _bo is not None and hasattr(_bo, 'same_net_escapes'):
-                _bo.same_net_escapes.SetValue(defaults.BGA_SAME_NET_ESCAPES)
             if _bo is not None and hasattr(_bo, 'exit_margin'):
                 _bo.exit_margin.SetValue(defaults.BGA_EXIT_MARGIN)
             _ft = self.fanout_tab

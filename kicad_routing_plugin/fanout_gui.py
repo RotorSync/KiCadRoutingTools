@@ -754,17 +754,6 @@ class BGAOptionsPanel(wx.ScrolledWindow):
         self.exit_margin.SetToolTip("Distance from BGA edge to route escape vias")
         grid.Add(self.exit_margin, 0, wx.EXPAND)
 
-        # Same-net escapes (issue #129): balls per multi-ball net that get
-        # their own escape; the rest connect to the escaped ball intra-BGA.
-        grid.Add(wx.StaticText(self, label="Same-net escapes:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.same_net_escapes = wx.SpinCtrl(self, min=0, max=8,
-                                            initial=defaults.BGA_SAME_NET_ESCAPES)
-        self.same_net_escapes.SetToolTip(
-            "How many balls of a multi-ball net get their own escape (issue #129). "
-            "Remaining same-net balls are routed to the escaped ball inside the BGA "
-            "instead of burning escape channels; BGA-only nets (no outside pad) fan "
-            "nothing and just interconnect. 0 = legacy fan-every-ball.")
-        grid.Add(self.same_net_escapes, 0, wx.EXPAND)
 
         param_sizer.Add(grid, 0, wx.EXPAND | wx.ALL, 5)
         main_sizer.Add(param_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
@@ -967,7 +956,6 @@ class BGAOptionsPanel(wx.ScrolledWindow):
         is_differential = self.differential_check.GetValue()
         return {
             'exit_margin': self.exit_margin.GetValue(),
-            'same_net_escapes': self.same_net_escapes.GetValue(),
             'differential': is_differential,
             'diff_pair_patterns': ['*'] if is_differential else [],  # Auto-detect all diff pairs when enabled
             'primary_escape': 'horizontal' if self.escape_direction.GetSelection() == 0 else 'vertical',

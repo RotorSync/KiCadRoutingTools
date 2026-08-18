@@ -687,12 +687,6 @@ def apply_step_params(step, dialog):
                     opts.exit_margin.SetValue(float(params["exit_margin"]))
                 except (TypeError, ValueError):
                     notes.append(f"ignored non-numeric exit_margin={params['exit_margin']!r}")
-            if "same_net_escapes" in params:
-                try:
-                    opts.same_net_escapes.SetValue(int(params["same_net_escapes"]))
-                except (TypeError, ValueError):
-                    notes.append(f"ignored non-numeric same_net_escapes="
-                                 f"{params['same_net_escapes']!r}")
         else:
             opts = dialog.fanout_tab.qfn_options
             if "extension" in params:

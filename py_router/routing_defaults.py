@@ -183,8 +183,6 @@ BGA_CLEARANCE = 0.25  # mm
 BGA_VIA_SIZE = 0.5  # mm
 BGA_VIA_DRILL = 0.3  # mm
 BGA_EXIT_MARGIN = 0.5  # mm
-BGA_SAME_NET_ESCAPES = 1  # balls per multi-ball net that get their own escape
-                          # (issue #129); 0 = legacy fan-every-ball
 BGA_DIFF_PAIR_GAP = 0.1  # mm
 
 # QFN Fanout defaults

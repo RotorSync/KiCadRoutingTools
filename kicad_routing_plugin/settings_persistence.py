@@ -186,7 +186,6 @@ def get_dialog_settings(dialog):
         # Fanout tab settings
         'fanout_type': dialog.fanout_tab.fanout_type.GetSelection(),
         'fanout_bga_exit_margin': dialog.fanout_tab.bga_options.exit_margin.GetValue(),
-        'fanout_bga_same_net_escapes': dialog.fanout_tab.bga_options.same_net_escapes.GetValue(),
         'fanout_bga_differential': dialog.fanout_tab.bga_options.differential_check.GetValue(),
         'fanout_bga_escape_direction': dialog.fanout_tab.bga_options.escape_direction.GetSelection(),
         'fanout_bga_force_escape': dialog.fanout_tab.bga_options.force_escape.GetValue(),
@@ -616,8 +615,6 @@ def restore_dialog_settings(dialog, settings):
         dialog.fanout_tab._on_type_changed(None)
     if 'fanout_bga_exit_margin' in settings:
         dialog.fanout_tab.bga_options.exit_margin.SetValue(settings['fanout_bga_exit_margin'])
-    if 'fanout_bga_same_net_escapes' in settings:
-        dialog.fanout_tab.bga_options.same_net_escapes.SetValue(settings['fanout_bga_same_net_escapes'])
     if 'fanout_bga_differential' in settings:
         dialog.fanout_tab.bga_options.differential_check.SetValue(settings['fanout_bga_differential'])
     if 'fanout_bga_escape_direction' in settings:
