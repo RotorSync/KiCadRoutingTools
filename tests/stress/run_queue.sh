@@ -5,20 +5,86 @@
 # it skips finished boards and won't double-launch ones already running (incl.
 # harness Agent runs detected via the run-dir).
 #
-# Usage: run_queue.sh [concurrency] [model]   (defaults: 10, backend default)
+# Usage: run_queue.sh [max_concurrency] [model]   (defaults: 8, backend default)
 #   Backend: STRESS_AI_BACKEND=claude (default) | opencode (#503) — inherited by
 #   every run_board.sh worker. Model defaults: claude -> sonnet; opencode -> the
 #   user's configured opencode default (or pass provider/model explicitly).
 # Watch:  tail -f ~/Documents/kicad_stress_test/QUEUE_STATUS.txt
 #
-# Concurrency defaults to 10, which is deliberately ABOVE the core count: a board
-# worker is mostly *thinking* (LLM latency) and only intermittently in a heavy
-# python route step, so the machine sits idle at ~Ncore workers. 10 keeps it busy
-# without 10 heavy processes at once. run_limited.sh caps each tool step and kills
-# it (a finding) if several heavy steps do coincide, so memory can't run away.
-# Lower the arg if you see sustained swapping.
+# Concurrency is LOAD-BASED, with the first arg as a hard CEILING (default 8).
+# A fixed worker count cannot know whether the heavy python route steps happen to
+# be coinciding: a board worker is mostly *thinking* (LLM latency), so N workers
+# might sit at load 3 or at load 20 depending on what they are each doing at that
+# instant. The old fixed default of 10 drove sustained load averages north of 20
+# on an 8-core box, which starves the route steps themselves and pushed three
+# routing integration tests past a 900 s timeout that all passed uncontended.
+#
+# So a new board launches only when the 1-minute load average is below
+# QUEUE_LOAD_MAX (default = HALF the core count, leaving room for other work).
+# Notes on the gate:
+#
+#   * LOAD, not swap or memory-pressure level. This box sits at
+#     kern.memorystatus_vm_pressure_level 2 ("warn") with ~6.5 GB of swap in use
+#     as its NORMAL idle state -- that is macOS compressing idle `claude`
+#     processes, not thrashing. Gating on either would wedge the queue forever.
+#     Only pressure level 4 (CRITICAL) blocks a launch.
+#   * A FLOOR (QUEUE_CONC_MIN, default 2) always launches, whatever the load.
+#     Without it, load from anything else on the machine -- a test suite, a
+#     build, another wave -- would stall the queue indefinitely with no way out.
+#   * Above the floor it launches at most ONE board per 45 s pass. The 1-minute
+#     load average is a lagging, exponentially-weighted signal: launching a burst
+#     and re-reading it immediately just overshoots, which is the failure this
+#     gate exists to prevent. Cold start is therefore fast to the floor and
+#     gentle above it.
+#   * Every skipped pass LOGS its reason, so a throttled queue reads as
+#     throttled rather than as hung.
+#
+# run_limited.sh still caps each tool step and kills it (a finding) if several
+# heavy steps coincide, so memory can't run away.
 set -u
-CONC="${1:-10}"; MODEL="${2:-}"   # empty -> run_board.sh's per-backend default
+CONC="${1:-8}"; MODEL="${2:-}"   # CONC = hard ceiling; empty MODEL -> per-backend default
+NCORE=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
+# Target NCORE-2 by default: leave two cores for other work (a test suite, a
+# build, an interactive session) but do not give away half the machine --
+# ncore/2 collapsed the tail to the floor, because a SINGLE heavy route step
+# holds load near 4 on its own. Clamped to >= 1 for small boxes.
+LOAD_MAX="${QUEUE_LOAD_MAX:-$(( NCORE - 2 > 0 ? NCORE - 2 : 1 ))}"
+# One launch per minute, whatever else is true. The 1-minute load average is a
+# LAGGING, exponentially-weighted signal: a launch does not show up in it for
+# up to a minute, so admitting on consecutive passes reads a load that predates
+# the previous launch and overshoots. Measured: at LOAD_MAX=8 three consecutive
+# admissions each saw load 7.4-7.5 (all legitimately under the bar) and load then
+# settled at 9.3 and reached 11.3. Rate-limiting is what makes the gate a
+# controller rather than a burst.
+LAUNCH_INTERVAL="${QUEUE_LAUNCH_INTERVAL:-60}"
+LAST_LAUNCH=0
+CONC_MIN="${QUEUE_CONC_MIN:-2}"        # always allow this many, whatever the load
+
+# 1-minute load average, portable (macOS sysctl prints "{ 7.58 8.93 11.46 }").
+load1(){
+  if [ -r /proc/loadavg ]; then awk '{print $1}' /proc/loadavg
+  else sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}'; fi
+}
+# ONLY hard-critical (4). Level 2 is this box's normal idle state -- see above.
+mem_critical(){
+  local lvl; lvl=$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null || echo 1)
+  case "$lvl" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$lvl" -ge 4 ]
+}
+# Why we may NOT launch right now (empty = go ahead).
+launch_block_reason(){
+  local run_n="$1" load
+  [ "$run_n" -ge "$CONC" ] && { echo "at ceiling $CONC"; return; }
+  local since=$(( $(date +%s) - LAST_LAUNCH ))
+  [ "$since" -lt "$LAUNCH_INTERVAL" ] \
+    && { echo "rate limit (${since}s since last launch, need ${LAUNCH_INTERVAL}s)"; return; }
+  [ "$run_n" -lt "$CONC_MIN" ] && return          # floor: always allow (load-wise)
+  mem_critical && { echo "memory pressure CRITICAL"; return; }
+  load=$(load1)
+  awk -v l="$load" -v m="$LOAD_MAX" 'BEGIN{exit !(l+0 >= m+0)}' \
+    && echo "load $load >= $LOAD_MAX"
+  return 0
+}
 # Repo root is derived from this script's own location (tests/stress/run_queue.sh),
 # so the script is portable; override with STRESS_REPO if needed.
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -70,7 +136,7 @@ is_running(){  # our worker, any tool writing the run dir, or run dir touched <1
 
 log(){ echo "$(date '+%H:%M:%S') $*" | tee -a "$STATUS"; }
 : > "$STATUS"
-log "queue start: concurrency=$CONC backend=${STRESS_AI_BACKEND:-claude} model=${MODEL:-(backend default)} total=$total"
+log "queue start: ceiling=$CONC load_max=$LOAD_MAX floor=$CONC_MIN cores=$NCORE backend=${STRESS_AI_BACKEND:-claude} model=${MODEL:-(backend default)} total=$total"
 
 # Bounded-retry watchdog: run_board.sh writes no results JSON on failure, so a
 # board whose worker can never finish would be relaunched forever. The watchdog
@@ -97,15 +163,27 @@ while true; do
     break
   fi
 
-  free=$(( CONC - run_n ))
+  # LOAD-BASED admission. Below the floor we fill straight to CONC_MIN (fast cold
+  # start); above it we admit at most ONE board per pass and then wait out the
+  # 45 s sleep, so the 1-minute load average -- a lagging, EWMA signal -- has time
+  # to reflect the launch instead of being overshot by a burst.
+  launched_this_pass=0
   for item in $todo; do
-    [ "$free" -le 0 ] && break
+    reason=$(launch_block_reason "$run_n")
+    if [ -n "$reason" ]; then
+      [ "$launched_this_pass" -eq 0 ] && log "  holding: $reason (running=$run_n, load=$(load1))"
+      break
+    fi
     b="${item%%:*}"; s="${item##*:}"
     is_running "$b" "$s" && continue
     nohup bash "$REPO/tests/stress/run_board.sh" "$b" "$s" "$MODEL" >/dev/null 2>&1 &
-    log "  launched $b (set $s) pid=$!"
-    free=$(( free - 1 ))
+    log "  launched $b (set $s) pid=$! [running=$((run_n+1))/$CONC load=$(load1)]"
+    LAST_LAUNCH=$(date +%s)
+    run_n=$(( run_n + 1 ))
+    launched_this_pass=$(( launched_this_pass + 1 ))
     sleep 3   # let the worker register before the next is_running sweep
   done
-  sleep 45
+  # Poll faster than LAUNCH_INTERVAL so the rate limit sets the cadence rather
+  # than the sleep: at a 45 s poll a 60 s limit would actually admit every 90 s.
+  sleep 30
 done

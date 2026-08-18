@@ -44,7 +44,7 @@ board workers in flight until every board has a results JSON, deriving all state
 from disk (safe to stop and restart):
 
 ```bash
-bash tests/stress/run_queue.sh [concurrency=<#cores>] [model=sonnet]
+bash tests/stress/run_queue.sh [max_concurrency=8] [model=sonnet]
 bash tests/stress/stress_status.sh        # monitor: DONE/RUNNING/TODO + free slots
 ```
 
@@ -70,11 +70,29 @@ approve when prompted.
 Hard operational limits (baked into the scripts; violating these has crashed the
 machine before):
 
-- Concurrency defaults to the **core count**. A board worker is mostly *thinking*
-  (LLM latency) and only intermittently in a heavy python route step, so ~Ncore
-  boards keep the cores busy without Ncore heavy processes at once. The real guard
-  is per-step memory, not the worker count — `run_limited.sh` kills any single step
-  that exceeds **12 GB**. Lower the arg only if you actually see swapping.
+- **Concurrency is LOAD-BASED; the arg is a hard ceiling (default 8).** A fixed
+  worker count cannot know whether the heavy python route steps happen to be
+  coinciding — a board worker is mostly *thinking* (LLM latency), so the same N
+  workers sit at load 3 or load 20 depending on what each is doing at that
+  instant. A new board launches only while the 1-minute load average is under
+  `QUEUE_LOAD_MAX` (default **ncore-2**, leaving two cores for other work), and
+  at most **one launch per minute** (`QUEUE_LAUNCH_INTERVAL`). Four things that
+  gate gets right, each a way to get it wrong:
+    - **Load, not swap or memory pressure.** A busy Mac's *normal* state is
+      pressure level 2 ("warn") with GBs of swap in use — macOS compressing idle
+      `claude` processes, not thrashing. Gating on either wedges the queue
+      forever. Only pressure level **4 (critical)** blocks.
+    - **A floor** (`QUEUE_CONC_MIN`, default 2) launches regardless of load, so
+      other work on the machine can't stall the wave indefinitely.
+    - **Rate-limit, because load lags.** The 1-min average is an EWMA: a launch
+      doesn't show up in it for up to a minute. Measured at target 8: three
+      consecutive admissions each read load 7.4–7.5 (all under the bar) and load
+      then settled at 9.3 and hit 11.3. Poll faster than the interval or the
+      limit doesn't govern the cadence.
+    - **Don't target half the machine.** `ncore/2` collapsed the tail to the
+      floor: one heavy route step alone holds load near 4.
+  The other guard is per-step memory, not the worker count — `run_limited.sh`
+  kills any single step that exceeds **12 GB**.
 - **Every tool command runs through `tests/stress/run_limited.sh`** (**12 GB** RSS
   watchdog — raised from 4 GB in #422; a legitimate fine-grid run on a big sparse
   board can still peak several GB, so 4 GB killed real work). An OOM kill is a
