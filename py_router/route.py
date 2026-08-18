@@ -3794,6 +3794,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         rip_blocker_nets=_finalize_rip9,
                         power_nets=power_nets,
                         power_nets_widths=power_nets_widths,
+                        # #658: same layer economics as the GUI leg above.
+                        # 34d2e448 forwarded layer_costs to the _gui9 branch
+                        # ONLY, so on the CLI -- every replay, stress and
+                        # corpus run -- the finalize's welds/taps/reconnects
+                        # still travelled priced-up layers for free, which is
+                        # the exact defect that commit set out to close.
+                        layer_costs=list(config.layer_costs or []) or None,
                         pcb_data=_live9,
                         progress_callback=_pcb9)
                 print(f"  [finalize timing] engine leg: "
