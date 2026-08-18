@@ -856,10 +856,17 @@ def generate_underpad_escape(footprint: Footprint,
             return home
         return home - c_all - c_lay.get(li, _EMPTY)
 
-    def _via_ctx(net_id, cx, cy):
+    def _via_ctx(net_id, cx, cy, extra=0.0):
         """Gather the geometry near (cx, cy) that an off-centre via must clear
-        (one scan per ball; the per-cell check then touches only these)."""
-        W = home_r + via_size + 2.0
+        (one scan per ball; the per-cell check then touches only these).
+
+        `extra` widens the window past the base reach -- the lane-walk site
+        chooser (#652) probes sites up to elbow + lane_max*pitch from the
+        ball, which lands EXACTLY at the old window edge at 0.8mm pitch
+        (0.4 + 3*0.8 = 2.8 vs W ~2.79): a committed via sitting on such a
+        site was invisible and mez_rx stacked a V1P2 plane-drop via dead on
+        R4's dog-bone via. Coarser pitches leave even k=2 sites unchecked."""
+        W = home_r + via_size + 2.0 + extra
 
         def close(x, y):
             return abs(x - cx) <= W and abs(y - cy) <= W
@@ -1687,10 +1694,15 @@ def generate_underpad_escape(footprint: Footprint,
         else:
             cands = [(alt * ex * hx, ey * hy), (-alt * ex * hx, ey * hy),
                      (alt * ex * hx, -ey * hy), (-alt * ex * hx, -ey * hy)]
-        ctx = _via_ctx(p.net_id, gx, gy)
-        pad_ex = set(occ._disk(gx, gy, max(pad_keep, via_keep)))
         import env_knobs as _ek
         lane_max = _ek.FANOUT_LANE_WALK_MAX if _ek.FANOUT_LANE_WALK else 0
+        # Window the exact-geometry scan out to the farthest lane-walked site
+        # (elbow + lane_max pitches), or far sites are checked against a
+        # context that cannot see their neighbours (the mez_rx via stack).
+        ctx = _via_ctx(p.net_id, gx, gy,
+                       extra=max(hx, hy) + lane_max * max(grid.pitch_x,
+                                                          grid.pitch_y))
+        pad_ex = set(occ._disk(gx, gy, max(pad_keep, via_keep)))
 
         def _lane_pad_exempt(x1, y1, x2, y2):
             # The inter-row lane clears the flanking ball pads by only a few
