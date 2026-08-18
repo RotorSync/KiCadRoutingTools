@@ -217,7 +217,7 @@ For each differential pair (from `list_nets.py --diff-pairs`):
 routing skill loops on:
 
 ```bash
-python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/board_score.py \
+python3 -X utf8 .claude/skills/plan-pcb-placement-and-routing/scripts/board_score.py \
     board.kicad_pcb --intent wk/floorplan.json \
     --min-track-width <spec> --min-via-diameter <spec> --min-via-drill <spec>
 ```

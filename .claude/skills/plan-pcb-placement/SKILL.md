@@ -158,9 +158,9 @@ read it when the step below points at it:
 
 | file | read when |
 |---|---|
-| `.claude/skills/plan-pcb-routing/references/evidence-map.md` | you are about to quote a number from any instrument |
-| `.claude/skills/plan-pcb-routing/references/verifier-prompts.md` | you are dispatching a verification subagent |
-| `.claude/skills/plan-pcb-routing/references/convergence.md` | you are running a fix loop and need its stop conditions |
+| `.claude/skills/plan-pcb-placement-and-routing/references/evidence-map.md` | you are about to quote a number from any instrument |
+| `.claude/skills/plan-pcb-placement-and-routing/references/verifier-prompts.md` | you are dispatching a verification subagent |
+| `.claude/skills/plan-pcb-placement-and-routing/references/convergence.md` | you are running a fix loop and need its stop conditions |
 
 ## Step 0: Placement gate — measure first, then decide
 
@@ -185,7 +185,7 @@ python3 -X utf8 py_placer/place_optimize.py board.kicad_pcb --suggest-locks
 |---|---|---|
 | **unplaced** (test it — see below) | follow the **unplaced ladder** below — seeder, then intent-driven `place_seed.py`, and report-and-stop only when NEITHER applies | see below |
 | careful hand placement, routing not yet attempted | **NO** | — |
-| routing already completed clean | **NO** — *unless* a spec clause placement could fix is still violated; see the last row of 9.3d | — |
+| routing already completed clean | **NO** — *unless* a spec clause placement could fix is still violated; see the last row of 9.3d in `/plan-pcb-placement-and-routing` | — |
 | board already carries copper (the tools exit 3) | **NO** — placement moves footprints, not tracks | — |
 | **placed, but placed WRONG** — `check_drc` on the **copper-free** board returns violations, or a mechanically-fixed part sits where mechanics forbid (an edge connector clear of every outline edge, a hole away from the pattern its siblings define) | yes, and **the quench is the wrong tool** | **Step 0a-0 first: RECONSTRUCT** — `place_seed --repair` for local violations, `place_reconstruct.py` for structural damage. Only then `place_optimize` on the residue |
 | rough / imported / auto-generated placement | yes | `place_optimize.py --max-displacement 3` |
@@ -484,7 +484,7 @@ Each lap:
    the quench with the ledger's `eaten_by`/pair refs as targets and everything else
    locked. One lap = one ledger entry, recorded before the next begins.
 
-3. **VERIFY, blocking** — a 9.4b boundary verification with **check 5,
+3. **VERIFY, blocking** — a 9.4b boundary verification (`/plan-pcb-placement-and-routing`) with **check 5,
    assembly-clean** (below). The verifier receives the fresh `check_assembly` and
    render JSONs; FAIL blocks the next step. The phase may not proceed to routing —
    and a routing failure later classified placement-shaped RE-ENTERS this loop —
@@ -499,7 +499,7 @@ Each lap:
 
 A face in **deficit at the finest legal grid** in the channels JSON is a
 floorplan/placement fact no routing parameter can fix — it classifies later
-routing failures as placement-shaped BY MEASUREMENT (9.3d's first mechanical
+routing failures as placement-shaped BY MEASUREMENT (9.3d of `/plan-pcb-placement-and-routing`, first mechanical
 input) and its `eaten_by` refs are the lap's quench targets. A deficit only at
 the routed grid means: try the finer grid before moving anything.
 
@@ -580,7 +580,7 @@ order:
 
    **Its printed note TRUNCATES the failed-net list and `seeds.json` does not
    carry the rest** — so ledgering the ranking from either one records a
-   count in disguise, against 9.4's names-not-counts rule. Recover the full
+   count in disguise, against 9.4's names-not-counts rule (`/plan-pcb-placement-and-routing`). Recover the full
    list from the per-seed probe output before ledgering. The same gap opens
    at ADOPTION: the board you adopt is a quench of the seed you ranked, i.e.
    a different board, so probe THAT one for its own failed names — otherwise
@@ -929,7 +929,7 @@ python3 -X utf8 py_placer/place_portfolio.py board.kicad_pcb --out-dir pf --seed
 ```
 
 **WHEN:** (a) run N+1 of a converged board whose remaining failures were
-classified **floorplan-shaped** (9.3d) — the portfolio explores exactly the
+classified **floorplan-shaped** (9.3d of `/plan-pcb-placement-and-routing`) — the portfolio explores exactly the
 axis those findings blame; (b) right after a seeder produced the first
 placement, before sinking a full chain into the only arrangement anyone has
 ever tried; (c) the user asks for options. It runs on the placed PRE-ROUTE

@@ -214,7 +214,7 @@ vias at 0.25 mm ⌀ passed against a 0.6 mm spec requirement. If the spec states
 sizes, pass them:
 
 ```bash
-python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/board_score.py board.kicad_pcb \
+python3 -X utf8 .claude/skills/plan-pcb-placement-and-routing/scripts/board_score.py board.kicad_pcb \
     --intent wk/floorplan.json \
     --min-track-width 0.15 --min-via-diameter 0.6 --min-via-drill 0.3
 ```

@@ -1203,7 +1203,7 @@ def l3(a):
         return err(e + '\n\nA retry without a classification is a guess, and '
                        'the three shapes re-enter at three different points. '
                        'Produce the score first:\n  python3 -X utf8 '
-                       '.claude/skills/plan-pcb-routing/scripts/board_score.py '
+                       '.claude/skills/plan-pcb-placement-and-routing/scripts/board_score.py '
                        '<board> --json wk/score.json')
     blocking = score.get('blocking')
     if blocking is None:
@@ -1213,7 +1213,7 @@ def l3(a):
             'nothing examined is reported UNEXAMINED, never clean. Re-score '
             'the board and read why the count is missing before classifying '
             'anything:\n  python3 -X utf8 '
-            '.claude/skills/plan-pcb-routing/scripts/board_score.py <board> '
+            '.claude/skills/plan-pcb-placement-and-routing/scripts/board_score.py <board> '
             '--json wk/score.json')
     # Bind the score to the board, exactly as L5 does. L3 named `--board` in
     # every command it emitted and never checked that `--score` described the
@@ -1583,7 +1583,7 @@ def l5(a):
             'L5 decides whether the loop is OVER, and that is a measurement, '
             'not a judgement call. Score the board and come back:\n'
             '  python3 -X utf8 '
-            '.claude/skills/plan-pcb-routing/scripts/board_score.py '
+            '.claude/skills/plan-pcb-placement-and-routing/scripts/board_score.py '
             f'{a.board} --json wk/score_final.json\n'
             f'  python3 -X utf8 {sys.argv[0]} --stage L5 --board {a.board} \\\n'
             f'      --ledger {a.ledger} --score wk/score_final.json\n\n'
@@ -1632,7 +1632,7 @@ def l5(a):
             f'unreadable measurement is not a stop condition. Re-score the '
             f'board, then come back:\n'
             f'  python3 -X utf8 '
-            f'.claude/skills/plan-pcb-routing/scripts/board_score.py '
+            f'.claude/skills/plan-pcb-placement-and-routing/scripts/board_score.py '
             f'{a.board} --json wk/score_final.json\n'
             f'  python3 -X utf8 {sys.argv[0]} --stage L5 --board {a.board} \\\n'
             f'      --ledger {a.ledger} --score wk/score_final.json')
@@ -1753,7 +1753,7 @@ Verify this board end to end, independently.
   board:  {a.board}
   ledger: {a.ledger}
 
-Read .claude/skills/plan-pcb-routing/references/verifier-prompts.md and apply
+Read .claude/skills/plan-pcb-placement-and-routing/references/verifier-prompts.md and apply
 its routed-board lenses, then check the PLACEMENT half too: the copper-free
 gate cannot be re-run on a routed board, so verify it from the ledger's
 recorded placement close-out and confirm the poses still match the board.

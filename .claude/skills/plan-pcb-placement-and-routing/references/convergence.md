@@ -64,7 +64,7 @@ loop asks.
 ### Score
 
 ```bash
-python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/board_score.py \
+python3 -X utf8 .claude/skills/plan-pcb-placement-and-routing/scripts/board_score.py \
     wk/iter03.kicad_pcb \
     --intent wk/floorplan.json \
     --min-track-width 0.15 --min-via-diameter 0.6 --min-via-drill 0.3 \
