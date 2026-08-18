@@ -398,7 +398,8 @@ placement, so run `place_fanout_clearance.py` on the **fanned** board to
 nudge those caps clear (and pull each pad toward its nearest same-net ball so
 a power/GND via dropped there later shares the via). See "Step 1b" below for
 the command. It's cheap, only touches caps near a BGA, and is a no-op when
-nothing collides — so run it after each fanout step before moving on.
+nothing collides — so run it ONCE after ALL fanouts are done, before signal
+routing (see Step 1c for why once, not per-BGA).
 
 Report to user:
 - List of components that may need fanout
@@ -934,8 +935,12 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    **plane-drop vias** (#424), and because the pour already exists the drop
    pass can skip a via entirely where the fill already covers the ball
    (pour-direct) and land the rest on intact copper.
-1c. **After each BGA/PGA fanout, run `place_fanout_clearance.py`** to clear
-   decoupling-cap / fanout-via collisions (#130) before routing.
+1c. **After ALL fanouts are done — once, not per-BGA — run
+   `place_fanout_clearance.py`** to clear decoupling-cap / fanout-via
+   collisions (#130) before routing. The pass is board-global (it reads every
+   via and every BGA), so one late run sees everything; running it per-BGA
+   compounds cap displacement and changes what later fanouts route around.
+   See Step 1c.
 2. **Differential Pairs** - The most constrained routes claim their channels before
    anything else can block them (if present). Add `--impedance <ohms>` for the
    controlled ones (USB/Ethernet/LVDS/balanced-RF; from `/find-high-speed-nets`).
@@ -1074,10 +1079,11 @@ short, add the fine-pitch escape via and/or a smaller `--track-width`. Only proc
 to Step 2 once `failed == 0` (or the remaining `unescaped_nets` are understood and
 accepted).
 
-### Step 1c: Optimize Decoupling-Cap Placement (run after EACH BGA fanout — issue #130)
+### Step 1c: Optimize Decoupling-Cap Placement (run ONCE after ALL fanouts — issue #130)
 Nudges decoupling caps near the BGA off the foreign-net fanout vias (the
 `PAD-VIA` violations #130) and pulls each pad toward its nearest same-net
-ball. Run it on the just-fanned board, **before** signal routing. Use the
+ball. Run it on the fully-fanned board — after the LAST fanout, **before**
+signal routing. Use the
 **same `--clearance`** you gave the fanout / your DRC floor — that's the only
 setting that matters (it reads each via's real size from the board).
 
@@ -1090,8 +1096,26 @@ nudge; they are not auto-fixed. By default (`--cap-prefix C,R`) it moves 2-pad
 **caps and resistors** near a BGA (RN-style arrays auto-excluded since only
 2-copper-pad parts move); it never overlaps parts, and is a no-op when nothing
 collides. Feed `board_step1c.kicad_pcb`
-into the next step (if multiple BGAs are fanned in series, run this once after
-each, or once after the last fanout — it considers all BGAs' vias on the board).
+into the next step. **With multiple BGAs, run it ONCE after the LAST fanout,
+not after each.** The pass is board-global — it reads every via on the board
+(`for v in pcb_data.vias`) and every BGA footprint for the same-net ball
+attraction — so a single late run already sees every constraint at once. Per-BGA
+runs are not equivalent, in two ways:
+- **Displacement compounds.** Each cap's seed is wherever it sits on the board
+  it is handed (`seed_x, seed_y = fp.x, fp.y`), and the budget
+  (`--max-displacement` 2.0, growing ×1.5 to `--max-displacement-cap` 3.0) is
+  measured from THAT seed. A second run re-seeds at the already-moved position,
+  so a cap can drift ~2× the cap budget from where it started, and "move as
+  little as possible" becomes minimal-from-the-moved-spot rather than from its
+  real seed.
+- **Moving caps changes later fanouts.** Cap pads are in the escape router's
+  obstacle map (foreign pads + existing copper + vias), so tidying after BGA1
+  hands BGA2's fanout a different obstacle field — different escapes, different
+  vias, and then different cap decisions.
+The two orders usually converge anyway (decoupling caps cluster around their own
+BGA, so BGA1's caps are rarely in BGA2's escape field), which is why per-BGA was
+long treated as interchangeable. Once-after-all is the default because it cannot
+compound and costs one step instead of N.
 Verify with `check_drc.py board_step1c.kicad_pcb -c 0.1` (PAD-VIA count drops).
 
 ### Step 2a: Differential Pairs (only if any were detected)

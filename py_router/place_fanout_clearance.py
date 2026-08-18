@@ -12,7 +12,15 @@ unresolved.
 Usage:
   python place_fanout_clearance.py fanned.kicad_pcb [output.kicad_pcb] [options]
 
-Pipeline: bga_fanout.py -> place_fanout_clearance.py -> (gnd/power vias, route)
+Run it ONCE after ALL fanouts, not after each: the pass is board-global (it
+reads every via and every BGA footprint), so one late run sees every constraint
+at once. Per-BGA runs compound displacement -- each cap's seed is wherever it
+sits on the board it is handed, so a second run re-seeds at the already-moved
+position -- and they change what later fanouts route around, since cap pads are
+in the escape router's obstacle map.
+
+Pipeline: bga_fanout.py (all of them) -> place_fanout_clearance.py -> (gnd/power
+vias, route)
 """
 
 import os
