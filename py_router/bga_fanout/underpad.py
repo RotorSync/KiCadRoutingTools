@@ -98,6 +98,9 @@ class _Occ:
         self.soft = [bytearray(self.nx * self.ny) for _ in range(self.nl)]
         self.soft_owner = {}
         self.has_soft = False
+        # One shared run of set bytes for the block_* slice blits (sliced to
+        # length per span); ny is the longest span any column can need.
+        self._ones = b'\x01' * self.ny
 
     def cell(self, x, y):
         return (int((x - self.x0) / self.res), int((y - self.y0) / self.res))
@@ -108,6 +111,60 @@ class _Occ:
     def inside(self, ix, iy):
         return 0 <= ix < self.nx and 0 <= iy < self.ny
 
+    def _disk_spans(self, x, y, r):
+        """Column spans [(a, b_lo, b_hi)] of the _disk membership -- EXACTLY
+        the cells the per-cell predicate admits (span edges are re-tested
+        with the original arithmetic so floating-point rounding can never
+        flip a boundary cell), but computed with one sqrt per column instead
+        of float math per cell. The 28.6M-yield _disk generator was 42% of a
+        BGA fanout profile; the block_* writers blit these spans instead."""
+        fx = (x - self.x0) / self.res
+        fy = (y - self.y0) / self.res
+        cx, cy = int(fx), int(fy)
+        rc = int(r / self.res) + 2
+        thr = (r / self.res) ** 2
+        a0 = cx - rc
+        if a0 < 0:
+            a0 = 0
+        a1 = cx + rc
+        if a1 > self.nx - 1:
+            a1 = self.nx - 1
+        blo_lim = cy - rc
+        if blo_lim < 0:
+            blo_lim = 0
+        bhi_lim = cy + rc
+        if bhi_lim > self.ny - 1:
+            bhi_lim = self.ny - 1
+        spans = []
+        for a in range(a0, a1 + 1):
+            adx2 = (a - fx) ** 2
+            rem = thr - adx2
+            if rem < 0:
+                continue
+            half = rem ** 0.5
+            b0 = int(fy - half) - 1
+            b1 = int(fy + half) + 1
+            if b0 < blo_lim:
+                b0 = blo_lim
+            if b1 > bhi_lim:
+                b1 = bhi_lim
+            # Edge-correct with the ORIGINAL predicate (identical expression
+            # and evaluation order) so membership is bit-identical.
+            while b0 <= b1 and (a - fx) ** 2 + (b0 - fy) ** 2 > thr:
+                b0 += 1
+            while b1 >= b0 and (a - fx) ** 2 + (b1 - fy) ** 2 > thr:
+                b1 -= 1
+            if b0 > b1:
+                continue
+            while b0 - 1 >= blo_lim and \
+                    (a - fx) ** 2 + (b0 - 1 - fy) ** 2 <= thr:
+                b0 -= 1
+            while b1 + 1 <= bhi_lim and \
+                    (a - fx) ** 2 + (b1 + 1 - fy) ** 2 <= thr:
+                b1 += 1
+            spans.append((a, b0, b1))
+        return spans
+
     def _disk(self, x, y, r):
         """Cells whose lattice point lies within r of the REAL point (x, y).
 
@@ -116,35 +173,58 @@ class _Occ:
         its keepout disk by up to res and letting a route one cell past the
         shifted disk graze the real via by up to res (issue #278).
         """
-        fx = (x - self.x0) / self.res
-        fy = (y - self.y0) / self.res
-        cx, cy = int(fx), int(fy)
-        rc = int(r / self.res) + 2
-        thr = (r / self.res) ** 2
-        for dx in range(-rc, rc + 1):
-            for dy in range(-rc, rc + 1):
-                a, b = cx + dx, cy + dy
-                if (a - fx) ** 2 + (b - fy) ** 2 <= thr:
-                    if 0 <= a < self.nx and 0 <= b < self.ny:
-                        yield a, b
+        for a, b0, b1 in self._disk_spans(x, y, r):
+            for b in range(b0, b1 + 1):
+                yield a, b
 
     def block_layer(self, li, x, y, r):
         g = self.grid[li]
         ny = self.ny
-        for a, b in self._disk(x, y, r):
-            g[a * ny + b] = 1
+        ones = self._ones
+        for a, b0, b1 in self._disk_spans(x, y, r):
+            s = a * ny
+            g[s + b0:s + b1 + 1] = ones[:b1 - b0 + 1]
 
     def block_all(self, x, y, r):
-        for a, b in self._disk(x, y, r):
+        ny = self.ny
+        ones = self._ones
+        for a, b0, b1 in self._disk_spans(x, y, r):
+            s = a * ny
+            run = ones[:b1 - b0 + 1]
             for li in range(self.nl):
-                self.grid[li][a * self.ny + b] = 1
+                self.grid[li][s + b0:s + b1 + 1] = run
 
     def block_segment(self, li, p, q, r):
         (x0, y0), (x1, y1) = p, q
         n = int(max(abs(x1 - x0), abs(y1 - y0)) / self.res) + 1
+        # Union of the sample disks, merged into per-column intervals and
+        # blitted once -- the same membership as stamping each sample disk
+        # (integer-adjacent intervals merge losslessly), ~10x less work.
+        cols = {}
+        dx, dy = x1 - x0, y1 - y0
         for i in range(n + 1):
             t = i / n
-            self.block_layer(li, x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, r)
+            for a, b0, b1 in self._disk_spans(x0 + dx * t, y0 + dy * t, r):
+                iv = cols.get(a)
+                if iv is None:
+                    cols[a] = [(b0, b1)]
+                else:
+                    iv.append((b0, b1))
+        g = self.grid[li]
+        ny = self.ny
+        ones = self._ones
+        for a, ivs in cols.items():
+            ivs.sort()
+            s = a * ny
+            cb0, cb1 = ivs[0]
+            for b0, b1 in ivs[1:]:
+                if b0 <= cb1 + 1:
+                    if b1 > cb1:
+                        cb1 = b1
+                else:
+                    g[s + cb0:s + cb1 + 1] = ones[:cb1 - cb0 + 1]
+                    cb0, cb1 = b0, b1
+            g[s + cb0:s + cb1 + 1] = ones[:cb1 - cb0 + 1]
 
     def block_poly(self, polys, r, li=None):
         """Keep-out for a custom pad's REAL polygon copper: block every cell
@@ -856,10 +936,17 @@ def generate_underpad_escape(footprint: Footprint,
             return home
         return home - c_all - c_lay.get(li, _EMPTY)
 
-    def _via_ctx(net_id, cx, cy):
+    def _via_ctx(net_id, cx, cy, extra=0.0):
         """Gather the geometry near (cx, cy) that an off-centre via must clear
-        (one scan per ball; the per-cell check then touches only these)."""
-        W = home_r + via_size + 2.0
+        (one scan per ball; the per-cell check then touches only these).
+
+        `extra` widens the window past the base reach -- the lane-walk site
+        chooser (#652) probes sites up to elbow + lane_max*pitch from the
+        ball, which lands EXACTLY at the old window edge at 0.8mm pitch
+        (0.4 + 3*0.8 = 2.8 vs W ~2.79): a committed via sitting on such a
+        site was invisible and mez_rx stacked a V1P2 plane-drop via dead on
+        R4's dog-bone via. Coarser pitches leave even k=2 sites unchecked."""
+        W = home_r + via_size + 2.0 + extra
 
         def close(x, y):
             return abs(x - cx) <= W and abs(y - cy) <= W
@@ -1687,10 +1774,15 @@ def generate_underpad_escape(footprint: Footprint,
         else:
             cands = [(alt * ex * hx, ey * hy), (-alt * ex * hx, ey * hy),
                      (alt * ex * hx, -ey * hy), (-alt * ex * hx, -ey * hy)]
-        ctx = _via_ctx(p.net_id, gx, gy)
-        pad_ex = set(occ._disk(gx, gy, max(pad_keep, via_keep)))
         import env_knobs as _ek
         lane_max = _ek.FANOUT_LANE_WALK_MAX if _ek.FANOUT_LANE_WALK else 0
+        # Window the exact-geometry scan out to the farthest lane-walked site
+        # (elbow + lane_max pitches), or far sites are checked against a
+        # context that cannot see their neighbours (the mez_rx via stack).
+        ctx = _via_ctx(p.net_id, gx, gy,
+                       extra=max(hx, hy) + lane_max * max(grid.pitch_x,
+                                                          grid.pitch_y))
+        pad_ex = set(occ._disk(gx, gy, max(pad_keep, via_keep)))
 
         def _lane_pad_exempt(x1, y1, x2, y2):
             # The inter-row lane clears the flanking ball pads by only a few
@@ -1847,9 +1939,14 @@ def generate_underpad_escape(footprint: Footprint,
             occ.block_segment(li, a, b, trk_keep)
             tracks.append({'start': a, 'end': b, 'width': track_width,
                            'layer': layers[li], 'net_id': p.net_id})
-        tracks.append({'start': (p.global_x, p.global_y), 'end': (vx, vy),
-                       'width': track_width, 'layer': layers[top_idx],
-                       'net_id': p.net_id})
+        # Emit the pad->via stub along the RESERVED polyline (#652): a lane-
+        # walked site is up to lane_max gaps away, and the straight hypotenuse
+        # would cut across the ball rows the elbow+lane path was chosen to
+        # clear (mez_rx: 23 stubs grazing every pad in between).
+        stub_pts = db_path.get(id(p)) or [(p.global_x, p.global_y), (vx, vy)]
+        for a, b in zip(stub_pts, stub_pts[1:]):
+            tracks.append({'start': a, 'end': b, 'width': track_width,
+                           'layer': layers[top_idx], 'net_id': p.net_id})
         occ.block_all(vx, vy, via_keep)
         vias_to_add.append({'x': vx, 'y': vy, 'size': via_size,
                             'drill': via_drill,

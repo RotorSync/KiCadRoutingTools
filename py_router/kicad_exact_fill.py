@@ -47,6 +47,8 @@ import sys
 import pcbnew
 src = sys.argv[1]
 dst = sys.argv[2]
+if len(sys.argv) > 3:
+    sys.path.insert(0, sys.argv[3])   # py_router, for kicad_exact_fill
 board = pcbnew.LoadBoard(src)
 if board is None:
     # LoadBoard returns None (no exception) on a file it rejects;
@@ -55,6 +57,18 @@ if board is None:
     # degrades to the raster model on any non-REFILL_OK outcome.
     print("REFILL_FAIL LoadBoard returned None")
     sys.exit(3)
+# LoadBoard's net propagation REASSIGNS the netcode of a via/track that
+# touches a STALE fill (no knockout around it yet) to the zone's net, so
+# filling as-loaded keeps NO knockout around it -- phantom pour joins for
+# exactly the copper the fill was meant to pull back from. Restore the
+# FILE's stored netcodes before filling (mez_rx: 24 fanout vias per load).
+try:
+    from kicad_exact_fill import repin_netcodes_from_file
+    n = repin_netcodes_from_file(board, src)
+    if n:
+        print("REPIN", n)
+except Exception as e:
+    print("(net repin skipped:", e, ")")
 filler = pcbnew.ZONE_FILLER(board)
 zones = board.Zones()
 filler.Fill(zones)
@@ -64,6 +78,77 @@ filler.Fill(zones)
 pcbnew.SaveBoard(dst, board, aSkipSettings=True)
 print("REFILL_OK", len(list(zones)))
 """
+
+
+def _file_nets_by_uuid(board_path: str) -> Dict[str, object]:
+    """{uuid: stored net (str name or int code)} for every (segment ...)/
+    (via ...) in the file.
+
+    The FILE is the net-assignment truth: pcbnew.LoadBoard runs net
+    propagation, which silently reassigns items touching stale zone fills
+    (see repin_netcodes_from_file). This tool's writer stores item nets BY
+    NAME ((net "B19"), no numeric net table at all); stock KiCad stores
+    numeric codes. Light balanced-paren scan, no parser dependency."""
+    with open(board_path, encoding='utf-8') as f:
+        text = f.read()
+    out: Dict[str, object] = {}
+    for m in re.finditer(r'\((?:segment|via)\b', text):
+        depth_, i = 0, m.start()
+        while i < len(text):
+            c = text[i]
+            if c == '(':
+                depth_ += 1
+            elif c == ')':
+                depth_ -= 1
+                if depth_ == 0:
+                    break
+            i += 1
+        block = text[m.start():i + 1]
+        um = re.search(r'\(uuid\s+"?([0-9a-fA-F-]+)"?\)', block)
+        if not um:
+            continue
+        nm = re.search(r'\(net\s+(\d+)\)', block)
+        if nm:
+            out[um.group(1).lower()] = int(nm.group(1))
+            continue
+        nn = re.search(r'\(net\s+"((?:[^"\\]|\\.)*)"\)', block)
+        if nn:
+            out[um.group(1).lower()] = nn.group(1).replace('\\"', '"')
+    return out
+
+
+def repin_netcodes_from_file(board, board_path: str) -> int:
+    """Restore every track/via netcode on a LOADED pcbnew board to what the
+    file actually stores. Returns the number of items re-pinned.
+
+    pcbnew.LoadBoard (and any bare BuildConnectivity) runs net propagation:
+    an item touching a STALE zone fill -- one poured before the item existed,
+    so it has no knockout -- gets the ZONE's netcode instead of its own
+    (measured on mez_rx: 24 of 125 fanout vias flipped to V3P3/V1P8/GND at
+    load). Matching is by item UUID, so position rounding cannot mispair;
+    net names resolve through the board's own net table."""
+    want = _file_nets_by_uuid(board_path)
+    if not want:
+        return 0
+    fixed = 0
+    for t in board.GetTracks():
+        u = getattr(t, 'm_Uuid', None)
+        if u is None:
+            continue
+        spec = want.get(str(u.AsString()).lower())
+        if spec is None:
+            continue
+        if isinstance(spec, int):
+            nid = spec
+        else:
+            net = board.FindNet(spec)
+            if net is None:
+                continue
+            nid = net.GetNetCode()
+        if t.GetNetCode() != nid:
+            t.SetNetCode(nid)
+            fixed += 1
+    return fixed
 
 
 def _win_version_key(path: str):
@@ -330,7 +415,10 @@ def refill_islands(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
         with open(script, 'w') as f:
             f.write(_REFILL_SCRIPT)
         filled = os.path.join(tmpdir, stem + '_filled.kicad_pcb')
-        r = subprocess.run([kpy, script, staged, filled],
+        # 3rd arg: py_router dir, so the script can import kicad_exact_fill
+        # for the net re-pin (LoadBoard flips netcodes over stale fills).
+        r = subprocess.run([kpy, script, staged, filled,
+                            os.path.dirname(os.path.abspath(__file__))],
                            capture_output=True, text=True, timeout=timeout)
         if 'REFILL_OK' not in (r.stdout or '') or not os.path.isfile(filled):
             if verbose:

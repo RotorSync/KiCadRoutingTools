@@ -544,7 +544,20 @@ fab floor as the geometry demands) into the output `.kicad_pro` DRC floor and in
 `JSON_SUMMARY` (`min_clearance_used`). `check_drc.py` **auto-grades at that
 `.kicad_pro` clearance when `-c` is omitted**, so a bare `check_drc.py board.kicad_pcb`
 already grades at the true routed floor. Passing `--clearance <floor>` still works
-as an explicit override; see Step 6.
+to TIGHTEN the grade — it is a FLOOR, `max(-c, classA, classB)`, not an
+override, so a value at or below the board's netclasses changes nothing.
+See Step 6.
+
+**`check_drc.py -c` is NOT `route.py --clearance`.** On route.py the flag is a
+**ceiling over every class** (`--clearance` caps each net at `min(its class,
+--clearance)`). On `check_drc` it is only the **global fallback**, and a netclass
+override still wins — the tool prints `Required clearance: 0.1600mm
+(local/netclass override; global 0.1500mm)` and grades at 0.16 no matter what
+`-c` says. Measured on one board: 7 violations at `-c 0.16`, the same 7 at
+`-c 0.15`, the same 7 at `-c 0.149`. If you expected a looser `-c` to clear
+class-driven violations, it will not; change the class, or use
+`--clearance-margin` (default 0.05) to filter grid-quantisation noise — and when
+you use it, quote the unfiltered count beside the filtered one.
 
 Only fall back to tool defaults when neither net classes nor Constraints are found
 (`--design-rules` then prints the JLCPCB fab floor for the board's layer count).
@@ -641,9 +654,12 @@ Report to user when presenting the plan:
 - If high-speed nets found: "**GND Return Vias:** This board has [tier] signals ([examples]).
   GND return vias are included in Step N with `--gnd-via-distance [X]mm`. Let me know if
   you'd like to skip this step."
-- If no high-speed nets found: "**GND Return Vias:** No high-speed signals detected (only
-  low-frequency I2C/UART/GPIO). GND return vias are included in the plan but are optional
-  for this board. Want me to remove the step?"
+- If no high-speed nets found: "**GND Return Vias:** The high-speed scan found
+  no nets that need them (only low-frequency I2C/UART/GPIO). The step is
+  included; it is cheap and harmless here. Want me to remove it?"
+  Say what the SCAN found, not that the vias are "optional" -- optional invites
+  dropping them on a board where the scan simply was not run, and a missing
+  return path is not visible in any DRC.
 
 `/find-high-speed-nets` ALSO reports **controlled-impedance nets** (its Step 4.5):
 RF/antenna feeds (radio/PA/LNA -> SMA/U.FL/chip-antenna = **50 ohm single-ended**,
@@ -1865,7 +1881,7 @@ python3 py_router/route.py board.kicad_pcb --nets "*" \
 0. **Net-coverage invariant (Step 5b)** - Every routable net must be claimed by a stage. Since #562 the route step takes `"*"` INCLUDING the plane nets, so the only legitimate exclusions are the Step-2b impedance nets; reconcile the exclusion set against that set (symmetric difference empty), check every poured net also appears in the route step's `--power-nets`, and confirm `check_connected.py`'s unrouted list is empty at the end. This is the guard against a net (e.g. a secondary ground like GNDA) being silently dropped by every stage.
 1. **Always check for GND connections** - If a component has GND pads but GND isn't being fanned out, the plane vias will handle it
 2. **Fanout ALL non-plane nets** - Use `--nets "*" "!GND" "!VCC"` to fan out all nets except those handled by planes. Do NOT use `"/*"` alone as it misses nets with non-hierarchical names like `Net-(U9-Pad1)`. Unconnected nets are automatically filtered out.
-3. **Order matters** - Fanout, then pours, then diff pairs, then the all-nets route (plane nets INCLUDED — the run ends with the in-run plane finalize, #562), then optional GND return vias/stitching. Signals route before stitching because stitching vias can relocate around tracks, but a diff pair cannot relocate around a badly placed via
+3. **Order matters** - Fanout (with plane-ball drops) comes AFTER the Step 1 bare pour (#424: planes FIRST, so the fill picks up the drop vias while intact and the fragility field steers every later route), then diff pairs, then the all-nets route with the plane nets INCLUDED (#562 — the run ends with the in-run plane finalize, so there is no separate repair step), then optional GND return vias/stitching. Signals route before stitching because stitching vias can relocate around tracks, but a diff pair cannot relocate around a badly placed via
 4. **Verify at the end** - Always run DRC, connectivity, and orphan stub checks
 5. **Consider the analyze-power-nets skill** - For complex boards where power net identification isn't obvious, use that skill first to analyze component datasheets
 6. **Consider the find-high-speed-nets skill** - For accurate GND return via distance recommendations based on actual component datasheet speeds and rise times, run `/find-high-speed-nets` before planning. The lightweight inline analysis (Step 4) uses net name patterns only.
@@ -2174,7 +2190,9 @@ hunt for.
        --no-bga-zone --max-ripup 5 \
        2>&1 | tee /tmp/route_signal.txt
    ```
-   A finer `--grid-step` (0.05, or 0.025 for sub-0.4 mm pitch) is the complementary
+   A finer `--grid-step` (0.05, or 0.025 AT ≤0.4 mm pitch — a part *at* 0.4 mm
+   needs 0.025: "sub-0.4" reads as excluding it, and measurement says otherwise)
+   is the complementary
    lever — a corridor that exists geometrically still needs a grid line on it to be
    found; pair it with the thin width at fine-pitch escapes ("boxed in by static
    obstacles"). If still congested, step the width down further toward the fab

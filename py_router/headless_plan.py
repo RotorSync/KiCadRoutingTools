@@ -162,6 +162,21 @@ def run_plan(board_path, steps, indices=None, snapshot_dir=None,
     from fake_ipc_board import install as _install_fake_board
     board = _install_fake_board(board_path)
 
+    # LoadBoard's net propagation reassigns netcodes of copper touching STALE
+    # zone fills (a mid-chain input: pours poured before the copper existed).
+    # Restore the file's stored nets, then refill so the fills carry real
+    # knockouts and later connectivity rebuilds cannot flip them again.
+    try:
+        from kicad_exact_fill import repin_netcodes_from_file
+        _n_repin = repin_netcodes_from_file(board, board_path)
+        if _n_repin:
+            print(f"run_plan: restored {_n_repin} netcode(s) the board load "
+                  f"flipped over stale fills")
+            from kicad_routing_plugin.gui_utils import refill_all_zones
+            refill_all_zones(board)
+    except Exception as _e:
+        print(f"run_plan: (net repin skipped: {_e})")
+
     from kicad_parser import build_pcb_data_from_board
     from kicad_routing_plugin import routing_dialog
     from kicad_routing_plugin.ai_plan import PlanExecutor, step_label
