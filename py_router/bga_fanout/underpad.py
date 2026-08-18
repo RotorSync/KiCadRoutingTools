@@ -1847,9 +1847,14 @@ def generate_underpad_escape(footprint: Footprint,
             occ.block_segment(li, a, b, trk_keep)
             tracks.append({'start': a, 'end': b, 'width': track_width,
                            'layer': layers[li], 'net_id': p.net_id})
-        tracks.append({'start': (p.global_x, p.global_y), 'end': (vx, vy),
-                       'width': track_width, 'layer': layers[top_idx],
-                       'net_id': p.net_id})
+        # Emit the pad->via stub along the RESERVED polyline (#652): a lane-
+        # walked site is up to lane_max gaps away, and the straight hypotenuse
+        # would cut across the ball rows the elbow+lane path was chosen to
+        # clear (mez_rx: 23 stubs grazing every pad in between).
+        stub_pts = db_path.get(id(p)) or [(p.global_x, p.global_y), (vx, vy)]
+        for a, b in zip(stub_pts, stub_pts[1:]):
+            tracks.append({'start': a, 'end': b, 'width': track_width,
+                           'layer': layers[top_idx], 'net_id': p.net_id})
         occ.block_all(vx, vy, via_keep)
         vias_to_add.append({'x': vx, 'y': vy, 'size': via_size,
                             'drill': via_drill,
