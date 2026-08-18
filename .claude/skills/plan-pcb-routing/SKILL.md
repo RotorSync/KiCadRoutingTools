@@ -2040,8 +2040,9 @@ arithmetic closes Step 5's smaller-via repair rung. The play becomes: the
 Step 1c pour still runs first (its taps land on an empty board and serve the
 part's plane pads from outside the pad field), then route EVERY signal pad
 of the part as a plain perimeter signal BEFORE the plane FINALIZE/repair
-passes place their taps — the pour gate holds you to it (a bare pad on a
-partially-routed board is a blocking defect, run 6's five-pad loss) — and
+passes place their taps — nothing enforces this since the run-6 pour gate was
+removed (5832e4eb), so it is yours to keep; a bare pad on a partially-routed
+board is still a real defect (run 6's five-pad loss) — and
 report the spec-via-vs-pitch arithmetic as a requirement finding. Read the
 Step 3 QFN mandate as "resolve every pad's escape before the late tap
 passes", not "run the fanout tool".
@@ -2930,13 +2931,13 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    hazard) and belong in Step 3. (The pour cannot rip at all any more:
    `--rip-blocker-nets` and the other tap knobs were REMOVED from
    `route_planes` with the tap machinery, #562.) **The order is load-bearing,
-   not stylistic**: the pour gate (`route_planes.py`) exempts only a board
-   with NO signal copper at all, and a fanout's escape stubs ARE signal
-   copper — with the fanout first, the pour refuses (exit 3, "N net(s) carry
-   BARE pads") on every board with a fanout and unrouted nets. Two runs
-   measured exactly that refusal and had to re-declare pour-first as a chain
-   deviation; this ordering is the fix. Why pour-first also wins on outcomes
-   (#424, measured): the fanout's plane-drop vias connect to a still-intact
+   not stylistic — but NOTHING ENFORCES IT.** `route_planes` once refused to
+   pour (exit 3, "N net(s) carry BARE pads") over a board carrying bare pads,
+   which made fanout-first fail loudly; that gate and its `--allow-bare-pads`
+   opt-out were REMOVED in 5832e4eb so this branch matches main, which never
+   had one. Fanout-first therefore now SUCCEEDS and simply produces a worse
+   board, which is the harder failure to notice. The reasons are measured
+   outcomes, not a refusal (#424): the fanout's plane-drop vias connect to a still-intact
    pour immediately, and the **plane-fragility field** (default on:
    `KICAD_PLANE_FRAGILITY_COST`, 2.0 mm-equiv, `=0` reverts) then makes every
    later routing step pay to cut the real fill where it is narrow — signals
