@@ -38,7 +38,7 @@ python3 validate_boards.py
 Drive the whole corpus with the queue manager:
 
 ```bash
-bash run_queue.sh [concurrency=4] [model=sonnet]   # from tests/stress/
+bash run_queue.sh [max_concurrency=8] [model=sonnet]   # from tests/stress/
 bash stress_status.sh                              # monitor: DONE/RUNNING/TODO + free slots
 ```
 
