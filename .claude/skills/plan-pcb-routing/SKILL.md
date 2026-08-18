@@ -544,7 +544,9 @@ fab floor as the geometry demands) into the output `.kicad_pro` DRC floor and in
 `JSON_SUMMARY` (`min_clearance_used`). `check_drc.py` **auto-grades at that
 `.kicad_pro` clearance when `-c` is omitted**, so a bare `check_drc.py board.kicad_pcb`
 already grades at the true routed floor. Passing `--clearance <floor>` still works
-as an explicit override; see Step 6.
+to TIGHTEN the grade — it is a FLOOR, `max(-c, classA, classB)`, not an
+override, so a value at or below the board's netclasses changes nothing.
+See Step 6.
 
 Only fall back to tool defaults when neither net classes nor Constraints are found
 (`--design-rules` then prints the JLCPCB fab floor for the board's layer count).
