@@ -162,11 +162,22 @@ class _Cap:
         # just translate per call. Keyed by rounded rotation.
         self._rect_cache: Dict[float, Tuple[float, float, float, float]] = {}
         self._pad_cache: Dict[float, list] = {}
+        self._pad_bbox_cache: Dict[float, Tuple[float, float, float, float]] = {}
+        # One-slot POSE memos: cost() and the shortfall helpers each rebuild
+        # the same translated geometry for the same candidate 4-6 times in a
+        # row (5.7M pad_rects calls on mez_rx); remember the last pose.
+        self._pr_key = None
+        self._pr_out: list = []
+        self._rc_key = None
+        self._rc_out: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
 
     def rect(self, x=None, y=None, rot=None):
         x = self.x if x is None else x
         y = self.y if y is None else y
         rot = self.rot if rot is None else rot
+        pose = (x, y, rot)
+        if pose == self._rc_key:
+            return self._rc_out
         # local_bounds is the footprint-LOCAL courtyard; rotate by the
         # absolute placement angle (matching how static obstacle rects are
         # built), not the delta from seed. The rotation is position-independent
@@ -176,12 +187,11 @@ class _Cap:
         if b is None:
             b = _rotate_local_bounds(*self.local_bounds, rot)
             self._rect_cache[key] = b
-        return (x + b[0], y + b[1], x + b[2], y + b[3])
+        out = (x + b[0], y + b[1], x + b[2], y + b[3])
+        self._rc_key, self._rc_out = pose, out
+        return out
 
-    def pad_rects(self, x=None, y=None, rot=None):
-        x = self.x if x is None else x
-        y = self.y if y is None else y
-        rot = self.rot if rot is None else rot
+    def _pad_cache_for(self, rot):
         key = round((rot - self.seed_rot) % 360, 3)
         cache = self._pad_cache.get(key)
         if cache is None:
@@ -196,11 +206,41 @@ class _Cap:
                 HX, HY = (hy, hx) if swap else (hx, hy)
                 cache.append((ox, oy, HX, HY, net))
             self._pad_cache[key] = cache
+            if cache:
+                self._pad_bbox_cache[key] = (
+                    min(ox - HX for ox, oy, HX, HY, net in cache),
+                    min(oy - HY for ox, oy, HX, HY, net in cache),
+                    max(ox + HX for ox, oy, HX, HY, net in cache),
+                    max(oy + HY for ox, oy, HX, HY, net in cache))
+            else:
+                self._pad_bbox_cache[key] = (0.0, 0.0, 0.0, 0.0)
+        return key, cache
+
+    def pad_rects(self, x=None, y=None, rot=None):
+        x = self.x if x is None else x
+        y = self.y if y is None else y
+        rot = self.rot if rot is None else rot
+        pose = (x, y, rot)
+        if pose == self._pr_key:
+            return self._pr_out
+        _key, cache = self._pad_cache_for(rot)
         out = []
         for ox, oy, HX, HY, net in cache:
             cx, cy = x + ox, y + oy
             out.append((cx - HX, cy - HY, cx + HX, cy + HY, net))
+        self._pr_key, self._pr_out = pose, out
         return out
+
+    def pad_bbox(self, x=None, y=None, rot=None):
+        """Union bbox of pad_rects at a pose -- a containment-conservative
+        prescreen: any pad-pair gap is >= the bbox-pair gap, so two caps whose
+        pad bboxes are >= clearance apart have EXACTLY zero pad shortfall."""
+        x = self.x if x is None else x
+        y = self.y if y is None else y
+        rot = self.rot if rot is None else rot
+        key, _cache = self._pad_cache_for(rot)
+        bb = self._pad_bbox_cache[key]
+        return (x + bb[0], y + bb[1], x + bb[2], y + bb[3])
 
 
 def _candidate_positions(cap, max_disp, step, grid_step):
@@ -715,18 +755,28 @@ class _Repair:
             if self._overlap(rect, r) > base + EPS:
                 return True
         cand_pads = None
+        cand_bbox = None
         for other_ref in self.cap_caps[ref]:
             pair = frozenset((ref, other_ref))
-            if self._overlap(rect, self.caps[other_ref].rect()) > \
+            other = self.caps[other_ref]
+            if self._overlap(rect, other.rect()) > \
                     self.base_cap.get(pair, 0.0) + EPS:
                 return True
             # no new/worse different-net pad encroachment against another
             # MOVER at its current pose (#275); each accepted move preserves
             # the pairwise seed baseline, so the invariant holds inductively
             # as both parts move.
+            # Pad-bbox prescreen: pads are contained in their union bbox, so
+            # every pad-pair gap >= the bbox gap; bboxes >= clearance apart
+            # means the shortfall is exactly 0 <= base + EPS -- skip the
+            # pairwise scan (the dominant cost of the candidate sweep).
+            if cand_bbox is None:
+                cand_bbox = cap.pad_bbox(x, y, rot)
+            if _rect_gap(cand_bbox, other.pad_bbox()) >= self.clearance:
+                continue
             if cand_pads is None:
                 cand_pads = cap.pad_rects(x, y, rot)
-            if _pad_pair_shortfall(cand_pads, self.caps[other_ref].pad_rects(),
+            if _pad_pair_shortfall(cand_pads, other.pad_rects(),
                                    self.clearance) > \
                     self.base_cap_pad.get(pair, 0.0) + EPS:
                 return True
@@ -898,99 +948,122 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
         r, st.caps[r], st.caps[r].x, st.caps[r].y, st.caps[r].rot),
         reverse=True)
 
-    for pass_num in range(1, max_passes + 1):
-        moves = 0
-        for _oi, ref in enumerate(order):
-            if progress_callback:
-                progress_callback(
-                    _oi + 1, len(order),
-                    f"Cap optimize pass {pass_num}: {ref}")
-            cap = st.caps[ref]
-            current = st.cost(ref, cap, cap.x, cap.y, cap.rot)
-            rots = ROTATIONS if (allow_rotations and rotate[ref]) else [cap.rot]
-            best = (current, cap.x, cap.y, cap.rot)
-            for cx, cy in _candidate_positions(cap, budget[ref], step, grid_step):
-                for rot in rots:
-                    if (cx, cy, rot) == (cap.x, cap.y, cap.rot):
-                        continue
-                    c = st.cost(ref, cap, cx, cy, rot)
-                    if c < best[0] - EPS:
-                        best = (c, cx, cy, rot)
-            if best[0] < current - EPS:
-                cap.x, cap.y, cap.rot = best[1], best[2], best[3]
-                moves += 1
-                if on_move is not None:
-                    on_move(st)
-                if verbose:
-                    print(f"  pass {pass_num}: {ref} -> "
-                          f"({cap.x:.3f},{cap.y:.3f}) rot {cap.rot:g} "
-                          f"cost {best[0]:.3f}")
+    # Pause the CYCLIC collector for the sweep. The candidate loops allocate
+    # short-lived tuples/lists at a rate that fires gen-2 collections, and
+    # each of those scans the ENTIRE process heap -- in a live GUI chain
+    # session (4 prior steps of boards/fills/engines resident) the identical
+    # sweep measured 5.9x slower than in a fresh process (mez_rx: 184s vs
+    # 31s, same call counts) purely from GC pressure. The sweep's garbage is
+    # acyclic, so reference counting reclaims it either way.
+    import gc
+    _gc_was_enabled = gc.isenabled()
+    gc.disable()
 
-        residual = {r: st.graze_penalty(r, st.caps[r], st.caps[r].x,
-                                        st.caps[r].y, st.caps[r].rot)
-                    for r in st.caps}
-        still = [r for r, p in residual.items() if p > EPS]
-        if not still:
-            print(f"All foreign-copper grazes cleared after {pass_num} pass(es).")
-            break
-        if moves == 0:
-            # stuck: escalate budget / rotations for the remaining violators
-            grown = False
-            for r in still:
-                if not rotate[r] and allow_rotations:
-                    rotate[r] = True
-                    grown = True
-                elif budget[r] < max_displacement_cap - EPS:
-                    budget[r] = min(budget[r] * displacement_growth,
-                                    max_displacement_cap)
-                    grown = True
-            if not grown:
-                print(f"Stuck with {len(still)} cap(s) still grazing foreign "
-                      f"copper (at the displacement cap): {', '.join(sorted(still))}")
+    try:
+        for pass_num in range(1, max_passes + 1):
+            moves = 0
+            for _oi, ref in enumerate(order):
+                if progress_callback:
+                    progress_callback(
+                        _oi + 1, len(order),
+                        f"Cap optimize pass {pass_num}: {ref}")
+                cap = st.caps[ref]
+                current = st.cost(ref, cap, cap.x, cap.y, cap.rot)
+                rots = ROTATIONS if (allow_rotations and rotate[ref]) \
+                    else [cap.rot]
+                best = (current, cap.x, cap.y, cap.rot)
+                for cx, cy in _candidate_positions(cap, budget[ref], step,
+                                                   grid_step):
+                    for rot in rots:
+                        if (cx, cy, rot) == (cap.x, cap.y, cap.rot):
+                            continue
+                        c = st.cost(ref, cap, cx, cy, rot)
+                        if c < best[0] - EPS:
+                            best = (c, cx, cy, rot)
+                if best[0] < current - EPS:
+                    cap.x, cap.y, cap.rot = best[1], best[2], best[3]
+                    moves += 1
+                    if on_move is not None:
+                        on_move(st)
+                    if verbose:
+                        print(f"  pass {pass_num}: {ref} -> "
+                              f"({cap.x:.3f},{cap.y:.3f}) rot {cap.rot:g} "
+                              f"cost {best[0]:.3f}")
+
+            residual = {r: st.graze_penalty(r, st.caps[r], st.caps[r].x,
+                                            st.caps[r].y, st.caps[r].rot)
+                        for r in st.caps}
+            still = [r for r, p in residual.items() if p > EPS]
+            if not still:
+                print(f"All foreign-copper grazes cleared after {pass_num} "
+                      f"pass(es).")
                 break
-            if verbose:
-                print(f"  escalating budget/rotation for {len(still)} cap(s)")
-
-    # Fallback (#213): a cap may still graze a foreign via because the soft cost
-    # (same-net attraction + displacement) judged the tiny penetration cheaper
-    # than a clear-but-distant spot, so the greedy descent never relocates it.
-    # A shipped PAD-VIA short is worse than a displaced decap, so for any cap
-    # still in via-conflict, jump it to the best position (within the full
-    # displacement budget) that FULLY clears every foreign via -- cost() still
-    # rejects any hard-constraint violation (board edge, courtyard, foreign
-    # track/pad #235), so this can never introduce a new short/overlap; it only
-    # overrides the soft trade-off. If no clean via-clearing spot exists the cap
-    # is left as-is and reported unresolved (needs a via re-drop, not a move).
-    if via_clear_fallback:
-        stuck = [r for r in st.caps
-                 if st.graze_penalty(r, st.caps[r], st.caps[r].x, st.caps[r].y,
-                                     st.caps[r].rot) > EPS]
-        rots_all = ROTATIONS if allow_rotations else None
-        for _fi, ref in enumerate(stuck):
-            if progress_callback:
-                progress_callback(
-                    _fi + 1, len(stuck),
-                    f"Cap optimize: via-clear fallback for {ref}")
-            cap = st.caps[ref]
-            rots = rots_all if rots_all is not None else [cap.rot]
-            best = None  # (cost, x, y, rot)
-            for cx, cy in _candidate_positions(cap, max_displacement_cap,
-                                               step, grid_step):
-                for rot in rots:
-                    if st.graze_penalty(ref, cap, cx, cy, rot) > EPS:
-                        continue
-                    c = st.cost(ref, cap, cx, cy, rot)  # inf if hard-blocked
-                    if c == float('inf'):
-                        continue
-                    if best is None or c < best[0] - EPS:
-                        best = (c, cx, cy, rot)
-            if best is not None:
-                cap.x, cap.y, cap.rot = best[1], best[2], best[3]
-                disp = math.hypot(cap.x - cap.seed_x, cap.y - cap.seed_y)
+            if moves == 0:
+                # stuck: escalate budget / rotations for the remaining
+                # violators
+                grown = False
+                for r in still:
+                    if not rotate[r] and allow_rotations:
+                        rotate[r] = True
+                        grown = True
+                    elif budget[r] < max_displacement_cap - EPS:
+                        budget[r] = min(budget[r] * displacement_growth,
+                                        max_displacement_cap)
+                        grown = True
+                if not grown:
+                    print(f"Stuck with {len(still)} cap(s) still grazing "
+                          f"foreign copper (at the displacement cap): "
+                          f"{', '.join(sorted(still))}")
+                    break
                 if verbose:
-                    print(f"  fallback: {ref} relocated to clear foreign copper "
-                          f"at disp {disp:.2f}mm -> ({cap.x:.3f},{cap.y:.3f}) "
-                          f"rot {cap.rot:g}")
+                    print(f"  escalating budget/rotation for {len(still)} "
+                          f"cap(s)")
+
+        # Fallback (#213): a cap may still graze a foreign via because the
+        # soft cost (same-net attraction + displacement) judged the tiny
+        # penetration cheaper than a clear-but-distant spot, so the greedy
+        # descent never relocates it. A shipped PAD-VIA short is worse than a
+        # displaced decap, so for any cap still in via-conflict, jump it to
+        # the best position (within the full displacement budget) that FULLY
+        # clears every foreign via -- cost() still rejects any hard-constraint
+        # violation (board edge, courtyard, foreign track/pad #235), so this
+        # can never introduce a new short/overlap; it only overrides the soft
+        # trade-off. If no clean via-clearing spot exists the cap is left
+        # as-is and reported unresolved (needs a via re-drop, not a move).
+        if via_clear_fallback:
+            stuck = [r for r in st.caps
+                     if st.graze_penalty(r, st.caps[r], st.caps[r].x,
+                                         st.caps[r].y,
+                                         st.caps[r].rot) > EPS]
+            rots_all = ROTATIONS if allow_rotations else None
+            for _fi, ref in enumerate(stuck):
+                if progress_callback:
+                    progress_callback(
+                        _fi + 1, len(stuck),
+                        f"Cap optimize: via-clear fallback for {ref}")
+                cap = st.caps[ref]
+                rots = rots_all if rots_all is not None else [cap.rot]
+                best = None  # (cost, x, y, rot)
+                for cx, cy in _candidate_positions(cap, max_displacement_cap,
+                                                   step, grid_step):
+                    for rot in rots:
+                        if st.graze_penalty(ref, cap, cx, cy, rot) > EPS:
+                            continue
+                        c = st.cost(ref, cap, cx, cy, rot)  # inf if blocked
+                        if c == float('inf'):
+                            continue
+                        if best is None or c < best[0] - EPS:
+                            best = (c, cx, cy, rot)
+                if best is not None:
+                    cap.x, cap.y, cap.rot = best[1], best[2], best[3]
+                    disp = math.hypot(cap.x - cap.seed_x, cap.y - cap.seed_y)
+                    if verbose:
+                        print(f"  fallback: {ref} relocated to clear foreign "
+                              f"copper at disp {disp:.2f}mm -> "
+                              f"({cap.x:.3f},{cap.y:.3f}) rot {cap.rot:g}")
+    finally:
+        if _gc_was_enabled:
+            gc.enable()
 
     placements = []
     resolved = []

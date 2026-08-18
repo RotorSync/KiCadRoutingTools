@@ -1608,9 +1608,11 @@ class PlanesTab(wx.Panel):
         # already has a zone on that layer (skip_existing_zones, default on).
         self._last_zone_counts = (zones_added, zones_skipped)
 
-        # Build connectivity before filling so nets are resolved properly.
-        self._apply_status("Rebuilding board connectivity...")
-        board.BuildConnectivity()
+        # NO bare BuildConnectivity here: the taps/stitch vias just added sit
+        # under the EXISTING (stale) fills, and building connectivity before
+        # the refill flips their netcodes to the zones' nets (see
+        # refill_all_zones's docstring). The refill below rebuilds
+        # connectivity itself, after the fills have correct knockouts.
 
         # Teardrops, if the shared "Add teardrops" checkbox is on (#489 §9). Both
         # plane modes apply copper into pcbnew, so the writers' file-side pass
@@ -1790,7 +1792,10 @@ class PlanesTab(wx.Panel):
                 added += 1
 
             if removed or added or delta.snapped:
-                board.BuildConnectivity()
+                # refill-first (rebuilds connectivity itself): a bare
+                # BuildConnectivity over stale fills flips new copper's nets.
+                from .gui_utils import refill_all_zones
+                refill_all_zones(board)
                 print(f"Plane cleanup: closed {delta.snapped} stub gap(s), "
                       f"trimmed {len(delta.segments_to_remove)} dead-end "
                       f"segment(s), added {added} connector(s)")

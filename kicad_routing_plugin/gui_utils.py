@@ -353,26 +353,41 @@ def apply_teardrops_to_board(board):
 
 
 def refill_all_zones(board):
-    """Re-fill EVERY copper zone on the board so plane pours pull back around
-    copper added after they were first filled (#362).
+    """Re-fill EVERY copper zone, then rebuild connectivity -- the ONLY safe
+    way to register freshly added copper while filled zones exist (#362).
 
-    The plane tab fills only the zones it just created; a signal routed in a
-    LATER plan step (e.g. +1V1 after the GND/+3V3 planes exist) then leaves the
-    plane fill STALE -- no antipad around the new track/via -- which KiCad DRC
-    flags as clearance / shorting violations on the saved board (the CLI board
-    is graded with kicad-cli --refill-zones, so it never shows these). Call this
-    after any apply that adds copper while filled zones exist. Best-effort.
+    Two distinct corruptions this prevents:
+    - STALE FILLS (#362): a signal routed after planes exist leaves the plane
+      fill with no antipad around the new track/via, which KiCad DRC flags as
+      clearance / shorting violations on the saved board (the CLI board is
+      graded with kicad-cli --refill-zones, so it never shows these).
+    - NET FLIPS (mez_rx): ``board.BuildConnectivity()`` over a stale fill
+      REASSIGNS a new via's netcode to the zone's net (the fill has no
+      knockout, so pcbnew's net propagation sees them touching -- measured:
+      a fresh RGMII_TX_CTL via under the BGA came back GND/V1P8/V3P3, 42 of
+      131 fanout vias misnetted). Once flipped, the via is same-net with the
+      zone, so a LATER refill keeps no knockout and the wrong net STICKS.
+      ``pcbnew.LoadBoard`` propagates the same way, so a saved board with
+      stale fills is corrupted for every pcbnew consumer that opens it.
+
+    Therefore: call THIS (never a bare ``BuildConnectivity``) as the first
+    connectivity rebuild after adding copper. ZONE_FILLER computes knockouts
+    from the still-correct netcodes, and only then is connectivity rebuilt.
+    Best-effort; builds connectivity even when the board has no zones.
     Returns the number of zones refilled (0 if none / on error)."""
     try:
         import pcbnew
         zones = list(board.Zones())
-        if not zones:
-            return 0
-        pcbnew.ZONE_FILLER(board).Fill(zones)
+        if zones:
+            pcbnew.ZONE_FILLER(board).Fill(zones)
         board.BuildConnectivity()
         return len(zones)
     except Exception as e:
         print(f"(zone refill skipped: {e})")
+        try:
+            board.BuildConnectivity()
+        except Exception:
+            pass
         return 0
 
 

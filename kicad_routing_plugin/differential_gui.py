@@ -1315,9 +1315,12 @@ class DifferentialTab(wx.Panel):
             board.Add(track)
             tracks_added += 1
 
-        # Build connectivity to register new items properly
-        self._apply_status("Rebuilding board connectivity...")
-        board.BuildConnectivity()
+        # Refill zones, THEN rebuild connectivity (refill_all_zones does both,
+        # in that order): a bare BuildConnectivity over stale pours flips new
+        # vias' netcodes to the zones' nets -- see refill_all_zones's docstring.
+        self._apply_status("Refilling zones and rebuilding connectivity...")
+        from .gui_utils import refill_all_zones
+        refill_all_zones(board)
 
         # Make the live board's DRC constraints consistent with what we just
         # routed to (issue #160), the GUI counterpart of the CLI route_diff's

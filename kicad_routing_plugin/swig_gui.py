@@ -3728,14 +3728,12 @@ class RoutingDialog(wx.Dialog):
             if cleared:
                 print(f"Cleared {cleared} graphic(s) from the guide/keepout User layer(s)")
 
-        # Build connectivity to register new items properly
-        self._apply_status("Rebuilding board connectivity...")
-        board.BuildConnectivity()
-
         # Re-fill plane zones so any pour pulls back around the copper we just
-        # routed (#362): a signal routed AFTER planes exist would otherwise
-        # leave the plane fill stale (no antipad), which KiCad DRC flags as
-        # clearance / shorting violations on the saved board.
+        # routed (#362), then rebuild connectivity -- refill_all_zones does
+        # both, in that order. The refill must come FIRST: a bare
+        # BuildConnectivity over the stale fills flips new vias' netcodes to
+        # the zones' nets, and once flipped the refill keeps no knockout and
+        # the wrong net sticks (see refill_all_zones's docstring).
         from .gui_utils import refill_all_zones
         self._apply_status("Refilling zones around the new copper...")
         _rf = refill_all_zones(board)
@@ -3775,9 +3773,11 @@ class RoutingDialog(wx.Dialog):
                         lambda c, t, m: self._apply_status(
                             f"{m} ({c}/{t})" if t else m)))
                 if _orc is not None:
-                    self._apply_status("Rebuilding connectivity after the "
+                    self._apply_status("Refilling zones after the "
                                        "plane-finalize oracle...")
-                    board.BuildConnectivity()
+                    # refill FIRST (it rebuilds connectivity itself): a bare
+                    # BuildConnectivity here would flip the oracle's new vias
+                    # to the stale fills' nets.
                     _rf2 = refill_all_zones(board)
                     if _rf2:
                         print(f"Refilled {_rf2} zone(s) after the "
