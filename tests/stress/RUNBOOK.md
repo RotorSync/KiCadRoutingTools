@@ -9,7 +9,7 @@ non-interactively and record everything.
 The whole set-1 + set-2 corpus is driven by ONE queue manager:
 
 ```bash
-bash tests/stress/run_queue.sh [concurrency=10] [model=sonnet]
+bash tests/stress/run_queue.sh [max_concurrency=8] [model=sonnet]
 ```
 
 It keeps N headless `claude -p` board workers in flight until every board has a

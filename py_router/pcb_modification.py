@@ -5364,6 +5364,28 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
     new_segments = result['new_segments']
     if not new_segments:
         return
+    # #658 in-run river packing: pack the FRESH route's runs against
+    # committed sibling runs BEFORE this copper becomes an obstacle.
+    # trace_event 'route' only -- a RESTORE must re-land the original
+    # geometry byte-faithfully, and rescue/weld copper commits are too
+    # short for the min-run filter to matter anyway.
+    _pi658 = getattr(pcb_data, '_pack_inline', None)
+    if _pi658 and trace_event == 'route':
+        try:
+            from pack_river import pack_result_segments
+            for _nid658 in {s.net_id for s in new_segments}:
+                _sib658 = _pi658['members'].get(_nid658)
+                if _sib658:
+                    _nm658 = pack_result_segments(
+                        pcb_data, new_segments,
+                        result.get('new_vias') or [], _nid658, _sib658,
+                        _pi658['clearance'],
+                        _pi658.get('net_clearances'))
+                    if _nm658:
+                        print(f"    in-run pack: {_nm658} run(s) packed "
+                              f"(net {_nid658})")
+        except Exception as _pe658:
+            print(f"    (in-run pack error: {_pe658})")
     # Copper epoch (rescue map cache, 2026-08-14 profiling): every commit
     # through this choke point invalidates cached pristine obstacle maps.
     pcb_data._copper_epoch = getattr(pcb_data, '_copper_epoch', 0) + 1

@@ -1,3 +1,91 @@
+55b54f1b 2026-08-17 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit b2d8074b..55b54f1b: ONE REAL GAP, found and fixed (55b54f1b). Eighty-
+eight upstream commits -- the largest range any of these audits has covered --
+almost all of it the #589/#658 global-planning and power-economics campaign.
+
+The mechanical sweep is clean in the three dimensions CLAUDE.md names, and
+that is exactly why the gap is worth recording: it is invisible to all three.
+NO new argparse flags on any routing CLI (zero add_argument diffs across all
+88 commits). NO added or removed batch_route / batch_route_diff_pairs kwargs
+(97 and 87 params, identical both sides). NO new CLI main() post-pass -- every
+single diff hunk in route.py lands inside batch_route, and gate 2 still reports
+8 registered passes / 15 in active use / 0 unreachable.
+
+Forty-two new env knobs (KICAD_GLOBAL_PLAN_*, KICAD_FANOUT_*, KICAD_ORACLE_
+UNION, KICAD_PACK_INLINE, KICAD_POWER_LAYER_COSTS, KICAD_RESCUE_CAP_MOVE,
+KICAD_TIE_BAND_COST, ...). All are read through env_knobs.py and consumed in
+SHARED modules only -- single_ended_loop, route.py's batch_route, kicad_oracle,
+global_plan, repair_planes, bga_fanout/underpad. No flag, no control, no
+argparse default, so both fronts inherit them identically: the same inert class
+as the last two audits. Verified by mapping every knob to its consumers; none
+is read in a CLI main(), and none needs a GUI mirror.
+
+THE GAP (fixed in 55b54f1b). batch_route's #562 plane finalize calls
+repair_planes through TWO sibling call sites -- `if _gui9:` (return_results,
+the GUI's in-memory leg) and `else:` (the CLI's file leg). 34d2e448 set out to
+make "route.py's #562 finalize forward the chain's layer_costs" and patched
+only the _gui9 branch. The result is an INVERTED Class-1 gap, the direction
+these audits do not usually look for: the GUI honored the chain's layer
+economics in the finalize while the CLI -- every replay, stress and corpus run,
+i.e. every arm 34d2e448's own composition evidence came from -- kept laying
+weld/tap/reconnect copper across priced-up layers at uniform cost.
+
+Why no sweep caught it: repair_planes GAINED the kwarg, so the signature diff
+reads as an addition, not a divergence; the call sites are 85 lines apart in
+one function; no flag and no post-pass changed. And test_gui_engine_parity
+agrees VACUOUSLY here -- its board leaves its pours complete, so the finalize's
+fill-aware pre-gate skips the engine leg on both fronts and neither ever calls
+repair_planes at all.
+
+Measured, not inferred. Patching repair_planes to record its kwargs and driving
+batch_route on both fronts with layer_costs=[1.0, 6.0] (NON-default on purpose:
+against [1.0, 1.0] a dropped kwarg is indistinguishable from a forwarded one),
+with the pre-gate forced open so the leg actually runs:
+
+    before   GUI -> [1.0, 6.0]     CLI -> <layer_costs NOT PASSED>
+    after    GUI -> [1.0, 6.0]     CLI -> [1.0, 6.0]
+
+NOTE this CHANGES CLI routing output on boards that pass --layer-costs AND
+reach the finalize's engine leg (an incomplete pour). That is the intended
+#658 behavior and the behavior the GUI already had; it is not a free change,
+and a corpus A/B is the way to price it.
+
+OTHER SURFACE, all clean:
+  * generate_bga_fanout / generate_qfn_fanout gained `cancel_check` (#621,
+    c39a8e99 -- the ONLY one of the 88 commits to touch kicad_routing_plugin).
+    Wired at BOTH GUI call sites (fanout_gui 1535, 1633). No CLI counterpart is
+    owed: cancel is a GUI concept, exactly as it already is for batch_route,
+    route_diff and the plane engines, and the CLI never passes it. The engines'
+    LAST_CANCEL_SKIPPED module state is GUI-consumed only and stays empty when
+    cancel_check is None. It ships with its own gates (test_fanout_cancel.py,
+    test_fanout_threaded_gui.py) -- both green.
+  * results_data gained exactly one key, `post_reconcile_oracle` (#589
+    re-audit). DOCUMENTED DIVERGENCE, not a gap: its whole block is gated
+    `output_file and not return_results`, i.e. CLI-only BY CONSTRUCTION, and
+    default-OFF (KICAD_FINALIZE_REAUDIT defaults '0'). The assignment is
+    guarded because results_data does not exist on that path (110480fd). If
+    the experiment is ever promoted to a default, the GUI needs it via
+    stage_board_fn the way the finalize's oracle leg already does -- flagged
+    here so that promotion does not ship one-sided.
+  * routing_defaults.py UNTOUCHED -- no default-value drift this range (the
+    class that bit e9523f23 last audit). routing_config gained `plan_probe`,
+    set only on the global plan's internal replace() clone; no flag, no
+    control, never on a config that emits copper.
+  * NO dialog control added, renamed or removed, so settings_persistence is
+    untouched by construction; the round-trip gate confirms 181 keys both ways.
+  * fanout_candidate_nets is NEW and internal (one caller inside bga_fanout).
+
+GATES (wx and pcbnew both present -- PROBED, per the standing warning against
+recording these as "pending a KiCad-python session"):
+  test_manifest_plan_parity ......... PASS  6549 flag-checks / 327 manifests, 0 mismatch
+  test_cli_postpass_coverage ........ PASS  8 registered, 15 in use, 0 unreachable
+  test_settings_roundtrip ........... PASS  181 keys, save/restore/legacy/re-save
+  test_fanout_rotated_gui ........... PASS  10/10, 104 tracks identical both fronts
+  test_fanout_threaded_gui .......... PASS  #621 worker-thread + UI-thread apply
+  test_gui_engine_parity ............ PASS  copper sets IDENTICAL (1267 seg, 128 via), drc 0/0
+  test_gui_finalize_oracle_inrun .... PASS
+  test_gui_livechain_rp2350 ......... PASS  GUI+CLI clean at every stage (DRC @ 0.09, 986s route step)
+
 b2d8074b 2026-08-14 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit 61e56a0..b2d8074b: NO GAPS; one LATENT hazard hardened (below). Twenty
 upstream commits plus the hardening commit b2d8074b that closes this audit.

@@ -599,6 +599,50 @@ def exact_clusters(pcb_data, net_id: int, islands,
     return sorted(clusters.values(), key=lambda c: -len(c['points']))
 
 
+def nearest_pair(pa_pts, pb_pts, same_layer_within: float = 3.0):
+    """Nearest-approach pair between two point sets (items indexable as
+    (x, y, layer[, ...])); returns (pa, pb) or (None, None).
+
+    FULL point sets via KD-tree (#648): the old O(n*m) scan in
+    exact_unconnected capped the primary cluster at its first 1500 points --
+    island-ordered, so on the #589 champion the true 0.036mm gap to a
+    mid-list island sat beyond the cap and the link anchored at a 1.34mm
+    pair two ball-columns west; every downstream weld then fought the wrong
+    corridor.
+
+    LAYER-AWARE: the global nearest is often a CROSS-LAYER overlap
+    (distance ~0 where two layers' fills interpenetrate) whose only bond is
+    a via -- frequently infeasible in the very pocket that isolated the
+    cluster -- while a nearby same-layer gap takes a plain track weld.
+    Prefer a same-layer pair within `same_layer_within` mm; layer None
+    (via points) matches any layer."""
+    import numpy as _np
+    from scipy.spatial import cKDTree as _KD
+    if not pa_pts or not pb_pts:
+        return None, None
+    aa = _np.asarray([(p[0], p[1]) for p in pa_pts])
+    bb = _np.asarray([(p[0], p[1]) for p in pb_pts])
+    dq, jq = _KD(bb).query(aa, k=1)
+    i = int(_np.argmin(dq))
+    best = (pa_pts[i], pb_pts[int(jq[i])])
+    lay_best = None
+    for L in sorted({p[2] for p in pa_pts if len(p) > 2 and p[2]}):
+        ai = [k for k, p in enumerate(pa_pts)
+              if len(p) > 2 and (p[2] == L or p[2] is None)]
+        bi = [k for k, p in enumerate(pb_pts)
+              if len(p) > 2 and (p[2] == L or p[2] is None)]
+        if not ai or not bi:
+            continue
+        dq2, jq2 = _KD(bb[bi]).query(aa[ai], k=1)
+        k2 = int(_np.argmin(dq2))
+        d2 = float(dq2[k2])
+        if lay_best is None or d2 < lay_best[0]:
+            lay_best = (d2, pa_pts[ai[k2]], pb_pts[bi[int(jq2[k2])]])
+    if lay_best is not None and lay_best[0] <= same_layer_within:
+        return lay_best[1], lay_best[2]
+    return best
+
+
 def exact_unconnected(board_file: str, net_names=None, pcb_data=None,
                       verbose: bool = False, project_from: str = None):
     """Drop-in DETERMINISTIC replacement for kicad_oracle.kicad_unconnected:
@@ -644,14 +688,7 @@ def exact_unconnected(board_file: str, net_names=None, pcb_data=None,
 
     links = []
 
-    def _nearest(pa_pts, pb_pts):
-        best = (float('inf'), None, None)
-        for ax, ay, al in pa_pts:
-            for bx, by, bl in pb_pts:
-                d = (ax - bx) ** 2 + (ay - by) ** 2
-                if d < best[0]:
-                    best = (d, (ax, ay, al), (bx, by, bl))
-        return best[1], best[2]
+    _nearest = nearest_pair
 
     name_to_id = {net.name: nid for nid, net in pcb_data.nets.items()}
     for name in sorted(names):
@@ -662,10 +699,9 @@ def exact_unconnected(board_file: str, net_names=None, pcb_data=None,
         if len(cl) <= 1:
             continue
         primary = cl[0]
-        # cap point sets for the O(n*m) nearest scan
-        ppts = primary['points'][:1500]
+        ppts = primary['points']
         for c in cl[1:]:
-            a, b = _nearest(c['points'][:800], ppts)
+            a, b = _nearest(c['points'], ppts)
             if a is None:
                 continue
             kind_a = 'zone' if c['islands'] and not c['pads'] else \

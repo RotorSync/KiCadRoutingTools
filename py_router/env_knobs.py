@@ -71,7 +71,38 @@ def refresh() -> None:
     g['DIRECT_FIRST'] = _on_default('KICAD_DIRECT_FIRST')
     g['IMPEDANCE_NECKDOWN'] = (_s('KICAD_IMPEDANCE_NECKDOWN', '1').strip().lower()
                                not in ('0', 'false', 'no', 'off'))
+    # #648 oracle source union: kicad-cli DRC gates the demand set, the
+    # exact-fill source carries the geometry. =0 restores the pure exact
+    # source for A/B.
+    g['ORACLE_UNION'] = _s('KICAD_ORACLE_UNION', '1') != '0'
+    # #667 net-tie band pricing (mm-equivalent cost per band cell,
+    # DIFFERENTIAL: the own-pad approach stays free, off-pad corridor
+    # cells are priced). Measured INERT on cynthion at 0.5 and 5.0 --
+    # the residual violations are the no-legal-landing footprint class
+    # (a tab flush inside the partner outline admits NO flag-free tip
+    # position, bisected to 5um), which no cost can steer. Default OFF;
+    # kept for corpus A/B on boards with mid-route plough-throughs.
+    try:
+        g['TIE_BAND_COST'] = float(_s('KICAD_TIE_BAND_COST', '0') or 0)
+    except ValueError:
+        g['TIE_BAND_COST'] = 0.0
     g['NET_RESCUE'] = _s('KICAD_NET_RESCUE', '1') != '0'
+    # #658 in-run river packing: pack each routed bus member's runs against
+    # already-committed sibling runs at the copper choke point, BEFORE the
+    # route becomes an obstacle -- the vacated lane is then free for every
+    # later net in the SAME pass (the pack_river post-pass frees it only
+    # for the next chain step). Experimental; default off pending the
+    # multi-board screen.
+    g['PACK_INLINE'] = _s('KICAD_PACK_INLINE', '0') != '0'
+    # #666 bare-ball escape rung inside the net rescue: a stripped or
+    # never-fanned SMD ball (zero own copper, 'no rippable blockers found')
+    # gets a dogbone escape (offset via + pad->via trace, via-in-pad clamp)
+    # before gap routing / terminal escalation. =0 disables for A/B.
+    g['BARE_PAD_ESCAPE'] = _s('KICAD_BARE_PAD_ESCAPE', '1') != '0'
+    # #666/IO_9: when the strict bare-ball escape fails, allow a MOVABLE-cap
+    # conflict IF the cap has a verified relocation -- the scoped post-write
+    # cap move + oracle re-weld then clears the conflict. =0 disables.
+    g['RESCUE_CAP_MOVE'] = _s('KICAD_RESCUE_CAP_MOVE', '1') != '0'
     # Terminal geometry escalation ("better than shipping opens", 2026-08-05):
     # post-rescue whole-net retry with track width + via size marching down
     # together toward the fab floor. =0 disables for A/B debugging.
@@ -164,6 +195,28 @@ def refresh() -> None:
     # '0' reverts the surface-pour direct connect (plane-drop balls whose own-
     # layer same-net pour provably fills to the pad get NO via). Default ON.
     g['FANOUT_POUR_DIRECT'] = _s('KICAD_FANOUT_POUR_DIRECT', '1') != '0'
+    # Near-miss companion to pour-direct (#652): a plane-drop ball whose own-
+    # layer pour's MAIN component stops just short of the pad (within
+    # KICAD_FANOUT_POUR_TRACK_R mm, default 2.0) gets a short surface track
+    # into the fill instead of a via -- the other half of the human dog-bone
+    # economy. '0' reverts. Default ON.
+    g['FANOUT_POUR_TRACK'] = _s('KICAD_FANOUT_POUR_TRACK', '1') != '0'
+    g['FANOUT_POUR_TRACK_R'] = float(_s('KICAD_FANOUT_POUR_TRACK_R', '2.0') or 2.0)
+    # #652 directive 2: rip-swap rescue for terminally dropped fanout balls
+    # (evict the nearest committed neighbour escape, re-escape both as a pair
+    # at the fab floor; strict-win only). '0' reverts. Default ON.
+    g['FANOUT_RIP_RESCUE'] = _s('KICAD_FANOUT_RIP_RESCUE', '1') != '0'
+    # #652 directive 1: surface (channel-engine) rescue for balls the via
+    # floor cannot serve at the array pitch. '0' reverts. Default ON.
+    g['FANOUT_SURFACE_RESCUE'] = _s('KICAD_FANOUT_SURFACE_RESCUE', '1') != '0'
+    # #652 human-survey escapes: lane-walked dog-bones (gap sites are a POOL
+    # reached by riding the inter-row lane; k = max gaps walked) and pair
+    # dive-first (diff pairs drop coupled vias at the first gap row instead
+    # of running surface legs that wall the single-ended corridors). '0'
+    # reverts each. Defaults ON.
+    g['FANOUT_LANE_WALK'] = _s('KICAD_FANOUT_LANE_WALK', '1') != '0'
+    g['FANOUT_LANE_WALK_MAX'] = _i('KICAD_FANOUT_LANE_WALK_MAX', 3)
+    g['FANOUT_PAIR_DIVE'] = _s('KICAD_FANOUT_PAIR_DIVE', '1') != '0'
     g['STOP_CLEANUP'] = _opt_in('KICAD_STOP_CLEANUP')
     g['TAP_RELOCATION'] = _opt_in('KICAD_TAP_RELOCATION')  # phase-3 tap pocket moves
     # #536 octolinear route smoothing (cleanup_pipeline pass 9b): collapse
@@ -262,6 +315,119 @@ def refresh() -> None:
         'rip_weight': _f('KICAD_HISTORY_RIP_WEIGHT', 1.0),  # v1 whole-footprint rip stamp
         'escalate': _f('KICAD_HISTORY_ESCALATE', 0.0),   # repeat-contest multiplier (0 = flat)
         'max_cells': _i('KICAD_HISTORY_MAX_CELLS', 500_000),
+    }
+    # Global planning pass (#589): rough-route every net before detailed
+    # routing; predicted paths become soft corridor reservations and inform
+    # net ordering. See global_plan.py. Opt-in experiment; 'cost' and 'order'
+    # are independent so the A/B arms (reservations-only / order-only / both)
+    # are all expressible under the one master gate.
+    g['GLOBAL_PLAN'] = {
+        'enable': _opt_in('KICAD_GLOBAL_PLAN'),
+        'cost': _f('KICAD_GLOBAL_PLAN_COST', 0.0),      # mm-equiv reservation cost; 0 = no reservations (glasgow: 0.15 HURT, 0.05 mildly helped)
+        'radius': _f('KICAD_GLOBAL_PLAN_RADIUS', 1.0),  # falloff radius (mm) beyond half-width
+        'hweight': _f('KICAD_GLOBAL_PLAN_HWEIGHT', 2.3),  # probe A* weight (glasgow: 2.3 == 4.0 verdict+cost; 1.0 worse AND 72x probes)
+        'iters': _i('KICAD_GLOBAL_PLAN_ITERS', 5000),   # static probe cap; <=10k disarms #529 extension
+        'order': _s('KICAD_GLOBAL_PLAN_ORDER', 'share'),  # ''=keep | planar (crossings) | share (share-peel, glasgow winner) | share_rev (reversed peel: cliques first) | contended
+        'c2': _opt_in('KICAD_GLOBAL_PLAN_C2'),          # seed congestion-v2 demand with rough paths
+        # Reservation cost multiplier INSIDE the BGA escape collars (zone +
+        # bga_proximity_radius): corridors converge there by NECESSITY, so
+        # stacked reservations price the mandatory approach (the #584 zoned
+        # lesson, predicted by the issue). 1.0 = off, 0 = no reservations
+        # inside collars.
+        'zone_scale': _f('KICAD_GLOBAL_PLAN_ZONE_SCALE', 1.0),
+        # Clique-aware layer levers (#589 options 1+2): 'layer'=pref arms the
+        # SOFT per-net step-cost discount on the plan-assigned layer;
+        # 'swaps'=1 MOVES stub copper onto the assigned layer up front via
+        # the validated stub-switch path. Either arms the assignment itself
+        # (share-graph cliques round-robined across their corridor's viable
+        # layers).
+        'layer': _s('KICAD_GLOBAL_PLAN_LAYER', ''),     # '' off | 'pref'
+        'layer_discount': _f('KICAD_GLOBAL_PLAN_LAYER_DISCOUNT', 0.7),
+        # #658: emit each assigned net's ATTRACTION lane on its home layer
+        # (the #656 potential does the pulling the soft discount cannot).
+        'attract_home': _opt_in('KICAD_GLOBAL_PLAN_ATTRACT_HOME'),
+        # #658: multiply NON-home cheap layers' step costs for assigned
+        # nets (defection tax; 1.0 = off). The discount alone is proven
+        # too weak to pack buses.
+        'layer_tax': _f('KICAD_GLOBAL_PLAN_LAYER_TAX', 1.0),
+        # #658 river mode: buses (endpoint-pair groups >= 4) route
+        # consecutively in lateral order; each member's attraction lane is
+        # its predecessor's REALIZED copper (follow-the-leader packing).
+        'river': _opt_in('KICAD_GLOBAL_PLAN_RIVER'),
+        'river_debug': _opt_in('KICAD_GLOBAL_PLAN_RIVER_DEBUG'),
+        # #658 power discipline: per-layer cost MULTIPLIERS for power nets
+        # (space list aligned with --layers; -1 forbids; '' = off).
+        'power_layer_costs': _s('KICAD_POWER_LAYER_COSTS', ''),
+        'swaps': _opt_in('KICAD_GLOBAL_PLAN_SWAPS'),
+        # Layer-assignment source: 'clique' = round-robin across each
+        # share-clique's viable layers (v1; built for BLIND probes that all
+        # pile onto one layer); 'probe' = each net's OWN rough-path
+        # majority layer -- only meaningful with SEQ probes, whose paths
+        # already spread like the human board's. 'probe' + SWAPS pays the
+        # net's first dive mechanically (stub moved before any map build),
+        # bypassing the via-economics veto that made the soft discount and
+        # attraction inert (adherence 37% attracted vs 38% not).
+        'layer_mode': _s('KICAD_GLOBAL_PLAN_LAYER_MODE', 'clique'),
+        'debug': _opt_in('KICAD_GLOBAL_PLAN_DEBUG'),    # ordering forensics dump
+        # Sequential-aware probing (#589 v2-lite, negotiated-congestion in
+        # ONE pass): each successful probe's corridor is stamped into the
+        # shared probe map as a soft ghost (compute_ripped_route_costs rows
+        # at _SEQ_COST/_SEQ_RADIUS), so later probes SEE earlier probes and
+        # spread laterally/across layers instead of all piling onto the
+        # cheapest layer (the human-anchor finding: probes 98.7% F.Cu vs
+        # human 50% on glasgow -- mutually-blind probes fake the demand map
+        # the ordering/layer levers consume).
+        'seq': _opt_in('KICAD_GLOBAL_PLAN_SEQ'),
+        'seq_cost': _f('KICAD_GLOBAL_PLAN_SEQ_COST', 0.15),
+        'seq_radius': _f('KICAD_GLOBAL_PLAN_SEQ_RADIUS', 1.0),
+        # Probe-only via cost override (grid steps; 0 = keep config's).
+        # config.via_cost 75 =~ 3.75mm-equiv means a blind/soft-ghosted
+        # probe will trade many mm of lateral squeeze before paying a via
+        # pair -- the human solution pays ~1 via/net to spread layers.
+        'probe_via_cost': _i('KICAD_GLOBAL_PLAN_VIA_COST', 0),
+        # Owner attraction (#589 v2 handoff): each net's detailed route is
+        # ATTRACTED to its own rough corridor via the bus attraction
+        # machinery (set_attraction_path; bonus/radius are the config's
+        # bus_attraction_* knobs, armed by default). v1 reservations are
+        # repulsion-only -- everyone is pushed off everyone's lane but
+        # nobody is guided INTO their own, so a near-disjoint negotiated
+        # plan had no consumer. Bus corridors take precedence for bus
+        # members.
+        'attract': _opt_in('KICAD_GLOBAL_PLAN_ATTRACT'),
+        # #656 potential-based attraction strength (cost units of the
+        # potential's PEAK; 0 = legacy discount-only). Loop-proof by
+        # construction (see rust GridRouter.attraction_potential). Sized
+        # against via_cost: ~60-70 lets a planned dive outbid a 75 via.
+        'attract_potential': _i('KICAD_ATTRACT_POTENTIAL', 0),
+        # Front-load list (#589 escape-risk ordering experiment): a file of
+        # net names (one per line); listed nets move to the FRONT of their
+        # #472 partition block in file order, others keep relative order.
+        # Solo forensics: walled nets route human-style (dive early) when
+        # the board is open -- they fail only when routed late, after
+        # in-run copper consumes their via sites. Oracle test: front-load
+        # the known failure set and see if completion follows.
+        'order_file': _s('KICAD_GLOBAL_PLAN_ORDER_FILE', ''),
+        # #658: probe power/plane nets FIRST so (with SEQ ghosts) every
+        # signal probe sees their approximate corridors -- the measured
+        # origin of the first plan divergences is the unmodeled power
+        # trees' early copper.
+        'power_first': _opt_in('KICAD_GLOBAL_PLAN_POWER_FIRST'),
+        # Plan-directed escape fanout (#589): for a plan-assigned end still
+        # on a non-assigned layer with no swappable stub and no fitting
+        # pad-center via, place a DOGBONE (offset via + pad->via trace,
+        # tap_pad_with_escalation) BEFORE any obstacle map exists -- the
+        # human's escape-first move (0.4-1.8mm surface stub + one via +
+        # inner-layer run on exactly the nets our chains fail; wave26: 53
+        # of 66 swap declines were 'no via fits at the pad CENTER').
+        'escape': _opt_in('KICAD_GLOBAL_PLAN_ESCAPE'),
+        'escape_radius': _f('KICAD_GLOBAL_PLAN_ESCAPE_RADIUS', 1.5),
+        # Offline-analysis dump (#589 plan-quality scoring): write the full
+        # plan state (rough paths, both conflict graphs, layer prefs, the
+        # order actually used + the front partition) as JSON to this path
+        # right after apply_plan_order; '_EXIT' stops the run there so a
+        # dump costs seconds, not a route step.
+        'dump': _s('KICAD_GLOBAL_PLAN_DUMP', ''),
+        'dump_exit': _opt_in('KICAD_GLOBAL_PLAN_DUMP_EXIT'),
     }
 
     # --- strings -------------------------------------------------------------

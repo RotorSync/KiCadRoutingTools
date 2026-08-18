@@ -1164,17 +1164,22 @@ def generate_underpad_escape(footprint: Footprint,
     # diagonal inter-ball gap. Filled by the dog-bone site chooser before
     # Phase B; consulted by home_of, the coupled templates and Phase D.
     db_site: Dict[int, Tuple[float, float]] = {}
+    # Full stub polyline per ball (ball -> [elbow ->] site) for lane-walked
+    # dog-bones (#652): db_site keeps the VIA spot for the site consumers;
+    # everything stub-shaped (emission, corridor exemption, reservation)
+    # walks db_path.
+    db_path: Dict[int, List[Tuple[float, float]]] = {}
 
-    def _stub_cells(p, vx, vy):
-        """Occupancy cells of the pad->via dog-bone stub corridor (own-copper
-        exemption for it, sampled at sub-resolution along the segment)."""
+    def _stub_cells_seg(x1, y1, x2, y2):
+        """Occupancy cells of one dog-bone stub segment (own-copper
+        exemption, sampled at sub-resolution along the segment)."""
         cells = set()
-        dx, dy = vx - p.global_x, vy - p.global_y
+        dx, dy = x2 - x1, y2 - y1
         n = max(2, int(math.hypot(dx, dy) / max(res, 1e-9)) + 1)
         r = track_width / 2 + clearance + margin
         for i in range(n + 1):
             t = i / n
-            cells |= set(occ._disk(p.global_x + dx * t, p.global_y + dy * t, r))
+            cells |= set(occ._disk(x1 + dx * t, y1 + dy * t, r))
         return cells
 
     def home_of(p):
@@ -1190,7 +1195,9 @@ def generate_underpad_escape(footprint: Footprint,
         s = db_site.get(id(p))
         if s is not None:
             cells |= set(occ._disk(s[0], s[1], via_keep))
-            cells |= _stub_cells(p, s[0], s[1])
+            pts = db_path.get(id(p)) or [(p.global_x, p.global_y), s]
+            for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+                cells |= _stub_cells_seg(ax, ay, bx, by)
         return cells
 
     def snap_exit_end(pts, li, exempt=None, net_id_for_snap=0):
@@ -1383,9 +1390,12 @@ def generate_underpad_escape(footprint: Footprint,
         else:
             v_size, v_drill, vkeep = via_size, via_drill, via_keep
             vx, vy = s
-            tracks.append({'start': (pad.global_x, pad.global_y),
-                           'end': (vx, vy), 'width': track_width,
-                           'layer': layers[top_idx], 'net_id': pad.net_id})
+            pts = db_path.get(id(pad)) or [(pad.global_x, pad.global_y), s]
+            for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+                tracks.append({'start': (ax, ay), 'end': (bx, by),
+                               'width': track_width,
+                               'layer': layers[top_idx],
+                               'net_id': pad.net_id})
         occ.block_all(vx, vy, vkeep)
         vias_to_add.append({'x': vx, 'y': vy, 'size': v_size, 'drill': v_drill,
                             'layers': [layers[0], layers[-1]],
@@ -1595,10 +1605,21 @@ def generate_underpad_escape(footprint: Footprint,
     # pads under them" strategy.
     coupled_targets.sort(key=lambda t: depth(t[1]) + depth(t[2]))
     remaining_pairs = []
+    import env_knobs as _ek
     for _ci, (base, pp, nn) in enumerate(coupled_targets):
         if cancel_check and cancel_check():    # #621
             break
         _prog(_ci + 1, len(coupled_targets), f"coupled pair {base}")
+        # #652 pair dive-first (human survey): diff pairs DIVE at the first
+        # gap row (adjacent dog-bone vias, coupled inner run) instead of
+        # running surface legs across the remaining rows -- measured on the
+        # human orangecrab, even last-row pairs dive. Long surface pair legs
+        # are exactly what walls the single-ended balls' corridors
+        # (USER_BUTTON/RAM_LDM). KICAD_FANOUT_PAIR_DIVE=0 restores the
+        # surface-first behaviour.
+        if dogbone and _ek.FANOUT_PAIR_DIVE:
+            remaining_pairs.append((base, pp, nn))
+            continue
         if (try_coupled(pp, nn, [(top_idx, False)])
                 or try_coupled_endon(pp, nn, [(top_idx, False)])):
             n_coupled += 1
@@ -1661,14 +1682,13 @@ def generate_underpad_escape(footprint: Footprint,
         t = 0.0 if L2 <= 0 else max(0.0, min(1.0, ((px_ - x1) * dx + (py_ - y1) * dy) / L2))
         return math.hypot(px_ - (x1 + t * dx), py_ - (y1 + t * dy))
 
-    def _stub_conflict(p, vx, vy, ctx):
-        """Exact-geometry check of the pad->via stub on the BGA's own layer
+    def _seg_conflict(net_id, gx, gy, vx, vy, ctx):
+        """Exact-geometry check of one stub segment on the BGA's own layer
         (the occupancy exemption around the pad/site would hide foreign copper
         there, #393 -- so the stub proves itself against the registries)."""
-        gx, gy = p.global_x, p.global_y
         hw = track_width / 2.0
         for (x1, y1, x2, y2, half_w, snid) in ctx['segs']:
-            if snid == p.net_id:
+            if snid == net_id:
                 continue
             # conservative: stub endpoint-to-seg / seg-to-stub sampling
             if (_pt_seg_d(x1, y1, gx, gy, vx, vy) < hw + half_w + clearance - 1e-6
@@ -1677,16 +1697,19 @@ def generate_underpad_escape(footprint: Footprint,
                     or _pt_seg_d(vx, vy, x1, y1, x2, y2) < hw + half_w + clearance - 1e-6):
                 return True
         for (ox, oy, orr, odr, onid) in ctx['vias'] + ctx['resv']:
-            if onid == p.net_id:
+            if onid == net_id:
                 continue
             if _pt_seg_d(ox, oy, gx, gy, vx, vy) < hw + orr + clearance - 1e-6:
                 return True
         for (px_, py_, half, pdr, pnid, has_cu) in ctx['pads']:
-            if not has_cu or pnid == p.net_id:
+            if not has_cu or pnid == net_id:
                 continue
             if _pt_seg_d(px_, py_, gx, gy, vx, vy) < hw + half + clearance - 1e-6:
                 return True
         return False
+
+    def _stub_conflict(p, vx, vy, ctx):
+        return _seg_conflict(p.net_id, p.global_x, p.global_y, vx, vy, ctx)
 
     def _choose_dogbone_site(p):
         """A free diagonal inter-ball gap site for p's dog-bone via, or None.
@@ -1711,36 +1734,80 @@ def generate_underpad_escape(footprint: Footprint,
                      (alt * ex * hx, -ey * hy), (-alt * ex * hx, -ey * hy)]
         ctx = _via_ctx(p.net_id, gx, gy)
         pad_ex = set(occ._disk(gx, gy, max(pad_keep, via_keep)))
+        import env_knobs as _ek
+        lane_max = _ek.FANOUT_LANE_WALK_MAX if _ek.FANOUT_LANE_WALK else 0
+
+        def _lane_pad_exempt(x1, y1, x2, y2):
+            # The inter-row lane clears the flanking ball pads by only a few
+            # um past the floor (0.25 - pad_half - track/2 vs clearance) --
+            # legal by the EXACT check, but the raster's inflated pad stamps
+            # can eat the whole lane cell. Exempt the flanking OWN-FOOTPRINT
+            # pads' disks; _seg_conflict has them exactly (registry-complete).
+            cells = set()
+            for p2 in footprint.pads:
+                if _pt_seg_d(p2.global_x, p2.global_y, x1, y1, x2, y2)                         < max(grid.pitch_x, grid.pitch_y) * 0.55:
+                    cells |= set(occ._disk(p2.global_x, p2.global_y, pad_keep))
+            return cells
+
+        def _site_ok(vx, vy, avoid_soft):
+            if not (grid.min_x - 1e-6 <= vx <= grid.max_x + 1e-6
+                    and grid.min_y - 1e-6 <= vy <= grid.max_y + 1e-6):
+                return False
+            if avoid_soft:
+                six, siy = occ.cell(vx, vy)
+                if any(occ.soft_foreign(L, six, siy, p.net_id)
+                       for L in range(occ.nl)):
+                    return False
+            if locked_smd_pads and not via_site_ok(vx, vy, via_size / 2.0):
+                return False
+            return _via_site_conflict(vx, vy, p.net_id, ctx) is None
+
         # Movable-cap soft keep-outs (#278): a via under a movable cap is legal
         # (cap-opt relocates the cap, and its via gate avoids vias, #445) but a
         # clean gap is better -- prefer soft-free sites, fall back if boxed in.
+        # Lane-walk (#652, human survey): when a diagonal gap is taken, the
+        # stub RIDES the inter-row lane outward to the nearest FREE gap (the
+        # human's dominant escape at fine pitch: gap sites are a POOL reached
+        # by lane runs, tracks and vias alternating along the lane -- never a
+        # track squeezed beside a via at half-pitch, which is what busts the
+        # channel budget). k = gaps walked; k=0 reproduces the classic sites.
         for avoid_soft in ((True, False) if occ.has_soft else (False,)):
-            for dx, dy in cands:
-                vx, vy = gx + dx, gy + dy
-                # keep the via inside the array bbox: a site past the boundary
-                # has no routed exit tail for route.py to pick up
-                if not (grid.min_x - 1e-6 <= vx <= grid.max_x + 1e-6
-                        and grid.min_y - 1e-6 <= vy <= grid.max_y + 1e-6):
-                    continue
-                if avoid_soft:
-                    six, siy = occ.cell(vx, vy)
-                    if any(occ.soft_foreign(L, six, siy, p.net_id)
-                           for L in range(occ.nl)):
-                        continue
-                if locked_smd_pads and not via_site_ok(vx, vy, via_size / 2.0):
-                    continue
-                if _via_site_conflict(vx, vy, p.net_id, ctx) is not None:
-                    continue
-                if _stub_conflict(p, vx, vy, ctx):
-                    continue
-                # coarse occupancy pass for anything not in the exact registries
-                ex_cells = pad_ex | set(occ._disk(vx, vy, via_keep))
-                if not occ.seg_clear(top_idx, (gx, gy), (vx, vy), exempt=ex_cells):
-                    continue
-                return (vx, vy)
+            for k in range(0, lane_max + 1):
+                for dx, dy in cands:
+                    ex_, ey_ = gx + dx, gy + dy   # the diagonal elbow (k=0 site)
+                    if k == 0:
+                        vx, vy = ex_, ey_
+                        if not _site_ok(vx, vy, avoid_soft):
+                            continue
+                        if _stub_conflict(p, vx, vy, ctx):
+                            continue
+                        ex_cells = pad_ex | set(occ._disk(vx, vy, via_keep))
+                        if not occ.seg_clear(top_idx, (gx, gy), (vx, vy),
+                                             exempt=ex_cells):
+                            continue
+                        return (vx, vy), [(gx, gy), (vx, vy)]
+                    # k >= 1: walk the horizontal lane, then the vertical one.
+                    walks = [(ex_ + math.copysign(k * grid.pitch_x, dx), ey_),
+                             (ex_, ey_ + math.copysign(k * grid.pitch_y, dy))]
+                    for vx, vy in walks:
+                        if not _site_ok(vx, vy, avoid_soft):
+                            continue
+                        if _seg_conflict(p.net_id, gx, gy, ex_, ey_, ctx):
+                            continue
+                        if _seg_conflict(p.net_id, ex_, ey_, vx, vy, ctx):
+                            continue
+                        via_ex = set(occ._disk(vx, vy, via_keep))
+                        if not occ.seg_clear(top_idx, (gx, gy), (ex_, ey_),
+                                             exempt=pad_ex | via_ex):
+                            continue
+                        lane_ex = _lane_pad_exempt(ex_, ey_, vx, vy)
+                        if not occ.seg_clear(top_idx, (ex_, ey_), (vx, vy),
+                                             exempt=pad_ex | via_ex | lane_ex):
+                            continue
+                        return (vx, vy), [(gx, gy), (ex_, ey_), (vx, vy)]
         return None
 
-    def _reserve_dogbone(p, site):
+    def _reserve_dogbone(p, site, path=None):
         vx, vy = site
         occ.block_all(vx, vy, via_keep)
         reserved_sites.append((vx, vy, via_size / 2.0,
@@ -1750,10 +1817,13 @@ def generate_underpad_escape(footprint: Footprint,
         # ball finally escapes, but a route committed in between must not
         # claim it (the cells sit outside every other ball's home disk, so
         # blocking is authoritative; the owner is exempt via home_of).
-        occ.block_segment(top_idx, (p.global_x, p.global_y), (vx, vy), trk_keep)
-        exact_segs.append((p.global_x, p.global_y, vx, vy,
-                           track_width / 2.0, p.net_id, top_idx))
+        pts = path or [(p.global_x, p.global_y), (vx, vy)]
+        for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+            occ.block_segment(top_idx, (ax, ay), (bx, by), trk_keep)
+            exact_segs.append((ax, ay, bx, by,
+                               track_width / 2.0, p.net_id, top_idx))
         db_site[id(p)] = site
+        db_path[id(p)] = pts
 
     if dogbone:
         # Deepest-first so interior balls claim their toward-exit gaps before
@@ -1764,9 +1834,10 @@ def generate_underpad_escape(footprint: Footprint,
         db_all.sort(key=depth, reverse=True)
         n_db = 0
         for p in db_all:
-            site = _choose_dogbone_site(p)
-            if site is not None:
-                _reserve_dogbone(p, site)
+            picked = _choose_dogbone_site(p)
+            if picked is not None:
+                site, _dbp = picked
+                _reserve_dogbone(p, site, _dbp)
                 n_db += 1
             elif not no_via_in_pad:
                 _reserve_via_site(p)   # classic via-in-pad fallback
@@ -1847,7 +1918,8 @@ def generate_underpad_escape(footprint: Footprint,
         _site = db_site.get(id(p)) if dogbone else None
         if _site is not None:
             home = home_of(p)
-            carve = _carve_foreign([(p.global_x, p.global_y), _site],
+            carve = _carve_foreign(db_path.get(id(p))
+                                   or [(p.global_x, p.global_y), _site],
                                    home, {p.net_id})
             vsx, vsy = occ.cell(*_site)
             path = None
@@ -2021,6 +2093,7 @@ def generate_underpad_escape(footprint: Footprint,
         _rep_nets: Dict[str, Dict[str, int]] = {}
         n_gap = n_ctr = n_exist = n_fail = n_pour = 0
         n_trk = [0]
+        n_ptrk = [0]
         for p in drop_pads:
             r = _rep_nets.setdefault(p.net_name,
                                      {'gap': 0, 'in_pad': 0, 'existing': 0,
@@ -2042,6 +2115,57 @@ def generate_underpad_escape(footprint: Footprint,
                 n_pour += 1
                 r['pour'] += 1
                 continue
+            # POUR-TRACK near-miss (#652): the pour's MAIN component stops
+            # just short of this ball (fill eroded around a neighbouring
+            # obstacle). A short track on the ball's own layer into the fill
+            # connects it with NO via -- the other half of the human dog-bone
+            # economy. KICAD_FANOUT_POUR_TRACK=0 reverts.
+            if env_knobs.FANOUT_POUR_TRACK and _pour_models:
+                _lay = next((l for l in (p.layers or [])
+                             if l.endswith('.Cu')), None)
+                _li = layers.index(_lay) if _lay in layers else None
+                _hit = None
+                if _li is not None:
+                    for _m in _pour_models.get((p.net_id, _lay), ()):
+                        _c = _m.largest_component()
+                        if not _c:
+                            continue
+                        _pt = _m.nearest_component_point(
+                            gx, gy, _c, env_knobs.FANOUT_POUR_TRACK_R)
+                        if _pt is not None and (_hit is None
+                                                or _pt[2] < _hit[2]):
+                            _hit = _pt
+                if _hit is not None:
+                    _tx, _ty, _d = _hit
+                    # Overshoot one track-width INTO the fill so the contact
+                    # is solid copper, not a cell-edge graze.
+                    if _d > 1e-6:
+                        _ux, _uy = (_tx - gx) / _d, (_ty - gy) / _d
+                        _tx += _ux * track_width
+                        _ty += _uy * track_width
+                    _n = max(2, int((_d + track_width) / max(occ.res, 1e-3)))
+                    _free = True
+                    for _t in range(_n + 1):
+                        _sx = gx + (_tx - gx) * _t / _n
+                        _sy = gy + (_ty - gy) * _t / _n
+                        if math.hypot(_sx - gx, _sy - gy) < pad_half:
+                            continue
+                        _ix, _iy = occ.cell(_sx, _sy)
+                        if not occ.inside(_ix, _iy) or \
+                                occ.blocked(_li, _ix, _iy):
+                            _free = False
+                            break
+                    if _free:
+                        tracks.append({'start': (gx, gy), 'end': (_tx, _ty),
+                                       'width': track_width, 'layer': _lay,
+                                       'net_id': p.net_id})
+                        occ.block_segment(_li, (gx, gy), (_tx, _ty),
+                                          track_width / 2.0 + clearance)
+                        _net_seg_ends.setdefault(p.net_id, []).extend(
+                            [(gx, gy), (_tx, _ty)])
+                        n_ptrk[0] += 1
+                        r['pour_track'] = r.get('pour_track', 0) + 1
+                        continue
             # TRACK-CONNECT (env-gated, KICAD_FANOUT_TRACK_CONNECT=1 arms): a through-barrel here
             # perforates EVERY foreign pour whose fill covers this (x,y) --
             # the mechanism that shreds middle-layer rail planes. When it
@@ -2103,13 +2227,16 @@ def generate_underpad_escape(footprint: Footprint,
                     if rn == p.net_id and abs(rx - gx) < 1e-6 and abs(ry - gy) < 1e-6]
             for t in _own:
                 reserved_sites.remove(t)
-            site = _choose_dogbone_site(p)
-            if site is not None:
-                _reserve_dogbone(p, site)
+            picked = _choose_dogbone_site(p)
+            if picked is not None:
+                site, _dbp = picked
+                _reserve_dogbone(p, site, _dbp)
                 vx, vy = site
-                tracks.append({'start': (gx, gy), 'end': (vx, vy),
-                               'width': track_width, 'layer': layers[top_idx],
-                               'net_id': p.net_id})
+                for (_ax, _ay), (_bx, _by) in zip(_dbp, _dbp[1:]):
+                    tracks.append({'start': (_ax, _ay), 'end': (_bx, _by),
+                                   'width': track_width,
+                                   'layer': layers[top_idx],
+                                   'net_id': p.net_id})
                 vias_to_add.append({'x': vx, 'y': vy, 'size': via_size,
                                     'drill': via_drill,
                                     'layers': [layers[0], layers[-1]],
@@ -2149,7 +2276,8 @@ def generate_underpad_escape(footprint: Footprint,
             plane_drop_report.update(
                 {'nets': _rep_nets, 'gap_vias': n_gap, 'pad_vias': n_ctr,
                  'skipped_existing': n_exist, 'skipped_pour': n_pour,
-                 'track_connects': n_trk[0], 'failed': n_fail})
+                 'track_connects': n_trk[0],
+                 'pour_tracks': n_ptrk[0], 'failed': n_fail})
         if verbose and drop_pads:
             per = ", ".join(f"{n} {c['gap']}+{c['in_pad']}"
                             for n, c in sorted(_rep_nets.items()))
@@ -2158,6 +2286,8 @@ def generate_underpad_escape(footprint: Footprint,
                       if n_pour else "")
             extra += (f", {n_trk[0]} track-connected (shared barrel)"
                       if n_trk[0] else "")
+            extra += (f", {n_ptrk[0]} pour-tracked (near-miss, no via)"
+                      if n_ptrk[0] else "")
             extra += f", {n_fail} FAILED (left for the plane tap)" if n_fail else ""
             print(f"  Plane drops (#424): {n_gap} gap + {n_ctr} in-pad vias "
                   f"[{per}]{extra}")

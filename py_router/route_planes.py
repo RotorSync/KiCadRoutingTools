@@ -1024,6 +1024,138 @@ def route_plane_connection(
     return route_points
 
 
+
+def _grammar_cluster(points, link=5.0):
+    """Single-linkage clusters of 2D points (union-find, O(N^2))."""
+    n = len(points)
+    parent = list(range(n))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+    l2 = link * link
+    for i in range(n):
+        xi, yi = points[i]
+        for j in range(i + 1, n):
+            dx = points[j][0] - xi
+            dy = points[j][1] - yi
+            if dx * dx + dy * dy <= l2:
+                ra, rb = find(i), find(j)
+                if ra != rb:
+                    parent[ra] = rb
+    groups = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(points[i])
+    return list(groups.values())
+
+
+def _grammar_hull(points):
+    """Convex hull (monotone chain); returns CCW polygon or None."""
+    pts = sorted(set(points))
+    if len(pts) < 3:
+        return None
+    def cross(o, a, b):
+        return (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0])
+    lower = []
+    for pt in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], pt) <= 0:
+            lower.pop()
+        lower.append(pt)
+    upper = []
+    for pt in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], pt) <= 0:
+            upper.pop()
+        upper.append(pt)
+    hull = lower[:-1] + upper[:-1]
+    return hull if len(hull) >= 3 else None
+
+
+def _grammar_inflate(hull, r):
+    """Offset a CCW convex polygon outward by r (edge-normal offset +
+    consecutive-line intersection)."""
+    import math as _m
+    n = len(hull)
+    lines = []
+    for i in range(n):
+        x1, y1 = hull[i]
+        x2, y2 = hull[(i + 1) % n]
+        ex, ey = x2 - x1, y2 - y1
+        L = _m.hypot(ex, ey) or 1e-9
+        # CCW polygon: outward normal is (ey, -ex)/L
+        nx, ny = ey / L, -ex / L
+        lines.append((x1 + nx * r, y1 + ny * r, x2 + nx * r, y2 + ny * r))
+    out = []
+    for i in range(n):
+        x1, y1, x2, y2 = lines[i - 1]
+        x3, y3, x4, y4 = lines[i]
+        d = (x2 - x1) * (y4 - y3) - (y2 - y1) * (x4 - x3)
+        if abs(d) < 1e-12:
+            out.append((x3, y3))
+            continue
+        t = ((x3 - x1) * (y4 - y3) - (y3 - y1) * (x4 - x3)) / d
+        out.append((x1 + t * (x2 - x1), y1 + t * (y2 - y1)))
+    return out
+
+
+def _grammar_zone_polygons(seeds_by_net, zone_polygon, board_bounds,
+                           name_of, verbose=False,
+                           inflate_mm=2.0, link_mm=5.0, pads_by_net=None):
+    """#662: build {net_id: [polygons]} as background sheet + hull islands.
+    Returns None when degenerate (a single seeded net, or the dominant net
+    cannot be identified) so the caller falls back to Voronoi."""
+    import math as _m
+    seeded = {nid: pts for nid, pts in seeds_by_net.items() if pts}
+    if len(seeded) < 2:
+        return None
+    bx0, by0, bx1, by1 = board_bounds
+    bdiag = _m.hypot(bx1 - bx0, by1 - by0) or 1.0
+    # dominant = largest spread (board-wide rail), tiebreak seed count
+    def spread(pts):
+        xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+        return _m.hypot(max(xs) - min(xs), max(ys) - min(ys))
+    # dominance = board-wide reach x consumer count (the human gives the
+    # layer to the rail with the most board-wide service to deliver, not
+    # merely the widest bbox -- spread-only picked P1.35V over the 39-pad
+    # P3.3V on orangecrab).
+    # Score on PADS (consumers), not augmented seeds -- seed lists carry
+    # MST route samples that scale with route length, not importance.
+    def score_pts(nid):
+        pts = (pads_by_net or {}).get(nid) or seeded[nid]
+        return spread(pts) / bdiag * len(pts), len(pts)
+    scored = sorted(((score_pts(nid)[0], score_pts(nid)[1], nid)
+                     for nid in seeded), reverse=True)
+    dom = scored[0][2]
+    out = {dom: [list(zone_polygon)]}
+    n_islands = 0
+    for nid, pts in seeded.items():
+        if nid == dom:
+            continue
+        polys = []
+        for cl in _grammar_cluster(pts, link=link_mm):
+            hull = _grammar_hull(cl)
+            if hull is None:
+                # 1-2 points: a small box around them
+                xs = [p[0] for p in cl]; ys = [p[1] for p in cl]
+                m = inflate_mm
+                hull = [(min(xs) - m, min(ys) - m), (max(xs) + m, min(ys) - m),
+                        (max(xs) + m, max(ys) + m), (min(xs) - m, max(ys) + m)]
+            else:
+                hull = _grammar_inflate(hull, inflate_mm)
+            # clamp to board bounds (also keeps hulls off the edge band)
+            hull = [(min(max(x, bx0 + 0.3), bx1 - 0.3),
+                     min(max(y, by0 + 0.3), by1 - 0.3)) for x, y in hull]
+            polys.append(hull)
+        out[nid] = polys
+        n_islands += len(polys)
+    print(f"  Grammar pour (#662): '{name_of.get(dom, dom)}' = background "
+          f"sheet; {n_islands} hull island(s) across "
+          f"{len(seeded) - 1} net(s) "
+          f"(KICAD_GRAMMAR_POUR=0 reverts to Voronoi)")
+    return out
+
+
 def _generate_multinet_layer_zones(
     layer: str,
     nets_on_layer: List[str],
@@ -1496,17 +1628,47 @@ def _generate_multinet_layer_zones(
             print(f"  Added deferred-BGA point seeds for "
                   f"{_seeded_nets} net(s) to the Voronoi")
 
+    # GRAMMAR POUR (#662, default ON; KICAD_GRAMMAR_POUR=0 reverts to the
+    # pad-Voronoi partition): the dominant net becomes a BACKGROUND SHEET
+    # (the whole layer) and every other net gets compact INFLATED CLUSTER
+    # HULLS. zone_overlap_priorities then ranks the nested hulls above the
+    # sheet (smaller area wins), so KiCad's fill does the subtraction --
+    # no polygon booleans. Rationale (measured, orangecrab vs its human
+    # original): Voronoi cells scored 0.3-2.6mm mean width and split the
+    # dominant rail into 7 crumbs (copper confetti with maximal neck-to-
+    # interior ratio -- every island is a weld obligation); the human's
+    # grammar is one deep sheet (15.8mm mean width) + compact islands
+    # (>=5mm). Connectedness is the binding metric, not pad coverage.
+    if os.environ.get('KICAD_GRAMMAR_POUR', '1') != '0' \
+            and len([n for n, s in augmented_vias_by_net.items() if s]) > 1:
+        _gz = _grammar_zone_polygons(
+            augmented_vias_by_net, zone_polygon, board_bounds,
+            {nid: (pcb_data.nets[nid].name if nid in pcb_data.nets else str(nid))
+             for nid in augmented_vias_by_net}, verbose,
+            pads_by_net={nid: [(pd.global_x, pd.global_y)
+                               for pd in pcb_data.pads_by_net.get(nid, [])]
+                         for nid in augmented_vias_by_net})
+        if _gz is not None:
+            zone_polygons = _gz
+            _skip_voronoi = True
+        else:
+            _skip_voronoi = False
+    else:
+        _skip_voronoi = False
+
     # Compute final Voronoi zones
     total_seeds = sum(len(vias) for vias in augmented_vias_by_net.values())
-    print(f"  Computing final Voronoi zones with {total_seeds} seed points")
+    if not _skip_voronoi:
+        print(f"  Computing final Voronoi zones with {total_seeds} seed points")
 
     try:
-        zone_polygons, _, _ = compute_zone_boundaries(
-            augmented_vias_by_net, board_bounds,
-            return_raw_polygons=True,
-            board_edge_clearance=board_edge_clearance,
-            verbose=verbose
-        )
+        if not _skip_voronoi:
+            zone_polygons, _, _ = compute_zone_boundaries(
+                augmented_vias_by_net, board_bounds,
+                return_raw_polygons=True,
+                board_edge_clearance=board_edge_clearance,
+                verbose=verbose
+            )
     except ValueError as e:
         print(f"  Error computing zone boundaries: {e}")
         print(f"  Falling back to full board rectangle for first net")
