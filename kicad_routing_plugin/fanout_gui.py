@@ -1759,9 +1759,13 @@ class FanoutTab(wx.Panel):
             board.Add(via)
             vias_added += 1
 
-        # Build connectivity to register new items properly
-        self._fanout_status("Rebuilding board connectivity...")
-        board.BuildConnectivity()
+        # Refill zones, THEN rebuild connectivity (refill_all_zones does both,
+        # in that order). A bare BuildConnectivity here flipped fanout via
+        # netcodes to the stale pours' nets (mez_rx: 42 of 131 vias came back
+        # V3P3/V1P8/GND) -- see refill_all_zones's docstring.
+        self._fanout_status("Refilling zones and rebuilding connectivity...")
+        from .gui_utils import refill_all_zones
+        refill_all_zones(board)
 
         # Teardrops, if the shared "Add teardrops" checkbox is on (#489 §9). The
         # CLI writer applies them to the output file; the GUI applies copper into
@@ -1775,7 +1779,7 @@ class FanoutTab(wx.Panel):
         if optimize_caps and fanout_kind == 'bga':
             cap_summary = self._optimize_decoupling_caps(
                 board, pcbnew, fanout_config or {})
-            board.BuildConnectivity()
+            refill_all_zones(board)   # never bare BuildConnectivity: net flips
 
         # Sync the dialog's in-memory pcb_data from the board.
         #
@@ -1985,7 +1989,10 @@ class FanoutTab(wx.Panel):
                 board.Add(nt)
 
             if via_moves:
-                board.BuildConnectivity()
+                # Re-placed vias sit under the (now stale) pours; a bare
+                # BuildConnectivity would flip their netcodes to the zones'.
+                from .gui_utils import refill_all_zones
+                refill_all_zones(board)
 
             moved = len(result.get('placements', []))
             nudged = len(via_moves)
@@ -2022,10 +2029,10 @@ class FanoutTab(wx.Panel):
             'grid_step': shared.get('grid_step', defaults.GRID_STEP),
             'via_size': shared.get('via_size', defaults.BGA_VIA_SIZE),
         })
-        from .gui_utils import redirect_prints_to_log
+        from .gui_utils import redirect_prints_to_log, refill_all_zones
         with redirect_prints_to_log(self.append_log):
             summary = self._optimize_decoupling_caps(board, pcbnew, cfg)
-            board.BuildConnectivity()
+            refill_all_zones(board)   # never bare BuildConnectivity: net flips
         pcbnew.Refresh()
         if summary:
             self.status_text.SetLabel(summary)
