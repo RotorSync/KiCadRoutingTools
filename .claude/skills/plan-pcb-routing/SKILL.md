@@ -2381,13 +2381,14 @@ Use the printed flags as-is **only when the board has no spec of its own**:
   standing behind.
 
   **`check_drc.py -c` is NOT `route.py --clearance`.** On route.py the flag is a
-  **ceiling over every class**. On `check_drc` it is only the **global fallback**,
+  **ceiling over every class** (`--clearance` caps each net at `min(its class,
+  --clearance)`). On `check_drc` it is only the **global fallback**,
   and a netclass override still wins — the tool prints
   `Required clearance: 0.1600mm (local/netclass override; global 0.1500mm)` and
   grades at 0.16 no matter what `-c` says. Measured on one board: 7 violations at
   `-c 0.16`, the same 7 at `-c 0.15`, the same 7 at `-c 0.149`. If you expected
   a looser `-c` to clear class-driven violations, it will not; change the class,
-  or use `--clearance-margin`.
+  or use `--clearance-margin` (default 0.05).
 
   **Do not fan out no-connect nets.** `--nets "*" "!GND" "!VCC"` matches every
   single-pad `*NC_*` net on the part. They get escape stubs, no later stage
