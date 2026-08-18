@@ -3649,19 +3649,40 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                     return False
         return True
 
+    import os as _665os
+    _665trace = bool(_665os.environ.get('KICAD_665_TRACE'))
+
     def clears(x1, y1, x2, y2, layer, net_id, w):
         eff = pair_base(net_id, layer)
-        d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      base_clearance=eff, net_clearances=net_clearances),
+        pd = _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                                   base_clearance=eff, net_clearances=net_clearances)
+        d = min(pd,
                 _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                                       net_clearances=net_clearances, base_clearance=eff),
                 _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                                       net_clearances=net_clearances, base_clearance=eff))
         hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2)
-        return (d >= eff + w / 2.0 - 1e-4 and
-                hd >= npth_clr + w / 2.0 - 1e-4 and
-                edge_clears(x1, y1, x2, y2, w) and
-                keepout_clears(x1, y1, x2, y2, layer, w))
+        ok = (d >= eff + w / 2.0 - 1e-4 and
+              hd >= npth_clr + w / 2.0 - 1e-4 and
+              edge_clears(x1, y1, x2, y2, w) and
+              keepout_clears(x1, y1, x2, y2, layer, w))
+        if _665trace and ok:
+            # #665 forensics: re-check the pad distance with a FRESH pad
+            # array (cache detached); a disagreement = a stale/poisoned
+            # cache at the exact acceptance moment.
+            _saved = getattr(pcb_data, '_foreign_pad_arr_cache', None)
+            if _saved is not None:
+                del pcb_data._foreign_pad_arr_cache
+            pd_fresh = _seg_foreign_pad_dist(
+                pcb_data, net_id, x1, y1, x2, y2, layer,
+                base_clearance=eff, net_clearances=net_clearances)
+            if _saved is not None:
+                pcb_data._foreign_pad_arr_cache = _saved
+            if abs(pd_fresh - pd) > 1e-6:
+                print(f"    [665] STALE PAD CACHE: net {net_id} "
+                      f"({x1:.2f},{y1:.2f})-({x2:.2f},{y2:.2f}) {layer} "
+                      f"w={w} cached_d={pd:.3f} fresh_d={pd_fresh:.3f}")
+        return ok
 
     def vk(x, y):
         return (round(x, 3), round(y, 3))
@@ -5281,6 +5302,28 @@ def add_route_to_pcb_data(pcb_data: PCBData, result: dict, debug_lines: bool = F
     new_segments = result['new_segments']
     if not new_segments:
         return
+    # #658 in-run river packing: pack the FRESH route's runs against
+    # committed sibling runs BEFORE this copper becomes an obstacle.
+    # trace_event 'route' only -- a RESTORE must re-land the original
+    # geometry byte-faithfully, and rescue/weld copper commits are too
+    # short for the min-run filter to matter anyway.
+    _pi658 = getattr(pcb_data, '_pack_inline', None)
+    if _pi658 and trace_event == 'route':
+        try:
+            from pack_river import pack_result_segments
+            for _nid658 in {s.net_id for s in new_segments}:
+                _sib658 = _pi658['members'].get(_nid658)
+                if _sib658:
+                    _nm658 = pack_result_segments(
+                        pcb_data, new_segments,
+                        result.get('new_vias') or [], _nid658, _sib658,
+                        _pi658['clearance'],
+                        _pi658.get('net_clearances'))
+                    if _nm658:
+                        print(f"    in-run pack: {_nm658} run(s) packed "
+                              f"(net {_nid658})")
+        except Exception as _pe658:
+            print(f"    (in-run pack error: {_pe658})")
     # Copper epoch (rescue map cache, 2026-08-14 profiling): every commit
     # through this choke point invalidates cached pristine obstacle maps.
     pcb_data._copper_epoch = getattr(pcb_data, '_copper_epoch', 0) + 1

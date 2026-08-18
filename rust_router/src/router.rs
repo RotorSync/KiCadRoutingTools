@@ -813,6 +813,15 @@ impl GridSearch {
                 let after_vert = (base_step - attraction_bonus).max(move_cost / 10);
                 let step_cost = (after_vert * (100 - path_discount_pct) / 100)
                     .max(move_cost / 10);
+                // #656 potential shaping: charge cost - (phi(next)-phi(cur)),
+                // floored positive. Approaching the lane earns once, leaving
+                // refunds, constant-phi travel pays full price -- cycles
+                // always cost > 0, so looping can never profit.
+                let step_cost = if router.attraction_potential > 0 {
+                    let d_phi = router.path_attraction_potential(ngx, ngy, current.layer)
+                        - router.path_attraction_potential(current.gx, current.gy, current.layer);
+                    (step_cost - d_phi).max(move_cost / 10)
+                } else { step_cost };
                 let new_g = g + step_cost;
 
                 if new_g < existing_g {
@@ -932,7 +941,17 @@ impl GridSearch {
                 let layer_transition_cost = dest_layer_cost - current_layer_cost;
                 // Combined via cost can be as low as 0 when switching to a much cheaper layer
                 let combined_via_cost = (via_cost + layer_transition_cost).max(0);
-                let new_g = g + combined_via_cost + proximity_cost;
+                // #656 potential shaping on the VIA edge: a via that lands
+                // on the lane's layer collects the same-layer/cross-layer
+                // potential difference once -- the edge attraction has
+                // always lacked (a planned dive can now outbid via_cost).
+                // Floored at 0 like the free-via case; the reverse via
+                // refunds the jump, so a down-up flip nets >= 2*via_cost.
+                let via_shaping = if router.attraction_potential > 0 {
+                    router.path_attraction_potential(current.gx, current.gy, layer)
+                        - router.path_attraction_potential(current.gx, current.gy, current.layer)
+                } else { 0 };
+                let new_g = g + (combined_via_cost + proximity_cost - via_shaping).max(0);
 
                 if new_g < existing_g {
                     if existing_g != i32::MAX {
@@ -994,18 +1013,31 @@ pub struct GridRouter {
     // membership-only hash still forced a linear scan of the WHOLE path per
     // candidate move; the index bounds each lookup to the nearby points.
     attraction_path_buckets: FxHashMap<u64, Vec<u32>>,
+    // #656 potential-based path attraction (0 = off / legacy discount
+    // only). Strength in cost units of the potential's PEAK: a state on
+    // the lane, on the lane's layer, holds potential `attraction_potential`;
+    // it falls off quadratically to 0 at attraction_radius, and off-layer
+    // states hold attraction_cross_layer_pct percent of the same-layer
+    // value. Search edges are charged (cost - (phi(next) - phi(prev))),
+    // floored positive -- so ANY cycle has strictly positive cost (loop
+    // farming is impossible by construction, not by tuning), staying at
+    // constant potential earns nothing per step (no meander reward), and
+    // a via ONTO the lane's layer collects a one-time potential jump that
+    // can genuinely compete with via_cost -- the capability no bounded
+    // per-step discount has.
+    attraction_potential: i32,
 }
 
 #[pymethods]
 impl GridRouter {
     #[new]
-    #[pyo3(signature = (via_cost, h_weight, turn_cost=None, via_proximity_cost=1, vertical_attraction_radius=0, vertical_attraction_bonus=0, layer_costs=None, proximity_heuristic_cost=None, layer_direction_preferences=None, direction_preference_cost=0, attraction_radius=0, attraction_bonus=0, attraction_cross_layer_pct=0))]
+    #[pyo3(signature = (via_cost, h_weight, turn_cost=None, via_proximity_cost=1, vertical_attraction_radius=0, vertical_attraction_bonus=0, layer_costs=None, proximity_heuristic_cost=None, layer_direction_preferences=None, direction_preference_cost=0, attraction_radius=0, attraction_bonus=0, attraction_cross_layer_pct=0, attraction_potential=0))]
     pub fn new(via_cost: i32, h_weight: f32, turn_cost: Option<i32>, via_proximity_cost: Option<i32>,
                vertical_attraction_radius: i32, vertical_attraction_bonus: i32,
                layer_costs: Option<Vec<i32>>, proximity_heuristic_cost: Option<i32>,
                layer_direction_preferences: Option<Vec<u8>>, direction_preference_cost: i32,
                attraction_radius: i32, attraction_bonus: i32,
-               attraction_cross_layer_pct: i32) -> Self {
+               attraction_cross_layer_pct: i32, attraction_potential: i32) -> Self {
         Self {
             via_cost,
             h_weight,
@@ -1022,6 +1054,7 @@ impl GridRouter {
             attraction_bonus,
             attraction_cross_layer_pct,
             attraction_path_buckets: FxHashMap::default(),
+            attraction_potential,
         }
     }
 
@@ -1483,6 +1516,59 @@ impl GridRouter {
     /// - layer: Current layer
     /// - move_dx, move_dy: Direction of the current move (normalized to -1, 0, 1)
     #[inline]
+    /// #656: potential-based attraction. phi(x, y, layer) in cost units:
+    /// peak `attraction_potential` on the lane on its layer, quadratic
+    /// falloff to 0 at attraction_radius, cross-layer states hold
+    /// attraction_cross_layer_pct percent. Directionless -- the shaping
+    /// (phi(next) - phi(prev)) pulls TOWARD the lane and refunds on
+    /// leaving; constant-potential travel earns nothing.
+    fn path_attraction_potential(&self, x: i32, y: i32, layer: u8) -> i32 {
+        if self.attraction_potential <= 0 || self.attraction_radius <= 0
+            || self.attraction_path.is_empty() {
+            return 0;
+        }
+        let bucket_size = (self.attraction_radius / 2).max(1);
+        let r2 = self.attraction_radius * self.attraction_radius;
+        let bx0 = (x - self.attraction_radius) / bucket_size - 1;
+        let bx1 = (x + self.attraction_radius) / bucket_size + 1;
+        let by0 = (y - self.attraction_radius) / bucket_size - 1;
+        let by1 = (y + self.attraction_radius) / bucket_size + 1;
+        let mut d2_same = i64::MAX;
+        let mut d2_cross = i64::MAX;
+        for bx in bx0..=bx1 {
+            for by in by0..=by1 {
+                let Some(idxs) = self.attraction_path_buckets
+                    .get(&Self::pack_bucket_key(bx, by, 254)) else { continue };
+                for &i in idxs {
+                    let (px, py, pl, _dx, _dy) = self.attraction_path[i as usize];
+                    let ddx = (x - px) as i64;
+                    let ddy = (y - py) as i64;
+                    let d2 = ddx * ddx + ddy * ddy;
+                    if d2 > r2 as i64 {
+                        continue;
+                    }
+                    if pl == layer {
+                        if d2 < d2_same { d2_same = d2; }
+                    } else if d2 < d2_cross {
+                        d2_cross = d2;
+                    }
+                }
+            }
+        }
+        let phi_of = |d2: i64, layer_pct: i64| -> i64 {
+            if d2 == i64::MAX { return 0; }
+            let dist = (d2 as f32).sqrt() as i64;
+            let ratio_num = (self.attraction_radius as i64 - dist).max(0);
+            // quadratic falloff: peak * ((R - d) / R)^2, then layer percent
+            self.attraction_potential as i64 * ratio_num * ratio_num
+                / (self.attraction_radius as i64 * self.attraction_radius as i64)
+                * layer_pct / 100
+        };
+        let same = phi_of(d2_same, 100);
+        let cross = phi_of(d2_cross, self.attraction_cross_layer_pct.max(0) as i64);
+        same.max(cross) as i32
+    }
+
     fn get_path_attraction_bonus(&self, x: i32, y: i32, layer: u8, move_dx: i32, move_dy: i32) -> i32 {
         if self.attraction_bonus <= 0 || self.attraction_radius <= 0 || self.attraction_path.is_empty() {
             return 0;

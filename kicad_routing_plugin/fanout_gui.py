@@ -6,6 +6,7 @@ Provides wx-based panels for BGA and QFN fanout configuration.
 
 import os
 import sys
+import threading
 import wx
 
 # Add parent directory to path
@@ -1127,6 +1128,17 @@ class FanoutTab(wx.Panel):
         # log tab (the route/diff/planes workers already redirected).
         self.append_log = append_log
 
+        # #621 cancel state. `_cancel_requested` is the flag the plan executor
+        # sets through PlanExecutor.stop() (ai_plan._action_owner already maps
+        # both "fanout" and "optimize_caps" to this tab), and the one the
+        # Cancel button sets directly. `_running` gates the button's dual role
+        # and keeps the event pump from re-entering a run.
+        self._cancel_requested = False
+        self._running = False
+        self._fanout_thread = None
+        self._operation_result = None
+        self._operation_error = None
+
         self._create_ui()
 
         # Set up connectivity check after UI creation
@@ -1201,8 +1213,9 @@ class FanoutTab(wx.Panel):
         btn_sizer.Add(self.fanout_btn, 1, wx.RIGHT, 5)
 
         self.close_btn = wx.Button(self, label="Close")
-        self.close_btn.SetToolTip("Close dialog")
-        self.close_btn.Bind(wx.EVT_BUTTON, self._on_close)
+        self.close_btn.SetToolTip("Close dialog (or cancel the fanout if one "
+                                  "is running)")
+        self.close_btn.Bind(wx.EVT_BUTTON, self._on_cancel_or_close)
         btn_sizer.Add(self.close_btn, 1)
 
         right_sizer.Add(btn_sizer, 0, wx.EXPAND)
@@ -1217,6 +1230,160 @@ class FanoutTab(wx.Panel):
     def _on_close(self, event):
         """Close the parent dialog (matches the other tabs' Close button)."""
         self.GetTopLevelParent().EndModal(wx.ID_CANCEL)
+
+    def _on_cancel_or_close(self, event):
+        """Cancel a running fanout, else close -- the planes tab's idiom.
+
+        #621: the fanout engines now take the same cooperative `cancel_check`
+        as batch_route / create_plane, and the escape runs on a worker thread,
+        so this button has both something to set and a UI thread free to
+        deliver the click.
+        """
+        if self._running:
+            self._cancel_requested = True
+            self.status_text.SetLabel("Cancelling...")
+        else:
+            self.GetTopLevelParent().EndModal(wx.ID_CANCEL)
+
+    def _begin_run(self, label):
+        """Enter the running state: disable Fanout, arm Cancel, clear the flag.
+
+        `fanout_btn` being disabled is ALSO the plan executor's busy signal
+        (ai_plan.py's `_poll_until_idle` watches `fanout_btn.IsEnabled()`), so
+        it must go down before the worker starts and only come back up in
+        `_end_run`, after the results are applied. Re-enabling it any earlier
+        lets the executor start the next step mid-apply -- the hazard the
+        planes tab documents at the same place.
+        """
+        self._running = True
+        self._cancel_requested = False
+        self._operation_result = None
+        self._operation_error = None
+        self.fanout_btn.Disable()
+        self.close_btn.SetLabel("Cancel")
+        self.status_text.SetLabel(label)
+        self.progress_bar.Pulse()
+        wx.Yield()
+
+    def _end_run(self):
+        """Leave the running state, whatever the outcome."""
+        self._running = False
+        self._fanout_thread = None
+        self.fanout_btn.Enable()
+        self.close_btn.SetLabel("Close")
+        self.progress_bar.SetValue(0)
+
+    def _fanout_worker(self, kind, footprint, kwargs):
+        """Run the escape engine OFF the UI thread (#621).
+
+        Everything wx-shaped is resolved by the caller before this starts: the
+        worker touches only the engine, `self.pcb_data` (read-only for the
+        duration) and the result slots. It deliberately does NOT apply anything
+        to the board -- pcbnew mutation happens in `_on_operation_complete`, on
+        the UI thread.
+        """
+        from .gui_utils import redirect_prints_to_log
+        # The tee lives INSIDE the worker: `_run_*_fanout` returns as soon as
+        # the thread starts, so a redirect installed on the UI thread would be
+        # restored while the engine was still printing (and sys.stdout is
+        # process-global). Same placement as the planes tab's worker.
+        # `append_log` marshals with wx.CallAfter, so this is thread-safe.
+        try:
+            with redirect_prints_to_log(self.append_log):
+                if kind == 'bga':
+                    import bga_fanout
+                    tracks, vias, vias_to_remove, failed = \
+                        bga_fanout.generate_bga_fanout(
+                            footprint, self.pcb_data, **kwargs)
+                    skipped = list(bga_fanout.LAST_CANCEL_SKIPPED)
+                else:
+                    import qfn_fanout
+                    tracks, vias, failed = qfn_fanout.generate_qfn_fanout(
+                        footprint, self.pcb_data, **kwargs)
+                    vias_to_remove = None
+                    skipped = list(qfn_fanout.LAST_CANCEL_SKIPPED)
+                self._operation_result = {
+                    'tracks': tracks, 'vias': vias, 'failed': failed,
+                    'vias_to_remove': vias_to_remove, 'skipped': skipped}
+        except Exception as exc:                                # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            self._operation_error = exc
+
+    def _poll_operation(self, apply_kw, kind):
+        """Poll for worker completion, mirroring the planes tab's loop."""
+        if self._fanout_thread is not None and self._fanout_thread.is_alive():
+            if self._cancel_requested:
+                self.status_text.SetLabel("Cancelling...")
+            wx.CallLater(100, self._poll_operation, apply_kw, kind)
+        else:
+            self._on_operation_complete(apply_kw, kind)
+
+    def _on_operation_complete(self, apply_kw, kind):
+        """Apply (or report) the worker's result on the UI thread."""
+        try:
+            if self._operation_error is not None:
+                wx.MessageBox(
+                    f"{kind.upper()} fanout failed:\n\n{self._operation_error}",
+                    "Fanout Error", wx.OK | wx.ICON_ERROR)
+                return
+            res = self._operation_result or {}
+            # #621: a cancelled run discards, like the planes tab. The engine
+            # hands back a coherent partial, but half a fanout applied to the
+            # live board is not what pressing Cancel asks for.
+            if self._cancel_requested:
+                self._report_cancelled(
+                    res.get('skipped') or [],
+                    kind='ball' if kind == 'bga' else 'pad net')
+                return
+            from .gui_utils import redirect_prints_to_log
+            with redirect_prints_to_log(self.append_log):
+                self._apply_fanout_results(
+                    res.get('tracks') or [], res.get('vias') or [],
+                    failed_nets=res.get('failed'),
+                    vias_to_remove=res.get('vias_to_remove'),
+                    **apply_kw)
+        finally:
+            self._end_run()
+
+    def _make_cancel_check(self):
+        """The engines' zero-arg cooperative cancel predicate (#621).
+
+        The fanout runs SYNCHRONOUSLY on the UI thread (unlike the planes tab,
+        The engine runs on a WORKER thread (`_fanout_worker`), so this is a
+        plain flag read -- the UI thread stays free to deliver the Cancel
+        click, exactly as on the planes tab. It reads a bool written by another
+        thread, which needs no lock: a torn read is impossible for a bool, and
+        the worst case is noticing the cancel one loop head later.
+        """
+        return lambda: self._cancel_requested
+
+    def _report_cancelled(self, skipped, kind='ball'):
+        """Tell the user what a cancelled run did and did NOT measure (#621).
+
+        The untried nets are deliberately NOT presented as escape failures: an
+        unfinished search measured nothing about them, and reading them as
+        failures is what sends someone into a pointless tighter-clearance
+        retry. Nothing is applied to the board -- same policy as the planes
+        tab, whose cancelled runs also discard.
+        """
+        self.status_text.SetLabel("Cancelled")
+        names = sorted(skipped or ())
+        msg = ["Fanout cancelled. Nothing was applied to the board.", ""]
+        if names:
+            shown = ', '.join(names[:20]) + (' ...' if len(names) > 20 else '')
+            msg.append(f"{len(names)} {kind}(s) were never attempted:")
+            msg.append("")
+            msg.append(shown)
+            msg.append("")
+            msg.append("These are NOT escape failures -- the search never ran "
+                       "on them, so they say nothing about clearance. Re-run "
+                       "without cancelling before changing any setting on "
+                       "this evidence.")
+        else:
+            msg.append("The cancel landed before any result was concluded.")
+        wx.MessageBox("\n".join(msg), "Fanout Cancelled",
+                      wx.OK | wx.ICON_INFORMATION)
 
     def _on_type_changed(self, event):
         """Handle fanout type change."""
@@ -1311,10 +1478,7 @@ class FanoutTab(wx.Panel):
 
     def _run_bga_fanout(self, footprint, net_patterns, config):
         """Run BGA fanout."""
-        self.fanout_btn.Disable()
-        self.status_text.SetLabel("Running BGA fanout...")
-        self.progress_bar.Pulse()
-        wx.Yield()
+        self._begin_run("Running BGA fanout...")
 
         # Get shared parameters from Basic tab (includes layers)
         shared = self.get_shared_params() if self.get_shared_params else {}
@@ -1332,119 +1496,93 @@ class FanoutTab(wx.Panel):
                 "No Layers Selected",
                 wx.OK | wx.ICON_WARNING
             )
-            self.fanout_btn.Enable()
-            self.progress_bar.SetValue(0)
+            self._end_run()
             return
 
-        # Tee engine narration into the log tab (placed AFTER the no-layers
-        # early return above so stdout is never left redirected).
-        import sys
-        from .gui_utils import StdoutRedirector
-        _orig_stdout = sys.stdout
-        if self.append_log:
-            sys.stdout = StdoutRedirector(self.append_log, _orig_stdout)
-        try:
-            from bga_fanout import generate_bga_fanout
+        # Everything wx-shaped is read HERE, on the UI thread; the worker
+        # gets a plain kwargs dict (#621).
+        engine_kw = dict(
+            cancel_check=self._make_cancel_check(),
+            # ipc-migration keeps forwarding the Basic tab's #581 via-in-pad
+            # policy (> 0 forces dog-bone). main's fanout tab does not pass
+            # this at all, so the #621 threading refactor had no place to
+            # carry it and the auto-merge dropped it silently -- restored
+            # here rather than inherited.
+            same_net_pad_clearance=shared.get('same_net_pad_clearance', -1.0),
+            net_filter=net_patterns,
+            diff_pair_patterns=config['diff_pair_patterns'] or None,
+            layers=layers,
+            track_width=track_width,
+            clearance=clearance,
+            # BGA_DIFF_PAIR_GAP, and NOT shared['diff_pair_gap'] (#493).
+            # Two bugs in one line: the fallback named the signal-routing
+            # constant (DIFF_PAIR_GAP 0.101) instead of the fanout one
+            # (BGA_DIFF_PAIR_GAP 0.1) -- every neighbouring param here
+            # correctly uses its BGA_* default -- and the shared lookup
+            # leaked the DIFFERENTIAL tab's _effective_diff_pair_gap() into
+            # fanout, which resolves to the board's Default net-class gap
+            # when its override box is unchecked. On eth_tap that handed the
+            # escape router 0.125 where the CLI's bga_fanout uses 0.1, and
+            # the ball field escaped down different channels (BOOT0 at
+            # x=123.275 vs 122.625, FPGA_I on F.Cu vs In1.Cu) -- which then
+            # cascaded through the whole chain. Same leak class as the
+            # no_bga_zone/max_iterations bleed from the route tab into the
+            # plane step. bga_fanout.py's --diff-pair-gap likewise defaults
+            # to BGA_DIFF_PAIR_GAP and does not consult the net class, so
+            # this is the value the recorded chains were routed at.
+            diff_pair_gap=defaults.BGA_DIFF_PAIR_GAP,
+            exit_margin=config['exit_margin'],
+            primary_escape=config['primary_escape'],
+            force_escape_direction=config['force_escape_direction'],
+            rebalance_escape=config['rebalance_escape'],
+            via_size=via_size,
+            via_drill=via_drill,
+            check_for_previous=config['check_for_previous'],
+            no_inner_top_layer=config['no_inner_top_layer'],
+            escape_method=config.get('escape_method', 'auto'),
+            # #424 plane-ball drops -- checkbox bool -> engine token, same
+            # default (on/'auto') as the CLI's --plane-drop.
+            plane_drop=('auto' if config.get('plane_drop', True) else 'off'),
+            # Same NET:LAYER[,...] spec parse as bga_fanout's main()
+            # (review parity finding 5: this kwarg was CLI-only).
+            plane_net_layers=(
+                {spec.split(':', 1)[0]: spec.split(':', 1)[1].split(',')
+                 for spec in config['plane_net_layers']
+                 if ':' in spec}
+                if config.get('plane_net_layers') else None),
+            grid_step=shared.get('grid_step', defaults.GRID_STEP),
+            # Shared Basic-tab per-layer costs (issue #288), same values the
+            # route/diff tabs use; None when the control is empty/invalid.
+            layer_costs=shared.get('layer_costs') or None,
+            # Per-ball progress into the status line. Safe from the worker:
+            # ui_thread_status marshals off-thread callers with CallAfter.
+            progress_callback=(lambda c, t, m:
+                               self._fanout_status(f"{m} ({c}/{t})" if t else m)),
+        )
+        apply_kw = dict(
+            fanout_config={
+                'track_width': track_width, 'clearance': clearance,
+                'via_size': via_size, 'via_drill': via_drill,
+                'exit_margin': config.get('exit_margin'),
+                'grid_step': shared.get('grid_step', defaults.GRID_STEP),
+                # Advanced cap-placement knobs (#130) so the inline checkbox
+                # path honours them too, not just defaults.
+                **{k: v for k, v in config.items() if k.startswith('cap_')},
+                # Shared "Add teardrops" checkbox (#489 section 9).
+                'add_teardrops': shared.get('add_teardrops', False),
+            },
+            optimize_caps=config.get('optimize_caps', False),
+        )
 
-            tracks, vias_to_add, vias_to_remove, failed_nets = generate_bga_fanout(
-                footprint,
-                self.pcb_data,
-                # #581: Basic-tab via-in-pad policy -- > 0 forces dog-bone.
-                same_net_pad_clearance=shared.get('same_net_pad_clearance', -1.0),
-                net_filter=net_patterns,
-                diff_pair_patterns=config['diff_pair_patterns'] or None,
-                layers=layers,
-                track_width=track_width,
-                clearance=clearance,
-                # BGA_DIFF_PAIR_GAP, and NOT shared['diff_pair_gap'] (#493).
-                # Two bugs in one line: the fallback named the signal-routing
-                # constant (DIFF_PAIR_GAP 0.101) instead of the fanout one
-                # (BGA_DIFF_PAIR_GAP 0.1) -- every neighbouring param here
-                # correctly uses its BGA_* default -- and the shared lookup
-                # leaked the DIFFERENTIAL tab's _effective_diff_pair_gap() into
-                # fanout, which resolves to the board's Default net-class gap
-                # when its override box is unchecked. On eth_tap that handed the
-                # escape router 0.125 where the CLI's bga_fanout uses 0.1, and
-                # the ball field escaped down different channels (BOOT0 at
-                # x=123.275 vs 122.625, FPGA_I on F.Cu vs In1.Cu) -- which then
-                # cascaded through the whole chain. Same leak class as the
-                # no_bga_zone/max_iterations bleed from the route tab into the
-                # plane step. bga_fanout.py's --diff-pair-gap likewise defaults
-                # to BGA_DIFF_PAIR_GAP and does not consult the net class, so
-                # this is the value the recorded chains were routed at.
-                diff_pair_gap=defaults.BGA_DIFF_PAIR_GAP,
-                exit_margin=config['exit_margin'],
-                primary_escape=config['primary_escape'],
-                force_escape_direction=config['force_escape_direction'],
-                rebalance_escape=config['rebalance_escape'],
-                via_size=via_size,
-                via_drill=via_drill,
-                check_for_previous=config['check_for_previous'],
-                no_inner_top_layer=config['no_inner_top_layer'],
-                escape_method=config.get('escape_method', 'auto'),
-                # #424 plane-ball drops -- checkbox bool -> engine token, same
-                # default (on/'auto') as the CLI's --plane-drop.
-                plane_drop=('auto' if config.get('plane_drop', True) else 'off'),
-                # Same NET:LAYER[,...] spec parse as bga_fanout's main()
-                # (review parity finding 5: this kwarg was CLI-only).
-                plane_net_layers=(
-                    {spec.split(':', 1)[0]: spec.split(':', 1)[1].split(',')
-                     for spec in config['plane_net_layers']
-                     if ':' in spec}
-                    if config.get('plane_net_layers') else None),
-                grid_step=shared.get('grid_step', defaults.GRID_STEP),
-                # Shared Basic-tab per-layer costs (issue #288), same values the
-                # route/diff tabs use; None when the control is empty/invalid.
-                layer_costs=shared.get('layer_costs') or None,
-                same_net_escapes=config.get('same_net_escapes',
-                                            defaults.BGA_SAME_NET_ESCAPES),
-                # The fanout runs ON the UI thread, so it reports through
-                # _fanout_status (which forces the repaint). Without this the
-                # tab pulsed one static "Running BGA fanout..." for the whole
-                # run -- minutes on a large ball field.
-                progress_callback=(lambda c, t, m:
-                                   self._fanout_status(f"{m} ({c}/{t})" if t else m)),
-            )
-
-            self._apply_fanout_results(
-                tracks, vias_to_add,
-                failed_nets=failed_nets,
-                # Carry the full BGA config (incl. the #130 cap knobs and
-                # optimize_caps) plus the shared-tab floors so the cap repair
-                # can run after the fanout commit.
-                fanout_config={
-                    **config,
-                    'track_width': track_width, 'clearance': clearance,
-                    'via_size': via_size, 'via_drill': via_drill,
-                    'grid_step': shared.get('grid_step', defaults.GRID_STEP),
-                    # Advanced cap-placement knobs (#130) so the inline checkbox
-                    # path honours them too, not just defaults.
-                    **{k: v for k, v in config.items() if k.startswith('cap_')},
-                    # Shared "Add teardrops" checkbox (#489 section 9).
-                    'add_teardrops': shared.get('add_teardrops', False),
-                },
-                optimize_caps=config.get('optimize_caps', False),
-                vias_to_remove=vias_to_remove)
-
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            wx.MessageBox(
-                f"BGA fanout failed:\n\n{e}",
-                "Fanout Error",
-                wx.OK | wx.ICON_ERROR
-            )
-        finally:
-            sys.stdout = _orig_stdout
-            self.fanout_btn.Enable()
-            self.progress_bar.SetValue(0)
+        self._fanout_thread = threading.Thread(
+            target=self._fanout_worker, args=('bga', footprint, engine_kw),
+            daemon=True)
+        self._fanout_thread.start()
+        self._poll_operation(apply_kw, 'bga')
 
     def _run_qfn_fanout(self, footprint, net_patterns, config):
         """Run QFN fanout."""
-        self.fanout_btn.Disable()
-        self.status_text.SetLabel("Running QFN fanout...")
-        self.progress_bar.Pulse()
-        wx.Yield()
+        self._begin_run("Running QFN fanout...")
 
         # Get shared parameters from Basic tab
         shared = self.get_shared_params() if self.get_shared_params else {}
@@ -1465,61 +1603,47 @@ class FanoutTab(wx.Panel):
         via_size = shared.get('via_size', defaults.BGA_VIA_SIZE)
         via_drill = shared.get('via_drill', defaults.BGA_VIA_DRILL)
 
-        # Tee engine narration into the log tab (same as the BGA path).
-        import sys
-        from .gui_utils import StdoutRedirector
-        _orig_stdout = sys.stdout
-        if self.append_log:
-            sys.stdout = StdoutRedirector(self.append_log, _orig_stdout)
-        try:
-            from qfn_fanout import generate_qfn_fanout
+        # Use the component's layer (F.Cu for top, B.Cu for bottom)
+        component_layer = footprint.layer if hasattr(footprint, 'layer') else 'F.Cu'
 
-            # Use the component's layer (F.Cu for top, B.Cu for bottom)
-            component_layer = footprint.layer if hasattr(footprint, 'layer') else 'F.Cu'
+        engine_kw = dict(
+            cancel_check=self._make_cancel_check(),
+            # ipc-migration keeps forwarding the Basic tab's #581 via-in-pad
+            # policy (> 0 forces dog-bone). main's fanout tab does not pass
+            # this at all, so the #621 threading refactor had no place to
+            # carry it and the auto-merge dropped it silently -- restored
+            # here rather than inherited.
+            same_net_pad_clearance=shared.get('same_net_pad_clearance', -1.0),
+            net_filter=net_patterns,
+            layer=component_layer,
+            track_width=track_width,
+            extension=extension,
+            clearance=clearance,
+            grid_step=shared.get('grid_step', defaults.GRID_STEP),
+            escape_method=escape_method,
+            via_size=via_size,
+            via_drill=via_drill,
+            allow_via_in_pad=allow_via_in_pad,
+            board_edge_clearance=shared.get('board_edge_clearance', 0.0),
+            # See the BGA path: safe from the worker via ui_thread_status.
+            progress_callback=(lambda c, t, m:
+                               self._fanout_status(f"{m} ({c}/{t})" if t else m)),
+        )
+        apply_kw = dict(
+            fanout_config={
+                'track_width': track_width,
+                'extension': extension,
+                # Shared "Add teardrops" checkbox (#489 section 9).
+                'add_teardrops': shared.get('add_teardrops', False),
+            },
+            fanout_kind='qfn',
+        )
 
-            tracks, vias, failed_nets = generate_qfn_fanout(
-                footprint,
-                self.pcb_data,
-                net_filter=net_patterns,
-                layer=component_layer,
-                track_width=track_width,
-                extension=extension,
-                clearance=clearance,
-                grid_step=shared.get('grid_step', defaults.GRID_STEP),
-                escape_method=escape_method,
-                via_size=via_size,
-                via_drill=via_drill,
-                allow_via_in_pad=allow_via_in_pad,
-                board_edge_clearance=shared.get('board_edge_clearance', 0.0),
-                # #581: Basic-tab policy overrides allow_via_in_pad when > 0.
-                same_net_pad_clearance=shared.get('same_net_pad_clearance', -1.0),
-                progress_callback=(lambda c, t, m:
-                                   self._fanout_status(f"{m} ({c}/{t})" if t else m)),
-            )
-
-            self._apply_fanout_results(
-                tracks, vias,
-                failed_nets=failed_nets,
-                fanout_config={
-                    'track_width': track_width,
-                    'extension': extension,
-                    # Shared "Add teardrops" checkbox (#489 section 9).
-                    'add_teardrops': shared.get('add_teardrops', False),
-                },
-                fanout_kind='qfn')
-
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            wx.MessageBox(
-                f"QFN fanout failed:\n\n{e}",
-                "Fanout Error",
-                wx.OK | wx.ICON_ERROR
-            )
-        finally:
-            sys.stdout = _orig_stdout
-            self.fanout_btn.Enable()
-            self.progress_bar.SetValue(0)
+        self._fanout_thread = threading.Thread(
+            target=self._fanout_worker, args=('qfn', footprint, engine_kw),
+            daemon=True)
+        self._fanout_thread.start()
+        self._poll_operation(apply_kw, 'qfn')
 
     def _apply_fanout_results(self, tracks, vias, failed_nets=None,
                               fanout_config=None, fanout_kind='bga',

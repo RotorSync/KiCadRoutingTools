@@ -101,10 +101,22 @@ def _foreign_pad_arrays(pcb_data, layer):
     the nudge passes re-bent tracks INTO the pad). `ext_x`/`ext_y` are the
     global-axis half-extents of the (possibly tilted) rect for windowing; equal
     to half_x/half_y for axis-aligned pads. Returns ten parallel arrays."""
+    # #665: version the cache on the pads_by_net IDENTITY (+ pad count).
+    # The docstring's "pads never change" was true of the FULL board, but a
+    # windowed shallow copy (plane_pad_tap) REBINDS pads_by_net to a subset
+    # while SHARING this cache dict -- its per-layer rebuild then poisoned
+    # the parent's cache with window-only pad arrays, and later full-board
+    # clearance checks (the cleanup passes' clears()) accepted copper
+    # STRAIGHT THROUGH the invisible pads (the 24 pad-segment violations on
+    # the iteration boards). Mirror the seg/via caches: signature tuple +
+    # setattr REBIND on mismatch, so each pcb_data view owns its arrays.
+    _sig = (id(pcb_data.pads_by_net),
+            sum(len(v) for v in pcb_data.pads_by_net.values()))
     cache = getattr(pcb_data, '_foreign_pad_arr_cache', None)
-    if cache is None:
-        cache = {}
+    if cache is None or not isinstance(cache, tuple) or cache[0] != _sig:
+        cache = (_sig, {})
         pcb_data._foreign_pad_arr_cache = cache
+    cache = cache[1]
     arr = cache.get(layer)
     if arr is None:
         nids, cx, cy, hx, hy, cr = [], [], [], [], [], []
@@ -1705,7 +1717,11 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     # Experimental default 35% when bus routing is on; override with
     # KICAD_BUS_XLAYER_PCT (0 = legacy same-layer-only attraction).
     bus_xlayer_pct = 0
-    if getattr(config, 'bus_enabled', False) and bus_attraction_bonus > 0:
+    # #589 owner attraction: plan corridors change layers (~1 via/net in a
+    # negotiated plan), so cross-layer pull must arm for plan-attracted
+    # nets too, not only bus members.
+    if bus_attraction_bonus > 0 and (getattr(config, 'bus_enabled', False)
+                                     or env_knobs.GLOBAL_PLAN.get('attract')):
         try:
             bus_xlayer_pct = env_knobs.BUS_XLAYER_PCT
         except ValueError:
@@ -1721,7 +1737,8 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                         direction_preference_cost=config.direction_preference_cost,
                         attraction_radius=bus_attraction_radius_grid,
                         attraction_bonus=bus_attraction_bonus,
-                        attraction_cross_layer_pct=bus_xlayer_pct)
+                        attraction_cross_layer_pct=bus_xlayer_pct,
+                        attraction_potential=env_knobs.GLOBAL_PLAN.get('attract_potential', 0))
 
     # Set attraction path for bus routing (if provided)
     if attraction_path:
@@ -1906,7 +1923,10 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         term_pts.append((end_original[0], end_original[1]))
     _necked157, _hard157 = _neck_terminal_grazes(new_segments, term_pts,
                                                  pcb_data, net_id, config)
-    if _hard157:
+    # #589: a plan probe's result is a hint, never shipped copper -- its
+    # terminals legitimately overlap future nets' stubs (the probe map
+    # excluded them), so the short gate must not veto the prediction.
+    if _hard157 and not config.plan_probe:
         _hs, _hd = _hard157[0]
         print(f"  {YELLOW}terminal copper on {_hs.layer} would OVERLAP a "
               f"foreign track/via (edge dist {_hd:.3f}mm < floor half-width) "
@@ -2387,11 +2407,18 @@ def _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data, net_id, 
     # through the registered free via. The free via is what lets the boxed pad
     # connect; a full via at the cell grazes a neighbouring foreign pad (only the
     # shrunk via fits) -- issue #212, glasgow_revC Z5 via vs RN4.6.
-    sizes = getattr(pcb_data, '_unblock_via_sizes', None)
-    if sizes is None:
-        sizes = {}
-        pcb_data._unblock_via_sizes = sizes
-    sizes[(vgx, vgy)] = (v['size'], v['drill'])
+    # #589 probe hygiene: plan probes route on a throwaway map and emit no
+    # copper, but this registry lives on pcb_data and steers the REAL run's
+    # via emission -- seq probes place ~10x more unblock vias than blind
+    # ones and the leak measurably changed routing (oc null-control 37 vs
+    # 33 with the plan off). Probes keep the unblock via for their own
+    # path; they just must not leave a persistent size registration.
+    if not getattr(config, 'plan_probe', False):
+        sizes = getattr(pcb_data, '_unblock_via_sizes', None)
+        if sizes is None:
+            sizes = {}
+            pcb_data._unblock_via_sizes = sizes
+        sizes[(vgx, vgy)] = (v['size'], v['drill'])
     # Off-pad rung: the tap's pad->via trace is the escape stub -- it ships
     # with the via (both kept or both dropped by the caller's used-via check).
     stub_segments = []
@@ -2542,8 +2569,11 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
                 print(f"{print_prefix}{GREEN}Boxed endpoint unblocked by "
                       f"rung-{_rp[0]}/{_rp[1]} via search (no pre-placed "
                       f"via){RESET}")
-                _register_rung_path_vias(pcb_data, obstacles, _r1[0],
-                                         _rp[0], _rp[1])
+                # #589 probe hygiene: no persistent registration from plan
+                # probes (see _place_shrunk_via_in_pad_impl).
+                if not getattr(config, 'plan_probe', False):
+                    _register_rung_path_vias(pcb_data, obstacles, _r1[0],
+                                             _rp[0], _rp[1])
                 return _r1 + ([], [])
 
     _dbg = _unblock_debug()
@@ -3581,7 +3611,11 @@ def route_multipoint_main(
     bus_attraction_radius_grid = coord.to_grid_dist(config.bus_attraction_radius) if config.bus_attraction_radius > 0 else 0
     bus_attraction_bonus = config.scaled_cell_units(config.bus_attraction_bonus) if config.bus_attraction_bonus > 0 else 0
     bus_xlayer_pct = 0
-    if getattr(config, 'bus_enabled', False) and bus_attraction_bonus > 0:
+    # #589 owner attraction: plan corridors change layers (~1 via/net in a
+    # negotiated plan), so cross-layer pull must arm for plan-attracted
+    # nets too, not only bus members.
+    if bus_attraction_bonus > 0 and (getattr(config, 'bus_enabled', False)
+                                     or env_knobs.GLOBAL_PLAN.get('attract')):
         try:
             bus_xlayer_pct = env_knobs.BUS_XLAYER_PCT
         except ValueError:
@@ -3598,7 +3632,8 @@ def route_multipoint_main(
                         direction_preference_cost=config.direction_preference_cost,
                         attraction_radius=bus_attraction_radius_grid,
                         attraction_bonus=bus_attraction_bonus,
-                        attraction_cross_layer_pct=bus_xlayer_pct)
+                        attraction_cross_layer_pct=bus_xlayer_pct,
+                        attraction_potential=env_knobs.GLOBAL_PLAN.get('attract_potential', 0))
 
     if attraction_path:
         router.set_attraction_path(attraction_path)
@@ -4052,6 +4087,13 @@ def _route_multipoint_taps_impl(
     if GridRouter is None:
         print("  GridRouter not available")
         return None
+
+    # #658 power discipline: Phase-3 tap/MST-edge routing is the bulk of a
+    # power net's copper (measured: 65 of 82 segments) and previously
+    # bypassed the SE loop's per-net config chain -- the leak that kept
+    # power trunks on forbidden layers. Same soft override as the loop.
+    from global_plan import power_layer_config
+    config = power_layer_config(config, config, net_id)
 
     pad_info = main_result['multipoint_pad_info']
     routed_indices = set(main_result['routed_pad_indices'])

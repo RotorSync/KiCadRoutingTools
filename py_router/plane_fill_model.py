@@ -570,6 +570,34 @@ class ZoneFillModel:
         # nearest labeled cell wins (ties: smallest label -- deterministic)
         return int(vals.min())
 
+    def nearest_component_point(self, x, y, comp, max_r_mm):
+        """Board coords of the nearest cell carrying label `comp` within
+        `max_r_mm` of (x, y). Returns (px, py, dist_mm) or None. Used by the
+        fanout near-miss pour-track (#652): find where the plane's main fill
+        component actually is, so a ball the fill stops short of can reach it
+        with a short track instead of a via."""
+        if not self.ok or comp <= 0:
+            return None
+        i = int((x - self.x0) / self.cell)
+        j = int((y - self.y0) / self.cell)
+        r = int(math.ceil(max_r_mm / self.cell)) + 1
+        i0, i1 = max(0, i - r), min(self.nx, i + r + 1)
+        j0, j1 = max(0, j - r), min(self.ny, j + r + 1)
+        if i0 >= i1 or j0 >= j1:
+            return None
+        win = self.labels[i0:i1, j0:j1] == comp
+        if not win.any():
+            return None
+        ii, jj = np.nonzero(win)
+        px = self.x0 + (i0 + ii + 0.5) * self.cell
+        py = self.y0 + (j0 + jj + 0.5) * self.cell
+        d2 = (px - x) ** 2 + (py - y) ** 2
+        k = int(d2.argmin())
+        d = math.sqrt(float(d2[k]))
+        if d > max_r_mm:
+            return None
+        return (float(px[k]), float(py[k]), d)
+
 
 def set_board_net_clearances(pcb_data, net_clearances):
     """Publish the per-net class clearance map every fill model for this board

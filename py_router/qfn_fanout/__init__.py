@@ -28,6 +28,18 @@ from net_queries import matches_net_filter
 from qfn_fanout.layout import analyze_qfn_layout, analyze_pad
 from qfn_fanout.geometry import calculate_fanout_stub
 
+# #621: nets whose escape was never ATTEMPTED because this run's own
+# `cancel_check` stopped it -- in practice the GUI's Cancel button or the plan
+# executor's Stop, the only cancel sources there are (the CLI passes None).
+# Refreshed by every generate_qfn_fanout call and EMPTY unless a cancel
+# actually fired.
+#
+# Deliberately a separate ledger from failed_nets/unescaped_nets: an unfinished
+# search has measured nothing about a pad, and folding untried pads into the
+# failure list reports a cancel as a routing defect -- which would send the
+# planner (or the user) into a pointless tighter-clearance retry.
+LAST_CANCEL_SKIPPED: List[str] = []
+
 
 def _snap_tip_on_grid(corner, tip, net_id, grid_step, grazes):
     """Move a shortened fan tip back ONTO the routing grid (#446).
@@ -453,7 +465,8 @@ def generate_qfn_fanout(footprint: Footprint,
                         same_net_pad_clearance: Optional[float] = None,
                         # progress_callback(current, total, label); the fanout
                         # tab otherwise shows one static label for the run.
-                        progress_callback=None) -> Tuple[List[Dict], List[Dict], List[str]]:
+                        progress_callback=None,
+                        cancel_check=None) -> Tuple[List[Dict], List[Dict], List[str]]:
     """
     Generate QFN fanout tracks for a footprint.
 
@@ -479,7 +492,27 @@ def generate_qfn_fanout(footprint: Footprint,
         too close to another net's stub (endpoint spacing < track_width +
         extension); those tracks are still emitted but flagged as failing
         clearance so the GUI can surface them.
+
+    Cancellation (#621): `cancel_check` is the standard zero-arg cooperative
+    predicate (`batch_route` / `create_plane` take the same one), honoured at
+    the head of the escape work and at the head of the per-stub clearance loop
+    -- the loop that actually costs the time (every stub is checked against the
+    obstacle map, every foreign pad and the board edge, then shortened by
+    search). It BREAKS the loop, never raises: an exception here dies in this
+    package's `except Exception` swallowers. Stubs already kept ship their
+    tracks; pads it never reached carry no copper and are NOT added to
+    failed_nets -- an unfinished search has measured nothing. The untried pads'
+    nets are published as qfn_fanout.LAST_CANCEL_SKIPPED. Passing None (the
+    default, and what the CLI passes) is fully inert.
     """
+    LAST_CANCEL_SKIPPED.clear()
+    _cancelled = [False]
+
+    def _cancel() -> bool:
+        if cancel_check is not None and cancel_check():
+            _cancelled[0] = True
+            return True
+        return False
     layout = analyze_qfn_layout(footprint)
     if layout is None:
         print(f"Warning: {footprint.reference} doesn't appear to be a QFN/QFP")
@@ -583,6 +616,26 @@ def generate_qfn_fanout(footprint: Footprint,
         print(f"  Sample pad geometry: {sample.pad_length:.2f} x {sample.pad_width:.2f} mm")
 
     if not pad_infos:
+        return [], [], []
+
+    def _record_skipped(tracks_, vias_, failed_):
+        """#621: the untried complement -- a candidate pad with no copper from
+        this call and no entry in failed_. Only built when a cancel fired."""
+        if not _cancelled[0]:
+            return
+        live = ({t.get('net_id') for t in tracks_}
+                | {v.get('net_id') for v in vias_})
+        done = set(failed_)
+        LAST_CANCEL_SKIPPED.extend(sorted(
+            {pi.pad.net_name for pi in pad_infos
+             if pi.pad.net_name and pi.pad.net_id not in live
+             and pi.pad.net_name not in done}))
+
+    # #621 escape-work head: covers BOTH escape methods, so a cancel raised
+    # before the first pad stops here with nothing tried instead of running an
+    # unbounded escape.
+    if _cancel():
+        _record_skipped([], [], [])
         return [], [], []
 
     # Via-drop / underpad escape (issue #164): drop a through-via just past each
@@ -760,6 +813,10 @@ def generate_qfn_fanout(footprint: Footprint,
     # The per-stub graze test scans every foreign pad; on a crowded board this
     # loop is where the QFN seconds go, so count it out to the status line.
     for _sti, (stub, pad_info) in enumerate(zip(stubs, pad_infos)):
+        if _cancel():                                   # #621
+            # Untried stubs are simply not kept: no copper, and NOT appended to
+            # qfn_dropped -- they were never checked, so they are not failures.
+            break
         if progress_callback:
             progress_callback(
                 _sti + 1, len(stubs),
@@ -902,6 +959,7 @@ def generate_qfn_fanout(footprint: Footprint,
     else:
         print(f"  Validated: No endpoint collisions")
 
+    _record_skipped(tracks, [], failed_nets)
     return tracks, [], failed_nets
 
 

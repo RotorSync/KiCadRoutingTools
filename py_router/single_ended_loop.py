@@ -665,10 +665,38 @@ def route_single_ended_nets(
         # main-edge selection + attraction too (they used to route blind).
         attraction_path, reverse_direction = bus_attraction_context(
             net_id, bus_net_to_group, bus_corridors, bus_routed_paths)
+        # #589 v2 owner attraction (KICAD_GLOBAL_PLAN_ATTRACT=1): a net
+        # with a planned rough corridor and NO bus corridor is attracted
+        # to its own plan -- the global->detailed handoff the repulsion-
+        # only reservations lack. Densified like a bus corridor; the
+        # attraction bonus/radius knobs are shared with bus routing.
+        if attraction_path is None:
+            _gp = getattr(config, '_global_plan', None)
+            if (_gp is not None and net_id in _gp.rough_paths
+                    and env_knobs.GLOBAL_PLAN.get('attract')):
+                # #658 river: predecessor's realized copper outranks the
+                # net's own probe corridor (follow-the-leader packing).
+                _riv = None
+                if env_knobs.GLOBAL_PLAN.get('river'):
+                    from global_plan import river_attraction_path
+                    _riv = river_attraction_path(config, net_id, pcb_data)
+                attraction_path = (_sample_path(_riv) if _riv is not None
+                                   else _sample_path(_gp.rough_paths[net_id]))
+                reverse_direction = False
         # Off-lane surcharge (the stick): members with a corridor pay
         # scaled step costs everywhere EXCEPT near the lane, where the
         # attraction discount compensates -- defection costs real money.
         cfg_route = bus_stick_config(config, attraction_path)
+        # #589 option 2 (KICAD_GLOBAL_PLAN_LAYER=pref): soft discount on the
+        # net's plan-assigned layer so corridor cliques pack N layers deep
+        # instead of all fighting for the probes' shared favorite layer.
+        # Unchanged cfg_route when the plan/knob is off or the net has no
+        # assignment.
+        from global_plan import plan_layer_config, power_layer_config
+        cfg_route = plan_layer_config(cfg_route, config, net_id)
+        # #658 power discipline: power nets get their own layer economics
+        # (off the highways, dive-fast) -- see power_layer_config.
+        cfg_route = power_layer_config(cfg_route, config, net_id)
         # #572: oracle forced links outrank endpoint derivation -- the
         # model's zone credit merges the exact-fill clusters, so both the
         # multipoint and plain derivations "see" no gap and succeed with
@@ -1139,6 +1167,12 @@ def route_single_ended_nets(
                         # Bus attraction for the retry, multipoint included
                         retry_attraction_path, retry_reverse_direction = bus_attraction_context(
                             net_id, bus_net_to_group, bus_corridors, bus_routed_paths)
+                        if retry_attraction_path is None:
+                            # #656: keep the plan lane through rip retries
+                            from global_plan import plan_attraction_path
+                            retry_attraction_path = plan_attraction_path(
+                                config, net_id, pcb_data)
+                            retry_reverse_direction = False
                         retry_cfg = bus_stick_config(config, retry_attraction_path)
                         # #572: a forced-link net retries its EXACT links
                         # against the post-rip board (same reason as the

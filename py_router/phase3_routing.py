@@ -1462,6 +1462,12 @@ def _retry_victim_main_with_ripup(
         _attr, _rev = bus_attraction_context(
             victim_id, getattr(state, 'bus_net_to_group', None),
             getattr(state, 'bus_corridors', None))
+        if _attr is None:
+            # #656: phase-3 victim reroutes keep their PLAN lane too --
+            # churn on contested nets is where adherence erodes (#655).
+            from global_plan import plan_attraction_path
+            _attr = plan_attraction_path(config, victim_id, pcb_data)
+            _rev = False
         if was_multipoint:
             multipoint_pads = get_multipoint_net_pads(pcb_data, victim_id, config)
             if multipoint_pads:

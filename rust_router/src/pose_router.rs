@@ -139,13 +139,15 @@ pub struct PoseRouter {
     vertical_attraction_bonus: i32,   // Cost reduction for positions aligned with other-layer tracks
     proximity_heuristic_cost: i32,  // Expected proximity cost per grid step (added to heuristic)
     layer_costs: Vec<i32>,  // Per-layer cost multipliers (1000 = 1.0x); empty = all 1.0 (issue #193)
+    layer_direction_preferences: Vec<u8>,  // 0=H, 1=V, 255=none; empty = no preference (#658 diff parity)
+    direction_preference_cost: i32,  // penalty per off-axis move; 0 = disabled
 }
 
 #[pymethods]
 impl PoseRouter {
     #[new]
-    #[pyo3(signature = (via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost=10, diff_pair_spacing=0, max_turn_units=4, gnd_via_perp_offset=0, gnd_via_along_offset=0, vertical_attraction_radius=0, vertical_attraction_bonus=0, proximity_heuristic_cost=0, layer_costs=None))]
-    pub fn new(via_cost: i32, h_weight: f32, turn_cost: i32, min_radius_grid: f64, via_proximity_cost: i32, diff_pair_spacing: i32, max_turn_units: i32, gnd_via_perp_offset: i32, gnd_via_along_offset: i32, vertical_attraction_radius: i32, vertical_attraction_bonus: i32, proximity_heuristic_cost: i32, layer_costs: Option<Vec<i32>>) -> Self {
+    #[pyo3(signature = (via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost=10, diff_pair_spacing=0, max_turn_units=4, gnd_via_perp_offset=0, gnd_via_along_offset=0, vertical_attraction_radius=0, vertical_attraction_bonus=0, proximity_heuristic_cost=0, layer_costs=None, layer_direction_preferences=None, direction_preference_cost=0))]
+    pub fn new(via_cost: i32, h_weight: f32, turn_cost: i32, min_radius_grid: f64, via_proximity_cost: i32, diff_pair_spacing: i32, max_turn_units: i32, gnd_via_perp_offset: i32, gnd_via_along_offset: i32, vertical_attraction_radius: i32, vertical_attraction_bonus: i32, proximity_heuristic_cost: i32, layer_costs: Option<Vec<i32>>, layer_direction_preferences: Option<Vec<u8>>, direction_preference_cost: i32) -> Self {
         // After a via, we need enough straight distance to allow the P/N offset tracks
         // to clear the vias before turning. Use min_radius_grid + 1 for safety margin.
         let base_straight = (min_radius_grid.ceil() as i32 + 1).max(3);
@@ -158,7 +160,7 @@ impl PoseRouter {
         } else {
             base_straight
         };
-        Self { via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost, straight_after_via, diff_pair_spacing, max_turn_units, gnd_via_perp_offset, gnd_via_along_offset, vertical_attraction_radius, vertical_attraction_bonus, proximity_heuristic_cost, layer_costs: layer_costs.unwrap_or_default() }
+        Self { via_cost, h_weight, turn_cost, min_radius_grid, via_proximity_cost, straight_after_via, diff_pair_spacing, max_turn_units, gnd_via_perp_offset, gnd_via_along_offset, vertical_attraction_radius, vertical_attraction_bonus, proximity_heuristic_cost, layer_costs: layer_costs.unwrap_or_default(), layer_direction_preferences: layer_direction_preferences.unwrap_or_default(), direction_preference_cost }
     }
 
     /// Set the proximity heuristic cost for subsequent routes.
@@ -249,6 +251,19 @@ impl PoseRouter {
     /// Cost for arithmetic; forbidden/missing folds to neutral 1.0x (1000) so the
     /// sentinel can never leak into a subtraction.
     #[inline]
+    /// #658: off-axis penalty for a move (dx, dy) on `layer`, mirroring
+    /// router.rs -- diagonals are off-axis for both preferences.
+    fn direction_penalty(&self, dx: i32, dy: i32, layer: usize) -> i32 {
+        if self.direction_preference_cost <= 0 {
+            return 0;
+        }
+        match self.layer_direction_preferences.get(layer).copied() {
+            Some(0) => if dy != 0 { self.direction_preference_cost } else { 0 },
+            Some(1) => if dx != 0 { self.direction_preference_cost } else { 0 },
+            _ => 0,
+        }
+    }
+
     fn layer_cost_or_default(&self, layer: usize) -> i32 {
         match self.layer_costs.get(layer).copied() {
             Some(c) if c >= 0 => c,
@@ -377,7 +392,8 @@ impl PoseRouter {
                     let neighbor_key = neighbor.as_key();
 
                     if !nodes.is_closed(neighbor_key) {
-                        let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_cost_or_default(current.layer as usize) as i64 / 1000) as i32;  // layer-cost scaled (issue #193; default 1.0x)
+                        let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_cost_or_default(current.layer as usize) as i64 / 1000) as i32  // layer-cost scaled (issue #193; default 1.0x)
+                            + self.direction_penalty(dx, dy, current.layer as usize);
                         let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny)
                             + obstacles.get_layer_proximity_cost(nx, ny, current.layer as usize);
                         let attraction_bonus = obstacles.get_cross_layer_attraction(
@@ -444,7 +460,8 @@ impl PoseRouter {
 
                     if !nodes.is_closed(neighbor_key) {
                         // Cost = movement + turn arc cost
-                        let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_cost_or_default(current.layer as usize) as i64 / 1000) as i32;  // layer-cost scaled (issue #193; default 1.0x)
+                        let move_cost = ((if dx != 0 && dy != 0 { DIAG_COST } else { ORTHO_COST }) as i64 * self.layer_cost_or_default(current.layer as usize) as i64 / 1000) as i32  // layer-cost scaled (issue #193; default 1.0x)
+                            + self.direction_penalty(dx, dy, current.layer as usize);
                         let proximity_cost = obstacles.get_stub_proximity_cost(nx, ny)
                             + obstacles.get_layer_proximity_cost(nx, ny, current.layer as usize);
                         let attraction_bonus = obstacles.get_cross_layer_attraction(

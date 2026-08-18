@@ -347,6 +347,19 @@ def make_local_window(pcb_data: PCBData, cx: float, cy: float,
         if in_window(p.global_x, p.global_y, max(p.size_x, p.size_y)):
             pads_by_net.setdefault(nid, []).append(p)
     local.pads_by_net = pads_by_net
+    # #665: a shallow copy SHARES the parent's derived-geometry caches; the
+    # window rebinds pads/segments/vias/board_info, so any cache the window
+    # rebuilds must live on ITS OWN attribute or it poisons the parent (the
+    # pad-array cache did exactly that -- 24 through-pad DRC violations).
+    # The pad/seg/via caches are signature-versioned now; drop the rest of
+    # the geometry-derived caches so the window rebuilds them locally.
+    for _cattr in ('_foreign_pad_arr_cache', '_foreign_seg_arr_cache',
+                   '_foreign_via_arr_cache', '_foreign_hole_cap_cache',
+                   '_edge_grid_cache', '_edge_mask_cache',
+                   '_cutout_mask_cache', '_tap_spatial_index_cache',
+                   '_net_tie_lift', '_attach_pts_memo'):
+        if _cattr in local.__dict__:
+            del local.__dict__[_cattr]
 
     board_info = copy.copy(pcb_data.board_info)
     board_info.board_bounds = (min_x, min_y, max_x, max_y)

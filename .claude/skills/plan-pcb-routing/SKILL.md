@@ -277,7 +277,7 @@ via_drill  = max(min_via_drill, via - 2*min_annular_ring)  # hold the annular ri
 
 Pass the computed `--via-size via --via-drill via_drill --track-width track
 --clearance C` to the fanout step. If `infeasible`, the pitch can't take a channel
-escape even at the fab floor → switch to `--escape-method underpad` and/or add
+escape even at the fab floor → for a POPULATED array prefer `--escape-method dogbone` (it never escapes fewer balls than underpad and matches the human idiom; this supersedes older underpad advice), else `--escape-method underpad`, and/or add
 escape layers; don't ship the graze.
 
 **Plan params can set ANY GUI option:** in the GUI's RESULT schema, each
@@ -738,6 +738,121 @@ Report to user:
 - Identified power nets and pad counts
 - Recommended strategy (plane vs wide traces) with layer assignments
 
+### Step 5a-tuned: Plane-map derivation rules (measured-optimal; refine the delegate's output with these)
+
+**THE DENSITY GATE COMES FIRST — plane-map aggression must scale with the
+board (15-board wave + controlled A/B, 2026-08-17).** The aggressive map
+below (outer floods, rail co-pours, many-rail splits) is what wins on dense
+BGA boards (orangecrab 18 KiCad-unconnected, the best from-scratch result of
+five arms; daisho 8-layer: 1 open, 0 new DRC). The SAME map applied to
+small boards was the wave's dominant failure source AND its dominant time
+sink: outer floods got carved into pad-anchored islands and hairline
+(<60 µm) gaps, and every route pass re-oracled the big outer fills.
+Controlled A/B on the four regressed boards, changing ONLY the plane map
+(floods+fragility=0 → inner-only) with every other step identical:
+
+| board | aggressive map | inner-only map |
+|---|---|---|
+| tigard | 7 open, 60s | **0 open, 41s** |
+| upduino | 5 open + 2 DRC, 286s | **0 open, 1 DRC, 61s** |
+| eis | 3 open, 504s | **0 open, 2 DRC, 115s** |
+| watchy | 1 open, 428s | **0 open, 0 DRC, 88s** |
+
+And the reverse control on the dense board cuts the other way just as
+hard — the same skill chain with the conservative (recorded-style) map
+on orangecrab: **26 open at 7687 s vs 18 open at 2028 s** with the
+aggressive map (plus ~2000 self-crossing weld-debris warnings on the
+conservative arm). The aggressive map on a dense board is BOTH more
+complete and ~4× faster; the conservative map on a small board is both
+more complete and 3–5× faster. Neither map is "the safe one" — the GATE
+is the safety.
+
+**Compute the tier, don't vibe it. DENSE** = the board has **6+ copper
+layers AND** (a populated fine-pitch grid array of ≥100 balls at ≤0.8 mm
+pitch, **or** >150 nets). Everything else is STANDARD. Layer count is the
+load-bearing half of the gate: on ≤4 layers the outer layers ARE the
+routing surface, so floods there lose even next to a big BGA (measured:
+eis, 4-layer with a fully-populated BGA-121 @0.8 mm, went 3 opens/504 s
+with the aggressive map → 0 opens/115 s inner-only; orangecrab and daisho,
+6/8-layer, are where the aggressive map wins).
+
+**STANDARD boards (the measured-optimal default — most boards):**
+
+- **Inner-only pours**: GND solid on the first inner layer (price 6.0);
+  the ONE dominant rail (most pads) solid or split on the second inner
+  (price 2.5). **NO outer-layer floods** — on a small board the outer
+  layers ARE the routing surface, and a flood there becomes island debt,
+  sub-60 µm gap debt, and board-edge DRC (all three measured).
+- **Every other rail rides `--power-nets` as a wide trace.** Do not
+  Voronoi many rails onto one layer: **never more than 2–3 rails share a
+  split layer** (measured: six rails Voronoi'd onto tigard's In2
+  fragmented +3V3 into 8 pad-anchored islands → 7 opens; the 2-rail map
+  → 0).
+- 2-layer boards: GND flood(s) per Step 8's 2-layer flow (pour LAST on
+  dense 2-layer); rails as traces.
+- No per-zone fragility overrides — the default fragility field protects
+  inner pours correctly.
+
+**DENSE boards (the aggressive map — every rule keys on a MEASURED board
+property; derive, don't copy):**
+
+1. **Outer-layer GND floods (pour-direct service).** Count GND SMD pads
+   per outer layer. An outer layer with a substantial GND SMD population
+   (≳20 pads, or a fine-pitch BGA's GND balls on it) gets a GND flood:
+   pads and balls are then served by FILL CONTACT with zero vias
+   (measured: 124 balls pour-served, the first 100% fanout escapes).
+   Floods must be carve-free — per-zone fragility `GND@<layer>=0` — or
+   later routing fragments them into weld debt. (This knob is DENSE-only:
+   it is exactly what turned small-board floods into island debt.)
+2. **One solid inner GND plane, adjacent to the highway.** The unsplit
+   reference layer. Price it 6.0 in `--layer-costs`.
+3. **Bus-highway layer: derive it, keep it EMPTY and FREE.** Find the
+   board's widest bus (largest same-endpoint-footprint-pair net group, or
+   the dominant netclass family — DDR data/address, ≥8 nets). The highway
+   is the inner layer adjacent to the GND reference spanning the bus's
+   endpoints. NO pours on it, cost 1.0 — pricing or pouring the highway
+   cost completions every time it was measured.
+4. **A rail whose pads live overwhelmingly on one outer layer shares
+   that layer's flood.** ≥~80% of the rail's pads SMD on outer layer L
+   (termination arrays, e.g. VTT on B.Cu) → co-pour on L by Voronoi/
+   grammar partition; the pads connect by fill contact and the rail needs
+   no inner-layer real estate at all.
+5. **Remaining rails: split across the remaining inner layers, grouped
+   by pad geography — capped at 2–3 rails per layer.** Cluster rails
+   geographically (the grammar-pour clustering) and assign clusters per
+   layer so each partition stays compact (#662 shape targets: sheet
+   compactness ≥0.6, islands ≥0.5). Price rail layers 2.5. Rails that
+   don't fit under the cap (or whose region would be a sliver) ride
+   `--power-nets` as wide traces instead — a fragmented pour is worse
+   than no pour.
+6. **Carry the SAME `--layer-costs` vector into `route_diff`** — the
+   diff step is otherwise plane-blind and its pairs squat the priced
+   layers.
+
+### Step 5a-tuned-ii: Escape completeness sweep (all interior-pad parts)
+
+COMPLETE FANOUT IS THE INVARIANT — never trade an escaped ball for a
+routing score. Beyond the big BGAs, enumerate EVERY component with
+interior pads the surface router cannot reach (WLCSP/CSP at ≤0.5mm pitch,
+staggered no-lead arrays — the issue-#144 class) and give each its own
+fanout step (`underpad` + via-in-pad at the pitch-derived fab-floor via)
+BEFORE the route step. On the benchmark, three 0.4mm WLCSP regulators
+nobody had ever fanned were part of the winning plan. A board-wide sweep:
+for every footprint, compute min pad pitch and whether any pad is
+enclosed by other pads on all four sides; plan an escape for every hit.
+
+### Step 5a-tuned-iii: Length matching from the board's own classes
+
+If netclass names carry length-match hints (`*_LM<tol>`, `*length*`,
+DDR-class groupings), wire them into the route step:
+`--length-match-group auto --length-match-tolerance <tol>` and
+`--time-matching` when the bus spans layers — but `--time-matching` ONLY
+on a board with a real stackup (it converts length to delay through the
+dielectrics; on KiCad's default stackup it computes garbage — the Step 10
+rule-1 no-stackup precedence applies to it exactly as to `--impedance`).
+The board's classes are the author's spec — honor them even when the
+recorded chains never did.
+
 ## Step 5b: Net-Coverage Reconciliation (mandatory — do not skip)
 
 The stages partition every routable net by glob pattern, and the patterns are
@@ -854,8 +969,15 @@ Based on the analysis, generate a step-by-step plan. The general order is:
    ordering concern lives here, not at the pour. This step cannot rip either --
    the pour never taps, so there is no blocker to clear.
    **Stitching is normal human practice, not an exotic add-on**: 58% of ~400
-   human corpus boards carry a free-standing GND stitch lattice — when the
-   board has GND pours on 2+ layers, recommend `--stitch-vias` here. Leave
+   human corpus boards carry a free-standing GND stitch lattice. **But gate
+   it on the SPEED TIER, not on pour count**: recommend `--stitch-vias` only
+   when `/find-high-speed-nets` puts the board at high tier or above (RF,
+   TMDS/SerDes, DDR) — "GND pours on 2+ layers" alone is NOT sufficient.
+   Measured cost of stitching low-speed boards (15-board wave): the
+   re-pour + mandatory trailing route.py roughly double a small board's
+   wall time, and the stitch pass is the source of the recurring
+   8–21 µm via-segment micro-graze DRC class and occasional orphan stitch
+   vias — pure cost when nothing on the board needs the lattice. Leave
    the PITCH at the tool default (20 mm); only `/find-high-speed-nets` output
    tightens it (via `--stitch-max-freq`, which derives λ/20 and overrides the
    pitch). Do not hand-pick a pitch from corpus statistics.
@@ -1001,7 +1123,7 @@ RF feed on an outer layer over the GND plane; recommend a `User.2` keepout +
 
 python3 -X utf8 py_router/route.py board_diff.kicad_pcb board_step2b.kicad_pcb \
     --nets RF --impedance 50 --layers F.Cu \
-    --clearance <floor> --no-bga-zone \
+    --clearance <floor> --no-bga-zones \
     2>&1 | tee /tmp/step2b_impedance.txt
 
 ### Step 2: Route ALL Nets — plane nets included (#562)
@@ -1060,13 +1182,101 @@ The `--layer-costs` line is NOT optional when Step 1 poured any solid plane:
 without it signals cross the pours at cost 1.0 and shred them (measured: split
 power pours at 0–2% connected under a BGA on a chain that omitted it). Order
 matches `--layers`; 3.0 on solid-plane layers, 1.0–1.5 on split/route+pour and
-highway layers, 1.0 on F/B.
+highway layers, 1.0 on F/B. On dense boards use the measured-optimal pricing
+from Step 2c instead (GND plane 6.0, rail pours 2.5, bus highway FREE).
 
 (When Step 2b ran, exclude its impedance nets, e.g. `--nets "*" "!RF"`, and
 route from `board_step2b.kicad_pcb`.)
 
 This produces the **canonical final board** — the finalize's `JSON_ORACLE`
 line reports the KiCad-verified plane-completion verdict for the run.
+
+### Step 2c: Tuned route parameters (the measured-optimal set)
+
+A 15-board screen (2026-08-17) measured the following parameter set as
+STRICTLY DOMINANT over each board's naive parameters — total KiCad
+post-refill unconnected 62 → 23 across the corpus at **equal total wall
+time** (better first-pass arrangement repays the extra search in saved
+rip/retry churn). Apply it whenever the board is dense enough that any
+fanout or escape is contested; on trivially-open boards the defaults are
+fine.
+
+1. **Strict small features** (the single biggest lever on packed boards —
+   lane pitch is quantized by track+clearance, and a 0.1 grid cannot
+   express a 0.28 pitch at fat features):
+   `--track-width 0.0762 --clearance 0.0889 --via-size 0.25
+   --via-drill 0.15`
+   The fab-floor clamps pin track/clearance/via UP automatically on
+   boards whose layer count or fab tier can't take them — passing those
+   four is always safe. Grading stays honest via the `.kicad_pro` floor
+   writeback.
+   **EXCEPTION — `--hole-to-hole-clearance` does NOT clamp**: route.py
+   board-derives h2h only when the flag is OMITTED and honors an explicit
+   value verbatim, while `check_drc` pins its grade UP to the board's
+   `min_hole_to_hole` — so an explicit 0.2 on a 0.25-constraint board
+   routes real, graded drill-pair violations (verified in code by two
+   independent plan audits). Pass the BOARD's own `min_hole_to_hole`
+   (from `--design-rules`), or omit the flag and let route.py derive it.
+2. **Direction preference**: `--direction-preference-cost 5`. The old 250
+   default was measured far off-optimum (dose curve 0→19, 5→9, 250→15 —
+   a weak nudge organizes layers; more over-taxes, #663).
+3. **Layer pricing** (order matches `--layers`): GND solid-plane layer
+   **6.0**; rail/split pour layers **2.5**; F/B and free routing layers
+   **1.0**; and leave the board's **bus-highway layer at 1.0 even if it
+   carries pours** — the inner layer adjacent to the largest BGA that its
+   widest bus needs (orangecrab: In2, the RAM highway; pricing it cost
+   completions every time it was tried).
+4. **The plan/attraction environment** (route step only, as env-var
+   prefixes on the command line so the manifest replays them):
+   `KICAD_GLOBAL_PLAN=1 KICAD_GLOBAL_PLAN_SEQ=1
+   KICAD_GLOBAL_PLAN_SEQ_COST=1.5 KICAD_GLOBAL_PLAN_VIA_COST=20
+   KICAD_GLOBAL_PLAN_ITERS=50000 KICAD_GLOBAL_PLAN_ATTRACT=1
+   KICAD_ATTRACT_POTENTIAL=65 KICAD_GLOBAL_PLAN_RIVER=1
+   KICAD_FINALIZE_REAUDIT=1 KICAD_PACK_INLINE=1`
+   (SEQ-negotiated global plan + potential attraction + river packing +
+   finalize re-audit. These are env knobs today, so they ride the
+   redo-manifest form of the plan but NOT the GUI plan JSON — see the
+   promotion note in Step 9.)
+   **On DENSE-tier boards (Step 5a-tuned gate), ALSO prepend**
+   `KICAD_GLOBAL_PLAN_LAYER_MODE=clique KICAD_GLOBAL_PLAN_LAYER=pref` —
+   clique-negotiated layer assignment with preference-directed layers.
+   These were the knobs that unlocked the orangecrab hand-ladder's 22→15
+   descent; on the skill's own plan they measured 17 vs 18 unconnected at
+   equal wall time (within single-board wobble by itself, but
+   directionally consistent and free). Leave them OFF for STANDARD
+   boards — unmeasured there, and standard boards already hit 0.
+
+### Step 2d: Guided iteration + endgame (dense boards)
+
+When Step 2 leaves failures on a dense board, do NOT hand-tune — iterate:
+
+```bash
+# each pass re-attempts only the failed/open tail (connected nets
+# gate-skip), with rip authority against the settled board; the plan
+# guidance persists through rips, which is what makes iteration
+# CONVERGE instead of plateauing
+python3 -X utf8 py_router/route.py board_step2.kicad_pcb board_iter1.kicad_pcb --nets "*" <same flags+env>
+python3 -X utf8 py_router/route.py board_iter1.kicad_pcb board_iter2.kicad_pcb --nets "*" <same flags+env>
+```
+
+Two iterations are near-free (measured: the tuned corpus run with 2
+iterations baked in cost +1.5% total time) and historically descend
+frontier boards 25→15 over 3–5 passes — so bake two passes into every
+plan, dense or not. The near-free property DEPENDS on the Step 5a-tuned
+density gate: connected nets gate-skip, but each pass still re-oracles
+every pour, so big carve-free outer floods on a small board turn "free"
+iterations into 100 s+ passes (the measured 428 s watchy chain; 88 s with
+the same iterations after the flood was removed). Then two endgame
+signatures:
+
+- **A net walled by its own protected diff partner** (`no rippable
+  blockers` naming the partner): the #521 override — name BOTH members
+  EXACTLY with `--nets P N --force-reroute`, then one more all-nets
+  iteration (override passes may pay off one pass late).
+- **Bare-ball / island signatures** are now handled automatically
+  in-engine (bare-ball fanout rescue incl. the cap-move, per-island
+  stitcher) — if a net still ships bare, check the rescue log lines
+  before reaching for manual surgery.
 
 #### Octolinear smoothing is ON by default -- leave it alone
 
@@ -1271,6 +1481,14 @@ Without this flag, the router auto-detects BGA/PGA zones and avoids them, which 
 leave internal pads unconnected if they weren't fanned out.
 
 ### Multi-Layer Boards (4+ layers)
+
+**Precedence: the Step 5a-tuned DENSITY GATE outranks this section.** The
+survey below describes HUMAN practice, and our engine measurably matches it
+only on DENSE boards. On STANDARD boards (no ≥100-ball fine-pitch array,
+≤150 nets) the measured-optimal map is inner-only pours + rails as wide
+traces (see the Step 5a-tuned A/B: four small boards, floods → 16 opens
+total; inner-only → 0). Read this section as the Tier-DENSE playbook and
+as background on why pours matter at all.
 
 **Pour philosophy (from a survey of the human-routed corpus): pour EVERY GND
 and power net that has more than a few pads, and treat pours as cheap.** Human
@@ -1972,3 +2190,80 @@ Example cleanup prompt:
 > The final routed board is: board_step2.kicad_pcb (or board_step4 if GND vias ran)
 >
 > Would you like me to delete the intermediate files?"
+
+## Step 9: Emit the plan as an executable artifact (always)
+
+The plan is not finished as prose — it ships as TWO machine-loadable files
+next to the board, so the exact tuned choices replay with no LLM:
+
+1. **`<board>_plan.sh`** — every board-mutating command from the plan, one
+   per line, fully quoted, in execution order, env-knob prefixes included
+   (the redo_commands.sh format; `tests/stress/redo_stress_test.py` replays
+   it verbatim). This is the authoritative form: it carries EVERYTHING,
+   including the Step 2c environment block and iteration passes.
+   **Begin the file with an explicit `cd <repo>` line** (not just a
+   `# cwd=` comment) so a bare `bash <board>_plan.sh` works — relative
+   `py_router/` tool paths fail from any other directory.
+   **Verification commands go in as COMMENTS, never executable lines** —
+   the file's exit code is read by executors as the chain verdict, and a
+   trailing read-only check that exits non-zero (violations found, or a
+   wrong relative path) makes a chain whose `final.kicad_pcb` is perfectly
+   good report as failed (measured: half the 15-board wave reported
+   rc≠0 from exactly this). The last executable line must be the final
+   `route.py`.
+2. **`<board>_plan.json`** — the GUI AI-tab form:
+
+   ```bash
+   python3 tests/stress/manifest_to_plan.py <board>_plan.sh -o <board>_plan.json
+   ```
+
+   The AI tab's Load button accepts this file and the plan executor runs
+   the same chain through the GUI engine path. KNOWN LIMITATION: env-only
+   knobs (the Step 2c plan/attraction stack) do not survive into the JSON —
+   only `--flag` params map to plan params. Until those knobs are promoted
+   to first-class engine params + dialog controls (the #513 discipline),
+   the `.sh` form is the one that reproduces the tuned result exactly; say
+   so in the summary when the two forms differ.
+
+A per-board plan file that ever gets improved (a better recipe found on a
+later pass) should be REGENERATED through this skill, not hand-patched —
+the skill is the tuner; the plan file is its output.
+
+## Step 10: Plan-authoring precedence rules (resolve these conflicts explicitly)
+
+Lessons from a dry-run audit (an agent following this skill end-to-end):
+
+1. **No stackup ⇒ no impedance passes, period.** When the board has KiCad's
+   default stackup, SKIP every `--impedance` step (including the DDR SSTL
+   40Ω pass) and lead the plan with the /recommend-stackup warning. The
+   no-stackup rule OUTRANKS every interface-specific impedance
+   recommendation.
+2. **Populated-array escape:** `dogbone` supersedes the older
+   "channel-infeasible → underpad" advice for populated BGAs; underpad is
+   for WLCSP/inner-row cases where no inter-pad gap exists at all.
+3. **Fanout `--layers` must EXCLUDE any layer carrying a solid plane**
+   (e.g. the In1 GND plane) — escapes on the solid plane shred it, and
+   the fanout does not avoid poured layers on its own.
+4. **The route flag is `--no-bga-zones` (plural).** The singular spelling
+   fails argparse.
+5. **No pipes in the emitted plan.sh.** `2>&1 | tee ...` is for
+   interactive runs only — `manifest_to_plan.py` tokenizes pipe segments
+   into net globs and corrupts the JSON. Plain redirects or nothing.
+6. **`--max-ripup`: 5 on dense boards** (any fine-pitch BGA present or
+   >150 nets), else leave the default 3.
+7. **A "pair" whose far end is bare test points** may stay in the diff
+   step (the peel machinery degrades gracefully) — note it in the plan
+   rather than agonizing.
+8. **The Step 5a-tuned density gate outranks the pour-philosophy survey.**
+   Outer-layer floods, per-zone fragility `=0`, and rail co-pours are
+   DENSE-tier moves only; a STANDARD board gets inner-only pours and rails
+   as wide traces, no matter how many pads a rail has (measured: the four
+   flood-regressed wave boards all went to 0 opens and 3–5× faster on the
+   inner-only map).
+9. **Never split more than 2–3 rails onto one Voronoi layer** — prefer
+   wide traces for the overflow (tigard: six rails on In2 → +3V3 in 8
+   islands, 7 opens).
+10. **Stitch/GND-via tail only at high speed tier or above** (from
+   `/find-high-speed-nets`) — and when it runs, the chain still ends on
+   `route.py`. Low-speed boards end at the Step 2 route (plus Step 2d
+   iterations) with no re-pour tail.

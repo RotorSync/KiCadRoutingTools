@@ -189,11 +189,27 @@ def run_gui(pcbnew):
         nets = sorted({p.net_name for p in fp.pads if p.net_id and p.net_name})
         tab._run_qfn_fanout(fp, nets, tab.qfn_options.get_config())
 
+        # #621: the tab runs its escape on a WORKER THREAD now, so the call
+        # above returns before the engine has done anything. Pump the real
+        # event loop until the tab reports idle -- the same condition
+        # ai_plan._poll_until_idle waits on. Reading `captured` without this
+        # gets an empty dict and the gate "passes" by comparing nothing.
+        import wx as _wx
+        for _ in range(60000):
+            if not getattr(tab, '_running', False):
+                break
+            _wx.YieldIfNeeded()
+            _wx.MilliSleep(5)
+
         kwargs = seen.get('kwargs')
         if kwargs is not None:
             # Bound to the tab's status label; the dialog is about to die and
             # the CLI leg has no UI to drive anyway.
             kwargs.pop('progress_callback', None)
+            # Same reason, for #621's cancel predicate: it is a live closure
+            # over the (about to be destroyed) tab, not a routing parameter,
+            # and the CLI leg has no cancel source anyway.
+            kwargs.pop('cancel_check', None)
 
         return ({'footprint': fp, 'sides': _sides(fp),
                  'tracks': captured.get('tracks') or [],
