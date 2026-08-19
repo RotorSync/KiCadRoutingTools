@@ -895,15 +895,15 @@ def try_phase3_ripup(
     # sort ahead of every frontier-inferred tier under all select algorithms.
     _blame = getattr(pcb_data, '_via_unblock_blame', None)
     _blame_ids = set(_blame.pop(net_id, None) or ()) if _blame else set()
-    # Same channel, second producer (run-6 fix): the stuck-probe wall cells.
-    # A probe that exhausts below its limit proves the endpoint is walled, and
-    # the wall's TRACK owners are recorded by _identify_blocking_obstacles --
-    # often a 1-3 cell decisive net that count-ranking buries under
-    # large-perimeter bystanders (test-board run 5: GPIO7 at "1 cell, near
-    # tgt" under whole rails, N=3 exhausted on the wrong victims).
-    _wall = getattr(pcb_data, '_stuck_wall_blame', None)
-    _wall_ids = set(_wall.pop(net_id, None) or ()) if _wall else set()
-    _known_ids = (_blame_ids | _wall_ids) - exclude_ids
+    # (1a903195, reverted) a second producer used to feed this channel: the
+    # stuck-probe wall's TRACK owners, recorded by _identify_blocking_obstacles
+    # and promoted here as validator-named. That let the phase-1 DIAGNOSTIC
+    # estimator outrank phase 3's own frontier evidence unconditionally, and
+    # cost 8 disconnected nets on neo6502. Its intent -- a decisive 1-3 cell
+    # wall should not sort under large-perimeter bystanders -- belongs in
+    # rank_blockers, which already has `unique_cells`/`near_target_cells` for
+    # exactly that, not in a cross-feed from a different estimator.
+    _known_ids = _blame_ids - exclude_ids
     _known = [(nid, 1) for nid in sorted(_known_ids)] or None
 
     # PER-EDGE attribution (audit #2i): three tap edges failing in three

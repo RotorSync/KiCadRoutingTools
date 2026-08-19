@@ -250,9 +250,17 @@ def refresh() -> None:
     g['SETTLE_DEBUG'] = _truthy('KICAD_SETTLE_DEBUG')
     g['LEGACY_GATE_ORACLE'] = _truthy('KICAD_LEGACY_GATE_ORACLE')
     # #549 D: route.py's end-of-run oracle summary check (one staged
-    # kicad-cli DRC per run; strictly additive -- only ADDS failure
-    # disclosure). Default on; KICAD_ORACLE_SUMMARY=0 disables.
-    g['ORACLE_SUMMARY'] = _on_default('KICAD_ORACLE_SUMMARY')
+    # kicad-cli DRC per run). Now OPT-IN (KICAD_ORACLE_SUMMARY=1), reverted
+    # from default-on: it was billed as "strictly additive -- only ADDS
+    # failure disclosure", but it also APPENDS to failed_multipoint, which
+    # the reconcile gate reads, so oracle-open nets were retried and the
+    # board's copper changed. That made routing depend on whether kicad-cli
+    # is INSTALLED: the cloud image ships no KiCad, so the retry never fired
+    # there and the same commit produced different copper locally vs in the
+    # container -- the lora_v3 failure mode (7 DRC without KiCad, 0 with),
+    # and it silently breaks A/B comparability. Disclosure is fine to make
+    # environment-dependent; copper is not. See issue #675.
+    g['ORACLE_SUMMARY'] = _opt_in('KICAD_ORACLE_SUMMARY')
     g['NO_GATE_ORACLE'] = _truthy('KICAD_NO_GATE_ORACLE')
     g['GATE_DEBUG'] = _truthy('KICAD_GATE_DEBUG')
     g['NO_SWEEP_PLATED'] = _truthy('KICAD_NO_SWEEP_PLATED')

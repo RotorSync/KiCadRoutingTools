@@ -523,6 +523,13 @@ def _regions_from_fill_models(net_id, pcb_data, coord, plane_layer,
     # exists there in both fills, which on one net and one layer is one
     # conductor -- so union them. Coarse sampling can only MISS an overlap
     # (the over-split direction this module already prefers), never invent one.
+    # KEPT (with the material-predicate seeding below, deliberately as a PAIR).
+    # Both answer "what counts as one region": this unions two fills that
+    # predict copper at the same point on one net and one layer, and the
+    # `validity`/`_on_material` predicates gate a join seed on being ON that
+    # region. They were developed and tuned together; reverting one half
+    # leaves the predicate judging a more-fragmented region view than it was
+    # measured against -- a combination that existed in neither branch.
     _colo_uf = UnionFind()          # co-located unions ONLY, for the log line
     for _ka, _kb in colocated_pairs:
         uf.union(_ka, _kb)

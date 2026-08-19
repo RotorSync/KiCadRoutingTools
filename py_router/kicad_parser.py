@@ -861,23 +861,23 @@ def _custom_pad_global_polygons(pad_text: str, global_x: float, global_y: float,
                 filled = not re.search(r'\(fill\s+(?:no|none)\b', block)
                 r_in = 0.0 if filled else max(0.0, r_mid - hw)
                 if R > 0:
-                    # Adaptive tessellation for PRIMITIVE circles (run-4 B6).
-                    # The fixed inscribed 32-gon had a ~2.4um radial error at
-                    # r=0.5 -- larger than the 1.6um by which a solder-jumper
-                    # pad's real copper undercut the 0.09 floor on run 3's
-                    # tigard board, so check_drc graded a graze clean that
-                    # kicad-cli (exact arcs) flagged. Stay INSCRIBED (never
-                    # exceed real copper), 1um sagitta, capped at 64 vertices
-                    # for the 266-custom-pad boards (sofle_pico caution).
-                    N = _adaptive_circle_n(R)
+                    # REVERTED to main's fixed inscribed 32-gon. The adaptive
+                    # version (run-4 B6) was more accurate -- ~2.4um radial
+                    # error at r=0.5 vs 1um sagitta -- but it sits in the
+                    # PARSER, so it moved obstacle geometry and DRC grading
+                    # together on every board with circle-primitive custom
+                    # pads, which makes cross-era comparisons on those boards
+                    # unresolvable by re-grading (both sides shift). Restore
+                    # if the accuracy is wanted, but land it as a deliberate,
+                    # measured baseline change rather than a silent one.
+                    N = 32
                     outer = [(c[0] + R * math.cos(2 * math.pi * k / N),
                               c[1] + R * math.sin(2 * math.pi * k / N))
                              for k in range(N)]
                     if r_in > 0.05:
-                        Ni = _adaptive_circle_n(r_in)
-                        inner = [(c[0] + r_in * math.cos(-2 * math.pi * k / Ni),
-                                  c[1] + r_in * math.sin(-2 * math.pi * k / Ni))
-                                 for k in range(Ni)]
+                        inner = [(c[0] + r_in * math.cos(-2 * math.pi * k / N),
+                                  c[1] + r_in * math.sin(-2 * math.pi * k / N))
+                                 for k in range(N)]
                         local = outer + [outer[0], inner[0]] + inner[1:] + [inner[0]]
                     else:
                         local = outer

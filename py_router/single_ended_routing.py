@@ -1103,20 +1103,22 @@ def _diagnose_blocked_start(obstacles: 'GridObstacleMap', cells: List, label: st
                             + ([f"{pc} pad"] if pc else [])
                         blocker_strs.append(f"{name}({', '.join(parts) or 0})")
                     _diag(f"{print_prefix}    Blocking obstacles: {', '.join(blocker_strs)}")
-                    # Feed the TRACK-blocking identities to the net's own rip
-                    # cascade (same channel shape as _via_unblock_blame): the
-                    # wall that stopped a stuck probe is micron-exact evidence,
-                    # and validator-named blockers sort ahead of every
-                    # frontier-inferred tier. Pads are deliberately excluded --
-                    # a pad cannot be ripped.
-                    if current_net_id >= 0:
-                        _wall = getattr(pcb_data, '_stuck_wall_blame', None)
-                        if _wall is None:
-                            _wall = {}
-                            pcb_data._stuck_wall_blame = _wall
-                        _wall.setdefault(current_net_id, set()).update(
-                            _bnid for _bnid, (_n, _t, tc, _p)
-                            in blockers.items() if tc)
+                    # NOTE (1a903195, reverted here): this used to ALSO feed the
+                    # track-blocking identities into `pcb_data._stuck_wall_blame`,
+                    # which phase3_routing.try_phase3_ripup consumes as
+                    # validator-named blockers -- and those sort ahead of every
+                    # frontier-inferred tier. That made a DIAGNOSTIC pass a live
+                    # input to rip VICTIM SELECTION, which is why the commit
+                    # titled "diagnostics:" changed routing.
+                    #
+                    # Measured on neo6502 (set1): promoting stuck-probe walls
+                    # left 8 nets disconnected (+3.3V, /A8, /D7, /D6, /D0, /A1,
+                    # /A4, GND -- mostly one stranded pad each) where main
+                    # finished clean, and the final --rip-existing-nets '*' step
+                    # then repaired NONE of them, against 4-of-4 on main.
+                    # It did buy 1 DRC violation -> 0. Keep the split-by-kind
+                    # DIAGNOSTICS above (a pad is not a rip candidate, and the
+                    # merged count hid that); drop only the rip-cascade feed.
 
 
 def _via_drill_exclusion_radius(config: 'GridRouteConfig') -> int:
