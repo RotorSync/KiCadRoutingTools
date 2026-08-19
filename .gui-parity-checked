@@ -1,3 +1,55 @@
+f78f3298 2026-08-19 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit ac3b5dcc..f78f3298 on PLACEMENT (not main): ONE REAL GAP, found by a gate
+and fixed (f78f3298). Run deliberately BEFORE merging placement -> main, so the
+merge arrives with GUI parity already confirmed rather than discovered after.
+
+Range note: the marker's first token was ac3b5dcc because the main->placement
+merge (3a8a130c) brought main's entry to the top, which resets the effective
+audited SHA to main's. The gate therefore measured 63 engine/GUI files -- the
+whole placement campaign's surface, most of which placement's own earlier
+ledger entries already covered. What is genuinely new since those is the
+#522 py_placer reorg's tail, group_routing (#459), the six engine reverts in
+6166a98b, and this session's harness work.
+
+THE GAP (fixed in f78f3298). manifest_to_plan had NO handling for the #459
+placement-block flags, so --group / --group-scope / --group-by fell through the
+generic unknown-flag path into step['params']. ai_plan's route action reads
+step["group"] / ["group_by"] / ["group_scope"] as TOP-LEVEL keys
+(_group_net_names) and never looks in params -- so a recorded chain carrying
+--group converted to a plan whose route step silently widened from one block to
+the WHOLE BOARD. That is verbatim the divergence _group_net_names' docstring
+says it exists to prevent, and the gate had been reporting it as FAILED since
+before this session (reproduced identically at unmodified 4accece8, so it was
+pre-existing, not merge fallout).
+
+Mechanical sweep, all three CLAUDE.md dimensions:
+* TEN new CLI flags in the range. Three are the gap above. Three (--undo,
+  --preview, --list-groups) are placement TOOLS the converter refuses loudly
+  and by design (gate: "refused loudly, chain intact"). Three (--capabilities,
+  --json-out, --preview-png) are route.py OUTPUT/INTROSPECTION flags -- print
+  an inventory and exit, tee the JSON summary to a file, render a preview
+  image -- none changes routing, so none owes a GUI control. The tenth,
+  route_planes --via-size, is a HELP-TEXT rewrite: default=None on both
+  branches, so no changed-default drift.
+* No new CLI main() post-pass: gate 2 reports 8 registered / 15 in active use /
+  0 unreachable / 0 failures / 0 warnings.
+* Engine kwargs: gate 5 drives the real dialog through a plan and compares the
+  full batch_route param set; copper came out IDENTICAL, which is the Class-1
+  check in its strongest form.
+
+All five gates green at this SHA:
+  manifest_plan_parity   8407 flag-checks / 402 manifests, 0 mismatch;
+                         12 params -> controls, 0 unresolved;
+                         placement-block flags OK (was FAILED);
+                         placement tools refused loudly
+  cli_postpass_coverage  0 failures, 0 warnings
+  settings_roundtrip     clean: save / restore / legacy / re-save, 188 keys
+                         (placement carries 7 controls main does not)
+  fanout_rotated_gui     10/10 -- CLI and GUI both 104 tracks / 0 vias /
+                         0 failed, track sets identical, every escape outward
+  gui_engine_parity      PARITY; copper sets IDENTICAL (1267 segments,
+                         128 vias, 0 cli-only, 0 gui-only)
+
 ac3b5dcc 2026-08-18 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit 55b54f1b..ac3b5dcc: NO GAPS. Sixteen commits, of which six are skill/doc
 edits and one is the previous ledger entry; the engine/GUI surface is eleven
