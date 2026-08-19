@@ -1461,6 +1461,11 @@ def main():
         # and check_drc grade the board at this floor.
         'min_clearance_used': eff_clearance,
     }
+    try:                       # #653: env knobs into the machine-readable
+        import env_knobs as _ek653   # summary, so a harness can detect a
+        summary['env_knobs'] = _ek653.active_env_knobs()   # dirty baseline
+    except Exception:          # without re-reading logs
+        pass
     print(f"JSON_SUMMARY: {_json.dumps(summary)}")
     return 0
 

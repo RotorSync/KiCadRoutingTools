@@ -450,3 +450,55 @@ def refresh() -> None:
 
 
 refresh()
+
+
+# --- #653: what was actually set, for the log and the JSON summary ----------
+#
+# Knobs are read once at import and never echoed, so a wave launched from a
+# shell that exported KICAD_* inherited them SILENTLY and its logs were
+# indistinguishable from a clean run. Measured cost: a whole A/B baseline
+# (orangecrab, "33 issues") was env-contaminated -- same commit, flags, .so and
+# python graded 37 clean -- and the cause could only be INFERRED, because
+# nothing in the log recorded what was set. These two helpers make a dirty
+# baseline detectable post-hoc instead of by re-running.
+#
+# Reported as the RAW environment, not the parsed attributes above: the point
+# is to record what the operator's shell actually handed this process,
+# including a knob this build does not know about (a knob from a branch, or
+# one deleted since) -- exactly the case a parsed inventory would hide.
+
+# KiCad's own installation variables are NOT knobs: the versioned dirs
+# (KICAD9_FOOTPRINT_DIR, KICAD8_3DMODEL_DIR, ...) and the stock data paths say
+# nothing about routing behaviour and would bury the real knobs in noise
+# inside the GUI, where KiCad sets a dozen of them.
+_INSTALL_PREFIX = __import__('re').compile(r'^KICAD\d+_')
+_INSTALL_NAMES = frozenset({
+    'KICAD_USER_TEMPLATE_DIR', 'KICAD_TEMPLATE_DIR', 'KICAD_STOCK_DATA_HOME',
+    'KICAD_DOCUMENTS_HOME', 'KICAD_CONFIG_HOME', 'KICAD_DATA', 'KICAD_PATH',
+    'KICAD_RUN_FROM_BUILD_DIR', 'KICAD_ALIAS_SUPPORT',
+})
+
+
+def active_env_knobs() -> dict:
+    """{name: value} for every KICAD_*/KRT_* variable set in the environment.
+
+    Installation paths (see _INSTALL_NAMES / KICAD<n>_*) are excluded. Read
+    from os.environ LIVE rather than from the import-time snapshot, so a
+    harness that sets a knob and calls refresh() is reported accurately.
+    """
+    out = {}
+    for k, v in os.environ.items():
+        if not (k.startswith('KICAD') or k.startswith('KRT_')):
+            continue
+        if _INSTALL_PREFIX.match(k) or k in _INSTALL_NAMES:
+            continue
+        out[k] = v if len(v) <= 200 else v[:197] + '...'
+    return dict(sorted(out.items()))
+
+
+def env_knobs_line() -> str:
+    """One-line, log-greppable inventory of the active knobs."""
+    knobs = active_env_knobs()
+    if not knobs:
+        return "ENV KNOBS: none"
+    return "ENV KNOBS: " + ' '.join(f"{k}={v}" for k, v in knobs.items())

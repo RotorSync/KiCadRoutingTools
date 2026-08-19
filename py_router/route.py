@@ -3520,6 +3520,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                                     'power_trace_ampacity',
                                                     'min_clearance_used')
                                         if k in summary]
+    try:                       # #653: env knobs into the machine-readable
+        import env_knobs as _ek653   # summary, so a harness can detect a
+        summary['env_knobs'] = _ek653.active_env_knobs()   # dirty baseline
+    except Exception:          # without re-reading logs
+        pass
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
     _SUMMARY_SINK.append(summary)
 

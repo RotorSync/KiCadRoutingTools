@@ -1515,6 +1515,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         # width floor, {layer: [solved_mm, floor_mm]} -- those layers will NOT
         # meet the impedance request. Key absent when no clamp fired.
         summary['impedance_width_clamped'] = impedance_width_clamped
+    try:                       # #653: env knobs into the machine-readable
+        import env_knobs as _ek653   # summary, so a harness can detect a
+        summary['env_knobs'] = _ek653.active_env_knobs()   # dirty baseline
+    except Exception:          # without re-reading logs
+        pass
     print(f"JSON_SUMMARY: {json.dumps(summary)}")
 
     # Write output file or return results for direct application

@@ -3654,6 +3654,11 @@ Examples:
     # source, so the run either finished or raised.
     _summary.setdefault("complete", True)
     _summary.setdefault("status", "ok")
+    try:                       # #653: env knobs into the machine-readable
+        import env_knobs as _ek653   # summary, so a harness can detect a
+        _summary['env_knobs'] = _ek653.active_env_knobs()   # dirty baseline
+    except Exception:          # without re-reading logs
+        pass
     print('JSON_SUMMARY: ' + json.dumps(_summary, sort_keys=True, default=str),
           flush=True)
 
