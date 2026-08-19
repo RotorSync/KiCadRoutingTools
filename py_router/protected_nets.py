@@ -238,6 +238,24 @@ def locked_net_names(pcb_data) -> Set[str]:
             if i in pcb_data.nets and pcb_data.nets[i].name}
 
 
+def cached_protection_map(pcb_data, input_file: Optional[str] = None) -> Dict[str, str]:
+    """protection_map(), memoized per pcb_data for the in-run rip ladders.
+
+    The phase-3 tap ladder and the blocking analyser consult protection on
+    every candidate, and protection_map re-reads the sibling .kicad_pro each
+    time. The map cannot change mid-run (the .pro is read-only to the engine
+    and locked copper does not move), so one resolve per board is correct.
+    """
+    m = getattr(pcb_data, '_protection_map_memo', None)
+    if m is None:
+        m = protection_map(pcb_data, input_file)
+        try:
+            pcb_data._protection_map_memo = m
+        except Exception:
+            pass
+    return m
+
+
 def protection_map(pcb_data, input_file: Optional[str] = None) -> Dict[str, str]:
     """Full protection map for a board: the .kicad_pro list plus nets with
     KiCad-locked copper. 'locked' wins where both apply -- unlike the .pro
@@ -247,12 +265,54 @@ def protection_map(pcb_data, input_file: Optional[str] = None) -> Dict[str, str]
     return m
 
 
+
+
+
+
 def exact_names(patterns: Optional[Iterable[str]]) -> Set[str]:
     """The non-glob entries of a pattern list: naming a net exactly is the
     deliberate-override signal that lifts its protection for this step."""
     if not patterns:
         return set()
     return {p for p in patterns if p and not (_GLOB_CHARS & set(p))}
+
+
+def stash_rip_overrides(pcb_data, patterns: Optional[Iterable[str]]) -> Set[str]:
+    """Record the exact-name rip overrides on pcb_data so the IN-RUN ladders
+    can honor them (run-6 z2 fix). The pre-run filters (--rip-existing-nets /
+    --force-reroute) already lift 'user' protection for exactly-named nets,
+    but the in-run ladders re-consult cached_protection_map, which still
+    lists them -- so the phase-3 tap cascade refused a net the operator had
+    explicitly named ('protected_skipped {"phase3 tap cascade":
+    {USB_DM_R: user}}' while --rip-existing-nets named it). 'locked' is
+    never overridable, here or anywhere."""
+    names = exact_names(patterns)
+    if names:
+        pcb_data._rip_override_names = set(
+            getattr(pcb_data, '_rip_override_names', None) or set()) | names
+    return getattr(pcb_data, '_rip_override_names', None) or set()
+
+
+def rip_override_names(pcb_data) -> Set[str]:
+    """The exact-name rip overrides stashed for this run (empty set if none)."""
+    return getattr(pcb_data, '_rip_override_names', None) or set()
+
+
+
+
+# What the last run's rip filters refused, and why: {context: {net: reason}}.
+# The print below is for a human reading a log; a PROGRAM driving the router
+# cannot see it, and the router's own failure hint tells that program to retry
+# with --rip-existing-nets naming exactly the net that was just refused. A
+# caller following that advice loops forever. route.py drains this into
+# JSON_SUMMARY['protected_skipped'] so the refusal is machine-readable, and so a
+# caller can tell "name it exactly to override" from "locked, no override ever".
+PROTECTED_SKIPPED: Dict[str, Dict[str, str]] = {}
+
+
+def clear_skipped() -> None:
+    """Reset the record. route.py calls this once per run."""
+    PROTECTED_SKIPPED.clear()
 
 
 def filter_rippable_names(names: List[str], protected: Dict[str, str],
@@ -271,6 +331,8 @@ def filter_rippable_names(names: List[str], protected: Dict[str, str],
         else:
             kept.append(n)
     if blocked:
+        PROTECTED_SKIPPED.setdefault(context, {}).update(
+            {n: protected[n] for n in blocked})
         by_reason: Dict[str, List[str]] = {}
         for n in blocked:
             by_reason.setdefault(protected[n], []).append(n)

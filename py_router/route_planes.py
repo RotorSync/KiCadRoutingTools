@@ -2870,6 +2870,23 @@ def _stitch_plane_area_vias(
     return new_via_dicts
 
 
+#: The pad tally from the last create_plane() in this process.
+#: #487 folded plane RESISTANCE into the machine-readable summary for exactly
+#: this reason and stopped one field short: the summary could report the
+#: plane's ampacity but not whether it reached its pads. `complete: true,
+#: status: "ok", EXIT=0` was the entire machine-readable story of a pour that
+#: left 5 pads open -- the number is held three times inside create_plane, and
+#: main() calls it as a bare statement, so none of it survived.
+_LAST_PAD_TALLY: dict = {}
+
+
+def consume_pad_tally() -> dict:
+    """Take (and clear) the last pour's pad tally."""
+    global _LAST_PAD_TALLY
+    out, _LAST_PAD_TALLY = dict(_LAST_PAD_TALLY), {}
+    return out
+
+
 def create_plane(
     input_file: str,
     output_file: str,
@@ -3002,6 +3019,31 @@ def create_plane(
     # copper in different ORDER, and list position leaks into decisions.
     from kicad_parser import canonicalize_pcb_data_order
     canonicalize_pcb_data_order(pcb_data)
+
+    # --plane-layers takes BARE copper layer names positionally matched to
+    # --nets, but the natural thing to type (and what the routing skill's R1
+    # stage used to instruct) is a net:layer pair. The argument is untyped
+    # `str`, so "GND:B.Cu" was accepted AS A LAYER NAME, travelled through
+    # generate_zone_sexpr, and was written verbatim as (layer "GND:B.Cu").
+    # KiCad then refuses the whole file ("Failed to load board") -- while every
+    # in-repo checker read it happily, because check_connected's copper-layer
+    # census only tested `endswith('.Cu')`. Two full routing laps of run 11
+    # were spent on boards nobody could open.
+    #
+    # Engine-side, not in main(): main() never parses the board so it cannot
+    # validate, and this way the CLI, the GUI planes tab and
+    # route_disconnected_planes all inherit the guard (same reasoning as the
+    # copper-to-edge rule below).
+    _copper = list(getattr(pcb_data.board_info, 'copper_layers', None) or ())
+    if _copper:
+        _bad = [l for l in plane_layers if l not in _copper]
+        if _bad:
+            print(f"Error: {', '.join(sorted(set(_bad)))} is not a copper layer "
+                  f"of this board ({', '.join(_copper)}). --plane-layers takes "
+                  f"BARE layer names positionally matched to --nets "
+                  f"(e.g. --nets GND GNDA --plane-layers B.Cu B.Cu), "
+                  f"not net:layer pairs.")
+            return _empty_plane_results(return_results)
 
     # Route trace (#482): plane creation builds its tap tracks/vias as dicts in
     # all_new_segments/all_new_vias (never touching pcb_data.segments), so record
@@ -3781,6 +3823,8 @@ def create_plane(
         print(f"  Nets processed: {len(net_names)}")
         print(f"  Total new vias placed: {total_vias_placed}")
         print(f"  Total traces added: {total_traces_added}")
+        _LAST_PAD_TALLY['failed_pads'] = int(total_failed_pads)
+        _LAST_PAD_TALLY['pads_needing_vias'] = int(total_pads_needing_vias)
         if total_failed_pads > 0:
             print(f"  Total failed pads: {total_failed_pads}")
 
@@ -3910,6 +3954,7 @@ def create_plane(
             output_file, net_ids, net_names, plane_layers)
         if geo_results:
             geo_failed = sum(info['failed'] for info in geo_results.values())
+            _LAST_PAD_TALLY['geometric_failed'] = int(geo_failed)
             if geo_failed != total_failed_pads:
                 print(f"\n  {geo_failed} pad(s) are not connected to their "
                       f"plane by the pour alone -- EXPECTED (#562): the plane "
@@ -4027,10 +4072,13 @@ Examples:
     parser.add_argument("--nets", "-n", nargs="+", required=True,
                         help="Net name(s) for the plane(s) (e.g., GND VCC)")
     parser.add_argument("--plane-layers", "-p", nargs="+", required=True,
-                        help="Plane layer(s) for the zone(s), one per net (e.g., In1.Cu In2.Cu)")
+                        help="BARE copper layer name(s) for the zone(s), one per net, "
+                             "positionally matched to --nets (e.g., In1.Cu In2.Cu). "
+                             "NOT net:layer pairs -- 'GND:B.Cu' is not a layer name and "
+                             "is refused against the board's own copper layers.")
 
     # Via and track geometry
-    parser.add_argument("--via-size", type=float, default=None, help="Via outer diameter in mm (default: the board Default net-class via, else 0.5)")
+    parser.add_argument("--via-size", type=float, default=None, help="Via outer diameter in mm (default: the board Default net-class via, else 0.5). NOT a hard floor: a tap into a fine-pitch pad field can escalate to the --fab-tier via and print a per-via warning, because a 0.5mm via does not fit a 0.5mm-pitch TQFP. Pass --fab-overrides to forbid the escalation -- at the cost of the taps that then cannot be made")
     parser.add_argument("--via-drill", type=float, default=None, help="Via drill size in mm (default: the board Default net-class via drill, else 0.3)")
     parser.add_argument("--track-width", type=float, default=None, help="Track width for via-to-pad connections in mm (default: the board Default net-class width, else 0.3)")
     parser.add_argument("--clearance", type=float, default=None, help="Copper clearance CEILING in mm. When given, every net class (Default included) is capped at min(class, this) and the writeback clamps. When OMITTED, each net routes at its own net-class clearance (base = the board's Default class, else 0.25).")
@@ -4165,7 +4213,7 @@ Examples:
     # keep their larger PLANE_EDGE_CLEARANCE fallback when the board declares none.
     # Resolved here, before enforce_fab_floors and every downstream use.
     from list_nets import (board_default_netclass_clearance, board_default_netclass_param,
-                           board_constraint)
+                           resolve_cli_floor)
     for _pname, _nckey, _fallback in (('track_width', 'track_width', defaults.TRACK_WIDTH),
                                       ('via_size', 'via_diameter', defaults.VIA_SIZE),
                                       ('via_drill', 'via_drill', defaults.VIA_DRILL)):
@@ -4188,20 +4236,18 @@ Examples:
               f"clearance {args.clearance}mm.")
     else:
         args.clearance = min(_dflt_clr, _ceiling) if _dflt_clr is not None else _ceiling
-    if args.hole_to_hole_clearance is None:
-        _h2h = board_constraint(args.input_file, 'min_hole_to_hole')
-        args.hole_to_hole_clearance = _h2h if _h2h is not None else defaults.HOLE_TO_HOLE_CLEARANCE
-        print(f"--hole-to-hole-clearance not given; using "
-              f"{'the board min_hole_to_hole' if _h2h is not None else 'the fallback'} "
-              f"{args.hole_to_hole_clearance}mm.")
-    if args.board_edge_clearance is None:
-        # Planes keep their larger edge keep-out (PLANE_EDGE_CLEARANCE) only when
-        # the board declares no edge rule of its own.
-        _edge = board_constraint(args.input_file, 'min_copper_edge_clearance')
-        args.board_edge_clearance = _edge if _edge is not None else defaults.PLANE_EDGE_CLEARANCE
-        print(f"--board-edge-clearance not given; using "
-              f"{'the board min_copper_edge_clearance' if _edge is not None else 'the fallback'} "
-              f"{args.board_edge_clearance}mm.")
+    # Shared resolver (list_nets.resolve_cli_floor). Planes keep their larger
+    # edge keep-out (PLANE_EDGE_CLEARANCE) only when the board declares no edge
+    # rule of its own -- and a DECLARED 0.0 is exactly that case, KiCad's "not
+    # configured". Read straight it was taken as a rule, dropping the plane
+    # inset from 0.5 to 0.0 while the GUI's plane tab held 0.5 (swig_gui.py
+    # _effective_plane_edge_clearance already had the `> 1e-9` guard).
+    args.hole_to_hole_clearance = resolve_cli_floor(
+        args.input_file, 'hole_to_hole', args.hole_to_hole_clearance,
+        defaults.HOLE_TO_HOLE_CLEARANCE, '--hole-to-hole-clearance')
+    args.board_edge_clearance = resolve_cli_floor(
+        args.input_file, 'board_edge_clearance', args.board_edge_clearance,
+        defaults.PLANE_EDGE_CLEARANCE, '--board-edge-clearance')
     set_default_fab_tier(*fab_tier_from_args(args))
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.input_file),
@@ -4278,6 +4324,10 @@ Examples:
     _out_before = (os.path.getmtime(args.output_file)
                    if args.output_file and os.path.isfile(args.output_file) else None)
 
+    # The engine's cooperative `cancel_check` / `progress_callback` are the
+    # GUI's (the planes tab's Cancel button); the CLI passes neither. There is
+    # deliberately no wall-clock budget -- no result this tool produces may
+    # depend on timing.
     create_plane(
         input_file=args.input_file,
         output_file=args.output_file,
@@ -4488,10 +4538,44 @@ Examples:
         "min_clearance_used": _cl.effective(args.clearance),
         "plane_nets": sorted(set(args.nets)),
     }
+    # `plane_nets` is a de-duplicated NAME list, and --nets/--plane-layers are
+    # matched POSITIONALLY, so `--nets GND GND --plane-layers In1.Cu In2.Cu`
+    # collapses two poured zones into one entry and the second one vanishes from
+    # the record entirely. Run 14 poured GND on both inner layers and its
+    # summary said `"plane_nets": ["GND"]`. Keep that key as it was -- consumers
+    # read it -- and state the actual zones alongside.
+    try:
+        _layers = list(getattr(args, 'plane_layers', None) or [])
+        _summary["plane_zones"] = [
+            {"net": _n, "layer": (_layers[_i] if _i < len(_layers) else None)}
+            for _i, _n in enumerate(args.nets)]
+    except Exception:                                       # noqa: BLE001
+        pass
     # #487: the plane resistance/ampacity numbers used to live only in stdout
     # ("report-only ... print and discard"). Fold the per-net results the
     # engine noted into the machine-readable summary so chains/graders/skills
     # can gate on them.
+    # The pad tally. Without it `complete: true, status: "ok", EXIT=0` is the
+    # whole machine-readable story of a pour that left pads open -- the text
+    # said "Total failed pads: 5" and the JSON had no channel for it at all.
+    _pt = consume_pad_tally()
+    if _pt:
+        _summary["pads"] = _pt
+        # SAY that this is one tally over every zone. The engine aggregates, so
+        # `failed_pads: 12` on a two-zone pour does not say which zone failed,
+        # and a reader pairing it with a single-entry `plane_nets` would
+        # reasonably assume it was scoped to that one net.
+        _summary["pads_scope"] = ("all zones in this run, summed -- not per "
+                                  "zone; see plane_zones for what was poured")
+        # `geometric_failed` is recorded but does NOT flip the status: under
+        # the pours-first architecture the plane step places no taps, so pads
+        # unreached by the pour alone are EXPECTED here (#562) -- the route
+        # step welds them and its finalize verifies/repairs. Only
+        # `failed_pads` (the engine's own via-placement failures) marks the
+        # pour incomplete.
+        if _pt.get('failed_pads'):
+            _summary["status"] = "incomplete-pads"
+
     try:
         from plane_resistance import consume_resistance_results
         _res = consume_resistance_results()
@@ -4508,10 +4592,26 @@ Examples:
                 for _n, _r in sorted(_res.items())]
     except Exception:
         pass
-    print("JSON_SUMMARY: " + _json.dumps(_summary))
+
+    # The run either finished or raised; there is no partial shape to report
+    # (the CLI has no cancel source). `complete`/`status` are kept because
+    # consumers read them -- see route_summary's sticky-incompleteness merge.
+    import json as _json
+    _summary.setdefault('complete', True)
+    _summary.setdefault('status', 'ok')
+    print('JSON_SUMMARY: ' + _json.dumps(_summary, sort_keys=True, default=str),
+          flush=True)
+    return 0
 
 
 if __name__ == "__main__":
     from console_encoding import enable_utf8_console
     enable_utf8_console()  # cp1252-safe non-ASCII prints (issue #152)
-    main()
+    # CMD/EXIT self-echo (run-3 B1); see route.py for the external-kill caveat.
+    # CLI-`__main__`-only: the GUI imports create_plane.
+    import cli_banner
+    cli_banner.install()
+    # `or 0`: main() has one early `return` (the net/plane-layer count
+    # mismatch) that returns None, and returning None from sys.exit is 0 --
+    # which is what this block did before, so that path is unchanged.
+    sys.exit(main() or 0)

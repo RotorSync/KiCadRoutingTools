@@ -279,20 +279,63 @@ def build_run(run_dir, size, ss, alpha, rip_hold, chunks):
     return build_boards(steps, final, size, ss, alpha, rip_hold, chunks)
 
 
-def build_boards(steps, final, size, ss, alpha, rip_hold, chunks):
+def build_boards(steps, final, size, ss, alpha, rip_hold, chunks, stage=None,
+                 marks=None):
     """Frames for a chain given as [(label, board, trace|None), ...] plus the
-    final board. ``build_run`` is this with the chain discovered from a run dir."""
+    final board. ``build_run`` is this with the chain discovered from a run dir.
+
+    ``stage`` (movie_camera.Stage, #431) adds a camera and animates FOOTPRINT
+    motion for placement rounds. With ``stage=None`` -- every existing caller --
+    the three hooks below are falsy branches and the routing movie is unchanged.
+
+    ``marks``, when a list is passed, collects ``(label, board, first, last)``
+    frame indices per step -- what a composer needs to caption, badge or splice
+    a beat without re-deriving where it landed. Rendering one pass and reading
+    the boundaries back is the only way to keep ONE scale across the whole
+    film; a per-segment call restarts from an empty board and re-reveals all
+    the copper, which reads as the board redrawing itself between beats.
+    """
     from kicad_parser import parse_kicad_pcb
     if not final:
         return []
     # dynamic_zones: plane pours reveal as each plane is created, rather than
-    # sitting under every frame from the start.
+    # sitting under every frame from the start. It is ALSO what lets a Stage
+    # animate part motion: with it, frame() draws pads per frame from
+    # renderer.pcb, so re-pointing that attribute moves the parts.
     r, layers = _renderer(final, None, size, ss, alpha, dynamic_zones=True)
     m = Movie(r, layers, rip_hold=rip_hold)
+    if stage is not None:
+        stage.attach(m, r, layers)
     m.snapshot("input")
-    for label, board, trace_path in steps:
+    for _step in steps:
+        # 4th element (optional, back-compatible): 'revert' undoes a beat with
+        # the SILENT trueup instead of reveal_delta -- which would flash the
+        # copper red and label it "(rip)". Nothing was ripped; an attempt was
+        # not kept, and the two read completely differently in a film.
+        label, board, trace_path = _step[0], _step[1], _step[2]
+        mode = _step[3] if len(_step) > 3 else None
+        _first = len(m.frames)
         pcb = parse_kicad_pcb(board)
         seg_rows, via_rows = _board_rows(pcb, layers)
+        if mode == 'revert':
+            if stage is not None:
+                r.pcb = pcb
+            m.reconcile_to(seg_rows, via_rows, label)
+            if len(m.frames) == _first:
+                # An attempt that only MOVED parts changes no copper, so the
+                # silent trueup stays silent and the undo is invisible. The
+                # parts still went back; show that they did.
+                m.snapshot(label)
+            if marks is not None:
+                marks.append((label, board, _first, len(m.frames)))
+            continue
+        if stage is not None:
+            # The renderer draws footprints from THIS board from here on.
+            r.pcb = pcb
+            if stage.enter_step(label, board, pcb, seg_rows, via_rows):
+                if marks is not None:
+                    marks.append((label, board, _first, len(m.frames)))
+                continue        # a placement round; the stage emitted its frames
         # Reveal any plane whose pour exists on this step board but had no fine
         # plane-tap event (untraced plane step) so its fill still appears here.
         step_zone_nets = {z.net_id for z in (getattr(pcb, 'zones', None) or [])
@@ -304,6 +347,8 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks):
                 for _nid in step_zone_nets:
                     m.reveal_zone(_nid)
                 m.reconcile_to(seg_rows, via_rows, label)   # trueup to step board
+                if marks is not None:
+                    marks.append((label, board, _first, len(m.frames)))
                 continue
             except Exception as e:
                 print(f"animate_route: trace {trace_path} failed ({e}); "
@@ -311,11 +356,17 @@ def build_boards(steps, final, size, ss, alpha, rip_hold, chunks):
         for _nid in step_zone_nets:      # untraced plane step: reveal its pours
             m.reveal_zone(_nid)
         m.reveal_delta(seg_rows, via_rows, label, chunks=chunks)
+        if marks is not None:
+            marks.append((label, board, _first, len(m.frames)))
     # final trueup (in case the graded final differs from the last step board)
     fpcb = parse_kicad_pcb(final)
+    if stage is not None:
+        r.pcb = fpcb
     for _z in (getattr(fpcb, 'zones', None) or []):   # ensure every pour shows
         m.reveal_zone(_z.net_id)
     m.reconcile_to(*_board_rows(fpcb, layers), "routed")
+    if stage is not None:
+        stage.outro()
     return m.frames
 
 
@@ -326,7 +377,14 @@ def _write_mp4(frames, out, fps) -> bool:
     try:
         import numpy as np
         import imageio.v2 as imageio
-    except Exception:
+    except Exception as e:
+        # SAY SO. The encode-failure branch below prints and this one did not,
+        # so a missing imageio-ffmpeg silently produced a .gif where the caller
+        # asked for .mp4 -- the only trace being a `wrote ...` line with a
+        # different extension than the one requested. Two branches, one
+        # consequence, and only one of them was audible.
+        print(f"animate_route: mp4 unavailable ({e}); falling back to GIF. "
+              f"`pip install imageio imageio-ffmpeg` for mp4.", file=sys.stderr)
         return False
     try:
         # yuv420p (broadly playable: browsers, QuickTime, Slack, social) needs
@@ -365,7 +423,22 @@ def save_movie(frames, out, fps, end_hold, png_dir=None):
         dur = max(20, int(1000 / max(0.1, fps)))
         frames[0].save(out, save_all=True, append_images=seq[1:],
                        duration=dur, loop=0, optimize=False)
-        print(f"animate_route: wrote {out} ({len(frames)} frames, {dur}ms each, "
+        # Count what LANDED, not what was handed to the encoder. Pillow's GIF
+        # writer collapses runs of byte-identical frames into one frame with an
+        # accumulated duration, and this film is full of such runs by
+        # construction -- card holds and the end hold are literal repeats of a
+        # single Image. So `len(frames)` overstates the file: one run printed
+        # 377 and wrote 348, and the gap was only found by counting the
+        # delivered GIF by hand. A number nobody can reconcile against the
+        # artifact is worse than no number.
+        _n = len(frames)
+        try:
+            from PIL import Image as _PILImage, ImageSequence
+            with _PILImage.open(out) as _chk:
+                _n = sum(1 for _ in ImageSequence.Iterator(_chk))
+        except Exception:                                       # noqa: BLE001
+            pass
+        print(f"animate_route: wrote {out} ({_n} frames, {dur}ms each, "
               f"{frames[0].size[0]}x{frames[0].size[1]})")
     if png_dir:
         os.makedirs(png_dir, exist_ok=True)

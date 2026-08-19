@@ -25,6 +25,7 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO))
 sys.path.insert(0, str(_REPO / 'py_router'))  # #522
+sys.path.insert(0, str(_REPO / 'py_placer'))  # #522
 sys.path.insert(0, str(_REPO / 'py_tools'))  # #522
 from kicad_parser import parse_kicad_pcb, detect_kicad_version, KICAD_10_MIN_VERSION  # noqa: E402
 

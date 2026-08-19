@@ -294,7 +294,11 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         # #436: cross-class-aware graze fix — measure shortfall against each
         # net's own netclass floor and each foreign net's class, not the global
         # clearance (daisho's 456 same-class grid grazes, cparti's SW1-vs-SMA).
-        net_clearances=_nc, board_edge_clearance=_bec)
+        net_clearances=_nc, board_edge_clearance=_bec,
+        # #617: this front HAS a config, so the explicit
+        # `config.hole_clearance` override reaches resolve_hole_clearance
+        # rather than being silently dropped. Both fronts call this pipeline.
+        config=config)
     counts['microshifted'] = _ms_segs
     _trace('microshift')
     strip.extend(_ms_strip)

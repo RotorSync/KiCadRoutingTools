@@ -207,6 +207,16 @@ def kicad_python_candidates() -> List[str]:
 _KICAD_PYTHON_MEMO: List[Optional[str]] = []
 
 
+def _windows_versioned_pythons():
+    """Standard Windows installs are VERSIONED (C:\\Program Files\\KiCad\\
+    10.0\\bin\\python.exe); the versionless path above matches none of them,
+    which silently disabled every exact-fill consumer on Windows. Newest
+    version first."""
+    import glob
+    return sorted(glob.glob(r"C:\Program Files\KiCad\*\bin\python.exe"),
+                  reverse=True)
+
+
 def find_kicad_python() -> Optional[str]:
     """Path of a python that can import pcbnew, or None.
 

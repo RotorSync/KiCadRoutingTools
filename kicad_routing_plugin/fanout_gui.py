@@ -19,6 +19,13 @@ if ROOT_DIR not in sys.path:
 _ENGINE_DIR = os.path.join(ROOT_DIR, 'py_router')
 if os.path.isdir(_ENGINE_DIR) and _ENGINE_DIR not in sys.path:
     sys.path.insert(0, _ENGINE_DIR)
+# py_placer/ holds the placement package (placement.groups / .fanout_clearance
+# are imported from here) and py_tools/ the instruments. Same exists() guard so
+# a FLAT installed layout (PCM zip) keeps working.
+for _sib in ('py_placer', 'py_tools'):
+    _d = os.path.join(ROOT_DIR, _sib)
+    if os.path.isdir(_d) and _d not in sys.path:
+        sys.path.append(_d)
 
 import routing_defaults as defaults
 from kicad_parser import mm_to_iu
@@ -1366,6 +1373,9 @@ class FanoutTab(wx.Panel):
                     res.get('skipped') or [],
                     kind='ball' if kind == 'bga' else 'pad net')
                 return
+            # The APPLY phase narrates too -- gui_utils.redirect_prints_to_log
+            # exists because every tab's apply ran after its worker restored
+            # stdout, so its output reached the terminal but never the log tab.
             from .gui_utils import redirect_prints_to_log
             with redirect_prints_to_log(self.append_log):
                 self._apply_fanout_results(
@@ -1434,6 +1444,19 @@ class FanoutTab(wx.Panel):
         """Handle BGA differential checkbox change - switch net panel mode."""
         self.net_panel.set_differential_mode(is_differential)
 
+    def _fanout_status(self, message):
+        """Status update for a fanout phase.
+
+        Engine-thread progress reaches the UI through gui_utils.ui_thread_status,
+        which marshals off-thread callers with wx.CallAfter and repaints
+        narrowly (no Gauge.Pulse) -- see its docstring for why that matters
+        inside a KiCad action plugin. Guarded: reporting must never break the
+        fanout.
+        """
+        from .gui_utils import ui_thread_status
+        ui_thread_status(getattr(self, 'status_text', None),
+                         getattr(self, 'progress_bar', None), message)
+
     def _on_fanout(self, event):
         """Handle fanout button click."""
         component_ref = self.net_panel.get_selected_component()
@@ -1492,19 +1515,6 @@ class FanoutTab(wx.Panel):
         else:
             config = self.qfn_options.get_config()
             self._run_qfn_fanout(footprint, selected_nets, config)
-
-    def _fanout_status(self, message):
-        """Status update for the fanout, which runs ON the UI thread.
-
-        A bare SetLabel cannot repaint while the main thread is blocked, so
-        force it -- otherwise the tab shows one frozen label for the whole run.
-        Guarded: reporting must never break the fanout. See
-        gui_utils.ui_thread_status for why the repaint is deliberately narrow
-        (no Gauge.Pulse) inside an action plugin.
-        """
-        from .gui_utils import ui_thread_status
-        ui_thread_status(getattr(self, 'status_text', None),
-                         getattr(self, 'progress_bar', None), message)
 
     def _run_bga_fanout(self, footprint, net_patterns, config):
         """Run BGA fanout."""

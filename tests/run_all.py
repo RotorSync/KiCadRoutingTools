@@ -106,34 +106,63 @@ def main():
     def run_one(f):
         name = os.path.basename(f)
         try:
-            r = subprocess.run([sys.executable, f], cwd=ROOT,
-                               capture_output=True, text=True, timeout=args.timeout)
+            # `text=True` alone decodes with the LOCALE default (cp1252 on
+            # Windows) and raises UnicodeDecodeError in the reader thread the
+            # moment any child prints a byte it cannot decode -- a degree sign,
+            # an ohm, a micro. That killed the whole runner mid-suite with a
+            # threading traceback and NO summary, which reads as "the tests
+            # crashed" rather than "the runner cannot read them". Every other
+            # subprocess call in this repo already pins utf-8 + replace.
+            r = subprocess.run([sys.executable, '-X', 'utf8', f], cwd=ROOT,
+                               capture_output=True, text=True,
+                               encoding='utf-8', errors='replace',
+                               timeout=args.timeout)
         except subprocess.TimeoutExpired:
-            return name, None, f'FAIL  {name}  (timeout after {args.timeout:.0f}s)'
+            return name, None, (f'TIME  {name}  (timeout after '
+                                f'{args.timeout:.0f}s -- NOT a failed '
+                                f'assertion; re-run it alone before treating '
+                                f'it as one)')
         if r.returncode == 0:
             return name, True, f'PASS  {name}'
         tail = (r.stdout or '')[-800:] + (r.stderr or '')[-800:]
         return name, False, f'FAIL  {name}  (exit {r.returncode})\n{tail}'
 
+    timed_out = []
+
+    def record(name, ok, line):
+        if ok is None:
+            timed_out.append(name)
+        elif ok:
+            passed.append(name)
+        else:
+            failed.append(name)
+        print(line)
+
     t0 = time.time()
     if jobs == 1:
         for f in to_run:
-            name, ok, line = run_one(f)
-            (passed if ok else failed).append(name)
-            print(line)
+            record(*run_one(f))
     else:
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=jobs) as ex:
             for name, ok, line in ex.map(run_one, to_run):
-                (passed if ok else failed).append(name)
-                print(line)
+                record(name, ok, line)
 
     dt = time.time() - t0
-    print(f'\n{len(passed)} passed, {len(failed)} failed, {len(skipped)} skipped '
-          f'in {dt:.1f}s')
+    # A TIMEOUT AND A FAILED ASSERTION ARE DIFFERENT FACTS: a timeout moving
+    # in or out of the list is a machine-speed fact, not a code fact, so it
+    # gets its own bucket and never joins the exit-deciding `failed` count on
+    # its own -- but the exit code still goes non-zero, because an unfinished
+    # suite is not a green one.
+    print(f'\n{len(passed)} passed, {len(failed)} failed, '
+          f'{len(timed_out)} timed out, {len(skipped)} skipped in {dt:.1f}s')
     if failed:
         print('Failed: ' + ', '.join(failed))
-    return 1 if failed else 0
+    if timed_out:
+        print(f'Timed out at {args.timeout:.0f}s: ' + ', '.join(timed_out))
+        print('  A timeout is not evidence of a broken test. Re-run each one '
+              'alone (or raise --timeout) before recording it as a failure.')
+    return 1 if (failed or timed_out) else 0
 
 
 if __name__ == '__main__':

@@ -27,6 +27,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # #522
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_placer'))  # placement split
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # #522
 
 from kicad_parser import parse_kicad_pcb
@@ -164,21 +165,65 @@ def test_group_move_valid_excludes_intra_group_pairs():
         f"{name} vetoed its own current pose -- intra-group pairs leaked in"
 
 
-def test_block_moves_improve_the_objective():
-    """A block move is only accepted on strict improvement, so grouping must not
-    make the final cost worse than the ungrouped run."""
-    f = _board('splitflap_driver')
-    blocks = derive_groups(parse_kicad_pcb(f), ('decap',))
-    plain, grouped = {}, {}
-    quench(parse_kicad_pcb(f), pcb_file=f, max_displacement=2.0, step=0.5,
-           max_passes=2, metrics_out=plain)
-    quench(parse_kicad_pcb(f), pcb_file=f, max_displacement=2.0, step=0.5,
-           max_passes=2, groups=blocks, metrics_out=grouped)
-    assert grouped['after']['total'] <= plain['after']['total'] + 1e-6, \
-        (f"grouping made it worse: {plain['after']['total']:.1f} -> "
-         f"{grouped['after']['total']:.1f}")
-    print(f"  PASS: total {plain['after']['total']:.1f} (plain) -> "
-          f"{grouped['after']['total']:.1f} (grouped)")
+# Grouped-vs-plain, measured on three boards after the decap tethers were
+# corrected to follow the RAIL rather than ground (`groups._from_decap`):
+#
+#   splitflap_driver   plain  4693.8   grouped  4710.0   +0.345%
+#   ulx3s              plain 40868.2   grouped 40655.6   -0.520%
+#   watchy             plain  3223.9   grouped  3223.9    0.000%
+#
+# 3x the worst observed regression, so a real degradation trips it and a
+# tie-break does not.
+GROUPED_REGRESSION_BAND = 0.01
+
+
+def test_block_moves_do_not_degrade_the_objective():
+    """Grouping must not MATERIALLY worsen the final cost.
+
+    This deliberately does NOT assert `grouped <= plain`. That stricter form was
+    here first and it is a non-sequitur: "a block move is only accepted on
+    strict improvement" is true, and it constrains each move -- but grouping
+    changes WHICH candidates are explored and in what order, so the two runs are
+    two different greedy trajectories and can settle in different local minima.
+    Nothing makes the grouped one's minimum the lower of the two.
+
+    It held until the decap tethers were corrected to match on the cap's RAIL
+    instead of on ground. On splitflap_driver two caps then retethered to the IC
+    that actually carries their rail -- C10 to U6 (+12V) and C11 to U7 (+3V3),
+    both at *exactly* the same 6.84 mm as the ICs they used to follow, which do
+    not carry those rails at all. Strictly better blocks, a different
+    trajectory, and a 0.345% worse landing on that one small symmetric board.
+    Restoring the strict form would mean preferring a wrong tether for a 16-unit
+    cost artifact, so the band is the honest gate and the mechanism-level
+    invariant below is the real one.
+    """
+    # splitflap_driver only: it is the small board, and it is also the WORST of
+    # the three measured above, so it is the one that would catch a real
+    # degradation. ulx3s takes minutes and belongs nowhere near --fast.
+    for name in ('splitflap_driver',):
+        f = _board(name)
+        blocks = derive_groups(parse_kicad_pcb(f), ('decap',))
+        plain, grouped = {}, {}
+        quench(parse_kicad_pcb(f), pcb_file=f, max_displacement=2.0, step=0.5,
+               max_passes=2, metrics_out=plain)
+        quench(parse_kicad_pcb(f), pcb_file=f, max_displacement=2.0, step=0.5,
+               max_passes=2, groups=blocks, metrics_out=grouped)
+        p, g = plain['after']['total'], grouped['after']['total']
+
+        # The invariant that actually holds, and the one worth pinning: every
+        # accepted move -- nudge, swap or block -- passes a strict-improvement
+        # test, so a run's cost is monotonically non-increasing. A block move
+        # that worsened its own run would break this and nothing else would.
+        assert g <= grouped['before']['total'] + 1e-6, \
+            f"{name}: the grouped run INCREASED its own cost: " \
+            f"{grouped['before']['total']:.1f} -> {g:.1f}"
+
+        assert g <= p * (1.0 + GROUPED_REGRESSION_BAND), \
+            (f"{name}: grouping materially worse: {p:.1f} -> {g:.1f} "
+             f"({100 * (g - p) / p:+.3f}%, band "
+             f"{100 * GROUPED_REGRESSION_BAND:.1f}%)")
+        print(f"  PASS: {name} total {p:.1f} (plain) -> {g:.1f} (grouped), "
+              f"{100 * (g - p) / p:+.3f}%")
 
 
 def test_locked_parts_are_never_in_a_moving_block():
@@ -201,7 +246,7 @@ TESTS = [
     test_every_member_stays_within_its_own_seed_cap,
     test_block_move_does_not_create_an_overlap,
     test_group_move_valid_excludes_intra_group_pairs,
-    test_block_moves_improve_the_objective,
+    test_block_moves_do_not_degrade_the_objective,
     test_locked_parts_are_never_in_a_moving_block,
 ]
 

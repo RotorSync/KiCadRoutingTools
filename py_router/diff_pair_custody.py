@@ -176,6 +176,29 @@ def build_pair_reports(state, diff_pair_ids_to_route, member_audit,
             # follow-up, whereas this one claimed a finished coupled route
             # and did not deliver it.
             outcome = 'incomplete'
+        # 'partial' credit discriminator: a partial pair KEEPS its
+        # routed_diff_pairs credit while it kept ANY coupled trunk copper;
+        # it is demoted ONLY when it kept no coupled trunk copper at all.
+        # (An earlier rule demoted on member count -- 'partial' + both
+        # members incomplete -- which misfires on multipoint pairs whose
+        # extra pads are DELIBERATELY deferred: tigard /USB_D keeps a
+        # coupled, DRC-clean trunk while the redundant J1-row pads close in
+        # the designed single-ended follow-up, expected step-level state,
+        # not false success; that rule dropped test_tigard_usb_diff from
+        # 12/12 to 9/12 with the copper unchanged. Incomplete members are
+        # already counted as pad deficit at chain level, so credit with a
+        # real coupled trunk hides nothing.) Trunk signal, recorded not
+        # derived: 'is_diff_pair' is stamped ONLY by the coupled-route
+        # constructors (route_diff_pair_with_obstacles, the multipoint leg
+        # merge) -- never by single-ended results -- and 'new_segments'
+        # nonempty means that coupled result committed real copper.
+        no_coupled_trunk = bool(
+            outcome == 'partial'
+            and not any(rr.get('is_diff_pair') and rr.get('new_segments')
+                        for rr in (_rr_p, _rr_n) if rr))
+        if no_coupled_trunk:
+            print(f"{RED}DEMOTED {pair_name}: no coupled trunk copper kept "
+                  f"-- 'partial' pair dropped from routed_diff_pairs{RESET}")
         rep = {
             'pair': pair_name,
             'p_net': pair.p_net_name,
@@ -186,19 +209,27 @@ def build_pair_reports(state, diff_pair_ids_to_route, member_audit,
             'failure_stage': (diag.get('stage')
                               ) if outcome in ('failed', 'deferred') else None,
             'incomplete_members': incomplete,
-            # The "one member silently incomplete" class (#514, peaksat CAN).
-            # 'partial' is deliberately NOT flagged here: a partial pair
-            # already DECLARES disconnected members (its peeled terminals
-            # close in the single-ended follow-up, which runs after this
-            # audit), so flagging it made every multipoint pair with a
-            # by-design peeled leg -- tigard /USB_D's redundant J1 row --
-            # read as a contradicted claim and demoted it from
+            # A summary claim contradicted by the actual copper. Two causes:
+            # (1) a COUPLED claim contradicted by actual pad connectivity --
+            # the "one member silently incomplete" class (#514, peaksat CAN).
+            # 'partial'-with-incomplete-members is deliberately NOT that: a
+            # partial pair already DECLARES disconnected members (its peeled
+            # terminals close in the single-ended follow-up, which runs
+            # after this audit), so flagging it here made every multipoint
+            # pair with a by-design peeled leg -- tigard /USB_D's redundant
+            # J1 row -- read as a contradicted claim and demoted it from
             # routed_diff_pairs while its trunk was coupled and its board
-            # finished clean. incomplete_members stays populated either way,
-            # and JSON_SUMMARY's member_incomplete_pairs carries the audit's
-            # own verdict so a caller can gate on it without that judgement
-            # call (#602).
-            'member_audit_mismatch': mismatch,
+            # finished clean. incomplete_members stays populated either way.
+            # (2) a PARTIAL claim with no coupled trunk copper kept at all
+            # (no_coupled_trunk above) -- there is no coupled route to
+            # credit. route_diff reads this flag to move the pair from
+            # routed_diff_pairs to partial_diff_pairs.
+            # NOTE `mismatch` is the CAPTURED value: #602 rewrites
+            # `outcome` to 'incomplete' above, so re-testing
+            # `outcome == 'coupled'` here would be permanently False and
+            # would drop #602's audit flag on the merge.
+            'member_audit_mismatch': bool(mismatch or no_coupled_trunk),
+            'no_coupled_trunk': no_coupled_trunk,
         }
         if diag.get('blocking_nets'):
             rep['blocking_nets'] = diag['blocking_nets']
@@ -216,6 +247,7 @@ def build_pair_reports(state, diff_pair_ids_to_route, member_audit,
             'failure_stage': 'pre-route',
             'incomplete_members': [p_name, n_name],
             'member_audit_mismatch': False,
+            'no_coupled_trunk': False,
         })
     return sorted(reports, key=lambda r: r['pair'])
 

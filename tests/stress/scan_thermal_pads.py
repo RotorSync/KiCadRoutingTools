@@ -15,6 +15,7 @@ import time
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, _REPO)
 sys.path.insert(0, os.path.join(_REPO, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(_REPO, 'py_placer'))  # #522
 sys.path.insert(0, os.path.join(_REPO, 'py_tools'))  # #522
 from kicad_parser import parse_kicad_pcb
 from route_planes import is_thermal_pad

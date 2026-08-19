@@ -181,6 +181,14 @@ class GridRouteConfig:
     # (kicad_routing_tools.same_net_pad_clearance); there is deliberately no
     # route.py/route_diff.py CLI flag.
     same_net_pad_clearance: float = -1.0
+    # mm - copper-to-HOLE floor (KiCad's `min_hole_clearance`). 0 = not set by
+    # the caller, so the obstacle builder reads the board's own constraint and
+    # falls back to routing_defaults.NPTH_TO_TRACK_CLEARANCE. It is NOT the same
+    # rule as hole_to_hole_clearance (drill-to-drill): this one keeps TRACKS off
+    # an NPTH wall. The router used to hardcode the 0.20 fab floor here while
+    # check_drc already read min_hole_clearance, so on a board declaring 0.25 the
+    # router would happily route into a band its own checker then flagged.
+    hole_clearance: float = 0.0
     max_turn_angle: float = 180.0  # Max cumulative turn angle (degrees) before reset, to prevent U-turns
     # Power-tap neck-down (issue #72): when a wide power-net tap edge fails,
     # retry it at the layer's default track width. The narrow neck extends
@@ -316,6 +324,24 @@ class GridRouteConfig:
     # the rules file is the one source of truth, and the graders (check_drc,
     # staged kicad-cli) read the same file.
     layer_clearances: Dict[str, float] = field(default_factory=dict)
+    # Track-to-track clearance from the board's .kicad_dru (#549),
+    # {obstacle_net_id: mm} -- the EFFECTIVE per-obstacle map for this call's
+    # routed set (kicad_dru.effective_track_clearances). RAISE-ONLY, applied
+    # by track-vs-track stamp sites over the already-resolved value (so it
+    # composes AFTER the #498 layer replacement); via/pad geometry never
+    # consults it (KiCad's Type=='track' binds tracks only). An empty map is
+    # a strict no-op. Like the layer map: no CLI flag, no GUI control.
+    track_clearances: Dict[int, float] = field(default_factory=dict)
+
+    def track_obstacle_clearance(self, net_id: int, resolved: float) -> float:
+        """#549 seg-vs-seg pair clearance against obstacle net ``net_id``:
+        max(resolved, the track-rule value) -- raise-only, one dict lookup per
+        SEGMENT. ``resolved`` is the caller's fully-resolved value (class
+        pairwise max, #498 layer replacement already applied)."""
+        if not self.track_clearances:
+            return resolved
+        v = self.track_clearances.get(net_id)
+        return resolved if v is None or v <= resolved else v
 
     def layer_clearance(self, layer: str, fallback: float) -> float:
         """#498 pair clearance on `layer`: the .kicad_dru rule value when the

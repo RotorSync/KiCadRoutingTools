@@ -108,12 +108,22 @@ import rust_alloc  # noqa: E402,F401  # issue #419: set MIMALLOC_PURGE_DELAY bef
 from grid_router import GridObstacleMap, GridRouter
 
 
+#: Set when the --nets patterns resolved to no differential pair at all.
+#: Read by main() to exit non-zero: the refusal used to print `Error:` and
+#: return (0, 0, 0.0), which main discarded, so the process exited 0 and a
+#: chained caller walked past an unrouted board.
+_NO_PAIRS_MATCHED = False
+
+
 def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
                 layer_costs: Optional[List[float]] = None,
                 # #498: {layer: mm} per-layer clearance. None (both fronts) ->
                 # auto-read the sibling .kicad_dru; explicit dict (tests) wins.
                 layer_clearances: Optional[Dict[str, float]] = None,
+                # #549: {net_id: mm} track-to-track clearance map; None ->
+                # auto-read the sibling .kicad_dru track rules.
+                track_clearances: Optional[Dict[int, float]] = None,
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
                 direction_order: str = None,
                 ordering_strategy: str = "inside_out",
@@ -196,6 +206,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 return_results: bool = False,
                 pcb_data=None,
                 net_clearances: dict = None,
+                # Net-name globs to PROTECT for this run (reason 'user', #521):
+                # rip machinery skips matches, and they persist to the output
+                # .kicad_pro so later steps honor them without the flag.
                 cancel_check=None,
                 progress_callback=None) -> Tuple[int, int, float]:
     """
@@ -545,6 +558,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                   f"(coupled via {', '.join(_xn.bridge_refs)})")
 
     if not diff_pairs:
+        # A precise sentinel. Inferring this from a (0, 0) return conflates it
+        # with a legitimate run in which every pair DEFERRED to single-ended
+        # routing -- also 0 routed, 0 failed, and not an error at all.
+        global _NO_PAIRS_MATCHED
+        _NO_PAIRS_MATCHED = True
         print(f"Error: No differential pairs found matching the patterns!")
         print("  Differential pairs must have _P/_N, P/N, or +/- suffixes.")
         print(f"  Patterns provided: {net_names}")
@@ -739,8 +757,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     config.set_net_clearances(net_clearances, [nid for _, nid in net_ids])
     # #498: per-layer .kicad_dru clearance rules, installed engine-side so the
     # GUI inherits them with no wiring (see kicad_dru.install_layer_clearances).
-    from kicad_dru import install_layer_clearances
+    from kicad_dru import install_layer_clearances, install_track_clearances
     install_layer_clearances(config, layer_clearances, input_file, pcb_data)
+    # #549: track-scoped .kicad_dru rules (raise-only on seg-vs-seg stamps).
+    install_track_clearances(config, track_clearances, input_file, pcb_data,
+                             routed_net_ids=[nid for _, nid in net_ids])
 
     # Upfront layer swap optimization: analyze all diff pairs and apply beneficial swaps
     # BEFORE MPS ordering, so ordering sees correct segment layers
@@ -1378,6 +1399,16 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         else:
             failed_diff_pairs.append(pair_name)
 
+    # A pair the audit demoted to PARTIAL was already counted in `successful`
+    # by the coupled-route loop, so the headline and the JSON key still claimed
+    # it. Take it back here, after the audit has spoken and BEFORE either the
+    # printed summary or the returned tuple reads the counter -- the GUI reads
+    # `successful` raw (differential_gui.py), so fixing only the print site
+    # would leave the GUI and JSON_SUMMARY saying different things than the
+    # member audit sitting next to them.
+    if partial_diff_pairs:
+        successful = max(0, successful - len(partial_diff_pairs))
+
     # Count total vias from results
     total_vias = sum(len(r.get('new_vias', [])) for r in results)
 
@@ -1417,6 +1448,20 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     if single_ended_diff_pairs:
         print(f"  Single-ended:  {len(single_ended_diff_pairs)} (electrically short - "
               f"deferred to single-ended routing)")
+        # ...and say how those members ACTUALLY came out. The headline above
+        # reads `Diff pairs: 0/2 routed` on a step where every member net got
+        # copper and connected, so a log tail -- which is what a grep, a CI
+        # summary or a person reads -- shows total failure off a fully
+        # successful step. Run 14 had to open the JSON to find out otherwise.
+        _fb = se_fallback_summary or {}
+        _rt, _pt, _fl = (len(_fb.get('routed') or []),
+                         len(_fb.get('partial') or []),
+                         len(_fb.get('failed') or []))
+        if _rt or _pt or _fl:
+            _tail = (f", {_pt} partial" if _pt else '') + \
+                    (f", {RED}{_fl} FAILED{RESET}" if _fl else '')
+            print(f"  SE fallback:   {_rt}/{_rt + _pt + _fl} member net(s) "
+                  f"routed{_tail}")
     if skipped_bad_fanout:
         print(f"  {RED}Skipped:       {len(skipped_bad_fanout)} (fanout stubs self-overlap - "
               f"fix the fanout, #242){RESET}")
@@ -1629,6 +1674,10 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
 if __name__ == "__main__":
     from console_encoding import enable_utf8_console
     enable_utf8_console()  # cp1252-safe non-ASCII prints (issue #152)
+    # CMD/EXIT self-echo (run-3 B1); see route.py for the external-kill caveat.
+    # CLI-`__main__`-only: the GUI imports the engine function.
+    import cli_banner
+    cli_banner.install()
     import argparse
     from redo_record import record_invocation
     record_invocation()  # stress-test redo manifest (#132); no-op unless REDO_MANIFEST set
@@ -1899,7 +1948,7 @@ Examples:
     # default to the board's own constraint minimum when omitted. Resolved before
     # enforce_fab_floors; _clamp_netclasses is stashed for drc_fix_kwargs.
     from list_nets import (board_default_netclass_clearance, board_default_netclass_param,
-                           board_constraint)
+                           resolve_cli_floor)
     # #435: whether the diff geometry was EXPLICITLY set on the CLI. If NOT, each
     # pair falls back engine-side to its OWN netclass diff_pair_gap/width (not the
     # board Default class), so a multi-class board routes every pair to its own
@@ -1964,18 +2013,14 @@ Examples:
         print(f"Diff-pair gap {args.diff_pair_gap}mm is below clearance "
               f"{args.clearance}mm; raising gap to clearance (#441).")
         args.diff_pair_gap = args.clearance
-    if args.hole_to_hole_clearance is None:
-        _h2h = board_constraint(args.input_file, 'min_hole_to_hole')
-        args.hole_to_hole_clearance = _h2h if _h2h is not None else defaults.HOLE_TO_HOLE_CLEARANCE
-        print(f"--hole-to-hole-clearance not given; using "
-              f"{'the board min_hole_to_hole' if _h2h is not None else 'the fallback'} "
-              f"{args.hole_to_hole_clearance}mm.")
-    if args.board_edge_clearance is None:
-        _edge = board_constraint(args.input_file, 'min_copper_edge_clearance')
-        args.board_edge_clearance = _edge if _edge is not None else defaults.BOARD_EDGE_CLEARANCE
-        print(f"--board-edge-clearance not given; using "
-              f"{'the board min_copper_edge_clearance' if _edge is not None else 'the fallback'} "
-              f"{args.board_edge_clearance}mm.")
+    # Shared resolver: a declared 0 is UNSET, the same rule the placement half
+    # of the loop applies (list_nets.resolve_cli_floor).
+    args.hole_to_hole_clearance = resolve_cli_floor(
+        args.input_file, 'hole_to_hole', args.hole_to_hole_clearance,
+        defaults.HOLE_TO_HOLE_CLEARANCE, '--hole-to-hole-clearance')
+    args.board_edge_clearance = resolve_cli_floor(
+        args.input_file, 'board_edge_clearance', args.board_edge_clearance,
+        defaults.BOARD_EDGE_CLEARANCE, '--board-edge-clearance')
     set_default_fab_tier(*fab_tier_from_args(args))
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.input_file),
@@ -2200,3 +2245,14 @@ Examples:
                 persist_same_net_pad_clearance(_pro, args.same_net_pad_clearance)
         except Exception as e:
             print(f"  (skipped protected-nets record: {e})")
+
+    # The other false success -- the patterns
+    # matched no pair at all, which used to print `Error:` and exit 0 because
+    # main called the router as a bare statement. Measured: a shell rewrote
+    # every `/IO_Banks/Z*` argument into a Windows path and 14 patterns matched
+    # nothing.
+    if _NO_PAIRS_MATCHED:
+        print("route_diff: the --nets patterns matched no differential pair, "
+              "so nothing was routed. Exiting non-zero so a chained caller "
+              "does not read this as success.", file=sys.stderr)
+        sys.exit(2)

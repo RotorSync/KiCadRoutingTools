@@ -236,7 +236,10 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else config.get_track_width(seg.layer)
         # #498: a .kicad_dru layer rule REPLACES the pair clearance on seg.layer.
         seg_clearance = config.layer_clearance(seg.layer, _obstacle_clearance(seg.net_id))
-        expansion_mm = reserve_width / 2 + seg_width / 2 + seg_clearance + extra_clearance
+        # #549: a track-scoped DRU rule RAISES the seg-vs-seg requirement only
+        # (the track capsule); via_block keeps the resolved value.
+        trk_clearance = config.track_obstacle_clearance(seg.net_id, seg_clearance)
+        expansion_mm = reserve_width / 2 + seg_width / 2 + trk_clearance + extra_clearance
         # For via blocking by segments: via half-size + segment half-width + clearance
         via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance + extra_clearance
         # FFI batching (2026-08-14 profiling): one Rust call per segment was
@@ -1510,6 +1513,121 @@ def block_track_cells_near_override_pad_holes(obstacles: GridObstacleMap,
         obstacles.add_blocked_cells_batch(np.hstack([arr, layer_col]))
 
 
+_HOLE_CLR_CACHE = {}          # board path -> declared min_hole_clearance (mm)
+_HOLE_CLR_ANNOUNCED = set()
+_HOLE_CLR_ORIGIN = set()      # paths whose floor came from fab_floor_origin,
+                              # i.e. a later step's writeback had relaxed the
+                              # live rule below what the board declared
+
+
+def resolve_hole_clearance(pcb_data: PCBData, config) -> float:
+    """The copper-to-HOLE floor this board declares, in mm (0.0 = none).
+
+    Resolved ENGINE-SIDE off ``PCBData.source_path`` (the #498 mechanism built
+    for exactly this), so both fronts inherit it with no wiring. An explicit
+    ``config.hole_clearance`` wins and stops the read.
+
+    TWO sources, and the larger wins: ``design_settings.rules`` (what the
+    project declares NOW) and ``kicad_routing_tools.fab_floor_origin`` (what it
+    declared before this chain touched it). The second is needed because the
+    first is not durable -- each writeback clamps the live rule down to the
+    clearance that step routed at, so a chain ERASES the author's declaration
+    after step 1. Measured on a tigard pour+route chain declaring 0.25: the
+    pour left ``rules`` at 0.15 and the route step read 0.15, i.e. below the
+    0.20 fab floor, and stopped honouring the board without saying anything.
+    Reading the origin too makes the declaration survive the whole chain, which
+    is the only reading under which "the board declares 0.25" means what a user
+    would expect. See :func:`fix_kicad_drc_settings.declared_fab_floor`.
+
+    WHO ACTUALLY INHERITS IT, precisely -- everything routed through
+    ``add_drill_hole_obstacles`` (signal, diff pairs, BGA/QFN fanout, via
+    ``build_base_obstacle_map``), plus ``plane_obstacle_builder`` which builds
+    its own map and therefore needed the call adding separately. #617 added the
+    call at every site that DECIDES WHERE COPPER GOES in the three engines this
+    docstring used to name as uncovered: ``plane_region_connector``
+    (``npth_floor_ok`` seeds, ``wide_route_clear`` legs, ``build_base_obstacles``
+    stamps), ``pcb_modification`` (``_seg_worst_offender``'s shortfall ranking
+    and ``nudge_grazing_microshift``'s detector + acceptance gate) and
+    ``placement/fanout_clearance`` (``_Repair``'s NPTH keep-out rects).
+
+    STILL AT THE FLAT ``NPTH_TO_TRACK_CLEARANCE``, and deliberately so -- read
+    this before "finishing the job":
+
+    * ``pcb_modification.close_soft_joints`` and ``_connector_clear`` gate a
+      BRIDGE between two pieces of copper that already exist (a soft joint's
+      caps already overlap; a stub snap spans at most 1.5 track widths). When
+      such a bridge violates a declared floor the flanking copper almost always
+      does too, so raising the gate drops the repair without removing the
+      violation -- measured, 99.96% of the refusals it would add.
+    * ``pcb_modification.nudge_grazing_octolinear`` and
+      ``placement/fanout_clearance.nudge_vias_for_unresolved`` are all-or-
+      nothing repairs: refusing their one clearing candidate abandons the
+      defect they exist to fix (measured: a -0.1 mm net-to-net overlap left in
+      place; a #130 pad-via graze left unrelocated) rather than routing around
+      the hole.
+    * ``placement/legality.PartPads`` builds its NPTH keep-out radii from a bare
+      ``fp``/``clearance`` pair with no board pointer in hand, so it cannot call
+      this helper without a threaded parameter.
+
+    The rule the first three encode: raise this floor on passes that CHOOSE
+    where new copper goes or that MOVE copper by a measured shortfall, not on
+    passes whose only alternative to their one candidate is doing nothing.
+
+    Why it exists: this keep-out was priced at a hardcoded
+    ``max(clearance, NPTH_TO_TRACK_CLEARANCE)`` -- a flat 0.20 fab floor -- and
+    never read the board, while `check_drc` DOES read `min_hole_clearance`
+    (:2390). So on a board declaring 0.25 the router would route into a band its
+    own checker then flagged. Measured: a route came within 0.2263 mm of BUS1's
+    NPTH against a declared 0.25, a real 0.0237 mm violation, routing-introduced
+    and confirmed independently by kicad-cli. It was the single DRC failure on
+    that board.
+
+    Cached per board path: the obstacle map is rebuilt per net, and this would
+    otherwise re-read the project file thousands of times in one run.
+    """
+    explicit = getattr(config, 'hole_clearance', 0.0) or 0.0
+    if explicit > 0:
+        return float(explicit)
+    path = getattr(pcb_data, 'source_path', "") or ""
+    if not path:
+        return 0.0
+    if path not in _HOLE_CLR_CACHE:
+        try:
+            from list_nets import board_constraint
+            v = board_constraint(path, 'min_hole_clearance')
+            v = float(v) if v and v > 0 else 0.0
+            # The DECLARED floor outranks the CURRENT rule, because the rule is
+            # not durable: every writeback clamps `rules.min_hole_clearance`
+            # down to the clearance that step routed at, so from step 2 onward
+            # the author's declaration is gone from the only place this used to
+            # look. Measured on a tigard pour+route chain declaring 0.25 -- the
+            # pour's writeback left rules at 0.15 and the route step then read
+            # 0.15, below the 0.20 fab floor, and silently stopped honouring
+            # the board. The original survives in `fab_floor_origin` (seeded at
+            # the first writeback, carried down with the project), so take the
+            # larger of the two. Raise-only, exactly like the rest of this
+            # helper: a board with no origin, or an origin at or below the
+            # rule, is bit-identical.
+            from fix_kicad_drc_settings import declared_fab_floor
+            _origin = declared_fab_floor(path, 'min_hole_clearance')
+            if _origin and _origin > v:
+                _HOLE_CLR_ORIGIN.add(path)
+                v = float(_origin)
+            _HOLE_CLR_CACHE[path] = v
+        except Exception:                                       # noqa: BLE001
+            _HOLE_CLR_CACHE[path] = 0.0
+    v = _HOLE_CLR_CACHE[path]
+    if v > defaults.NPTH_TO_TRACK_CLEARANCE and path not in _HOLE_CLR_ANNOUNCED:
+        _HOLE_CLR_ANNOUNCED.add(path)
+        _src = ("the floor the board ORIGINALLY declared, which a later step's "
+                "writeback relaxed in the project"
+                if path in _HOLE_CLR_ORIGIN else "the board's own "
+                "min_hole_clearance")
+        print(f"Copper-to-hole clearance {v:g}mm (from {_src}, above the "
+              f"{defaults.NPTH_TO_TRACK_CLEARANCE}mm fab floor)")
+    return v
+
+
 def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
                               config: GridRouteConfig, nets_to_route_set: set,
                               extra_clearance: float = 0.0):
@@ -1532,6 +1650,9 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         config: Routing configuration
         nets_to_route_set: Set of net IDs being routed (excluded from blocking)
     """
+    # The board's own copper-to-hole floor, once per call (cached per board).
+    _hole_clr = resolve_hole_clearance(pcb_data, config)
+
     drill_holes = []   # every drill -> via (hole-to-hole) keep-out
     npth_holes = []    # no-copper holes only -> track keep-out
     npth_slot_holes = []  # milled SLOT subset: board-edge clearance applies (#448)
@@ -1588,7 +1709,10 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         # extra_clearance covers geometry offset from the routed centerline
         # (diff-pair P/N tracks ride +-(gap+width)/2 off it), matching how every
         # other obstacle in that base map is inflated (issue #268).
-        npth_clr = max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE) + extra_clearance
+        # `_hole_clr` is the BOARD's own min_hole_clearance -- raise-only, so a
+        # board declaring nothing is byte-identical (see resolve_hole_clearance).
+        npth_clr = (max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE,
+                        _hole_clr) + extra_clearance)
         block_track_cells_near_drills(obstacles, npth_holes, config.track_width,
                                       npth_clr, config.grid_step,
                                       list(range(len(config.layers))))
@@ -1603,7 +1727,8 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         edge_eff = (config.board_edge_clearance if config.board_edge_clearance > 0
                     else config.clearance)
         slot_clr = edge_eff + extra_clearance
-        if slot_clr > max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE) + extra_clearance:
+        if slot_clr > max(config.clearance, defaults.NPTH_TO_TRACK_CLEARANCE,
+                          _hole_clr) + extra_clearance:
             block_track_cells_near_drills(obstacles, npth_slot_holes,
                                           config.track_width, slot_clr,
                                           config.grid_step,
@@ -1689,7 +1814,9 @@ def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else config.get_track_width(seg.layer)
         # #498: a .kicad_dru layer rule REPLACES the pair clearance on seg.layer.
         seg_clearance = config.layer_clearance(seg.layer, obs_clearance)
-        expansion_mm = reserve_width / 2 + seg_width / 2 + seg_clearance + extra_clearance
+        # #549: a track-scoped DRU rule RAISES the seg-vs-seg requirement only.
+        trk_clearance = config.track_obstacle_clearance(seg.net_id, seg_clearance)
+        expansion_mm = reserve_width / 2 + seg_width / 2 + trk_clearance + extra_clearance
         via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance + extra_clearance
         _c = segment_blocked_cells_array(seg.start_x, seg.start_y,
                                          seg.end_x, seg.end_y,
@@ -2091,7 +2218,11 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
             seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else config.get_track_width(seg.layer)
             seg_clearance = config.layer_clearance(  # #498: layer rule replaces
             seg.layer, config.obstacle_clearance(getattr(seg, 'net_id', 0)))
-            expansion_mm = reserve_width / 2 + seg_width / 2 + seg_clearance + extra_clearance
+            # #549: track rule raises the seg-vs-seg capsule; identical line in
+            # the REMOVE twin below (ref-count symmetry).
+            trk_clearance = config.track_obstacle_clearance(
+                getattr(seg, 'net_id', 0), seg_clearance)
+            expansion_mm = reserve_width / 2 + seg_width / 2 + trk_clearance + extra_clearance
             via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance
             _c = segment_blocked_cells_array(seg.start_x, seg.start_y,
                                              seg.end_x, seg.end_y,
@@ -2157,7 +2288,10 @@ def remove_segments_list_from_obstacles(obstacles: GridObstacleMap, segments: li
         seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else config.get_track_width(seg.layer)
         seg_clearance = config.layer_clearance(  # #498: layer rule replaces
             seg.layer, config.obstacle_clearance(getattr(seg, 'net_id', 0)))
-        expansion_mm = reserve_width / 2 + seg_width / 2 + seg_clearance + extra_clearance
+        # #549: identical raise to the ADD twin, or ref-counts desync.
+        trk_clearance = config.track_obstacle_clearance(
+            getattr(seg, 'net_id', 0), seg_clearance)
+        expansion_mm = reserve_width / 2 + seg_width / 2 + trk_clearance + extra_clearance
         via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance
 
         # Sweep item 2 (#625 follow-up): the arrays already exist -- stack a

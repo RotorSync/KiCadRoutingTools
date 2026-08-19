@@ -3,7 +3,8 @@
 # The converter only PARSES commands (never runs them), so the referenced
 # boards need not exist. Exercises every flag the parity gate asserts:
 # clearance/track-width/via/grid/max-ripup/hole-to-hole/no-bga-zones/
-# no-gnd-vias/escape-method/diff-pair-gap/plane-layers.
+# no-gnd-vias/escape-method/diff-pair-gap/plane-layers/
+# rip-existing-nets/protect-nets (#521).
 set -e
 # cwd=/repo
 python3 -u -X utf8 bga_fanout.py board.kicad_pcb step1.kicad_pcb --component U1 --nets '*' '!GND' --clearance 0.09 --track-width 0.0762 --via-size 0.25 --via-drill 0.15 --grid-step 0.05 --escape-method auto

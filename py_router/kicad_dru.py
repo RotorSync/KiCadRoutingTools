@@ -24,12 +24,51 @@ expression engine would silently manufacture wrong clearances):
 
 import os
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 # value with unit suffix; KiCad writes e.g. 0.3mm / 12mil / 0.012in
 _VAL = re.compile(r"^(-?[0-9.]+)\s*(mm|mil|in|um|nm)?$")
 _UNIT_MM = {"mm": 1.0, "mil": 0.0254, "in": 25.4, "um": 0.001, "nm": 1e-6, None: 1.0}
 _ONLAYER = re.compile(r"[AB]\s*\.\s*onLayer\s*\(\s*['\"]([^'\"]+)['\"]\s*\)")
+# #549 track-scoped clearance subset: A.Type=='track' && B.Type=='track' plus
+# exactly one X.NetClass=='C' term (optionally the mirror Y.NetClass!='C').
+_TRACK_TYPE = re.compile(r"([AB])\s*\.\s*Type\s*==\s*['\"]track['\"]", re.IGNORECASE)
+_NC_TERM = re.compile(r"([AB])\s*\.\s*NetClass\s*([!=]=)\s*['\"]([^'\"]+)['\"]")
+
+
+class TrackRule(NamedTuple):
+    """A #549 track-to-track clearance rule scoped to one net class.
+
+    ``other_only`` is True for the ``A.NetClass=='C' && B.NetClass!='C'``
+    shape: the requirement binds only member-vs-NON-member pairs, so a
+    member's own siblings (the coupled half of a diff pair) are exempt.
+    """
+    name: str
+    cls: str
+    other_only: bool
+    clearance_mm: float
+
+
+def _parse_track_condition(expr: str) -> Optional[Tuple[str, bool]]:
+    """(class, other_only) when ``expr`` is exactly the honored track-pair
+    subset; None otherwise (the rule falls back to the skip note)."""
+    types = {t.upper() for t in _TRACK_TYPE.findall(expr)}
+    ncs = _NC_TERM.findall(expr)
+    residue = _NC_TERM.sub("", _TRACK_TYPE.sub("", expr))
+    residue = residue.replace("&&", "").strip()
+    if residue or types != {'A', 'B'} or not ncs:
+        return None
+    eq = [(s.upper(), c) for s, op, c in ncs if op == '==']
+    ne = [(s.upper(), c) for s, op, c in ncs if op == '!=']
+    if len(eq) != 1 or len(ne) > 1 or len(ncs) != len(eq) + len(ne):
+        return None
+    side, cls = eq[0]
+    if ne:
+        oside, ocls = ne[0]
+        if oside == side or ocls != cls:
+            return None
+        return cls, True
+    return cls, False
 
 
 def _to_mm(tok: str) -> Optional[float]:
@@ -132,14 +171,17 @@ def _rule_layers(rule, copper_layers, notes) -> Optional[List[str]]:
     return list(copper_layers)  # unscoped rule: applies everywhere
 
 
-def parse_dru_layer_clearances(text: str, copper_layers: List[str]
-                               ) -> Tuple[Dict[str, float], List[str]]:
-    """Parse .kicad_dru text -> ({layer: clearance_mm}, notes).
+def _parse_dru(text: str, copper_layers: List[str]
+               ) -> Tuple[Dict[str, float], List[TrackRule], List[str]]:
+    """Single-pass parse of .kicad_dru text ->
+    ({layer: clearance_mm}, [TrackRule], notes).
 
-    Later rules override earlier ones per layer. Notes describe every skipped
-    clearance rule (out-of-subset scope) so the caller can print them.
+    Later rules override earlier ones per layer. A rule whose condition is the
+    #549 track-pair subset becomes a TrackRule (and never a layer entry); any
+    other out-of-subset scope is skipped with a note.
     """
     result: Dict[str, float] = {}
+    track_rules: List[TrackRule] = []
     notes: List[str] = []
     for node in _parse_nodes(_tokenize(text)):
         if not isinstance(node, list) or not node or node[0] != "rule":
@@ -147,11 +189,17 @@ def parse_dru_layer_clearances(text: str, copper_layers: List[str]
         name = node[1] if len(node) > 1 and not isinstance(node[1], list) else "?"
         clearance_mm = None
         severity_ignore = False
+        condition = None
+        has_layer_clause = False
         for item in node:
             if not isinstance(item, list) or not item:
                 continue
             if item[0] == "severity" and len(item) >= 2 and item[1] == "ignore":
                 severity_ignore = True
+            if item[0] == "condition" and len(item) >= 2:
+                condition = item[1]
+            if item[0] == "layer":
+                has_layer_clause = True
             if item[0] == "constraint" and len(item) >= 2 and item[1] == "clearance":
                 for sub in item[2:]:
                     if isinstance(sub, list) and sub and sub[0] == "min" and len(sub) >= 2:
@@ -161,6 +209,16 @@ def parse_dru_layer_clearances(text: str, copper_layers: List[str]
         if severity_ignore:
             notes.append(f"rule '{name}': severity ignore, skipped")
             continue
+        track = (_parse_track_condition(condition)
+                 if condition and not has_layer_clause else None)
+        if track is not None:
+            cls, other_only = track
+            track_rules.append(TrackRule(str(name), cls, other_only, clearance_mm))
+            notes.append(f"rule '{name}': track-to-track clearance "
+                         f"{clearance_mm}mm for class '{cls}'"
+                         f"{' vs other classes only' if other_only else ''}"
+                         f" -- handled by the track channel (#549)")
+            continue
         layers = _rule_layers(node, copper_layers, notes)
         if layers is None:
             notes.append(f"rule '{name}': clearance {clearance_mm}mm has a "
@@ -169,7 +227,27 @@ def parse_dru_layer_clearances(text: str, copper_layers: List[str]
             continue
         for l in layers:
             result[l] = clearance_mm
+    return result, track_rules, notes
+
+
+def parse_dru_layer_clearances(text: str, copper_layers: List[str]
+                               ) -> Tuple[Dict[str, float], List[str]]:
+    """Parse .kicad_dru text -> ({layer: clearance_mm}, notes).
+
+    Later rules override earlier ones per layer. Notes describe every skipped
+    clearance rule (out-of-subset scope) so the caller can print them.
+    """
+    result, _track, notes = _parse_dru(text, copper_layers)
     return result, notes
+
+
+def parse_dru_track_clearances(text: str) -> Tuple[List[TrackRule], List[str]]:
+    """Parse .kicad_dru text -> ([TrackRule], notes) for the #549 track
+    channel. Copper layers are irrelevant to track rules; a synthetic list
+    keeps the shared single-pass parser happy."""
+    copper = ["F.Cu", "B.Cu"] + [f"In{i}.Cu" for i in range(1, 31)]
+    _layers, track_rules, notes = _parse_dru(text, copper)
+    return track_rules, notes
 
 
 def read_board_layer_clearances(board_path: str, copper_layers: List[str],
@@ -197,6 +275,105 @@ def read_board_layer_clearances(board_path: str, copper_layers: List[str],
                              f"floor {fab_clearance_floor}mm -- pinned up")
                 result[l] = fab_clearance_floor
     return result, notes
+
+
+def read_board_track_clearances(board_path: str) -> Tuple[List[TrackRule], List[str]]:
+    """Auto-read the sibling ``<board>.kicad_dru`` #549 track rules.
+
+    Returns ([], []) when there is no dru file. Unlike the layer map there is
+    deliberately NO fab pinning: the track channel is raise-only over the
+    already-resolved pair clearance, so a rule below the resolved value is
+    simply inert -- it can never drag copper under the fab floor."""
+    dru = os.path.splitext(board_path)[0] + ".kicad_dru" if board_path else ""
+    if not dru or not os.path.isfile(dru):
+        return [], []
+    try:
+        text = open(dru, encoding="utf-8").read()
+    except OSError as e:
+        return [], [f"could not read {dru}: {e}"]
+    return parse_dru_track_clearances(text)
+
+
+def effective_track_clearances(track_rules: List[TrackRule],
+                               memberships: Dict[int, set],
+                               all_net_ids, routed_net_ids
+                               ) -> Dict[int, float]:
+    """The per-obstacle-net {net_id: mm} map for THIS call's routed set.
+
+    The obstacle map is SHARED across the routed nets, so a per-pair rule must
+    be over-approximated per obstacle net: eff[nid] is the max clearance any
+    ROUTED net requires against nid under the rules. For a rule on class C:
+
+      * nid in C: applies when the routed set has NON-members (the pair
+        member-vs-nonmember binds), or -- unless ``other_only`` -- when it has
+        members (C-vs-C pairs bind too).
+      * nid not in C: applies when the routed set has members of C.
+
+    An XTAL-only run therefore does NOT inflate XTAL-vs-XTAL sibling stamps
+    under an ``other_only`` rule -- the route-the-pair-tight-first workflow
+    survives. Monolithic runs mixing classes over-block non-member pairs, the
+    same over-approximation shape PR392 accepted; route a ruled class in its
+    own invocation for exact pricing."""
+    if not track_rules:
+        return {}
+    routed = set(routed_net_ids or ())
+    eff: Dict[int, float] = {}
+    for rule in track_rules:
+        members = {nid for nid, cls in memberships.items() if rule.cls in cls}
+        routed_has_member = bool(routed & members)
+        routed_has_nonmember = bool(routed - members)
+        for nid in all_net_ids:
+            in_c = nid in members
+            applies = ((in_c and (routed_has_nonmember
+                                  or (not rule.other_only and routed_has_member)))
+                       or (not in_c and routed_has_member))
+            if applies and rule.clearance_mm > eff.get(nid, 0.0):
+                eff[nid] = rule.clearance_mm
+    return eff
+
+
+_TRACK_ANNOUNCED = set()  # (board path, rules) already printed this process
+
+
+def install_track_clearances(config, track_clearances, input_file,
+                             pcb_data=None, routed_net_ids=None):
+    """Resolve and install the #549 track-to-track clearance map on ``config``,
+    engine-side so BOTH fronts inherit it (like install_layer_clearances: no
+    flag, no GUI control -- the .kicad_dru is the single source of truth). An
+    explicit {net_id: mm} dict (tests) wins and stops the auto-read; None ->
+    read the sibling .kicad_dru, resolve class memberships through
+    list_nets.net_class_memberships (the SAME resolver the netclass clearance
+    map uses), and compute the effective per-obstacle map for this call's
+    routed set. Announces what is honored, once per (board, rules)."""
+    if track_clearances is not None:
+        config.track_clearances = dict(track_clearances)
+        return
+    if not input_file:
+        input_file = getattr(pcb_data, 'source_path', "") or ""
+    if not input_file or pcb_data is None:
+        config.track_clearances = {}
+        return
+    rules, notes = read_board_track_clearances(input_file)
+    if not rules:
+        config.track_clearances = {}
+        return
+    from list_nets import net_class_memberships
+    nets = {nid: n.name for nid, n in pcb_data.nets.items() if n.name}
+    memberships = net_class_memberships(input_file, nets)
+    eff = effective_track_clearances(rules, memberships, nets.keys(),
+                                     routed_net_ids or nets.keys())
+    config.track_clearances = eff
+    _key = (os.path.abspath(input_file),
+            tuple(sorted((r.name, r.cls, r.other_only, r.clearance_mm)
+                         for r in rules)))
+    if _key not in _TRACK_ANNOUNCED:
+        _TRACK_ANNOUNCED.add(_key)
+        for r in rules:
+            print(f"Track-to-track clearance rule from the board's .kicad_dru "
+                  f"(#549, raise-only on seg-seg pairs): '{r.name}' class "
+                  f"'{r.cls}' {r.clearance_mm:g}mm"
+                  f"{' (vs other classes only)' if r.other_only else ''}"
+                  f" -- {len(eff)} net(s) priced")
 
 
 _ANNOUNCED = set()  # (board path, map items) already printed this process

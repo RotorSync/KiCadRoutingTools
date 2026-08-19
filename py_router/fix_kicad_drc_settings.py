@@ -30,7 +30,10 @@ board actually uses:
   * Default net-class **differential-pair gap / width** (``--diff-pair-gap`` /
     ``--diff-pair-width``) -- lowered to the routed values so the net class stops
     advertising the stock-wide 0.25 mm gap a planner would read back and re-use
-  * non-routing severities (courtyard, solder-mask, footprint/library) -> ignore
+  * non-routing severities (courtyard shapes, solder-mask, footprint/library)
+    -> ignore, EXCEPT ``courtyards_overlap`` -> warning (run-6: ignore gagged
+    KiCad on the one check that catches a stacked part; warning keeps a routed
+    board's exit green while the pair stays visible in the report)
 
 **Only loosen, never tighten.** Every constraint is set to ``min(current, target)``
 -- it is only *lowered* toward the real fab floor, never raised. So this can
@@ -355,6 +358,180 @@ def effective_board_edge_clearance(pcb_path: str, cli_value: float,
     return max(base, fab_edge_floor(pcb_path)) if fab_floor else base
 
 
+# Rules that describe what the FAB can make, as opposed to how the board is
+# graded. Lowering a clearance is a grading decision with a measured rationale
+# (stock netclass clearances are aspirational, and keeping them manufactures
+# phantom violations on correctly-routed copper). Lowering one of these is a
+# different claim: that the board can be manufactured at the new number.
+_FLOOR_EPS = 1e-9
+
+FAB_FLOOR_KEYS = (
+    ("min_track_width", "track width"),
+    ("min_via_diameter", "via diameter"),
+    ("min_via_annular_width", "via annular ring"),
+    ("min_via_drill", "via drill"),
+    ("min_through_hole_diameter", "hole diameter"),
+    # Copper-to-hole. It belongs here and not with the aspirational netclass
+    # clearances: it is a drill-REGISTRATION constraint, the same family as
+    # annular ring above, and relaxing it is a claim about what the fab can
+    # make. Measured on neo6502: a chain lowered it 0.25 -> 0.20 and the
+    # disclosure said nothing, because this tuple did not list it, so
+    # `relaxed: []` was a blind pass over three NPTH holes carrying copper at
+    # 0.2126/0.2263/0.2263 mm.
+    #
+    # NOTE it is DECLARATION-only: scan_board_minima measures object sizes and
+    # no pairwise geometry, so no measured counterpart exists for this key.
+    # `_fab_floor_disclosure` (declared-vs-declared) covers it; consumers that
+    # compare against a measured board minimum cannot, and must say so rather
+    # than skip it in silence -- see check_complete's `unmeasured` list.
+    ("min_hole_clearance", "copper-to-hole clearance"),
+)
+
+#: Subset of :data:`FAB_FLOOR_KEYS` that :func:`scan_board_minima` can actually
+#: measure off the copper. Anything outside this set can be compared between two
+#: DECLARATIONS but never against the board itself.
+FAB_FLOOR_KEYS_MEASURABLE = frozenset({
+    "min_track_width", "min_via_diameter", "min_via_annular_width",
+    "min_via_drill", "min_through_hole_diameter",
+})
+
+
+def declared_fab_floor(pcb_path: str, key: str):
+    """The floor the board declared for ``key`` BEFORE this chain touched it, mm.
+
+    Reads ``kicad_routing_tools.fab_floor_origin`` from the sibling
+    ``.kicad_pro`` -- seeded on the FIRST writeback and carried down the chain
+    with the project, the same record :func:`_fab_floor_disclosure` compares
+    against. Returns ``None`` when there is no project, no origin (nothing has
+    written back yet, so ``design_settings.rules`` IS the original), or the key
+    is absent.
+
+    Why an ENGINE needs this and not just the disclosure: the writeback clamps
+    ``rules`` DOWN to what the step routed, so by step 2 the rules value is the
+    routed clearance and the author's declaration is gone from the place every
+    reader looks. Measured on tigard, a pour + route chain from a project
+    declaring ``min_hole_clearance`` 0.25::
+
+        step   rules.min_hole_clearance   fab_floor_origin.min_hole_clearance
+        in     0.25                       (none yet)
+        pour   0.15                       0.25
+        out    0.1375                     0.25
+
+    A consumer reading ``rules`` alone stops honouring 0.25 after step 1 --
+    silently, because 0.15 is a perfectly plausible value. The origin is the
+    durable record; prefer the LARGER of the two (see
+    :func:`obstacle_map.resolve_hole_clearance`).
+    """
+    try:
+        pro = os.path.splitext(pcb_path)[0] + '.kicad_pro'
+        if not os.path.exists(pro):
+            return None
+        with open(pro, 'r', encoding='utf-8') as fh:
+            proj = json.load(fh)
+        v = ((proj.get("kicad_routing_tools") or {})
+             .get("fab_floor_origin") or {}).get(key)
+        return float(v) if isinstance(v, (int, float)) and v > 0 else None
+    except Exception:                                            # noqa: BLE001
+        return None
+
+
+def _fab_floor_disclosure(output_pcb: str, rules_before: dict, proj: dict,
+                          origin: dict = None):
+    """Say out loud when the writeback relaxed a MANUFACTURING floor.
+
+    ``origin`` is the floor the board declared BEFORE this chain touched it
+    (``kicad_routing_tools.fab_floor_origin``, seeded on the first writeback
+    and carried down with the project). Without it this function compares
+    against its immediate input, which goes silent the moment a chain has more
+    than one step: run 14's R1 announced ``via diameter 0.5 -> 0.25`` once, and
+    then R4 added 7 more sub-0.5 vias and R5 added 10 with NO banner at all,
+    because by then 0.25 was the input and nothing had "moved". The board that
+    shipped had 10 vias under its own declared 0.5 and every instrument called
+    it clean. So the comparison is against the ORIGIN, and a step that inherits
+    an already-relaxed floor still says so.
+
+    Run-7 finding: two routed boards shipped with their project's
+    min_track_width rewritten 0.2 -> 0.0889 and min_via_diameter 0.5 -> 0.25,
+    and on one of them 5629 of 5933 segments and 371 of 712 vias sat below the
+    board's ORIGINAL declared floors -- while check_drc, board_score and
+    KiCad's own DRC all read clean, because every one of them grades against
+    the rewritten project.
+
+    The relaxation is not simply a bug: both boards carried KiCad's STOCK
+    defaults (0.2 / 0.5 / 0.1), which is exactly the aspirational case the
+    clamp exists for, and the routed copper sat at the repo's fab track floor
+    rather than below it. The defect is that the tool cannot tell a stock
+    default from a deliberate fab constraint -- and when it is the latter, a
+    silent rewrite ships a board the fab cannot make, with every instrument
+    green. A third board whose author had set 0.127 was never ratcheted,
+    because its routing stayed above it; that is luck, not protection.
+
+    So: keep the relaxation (removing it re-manufactures phantom DRC), and
+    make it impossible to miss. Counts, not adjectives.
+    """
+    rules_after = ((proj.get("board") or {}).get("design_settings")
+                   or {}).get("rules") or {}
+    origin = origin or {}
+    relaxed = []
+    for key, label in FAB_FLOOR_KEYS:
+        was, now = rules_before.get(key), rules_after.get(key)
+        # Baseline is the board's ORIGINAL declaration where we know it, and
+        # the immediate input otherwise (first step of a chain, or a project
+        # that predates the origin key).
+        base = origin.get(key, was)
+        if not isinstance(now, (int, float)) or not isinstance(base, (int, float)):
+            continue
+        if now < base - _FLOOR_EPS:
+            # `moved_here` separates "this step lowered it" from "this step
+            # inherited it and is still under the original".
+            moved_here = (isinstance(was, (int, float))
+                          and now < was - _FLOOR_EPS)
+            relaxed.append((key, label, float(base), float(now), moved_here))
+    if not relaxed:
+        return []
+
+    census = {}
+    try:
+        from kicad_parser import parse_kicad_pcb
+        pcb = parse_kicad_pcb(output_pcb)
+        for key, _label, was, _now, _mv in relaxed:
+            if key == "min_track_width":
+                objs = [s.width for s in pcb.segments if s.width]
+            elif key == "min_via_diameter":
+                objs = [v.size for v in pcb.vias if v.size]
+            elif key == "min_via_drill":
+                objs = [v.drill for v in pcb.vias if v.drill]
+            elif key == "min_via_annular_width":
+                objs = [(v.size - v.drill) / 2.0 for v in pcb.vias
+                        if v.size and v.drill and v.size > v.drill]
+            else:
+                objs = []
+            if objs:
+                census[key] = (sum(1 for o in objs if o < was - _FLOOR_EPS), len(objs))
+    except Exception:                                   # disclosure is best-effort
+        pass
+
+    lines = ["  FAB FLOOR RELAXED -- the output project declares a smaller "
+             "minimum than the board originally did:"]
+    for key, label, was, now, moved_here in relaxed:
+        under, total = census.get(key, (None, None))
+        tail = (f"; {under} of {total} object(s) on this board are below the "
+                f"ORIGINAL {was:g}mm" if under is not None else "")
+        if moved_here:
+            lines.append(f"    {label}: {was:g} -> {now:g} mm{tail}")
+        else:
+            # Inherited from an earlier step in the chain. Saying nothing here
+            # is what let run 14 add 17 sub-floor vias in silence.
+            lines.append(f"    {label}: {now:g} mm, unchanged by this step but "
+                         f"still below the board's ORIGINAL {was:g}mm{tail}")
+    lines.append("    Every checker (check_drc, board_score, KiCad's own DRC) "
+                 "grades against the NEW value, so this copper will read clean. "
+                 "Confirm your fab supports it; if the original number was a "
+                 "real process limit, re-route at that floor rather than "
+                 "shipping this project.")
+    return lines
+
+
 def scan_board_minima(pcb_path: str):
     """Smallest track width / via diameter / via drill / via annular ring / hole
     diameter actually present on the board. These are floors KiCad's min-size
@@ -485,13 +662,24 @@ def compute_targets(clearance=None, hole_clearance=None, hole_to_hole=None,
 def severity_plan(keep_courtyards=False, keep_mask=False, keep_footprint=False,
                   keep_thermal=False, extra_ignore=()):
     """Desired severity per DRC category: {category -> 'ignore' | 'warning'}.
-    Applied with only-loosen semantics by the apply_* functions."""
+    Applied with only-loosen semantics by the apply_* functions.
+
+    Run-6: `courtyards_overlap` demotes to WARNING, never ignore. The old
+    ignore GAGGED KiCad on the one check that catches a stacked part (run 5
+    shipped C14-on-R14 with a project file whose severities silenced
+    kicad-cli's own courtyards_overlap error). Warning keeps a routed
+    board's exit green (the routing checks stay the gate) while the pair
+    remains VISIBLE to any reader of the report; check_assembly is the
+    blocking arbiter with its class waivers. The other courtyard-shape
+    categories (malformed etc.) stay ignore -- library noise, not
+    placement facts."""
     plan = {}
     for cat in extra_ignore:
         plan[cat] = "ignore"
     if not keep_courtyards:
         for cat in COURTYARD_CATS:
             plan[cat] = "ignore"
+        plan["courtyards_overlap"] = "warning"
     if not keep_mask:
         for cat in MASK_CATS:
             plan[cat] = "ignore"
@@ -801,6 +989,27 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
 
     with open(out_pro) as f:
         proj = json.load(f)
+    # The board's DECLARED manufacturing floors, before this function lowers
+    # them to whatever was routed. Kept so the relaxation can be disclosed
+    # (see _fab_floor_disclosure): a clearance clamp is a grading decision, a
+    # track/via floor is a statement about what the fab can make.
+    _rules_before = dict(((proj.get("board") or {}).get("design_settings")
+                          or {}).get("rules") or {})
+    # The floors the board declared BEFORE this chain touched anything. Seeded
+    # on the first writeback and carried down with the project (same mechanism
+    # as protected_nets / net_impedance, #521), so step N still knows what step
+    # 0 started from. Without it the disclosure below compares against its
+    # immediate input and goes silent for every step after the first -- which
+    # is exactly how run 14 shipped 10 vias under its declared 0.5 mm with one
+    # banner at R1 and none at R4 or R5.
+    _origin = dict((proj.get("kicad_routing_tools") or {})
+                   .get("fab_floor_origin") or {})
+    _origin_seeded = False
+    if not _origin:
+        _origin = {k: float(v) for k, v in _rules_before.items()
+                   if k in {key for key, _ in FAB_FLOOR_KEYS}
+                   and isinstance(v, (int, float))}
+        _origin_seeded = bool(_origin)
     # `minima` lets a caller that ALREADY has the board in memory supply these
     # instead of us re-parsing the file. The GUI does: scan_board_minima ->
     # parse_kicad_pcb allocates thousands of GC-tracked objects, and the GUI
@@ -838,7 +1047,15 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
     if not changes:
         if verbose:
             print(f"  DRC settings already consistent ({out_pro})")
+            # The floors did not move, but they may ALREADY be under the
+            # board's original declaration from an earlier step -- and that is
+            # still true of the board being shipped. Say so.
+            for line in _fab_floor_disclosure(output_pcb, _rules_before, proj,
+                                              _origin):
+                print(line)
         return out_pro
+    if _origin_seeded:
+        proj.setdefault("kicad_routing_tools", {})["fab_floor_origin"] = _origin
     # Atomic replace (#513 item 12): a kill mid-dump must not leave a
     # truncated/unparseable project stranding the DRC floor.
     _tmp_pro = out_pro + ".tmp"
@@ -847,8 +1064,19 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
         f.write("\n")
     os.replace(_tmp_pro, out_pro)
     if verbose:
-        print(f"  DRC settings: updated {len(changes)} value(s) in {out_pro} "
-              f"to match the routed floors (close+reopen in KiCad if it is open)")
+        print(f"  DRC settings: wrote {len(changes)} value(s) to {out_pro} "
+              f"to match the routed floors (close+reopen in KiCad if it "
+              f"is open). WRITES, not changes: a key the project never "
+              f"declared counts here, and one logical value is written once "
+              f"per net class:")
+        # LIST them. Pointing at a summary that names three of seventeen is how
+        # run 14's netclass via_diameter went 0.6 -> 0.25 and its
+        # min_hole_clearance 0.25 -> 0.175 with nothing said about either.
+        for c in changes:
+            print(f"      {c}")
+    for line in _fab_floor_disclosure(output_pcb, _rules_before, proj,
+                                      _origin):
+        print(line)
     return out_pro
 
 
