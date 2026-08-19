@@ -284,7 +284,16 @@ class GridRouteConfig:
     # Heuristic tuning
     proximity_heuristic_factor: float = 0.0  # proximity add-on to the A* heuristic (0 since the hw-2.3 default; the base greediness covers it)
     # Layer direction preference - alternates H/V starting with horizontal on top
-    direction_preference_cost: int = 250  # Cost penalty for non-preferred direction (0 = disabled); see routing_defaults
+    # DELIBERATELY NOT routing_defaults.DIRECTION_PREFERENCE_COST (which #663
+    # took 250 -> 5). route.py/route_diff.py always pass the caller's value, so
+    # this default is reached only by configs built field-by-field that never
+    # pass the parameter at all -- the oracle-weld and plane sub-configs
+    # (route.py:3673, route.py:4216, route_planes.py, repair_planes.py). Those
+    # legs have ALWAYS run at 250, on both front-ends, and #663's corpus screen
+    # patched only the module constant -- so it measured signal routing and says
+    # nothing about them. Lowering this to match would be an unmeasured change,
+    # not a consistency fix; measure it first (see #663).
+    direction_preference_cost: int = 250  # Cost penalty for non-preferred direction (0 = disabled)
     # Bus routing - auto-detection and parallel routing of grouped nets
     bus_enabled: bool = False  # Enable bus detection and routing
     bus_detection_radius: float = 5.0  # mm - max endpoint distance to form bus

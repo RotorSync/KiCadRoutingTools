@@ -132,7 +132,10 @@ RIPUP_BLOCKER_SELECT_CHOICES = ('count', 'near-target', 'bidir', 'mincut', 'cost
 
 # Layer direction preference (0=horizontal, 1=vertical, 255=none)
 # Alternates H/V starting with horizontal on top layer
-DIRECTION_PREFERENCE_COST = 250  # Cost penalty for non-preferred direction (0 = disabled).
+DIRECTION_PREFERENCE_COST = 5  # 250 -> 5: #663 corpus screen (dirs5 vs dirs250, sets 1-5,
+# 75 boards/arm at one commit): verdict -22 incomplete nets (-19.6%), W15/L6, real DRC flat.
+# 250 taxed every off-axis move at >3 vias (VIA_COST 75); 5 keeps the H/V organization that
+# 0 loses. Cost penalty for non-preferred direction (0 = disabled).
 # 250 is a compromise: 5000 (5x a move) reproduced human H/V lane style but
 # starved routability on dense boards (sets 6-11 A/B: +104 incomplete nets,
 # kbic65 98.9%->15.1%, route.py ~2x slower); the old 50 (~5% of a move) was

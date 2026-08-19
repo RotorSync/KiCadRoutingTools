@@ -1257,9 +1257,13 @@ fine.
    routes real, graded drill-pair violations (verified in code by two
    independent plan audits). Pass the BOARD's own `min_hole_to_hole`
    (from `--design-rules`), or omit the flag and let route.py derive it.
-2. **Direction preference**: `--direction-preference-cost 5`. The old 250
-   default was measured far off-optimum (dose curve 0→19, 5→9, 250→15 —
-   a weak nudge organizes layers; more over-taxes, #663).
+2. **Direction preference**: this is now the DEFAULT (5), so passing
+   `--direction-preference-cost 5` is optional — keep it if you want the
+   manifest self-documenting. #663's corpus screen took the old 250 default
+   to 5 on the strength of sets 1-5, 75 boards per arm at one commit: −22
+   incomplete nets (−19.6%), W15/L6, real DRC flat. A weak nudge organizes
+   layers; 250 priced every off-axis move above 3 vias and forced detours,
+   while 0 loses the organization entirely.
 3. **Layer pricing** (order matches `--layers`): GND solid-plane layer
    **6.0**; rail/split pour layers **2.5**; F/B and free routing layers
    **1.0**; and leave the board's **bus-highway layer at 1.0 even if it
