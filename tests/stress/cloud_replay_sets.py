@@ -111,6 +111,18 @@ def sh_capture(cmd, **kw):
     return p.returncode, "".join(out)
 
 
+def _num(v: str):
+    """int, else float, else the raw string -- the order matters (see stage_run)."""
+    try:
+        return int(v)
+    except ValueError:
+        pass
+    try:
+        return float(v)
+    except ValueError:
+        return v
+
+
 def expand_sets(spec: str) -> list:
     """'set10-set19' / 'set10,set12' / 'set10-set12,set19' -> [set10, ...]."""
     out = []
@@ -501,7 +513,12 @@ def stage_run(args, sets, stress, plan):
     if getattr(args, "env", None):
         spec["env"] = dict(kv.split("=", 1) for kv in args.env)
     if getattr(args, "defaults", None):
-        spec["defaults"] = {k: float(v) if v.replace(".", "", 1).lstrip("-").isdigit() else v
+        # int BEFORE float: several routing_defaults constants land in a pyo3
+        # `i32` argument (DIRECTION_PREFERENCE_COST, VIA_COST, TURN_COST, ...),
+        # and pyo3 refuses a Python float there -- coercing every numeric knob
+        # to float made such an arm raise TypeError on its first route step
+        # instead of measuring the knob.
+        spec["defaults"] = {k: _num(v)
                             for k, v in (kv.split("=", 1) for kv in args.defaults)}
     if spec.get("env") or spec.get("defaults"):
         spec["note"] = f"cloud replay; env={spec.get('env')} defaults={spec.get('defaults')}"
