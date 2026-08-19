@@ -382,10 +382,13 @@ def test_an_edge_connector_outside_its_declared_overhang_is_caught():
     print(f"  PASS: {hits[0].message[:84]}")
 
 
-def test_a_board_whose_outline_did_not_parse_is_refused_not_graded():
-    """#550 in miniature: a round board parses its ring fine but reports
-    board_bounds None, and every containment check would silently degrade to a
-    bounding box that does not exist."""
+def test_a_round_board_now_parses_its_outline():
+    """The #550 case this used to reproduce is FIXED: a gr_circle Edge.Cuts
+    ring is tessellated (64 edge segments) and yields real bounds, so the
+    round board is gradeable rather than refused. Kept as a regression guard
+    on the parse, with the refusal path itself moved to the test below --
+    which uses a board that genuinely HAS no bounds, since a round one no
+    longer does."""
     d = tempfile.mkdtemp()
     p = os.path.join(d, 'round.kicad_pcb')
     with open(p, 'w', encoding='utf-8') as fh:
@@ -397,14 +400,38 @@ def test_a_board_whose_outline_did_not_parse_is_refused_not_graded():
                  '  (net 0 "")\n)\n')
     pcb = parse_kicad_pcb(p)
     st = outline_state(pcb, p)
+    assert st['trustworthy'], st
+    assert st['outlines'] == 1 and st['edge_segments'] > 8, st
+    # r=20 at (50,50) -> the tessellated ring's extent, not a phantom box.
+    assert st['bounds'] == (30.0, 30.0, 70.0, 70.0), st
+    assert not st['problems'], st['problems']
+    print("  PASS: a round outline tessellates and grades (was #550-refused)")
+
+
+def test_a_board_with_no_outline_at_all_is_refused_not_graded():
+    """The refusal itself, on a board that genuinely has no bounds: every
+    containment check would otherwise degrade to a bounding box that does not
+    exist."""
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, 'noedge.kicad_pcb')
+    with open(p, 'w', encoding='utf-8') as fh:
+        fh.write('(kicad_pcb (version 20221018) (generator pcbnew)\n'
+                 '  (layers (0 "F.Cu" signal) (31 "B.Cu" signal)'
+                 ' (44 "Edge.Cuts" user))\n'
+                 '  (net 0 "")\n)\n')
+    pcb = parse_kicad_pcb(p)
+    st = outline_state(pcb, p)
     assert not st['trustworthy'], st
-    assert st['bounds'] is None and st['outlines'] == 1, st
-    assert any('550' in s for s in st['problems']), st['problems']
+    assert st['bounds'] is None and st['outlines'] == 0, st
+    assert st['problems'], st
     try:
         emit_intent(pcb, p)
         raise AssertionError("emit_intent graded a board with no usable bounds")
     except UntrustworthyOutline as exc:
-        assert '550' in str(exc), exc
+        # The message names the reason. It used to be pinned to '550' because
+        # the fixture was a ROUND board; that case now parses (see the test
+        # above), so this one has no Edge.Cuts at all and says so.
+        assert 'outline' in str(exc).lower(), exc
     print(f"  PASS: refused -- {st['problems'][0][:80]}")
 
 
@@ -475,7 +502,8 @@ TESTS = [
     test_emit_never_claims_a_zone_it_cannot_defend,
     test_emit_records_the_overhanging_parts_as_edge_connectors,
     test_an_edge_connector_outside_its_declared_overhang_is_caught,
-    test_a_board_whose_outline_did_not_parse_is_refused_not_graded,
+    test_a_round_board_now_parses_its_outline,
+    test_a_board_with_no_outline_at_all_is_refused_not_graded,
     test_a_plain_rectangular_board_is_trustworthy_with_no_rings,
     test_the_summary_says_how_many_rules_RAN,
     test_state_signals_reach_the_summary,

@@ -34,6 +34,19 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_placer'))  # placement split
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # #522
 
+# #522 reorg + skill merge: engine -> py_router/, placer -> py_placer/,
+# board_score.py -> the placement-and-routing skill. Without these roots the
+# imports below raise and the test never runs (it reports as a failure while
+# asserting nothing).
+_R522 = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _p522 in ('py_router', 'py_placer',
+              os.path.join('.claude', 'skills',
+                           'plan-pcb-placement-and-routing', 'scripts')):
+    _d522 = os.path.join(_R522, _p522)
+    if _d522 not in sys.path:
+        sys.path.insert(0, _d522)
+
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SEEDS = ('0', '1', '12345')
 
@@ -75,6 +88,11 @@ def _run(board, seed):
     env = dict(os.environ, PYTHONHASHSEED=seed,
                PYTHONPATH=os.pathsep.join(
                    (os.path.join(ROOT, 'py_router'),
+                    # the placer split out of py_router; _PROBE imports
+                    # placement.quench from here, and without it the probe
+                    # died before running and the test reported a failure
+                    # while asserting nothing.
+                    os.path.join(ROOT, 'py_placer'),
                     os.path.join(ROOT, 'rust_router'), ROOT)))
     r = subprocess.run([sys.executable, '-c', _PROBE,
                         os.path.join(ROOT, 'kicad_files', board)],

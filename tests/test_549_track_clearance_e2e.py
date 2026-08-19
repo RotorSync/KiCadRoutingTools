@@ -22,6 +22,19 @@ import tempfile
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
+# #522 reorg + skill merge: engine -> py_router/, placer -> py_placer/,
+# board_score.py -> the placement-and-routing skill. Without these roots the
+# imports below raise and the test never runs (it reports as a failure while
+# asserting nothing).
+_R522 = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _p522 in ('py_router', 'py_placer',
+              os.path.join('.claude', 'skills',
+                           'plan-pcb-placement-and-routing', 'scripts')):
+    _d522 = os.path.join(_R522, _p522)
+    if _d522 not in sys.path:
+        sys.path.insert(0, _d522)
+
+
 BOARD = os.path.join(REPO, "kicad_files", "splitflap_driver.kicad_pcb")
 RULE = 0.45
 DRU = ('(version 1)\n(rule crit_space (condition "A.Type==\'track\' && '
@@ -56,7 +69,7 @@ def route(workdir, with_dru, out_name):
     out = os.path.join(workdir, out_name)
     js = out + ".json"
     r = subprocess.run(
-        [sys.executable, os.path.join(REPO, "route.py"), src, out,
+        [sys.executable, os.path.join(REPO, 'py_router', 'route.py'), src, out,
          "--nets", *NETS, "--layers", "F.Cu", "B.Cu",
          "--clearance", "0.2", "--track-width", "0.2", "--json-out", js],
         capture_output=True, text=True, timeout=1200)
@@ -101,7 +114,7 @@ with tempfile.TemporaryDirectory() as d:
           gap1 >= RULE * 0.95, f"min gap {gap1:.3f}")
 
     dr = subprocess.run(
-        [sys.executable, os.path.join(REPO, "check_drc.py"), out_dru,
+        [sys.executable, os.path.join(REPO, 'py_router', 'check_drc.py'), out_dru,
          "--no-size-checks"],
         capture_output=True, text=True, timeout=600)
     check("check_drc grades the ruled board clean", dr.returncode == 0,

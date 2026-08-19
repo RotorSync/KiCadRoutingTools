@@ -21,6 +21,21 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+# #522: the engine lives in py_router/, the placer in py_placer/ --
+# ROOT alone does not make `import kicad_parser` work.
+for _p522 in ('py_router', 'py_placer'):
+    _d522 = os.path.join(ROOT, _p522)
+    if _d522 not in sys.path:
+        sys.path.insert(0, _d522)
+# #522 reorg + skill merge: the engine moved to py_router/, the placer to
+# py_placer/, and board_score.py into the placement-and-routing skill. Tests
+# that shell out to or import them need those roots on sys.path.
+for _p in ('py_router', 'py_placer',
+           os.path.join('.claude', 'skills', 'plan-pcb-placement-and-routing',
+                        'scripts')):
+    _d = os.path.join(ROOT, _p)
+    if _d not in sys.path:
+        sys.path.insert(0, _d)
 
 RUN3_BOARD = os.path.join(ROOT, 'wk', 'run3', 'final2.kicad_pcb')
 
@@ -52,7 +67,7 @@ def board_with_gap(gap_mm: float) -> str:
 def run_drc(board_path, *argv):
     env = dict(os.environ, PYTHONPATH=ROOT, PYTHONIOENCODING='utf-8')
     return subprocess.run(
-        [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'check_drc.py'),
+        [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'py_router', 'check_drc.py'),
          board_path, *argv],
         capture_output=True, text=True, env=env, cwd=ROOT)
 

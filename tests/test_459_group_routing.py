@@ -42,7 +42,7 @@ FLAT = os.path.join(KF, 'tigard.kicad_pcb')                         # no sheets
 
 
 def _run(*args, timeout=1800):
-    return subprocess.run([sys.executable, os.path.join(ROOT, 'route.py')] + list(args),
+    return subprocess.run([sys.executable, os.path.join(ROOT, 'py_router', 'route.py')] + list(args),
                           capture_output=True, text=True, cwd=ROOT, timeout=timeout)
 
 

@@ -25,7 +25,7 @@ sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.join(REPO, "py_router"))  # #522 layout
 
 BOARD = os.path.join(REPO, "kicad_files", "splitflap_driver.kicad_pcb")
-SCORE = os.path.join(REPO, '.claude', 'skills', 'plan-pcb-routing',
+SCORE = os.path.join(REPO, '.claude', 'skills', 'plan-pcb-placement-and-routing',
                      'scripts', 'board_score.py')
 RULE = 0.45
 DRU = ('(version 1)\n(rule "PCBX: crit space" (condition "A.Type==\'track\' && '
