@@ -1103,7 +1103,7 @@ signal routing. Use the
 **same `--clearance`** you gave the fanout / your DRC floor — that's the only
 setting that matters (it reads each via's real size from the board).
 
-python3 py_router/place_fanout_clearance.py board_step1b.kicad_pcb board_step1c.kicad_pcb \
+python3 py_placer/place_fanout_clearance.py board_step1b.kicad_pcb board_step1c.kicad_pcb \
     --clearance 0.1
 
 It prints `Moved N cap(s); resolved R/M ... K unresolved`. Any **unresolved**

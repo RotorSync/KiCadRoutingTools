@@ -48,6 +48,7 @@ import tempfile
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.join(REPO, 'py_router'))  # #522
+sys.path.insert(0, os.path.join(REPO, 'py_placer'))  # placement split
 sys.path.insert(0, os.path.join(REPO, 'py_tools'))  # #522
 
 # Env var wins; else PATH (Windows/Linux installs put kicad-cli there, the
@@ -72,6 +73,15 @@ KICAD_COPPER_TYPES = {
 # pollute kicad_only (the check_drc-false-negative alarm channel).
 KICAD_WEB_TYPES = {"connection_width"}
 
+# Courtyard-overlap class (run-6): a third LABELED channel, never silently
+# filtered (run 5 shipped a stacked part while this comparator dropped
+# KiCad's courtyards_overlap on the floor and reported CONSISTENT). Items
+# are reconciled against check_assembly's class-waiver verdicts: each pair
+# is labeled blocking / advisory / waived / unmatched -- `unmatched` (KiCad
+# sees a pair our grader does not, or vice versa) is the alarm channel.
+# Never enters the copper match.
+KICAD_COURTYARD_TYPES = {"courtyards_overlap"}
+
 MATCH_RADIUS_MM = 0.5
 
 
@@ -82,8 +92,25 @@ def run_kicad_drc(board: str):
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
         out_json = f.name
     try:
+        # --severity-all, not --severity-error: courtyards_overlap is
+        # demoted to WARNING by the run-6 project writeback and must still
+        # reach this comparator. Non-error items of every OTHER class are
+        # dropped below, so the copper channels keep error-only semantics.
+        if not (os.path.isfile(KICAD_CLI) or shutil.which(KICAD_CLI)):
+            # Run-7 A19: on a machine where kicad-cli is not on PATH this fell
+            # through to the macOS bundle default and died with a bare
+            # FileNotFoundError naming a path the user has never heard of. The
+            # oracle is the instrument that catches check_drc's own false
+            # negatives, so a run that cannot start it must say what to set.
+            return None, (
+                f"kicad-cli not found at '{KICAD_CLI}'. Set KICAD_CLI to the "
+                f"binary, e.g. KICAD_CLI='C:/Program Files/KiCad/<ver>/bin/"
+                f"kicad-cli.exe' (Windows), /usr/bin/kicad-cli (Linux), or "
+                f"/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli "
+                f"(macOS) -- or put it on PATH. The KiCad oracle is skipped "
+                f"without it, so check_drc's result is UNCORROBORATED.")
         r = subprocess.run(
-            [KICAD_CLI, "pcb", "drc", "--format", "json", "--severity-error",
+            [KICAD_CLI, "pcb", "drc", "--format", "json", "--severity-all",
              "--refill-zones", "--output", out_json, board],
             capture_output=True, text=True, timeout=1800)
         if not os.path.exists(out_json) or os.path.getsize(out_json) == 0:
@@ -99,7 +126,25 @@ def run_kicad_drc(board: str):
     out = []
     for v in data.get("violations", []):
         vtype = v.get("type", "")
+        if vtype in KICAD_COURTYARD_TYPES:
+            # any severity (the writeback demotes to warning); ref pair
+            # from the item descriptions ("Footprint H4 of ...")
+            refs = []
+            for item in v.get("items", []):
+                m = re.search(r"Footprint\s+(\S+)", item.get("description",
+                                                             "") or "")
+                if m:
+                    refs.append(m.group(1))
+            out.append({"type": vtype, "nets": frozenset(),
+                        "pos": (0.0, 0.0), "desc": v.get("description", ""),
+                        "kinds": tuple(sorted(refs)[:2]),
+                        "severity": v.get("severity", "")})
+            continue
         if vtype not in KICAD_COPPER_TYPES and vtype not in KICAD_WEB_TYPES:
+            continue
+        if v.get("severity") == "warning":
+            # copper/web channels keep their historical error-only
+            # semantics under the new --severity-all run
             continue
         nets = set()
         pos = None
@@ -666,6 +711,54 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
             web_min = None
     web_items = [v for v in kicad if v["type"] in KICAD_WEB_TYPES]
     kicad = [v for v in kicad if v["type"] not in KICAD_WEB_TYPES]
+    # Run-6: the courtyard channel splits out the same way (never enters the
+    # copper match), then reconciles against check_assembly's class-waiver
+    # verdicts by ref pair. `unmatched` on either side is the alarm.
+    court_items = [v for v in kicad if v["type"] in KICAD_COURTYARD_TYPES]
+    kicad = [v for v in kicad if v["type"] not in KICAD_COURTYARD_TYPES]
+    courtyard = None
+    try:
+        from kicad_parser import parse_kicad_pcb as _pk
+        from placement.legality import grade_body_overlap as _gbo
+        import routing_defaults as _defaults
+        _g = _gbo(_pk(board), clearance or _defaults.CLEARANCE,
+                  pcb_file=board)
+        _ours = {}
+        for q in _g["pairs"]:
+            key = tuple(sorted((q.a, q.b)))
+            lab = ("blocking" if q.kind == "pad_intersection"
+                   else (f"waived:{q.waiver}" if q.waived else "advisory"))
+            # blocking outranks advisory outranks waived for a shared pair
+            rank = {"blocking": 2}.get(lab.split(":")[0],
+                                       1 if lab == "advisory" else 0)
+            if key not in _ours or rank > _ours[key][1]:
+                _ours[key] = (lab, rank)
+        rows = []
+        seen_pairs = set()
+        for v in court_items:
+            key = tuple(v.get("kinds") or ())
+            seen_pairs.add(key)
+            lab = _ours.get(key, ("unmatched-by-krt", -1))[0]
+            rows.append({"pair": list(key), "krt": lab,
+                         "severity": v.get("severity", "")})
+        for key, (lab, rank) in sorted(_ours.items()):
+            # krt-only rows are BLOCKING only: advisory pairs are routine
+            # on dense healthy boards (corpus: glasgow ships 55) and have
+            # their reporting home in check_assembly; this channel exists
+            # to reconcile the two BLOCKING-grade instruments.
+            if key not in seen_pairs and rank >= 2:
+                rows.append({"pair": list(key), "krt": lab,
+                             "severity": "krt-only"})
+        courtyard = {"kicad": len(court_items),
+                     "krt_blocking": _g["blocking"],
+                     "krt_advisory": _g["advisory"],
+                     "krt_waived": _g["waived"],
+                     "unmatched": sum(1 for r in rows
+                                      if r["krt"].startswith("unmatched")
+                                      or r["severity"] == "krt-only"),
+                     "pairs": rows}
+    except Exception as e:  # noqa: BLE001 -- reporting channel, not a gate
+        courtyard = {"error": str(e)[:150], "kicad": len(court_items)}
     pre = web_pre = 0
     if baseline and os.path.exists(baseline):
         base_items, berr = kicad_items_for(baseline, clearance)
@@ -762,6 +855,8 @@ def compare_board_data(board: str, label: str = None, clearance: float = None,
             "connection_width_min": web_min,
             "connection_width_preexisting": web_pre,
             "connection_width_items": web_items,
+            # run-6: the labeled courtyard channel (never silently filtered)
+            "courtyard": courtyard,
             "kicad_only_items": kicad_only, "checkdrc_only_items": cd_only}
 
 
@@ -770,7 +865,8 @@ _SUMMARY_KEYS = ("board", "kicad", "kicad_preexisting", "check_drc",
                  "kicad_intentional_edge", "checkdrc_intentional_edge",
                  "matched", "kicad_only", "checkdrc_only",
                  "pairs_kicad_only", "pairs_checkdrc_only",
-                 "kicad_connection_width", "connection_width_min")
+                 "kicad_connection_width", "connection_width_min",
+                 "courtyard")
 
 
 def compare_board(board: str, label: str = None, clearance: float = None,
@@ -807,6 +903,20 @@ def compare_board(board: str, label: str = None, clearance: float = None,
     for wv in data.get("connection_width_items", []):
         print(f"    CONNWIDTH   {'/'.join(wv.get('kinds', ())) or '?':16s} "
               f"{sorted(wv['nets'])} @ {wv['pos']}  {wv.get('desc', '')[:60]}")
+    court = data.get("courtyard")
+    if court is not None:
+        if "error" in court:
+            print(f"    COURTYARD   kicad={court.get('kicad')} "
+                  f"(krt grader error: {court['error']})")
+        else:
+            print(f"    COURTYARD   kicad={court['kicad']} "
+                  f"krt_blocking={court['krt_blocking']} "
+                  f"advisory={court['krt_advisory']} "
+                  f"waived={court['krt_waived']} "
+                  f"unmatched={court['unmatched']}")
+            for row in court["pairs"]:
+                print(f"      {'<->'.join(row['pair']) or '?':20s} "
+                      f"krt={row['krt']} sev={row['severity']}")
     return {k: data[k] for k in _SUMMARY_KEYS}
 
 
@@ -848,4 +958,5 @@ def main():
 
 
 if __name__ == "__main__":
+    import cli_banner; cli_banner.install()  # CMD/EXIT self-echo (run-5 c1)
     sys.exit(main())

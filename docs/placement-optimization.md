@@ -175,6 +175,95 @@ Two additions the literature argues for:
    with FreeRouting; we have a faster router in-house, so "fraction of pin
    pairs routed" becomes a measurable, optimizable number.
 
+### Corridor cut length: a good measurement and a bad objective
+
+*(A negative result, kept because the reasoning that produced it was
+plausible and wrong, and the next person will have the same idea.)*
+
+When the intent declares `health.bus_corridors`, we can measure the **length**
+each foreign airwire cuts through a bus's lane instead of counting that it
+does. The argument for putting that in the objective went: `foreign_crossings`
+is a count, a count is piecewise constant in pose, its gradient is zero almost
+everywhere, so a greedy descent sees a cliff instead of a slope; the chord
+length is piecewise linear, so every millimetre of a move gets priced.
+
+The first half is right. The second half is right about the *shape* of the
+function and wrong about what it buys. Three measurements, in the order they
+were made, because the order is the lesson:
+
+**1. The chord of a fully-traversing wire is position-invariant.** It is
+`w/sin θ` wherever along the lane the wire crosses. A nudge slides the crossing
+point and changes the toll not at all; the term responds only to *angle*, and a
+3 mm move barely turns a 40 mm airwire. Pinned in
+`tests/test_corridor_diagnostics.py`.
+
+**2. The parts that block a corridor are not the parts whose airwires cut it.**
+Ten parts intrude into ulx3s's SDRAM corridor; with the term at weight 20, zero
+of them move differently. They are decaps, and their nets are power rails —
+which the fanout cut correctly drops. Body obstruction and airwire crossing are
+two different measurements, and only `corridor_intrusions` was ever measuring
+the first.
+
+**3. It does change the placement — and the gain does not survive.** The first
+A/B reported the term completely inert, and *that run was wrong*: it had been
+pointed at `sdram_*`, a merged glob whose `cover` is 0.46, i.e. a phantom
+corridor. Re-run against `SDRAM_A*` and `SDRAM_D*` declared separately, the
+term moves parts on every board — and the independent grade says:
+
+| board | crossings | hpwl | `bus_foreign_crossings` (re-derived) |
+|---|---|---|---|
+| ulx3s | 2417 → 2390 | 7512 → **7634** | 62 → **63** |
+| orangecrab_ext_pll | 1051 → 1041 | 2120 → 2116 | 32 → **33** |
+| kit-dev-coldfire | 1377 → 1371 | 7413 → 7219 | 148 → 143 |
+
+One board of three improved the number the term exists to improve. **The
+mechanism is the frozen model:** the optimizer minimises the cut against
+corridors frozen at construction, but the corridor is *defined by the pads of
+the bus*, so when parts move the corridor moves with them and the grader's
+re-derived rectangle is not the one that was minimised. Freezing is still
+required — an unfrozen corridor makes the objective non-stationary — so the
+term is caught between two necessities.
+
+Worth keeping from run 3: **a term that helps on one board of three is not a
+term.** The `corridor-coldfire` row stays in the A/B table precisely because it
+disagrees with the other two; dropping the disagreeing row is how a one-in-three
+result becomes folklore about a term that "works".
+
+So the cut ships as a **diagnostic**, not as an objective term:
+
+- `check_floorplan --intent --health` reports `cut_mm` per corridor. It is
+  strictly the better of the two numbers to *read* — it prices obliqueness, and
+  on two layers it is the geometric lower bound on reference-plane copper the
+  crossing removes, which is exactly what `check_impedance.py`'s void-run
+  counter grades later.
+- Alongside it, `cover`: the fraction of a bus's own pads that actually sit at
+  the corridor's endpoints. `corridors_from_intent` will build a confident
+  rectangle for any set of nets, including six identical motor channels
+  scattered over a board whose endpoint centroids average to the middle of
+  nothing (splitflap `OUT_*`: 24 nets, cover 0.0). Below `CORRIDOR_MIN_COVER`
+  the corridor is reported as `bus_corridors_phantom` so it can be disbelieved
+  rather than silently graded. Related trap from the same survey: **do not
+  merge sub-buses.** `SDRAM_*` scores cover 0.62 where `SDRAM_A*` and
+  `SDRAM_D*` separately score 1.0, because address and data leave the part on
+  different faces and the average lands between them.
+- `--corridor-weight` remains, default 0.0, flagged experimental with this
+  result in its `--help`. It is kept rather than deleted because the kernel is
+  exact and tested, and because a future move set that can relocate a part
+  *across* a bus is exactly the regime where the term would bite.
+
+Two design points that were right and are worth keeping if anyone revisits it:
+
+- **The corridors are frozen at `QuenchState.__init__` and never rebuilt.**
+  `_cluster_ends` derives endpoints from live pad positions, so a corridor that
+  followed its parts would make the cost of a pose depend on *when* it was
+  evaluated — an accepted gain would not match the recomputed total and the
+  descent could cycle. Freezing makes that impossible rather than avoided by
+  discipline.
+- **The check must not be the model.** `check_floorplan --intent --health`
+  re-derives corridors from the *final* poses, so it cannot be gamed by the
+  frozen rectangles the optimizer minimised against. That independence is what
+  let the A/B return "improved nothing" instead of a flattering self-report.
+
 ### Metric cheat-sheet
 
 | Metric | Cost per move | Routability signal at PCB scale | Verdict |
@@ -453,6 +542,223 @@ This validates the core hypothesis of the whole investigation: **proxies
 propose, the router disposes.** Wall-clock cost was ~5 routing runs
 (~4 minutes total on this board).
 
+## The portfolio: diversity without giving up determinism
+
+Everything above converges on ONE answer: the quench is a zero-temperature
+greedy descent, deliberately de-randomized (#457), so the same board and
+knobs produce the same placement byte for byte. That is the right property
+for reproducibility and exactly the wrong one for exploring — a re-run can
+never say "here is a different arrangement worth considering".
+
+`place_portfolio.py` injects diversity at the SEED instead of un-suppressing
+it in the engine, which keeps both properties at once:
+
+- Each candidate is a legal perturbation of the input placement — `jitter`
+  (seeded disc offsets of the free parts), `poses` (rotation variants of the
+  highest-pin free parts, pruned by `pair_order.ref_inversions` so a
+  rotation that provably raises the forced-crossing floor is never even
+  quenched), `swap` (position exchanges inside a declared block, the move
+  the quench's own displacement-capped swap phase cannot reach).
+- Every candidate is then quenched by the ORDINARY engine — `quench.py` is
+  not modified, and a default `place_optimize.py` run is bit-identical with
+  the portfolio in the tree.
+- Randomness is scoped, never ambient: candidate i draws from
+  `random.Random(f"{seed}:{i}:{strategy}")`, so the portfolio is a pure
+  function of (board, knobs, seed) and any single candidate replays alone
+  via `--only i`. `tests/test_portfolio_determinism.py` pins this across
+  PYTHONHASHSEED values, test_457-style.
+- Ranking is a lexicographic tuple of numbers this document already
+  establishes as trustworthy — crossings, the inversion lower bound, hpwl,
+  the floorplan health signals, displacement — and the top candidates are
+  probe-ROUTED (`--route-top`, default 2), because proxies propose and the
+  router disposes applies to a slate exactly as it applies to a single
+  repair.
+
+The perturb-then-descend shape is classical basin hopping (Wales & Doye) —
+the "extend the scorer to evaluate a perturbation" note in the SA section
+above, finally built, with the acceptance step replaced by an explicit
+ranked presentation to the user.
+
+`place_seed.py` is the same idea one step earlier: for a board with NO
+placement yet, a declared floorplan intent (zones, edge bands, locks, decap
+rules — `docs/floorplan-intent.md`) carries exactly the unmodeled
+constraints whose absence makes naive from-scratch placement fail (see "Why
+from-scratch autoplacement fails" above). The seeder turns the intent's
+constructs into a legal, seeded initial placement, grades its own output
+against the same intent, and hands the result to the portfolio. The
+from-scratch verdict stands: unaided is still out of scope; *aided by a
+declared intent* is now a supported path.
+
+## Roadmap: placement science after run 7 (August 2026)
+
+Run 7 (the first clean-slate run whose placement this stack generated) and
+the discussion-#118 thread converged on the same diagnosis: the candidate
+score is built from signal proxies while several measured placement
+failures live elsewhere. Ordered by cost-to-value, cheapest first; item 1
+is implemented, the rest are documented targets.
+
+1. **Plane fragility in the candidate score — implemented** (`--plane-score`
+   on `place_portfolio.py`, backed by `plane_score.py`). Quench and
+   portfolio were plane-blind while the router-side #424 machinery already
+   prices exact fill damage. The score pours the declared plane nets on a
+   scratch copy (KiCad ZONE_FILLER refill), and folds (islands, neck sum)
+   into `rank_key` — islands before hpwl, neck sum after it. Trust it only
+   after calibration on boards with a measured probe order (run 7's seed
+   archive is the first known-answer case).
+
+2. **Channel occupancy as a nonlocality proxy.** *(partly done —
+   `--corridor-weight`, below. What remains is occupancy against a capacity,
+   which needs the escape-lane supply model; the cut term prices damage, not
+   fullness.)* A candidate that fills a corridor past capacity fails ROUTING
+   nonlocally — the failure surfaces on whatever net routes last, far from the
+   part that caused it (run 7's west-fan capacity finding is exactly this
+   shape).
+
+2b. **Constrained-part re-seating** (`placement/reseat.py`). *Done.* The
+   observation it comes from: parts under a proximity rule are **locked**,
+   because the quench has no proximity term and will otherwise walk a different
+   member past the limit every run — lock one and the next moves. That works,
+   and it freezes exactly the parts whose re-seating produced most of run 8's
+   placement wins.
+
+   The move that removes the need for both the locks and a proximity cost term:
+   **make the proximity rule the definition of the slot pool.** Slots are
+   generated on rings around the anchor's relevant *pins* (not its centre — that
+   would send a decap to the middle of the die), so every candidate satisfies
+   the constraint by construction and there is nothing to price.
+
+   What remains is an assignment problem, and it is exactly additive: each
+   member is scored with every other member's pads overridden to an **empty
+   list**, which removes them from the airwire model. No member–member term ⇒
+   Hungarian-legal. The constant the rows share (the rest of the board's
+   contribution to the same nets) is uniform across the matrix, and Hungarian is
+   invariant to adding a constant everywhere. `scipy.linear_sum_assignment` when
+   present, deterministic greedy otherwise — KiCad's bundled Python has no
+   scipy and this runs on the same paths.
+
+   Three properties that make it safe rather than merely clever: identity is
+   always in the pool, so "leave it alone" is a possible answer; **acceptance is
+   on the exact cluster objective**, re-evaluated with every member in place, so
+   a lying surrogate can waste time but can never ship a worse board; and there
+   is no RNG anywhere.
+
+   **The limit, stated rather than left to be discovered:** the objective is the
+   cluster's airwire cost, so the cluster must carry a net worth scoring. The
+   only tether source in-repo is `decap_tethers`, and a decoupling cap's two
+   nets are *rails* — which the fanout cut correctly drops, because scoring a
+   pose against a 96-part GND MST measures distance from the middle of the
+   board. Those clusters report that and are left alone, which is right: where a
+   decap sits is governed by its pin, and the slot pool already guarantees that.
+   The mechanism earns its keep on clusters carrying **signal** nets (series
+   terminations, filter networks, a part tethered to a zone), and it is generic
+   over `(member, anchor, radius)`, so a new tether source needs no change here.
+
+   Two traps, both found by writing the tests rather than by reasoning:
+   Hungarian returns distinct slot *indices*, which is not the same as
+   non-overlapping courtyards, so members are seated one at a time with an
+   explicit check against the poses already assigned (`state.parts` still holds
+   the old ones) and the bumps are reported as `repairs` rather than hidden. And
+   snapping a ring to the placement grid moves a point by up to half a cell per
+   axis, so slots generated *at* the radius land outside it — the pool shrinks
+   by the snap diagonal, or the by-construction claim is false at exactly the
+   outer ring where a re-seat wants to look.
+
+3. **The #411 undo-a-known-good-placement harness — BUILT.** See "What the
+   #411 harness measured" below. `placement/perturb.py` manufactures the bad
+   seed, `placement/recovery.py` grades it against the original, and
+   `tests/stress/perturb_batch.py` walks the skill's Step 0 ladder over the
+   result. The first two batches are in; the headline is that no arm in the
+   toolbox recovers a displaced floorplan, and that this is a missing objective
+   term rather than a tuning problem.
+
+4. **Per-component best-location heatmap** (the #118 ask): for a chosen
+   part, render the board as a heatmap of the candidate score over
+   positions (with matching JSON), so a human can SEE why the optimizer
+   wants a part somewhere — and where the score is flat, which is where
+   declared intent has to carry the decision.
+
+5. **Part-class rule table as seeder configuration.** #118's taxonomy:
+   different part classes obey different placement logic (decap ≠ connector
+   ≠ crystal ≠ series termination). The seeder hardcodes a version of this;
+   making it a declared table would let a repo tune class behavior without
+   engine edits.
+
+## What the #411 harness measured
+
+*(First results, August 2026. Boards: `tigard`, `splitflap_driver` and
+`glasgow_revC` — the last two are stress set-1 members. Ground truth is each
+board's own shipped placement; `recovery = 1 − d_after/d_applied_dose` in
+pad-space RMS, so 1.0 is a full recovery, 0 inert, negative worse than the
+perturbed board. Scoreboard: `$STRESS_DIR/perturb/scoreboard.jsonl`,
+append-only, keyed by `code_version`.)*
+
+**Nothing recovers. Every proxy says otherwise.**
+
+| arm | recovery (3–6 cells) | median | crossings improved | routing failures improved |
+|---|---|---|---|---|
+| `place_optimize --max-displacement 3` (Step 0c's command) | −0.062 … +0.023 | −0.005 | 6/6 | — |
+| `place_optimize` at a cap matched to the dose | −0.215 … +0.301 | −0.087 | 6/6 | — |
+| `place_route_loop` shipped | −0.001 … +0.029 | +0.001 | 3/3 | 3/3 |
+| `place_route_loop --target-nets` | −0.107 … +0.047 | +0.001 | 3/3 | 3/3 |
+| `place_route_loop` cap matched, pin gate lifted, blocks on | −0.689 … +0.161 | −0.052 | 3/3 | 3/3 |
+
+`R_pose(recovery ≥ 0.5)` is **None for every arm at every dose tested.**
+
+Two findings follow, and they are different in kind.
+
+**The quench optimises away from the answer.** Crossings fell in 6 of 6 cells
+(median −18.5% at the prescribed cap, −33.1% at a capable one) while
+displacement-to-original improved in 1 of 6. Three arms *beat the human
+placement* on crossings while sitting further from it than the perturbed board
+they started from — tigard/swap 267 vs 276, splitflap/translate 55 vs 123,
+glasgow/translate 563 vs 785. Overlap falls in every cell too, so without a
+pose metric this reads as success on every legality and crossing number
+available. This is the document's own "proxies propose, the router disposes",
+measured against ground truth instead of argued from anecdote — and the cause is
+structural: **the objective has no displacement-from-seed term, so nothing pulls
+a part back**, and on a wrong floorplan the crossing gradient points away.
+
+**The loop compensates rather than recovers, and that is not a defect.**
+`loop@allon` took tigard from 13 routing failures to 2 — the best-routing board
+in the experiment — at a recovery of −0.052; on glasgow it took 19 → 11 while
+moving parts 69% further out. The loop makes a wrong floorplan routable *in
+place*. Nothing in its objective rewards placement fidelity, so `compensated` is
+a first-class verdict here, not a shortfall.
+
+That also settles #411's own stated prediction — *"at block scale
+`--max-target-pins 40` recovers none of them, because the part that needs to
+move is never a passive"* — as **right about the outcome, wrong about the
+mechanism**. Lifting the gate improved routing enormously (13→12 becomes 13→2)
+and left recovery at −0.052. Removing a filter on *which* parts may move cannot
+produce recovery when no term rewards moving them back.
+
+Three smaller results worth keeping:
+
+- **A loop cannot see a floorplan that is wrong but still routable.** A scoped
+  route of a perturbed board returned `failures=0`, so the loop printed "No
+  failures left - stopping" at `rounds_run=0` and returned its input byte for
+  byte. Its move candidates come only from failed and blocking nets, so the pin
+  gate was never even consulted. `--target-nets` is the documented answer and it
+  works: on both smaller boards the targeted arm beat the shipped one on the
+  router's own terms (tigard 13→8 vs 13→12; splitflap 10→5 vs 10→9).
+- **A rigid block translate barely moves on a packed board.** Feasible doses
+  before a member leaves the outline: 1.40 mm for coldfire's 21-part sheet
+  block, 5.10 mm for glasgow's 67-part anchor unit — far below #411's proposed
+  5/10/20/40/80 ladder, because a shipped board has nowhere to translate into.
+  `swap`, which exchanges two units and changes no net area, reaches 14–66 mm.
+  The block-scale ladder is a per-(board, unit) property, not a constant.
+- **Cost goes as `(cap/step)²`, so a bigger cap is not a slower run.**
+  `loop@allon` searched a 7.9× larger radius and ran **4.6× faster** than
+  `loop@shipped` (185 s vs 846 s) because `--step` scaled with the cap. Step 0c
+  prescribes `--max-displacement` and never mentions `--step`.
+
+**What this says about Step 0c's acceptance rule.** It accepts on
+`crossings_after ≤ crossings_before` and `hpwl_after ≤ hpwl_before`. On
+splitflap/swap both improve while the board is 91% un-recovered, so the rule
+green-lights every run above. Two numbers produced by the optimizer cannot
+adjudicate a property the optimizer has no term for — which is the same lesson
+this document already records for the decap case, now with a second instance.
+
 ## References and further reading
 
 ### PCB-specific placement research
@@ -510,3 +816,14 @@ propose, the router disposes.** Wall-clock cost was ~5 routing runs
 - [TI SNVA021](https://www.ti.com/lit/pdf/snva021) and [ADI AN-1119](https://www.analog.com/en/resources/app-notes/an-1119.html) — switching-regulator layout intent that lives in datasheets, not netlists
 - [HN: tscircuit autorouter discussion](https://news.ycombinator.com/item?id=43499992) and [JITX discussion](https://news.ycombinator.com/item?id=39771983) — autorouter/autoplacer trust culture
 - [Cypress benchmark suite](https://github.com/NVlabs/Cypress) — the only open PCB placement benchmark set (10 boards, 41–476 components)
+
+## Update: hard pad+drill legality (default on)
+
+The quench, seeder and portfolio now share a pad+drill legality layer
+(`placement/legality.py`: `PartPads`/`LegalityContext`/`grade_pad_legality`) —
+courtyard-only gating is history (`--courtyard-only` restores it for A/B).
+New repair entry points: `place_seed --repair` (violation-driven,
+minimal-move) and `place_reconstruct.py` (structural reconstruction with an
+exact assignment solve). Anti-churn: `--min-gain-per-mm`. Mounting holes are
+frozen by default (`--move-unconnected` frees them). Full design notes and
+measured acceptance numbers: `placement/README.md`.

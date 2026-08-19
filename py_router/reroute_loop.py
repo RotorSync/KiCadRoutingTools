@@ -294,7 +294,8 @@ def run_reroute_loop(
 
                         # Filter to only rippable blockers
                         rippable_blockers, seen_canonical_ids = filter_rippable_blockers(
-                            blockers, routed_results, diff_pair_by_net_id, get_canonical_net_id
+                            blockers, routed_results, diff_pair_by_net_id, get_canonical_net_id,
+                            pcb_data=pcb_data, context="reroute rip ladder"
                         )
                         ripped_canonical_ids = set()
                         last_retry_blocked_cells = blocked_cells
@@ -741,7 +742,8 @@ def run_reroute_loop(
 
                         # Filter to only rippable blockers and deduplicate by diff pair
                         rippable_blockers, seen_canonical_ids = filter_rippable_blockers(
-                            blockers, routed_results, diff_pair_by_net_id, get_canonical_net_id
+                            blockers, routed_results, diff_pair_by_net_id, get_canonical_net_id,
+                            pcb_data=pcb_data, context="reroute rip ladder"
                         )
                         if rippable_blockers:
                             rr_fail_reason = 'congestion'

@@ -83,6 +83,17 @@ CLI_ONLY_OK = {
     # The CLI streams a route trace to build the stress movie (#482). The GUI has
     # its own recorder (movie_recorder.py) driven from the dialog, so it does not
     # hand the engine a callback.
+    "vis_callback": "GUI uses movie_recorder.py instead of an engine callback (#482/#506)",
+    # --json-out writes the merged JSON_SUMMARY to a FILE for the stress
+    # harness to scrape. The GUI consumes results in-memory (return_results=
+    # True) and has no summary-file output, so there is nothing to point at.
+    "json_out": "CLI writes a JSON summary file; the GUI consumes results in-memory",
+    # (net_name_patterns was exempted here as "the GUI has no raw globs".
+    # REVERSED: ai_plan resolving a plan's globs to exact names BEFORE the
+    # call is not the reason the exemption is safe, it is the reason it was
+    # NOT -- the engine then reads every glob-matched protected net as
+    # 'exactly named' and rips it. The GUI now forwards the step's raw globs
+    # (dialog._plan_net_globs), so no exemption is needed.)
 }
 
 # Kwargs only the GUI passes: the in-memory/live-board plumbing that has no CLI

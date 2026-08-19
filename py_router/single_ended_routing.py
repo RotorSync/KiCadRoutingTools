@@ -925,12 +925,26 @@ def _identify_blocking_obstacles(
     pads = pads_all[pads_all[:, 4] != current_net_id] if len(pads_all) \
         else pads_all
 
-    counts = rust_fn(blocked, segs, vias, pads,
-                     int(expansion_grid), int(via_expansion_grid), int(num_layers))
-    blockers: Dict[int, Tuple[str, int]] = {}
-    for net_id, count in counts.items():
-        net_name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else f"net_{net_id}"
-        blockers[net_id] = (net_name, count)
+    # Two calls, split by obstacle KIND (run-6 fix): copper (segments+vias,
+    # rippable) versus pads (static). The merged count sent the operator on
+    # named-rip goose chases -- measured on test-board run 5: GPIO7 kept being
+    # cited AFTER its rip because the residue was its unrippable PAD, and the
+    # decisive 1-cell track wall ranked under big-perimeter bystanders.
+    _no_segs = np.empty((0, 6), dtype=np.int64)
+    _no_vias = np.empty((0, 3), dtype=np.int64)
+    _no_pads = np.empty((0, 6), dtype=np.int64)
+    counts_copper = rust_fn(blocked, segs, vias, _no_pads,
+                            int(expansion_grid), int(via_expansion_grid),
+                            int(num_layers))
+    counts_pads = rust_fn(blocked, _no_segs, _no_vias, pads,
+                          int(expansion_grid), int(via_expansion_grid),
+                          int(num_layers))
+    blockers: Dict[int, Tuple[str, int, int, int]] = {}
+    for nid in set(counts_copper) | set(counts_pads):
+        net_name = pcb_data.nets[nid].name if nid in pcb_data.nets else f"net_{nid}"
+        tc = int(counts_copper.get(nid, 0))
+        pc = int(counts_pads.get(nid, 0))
+        blockers[nid] = (net_name, tc + pc, tc, pc)
     return blockers
 
 
@@ -1078,10 +1092,33 @@ def _diagnose_blocked_start(obstacles: 'GridObstacleMap', cells: List, label: st
             if blocked_positions:
                 blockers = _identify_blocking_obstacles(blocked_positions, pcb_data, config, current_net_id)
                 if blockers:
-                    # Sort by count descending
-                    sorted_blockers = sorted(blockers.items(), key=lambda x: x[1][1], reverse=True)
-                    blocker_strs = [f"{name}({count})" for net_id, (name, count) in sorted_blockers[:5]]
+                    # Sort by count descending; say WHICH KIND of copper blocks.
+                    # "GPIO7(1 pad)" is not a rip candidate; "GPIO7(2 track)"
+                    # is -- the merged count used to read identically.
+                    sorted_blockers = sorted(blockers.items(),
+                                             key=lambda x: x[1][1], reverse=True)
+                    blocker_strs = []
+                    for _bnid, (name, _tot, tc, pc) in sorted_blockers[:5]:
+                        parts = ([f"{tc} track"] if tc else []) \
+                            + ([f"{pc} pad"] if pc else [])
+                        blocker_strs.append(f"{name}({', '.join(parts) or 0})")
                     _diag(f"{print_prefix}    Blocking obstacles: {', '.join(blocker_strs)}")
+                    # NOTE (1a903195, reverted here): this used to ALSO feed the
+                    # track-blocking identities into `pcb_data._stuck_wall_blame`,
+                    # which phase3_routing.try_phase3_ripup consumes as
+                    # validator-named blockers -- and those sort ahead of every
+                    # frontier-inferred tier. That made a DIAGNOSTIC pass a live
+                    # input to rip VICTIM SELECTION, which is why the commit
+                    # titled "diagnostics:" changed routing.
+                    #
+                    # Measured on neo6502 (set1): promoting stuck-probe walls
+                    # left 8 nets disconnected (+3.3V, /A8, /D7, /D6, /D0, /A1,
+                    # /A4, GND -- mostly one stranded pad each) where main
+                    # finished clean, and the final --rip-existing-nets '*' step
+                    # then repaired NONE of them, against 4-of-4 on main.
+                    # It did buy 1 DRC violation -> 0. Keep the split-by-kind
+                    # DIAGNOSTICS above (a pad is not a rip candidate, and the
+                    # merged count hid that); drop only the rip-cascade feed.
 
 
 def _via_drill_exclusion_radius(config: 'GridRouteConfig') -> int:
@@ -3481,6 +3518,12 @@ def route_multipoint_main(
     if num_components < len(pad_info):
         print(f"  Existing copper joins {len(pad_info)} terminals into "
               f"{num_components} group(s)")
+    if net_id in (getattr(pcb_data, '_zone_blob_fallback_nets', None) or ()):
+        # #549: the strict grouping above fell back to zone-outline credit
+        # for a zone with no fill model (scipy absent / oversize) -- the
+        # fragment view for this net is DEGRADED, disclose it.
+        print("  (fragment view degraded to zone-outline credit: no fill "
+              "model for a zone on this net)")
     # #479 multi-board: never ATTEMPT an MST edge between two board outlines
     # -- no copper can join them (grading exempts them, and
     # filter_already_routed skips the net entirely once each outline is
@@ -3531,6 +3574,10 @@ def route_multipoint_main(
             'tap_edges_failed': 0,
             'tap_pads_connected': len(pad_info),
             'tap_pads_total': len(pad_info),
+            # #549 A-2: the STRICT component count behind this verdict --
+            # with the planner on the strict view, an "already connected"
+            # return now really means one fragment per outline.
+            'strict_fragments': num_components,
         }
 
     # Sort MST edges by length (longest first), then let the corridor /

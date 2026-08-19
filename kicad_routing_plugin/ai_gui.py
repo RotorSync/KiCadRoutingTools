@@ -38,6 +38,13 @@ if ROOT_DIR not in sys.path:      # top-level modules
 _ENGINE_DIR = os.path.join(ROOT_DIR, 'py_router')
 if os.path.isdir(_ENGINE_DIR) and _ENGINE_DIR not in sys.path:
     sys.path.insert(0, _ENGINE_DIR)
+# py_placer/ holds the placement package (placement.groups / .fanout_clearance
+# are imported from here) and py_tools/ the instruments. Same exists() guard so
+# a FLAT installed layout (PCM zip) keeps working.
+for _sib in ('py_placer', 'py_tools'):
+    _d = os.path.join(ROOT_DIR, _sib)
+    if os.path.isdir(_d) and _d not in sys.path:
+        sys.path.append(_d)
 
 # "Default" combo entry = don't pass the model/effort flag at all.
 DEFAULT_CHOICE = "Default"
@@ -115,24 +122,45 @@ class AISkillRunner:
                                     error="Cancelled."
     """
 
-    def __init__(self, cli_path, on_transcript, on_done, backend=None):
+    def __init__(self, cli_path, on_transcript, on_done, backend=None,
+                 on_event=None):
         self.backend = backend or BACKENDS[DEFAULT_BACKEND_ID]
         self.cli_path = cli_path  # the backend's CLI path
         self.on_transcript = on_transcript
         self.on_done = on_done
+        # Optional raw-event tap (wx main thread): the parsed stream-json
+        # dict BEFORE formatting/truncation. The Placement tab's monitor
+        # derives its stage from full Bash commands this way - the formatted
+        # transcript prefers the tool's short description and truncates.
+        self.on_event = on_event
         self._process = None
         self._thread = None
         self._stream_state = None
+        self._stdin_payload = None
         self._cancel_requested = False
 
     def is_running(self):
         return self._thread is not None and self._thread.is_alive()
 
-    def run(self, prompt, model=None, effort=None):
+    def run(self, prompt, model=None, effort=None, **cmd_kwargs):
         if self.is_running():
             raise RuntimeError(f"a {self.backend.label} run is already in progress")
         cmd = self.backend.build_cmd(self.cli_path, prompt,
-                                     model=model, effort=effort)
+                                     model=model, effort=effort, **cmd_kwargs)
+        # npm installs resolve `claude` to a .cmd shim, which Windows launches
+        # through an implicit cmd.exe -- and cmd's tokenizer does not
+        # understand list2cmdline's \" escaping, so the first embedded quote
+        # in the prompt ends the quoted region and any | in it becomes a
+        # shell pipe. Claude Code reads the prompt from stdin in -p mode, so
+        # hand it over that way and keep the argv quote-free.
+        self._stdin_payload = None
+        if os.name == "nt" and cmd and cmd[0].lower().endswith((".cmd", ".bat")):
+            try:
+                i = cmd.index("-p")
+                if i + 1 < len(cmd) and cmd[i + 1] == prompt:
+                    self._stdin_payload = cmd.pop(i + 1)
+            except ValueError:
+                pass
         self._stream_state = self.backend.stream_state()
         self._cancel_requested = False
         self._thread = threading.Thread(target=self._work, args=(cmd,), daemon=True)
@@ -153,16 +181,26 @@ class AISkillRunner:
             kwargs = {}
             if os.name == "nt":
                 kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            stdin_payload = self._stdin_payload
             self._process = subprocess.Popen(
                 cmd,
                 cwd=ROOT_DIR,  # skill discovery is working-directory based
+                stdin=subprocess.PIPE if stdin_payload is not None else None,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                # utf-8, not the locale codec: the CLI emits UTF-8, and the
+                # RESULT= payload can carry file paths that must round-trip.
+                encoding="utf-8",
                 errors="replace",
                 bufsize=1,  # line-buffered: one stream-json event per line
                 **kwargs,
             )
+            if stdin_payload is not None:
+                try:
+                    self._process.stdin.write(stdin_payload)
+                finally:
+                    self._process.stdin.close()
             # Drain stderr concurrently so a chatty stderr can't fill its
             # pipe buffer and deadlock the stdout loop below.
             stderr_chunks = []
@@ -178,6 +216,8 @@ class AISkillRunner:
                     event = json.loads(line)
                 except (json.JSONDecodeError, ValueError):
                     continue
+                if self.on_event is not None:
+                    wx.CallAfter(self.on_event, event)
                 text = state.feed(event)
                 if text:
                     wx.CallAfter(self.on_transcript, text)

@@ -126,6 +126,62 @@ VIOLATION: Track too close to track
   Distance: 0.185mm (minimum: 0.2mm)
 ```
 
+## Hand-Join Verifier (`check_join.py`)
+
+Verifies a CANDIDATE hand-join (a polyline of track points plus optional
+vias) against all board copper, before the first segment is committed —
+promoted from the run-7 endgame, where hand-authored copper verified only
+against its target pads shipped 42 shorts.
+
+```bash
+python py_tools/check_join.py BOARD NET x,y,layer x,y,layer ... [via:x,y ...]
+```
+
+Consecutive same-layer points become track segments; a layer change must
+happen at one coordinate over a `via:` token or it is a `missing-via`
+violation. The candidate is staged onto a copy of the board and graded by
+the real `check_drc` engine (staged-vs-baseline diff), so netclass pairwise
+clearances, `.kicad_dru` layer rules, rotated pads, custom pad polygons,
+board-edge and hole-to-hole all apply — plus a same-net via-stack check
+KiCad's DRC deliberately never does. Track width and via geometry default
+from the board's own Default netclass; override with `--width` /
+`--via-size` / `--via-drill`. `--keep-staged PATH` writes the staged board
+for inspection in KiCad. Exit 0 clean, 1 violations, 2 usage errors.
+
+## Seed Comparator (`compare_seeds.py`)
+
+Ranks `place_seed.py` seeds by ONE identical full-board probe route each —
+the seed-axis instrument crossings/hpwl cannot be (measured: crossings
+ranked a seed family first that probed 53 full-board failures while a
+crossings-middle seed probed 39).
+
+```bash
+python py_placer/compare_seeds.py board.kicad_pcb --intent floorplan.json \
+    --seeds 0 1 2 --out-dir seedcmp --ignore-nets GND VCC
+```
+
+Per seed: a `place_seed` run (a seed failing its own intent gate is
+recorded but never ranked), then a probe of `'*'` minus the ignored nets
+with identical route args. Emits a ranked table, `seeds.json`, and a
+`JSON_SUMMARY` with `best_seed`. Exit 0 with a ranked winner, 4 when
+nothing was rankable.
+
+## Plane-Fragility Placement Score (`plane_score.py`)
+
+Pours the named plane nets on a scratch copy of a board (full-outline
+zones, KiCad ZONE_FILLER refill) and reduces the fill to
+`(islands, neck_sum)` — how many pieces the pour lands in, and the #424
+fragility field summed over it. Used by `place_portfolio.py --plane-score`
+to price placements by what they do to the pour; meaningful RELATIVELY,
+candidate vs candidate on the same board, and only where the pour layer
+shares parts with the placement (a bottom pour under an all-top board is
+placement-invariant). Requires KiCad python for the refill; exits 3 when
+unavailable rather than guessing from drawn outlines.
+
+```bash
+python py_placer/plane_score.py board.kicad_pcb --plane-nets GND 3V3:F.Cu
+```
+
 ## Connectivity Checker (`check_connected.py`)
 
 Verifies that all nets are fully connected after routing. Detects two types of issues:

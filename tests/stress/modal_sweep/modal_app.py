@@ -136,10 +136,19 @@ def _build_step() -> str:
     Both are handled here rather than by rewriting this file from the caller
     (corpus_bisect.sh used to sed the command in): a rewrite that silently
     no-ops launches an arm that dies half an hour later.
+
+    LAST resort is a source build, which needs the rustup layer below. It is
+    the ONLY path when the branch's crate is ahead of every published release
+    (placement's 0.21.1 vs the v0.20.4 assets): no prebuilt exists, and pinning
+    --tag to an older release would silently run a crate MISSING the parameters
+    this Python passes (0.21.0 `attraction_potential`, 0.21.1
+    `layer_direction_preferences`).
     """
     tag = os.environ.get("KICAD_SWEEP_BUILD_TAG", "").strip()
     br = "python3 build_router.py" + (f" --tag {tag}" if tag else "")
-    return f"cd {REPO} && ({br} || (sleep 20 && {br}) || (sleep 60 && {br}))"
+    src = ". $HOME/.cargo/env && python3 build_router.py --from-source"
+    return (f"cd {REPO} && ({br} || (sleep 20 && {br}) || (sleep 60 && {br})"
+            f" || ({src}))")
 
 
 # THIS FILE IS IMPORTED INSIDE THE CONTAINER TOO, so nothing at module scope may
@@ -172,7 +181,13 @@ image = (
     # absent from debian_slim, the sampler's except-pass reported 0 MB for
     # every cloud task -- which is exactly the data needed to right-size
     # (and stop over-paying for) the container memory tiers.
-    .apt_install("curl", "procps")
+    .apt_install("curl", "procps", "build-essential")
+    # Rust toolchain, for the source-build fallback in _build_step(). Placed
+    # BEFORE add_local_dir on purpose: a layer after it rebuilds on every
+    # source change, and rustup is a ~1 min download we do not want to repay
+    # per commit. Costs a ~10 min cargo build the first time an image is built
+    # for a given crate, then Modal caches the whole layer stack.
+    .run_commands("curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal")
     # Carry the source commit to the containers. They cannot compute it: no git
     # binary, no repo -- see the is_local() guard above.
     .env({"KICAD_SWEEP_GIT": GIT_SHA})
@@ -180,7 +195,11 @@ image = (
         "**/.git/**", "**/__pycache__/**", "**/target/**", "**/.claude/worktrees/**",
     ])
     .run_commands(
-        # NO Rust toolchain: the v0.20.2 release publishes grid_router-linux-x86_64.so
+        # A Rust toolchain IS installed above, so the last resort in _build_step()
+        # is a real source build rather than a guaranteed death. The prebuilt is
+        # still tried first -- it is ~10 min cheaper. Historical note follows.
+        #
+        # the v0.20.2 release publishes grid_router-linux-x86_64.so
         # built from crate 0.20.1, so build_router.py downloads the prebuilt and keeps
         # it (verified: the released macos-arm64 asset reports __version__ 0.20.1,
         # matching Cargo.toml). That took a rustup + build-essential layer and a ~10 min

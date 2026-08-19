@@ -23,6 +23,13 @@ if ROOT_DIR not in sys.path:
 _ENGINE_DIR = os.path.join(ROOT_DIR, 'py_router')
 if os.path.isdir(_ENGINE_DIR) and _ENGINE_DIR not in sys.path:
     sys.path.insert(0, _ENGINE_DIR)
+# py_placer/ holds the placement package (placement.groups / .fanout_clearance
+# are imported from here) and py_tools/ the instruments. Same exists() guard so
+# a FLAT installed layout (PCM zip) keeps working.
+for _sib in ('py_placer', 'py_tools'):
+    _d = os.path.join(ROOT_DIR, _sib)
+    if os.path.isdir(_d) and _d not in sys.path:
+        sys.path.append(_d)
 
 import routing_defaults as defaults
 from kicad_parser import POSITION_DECIMALS
@@ -473,9 +480,14 @@ class RoutingDialog(wx.Dialog):
         self.planes_tab = self._create_planes_tab()
         self.notebook.AddPage(self.planes_tab, "Planes")
 
-        # Tab 6: AI (AI skills, issue #40)
-        self.ai_tab = self._create_ai_tab()
-        self.notebook.AddPage(self.ai_tab, "AI")
+        # Tab 6: AI (AI skills, issue #40) - a nested notebook: "Routing"
+        # (the original route-only assistant) + "Placement" (Claude-driven
+        # placement runs, issue #481). self.ai_tab keeps pointing at the
+        # AITab PANEL inside the nested notebook, so every existing consumer
+        # (settings persistence, _ai_params, resets) is unaffected; the page
+        # added here is the container.
+        ai_container = self._create_ai_tab()
+        self.notebook.AddPage(ai_container, "AI")
 
         # Tab 7: Log
         log_panel = self._create_log_tab()
@@ -848,6 +860,23 @@ class RoutingDialog(wx.Dialog):
             else:
                 netclass = _get_netclass_parameters('Default', self.pcb_data) or {}
                 board_val = netclass.get(name)
+            # A declared 0 is UNSET, not a floor of zero -- KiCad writes 0 into
+            # these fields for "not configured". Every other resolver in the
+            # tree applies that rule (list_nets.board_floor / board_floor_knobs,
+            # resolve_cli_floor, and _effective_plane_edge_clearance just above,
+            # which already guarded `> 1e-9`); this branch tested only
+            # `is not None` and so diverged from the CLI.
+            #
+            # Masked in the default tier, because _fab_floored then pins a 0.0
+            # up to the 0.2 fab hole-to-hole floor and the CLI lands on 0.2
+            # too. NOT masked once the fab floor moves: with a --fab-overrides
+            # declaring hole_to_hole 0.10 (fab_floor_ladder collapses to that
+            # one hard rung, and the GUI reaches it through the fab_tier /
+            # fab_overrides_path controls), a board declaring 0.0 resolved to
+            # GUI 0.1 against CLI 0.2 -- the GUI drilling twice as close as the
+            # CLI on the same board and the same settings.
+            if board_val is not None and board_val <= 0:
+                board_val = None
             val = board_val if board_val is not None else getattr(self, name).GetValue()
         return self._fab_floored(name, val)
 
@@ -1931,15 +1960,35 @@ class RoutingDialog(wx.Dialog):
         )
 
     def _create_ai_tab(self):
-        """Create the AI tab for running AI skills headless (issue #40)."""
+        """Create the AI tab: a nested notebook hosting "Routing" (the
+        original AI-skills tab, issue #40 - route-only by design) and
+        "Placement" (Claude-driven placement runs). Returns the container
+        panel; sets self.ai_tab / self.placement_tab / self.ai_notebook."""
         from .ai_gui import AITab
+        from .placement_gui import PlacementTab
 
-        return AITab(
-            self.notebook,
+        container = wx.Panel(self.notebook)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        self.ai_notebook = wx.Notebook(container)
+        self.ai_tab = AITab(
+            self.ai_notebook,
             self.board_filename,
             log_callback=self._append_log,
             routing_dialog=self,
         )
+        self.ai_notebook.AddPage(self.ai_tab, "Routing")
+        self.placement_tab = PlacementTab(
+            self.ai_notebook,
+            self.pcb_data,
+            self.board_filename,
+            on_complete=self._on_tab_operation_complete,
+            append_log=self._append_log,
+            sync_pcb_data_callback=self._sync_pcb_data_from_board,
+        )
+        self.ai_notebook.AddPage(self.placement_tab, "Placement")
+        sizer.Add(self.ai_notebook, 1, wx.EXPAND)
+        container.SetSizer(sizer)
+        return container
 
     def _ai_params(self):
         """The AI tab's backend/model/effort selection, for the other tabs'
@@ -2508,10 +2557,10 @@ class RoutingDialog(wx.Dialog):
         except Exception:
             pass
         try:
-            # BGA options live on the fanout tab's bga_options panel.
-            _bo = getattr(self.fanout_tab, 'bga_options', None)
-            if _bo is not None and hasattr(_bo, 'exit_margin'):
-                _bo.exit_margin.SetValue(defaults.BGA_EXIT_MARGIN)
+            self.placement_tab.labels_options.reset_to_defaults()
+        except Exception:
+            pass
+        try:
             _ft = self.fanout_tab
             # The option controls live on the bga_options / qfn_options
             # PANELS, not the tab -- a tab-only getattr silently skipped
@@ -2730,6 +2779,27 @@ class RoutingDialog(wx.Dialog):
             if getattr(_panel, 'component_filter_ctrl', None):
                 _panel.component_filter_ctrl.SetValue("")
             _panel._component_filter_value = ""
+        # Reset the Placement sub-tab's backend/model/effort too
+        self.placement_tab.set_backend_value(None)
+        self.placement_tab.set_model_value(None)
+        self.placement_tab.set_effort_value(None)
+
+        # Reset component dropdowns to "All"
+        if self.net_panel.component_dropdown:
+            self.net_panel.component_dropdown.SetSelection(0)
+            self.net_panel._component_filter_value = ""
+        if self.swappable_net_panel.component_dropdown:
+            self.swappable_net_panel.component_dropdown.SetSelection(0)
+            self.swappable_net_panel._component_filter_value = ""
+        if self.differential_tab.pair_panel.component_dropdown:
+            self.differential_tab.pair_panel.component_dropdown.SetSelection(0)
+            self.differential_tab.pair_panel._component_filter_value = ""
+        if self.fanout_tab.net_panel.component_dropdown:
+            self.fanout_tab.net_panel.component_dropdown.SetSelection(0)
+            self.fanout_tab.net_panel._component_filter_value = ""
+        if self.planes_tab.net_panel.component_dropdown:
+            self.planes_tab.net_panel.component_dropdown.SetSelection(0)
+            self.planes_tab.net_panel._component_filter_value = ""
 
         # Reset differential tab
         self.differential_tab.diff_pair_width_check.SetValue(False)

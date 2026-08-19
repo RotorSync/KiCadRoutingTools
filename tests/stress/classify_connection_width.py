@@ -33,6 +33,7 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / 'py_router'))  # #522
 sys.path.insert(0, str(REPO / 'py_tools'))  # #522
 sys.path.insert(0, str(REPO / "tests" / "stress"))
+sys.path.insert(0, str(REPO / 'py_placer'))  # #522/py_placer layout
 
 RADIUS = 5.0   # mm of local copper context around the flagged position
 EPS = 1e-3     # relative erosion shortfall (stay strictly inside the floor)

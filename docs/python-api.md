@@ -95,6 +95,40 @@ print("Wrote quickstart_output.kicad_pcb")
 The output file opens in KiCad with the new copper present and correctly
 netted.
 
+## Reference labels (`RefLabel`)
+
+Every footprint's Reference-designator text (the silkscreen label) is parsed
+into `footprint.ref_label`, an `Optional[RefLabel]` — `None` only for a
+reference-less footprint (drill dots) or an unparseable node. Both parse
+paths (the text parser and `build_pcb_data_from_board`) fill it in the same
+normalized form, so label geometry decisions are front-end independent.
+`beautify_labels.py` (issue #481) consumes it.
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `at_x`, `at_y` | float | Offset from the footprint origin in its UNROTATED local frame (mm), pre-mirrored for B-side parts — like pad locals. World position is `local_to_global(fp.x, fp.y, fp.rotation, at_x, at_y)`. |
+| `rotation` | float | The label's **absolute board angle** in degrees, normalized to `[0, 360)`. NOT footprint-relative (settled by a pcbnew probe; `GetTextAngle()` returns the file value unchanged). The drawn angle is the keep-upright fold into `(-90, 90]` — see `placement/labels.py::label_world_angle`. |
+| `size_h`, `size_w` | float | Font height/width in mm (the file stores `(size HEIGHT WIDTH)`); 1.0/1.0 when the node has no effects block. |
+| `thickness` | float | Stroke width in mm; 0.15 when unspecified. |
+| `layer` | str | The label's own layer (e.g. `'F.SilkS'`) — a B-side part can carry an F-side label. |
+| `justify` | str | Raw `(justify …)` tokens, space-joined (e.g. `'mirror'`); `''` = KiCad's centered default. |
+| `hidden` | bool | `(hide yes)`, or the bare `hide` token KiCad ≤8 wrote. |
+| `is_property_node` | bool | `False` only for the KiCad 6/7 `(fp_text reference …)` form. |
+
+```python
+from kicad_parser import parse_kicad_pcb
+
+pcb = parse_kicad_pcb('kicad_files/splitflap_driver.kicad_pcb')
+
+label = pcb.footprints['C1'].ref_label
+print(f"C1 label at ({label.at_x}, {label.at_y}) rot {label.rotation} "
+      f"on {label.layer}, size {label.size_h}, hidden={label.hidden}")
+
+hidden = [ref for ref, fp in pcb.footprints.items()
+          if fp.ref_label is not None and fp.ref_label.hidden]
+print(f"{len(hidden)} hidden reference labels")
+```
+
 ## Which module do I want?
 
 - **"What's on this board?"** → [`kicad_parser`](api-kicad-parser.md). One
