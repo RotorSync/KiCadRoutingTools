@@ -659,6 +659,47 @@ def net_pad_pairs_within_outlines(pcb_data, result, pads):
     return total, conn
 
 
+def reconcile_status_line(recon: dict) -> str:
+    """One-line verdict for the KiCad-refill cross-check (#654).
+
+    The cross-check used to speak only when it CHANGED something, so a reader
+    could not tell "KiCad ran and agreed" from "KiCad never ran" -- both were
+    silence, and both ended in the same `ALL NETS FULLY CONNECTED!`. That
+    distinction matters most exactly when the copper-grading model is under
+    suspicion of fill-model artifacts, which is the whole reason the
+    cross-check exists.
+
+    `recon` keys: state (ran | did_not_run | disabled | not_applicable |
+    error), links, reclass, kicad_only, detail. Kept a pure function of that
+    dict so the wording is testable without a board.
+    """
+    st = recon.get('state')
+    if st == 'ran':
+        n = recon.get('links', 0)
+        parts = [f"ran, {n} KiCad link(s)"]
+        if recon.get('reclass'):
+            parts.append(f"reclassified {recon['reclass']} net(s) CONNECTED")
+        if recon.get('kicad_only'):
+            parts.append(f"flagged {recon['kicad_only']} net(s) KiCad-only "
+                         "UNCONNECTED")
+        if not recon.get('reclass') and not recon.get('kicad_only'):
+            parts.append("agrees with copper grading")
+        return "KiCad refill cross-check: " + ", ".join(parts)
+    if st == 'did_not_run':
+        return ("KiCad refill cross-check: DID NOT RUN "
+                f"({recon.get('detail', 'unknown')}) -- zone-covered nets are "
+                "graded by the copper model ALONE; KiCad has not agreed with "
+                "them")
+    if st == 'disabled':
+        return ("KiCad refill cross-check: DISABLED "
+                f"({recon.get('detail', '')}) -- copper grading only")
+    if st == 'error':
+        return ("KiCad refill cross-check: UNAVAILABLE "
+                f"({recon.get('detail', '')}) -- copper grading only")
+    return ("KiCad refill cross-check: not applicable "
+            f"({recon.get('detail', 'board has no zones')})")
+
+
 def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via],
                            pads: List[Pad], zones: List[Zone] = None,
                            tolerance: float = 0.02,
@@ -1746,30 +1787,44 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
     # synthetic/unit boards never pay the kicad-cli call.
     _zone_issue_ids = {i['net_id'] for i in issues
                        if any(z.net_id == i['net_id'] for z in pcb_data.zones)}
+    # #654: this block used to print ONLY when it CHANGED something, so
+    # "ran and agreed", "skipped -- no kicad-cli", "disabled" and "not
+    # applicable" were one indistinguishable silence -- and a run that never
+    # cross-checked still ended `ALL NETS FULLY CONNECTED!` / exit 0. That is
+    # exactly the ambiguity the cross-check exists to remove, and resolving it
+    # cost a hand call to kicad_unconnected() mid-campaign. Every path below
+    # now records a state, and exactly ONE status line is printed after the
+    # block, so a zone-backed verdict can be trusted or distrusted from the
+    # report alone.
+    _recon = {'state': 'not_applicable', 'links': 0, 'reclass': 0,
+              'kicad_only': 0, 'detail': ''}
+    if not pcb_data.zones:
+        _recon['detail'] = 'board has no zones'
+    elif os.environ.get('KICAD_NO_GRADE_RECONCILE'):
+        _recon['state'] = 'disabled'
+        _recon['detail'] = 'KICAD_NO_GRADE_RECONCILE is set'
     if pcb_data.zones and not os.environ.get('KICAD_NO_GRADE_RECONCILE'):
         try:
             from kicad_oracle import find_kicad_cli, kicad_unconnected
             _cli = find_kicad_cli()
             _links = kicad_unconnected(pcb_file, _cli) if _cli else None
-            if _links is None and not quiet:
-                # There was no `else` here, so "the oracle ran and agreed" and
-                # "the oracle never ran" printed identically -- i.e. nothing --
-                # and the run still ended `ALL NETS FULLY CONNECTED!` / exit 0.
-                # On a board with zones that is the difference between a graded
-                # result and an ungraded one, and the reader could not tell.
+            if _links is None:
                 # kicad_unconnected() returns None for a missing CLI, a DRC
                 # timeout (ORACLE_DRC_TIMEOUT 240s), a bad return code, or
                 # unreadable JSON; only the timeout prints anything of its own.
-                print(f"  NOTE: the KiCad grade reconciliation did NOT run "
-                      f"({'kicad-cli not found' if not _cli else 'the oracle returned nothing -- DRC timeout, bad exit, or unreadable output'})."
-                      f" Zone-covered nets below are graded by the copper model "
-                      f"ALONE; KiCad has not agreed with them.")
+                _recon['state'] = 'did_not_run'
+                _recon['detail'] = ('kicad-cli not found' if not _cli else
+                                    'the oracle returned nothing -- DRC '
+                                    'timeout, bad exit, or unreadable output')
             if _links is not None:
+                _recon['state'] = 'ran'
+                _recon['links'] = len(_links)
                 _linked_nets = {lk[0] for lk in _links}
                 _reclass = [i for i in issues
                             if i['net_id'] in _zone_issue_ids
                             and i['net_name'] not in _linked_nets]
                 if _reclass:
+                    _recon['reclass'] = len(_reclass)
                     issues[:] = [i for i in issues if i not in _reclass]
                     _names = ', '.join(i['net_name'] for i in _reclass)
                     print(f"  {len(_reclass)} zone-backed net(s) reclassified "
@@ -1889,14 +1944,21 @@ def run_connectivity_check(pcb_file: str, net_patterns: Optional[List[str]] = No
                                                 for lk in _nl[:4])),
                     })
                 if _rev:
+                    _recon['kicad_only'] = len(_rev)
                     issues.extend(_rev)
                     _names = ', '.join(i['net_name'] for i in _rev)
                     print(f"  {len(_rev)} net(s) UNCONNECTED per KiCad "
                           f"refill though copper grading passed them: "
                           f"{_names}")
         except Exception as _re:
-            if not quiet:
-                print(f"  (KiCad grade reconciliation unavailable: {_re})")
+            _recon['state'] = 'error'
+            _recon['detail'] = str(_re)
+
+    # #654: the single always-printed status line. Emitted for EVERY state,
+    # including the two that used to be silent (ran-and-agreed, and skipped),
+    # because their silence was identical to a clean pass.
+    if not quiet:
+        print("  " + reconcile_status_line(_recon))
 
     # Report results
     if quiet:
