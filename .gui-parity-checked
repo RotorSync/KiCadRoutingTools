@@ -1,3 +1,30 @@
+bd5d8d39 2026-08-19 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit: the placement -> main merge (bd5d8d39). NO NEW SURFACE, and all five
+gates re-run ON MAIN to prove it rather than inferring it.
+
+Why this entry is short. The audit that matters was done on PLACEMENT one
+commit earlier (f78f3298, the entry below) precisely so the merge would arrive
+with parity settled instead of discovered. Main is now placement plus
+d5468171, a cherry-pick of the stress/cloud harness commit that touches only
+tests/stress/. So the engine/GUI surface changed by this merge, measured from
+the previously audited SHA, is EMPTY -- check_release_version.py --tag v0.21.1
+passes on main with no parity complaint, which is the mechanical statement of
+exactly that.
+
+Re-run on main at this SHA anyway, because "should be identical" is not a
+measurement:
+  manifest_plan_parity   8407 flag-checks / 402 manifests, 0 mismatch;
+                         12 params -> controls, 0 unresolved;
+                         placement-block flags OK (the f78f3298 fix carried
+                         through the merge intact); placement tools refused
+  cli_postpass_coverage  8 registered / 15 in active use / 0 unreachable /
+                         0 failures / 0 warnings
+  settings_roundtrip     clean: save / restore / legacy / re-save, 188 keys
+  fanout_rotated_gui     10/10 -- CLI and GUI both 104 tracks / 0 vias /
+                         0 failed, track sets identical, every escape outward
+  gui_engine_parity      PARITY; copper sets IDENTICAL (1267 segments,
+                         128 vias, 0 cli-only, 0 gui-only)
+
 f78f3298 2026-08-19 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit ac3b5dcc..f78f3298 on PLACEMENT (not main): ONE REAL GAP, found by a gate
 and fixed (f78f3298). Run deliberately BEFORE merging placement -> main, so the
