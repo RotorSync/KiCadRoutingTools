@@ -393,26 +393,45 @@ def build_recorded_baseline(args, sets, stress):
 
 # ------------------------------------------------------------------- upload
 
-def corpus_has(sets: list) -> set:
-    """Set names already present on the corpus volume."""
+def corpus_has(sets: list, stress: Path) -> set:
+    """Set names already present on the corpus volume, under the name the
+    CONTAINERS will ask for.
+
+    The name that matters is the one `sweep_lib.discover_boards` derives from
+    the LOCAL preferred run dir -- modal_app resolves the manifest as
+    `/corpus/runs_<that name>`. So "present" means that exact dir is on the
+    volume, not merely something that looks like it.
+
+    This was a substring test (`f"runs_{s}" in listing`) against the whole
+    listing text, and it lied in exactly the case that matters: sets 1-5 had
+    been RE-RECORDED locally as plain `runs_set1..5`, while the volume still
+    held only the older `runs_set1_llm0801`. "runs_set1" is a substring of
+    "runs_set1_llm0801", so upload reported all five present and pushed
+    nothing -- then all 75 boards died container-side on
+    FileNotFoundError: /corpus/runs_set2/ulx3s/redo_commands.sh.
+    """
+    import sweep_lib as sl
+
     r = subprocess.run(["modal", "volume", "ls", CORPUS_VOLUME, "/"],
                        capture_output=True, text=True)
     if r.returncode != 0:
         print(f"  (could not list {CORPUS_VOLUME}: {r.stderr.strip()[:200]}); "
               f"assuming nothing is uploaded")
         return set()
-    listing = r.stdout
+    on_volume = {ln.strip() for ln in r.stdout.splitlines() if ln.strip()}
     have = set()
     for s in sets:
         # A set is present when its RUN dir is -- boards_* alone is not enough
-        # to replay. Run dirs may carry a recording suffix (runs_set3_llm0801).
-        if f"runs_{s}" in listing:
+        # to replay.
+        local = sl.run_dirs_for(stress, s)
+        wanted = local[0].name if local else f"runs_{s}"
+        if wanted in on_volume:
             have.add(s)
     return have
 
 
 def stage_upload(args, sets, stress):
-    have = corpus_has(sets)
+    have = corpus_has(sets, stress)
     missing = [s for s in sets if s not in have]
     print(f"\n=== UPLOAD ===\n  corpus already has: "
           f"{', '.join(sorted(have)) or '(none)'}")
