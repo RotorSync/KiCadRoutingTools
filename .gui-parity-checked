@@ -1,3 +1,81 @@
+972131a4 2026-08-19 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit bd5d8d39..972131a4 on main. NO GAP FOUND -- but the gate that would have
+shown one is VACUOUS for the thing that changed, and that is recorded here
+rather than glossed as a pass.
+
+The surface is two commits. 2d3f2ab8 is GUI-ONLY (the AI tab's Placement side
+reparented into a wx.ScrolledWindow, backend/model memory mirrored from the
+Routing side, tab label). 972131a4 is a SHARED-ENGINE fix: the #536 octolinear
+smoothing pass was handing back the #549 .kicad_dru track-rule clearance the
+router had reserved (0.4708 mm routed -> 0.400 mm after smoothing, under a
+0.45 mm rule), because its clears() resolved the netclass pair (#436) and the
+dru LAYER rule (#498) but never the dru TRACK rule. Everything else in the
+range is tests/ and skills/.
+
+Neither commit adds front-end surface, and that was checked mechanically, not
+assumed: no new add_argument in py_router/ across the range, no new engine
+kwarg at a front-end boundary, no new JSON_SUMMARY / results key. The one new
+parameter is `track_clearances` on the INTERNAL helper
+_seg_foreign_seg_dist -- below the CLI/GUI boundary, so it needs no argparse
+entry, no dialog control, no FLAG_PARAMS row.
+
+WHY THE GUI GETS THE #549 FIX FOR FREE (verified, not asserted). Both halves
+live inside batch_route, the function both fronts call, sharing ONE config
+object: install_track_clearances at route.py:1692 fills config.track_clearances,
+run_post_route_cleanup at route.py:2558 runs the smoothing that now reads it.
+The GUI's auto-read works too -- install_track_clearances falls back to
+PCBData.source_path when input_file is empty (kicad_dru.py:352), and the
+PCBNEW parse path sets source_path from board.GetFileName()
+(kicad_parser.py:4689), so a live board with a sibling .kicad_dru resolves the
+same rules the CLI does. This is the Class-1 shape from CLAUDE.md (fix INSIDE
+the shared engine function), which is why it needed no GUI wiring.
+
+THE VACUITY, stated plainly. test_gui_engine_parity routes
+kicad_files/splitflap_driver.kicad_pcb, which has NO sibling .kicad_dru. Its
+config.track_clearances is therefore empty on BOTH fronts, the new code path
+short-circuits (_trk_clr is None, the excess branch reduces to the pre-existing
+`if net_clearances`), and its IDENTICAL copper sets prove only that the change
+is INERT without a rule -- which is worth proving, and is not the same as
+proving the raise reaches the GUI. That claim rests on the call-graph check
+above plus the CLI-side e2e (tests/test_549_track_clearance_e2e.py, 8/8, min
+CRIT gap 0.400 -> 0.471, check_drc clean). Same caveat class as this gate's
+known signal+plane blind spot for diff-pair/impedance params: a #549 or #498
+regression on the GUI leg can pass this gate untouched. Closing it needs a
+fixture board carrying a .kicad_dru; not built here, and named so the next
+audit does not re-derive the gap.
+
+RUN TWICE, AND THE SECOND RUN IS THE ONE THAT COUNTS. The first pass of all
+five gates happened while a CONCURRENT session had uncommitted #675
+rip-up-transaction work in this worktree (blocking_analysis.py, route.py,
+routing_defaults.py, swig_gui.py, docs/rip-up-reroute.md). That session then
+branched its work to 675-ripup-transactions and reset main back to 972131a4,
+which is how the dirt became visible in the reflog rather than silent. Gates
+execute the WORKING TREE, not the SHA, so those first numbers described code
+that is not in this range -- the published-dirty-wave trap. Every gate below
+was re-run afterwards on a tree verified clean by `git status`, and all five
+reproduced IDENTICALLY (8407/402/0, 12/0, 8/15/1/0/0/0, 188 keys, 10/10,
+1267/128). The #675 changes are env-gated (KICAD_MINCUT_* default off), which
+is why the two passes agree -- but agreement was MEASURED, not assumed from
+reading the knobs.
+
+All five gates run at this SHA, prerequisites PROBED first (pcbnew 10.0.0-103,
+wx 4.2.2a1) rather than assumed absent:
+  manifest_plan_parity   8407 flag-checks / 402 manifests, 0 mismatch;
+                         12 params -> controls, 0 unresolved;
+                         placement-block flags OK; placement tools refused
+  cli_postpass_coverage  8 registered / 15 in active CLI use / 1 CLI-only
+                         acknowledged / 0 unreachable / 0 failures / 0 warnings
+  settings_roundtrip     clean: save / restore / legacy / re-save, 188 keys --
+                         UNCHANGED from bd5d8d39, which is the measurement that
+                         2d3f2ab8 reparented 15 widgets without adding,
+                         renaming or dropping a single persisted control
+  fanout_rotated_gui     10/10 -- CLI and GUI both 104 tracks / 0 vias /
+                         0 failed, track sets identical, every escape outward
+  gui_engine_parity      PARITY; copper sets IDENTICAL (1267 segments,
+                         128 vias, 0 cli-only, 0 gui-only) -- same counts as
+                         bd5d8d39, i.e. the engine fix moved no copper on a
+                         board with no track rule
+
 bd5d8d39 2026-08-19 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit: the placement -> main merge (bd5d8d39). NO NEW SURFACE, and all five
 gates re-run ON MAIN to prove it rather than inferring it.
