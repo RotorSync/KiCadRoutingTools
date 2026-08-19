@@ -1,3 +1,44 @@
+ac3b5dcc 2026-08-18 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit 55b54f1b..ac3b5dcc: NO GAPS. Sixteen commits, of which six are skill/doc
+edits and one is the previous ledger entry; the engine/GUI surface is eleven
+files -- the dogbone-lane fanout work, the cap-opt speedups, and the stale-fill
+net-flip fix.
+
+The mechanical sweep is clean in all three dimensions CLAUDE.md names. NO new
+argparse flags on any routing CLI (zero add_argument diffs across the range).
+NO new engine parameters: every added def is an internal helper (_disk_spans,
+_via_ctx, _pad_cache_for, pad_rects, pad_bbox) or a module function in
+kicad_exact_fill (_file_nets_by_uuid, repin_netcodes_from_file). NO new CLI
+main() post-pass -- place_fanout_clearance.py's only change in the range is its
+DOCSTRING (the "run ONCE after ALL fanouts" cadence), and gate 2 still reports
+8 registered / 15 in active use / 0 unreachable / 0 failures.
+
+The one change that could have been a Class-1 gap is the stale-fill net flip
+(10029187 + b717ac3c), and it is fixed on BOTH fronts by DIFFERENT mechanisms
+-- which is correct here, because the fronts differ in how the board reaches
+them. GUI: every bare board.BuildConnectivity() becomes refill_all_zones(board)
+(refill THEN rebuild) in swig_gui, planes_gui and differential_gui alike -- all
+three tabs, no straggler. CLI/headless: repin_netcodes_from_file() after
+LoadBoard, because this tool's writer stores item nets BY NAME and pcbnew
+renumbers them on load. Neither front needs the other's fix, and neither is
+missing its own.
+
+ai_plan.py's changes (the machine-contract prompt, cap pass ONCE after all
+fanouts) are GUI-planner policy with no CLI counterpart to drift from -- the
+CLI has no planner -- and the manifest converter is unaffected.
+
+All five gates green, run at this SHA:
+  cli_postpass_coverage  0 failures, 0 warnings
+  manifest_plan_parity   8378 flag-checks / 402 manifests, 0 mismatch;
+                         12 params -> controls, 0 unresolved
+  fanout_rotated_gui     10/10 -- CLI and GUI both 104 tracks / 0 vias /
+                         0 failed, track sets identical, every escape outward.
+                         The ONLY gate that runs fanout, and fanout is what
+                         changed in this range.
+  settings_roundtrip     clean: save / restore / legacy / re-save, 181 keys
+  gui_engine_parity      PARITY; copper sets IDENTICAL (1267 segments, 128
+                         vias, 0 cli-only, 0 gui-only)
+
 55b54f1b 2026-08-17 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit b2d8074b..55b54f1b: ONE REAL GAP, found and fixed (55b54f1b). Eighty-
 eight upstream commits -- the largest range any of these audits has covered --
