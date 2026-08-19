@@ -3538,7 +3538,8 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
       * keeps clearance from all foreign copper (pads / segments / vias),
         NPTH holes at their higher floor, and the board edge -- with a
         .kicad_dru layer rule replacing the base clearance on ruled layers
-        (#498, which the older graze passes never honored);
+        (#498, which the older graze passes never honored) and a .kicad_dru
+        TRACK rule raising the seg-vs-seg term on top of it (#549);
       * is strictly shorter than the copper it replaces (min_gain);
       * strands no same-net copper: mid-span via taps, pad touches, and
         T/X-touching sibling tracks hold their span un-collapsed unless the
@@ -3585,6 +3586,18 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
         if config is not None and hasattr(config, 'layer_clearance'):
             return config.layer_clearance(layer, base)
         return base
+
+    # #549: the track-scoped .kicad_dru channel, {obstacle_net_id: mm}. It is
+    # a seg-vs-seg rule (KiCad's Type=='track' binds tracks only), so it rides
+    # the FOREIGN-SEGMENT term below and never the pad/via/hole ones. Without
+    # it a shortcut that clears the class floor could still collapse a
+    # staircase to inside the rule -- the router stamps the raise into its
+    # obstacle map, then this pass hands the space straight back (measured on
+    # the #549 e2e fixture: 0.47 mm routed, 0.40 mm after smoothing, under a
+    # 0.45 mm rule). Raise-only over the already-resolved pair value, exactly
+    # like config.track_obstacle_clearance does at the stamp sites.
+    _trk_clr = (getattr(config, 'track_clearances', None) or None
+                if config is not None else None)
 
     edge_rings, edge_outer, edge_cutouts = board_edge_geometry(pcb_data.board_info)
     board_bounds = pcb_data.board_info.board_bounds
@@ -3686,7 +3699,8 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                                    base_clearance=eff, net_clearances=net_clearances)
         d = min(pd,
                 _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      net_clearances=net_clearances, base_clearance=eff),
+                                      net_clearances=net_clearances, base_clearance=eff,
+                                      track_clearances=_trk_clr),  # #549
                 _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                                       net_clearances=net_clearances, base_clearance=eff))
         hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2)

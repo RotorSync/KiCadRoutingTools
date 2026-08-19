@@ -362,7 +362,8 @@ def _foreign_seg_arrays(pcb_data, layer):
 
 
 def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                          net_clearances=None, base_clearance=0.0):
+                          net_clearances=None, base_clearance=0.0,
+                          track_clearances=None):
     """Min edge distance from a (short, terminal) segment to any OTHER-net segment or
     via on `layer` -- the segment analogue of _seg_foreign_pad_dist. Distance is from
     the terminal centreline to the foreign copper EDGE (point-to-segment distance to
@@ -375,7 +376,13 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     base)) is SUBTRACTED from its distance, so a uniform caller check
     `dist >= base_clearance + w/2` enforces KiCad's pairwise max(base, classF)
     per foreign net. base_clearance should be the moving net's own floor
-    (max(global, own class)). Inert when net_clearances is None."""
+    (max(global, own class)). Inert when net_clearances is None.
+
+    #549: `track_clearances` (config.track_clearances, {obstacle_net_id: mm})
+    folds the SAME way, raise-only on top of the class value -- this channel is
+    seg-vs-seg ONLY, which is exactly what this helper measures, so a caller
+    passing it here must NOT pass it to the pad/via helpers (KiCad's
+    Type=='track' binds tracks to tracks). Inert when the map is empty."""
     nid, fax, fay, fbx, fby, fhw = _foreign_seg_arrays(pcb_data, layer)
     if nid.size == 0:
         return 1e9
@@ -401,10 +408,15 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     projx = ax[None, :] + tt * abx[None, :]
     projy = ay[None, :] + tt * aby[None, :]
     dist = np.hypot(sx[:, None] - projx, sy[:, None] - projy) - hw[None, :]
-    if net_clearances:
+    if net_clearances or track_clearances:
         # #436: fold each foreign net's class-excess into its distance.
+        # #549: the track-rule value raises the same per-foreign requirement.
         fnid = nid[near]
-        excess = np.array([max(0.0, net_clearances.get(int(f), base_clearance) - base_clearance)
+        _nc = net_clearances or {}
+        _tc = track_clearances or {}
+        excess = np.array([max(0.0,
+                               max(_nc.get(int(f), base_clearance),
+                                   _tc.get(int(f), 0.0)) - base_clearance)
                            for f in fnid], dtype=float)
         dist = dist - excess[None, :]
     return float(np.min(dist))
