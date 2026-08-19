@@ -289,6 +289,18 @@ def parse_command(argv):
                 vals.append(_num(argv[i]))
                 i += 1
             lists[a] = vals
+        elif a in ('--group', '--group-scope', '--group-by'):
+            # #459 placement blocks: these must land as TOP-LEVEL step keys,
+            # not in params. ai_plan's route action reads step["group"] /
+            # ["group_by"] / ["group_scope"] directly (_group_net_names); the
+            # generic unknown-flag path below would file them under params,
+            # where nothing reads them -- and per that function's own comment
+            # the step then silently widens to the WHOLE BOARD where the CLI
+            # routed one block. Same shape as --component just below.
+            i += 1
+            if i < len(argv) and not argv[i].startswith('--'):
+                step[a.lstrip('-').replace('-', '_')] = argv[i]
+                i += 1
         elif a == '--component':
             # #537: --component now takes one or more references. One converts
             # to the `component` key the plan executor already understands;
