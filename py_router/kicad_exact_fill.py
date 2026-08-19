@@ -169,6 +169,42 @@ def _win_version_key(path: str):
     return tuple(int(p) for p in re.findall(r'\d+', m.group(1))) or (0,)
 
 
+def _this_interpreter() -> str:
+    """Path of a REAL python interpreter for THIS process ('' if none found).
+
+    Inside KiCad's embedded python -- i.e. the GUI plugin -- `sys.executable`
+    is the HOST C++ BINARY (`.../MacOS/pcbnew`, `pcbnew.exe`), not python3.
+    Handing that to subprocess.run([exe, script, board, ...]) does not run a
+    script: pcbnew treats every argument as a FILE TO OPEN, so the exact-fill
+    refill re-launched the APPLICATION -- once per call -- and KiCad answered
+    "Pcbnew:OpenProjectFiles() takes a single filename" (the output path in
+    that argv does not exist yet, which is the empty filename in the message).
+
+    So reconstruct the interpreter from sys.prefix, the same way the plugin's
+    deps_check._find_python_executable does for `-m pip`. Returning '' is
+    correct when nothing is found: the caller then falls through to the
+    platform paths below rather than spawning the host binary.
+    """
+    exe = sys.executable or ""
+    if exe and os.path.basename(exe).lower().startswith('python'):
+        return exe                      # already a python (CLI, KiCad python3)
+    prefix = sys.prefix or getattr(sys, 'base_prefix', '') or ""
+    if not prefix:
+        return ""
+    v = sys.version_info
+    if sys.platform == 'win32':
+        cands = [os.path.join(prefix, 'python.exe'),
+                 os.path.join(prefix, 'Scripts', 'python.exe')]
+    else:
+        cands = [os.path.join(prefix, 'bin', n) for n in
+                 (f'python{v.major}.{v.minor}', f'python{v.major}',
+                  'python3', 'python')]
+    for c in cands:
+        if os.path.isfile(c):
+            return c
+    return ""
+
+
 def kicad_python_candidates() -> List[str]:
     """Plausible pcbnew-capable interpreters, best first (unverified).
 
@@ -180,7 +216,10 @@ def kicad_python_candidates() -> List[str]:
     cands = [os.environ.get('KICAD_PYTHON') or '',
              # THIS interpreter, when it is already KiCad's python (the GUI
              # plugin) or a Linux system python with pcbnew installed.
-             sys.executable,
+             # _this_interpreter(), NOT sys.executable: in the GUI the latter
+             # is the pcbnew HOST BINARY and spawning it opens the app instead
+             # of running a script (see _this_interpreter's docstring).
+             _this_interpreter(),
              "/Applications/KiCad/KiCad.app/Contents/Frameworks/"
              "Python.framework/Versions/Current/bin/python3"]
     # Windows installs into a VERSIONED directory
@@ -235,8 +274,13 @@ def find_kicad_python() -> Optional[str]:
         return _KICAD_PYTHON_MEMO[0]
     found = None
     for cand in kicad_python_candidates():
-        if cand == sys.executable and 'pcbnew' in sys.modules:
-            found = cand           # the GUI plugin: already KiCad's python
+        # The free settle: this IS the running interpreter and pcbnew is
+        # already imported, so no probe can tell us anything new. Requires
+        # `cand is sys.executable` LITERALLY -- a path DERIVED from sys.prefix
+        # (the GUI case, see _this_interpreter) is a reconstruction, so it
+        # gets probed like any other candidate rather than trusted.
+        if cand and cand == sys.executable and 'pcbnew' in sys.modules:
+            found = cand           # the GUI plugin on a python-exe front
             break
         if not os.path.isfile(cand):
             continue

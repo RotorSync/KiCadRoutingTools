@@ -56,6 +56,41 @@ def test_candidates_cover_the_real_windows_install():
     assert sys.executable in kef.kicad_python_candidates()
 
 
+def test_gui_host_binary_is_never_a_candidate():
+    """Inside KiCad's embedded python (the GUI plugin) `sys.executable` is the
+    pcbnew HOST BINARY, not python3. It must never reach the candidate list:
+    subprocess.run([pcbnew, script, board, out, dir]) does not run a script --
+    pcbnew opens every argument as a FILE, so the exact-fill refill re-launched
+    the APPLICATION once per call and KiCad reported
+    "Pcbnew:OpenProjectFiles() takes a single filename" (the `out` path in that
+    argv does not exist yet -- the empty filename in the message)."""
+    import types
+    memo, real = list(kef._KICAD_PYTHON_MEMO), sys.executable
+    had_pcbnew = 'pcbnew' in sys.modules
+    try:
+        kef._KICAD_PYTHON_MEMO.clear()
+        sys.modules.setdefault('pcbnew', types.ModuleType('pcbnew'))
+        for host in ("/Applications/KiCad/KiCad.app/Contents/MacOS/pcbnew",
+                     r"C:\Program Files\KiCad\10.0\bin\pcbnew.exe",
+                     "/usr/bin/pcbnew"):
+            sys.executable = host
+            assert host not in kef.kicad_python_candidates(), \
+                f"host binary {host} leaked into the candidate list"
+            kef._KICAD_PYTHON_MEMO.clear()
+            got = kef.find_kicad_python()
+            assert got != host, f"find_kicad_python() returned the host binary {host}"
+            assert got is None or \
+                os.path.basename(got).lower().startswith('python'), \
+                f"find_kicad_python() returned a non-python: {got}"
+    finally:
+        sys.executable = real
+        if not had_pcbnew:
+            sys.modules.pop('pcbnew', None)
+        kef._KICAD_PYTHON_MEMO.clear()
+        kef._KICAD_PYTHON_MEMO.extend(memo)
+    print("  PASS: the pcbnew host binary never reaches a subprocess spawn")
+
+
 def test_finder_verifies_pcbnew_rather_than_file_existence():
     """A path that exists but cannot import pcbnew is not an answer."""
     memo, env = list(kef._KICAD_PYTHON_MEMO), os.environ.get('KICAD_PYTHON')
@@ -127,6 +162,7 @@ def test_fragility_survives_unavailable_refill(capsys_print=None):
 def main():
     test_windows_versioned_layout_sorts_newest_first()
     test_candidates_cover_the_real_windows_install()
+    test_gui_host_binary_is_never_a_candidate()
     test_finder_verifies_pcbnew_rather_than_file_existence()
     test_fragility_survives_unavailable_refill()
     print("PASS: KiCad-python discovery + exact-fill unavailable contract")
