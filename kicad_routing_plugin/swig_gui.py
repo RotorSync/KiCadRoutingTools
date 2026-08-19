@@ -399,7 +399,7 @@ class RoutingDialog(wx.Dialog):
         # (settings persistence, _ai_params, resets) is unaffected; the page
         # added here is the container.
         ai_container = self._create_ai_tab()
-        self.notebook.AddPage(ai_container, "AI")
+        self.notebook.AddPage(ai_container, "AI Drive")
 
         # Tab 7: Log
         log_panel = self._create_log_tab()
