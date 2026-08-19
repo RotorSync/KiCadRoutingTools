@@ -717,6 +717,36 @@ boards" and "which commit broke connectivity".
   bisecting a regression: `bash tests/stress/corpus_bisect.sh <sha> <tag>`.
   5-6 points bracket a 38-commit range for under $10.
 
+- **`cloud_arms_to_sweep.py`** — score a knob screened as SEPARATE
+  `cloud_replay_sets.py` arms. Each arm lands in its own wave dir, and the
+  wave-dir readers (`ab_wave_report.py`, `--compare`) do a two-wave roll-up
+  with no chain pairing, no rescue-clean cell and no `--hard` split — i.e.
+  without rules 3, 5 and the congestion dilution below. Merge the arms into
+  one sweep json and score them with the tool that applies all of it:
+
+  ```bash
+  # one control arm + one knob arm, launched separately, at the SAME commit
+  python3 tests/stress/cloud_replay_sets.py --sets set1-set5 --label dirs250
+  python3 tests/stress/cloud_replay_sets.py --sets set1-set5 --label dirs5 \
+      --defaults DIRECTION_PREFERENCE_COST=5 --no-baseline
+  python3 tests/stress/cloud_arms_to_sweep.py \
+      ~/Documents/kicad_stress_test/cloud_dirs250_<sha> \
+      ~/Documents/kicad_stress_test/cloud_dirs5_<sha> --out sweep_dirs.json
+  python3 tests/stress/modal_sweep/rank_arms.py sweep_dirs.json --drop-rescue-clean
+  ```
+
+  It merges each wave's REGRADED grading with the `_raw` provenance the local
+  regrade drops (`arm`, `steps`, `rescue_steps`, `patched_defaults`) — feed
+  rank_arms the regraded rows alone and you silently disable its arm
+  identification, its chain-identity guard and its rescue cell at once. Rows
+  the regrade could not re-score (cloud-graded, so no kicad-cli `drc_real`)
+  are dropped rather than paired against locally-graded rows, per rule 2.
+
+  **Launch the arms at ONE commit and do not commit in between.** The image is
+  `git archive HEAD`, so a commit landing between two launches makes the arms
+  differ by more than the knob — the arm name records the sha it was launched
+  at, so check that both wave dirs carry the same one.
+
 ### Rules that make these trustworthy
 
 1. **The baseline is the RECORDED RUNS, re-graded — not an archived `ab_*` wave.**
