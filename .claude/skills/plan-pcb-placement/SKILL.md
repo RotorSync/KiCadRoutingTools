@@ -103,7 +103,13 @@ re-emit if in doubt.
        new routing failures.
    "Clean" is a measured verdict, never an impression of the board.
 2. THE BOARD OUTLINE IS NOT YOURS TO CHANGE. Size, cutouts and slots are
-   mechanical decisions the user owns.
+   mechanical decisions the user owns. NEVER RESIZE A BOARD to make parts fit
+   -- if they do not fit, say so and stop. This holds today only by
+   construction (no writer here emits an Edge.Cuts primitive), so it is
+   written down rather than left implied. Three tools in the repo DO rewrite
+   Edge.Cuts and are not part of placement: `stress/fix_outline_gaps.py`,
+   `stress/strip_routing.py` and `stress/prep_set2.py`. They exist to prepare
+   corpus boards; never run them on a user's board.
 3. A part the file marks `(locked yes)` is never yours to move, whatever an
    intent says.
 4. Gate on hpwl, PAD-PAD conflicts and the assembly channel's blocking pairs.

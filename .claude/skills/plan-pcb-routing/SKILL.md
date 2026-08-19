@@ -770,10 +770,10 @@ Controlled A/B on the four regressed boards, changing ONLY the plane map
 
 | board | aggressive map | inner-only map |
 |---|---|---|
-| tigard | 7 open, 60s | **0 open, 41s** |
+| a 4-layer board | 7 open, 60s | **0 open, 41s** |
 | upduino | 5 open + 2 DRC, 286s | **0 open, 1 DRC, 61s** |
 | eis | 3 open, 504s | **0 open, 2 DRC, 115s** |
-| watchy | 1 open, 428s | **0 open, 0 DRC, 88s** |
+| a small 2-layer board | 1 open, 428s | **0 open, 0 DRC, 88s** |
 
 And the reverse control on the dense board cuts the other way just as
 hard — the same skill chain with the conservative (recorded-style) map
@@ -802,7 +802,7 @@ with the aggressive map → 0 opens/115 s inner-only; orangecrab and daisho,
   sub-60 µm gap debt, and board-edge DRC (all three measured).
 - **Every other rail rides `--power-nets` as a wide trace.** Do not
   Voronoi many rails onto one layer: **never more than 2–3 rails share a
-  split layer** (measured: six rails Voronoi'd onto tigard's In2
+  split layer** (measured: six rails Voronoi'd onto one 4-layer board's In2
   fragmented +3V3 into 8 pad-anchored islands → 7 opens; the 2-rail map
   → 0).
 - 2-layer boards: GND flood(s) per Step 8's 2-layer flow (pour LAST on
@@ -1305,7 +1305,7 @@ frontier boards 25→15 over 3–5 passes — so bake two passes into every
 plan, dense or not. The near-free property DEPENDS on the Step 5a-tuned
 density gate: connected nets gate-skip, but each pass still re-oracles
 every pour, so big carve-free outer floods on a small board turn "free"
-iterations into 100 s+ passes (the measured 428 s watchy chain; 88 s with
+iterations into 100 s+ passes (one measured 428 s chain; 88 s with
 the same iterations after the flood was removed). Then two endgame
 signatures:
 
@@ -2303,7 +2303,7 @@ Lessons from a dry-run audit (an agent following this skill end-to-end):
    flood-regressed wave boards all went to 0 opens and 3–5× faster on the
    inner-only map).
 9. **Never split more than 2–3 rails onto one Voronoi layer** — prefer
-   wide traces for the overflow (tigard: six rails on In2 → +3V3 in 8
+   wide traces for the overflow (measured: six rails on In2 → +3V3 in 8
    islands, 7 opens).
 10. **Stitch/GND-via tail only at high speed tier or above** (from
    `/find-high-speed-nets`) — and when it runs, the chain still ends on

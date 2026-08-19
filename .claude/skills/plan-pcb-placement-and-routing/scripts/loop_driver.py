@@ -399,8 +399,8 @@ def _cycle_index(ledger, starting=False):
     all say `--stage L1`. The driver had no concept of one, and named the same
     output paths every time. Measured, on a real second cycle L2 printed:
 
-        write the result to wk/run17/neo6502/frozen.kicad_pcb
-        Take the list from wk/run17/neo6502/freeze_refs.json
+        write the result to <workdir>/<board>/frozen.kicad_pcb
+        Take the list from <workdir>/<board>/freeze_refs.json
 
     Both are CYCLE ONE's files. That `frozen.kicad_pcb` is cycle 1's
     `--authored-from` baseline and is referenced by the ledger by content hash,
