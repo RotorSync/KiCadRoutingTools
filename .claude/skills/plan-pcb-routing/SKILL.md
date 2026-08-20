@@ -301,7 +301,8 @@ Worked example (a 256-ball 0.8 mm-pitch BGA, clearance 0.1, fab floor track 0.1 
 `budget = 0.8 − 0.2 − 0.05 = 0.55`; track 0.127 → via = min(working, 0.55−0.127) =
 **0.42** (≥ floor) → DRC-clean, vs the Ø0.5 the net-class default would have used
 (163 grazes). At 0.4 mm pitch the budget forces both to the floor (track 0.10, via
-~0.30/0.20 advanced); if even those don't fit, go `--escape-method underpad`.
+~0.30/0.20 advanced); if even those don't fit, go `--escape-method dogbone`
+(populated array; `underpad` only when no inter-ball gap site exists at all).
 `bga_fanout.py` also warns `WARNING: escape via ... busts the half-pitch budget`
 when handed infeasible params, but choose feasible ones here so it never fires.
 
@@ -312,17 +313,26 @@ rippable blockers", so it must be caught here. If `failed > 0`, retry the fanout
 more layers and/or a smaller `--clearance` (see "Escape clearance" below) before
 moving on — do not start signal routing while balls are still dropped.
 
-**If balls still drop on a dense, fully-populated array, switch to the under-pad
-escape:** add `--escape-method underpad` with a small via/track for the pitch
+**If balls still drop on a dense, fully-populated array, switch to the dog-bone
+escape:** add `--escape-method dogbone` with a small via/track for the pitch
 (e.g. `--via-size 0.35 --track-width 0.12 --clearance 0.1` at 0.8 mm pitch). The
-default `channel` engine confines every layer to the gaps *between* ball rows, so
-a few channels over-subscribe and the deepest balls can't escape; `underpad`
-routes each ball *under* the pad field on inner layers via a via-in-pad and
-escapes arrays `channel` can't (e.g. a 22×22 BGA that drops ~20 balls → 0).
-Caveats: it routes diff pairs as **single-ended**, and it **skips power/plane
-nets** as escapes — but every skipped plane ball still gets a **plane-drop via**
-(below), so nothing is left stranded. Rule of thumb: try `channel` first (keeps
-diff pairs); fall back to `underpad` when `channel` can't escape a dense array.
+`channel` engine confines every layer to the gaps *between* ball rows, so a few
+channels over-subscribe and the deepest balls can't escape; `dogbone` stubs each
+ball to a via in the diagonal inter-ball gap (falling back per-ball to
+via-in-pad), so it never escapes fewer balls than `underpad` at roughly half the
+via-in-pad / IPC-4761 fab burden (#669: orangecrab U3 108/108 vs underpad's
+104/108, with the 3 stranded balls unrecoverable by ANY later routing).
+`underpad` (every via in its pad) is for arrays with **no legal inter-ball gap
+at all** — WLCSP-class pitches where even a floor via busts the half-pitch lane
+budget. Caveats (both grid escapes): diff pairs route **single-ended**, and
+power/plane nets are skipped as escapes — but every skipped plane ball still
+gets a **plane-drop via** (below), so nothing is left stranded. `auto` (the
+default) retries channel's drops with `underpad` only — a dogbone-first retry
+was measured and REJECTED as the default (#669 sets1-5 corpus A/B: +10
+incomplete nets, +59 kicad DRC — dogbone gap vias claim inter-ball streets
+that chains not authored for dogbone then collide with). So on a populated
+array, `dogbone` must be passed EXPLICITLY, with via/track/clearance chosen
+for it — which is exactly what this plan does.
 
 **How humans escape big BGAs — and which of OUR tool options that maps to**
 (survey of 54 human corpus boards with a real ≥100-ball array; the fanout
@@ -335,8 +345,12 @@ places vias itself, so this is about choosing its options, not via positions):
   populated array prefer **`--escape-method dogbone`** — each ball vias in a
   free inter-ball gap and falls back per-ball to via-in-pad, so it never
   escapes fewer balls than `underpad` while keeping the inner-layer streets
-  open. `channel` (the `auto` default) already leaves the outer rings via-free;
-  keep it for sparse/perimeter-heavy arrays and diff pairs.
+  open. `channel` (`auto`'s first pass) already leaves the outer rings
+  via-free; keep it for sparse/perimeter-heavy arrays and diff pairs. Note
+  `auto`'s retry for channel's drops is `underpad`, NOT dogbone (#669 measured
+  a dogbone-first retry worse as a default) — so a populated array gets
+  dogbone only by passing `--escape-method dogbone` explicitly, with params
+  chosen for it.
 - **Rail balls under a pour need NO via when the pour is on their own layer**
   — the plane-drop pass (#424) detects this automatically when the pours
   already exist (the Step 1 pour runs before fanout): it prints `N pour-covered (no via
@@ -1980,8 +1994,9 @@ Rules of the loop:
   reports. `/diagnose-routing-failures` automates most of this.
 - **Symptom → knob map** (beyond the Diagnose and Retry table):
   - Fanout drops balls in one quadrant → re-run that fanout with
-    `--escape-method underpad`, a smaller via from the fab ladder
-    (0.30/0.15 → 0.25/0.15), or different `--primary-escape` direction.
+    `--escape-method dogbone` (`underpad` if no gap sites exist), a smaller
+    via from the fab ladder (0.30/0.15 → 0.25/0.15), or different
+    `--primary-escape` direction.
   - Signal step fails a cluster of long cross-board nets while an inner
     layer is plane-reserved → revisit the plane→layer map (dense-board
     exception above): free one inner layer, drop its `--layer-costs` entry

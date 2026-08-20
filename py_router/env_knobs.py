@@ -202,6 +202,15 @@ def refresh() -> None:
     # economy. '0' reverts. Default ON.
     g['FANOUT_POUR_TRACK'] = _s('KICAD_FANOUT_POUR_TRACK', '1') != '0'
     g['FANOUT_POUR_TRACK_R'] = float(_s('KICAD_FANOUT_POUR_TRACK_R', '2.0') or 2.0)
+    # #669: '1' makes escape-method 'auto' retry channel drops with DOGBONE
+    # first, then underpad only if dogbone still dropped balls. Default OFF:
+    # the sets1-5 corpus A/B REJECTED it as a default (autodb0/autodb1 arms
+    # at 21b1c0e5: +10 incomplete nets and +59 kicad DRC vs the underpad-only
+    # retry -- dogbone gap vias claim inter-ball streets that recorded chains'
+    # later steps collide with). Explicit --escape-method dogbone remains the
+    # populated-array doctrine; this knob is the opt-in ladder for chains
+    # whose params are chosen for dogbone.
+    g['FANOUT_AUTO_DOGBONE'] = _s('KICAD_FANOUT_AUTO_DOGBONE', '0') == '1'
     # #652 directive 2: rip-swap rescue for terminally dropped fanout balls
     # (evict the nearest committed neighbour escape, re-escape both as a pair
     # at the fab floor; strict-win only). '0' reverts. Default ON.
