@@ -67,6 +67,7 @@ source to zero at the radius.
 | `package_proximity_zones` | `None` | Per-package proximity rects `(min_x, min_y, max_x, max_y, radius_mm)` for BGA/QFN/QFP, filled by the batch engines under the opt-in `KICAD_PACKAGE_PROXIMITY`. `None` = legacy (the hard BGA zones at the flat radius) |
 | `track_proximity_distance` | `2.0` | Radius around routed tracks (same layer) |
 | `track_proximity_cost` | `0.0` | Cost near routed tracks (**0 = off by default**) |
+| `plan_probe` | `False` | Marks a config as the global plan's (#589) rough-route PROBE, whose relaxed legality lets probe terminals overlap future nets' copper. Set only on the plan's `replace()` clone — never on a config that emits copper |
 | `ripped_route_avoidance_radius` | `1.0` | Radius around just-ripped routes |
 | `ripped_route_avoidance_cost` | `0.1` | Cost near just-ripped routes (helps reroutes diverge) |
 
@@ -399,6 +400,7 @@ search speed on proximity-heavy boards.
 |-------|---------|---------|
 | `routing_clearance_margin` | `1.0` | Multiplier on track-to-via clearance (1.0 = exact DRC minimum) |
 | `hole_to_hole_clearance` | `0.25` | Drill-to-drill clearance, edge to edge |
+| `hole_clearance` | `0.0` | Copper-to-HOLE floor (KiCad's `min_hole_clearance`) — keeps TRACKS off an NPTH wall. NOT the same rule as `hole_to_hole_clearance` (drill-to-drill). `0` = read the board's own constraint, falling back to `routing_defaults.NPTH_TO_TRACK_CLEARANCE` |
 | `board_edge_clearance` | `0.0` | Clearance from board edge (0 = use `clearance`) |
 | `same_net_pad_clearance` | `-1.0` | #581: edge-to-edge clearance between **every placed via** and **same-net SMD pads**. `> 0` forbids via-in-pad globally (routing/tap/rescue via placement blocks same-net SMD pads at this clearance; pad-centre swap vias are declined; the #189 in-pad rescue is disabled; the sub-grid via nudge honors it; BGA under-pad escapes run dog-bone, QFN refuses via-in-pad). `-1` **and** `0` preserve pre-#581 behavior exactly (0 keeps only its legacy meaning where `route_planes` passes it explicitly into its stitching via maps). Set from `--same-net-pad-clearance` (planes/route/route_diff/fanout/repair) or auto-read from the persisted `.kicad_pro` record (`kicad_routing_tools.same_net_pad_clearance`); an active flag value is persisted so later chain steps inherit it |
 | `net_clearances` | `{}` | `{net_id: class_clearance_mm}` — per-net **net-class** clearance for KiCad's cross-class rule (see below) |
