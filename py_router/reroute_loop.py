@@ -588,9 +588,14 @@ def run_reroute_loop(
                     if not ripped_items:
                         print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
                         from routing_diagnostics import static_boxin_hint, condense_hint
-                        hint = condense_hint(static_boxin_hint(result, config, pcb_data))
+                        hint, _boxin = static_boxin_hint(
+                            result, config, pcb_data, return_verdict=True)
+                        hint = condense_hint(hint)
                         if hint:
                             print(f"  {hint}")
+                        if _boxin:
+                            record_net_event(state, ripped_net_id,
+                                             "boxed_in_static", _boxin)
                     # Remove from pending_multipoint_nets to prevent Phase 3 from
                     # trying to route taps for a net with no main route.
                     if ripped_net_id in state.pending_multipoint_nets:
