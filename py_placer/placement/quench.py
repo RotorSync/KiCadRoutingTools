@@ -34,6 +34,7 @@ untouched, since max(1, 1) = 1.
 """
 from __future__ import annotations
 
+import os
 import math
 from typing import Dict, List, NamedTuple, Sequence, Tuple, Set, Optional
 
@@ -45,12 +46,20 @@ from placement.parser import (courtyard_for_side, extract_courtyard_sides,
                               extract_locked_refs, warn_missing_courtyards)
 from placement.utility import compute_footprint_bbox_local, snap_to_grid
 from placement import legality
-from placement.legality import (CONTAINER_RATIO, BoardOutlineGate,
+from placement.legality import (CONTAINER_RATIO, CONTAINMENT_FRAC,
+                                BoardOutlineGate, containment_frac,
                                 footprint_has_through_pads,
                                 footprint_side, pair_min_gap, rect_gap,
+                                rect_overlap_area,
                                 rotate_local_bounds, sides_occupied)
 
 ROTATIONS = [0.0, 90.0, 180.0, 270.0]
+
+#: Kill switch for the body-containment conjunct in `candidate_valid`. It is a
+#: HARD gate on real boards, so a way to isolate it without a git stash is
+#: worth the one line -- `KRT_NO_CONTAINMENT_GATE=1` restores the pre-2026-08
+#: behaviour exactly. Not a supported flag; a debugging lever.
+_CONTAINMENT_GATE = os.environ.get('KRT_NO_CONTAINMENT_GATE', '') != '1'
 EPS_IMPROVE = 1e-6
 
 # Both helpers now live in placement/legality.py, the single home shared with
@@ -430,6 +439,13 @@ class QuenchState:
         self.edge_halo = edge_halo
         self.edge_weight = edge_weight
         self.grid_step = grid_step
+
+        # Kept so the FAB body channel can be resolved lazily -- see
+        # `fab_rect`. Nothing is parsed unless something asks.
+        self.pcb_file = pcb_file
+        self.pcb_data = pcb_data
+        self._fab_local = None
+        self._fab_cache = {}
 
         courtyards = extract_courtyard_sides(pcb_file)
         locked_refs = set(extract_locked_refs(pcb_file))
@@ -1083,6 +1099,27 @@ class QuenchState:
                 if rect_gap(rect, r) < clr:
                     legal = False
                     break
+        if legal:
+            # BODY layer. A pose that buries this part inside another part's
+            # .Fab body is not a trade-off to be priced -- it is illegal, the
+            # same verdict reconstruct._pair_conflicts already returns for the
+            # assign/exchange ILP. Without it here, `legalize` and every
+            # quench pass could re-seat a charged part straight back inside
+            # the body it was charged for, and _try_place's clearance ladder
+            # (full, full/2, 0.02) makes such a seat MORE reachable, not less.
+            #
+            # FAB currency, and only fab. The courtyard would be a false-veto
+            # machine: four healthy corpus boards ship frac-1.0 COURTYARD
+            # containment (esp_prog, orangecrab, rp2350, ulx3s). The docstring
+            # above warns that on watchy 81 of 82 parts start in violation of
+            # the courtyard clearance -- that warning is about the courtyard
+            # currency and about RELAXING the gate, and it does not transfer:
+            # on the fab currency the whole 33-board corpus carries 4 pairs
+            # with a maximum non-exempt frac of 0.011.
+            #
+            # Same marker/container exemption as the prevention gate, or a
+            # displaced fiducial could never come home under a connector.
+            legal = not self._body_contained_at(ref, x, y, rot, exclude)
         if legal and self.legality_ctx is not None:
             # Pad+drill layer: courtyard-clear does not imply pad-clear (pads
             # overhanging courtyards, exchanged nets, NPTH holes). Baseline-
@@ -1097,9 +1134,8 @@ class QuenchState:
         # candidate of this part until something moves. Without the cache this
         # branch runs a full neighbour sweep per rejected candidate, which on a
         # dense board is most of them.
-        cur_board, cur_overlap = (
-            self.violation_parts(ref, exclude=exclude) if exclude
-            else self._incumbent_violation(ref))
+        cur_board, cur_overlap = self._incumbent_violation(ref,
+                                                           exclude=exclude)
         if cur_overlap > EPS_IMPROVE or cur_board <= EPS_IMPROVE:
             # Overlapping, or already legal: original rule, legal poses only.
             return False
@@ -1153,11 +1189,29 @@ class QuenchState:
             return False
         return cur.hole <= base.hole + EPS_IMPROVE
 
-    def _incumbent_violation(self, ref):
-        v = self._inc_violation.get(ref)
+    def _incumbent_violation(self, ref, exclude=None):
+        """The incumbent pose's violation, cached per (ref, exclude).
+
+        The `exclude` half is why this exists. `candidate_valid`'s rejection
+        path guarded the cache with `if exclude:` and fell through to an
+        uncached `violation_parts` whenever one was supplied -- and the seeder
+        ALWAYS supplies one (the unplaced pile), so on the path that matters
+        the cache never ran. Measured over 30s of a real seeding run: 61,119
+        incumbent-pose calls, of which 61,092 (99.96%) were exact repeats of
+        the same (ref, clearance, exclude). Each one walks the neighbours and
+        the outline; the comment three lines above the guard already said this
+        must not happen.
+
+        The key is a frozenset, so it costs O(|exclude|) hashing against a
+        full neighbour-and-outline sweep -- cheap by a wide margin. The whole
+        cache is cleared on every move (see apply_move), which is what makes
+        an incumbent answer safe to hold at all.
+        """
+        key = (ref, frozenset(exclude) if exclude else None)
+        v = self._inc_violation.get(key)
         if v is None:
-            v = self.violation_parts(ref)
-            self._inc_violation[ref] = v
+            v = self.violation_parts(ref, exclude=exclude)
+            self._inc_violation[key] = v
         return v
 
     def _edges_near(self, ref) -> list:
@@ -1246,6 +1300,113 @@ class QuenchState:
         return cost, n_out + n_in
 
     # ----- full cost (for reporting) ---------------------------------------
+
+    def fab_rect(self, ref, x=None, y=None, rot=None):
+        """The part's .Fab BODY rect at a pose, or None when its footprint
+        draws no .Fab geometry.
+
+        The body currency for CONTAINMENT tests. It must never fall back to
+        the courtyard: a courtyard is body + margin + shell-overhang volume,
+        and the 33-board corpus ships frac-1.0 COURTYARD containment on four
+        healthy boards (esp_prog, orangecrab_ext_pll,
+        rp2350_fpga_eensy_prePlane, ulx3s) against ZERO non-exempt fab
+        containment. A courtyard-based containment test is a false-veto
+        machine; this one is not.
+
+        None means UNJUDGED, not clear -- a pose inside a bodyless part
+        cannot be refused, and callers disclose that rather than assuming
+        coverage they do not have.
+
+        Lazy: nothing is parsed until the first call, so every existing
+        quench/seeder path pays nothing.
+        """
+        if self._fab_local is None:
+            try:
+                from placement.parser import extract_fab_sides
+                self._fab_local = extract_fab_sides(self.pcb_file) or {}
+            except Exception:
+                self._fab_local = {}
+        p = self.parts.get(ref)
+        if p is None:
+            return None
+        sides = self._fab_local.get(ref)
+        if not sides:
+            return None
+        x = p.x if x is None else x
+        y = p.y if y is None else y
+        rot = p.rot if rot is None else rot
+        key = (ref, rot % 360)
+        local = self._fab_cache.get(key)
+        if local is None:
+            own = 'B' if str(getattr(p, 'side', 'F')).upper().startswith('B')                 else 'F'
+            lb = sides.get(own) or next(iter(sides.values()))
+            local = rotate_local_bounds(*lb, rot)
+            self._fab_cache[key] = local
+        return (x + local[0], y + local[1], x + local[2], y + local[3])
+
+    def body_exempt_refs(self):
+        """Refs whose body may legitimately swallow or be swallowed.
+
+        MARKER (mount_hole/fiducial/testpoint) and CONTAINER only -- the same
+        set reconstruct._body_exempt_refs builds, and deliberately NOT the
+        edge classes. Measured: orangecrab ships FID2 wholly inside J5 at frac
+        1.000 and FID1 inside J4 at 0.867, so without the marker exemption a
+        displaced fiducial could never come home under a connector.
+        """
+        cached = getattr(self, '_body_exempt', None)
+        if cached is not None:
+            return cached
+        exempt = set(getattr(self, 'container_refs', ()) or ())
+        try:
+            from placement.part_class import classify_part
+            fps = getattr(getattr(self, 'pcb_data', None), 'footprints', {})
+            for ref in self.parts:
+                fp = (fps or {}).get(ref)
+                if fp is None:
+                    continue
+                try:
+                    if classify_part(fp, ref).name in ('mount_hole', 'fiducial',
+                                                       'testpoint'):
+                        exempt.add(ref)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        self._body_exempt = exempt
+        return exempt
+
+    def _body_contained_at(self, ref, x, y, rot, exclude=None):
+        """Would this pose put `ref`'s body inside a neighbour's, or vice
+        versa? Fab currency; `None` from fab_rect means UNJUDGED, never clear.
+        """
+        if not _CONTAINMENT_GATE:
+            return False
+        exempt = self.body_exempt_refs()
+        if ref in exempt:
+            return False
+        ra = self.fab_rect(ref, x, y, rot)
+        if ra is None:
+            return False
+        part = self.parts[ref]
+        if self._neighbors is not None and ref in self._neighbors:
+            others = [(o, self.parts[o]) for o in self._neighbors[ref]]
+        else:
+            others = list(self.parts.items())
+        for other_ref, other in others:
+            if other_ref == ref or (exclude and other_ref in exclude):
+                continue
+            if other_ref in exempt or other.side != part.side:
+                continue
+            rb = self.fab_rect(other_ref)
+            if rb is None:
+                continue
+            area = rect_overlap_area(ra, rb)
+            if area <= 1e-9:
+                continue
+            frac = containment_frac(area, ra, rb)
+            if frac is not None and frac >= CONTAINMENT_FRAC:
+                return True
+        return False
 
     def total_cost(self):
         all_aw = _aw_array([aw for lst in self.net_airwires.values() for aw in lst])

@@ -692,5 +692,11 @@ Examples:
 
 
 if __name__ == "__main__":
-    import cli_banner; cli_banner.install()  # CMD/EXIT self-echo (run-3 B1)
-    sys.exit(main())
+    # Declare the lever for the WHOLE run, so every pose this CLI
+    # writes carries its name. Nothing called declare_lever outside
+    # tests, so the unaided instrument had no armed state at all:
+    # unarmed it is silent, and armed by hand it refused the engine.
+    from placement.provenance import declare_lever
+    with declare_lever('place_reconstruct.py', sys.argv):
+        import cli_banner; cli_banner.install()  # CMD/EXIT self-echo (run-3 B1)
+        sys.exit(main())
