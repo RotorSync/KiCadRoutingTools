@@ -139,6 +139,45 @@ rotation, and an unlocked load-bearing rotation was never protected from the
 quench either. Explore rotations deliberately with
 `place_portfolio.py --strategy poses`.
 
+### The eviction rung (`--evict-depth`, #630)
+
+A part with no legal pose is not necessarily a part with no **room**. Run 19
+measured the difference: three sweeps returned a bare *"no legal pose anywhere
+on the board"* for two switches, and when the question was finally asked in
+scoped form the engine answered precisely: with D14 in place **0** poses,
+with D14 lifted **46**; with D31, **0** then **32**. One eviction each and both
+seated. That verdict was reachable the whole time and nothing asked for it.
+
+So when a part cannot be seated, the seeder counts its poses with each nearby
+seated incumbent lifted in turn. That census runs at every depth and is what
+the JSON_SUMMARY's `no_pose_blockers` (`{ref: {blocker: poses_freed}}`)
+reports, next to `unseated_refs` (names, not just a count). `--evict-depth 0`,
+the default, stops there: *tell me what is in the way, move nothing*. The
+`--reseat` path carries the same keys (`no_pose_blockers`, `evictions`,
+`evictions_reverted`) for its scope; it runs at depth 0, so the counts are 0.
+
+`--evict-depth 1` also trades: evict the incumbent that frees the most, seat
+the blocked part **first** against the lifted board, then put the blocker back
+(inside its own zone, searching out from its old pose) with the part in place.
+That ordering is the point: `reseat_scope` re-seats its scope at their net
+centroids, which is back into the pockets they block, and returned a null
+three times on exactly this case. The trade is kept only if, in this order,
+both seats were found, both are legal against **every** seated part (re-checked
+with the seat predicate, not read off the search's return value; the two parts
+are obstacles to each other), and the seated board's violation count and
+overlap area did not rise. HPWL is recorded and never consulted: a part in the
+pile has an artificially short HPWL, so any gate that ranks it refuses every
+legal seat. A trade that fails puts both parts back and is recorded as
+reverted (`evictions` counts kept trades, `evictions_reverted` the others).
+
+Bounded on every axis: depth 1 (a blocker's own blocker is not chased), at
+most 8 candidates per part (a geometric superset, so a part outside the box
+frees zero poses by construction), one trade per part, and the census counts
+to a cap. Locked parts and declared edge connectors are never candidates. The
+rung only fires on a part that was going to be reported unseated, so a run
+that seats everything is unaffected at either depth. It is opt-in until an
+A/B row on three boards exists (`tests/test_placement_ab.py`).
+
 Requires an Edge.Cuts outline (exit 3 without one — the outline is spec-owned
 and will not be invented) and refuses a board that already looks placed
 (use `place_portfolio.py` to explore around an existing placement, or
