@@ -272,6 +272,10 @@ _PARAM_CONTROL_ALIASES = {
     # Review parity finding 5: bga_fanout's future-pour declaration
     # (NET:LAYER[,...] specs). List param -> space-joined into the text ctrl.
     'plane_net_layers': 'plane_net_layers_ctrl',
+    # #237: plans converted BEFORE manifest_to_plan mapped --fab-overrides
+    # carry it under the fallthrough name `fab_overrides`; the control is
+    # fab_overrides_path. New conversions emit fab_overrides_path directly.
+    'fab_overrides': 'fab_overrides_path',
 }
 # _PARAM_SPECIAL: params handled by _apply_special() (composite / inverted /
 # panel-backed controls that a plain SetValue can't fill).

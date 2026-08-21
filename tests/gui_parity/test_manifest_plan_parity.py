@@ -45,6 +45,17 @@ SCALAR_FLAGS = {
     '--max-ripup': 'max_ripup', '--hole-to-hole-clearance': 'hole_to_hole_clearance',
     '--diff-pair-gap': 'diff_pair_gap', '--escape-method': 'escape_method',
     '--ripup-abandon-metric': 'ripup_abandon_metric',
+    # #237's shared fab flags (fab_tiers.add_fab_tier_args). Absent from this
+    # table AND the converter's FLAG_PARAMS until 2026-08, so the gate never
+    # asserted them: --fab-tier survived only via the converter's unknown-flag
+    # fallthrough coinciding with the control name (luck, now pinned), and
+    # --fab-overrides fell through under the WRONG name (`fab_overrides` vs
+    # the `fab_overrides_path` control) and was silently ignored at apply.
+    # Nothing failed because a flag missing from both hand-maintained lists is
+    # invisible here, and no corpus manifest used --fab-overrides -- which is
+    # why the FIXTURE now carries both (and always runs). When adding a CLI
+    # flag, add it to the converter's FLAG_PARAMS and to this table.
+    '--fab-tier': 'fab_tier', '--fab-overrides': 'fab_overrides_path',
 }
 BOOL_FLAGS = {
     '--no-bga-zones': 'no_bga_zone', '--no-bga-zone': 'no_bga_zone',
@@ -418,9 +429,12 @@ def check_refused_tools():
 
 def main():
     # Corpus manifests give broad coverage; the checked-in fixture makes the gate
-    # self-contained (runs on a fresh checkout with no corpus). Explicit args win.
-    manifests = sys.argv[1:] or sorted(
-        glob.glob(str(STRESS / "runs_set*/*/redo_commands.sh"))) or [FIXTURE]
+    # self-contained (runs on a fresh checkout with no corpus) AND is always
+    # included: it is the only manifest guaranteed to exercise every asserted
+    # flag (--fab-overrides appears in no corpus manifest, so corpus-only runs
+    # could never detect its loss). Explicit args win.
+    manifests = sys.argv[1:] or (sorted(
+        glob.glob(str(STRESS / "runs_set*/*/redo_commands.sh"))) + [FIXTURE])
     if not manifests:
         print("no manifests found (set $STRESS_DIR or pass paths)")
         return 1

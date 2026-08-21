@@ -116,6 +116,18 @@ FLAG_PARAMS = {
     '--max-track-width': 'max_track_width',
     '--min-track-width': 'min_track_width',
     '--analysis-grid-step': 'analysis_grid_step',
+    # #237's shared fab-capability flags (fab_tiers.add_fab_tier_args, on ten
+    # CLIs) were in NONE of this module's tables. The unknown-flag fallthrough
+    # still carried both into the plan, with opposite outcomes: `fab_tier`
+    # happened to MATCH its dialog control's name, so it worked -- by luck,
+    # unasserted -- while `fab_overrides` matched no control and no alias, so
+    # ai_plan silently ignored it and a replayed plan routed with the bare
+    # tier (and with escalation re-enabled, which supplying the file turns
+    # off). Same class as `--ordering` above: the fallthrough name is not the
+    # control name. Both are string-valued (`_num` falls through to the raw
+    # string); both controls are already in reset_params_to_defaults.
+    '--fab-tier': 'fab_tier',
+    '--fab-overrides': 'fab_overrides_path',
 }
 LIST_FLAGS = {
     '--layers': 'layers',
