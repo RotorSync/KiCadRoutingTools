@@ -6,10 +6,71 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
+import sys
 
 # Get the root directory (parent of tests/)
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(TESTS_DIR)
+
+#: Where the #522 reorg put the CLIs. Same order as krt_capabilities._TOOL_DIRS,
+#: which is the resolver this delegates to.
+_TOOL_DIRS = ('', 'py_router', 'py_tools', 'py_placer')
+
+
+def tool(name):
+    """Absolute path to a shipped CLI, wherever the #522 reorg put it.
+
+    RAISES when the tool is absent, and that is the whole point.
+
+    Commit ee860796 moved route.py, check_drc.py, place_optimize.py and the
+    rest out of the repo root into py_router/ py_tools/ py_placer/. EIGHTEEN
+    tests kept spawning `os.path.join(ROOT, 'route.py')`. Python exits 2 with
+    `can't open file ...: [Errno 2]` on STDERR, and those tests all assert on
+    STDOUT -- so the whole class surfaced as a bare AssertionError with an
+    empty message that reads exactly like a product failure. They sat red long
+    enough that several of them rotted into FALSE PASSES underneath: five of
+    test_soft_joint's ten checks "passed" only because the subprocess produced
+    no output at all, and test_457_startup_checks' `returncode == 1` passed
+    because ModuleNotFoundError also exits 1.
+
+    So a missing tool must fail HERE, naming what it looked for and where,
+    rather than three frames away inside a subprocess. A static lint cannot do
+    this job: test_431_board_gates builds `os.path.join(ROOT, script)` with
+    `script` a variable, so the bad path is only knowable at runtime. This
+    function is the gate.
+    """
+    try:
+        sys.path.insert(0, ROOT_DIR)
+        from krt_capabilities import _tool_path       # the shipped resolver
+        p = _tool_path(ROOT_DIR, name)
+    except Exception:                                  # pragma: no cover
+        p = os.path.join(ROOT_DIR, name)
+    if not os.path.isfile(p):
+        raise FileNotFoundError(
+            f'{name!r} is not in this checkout. Looked in: '
+            + ', '.join(repr(os.path.join(d, name) or name)
+                        for d in _TOOL_DIRS)
+            + '. If a tool moved, fix the caller -- do not hardcode a new path.')
+    return p
+
+
+def tool_env(env=None):
+    """An environment whose PYTHONPATH reaches every package the reorg made.
+
+    The sibling defect to `tool`: a subprocess probe launched with
+    `PYTHONPATH=ROOT` alone cannot `import kicad_parser` or `import
+    startup_checks` any more, because both moved into py_router/. The child
+    dies with ModuleNotFoundError and the parent reports whatever that exit
+    code happens to collide with.
+    """
+    env = dict(os.environ if env is None else env)
+    parts = [os.path.join(ROOT_DIR, d) if d else ROOT_DIR
+             for d in _TOOL_DIRS]
+    prev = env.get('PYTHONPATH')
+    if prev:
+        parts.append(prev)
+    env['PYTHONPATH'] = os.pathsep.join(parts)
+    return env
 
 
 def run(cmd: str, unbuffered: bool = False) -> None:

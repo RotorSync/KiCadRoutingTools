@@ -1559,6 +1559,96 @@ def solve_assignment(state, candidates: Dict[str, List[Tuple[float, float]]],
                                edge_pref=edge_pref or {})
 
 
+def _body_exempt_refs(state):
+    """Refs whose body may legitimately swallow, or be swallowed by, another.
+
+    Cached on the state. Two classes only, and both are MEASURED necessary on
+    the 33-board corpus, not assumed:
+
+      marker  (mount_hole / fiducial / testpoint) -- orangecrab_ext_pll ships
+              FID2 wholly inside J5 (frac 1.000) and FID1 inside J4 (0.867).
+              Without this exemption a displaced fiducial or mounting hole
+              could never come home under a connector, which is where they
+              belong.
+      container (courtyard >= CONTAINER_RATIO of the board) -- a part that
+              covers half the board contains things by construction.
+
+    EDGE classes (edge_receptacle / edge_actuator) are deliberately NOT
+    exempt here, although `legality._waiver_for` waives them for REPORTING.
+    That difference is the point: run-22's D4 landed wholly inside SW2, and
+    SW2 is a declared `edge_actuator`, so an edge exemption would re-permit
+    the exact defect this predicate exists to stop. It is safe by
+    measurement -- the only non-exempt fab pairs on the whole corpus are
+    ulx3s GPDI1/J5 at frac 0.011 and GPDI1/SW1 at 0.001, both far under
+    CONTAINMENT_FRAC.
+    """
+    cached = getattr(state, '_body_exempt', None)
+    if cached is not None:
+        return cached
+    exempt = set(getattr(state, 'container_refs', ()) or ())
+    try:
+        from placement.part_class import classify_part
+        fps = getattr(getattr(state, 'pcb_data', None), 'footprints', None)
+        if fps is None:
+            fps = {}
+        for ref in state.parts:
+            fp = fps.get(ref)
+            if fp is None:
+                continue
+            try:
+                if classify_part(fp, ref).name in ('mount_hole', 'fiducial',
+                                                   'testpoint'):
+                    exempt.add(ref)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    state._body_exempt = exempt
+    return exempt
+
+
+def _body_contained(state, a: str, pos_a, b: str, pos_b) -> bool:
+    """Would one of these two poses put a part's BODY inside the other's?
+
+    The run-22 defect, verbatim: `assign`/`exchange` moved parts by a derived
+    +/-v with only pad legality and hpwl in the objective, so a teleport could
+    land a part wholly inside another part's body and score clean. It did,
+    twice, on two different pairs -- and every gate downstream reported
+    `blocking 0`, because no pad copper intersects.
+
+    FAB currency, never the courtyard. Measured on the corpus: the courtyard
+    ships frac-1.0 containment on four healthy boards, so a courtyard test
+    would veto legal poses on 12% of the corpus -- the run-4 lesson in a new
+    costume. `.Fab` is the drawn body, and non-exempt fab containment is
+    unknown on the corpus.
+
+    This charges CONTAINMENT, not a kiss. Two courtyards touching is not a
+    defect and is not priced here; that ordering decision (run-4, r=+0.72 of
+    courtyard overlap with distance-to-truth) is untouched, and `measure()`
+    still carries `overlap` as its last tiebreak below hpwl.
+
+    A part whose footprint draws no `.Fab` outline is UNJUDGED: this returns
+    False for it, and `place_reconstruct` discloses the count rather than
+    implying coverage it does not have.
+    """
+    if a in _body_exempt_refs(state) or b in _body_exempt_refs(state):
+        return False
+    pa, pb = state.parts[a], state.parts[b]
+    if pa.side != pb.side:          # same rule as legality's fab channel
+        return False
+    ra = state.fab_rect(a, pos_a[0], pos_a[1], pa.rot)
+    if ra is None:
+        return False
+    rb = state.fab_rect(b, pos_b[0], pos_b[1], pb.rot)
+    if rb is None:
+        return False
+    area = legality.rect_overlap_area(ra, rb)
+    if area <= legality.EPS:
+        return False
+    frac = legality.containment_frac(area, ra, rb)
+    return frac is not None and frac >= legality.CONTAINMENT_FRAC
+
+
 def _pair_conflicts(state, a: str, pos_a, b: str, pos_b) -> bool:
     """Do these two candidate poses conflict, ABSOLUTELY? Repair semantics:
     unlike the quench's baseline-relative gate, the assign stage exists to
@@ -1566,6 +1656,11 @@ def _pair_conflicts(state, a: str, pos_a, b: str, pos_b) -> bool:
     damaged status quo feasible at zero cost (measured: the ILP chose
     all-stay on the swap corpus). The outer stage gate still reverts any
     application that worsens the board."""
+    # Body containment first: two memoized rect lookups against
+    # pair_shortfall's full pad-set geometry, so a contained pair now costs
+    # LESS to reject than it used to cost to wrongly accept.
+    if _body_contained(state, a, pos_a, b, pos_b):
+        return True
     ctx = state.legality_ctx
     pa, pb = state.parts[a], state.parts[b]
     cur = ctx.pair_shortfall(a, b, pose_a=(pos_a[0], pos_a[1], pa.rot),
@@ -1578,7 +1673,16 @@ def _pair_conflicts(state, a: str, pos_a, b: str, pos_b) -> bool:
 
 
 def _interacting_pairs(state, candidates):
-    """Part pairs whose candidate extents can come near each other."""
+    """Part pairs whose candidate extents can come near each other.
+
+    Reach is the union of the PAD extent and the .Fab BODY, because a row
+    only exists for a pair this yields, and `_pair_conflicts` now refuses
+    body containment as well as pad contact. A part whose body is far larger
+    than its pad reach -- a shield can with four corner pads, a connector
+    whose shell overhangs its own pins -- would otherwise never be paired
+    with the small part sitting inside it, and the containment predicate
+    would never be asked.
+    """
     ctx = state.legality_ctx
     reach: Dict[str, Tuple[float, float, float, float]] = {}
     for ref, cands in candidates.items():
@@ -1590,6 +1694,9 @@ def _interacting_pairs(state, candidates):
             e = pp.extent(x, y, state.parts[ref].rot)
             if e is not None:
                 boxes.append(e)
+            fb = state.fab_rect(ref, x, y, state.parts[ref].rot)
+            if fb is not None:
+                boxes.append(fb)
         if boxes:
             reach[ref] = (min(b[0] for b in boxes), min(b[1] for b in boxes),
                           max(b[2] for b in boxes), max(b[3] for b in boxes))

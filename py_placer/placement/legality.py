@@ -96,6 +96,66 @@ def rect_area(rect):
     return max(0.0, rect[2] - rect[0]) * max(0.0, rect[3] - rect[1])
 
 
+#: A body overlap at or above this fraction of the SMALLER body is a
+#: CONTAINMENT rather than a kiss. Corpus-calibrated on the 33 boards in
+#: kicad_files/, measured (not assumed), in the FAB currency:
+#:
+#:     FID2 / J5   (orangecrab_ext_pll)  frac 1.000  2.25 mm2  marker-exempt
+#:     FID1 / J4   (orangecrab_ext_pll)  frac 0.867  1.95 mm2  marker-exempt
+#:     GPDI1 / J5  (ulx3s)               frac 0.011  0.22 mm2  non-exempt
+#:     GPDI1 / SW1 (ulx3s)               frac 0.001  0.085 mm2 non-exempt
+#:
+#: Those 4 pairs are the entire fab census. NON-EXEMPT fab containment at
+#: frac >= 0.5 is ZERO on all 33 healthy boards, and the worst healthy
+#: non-exempt fab frac is 0.011 against a measured defect of 1.000 -- a ~90x
+#: separation, the same standard that licensed `stacks` to gate.
+CONTAINMENT_FRAC = 0.5
+
+#: Courtyard BLOCKING policy (run-23). The courtyard channel stayed advisory
+#: because area alone cannot tell a by-design kiss from an interpenetration:
+#: run-23's final board shipped D3<->SW1 at 0.059 mm2 / depth 0.02 (a sliver a
+#: healthy board carries) NEXT TO J4<->U6 at 5.56 mm2 / depth 0.90 (two parts
+#: in the same space) and every gate passed both. A pair gates only when BOTH
+#: exceed these floors -- area says the overlap is substantial, depth says it
+#: is an interpenetration rather than an edge graze -- and the pair is
+#: unwaived (marker/edge/container/intent ladders still apply) and both
+#: courtyards are REAL geometry (see GradedPart.synthetic: a zero-pad
+#: footprint's fictional +/-0.5mm box manufactures phantom pairs).
+COURTYARD_BLOCKING_MIN_MM2 = 0.5
+COURTYARD_BLOCKING_MIN_DEPTH_MM = 0.3
+#: The RELATIVE floor (run-23, user finding #2): an absolute area floor is
+#: blind to small parts -- J4<->R21 measured 0.445mm2 (11% under the area
+#: floor) while a QUARTER of R21's courtyard sat inside J4's. A pair also
+#: gates when the overlap consumes this fraction of the SMALLER courtyard,
+#: the same denominator containment_frac uses and for the same reason: area
+#: is everything to a 0402 and nothing to a connector.
+COURTYARD_BLOCKING_MIN_FRAC = 0.25
+
+
+def containment_frac(area, ra, rb):
+    """How much of the SMALLER of two bodies the overlap `area` consumes.
+
+    The number `area_mm2` alone cannot supply, and the reason run-22 shipped a
+    board every gate called buildable: a connector shell KISSING a neighbour
+    and a part sitting WHOLLY INSIDE another part produce the same
+    `area_mm2` on different-sized parts, so a reader could not tell an
+    intended overhang from an assembly impossibility without re-deriving the
+    geometry by hand (the run wrote a throwaway probe to do exactly that).
+
+    Measured on that board: RN3 inside U5 and RN7 inside U6 both reported
+    `fab 2.0 mm2` -- identical to a large shell's legitimate graze -- while
+    being 1.000 of the smaller body.
+
+    Smaller-body denominator, because containment is asymmetric: a 2 mm2
+    overlap is everything to a 0402 and nothing to a connector. Returns
+    0.0..1.0, or None when either body has no area (nothing to be inside of).
+    """
+    small = min(rect_area(ra), rect_area(rb))
+    if small <= EPS:
+        return None
+    return round(min(1.0, area / small), 4)
+
+
 def point_to_seg_dist(px, py, x1, y1, x2, y2):
     """Distance from a point to a line segment."""
     dx, dy = x2 - x1, y2 - y1
@@ -280,6 +340,44 @@ class BoardOutlineGate:
             self._edges = out
         return self._edges
 
+    def _ring_edge_set(self, skip_rings) -> frozenset:
+        """The EDGES belonging to `skip_rings`, as a set for exact filtering.
+
+        Ring ids index `cutouts + milled` (the `_swallow_pts` convention), which
+        is NOT the ordering of `self.rings` -- so the mapping is done from the
+        source lists rather than by index into `edges()`. Edges are built from
+        the same vertex tuples in both places, so equality is exact; both
+        orientations are stored because `edges()` walks each ring in one
+        direction only and a future caller might not.
+
+        Cached: `rect_blocked` is called in the innermost candidate loop.
+        """
+        if not skip_rings:
+            return frozenset()
+        key = frozenset(skip_rings)
+        cache = getattr(self, '_ring_edge_cache', None)
+        if cache is None:
+            cache = self._ring_edge_cache = {}
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
+        out = set()
+        for rid in key:
+            if rid < len(self.cutouts):
+                ring = self.cutouts[rid]
+            elif rid - len(self.cutouts) < len(self.milled):
+                ring = self.milled[rid - len(self.cutouts)]
+            else:
+                continue
+            n = len(ring)
+            for i in range(n):
+                a, b = ring[i], ring[(i + 1) % n]
+                out.add((a[0], a[1], b[0], b[1]))
+                out.add((b[0], b[1], a[0], a[1]))
+        hit = frozenset(out)
+        cache[key] = hit
+        return hit
+
     # -- level 2: cached reachability prune
     def edges_near(self, key, seed_rect, travel: float, center=None) -> list:
         """Cached: the ring edges a part seeded at `seed_rect` could ever bring
@@ -353,6 +451,53 @@ class BoardOutlineGate:
                     break
         return frozenset(owned)
 
+    # -- level 2b: per-rect bbox prefilter, exact
+    def _edges_touching(self, rect, edges):
+        """The subset of `edges` that can possibly come within `margin` of
+        `rect`.
+
+        EXACT, not a heuristic, and that is the whole reason it is safe to put
+        in front of the threshold tests: if an edge's bounding box is
+        separated from the rect's bbox by more than `margin` on EITHER axis,
+        then every point of that edge differs from every point of the rect by
+        more than `margin` on that axis alone, so their distance exceeds
+        `margin` and the edge cannot contribute.
+
+        It is not usable in front of `edge_clearance`, which reports the true
+        minimum distance rather than testing it against a threshold -- the
+        nearest edge there may be arbitrarily far away.
+
+        Why it matters: `edges_near` prunes per PART, sized by a displacement
+        budget, and the seeder's state has no budget at all (pose_score builds
+        its QuenchState without `build_neighbor_lists`, so `_travel_budget` is
+        infinite and `edges_near` returns every edge). `_try_place` calls
+        `rect_outside_amount` once per candidate offset, and `_offsets(16,
+        0.25)` alone is 16,641 offsets.
+
+        Measured on run 19's urchin, a 638-edge outline with one milled ring:
+        7x to 14x depending on machine load and on which rect population is
+        swept (a sweep near an edge keeps more edges than one over open
+        board). The conservative end is the number to quote. An independent
+        measurement that neutralised this method by monkeypatching it to the
+        identity -- so the ONLY difference between arms was the prefilter --
+        put it at 11.98x on two separate runs.
+        """
+        m = self.margin
+        lo_x, lo_y, hi_x, hi_y = rect[0] - m, rect[1] - m, rect[2] + m, rect[3] + m
+        out = []
+        for e in edges:
+            ax, ay, bx, by = e
+            if (ax if ax > bx else bx) < lo_x:
+                continue
+            if (ax if ax < bx else bx) > hi_x:
+                continue
+            if (ay if ay > by else by) < lo_y:
+                continue
+            if (ay if ay < by else by) > hi_y:
+                continue
+            out.append(e)
+        return out
+
     # -- level 3: the exact tests
     def rect_blocked(self, rect, edges=None, skip_rings=None) -> bool:
         """True when a rect leaves the real outline, enters a cutout, or comes
@@ -362,18 +507,40 @@ class BoardOutlineGate:
         `edges_near`; omitted, every ring edge is measured.
 
         `skip_rings` (from `rings_enclosing`) exempts the tested part's OWN
-        milled rings from the swallow probe -- a connector over its own milled
-        relief may swallow it, and without this it is judged board-violating at
-        its own hand-placed pose.
+        milled rings -- a connector over its own milled relief may swallow it,
+        and without this it is judged board-violating at its own hand-placed
+        pose.
+
+        THE EXEMPTION COVERS THE EDGE-MARGIN TEST TOO, not only the swallow
+        probe. It did not, and the omission made the exemption almost useless:
+        a part whose own pads caused a contour to be reclassified as an inner
+        milled edge still had every pose within `margin` of that contour
+        vetoed -- which, for a part sitting INSIDE its own relief, is every
+        pose there is. Measured on run 20's SW2, which owns the strap slot its
+        two NPTH posts sit in: 0 legal poses of 14884 at the board's own
+        floors, and at margin 0, 508 of 9604 -- all at rot 0/180, none at SW2's
+        own rot 270. `place_optimize` with SW2 free and 83 refs locked moved it
+        0 mm with the edge term as the entire objective; `place_reconstruct`
+        reported "no legal pose within any cap". The run had to declare SW2 an
+        `edge_actuator` and waive it permanently.
+
+        PER-PART, never global: the ring stays a hard edge for every other
+        part, and `rings_enclosing` only ever returns MILLED ids, so the outer
+        outline and the genuine cutouts can never be exempted by this path.
         """
         from check_drc import _point_on_board, _seg_seg_dist_coords
         x0, y0, x1, y1 = rect
         for (px, py) in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
             if not _point_on_board(px, py, self.outer, self.cutouts):
                 return True
+        near = self._edges_touching(
+            rect, self.edges() if edges is None else edges)
+        _own = self._ring_edge_set(skip_rings)
+        if _own:
+            near = [e for e in near if e not in _own]
         for (ax, ay, bx, by) in ((x0, y0, x1, y0), (x1, y0, x1, y1),
                                  (x1, y1, x0, y1), (x0, y1, x0, y0)):
-            for (ex1, ey1, ex2, ey2) in (self.edges() if edges is None else edges):
+            for (ex1, ey1, ex2, ey2) in near:
                 if _seg_seg_dist_coords(ax, ay, bx, by,
                                         ex1, ey1, ex2, ey2) < self.margin:
                     return True
@@ -428,9 +595,21 @@ class BoardOutlineGate:
                 # so an off-board corner always outweighs a mere margin graze.
                 amt += max(self.margin,
                            _point_to_rings_distance(px, py, self.rings))
+        # Only edges that can come within `margin` can contribute a term, and
+        # `_edges_touching` selects exactly those -- so this stays the same
+        # number while measuring against a short list. See its docstring.
+        near = self._edges_touching(rect, use)
+        # Same exemption as rect_blocked's, and it MUST be the same: the two
+        # functions' agreement is what makes `violation() == 0` imply `not
+        # rect_blocked()`. Exempting the owned ring in one and not the other
+        # would give a part a legal verdict and a non-zero cost at the same
+        # pose, which every acceptance rule downstream reads as a regression.
+        _own = self._ring_edge_set(skip_rings)
+        if _own:
+            near = [e for e in near if e not in _own]
         for (ax, ay, bx, by) in ((x0, y0, x1, y0), (x1, y0, x1, y1),
                                  (x1, y1, x0, y1), (x0, y1, x0, y0)):
-            d = min((_seg_seg_dist_coords(ax, ay, bx, by, *e) for e in use),
+            d = min((_seg_seg_dist_coords(ax, ay, bx, by, *e) for e in near),
                     default=float('inf'))
             if d < self.margin:
                 amt += self.margin - d
@@ -490,6 +669,13 @@ class GradedPart(NamedTuple):
     rect: Tuple[float, float, float, float]      # courtyard, own side
     tht_rect: Optional[Tuple[float, float, float, float]] = None
     has_tht: bool = False
+    # True when `rect` is the +/-0.5mm FICTION compute_footprint_bbox_local
+    # returns for a footprint with no courtyard AND no pads (logos, graphics).
+    # Such a rect is not geometry anyone drew, so overlap against it must
+    # never gate -- run-23's G***<->J5 "0.537 mm2" pair was exactly this
+    # artifact. A pad-bbox fallback (pads exist, courtyard missing) stays
+    # False: those bounds are real copper.
+    synthetic: bool = False
 
     @property
     def sides(self) -> frozenset:
@@ -569,7 +755,7 @@ def placement_out_of_board(parts: Sequence[GradedPart], board_info,
 class BodyOverlapPair(NamedTuple):
     a: str
     b: str
-    kind: str            # 'pad_intersection' | 'courtyard'
+    kind: str            # 'pad_intersection' | 'courtyard' | 'fab'
     area_mm2: float      # intersection area on the worst shared side
     side: str            # the shared side it occurs on ('F'/'B'; worst side)
     waived: bool
@@ -595,6 +781,44 @@ class BodyOverlapPair(NamedTuple):
     # a decision somebody made; copper landing on it is never dispositionable
     # by a placement search (run-8 E6).
     locked_ref: str = ''
+    # How much of the SMALLER body this overlap consumes, 0..1 -- see
+    # `containment_frac`. THE field `area_mm2` alone cannot supply: run-22
+    # shipped RN3-in-U5 and RN7-in-U6 at `fab 2.0 mm2`, which is also what a
+    # large connector's by-design graze measures. Area cannot tell a KISS from
+    # a part WHOLLY INSIDE another; this can.
+    #
+    # None = NOT MEASURED, not "no containment". The pad_intersection channel
+    # has no body rect in scope, so it reports None rather than a 0.0 that
+    # would read as a measurement someone took.
+    contained_frac: Optional[float] = None
+    # Penetration depth: the SHORTER axis extent of the intersection rect, mm
+    # (0.0 = not measured; the pad_intersection channel has no body rects).
+    # Area cannot tell a long thin kiss from a real interpenetration --
+    # run-23: D3<->SW1 0.059mm2 at depth 0.02 vs J4<->U6 5.56mm2 at depth
+    # 0.90 -- and the courtyard blocking policy keys on this axis.
+    depth_mm: float = 0.0
+    # WHERE the overlap is: the intersection rect (x0, y0, x1, y1), None =
+    # not measured. run-23 user finding #1: the edge-class waiver needs the
+    # REGION, not only the pair -- J1's mating overhang legitimately covers
+    # the strip at/over the outline, and nothing else, yet R5 sat 45.7%
+    # inside J1's INTERIOR courtyard (under the connector body, 1.5mm inside
+    # the board) behind the same waiver.
+    overlap_rect: Optional[Tuple[float, float, float, float]] = None
+    # `contained_frac >= CONTAINMENT_FRAC`, **on the fab channel only**.
+    #
+    # Why fab-only, measured on the same 33 boards: the COURTYARD currency
+    # ships frac-1.0 containment on four healthy boards -- esp_prog (a part
+    # inside USB1), orangecrab_ext_pll (R9, R12 inside J5),
+    # rp2350_fpga_eensy_prePlane (U3 inside J2), ulx3s (R24, R22, C18 inside
+    # GPDI1, OSHW inside U9). A courtyard is body PLUS margin PLUS shell
+    # overhang volume, so a small part living under a connector's courtyard is
+    # ordinary and correct. The .Fab outline is the real body, and there a
+    # non-exempt containment is unknown on the corpus.
+    #
+    # So `contained_frac` is measured on both body channels because it is free
+    # and true, while `contained` -- the flag anything downstream acts on --
+    # is asserted only where the corpus says it discriminates.
+    contained: bool = False
 
 
 def body_overlap_pairs(parts: Sequence[GradedPart]) -> List[BodyOverlapPair]:
@@ -612,6 +836,7 @@ def body_overlap_pairs(parts: Sequence[GradedPart]) -> List[BodyOverlapPair]:
         for b in items[i + 1:]:
             worst = 0.0
             worst_side = ''
+            worst_rects = None
             for s in (a.sides & b.sides):
                 ra = rect_on(s, a.side, a.rect, a.tht_rect)
                 rb = rect_on(s, b.side, b.rect, b.tht_rect)
@@ -621,11 +846,19 @@ def body_overlap_pairs(parts: Sequence[GradedPart]) -> List[BodyOverlapPair]:
                 if area > worst:
                     worst = area
                     worst_side = s
+                    worst_rects = (ra, rb)
             if worst > EPS:
+                ra, rb = worst_rects
+                ix = (max(ra[0], rb[0]), max(ra[1], rb[1]),
+                      min(ra[2], rb[2]), min(ra[3], rb[3]))
+                _dx, _dy = ix[2] - ix[0], ix[3] - ix[1]
                 out.append(BodyOverlapPair(
                     a=min(a.ref, b.ref), b=max(a.ref, b.ref),
                     kind='courtyard', area_mm2=round(worst, 4),
-                    side=worst_side, waived=False, waiver=''))
+                    side=worst_side, waived=False, waiver='',
+                    contained_frac=containment_frac(worst, *worst_rects),
+                    depth_mm=round(max(0.0, min(_dx, _dy)), 4),
+                    overlap_rect=tuple(round(v, 4) for v in ix)))
     out.sort(key=lambda p: (-p.area_mm2, p.a, p.b))
     return out
 
@@ -655,11 +888,14 @@ def graded_parts_from_file(pcb_data, pcb_file: Optional[str] = None
     for ref, fp in sorted((pcb_data.footprints or {}).items()):
         own = footprint_side(fp)
         local = None
+        synthetic = False
         if sides.get(ref):
             local = courtyard_for_side(sides[ref], own)
         if local is None:
             try:
                 local = compute_footprint_bbox_local(fp)
+                # No courtyard AND no pads: the +/-0.5mm fiction, not geometry.
+                synthetic = not (fp.pads or ())
             except Exception:
                 local = None
         if local is None:
@@ -675,7 +911,8 @@ def graded_parts_from_file(pcb_data, pcb_file: Optional[str] = None
                 tx0, ty0, tx1, ty1 = rotate_local_bounds(*tlb, rot)
                 tht = (fp.x + tx0, fp.y + ty0, fp.x + tx1, fp.y + ty1)
         out.append(GradedPart(ref=ref, side=own, rect=rect,
-                              tht_rect=tht, has_tht=has_tht))
+                              tht_rect=tht, has_tht=has_tht,
+                              synthetic=synthetic))
     return out
 
 
@@ -708,11 +945,15 @@ def grade_body_overlap(pcb_data, clearance: float,
         except Exception:
             return None
 
+    _graded = graded_parts_from_file(pcb_data, pcb_file)
+    # Refs whose courtyard rect is the zero-pad +/-0.5mm fiction: their pairs
+    # may inform but must never gate (run-23's phantom G***<->J5).
+    _synthetic_refs = {g.ref for g in _graded if g.synthetic}
     _containers: set = set()
     bb = getattr(getattr(pcb_data, 'board_info', None), 'board_bounds', None)
     if bb:
         _barea = max(1e-9, (bb[2] - bb[0]) * (bb[3] - bb[1]))
-        for g in graded_parts_from_file(pcb_data, pcb_file):
+        for g in _graded:
             if rect_area(g.rect) >= CONTAINER_RATIO * _barea:
                 _containers.add(g.ref)
 
@@ -729,9 +970,13 @@ def grade_body_overlap(pcb_data, clearance: float,
         return ''
 
     pairs: List[BodyOverlapPair] = []
+    # Refs the fab channel could not judge (no .Fab geometry). A board with no
+    # readable source path leaves this empty AND judges nothing -- both are
+    # reported rather than silently conflated with "clean".
+    fab_unjudged: set = set()
 
-    # -- courtyard channel (advisory) -----------------------------------------
-    for p in body_overlap_pairs(graded_parts_from_file(pcb_data, pcb_file)):
+    # -- courtyard channel (advisory + the run-23 blocking policy below) ------
+    for p in body_overlap_pairs(_graded):
         waiver = _waiver_for(p.a, p.b)
         pairs.append(p._replace(waived=bool(waiver), waiver=waiver))
 
@@ -747,6 +992,7 @@ def grade_body_overlap(pcb_data, clearance: float,
         for ref, fp in sorted(fps.items()):
             sides = fab.get(ref)
             if not sides:
+                fab_unjudged.add(ref)
                 continue
             own = footprint_side(fp)
             lb = sides.get(own) or next(iter(sides.values()))
@@ -761,10 +1007,16 @@ def grade_body_overlap(pcb_data, clearance: float,
                 ov = rect_overlap_area(rca, rcb)
                 if ov > EPS:
                     waiver = _waiver_for(ra, rb)
+                    _cf = containment_frac(ov, rca, rcb)
+                    _dx = min(rca[2], rcb[2]) - max(rca[0], rcb[0])
+                    _dy = min(rca[3], rcb[3]) - max(rca[1], rcb[1])
                     pairs.append(BodyOverlapPair(
                         a=min(ra, rb), b=max(ra, rb), kind='fab',
                         area_mm2=round(ov, 4), side=sa,
-                        waived=bool(waiver), waiver=waiver))
+                        waived=bool(waiver), waiver=waiver,
+                        contained_frac=_cf, contained=_cf is not None
+                        and _cf >= CONTAINMENT_FRAC,
+                        depth_mm=round(max(0.0, min(_dx, _dy)), 4)))
 
     # -- pad_intersection channel (never waivable) ----------------------------
     # AABB broad phase in the gate currency, then exact re-verification at
@@ -881,12 +1133,186 @@ def grade_body_overlap(pcb_data, clearance: float,
     blocking = [p for p in pairs if p.kind == 'pad_intersection']
     advisory = [p for p in pairs
                 if p.kind != 'pad_intersection' and not p.waived]
+    contained = [p for p in pairs if p.contained]
+    # The subset that GATES. A containment is by-design when a MARKER
+    # (mount_hole/fiducial/testpoint) or a CONTAINER (courtyard >= half the
+    # board) is involved -- orangecrab ships FID2 wholly inside J5 at frac
+    # 1.000 and FID1 inside J4 at 0.867, and both are correct -- or when an
+    # operator has named the pair in the intent's `overlap_waivers`, which is
+    # AUTHORED and recorded.
+    #
+    # `edge_class` is deliberately NOT an exemption, and that is the whole
+    # point. It is a pure part-class lookup with no geometry in it, and it is
+    # the waiver that hid run-22's D4-wholly-inside-SW2 (SW2 is a declared
+    # edge_actuator) and C26/FB3/R1 inside J1's 65mm2 USB-C body on the board
+    # that run shipped as `buildable`. An operator may still accept those --
+    # by writing the pair into the intent, where the acceptance is visible --
+    # but never by inheriting a class waiver nobody authored.
+    #
+    # Corpus effect, measured: ZERO boards gate on this.
+    _GATE_EXEMPT = ('marker_class', 'container_class', 'intent_declared')
+    containment_blocking = [p for p in contained
+                            if p.waiver not in _GATE_EXEMPT]
+    # Courtyard BLOCKING (run-23): the subset of courtyard pairs that gates.
+    # Both floors must trip -- area >= COURTYARD_BLOCKING_MIN_MM2 and depth
+    # >= COURTYARD_BLOCKING_MIN_DEPTH_MM -- so by-design slivers a healthy
+    # board carries stay advisory, and a synthetic (+/-0.5mm fiction)
+    # courtyard never gates anything.
+    #
+    # The waiver ladder applies WITH ONE GEOMETRY CONDITION on edge_class
+    # (the run-22 containment lesson, in its courtyard form): an edge-class
+    # waiver is a claim that the part's shell/actuator legitimately overhangs
+    # -- which is only TRUE of a part that is actually AT an edge. Run-23's
+    # board waived every SW1/SW2 collision this way (SW1<->U1 1.74mm2,
+    # FB1<->SW2 0.70mm2 with real body contact) while SW2 sat 8.33mm
+    # INTERIOR, where the overhang story is geometrically dead. The waiver
+    # now stands only for a member whose pose is edge-LIVE: overhanging the
+    # outline, or within SEAT_TOL_MM of an edge. J1<->SW1 stays waived (J1
+    # is a receptacle overhanging at the edge; its courtyard includes the
+    # mating volume); marker/container/intent waivers are untouched --
+    # geometry cannot invalidate "this is a fiducial" or an authored intent.
+    _EDGE_W = ('edge_receptacle', 'edge_actuator')
+    _edge_live_cache: Dict[str, bool] = {}
+
+    def _edge_waiver_live(ref: str) -> bool:
+        if ref in _edge_live_cache:
+            return _edge_live_cache[ref]
+        live = False
+        if _class_of(ref) in _EDGE_W and bb:
+            g = next((x for x in _graded if x.ref == ref), None)
+            if g is not None:
+                try:
+                    from .part_class import SEAT_TOL_MM
+                    _og = BoardOutlineGate(pcb_data.board_info, 0.0)
+                    live = (_og.rect_outside_amount(g.rect) > EPS
+                            or _og.edge_clearance(g.rect) <= SEAT_TOL_MM)
+                except Exception:                            # noqa: BLE001
+                    live = True     # unmeasurable geometry never UN-waives
+        _edge_live_cache[ref] = live
+        return live
+
+    # Marker classes whose courtyard is NON-PHYSICAL and may keep the blanket
+    # blocking exemption. A mount_hole is deliberately absent (run-23, user
+    # finding #3): its courtyard is the SCREW-HEAD/standoff keepout -- J3's
+    # header sat 1.47mm inside locked H2's courtyard behind the same
+    # 'marker_class' label a fiducial gets, and a screw in H2 lands on J3's
+    # pin row. Fiducials and testpoints have nothing above board level;
+    # mounting holes do.
+    _MARKER_NONPHYSICAL = ('fiducial', 'testpoint')
+
+    def _blocking_waived(p) -> bool:
+        if not p.waived:
+            return False
+        # An AUTHORED waiver outranks everything below: it is a recorded
+        # human decision about this exact pair.
+        if p.waiver == 'intent_declared':
+            return True
+        # No CLASS waiver blesses contact with a KiCad-LOCKED part (the
+        # run-8 E6 principle, extended to the courtyard channel): a locked
+        # pose is a decision somebody made, and a class label chosen for
+        # unlocked parts does not apply to copper or courtyards landing on
+        # it. The pair still faces the floors + the moved gate like any
+        # unwaived pair.
+        if p.a in locked_refs or p.b in locked_refs:
+            return False
+        if p.waiver == 'marker_class':
+            return (_class_of(p.a) in _MARKER_NONPHYSICAL
+                    or _class_of(p.b) in _MARKER_NONPHYSICAL)
+        if p.waiver != 'edge_class':
+            return True
+        if not (_edge_waiver_live(p.a) or _edge_waiver_live(p.b)):
+            return False
+        # run-23 user finding #1: an edge-LIVE part's waiver covers its
+        # MATING ZONE, never its whole courtyard. The overhang story is
+        # about the strip at/over the outline; an overlap sitting INSIDE
+        # the board is under the part's BODY, whoever is at the edge --
+        # R5 sat 45.7% inside J1's interior courtyard behind this waiver.
+        # The overlap region must leave the outline or hug the edge
+        # (within SEAT_TOL_MM); unmeasurable geometry never UN-waives.
+        r = p.overlap_rect
+        if r is None or not bb:
+            return True
+        try:
+            from .part_class import SEAT_TOL_MM
+            _og = BoardOutlineGate(pcb_data.board_info, 0.0)
+            return (_og.rect_outside_amount(r) > EPS
+                    or _og.edge_clearance(r) <= SEAT_TOL_MM)
+        except Exception:                                    # noqa: BLE001
+            return True
+
+    courtyard_blocking = [
+        p for p in pairs
+        if p.kind == 'courtyard' and not _blocking_waived(p)
+        # ABSOLUTE floor or RELATIVE floor (user finding #2: 0.445mm2 was
+        # 25.5% of R21's courtyard and slid under the absolute floor).
+        and (p.area_mm2 >= COURTYARD_BLOCKING_MIN_MM2
+             or (p.contained_frac or 0.0) >= COURTYARD_BLOCKING_MIN_FRAC)
+        and p.depth_mm >= COURTYARD_BLOCKING_MIN_DEPTH_MM
+        and p.a not in _synthetic_refs and p.b not in _synthetic_refs]
     return {'blocking': len(blocking),
             'advisory': len(advisory),
             'waived': sum(1 for p in pairs if p.waived),
             'pairs': pairs,
             'blocking_pairs': blocking,
             'advisory_pairs': advisory,
+            # Body containment: one part's .Fab outline (near-)wholly inside
+            # another's. DISCLOSURE ONLY -- deliberately NOT folded into
+            # `blocking`, because the corpus ships legitimate frac-1.0
+            # containments (fiducials under connector bodies, measured on
+            # orangecrab_ext_pll: FID2/J5 at 1.000, FID1/J4 at 0.867).
+            #
+            # NOT filtered by `waived`, and that one omission is the whole
+            # point. `_waiver_for` is pure class membership and geometry-blind,
+            # so a part sitting WHOLLY inside an `edge_actuator` gets the same
+            # `edge_class` label as a 0.01 mm2 graze and then leaves
+            # `advisory`, `advisory_pairs` AND `new_advisory_pairs` in one
+            # step. Run-22 lost D4-inside-SW2 exactly that way, twice, and
+            # nothing in the chain could report it. This is the list a waiver
+            # cannot empty.
+            'contained': len(contained),
+            'containment_pairs': contained,
+            'containment_blocking': len(containment_blocking),
+            'containment_blocking_pairs': containment_blocking,
+            # Parts whose footprint draws no .Fab outline at all, so the fab
+            # channel CANNOT judge them (parser.extract_fab_sides skips them
+            # and the loop above continues past them). An unjudged part is not
+            # a clean part, and saying nothing would claim it was.
+            #
+            # MEASURED across all 33 corpus boards, so nobody has to re-derive
+            # it: 144 of 1583 footprints are unjudged, and 144 of 144 draw ZERO
+            # .Fab geometric primitives. They are mounting holes, testpoints,
+            # logos, fiducials and panel tabs. There is NO footprint anywhere
+            # in the corpus whose .Fab geometry the parser fails to read --
+            # every primitive kind used on that layer (fp_line, fp_arc,
+            # fp_circle, fp_poly, fp_rect) is already handled, and there are no
+            # degenerate bboxes.
+            #
+            # So a parser tolerance or polygon-closure fix moves ZERO
+            # footprints out of this set. (313 footprints do have non-closing
+            # .Fab line chains -- tigard Q1's left edge stops 0.02mm short --
+            # and every one of them is judged correctly, because a bbox is a
+            # min/max over points and the gap is interior to it.)
+            #
+            # And the one change that WOULD close the hole is measured
+            # dangerous: giving a bodyless part a fallback body (its courtyard,
+            # else its pad bbox) adds 77 new fab pairs corpus-wide, 65 of them
+            # above CONTAINMENT_FRAC -- dominated by rp2350's Teensy40, a
+            # bodyless module whose courtyard swallows 56 neighbours at frac
+            # 1.0. It would also break the 4-pair calibration gate outright.
+            #
+            # DISCLOSURE IS THE ANSWER HERE, not a fix. Report the count and
+            # let a reader judge.
+            'fab_unjudged': len(fab_unjudged),
+            'fab_unjudged_refs': sorted(fab_unjudged),
+            # Run-23 courtyard blocking channel -- see the selection above.
+            # NOTE these pairs also remain in `advisory`/`advisory_pairs`
+            # (that count's meaning is unchanged for its existing consumers);
+            # a pair can be both advisory-listed and courtyard-blocking.
+            'courtyard_blocking': len(courtyard_blocking),
+            'courtyard_blocking_pairs': courtyard_blocking,
+            # Refs graded on the zero-pad +/-0.5mm fictional box: their pairs
+            # are disclosure, never gates (run-23's phantom G***<->J5).
+            'courtyard_synthetic_refs': sorted(_synthetic_refs),
             # E6: pairs where copper lands on a part KiCad marks (locked yes),
             # of ANY channel including waived ones. A locked pose is a decision
             # somebody made -- a mounting hole against an enclosure, a
