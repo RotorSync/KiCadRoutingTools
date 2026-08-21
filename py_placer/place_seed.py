@@ -79,6 +79,23 @@ Examples:
                         "non-obstacles either way (the existing exclude "
                         "mechanism); this changes only WHO goes first "
                         "(run-4 C)")
+    p.add_argument("--evict-depth", type=int, default=0, choices=(0, 1),
+                   metavar="N",
+                   help="Eviction rung (#630). At every depth a part with NO "
+                        "legal pose gets a census of its seated neighbours "
+                        "(JSON_SUMMARY no_pose_blockers: how many poses "
+                        "lifting each one would free). 0 (default) moves "
+                        "nothing. 1 evicts the neighbour that frees the most, "
+                        "seats the part, then re-seats the neighbour (inside "
+                        "its own zone) with the part in place; the trade is "
+                        "kept only if both seats are legal against every "
+                        "seated part and the seated board's overlap count "
+                        "did not rise, else both parts are put back and the "
+                        "revert is recorded. Locked parts and declared edge "
+                        "connectors are never evicted; a blocker's own "
+                        "blocker is not chased. Only fires on a part that "
+                        "was going to be reported unseated. Opt-in until an "
+                        "A/B row on three boards exists")
     p.add_argument("--anchor-rounds", type=int, default=1,
                    help="With --anchors-first: gated re-seat passes after "
                         "the first full placement (default 1 = none). Each "
@@ -232,6 +249,9 @@ Examples:
                 'reseated': len(reseat['reseated']),
                 'reseated_refs': reseat['reseated'],
                 'unseated': reseat['unseated'],
+                'no_pose_blockers': reseat.get('no_pose_blockers') or {},
+                'evictions': reseat.get('evictions', 0),
+                'evictions_reverted': reseat.get('evictions_reverted', 0),
                 'refused': reseat['refused'],
                 'edge_bands_dropped': reseat['edge_bands_dropped'],
                 # THE load-bearing number: it is the one that predicts
@@ -384,7 +404,8 @@ Examples:
         board_edge_clearance=args.board_edge_clearance,
         grid_step=args.grid_step, seed_refs=seed_refs,
         anchors_first=args.anchors_first,
-        anchor_rounds=args.anchor_rounds)
+        anchor_rounds=args.anchor_rounds,
+        evict_depth=args.evict_depth)
     for note in result['notes']:
         print(f"  NOTE: {note}")
     print(f"Seeded {len(result['placements'])} part(s); "
@@ -490,6 +511,18 @@ Examples:
     after = ratsnest.get('after', {})
     summary = {'placed': len(result['placements']),
                'unseated': len(result['unseated']),
+               # NAMES, not just a count. #629's complaint is that a verdict
+               # you cannot act on is a dead end, and a count names nobody.
+               'unseated_refs': list(result['unseated']),
+               'no_pose_blockers': result.get('no_pose_blockers') or {},
+               # Trades KEPT, and trades REVERTED, separately: a reader who
+               # sees `evictions: 1` must not have to guess whether the board
+               # changed. The records themselves are in the NOTE lines.
+               'evictions': sum(1 for e in (result.get('evictions') or [])
+                                if e.get('accepted')),
+               'evictions_reverted': sum(
+                   1 for e in (result.get('evictions') or [])
+                   if not e.get('accepted')),
                'locked': n_locked,
                'grade_errors': len(graded.errors),
                'grade_warnings': len(graded.warnings),
@@ -507,5 +540,11 @@ Examples:
 
 
 if __name__ == "__main__":
-    import cli_banner; cli_banner.install()  # CMD/EXIT self-echo (run-3 B1)
-    sys.exit(main())
+    # Declare the lever for the WHOLE run, so every pose this CLI writes
+    # carries its name in the provenance record -- place_reconstruct.py
+    # does the same. Without it a seeded board carries no lever at all, and
+    # the provenance instrument is silent about where its poses came from.
+    from placement.provenance import declare_lever
+    with declare_lever('place_seed.py', sys.argv):
+        import cli_banner; cli_banner.install()  # CMD/EXIT self-echo (run-3 B1)
+        sys.exit(main())
