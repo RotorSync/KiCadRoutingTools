@@ -153,6 +153,17 @@ def merge_summaries(summaries: List[Dict], aborted: bool = False) -> Optional[Di
                     _failed |= {d.get('net_name') if isinstance(d, dict) else d
                                 for d in (merged.get('failed_multipoint') or [])}
                 merged[_k] = [e for e in first[_k] if e.get('net') in _failed]
+        # `finalize_excluded_nets` carries WHOLE, not through the
+        # still-failing filter: it is a list of net NAMES rather than per-net
+        # records, and it states what the finalize declined to do BY PLAN --
+        # something the reconcile sub-run neither repeats nor revokes. It is
+        # stamped on the summary AFTER the JSON_SUMMARY line printed, so it
+        # exists only on `first`; without this carry, last-wins drops it on
+        # exactly the runs that reconciled -- i.e. the failing ones, where
+        # telling "declined by plan" from "failed to" is the whole point.
+        if ('finalize_excluded_nets' in first
+                and 'finalize_excluded_nets' not in merged):
+            merged['finalize_excluded_nets'] = first['finalize_excluded_nets']
 
     # Coverage-gate nets have NO routed result, so their pads never reach
     # multipoint_pads_total and a caller's
@@ -231,7 +242,15 @@ def summary_min(merged: Dict, name_cap: int = 20) -> Dict:
         'terminal_restores_broken': _names(broken_restores),
         'min_clearance_used': merged.get('min_clearance_used'),
         'vias': merged.get('total_vias'),
-        'duration_s': merged.get('total_time'),
+        # NOT wall clock, and named for what it actually counts. `total_time`
+        # is the single-ended loop plus the reroute loop and nothing else --
+        # phase-3 taps, rescues, the plane finalize, and parse/write all sit
+        # outside it. Measured on splitflap_driver: 0.35 against 20.72 s of
+        # real wall time, a 59x under-report. The big summary can afford to
+        # call it `total_time` among thirty other keys; a one-line verdict an
+        # agent reads INSTEAD of those cannot call it `duration_s` without
+        # asserting the run took that long.
+        'main_loop_time_s': merged.get('total_time'),
     }
     if merged.get('finalize_excluded_nets'):
         out['finalize_excluded_nets'] = _names(

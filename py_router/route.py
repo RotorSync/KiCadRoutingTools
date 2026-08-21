@@ -295,6 +295,41 @@ def _plane_finalize_active() -> bool:
     return _PLANE_FINALIZE_DEPTH > 0
 
 
+def _emit_summary_min(gate_report: Optional[dict] = None,
+                      status: Optional[str] = None) -> None:
+    """Print the ONE compact verdict line for an outermost run.
+
+    Shared by the normal end-of-run path and the two "nothing to route" early
+    returns. The contract a consumer relies on is "exactly one
+    JSON_SUMMARY_MIN per outermost run", and a step that legitimately did
+    nothing -- "All nets are already fully connected", the routine state a
+    replay or a retry step lands in -- must still satisfy it. A missing line
+    there is indistinguishable from a crash, which is the one reading that
+    would make an agent do the wrong thing.
+
+    `status` names WHY the tally is empty on those paths; it is absent on an
+    ordinary run.
+    """
+    try:
+        from route_summary import merge_summaries as _ms, summary_min
+        _m = _ms(list(_SUMMARY_SINK), _RECONCILE_RAISED[0])
+        if _m is None and status is not None:
+            # The early returns fire before any summary is built, so there is
+            # nothing in the sink to merge: synthesize the empty tally rather
+            # than print nothing.
+            _m = {'successful': 0, 'failed': 0}
+        if not _m:
+            return
+        _min = summary_min(_m)
+        if status is not None:
+            _min['status'] = status
+        if gate_report and gate_report.get('verdict') == 'reject':
+            _min['improvement_gate'] = 'reverted'
+        print("JSON_SUMMARY_MIN: " + json.dumps(_min, sort_keys=True))
+    except Exception as _e:                                     # noqa: BLE001
+        print(f"  WARNING: could not emit JSON_SUMMARY_MIN: {_e}")
+
+
 def batch_route(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
@@ -1104,6 +1139,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 f"a trailing carriage return) or a stale net list. "
                 f"First few: {', '.join(repr(n) for n in list(net_names)[:5])}")
         print("No valid nets to route!")
+        if final_reconcile:
+            _emit_summary_min(status='no_valid_nets')
         if return_results:
             return 0, 0, 0.0, _empty_results_data()
         _write_passthrough_output(input_file, output_file)
@@ -1210,6 +1247,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"from scratch (#515).")
     if not net_ids:
         print("All nets are already fully connected - nothing to route!")
+        if final_reconcile:
+            _emit_summary_min(status='already_connected')
         if return_results:
             return 0, 0, 0.0, _empty_results_data()
         _write_passthrough_output(input_file, output_file)
@@ -5177,18 +5216,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # LAST thing printed: after the reconcile block, so it carries the merged
     # tally, and after the improvement gate, so it describes the copper that
     # is actually on the board -- a rejected run says so here, because its
-    # tallies describe a board that was reverted.
+    # tallies describe a board that was reverted. It is the last line
+    # batch_route prints, NOT the last line of a run: main()'s .kicad_pro
+    # DRC-floor writeback reports after this, so read the log for the line,
+    # do not tail it.
     if final_reconcile:
-        try:
-            from route_summary import merge_summaries as _ms, summary_min
-            _m = _ms(list(_SUMMARY_SINK), _RECONCILE_RAISED[0])
-            if _m:
-                _min = summary_min(_m)
-                if _gate_report and _gate_report.get('verdict') == 'reject':
-                    _min['improvement_gate'] = 'reverted'
-                print("JSON_SUMMARY_MIN: " + json.dumps(_min, sort_keys=True))
-        except Exception as _e:                                 # noqa: BLE001
-            print(f"  WARNING: could not emit JSON_SUMMARY_MIN: {_e}")
+        _emit_summary_min(_gate_report)
 
     if return_results:
         return successful, failed, total_time, results_data
