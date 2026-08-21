@@ -266,6 +266,7 @@ def _empty_results_data() -> dict:
         'segments_to_remove': [],
         'vias_to_remove': [],
         'blockers': [],
+        'boxed_in': [],
         'pad_pairs_open': [],
     }
 
@@ -530,7 +531,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # previous board in the same (GUI) process.
     from routing_diagnostics import reset_hint_condenser
     reset_hint_condenser()
-    if json_out:
+    # Every OUTERMOST entry starts the summary sink clean, not only a
+    # --json-out one: the GUI calls batch_route once per click in ONE
+    # process with no json_out, and a sink that survived the previous
+    # click would merge the next run's JSON_SUMMARY_MIN onto the previous
+    # run's summaries (effort keys summed, pad-pair attribution from the
+    # old run) and stamp its summaries 'reconciliation-subset'. Nested
+    # sub-runs pass final_reconcile=False and so keep the live sink.
+    if json_out or final_reconcile:
         _SUMMARY_SINK.clear()
         _RECONCILE_RAISED[0] = False
     if not _SUMMARY_SINK:
@@ -3376,6 +3384,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # a net that failed early but was later rescued/rerouted is filtered out
     # here because the final failed sets are authoritative.
     blockers_report = []
+    boxed_in_report = []
     try:
         _final_failed_ids = list(dict.fromkeys(
             failed_single_ids + [m['net_id'] for m in failed_multipoint]))
@@ -3406,8 +3415,21 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     'net': _name, 'stage': 'preexisting',
                     'blocked_by': [{'net': _bn, 'preexisting': True}
                                    for _bn in _pre103]})
+            # The static-vs-congestion verdict (the "boxed in by static
+            # obstacles" hint, #95) as its OWN key, beside `blockers` rather
+            # than inside it: `blockers` names WHICH routed copper is in the
+            # way, `boxed_in` says whether anything rippable is in the way at
+            # all, and a consumer reads both.
+            _bx = None
+            for _ev in (state.net_history.get(_nid) or []):
+                if _ev.get('event') == 'boxed_in_static':
+                    _bx = _ev.get('details') or _bx
+            if _bx:
+                boxed_in_report.append(dict(_bx, net=_name))
         if blockers_report:
             summary['blockers'] = blockers_report
+        if boxed_in_report:
+            summary['boxed_in'] = boxed_in_report
     except Exception:
         blockers_report = []
     # #409 follow-up: pad-pair routability tallies (PRR ingredients: connected
@@ -3548,6 +3570,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             'vias_to_remove': stale_input_vias,
             # #409: same data as JSON_SUMMARY['blockers'] (may be empty).
             'blockers': blockers_report,
+            # ...and the static-vs-congestion verdict beside it, same data as
+            # JSON_SUMMARY['boxed_in']. The GUI reads results_data, not the
+            # printed summary, so a key that only reaches stdout does not
+            # reach the plugin (CLAUDE.md's Class-1 CLI/GUI gap).
+            'boxed_in': boxed_in_report,
             # #409 follow-up: same data as JSON_SUMMARY['pad_pairs_open']
             # (may be empty).
             'pad_pairs_open': pad_pairs_open_report,
@@ -3862,6 +3889,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                           f"PLAN. Since #562 a pour alone connects nothing: "
                           f"unless a later route step covers these nets, "
                           f"their pads ship disconnected.{RESET}")
+                    # ...and in the SUMMARY, not only in the log, so a later
+                    # grade can tell a step that declined to weld these pads
+                    # BY PLAN from one that failed to. The printed
+                    # `JSON_SUMMARY:` line predates the finalize, so it does
+                    # NOT carry this key; `summary` sits in `_SUMMARY_SINK` by
+                    # reference, so `--json-out`, the returned dict and the
+                    # JSON_SUMMARY_MIN line (printed last) do.
+                    summary['finalize_excluded_nets'] = _excluded9
             # PRE-GATE for the MODEL-BASED legs (engine taps/joins +
             # cleanup): run them only for zone nets the fill-aware checker
             # says are incomplete on THIS run's board (pcb_data == file
@@ -5091,7 +5126,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # the diagnostics (blockers / open pad pairs) -- they are
                 # why the caller asked -- and the gate report itself.
                 _keep6 = {k: results_data.get(k) or []
-                          for k in ('blockers', 'pad_pairs_open')}
+                          for k in ('blockers', 'pad_pairs_open',
+                                    'boxed_in')}
                 results_data = _empty_results_data()
                 results_data.update(_keep6)
                 _action = ("DISCARDED this run's changes (nothing is applied "
@@ -5131,6 +5167,28 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         except Exception as _ge:
             # A gate that crashes must not take the run's board with it.
             print(f"  (improvement gate skipped: {_ge})")
+
+    # ONE compact authoritative line per outermost run, CLI and GUI alike.
+    # The big JSON_SUMMARY lines are 6-20KB each with scope semantics the log
+    # itself has to warn about; this one is the merged tally in <1KB.
+    # `final_reconcile` is True only on the outermost call (every sub-run --
+    # plane finalize, end-of-run reconcile -- passes False, the #562 recursion
+    # guard), so nested passes never emit a second MIN line. Deliberately the
+    # LAST thing printed: after the reconcile block, so it carries the merged
+    # tally, and after the improvement gate, so it describes the copper that
+    # is actually on the board -- a rejected run says so here, because its
+    # tallies describe a board that was reverted.
+    if final_reconcile:
+        try:
+            from route_summary import merge_summaries as _ms, summary_min
+            _m = _ms(list(_SUMMARY_SINK), _RECONCILE_RAISED[0])
+            if _m:
+                _min = summary_min(_m)
+                if _gate_report and _gate_report.get('verdict') == 'reject':
+                    _min['improvement_gate'] = 'reverted'
+                print("JSON_SUMMARY_MIN: " + json.dumps(_min, sort_keys=True))
+        except Exception as _e:                                 # noqa: BLE001
+            print(f"  WARNING: could not emit JSON_SUMMARY_MIN: {_e}")
 
     if return_results:
         return successful, failed, total_time, results_data
