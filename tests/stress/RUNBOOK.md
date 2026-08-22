@@ -1100,3 +1100,71 @@ that record embeds the human placement pose-for-pose. Stage with `control_out=`
 pointing at a **sibling** `_truth/` (never a child of the work dir — the audit
 recurses into it) and neither file ever enters. The record test reads bytes, so
 re-saving it as UTF-16 does not evade it.
+
+### Staging blind, in one call
+
+`tests/stress/stage_blind.py` does the whole staging above and draws the
+perturbation itself, so the operator never learns the kind, dose, block or
+seed:
+
+```bash
+python3 -X utf8 tests/stress/stage_blind.py \
+    kicad_files/tigard.kicad_pcb wk/run12/tigard wk/run12/_truth/tigard
+```
+
+It also SANITISES the project it carries into the work dir. The project must
+travel or the board grades at the stock netclass (#441), but KiCad writes
+`meta.filename` into it and `pcbnew.last_paths` holds the author's own
+directories, so a verbatim copy puts the source board's NAME inside the fence.
+The declaration of what it withheld is written to `_truth/draw.json` under
+`staged_project`, not into the work dir, because naming the withheld strings
+inside the fence would be the leak itself.
+
+### Auditing that every pose came from the engine
+
+`fence_audit` answers "did the answer key get in". It cannot answer "did a
+human place this by hand", because a hand-placed board is not the control's
+placement either. That is a separate question with a separate instrument:
+
+```bash
+python3 -X utf8 tests/stress/provenance_audit.py --workdir wk/run12/tigard
+# 0 CLEAN   every moved pose traces to a registered lever, and is where that
+#           lever put it
+# 4 VIOLATION a moved pose has no lever, or drifted after the lever wrote it
+# 5 UNPROVEN  nothing was measured (no regime, or no board)
+```
+
+Arm it by staging the work dir with `placement.provenance.start_regime`; the
+CLIs in `LEVER_REGISTRY` then record every pose they write to
+`.pose-provenance.jsonl`, and an undeclared write RAISES instead of landing.
+
+### Watching a long run
+
+`tests/stress/run_watch.py` has two modes, both of which emit one stdout line
+per event so they can be armed once and left alone:
+
+```bash
+python3 -X utf8 tests/stress/run_watch.py bugs   --workdir wk/run12/tigard
+python3 -X utf8 tests/stress/run_watch.py cheats --workdir wk/run12/tigard \
+    --truthdir wk/run12/_truth/tigard --done wk/run12/tigard/DONE
+```
+
+`bugs` reports new problems as they appear and runs until you stop it.
+`cheats` reports the ways the run could report success without earning it (a
+scope narrowed to the failing nets, a grader floor overridden, a waiver spent)
+and ends when the `DONE` marker appears, running `fence_audit` and
+`provenance_audit` as it goes. Neither budgets on a clock.
+
+`cheats` reads a tool's argv from its `CMD:` banner line. The two skill
+drivers install no banner, so wrap timed invocations in
+`tests/stress/tee_cmd.py`, which tees the output and appends one
+`cmd_timing.jsonl` row per invocation carrying the argv, the exit code and the
+elapsed time:
+
+```bash
+python3 -X utf8 tests/stress/tee_cmd.py --workdir wk/run12/tigard \
+    route4 -- python3 -X utf8 py_router/route.py in.kicad_pcb out.kicad_pcb
+```
+
+Wait on `logs/<label>.done`, which appears exactly when the child exits and
+holds its exit code. Nothing else is a completion signal.
