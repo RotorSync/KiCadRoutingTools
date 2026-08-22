@@ -99,7 +99,7 @@ _TOP_LEVEL_KEYS = {
     'health', 'severity', 'context', 'overlap_waivers', 'min_reader',
 }
 _BLOCK_KEYS = {'name', 'group', 'refs', 'zone', 'side', 'exclusive',
-               'tolerance_mm', 'note'}
+               'tolerance_mm', 'note', 'context'}
 
 # The principle `_BLOCK_KEYS` already encodes, applied one level down (#710).
 # Before this the loader was strict at exactly two levels -- top-level and
@@ -121,14 +121,15 @@ _BLOCK_KEYS = {'name', 'group', 'refs', 'zone', 'side', 'exclusive',
 # pinned against them by tests/test_549_floorplan_grade.py -- so a new emitted
 # key fails there, rather than as an artifact that stops loading months later.
 _ENVELOPE_KEYS = {'rect', 'tolerance_mm'}
-_KEEPOUT_KEYS = {'name', 'rect', 'circle', 'sides', 'allow', 'note'}
+_KEEPOUT_KEYS = {'name', 'rect', 'circle', 'sides', 'allow', 'note',
+                 'context'}
 #: `source`, `suspect`, `suspect_reason`, `overhang_capped` and
 #: `observed_overhang_mm` are emitter-written and read by nothing today; they
 #: are accepted because `emit_intent` writes them and the round trip must
 #: survive, not because anything acts on them.
 _EDGE_CONNECTOR_KEYS = {'ref', 'edge', 'overhang_mm', 'max_setback_mm',
                         'class', 'source', 'note', 'suspect', 'suspect_reason',
-                        'overhang_capped', 'observed_overhang_mm'}
+                        'overhang_capped', 'observed_overhang_mm', 'context'}
 _OVERHANG_KEYS = {'min', 'max'}
 _DECAP_KEYS = {'max_distance_mm', 'exempt', 'search_radius_mm'}
 _DEFAULTS_KEYS = {'zone_tolerance_mm'}
@@ -139,9 +140,16 @@ _HEALTH_KEYS = {'bus_corridors', 'classes', 'zoned_blocks',
                 'ignore_net_ids', 'max_fanout', 'block_displacement_mm'}
 _CORRIDOR_KEYS = {'name', 'nets', 'width_mm'}
 _BUDGET_KEYS = {'overlap_area', 'oob_count', 'oob_amount'}
-_WAIVER_KEYS = {'pair', 'reason'}
-# `context` deliberately has NO key set: it is the documented read-only slot
-# where a run records provenance no rule will ever grade. See where it is read.
+_WAIVER_KEYS = {'pair', 'reason', 'context'}
+# `context` deliberately has NO key set of its own, at the top level or on an
+# entry: it is the read-only slot where a run records provenance no rule will
+# ever grade. Every object above accepts one, because the alternative is worse.
+# Refusing prose outright pushes it into a key that IS graded -- the recorded
+# runs show exactly that drift, an `edge_connectors[]` entry that grew
+# `band_basis`, `why`, `why_not_repaired` and `rejected_alternative` because
+# there was nowhere else for the reasoning to go. Folding it into `note`
+# instead would be worse still: `note` is load-bearing, grepped for the
+# substring SUSPECT by emit_intent and place_reconstruct.
 _EDGES = ('north', 'south', 'east', 'west')
 
 
@@ -309,6 +317,16 @@ def _reject_unknown(obj, allowed, where: str) -> None:
                           f"Known: {', '.join(sorted(allowed))}")
 
 
+def _entry_context(entry, where: str) -> None:
+    """An entry's `context` is free-form, but it is still an OBJECT.
+
+    Type-checked and otherwise untouched: a list here means the author meant
+    something else, while an unknown key inside means nothing at all.
+    """
+    if 'context' in entry:
+        _obj(entry['context'], f"{where}.context")
+
+
 def _obj(value, where: str) -> Dict:
     """An intent object, or `{}` when absent.
 
@@ -400,6 +418,7 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
         if not isinstance(b, dict):
             raise IntentError(f"blocks[{i}]: expected an object")
         _reject_unknown(b, _BLOCK_KEYS, f"blocks[{i}]")
+        _entry_context(b, f"blocks[{i}]")
         name = b.get('name') or f"block{i}"
         if name in seen_names:
             raise IntentError(f"blocks[{i}]: duplicate block name {name!r}")
@@ -430,6 +449,7 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
         if not isinstance(k, dict):
             raise IntentError(f"keepouts[{i}]: expected an object")
         _reject_unknown(k, _KEEPOUT_KEYS, f"keepouts[{i}]")
+        _entry_context(k, f"keepouts[{i}]")
         k = dict(k)
         k.setdefault('name', f"keepout{i}")
         if 'rect' in k and k['rect'] is not None:
@@ -457,6 +477,7 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
         # it is unknown, not reported as a missing `ref` while the author
         # stares at the key they did write.
         _reject_unknown(c, _EDGE_CONNECTOR_KEYS, f"edge_connectors[{i}]")
+        _entry_context(c, f"edge_connectors[{i}]")
         if not c.get('ref'):
             raise IntentError(f"edge_connectors[{i}]: expected an object with "
                               f"a `ref`")
@@ -532,6 +553,7 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
                 "overlap_waivers: each entry needs 'pair': [refA, refB] "
                 "(and should carry a 'reason')")
         _reject_unknown(w, _WAIVER_KEYS, f"overlap_waivers[{i}]")
+        _entry_context(w, f"overlap_waivers[{i}]")
 
     return Intent(
         schema=schema, kind=kind, board=raw.get('board', '') or '',

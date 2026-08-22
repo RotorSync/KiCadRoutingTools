@@ -212,6 +212,43 @@ def test_context_is_deliberately_open():
     print("  PASS: context accepts arbitrary keys; budget_withheld still read")
 
 
+def test_an_entry_carries_its_own_context_slot():
+    """Provenance needs somewhere to go that is not a constraint.
+
+    Without a slot the reasoning drifts into the graded keys -- the recorded
+    runs show one intent whose edge_connectors entries grew `band_basis`,
+    `why`, `why_not_repaired` and `rejected_alternative`, which every consumer
+    then ignored. `note` is not the answer either: it is grepped for the
+    substring SUSPECT, so appending prose to it can change behaviour.
+    """
+    ctx = {'why': 'the mating face is on the east wall of the enclosure',
+           'rejected_alternative': 'north, blocked by the display window'}
+    i = intent_from_dict(_base(
+        blocks=[{'name': 'p', 'refs': ['U1'], 'context': ctx}],
+        keepouts=[{'name': 'k', 'rect': [0, 0, 6, 6], 'context': ctx}],
+        edge_connectors=[{'ref': 'J1', 'edge': 'east', 'context': ctx}],
+        overlap_waivers=[{'pair': ['U1', 'U2'], 'reason': 'net tie',
+                          'context': ctx}]))
+    assert i.keepouts[0]['context'] == ctx
+    assert i.edge_connectors[0]['context'] == ctx
+    # Free-form, but still an object -- a list means the author meant
+    # something else, while an unknown key inside means nothing at all.
+    for raw, where in (
+            (_base(blocks=[{'name': 'p', 'refs': ['U1'], 'context': []}]),
+             'blocks[0].context'),
+            (_base(edge_connectors=[{'ref': 'J1', 'context': 'why'}]),
+             'edge_connectors[0].context'),
+            (_base(keepouts=[{'name': 'k', 'rect': [0, 0, 6, 6],
+                              'context': 1}]), 'keepouts[0].context'),
+            (_base(overlap_waivers=[{'pair': ['U1', 'U2'],
+                                     'context': []}]),
+             'overlap_waivers[0].context')):
+        msg = _rejects(raw, f"{where} as a non-object")
+        assert where in msg, (where, msg)
+    print("  PASS: 4 entry kinds carry a free-form context; a non-object is "
+          "refused by path")
+
+
 def test_severity_keys_are_checked_against_the_rule_names():
     """#710: `severity` validated its VALUES and never its keys.
 
@@ -407,6 +444,7 @@ TESTS = [
     test_unknown_nested_keys_are_refused_not_ignored,
     test_a_nested_object_must_be_an_object,
     test_context_is_deliberately_open,
+    test_an_entry_carries_its_own_context_slot,
     test_severity_keys_are_checked_against_the_rule_names,
     test_every_violation_rule_name_is_settable,
     test_a_block_needs_refs_or_group,
