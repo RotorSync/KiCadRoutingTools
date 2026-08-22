@@ -31,7 +31,11 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.dirname(HERE)
-REFS = os.path.join(os.path.dirname(SKILL_DIR), 'plan-pcb-routing', 'references')
+#: The reference pages live with the combined skill; there is no
+#: plan-pcb-routing/references directory, so the old path resolved to
+#: nothing and every stage that cited a reference cited a missing file.
+REFS = os.path.join(os.path.dirname(SKILL_DIR),
+                    'plan-pcb-placement-and-routing', 'references')
 
 
 # --------------------------------------------------------------------------
