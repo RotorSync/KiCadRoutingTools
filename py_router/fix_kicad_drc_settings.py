@@ -912,6 +912,84 @@ def warn_if_missing_project_floor(input_pcb) -> bool:
     return True
 
 
+def apply_routed_floors(board_pcb: str, clearance=None, hole_clearance=None,
+                        clamp_nondefault_netclasses=False, verbose=False):
+    """Lower ``board_pcb``'s sibling ``.kicad_pro`` to the COPPER floors this run
+    routed to, MID-RUN, so anything that grades the board before ``main()``'s
+    authoritative writeback sees the floors the board will actually SHIP with.
+
+    Why (#650). The plane finalize's oracle audits ``output_file`` while its
+    sibling project is still the one :func:`seed_project_for_output` copied from
+    the INPUT -- so the audit fills the pours at the input's *declared* floors
+    while the shipped board is graded at the *clamped* ones. Measured on
+    orangecrab (``runs_set3``, identical copper, only the staged project
+    varied): 57 unconnected links under the input's project vs 46 under the
+    written-back one -- GND 19 vs 11 -- and ``rules.min_hole_clearance``
+    (0.25 -> 0.0889) accounted for ALL of it, because the zone filler pulls
+    copper back from every drill by that rule. The audit's extra links are
+    phantom, and kicad-cli is the DEMAND gate of the #648 source union, so they
+    become junk welds in the longest leg of the chain.
+
+    COPPER floors only -- clearance / hole-to-copper, and the net classes that
+    follow them, which is what changes zone fill. Track / via / annular floors
+    are left to the final writeback: measured inert for the fill (the same board
+    graded 57 either way with only those clamped) and they want the board's
+    scanned minima, which mid-run copper has not settled.
+
+    How big the gap is depends on CHAIN POSITION, so do not read 57/46 as a
+    per-step cost: the declared floors survive only until the first writeback
+    (down that same chain ``min_hole_clearance`` goes 0.25 -> 0.09 at step 1 and
+    stays there, leaving later steps stale by ~1 um -- inert). This earns its
+    keep on the first step over a board still carrying its declared floors,
+    which includes the ordinary case of a board that arrives with pours already
+    drawn, and on the aspirational stock netclass (0.2 declared, routed 0.1).
+
+    ``clamp_nondefault_netclasses`` defaults OFF, unlike the writeback's ON
+    (#439): whether the non-Default classes get clamped depends on the caller
+    having passed a ``--clearance`` ceiling, which is a ``main()`` fact and not
+    an engine one, and lowering them here could ship a tightened class on a run
+    that meant to honor them. The Default class and ``rules.min_clearance`` are
+    written regardless -- that is :func:`apply_targets_to_project`'s documented
+    behaviour and matches what the writeback will do either way.
+
+    Only-loosen, via the same :func:`apply_targets_to_project` the writeback
+    uses, so :func:`fix_project_for_output` stays authoritative and can never
+    conflict with what this wrote. No-op when the board has no sibling project
+    or no floor was given. Returns the change strings (empty = nothing done)."""
+    if not board_pcb or (clearance is None and hole_clearance is None):
+        return []
+    pro = find_project(board_pcb)
+    if not os.path.isfile(pro):
+        return []
+    try:
+        with open(pro) as f:
+            proj = json.load(f)
+    except (OSError, ValueError):
+        return []
+    targets = compute_targets(clearance=clearance, hole_clearance=hole_clearance)
+    changes = apply_targets_to_project(
+        proj, targets, {},
+        clamp_nondefault_netclasses=clamp_nondefault_netclasses)
+    if not changes:
+        return []
+    try:
+        # Atomic replace, same discipline as the writeback (#513 item 12).
+        tmp_pro = pro + ".tmp"
+        with open(tmp_pro, "w") as f:
+            json.dump(proj, f, indent=2)
+            f.write("\n")
+        os.replace(tmp_pro, pro)
+    except OSError:
+        return []
+    if verbose:
+        print(f"  In-run DRC floors (#650): lowered {len(changes)} value(s) in "
+              f"{os.path.basename(pro)} to the routed floors so the in-run "
+              f"audit grades what ships")
+        for c in changes:
+            print(f"      {c}")
+    return changes
+
+
 def seed_project_for_output(output_pcb: str, input_pcb=None):
     """Carry the input board's sibling ``.kicad_pro`` over to the output path
     BEFORE the board file is written (#513 item 12). The full floor writeback
