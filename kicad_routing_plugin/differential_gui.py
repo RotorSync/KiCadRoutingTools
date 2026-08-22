@@ -1380,16 +1380,23 @@ class DifferentialTab(wx.Panel):
         # had tightened to 0.0889 / 0.25-0.15 by step 10. Every later step
         # resolves its geometry from that class, so the two fronts routed with
         # DIFFERENT parameters from step 11 on (GUI 3581 segments vs CLI 3428).
-        from .gui_utils import update_live_drc_floors
+        # #693: gated on the shared "Fix DRC settings after routing"
+        # checkbox, like the netclass/severity writeback above -- it used to
+        # run unconditionally, so an unchecked box still moved the board's
+        # Board Setup floors. The CLI gates its twin on
+        # --no-fix-drc-settings.
         _cfg = getattr(self, '_diff_drc_config', {}) or {}
-        update_live_drc_floors(
-            board,
-            clearance=_cfg.get('clearance'),
-            track_width=_cfg.get('diff_pair_width') or _cfg.get('track_width'),
-            via_size=_cfg.get('via_size'),
-            via_drill=_cfg.get('via_drill'),
-            hole_to_hole=_cfg.get('hole_to_hole_clearance'),
-            edge_clearance=_cfg.get('board_edge_clearance'))
+        if _cfg.get('fix_drc_settings', True):
+            from .gui_utils import update_live_drc_floors
+            update_live_drc_floors(
+                board,
+                clearance=_cfg.get('clearance'),
+                track_width=(_cfg.get('diff_pair_width')
+                             or _cfg.get('track_width')),
+                via_size=_cfg.get('via_size'),
+                via_drill=_cfg.get('via_drill'),
+                hole_to_hole=_cfg.get('hole_to_hole_clearance'),
+                edge_clearance=_cfg.get('board_edge_clearance'))
 
         return tracks_added, vias_added, tracks_removed
 

@@ -1699,15 +1699,21 @@ class PlanesTab(wx.Panel):
         if self.sync_pcb_data_callback:
             self.sync_pcb_data_callback()
 
-        from .gui_utils import update_live_drc_floors
+        # #693: gated on the shared "Fix DRC settings after routing"
+        # checkbox, like the netclass/severity writeback above -- it used to
+        # run unconditionally, so an unchecked box still moved the board's
+        # Board Setup floors. The CLI gates its twin on
+        # --no-fix-drc-settings.
         _cfg = getattr(self, '_plane_drc_config', {}) or {}
-        update_live_drc_floors(
-            board,
-            clearance=_cfg.get('clearance'),
-            track_width=_cfg.get('track_width'),
-            via_size=_cfg.get('via_size'),
-            via_drill=_cfg.get('via_drill'),
-            hole_to_hole=_cfg.get('hole_to_hole_clearance'))
+        if _cfg.get('fix_drc_settings', True):
+            from .gui_utils import update_live_drc_floors
+            update_live_drc_floors(
+                board,
+                clearance=_cfg.get('clearance'),
+                track_width=_cfg.get('track_width'),
+                via_size=_cfg.get('via_size'),
+                via_drill=_cfg.get('via_drill'),
+                hole_to_hole=_cfg.get('hole_to_hole_clearance'))
 
         # (No oracle recheck here, #562: after plane CREATION the remaining
         # gaps are deliberate -- the route step's in-run plane finalize and
