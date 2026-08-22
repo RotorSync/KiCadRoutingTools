@@ -24,9 +24,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # placement split
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # placement split
 
-from placement.floorplan import (ERROR, KIND, RULES, SCHEMA_VERSION, WARN,
-                                 Intent, IntentError, _SEVERITY_KEYS,
-                                 intent_from_dict, load_intent,
+from placement.floorplan import (ERROR, KIND, READER_VERSION, RULES,
+                                 SCHEMA_VERSION, WARN, Intent, IntentError,
+                                 _SEVERITY_KEYS, intent_from_dict, load_intent,
                                  validate_intent)
 
 
@@ -101,6 +101,34 @@ def test_unknown_keys_are_refused_not_ignored():
                    "zones instead of zone")
     assert 'zones' in msg, msg
     print("  PASS: unknown top-level and per-block keys both refused")
+
+
+def test_min_reader_refuses_a_build_that_would_ignore_the_claim():
+    """#710, the compatibility half.
+
+    Refusing unknown nested keys makes an older build fail on a field it does
+    not know -- but only if the field is NEW. `min_reader` covers the other
+    case: a field whose spelling an old build accepts while its MEANING
+    changed, and any file whose author wants "refuse" rather than "grade it
+    without this". `schema` cannot do that job: it is matched exactly, so
+    bumping it invalidates every existing intent at once.
+    """
+    assert intent_from_dict(_base(min_reader=READER_VERSION))
+    assert intent_from_dict(_base(min_reader=1))
+    msg = _rejects(_base(min_reader=READER_VERSION + 1), "a future reader")
+    assert str(READER_VERSION + 1) in msg and str(READER_VERSION) in msg, msg
+    for bad in ('2', 2.5, True, [2]):
+        assert 'min_reader' in _rejects(_base(min_reader=bad),
+                                        f"min_reader={bad!r}")
+    # It is refused BEFORE the rest of the file is read: a build that cannot
+    # act on the claim must not report on the board at all.
+    msg = _rejects({'schema': SCHEMA_VERSION, 'kind': KIND,
+                    'min_reader': READER_VERSION + 1,
+                    'blocks': [{'name': 'x', 'zone': [0, 0, 1, 1]}]},
+                   "a future reader with a malformed block")
+    assert 'min_reader' in msg, msg
+    print(f"  PASS: reader {READER_VERSION} loads min_reader<={READER_VERSION}"
+          f", refuses {READER_VERSION + 1} before reading further")
 
 
 def test_unknown_nested_keys_are_refused_not_ignored():
@@ -375,6 +403,7 @@ TESTS = [
     test_the_wrong_file_is_refused_by_kind,
     test_schema_version_is_enforced,
     test_unknown_keys_are_refused_not_ignored,
+    test_min_reader_refuses_a_build_that_would_ignore_the_claim,
     test_unknown_nested_keys_are_refused_not_ignored,
     test_a_nested_object_must_be_an_object,
     test_context_is_deliberately_open,

@@ -81,10 +81,22 @@ DEFAULT_ENVELOPE_TOLERANCE_MM = 0.5
 #: which already knows this failure mode for one part class.
 EDGE_BAND_SANITY_MM = 5.0
 
+#: What this build can ACT on, as distinct from what it can parse (#710).
+#: `schema` is the format number and is matched exactly; bumping it invalidates
+#: every existing intent file at once, which is far too blunt for "this build
+#: learned a new field". `READER_VERSION` is the field-vocabulary number, and an
+#: intent whose claim would be MEANINGLESS to an older build says so by setting
+#: `min_reader` to the version that introduced the field.
+#:
+#: Bump this whenever the loader learns a declarable field that changes a
+#: verdict, and say in docs/floorplan-intent.md which field arrived. Do NOT
+#: bump it for a field nothing grades.
+READER_VERSION = 1
+
 _TOP_LEVEL_KEYS = {
     'schema', 'kind', 'board', 'units', 'envelope', 'defaults', 'blocks',
     'keepouts', 'edge_connectors', 'decaps', 'must_lock', 'legality_budget',
-    'health', 'severity', 'context', 'overlap_waivers',
+    'health', 'severity', 'context', 'overlap_waivers', 'min_reader',
 }
 _BLOCK_KEYS = {'name', 'group', 'refs', 'zone', 'side', 'exclusive',
                'tolerance_mm', 'note'}
@@ -346,6 +358,25 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
     if schema != SCHEMA_VERSION:
         raise IntentError(
             f"schema {schema!r}: this build reads schema {SCHEMA_VERSION}")
+    # Refused BEFORE anything else is read: the point of the field is that a
+    # build which cannot act on the file must not grade it, and grading it
+    # halfway is the same wrong answer as grading it fully.
+    #
+    # Note the field works in the backwards direction from the day it lands:
+    # a build older than this one refuses `min_reader` as an unknown
+    # top-level key, which is exactly the intended answer.
+    min_reader = raw.get('min_reader')
+    if min_reader is not None:
+        if not isinstance(min_reader, int) or isinstance(min_reader, bool):
+            raise IntentError(
+                f"min_reader {min_reader!r}: expected an integer")
+        if min_reader > READER_VERSION:
+            raise IntentError(
+                f"min_reader {min_reader}: this build is reader "
+                f"{READER_VERSION}. The intent declares a claim this build "
+                f"would not act on, and grading it would report clean on a "
+                f"constraint that was never checked -- upgrade instead")
+
     kind = raw.get('kind')
     if kind != KIND:
         # A round sidecar or a lock-advisor dump handed in by mistake reads as
