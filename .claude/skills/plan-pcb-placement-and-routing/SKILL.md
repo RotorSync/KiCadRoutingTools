@@ -606,10 +606,17 @@ escalation is allowed, which is what puts sub-spec vias on a board that asked fo
 big ones. Both report the net routed.
 
 So every route call in the loop — not only the first one — carries
-`--fab-overrides <the spec file>` when the spec is tighter than the tier, plus
-`--track-width-floor` for a width clause. Measured, one such file took a board's
-`undersized` from **169 to 0**. Check `min_clearance_used` in the `JSON_SUMMARY`
-afterwards: it is the only place a floor that was silently loosened shows up.
+`--fab-overrides <the spec file>` when the spec is tighter than the tier.
+Measured, one such file took a board's `undersized` from **169 to 0**. Check
+`min_clearance_used` in the `JSON_SUMMARY` afterwards: it is the only place a
+floor that was silently loosened shows up.
+
+A width clause rides on `--track-width` (or the board's Default netclass, which
+is where `route.py` reads it from when the flag is absent). **There is no hard
+per-net width floor any more**: `--track-width-floor` was removed in 53a5a16e
+along with the two engine behaviours it drove, so the rescue path re-necks at
+the class-aware `min(nominal, fab_track, netclass)` with no floor guard.
+Passing the flag is an argparse error — exit 2, mid-chain, with the lap lost.
 
 ##### 9.3c — Ripping blocking nets IS a sanctioned lever
 

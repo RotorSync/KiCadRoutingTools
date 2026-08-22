@@ -44,6 +44,14 @@ from placement.lock_advisor import advise_locks, to_json  # noqa: E402
 from placement.placement_state import (UNPLACED_EXIT, assess_placement)  # noqa: E402
 from placement.writer import write_placed_output  # noqa: E402
 
+#: Measured 516 s ALONE (2026-08-19, exit 0, all checks pass) -- UNDER the
+#: 600 s default, yet it times out in-suite. run_all defaults to -j 4, so
+#: it competes for CPU with three other processes while that clock runs.
+#: A budget for the contended case, not for a hung test: the standalone
+#: number is the evidence that it finishes.
+RUN_ALL_TIMEOUT = 1200
+
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KF = os.path.join(ROOT, 'kicad_files')
 TIGARD = os.path.join(KF, 'tigard.kicad_pcb')
