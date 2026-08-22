@@ -2974,14 +2974,21 @@ def _extract_via_protection_attrs(content: str) -> Dict[str, Dict[str, str]]:
     for m in re.finditer(r'\(via(?=[\s(])', content):
         start = m.start()
         depth = 0
-        end = start
-        for i, c in enumerate(content[start:]):
+        end = len(content)
+        # Direct indexing instead of `enumerate(content[start:])`: slicing the
+        # board's remainder for EVERY via is the #225 class of
+        # O(vias x filesize) copies even when the loop breaks at the via's own
+        # short block. Indexing without the per-via slice keeps this a single
+        # pass over each via's own block, so a malformed/very-long block can
+        # still only cost its own length, never a whole-board copy per via.
+        for i in range(start, len(content)):
+            c = content[i]
             if c == '(':
                 depth += 1
             elif c == ')':
                 depth -= 1
                 if depth == 0:
-                    end = start + i + 1
+                    end = i + 1
                     break
         block = content[start:end]
         uuid_match = re.search(r'\(uuid\s+"([^"]+)"\)', block)
