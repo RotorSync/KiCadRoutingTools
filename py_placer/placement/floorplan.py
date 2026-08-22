@@ -133,8 +133,10 @@ _EDGE_CONNECTOR_KEYS = {'ref', 'edge', 'overhang_mm', 'max_setback_mm',
 _OVERHANG_KEYS = {'min', 'max'}
 _DECAP_KEYS = {'max_distance_mm', 'exempt', 'search_radius_mm'}
 _DEFAULTS_KEYS = {'zone_tolerance_mm'}
-#: `zoned_blocks` and `affinity_exempt_net_ids` are setdefault-injected into
-#: this same dict by `grade` after load, so an author may also set them.
+#: `zoned_blocks` is setdefault-injected into this same dict by `grade` after
+#: load, and `affinity_exempt_net_ids` is derived there from
+#: `affinity_exempt_nets` -- but only when that key is present, so an author
+#: may also set the ids directly. Both are accepted for that reason.
 _HEALTH_KEYS = {'bus_corridors', 'classes', 'zoned_blocks',
                 'affinity_exempt_nets', 'affinity_exempt_net_ids',
                 'ignore_net_ids', 'max_fanout', 'block_displacement_mm'}
@@ -143,7 +145,11 @@ _BUDGET_KEYS = {'overlap_area', 'oob_count', 'oob_amount'}
 _WAIVER_KEYS = {'pair', 'reason', 'context'}
 # `context` deliberately has NO key set of its own, at the top level or on an
 # entry: it is the read-only slot where a run records provenance no rule will
-# ever grade. Every object above accepts one, because the alternative is worse.
+# ever grade. The four objects a human AUTHORS entry-by-entry accept one --
+# _BLOCK_KEYS, _KEEPOUT_KEYS, _EDGE_CONNECTOR_KEYS, _WAIVER_KEYS -- because the
+# alternative is worse; the settings objects (envelope, defaults, decaps,
+# health, legality_budget, overhang_mm) do not, since prose about a setting
+# belongs on the claim that uses it or at the top level.
 # Refusing prose outright pushes it into a key that IS graded -- the recorded
 # runs show exactly that drift, an `edge_connectors[]` entry that grew
 # `band_basis`, `why`, `why_not_repaired` and `rejected_alternative` because
@@ -200,6 +206,13 @@ class Zone:
     exclusive: bool = False
     tolerance_mm: Optional[float] = None
     note: str = ''
+    #: Free-form provenance, read by nothing (see `_BLOCK_KEYS`). Carried on
+    #: the Zone rather than dropped: `keepouts`/`edge_connectors`/
+    #: `overlap_waivers` keep their raw dict and so keep theirs, and a slot
+    #: that silently vanishes for ONE of the four is the #710 defect itself.
+    #: (Zone is frozen, so this makes it unhashable -- nothing hashes a Zone,
+    #: only iterates them.)
+    context: Dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -311,10 +324,15 @@ def _reject_unknown(obj, allowed, where: str) -> None:
     `health.bus_corridors[0]` all read alike. The `Known:` list is what turns
     a typo into a fix -- `keepout` only looks wrong next to `keepouts`.
     """
-    bad = sorted(set(obj) - set(allowed))
+    # str() BEFORE sorting, not at join time: a dict handed to
+    # `intent_from_dict` directly (it is public, and the place_* mains catch
+    # only ValueError) can carry a non-string key, and both `sorted` over
+    # mixed types and `join` over non-strings raise TypeError -- which would
+    # traceback past the callers instead of becoming their exit 2.
+    bad = sorted(str(k) for k in set(obj) - set(allowed))
     if bad:
         raise IntentError(f"{where}: unknown key(s) {', '.join(bad)}. "
-                          f"Known: {', '.join(sorted(allowed))}")
+                          f"Known: {', '.join(sorted(map(str, allowed)))}")
 
 
 def _entry_context(entry, where: str) -> None:
@@ -370,19 +388,14 @@ def load_intent(path: str) -> Intent:
 
 
 def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
-    _reject_unknown(raw, _TOP_LEVEL_KEYS, 'top level')
-
-    schema = raw.get('schema')
-    if schema != SCHEMA_VERSION:
-        raise IntentError(
-            f"schema {schema!r}: this build reads schema {SCHEMA_VERSION}")
-    # Refused BEFORE anything else is read: the point of the field is that a
-    # build which cannot act on the file must not grade it, and grading it
-    # halfway is the same wrong answer as grading it fully.
+    # FIRST, ahead of the unknown-key and schema checks. A build that declares
+    # a new field almost always declares a new TOP-LEVEL one, so checking the
+    # key set first means the actionable "this build is too old, upgrade"
+    # message is exactly the one an author never sees -- they get "unknown
+    # key(s) zones" and go looking for a typo that is not there.
     #
-    # Note the field works in the backwards direction from the day it lands:
-    # a build older than this one refuses `min_reader` as an unknown
-    # top-level key, which is exactly the intended answer.
+    # Grading such a file halfway is the same wrong answer as grading it
+    # fully, so nothing else is read until this passes.
     min_reader = raw.get('min_reader')
     if min_reader is not None:
         if not isinstance(min_reader, int) or isinstance(min_reader, bool):
@@ -394,6 +407,13 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
                 f"{READER_VERSION}. The intent declares a claim this build "
                 f"would not act on, and grading it would report clean on a "
                 f"constraint that was never checked -- upgrade instead")
+
+    _reject_unknown(raw, _TOP_LEVEL_KEYS, 'top level')
+
+    schema = raw.get('schema')
+    if schema != SCHEMA_VERSION:
+        raise IntentError(
+            f"schema {schema!r}: this build reads schema {SCHEMA_VERSION}")
 
     kind = raw.get('kind')
     if kind != KIND:
@@ -437,6 +457,7 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
             exclusive=bool(b.get('exclusive', False)),
             tolerance_mm=b.get('tolerance_mm'),
             note=b.get('note', '') or '',
+            context=b.get('context') or {},
         ))
         if not blocks[-1].refs and not blocks[-1].group:
             raise IntentError(

@@ -169,14 +169,20 @@ def _emitted_connector_keys():
                 keys |= dict_keys(node.value)
         elif isinstance(node, ast.AugAssign) and is_entry(node.target):
             keys.add(node.target.slice.value)
-        # conns.append({...})
-        elif (isinstance(node, ast.Call)
-              and isinstance(node.func, ast.Attribute)
-              and node.func.attr == 'append'
-              and isinstance(node.func.value, ast.Name)
-              and node.func.value.id == 'conns'
-              and node.args and isinstance(node.args[0], ast.Dict)):
-            keys |= dict_keys(node.args[0])
+        # conns.append({...}), entry.update({...}), entry.setdefault('k', ..)
+        elif isinstance(node, ast.Call) and isinstance(node.func,
+                                                       ast.Attribute):
+            recv = node.func.value
+            named = isinstance(recv, ast.Name) and recv.id in ('conns', 'entry')
+            if not named or not node.args:
+                continue
+            if node.func.attr in ('append', 'update') and isinstance(
+                    node.args[0], ast.Dict):
+                keys |= dict_keys(node.args[0])
+            elif node.func.attr == 'setdefault' and isinstance(
+                    node.args[0], ast.Constant) and isinstance(
+                    node.args[0].value, str):
+                keys.add(node.args[0].value)
     return keys
 
 

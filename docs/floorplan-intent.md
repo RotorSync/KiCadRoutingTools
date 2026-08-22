@@ -116,7 +116,7 @@ source, suspect, suspect_reason
 | `edge_connectors[].overhang_mm` | `min`, `max` |
 | `decaps` | `max_distance_mm`, `exempt`, `search_radius_mm` |
 | `legality_budget` | `overlap_area`, `oob_count`, `oob_amount` (`oob_area` refused — see below) |
-| `health` | `bus_corridors`, `classes`, `block_displacement_mm`, `ignore_net_ids`, `max_fanout`, `zoned_blocks`, `affinity_exempt_nets` |
+| `health` | `bus_corridors`, `classes`, `block_displacement_mm`, `ignore_net_ids`, `max_fanout`, `zoned_blocks`, `affinity_exempt_nets`, `affinity_exempt_net_ids` |
 | `health.bus_corridors[]` | `name`, `nets`, `width_mm` |
 | `severity` | any of the 12 rule names below |
 | `overlap_waivers[]` | `pair`, `reason`, `context` |
@@ -169,9 +169,20 @@ grading it halfway is the same wrong answer as grading it fully. A build older
 than the field itself refuses `min_reader` as an unknown top-level key, which
 is the same answer.
 
-The policy: an additive nested field is inert on an older build and needs no
-`min_reader`. A field whose ABSENCE changes the verdict carries one, and
-`READER_VERSION` bumps in the commit that adds it.
+The policy, and what each half is for. Refusing unknown keys already covers
+**new** fields: an older build does not know the key, so it refuses the file
+outright and says which key it did not understand. That is loud, automatic,
+and needs no `min_reader`.
+
+What refusal cannot see is a key an older build *does* know:
+
+- its accepted **values** widened (a new `edge` direction, a new `class`);
+- its **meaning** changed, so an old build acts on it differently;
+- a **default** changed, so the same file grades differently than intended.
+
+Those are what `min_reader` is for, and the file's author is the only one who
+can know it applies. `READER_VERSION` bumps in the commit that makes such a
+change, and files depending on it declare `min_reader`.
 
 ### `refs` is the primitive, not `group`
 
