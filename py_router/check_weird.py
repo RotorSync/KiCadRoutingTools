@@ -38,6 +38,14 @@ Categories:
                      Zone-connected copper counts as connected (the island
                      unions with everything in its zone outline). Size = the
                      island's total copper length.
+  narrow-pad-joint   a degree-1 terminal cap that overlaps a same-net pad only
+                     near a CORNER, so the two join through a copper web
+                     thinner than the board's min-track floor (issue #416).
+                     DRC-clean and connected, but the joint can etch open --
+                     KiCad's own `connection_width` class. Reported with NO
+                     size, so --tolerance never filters it (as for soft-joint:
+                     for a web, THINNER is worse, so a size filter would drop
+                     the severe findings and keep the marginal ones).
 
 This script NEVER modifies the board (read-only; nothing is written back).
 Net 0 (unconnected) copper is skipped -- "same-net" semantics do not apply.
@@ -65,7 +73,7 @@ from pcb_modification import _point_anchored, _prune_net_cycles, _pt_seg_dist
 
 CATEGORIES = ['dangling-end', 'soft-joint', 'redundant-cycle',
               'removable-segment', 'stacked-copper', 'unsupported-via',
-              'dangling-via', 'orphan-island']
+              'dangling-via', 'orphan-island', 'narrow-pad-joint']
 # Cost cap for the per-segment removable scan (spec: skip unless --thorough).
 MAX_SEGS_PER_NET = 500
 _CELL = 1.0  # spatial-grid cell (mm) fed to _point_anchored, as in the pruner
@@ -605,8 +613,14 @@ def _check_terminal_web(pcb_data, net_id, name, net_segs, net_pads, floor,
                 nlx, nly, elx, ely, target.size_x / 2.0, target.size_y / 2.0, r, e)
             if is_neck and terminal_web_neck_exact(
                     pcb_data, net_id, s.layer, ex, ey, floor) is not False:
+                # size=None: narrow pad joints bypass the --tolerance
+                # filter, for the same reason soft joints do (see the note in
+                # _check_soft_joints). Every magnitude available here is
+                # INVERTED against severity -- a THINNER web is a worse
+                # etch-open -- so a size filter would drop the severe findings
+                # and keep the marginal ones.
                 findings.append(_finding(
-                    'narrow_pad_joint', name, s.layer, ex, ey,
+                    'narrow-pad-joint', name, s.layer, ex, ey,
                     f"terminal cap joins pad {target.component_ref}."
                     f"{target.pad_number} through a copper web below the "
                     f"{floor:.3f}mm min-track floor (connection_width hazard)",
@@ -695,7 +709,13 @@ def print_report(findings: List[Dict], skipped_nets: List[Tuple[str, int]],
         by_cat[f['category']].append(f)
     if findings:
         print(f"\nFOUND {len(findings)} WEIRD THINGS:\n")
-        for cat in CATEGORIES:
+        # CATEGORIES is hand-maintained, so a check whose category was
+        # never registered would print NOTHING while still counting toward the
+        # headline and the exit code (#696: that shipped, and blocked DONE with
+        # nothing on screen to act on). Report the strays too, after the
+        # registered ones, so a future omission can only ever cost ordering.
+        unregistered = [c for c in sorted(by_cat) if c not in CATEGORIES]
+        for cat in CATEGORIES + unregistered:
             items = by_cat.get(cat, [])
             print(f"  {cat}: {len(items)}")
             limit = len(items) if (max_print is not None and max_print <= 0) \
@@ -722,7 +742,8 @@ def main():
     parser = argparse.ArgumentParser(
         description='Check PCB for weird copper hygiene issues '
                     '(dangles, soft joints, loops, removable/stacked copper, '
-                    'floating vias). Read-only: never modifies the board.')
+                    'floating vias, narrow pad joints). Read-only: never '
+                    'modifies the board.')
     parser.add_argument('pcb', help='Input PCB file')
     parser.add_argument('--nets', '-n', nargs='+', default=None,
                         help='Net name patterns to check (fnmatch wildcards '
@@ -734,7 +755,9 @@ def main():
                         help='Minimum finding size in mm (dangle/tail length, '
                              'gap, duplicated-copper length, via diameter); '
                              'smaller findings are dropped. Default 0.1; use '
-                             '0 to report everything.')
+                             '0 to report everything. soft-joint and '
+                             'narrow-pad-joint carry no size and are ALWAYS '
+                             'reported -- for those, smaller is worse.')
     parser.add_argument('--max-print', type=int, default=20,
                         help='Max findings printed per category '
                              '(<=0 prints all; default 20)')
