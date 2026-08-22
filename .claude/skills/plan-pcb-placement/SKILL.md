@@ -1078,6 +1078,13 @@ area**. Schematic sheets usually are not: on one 4-layer corpus board all ten sh
 bounding boxes overlap each other, so `--emit-intent` claims a zone for only 4 of 10 and
 says why for the rest.
 
+A misspelled key is **refused**, at every level of the file and including
+`severity` keys — you will be told the key that was wrong and the ones that
+were accepted, so fix the spelling rather than assuming the claim landed.
+Reasoning about *why* a claim is what it is goes in `context`, which every
+entry accepts and nothing grades; do not put it in `note`, which is read for
+the substring `SUSPECT`.
+
 `--health` adds the routability signals: how far each block sits from the parts
 it connects to, and what crosses each declared bus corridor. Advisory — they say
 the floorplan will fight the router, not that it breaks your intent.

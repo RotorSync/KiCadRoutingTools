@@ -585,6 +585,16 @@ parts worth knowing from here:
 - **`oob_area` cannot be budgeted.** It is measured against the bbox inset, so a
   part sitting entirely inside a cutout scores `0.0`. Refused at load time with
   that reason; use `oob_count` / `oob_amount`.
+- **An unknown key is refused at every level of the intent** (#710), and so is a
+  `severity` key that is not a rule name. Same reason as `block_unresolved`, one
+  level down: a typo'd key that is silently dropped is a constraint the author
+  believes they set and the grader never checks. `context` is the one exception,
+  open by design at the top level and on every entry, because provenance with
+  nowhere to go ends up in a key that IS graded.
+- **`schema` is the format number; `min_reader` is the field vocabulary.** An
+  intent sets `min_reader` when a claim must not be silently ignored, and a
+  build whose `READER_VERSION` is lower refuses the file instead of grading it
+  without the claim.
 
 One thing `--emit-intent` will not do: claim a `zone` for a sheet block. A
 schematic sheet is a *functional* grouping, so its members scatter and all ten of
