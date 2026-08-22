@@ -17,6 +17,15 @@ import subprocess
 import sys
 import tempfile
 
+#: #716: this test gives its OWN subprocess `timeout=3600` (below), so under
+#: run_all's 600 s default it was killed at 600 s -- long before its internal
+#: limit could fire -- and reported a machine-speed fact as a code fact. The
+#: budget declaration added in #691 was written FOR this test and
+#: test_obstacle_map_balance, and neither actually declared one; measured on the
+#: #691 branch, this still timed out at 600 s. Matches the internal budget so
+#: the subprocess limit is the one that governs.
+RUN_ALL_TIMEOUT = 3600
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # placement split

@@ -142,8 +142,12 @@ LIST_FLAGS = {
     # #486: route.py's coplanar-waveguide net allowlist (nargs='+' globs).
     # LIST, not FLAG_PARAMS -- as a scalar flag only the FIRST pattern survived.
     '--coplanar-nets': 'coplanar_nets',
-    # #284/#521: rip-existing and protect allowlists (nargs='+' globs). Both
-    # route to TextCtrls via ai_plan's alias table.
+    # #284: the rip-existing allowlist (nargs='+' globs), routed to a TextCtrl
+    # via ai_plan's alias table. #521's `--protect-nets` was REMOVED from every
+    # tool in 53a5a16e and is deliberately absent here: it had no LIST_FLAGS
+    # entry, so the conversion loop would have raised KeyError on any manifest
+    # carrying it. Protection is now recorded in the .kicad_pro by the step that
+    # routes a matched group or diff pair, not passed as a flag.
     '--rip-existing-nets': 'rip_existing_nets',
     # bga_fanout's future-pour declaration (NET:LAYER[,LAYER...] specs,
     # nargs='+'). Review parity finding 5: a recorded manifest carrying the
@@ -406,7 +410,7 @@ def parse_command(argv):
         step['nets'] = [str(n) for n in nets] or ['*']
     for k in ('--power-nets', '--power-nets-widths', '--layer-costs',
               '--layers', '--polarity-swap-nets', '--coplanar-nets',
-              '--rip-existing-nets', '--protect-nets'):
+              '--rip-existing-nets'):
         if k in lists:
             step['params'][LIST_FLAGS[k]] = lists[k]
     return step
