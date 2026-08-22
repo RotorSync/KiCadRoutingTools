@@ -19,6 +19,7 @@ Two invariants, both of which were violated:
    suite left modified tracked files in the working tree.
 """
 
+import ast
 import os
 import re
 import subprocess
@@ -140,6 +141,256 @@ def test_no_test_reads_an_untracked_board_directly():
     print("  PASS: no test reads an untracked kicad_files/ board directly")
 
 
+#: Tests whose coverage depends on a board under the GITIGNORED `wk/` work
+#: tree. Registered, not merely tolerated.
+#:
+#: #718 item 5: absent those boards each of these `skipTest()`s and the FILE
+#: STILL EXITS 0 -- green while covering nothing. That is how item 3 of the same
+#: issue (a sub-test pinning custom-pad tessellation that 6166a98b deliberately
+#: reverted) stayed invisible on every machine but the reporter's, and it makes
+#: the suite's green/red state machine-dependent in a way nothing reported.
+#: `test_no_test_reads_an_untracked_board_directly` cannot see this class: its
+#: regexes scan `kicad_files/` only.
+#:
+#: These boards are stress/placement-run OUTPUTS, not fixtures -- there is no
+#: recipe to add, so the contract here is DISCLOSURE, not reproducibility. The
+#: guard holds the map in BOTH directions: a new `wk/` dependency must be
+#: declared, AND a registration that no longer matches the source is reported.
+#: One direction is not enough -- a stale registration passed the #696
+#: containment guard 28/28 while the thing it named had moved.
+_WK_DEPENDENT = {
+    'test_outline_prefilter.py': ['wk/run19/urchin/base.kicad_pcb'],
+    'test_part_class.py': ['wk/b2/tigard__swap/d0/perturbed.control.kicad_pcb',
+                           'wk/b2/tigard__swap/d0/perturbed.kicad_pcb'],
+    'test_place_reconstruct.py':
+        ['wk/b2/tigard__swap/d0/perturbed.control.kicad_pcb',
+         'wk/b2/tigard__swap/d0/perturbed.kicad_pcb'],
+    'test_placement_pad_legality.py':
+        ['../wk/b2/tigard__swap/d0/perturbed.kicad_pcb'],
+    'test_run20_run_watch.py': ['wk/run20'],
+    'test_run4_custom_pad_circle.py': ['wk/run3/final2.kicad_pcb'],
+    'test_run4_reconstruct.py': ['wk/b2/tigard__swap/d0/perturbed.kicad_pcb'],
+    'test_run5_emit_guard.py': ['wk/b2/tigard__swap/d0/perturbed.kicad_pcb'],
+    'test_run5_exchange.py': ['wk/b2/tigard__swap/d0/perturbed.kicad_pcb'],
+    'test_run6_backlog.py': ['wk/run5/s1_pour.kicad_pcb'],
+    'test_run6_body_overlap.py': ['wk/run2/original/tigard_v10.kicad_pcb',
+                                  'wk/run5/final5.kicad_pcb'],
+    'test_run6_check_assembly.py':
+        ['wk/b2/tigard__swap/d0/perturbed.kicad_pcb',
+         'wk/run2/original/tigard_v10.kicad_pcb',
+         'wk/run5/final5.kicad_pcb'],
+    'test_run7_vectors.py': ['wk/b2/tigard__swap/d0/perturbed.kicad_pcb'],
+    'test_run8_airwire_refuted.py':
+        ['wk/run7/glasgow_revC/perturbed.kicad_pcb'],
+    'test_run8_oob_outline.py': ['wk/run7/glasgow_revC/perturbed.kicad_pcb'],
+    'test_run8_rigid_consistency.py':
+        ['wk/run7/glasgow_revC/perturbed.control.kicad_pcb',
+         'wk/run7/glasgow_revC/perturbed.kicad_pcb',
+         'wk/run7/glasgow_revC/rL_repair.kicad_pcb'],
+    'test_run8_starved_face_gate.py': ['wk/run7/glasgow_revC'],
+}
+
+#: `os.path.join(<repo root>, 'a', 'b')` with every component after the base a
+#: literal. Applied to `_code_only` output, which puts each call on one line;
+#: the whitespace collapse keeps it working on raw text as a fallback.
+_JOIN_RE = re.compile(
+    r"""os\.path\.join\(\s*([A-Za-z_][A-Za-z0-9_.()'"\[\], ]*?)\s*,\s*"""
+    r"""((?:'[^']*'|"[^"]*")\s*(?:,\s*(?:'[^']*'|"[^"]*")\s*)*)\)""")
+
+#: One single- or double-quoted string literal.
+_STR_RE = re.compile(r"'[^']*'" + r'|"[^"]*"')
+
+_ROOT_BASES = ('ROOT', 'REPO', 'ROOT_DIR')
+
+#: A subprocess argv list literal -- `[sys.executable, ..., <path>, ...]`.
+_ARGV_RE = re.compile(r"\[[^\[\]]*sys\.executable[^\[\]]*\]")
+
+#: `os.path.join(<repo root>, <bare identifier>)`: the repo root joined with a
+#: script name only known at runtime.
+_JOIN_VAR_RE = re.compile(
+    r"os\.path\.join\(\s*(?:ROOT|REPO|ROOT_DIR)\s*,\s*"
+    r"[A-Za-z_][A-Za-z0-9_]*\s*\)")
+
+#: Tests that legitimately join the repo root with a VARIABLE inside a
+#: subprocess argv. Declared with the reason, and held in both directions.
+_ROOT_JOIN_ARGV_OK = {
+    'test_431_skill_commands.py':
+        'its `tool` values come from discovered_tools(), which yields paths '
+        'ALREADY qualified by directory ("py_router/route.py") straight out '
+        'of the skill text and filters them through os.path.isfile -- so the '
+        'join is over a relative path, not a bare basename.',
+}
+
+
+def _code_only(src):
+    """`src` with comments and docstrings gone, so PROSE cannot be scanned.
+
+    These gates match path expressions, and a path expression written inside a
+    docstring to EXPLAIN the defect is not an instance of it -- the first draft
+    of test_no_test_spawns_a_script_that_moved flagged its own docstring. Round
+    tripping through ast drops every comment and, once the docstring nodes are
+    removed, every docstring; real string literals in code survive, which is
+    the point. On a syntax error, fall back to the raw text: a gate that goes
+    quiet on a file it cannot parse is worse than one that is slightly noisy.
+    """
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:                                    # pragma: no cover
+        return src
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                 ast.AsyncFunctionDef)):
+            continue
+        body = node.body
+        if (body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            node.body = body[1:] or [ast.Pass()]
+    ast.fix_missing_locations(tree)
+    return ast.unparse(tree)
+
+
+def _test_files():
+    here = os.path.dirname(os.path.abspath(__file__))
+    for fname in sorted(os.listdir(here)):
+        if fname.startswith('test_') and fname.endswith('.py'):
+            with open(os.path.join(here, fname), encoding='utf-8') as fh:
+                yield fname, _code_only(fh.read())
+
+
+def _joins(src):
+    """(base_expr, [literal, ...]) for every literal os.path.join in `src`."""
+    flat = re.sub(r'\s+', ' ', src)
+    for m in _JOIN_RE.finditer(flat):
+        lits = [x[1:-1] for x in _STR_RE.findall(m.group(2))]
+        yield m.group(1).strip(), lits
+
+
+def _scan_wk_deps():
+    """file -> sorted board paths it resolves out of the REPO's `wk/`.
+
+    Only joins rooted at the repo count. A test that builds a `wk` inside its
+    own tempdir (`os.path.join(td, 'wk')` -- test_provenance_audit,
+    test_blind_stage_identity, test_run15_handback_contract) depends on nothing
+    external and must NOT be swept in.
+    """
+    found = {}
+    for fname, src in _test_files():
+        for base, lits in _joins(src):
+            if 'wk' not in lits:
+                continue
+            if base not in _ROOT_BASES and '__file__' not in base:
+                continue
+            found.setdefault(fname, set()).add('/'.join(lits))
+    return {k: sorted(v) for k, v in found.items()}
+
+
+def test_wk_dependent_tests_are_declared():
+    """#718 item 5: a test that silently skips is not coverage -- name it."""
+    found = _scan_wk_deps()
+    unregistered = sorted(set(found) - set(_WK_DEPENDENT))
+    departed = sorted(set(_WK_DEPENDENT) - set(found))
+    changed = sorted(f for f in set(found) & set(_WK_DEPENDENT)
+                     if found[f] != sorted(_WK_DEPENDENT[f]))
+    assert not unregistered, (
+        "test(s) reading a board out of the gitignored wk/ work tree without "
+        "declaring it:\n  " + "\n  ".join(
+            f"{f}: {', '.join(found[f])}" for f in unregistered)
+        + "\nAbsent that board the test skipTest()s and the file still exits "
+          "0 -- green while covering nothing. Add it to _WK_DEPENDENT so the "
+          "dependency is on the record, or use a tracked board.")
+    assert not departed, (
+        "_WK_DEPENDENT names file(s) that no longer read a wk/ board:\n  "
+        + "\n  ".join(departed) + "\nA stale registration is a guard that "
+        "passes while covering nothing -- drop the entry.")
+    assert not changed, (
+        "_WK_DEPENDENT is out of date for:\n  " + "\n  ".join(
+            f"{f}: declared {sorted(_WK_DEPENDENT[f])} != found {found[f]}"
+            for f in changed))
+    absent = sorted(
+        f for f, boards in found.items()
+        if any(not os.path.exists(
+            os.path.normpath(os.path.join(ROOT, b))) for b in boards))
+    print(f"  PASS: {len(found)} wk/-dependent test file(s) declared")
+    if absent:
+        print(f"  NOTE: {len(absent)} of them are INERT on this machine (the "
+              f"wk/ board is absent) -- they report PASS while covering "
+              f"nothing:")
+        for f in absent:
+            print(f"          {f}")
+
+
+def test_no_test_spawns_a_script_that_moved():
+    """#718 item 1: spawning a CLI at a path the #522 reorg vacated.
+
+    CPython writes `can't open file ...: [Errno 2]` to STDERR and exits 2, so a
+    test asserting on STDOUT fails as a bare AssertionError that reads like a
+    product bug, and one asserting `returncode == 0` reads exit 2 as the tool's
+    own. test_run6_backlog and test_run5_exchange were correct on their
+    branches and went stale on MERGE -- which is why ed779096's sweep missed
+    them, and why this is a standing gate rather than another sweep.
+
+    TWO forms, because one of them is what actually shipped:
+
+    * LITERAL -- `os.path.join(ROOT, 'route.py')`. Decided exactly: an offender
+      is a name that is NOT at the root but IS where the shipped resolver
+      looks. A literal that resolves nowhere (test_krt_capabilities' deliberate
+      `no_such_file.py`) is a negative control, not a stale path.
+
+    * VARIABLE -- `os.path.join(ROOT, script)` inside a subprocess argv, which
+      is the form BOTH #718 offenders used. `run_utils.tool`'s docstring says a
+      static lint cannot do this job, and it is right that the *value* is only
+      knowable at runtime -- but the SHAPE is not. Joining the repo root with a
+      bare script name is the assumption #522 falsified, so the shape is the
+      defect, and the few legitimate uses are declared below. Scoped to
+      subprocess argv on purpose: `os.path.join(ROOT, _p522)` for a sys.path
+      insert is the same shape and is not a spawn (46 such joins across the
+      suite, 1 of them an argv).
+    """
+    sys.path.insert(0, ROOT)
+    from krt_capabilities import _tool_path
+    offenders = []
+    argv_var = set()
+    for fname, src in _test_files():
+        flat = re.sub(r'\s+', ' ', src)
+        for base, lits in _joins(src):
+            if base not in _ROOT_BASES or len(lits) != 1:
+                continue
+            name = lits[0]
+            if not name.endswith('.py'):
+                continue
+            if os.path.isfile(os.path.join(ROOT, name)):
+                continue
+            resolved = _tool_path(ROOT, name)
+            if os.path.isfile(resolved):
+                offenders.append(
+                    f"{fname}: spawns ROOT/{name} (literal), which lives at "
+                    f"{os.path.relpath(resolved, ROOT)}")
+        for m in _ARGV_RE.finditer(flat):
+            if _JOIN_VAR_RE.search(m.group(0)):
+                argv_var.add(fname)
+    undeclared = sorted(argv_var - set(_ROOT_JOIN_ARGV_OK))
+    departed = sorted(set(_ROOT_JOIN_ARGV_OK) - argv_var)
+    offenders += [
+        f"{f}: spawns os.path.join(ROOT, <variable>) -- the shape #522 "
+        f"falsified" for f in undeclared]
+    assert not offenders, (
+        "test(s) spawning a CLI at a path the #522 reorg vacated:\n  "
+        + "\n  ".join(offenders)
+        + "\nUse tests/run_utils.tool() / tool_env(), which resolve the tool "
+          "wherever it is and RAISE by name when it is absent, instead of "
+          "dying into an empty stdout three frames away. If the variable "
+          "genuinely carries a directory-qualified path, declare it in "
+          "_ROOT_JOIN_ARGV_OK with the reason.")
+    assert not departed, (
+        "_ROOT_JOIN_ARGV_OK declares file(s) that no longer join ROOT with a "
+        "variable in an argv:\n  " + "\n  ".join(departed)
+        + "\nDrop the entry -- an exemption for something that stopped "
+          "happening is a hole nobody is watching.")
+    print(f"  PASS: no test spawns a root-level script the reorg moved "
+          f"({len(_ROOT_JOIN_ARGV_OK)} declared exemption)")
+
+
 def test_fixtures_build_from_a_clean_state():
     """End to end: every fixture is producible right now."""
     for name in _RECIPES:
@@ -167,6 +418,8 @@ TESTS = [
     test_no_tracked_project_file_without_its_board,
     test_consumers_do_not_silently_skip_a_missing_fixture,
     test_no_test_reads_an_untracked_board_directly,
+    test_wk_dependent_tests_are_declared,
+    test_no_test_spawns_a_script_that_moved,
     test_fixtures_build_from_a_clean_state,
     test_building_a_fixture_leaves_no_tracked_file_modified,
 ]
