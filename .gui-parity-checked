@@ -1,93 +1,85 @@
-0fd0a991 2026-08-19 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
-Audit 972131a4..0fd0a991 on main. NO GAP FOUND. Five gates green, all five
-reproducing the previous audit's numbers exactly (8407/402/0 and 12/0,
-8/15/1/0/0/0, 188 keys, 10/10, 1267/128 copper-identical).
+aaa60331 2026-08-22 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit 0fd0a991..aaa60331 on main, for the v0.21.3 release. NO GAP FOUND.
+Seven gates green (five carried forward plus two new ones).
 
-THE SURFACE. Six commits. Two are mine and touch tests/stress/ only (#663's
---defaults int coercion and the cloud_arms_to_sweep bridge) -- no front-end
-surface at all. The other four are #653 (env-knob logging), #654 (the KiCad
-refill cross-check always states what it did), d4831b93 (the exact-fill refill
-re-launched pcbnew instead of running a script) and the previous ledger entry.
+THE SURFACE. 40 commits, but most of the volume is py_placer/ and py_tools/
+(PRs #689/#690/#691/#715: reachability JSON, review instruments, the recovery
+harness, the capacity engine) -- a separate subsystem from routing an already
+placed board, with no routing front-end surface. Checked mechanically rather
+than assumed, across the whole range:
 
-Checked mechanically, not assumed: NO new `add_argument` anywhere in
-py_router/ across the range, no new engine kwarg at a front-end boundary, and
-the only new results-data key is `env_knobs` (below).
+  * NO new `add_argument` anywhere in py_router/.
+  * NO new engine kwarg at a front-end boundary (batch_route,
+    batch_route_diff_pairs, create_plane, generate_*_fanout signatures).
+  * NO new results_data key.
+  * NET default change: ZERO. DIRECTION_PREFERENCE_COST went 250 -> 5
+    (be73378b, #663) and back to 250 (aaa60331) inside this range, so the
+    range is a no-op on defaults; only the comment differs. The previous
+    ledger entry had already established this is a ONE-CONSTANT change with no
+    GUI mirroring owed (every front-end site reads it from `defaults`), which
+    is exactly why the revert needed no GUI work.
 
-#653 SPLITS ACROSS THE BOUNDARY, AND THE HALVES LAND DIFFERENTLY. This is the
-one thing in the range that needed real checking rather than a glance:
+TWO NEW ENV KNOBS, both CLASS-FREE by construction: KICAD_FANOUT_AUTO_DOGBONE
+(#669, default OFF) and KICAD_INRUN_FLOOR_SYNC (#650, default ON). Both are
+read via env_knobs INSIDE shared engine functions -- the fanout core and
+batch_route respectively -- so both fronts observe them identically from the
+environment. No dialog control, no FLAG_PARAMS row, nothing to mirror. This is
+the same status as the existing ORACLE_UNION / LEGACY_ORACLE knobs.
 
-  * route.py:3520 and route_diff.py:1515 add `summary['env_knobs']` INSIDE
-    batch_route / batch_route_diff_pairs -- the shared engine functions both
-    fronts call. The GUI gets the key for free; Class-1 shape from CLAUDE.md.
-  * route_planes.py:4599 and repair_planes.py:3654 add the same key in
-    `main()`, i.e. CLI-only. NOT a gap: the planes/repair GUI paths call the
-    shared engines with return_results and emit no JSON_SUMMARY at all, so
-    there is no GUI artifact for the key to be missing from. Report-only,
-    mutates no board -- which is why test_cli_postpass_coverage still reads
-    8/15/1/0/0/0 rather than flagging a new Class-2 post-pass.
-  * cli_banner.install() is CLI-only BY CONSTRUCTION and says so in its own
-    docstring ("The GUI never calls install(), so no GUI path changes"). It
-    prints a CMD/EXIT banner and patches ArgumentParser.error for the
-    dash-leading-net-name hint; a GUI has no command line and no argparse, so
-    there is nothing to mirror.
-  * bga_fanout.py / qfn_fanout.py print the knob line directly in `__main__`
-    because those two fronts do not install the banner. Same CLI-only status,
-    and the fanout GUI tab is unaffected.
+#688 IS THE INVERTED CASE AGAIN (like d4831b93 last time): a GUI bug fixed in
+a SHARED module. The routing WORKER thread called pcbnew.SaveBoard -- a
+wx-backed C++ call -- while the UI thread sat in ShowModal, deadlocking the
+plugin on Windows (py-spy named both sides). The guard lives ENGINE-side in
+py_router/ui_thread.py because the engine makes such calls of its own (the
+live-fill provider in kicad_parser, reached from exact_unconnected and
+plane_fragility every oracle round), so it could not live only in
+kicad_routing_plugin/. wx is imported lazily; the CLI has no wx and degrades
+to a direct call. gui_utils.save_board_via_ui_thread is a thin alias, so there
+is ONE implementation. Parity direction: CLI-was-fine, GUI-was-broken,
+shared-module-fix.
 
-d4831b93 IS A GUI FIX LIVING IN A SHARED MODULE, which is the inverted case
-worth naming. `kicad_exact_fill._this_interpreter()` replaces bare
-`sys.executable` in kicad_python_candidates(), because inside KiCad's embedded
-python sys.executable is the pcbnew HOST BINARY -- spawning it opened the
-application once per call instead of running the refill script. The fix is in
-the shared resolver, so both fronts pick it up and the front that was BROKEN
-is the GUI. No wiring needed; the parity direction here is CLI-was-fine,
-GUI-was-broken, shared-module-fix.
+#693 IS GUI-ONLY BY NATURE and is the one range item that WAS a real gap:
+"Fix DRC settings after routing" gated apply_targets_to_board but NOT
+update_live_drc_floors, at ALL FIVE call sites (signal/planes/diff/fanout tabs
++ the plan executor), so an unchecked box still rewrote the board's Board
+Setup floors. The CLI has always gated its twin (fix_project_for_output) on
+--no-fix-drc-settings, so this was the GUI diverging FROM the CLI, and the fix
+restores parity rather than creating it. Two sites needed more than a gate:
+fanout's get_shared_params() never carried the flag at all, and ai_plan.py had
+no notion of it -- on both, a bare .get('fix_drc_settings', True) would have
+been a silent no-op. Now covered by a dedicated gate (below).
 
-#654 IS CHECKER-SIDE ONLY. reconcile_status_line() and the run_connectivity_
-check reporting live in check_connected.py's report path. The GUI imports
-exactly one symbol from that module -- check_net_connectivity (swig_gui.py:
-2266) -- which the range does not touch (verified: the diff adds
-reconcile_status_line and edits run_connectivity_check, nothing else). No GUI
-counterpart is owed for a CLI report line.
+#650's in-run floor sync lives in batch_route (shared), so both fronts get it
+free -- Class-1 shape. Its two call sites are inside the engine function, not
+in a CLI main(), which is why test_cli_postpass_coverage still reads
+8/15/1/0/0/0 rather than flagging a new Class-2 post-pass.
 
-THE DEFAULT-CONSTANT CHECK THAT CAME OUT CLEAN, recorded because the #663 work
-needed it and the next person will too: DIRECTION_PREFERENCE_COST is read from
-`defaults` at every front-end site -- swig_gui.py:954 (the control's default),
-swig_gui.py:2570 (inside reset_params_to_defaults, verified by locating the
-enclosing def, not by proximity), differential_gui.py:1009, and both argparse
-defaults. manifest_to_plan has no FLAG_PARAMS row for
---direction-preference-cost, but its generic fallthrough derives exactly the
-control name: converting the one corpus manifest that carries the flag
-(runs_set3/orangecrab) yields direction_preference_cost=5 on plan steps 11, 12
-and 14. So changing that default is a ONE-CONSTANT change, with no GUI
-mirroring and no FLAG_PARAMS row required.
+GATES, run on a tree verified clean by git status, with KiCad python 10.0.0
++ wx 4.2.2 probed live before running (the ledger's standing instruction):
 
-A REAL DUPLICATION FOUND, not a parity gap but adjacent and easy to trip over:
-routing_config.py:287 hardcodes `direction_preference_cost: int = 250` instead
-of reading routing_defaults, and the oracle-weld and plane sub-configs
-(route.py:3673, route.py:4216, route_planes.py, repair_planes.py) build a
-fresh GridRouteConfig field-by-field and never pass the parameter. So
---direction-preference-cost -- which the skill and every tuned plan pass --
-has only ever reached signal routing; the weld/tap legs run at 250 on BOTH
-fronts. Both fronts agree, so parity holds; it is logged here because a future
-default change made only in routing_defaults would silently not reach those
-legs.
-
-GATES, all run on a tree verified clean by git status, KiCad python 10.0.0
-+ wx 4.2.2 probed live before running rather than assumed (the ledger's own
-standing instruction):
-
-  test_manifest_plan_parity      8407 flag-checks / 402 manifests / 0 mismatch
+  test_manifest_plan_parity      8460 flag-checks / 403 manifests / 0 mismatch
                                  12 params checked, 0 unresolved
   test_cli_postpass_coverage     8 registered, 15 in active CLI use,
                                  1 CLI-only acknowledged, 0 unreachable, 0 fail
   test_settings_roundtrip        188 keys; save / restore / legacy / re-save OK
-  test_fanout_rotated_gui        10/10 (104 tracks both fronts, all outward)
-  test_gui_engine_parity         PARITY; segments 1267=1267, vias 128=128,
-                                 copper sets IDENTICAL
+  test_fanout_rotated_gui        10/10 (104 escapes both fronts, all outward)
+  test_gui_engine_parity         PARITY; copper sets IDENTICAL
+  test_live_drc_floors_gated     NEW (#693): all 5 update_live_drc_floors call
+                                 sites gated. Pure AST, ~1s, no wx. Verified as
+                                 a real change detector, not a rubber stamp:
+                                 removing one gate fails it with file+line, and
+                                 it fails loudly if the function is renamed
+                                 rather than silently checking nothing.
+  test_ui_thread_save            NEW (#688): runs a board save from a REAL
+                                 worker thread in both configurations -- UI
+                                 pumping (must complete) and UI not pumping
+                                 (must TIME OUT, not hang). The livechain and
+                                 engine-parity gates drive the engine on the
+                                 MAIN thread, so wx.IsMainThread() is True
+                                 there and neither can catch a regression in
+                                 this guard.
 
-CARRIED FORWARD UNCHANGED from the 972131a4 entry, because nothing in this
-range addresses them: test_gui_engine_parity is still VACUOUS for #549/#498
-(its board has no sibling .kicad_dru) and still blind to diff-pair/impedance
-parameters (its plan is signal+plane). Closing either needs a new fixture
-board, not another audit.
+CARRIED FORWARD UNCHANGED, because nothing in this range addresses them:
+test_gui_engine_parity is still VACUOUS for #549/#498 (its board has no sibling
+.kicad_dru) and still blind to diff-pair/impedance parameters (its plan is
+signal+plane). Closing either needs a new fixture board, not another audit.
