@@ -438,6 +438,21 @@ def main(argv=None):
     ap.add_argument('--json', action='store_true', help='machine-readable report')
     args = ap.parse_args(argv)
 
+    #: Diagnostics that are NOT the verdict -- "there was nothing to check
+    #: against", not "this work dir is clean". They must reach both readers,
+    #: and `--json` has exactly one: the document on stdout. Printing them to
+    #: stderr in JSON mode put a second, non-JSON thing in front of every
+    #: caller that reads stdout+stderr together (tests/test_run15_fence_and_
+    #: channels.py does), so `json.loads` saw "Extra data" and a working audit
+    #: read as a crash. They ride in `notes` instead, and stderr keeps them in
+    #: the human mode where nothing is parsing it.
+    _notes = []
+
+    def _note(msg):
+        _notes.append(msg)
+        if not args.json:
+            print(msg, file=sys.stderr)
+
     if not os.path.isfile(args.control):
         print(f'fence_audit: control not found: {args.control}', file=sys.stderr)
         return 2
@@ -483,10 +498,10 @@ def main(argv=None):
         # projects and made every one of them a hard exit 4. With no staging
         # record there is nothing to compare against, and saying so beats
         # inventing a needle.
-        print('fence_audit: no staging record beside the control '
+        _note('fence_audit: no staging record beside the control '
               '(draw.json/source or stage.json/source_basename), so no '
               'project can be checked for the SOURCE name. Pose scanning '
-              'is unaffected.', file=sys.stderr)
+              'is unaffected.')
     rows = [r for r in scan(args.workdir, control_poses, allow, control_pads,
                             control_stem=_stem)
             if os.path.realpath(os.path.join(args.workdir, r['file'])) != control_real]
@@ -497,18 +512,17 @@ def main(argv=None):
         try:
             manifest = json.load(open(manifest_path, encoding='utf-8'))
         except Exception as exc:
-            print(f'fence_audit: manifest unreadable ({exc}); every '
-                  f'truth-carrying board is reported as a LEAK', file=sys.stderr)
+            _note(f'fence_audit: manifest unreadable ({exc}); every '
+                  f'truth-carrying board is reported as a LEAK')
 
     if args.mode == 'audit' and manifest is None:
         # SAY it. The unreadable-manifest path above warns; the ABSENT one said
         # nothing, so audit silently became strict where create had been silent
         # -- and a reader could not tell "no board carried truth" from "there
         # was no record to check against".
-        print('fence_audit: no creation manifest in this work dir, so no board '
+        _note('fence_audit: no creation manifest in this work dir, so no board '
               'has provenance. Every truth-carrying board will be reported as '
-              'a LEAK. Run --mode create BEFORE the run to record one.',
-              file=sys.stderr)
+              'a LEAK. Run --mode create BEFORE the run to record one.')
 
     at_creation = set((manifest or {}).get('files', []))
     at_creation_shas = (manifest or {}).get('shas') or {}
@@ -601,6 +615,9 @@ def main(argv=None):
         'leaks': leaks,
         'recovered_to_truth': recovered,
         'unparseable': errors,
+        # What could NOT be checked, beside what was. A reader who sees
+        # CLEAN is entitled to know the project channel never ran.
+        'notes': _notes,
         'verdict': 'LEAK' if leaks else 'CLEAN',
     }
     if args.json:
