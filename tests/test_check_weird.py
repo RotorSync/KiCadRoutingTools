@@ -14,7 +14,8 @@ Synthetic Segment/Via/Pad cases:
   * the same cap landing in the pad body -> NOT flagged (clean)
 
 Plus two guards on the REPORTER, which is what #696 actually broke:
-  * every category any _finding(...) emits is registered in CATEGORIES
+  * CATEGORIES is exactly the set of categories _finding(...) emits
+    (both directions: an unregistered emission AND a stale registration)
   * print_report names a category that is NOT in CATEGORIES, and its headline
     count equals the sum of the per-category counts
 
@@ -258,8 +259,12 @@ def main():
     emitted = _emitted_categories()
     results.append(("the source emits categories at all (guard not vacuous)",
                     len(emitted) >= 8))
-    results.append(("every emitted category is registered in CATEGORIES",
-                    bool(emitted) and emitted <= set(CATEGORIES)))
+    # Set EQUALITY, not containment, so the guard holds in both directions.
+    # A registered category nobody emits is the mirror defect: it prints a
+    # permanent `: 0` line that no board can ever produce, and it is exactly
+    # what a rename like this one leaves behind when only one side is edited.
+    results.append(("CATEGORIES is exactly the set of emitted categories",
+                    emitted == set(CATEGORIES)))
 
     stray = [{'category': 'brand-new-category', 'net': NAME, 'layer': 'F.Cu',
               'x': 1.0, 'y': 2.0, 'detail': 'a category nobody registered',
