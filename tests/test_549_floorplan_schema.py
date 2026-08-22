@@ -102,6 +102,87 @@ def test_unknown_keys_are_refused_not_ignored():
     print("  PASS: unknown top-level and per-block keys both refused")
 
 
+def test_unknown_nested_keys_are_refused_not_ignored():
+    """#710: the same principle, one level down.
+
+    The loader used to be strict at exactly two levels -- top-level and
+    `blocks[]` -- and permissive everywhere else, so a typo'd key inside a
+    keepout, an edge connector or `health` loaded clean and constrained
+    nothing. Every case below is a REAL near-miss: `max_setback` for
+    `max_setback_mm`, `bus_corridor` for `bus_corridors`, `exempts` for
+    `exempt`. Each message must name the key that was wrong AND the one that
+    was meant -- a bare "unknown key" leaves the author reading their own
+    typo back.
+    """
+    cases = [
+        (_base(keepouts=[{'name': 'k', 'rect': [0, 0, 1, 1], 'sids': ['F']}]),
+         'sids', 'sides'),
+        (_base(edge_connectors=[{'ref': 'J1', 'max_setback': 2.0}]),
+         'max_setback', 'max_setback_mm'),
+        (_base(edge_connectors=[{'ref': 'J1',
+                                 'overhang_mm': {'min': 0.0, 'maximum': 1.0}}]),
+         'maximum', 'max'),
+        (_base(decaps={'max_distance_mm': 2.5, 'exempts': ['C9']}),
+         'exempts', 'exempt'),
+        (_base(defaults={'zone_tolerance': 0.5}),
+         'zone_tolerance', 'zone_tolerance_mm'),
+        (_base(health={'bus_corridor': []}),
+         'bus_corridor', 'bus_corridors'),
+        (_base(health={'bus_corridors': [{'nets': ['/D*'], 'width': 8.0}]}),
+         'width', 'width_mm'),
+        (_base(envelope={'rect': [0, 0, 100, 80], 'tolerance': 0.5}),
+         'tolerance', 'tolerance_mm'),
+        (_base(overlap_waivers=[{'pair': ['U1', 'U2'], 'because': 'by design'}]),
+         'because', 'reason'),
+    ]
+    # Split on `Known:` before asserting. Checking both halves of the raw
+    # message would pass vacuously on every pair here -- `width` is a
+    # substring of `width_mm`, `ref` of `reff` -- so the typo has to appear
+    # in the REFUSAL half and the correction in the KNOWN half.
+    for raw, typo, meant in cases:
+        msg = _rejects(raw, f"{typo} instead of {meant}")
+        refused, _, known = msg.partition('Known:')
+        assert known, f"message carries no `Known:` list: {msg}"
+        assert typo in refused, (typo, msg)
+        assert meant in known.replace(',', ' ').split(), (meant, msg)
+    # A typo'd `ref` reports the unknown key, not a missing `ref` -- the
+    # author is looking at the key they DID write.
+    msg = _rejects(_base(edge_connectors=[{'reff': 'J1'}]), "reff")
+    refused, _, known = msg.partition('Known:')
+    assert 'reff' in refused, msg
+    assert 'ref' in known.replace(',', ' ').split(), msg
+    print(f"  PASS: {len(cases) + 1} nested typos refused, each naming the "
+          f"key that was meant")
+
+
+def test_a_nested_object_must_be_an_object():
+    """`raw.get(k) or {}` handed a list straight on, so the schema error
+    surfaced as an AttributeError inside a rule three frames later -- or, for
+    a key nothing reads yet, not at all."""
+    for key, value in (('envelope', []), ('defaults', []), ('decaps', 'none'),
+                       ('health', []), ('context', 3), ('severity', []),
+                       ('legality_budget', [])):
+        msg = _rejects(_base(**{key: value}), f"{key}={value!r}")
+        assert key in msg, (key, msg)
+        assert 'object' in msg, (key, msg)
+    print("  PASS: 7 nested objects refuse a list/scalar instead of crashing "
+          "later")
+
+
+def test_context_is_deliberately_open():
+    """The read-only slot. `emit_intent` writes `cutouts` / `file_locked` /
+    `budget_withheld` there, and run artifacts add their own provenance prose
+    (17 distinct keys across the recorded runs). Nothing grades it, so
+    refusing a key here would only push provenance into a key that IS
+    graded -- the worse failure."""
+    i = intent_from_dict(_base(context={
+        'note': 'read-only', 'authored_by': 'run-20',
+        'j7_evidence': 'six of seven pins interior',
+        'budget_withheld': {'overlap_area': 'a blocking body pair'}}))
+    assert i.budget_withheld == {'overlap_area': 'a blocking body pair'}
+    print("  PASS: context accepts arbitrary keys; budget_withheld still read")
+
+
 def test_a_block_needs_refs_or_group():
     msg = _rejects(_base(blocks=[{'name': 'x', 'zone': [0, 0, 1, 1]}]),
                    "a block naming no members")
@@ -245,6 +326,9 @@ TESTS = [
     test_the_wrong_file_is_refused_by_kind,
     test_schema_version_is_enforced,
     test_unknown_keys_are_refused_not_ignored,
+    test_unknown_nested_keys_are_refused_not_ignored,
+    test_a_nested_object_must_be_an_object,
+    test_context_is_deliberately_open,
     test_a_block_needs_refs_or_group,
     test_refs_as_a_bare_string_is_refused,
     test_enumerations_are_checked,
