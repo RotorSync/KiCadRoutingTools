@@ -29,6 +29,20 @@ def set_ui_status_mirror(fn):
 _LAST_UI_YIELD = 0.0
 
 
+def save_board_via_ui_thread(path, board, timeout_s=None):
+    """Plugin-side alias for :func:`ui_thread.save_board_on_ui_thread` (#688).
+
+    The implementation is ENGINE-side because the engine makes worker-thread
+    pcbnew calls of its own (the live-fill provider in
+    ``kicad_parser.build_pcb_data_from_board``), so the guard cannot live only
+    here. See that module for the py-spy evidence and the reasoning.
+    """
+    from ui_thread import save_board_on_ui_thread, SAVE_BOARD_UI_TIMEOUT_S
+    return save_board_on_ui_thread(
+        path, board,
+        SAVE_BOARD_UI_TIMEOUT_S if timeout_s is None else timeout_s)
+
+
 def ui_thread_status(status_text, progress_bar, message):
     """Show `message` for work running ON the wx main thread.
 

@@ -4618,7 +4618,17 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             # #627's GUI-only copper drift (the refill fell back to stock
             # rules; project_from=tmp resolved nothing). stage_live_
             # project_rules re-authors it from the live board, crash-free.
-            _pcbnew.SaveBoard(tmp, _board, aSkipSettings=True)
+            # #688: this provider is invoked BY THE ENGINE (exact_unconnected,
+            # plane_fragility -- every oracle round), which in the GUI means the
+            # routing WORKER thread. A worker-thread SaveBoard is what deadlocked
+            # the plugin on Windows, so marshal it to the wx main thread; on the
+            # CLI (no wx) the helper calls straight through. Returning False here
+            # falls through to the in-process fill below, which is exactly the
+            # documented fallback.
+            from ui_thread import save_board_on_ui_thread as _save688
+            if not _save688(tmp, _board, label=" live-fill"):
+                raise RuntimeError("could not save the live board on the UI "
+                                   "thread (#688 guard)")
             _pro = stage_live_project_rules(tmp, _board)
             _h = hashlib.sha256()
             with open(tmp, 'rb') as _fh:

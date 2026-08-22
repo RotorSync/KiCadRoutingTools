@@ -3334,15 +3334,34 @@ class RoutingDialog(wx.Dialog):
                     with tempfile.NamedTemporaryFile(
                             suffix='.kicad_pcb', delete=False) as _f:
                         _p = _f.name
-                    # aSkipSettings: the oracle leg needs the copper, not a
-                    # .kicad_pro. KiCad 10's implicit project-settings save
-                    # merges the pre-migration on-disk project JSON with its
-                    # migrated in-memory view and throws on any key whose
-                    # type changed (KiCad 9 wrote sheet_component_classes as
-                    # [], 10 holds an object) -- and with no C++ handler
-                    # above this worker thread, that throw aborts ALL of
-                    # KiCad. Snapshots must always skip the settings save.
-                    pcbnew.SaveBoard(_p, _b, aSkipSettings=True)
+                    # #688: this runs on the ROUTING WORKER thread, and
+                    # SaveBoard is a wx-backed C++ call -- calling it from
+                    # here deadlocked the whole plugin on Windows (py-spy
+                    # caught the worker inside SaveBoard while the UI thread
+                    # sat in ShowModal). save_board_via_ui_thread marshals it
+                    # to the main thread and, if that thread is not pumping,
+                    # times out and returns False so we degrade to the
+                    # post-apply oracle instead of hanging the session.
+                    #
+                    # aSkipSettings (inside the helper): the oracle leg needs
+                    # the copper, not a .kicad_pro. KiCad 10's implicit
+                    # project-settings save merges the pre-migration on-disk
+                    # project JSON with its migrated in-memory view and throws
+                    # on any key whose type changed (KiCad 9 wrote
+                    # sheet_component_classes as [], 10 holds an object) --
+                    # and with no C++ handler above this worker thread, that
+                    # throw aborts ALL of KiCad. Snapshots must always skip
+                    # the settings save.
+                    from .gui_utils import save_board_via_ui_thread
+                    if not save_board_via_ui_thread(_p, _b):
+                        # NamedTemporaryFile already created the file; the
+                        # engine only cleans up paths we hand back, so drop
+                        # it here rather than leaking one temp per run.
+                        try:
+                            os.unlink(_p)
+                        except OSError:
+                            pass
+                        return None
                     return _p
                 except Exception as e:
                     print(f"(could not stage the live board for the "
