@@ -1086,12 +1086,15 @@ hole-conflicting will still be there after the route, and no router setting
 removes it. Keep that board: it is the baseline `check_channels --baseline`
 needs, and you return its path below.
 
-No step has a wall-clock budget -- `--deadline` was removed everywhere (no
-result may depend on timing), so passing it is an argparse error. A harness
-timeout SIGTERMs the tool, its own shutdown never runs, and you get exit 143
-with no partial board and no summary. 143 and 124 are the SHELL's codes, not a
-tool's. Run long steps DETACHED, and bound them by SCOPE -- fewer nets, a
-tighter --max-ripup, a smaller violator set -- rather than by a clock.
+No step has a wall-clock budget -- `--deadline` was removed everywhere (#621:
+no result may depend on timing, so the same board with the same arguments has
+to produce the same copper on a slow machine and a fast one), and passing it is
+an argparse error. A harness timeout SIGTERMs the tool, its own shutdown never
+runs, and you get exit 143 with no partial board and no summary. 143 and 124
+are the SHELL's codes, not a tool's. Run long steps DETACHED, and bound them by
+SCOPE -- fewer nets in --nets, a tighter --max-ripup, a named set of refs
+rather than a board sweep, --evict-depth 0 (already the default; it
+censuses and moves nothing) -- rather than by a clock.
 
 Record EVERY accepted iteration into the ledger above with converge.py, and
 every rejected one with --rejected before stepping back. The stage after this
@@ -1136,6 +1139,27 @@ Return, and return ONLY:
   5. anything left UNGRADED, named as unexamined rather than clean.
 
 Do not summarise the process, and do not retype the numbers.
+
+IF A STEP RUNS LONG, HAND BACK -- do not wait on it. You cannot: a teammate has
+no way to sit on a backgrounded process and be woken when it exits, and both
+routing halves in run 20 returned "still working, I'll wait" for exactly that
+reason. Launch it DETACHED -- with a scope it can finish, since no tool stops
+itself on a clock -- then return three things and stop:
+  LOG=<where it is writing>   MARKER=<the file whose appearance means done>
+  NEXT=<what consumes it>
+This loop arms the wait and resumes you. That is a correct hand-back, not a
+failure -- report it as one and it will be read as one. The marker must be
+written by the STEP, never by you: a "done" file you write before returning says
+the work finished when it has not started. The cheapest marker is the step's
+own exit -- redirect it into a log and, as the LAST action of the same command
+line, write its exit code into <label>.done. Wait on THAT file, never on a log
+line (run 23 lost 25 minutes to a completion line that goes to stdout while the
+waiter grepped the log).
+
+READ ROUTE RESULTS FROM THE `JSON_SUMMARY_MIN:` LINE -- one per run,
+authoritative-last, the MERGED tally in <1KB (#686). The big JSON_SUMMARY lines
+are several kB each, several per log, with scope semantics the log itself warns
+about; they are forensics, not your read.
 </subagent_prompt>
 
 When it returns, continue here with the paths it named. Do not retype its
@@ -1164,12 +1188,15 @@ only ones in front of you:
 Its Step 0 placement gate will pass: you just did that work, and the close-out
 is the evidence -- so it drops straight through to the routing stages.
 
-No step has a wall-clock budget -- `--deadline` was removed everywhere (no
-result may depend on timing), so passing it is an argparse error. A harness
-timeout SIGTERMs the tool, its own shutdown never runs, and you get exit 143
-with no partial board and no summary. 143 and 124 are the SHELL's codes, not a
-tool's. Run long steps DETACHED, and bound them by SCOPE -- fewer nets, a
-tighter --max-ripup, a smaller violator set -- rather than by a clock.
+No step has a wall-clock budget -- `--deadline` was removed everywhere (#621:
+no result may depend on timing, so the same board with the same arguments has
+to produce the same copper on a slow machine and a fast one), and passing it is
+an argparse error. A harness timeout SIGTERMs the tool, its own shutdown never
+runs, and you get exit 143 with no partial board and no summary. 143 and 124
+are the SHELL's codes, not a tool's. Run long steps DETACHED, and bound them by
+SCOPE -- fewer nets in --nets, a tighter --max-ripup, a named set of refs
+rather than a board sweep, --evict-depth 0 (already the default; it
+censuses and moves nothing) -- rather than by a clock.
 
 Two rules that are only true HERE, where the halves meet:
   - copper is not evidence about placement. A route that completed does not

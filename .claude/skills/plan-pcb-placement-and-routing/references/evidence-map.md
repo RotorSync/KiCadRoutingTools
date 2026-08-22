@@ -202,7 +202,7 @@ on this page describes what a step *claims*; this describes what the board *is*.
 | `unknown` | a component that was asked for and could not run. `blocking` is `null`, not 0 — the loop must not stop here |
 | `components.drc.graded_at` | the clearance actually graded at. Confirm it is the routed floor; stricter invents violations, looser hides them |
 | `components.drc.by_type` | `segment-segment`, `pad-segment`, … — clearance conflicts |
-| `components.undersized.by_type` | `track-width`, `via-size`, `via-drill-size` — **sub-spec copper** |
+| `components.undersized.by_type` | `track-width`, `via-size`, `via-drill-size` — **sub-spec copper**, graded separately per floor. Note what this cannot see: diameter and drill are tested independently, so a via whose ring is zero (a 0.3/0.3 via) passes both — removing such vias earns no credit here; state it in the ledger |
 | `components.floorplan.rules_run` / `.rules_skipped` | `0 violations` with `0 rules run` is a vacuous pass. Quote both |
 | `connectivity_nets` | *which* nets failed. Same nets every iteration ⇒ parameters; different nets ⇒ congestion |
 | exit code | `0` blocking is zero · `4` graded with blockers · `3` board state · `2` args · `1` crash |

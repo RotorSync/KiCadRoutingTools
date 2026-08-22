@@ -488,6 +488,26 @@ Use the printed flags as-is:
   USB_D's two 0.5 mm vias collide by 0.1 mm at the connector pitch — a smaller via
   clears it). Step **toward, never below**, the fab floors, and keep `--impedance`
   so the ohms target is held as the geometry shrinks.
+
+  **Necking is floored at the FAB minimum, not at your spec width.** When the
+  diff engine has to neck a pair to clear a graze it does so silently
+  (`_neck_pair_partner_grazes` in `py_router/diff_pair_routing.py`, floored by
+  `_fab_track_floor`) and the summary still reports the pair routed. So a pair
+  whose width is a HARD requirement — a spec'd 0.8 mm USB geometry, say — is
+  protected down to the fab floor and no further, and there is no flag that
+  states the spec: `--track-width-floor` was removed in 53a5a16e and
+  `route_diff.py` never carried it. Measure the emitted copper after the call,
+  and carry the requirement in `board_score.py --net-min-widths` so it reaches
+  `blocking`:
+
+  ```python
+  from collections import Counter
+  from kicad_parser import parse_kicad_pcb
+  pcb = parse_kicad_pcb('out.kicad_pcb')
+  print(Counter(round(s.width, 4) for s in pcb.segments
+                if pcb.nets[s.net_id].name.startswith('USB_')))
+  ```
+
 - **Escape clearance — trigger on dropped balls, not pitch (issue #122):** the
   inter-ball channel is too narrow to fit a track at the net-class clearance on
   more BGAs than just "fine-pitch" ones. Even an **0.8 mm-pitch** BGA drops balls
@@ -1405,6 +1425,25 @@ so the old rip-then-reconnect two-step happens inside one invocation.
 after it.) `repair_planes.py` still exists
 for repairing a board OUTSIDE this chain (e.g. a hand-edited board).
 
+**Bound `repair_planes.py` by SCOPE** — a named `--nets` set, a named
+`--rip-blocker-nets` set, one net at a time if you have to — and run it
+DETACHED. It takes no wall-clock budget and no main does; see "THE
+SILENT-TIMEOUT FAMILY" under *Verify, do not assume* for why, and for
+what to turn down instead, and for the measurement that makes it concrete.
+That measurement was taken HERE, on this tool, and it fired again on a
+113-part board (run 15) — so do not assume a small board is safe.
+
+**Check `protected_nets` is still there before relying on it.** `route_diff`
+records the pair under `kicad_routing_tools.protected_nets` in the output
+`.kicad_pro`, and any helper that *replaces* that project file rather than
+merging into it silently deletes the record and re-exposes the pair. The tell is
+the log line `N PROTECTED net(s) excluded from blocker rip-up` — but read it
+only on a call that passed `--rip-blocker-nets`, because that is the only case
+in which it prints at all. On such a call, a count that dropped or a line that
+vanished means the protection is gone; on any other call its absence means
+nothing. Otherwise read `kicad_routing_tools.protected_nets` out of the
+`.kicad_pro` directly.
+
 > **Never `cp` a board without its `.kicad_pro`.** A bare `cp a.kicad_pcb
 > b.kicad_pcb` copies only the board and strands the sibling `.kicad_pro`, which
 > holds the DRC floor (the Default-netclass clearance/track/via the chain routed to).
@@ -1973,6 +2012,161 @@ The JSON_SUMMARY line contains structured data including:
 - `pad_pairs_connected`/`pad_pairs_total` + `pad_pairs_open`: Pad-pair routability tallies (PRR = connected/total) and per-open-net outcome — route-time failures are opens; shorts are DRC's domain (#409 follow-up)
 - `multipoint_pads_connected` vs `multipoint_pads_total`: Connection success rate
 
+**Read the `JSON_SUMMARY_MIN:` line, not the big ones (#686).** There is exactly
+one per outermost run, printed last, and it carries the MERGED tally in under a
+kilobyte: `routed`, `failed`, `failed_single`, `open_single`,
+`multipoint_deficit`, `pad_pairs_open`, `terminal_restores_broken`,
+`min_clearance_used`, `vias`, `main_loop_time_s`, and `finalize_excluded_nets`
+when the finalize declined plane nets by plan. The big `JSON_SUMMARY` lines are
+several kB each and run-scope rather than merged — they are forensics, not your
+read. Four things about it that are easy to get wrong:
+
+- **It says NOTHING about whether the DRC floors held.** The `.kicad_pro`
+  writeback runs AFTER this line prints and reports on its own (in one measured
+  log, 23 further lines of it), so a run whose copper is below its own declared
+  floor still prints a clean MIN line. `route_summary.py` says so at the
+  function that builds it. Read the writeback too — the fab-floor ratchet is
+  exactly the defect that hides behind "the summary was clean".
+- **`main_loop_time_s` counts the single-ended loop plus the reroute loop and
+  nothing else.** Phase-3 taps, rescues, the plane finalize and parse/write all
+  sit outside it. Measured on a small in-repo board, it reported a fraction of
+  real time in the low single-digit percent — the ratio is the point, the
+  absolute pair is a property of the machine that produced it. It is not a
+  duration for the run.
+- **`status` appears only on a run that legitimately did nothing**, and takes
+  exactly two values, `no_valid_nets` and `already_connected`. It says why the
+  tally is empty; it is not a verdict about the board.
+- **`complete` means "a sub-run did not finish", never "a budget expired".** No
+  main writes `complete: false` today, because none of them can stop early, but
+  the key is still read and it is the disclosure that keeps a partial tally from
+  being merged into a whole-board one: `route_summary.merge_summaries` forces it
+  onto the merged summary when ANY summary it merges carries it (merging is
+  otherwise last-wins), and `place_route_loop` refuses a summary that has it. A
+  hand-read must do the same — `.get('complete', True)`, so an ordinary log is
+  unaffected.
+
+### Verify, do not assume
+
+**A note on vocabulary, because this section imports it.** `blocking`,
+`quality`, `unrouted` and `broken` are keys of
+`.claude/skills/plan-pcb-placement-and-routing/scripts/board_score.py`, not of
+`route.py` — `board_score` grades a written board, `route.py` reports on its own
+run, and the classification table below reads BOTH. The *ledger* and the
+*verifier lens* belong to `py_placer/converge.py` and are the combined
+placement-and-routing loop's machinery; this skill only needs to know that
+`blocking == 0` is not by itself a stop condition.
+
+- **`failed_single` is HALF the answer — read `failed_multipoint` too, and read
+  EVERY `JSON_SUMMARY` in the log, not the last one.** A net can fail as
+  multipoint while the single-ended bucket is empty, and route.py's in-run
+  reconciliation prints a SECOND summary whose buckets differ from the first.
+  Measured: a call printed `routed_single: ["QSPI_SD1"], failed_single: []` and
+  wrote a board with **0 segments** on that net — which reads exactly like the
+  "routers report false success" hazard and was **not** one. The reconciliation
+  had re-routed `QSPI_SD2` and reported breaking `QSPI_SD1` in
+  `failed_multipoint`, the field the chain was not grepping. A grep of one bucket
+  turns an honestly-reported failure into a silent one, and then into a wrong bug
+  report against the engine. Grep both, from every summary line:
+
+  ```bash
+  grep -oE '"routed_single": \[[^]]*\]|"failed_single": \[[^]]*\]|"failed_multipoint": \[[^]]*' run.log
+  ```
+
+- **The routable denominator is ON-BOARD pads, and you do not have to work that
+  out by hand.** `board_score` counts a net routable at ≥2 pads while the
+  router's own `net_queries.filter_routable_nets` requires ≥2 pads **on the
+  board**; measured on one board, 147 against 149, and the two nets in the gap
+  (2 pads, 1 on-board each) sit in `unrouted` forever while no router could ever
+  route them. `board_score` reports the difference itself as
+  `components.unrouted.placement_blocked` and prints it, so read that key before
+  reporting an unrouted net as a routing failure.
+
+- **YOUR OWN CHECKS ARE INSTRUMENTS TOO, and they fail the same way.** Every
+  rule above is about a tool that can fail two ways and reports one. The greps,
+  probes and one-off scripts you write to CHECK those tools have exactly that
+  shape, and they are *easier* to get wrong, because a check's failure path is
+  the path nobody looks at. The bullet above is one: a grep of a single bucket
+  reported a routed net that had no copper.
+
+  Two more, measured, both reporting "the feature is absent" when it was not:
+
+  | what was run | what it actually did | what was concluded |
+  |---|---|---|
+  | a probe calling `check_connectivity(...)` | that function does not exist | "the branch never fires" |
+  | an `awk` section splitter | matched the first of two `===== L5 =====` | "zero render mentions" |
+
+  Two rules:
+
+  1. **Test both directions.** "It reports X when the board is bad" is half a
+     check; "it stays quiet when the board is good" is the half that catches
+     one wedged shut. A checker you have only ever run against a failing board
+     has not been shown to discriminate.
+  2. **When a check reports something surprising, suspect the check first.**
+     Both rows above looked like real findings. The tell is always the same: a
+     result that would require the code to be broken in a way you have no other
+     evidence for.
+
+  (Writing a repo *test* rather than a one-off check? The same failure has a
+  standard answer there — assert the REASON, not a non-zero exit, and verify
+  the input file exists. See **Testing & Verification** in `CLAUDE.md`.)
+
+- **THE SILENT-TIMEOUT FAMILY. Learn its signature, because several
+  instruments share it and none of them says the word "timeout" where you look.**
+  A long quiet phase after a complete-looking report; an exit code belonging to
+  the **shell** rather than the tool; and staged output that leaves nothing at
+  the output path on a kill. Measured members:
+
+  | where | limit | on expiry | what you see |
+  |---|---|---|---|
+  | any main under a shell `timeout`, or any harness kill | the SHELL's clock, never the tool's | the process dies wherever it stood; nothing is flushed and no output board is written | shell `124`/`143`, no `JSON_SUMMARY`, no `JSON_SUMMARY_MIN` |
+  | `EXACT_FILL_TIMEOUT` (`py_router/kicad_exact_fill.py`) | 300 s | returns `None`; the caller silently falls back to its own model | ONE misattributed line |
+  | `ORACLE_DRC_TIMEOUT` (`py_router/kicad_oracle.py`) | 240 s | `None`, and **memoises the board so every later step skips the oracle too** | nothing at all |
+  | `converge.py record` argv | the OS exec limit (~32 kB) | never execs | shell `126`, **no ledger row** |
+
+  The last three degrade to a fallback with no failure signal and no effect on
+  the exit code. Two consequences you must build into how you run:
+
+  1. **NO MAIN TAKES A WALL-CLOCK BUDGET, AND THAT IS DELIBERATE — BOUND THE
+     WORK BY SCOPE.** `--deadline` was removed from every tool by upstream #621
+     and passing it anywhere is now an argparse error. The reason is
+     determinism: the same board with the same arguments must produce the same
+     copper on a slow machine and a fast one, and a clock breaks that — the
+     result would depend on the hardware it ran on. So the only clock left is
+     the shell's, and it is the wrong instrument. A `timeout` SIGTERMs the tool
+     (on Windows `TerminateProcess`, which no signal handler, `atexit` or flush
+     can catch), so the partial board is lost, the exit code you read is the
+     SHELL's `124`/`143` rather than anything the run computed, and there is no
+     summary line to parse. What you have instead are the caps the tools do
+     take — every one of them a COUNT or a SET, so the run stays reproducible:
+
+     | to make a step do less work | turn this down |
+     |---|---|
+     | fewer nets in the search | `route.py --nets` — name the sub-bus rather than `'*'` |
+     | a shallower rip-up search | `--max-ripup` (on `route.py` and `route_diff.py`) |
+     | fewer parts in a placement repair | `py_placer/place_seed.py --reseat <REFS>` takes the refs; scope it yourself instead of sweeping the board |
+     | no neighbour eviction | `py_placer/place_seed.py --evict-depth 0` (the default) — it censuses `no_pose_blockers` and moves nothing |
+     | a half that closes on a counted plateau | `py_placer/converge.py verdict --flat N` counts RECORDED laps (default 5), and `converge.py record --exhausted <half>` closes one honestly |
+
+     Then run the long step DETACHED and read its log, rather than wrapping it
+     in a `timeout` that can only destroy the evidence. Measured, run 9: two
+     plane-repair calls, 40 min with `--rip-blocker-nets` and 25 min plain on a
+     217-part board, killed both times, no board written either time. The fix
+     was a smaller net set, not a bigger cap.
+
+     **A step that has run long is not thereby broken.** Wall-clock is evidence
+     about the machine, not about the board; before you touch anything, re-read
+     the log for the structured tail, or re-parse the output board. `complete`
+     and `status` are not clocks either — see the key notes above.
+  2. **Check the row count after every `converge.py record`.** The 126 is the
+     shell's, so a caller that does not re-count sees no error and the lap is
+     gone. Prefer `--score-file` over `--score "$(cat …)"`.
+
+  When a step you launched is genuinely long, do not sit on it: the delegation
+  half of this rule — hand back with LOG, MARKER and NEXT rather than blocking
+  on a detached process — is orchestration doctrine and lives in
+  `.claude/skills/plan-pcb-placement-and-routing/scripts/loop_driver.py`, which
+  is the thing that has teammates to hand back to.
+
 ### Tune mode (issue #153) — opt-in per-board feedback loop
 
 When the user asks for **tune** (e.g. "plan routing with tune", "tune mode"),
@@ -2047,6 +2241,26 @@ bare re-pour and both shipped disconnected; core1106 simply stopped after a
 failed retry). If you re-pour or re-run diffs late, ALWAYS follow with a
 `route.py` step whose `--nets` covers the plane nets (even `--nets GND`
 suffices — its in-run finalize welds and verifies against KiCad's fill).
+
+### Retrying a failed net
+
+Re-enter at the FAILING STEP rather than re-running the chain, and read the
+router's hint before choosing a lever: both are set out in `.claude/skills/plan-pcb-placement-and-routing/SKILL.md`
+(9.3a and 9.3b). Two things that section does not yet say, and that cost a lap
+each:
+
+**A scoped `--nets` retry on a net that is ALREADY CONNECTED is a no-op.** The
+router has nothing to improve there: the escalation ladder never fires and the
+copper comes back byte-identical. To change the geometry of copper the router is
+happy with you must **rip** it (`--rip-existing-nets <exact names>`) or route the
+whole board. Run 20 spent a lap discovering this — a targeted via fix produced
+vias at identical coordinates in both boards.
+
+**The hint's suggested values are an EXAMPLE, not a derivation — read its
+`(current: ...)` tail.** On a board already routing at 0.15/0.15 the box-in hint
+recommends `--clearance 0.15 --track-width 0.15`, the values already in force,
+so the only novel token in the whole sentence is the grid. The tail is what
+tells you that, and the grid alone is not a lever (see below).
 
 ### Diagnose and Retry
 
@@ -2252,6 +2466,32 @@ Example cleanup prompt:
 >
 > Would you like me to delete the intermediate files?"
 
+### The box-in row needs one qualification
+
+The blocker-classification table — which evidence means floorplan, which means
+placement detail, which means parameters — is in `.claude/skills/plan-pcb-placement-and-routing/SKILL.md`
+(9.3d), and it is the same table for both skills. Follow it, with ONE
+qualification to the boxed-in row.
+
+That row reads *"`blockers` empty; the log says boxed in by static obstacles |
+parameters | stay here — grid, ripup budget, width. Placement is not the
+lever."* That is right only while the geometry still has somewhere to go, and
+the row does not say how to tell. **Read `boxed_in[].geometry` first**: it
+carries the grid, clearance, track width and via diameter the run was actually
+using. Compare those against the board's own floor — its `.kicad_dru` rules and
+the fab minimums — yourself, because no summary key makes that comparison for
+you.
+
+- **Geometry still above the floor:** the row applies. Shrink it, and pair a
+  finer grid **with** the shrink rather than spending the grid alone.
+- **Geometry already at the floor:** the row's advice is exhausted, and this is
+  a placement question after all. A finer grid resolves the same obstacles more
+  precisely; it does not make a gap wider, and there is nothing left to pair it
+  with. Measured (run 20): `0.05 -> 0.025 -> 0.0125`, about 40 minutes, left
+  `unrouted` at exactly BUSY / Net-(U4-XTAL_P) / SCK at every resolution. Note
+  also that "ripup budget" is not a lever here at all — "no rippable blockers
+  found" means the blockers are not rippable copper.
+
 ## Step 9: Emit the plan as an executable artifact (always)
 
 The plan is not finished as prose — it ships as TWO machine-loadable files
@@ -2289,6 +2529,20 @@ next to the board, so the exact tuned choices replay with no LLM:
 A per-board plan file that ever gets improved (a better recipe found on a
 later pass) should be REGENERATED through this skill, not hand-patched —
 the skill is the tuner; the plan file is its output.
+
+### Stop conditions
+
+There are four, they are listed in `.claude/skills/plan-pcb-placement-and-routing/SKILL.md`
+(9.5), and the rule is to say which one fired. Two of them bite in a
+routing-only run: `blocking == 0` **plus** the repo's own spec checker **plus**
+every verifier lens (`board_score` exits 0 at `blocking == 0` even on a board
+with ten HARD clauses violated, because a repo checker's clauses are not
+`board_score` components), and a blocker that is geometrically unsatisfiable,
+which is a finding about the REQUIREMENT and needs the measurement that proves
+it.
+
+"This is taking a long time" is not one of them, for the reason given under
+the budget doctrine above.
 
 ## Step 10: Plan-authoring precedence rules (resolve these conflicts explicitly)
 

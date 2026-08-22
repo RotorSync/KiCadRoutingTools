@@ -11,6 +11,15 @@ VERDICT=PASS:lens=<lens>
 VERDICT=FAIL:lens=<lens>;finding=<one line>;evidence=<path#json-pointer|path@x,y>;route=<step>
 ```
 
+**And ALSO writes that line to disk, as a durable record** (run-23). The reply
+is the delivery channel and the driver asks for it that way, but a reply is a
+notification and notifications get lost: run 23's connectivity and drc lens
+verdicts never reached the parent — it waited on them, was nudged, and had to
+re-derive both lenses inline, which the copy on disk would have made
+unnecessary. Put it beside the round's other artifacts, named for the lens. A
+verdict you cannot produce afterwards is a finding about the verifier, not a
+reason to assume PASS.
+
 `evidence=` must point into the round's own files — `wk/place.log#JSON_SUMMARY.
 crossings_after`, `wk/intent.json#/violations/3`, `wk/view/board_F.png@112.4,63.1`.
 **A verifier that cannot fill it has not verified anything.**
@@ -143,7 +152,9 @@ VERDICT=FAIL:lens=drc;finding=8 vias below the 0.6 mm spec on B.Cu;
 ```
 
 1. **Record the verdict with `converge.py record --lens`**, passing the
-   `VERDICT=` line verbatim (repeatable; stored raw as `entry["lenses"]`). It
+   `VERDICT=` line verbatim — as the verifier returned it, or from its copy on
+   disk, never as one you remember — (repeatable; stored raw as
+   `entry["lenses"]`). It
    refuses at write time anything that is not a `VERDICT=(PASS|FAIL):lens=…`
    line, so a malformed verdict stays visible instead of being normalised into
    something that reads like a pass — and `--final` refuses without all three
