@@ -24,8 +24,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # placement split
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # placement split
 
-from placement.floorplan import (ERROR, KIND, SCHEMA_VERSION, WARN, Intent,
-                                 IntentError, intent_from_dict, load_intent,
+from placement.floorplan import (ERROR, KIND, RULES, SCHEMA_VERSION, WARN,
+                                 Intent, IntentError, _SEVERITY_KEYS,
+                                 intent_from_dict, load_intent,
                                  validate_intent)
 
 
@@ -183,6 +184,54 @@ def test_context_is_deliberately_open():
     print("  PASS: context accepts arbitrary keys; budget_withheld still read")
 
 
+def test_severity_keys_are_checked_against_the_rule_names():
+    """#710: `severity` validated its VALUES and never its keys.
+
+    The vocabulary is 12 names, not the 9 in `RULES`: three findings are
+    raised outside the rules loop (`validate_intent` raises two,
+    `resolve_blocks` one) and an intent has always been allowed to set their
+    severity. Validating against `RULES` alone would refuse
+    `{"block_unresolved": "warn"}`, which is legal today -- so the test
+    asserts every name in the real vocabulary still loads, not just that a
+    typo is refused.
+    """
+    msg = _rejects(_base(severity={'decap_distanc': WARN}), "a typo'd rule")
+    refused, _, known = msg.partition('Known:')
+    assert 'decap_distanc' in refused, msg
+    assert 'decap_distance' in known.replace(',', ' ').split(), msg
+    # Stated here as a literal, NOT iterated off _SEVERITY_KEYS: a test that
+    # loops over the set under test just tests fewer names when the set
+    # shrinks, and passes. (It did.)
+    expected = {n for n, _ in RULES} | {'intent_zone_outside_envelope',
+                                        'intent_zone_overlap',
+                                        'block_unresolved'}
+    assert _SEVERITY_KEYS == expected, sorted(_SEVERITY_KEYS ^ expected)
+    for name in sorted(expected):
+        i = intent_from_dict(_base(severity={name: WARN}))
+        assert i.severity_of(name) == WARN, name
+    print(f"  PASS: {len(expected)} settable rule names accepted, "
+          f"a typo refused (RULES has {len(RULES)})")
+
+
+def test_every_violation_rule_name_is_settable():
+    """A change detector for the next rule.
+
+    A rule whose name is not in `_SEVERITY_KEYS` cannot be demoted to warn --
+    and, now that severity keys are refused, an intent trying to would be
+    told the name does not exist. Read off the SOURCE so a new
+    `Violation(rule='...')` is caught wherever it is raised, including the
+    paths that never reach the RULES loop.
+    """
+    import re
+    src = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), 'py_placer', 'placement', 'floorplan.py')
+    with open(src, encoding='utf-8') as fh:
+        names = set(re.findall(r"rule='([a-z_]+)'", fh.read()))
+    assert len(names) >= 10, names
+    assert names <= _SEVERITY_KEYS, sorted(names - _SEVERITY_KEYS)
+    print(f"  PASS: all {len(names)} violation rule names are settable")
+
+
 def test_a_block_needs_refs_or_group():
     msg = _rejects(_base(blocks=[{'name': 'x', 'zone': [0, 0, 1, 1]}]),
                    "a block naming no members")
@@ -329,6 +378,8 @@ TESTS = [
     test_unknown_nested_keys_are_refused_not_ignored,
     test_a_nested_object_must_be_an_object,
     test_context_is_deliberately_open,
+    test_severity_keys_are_checked_against_the_rule_names,
+    test_every_violation_rule_name_is_settable,
     test_a_block_needs_refs_or_group,
     test_refs_as_a_bare_string_is_refused,
     test_enumerations_are_checked,

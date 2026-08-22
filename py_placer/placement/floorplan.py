@@ -449,6 +449,10 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
     if any(v not in (ERROR, WARN) for v in severity.values()):
         raise IntentError(
             f"severity: expected {{rule: 'error'|'warn'}}, got {severity!r}")
+    # Keys too, not only values (#710). `{"decap_distanc": "warn"}` used to
+    # load clean and leave the rule at its default -- a demotion the author
+    # believes they made and the exit code never reflects.
+    _reject_unknown(severity, _SEVERITY_KEYS, 'severity')
 
     budget = _obj(raw.get('legality_budget'), 'legality_budget')
     if 'oob_area' in budget:
@@ -1131,6 +1135,19 @@ RULES = (
     ('must_lock', rule_must_lock),
     ('legality', rule_legality),
 )
+
+#: Rules whose violations are raised OUTSIDE the `RULES` loop, and so have no
+#: rule function to be enumerated from: the two self-contradiction findings in
+#: `validate_intent` and the unresolved-block finding in `resolve_blocks`.
+#: Kept as a named set rather than folded into `_SEVERITY_KEYS` by hand, so the
+#: next reader can see which names are the exception and why.
+_NON_RULE_SEVERITIES = frozenset({
+    'intent_zone_outside_envelope', 'intent_zone_overlap', 'block_unresolved'})
+
+#: Every rule name an intent may set a severity for. Derived from `RULES`, so a
+#: new rule is settable the moment it is registered -- a hand-listed set would
+#: silently refuse the newest rule's own name.
+_SEVERITY_KEYS = frozenset(name for name, _ in RULES) | _NON_RULE_SEVERITIES
 
 # Why a rule did not run. Reported so that "0 violations" and "0 rules ran"
 # cannot look the same to a reader or to a machine.
