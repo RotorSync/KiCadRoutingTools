@@ -3138,6 +3138,21 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     add_teardrops=False,
                     segments_to_remove=dead_end_input_segments,
                     vias_to_remove=stale_input_vias)
+                # #650: the staged board's sibling project is the INPUT's
+                # (seed_project_for_output), whose declared floors are LOOSER
+                # than the ones this run routed to -- the zone filler then
+                # pulls the pours back further than the shipped board's will
+                # and this check over-reports opens. Its entries land in
+                # failed_multipoint before the reconcile gate reads them, so
+                # a phantom open costs a real retry. Grade at what ships.
+                if env_knobs.INRUN_FLOOR_SYNC:
+                    try:
+                        from fix_kicad_drc_settings import apply_routed_floors
+                        apply_routed_floors(_staged,
+                                            clearance=config.clearance,
+                                            clamp_nondefault_netclasses=False)
+                    except Exception as _e650:
+                        print(f"  (in-run DRC floor sync skipped: {_e650})")
                 _links = (kicad_unconnected(_staged, _ocli) if _ow else None)
                 if _links is None:
                     oracle_check = 'failed'
@@ -3653,6 +3668,42 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # in-memory contract checked before the write.
             verify_written_file_parity(output_file, pcb_data, sweep_scope_ids,
                                        label=' route')
+        if output_file and os.path.isfile(output_file):
+            # #650: sync the output's sibling .kicad_pro to the floors this run
+            # ROUTED to, BEFORE anything grades the board in-run (the plane
+            # finalize's oracle audit, its #589 re-audit). Until now that
+            # sibling was the input's, seeded by seed_project_for_output, and
+            # the audit graded the pours at the input's declared floors while
+            # the shipped board is graded at the clamped ones -- measured on
+            # orangecrab, 57 reported opens vs the 46 that ship (GND 19 vs
+            # 11), all of it rules.min_hole_clearance 0.25 -> 0.0889.
+            # Only-loosen and idempotent, so main()'s writeback stays
+            # authoritative.
+            #
+            # SIZE OF THE GAP IS CHAIN-POSITION DEPENDENT, so do not read that
+            # 57/46 as a per-step cost: the declared floors survive only until
+            # the FIRST writeback (down the recorded orangecrab chain
+            # min_hole_clearance goes 0.25 -> 0.09 at step 1 and stays there,
+            # leaving later steps stale by ~1 um -- inert). This earns its
+            # keep on the first step over a board still carrying its declared
+            # floors, which includes the ordinary case of a board that arrives
+            # with pours already drawn, and on the aspirational stock netclass
+            # (0.2 declared, routed 0.1) that CLAUDE.md describes.
+            #
+            # clamp_nondefault_netclasses is deliberately FALSE: whether the
+            # non-Default classes get clamped is the writeback's call (#439 --
+            # it depends on the caller having passed a --clearance ceiling,
+            # which is a main() fact, not an engine one). Lowering them here
+            # could ship a tightened class on a run that meant to honor them.
+            if env_knobs.INRUN_FLOOR_SYNC:
+                try:
+                    from fix_kicad_drc_settings import apply_routed_floors
+                    apply_routed_floors(output_file,
+                                        clearance=config.clearance,
+                                        clamp_nondefault_netclasses=False,
+                                        verbose=True)
+                except Exception as _e650b:
+                    print(f"  (in-run DRC floor sync skipped: {_e650b})")
         if wrote and output_file:
             # #666 always-on write-divergence repair: a rip/restore cycle can
             # leave a net's copper in the MODEL while the write lists dropped
@@ -5229,6 +5280,25 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
 if __name__ == "__main__":
     import argparse
+    # #666's scoped cap move calls `write_placed_output`, which makes this a
+    # registered pose author (LEVER_REGISTRY). Declare it for the whole
+    # process: this `__main__` is one long inline block rather than a call to
+    # a main(), so an ExitStack closed at interpreter exit gives exactly the
+    # lifetime a `with` around the block would. Best-effort -- a flat install
+    # without py_placer/ must still route.
+    try:
+        import atexit
+        import contextlib
+        # Imported for its SIDE EFFECT only (it appends py_placer/ to
+        # sys.path), and without binding a name, because two later blocks in
+        # this same __main__ import it under that name for the same reason.
+        __import__('_placer_path')
+        from placement.provenance import declare_lever as _declare_lever
+        _lever_stack = contextlib.ExitStack()
+        _lever_stack.enter_context(_declare_lever('route.py', sys.argv))
+        atexit.register(_lever_stack.close)
+    except Exception:                                        # noqa: BLE001
+        pass
     # Windows consoles default to cp1252, which can't encode the non-ASCII glyphs
     # some log lines use (arrows in bus order, Ohm in impedance, the fab-floor
     # warning sign); reconfigure stdout/stderr to UTF-8 so a print never crashes

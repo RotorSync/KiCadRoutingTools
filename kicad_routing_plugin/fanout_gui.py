@@ -1607,6 +1607,9 @@ class FanoutTab(wx.Panel):
                 **{k: v for k, v in config.items() if k.startswith('cap_')},
                 # Shared "Add teardrops" checkbox (#489 section 9).
                 'add_teardrops': shared.get('add_teardrops', False),
+                # #693: shared "Fix DRC settings after routing" checkbox --
+                # the apply path gates its live-floor writeback on this.
+                'fix_drc_settings': shared.get('fix_drc_settings', True),
             },
             optimize_caps=config.get('optimize_caps', False),
         )
@@ -1668,6 +1671,9 @@ class FanoutTab(wx.Panel):
                 'extension': extension,
                 # Shared "Add teardrops" checkbox (#489 section 9).
                 'add_teardrops': shared.get('add_teardrops', False),
+                # #693: shared "Fix DRC settings after routing" checkbox --
+                # the apply path gates its live-floor writeback on this.
+                'fix_drc_settings': shared.get('fix_drc_settings', True),
             },
             fanout_kind='qfn',
         )
@@ -1823,18 +1829,23 @@ class FanoutTab(wx.Panel):
         # 0.125 / 0.5-0.25 after step 9. Later steps resolve their geometry
         # from that class, so the fronts diverge from there.
         _fcfg = fanout_config or {}
-        try:
-            from .gui_utils import update_live_drc_floors
-            update_live_drc_floors(
-                board,
-                clearance=_fcfg.get('clearance'),
-                track_width=_fcfg.get('track_width'),
-                via_size=_fcfg.get('via_size'),
-                via_drill=_fcfg.get('via_drill'),
-                hole_to_hole=_fcfg.get('hole_to_hole_clearance'),
-                edge_clearance=_fcfg.get('board_edge_clearance'))
-        except Exception as _e:
-            print(f"(live DRC floor update skipped: {_e})")
+        # #693: gated on the shared "Fix DRC settings after routing" checkbox.
+        # This tab is the one whose shared params did not even CARRY the flag,
+        # so the gate and the flag were added together -- see the
+        # get_shared_params() that feeds FanoutTab in swig_gui.
+        if _fcfg.get('fix_drc_settings', True):
+            try:
+                from .gui_utils import update_live_drc_floors
+                update_live_drc_floors(
+                    board,
+                    clearance=_fcfg.get('clearance'),
+                    track_width=_fcfg.get('track_width'),
+                    via_size=_fcfg.get('via_size'),
+                    via_drill=_fcfg.get('via_drill'),
+                    hole_to_hole=_fcfg.get('hole_to_hole_clearance'),
+                    edge_clearance=_fcfg.get('board_edge_clearance'))
+            except Exception as _e:
+                print(f"(live DRC floor update skipped: {_e})")
 
         # Refresh the view
         pcbnew.Refresh()

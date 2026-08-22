@@ -1758,6 +1758,11 @@ class RoutingDialog(wx.Dialog):
                 # reaches fanout too -- it is the step where a track-to-via
                 # teardrop matters most.
                 'add_teardrops': self.add_teardrops_check.GetValue(),
+                # #693: the fanout tab's shared params were the ONE set that
+                # did not carry this, so its live-floor writeback had nothing
+                # to gate on. Unchecked must mean "change no DRC setting" on
+                # every tab, not just the ones that happened to pass it.
+                'fix_drc_settings': self.fix_drc_check.GetValue(),
                 # #581: one via-in-pad policy for every step (Basic tab).
                 # > 0 -> BGA under-pad escapes run dog-bone, QFN via-in-pad off.
                 'same_net_pad_clearance': self._same_net_pad_clearance_value(),
@@ -3947,15 +3952,26 @@ class RoutingDialog(wx.Dialog):
         # Per-step live DRC floors (GUI twin of the CLI's per-step
         # fix_project_for_output): a DRC pressed right after this step must
         # grade at the routed floors, not stock constraints.
-        from .gui_utils import update_live_drc_floors
-        update_live_drc_floors(
-            board,
-            clearance=config.get('clearance'),
-            track_width=config.get('track_width'),
-            via_size=config.get('via_size'),
-            via_drill=config.get('via_drill'),
-            hole_to_hole=config.get('hole_to_hole_clearance'),
-            edge_clearance=config.get('board_edge_clearance'))
+        #
+        # #693: gated on the SAME "Fix DRC settings after routing" checkbox as
+        # the netclass/severity writeback above. It used to run unconditionally,
+        # so unchecking the box suppressed one writeback and left this one
+        # lowering the board's Board Setup floors anyway -- the reporter watched
+        # Minimum annular width change with the box unchecked. The CLI gates its
+        # twin (fix_project_for_output) on --no-fix-drc-settings; a twin honors
+        # the same switch. NOTE this also stops the copper-to-edge PIN-UP below,
+        # which is the one floor this raises: with the box unchecked the user
+        # owns their DRC settings, protective changes included.
+        if config.get('fix_drc_settings', True):
+            from .gui_utils import update_live_drc_floors
+            update_live_drc_floors(
+                board,
+                clearance=config.get('clearance'),
+                track_width=config.get('track_width'),
+                via_size=config.get('via_size'),
+                via_drill=config.get('via_drill'),
+                hole_to_hole=config.get('hole_to_hole_clearance'),
+                edge_clearance=config.get('board_edge_clearance'))
 
     def _add_via_to_board(self, board, via, get_layer_id):
         """Add a via to the pcbnew board."""

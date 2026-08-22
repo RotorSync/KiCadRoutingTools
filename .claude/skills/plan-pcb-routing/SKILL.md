@@ -2082,38 +2082,33 @@ placement-and-routing loop's machinery; this skill only needs to know that
   reporting an unrouted net as a routing failure.
 
 - **YOUR OWN CHECKS ARE INSTRUMENTS TOO, and they fail the same way.** Every
-  rule above is about a tool that can fail two ways and reports one. The checks
-  you write to test those tools have exactly that shape, and they are *easier*
-  to get wrong, because a check's failure path is the path nobody looks at.
+  rule above is about a tool that can fail two ways and reports one. The greps,
+  probes and one-off scripts you write to CHECK those tools have exactly that
+  shape, and they are *easier* to get wrong, because a check's failure path is
+  the path nobody looks at. The bullet above is one: a grep of a single bucket
+  reported a routed net that had no copper.
 
-  Measured in a single session, all five reporting "the guard held" or "the
-  feature is absent" when neither was true:
+  Two more, measured, both reporting "the feature is absent" when it was not:
 
-  | what I ran | what it actually did | what I concluded |
+  | what was run | what it actually did | what was concluded |
   |---|---|---|
-  | a negative control copied to a temp dir | died on `ModuleNotFoundError`, exit 1 | "the gate refused" |
   | a probe calling `check_connectivity(...)` | that function does not exist | "the branch never fires" |
-  | evidence passed as `<(echo '{...}')` | fd gone before a Windows child opened it | "the stage never mentions it" |
   | an `awk` section splitter | matched the first of two `===== L5 =====` | "zero render mentions" |
-  | a negative control asserting "this must stop early" | a board with no work correctly ran to completion | "the stop condition is broken" |
 
-  Four rules, and the first one is most of it:
+  Two rules:
 
-  1. **A non-zero exit is not evidence.** Assert the REASON. `tests/run_utils.py`
-     has `check(argv, refuse='<the reason>', code=N)`, which reports an
-     `ImportError`/traceback/argparse accident as a **BROKEN TEST** rather than
-     as a satisfied guard. Use it instead of `assert r.returncode == 2`.
-  2. **Verify the input before trusting the output.** `run_utils.evidence(path)`
-     refuses a path that is not a real non-empty file. A check whose input is
-     missing tests nothing — and process substitution is not a file on Windows.
-  3. **Test both directions.** "It refuses when X" is half a test; "it accepts
-     when not-X" is the half that catches a gate wedged shut. The last row
-     above was a spec error in the CHECK, and only the accepting direction
-     exposed it.
-  4. **When a check reports something surprising, suspect the check first.**
-     Every one of the five looked like a real finding. The tell is always the
-     same: a result that would require the code to be broken in a way you have
-     no other evidence for.
+  1. **Test both directions.** "It reports X when the board is bad" is half a
+     check; "it stays quiet when the board is good" is the half that catches
+     one wedged shut. A checker you have only ever run against a failing board
+     has not been shown to discriminate.
+  2. **When a check reports something surprising, suspect the check first.**
+     Both rows above looked like real findings. The tell is always the same: a
+     result that would require the code to be broken in a way you have no other
+     evidence for.
+
+  (Writing a repo *test* rather than a one-off check? The same failure has a
+  standard answer there — assert the REASON, not a non-zero exit, and verify
+  the input file exists. See **Testing & Verification** in `CLAUDE.md`.)
 
 - **THE SILENT-TIMEOUT FAMILY. Learn its signature, because several
   instruments share it and none of them says the word "timeout" where you look.**

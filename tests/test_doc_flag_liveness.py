@@ -14,6 +14,21 @@ asserts `--track-width-floor` is absent on `route_planes.py` and
 removed from. The removal passed CI because the only assertions about the flag
 were about the two tools that never had it.
 
+How this differs from `tests/test_431_skill_commands.py`, which is ALSO a
+"every flag the skill tells you to pass must exist" gate over the same skill
+files -- keep both, and do not delete either as a duplicate:
+
+  * #431 reads COMMAND LINES and resolves each flag against the NAMED tool's
+    real parser (`--help`, or the built argparse object). Stronger, per-tool,
+    and it is the right check for an emitted invocation.
+  * this gate reads PROSE -- a `--flag` in backticks in a sentence -- and
+    resolves it as a UNION over every tool, because prose names a flag without
+    naming a tool.
+
+That is exactly the gap 53a5a16e fell through: the stale `--track-width-floor`
+instruction was a sentence ("plus `--track-width-floor` for a width clause"),
+never a command line, so #431 could not see it and was not at fault.
+
 The gate is UNION-shaped on purpose: a flag is live if ANY routing CLI defines
 it. A per-tool gate would drown in false positives, because the prose
 legitimately discusses one tool's flag while describing another's step, and a
@@ -50,25 +65,76 @@ DOCS = (
 SKIP_DIRS = ('.git', 'wk', 'kicad_files', 'docs', 'node_modules',
              '__pycache__', 'rust_router')
 
-#: ANY quoted long-flag literal in non-test source, not only `add_argument`
-#: calls. Deliberately over-broad, because the two error directions are not
-#: symmetric here:
+#: A flag literal quoted inside an `add_argument(...)` CALL -- not any
+#: `--flag`-shaped string anywhere in the source.
 #:
-#:   a false POSITIVE (calling a live flag dead) fails the build on correct
-#:   documentation, and a gate that cries wolf gets deleted -- taking the
-#:   real finding with it.
-#:   a false NEGATIVE (missing a dead flag) just leaves one stale doc line.
+#: The first version of this gate scanned all non-test source text for
+#: `--flag` literals, on the reasoning that a removed flag disappears from the
+#: source entirely. It does not. A REMOVED flag survives in prose: docstrings,
+#: usage examples, comments and legacy tables. Measured on the commit that
+#: introduced this file, the broad scan reported:
 #:
-#: And the over-approximation costs almost nothing for the class this gate
-#: exists to catch: a flag that was genuinely REMOVED disappears from the
-#: source entirely -- help text, error strings and all -- which is exactly
-#: what happened to --track-width-floor in 53a5a16e.
+#:     --track-width-floor -> LIVE      (krt_capabilities.py's usage example)
+#:     --protect-nets      -> LIVE      (a tuple in tests/stress/manifest_to_plan.py)
+#:     --net-layers        -> dead
 #:
-#: Narrower rules were tried and each produced false positives: flags
-#: registered from a sibling sub-package (--suggest-locks via
-#: placement/cli_gates.py) and generated boolean pairs (--no-ratsnest, whose
-#: positive half never appears in an add_argument call either).
-_ADD_ARG = re.compile(r"(?<![\w-])(--[a-z][a-z0-9-]{2,})")
+#: -- so the gate was blind to two of the three flags it was written to catch,
+#: including the one that cost run 22 a lap. It passed only because that commit
+#: had already removed the doc mentions by hand; re-adding one tomorrow would
+#: have stayed green. A gate that cries wolf gets deleted, but a gate that
+#: never cries at all is worse: it is deleted AND it was never doing anything.
+#:
+#: The two objections the broad scan was reaching for both survive here:
+#:   * flags registered from a sibling sub-package (`--suggest-locks` via
+#:     `py_placer/placement/cli_gates.py`) stay live, because the scan is a
+#:     UNION over every non-test source file, not a per-CLI parser walk;
+#:   * generated boolean pairs stay live via the `--no-` derivation below --
+#:     `argparse.BooleanOptionalAction` registers `--refs` and supplies
+#:     `--no-refs` (`py_router/route_render.py`), which appears in no
+#:     add_argument call anywhere. (The broad scan's comment cited
+#:     `--no-ratsnest` here; there is no such flag -- render_placement.py
+#:     registers `--ratsnest-nets` and `--ratsnest-all` and nothing else.)
+_ADD_ARG_CALL = re.compile(r"add_argument\s*\(")
+_FLAG_LIT = re.compile(r"""['"](--[a-z][a-z0-9-]{2,})['"]""")
+
+
+def _call_args(text, open_paren):
+    """The source slice between `add_argument(` and its matching `)`.
+
+    Quote-aware, because help strings routinely contain unbalanced parens
+    ("(default: 5)"). Returns '' if the call does not close within a
+    generous window -- a malformed slice must yield no flags rather than
+    swallow the rest of the file.
+    """
+    depth, k, n = 0, open_paren, min(len(text), open_paren + 4000)
+    while k < n:
+        c = text[k]
+        if c in '\'"':
+            q = c
+            trip = text.startswith(q * 3, k)
+            k += 3 if trip else 1
+            while k < n:
+                if text[k] == '\\':
+                    k += 2
+                    continue
+                if trip and text.startswith(q * 3, k):
+                    k += 3
+                    break
+                if not trip and text[k] == q:
+                    k += 1
+                    break
+                if not trip and text[k] == '\n':
+                    break
+                k += 1
+            continue
+        if c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+            if depth == 0:
+                return text[open_paren:k]
+        k += 1
+    return ''
 
 
 def live_flags():
@@ -89,7 +155,9 @@ def live_flags():
                             errors='replace').read()
             except OSError:
                 continue
-            out |= set(_ADD_ARG.findall(text))
+            for m in _ADD_ARG_CALL.finditer(text):
+                out |= set(_FLAG_LIT.findall(
+                    _call_args(text, m.end() - 1)))
     # Paired boolean flags: several tools register `--x` and get `--no-x`
     # from a helper, so `--no-ratsnest` is real on render_placement.py while
     # appearing in no add_argument call anywhere. A text scan cannot see the

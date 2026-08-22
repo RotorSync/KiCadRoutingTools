@@ -1225,15 +1225,29 @@ class PlanExecutor:
                     # 0.089-0.1 tracks and 0.25/0.15 fine vias) -- 109
                     # floor-class violations in Andy's DRC3.rpt, all
                     # manufactured at plan end.
+                    # #693: honor the shared "Fix DRC settings after
+                    # routing" checkbox here too. The plan executor had no
+                    # notion of it, so a plan run always rewrote the board's
+                    # Board Setup floors at plan end regardless of the box.
+                    # Read the live control (this path owns the real dialog);
+                    # default True if it is somehow absent, matching the
+                    # unchecked-means-unchanged contract everywhere else.
+                    _fixdrc693 = True
+                    try:
+                        _fixdrc693 = bool(
+                            self.dialog.fix_drc_check.GetValue())
+                    except Exception:
+                        pass
                     from .gui_utils import update_live_drc_floors
-                    update_live_drc_floors(
-                        board,
-                        clearance=eff,
-                        track_width=track_width,
-                        via_size=floors.get('via_size'),
-                        via_drill=floors.get('via_drill'),
-                        hole_to_hole=floors.get('hole_to_hole_clearance'),
-                        edge_clearance=floors.get('board_edge_clearance'))
+                    if _fixdrc693:
+                        update_live_drc_floors(
+                            board,
+                            clearance=eff,
+                            track_width=track_width,
+                            via_size=floors.get('via_size'),
+                            via_drill=floors.get('via_drill'),
+                            hole_to_hole=floors.get('hole_to_hole_clearance'),
+                            edge_clearance=floors.get('board_edge_clearance'))
                     try:
                         # board.GetNetClasses() is EMPTY on KiCad 10 -- this
                         # loop ran zero times, so the diff-pair floors were

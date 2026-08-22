@@ -75,6 +75,16 @@ def refresh() -> None:
     # exact-fill source carries the geometry. =0 restores the pure exact
     # source for A/B.
     g['ORACLE_UNION'] = _s('KICAD_ORACLE_UNION', '1') != '0'
+    # #650 in-run DRC floor sync: before anything grades the board mid-run,
+    # lower the output's sibling .kicad_pro to the COPPER floors this run
+    # routed to, so the in-run audit fills the pours the way the SHIPPED
+    # board will. Until this, that sibling was the input's (seeded by
+    # seed_project_for_output) and its looser declared floors pulled the
+    # pours back further than the shipped board's -- measured on orangecrab:
+    # 57 reported opens vs the 46 that ship (GND 19 vs 11), all of it
+    # rules.min_hole_clearance 0.25 -> 0.0889. =0 restores the old staleness
+    # for A/B.
+    g['INRUN_FLOOR_SYNC'] = _s('KICAD_INRUN_FLOOR_SYNC', '1') != '0'
     # #667 net-tie band pricing (mm-equivalent cost per band cell,
     # DIFFERENTIAL: the own-pad approach stays free, off-pad corridor
     # cells are priced). Measured INERT on cynthion at 0.5 and 5.0 --

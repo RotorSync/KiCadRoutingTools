@@ -69,6 +69,17 @@ Validate routed boards against the *real* spec, with the right checker — most
 - **Routers can report false success.** A router's own "routed" tally may come from
   a local/heuristic proxy while pads stay disconnected; re-verify with the
   authoritative, zone/fill-aware `check_net_connectivity` before trusting it.
+- **A test's own failure path is the path nobody looks at.** A check that dies
+  before it checks anything reports the same non-zero exit as a satisfied guard,
+  so **a non-zero exit is not evidence — assert the REASON.** `tests/run_utils.py`
+  has `check(argv, refuse='<the reason>', code=N)`, which reports an
+  `ImportError`/traceback/argparse accident as a **BROKEN TEST** rather than as a
+  guard that held; use it instead of `assert r.returncode == 2`. Likewise
+  **verify the input before trusting the output**: `run_utils.evidence(path)`
+  refuses a path that is not a real non-empty file, because a check whose input
+  is missing tests nothing — and process substitution (`<(echo ...)`) is not a
+  file on Windows. Measured: a negative control copied to a temp dir died on
+  `ModuleNotFoundError` and was read as "the gate refused".
 - **Read the failure buckets by their real definitions.** `failed_single` = "no
   result at all"; `open_single` = a KEPT result whose pads are still disconnected
   (non-multipoint only — a multipoint shortfall is already the pad deficit). A
