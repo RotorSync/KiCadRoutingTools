@@ -10,19 +10,31 @@ Synthetic Segment/Via/Pad cases:
   * a clean two-pad net            -> no findings at all
   * a half-segment tail past a mid-body via anchor -> dangling-end (tail)
   * a floating via                 -> unsupported-via flagged
+  * a corner-graze terminal cap    -> narrow-pad-joint flagged (#696/#416)
+  * the same cap landing in the pad body -> NOT flagged (clean)
+
+Plus two guards on the REPORTER, which is what #696 actually broke:
+  * every category any _finding(...) emits is registered in CATEGORIES
+  * print_report names a category that is NOT in CATEGORIES, and its headline
+    count equals the sum of the per-category counts
 
     python3 tests/test_check_weird.py
 """
+import ast
+import io
 import os
+import re
 import sys
 from collections import Counter
+from contextlib import redirect_stdout
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # #522
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # #522
 
 from kicad_parser import Pad, Segment, Via, Zone, Net, BoardInfo, PCBData
-from check_weird import check_weird
+import check_weird as check_weird_mod
+from check_weird import check_weird, print_report, CATEGORIES
 
 NET = 1
 NAME = '/TEST'
@@ -33,6 +45,31 @@ def _pad(x, y, size=0.6, layers=('F.Cu',), drill=0.0, num='1', ref='U1'):
                local_x=0, local_y=0, size_x=size, size_y=size, shape='circle',
                layers=list(layers), net_id=NET, net_name=NAME,
                rotation=0.0, drill=drill)
+
+
+def _rect_pad(x, y, w, h, layers=('F.Cu',), num='1', ref='U1'):
+    # _check_terminal_web only considers rect/roundrect/oval pads -- a circle
+    # has no corner to graze, so _pad() above cannot exercise it.
+    return Pad(component_ref=ref, pad_number=num, global_x=x, global_y=y,
+               local_x=0, local_y=0, size_x=w, size_y=h, shape='rect',
+               layers=list(layers), net_id=NET, net_name=NAME,
+               rotation=0.0, drill=0.0)
+
+
+def _emitted_categories():
+    """Every category literal any `_finding(...)` call in check_weird.py emits,
+    read from the source. This is how #696 is caught at test time: the category
+    existed and the emission worked, and only the CATEGORIES entry was missing
+    -- so nothing that merely RUNS the checker could see the gap."""
+    tree = ast.parse(io.open(check_weird_mod.__file__, encoding='utf-8').read())
+    out = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == '_finding' and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)):
+            out.add(node.args[0].value)
+    return out
 
 
 def _seg(x1, y1, x2, y2, layer='F.Cu', width=0.2):
@@ -159,10 +196,18 @@ def main():
     results.append(("coincident vias flagged as stacked-copper",
                     c['stacked-copper'] == 1))
 
-    # Default tolerance hides sub-0.1mm findings (the same 0.05mm soft joint).
-    f_tol, _ = check_weird(pcb)
-    results.append(("default 0.1mm tolerance hides the 0.05mm soft joint",
-                    len([x for x in f_tol if x['category'] == 'soft-joint']) == 0))
+    # Soft joints carry size=None deliberately (check_weird.py, the note in
+    # _check_soft_joints: a SMALLER gap is still fragile, so filtering by size
+    # would invert severity, and on <=0.1mm routing the whole category vanished
+    # at the default). So the default 0.1mm tolerance must NOT hide the 0.05mm
+    # joint of case 3. This assertion previously ran on the coincident-VIAS
+    # board above -- which has no soft joint at all -- so it passed vacuously
+    # while claiming the opposite of the shipped behavior.
+    soft_pcb = _pcb([_seg(0, 0, 5, 0), _seg(5.05, 0, 10, 0)],
+                    pads=[_pad(0, 0, num='1'), _pad(10, 0, num='2', ref='U2')])
+    f_tol, _ = check_weird(soft_pcb)
+    results.append(("0.05mm soft joint survives the default 0.1mm tolerance",
+                    len([x for x in f_tol if x['category'] == 'soft-joint']) == 1))
 
     # Orphan island: two joined segments + via, nowhere near any pad of the
     # net (pads at 0/10, island at 50) -> flagged with its total length; a
@@ -180,6 +225,57 @@ def main():
     f2, _ = check_weird(pcb2)
     results.append(("sub-tolerance orphan island hidden by default",
                     not [x for x in f2 if x['category'] == 'orphan-island']))
+
+    # 10. Narrow pad joint (#416): a 0.2mm track whose free cap overlaps a
+    #     1.0x1.0mm rect pad only at the CORNER. The floor is the board's
+    #     thinnest track (0.2), so erosion by 0.1 parts the cap from the pad:
+    #     a sub-floor web. Flagged, and NOT dropped by the default 0.1mm
+    #     tolerance (size=None is deliberate -- for a web, thinner is worse).
+    pads = [_rect_pad(0, 0, 1.0, 1.0, num='1'),
+            _rect_pad(10, 0, 1.0, 1.0, num='2', ref='U2')]
+    pcb = _pcb([_seg(0.55, 0.55, 2.0, 2.0)], pads=pads)
+    f, _ = check_weird(pcb)
+    necks = [x for x in f if x['category'] == 'narrow-pad-joint']
+    results.append(("corner-graze terminal cap flagged as narrow-pad-joint",
+                    len(necks) == 1))
+    results.append(("narrow-pad-joint reported at the cap (0.55, 0.55)",
+                    len(necks) == 1 and abs(necks[0]['x'] - 0.55) < 1e-6
+                    and abs(necks[0]['y'] - 0.55) < 1e-6))
+    results.append(("narrow-pad-joint survives the default 0.1mm tolerance",
+                    len(necks) == 1 and necks[0]['size'] is None))
+    #     Negative control, same pad and same track: a cap landing in the pad
+    #     BODY joins through full-width copper and is NOT flagged. Without it
+    #     the case above would also pass on a check that flagged everything.
+    pcb = _pcb([_seg(0.0, 0.0, 2.0, 2.0)], pads=pads)
+    f, _ = check_weird(pcb)
+    results.append(("cap landing in the pad body NOT flagged",
+                    not [x for x in f if x['category'] == 'narrow-pad-joint']))
+
+    # 11. The reporter, which is what #696 actually broke: a finding whose
+    #     category is missing from CATEGORIES counted toward the headline and
+    #     the exit code but printed nothing, so the board was blocked by a
+    #     defect that was never named. Both halves are pinned here.
+    emitted = _emitted_categories()
+    results.append(("the source emits categories at all (guard not vacuous)",
+                    len(emitted) >= 8))
+    results.append(("every emitted category is registered in CATEGORIES",
+                    bool(emitted) and emitted <= set(CATEGORIES)))
+
+    stray = [{'category': 'brand-new-category', 'net': NAME, 'layer': 'F.Cu',
+              'x': 1.0, 'y': 2.0, 'detail': 'a category nobody registered',
+              'size': None}]
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        print_report(stray, [])
+    out = buf.getvalue()
+    results.append(("print_report names a category missing from CATEGORIES",
+                    'brand-new-category: 1' in out
+                    and 'a category nobody registered' in out))
+    counts = [int(m) for m in re.findall('^  [^ ]+: ([0-9]+)$', out, re.M)]
+    head = re.search('FOUND ([0-9]+) WEIRD THINGS', out)
+    results.append(("the headline count equals the sum of printed counts",
+                    head is not None and bool(counts)
+                    and int(head.group(1)) == sum(counts) == 1))
 
     passed = 0
     for name, ok in results:
