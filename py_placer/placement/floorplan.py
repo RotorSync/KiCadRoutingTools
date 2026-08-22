@@ -161,6 +161,39 @@ class Intent:
     # NEVER auto-emitted (a waiver derived from the board under repair would
     # be the budget self-bless bug again); consumed by grade_body_overlap.
     overlap_waivers: Tuple[Dict[str, object], ...] = ()
+    # Run-23: budget keys `emit_intent` deliberately did NOT bake, and why
+    # ({key: reason}). Emitted into `context.budget_withheld`; carried here so
+    # the GRADE can say "not derivable" instead of grading nothing and
+    # printing 0 errors. Hand-written intents leave it empty, which is the
+    # honest answer for a budget a human simply chose not to declare.
+    budget_withheld: Dict[str, str] = field(default_factory=dict)
+
+    def edge_claims(self) -> Tuple[Dict[str, object], ...]:
+        """The `edge_connectors` entries that actually CLAIM AN EDGE.
+
+        The wire key holds two populations. An `edge_receptacle` /
+        `edge_actuator` entry says "this part's mating face belongs at the
+        boundary", and the placement engines act on that: place_seed LOCKS it
+        during the polish quench, place_reconstruct grants it a banded
+        out-of-outline allowance and excludes it from the exchange stage, and
+        reconstruct.classify forces it into the anchor tier. A
+        `connector_affinity` entry (run-23) says only "this is a
+        connector-family part with NO edge claim" -- it exists so a mid-board
+        header stops being invisible to `rule_edge_connector`, which flags an
+        interior pose at WARN.
+
+        Handing the second population to the first's consumers would silently
+        change placement: on tigard_placed that is 6 extra refs locked in the
+        seed quench, given a 2.0mm off-outline allowance each and pinned as
+        anchors -- for parts nobody said anything about. So the engines read
+        THIS, and the rule reads `edge_connectors`.
+
+        The split lives here, in one place, rather than as a filter repeated
+        at every consumer: a filter that must be remembered is a filter that
+        will be forgotten at the next call site.
+        """
+        return tuple(c for c in self.edge_connectors
+                     if c.get('class') != 'connector_affinity')
 
     def waiver_pairs(self) -> Tuple[Tuple[str, str], ...]:
         out = []
@@ -390,6 +423,9 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
         severity={str(k): str(v) for k, v in severity.items()},
         source_path=source_path,
         overlap_waivers=tuple(waivers),
+        budget_withheld={
+            str(k): str(v) for k, v in
+            ((raw.get('context') or {}).get('budget_withheld') or {}).items()},
     )
 
 
@@ -878,19 +914,32 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         # a violation -- which is also what makes a misplaced edge part
         # CHARGEABLE by place_seed --repair.
         setback = c.get('max_setback_mm')
+        _sev = ctx.sev('edge_connector')
         if setback is None and c.get('class') == 'edge_receptacle':
             from .part_class import SEAT_TOL_MM
             setback = SEAT_TOL_MM
+        if setback is None and c.get('class') == 'connector_affinity':
+            # run-23: the weak class. An INTERIOR generic connector is a flag
+            # for the boundary review, never an error -- legitimately-interior
+            # connectors exist (tigard J7), so this fires at WARN whatever the
+            # rule's configured severity. An author upgrades by writing
+            # max_setback_mm (then the configured severity applies) or edge.
+            from .part_class import INTERIOR_AFFINITY_MM
+            setback = INTERIOR_AFFINITY_MM
+            _sev = WARN
         if setback is not None and amount <= legality.EPS:
             clr = ctx.gate.edge_clearance(part.rect)
             if clr > float(setback) + legality.EPS:
                 yield Violation(
-                    rule='edge_connector', severity=ctx.sev('edge_connector'),
+                    rule='edge_connector', severity=_sev,
                     ref=ref,
                     message=(f"{ref} is an edge part seated {clr:.2f}mm from "
                              f"the nearest edge with no overhang (seat "
-                             f"tolerance {float(setback):.2f}mm) -- the "
-                             f"mating face cannot reach the edge"),
+                             f"tolerance {float(setback):.2f}mm) -- "
+                             + ("a plug may not reach it; disposition in the "
+                                "boundary review or declare max_setback_mm"
+                                if _sev == WARN else
+                                "the mating face cannot reach the edge")),
                     measured={'edge_clearance_mm': round(clr, 4)},
                     expected={'max_setback_mm': float(setback)})
 
@@ -964,6 +1013,11 @@ def rule_legality(ctx) -> Iterator[Violation]:
                        ('oob_count', 'parts leaving the board outline'),
                        ('oob_amount', 'total off-board overhang (mm)')):
         if key not in budget:
+            # Not graded. When the emitter WITHHELD it (a blocking body pair
+            # or an unwaived courtyard interpenetration on the board it was
+            # emitted from), the run must not look like a pass on this
+            # channel: `budget_abstained` on the result carries it, and both
+            # the report and the summary print it. See grade().
             continue
         got = ctx.legality.get(key)
         if got is None:
@@ -1043,6 +1097,11 @@ class GradeResult:
     rules_run: Tuple[str, ...]
     rules_skipped: Dict[str, str]
     n_footprints: int
+    # Run-23: budget keys the intent could NOT derive, {key: reason}. An
+    # abstention, not a pass -- the channel was never graded. Before this the
+    # withheld key was a bare `continue` in rule_legality and the run printed
+    # "PASS: N rules ran, no violations" with overlap unmeasured.
+    budget_abstained: Dict[str, str] = field(default_factory=dict)
 
     @property
     def errors(self) -> List[Violation]:
@@ -1106,9 +1165,21 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
     violations = list(validate_intent(intent)) + list(block_problems)
     ran: List[str] = []
     skipped: Dict[str, str] = {}
+    # Budget keys the emitter withheld and that are therefore NOT graded.
+    # A key present in the budget was declared (by hand, deliberately) and
+    # overrides its withholding note.
+    abstained = {str(k): str(v)
+                 for k, v in (intent.budget_withheld or {}).items()
+                 if k not in (intent.legality_budget or {})}
     for name, fn in RULES:
         if not _wants(intent, name):
-            skipped[name] = _SKIP_REASON.get(name, 'not requested')
+            reason = _SKIP_REASON.get(name, 'not requested')
+            if name == 'legality' and abstained:
+                # "declares no legality_budget" is true but reads as "nobody
+                # wanted one". Say that the emitter refused to derive it.
+                reason += ('; the emitter WITHHELD ' + ', '.join(
+                    f'{k} ({v})' for k, v in sorted(abstained.items())))
+            skipped[name] = reason
             continue
         ran.append(name)
         violations.extend(fn(ctx))
@@ -1158,6 +1229,7 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
                'segments': st.segments, 'vias': st.vias},
         health=health_out,
         rules_run=tuple(ran), rules_skipped=skipped,
+        budget_abstained=abstained,
         n_footprints=len(pcb_data.footprints))
 
 
@@ -1428,6 +1500,21 @@ def emit_intent(pcb_data, pcb_file: str, *,
             if fp is None:
                 continue
             pc = classify_part(fp, ref)
+            if pc.name == 'connector_affinity':
+                # run-23: generic connectors (headers, JST, terminal blocks)
+                # had NO class, so J2/J5/J6/J7 seated mid-board and no
+                # instrument could say so. Declared WITHOUT an edge (the
+                # run-4 rule stands: naming one would be an invention) and
+                # with no band ceiling; the grade flags an INTERIOR pose at
+                # ADVISORY severity only. A human upgrades by adding `edge`
+                # or `max_setback_mm` to the entry.
+                clr = state.edge_gate.edge_clearance(parts[ref].rect)
+                conns.append({
+                    'ref': ref, 'class': pc.name, 'source': 'auto-class',
+                    'overhang_mm': {'min': 0.0},
+                    'note': (f'connector-family part, no edge claim; '
+                             f'measured {clr:.2f}mm from the nearest edge')})
+                continue
             if pc.name != 'edge_receptacle':
                 # actuators make no claim unless they actually overhang
                 # (handled above); nothing else is an edge class.
@@ -1453,15 +1540,37 @@ def emit_intent(pcb_data, pcb_file: str, *,
     # (the emitted 6.112 budget graded the C14-on-R14 board clean). The
     # repaired board re-emits the honest number; meanwhile board_score's
     # `assembly` component grades independently of any budget.
+    # Run-23 extends the same withholding to unwaived COURTYARD interpene-
+    # trations past the blocking floors: run 23's intent was emitted from a
+    # mid-repair board carrying J4 0.90mm inside U6, baked overlap_area
+    # 30.1085, and the final board's 26.302 then graded PASS -- the budget
+    # blessed the board it was emitted from. A board with such pairs gets no
+    # auto overlap budget; declare one by hand (visibly) if the overlap is
+    # by design. Cost, measured: 5 of 34 corpus boards carry by-design
+    # censuses and lose the auto-budget too -- the legality rule then
+    # ABSTAINS (not-derivable) on them, which is honest degradation; their
+    # independent coverage is check_assembly's moved-vs-baseline gate.
     try:
         from placement.legality import grade_body_overlap
-        _body_blocking = grade_body_overlap(
-            pcb_data, state.clearance, pcb_file=pcb_file)['blocking']
+        _g_overlap = grade_body_overlap(
+            pcb_data, state.clearance, pcb_file=pcb_file)
+        _body_blocking = _g_overlap['blocking']
+        _courtyard_blocking = _g_overlap.get('courtyard_blocking', 0)
     except Exception:
         _body_blocking = 0
+        _courtyard_blocking = 0
     _suspects = any('SUSPECT' in (c.get('note') or '') for c in conns)
     _budget = {}
-    if not _body_blocking:
+    _withheld = {}
+    if _body_blocking:
+        _withheld['overlap_area'] = (f'{_body_blocking} blocking body '
+                                     f'pair(s) on the emitting board (run-6)')
+    elif _courtyard_blocking:
+        _withheld['overlap_area'] = (
+            f'{_courtyard_blocking} unwaived courtyard interpenetration(s) '
+            f'past the blocking floors on the emitting board (run-23): an '
+            f'auto-budget would bless them')
+    else:
         _budget['overlap_area'] = _ceil4(float(leg['overlap_area']))
     if not _suspects:
         _budget['oob_count'] = int(leg['oob_count'])
@@ -1499,6 +1608,10 @@ def emit_intent(pcb_data, pcb_file: str, *,
             'note': ('read-only, describing the board as it is. The outline is '
                      'not editable by this toolchain: size, cutouts and slots '
                      'are mechanical decisions the user owns'),
+            # Budget keys deliberately NOT baked, and why -- so a reader of
+            # the intent can tell "withheld" from "forgot" (empty when
+            # nothing was withheld).
+            'budget_withheld': _withheld,
             'cutouts': [[[round(x, 3), round(y, 3)] for x, y in ring]
                         for ring in (pcb_data.board_info.board_cutouts or [])],
             'edge_contours': len(
@@ -1542,6 +1655,11 @@ def format_text(r: GradeResult) -> str:
         for v in r.violations:
             tag = 'ERROR' if v.severity == ERROR else 'warn '
             lines.append(f"    [{tag}] {v.rule}: {v.message}")
+    if r.budget_abstained:
+        lines.append(f"  {len(r.budget_abstained)} legality budget key(s) NOT "
+                     f"DERIVABLE -- not graded, not passed:")
+        for key in sorted(r.budget_abstained):
+            lines.append(f"    - {key}: {r.budget_abstained[key]}")
     if r.rules_skipped:
         lines.append(f"  {len(r.rules_skipped)} rule(s) did not run:")
         for name in sorted(r.rules_skipped):
@@ -1641,6 +1759,7 @@ def to_json(r: GradeResult) -> Dict:
         'health': r.health,
         'rules_run': list(r.rules_run),
         'rules_skipped': r.rules_skipped,
+        'budget_abstained': r.budget_abstained,
         'n_footprints': r.n_footprints,
     }
 
@@ -1660,6 +1779,9 @@ def summary(r: GradeResult) -> Dict:
         'violations_by_rule': by_rule,
         'rules_run': len(r.rules_run),
         'rules_skipped': len(r.rules_skipped),
+        # Not a violation count and not a pass: channels nothing graded.
+        'budget_abstained': len(r.budget_abstained),
+        'budget_abstained_keys': sorted(r.budget_abstained),
         'blocks': len(r.blocks),
         'blocks_resolved': sum(1 for v in r.blocks.values() if v),
         'parts_covered': len({ref for v in r.blocks.values() for ref in v}),

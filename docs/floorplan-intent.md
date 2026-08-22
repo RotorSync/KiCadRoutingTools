@@ -129,7 +129,7 @@ for it, and the reason is printed:
 | `zone_side` | a member is on the other face | `legality.footprint_side` |
 | `zone_exclusive` | a non-member intrudes on a reserved zone | `rect_overlap_area` |
 | `keepout` | any part enters a keep-out, unless in `allow` | courtyard **and** through-hole rect |
-| `edge_connector` | overhang outside `[min,max]`, or the wrong edge | `BoardOutlineGate.rect_outside_amount` |
+| `edge_connector` | overhang outside `[min,max]`, or the wrong edge; a `connector_affinity` entry seated more than 3 mm from every edge fires at **warn** whatever the configured severity | `BoardOutlineGate.rect_outside_amount`, `edge_clearance` |
 | `decap_distance` | a decoupling cap is too far from its own IC | `groups.decap_tethers` |
 | `must_lock` | a declared-critical part is not locked in the file | `parser.extract_locked_refs` |
 | `legality` | overlap or off-board parts exceed a budget | `QuenchState.legality_metrics` |
@@ -324,3 +324,39 @@ This is the same spatial incoherence that makes sheet blocks useless for
 Parts already overhanging the outline are recorded as `edge_connectors` by
 observation, which is what stops `oob_count` reporting a card edge or USB shell
 as a defect forever.
+
+With `--declare-classes`, connector-family parts that claim no edge (headers,
+JST, terminal blocks; `part_class` calls them `connector_affinity`) are also
+recorded, with `"class": "connector_affinity"` and **no `edge`** (naming one
+would be an invention). The grade then flags such a part seated more than
+3 mm from every edge at `warn` only, because legitimately interior connectors
+exist; write `max_setback_mm` or `edge` on the entry to make it a real claim
+at the configured severity.
+
+These entries are **declarations, not seat claims**, and the placement engines
+do not act on them. `edge_connectors` therefore holds two populations, and
+`Intent.edge_claims()` is the split: it drops `connector_affinity` and is what
+`place_seed` (which LOCKS edge refs for its polish quench), `place_reconstruct`
+(banded off-outline allowance, exchange-stage exclusion) and
+`reconstruct.classify` (the anchor tier) read. The `edge_connector` **rule**
+reads the whole key, because flagging an interior pose is the entry's only
+purpose. Writing `max_setback_mm` or `edge` on an entry changes its class-based
+severity, not its membership -- to hand a part the edge-part treatment in the
+engines, declare it with an edge class.
+
+The `overlap_area` budget is **withheld** when the emitting board carries a
+blocking body pair, or an unwaived courtyard interpenetration past the
+blocking floors: baking the number would bless the board it was measured on.
+`context.budget_withheld` names each withheld key and why, so a reader can tell
+"withheld" from "forgot"; declare the budget by hand if the overlap is by
+design.
+
+A withheld key is **abstained at grade time, not passed**. `check_floorplan
+--intent` reads `context.budget_withheld`, reports every withheld key that the
+intent does not also declare under `N legality budget key(s) NOT DERIVABLE --
+not graded, not passed`, and carries them as `budget_abstained` in `--json` and
+as `budget_abstained` / `budget_abstained_keys` in `JSON_SUMMARY`. When the
+whole budget is empty the `legality` rule does not run at all, and its skip
+reason names the withholding rather than saying only "the intent declares no
+legality_budget". Declaring the key by hand overrides the note: a declared
+budget is graded.

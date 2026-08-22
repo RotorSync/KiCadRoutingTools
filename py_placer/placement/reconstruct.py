@@ -306,7 +306,9 @@ def classify(state, intent=None, anchor_extent='auto') -> Tiers:
     else:
         thr = float(anchor_extent)
     t.threshold = round(thr, 3)
-    edge_refs = ({c['ref'] for c in intent.edge_connectors}
+    # edge_claims(): forcing a connector_affinity part into the anchor tier
+    # would let a class declaration reshape the reconstruction.
+    edge_refs = ({c['ref'] for c in intent.edge_claims()}
                  if intent is not None else set())
     t.edge = edge_refs & set(state.parts)   # run-4 F2: kept, not discarded
     t.anchors = {r for r in free

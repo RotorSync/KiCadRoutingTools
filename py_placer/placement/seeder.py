@@ -988,8 +988,12 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                 rng.uniform(-TARGET_JITTER_MM, TARGET_JITTER_MM))
 
     # ---- 1. edge connectors: spec geometry, no legality gate ---------------
+    # edge_claims(), not the raw key: a connector_affinity entry declares a
+    # class and makes no seat claim, so stage 1 has nothing to seat it from.
+    # Reading the raw key printed "edge connector J7: no edge declared" at a
+    # part that never claimed one.
     by_edge: Dict[str, List[Dict]] = {}
-    for c in intent.edge_connectors:
+    for c in intent.edge_claims():
         if c['ref'] not in state.parts:
             notes.append(f"edge connector {c['ref']} is not on this board")
         elif c['ref'] in unplaced:
@@ -1346,7 +1350,7 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
         # no `edge` key is not protected, consistent with stage 1: it seats
         # no such entry ("no edge, no seat") and leaves it to the ordinary
         # stages, so it is an ordinary part here too.
-        immovable = set(lock_refs) | {c['ref'] for c in intent.edge_connectors
+        immovable = set(lock_refs) | {c['ref'] for c in intent.edge_claims()
                                       if c.get('edge')}
         still: List[str] = []
         # DEDUPED, and placed-aware. A zone member that fails its zone stage
@@ -1587,7 +1591,7 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
     # EXCESS past the band, not nothing at all -- see the note there.
     edge_band: Dict[str, float] = {}
     if intent:
-        for _c in intent.edge_connectors:
+        for _c in intent.edge_claims():   # seat claims only; see edge_claims
             edge_band[_c['ref']] = float(
                 (_c.get('overhang_mm') or {}).get('max') or 0.0)
 
@@ -1807,7 +1811,18 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
                  if r not in unrepairable]
 
     # ---- seat violators, worst first, escalating cap -----------------------
-    edge_entry = ({c['ref']: c for c in intent.edge_connectors}
+    # edge_claims(), and this one is a REGRESSION FIX, not tidiness. The
+    # dispatch below short-circuits every entry in this map that carries no
+    # `edge` into a refusal, so reading the raw key took the run-23
+    # connector_affinity declarations -- which never carry an edge, by
+    # design -- straight out of the ordinary `_try_place` loop. Measured on
+    # tests/fixtures/run23/tigard_damaged.kicad_pcb with its own
+    # --declare-classes intent: J5, J6 and J7 were refused with "declared
+    # edge part misplaced, but no edge is declared" (which also mislabels
+    # them), where upstream main tries them like any other violator and
+    # reports the honest "no legal pose within any cap". A declaration must
+    # not remove a part from repair.
+    edge_entry = ({c['ref']: c for c in intent.edge_claims()}
                   if intent else {})
     repaired: List[str] = []
     failed: List[str] = []
@@ -2174,7 +2189,13 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
     # ---- edge bands: the scope forfeits its own ----------------------------
     if edge_bands is None:
         edge_bands = {}
-        for c in intent.edge_connectors:
+        # edge_claims(): the `or 2.0` default below is an off-outline
+        # allowance for a part whose seat overhangs by design. A
+        # connector_affinity entry carries `overhang_mm` with only a `min`,
+        # so the raw key handed every generic header 2.0mm of licence in the
+        # gate tuple -- the exact trap test_run23_connector_affinity's
+        # edge-band test names.
+        for c in intent.edge_claims():
             if c['ref'] in state.parts:
                 band = c.get('overhang_mm') or {}
                 edge_bands[c['ref']] = float(band.get('max') or 2.0)
@@ -2182,8 +2203,21 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
 
     dropped = {}
     keep = []
-    for c in intent.edge_connectors:
-        if c['ref'] in scope:
+    # Only an edge CLAIM has a band to forfeit, and only a claim is seated by
+    # stage 1 without a legality gate (the 30km probe below). A
+    # connector_affinity entry declares a class and no band, so it rides
+    # through into `intent2` untouched rather than being reported as a
+    # dropped declaration it never made.
+    _claims = {c['ref'] for c in intent.edge_claims()}
+    # The raw key here is deliberate: `intent2` below must stay a faithful
+    # copy of the declaration list minus only the bands the scope forfeits,
+    # and filtering it would silently strip every connector_affinity entry
+    # from the sub-intent. Every OTHER engine read goes through
+    # edge_claims(); the marker on the next line is what the source guard in
+    # tests/test_run23_connector_affinity.py accepts, and it asserts this is
+    # the ONLY one in the tree.
+    for c in intent.edge_connectors:   # edge-claims-exempt: faithful copy
+        if c['ref'] in scope and c['ref'] in _claims:
             dropped[c['ref']] = float((c.get('overhang_mm') or {}).get('max')
                                       or 0.0)
         else:

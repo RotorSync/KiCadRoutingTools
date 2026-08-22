@@ -426,7 +426,9 @@ Examples:
         # polished by the objective the later steps rank with. Locks ride in
         # from the file (must_lock was just stamped); edge connectors are
         # locked per-call so the polish cannot walk them off their band.
-        edge_refs = [c['ref'] for c in intent.edge_connectors]
+        # edge_claims(), not edge_connectors: a connector_affinity entry
+        # makes no seat claim and must not be locked out of the polish.
+        edge_refs = [c['ref'] for c in intent.edge_claims()]
         placements = quench(
             pcb_seeded, pcb_file=args.output_file,
             max_displacement=args.max_displacement,

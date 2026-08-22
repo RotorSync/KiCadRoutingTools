@@ -134,6 +134,35 @@ def test_drc_panels_cluster_mark_and_cap():
     print("  PASS: 2 clusters -> 2 panels, waived skipped, cap reported")
 
 
+def test_quiet_keeps_keys_off_stdout_when_json_out_carries_them():
+    """Run 24, finding A-1: the review gates order 'view the image BEFORE the
+    keys', then prescribe a render command whose unconditional JSON_SUMMARY
+    echo put the keys on screen first. --quiet with --json-out now suppresses
+    the echo and the describe text (the file carries both); --quiet WITHOUT
+    --json-out must still print the summary -- data is never silenced into
+    nowhere."""
+    rp = os.path.join(ROOT, 'py_tools', 'render_placement.py')
+    board = os.path.join(ROOT, 'kicad_files', 'splitflap_driver.kicad_pcb')
+    with tempfile.TemporaryDirectory() as td:
+        out = os.path.join(td, 'r.json')
+        r = subprocess.run(
+            [sys.executable, '-X', 'utf8', rp, board, '--clearance', '0.15',
+             '--json-out', out, '--quiet', '-o', os.path.join(td, 'r.png')],
+            capture_output=True, text=True, cwd=ROOT)
+        assert r.returncode == 0, r.stdout[-400:]
+        assert 'JSON_SUMMARY' not in r.stdout, 'the echo defeats blind-first'
+        assert 'WHAT THIS PANEL SHOWS' not in r.stdout
+        assert os.path.getsize(out) > 100, 'the file must still carry the doc'
+        r2 = subprocess.run(
+            [sys.executable, '-X', 'utf8', rp, board, '--clearance', '0.15',
+             '--json', '--quiet', '-o', os.path.join(td, 'r2.png')],
+            capture_output=True, text=True, cwd=ROOT)
+        assert 'JSON_SUMMARY' in r2.stdout, \
+            'without --json-out the summary must still print somewhere'
+    print("  PASS: --quiet + --json-out is blind; --quiet alone never "
+          "silences data into nowhere")
+
+
 if __name__ == '__main__':
     for k, fn in sorted(globals().items()):
         if k.startswith('test_'):
