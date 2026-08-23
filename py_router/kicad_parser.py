@@ -3153,13 +3153,35 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                 width=ew, layer=layer, net_id=nid, uuid=uuid, graphic=True))
 
     def _blk_fields(blk):
+        # BOTH layer tokens (#659 follow-up). KiCad writes the singular
+        # (layer "F.Cu") for a one-layer graphic and the PLURAL
+        # (layers "F.Cu" "F.Mask") for one that also carries mask/paste --
+        # and a singular-only regex dropped the plural form ENTIRELY, so its
+        # copper was neither connectivity nor an OBSTACLE. Measured on
+        # endgame_trackball: 8 filled 3.2mm copper gr_circles invisible, and
+        # the router laid 13 foreign-net crossings straight through them (the
+        # unrouted input had 0) while every checker read clean, because
+        # check_drc reads this same parser. Returns the copper layers as a
+        # LIST -- a two-sided graphic is copper on both.
         lm = re.search(r'\(layer\s+"([^"]+)"\)', blk)
+        if lm:
+            names = [lm.group(1)]
+        else:
+            lsm = re.search(r'\(layers\s+((?:"[^"]*"\s*)+)\)', blk)
+            names = re.findall(r'"([^"]*)"', lsm.group(1)) if lsm else []
+        layers = []
+        for _nm in names:
+            # F&B.Cu is KiCad's two-sided shorthand. A bare *.Cu wildcard
+            # cannot be expanded here (extract_segments has no stackup), so
+            # it falls through as non-copper rather than being guessed at.
+            for _one in (('F.Cu', 'B.Cu') if _nm == 'F&B.Cu' else (_nm,)):
+                if _one.endswith('.Cu') and _one not in layers:
+                    layers.append(_one)
         wm = re.search(r'\(width\s+([-\d.]+)\)', blk)
         nm = re.search(r'\(net\s+("[^"]*"|\d+)\)', blk)
         um = (re.search(r'\(uuid\s+"([^"]+)"\)', blk)
               or re.search(r'\(tstamp\s+([-\w]+)\)', blk))
-        layer = lm.group(1) if lm else None
-        return (layer, float(wm.group(1)) if wm else 0.0,
+        return (layers, float(wm.group(1)) if wm else 0.0,
                 _resolve_net(nm.group(1)) if nm else 0,
                 um.group(1) if um else '')
 
@@ -3181,42 +3203,41 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
             j = find_matching_paren(content, i)
             blk = content[i:j]
             pos = j
-            layer, w, nid, uuid = _blk_fields(blk)
-            if not layer or not layer.endswith('.Cu'):
+            layers, w, nid, uuid = _blk_fields(blk)
+            if not layers:
                 continue
-            if tag == 'gr_line':
-                if w <= 0:
-                    continue
-                a, b = _xy(blk, 'start'), _xy(blk, 'end')
-                if a and b:
-                    segments.append(Segment(
-                        start_x=a[0], start_y=a[1], end_x=b[0], end_y=b[1],
-                        width=w, layer=layer, net_id=nid, uuid=uuid, graphic=True))
-            elif tag == 'gr_arc':
-                if w <= 0:
-                    continue
-                a, mid, b = _xy(blk, 'start'), _xy(blk, 'mid'), _xy(blk, 'end')
-                if a and mid and b:
-                    for p0, p1 in _arc_to_segments(a, mid, b):
+            if tag in ('gr_line', 'gr_arc') and w <= 0:
+                continue        # unstroked line/arc: no copper to model
+            for layer in layers:
+                if tag == 'gr_line':
+                    a, b = _xy(blk, 'start'), _xy(blk, 'end')
+                    if a and b:
                         segments.append(Segment(
-                            start_x=p0[0], start_y=p0[1], end_x=p1[0], end_y=p1[1],
+                            start_x=a[0], start_y=a[1], end_x=b[0], end_y=b[1],
                             width=w, layer=layer, net_id=nid, uuid=uuid, graphic=True))
-            elif tag == 'gr_poly':
-                pts = [(float(x), float(y)) for x, y in
-                       re.findall(r'\(xy\s+([-\d.]+)\s+([-\d.]+)\)', blk)]
-                _emit_outline(pts, w, layer, nid, uuid)
-            elif tag == 'gr_rect':
-                a, b = _xy(blk, 'start'), _xy(blk, 'end')
-                if a and b:
-                    _emit_outline([(a[0], a[1]), (b[0], a[1]),
-                                   (b[0], b[1]), (a[0], b[1])], w, layer, nid, uuid)
-            elif tag == 'gr_circle':
-                c, e = _xy(blk, 'center'), _xy(blk, 'end')
-                if c and e:
-                    r = math.hypot(e[0] - c[0], e[1] - c[1])
-                    _emit_outline([(c[0] + r * math.cos(k * math.pi / 8),
-                                    c[1] + r * math.sin(k * math.pi / 8))
-                                   for k in range(16)], w, layer, nid, uuid)
+                elif tag == 'gr_arc':
+                    a, mid, b = _xy(blk, 'start'), _xy(blk, 'mid'), _xy(blk, 'end')
+                    if a and mid and b:
+                        for p0, p1 in _arc_to_segments(a, mid, b):
+                            segments.append(Segment(
+                                start_x=p0[0], start_y=p0[1], end_x=p1[0], end_y=p1[1],
+                                width=w, layer=layer, net_id=nid, uuid=uuid, graphic=True))
+                elif tag == 'gr_poly':
+                    pts = [(float(x), float(y)) for x, y in
+                           re.findall(r'\(xy\s+([-\d.]+)\s+([-\d.]+)\)', blk)]
+                    _emit_outline(pts, w, layer, nid, uuid)
+                elif tag == 'gr_rect':
+                    a, b = _xy(blk, 'start'), _xy(blk, 'end')
+                    if a and b:
+                        _emit_outline([(a[0], a[1]), (b[0], a[1]),
+                                       (b[0], b[1]), (a[0], b[1])], w, layer, nid, uuid)
+                elif tag == 'gr_circle':
+                    c, e = _xy(blk, 'center'), _xy(blk, 'end')
+                    if c and e:
+                        r = math.hypot(e[0] - c[0], e[1] - c[1])
+                        _emit_outline([(c[0] + r * math.cos(k * math.pi / 8),
+                                        c[1] + r * math.sin(k * math.pi / 8))
+                                       for k in range(16)], w, layer, nid, uuid)
 
     warn_net_tagged_graphics(segments, name_to_id)
     return segments
@@ -4458,8 +4479,26 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         for _d in board.GetDrawings():
             if _d.GetClass() not in ("PCB_SHAPE", "DRAWSEGMENT"):
                 continue
-            _ln = get_layer_name(_d.GetLayer())
-            if not (_ln or '').endswith('.Cu'):
+            # EVERY copper layer of the shape, not just GetLayer() (#659
+            # follow-up): KiCad writes a multi-layer graphic as the plural
+            # (layers "F.Cu" "F.Mask") / ("F.Cu" "B.Cu"), and the text parser
+            # now models one copy per copper layer -- the same rule the
+            # multi-layer ZONE fix already follows. GetLayer() returns only
+            # the primary layer, so a two-sided graphic would be copper on
+            # one side in the GUI and both in the CLI.
+            _lns = []
+            try:
+                for _lid in _d.GetLayerSet().Seq():
+                    _n2 = get_layer_name(_lid)
+                    if (_n2 or '').endswith('.Cu') and _n2 not in _lns:
+                        _lns.append(_n2)
+            except Exception:
+                pass        # older pcbnew: no LayerSet on a shape
+            if not _lns:
+                _n2 = get_layer_name(_d.GetLayer())
+                if (_n2 or '').endswith('.Cu'):
+                    _lns = [_n2]
+            if not _lns:
                 continue
             try:
                 _shape = _d.GetShape()
@@ -4471,60 +4510,61 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             _RECT = getattr(_pcbnew_g, 'SHAPE_T_RECT', -11)
             _CIRC = getattr(_pcbnew_g, 'SHAPE_T_CIRCLE', -12)
 
-            def _emit_outline_b(pts, ew):
-                seq = list(pts) + [pts[0]]
-                for _a, _b in zip(seq, seq[1:]):
-                    segments.append(Segment(
-                        start_x=_a[0], start_y=_a[1], end_x=_b[0], end_y=_b[1],
-                        width=ew, layer=_ln, net_id=_nid, graphic=True))
+            for _ln in _lns:
+                def _emit_outline_b(pts, ew):
+                    seq = list(pts) + [pts[0]]
+                    for _a, _b in zip(seq, seq[1:]):
+                        segments.append(Segment(
+                            start_x=_a[0], start_y=_a[1], end_x=_b[0], end_y=_b[1],
+                            width=ew, layer=_ln, net_id=_nid, graphic=True))
 
-            if _shape == getattr(_pcbnew_g, 'SHAPE_T_SEGMENT', 0):
-                if _w <= 0:
-                    continue
-                segments.append(Segment(
-                    start_x=to_mm(_d.GetStart().x), start_y=to_mm(_d.GetStart().y),
-                    end_x=to_mm(_d.GetEnd().x), end_y=to_mm(_d.GetEnd().y),
-                    width=_w, layer=_ln, net_id=_nid, graphic=True))
-            elif _shape == getattr(_pcbnew_g, 'SHAPE_T_ARC', 2):
-                if _w <= 0:
-                    continue
-                try:
-                    _s0 = (to_mm(_d.GetStart().x), to_mm(_d.GetStart().y))
-                    _m0 = (to_mm(_d.GetArcMid().x), to_mm(_d.GetArcMid().y))
-                    _e0 = (to_mm(_d.GetEnd().x), to_mm(_d.GetEnd().y))
-                except Exception:
-                    continue
-                for _p0, _p1 in _arc_to_segments(_s0, _m0, _e0):
+                if _shape == getattr(_pcbnew_g, 'SHAPE_T_SEGMENT', 0):
+                    if _w <= 0:
+                        continue
                     segments.append(Segment(
-                        start_x=_p0[0], start_y=_p0[1], end_x=_p1[0], end_y=_p1[1],
+                        start_x=to_mm(_d.GetStart().x), start_y=to_mm(_d.GetStart().y),
+                        end_x=to_mm(_d.GetEnd().x), end_y=to_mm(_d.GetEnd().y),
                         width=_w, layer=_ln, net_id=_nid, graphic=True))
-            elif _shape in (_POLY, _RECT, _CIRC):
-                # FILLED copper areas (#337): outline as graphic segments (parity
-                # with the text parser). Filled shapes may have 0 stroke width.
-                _ow = _w if _w > 0 else defaults.TRACK_WIDTH
-                try:
-                    if _shape == _POLY:
-                        _ps = _d.GetPolyShape()
-                        _ol = _ps.Outline(0)
-                        _pts = [(to_mm(_ol.CPoint(k).x), to_mm(_ol.CPoint(k).y))
-                                for k in range(_ol.PointCount())]
-                        if len(_pts) >= 2:
-                            _emit_outline_b(_pts, _ow)
-                    elif _shape == _RECT:
-                        _s0 = _d.GetStart(); _e0 = _d.GetEnd()
-                        _x1, _y1 = to_mm(_s0.x), to_mm(_s0.y)
-                        _x2, _y2 = to_mm(_e0.x), to_mm(_e0.y)
-                        _emit_outline_b([(_x1, _y1), (_x2, _y1),
-                                         (_x2, _y2), (_x1, _y2)], _ow)
-                    elif _shape == _CIRC:
-                        _c = _d.GetCenter(); _cx, _cy = to_mm(_c.x), to_mm(_c.y)
-                        _r = to_mm(_d.GetRadius())
-                        _emit_outline_b(
-                            [(_cx + _r * math.cos(k * math.pi / 8),
-                              _cy + _r * math.sin(k * math.pi / 8))
-                             for k in range(16)], _ow)
-                except Exception:
-                    pass
+                elif _shape == getattr(_pcbnew_g, 'SHAPE_T_ARC', 2):
+                    if _w <= 0:
+                        continue
+                    try:
+                        _s0 = (to_mm(_d.GetStart().x), to_mm(_d.GetStart().y))
+                        _m0 = (to_mm(_d.GetArcMid().x), to_mm(_d.GetArcMid().y))
+                        _e0 = (to_mm(_d.GetEnd().x), to_mm(_d.GetEnd().y))
+                    except Exception:
+                        continue
+                    for _p0, _p1 in _arc_to_segments(_s0, _m0, _e0):
+                        segments.append(Segment(
+                            start_x=_p0[0], start_y=_p0[1], end_x=_p1[0], end_y=_p1[1],
+                            width=_w, layer=_ln, net_id=_nid, graphic=True))
+                elif _shape in (_POLY, _RECT, _CIRC):
+                    # FILLED copper areas (#337): outline as graphic segments (parity
+                    # with the text parser). Filled shapes may have 0 stroke width.
+                    _ow = _w if _w > 0 else defaults.TRACK_WIDTH
+                    try:
+                        if _shape == _POLY:
+                            _ps = _d.GetPolyShape()
+                            _ol = _ps.Outline(0)
+                            _pts = [(to_mm(_ol.CPoint(k).x), to_mm(_ol.CPoint(k).y))
+                                    for k in range(_ol.PointCount())]
+                            if len(_pts) >= 2:
+                                _emit_outline_b(_pts, _ow)
+                        elif _shape == _RECT:
+                            _s0 = _d.GetStart(); _e0 = _d.GetEnd()
+                            _x1, _y1 = to_mm(_s0.x), to_mm(_s0.y)
+                            _x2, _y2 = to_mm(_e0.x), to_mm(_e0.y)
+                            _emit_outline_b([(_x1, _y1), (_x2, _y1),
+                                             (_x2, _y2), (_x1, _y2)], _ow)
+                        elif _shape == _CIRC:
+                            _c = _d.GetCenter(); _cx, _cy = to_mm(_c.x), to_mm(_c.y)
+                            _r = to_mm(_d.GetRadius())
+                            _emit_outline_b(
+                                [(_cx + _r * math.cos(k * math.pi / 8),
+                                  _cy + _r * math.sin(k * math.pi / 8))
+                                 for k in range(16)], _ow)
+                    except Exception:
+                        pass
     except Exception:
         pass  # older pcbnew APIs: best-effort
 
