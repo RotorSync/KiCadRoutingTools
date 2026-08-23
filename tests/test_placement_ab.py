@@ -355,14 +355,30 @@ def _sign(a, b, tol=0.0):
     return 1 if d > 0 else -1
 
 
+BASELINE_KEYS = BASELINE_INT_KEYS + BASELINE_FLOAT_KEYS + BASELINE_DICT_KEYS
+
+
 def record_for(row, mark, off, on):
-    """The serializable evidence for one row."""
-    def keep(d):
-        return {k: v for k, v in (d or {}).items()
-                if k in BASELINE_INT_KEYS or k in BASELINE_FLOAT_KEYS
-                or k in BASELINE_DICT_KEYS}
+    """The serializable evidence for one row.
+
+    Refuses a measurement that is MISSING a compared key rather than writing a
+    baseline with a hole in it. A key that quietly stops being produced is the
+    same failure as a number that quietly inverts: the evidence still looks
+    complete. (`health_blocks_displaced` was None on every board for months
+    because nothing ever asked whether it had a value.) A key present and None
+    is fine -- that is a measurement, and the comparator handles it.
+    """
+    def keep(arm, d):
+        missing = [k for k in BASELINE_KEYS if k not in (d or {})]
+        if missing:
+            raise AssertionError(
+                f"{row['name']}: the {arm} measurement is missing "
+                f"{', '.join(missing)} -- _run no longer produces "
+                f"{'it' if len(missing) == 1 else 'them'}, or the compared-key "
+                f"lists and _run have drifted apart")
+        return {k: v for k, v in d.items() if k in BASELINE_KEYS}
     return {'board': row['board'], 'mark': mark,
-            'off': keep(off), 'on': keep(on)}
+            'off': keep('OFF', off), 'on': keep('ON', on)}
 
 
 def compare_baseline(current, expected, float_tol=1e-6, scope=None):
@@ -516,6 +532,14 @@ def _self_test():
     ok, _ = gate(rows, {'a': 'improve', 'b': 'improve', 'c': 'neutral'})
     assert ok, "improve on N-1 boards with no regress must pass"
 
+    # 3b. two neutral boards is only N-2 improved -- the N-1 rule must FAIL.
+    #     Without this case, deleting the improve count entirely still passes
+    #     every other assertion here.
+    ok, _ = gate(rows, {'a': 'improve', 'b': 'neutral', 'c': 'neutral'})
+    assert not ok, "improve on N-2 boards must fail"
+    ok, _ = gate(rows, {'a': 'neutral', 'b': 'neutral', 'c': 'neutral'})
+    assert not ok, "an inert term must fail"
+
     # 4. any regress fails, however many improve.
     ok, _ = gate(rows, {'a': 'improve', 'b': 'improve', 'c': 'regress'})
     assert not ok, "a regressing board must fail"
@@ -639,6 +663,16 @@ def _self_test():
         for k in BASELINE_INT_KEYS + BASELINE_FLOAT_KEYS + BASELINE_DICT_KEYS:
             assert k in rec[arm], (k, rec[arm])
     assert compare_baseline({'v': rec}, {'v': rec}) == []
+
+    # 18. a measurement that has LOST a compared key refuses, instead of
+    #     recording a baseline with a hole in it.
+    try:
+        record_for(vrow, 'regress', {k: v for k, v in voff.items()
+                                     if k != 'intent_errors'}, von)
+    except AssertionError as exc:
+        assert 'intent_errors' in str(exc), exc
+    else:
+        raise AssertionError('a missing compared key must refuse')
 
 
 def main(argv=None):
