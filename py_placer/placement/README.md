@@ -216,9 +216,12 @@ in the JSON_SUMMARY and as a NOTE:
 | `no_target_recorded` | the rung never got to ask (no recorded seat context) | — |
 
 `no_pose_census[ref]` carries the counts those verdicts came from — `boxed`,
-`movable`, `frozen`, `truncated`, `baseline`, `pairs_total`, `pairs_censused`,
-`pairs_truncated`, `best_pair` — so a capped sweep can never read as a
-complete one.
+`movable`, `censused`, `frozen`, `truncated`, `baseline`, `pairs_total`,
+`pairs_censused`, `pairs_truncated`, `best_pair` — so a capped sweep can never
+read as a complete one. `movable` and `censused` are deliberately separate:
+the first is how many neighbours *could* have been censused, the second how
+many were, and quoting the first as the second is the inversion the whole
+disclosure exists to prevent.
 
 **On the `--reseat` path** the same flag applies and the same keys are
 carried. Depth ≥ 1 is the one exception to that pass's *"every other part is
@@ -226,9 +229,24 @@ held fixed"* contract: it may trade out a seated **non-scope** neighbour, and
 those refs are named in `evicted`, in a NOTE, and in `moves`. They have to be
 in `moves` — that list is the whole of what gets written, so an evicted part
 left out of it is written at its **old** pose while the scope ref takes the
-pocket it vacated, which is overlapping copper reported as success. The pass
-additionally refuses any eviction that raised the board's stack count or
-overlap area (`eviction_licence_ok`): its ordinary gate compares `oob`
+pocket it vacated, which is overlapping copper reported as success. `evicted`
+names what reached the **written** board: a pass the gate refused wrote
+nothing, so it reports none even though `evictions` records the attempt.
+
+An evicted part is **exempt from the per-part prune sweep**, and that is what
+makes the trade atomic rather than a nicety. `prune_assignment` reverts a
+moved part whenever restoring its input pose strictly improves the gate tuple
+— `evidenced` gates only the *equal* case — and `GATE_TERMS` ranks `hpwl`
+above `overlap`, so putting an evicted blocker back into the pocket the trade
+just gave away scores as an improvement. Measured: prune restored a blocker
+inside the seated part's courtyard on hpwl 24.4 → 14.4, the licence then
+correctly refused the board prune had damaged, and a legal pair trade that
+would have taken `oob` 9.65 → 0 was thrown away whole. `exempt`'s own
+rationale — *"an edge-class seat is hpwl-worse BY DESIGN; pruning it back
+would undo the seat one stage later"* — is exactly this case.
+
+The pass additionally refuses any eviction that raised the board's stack count
+or overlap area (`eviction_licence_ok`): its ordinary gate compares `oob`
 lexicographically first, and `oob` moves hugely in this pass's own favour, so
 a new stack would sit below it unread. At depth 0 — the default, and what
 `place_reconstruct`'s reseat rung uses — nothing outside the scope is touched
