@@ -959,16 +959,20 @@ def main():
                     help="proceed even if the baseline wave was built from a dirty tree")
     ap.add_argument("--no-baseline", action="store_true",
                     help="skip baseline checks and the compare stage entirely")
-    ap.add_argument("--with-kicad", action="store_true",
-                    help="build the image WITH KiCad (kicad/kicad:10.0.0) so the "
-                         "oracle legs actually run. Without it every oracle leg is "
-                         "DEAD, not degraded -- oracle_reconnect returns "
+    ap.add_argument("--with-kicad", action="store_true", default=True,
+                    help="(DEFAULT since 2026-08-23) build the image WITH KiCad "
+                         "(kicad/kicad:10.0.0) so the oracle legs actually run. "
+                         "Use --no-kicad to opt out.")
+    ap.add_argument("--no-kicad", dest="with_kicad", action="store_false",
+                    help="build WITHOUT KiCad (the old default). Every oracle leg "
+                         "is then DEAD, not degraded -- oracle_reconnect returns "
                          "available=False as soon as find_kicad_cli() is None, so a "
                          "change acting only through the finalize audit / #589 "
-                         "re-audit / #549 B-1 check A/Bs as a perfect null (#650). "
-                         "Costs more (the oracle is the longest leg) and is a "
-                         "different image, so compare it only against another "
-                         "--with-kicad arm; the label is suffixed -kc to enforce that.")
+                         "re-audit / #549 B-1 check A/Bs as a PERFECT NULL that "
+                         "reads as a measurement (#650). Only use it when you know "
+                         "the change cannot touch an oracle leg and you want the "
+                         "cheaper image. NOTE the arm label loses its -kc suffix, "
+                         "so such an arm is not comparable with a KiCad one.")
     args = ap.parse_args()
 
     sets = expand_sets(args.sets)

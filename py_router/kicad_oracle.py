@@ -152,6 +152,42 @@ def find_kicad_cli() -> Optional[str]:
                 except ValueError:
                     return (0,)
             return sorted(set(hits), key=_ver)[-1]
+    _warn_no_kicad_cli()
+    return None
+
+
+_WARNED_NO_CLI = []
+
+
+def _warn_no_kicad_cli() -> None:
+    """Say loudly, ONCE per process, that KiCad is missing.
+
+    KiCad is expected to be present now -- even the cloud image ships it --
+    so its absence is an ENVIRONMENT DEFECT, not a supported mode. It is
+    worth shouting about because of how it fails: every oracle leg returns
+    available=False and becomes a NO-OP rather than degrading, so a run looks
+    successful while the finalize audit, the #589 re-audit and the #549 B-1
+    check all silently did nothing. A change that acts only through those legs
+    then A/Bs as a PERFECT NULL -- the worst result shape, because it reads as
+    a measurement (#650). Grades are affected too: check_drc's drc_real falls
+    back to raw DRC without kicad-cli.
+    """
+    if _WARNED_NO_CLI:
+        return
+    _WARNED_NO_CLI.append(True)
+    try:
+        from terminal_colors import RED, RESET
+    except Exception:
+        RED = RESET = ''
+    print(f"{RED}WARNING: kicad-cli NOT FOUND. This is not a supported mode "
+          f"-- every KiCad-oracle leg becomes a NO-OP (not a degraded pass): "
+          f"the plane-finalize audit, the #589 re-audit and the #549 B-1 "
+          f"check all silently do nothing, and check_drc's drc_real falls "
+          f"back to raw DRC. A result measured here can be a perfect null "
+          f"that looks like data (#650). Install KiCad, or set KICAD_CLI=/path/"
+          f"to/kicad-cli if it lives somewhere non-standard; "
+          f"KICAD_RASTER_ORACLE=1 substitutes a weaker KiCad-free link "
+          f"source (#648).{RESET}")
     return None
 
 
@@ -1495,8 +1531,22 @@ def oracle_reconnect(board_file: str, net_names, config,
                                         route_plane_connection_wide)
 
     kicad_cli = find_kicad_cli()
-    if kicad_cli is None:
-        print("  KiCad-oracle recheck: kicad-cli not found, skipping")
+    # Bail iff NOTHING could serve as a link source. The ladder is
+    # exact-fill (pcbnew; tried unless LEGACY_ORACLE) -> kicad-cli -> raster
+    # (opt-in), so kicad-cli being absent only matters when it is the ONLY
+    # rung left.
+    if (kicad_cli is None and env_knobs.LEGACY_ORACLE
+            and not env_knobs.RASTER_ORACLE):
+        # Only bail when kicad-cli really is the only source we could use
+        # (audit finding 7). The DEFAULT source is exact_unconnected ->
+        # pcbnew's ZONE_FILLER, which does not need kicad-cli at all, so this
+        # early return used to throw away a working leg on any machine whose
+        # kicad-cli sits outside the three hard-coded candidates -- a custom
+        # build, nix, an AppImage. Measured: with find_kicad_cli patched to
+        # None, exact_unconnected still returned 2 links on daisho while
+        # oracle_reconnect reported available=False.
+        print("  KiCad-oracle recheck: kicad-cli not found and no other "
+              "source is enabled, skipping")
         return {'available': False, 'rounds': 0, 'links_routed': 0,
                 'links_failed': 0, 'remaining': -1}
 
@@ -1687,10 +1737,33 @@ def oracle_reconnect(board_file: str, net_names, config,
                           f"does not demand them), {_added648} kicad-cli "
                           f"link(s) added (unseen by the exact source)")
                 links = _out648
-        if links is None:
+        if links is None and kicad_cli:
             links = kicad_unconnected(board_file, kicad_cli)
+        if links is None and env_knobs.RASTER_ORACLE:
+            # THIRD BRANCH (#648): our own fill-aware model, no KiCad at all.
+            # OPT-IN, and deliberately not a silent fallback: making the leg
+            # run off a different source when KiCad is absent would make
+            # COPPER depend on what is installed, which is the exact failure
+            # #675 reverted the B-1 check for. Opt in and you accept a weaker
+            # source knowingly. Validated against kicad-cli on daisho (1 link,
+            # identical), spartan6_4layer (61 of 87 nets) and openstint (0/0):
+            # a strict SUBSET every time -- it never invents demand, it only
+            # misses the model-over-credit class it cannot see by construction.
+            try:
+                from kicad_parser import parse_kicad_pcb as _pk648
+                from check_connected import raster_unconnected as _ru648
+                links = _ru648(_pk648(board_file), names)
+                if rnd == 0:
+                    print(f"  KiCad-oracle recheck: RASTER link source "
+                          f"(KICAD_RASTER_ORACLE=1, no KiCad needed) -- "
+                          f"{len(links)} link(s)")
+            except Exception as _re648:
+                print(f"  (raster link source failed: {_re648})")
+                links = None
         if links is None:
-            print("  KiCad-oracle recheck: kicad-cli DRC failed, skipping")
+            print("  KiCad-oracle recheck: no link source available "
+                  "(kicad-cli DRC failed or absent; KICAD_RASTER_ORACLE=1 "
+                  "enables the KiCad-free raster source), skipping")
             _links_unavailable = True
             break
         ours = [l for l in links if l[0] in names]

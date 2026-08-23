@@ -3022,6 +3022,18 @@ def warn_net_tagged_graphics(segments, name_to_id=None) -> int:
           f"target them, and copper joined only through them is electrically "
           f"OPEN. Convert them to footprint pads or tracks if they must "
           f"conduct (#513).")
+    # ...and say what it will look like AFTERWARDS, which is the part people
+    # actually hit (#659). KiCad's own DRC lists such a net as unconnected on
+    # every run, forever: the art is copper to KiCad, so it demands a link to
+    # it, while #337 makes the art immutable so no routing pass may weld to it
+    # or delete it. Measured over 31 recorded boards, this is the DOMINANT
+    # class of "KiCad says open, our grading says connected" -- 36 of 51 such
+    # links on zone-less signal nets. Nobody should spend a retry on it.
+    print(f"         Expect KiCad DRC to keep reporting these {len(nets)} "
+          f"net(s) as UNCONNECTED on every run: no routing pass can fix it "
+          f"(the art is immutable, #337), so this is a board-authoring fix, "
+          f"not a routing failure. It is the single largest source of "
+          f"'KiCad says open, our grading says connected' (#659).")
     return len(tagged)
 
 

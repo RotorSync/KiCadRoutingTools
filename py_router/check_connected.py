@@ -467,6 +467,112 @@ def net_copper_fragments(net_id, segments, vias, pads, zones=None,
             'zone_blob_fallback': bool(graph.get('zone_blob_fallback'))}
 
 
+def raster_unconnected(pcb_data, net_names=None, tolerance: float = 0.02):
+    """[(net, (x, y, layer, kind), (x, y, layer, kind)), ...] -- the same
+    contract as ``kicad_oracle.kicad_unconnected``, computed from OUR
+    fill-aware model with **no KiCad at all** (issue #648's third branch:
+    exact-fill -> kicad-cli -> raster).
+
+    The primitive already existed: ``check_net_connectivity`` builds per-net
+    connected components over segments u vias u pads u zone credit -- it is
+    what prints "Disconnected components: N". This packages it as a LINK
+    SOURCE: one spanning link per extra component, drawn between the two
+    components' true nearest approach, endpoints tagged with their layer.
+
+    What it is FOR, stated precisely, because it is not a drop-in replacement
+    for KiCad:
+
+      * It is DETERMINISTIC and dependency-free, where kicad-cli's threaded
+        connectivity is not (#490 measured 103/65/92 on identical input).
+      * It is the only source at all on a machine with no KiCad -- where
+        ``oracle_reconnect`` otherwise returns available=False and every
+        oracle leg is a no-op rather than degraded (the cloud image, #650).
+      * It CANNOT find the class #659 is about. A micro-gap that our model
+        credits and KiCad rejects -- a custom pad modelled as its bounding
+        rectangle, two pads 20 nm apart -- is by construction invisible to
+        the model doing the crediting. Only KiCad sees those. Anything that
+        needs that class must keep asking KiCad.
+
+    `net_names` limits the scan (names, not ids); None scans every net with
+    copper. Pad-less debris components are included, exactly as kicad-cli
+    reports them -- the caller decides weld vs delete (classify_unconnected_link).
+    """
+    import math
+    from geometry_utils import UnionFind
+    want = set(net_names) if net_names is not None else None
+    out = []
+    segs_by_net, vias_by_net = {}, {}
+    for s in pcb_data.segments:
+        segs_by_net.setdefault(s.net_id, []).append(s)
+    for v in pcb_data.vias:
+        vias_by_net.setdefault(v.net_id, []).append(v)
+    for nid, net in (pcb_data.nets or {}).items():
+        name = getattr(net, 'name', None)
+        if not name or (want is not None and name not in want):
+            continue
+        segs = segs_by_net.get(nid, [])
+        vias = vias_by_net.get(nid, [])
+        if not segs and not vias:
+            continue
+        pads = pcb_data.pads_by_net.get(nid, [])
+        zones = [z for z in (getattr(pcb_data, 'zones', None) or [])
+                 if z.net_id == nid]
+        r = check_net_connectivity(nid, segs, vias, pads, zones,
+                                   tolerance=tolerance, return_graph=True,
+                                   pcb_data=pcb_data)
+        g = r.get('graph') or {}
+        uf = UnionFind()
+        for a, b in g.get('edges', []) or []:
+            uf.union(a, b)
+        # Points per component, tagged with layer + kind, so a link's
+        # endpoints carry what the consumers key on.
+        comp = {}
+        for i, s in enumerate(segs):
+            if getattr(s, 'graphic', False):
+                continue          # art is not a routable endpoint (#337)
+            root = uf.find(2 * i)
+            comp.setdefault(root, []).append((s.start_x, s.start_y, s.layer, 'track'))
+            comp.setdefault(root, []).append((s.end_x, s.end_y, s.layer, 'track'))
+        vrep = g.get('via_index_repr') or {}
+        for j, v in enumerate(vias):
+            rep = vrep.get(j)
+            if rep is None:
+                continue
+            comp.setdefault(uf.find(rep), []).append((v.x, v.y, None, 'via'))
+        prep = g.get('pad_index_repr') or {}
+        for k, pid in (prep.items() if isinstance(prep, dict) else []):
+            pad = pads[k] if isinstance(k, int) and k < len(pads) else None
+            if pad is None:
+                continue
+            lyr = next((L for L in (pad.layers or []) if L.endswith('.Cu')), None)
+            comp.setdefault(uf.find(pid), []).append(
+                (pad.global_x, pad.global_y, lyr, 'pad'))
+        comp = {k: v for k, v in comp.items() if v}
+        if len(comp) < 2:
+            continue
+        # Spanning links: each component after the first joins to whichever
+        # ALREADY-JOINED component it comes nearest to -- a tree, not a
+        # clique, so N components yield N-1 links exactly as a ratsnest does.
+        roots = sorted(comp, key=lambda rr: (-len(comp[rr]), str(rr)))
+        joined, rest = [roots[0]], roots[1:]
+        for _ in range(len(rest)):
+            best = None
+            for rr in rest:
+                for jr in joined:
+                    for (ax, ay, al, ak) in comp[rr]:
+                        for (bx, by, bl, bk) in comp[jr]:
+                            d = math.hypot(ax - bx, ay - by)
+                            if best is None or d < best[0]:
+                                best = (d, rr, (ax, ay, al, ak), (bx, by, bl, bk))
+            if best is None:
+                break
+            _d, rr, pa, pb = best
+            out.append((name, pb, pa))
+            joined.append(rr)
+            rest.remove(rr)
+    return out
+
+
 def net_dead_copper(pcb_data, net_id, segments, vias, pads, zones=None):
     """The net's copper that reaches NO pad and NO zone of its own net (#659).
 

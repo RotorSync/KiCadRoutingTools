@@ -280,6 +280,12 @@ def refresh() -> None:
     # and it silently breaks A/B comparability. Disclosure is fine to make
     # environment-dependent; copper is not. See issue #675.
     g['ORACLE_SUMMARY'] = _opt_in('KICAD_ORACLE_SUMMARY')
+    # #648's third link-source branch (exact-fill -> kicad-cli -> raster).
+    # OPT-IN on purpose: a silent fallback would make the oracle run off a
+    # different source depending on whether KiCad is installed, i.e. make
+    # COPPER environment-dependent -- the exact failure #675 reverted the B-1
+    # check for. Opt in and you accept a weaker source knowingly.
+    g['RASTER_ORACLE'] = _opt_in('KICAD_RASTER_ORACLE')
     # HOT knobs (measured, not guessed): on splitflap_driver one route reads
     # KICAD_VIA_RUNG 902 times and KICAD_POUR_LAUNCH 316 -- they sit inside
     # per-net / per-endpoint loops, which is exactly the "hammers the environ
