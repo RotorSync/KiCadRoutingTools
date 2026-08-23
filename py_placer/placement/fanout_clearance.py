@@ -43,8 +43,9 @@ import routing_defaults as defaults
 from bga_fanout.grid import analyze_bga_grid
 from placement.parser import extract_courtyard_bboxes, extract_locked_refs
 from placement.utility import compute_footprint_bbox_local, snap_to_grid
-from placement.legality import (BoardOutlineGate, point_to_seg_dist, rect_gap,
-                                ring_is_rect, rotate_local_bounds)
+from placement.legality import (BoardOutlineGate, PadClearanceModel, PadFloor,
+                                format_required_clause, point_to_seg_dist,
+                                rect_gap, ring_is_rect, rotate_local_bounds)
 
 ROTATIONS = [0.0, 90.0, 180.0, 270.0]
 EPS = 1e-6
@@ -74,18 +75,26 @@ def _point_to_rect_dist(px, py, rect):
     return math.hypot(dx, dy)
 
 
-def _pad_pair_shortfall(pads_a, pads_b, clearance):
+def _pad_pair_shortfall(pads_a, pads_b, clearance, effs=None):
     """Sum of different-net pad clearance shortfalls between two movable parts'
     pad rects (#275) -- the mover-vs-mover analogue of pad_penalty. Same-net
-    pad pairs are fine (shared rail copper may touch)."""
+    pad pairs are fine (shared rail copper may touch).
+
+    `effs` (#725) is the per-pair REQUIRED clearance, `effs[ia][ib]` aligned
+    with pads_a x pads_b -- a pad override / netclass / .kicad_dru layer rule
+    can put a pair's requirement above (or, for a relaxing rule, below) the
+    flat scalar. None keeps the flat path, which is what a board declaring
+    none of them takes."""
     pen = 0.0
-    for (ax0, ay0, ax1, ay1, anet) in pads_a:
-        for (bx0, by0, bx1, by1, bnet) in pads_b:
+    for ia, (ax0, ay0, ax1, ay1, anet) in enumerate(pads_a):
+        row = None if effs is None else effs[ia]
+        for ib, (bx0, by0, bx1, by1, bnet) in enumerate(pads_b):
             if anet == bnet:
                 continue
             gap = _rect_gap((ax0, ay0, ax1, ay1), (bx0, by0, bx1, by1))
-            if gap < clearance - EPS:
-                pen += (clearance - gap)
+            clr = clearance if row is None else row[ib]
+            if gap < clr - EPS:
+                pen += (clr - gap)
     return pen
 
 
@@ -134,7 +143,7 @@ class _Cap:
     for decoupling caps).
     """
 
-    def __init__(self, fp, courtyard_local):
+    def __init__(self, fp, courtyard_local, model=None):
         self.ref = fp.reference
         self.side = 'B' if (fp.layer or '').startswith('B') else 'F'
         self.seed_x, self.seed_y = fp.x, fp.y
@@ -145,6 +154,21 @@ class _Cap:
         # separate paste-only "pads" (e.g. gkl_misc C_0201_0603Metric), which are
         # not copper and must not enter the clearance/attraction geometry.
         self.pads = []
+        # #725, mirroring PartPads (legality.py): the per-pad clearance FLOOR
+        # rides in a parallel list index-aligned with self.pads, never widened
+        # into the pad tuple -- pad_rects()' 5-tuple is unpacked positionally by
+        # tests and by animate_fanout_clearance.py. `max_floor` is the
+        # over-reach a broad phase must use (a .kicad_dru rule REPLACES, so it
+        # can also LOWER a pair; a prune must never under-reach).
+        # NOTE the copper filter below stays _Cap's own `endswith('.Cu')` test
+        # and is deliberately NOT unified with legality._pad_carries_copper,
+        # which additionally rejects np_thru_hole. Unifying would change which
+        # pads enter pad_rects/pad_bbox/attraction and desynchronise the
+        # n_copper cap-detection test in _Repair.__init__ -- a placement change
+        # dressed as a clearance fix. Building the floors against THIS rule
+        # makes the alignment true by construction.
+        self.pad_floors = []
+        self.max_floor = 0.0
         for p in fp.pads:
             if not any(str(l).endswith('.Cu') for l in p.layers):
                 continue  # paste/mask-only aperture, not copper
@@ -156,6 +180,12 @@ class _Cap:
             half_x = hx * c + hy * s
             half_y = hx * s + hy * c
             self.pads.append((off_x, off_y, half_x, half_y, p.net_id))
+            if model is not None:
+                fl = model.pad_floor(p)
+                self.pad_floors.append(fl)
+                mf = model.max_floor(fl)
+                if mf > self.max_floor:
+                    self.max_floor = mf
         self.local_bounds = courtyard_local
         # Rotation-only geometry is reused across every candidate position
         # (millions of times on a dense board), so memoize it per angle and
@@ -298,6 +328,29 @@ class _Repair:
         self._edge_active = self.edge_gate.active
         self._max_disp_cap = max_displacement_cap
         self.clearance = clearance
+        # #725: `clearance` is ONE flat scalar, but KiCad's different-net
+        # requirement for a pair is max(clearance, netclass a, netclass b),
+        # then REPLACED by any .kicad_dru rule on the layers the two share,
+        # then raised by either item's own pad `(clearance ...)` override.
+        # This pass is the second channel of #697's defect: priced flat, a pair
+        # separated by more than `clearance` but less than its real requirement
+        # is never charged, so the repair reports nothing to fix on geometry
+        # check_drc flags. PadClearanceModel resolves it exactly as check_drc
+        # does and is STRICTLY INERT on a board declaring none of the three.
+        # `notes` must be read BEFORE the active-drop: a FAILED read (an
+        # unreadable sibling) is exactly what makes the model look inert.
+        _model = PadClearanceModel.for_board(pcb_data, clearance, pcb_file)
+        self.clearance_notes = list(_model.notes)
+        self._floors = _model if _model.active else None
+        # Pad-layer scope for the non-pad items below. A via spans copper, so
+        # it is scoped to ALL copper: check_drc's pad-via path passes
+        # layers_b=None meaning "scope to the pad's own layers", and
+        # intersecting with all-copper reproduces that exactly (blind vias
+        # included). Never None here -- PadClearanceModel.pair does
+        # `fb.layers or ()`, and an EMPTY shared set discards every dru rule.
+        self._all_cu = frozenset(pcb_data.board_info.copper_layers or ())
+        self._via_floor: Dict[int, PadFloor] = {}
+        self._seg_floor: Dict[Tuple[int, str], PadFloor] = {}
         # #617: KiCad's copper-to-hole rule is the BOARD's `min_hole_clearance`
         # whenever it declares one above the 0.20 NPTH fab floor -- the same
         # value check_drc grades at. The NPTH keep-out rects below were grown
@@ -326,20 +379,44 @@ class _Repair:
         # Each (x, y, net, keepout) where keepout = via_radius + clearance; a
         # cap pad must clear vias of a DIFFERENT net by this. Through-vias, so
         # they apply to caps on either board side.
+        # #725: `keepout` is the OVER-REACH -- radius + max(clearance, this
+        # via's own upper-bound floor). It feeds the prunes, the locked-part
+        # warning and the animator's drawn disk, all of which may over-reach.
+        # The EXACT per-(cap pad, via) value is resolved in the eff lists
+        # below, never from this slot. Byte-identical (radius + clearance) when
+        # the model is inert. The 4-tuple shape is pinned: tests assign
+        # st.vias wholesale and animate_fanout_clearance.py unpacks it.
         self.vias: List[Tuple[float, float, int, float]] = []
         for v in pcb_data.vias:
             size = v.size if v.size and v.size > 0 else default_via_size
-            self.vias.append((v.x, v.y, v.net_id, size / 2.0 + clearance))
+            self.vias.append((v.x, v.y, v.net_id,
+                              size / 2.0 + self._item_reach(
+                                  self._via_floor_for(v.net_id))))
 
         # --- avoidance: foreign-net tracks on the cap's own side ---
         # Fanout escapes can land on the bottom (cap) side; attraction could
         # then pull a cap onto an escape track -> a PAD-SEGMENT violation.
         # Keyed by side so a B.Cu cap only avoids B.Cu tracks.
+        # #725: element 5 is the OVER-REACH, like self.vias[3] above. The
+        # segment's floor is keyed by its REAL layer, not by the F/B `side`
+        # collapse on the next line (which files an In1.Cu track under 'F') --
+        # a .kicad_dru rule is layer-scoped, and check_drc's pad-segment path
+        # resolves it as a single-layer REPLACE on seg.layer. The side collapse
+        # is pre-existing and deliberately left alone here.
         self.segments: List[Tuple[float, float, float, float, int, float, str]] = []
+        # The 7-tuple carries `side`, not the real layer, so the floor cannot be
+        # re-derived from it later -- keep it on the tuple's identity. The
+        # tuples live for this object's lifetime, so the id is stable; a tuple a
+        # test injects is simply absent and grades flat.
+        self._seg_floor_by_id: Dict[int, PadFloor] = {}
         for s in pcb_data.segments:
             side = 'B' if (s.layer or '').startswith('B') else 'F'
-            self.segments.append((s.start_x, s.start_y, s.end_x, s.end_y,
-                                  s.net_id, s.width / 2.0 + clearance, side))
+            fl = self._seg_floor_for(s.net_id, s.layer)
+            t = (s.start_x, s.start_y, s.end_x, s.end_y, s.net_id,
+                 s.width / 2.0 + self._item_reach(fl), side)
+            self.segments.append(t)
+            if fl is not None:
+                self._seg_floor_by_id[id(t)] = fl
 
         # --- attraction: BGA balls grouped by net ---
         # A cap pad is pulled toward the nearest ball of its own net, so a via
@@ -378,6 +455,13 @@ class _Repair:
         # a through-hole pad that blocks both sides). Same-net pads are fine.
         self.foreign_pads: List[
             Tuple[float, float, float, float, int, Optional[str]]] = []
+        # #725: index-aligned with self.foreign_pads (the 6-tuple shape is
+        # pinned -- tests inject into cap_foreign_pads directly). An NPTH
+        # entry gets floor None / mf 0.0: its rect is already inflated to the
+        # hole floor, and the copper-to-HOLE rule is net-independent, so the
+        # new machinery must never raise it via a neighbouring pad's netclass.
+        self.foreign_pad_floors: List[Optional[PadFloor]] = []
+        self.foreign_pad_mf: List[float] = []
         self.caps: Dict[str, _Cap] = {}
         self.static_rects: List[Tuple[Tuple[float, float, float, float], str]] = []
         for ref, fp in pcb_data.footprints.items():
@@ -392,7 +476,7 @@ class _Repair:
             is_cap = (ref.startswith(self._cap_prefixes) and n_copper <= 2
                       and ref not in locked)
             if is_cap:
-                cap = _Cap(fp, lb)
+                cap = _Cap(fp, lb, self._floors)
                 if self._near_any(cap.rect(), bga_bboxes, near_margin):
                     self.caps[ref] = cap
                     continue
@@ -421,6 +505,8 @@ class _Repair:
                             hr = hd / 2.0 + grow
                             self.foreign_pads.append(
                                 (hx - hr, hy - hr, hx + hr, hy + hr, -1, None))
+                            self.foreign_pad_floors.append(None)
+                            self.foreign_pad_mf.append(0.0)
                     continue
                 if not copper:
                     continue  # paste/mask-only aperture
@@ -436,6 +522,10 @@ class _Repair:
                     (p.global_x - half_x, p.global_y - half_y,
                      p.global_x + half_x, p.global_y + half_y,
                      p.net_id, pside))
+                _fl = None if self._floors is None else self._floors.pad_floor(p)
+                self.foreign_pad_floors.append(_fl)
+                self.foreign_pad_mf.append(
+                    0.0 if _fl is None else self._floors.max_floor(_fl))
 
         # Per-cap spatially-pruned neighbour lists (perf). A cap moves at most
         # max_displacement_cap from its seed, so anything whose seed gap already
@@ -443,6 +533,26 @@ class _Repair:
         # it -- excluding it is exact, not an approximation. This turns the
         # per-candidate hard_blocked / penalty loops from O(all parts) into
         # O(handful), the dominant cost on dense boards (#213 profiling).
+        # #725: same identity-keyed map for foreign pads -- a pad's floor
+        # depends on its own `(clearance ...)` and its copper layers, neither of
+        # which the 6-tuple carries.
+        self._fp_floor_by_id: Dict[int, PadFloor] = {}
+        if self._floors is not None:
+            for _t, _f in zip(self.foreign_pads, self.foreign_pad_floors):
+                if _f is not None:
+                    self._fp_floor_by_id[id(_t)] = _f
+        # Per-(cap, neighbour) REQUIRED-clearance memos. model.pair() is
+        # pose-independent, so it is resolved ONCE per pair here and never
+        # inside the candidate sweep. Each memo is (source_list, rows) and is
+        # rebuilt when the source list identity changes -- which makes
+        # repair_fanout_clearance's wholesale `st.cap_vias = {...}` reassignment
+        # self-heal, and makes a test that injects into cap_foreign_pads grade
+        # flat rather than mis-index.
+        self._cap_pad_eff: Dict[str, Tuple[list, list]] = {}
+        self._cap_seg_eff: Dict[str, Tuple[list, list]] = {}
+        self._cap_via_eff: Dict[str, Tuple[list, list]] = {}
+        self._cap_pair_eff: Dict[Tuple[str, str], list] = {}
+
         cap_geom: Dict[str, Tuple[float, float, float, Tuple]] = {}
         for ref, cap in self.caps.items():
             r = cap.rect()
@@ -460,16 +570,25 @@ class _Repair:
         self.cap_segs: Dict[str, List[Tuple]] = {}
         # through-vias in reach (each (vx, vy, net, keepout))
         self.cap_vias: Dict[str, List[Tuple[float, float, int, float]]] = {}
+        # #725: every reach below is raised by THE TWO ITEMS' OWN maxima, never
+        # by a board-wide maximum -- these lists gate per-candidate loops, so a
+        # board-wide bound would slow every cap for the sake of one keep-clear
+        # pad. `cap.max_floor` and `foreign_pad_mf` are 0.0 on an inert board,
+        # so `max(clearance, 0.0, 0.0) == clearance` and the reaches are
+        # byte-identical. Left un-raised on purpose: cap_static below, which
+        # gates _overlap (courtyards, not copper).
         cap_refs = list(self.caps)
         for ref, cap in self.caps.items():
             ccx, ccy, span, crect = cap_geom[ref]
-            reach = max_displacement_cap + span + clearance
+            reach = max_displacement_cap + span
+            cap_mf = cap.max_floor
             near_pads = []
-            for fp_pad in self.foreign_pads:
+            for j, fp_pad in enumerate(self.foreign_pads):
                 px = (fp_pad[0] + fp_pad[2]) / 2.0
                 py = (fp_pad[1] + fp_pad[3]) / 2.0
                 phalf = math.hypot(fp_pad[2] - px, fp_pad[3] - py)
-                if math.hypot(px - ccx, py - ccy) <= reach + phalf:
+                req = max(clearance, cap_mf, self.foreign_pad_mf[j])
+                if math.hypot(px - ccx, py - ccy) <= reach + req + phalf:
                     near_pads.append(fp_pad)
             self.cap_foreign_pads[ref] = near_pads
 
@@ -487,12 +606,17 @@ class _Repair:
                     continue
                 # both caps can move, so the combined reach is 2x the budget
                 if (_rect_gap(crect, cap_geom[oref][3])
-                        <= 2 * max_displacement_cap + clearance + EPS):
+                        <= 2 * max_displacement_cap
+                        + max(clearance, cap_mf, self.caps[oref].max_floor)
+                        + EPS):
                     near_caps.append(oref)
             self.cap_caps[ref] = near_caps
 
             near_segs = []
-            seg_reach = max_displacement_cap + 2 * span + clearance
+            # seg[5] already carries the segment's own over-reach, so adding
+            # this cap's excess over the flat scalar bounds the pair.
+            seg_reach = (max_displacement_cap + 2 * span + clearance
+                         + max(0.0, cap_mf - clearance))
             for seg in self.segments:
                 if seg[6] != cap.side:
                     continue
@@ -502,11 +626,13 @@ class _Repair:
             self.cap_segs[ref] = near_segs
 
             near_vias = []
+            # v[3] = via_radius + its own keep-out; a via that can reach a pad
+            # must be within (move + span + keep-out) of the seed. #725: plus
+            # this cap's excess over the flat scalar, which bounds the pair.
+            via_slack = max(0.0, cap_mf - clearance)
             for v in self.vias:
-                # v[3] = via_radius + clearance keep-out; a via that can reach
-                # a pad must be within (move + span + keep-out) of the seed.
                 if math.hypot(v[0] - ccx, v[1] - ccy) <= (
-                        max_displacement_cap + span + v[3]):
+                        max_displacement_cap + span + v[3] + via_slack):
                     near_vias.append(v)
             self.cap_vias[ref] = near_vias
 
@@ -562,8 +688,15 @@ class _Repair:
             for oref in self.cap_caps[ref]:
                 key = frozenset((ref, oref))
                 if key not in self.base_cap_pad:
+                    # #725: the baseline must be in the SAME currency as the
+                    # candidate it gates. Priced flat while candidates are
+                    # priced at the requirement, _worsens_any_net fires on
+                    # every pose and the pass silently stops moving anything --
+                    # a failure whose symptom is FEWER placements, which reads
+                    # as conservative rather than broken.
                     self.base_cap_pad[key] = _pad_pair_shortfall(
-                        seed_pads, self.caps[oref].pad_rects(), self.clearance)
+                        seed_pads, self.caps[oref].pad_rects(), self.clearance,
+                        self._pair_effs(ref, cap, oref, self.caps[oref]))
 
     @staticmethod
     def _near_any(rect, bboxes, margin):
@@ -617,26 +750,282 @@ class _Repair:
         return self.edge_gate.rect_blocked(
             rect, skip_rings=self._owned_rings(ref) if ref is not None else None)
 
+    # ---- #725: per-pair required clearance -------------------------------
+    # A via or a track carries no pad `(clearance ...)` override, so its floor
+    # is a pure function of (net, layer scope) and is memoised on that key --
+    # never on a list position, because st.vias is reassigned wholesale by
+    # tests and rebuilt by nudge_vias_for_unresolved, which would desync any
+    # index-aligned parallel list.
+
+    def _via_floor_for(self, net_id):
+        """The PadFloor standing in for a via: its net's class floor, no pad
+        override, scoped to all copper (see self._all_cu). None when inert."""
+        if self._floors is None:
+            return None
+        f = self._via_floor.get(net_id)
+        if f is None:
+            f = PadFloor(self._floors.net_floor.get(net_id or 0, 0.0), 0.0,
+                         self._all_cu if self._floors.layer_rules else None)
+            self._via_floor[net_id] = f
+        return f
+
+    def _seg_floor_for(self, net_id, layer):
+        """The PadFloor standing in for a track: its net's class floor, no pad
+        override, scoped to its OWN layer -- which reproduces check_drc's
+        single-layer REPLACE for pad-segment, since with one shared layer
+        pads_shared_layer_clearance is all-or-nothing. None when inert."""
+        if self._floors is None:
+            return None
+        key = (net_id, layer)
+        f = self._seg_floor.get(key)
+        if f is None:
+            f = PadFloor(self._floors.net_floor.get(net_id or 0, 0.0), 0.0,
+                         frozenset({layer}) if self._floors.layer_rules else None)
+            self._seg_floor[key] = f
+        return f
+
+    def _item_reach(self, floor):
+        """The over-reach for a via/track keep-out: never below the flat
+        scalar, raised by that item's own upper bound. Exactly `clearance`
+        when the model is inert, so the keep-outs stay byte-identical."""
+        if floor is None:
+            return self.clearance
+        return max(self.clearance, self._floors.max_floor(floor))
+
+    # Public resolvers. nudge_vias_for_unresolved composes its requirements
+    # from these rather than re-deriving them, so there is ONE answer per pair
+    # kind in this module.
+
+    def required(self, fa, fb):
+        """Required clearance between two resolved floors (either may be None
+        -- an NPTH keep-out, a test-injected tuple -- which grades flat)."""
+        return self._pair_or_flat(fa, fb)
+
+    def pad_floor(self, pad):
+        """The floor for a real parser Pad; None when inert."""
+        return None if self._floors is None else self._floors.pad_floor(pad)
+
+    def via_floor(self, net_id):
+        """The floor standing in for a via of `net_id`; None when inert."""
+        return self._via_floor_for(net_id)
+
+    def seg_floor(self, net_id, layer):
+        """The floor standing in for a track on `layer`; None when inert."""
+        return self._seg_floor_for(net_id, layer)
+
+    def via_required(self, pad_floor, via_net):
+        """The required clearance for one (cap pad, via) pair.
+
+        The offender test in nudge_vias_for_unresolved and via_penalty's
+        grazing test MUST both resolve through here: if they diverge, the
+        nudger chases a via the grader no longer flags (or reports a cap
+        unresolved that its own nudger then refuses to see). The via eff rows
+        are built from this same call, so they cannot drift from it either."""
+        return self._pair_or_flat(pad_floor, self._via_floor_for(via_net))
+
+    def _pair_or_flat(self, fa, fb):
+        """model.pair for two floors, falling back to the flat scalar whenever
+        either side has none (an NPTH keep-out rect, a test-injected tuple)."""
+        if fa is None or fb is None:
+            return self.clearance
+        return self._floors.pair(fa, fb)
+
+    def _cap_floors_ok(self, cap):
+        """True when this cap carries a usable, index-aligned floor list. A
+        _Cap built without the model (or by a test) grades flat."""
+        pf = getattr(cap, 'pad_floors', None)
+        return (self._floors is not None and pf is not None
+                and len(pf) == len(getattr(cap, 'pads', ())))
+
+    def _pad_effs(self, ref, cap):
+        """[cap pad i][pruned foreign pad j] required clearance, or None for
+        the flat path."""
+        if not self._cap_floors_ok(cap):
+            return None
+        src = self.cap_foreign_pads[ref]
+        rec = self._cap_pad_eff.get(ref)
+        if rec is not None and rec[0] is src:
+            return rec[1]
+        by_id = self._fp_floor_by_id
+        rows = [[self._pair_or_flat(fa, by_id.get(id(t))) for t in src]
+                for fa in cap.pad_floors]
+        self._cap_pad_eff[ref] = (src, rows)
+        return rows
+
+    def _seg_effs(self, ref, cap):
+        """[cap pad i][pruned segment j] final half-width KEEP-OUT -- the
+        track's half width plus that pair's required clearance -- or None."""
+        if not self._cap_floors_ok(cap):
+            return None
+        src = self.cap_segs[ref]
+        rec = self._cap_seg_eff.get(ref)
+        if rec is not None and rec[0] is src:
+            return rec[1]
+        by_id = self._seg_floor_by_id
+        floors = [by_id.get(id(t)) for t in src]
+        # t[5] is half width + the segment's own over-reach; strip it back.
+        halves = [t[5] - self._item_reach(f) for t, f in zip(src, floors)]
+        rows = [[halves[j] + self._pair_or_flat(fa, floors[j])
+                 for j in range(len(src))] for fa in cap.pad_floors]
+        self._cap_seg_eff[ref] = (src, rows)
+        return rows
+
+    def _via_effs(self, ref, cap, vias):
+        """[cap pad i][via j] final KEEP-OUT for `vias` -- the via's radius plus
+        that pair's required clearance -- or None for the flat path. The
+        requirement is resolved through via_required, so this can never
+        disagree with the offender test in nudge_vias_for_unresolved."""
+        if not self._cap_floors_ok(cap):
+            return None
+        rec = self._cap_via_eff.get(ref)
+        if rec is not None and rec[0] is vias:
+            return rec[1]
+        # v[3] is radius + the via's own over-reach; strip it back to a radius.
+        radii = [v[3] - self._item_reach(self._via_floor_for(v[2])) for v in vias]
+        rows = [[radii[j] + self.via_required(fa, v[2])
+                 for j, v in enumerate(vias)] for fa in cap.pad_floors]
+        self._cap_via_eff[ref] = (vias, rows)
+        return rows
+
+    def _pair_effs(self, ref, cap, oref, other):
+        """[this cap's pad i][other mover's pad j] required clearance, or None.
+        Keyed on the ORDERED pair so the row index always addresses `cap`; the
+        summed shortfall itself is symmetric, so the seed baseline is not."""
+        if not (self._cap_floors_ok(cap) and self._cap_floors_ok(other)):
+            return None
+        key = (ref, oref)
+        rows = self._cap_pair_eff.get(key)
+        if rows is None:
+            rows = [[self._pair_or_flat(fa, fb) for fb in other.pad_floors]
+                    for fa in cap.pad_floors]
+            self._cap_pair_eff[key] = rows
+        return rows
+
+    def required_rows(self, net_names=None, limit=200):
+        """Rows `[cap_ref, '<kind> <partner>', mm, source]` for every pair this
+        pass actually CHARGED at a requirement above the flat scalar, at the
+        caps' current poses.
+
+        Same 4-column shape as legality.grade_pad_legality's 'required', so
+        legality.format_required_clause renders it unchanged. `[]` when inert.
+        Only charged pairs are listed -- an in-reach pair that happens to be
+        clear is not a finding, it is the normal case on a declaring board.
+        The partner is named by NET, not by reference: foreign_pads / vias /
+        segments carry no owning ref and their tuple shapes are pinned."""
+        if self._floors is None:
+            return []
+        names = net_names or {}
+        pair_with_source = self._floors.pair_with_source
+        rows = []
+
+        def net_label(net):
+            if net == 0:
+                return '<no net>'
+            if net == -1:
+                return '<hole>'
+            return names.get(net, str(net))
+
+        def best(floors_a, items, floor_of, net_of, only):
+            """Worst requirement, with its source, over the items on `only`."""
+            out = {}
+            for t in items:
+                net = net_of(t)
+                if net not in only:
+                    continue
+                fb = floor_of(t)
+                if fb is None:
+                    continue
+                for fa in floors_a:
+                    mm, src = pair_with_source(fa, fb)
+                    if src and mm > out.get(net, (0.0, ''))[0]:
+                        out[net] = (mm, src)
+            return out
+
+        for ref, cap in self.caps.items():
+            if not self._cap_floors_ok(cap):
+                continue
+            fls = cap.pad_floors
+            x, y, rot = cap.x, cap.y, cap.rot
+            for kind, items, floor_of, net_of, charged in (
+                    ('pad', self.cap_foreign_pads[ref],
+                     lambda t: self._fp_floor_by_id.get(id(t)), lambda t: t[4],
+                     self._pad_shortfalls(ref, cap, x, y, rot)),
+                    ('via', self.cap_vias[ref],
+                     lambda t: self._via_floor_for(t[2]), lambda t: t[2],
+                     self._via_shortfalls(ref, cap, x, y, rot)),
+                    ('track', self.cap_segs[ref],
+                     lambda t: self._seg_floor_by_id.get(id(t)), lambda t: t[4],
+                     self._seg_shortfalls(ref, cap, x, y, rot))):
+                for net, (mm, src) in best(fls, items, floor_of, net_of,
+                                           set(charged)).items():
+                    rows.append([ref, '{} {}'.format(kind, net_label(net)),
+                                 round(mm, 6), src])
+            # mover-vs-mover: the shortfall is a scalar per pair, so charge the
+            # pair as a whole and name it by the partner's reference.
+            cand = cap.pad_rects(x, y, rot)
+            for oref in self.cap_caps[ref]:
+                other = self.caps[oref]
+                if not self._cap_floors_ok(other):
+                    continue
+                effs = self._pair_effs(ref, cap, oref, other)
+                if _pad_pair_shortfall(cand, other.pad_rects(),
+                                       self.clearance, effs) <= EPS:
+                    continue
+                mm, src = 0.0, ''
+                for fa in fls:
+                    for fb in other.pad_floors:
+                        m, sc = pair_with_source(fa, fb)
+                        if sc and m > mm:
+                            mm, src = m, sc
+                if src:
+                    rows.append([ref, 'cap ' + oref, round(mm, 6), src])
+        rows.sort(key=lambda r: (-r[2], r[0], r[1]))
+        return rows[:limit]
+
     def _overlap(self, a, b):
-        """Courtyard-clearance shortfall between two rects (0 if clear)."""
+        """Courtyard-clearance shortfall between two rects (0 if clear).
+
+        Deliberately NOT #725-converted: a courtyard is a mechanical/assembly
+        extent, not copper, so charging a netclass or a pad override here would
+        move caps for a reason KiCad's DRC never raises. The cap_static prune
+        that gates it is therefore still exact at the flat scalar."""
         return max(0.0, self.clearance - _rect_gap(a, b))
 
-    def via_penalty(self, cap, x, y, rot, vias=None):
+    def via_penalty(self, cap, x, y, rot, vias=None, ref=None):
         """Sum of foreign-net via penetration depths for a cap placement
         (how far each pad intrudes inside a different-net via's keep-out).
 
         vias defaults to the full board list; callers with a ref pass the
         per-cap pruned list (self.cap_vias[ref]), which is exact -- a via that
-        can penetrate a pad is necessarily within the cap's reach."""
+        can penetrate a pad is necessarily within the cap's reach.
+
+        #725: `ref` keys the per-pair required-clearance memo. Without it (the
+        4-positional test/default path) the flat scalar is used, which is what
+        the whole-board `vias` default is for anyway."""
         vias = self.vias if vias is None else vias
+        effs = None if ref is None else self._via_effs(ref, cap, vias)
         pen = 0.0
-        for (bx0, by0, bx1, by1, net) in cap.pad_rects(x, y, rot):
-            for vx, vy, vnet, keepout in vias:
+        if effs is None:
+            for (bx0, by0, bx1, by1, net) in cap.pad_rects(x, y, rot):
+                for vx, vy, vnet, keepout in vias:
+                    if vnet == net:
+                        continue
+                    d = _point_to_rect_dist(vx, vy, (bx0, by0, bx1, by1))
+                    if d < keepout - EPS:
+                        pen += (keepout - d)
+            return pen
+        # #725 active path: effs[i][j] IS the pair's keep-out (via radius +
+        # required clearance), precomputed -- the tuple's own keepout slot is
+        # the prune over-reach and is not the requirement.
+        for i, (bx0, by0, bx1, by1, net) in enumerate(cap.pad_rects(x, y, rot)):
+            row = effs[i]
+            for j, (vx, vy, vnet, _ko) in enumerate(vias):
                 if vnet == net:
                     continue
+                ko = row[j]
                 d = _point_to_rect_dist(vx, vy, (bx0, by0, bx1, by1))
-                if d < keepout - EPS:
-                    pen += (keepout - d)
+                if d < ko - EPS:
+                    pen += (ko - d)
         return pen
 
     def _via_shortfalls(self, ref, cap, x, y, rot):
@@ -648,10 +1037,23 @@ class _Repair:
         much track graze it relieves elsewhere (zynq_ad9364 R2 onto the
         DDR3_VREF via)."""
         by_net: Dict[int, float] = {}
-        for (bx0, by0, bx1, by1, net) in cap.pad_rects(x, y, rot):
-            for vx, vy, vnet, keepout in self.cap_vias[ref]:
+        vias = self.cap_vias[ref]
+        effs = self._via_effs(ref, cap, vias)
+        if effs is None:
+            for (bx0, by0, bx1, by1, net) in cap.pad_rects(x, y, rot):
+                for vx, vy, vnet, keepout in vias:
+                    if vnet == net:
+                        continue
+                    d = _point_to_rect_dist(vx, vy, (bx0, by0, bx1, by1))
+                    if d < keepout - EPS:
+                        by_net[vnet] = by_net.get(vnet, 0.0) + (keepout - d)
+            return by_net
+        for i, (bx0, by0, bx1, by1, net) in enumerate(cap.pad_rects(x, y, rot)):
+            row = effs[i]
+            for j, (vx, vy, vnet, _ko) in enumerate(vias):
                 if vnet == net:
                     continue
+                keepout = row[j]
                 d = _point_to_rect_dist(vx, vy, (bx0, by0, bx1, by1))
                 if d < keepout - EPS:
                     by_net[vnet] = by_net.get(vnet, 0.0) + (keepout - d)
@@ -670,11 +1072,30 @@ class _Repair:
         scalar baseline). Uses the per-cap pruned, same-side track list."""
         by_net: Dict[int, float] = {}
         segs = self.cap_segs[ref]
-        for (bx0, by0, bx1, by1, net) in cap.pad_rects(x, y, rot):
-            for x1, y1, x2, y2, snet, halfw, side in segs:
+        effs = self._seg_effs(ref, cap)
+        if effs is None:
+            for (bx0, by0, bx1, by1, net) in cap.pad_rects(x, y, rot):
+                for x1, y1, x2, y2, snet, halfw, side in segs:
+                    if snet == net:
+                        continue
+                    # cheap reject: the segment's bbox can't reach the pad rect
+                    if (min(x1, x2) > bx1 + halfw or max(x1, x2) < bx0 - halfw
+                            or min(y1, y2) > by1 + halfw
+                            or max(y1, y2) < by0 - halfw):
+                        continue
+                    d = _seg_to_rect_dist(x1, y1, x2, y2, (bx0, by0, bx1, by1))
+                    if d < halfw - EPS:
+                        by_net[snet] = by_net.get(snet, 0.0) + (halfw - d)
+            return by_net
+        # #725 active path: effs[i][j] IS the pair's keep-out, and the cheap
+        # bbox reject widens with it -- a reject left at the flat half width
+        # would silently drop the pairs this fix exists to charge.
+        for i, (bx0, by0, bx1, by1, net) in enumerate(cap.pad_rects(x, y, rot)):
+            row = effs[i]
+            for j, (x1, y1, x2, y2, snet, _hw, side) in enumerate(segs):
                 if snet == net:
                     continue
-                # cheap reject: the segment's bbox can't reach the pad rect
+                halfw = row[j]
                 if (min(x1, x2) > bx1 + halfw or max(x1, x2) < bx0 - halfw or
                         min(y1, y2) > by1 + halfw or max(y1, y2) < by0 - halfw):
                     continue
@@ -697,15 +1118,30 @@ class _Repair:
         Same-net pads are ignored (a shared via / touching same-net copper is
         fine)."""
         by_net: Dict[int, float] = {}
-        for (bx0, by0, bx1, by1, net) in cap.pad_rects(x, y, rot):
-            for (px0, py0, px1, py1, pnet, pside) in self.cap_foreign_pads[ref]:
+        fpads = self.cap_foreign_pads[ref]
+        effs = self._pad_effs(ref, cap)
+        if effs is None:
+            for (bx0, by0, bx1, by1, net) in cap.pad_rects(x, y, rot):
+                for (px0, py0, px1, py1, pnet, pside) in fpads:
+                    if pnet == net:
+                        continue
+                    if pside is not None and pside != cap.side:
+                        continue  # SMD pad on the other side
+                    gap = _rect_gap((bx0, by0, bx1, by1), (px0, py0, px1, py1))
+                    if gap < self.clearance - EPS:
+                        by_net[pnet] = by_net.get(pnet, 0.0) + (self.clearance - gap)
+            return by_net
+        for i, (bx0, by0, bx1, by1, net) in enumerate(cap.pad_rects(x, y, rot)):
+            row = effs[i]
+            for j, (px0, py0, px1, py1, pnet, pside) in enumerate(fpads):
                 if pnet == net:
                     continue
                 if pside is not None and pside != cap.side:
                     continue  # SMD pad on the other side
+                eff = row[j]
                 gap = _rect_gap((bx0, by0, bx1, by1), (px0, py0, px1, py1))
-                if gap < self.clearance - EPS:
-                    by_net[pnet] = by_net.get(pnet, 0.0) + (self.clearance - gap)
+                if gap < eff - EPS:
+                    by_net[pnet] = by_net.get(pnet, 0.0) + (eff - gap)
         return by_net
 
     def pad_penalty(self, ref, cap, x, y, rot):
@@ -770,14 +1206,22 @@ class _Repair:
             # every pad-pair gap >= the bbox gap; bboxes >= clearance apart
             # means the shortfall is exactly 0 <= base + EPS -- skip the
             # pairwise scan (the dominant cost of the candidate sweep).
+            # #725: the prescreen is a SKIP, so it must widen with the pair's
+            # requirement -- left at the flat scalar it silently drops exactly
+            # the pairs a pad override / netclass / dru rule raises. Bounded by
+            # the two movers' OWN maxima, never a board-wide one: this runs per
+            # candidate pose.
             if cand_bbox is None:
                 cand_bbox = cap.pad_bbox(x, y, rot)
-            if _rect_gap(cand_bbox, other.pad_bbox()) >= self.clearance:
+            screen = self.clearance if self._floors is None else max(
+                self.clearance, cap.max_floor, other.max_floor)
+            if _rect_gap(cand_bbox, other.pad_bbox()) >= screen:
                 continue
             if cand_pads is None:
                 cand_pads = cap.pad_rects(x, y, rot)
             if _pad_pair_shortfall(cand_pads, other.pad_rects(),
-                                   self.clearance) > \
+                                   self.clearance,
+                                   self._pair_effs(ref, cap, other_ref, other)) > \
                     self.base_cap_pad.get(pair, 0.0) + EPS:
                 return True
         return False
@@ -812,7 +1256,7 @@ class _Repair:
         (#130) + same-side track (#278 PAD-SEGMENT) + component pad (#275
         PAD-PAD). Anything positive is a shipped DRC violation, so all three
         are violations to FIX, not just baselines to preserve."""
-        return (self.via_penalty(cap, x, y, rot, self.cap_vias[ref])
+        return (self.via_penalty(cap, x, y, rot, self.cap_vias[ref], ref=ref)
                 + self.seg_penalty(ref, cap, x, y, rot)
                 + self.pad_penalty(ref, cap, x, y, rot))
 
@@ -895,14 +1339,19 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
     print(f"BGAs: {', '.join(st.bga_refs) or '(none)'}  "
           f"fanout vias: {len(st.vias)}  "
           f"movable near-BGA caps: {len(st.caps)}")
+    # #725: the early returns carry the same key set as the full one, so a
+    # caller reading result['required'] / ['clearance_notes'] does not have to
+    # special-case a no-op board.
     if not st.vias:
         print("No vias on the board - run this AFTER bga_fanout.py.")
         return {'placements': [], 'resolved': [], 'unresolved': [],
-                'bga_refs': st.bga_refs}
+                'bga_refs': st.bga_refs, 'required': [],
+                'clearance_notes': list(st.clearance_notes)}
     if not st.caps:
         print("No movable caps near a BGA - nothing to do.")
         return {'placements': [], 'resolved': [], 'unresolved': [],
-                'bga_refs': st.bga_refs}
+                'bga_refs': st.bga_refs, 'required': [],
+                'clearance_notes': list(st.clearance_notes)}
 
     # Initial violators: any foreign-copper clearance shortfall (via #130,
     # track #278, pad #275) is a shipped DRC violation to fix.
@@ -927,10 +1376,18 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
                 continue
             rect = (p.global_x - p.size_x / 2, p.global_y - p.size_y / 2,
                     p.global_x + p.size_x / 2, p.global_y + p.size_y / 2)
+            # #725: graded at the pair's REAL requirement, like everything
+            # else. `keepout` is the prune over-reach, so re-form the pair's
+            # keep-out from the via's radius. A locked fiducial's keep-clear
+            # override is exactly the case this warning exists to surface, and
+            # priced flat it under-reported it.
+            pfl = st.pad_floor(p)
             for vx, vy, vnet, keepout in st.vias:
                 if vnet == p.net_id:
                     continue
-                if _point_to_rect_dist(vx, vy, rect) < keepout - EPS:
+                ko = (keepout - st._item_reach(st.via_floor(vnet))
+                      + st.via_required(pfl, vnet))
+                if _point_to_rect_dist(vx, vy, rect) < ko - EPS:
                     locked_hits.append((ref, p.pad_number, vx, vy))
     if locked_hits:
         print(f"WARNING: {len(locked_hits)} foreign via(s) inside LOCKED parts' pad "
@@ -1098,10 +1555,19 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
           f"{len(unresolved)} unresolved.")
     if unresolved:
         print(f"  Unresolved (need manual attention): {', '.join(sorted(unresolved))}")
+    # #725: disclose what was graded ABOVE the flat --clearance, and why.
+    # Printed from the ENGINE so the CLI and the GUI plugin both inherit it.
+    required = st.required_rows({n.net_id: n.name for n in pcb_data.nets.values()})
+    _clause = format_required_clause({'required': required})
+    if _clause:
+        print(f"  above the {clearance}mm floor: {_clause}")
+    for _note in st.clearance_notes:
+        print(f"  pad clearance: {_note}")
 
     return {'placements': placements, 'resolved': resolved,
             'unresolved': unresolved, 'bga_refs': st.bga_refs,
-            'via_moves': via_moves, 'new_segments': new_segs}
+            'via_moves': via_moves, 'new_segments': new_segs,
+            'required': required, 'clearance_notes': list(st.clearance_notes)}
 
 
 def _point_in_poly(px, py, poly) -> bool:
@@ -1195,57 +1661,109 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
     # missing layer gate rejected every candidate: the connector necessarily
     # starts at the old via position, inside the grazed cap's keep-out, but
     # only the VIA barrel -- not an inner-layer connector -- conflicts there).
+    # #725: every requirement below resolves through st's own resolvers, so the
+    # nudger and the grader cannot disagree. `getattr` throughout -- tests pass
+    # a duck-typed _FakeSt that carries none of this, and must grade flat.
+    _req = getattr(st, 'required', None)
+    _via_req = getattr(st, 'via_required', None)
+    _pad_fl = getattr(st, 'pad_floor', None)
+    _via_fl = getattr(st, 'via_floor', None)
+    _seg_fl = getattr(st, 'seg_floor', None)
+
+    def req(fa, fb):
+        return clearance if _req is None else _req(fa, fb)
+
+    def via_req(pad_floor, via_net):
+        return clearance if _via_req is None else _via_req(pad_floor, via_net)
+
+    def pad_fl(p):
+        return None if _pad_fl is None else _pad_fl(p)
+
+    def via_fl(net):
+        return None if _via_fl is None else _via_fl(net)
+
+    def seg_fl(net, layer):
+        return None if _seg_fl is None else _seg_fl(net, layer)
+
+    def cap_floors_of(cap, rects):
+        """This cap's per-pad floors, index-aligned with `rects` -- or None,
+        which grades flat. Tests drive this function with a duck-typed cap that
+        carries neither the attribute nor a matching length."""
+        pf = getattr(cap, 'pad_floors', None)
+        return pf if (pf is not None and len(pf) == len(rects)) else None
+
+    # `all_cap_rects` is function-local, so it CAN carry the pad's floor.
     all_cap_rects = []
     for ref, cap in st.caps.items():
         fp = pcb_data.footprints.get(ref)
         cl = getattr(fp, 'layer', 'F.Cu') if fp is not None else 'F.Cu'
-        for (bx0, by0, bx1, by1, net) in cap.pad_rects(cap.x, cap.y, cap.rot):
-            all_cap_rects.append((bx0, by0, bx1, by1, net, cl))
+        _rects = cap.pad_rects(cap.x, cap.y, cap.rot)
+        pf = cap_floors_of(cap, _rects)
+        for i, (bx0, by0, bx1, by1, net) in enumerate(_rects):
+            all_cap_rects.append((bx0, by0, bx1, by1, net, cl,
+                                  None if pf is None else pf[i]))
+
+    # Flatten the board's pads ONCE, in pads_by_net iteration order, resolving
+    # each pad's floor and drill capsule here instead of inside the 16-angle x
+    # 12-radius sweep below. Strictly cheaper than the previous per-call walk.
+    board_pads = []
+    for _pads in pcb_data.pads_by_net.values():
+        for p in _pads:
+            if getattr(p, 'component_ref', None) in st.caps:
+                continue  # movable caps handled by the final rects above
+            cap_ = pad_drill_capsule(p) if (p.drill and p.drill > 0) else None
+            board_pads.append((p, pad_fl(p), not _pad_has_no_copper(p), cap_))
 
     def valid_via_pos(v, nx, ny):
         vr = (v.size or 0.5) / 2.0
+        vfl = via_fl(v.net_id)
         # never off the board / into a cutout / inside the edge margin (#370 B3)
         if not edge_ok_point(nx, ny, vr):
             return False
-        for (bx0, by0, bx1, by1, net, _cl) in all_cap_rects:
+        for (bx0, by0, bx1, by1, net, _cl, pfl) in all_cap_rects:
             # via barrel spans all layers: no layer gate here
             if net != v.net_id and _point_to_rect_dist(
-                    nx, ny, (bx0, by0, bx1, by1)) < vr + clearance:
+                    nx, ny, (bx0, by0, bx1, by1)) < vr + via_req(pfl, v.net_id):
                 return False
-        for pads in pcb_data.pads_by_net.values():
-            for p in pads:
-                if getattr(p, 'component_ref', None) in st.caps:
-                    continue  # movable caps handled by final rects above
-                # rotation/shape-aware pad copper distance (#370 B3, #356
-                # class: the axis-aligned size_x/size_y rect under-blocked
-                # rotated pads). NPTH pads carry no copper -- drill-only.
-                if (p.net_id != v.net_id and not _pad_has_no_copper(p)
-                        and point_to_pad_distance(nx, ny, p) < vr + clearance):
+        for p, pfl, has_cu, cap_ in board_pads:
+            # rotation/shape-aware pad copper distance (#370 B3, #356
+            # class: the axis-aligned size_x/size_y rect under-blocked
+            # rotated pads). NPTH pads carry no copper -- drill-only.
+            if (p.net_id != v.net_id and has_cu
+                    and point_to_pad_distance(nx, ny, p) < vr + req(pfl, vfl)):
+                return False
+            if cap_ is not None:
+                # slot/offset-aware drill capsule (net-INDEPENDENT floor, so
+                # deliberately NOT #725-resolved -- see npth_clr above)
+                (c1x, c1y), (c2x, c2y), prad = cap_
+                if _point_to_seg_dist(nx, ny, c1x, c1y, c2x, c2y) < \
+                        (v.drill or 0.3) / 2.0 + prad + H2H_PAD:
                     return False
-                if p.drill and p.drill > 0:
-                    # slot/offset-aware drill capsule (net-INDEPENDENT floor)
-                    (c1x, c1y), (c2x, c2y), prad = pad_drill_capsule(p)
-                    if _point_to_seg_dist(nx, ny, c1x, c1y, c2x, c2y) < \
-                            (v.drill or 0.3) / 2.0 + prad + H2H_PAD:
-                        return False
         for ov in pcb_data.vias:
             if ov is v:
                 continue
             d = math.hypot(nx - ov.x, ny - ov.y)
-            if ov.net_id != v.net_id and d < vr + (ov.size or 0.5) / 2.0 + clearance:
+            if ov.net_id != v.net_id and d < vr + (ov.size or 0.5) / 2.0 + \
+                    req(vfl, via_fl(ov.net_id)):
                 return False
             if d < (v.drill or 0.3) / 2.0 + (ov.drill or 0.3) / 2.0 + H2H_VIA:
                 return False
         for s in pcb_data.segments:
             if s.net_id == v.net_id:
                 continue
-            if _point_to_seg_dist(nx, ny, s.start_x, s.start_y,
-                                  s.end_x, s.end_y) < vr + s.width / 2.0 + clearance:
+            if _point_to_seg_dist(nx, ny, s.start_x, s.start_y, s.end_x, s.end_y) \
+                    < vr + s.width / 2.0 + req(vfl, seg_fl(s.net_id, s.layer)):
                 return False
         return True
 
     def connector_clear(net_id, layer, width, sx, sy, ex, ey):
         hw = width / 2.0
+        # The connector is a TRACK on `layer`, so it resolves like one. Note
+        # this honours netclasses and .kicad_dru LAYER rules, but not #549
+        # track-scoped rules, which live in a channel PadClearanceModel does
+        # not carry (check_drc.read_board_track_clearances); under-blocking a
+        # geometric connector that is separately DRC'd is the safe direction.
+        cfl = seg_fl(net_id, layer)
         # board edge / cutouts + NPTH drill holes at their floor (#370 B3):
         # a connector is drawn geometrically, not routed, so it must gate
         # against Edge.Cuts and copper-less holes itself.
@@ -1254,33 +1772,33 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
         if _seg_foreign_hole_dist(pcb_data, net_id, sx, sy, ex, ey) < \
                 npth_clr + hw - 1e-4:
             return False
-        for (bx0, by0, bx1, by1, net, cl) in all_cap_rects:
+        for (bx0, by0, bx1, by1, net, cl, pfl) in all_cap_rects:
             if cl != layer:
                 continue  # cap pads only exist on the cap's own side
             if net != net_id and _seg_to_rect_dist(
-                    sx, sy, ex, ey, (bx0, by0, bx1, by1)) < hw + clearance:
+                    sx, sy, ex, ey, (bx0, by0, bx1, by1)) < hw + req(pfl, cfl):
                 return False
-        for pads in pcb_data.pads_by_net.values():
-            for p in pads:
-                if getattr(p, 'component_ref', None) in st.caps or p.net_id == net_id:
-                    continue
-                if not _pad_on_layer(p, layer):
-                    continue
-                if _pad_has_no_copper(p):
-                    continue  # NPTH: no copper; the hole check above covers it
-                # rotation-aware pad rect (#370 B3): rotate the segment into
-                # the pad's frame so a tilted pad is tested against its true
-                # rectangle (distance is rotation-invariant).
-                rx1, ry1 = into_pad_frame_point(sx, sy, p)
-                rx2, ry2 = into_pad_frame_point(ex, ey, p)
-                d, _ = segment_to_rect_distance(
-                    rx1, ry1, rx2, ry2, p.global_x, p.global_y,
-                    p.size_x / 2.0, p.size_y / 2.0)
-                if d < hw + clearance:
-                    return False
+        for p, pfl, has_cu, _cap in board_pads:
+            if p.net_id == net_id:
+                continue
+            if not _pad_on_layer(p, layer):
+                continue
+            if not has_cu:
+                continue  # NPTH: no copper; the hole check above covers it
+            # rotation-aware pad rect (#370 B3): rotate the segment into
+            # the pad's frame so a tilted pad is tested against its true
+            # rectangle (distance is rotation-invariant).
+            rx1, ry1 = into_pad_frame_point(sx, sy, p)
+            rx2, ry2 = into_pad_frame_point(ex, ey, p)
+            d, _ = segment_to_rect_distance(
+                rx1, ry1, rx2, ry2, p.global_x, p.global_y,
+                p.size_x / 2.0, p.size_y / 2.0)
+            if d < hw + req(pfl, cfl):
+                return False
         for ov in pcb_data.vias:
             if ov.net_id != net_id and _point_to_seg_dist(
-                    ov.x, ov.y, sx, sy, ex, ey) < (ov.size or 0.5) / 2.0 + hw + clearance:
+                    ov.x, ov.y, sx, sy, ex, ey) < (ov.size or 0.5) / 2.0 + hw \
+                    + req(cfl, via_fl(ov.net_id)):
                 return False
         for s2 in pcb_data.segments:
             if s2.net_id == net_id or s2.layer != layer:
@@ -1292,19 +1810,26 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
                     _point_to_seg_dist(ex, ey, s2.start_x, s2.start_y, s2.end_x, s2.end_y),
                     _point_to_seg_dist(s2.start_x, s2.start_y, sx, sy, ex, ey),
                     _point_to_seg_dist(s2.end_x, s2.end_y, sx, sy, ex, ey))
-            if d < hw + s2.width / 2.0 + clearance:
+            if d < hw + s2.width / 2.0 + req(cfl, seg_fl(s2.net_id, s2.layer)):
                 return False
         return True
 
     for ref in sorted(unresolved):
         cap = st.caps[ref]
         rects = cap.pad_rects(cap.x, cap.y, cap.rot)
+        # #725: this predicate MUST match via_penalty's, which is why both go
+        # through st.via_required. Left at the flat scalar while the grader
+        # resolves the requirement, a cap reported unresolved because of a
+        # raised via would yield an EMPTY offender list -- the pass would print
+        # nothing and report the cap unresolved forever.
+        pfls = cap_floors_of(cap, rects)
         offenders = []
         for v in pcb_data.vias:
             vr = (v.size or 0.5) / 2.0
-            for (bx0, by0, bx1, by1, net) in rects:
+            for i, (bx0, by0, bx1, by1, net) in enumerate(rects):
                 if v.net_id != net and _point_to_rect_dist(
-                        v.x, v.y, (bx0, by0, bx1, by1)) < vr + clearance - EPS:
+                        v.x, v.y, (bx0, by0, bx1, by1)) < vr + via_req(
+                            None if pfls is None else pfls[i], v.net_id) - EPS:
                     offenders.append(v)
                     break
         for v in offenders:
@@ -1380,6 +1905,10 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
                     start_x=old[0], start_y=old[1], end_x=nx, end_y=ny,
                     width=w, layer=layer, net_id=v.net_id))
             v.x, v.y = nx, ny
+            # w2[2]/w2[3] (net and keep-out) are carried through unchanged --
+            # a moved via keeps its requirement. #725: this rebuild gives the
+            # list a NEW identity, which is what makes _Repair's per-cap
+            # required-clearance memos rebuild instead of going stale.
             st.vias = [(nx, ny, w2[2], w2[3]) if (abs(w2[0] - old[0]) < 1e-6 and
                                                   abs(w2[1] - old[1]) < 1e-6) else w2
                        for w2 in st.vias]
