@@ -236,16 +236,44 @@ before it ships on.** It runs the same board twice (flag off, flag on), writes
 both, and grades both with an *independent* check — `floorplan.grade(...,
 with_health=True)` re-derives its corridors from the FINAL poses, so a term that
 only improves the model it is computed from shows up as "improved nothing". Add
-a row to `ROWS`, do not add a file. Three rules the table encodes and that are
+a row to `ROWS`, do not add a file. Five rules the table encodes and that are
 easy to get wrong:
 
-- **Judge on ≥3 boards, paired and directional** (improve on ≥ N−1, regress on
-  none), never a per-board absolute. Neutral boards are printed, not dropped.
+- **Judge on ≥3 DISTINCT boards, paired and directional** (improve on ≥ N−1,
+  regress on none), never a per-board absolute. Neutral boards are printed, not
+  dropped. This is **enforced in `gate()`**, not just stated here (#694): the
+  old rule counted trial *rows*, so one improving row on one board passed, and
+  `--row` made that the convenient path. The refusal applies to rows **on
+  trial**, and every row in the table today is pinned — so a real run does not
+  reach it and `--self-test` does. A term whose per-board direction is a coin
+  flip passes the rule 1 run in 2^N (1 in 8 at N=3), which the run prints when
+  a term is on trial.
 - **Keep the row that disagrees.** A term that helps on one board of three is
   not a term, and deleting the dissenting row is how that becomes folklore.
 - **A rejected term keeps its rows**, marked `rejected` with its measured
   `expect`, so it stays a change detector instead of a permanent red mark that
   someone eventually deletes along with the finding.
+- **Numbers live in `tests/placement_ab_baseline.json`, never in a `why`
+  string.** Every run re-measures and compares it per key and per arm, reporting
+  a reversed direction (`INVERTED`) apart from a moved value (`DRIFT`), a
+  baseline row `ROWS` no longer declares (`ORPHAN`), and a baseline that is not
+  shaped like one (`MALFORMED`). A `why` records the MECHANISM only. This exists
+  because `corridor-ulx3s` sat rejected on a recorded claim whose signal had
+  reversed while the gate printed PASS (#694) — and the reason is worth getting
+  right, because the obvious reading is wrong: **the gate never compared the
+  signal.** `_verdict` collapses the signal, the guards and intent errors into
+  ONE mark, and only that mark is checked against `expect`, so the reversal was
+  MASKED by a different criterion turning the mark `regress` for its own
+  reasons. An aggregate verdict cannot say which of its inputs moved.
+  **A placement-engine change that moves these numbers re-records the baseline
+  (`--write-baseline`) in the same commit**, after reading the table; a partial
+  run refuses to write one, and a missing baseline FAILs rather than passing.
+  `--baseline ""` is the deliberate way to run without the comparison, and
+  `--self-test` runs the gate and comparator logic in milliseconds at the top of
+  every invocation.
+- **A mark resting on intent errors names the rules that moved**
+  (`intent errors A -> B (zone_containment X -> Y)`). An unattributed error
+  count is what let #694's inverted row keep reading as an intact finding.
 
 Two traps measured the hard way: the first run of that harness reported the
 corridor term inert because it had been pointed at a **merged** net glob whose
@@ -532,6 +560,21 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   KiCad enforces max(the two items' clearances) per pair; the obstacle stamps
   and check_drc honor it the same way. Clearance consumers should read this
   field, never re-derive footprint inheritance.
+  **The PLACEMENT side honors it too, since #697** — `placement.legality`'s
+  `PadClearanceModel` resolves each pad pair at check_drc's own value
+  (`max(clearance, netclass a, netclass b)` → `.kicad_dru` layer rules over the
+  SHARED copper layers, which REPLACE → `max(…, lc_a, lc_b)`), and CALLS
+  check_drc's `pad_copper_layers` / `pads_shared_layer_clearance` rather than
+  mirroring them. It is strictly inert (`model.active` False, every consumer on
+  its original flat-scalar path) when the board declares no netclass, no dru
+  rule and no pad override. Before #697 the census priced every pair at one
+  flat scalar and read `local_clearance` nowhere in `py_placer/`, so a board
+  failing DRC on a 1.016mm fiducial keep-clear reported **0 conflict pairs** to
+  fix. Two consequences worth knowing: a pair graded above the board-wide
+  clearance is disclosed in `grade_pad_legality`'s `required` key (print it via
+  `legality.format_required_clause`, never a hand-copied string), and
+  `placement/fanout_clearance.py` is a SEPARATE flat-scalar channel that still
+  has this bug.
 
 ### Through-Hole vs SMD Pads
 

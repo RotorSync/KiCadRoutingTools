@@ -72,6 +72,38 @@ Expect `recovery` to get no better and `collateral_pad_rms` to grow: this puts
 parts where the netlist wants them, not where they were. That is the intended
 trade.
 
+#### When a part will not seat, read the verdict before reaching for a hammer
+
+Every part the rung leaves unseated carries a **`no_pose_verdict`** in the
+JSON_SUMMARY and as a NOTE, and it tells you whether eviction can help at all
+— `no_pose_blockers == {}` used to mean two opposite things, *nothing is near
+this part* and *everything near it is locked*.
+
+| verdict | what it means | what to do |
+| --- | --- | --- |
+| `no_movable_neighbour` | nothing seated is near it | eviction cannot help — the pocket does not exist; re-check the outline or the intent |
+| `immovable_given_frozen` | everything near it is frozen (it names each neighbour **and the decision that froze it**) | unlock one of them, or accept it |
+| `blocker_available` | a useful blocker exists, the rung is disarmed | raise `--evict-depth` |
+| `no_single_lift_frees` | lifting any ONE neighbour frees no pose | try `--evict-depth 2` |
+| `no_pair_lift_frees` | pairs do not free one either | stop; this is a floorplan problem |
+| `trade_reverted` | the trade was made and scored worse | the pocket is real but costs more than it buys |
+| `seated_after_eviction` | it worked | — |
+| `no_target_recorded` | the part reached `unseated` with no ledger entry | a bug; report it |
+
+`--evict-depth 1` trades out the single neighbour that frees the most poses;
+`2` also sweeps **pairs**, and only for a part no single lift helped — in the
+case pairs exist for, every single-lift count is zero, so the sweep cannot be
+pruned by them. Bounded by counts and never a clock (#621): at most 8
+candidates per part, 16 pairs, and **one trade per part**; what a cap drops is
+reported. Depth 2 costs the most, and depth 3 is refused rather than defined.
+
+Two things to know before arming it. Locked parts and declared edge connectors
+are never evicted, and `--lock` is honoured by the rung — so lock what must not
+move. And **an evicted blocker is WRITTEN**: it is named in `evicted` and in a
+NOTE, but it is by construction outside the scope you asked for, so the board
+that comes back has moved a part you did not name. `reseated` deliberately does
+not count it — an eviction is not a re-seat.
+
 ### An observed violation is evidence, never permission
 
 **Never derive an intent from a damaged board and then use it to gate that

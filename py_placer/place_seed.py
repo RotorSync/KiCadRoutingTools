@@ -79,23 +79,36 @@ Examples:
                         "non-obstacles either way (the existing exclude "
                         "mechanism); this changes only WHO goes first "
                         "(run-4 C)")
-    p.add_argument("--evict-depth", type=int, default=0, choices=(0, 1),
+    p.add_argument("--evict-depth", type=int, default=0, choices=(0, 1, 2),
                    metavar="N",
-                   help="Eviction rung (#630). At every depth a part with NO "
-                        "legal pose gets a census of its seated neighbours "
-                        "(JSON_SUMMARY no_pose_blockers: how many poses "
-                        "lifting each one would free). 0 (default) moves "
-                        "nothing. 1 evicts the neighbour that frees the most, "
-                        "seats the part, then re-seats the neighbour (inside "
-                        "its own zone) with the part in place; the trade is "
-                        "kept only if both seats are legal against every "
-                        "seated part and the seated board's overlap count "
-                        "did not rise, else both parts are put back and the "
-                        "revert is recorded. Locked parts and declared edge "
-                        "connectors are never evicted; a blocker's own "
-                        "blocker is not chased. Only fires on a part that "
-                        "was going to be reported unseated. Opt-in until an "
-                        "A/B row on three boards exists")
+                   help="Eviction rung (#630, #699). At every depth a part "
+                        "with NO legal pose gets a census of its seated "
+                        "neighbours (JSON_SUMMARY no_pose_blockers: how many "
+                        "poses lifting each one would free). 0 (default) "
+                        "moves nothing. 1 evicts the neighbour that frees "
+                        "the most, seats the part, then re-seats the "
+                        "neighbour (inside its own zone) with the part in "
+                        "place; the trade is kept only if both seats are "
+                        "legal against every seated part and the seated "
+                        "board's overlap count did not rise, else both parts "
+                        "are put back and the revert is recorded. 2 also "
+                        "censuses PAIRS when no single lift frees a pose, "
+                        "and trades the best pair under the same rule -- at "
+                        "most 16 of the pairs its 8 candidates form, so it "
+                        "costs nothing on a part a single lift already "
+                        "solves. APPLIES TO --reseat TOO, and there it "
+                        "relaxes that pass's contract: --reseat normally "
+                        "holds every part outside its scope fixed, and a "
+                        "depth >= 1 lets it trade one out. Those parts are "
+                        "named in the JSON's `evicted` and in a NOTE, and "
+                        "the pass additionally refuses any trade that raised "
+                        "the board's stack count or overlap area. Parts "
+                        "locked in the file or by the intent's must_lock, "
+                        "and declared edge connectors, are never evicted; a "
+                        "blocker's own blocker is not chased, at either "
+                        "depth, and there is one trade per part. Only fires "
+                        "on a part that was going to be reported unseated. "
+                        "Opt-in until an A/B row on three boards exists")
     p.add_argument("--anchor-rounds", type=int, default=1,
                    help="With --anchors-first: gated re-seat passes after "
                         "the first full placement (default 1 = none). Each "
@@ -224,11 +237,21 @@ Examples:
                 refs=(args.reseat or None), group_sources=sources,
                 clearance=args.clearance,
                 board_edge_clearance=args.board_edge_clearance,
-                grid_step=args.grid_step, seed=args.seed)
+                grid_step=args.grid_step, seed=args.seed,
+                # The same flag, not a second one: it was parsed and
+                # silently ignored on this path (#699).
+                evict_depth=args.evict_depth)
             for note in reseat['notes']:
                 print(f"  NOTE: {note}")
+            # Over the SCOPE only: the line prints it as "{n} re-seated
+            # (max X mm)", and `n` deliberately excludes the parts the
+            # eviction rung moved, so measuring over both mixes the two
+            # counts the engine went to the trouble of separating.
+            _scope = set(reseat['scope'])
             _rmax = 0.0
             for mv in reseat['moves']:
+                if mv['reference'] not in _scope:
+                    continue
                 fp = cur_pcb.footprints.get(mv['reference'])
                 if fp is not None:
                     _rmax = max(_rmax, _math.hypot(mv['new_x'] - fp.x,
@@ -237,7 +260,8 @@ Examples:
                   f"{len(reseat['scope'])} in scope, "
                   f"{len(reseat['reseated'])} re-seated "
                   f"(max {_rmax:.2f}mm), {len(reseat['unseated'])} unseated, "
-                  f"{len(reseat['refused'])} refused; "
+                  f"{len(reseat['refused'])} refused, "
+                  f"{len(reseat.get('evicted') or [])} evicted; "
                   f"OFF-OUTLINE PARTS {len(reseat['witnesses_before'])} -> "
                   f"{len(reseat['witnesses_after'])}"
                   + ('' if reseat['accepted'] else '  [GATE REFUSED]'))
@@ -250,6 +274,11 @@ Examples:
                 'reseated_refs': reseat['reseated'],
                 'unseated': reseat['unseated'],
                 'no_pose_blockers': reseat.get('no_pose_blockers') or {},
+                'no_pose_verdict': reseat.get('no_pose_verdict') or {},
+                # Parts moved OUTSIDE the declared scope by the eviction
+                # rung. Empty at depth 0, which is the default.
+                'evicted': reseat.get('evicted') or [],
+                'no_pose_census': reseat.get('no_pose_census') or {},
                 'evictions': reseat.get('evictions', 0),
                 'evictions_reverted': reseat.get('evictions_reverted', 0),
                 'refused': reseat['refused'],
@@ -319,7 +348,8 @@ Examples:
             copy_siblings(cur, args.output_file)
             from placement.legality import grade_pad_legality
             pcb_out = parse_kicad_pcb(args.output_file)
-            pads_after = grade_pad_legality(pcb_out, args.clearance)
+            pads_after = grade_pad_legality(pcb_out, args.clearance,
+                                            pcb_file=args.output_file)
             graded = floorplan.grade(intent, pcb_out, args.output_file,
                                      group_sources=sources,
                                      clearance=args.clearance,
@@ -328,6 +358,13 @@ Examples:
                 print(f"  GRADE ERROR [{v.rule}] {v.message}")
             summary['grade_errors'] = len(graded.errors)
             summary['pad_conflicts_after'] = pads_after['pad_conflicts']
+            # #697: the requirement each counted pair was graded at, when it
+            # sits above args.clearance, so the count is explainable.
+            summary['pad_clearance_required'] = pads_after.get('required') or []
+            from placement.legality import format_required_clause as _req_cl
+            if _req_cl(pads_after):
+                print(f"  above the {args.clearance}mm floor: "
+                      f"{_req_cl(pads_after)}")
             summary['hole_conflicts_after'] = pads_after['hole_conflicts']
             summary['oob_pad_count_after'] = pads_after['oob_pad_count']
             if graded.errors:
@@ -517,6 +554,11 @@ Examples:
                # you cannot act on is a dead end, and a count names nobody.
                'unseated_refs': list(result['unseated']),
                'no_pose_blockers': result.get('no_pose_blockers') or {},
+               # WHY each of them has no pose, not just who is nearby (#699).
+               # "nothing is near it" and "everything near it is locked" were
+               # the same empty dict, and they need different answers.
+               'no_pose_verdict': result.get('no_pose_verdict') or {},
+               'no_pose_census': result.get('no_pose_census') or {},
                # Trades KEPT, and trades REVERTED, separately: a reader who
                # sees `evictions: 1` must not have to guess whether the board
                # changed. The records themselves are in the NOTE lines.
