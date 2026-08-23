@@ -299,13 +299,15 @@ EVICT_MAX_PAIRS = 16
 
 
 def _evict_candidates(state, ref: str, tx: float, ty: float,
-                      placed: Set[str], immovable: Set[str],
-                      constraint=None, tol: float = 0.5) -> List[str]:
+                      placed: Set[str], immovable,
+                      constraint=None, tol: float = 0.5,
+                      info: Optional[Dict] = None) -> List[str]:
     """Seated, movable parts that could possibly be in `ref`'s way at (tx,ty).
 
     `immovable` is every seated ref the rung may not lift: the intent's
     `must_lock` set and its DECLARED EDGE CONNECTORS. A file-locked part is
-    skipped here as well. The edge connectors are excluded because the rung
+    skipped here as well. It may be a plain set, or a {ref: source} mapping,
+    in which case the source is what `info['frozen']` reports. The edge connectors are excluded because the rung
     re-seats a blocker through `_try_place`, which demands full containment
     -- measured, it lifted a stage-1 connector off its edge band and seated
     it inland, on top of another part. An edge seat is `_seat_edge`'s to
@@ -320,7 +322,9 @@ def _evict_candidates(state, ref: str, tx: float, ty: float,
     budget replaced by the census radius.
 
     Then nearest-first, capped: the cap is the only approximation, and it is
-    reported by the caller rather than hidden.
+    reported rather than hidden -- pass `info` and it comes back carrying
+    `boxed` / `movable` / `frozen` / `truncated`, which is what makes
+    "censused 8 neighbour(s)" auditable against how many there really were.
     """
     part = state.parts.get(ref)
     if part is None:
@@ -345,19 +349,41 @@ def _evict_candidates(state, ref: str, tx: float, ty: float,
         cx = min(max(tx, constraint[0]), constraint[2])
         cy = min(max(ty, constraint[1]), constraint[3])
     out: List[Tuple[float, str]] = []
+    frozen: Dict[str, str] = {}
+    # THE BOX FIRST, then the freeze. Reversed (as this read until #699) a
+    # locked neighbour never reaches the box test, so "no candidates" cannot
+    # be told apart from "every neighbour that could be in the way is one
+    # nobody may move" -- two verdicts with two different answers for the
+    # reader, recorded as the same empty dict.
     for other in sorted(placed):
         if other == ref or other not in state.parts:
             continue
         op = state.parts[other]
-        if op.locked or other in locked:
-            continue          # not this tool's to move -- see reseat_scope
         orect = op.rect(op.x, op.y, op.rot)
         if (orect[2] + clr < bx0 or orect[0] - clr > bx1
                 or orect[3] + clr < by0 or orect[1] - clr > by1):
             continue
+        if op.locked or other in locked:
+            # NAME THE SOURCE. "frozen" collapses three different decisions
+            # -- a lock in the FILE, the intent's must_lock, a declared edge
+            # connector -- and the reader's next move differs for each.
+            frozen[other] = ('file-locked' if op.locked else
+                             (immovable.get(other)
+                              if isinstance(immovable, dict) else None)
+                             or 'immovable')
+            continue          # not this tool's to move -- see reseat_scope
         out.append((math.hypot(op.x - cx, op.y - cy), other))
     out.sort()
-    return [b for _d, b in out[:EVICT_MAX_BLOCKERS]]
+    picked = [b for _d, b in out[:EVICT_MAX_BLOCKERS]]
+    if info is not None:
+        # The docstring above has always promised the cap is "reported by the
+        # caller rather than hidden". Until #699 nothing reported it: eight
+        # entries in `no_pose_blockers` and no way to learn there were twelve.
+        info['boxed'] = len(out) + len(frozen)
+        info['movable'] = len(out)
+        info['frozen'] = dict(sorted(frozen.items()))
+        info['truncated'] = max(0, len(out) - len(picked))
+    return picked
 
 
 def count_legal_poses(state, ref: str, tx: float, ty: float,
@@ -419,6 +445,75 @@ def count_legal_poses(state, ref: str, tx: float, ty: float,
                 if n >= cap:
                     return n
     return n
+
+
+#: The verdicts a part with no legal pose can be given (#699). Two of them
+#: used to be the SAME ledger entry -- an empty `no_pose_blockers[ref]` --
+#: and they have opposite answers for the reader: NO_MOVABLE_NEIGHBOUR says
+#: the geometry refuses the part with nothing in the way, IMMOVABLE_GIVEN
+#: _FROZEN says the neighbours that ARE in the way are ones somebody locked,
+#: so the next move is to relax a lock, not to re-place anything.
+NO_POSE_VERDICTS = (
+    'seated_after_eviction',    # not unseated after all: a trade worked
+    'no_target_recorded',       # the rung never got to ask (no seat context)
+    'no_movable_neighbour',     # nothing seated is anywhere near it
+    'immovable_given_frozen',   # only locked / declared-edge neighbours are
+    'no_single_lift_frees',     # movable neighbours censused, none frees one
+    'no_pair_lift_frees',       # ... and no PAIR of them frees one either
+    'blocker_available',        # a lift WOULD free a pose; the depth said no
+    'trade_reverted',           # a trade was tried and put back
+)
+
+
+#: Every sub-key present on every entry, so no consumer needs a defaulting
+#: `.get` that quietly reads as a real measurement.
+_EMPTY_CENSUS = {'boxed': 0, 'movable': 0, 'frozen': {}, 'truncated': 0,
+                 'baseline': 0, 'pairs_total': 0, 'pairs_censused': 0,
+                 'pairs_truncated': 0, 'best_pair': None}
+
+
+def _verdict_for(cands: Sequence[str], census: Dict) -> str:
+    """The verdict for a part still unseated after the census."""
+    if not cands:
+        return ('immovable_given_frozen' if census.get('frozen')
+                else 'no_movable_neighbour')
+    return ('no_pair_lift_frees' if census.get('pairs_censused')
+            else 'no_single_lift_frees')
+
+
+def _no_pose_note(ref: str, verdict: str, census: Dict) -> str:
+    """The one place the verdict's prose is written.
+
+    A verdict string in the JSON and a differently-worded sentence on stdout
+    is the next thing to drift apart, so both come from here -- the same
+    argument `zone_gate` makes for having ONE definition shared by the seat
+    search and the pose census.
+    """
+    frozen = census.get('frozen') or {}
+    n = census.get('movable', 0)
+    trunc = census.get('truncated', 0)
+    tail = (f" ({trunc} further movable neighbour(s) not censused, cap "
+            f"EVICT_MAX_BLOCKERS={EVICT_MAX_BLOCKERS})" if trunc else "")
+    if verdict == 'no_movable_neighbour':
+        return (f"{ref}: no legal pose, and NOTHING seated is near enough to "
+                f"be in the way -- the outline, the zone or its own size "
+                f"refuses it, not a neighbour")
+    if verdict == 'immovable_given_frozen':
+        who = ', '.join(f"{r} ({why})" for r, why in sorted(frozen.items()))
+        return (f"{ref}: no legal pose, and every neighbour that could be in "
+                f"the way is one this rung may not move: {who}. Immovable "
+                f"GIVEN those, not immovable")
+    if verdict == 'no_single_lift_frees':
+        return (f"{ref}: censused {n} neighbour(s); lifting any ONE of them "
+                f"frees no pose{tail}; --evict-depth 2 also tries pairs")
+    if verdict == 'no_pair_lift_frees':
+        p = census.get('pairs_censused', 0)
+        pt = census.get('pairs_truncated', 0)
+        return (f"{ref}: censused {n} neighbour(s) and {p} pair(s); lifting "
+                f"no one or two of them frees a pose{tail}"
+                + (f" ({pt} further pair(s) not censused, cap "
+                   f"EVICT_MAX_PAIRS={EVICT_MAX_PAIRS})" if pt else ""))
+    return ""
 
 
 def _seated_violations(state, seated: Set[str]) -> Tuple[int, float]:
@@ -998,7 +1093,8 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                      seed_refs: Optional[Set[str]] = None,
                      anchors_first: bool = False,
                      anchor_rounds: int = 1,
-                     evict_depth: int = 0) -> Dict:
+                     evict_depth: int = 0,
+                     immovable_extra: Sequence[str] = ()) -> Dict:
     """Compute a full placement for an unplaced board from its intent.
 
     Returns {'placements': [...], 'lock_refs': [...], 'unseated': [...],
@@ -1019,6 +1115,15 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
     a pose, and trades the best pair (#699). Opt-in until an A/B row on three
     boards exists (CLAUDE.md, "A new PLACEMENT objective term"). Nothing
     deeper is defined -- depth 3 raises rather than silently meaning 2.
+
+    `immovable_extra` names seated refs the eviction rung may not lift on top
+    of the intent's own locks. It exists because a caller's lock is not
+    always IN the intent: `reseat_scope` resolves `--lock` globs into its own
+    state and the seeder builds a fresh one, so without this the rung would
+    happily evict a ref the user locked by name. It is deliberately NOT
+    laundered through `must_lock`, which also drives stage 1.5, the
+    file-lock/zone contradiction note and the `lock_refs` this returns (which
+    `place_seed` STAMPS into the board).
     """
     if evict_depth not in (0, 1, 2):
         raise ValueError(
@@ -1052,6 +1157,11 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
     unseated_ctx: Dict[str, Tuple[float, float, Any, float]] = {}
     evictions: List[Dict] = []
     no_pose_blockers: Dict[str, Dict[str, int]] = {}
+    # #699: WHY a part has no pose, and what the census actually looked at.
+    # `no_pose_blockers` alone cannot say it -- an empty dict there means
+    # both "nothing is near it" and "everything near it is locked".
+    no_pose_verdict: Dict[str, str] = {}
+    no_pose_census: Dict[str, Dict] = {}
     # A part locked IN THE FILE is already authoritatively placed -- a caller
     # that pre-placed its spec-fixed parts and stamped them (locked yes) must
     # not have the seeder re-derive them. Treated as placed from the start:
@@ -1447,8 +1557,14 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
         # no `edge` key is not protected, consistent with stage 1: it seats
         # no such entry ("no edge, no seat") and leaves it to the ordinary
         # stages, so it is an ordinary part here too.
-        immovable = set(lock_refs) | {c['ref'] for c in intent.edge_claims()
-                                      if c.get('edge')}
+        # {ref: why}, not a bare set, so a frozen neighbour can be reported
+        # with the decision that froze it -- the reader's next move differs
+        # for a must_lock and for a declared edge connector.
+        immovable = {r: 'must_lock' for r in lock_refs}
+        immovable.update({c['ref']: 'edge_connector'
+                          for c in intent.edge_claims() if c.get('edge')})
+        immovable.update({r: 'lock-glob' for r in immovable_extra
+                          if r not in immovable})
         still: List[str] = []
         # DEDUPED, and placed-aware. A zone member that fails its zone stage
         # stays in `unplaced`, so stage 3 tries it again and appends it a
@@ -1464,7 +1580,12 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             if ref in placed:
                 continue          # an earlier pass of this rung seated it
             if ref not in unseated_ctx or ref not in state.parts:
+                # The rung never got to ask. This landed in `unseated` with
+                # NO ledger entry at all before #699 -- the same "a verdict
+                # you cannot act on" the census exists to end, one level down.
                 still.append(ref)
+                no_pose_verdict[ref] = 'no_target_recorded'
+                no_pose_census[ref] = dict(_EMPTY_CENSUS)
                 continue
             tx, ty, constraint, tol = unseated_ctx[ref]
             base_excl = unplaced - {ref}
@@ -1474,37 +1595,55 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # and this one reaches `place_seed`'s JSON_SUMMARY.
             zkw = dict(constraint=constraint, tol=tol)
             baseline = count_legal_poses(state, ref, tx, ty, base_excl, **zkw)
+            cinfo: Dict = {}
             cands = _evict_candidates(state, ref, tx, ty, placed, immovable,
-                                      constraint=constraint, tol=tol)
+                                      constraint=constraint, tol=tol,
+                                      info=cinfo)
             freed = {b: count_legal_poses(state, ref, tx, ty,
                                           base_excl | {b}, **zkw)
                      for b in cands}
             no_pose_blockers[ref] = dict(freed)
+            census = dict(_EMPTY_CENSUS)
+            census.update({'boxed': cinfo.get('boxed', 0),
+                           'movable': cinfo.get('movable', 0),
+                           'frozen': cinfo.get('frozen') or {},
+                           'truncated': cinfo.get('truncated', 0),
+                           'baseline': baseline})
+            no_pose_census[ref] = census
             useful = sorted((n, b) for b, n in freed.items() if n > baseline)
             if not evict_depth:
                 still.append(ref)
                 if useful:
+                    no_pose_verdict[ref] = 'blocker_available'
                     notes.append(
                         f"{ref}: no legal pose, and lifting {useful[-1][1]} "
                         f"would free {useful[-1][0]} -- not evicted "
                         f"(--evict-depth 0)")
+                else:
+                    # Depth 0 printed NOTHING here: no `useful` blocker, no
+                    # note, and an empty dict in the JSON that could mean
+                    # three different things. Every unseated part now leaves
+                    # a sentence and a verdict, at every depth.
+                    no_pose_verdict[ref] = _verdict_for(cands, census)
+                    notes.append(_no_pose_note(ref, no_pose_verdict[ref],
+                                               census))
                 continue
             # Depth 2 (#699): when NO single lift frees a pose, ask the same
-            # question of pairs. Enumerated over `cands` as it comes -- that
-            # is nearest-first -- so the choice is deterministic, and NOT
-            # ranked by the single-lift counts, which are all zero in exactly
-            # the case this exists for.
+            # question of pairs. The pair sweep CANNOT be pruned by the
+            # single-lift counts -- in the case it exists for every one of
+            # them is zero -- so it is ordered geometrically instead.
             chosen: List[str] = [useful[-1][1]] if useful else []
             chosen_freed = useful[-1][0] if useful else 0
-            pairs_censused = pairs_dropped = 0
             if not useful and evict_depth >= 2 and len(cands) >= 2:
                 pairs = sorted(
                     itertools.combinations(range(len(cands)), 2),
                     key=lambda ij: (ij[0] + ij[1], ij[1]))
                 pairs = [(cands[i], cands[j]) for i, j in pairs]
-                pairs_dropped = max(0, len(pairs) - EVICT_MAX_PAIRS)
+                census['pairs_total'] = len(pairs)
+                census['pairs_truncated'] = max(0, len(pairs)
+                                                - EVICT_MAX_PAIRS)
                 pairs = pairs[:EVICT_MAX_PAIRS]
-                pairs_censused = len(pairs)
+                census['pairs_censused'] = len(pairs)
                 freed2 = {pr: count_legal_poses(state, ref, tx, ty,
                                                 base_excl | set(pr), **zkw)
                           for pr in pairs}
@@ -1513,28 +1652,15 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                 if useful2:
                     chosen = list(useful2[-1][1])
                     chosen_freed = useful2[-1][0]
+                    # The winning pair, as a RECORD. A tuple key is not
+                    # JSON, and stringifying it ("S1+S2") invents a
+                    # separator that a real reference may contain.
+                    census['best_pair'] = {'blockers': list(chosen),
+                                           'freed': chosen_freed}
             if not chosen:
                 still.append(ref)
-                if cands and pairs_censused:
-                    notes.append(
-                        f"{ref}: censused {len(cands)} neighbour(s) and "
-                        f"{pairs_censused} pair(s); lifting no one or two of "
-                        f"them frees a pose, so they are not what is in the "
-                        f"way"
-                        + (f" ({pairs_dropped} further pair(s) not "
-                           f"censused, cap "
-                           f"EVICT_MAX_PAIRS={EVICT_MAX_PAIRS})"
-                           if pairs_dropped else ""))
-                elif cands:
-                    # NOT "they are not what is in the way": that is a
-                    # universal claim from a sweep that only ever lifted ONE
-                    # of them, and it is false for a part two neighbours
-                    # jointly block (#699). Say what was actually measured.
-                    notes.append(
-                        f"{ref}: censused {len(cands)} neighbour(s); lifting "
-                        f"any ONE of them frees no pose"
-                        + ("; --evict-depth 2 also tries pairs"
-                           if evict_depth < 2 else ""))
+                no_pose_verdict[ref] = _verdict_for(cands, census)
+                notes.append(_no_pose_note(ref, no_pose_verdict[ref], census))
                 continue
             zinfo = []
             for b in chosen:
@@ -1548,6 +1674,8 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                         'depth': len(chosen)})
             evictions.append(rec)
             names = ', '.join(chosen)
+            no_pose_verdict[ref] = ('seated_after_eviction' if rec['accepted']
+                                    else 'trade_reverted')
             if rec['accepted']:
                 placed.add(ref)
                 unplaced.discard(ref)
@@ -1634,9 +1762,18 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # a ref means the census ran and found no movable neighbour; a
             # ref absent from the dict had no recorded target.
             'no_pose_blockers': no_pose_blockers,
-            # One record per attempted trade (depth 1 only), accepted or
-            # reverted -- see `_evict_trade`.
-            'evictions': evictions}
+            # One record per attempted trade, accepted or reverted -- see
+            # `_evict_trade`. `blockers` holds one ref at depth 1 and two at
+            # depth 2.
+            'evictions': evictions,
+            # #699: WHY, not just WHO. `no_pose_blockers[ref] == {}` says
+            # both "nothing is near it" and "everything near it is locked",
+            # and those have opposite answers for the reader. One of
+            # NO_POSE_VERDICTS per ref the rung reached, with the counts it
+            # reached them by -- including the neighbours and pairs it did
+            # NOT census, so a cap can never read as a complete sweep.
+            'no_pose_verdict': no_pose_verdict,
+            'no_pose_census': no_pose_census}
 
 
 def stamp_locked(board_file: str, refs: Sequence[str]) -> int:
@@ -2315,6 +2452,14 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
                 'intent_used': intent,
                 'unseated': [], 'scope': [], 'scope_source': scope_source,
                 'notes': notes, 'reason': reason,
+                # The SAME keys as the seated path below. This early-out
+                # omitted every census key, and `place_seed` papered over it
+                # with defaulting `.get`s -- so one function returned two
+                # different schemas and a reader could not tell "the census
+                # found nothing" from "no census ran".
+                'no_pose_blockers': {}, 'no_pose_verdict': {},
+                'no_pose_census': {},
+                'evictions': 0, 'evictions_reverted': 0,
                 'gate_before': list(_recon.measure(state, edge_bands or {})),
                 'gate_after': list(_recon.measure(state, edge_bands or {})),
                 'accepted': True, 'pruned': [],
@@ -2458,6 +2603,13 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
             'no_pose_blockers': {r: v for r, v in
                                  (res.get('no_pose_blockers') or {}).items()
                                  if r in scope},
+            # #699's ledger travels with the verdict here too, same filter.
+            'no_pose_verdict': {r: v for r, v in
+                                (res.get('no_pose_verdict') or {}).items()
+                                if r in scope},
+            'no_pose_census': {r: v for r, v in
+                               (res.get('no_pose_census') or {}).items()
+                               if r in scope},
             'evictions': sum(1 for e in (res.get('evictions') or [])
                              if e.get('accepted')),
             'evictions_reverted': sum(1 for e in (res.get('evictions') or [])

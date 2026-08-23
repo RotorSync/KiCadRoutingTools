@@ -256,6 +256,8 @@ Examples:
                 'reseated_refs': reseat['reseated'],
                 'unseated': reseat['unseated'],
                 'no_pose_blockers': reseat.get('no_pose_blockers') or {},
+                'no_pose_verdict': reseat.get('no_pose_verdict') or {},
+                'no_pose_census': reseat.get('no_pose_census') or {},
                 'evictions': reseat.get('evictions', 0),
                 'evictions_reverted': reseat.get('evictions_reverted', 0),
                 'refused': reseat['refused'],
@@ -523,6 +525,11 @@ Examples:
                # you cannot act on is a dead end, and a count names nobody.
                'unseated_refs': list(result['unseated']),
                'no_pose_blockers': result.get('no_pose_blockers') or {},
+               # WHY each of them has no pose, not just who is nearby (#699).
+               # "nothing is near it" and "everything near it is locked" were
+               # the same empty dict, and they need different answers.
+               'no_pose_verdict': result.get('no_pose_verdict') or {},
+               'no_pose_census': result.get('no_pose_census') or {},
                # Trades KEPT, and trades REVERTED, separately: a reader who
                # sees `evictions: 1` must not have to guess whether the board
                # changed. The records themselves are in the NOTE lines.

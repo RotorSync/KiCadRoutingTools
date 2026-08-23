@@ -325,6 +325,15 @@ with tempfile.TemporaryDirectory() as wd:
     check("the bare verdict is still printed, now with the census beside it",
           'no legal pose' in proc.stdout and 'would free' in proc.stdout,
           proc.stdout[-300:])
+    check("#699: the JSON_SUMMARY says WHY, not only who is nearby -- a "
+          "blocker exists and depth 0 declined to move it",
+          s and s.get('no_pose_verdict', {}).get('BIG') == 'blocker_available',
+          str(s and s.get('no_pose_verdict')))
+    check("#699: and the census discloses what it looked at",
+          s and s.get('no_pose_census', {}).get('BIG', {}).get('movable') == 1
+          and s['no_pose_census']['BIG']['truncated'] == 0
+          and s['no_pose_census']['BIG']['frozen'] == {},
+          str(s and s.get('no_pose_census')))
     proc2, s2, out2 = run(wd, pile_board, intent_for(['BIG', 'SMALL']),
                           '--evict-depth', '0', tag='d0')
     check("--evict-depth 0 is the same as the default",
@@ -396,6 +405,11 @@ with tempfile.TemporaryDirectory() as wd:
           and not any('not what is in the way' in n for n in r1['notes']),
           str([n for n in r1['notes'] if 'censused' in n]))
 
+    check("#699: and the depth-1 VERDICT is the honest one -- no single "
+          "lift frees a pose, which is not the same as immovable",
+          r1['no_pose_verdict'].get('BIG') == 'no_single_lift_frees',
+          str(r1['no_pose_verdict']))
+
     r2 = _seed(2)
     ev = r2['evictions']
     check("#699: at depth 2 BIG is seated", r2['unseated'] == [],
@@ -423,6 +437,13 @@ with tempfile.TemporaryDirectory() as wd:
     check("#699: and all three parts really are on the board",
           len(r2['placements']) == 3,
           str([p['reference'] for p in r2['placements']]))
+    check("#699: the depth-2 verdict says the part was SEATED, and the "
+          "census records the pair that did it",
+          r2['no_pose_verdict'].get('BIG') == 'seated_after_eviction'
+          and (r2['no_pose_census']['BIG']['best_pair'] or {}
+               ).get('blockers') == ['S1', 'S2']
+          and r2['no_pose_census']['BIG']['pairs_censused'] == 1,
+          f"{r2['no_pose_verdict']} {r2['no_pose_census']}")
 
 # --------------------------------------------------------------------------
 # A trade that cannot be completed REVERTS, says so, and leaves the board as
@@ -454,6 +475,12 @@ with tempfile.TemporaryDirectory() as wd:
         check("THE BOARD equals the pre-eviction poses (depth 0 output)",
               poses(out) == poses(out0),
               f"{poses(out)} vs {poses(out0)}")
+        check("#699: the verdict for a reverted trade is not the verdict "
+              "for a part nothing was tried on",
+              s.get('no_pose_verdict', {}).get('BIG1') == 'trade_reverted'
+              and s0.get('no_pose_verdict', {}).get('BIG1')
+              == 'blocker_available',
+              f"d1 {s.get('no_pose_verdict')} d0 {s0.get('no_pose_verdict')}")
 
 # --------------------------------------------------------------------------
 # CONJUNCT 3 IS THE DECIDING ONE: a re-seat that is courtyard-clear but
@@ -526,6 +553,25 @@ with tempfile.TemporaryDirectory() as wd:
         check("and J1 is still ON ITS EDGE in the written board, not inland",
               abs(pz['J1'][1] - 12.5) < 0.05 and pz['J1'][2] == 0.0,
               str(pz))
+        # #699 ask 2. Before this, the ONLY record of J1's role was its
+        # ABSENCE from `no_pose_blockers` -- indistinguishable from a board
+        # where nothing is near BIG at all, and the rung printed no note.
+        check("#699: the verdict distinguishes 'immovable GIVEN frozen "
+              "neighbours' from 'immovable'",
+              s.get('no_pose_verdict', {}).get('BIG')
+              == 'immovable_given_frozen',
+              str(s.get('no_pose_verdict')))
+        check("#699: and it NAMES the frozen neighbour and the decision "
+              "that froze it, so the reader knows which lock to relax",
+              s.get('no_pose_census', {}).get('BIG', {}).get('frozen')
+              == {'J1': 'edge_connector'},
+              str(s.get('no_pose_census')))
+        check("#699: the rung now SAYS so on stdout (it printed nothing "
+              "at all about BIG here before)",
+              any('every neighbour that could be in the way' in ln
+                  and 'J1 (edge_connector)' in ln
+                  for ln in proc.stdout.splitlines()),
+              str([ln for ln in proc.stdout.splitlines() if 'BIG:' in ln]))
 
 # --------------------------------------------------------------------------
 # The --reseat path carries the census too: a scope ref with no legal pose
