@@ -804,6 +804,97 @@ with tempfile.TemporaryDirectory() as wd:
           str(sorted(empty)))
 
 # --------------------------------------------------------------------------
+# #699: THE EVICTION LICENCE IS NOT UNCONDITIONAL. Once --reseat may move a
+# part nobody named, "oob improved and no new witness" stops being a
+# sufficient gate: the tuple is lexicographic and `oob` moves hugely in this
+# pass's own favour, so a new stack or a pile of overlap sits below it unread.
+#
+# `_evict_trade`'s own conjunct 3 should never let such a trade through, so
+# this is defence in depth -- and defence nothing reaches is decoration. The
+# fault is injected: an `_evict_trade` that reports success having parked the
+# blocker ON the part it just seated. The licence must refuse it.
+# --------------------------------------------------------------------------
+with tempfile.TemporaryDirectory() as wd:
+    from placement import floorplan as _fp3
+    bpath = os.path.join(wd, 'lic.kicad_pcb')
+    ipath = os.path.join(wd, 'lic.json')
+    offboard_blocked(bpath)
+    with open(ipath, 'w', encoding='utf-8') as f:
+        json.dump(intent_for(['BIG', 'SMALL']), f)
+    licintent = _fp3.load_intent(ipath)
+
+    def _reseat_lic():
+        return seeder.reseat_scope(
+            parse_kicad_pcb(bpath), bpath, licintent, refs=['BIG'],
+            group_sources=(), clearance=0.2, board_edge_clearance=0.5,
+            grid_step=0.1, seed=0, evict_depth=1)
+
+    honest = _reseat_lic()
+    _real_trade = seeder._evict_trade
+    fired = {'n': 0}
+
+    def _stacking_trade(state, ref, blockers, tx, ty, constraint, tol,
+                        blocker_zones, placed, unplaced):
+        rec = _real_trade(state, ref, blockers, tx, ty, constraint, tol,
+                          blocker_zones, placed, unplaced)
+        if rec['accepted']:
+            fired['n'] += 1
+            pr = state.parts[ref]
+            for b in blockers:
+                state.apply_move(b, pr.x, pr.y, state.parts[b].rot)
+        return rec
+
+    seeder._evict_trade = _stacking_trade
+    try:
+        faulty = _reseat_lic()
+    finally:
+        seeder._evict_trade = _real_trade
+    check("#699: the licence control -- an honest eviction is accepted",
+          honest['accepted'] is True and honest['evicted'] == ['SMALL'],
+          f"accepted {honest['accepted']} evicted {honest['evicted']}")
+    check("#699: the fault was injected (the blocker was parked on the part)",
+          fired['n'] == 1, str(fired))
+    check("#699: and the pass REFUSED it -- an eviction that wrecks the "
+          "board does not ride through on its own oob improvement",
+          faulty['accepted'] is False and faulty['moves'] == [],
+          f"accepted {faulty['accepted']} moves {faulty['moves']}")
+    check("#699: prune_assignment is the conjunct that caught it, which is "
+          "WHY the licence check below is tested directly and not through a "
+          "fixture: a fixture would have to defeat prune first",
+          any('prune' in n and 'BIG' in n for n in faulty['notes']),
+          str([n for n in faulty['notes'] if 'prune' in n or 'REVERT' in n]))
+
+# The JOINT check itself. prune's sweep restores ONE pose at a time, so a
+# pair of moves that is individually neutral and jointly worse is exactly
+# what it cannot see. `eviction_licence_ok` is that conjunct, unit-tested,
+# because shipping a guard no test reaches is shipping decoration.
+_TERMS = __import__('placement.reconstruct', fromlist=['x']).GATE_TERMS
+_base = [0, 0, 0.0, 9.65, 0, 34.0, 0.0]
+
+
+def _gate(**kw):
+    g = list(_base)
+    for k, v in kw.items():
+        g[_TERMS.index(k)] = v
+    return g
+
+
+check("#699: the eviction licence passes an unchanged board",
+      seeder.eviction_licence_ok(_base, list(_base)) is True)
+check("#699: it passes the honest trade (oob collapses, nothing else rises)",
+      seeder.eviction_licence_ok(_base, _gate(oob=0.0, hpwl=12.0)) is True)
+check("#699: it REFUSES a new stack hiding below oob in the tuple",
+      seeder.eviction_licence_ok(_base, _gate(oob=0.0, stacks=1)) is False)
+check("#699: and refuses new overlap area, the term the lexicographic gate "
+      "never reaches once oob has improved",
+      seeder.eviction_licence_ok(_base, _gate(oob=0.0, overlap=3.5)) is False)
+check("#699: an improvement in both is still accepted",
+      seeder.eviction_licence_ok(_gate(stacks=2, overlap=5.0),
+                                 _gate(oob=0.0, stacks=0, overlap=0.0))
+      is True)
+
+
+# --------------------------------------------------------------------------
 # A locked incumbent is never evicted -- it is not this tool's to move
 # --------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as wd:

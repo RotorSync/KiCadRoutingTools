@@ -2307,6 +2307,34 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
             'grade_errors_before': len(graded.errors) if graded else None}
 
 
+def eviction_licence_ok(before: Sequence[float],
+                        after: Sequence[float]) -> bool:
+    """May a re-seat that moved parts OUTSIDE its scope be accepted?
+
+    `reseat_scope`'s own gate compares `oob` and the witness count, and that
+    is sufficient while the pass only moves parts it was asked about. Once
+    `--evict-depth` lets it trade out a part nobody named, it is not: the gate
+    tuple is lexicographic and `oob` moves hugely in this pass's own favour,
+    so a new stack or a pile of overlap sits below it and is never read.
+
+    So: stacks and overlap must not RISE. Both terms are already in the tuple,
+    which is why this costs nothing.
+
+    It is the JOINT check. `prune_assignment` runs first and reverts per-part
+    mis-moves the global gate cannot see -- measured, it catches an injected
+    "blocker parked on the part just seated" before this is reached -- but its
+    sweep restores ONE pose at a time, so a pair of moves that is individually
+    neutral and jointly worse is exactly what it cannot see and this can.
+    Tested directly (`tests/test_630_seeder_eviction.py`) rather than through
+    a fixture, because a fixture that reaches it has to defeat prune first.
+    """
+    from placement import reconstruct as _recon
+    _stk = _recon.GATE_TERMS.index('stacks')
+    _ovl = _recon.GATE_TERMS.index('overlap')
+    return (after[_stk] <= before[_stk]
+            and after[_ovl] <= before[_ovl] + 1e-9)
+
+
 def reseat_scope(pcb_data, pcb_file: str, intent, *,
                  lock_globs: Optional[Sequence[str]] = None,
                  refs: Optional[Sequence[str]] = None,
@@ -2604,23 +2632,15 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
     _oob = _recon.GATE_TERMS.index('oob')
     accepted = (after[_oob] < before[_oob]
                 and len(witnesses_after) <= len(witnesses_before))
-    if evicted:
-        # Once the pass may move parts it was not asked about, "oob improved
-        # and no new witness" is not a sufficient licence: the gate tuple is
-        # lexicographic and `oob` moves hugely in this pass's own favour, so
-        # a new stack or a pile of overlap sits below it unread. Both terms
-        # are already computed; comparing them costs nothing and is what
-        # makes the widened contract auditable on the board that is written.
+    if evicted and not eviction_licence_ok(before, after):
+        accepted = False
         _stk = _recon.GATE_TERMS.index('stacks')
         _ovl = _recon.GATE_TERMS.index('overlap')
-        if not (after[_stk] <= before[_stk]
-                and after[_ovl] <= before[_ovl] + 1e-9):
-            accepted = False
-            notes.append(
-                f"the eviction licence is REFUSED: moving "
-                f"{', '.join(evicted)} outside the scope raised stacks "
-                f"{before[_stk]:g} -> {after[_stk]:g} or overlap "
-                f"{before[_ovl]:g} -> {after[_ovl]:g}")
+        notes.append(
+            f"the eviction licence is REFUSED: moving "
+            f"{', '.join(evicted)} outside the scope raised stacks "
+            f"{before[_stk]:g} -> {after[_stk]:g} or overlap "
+            f"{before[_ovl]:g} -> {after[_ovl]:g}")
     if not accepted:
         for ref, (x, y, rot) in old.items():
             state.apply_move(ref, x, y, rot)
