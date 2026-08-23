@@ -205,6 +205,32 @@ class TestShippedTessellation(unittest.TestCase):
             'drift back in.')
 
 
+class TestRetainedAdaptiveHelper(unittest.TestCase):
+    """`_adaptive_circle_n` is dead code, and kept under test anyway.
+
+    6166a98b reverted the CALL, not the helper, explicitly so the accuracy can
+    be restored later "as a deliberate, measured baseline change". Keeping its
+    arithmetic pinned makes that a one-line rewire of a working helper rather
+    than a rewrite from the commit message. The zero call sites are asserted
+    separately in TestShippedTessellation -- the two together say "correct, and
+    deliberately unused". (Kept on edgehero's argument in PR #719; the first
+    draft of this file deleted this coverage along with the stale arm.)
+    """
+
+    def test_it_still_computes_its_stated_budget(self):
+        from kicad_parser import _adaptive_circle_n
+        # 1um sagitta wherever the 64-vertex cap does not bite (r <= ~0.9)...
+        for r in (0.2, 0.5, 0.8):
+            n = _adaptive_circle_n(r)
+            sagitta = r * (1 - math.cos(math.pi / n))
+            self.assertLessEqual(sagitta, 0.001 + 1e-9, (r, n, sagitta))
+        # ...and bounded growth past it: at the cap the sagitta is r*0.0012,
+        # so a r=1mm jumper-pad circle stays within ~1.3um.
+        self.assertLessEqual(_adaptive_circle_n(10.0), 64)
+        s1 = 1.0 * (1 - math.cos(math.pi / _adaptive_circle_n(1.0)))
+        self.assertLessEqual(s1, 0.0013)
+
+
 class TestTessellationBlindSpot(unittest.TestCase):
     """The run-3 defect, reproduced WITHOUT the gitignored archive board.
 

@@ -31,8 +31,13 @@ class TestQfnAutoDetect(unittest.TestCase):
         fallback classifies QFN) over the 64-pin U3."""
         if not os.path.exists(POUR):
             self.skipTest('run-5 chain board not present')
-        r = _run('qfn_fanout.py', POUR, '-o', os.devnull,
-                 '--clearance', '0.09', '--width', '0.127')
+        # tempdir, not os.devnull (edgehero, PR #719): the tool writes a
+        # board here, and NUL is not a portable destination for one.
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            r = _run('qfn_fanout.py', POUR, '-o',
+                     os.path.join(td, 'x.kicad_pcb'),
+                     '--clearance', '0.09', '--width', '0.127')
         self.assertIn('Auto-detected QFN/QFP component: U3', r.stdout)
 
 
