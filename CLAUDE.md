@@ -236,16 +236,34 @@ before it ships on.** It runs the same board twice (flag off, flag on), writes
 both, and grades both with an *independent* check — `floorplan.grade(...,
 with_health=True)` re-derives its corridors from the FINAL poses, so a term that
 only improves the model it is computed from shows up as "improved nothing". Add
-a row to `ROWS`, do not add a file. Three rules the table encodes and that are
+a row to `ROWS`, do not add a file. Five rules the table encodes and that are
 easy to get wrong:
 
-- **Judge on ≥3 boards, paired and directional** (improve on ≥ N−1, regress on
-  none), never a per-board absolute. Neutral boards are printed, not dropped.
+- **Judge on ≥3 DISTINCT boards, paired and directional** (improve on ≥ N−1,
+  regress on none), never a per-board absolute. Neutral boards are printed, not
+  dropped. This is **enforced in `gate()`**, not just stated here (#694): the
+  old rule counted trial *rows*, so one improving row on one board passed, and
+  `--row` made that the convenient path. At N=3 a term with no real effect
+  still passes 1 run in 8 — the harness prints that floor.
 - **Keep the row that disagrees.** A term that helps on one board of three is
   not a term, and deleting the dissenting row is how that becomes folklore.
 - **A rejected term keeps its rows**, marked `rejected` with its measured
   `expect`, so it stays a change detector instead of a permanent red mark that
   someone eventually deletes along with the finding.
+- **Numbers live in `tests/placement_ab_baseline.json`, never in a `why`
+  string.** Every run re-measures and compares it, and reports a reversed
+  direction (`INVERTED`) apart from a moved value (`DRIFT`). A `why` records the
+  MECHANISM only. This exists because the `corridor-ulx3s` row sat rejected on a
+  recorded claim that had fully inverted — 62 → 63 recorded, 62 → 55 measured
+  — while the gate printed PASS, because it compared only the *sign* of one
+  number and that sign was propped up by a criterion the prose never named
+  (#694). **A placement-engine change that moves these numbers re-records the
+  baseline (`--write-baseline`) in the same commit**, after reading the table;
+  `--baseline ""` skips the comparison. `--self-test` runs the gate and
+  comparator logic in milliseconds and runs at the top of every invocation.
+- **A mark resting on intent errors names the rules that moved**
+  (`intent errors 14 -> 17 (zone_containment 4 -> 7)`). An unattributed error
+  count is what let #694's inverted row keep reading as an intact finding.
 
 Two traps measured the hard way: the first run of that harness reported the
 corridor term inert because it had been pointed at a **merged** net glob whose
