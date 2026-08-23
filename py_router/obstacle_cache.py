@@ -21,6 +21,7 @@ from net_queries import expand_pad_layers
 
 # Import Rust router
 import sys
+import env_knobs
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'rust_router')))
 import rust_alloc  # noqa: E402,F401  # issue #419: set MIMALLOC_PURGE_DELAY before grid_router loads
@@ -283,7 +284,7 @@ def set_rung_unsafe(flag: bool) -> None:
 
 def rung_small_armed() -> bool:
     """True when rung-1 small-via legality may be stamped/trusted this run."""
-    return (os.environ.get('KICAD_VIA_RUNG', '2') == '2') and not _RUNG_UNSAFE
+    return env_knobs.VIA_RUNG_2 and not _RUNG_UNSAFE
 
 
 def _small_via_pair(config, pcb_data):

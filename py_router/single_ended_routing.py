@@ -3033,7 +3033,7 @@ def _pour_launch_region_cells(pcb_data, net_id, pad_info, pad_components,
     KICAD_POUR_LAUNCH=0 disables; {} when off or unavailable.
     """
     import os as _os
-    if _os.environ.get('KICAD_POUR_LAUNCH', '1') != '1':
+    if not env_knobs.POUR_LAUNCH:
         return {}
     # Same-invocation memo: Phase 1 and Phase 3 call this back-to-back with
     # the IDENTICAL pad_components object (main_result carries it), and every
@@ -3056,10 +3056,10 @@ def _pour_launch_region_cells(pcb_data, net_id, pad_info, pad_components,
     _RUNGS = (1.0, 2.5, 6.0, 15.0)   # mm
     _NBEST = 12
     try:
-        _FRAG_MM = float(_os.environ.get('KICAD_POUR_LAUNCH_FRAG', '1.0') or 0)
+        _FRAG_MM = env_knobs.POUR_LAUNCH_FRAG
     except ValueError:
         _FRAG_MM = 1.0
-    _COPPER_RUNGS = _os.environ.get('KICAD_POUR_LAUNCH_COPPER', '1') == '1'
+    _COPPER_RUNGS = env_knobs.POUR_LAUNCH_COPPER
     _DEEP_MM = 0.5
     out = {}
     _bare_kept = 0
@@ -3171,7 +3171,7 @@ def _pour_launch_pair_anchors(pcb_data, net_id, sources, targets,
     disables; ([], []) when off, no zones, or unavailable.
     """
     import os as _os
-    if _os.environ.get('KICAD_POUR_LAUNCH', '1') != '1':
+    if not env_knobs.POUR_LAUNCH:
         return [], []
     try:
         from plane_fill_model import get_zone_model
@@ -3186,7 +3186,7 @@ def _pour_launch_pair_anchors(pcb_data, net_id, sources, targets,
     _RUNGS = (1.0, 2.5, 6.0, 15.0)   # mm, same ladder as the multipoint side
     _NBEST = 12
     try:
-        _FRAG_MM = float(_os.environ.get('KICAD_POUR_LAUNCH_FRAG', '1.0') or 0)
+        _FRAG_MM = env_knobs.POUR_LAUNCH_FRAG
     except ValueError:
         _FRAG_MM = 1.0
     _DEEP_MM = 0.5
@@ -4869,7 +4869,7 @@ def _trim_after_fill_via(path, coord, layer_names, pcb_data, net_id):
     Returns (possibly-truncated path, end_original override or None).
     """
     import os as _os
-    if _os.environ.get('KICAD_POUR_LAUNCH', '1') != '1' or len(path) < 4:
+    if not env_knobs.POUR_LAUNCH or len(path) < 4:
         return path, None
     try:
         from plane_fill_model import get_fill_models

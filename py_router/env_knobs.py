@@ -280,6 +280,31 @@ def refresh() -> None:
     # and it silently breaks A/B comparability. Disclosure is fine to make
     # environment-dependent; copper is not. See issue #675.
     g['ORACLE_SUMMARY'] = _opt_in('KICAD_ORACLE_SUMMARY')
+    # HOT knobs (measured, not guessed): on splitflap_driver one route reads
+    # KICAD_VIA_RUNG 902 times and KICAD_POUR_LAUNCH 316 -- they sit inside
+    # per-net / per-endpoint loops, which is exactly the "hammers the environ
+    # dict from hot paths" this module exists for. Every other bare-read knob
+    # in the tree measured 1-2 reads per run and is left at its call site.
+    # Parse semantics preserved: VIA_RUNG is a =='2' string test with default
+    # '2' (so '1' or anything else disarms), the POUR_LAUNCH pair are =='1'
+    # tests with default '1' (default ON, any other value disables), and
+    # POUR_LAUNCH_FRAG keeps its `or 0` empty-value rule -- see below for the
+    # one deliberate deviation.
+    g['VIA_RUNG_2'] = os.environ.get('KICAD_VIA_RUNG', '2') == '2'
+    g['POUR_LAUNCH'] = os.environ.get('KICAD_POUR_LAUNCH', '1') == '1'
+    g['POUR_LAUNCH_COPPER'] = os.environ.get('KICAD_POUR_LAUNCH_COPPER', '1') == '1'
+    # NOT _f(): the call site was `float(get(name, '1.0') or 0)`, so an
+    # EMPTY value means 0.0 (threshold disabled) where _f would hand back the
+    # 1.0 default -- silently re-enabling a threshold someone turned off,
+    # which is precisely the "stricter parse disables a recorded workflow"
+    # this module's docstring warns about. Preserved exactly. The one
+    # deliberate difference: garbage used to raise ValueError mid-route, and
+    # now falls back to the default; a crash is nobody's workflow.
+    _plf = os.environ.get('KICAD_POUR_LAUNCH_FRAG', '1.0')
+    try:
+        g['POUR_LAUNCH_FRAG'] = float(_plf or 0)
+    except ValueError:
+        g['POUR_LAUNCH_FRAG'] = 1.0
     g['NO_GATE_ORACLE'] = _truthy('KICAD_NO_GATE_ORACLE')
     g['GATE_DEBUG'] = _truthy('KICAD_GATE_DEBUG')
     g['NO_SWEEP_PLATED'] = _truthy('KICAD_NO_SWEEP_PLATED')
