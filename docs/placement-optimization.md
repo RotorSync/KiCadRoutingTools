@@ -204,30 +204,64 @@ which the fanout cut correctly drops. Body obstruction and airwire crossing are
 two different measurements, and only `corridor_intrusions` was ever measuring
 the first.
 
-**3. It does change the placement — and the gain does not survive.** The first
-A/B reported the term completely inert, and *that run was wrong*: it had been
-pointed at `sdram_*`, a merged glob whose `cover` is 0.46, i.e. a phantom
-corridor. Re-run against `SDRAM_A*` and `SDRAM_D*` declared separately, the
-term moves parts on every board — and the independent grade says:
+**3. It does change the placement — and whether the gain survives depends on a
+layer that shipped after this was first measured.** The first A/B reported the
+term completely inert, and *that run was wrong*: it had been pointed at
+`sdram_*`, a merged glob whose `cover` is 0.46, i.e. a phantom corridor. Re-run
+against `SDRAM_A*` and `SDRAM_D*` declared separately, the term moves parts on
+every board.
 
-| board | crossings | hpwl | `bus_foreign_crossings` (re-derived) |
-|---|---|---|---|
-| ulx3s | 2417 → 2390 | 7512 → **7634** | 62 → **63** |
-| orangecrab_ext_pll | 1051 → 1041 | 2120 → 2116 | 32 → **33** |
-| kit-dev-coldfire | 1377 → 1371 | 7413 → 7219 | 148 → 143 |
+What the independent grade *says* has since reversed on ulx3s, and the reversal
+went unnoticed because the numbers lived in prose rather than in a file anything
+re-ran (#694). Measured at the commit that recorded them (`82dbf662`,
+2026-08-03) and at HEAD:
 
-One board of three improved the number the term exists to improve. **The
-mechanism is the frozen model:** the optimizer minimises the cut against
+| ulx3s | crossings | hpwl | `bus_foreign_crossings` (re-derived) | intent errors |
+|---|---|---|---|---|
+| as recorded, `82dbf662` | 2417 → 2390 | 7512.72 → **7634.27** | 62 → **63** | 15 → 13 |
+| HEAD | 2477 → 2407 | 7437.99 → 7416.23 | 62 → **55** | 14 → **17** |
+
+**The cause is the hard pad+drill legality layer** (`quench(pad_legality=...)`,
+default on, introduced in `be97da7e` — which is *not* an ancestor of the commit
+that recorded the row). Force it off at HEAD and ulx3s returns to the recorded
+direction on every signal: `bus_foreign_crossings` 62 → 63, hpwl 7437.99 →
+7548.02, intent errors 14 → 12. Every OFF-arm number is identical with the layer
+on or off, so it is not moving the baseline placement — it is redirecting the
+corridor-priced descent into different poses. On orangecrab and coldfire the
+same toggle changes nothing at all, so this is a ulx3s-specific interaction,
+not a global one. (The `corridor-orangecrab` row used to blame the same layer
+for its own flip; measured at HEAD that is no longer true either.)
+
+**The mechanism argument still stands:** the optimizer minimises the cut against
 corridors frozen at construction, but the corridor is *defined by the pads of
 the bus*, so when parts move the corridor moves with them and the grader's
 re-derived rectangle is not the one that was minimised. Freezing is still
 required — an unfrozen corridor makes the objective non-stationary — so the
-term is caught between two necessities.
+term is caught between two necessities. What the re-measurement changes is the
+*claim about the outcome*, not the reasoning about the model.
+
+**The term remains NOT adopted, and now for a stated reason.** At HEAD all three
+boards improve the signal the term exists to improve, and both guards improve on
+all three. ulx3s still marks REGRESS, because the ON arm leaves three more parts
+outside the zones the emitted intent recorded (`zone_containment` 4 → 7). So the
+term fails the harness's own rule — improve on ≥ N−1 boards **and** regress on
+none — by buying its signal with containment.
+
+**The numbers above are the only ones this page states, and only because they
+are the before/after of a finding.** The live measurements live in
+`tests/placement_ab_baseline.json`, which `tests/test_placement_ab.py`
+re-measures and compares on every run, reporting a reversed direction
+(`INVERTED`) apart from a moved value (`DRIFT`). This section used to carry a
+three-row table of numbers that had every one gone stale, next to a `--help`
+text that had gone stale differently.
 
 Worth keeping from run 3: **a term that helps on one board of three is not a
-term.** The `corridor-coldfire` row stays in the A/B table precisely because it
-disagrees with the other two; dropping the disagreeing row is how a one-in-three
-result becomes folklore about a term that "works".
+term**, and the row that disagrees is the one to keep. But note which row that
+is has changed: `corridor-coldfire` was the lone dissenter when this was
+written, and today the dissenter is `corridor-ulx3s`. All three rows stay in
+the table — dropping the disagreeing row is how a one-in-three result becomes
+folklore about a term that "works", and *which* board disagrees is not a stable
+property of a term.
 
 So the cut ships as a **diagnostic**, not as an objective term:
 
@@ -246,10 +280,13 @@ So the cut ships as a **diagnostic**, not as an objective term:
   merge sub-buses.** `SDRAM_*` scores cover 0.62 where `SDRAM_A*` and
   `SDRAM_D*` separately score 1.0, because address and data leave the part on
   different faces and the average lands between them.
-- `--corridor-weight` remains, default 0.0, flagged experimental with this
-  result in its `--help`. It is kept rather than deleted because the kernel is
-  exact and tested, and because a future move set that can relocate a part
-  *across* a bus is exactly the regime where the term would bite.
+- `--corridor-weight` remains, default 0.0, flagged experimental in its
+  `--help` — which states the mechanism and points at
+  `tests/placement_ab_baseline.json` rather than quoting counts, because the
+  counts it used to quote went stale twice. It is kept rather than deleted
+  because the kernel is exact and tested, and because a future move set that
+  can relocate a part *across* a bus is exactly the regime where the term would
+  bite.
 
 Two design points that were right and are worth keeping if anyone revisits it:
 
