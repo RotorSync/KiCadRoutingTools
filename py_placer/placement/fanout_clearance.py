@@ -1339,9 +1339,10 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
     print(f"BGAs: {', '.join(st.bga_refs) or '(none)'}  "
           f"fanout vias: {len(st.vias)}  "
           f"movable near-BGA caps: {len(st.caps)}")
-    # #725: the early returns carry the same key set as the full one, so a
-    # caller reading result['required'] / ['clearance_notes'] does not have to
-    # special-case a no-op board.
+    # #725: the early returns carry 'required' / 'clearance_notes' too, so a
+    # caller does not have to special-case a no-op board for them. (They still
+    # omit 'via_moves' / 'new_segments', as they always have -- every caller
+    # reads the dict with .get.)
     if not st.vias:
         print("No vias on the board - run this AFTER bga_fanout.py.")
         return {'placements': [], 'resolved': [], 'unresolved': [],

@@ -11,12 +11,17 @@ Conventions this file follows (from #697's test file, and CLAUDE.md):
   * Assert you are ON the branch before asserting about it -- each test spies the
     value its branch keys on, with a detail string saying why.
 
-It deliberately imports neither `run_utils` nor `subprocess`: `run_all.py`
-classifies a test as integration by grepping its SOURCE for those, and `--fast`
-would then never run this file.
+Nothing here shells out or drives a CLI: it runs entirely in-process in ~22 s.
+`run_all.is_integration` classifies by grepping the SOURCE for `run_utils` and
+the name of the standard sub-process module, and this file NAMES those markers
+in prose (including in this sentence) -- which is exactly how the first version
+of it got bucketed as integration and silently skipped under `--fast`, a test
+file that proves nothing being worse than no test file at all. Hence the
+explicit opt-out below.
 """
 from __future__ import annotations
 
+RUN_ALL_FAST_OK = True
 RUN_ALL_TIMEOUT = 900
 
 import json
