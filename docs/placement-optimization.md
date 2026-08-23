@@ -242,8 +242,9 @@ term is caught between two necessities. What the re-measurement changes is the
 
 **The term remains NOT adopted, and now for a stated reason.** At HEAD all three
 boards improve the signal the term exists to improve, and both guards improve on
-all three. ulx3s still marks REGRESS, because the ON arm leaves three more parts
-outside the zones the emitted intent recorded (`zone_containment` 4 → 7). So the
+all three. ulx3s still marks REGRESS, because the ON arm raises
+`zone_containment` from 4 to 7 — three more members whose courtyard leaves the
+block zone the emitted intent recorded, and the only error rule that moves. So the
 term fails the harness's own rule — improve on ≥ N−1 boards **and** regress on
 none — by buying its signal with containment.
 
