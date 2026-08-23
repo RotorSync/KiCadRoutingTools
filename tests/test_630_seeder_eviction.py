@@ -485,9 +485,13 @@ with tempfile.TemporaryDirectory() as wd:
           str(sorted(last.get('S1', ()))))
     check("#699: and the second goes back with the first as an OBSTACLE, "
           "not excluded again (that is the fault that shipped at depth 1)",
-          'S1' not in last.get('S2', frozenset())
-          and 'S2' not in last.get('S2', frozenset()),
-          str(sorted(last.get('S2', ()))))
+          # `'S1' not in ...` passes vacuously if S2 was never re-seated at
+          # all, so demand the call happened FIRST -- the row is named for
+          # this invariant and must be the one that fails when it breaks.
+          'S2' in last
+          and 'S1' not in last['S2'] and 'S2' not in last['S2'],
+          str(sorted(last.get('S2', ())) if 'S2' in last
+              else 'S2 was never re-seated'))
 
 # --------------------------------------------------------------------------
 # A trade that cannot be completed REVERTS, says so, and leaves the board as
@@ -760,6 +764,175 @@ with tempfile.TemporaryDirectory() as wd:
     check("#699 --reseat: depth 0 wrote nothing (the gate refused), so the "
           "output equals the input board",
           poses(o0) == poses(b0), f"{poses(o0)} vs {poses(b0)}")
+
+# --------------------------------------------------------------------------
+# #699: --reseat AT DEPTH 2, and the reason it needs its own row.
+#
+# `prune_assignment` reverts a moved part whenever restoring its input pose
+# STRICTLY improves the gate tuple -- `evidenced` gates only the EQUAL case
+# -- and GATE_TERMS ranks `hpwl` above `overlap`. So putting an evicted
+# blocker back into the pocket the trade just gave away scores as an
+# improvement, prune splits the atomic trade in half, and the eviction
+# licence then correctly refuses the board prune damaged. Measured before the
+# fix: pruned ['S2'], accepted False, BIG left off the outline, with the NOTE
+# blaming the eviction rung for damage prune caused.
+#
+# The depth-1 rows above do NOT catch this: reverting SMALL there raises
+# `pad_pairs`, which outranks hpwl, so geometry saves them. Only a blocker
+# whose revert trips `overlap` alone reproduces it.
+# --------------------------------------------------------------------------
+def offboard_pair_blocked(path):
+    """`pair_block_board`, with BIG parked 9mm off the outline.
+
+    Same theorem as `pair_block_board` -- S1 and S2 each alone deny BIG every
+    pose -- but now BIG is a `damage_witnesses` hit, so the AUTO scope is
+    {BIG} and this drives the whole thing through --reseat.
+    """
+    board(path, [_part('BIG', 25, 7, 5.0, 5.0, 2),
+                 _part('S1', 7, 7, 0.5, 0.5, 4),
+                 _part('S2', 9, 7, 0.5, 0.5, 4)])
+
+
+with tempfile.TemporaryDirectory() as wd:
+    it3 = intent_for(['BIG', 'S1', 'S2'])
+    q1, t1, o1, _b = run_reseat(wd, offboard_pair_blocked, it3,
+                                '--evict-depth', '1', tag='rp1')
+    q2, t2, o2, _b2 = run_reseat(wd, offboard_pair_blocked, it3,
+                                 '--evict-depth', '2', tag='rp2')
+    check("#699 --reseat: the depth-2 fixture runs at both depths",
+          t1 is not None and t2 is not None,
+          (q2.stdout[-400:] + q2.stderr[-400:]))
+    if t1 and t2:
+        check("#699 --reseat: at depth 1 no single lift frees a pose, so "
+              "the pass is refused and BIG stays off the outline",
+              t1.get('unseated') == ['BIG'] and t1.get('evicted') == []
+              and t1.get('witnesses_after') == 1,
+              f"unseated {t1.get('unseated')} evicted {t1.get('evicted')} "
+              f"witnesses_after {t1.get('witnesses_after')}")
+        check("#699 --reseat: at depth 2 the PAIR trade survives the "
+              "per-part prune sweep and the pass is accepted",
+              t2.get('accepted') is True
+              and sorted(t2.get('evicted') or []) == ['S1', 'S2'],
+              f"accepted {t2.get('accepted')} evicted {t2.get('evicted')} "
+              f"pruned-note {[n for n in q2.stdout.splitlines() if 'prune' in n]}")
+        check("#699 --reseat: and BIG actually comes home (off-outline "
+              "parts 1 -> 0) -- the number this pass is judged by",
+              t2.get('witnesses_before') == 1
+              and t2.get('witnesses_after') == 0,
+              f"{t2.get('witnesses_before')} -> {t2.get('witnesses_after')}")
+        check("#699 --reseat: nothing was pruned back out of the trade",
+              not any('prune' in n for n in q2.stdout.splitlines()),
+              str([n for n in q2.stdout.splitlines() if 'prune' in n]))
+    ok, detail = pairwise_legal(o2)
+    check("#699 --reseat THE BOARD (depth 2): all three parts written, "
+          "every pair legal", ok, detail)
+    check("#699 --reseat: a REFUSED pass reports no eviction, because "
+          "`evicted` describes the board that was written",
+          t1 is not None and t1.get('evicted') == []
+          and any('REFUSED' in n or 'REVERTED' in n
+                  for n in q1.stdout.splitlines()),
+          str(t1 and t1.get('evicted')))
+
+# --------------------------------------------------------------------------
+# #699: the caps are DISCLOSED, and the disclosure counts what was censused
+# --------------------------------------------------------------------------
+with tempfile.TemporaryDirectory() as wd:
+    from placement import floorplan as _fp4
+    # 12 movable 1x1 neighbours around a BIG that cannot be seated: the
+    # census cap keeps 8, so `movable` is 12 and `censused` is 8.
+    def crowd(path):
+        parts = [_part('BIG', 8, 7, 5.0, 5.0, 2)]
+        for i in range(12):
+            parts.append(_part(f'C{i:02d}', 3.0 + i, 7.0, 0.5, 0.5, 4))
+        board(path, parts)
+    bpath = os.path.join(wd, 'cr.kicad_pcb')
+    ipath = os.path.join(wd, 'cr.json')
+    crowd(bpath)
+    refs = ['BIG'] + [f'C{i:02d}' for i in range(12)]
+    with open(ipath, 'w', encoding='utf-8') as f:
+        json.dump(intent_for(refs), f)
+    cres = seeder.seed_from_intent(
+        parse_kicad_pcb(bpath), bpath, _fp4.load_intent(ipath),
+        __import__('random').Random("0"), clearance=0.2,
+        board_edge_clearance=0.5, grid_step=0.1, seed_refs={'BIG'},
+        evict_depth=1)
+    cc = (cres.get('no_pose_census') or {}).get('BIG') or {}
+    check("#699: the cap actually bit (more movable neighbours than "
+          "EVICT_MAX_BLOCKERS)",
+          cc.get('movable', 0) > seeder.EVICT_MAX_BLOCKERS
+          and cc.get('truncated', 0) > 0,
+          str(cc))
+    check("#699: `censused` is what was TESTED, not what could have been -- "
+          "reporting the pre-cap count is the inversion the disclosure "
+          "exists to prevent",
+          cc.get('censused') == seeder.EVICT_MAX_BLOCKERS
+          and cc.get('censused') == len(cres['no_pose_blockers']['BIG']),
+          f"censused {cc.get('censused')} movable {cc.get('movable')} "
+          f"blockers {len(cres['no_pose_blockers']['BIG'])}")
+    check("#699: and the NOTE quotes the censused count with the cap beside "
+          "it, so it cannot read as a complete sweep",
+          any(f"censused {seeder.EVICT_MAX_BLOCKERS} neighbour(s)" in n
+              and 'not censused' in n for n in cres['notes']),
+          str([n for n in cres['notes'] if 'censused' in n]))
+
+# --------------------------------------------------------------------------
+# #699: at depth 2 with fewer than two movable neighbours there is no pair,
+# and the prose must not tell the reader to pass the flag they passed
+# --------------------------------------------------------------------------
+with tempfile.TemporaryDirectory() as wd:
+    from placement import floorplan as _fp5
+
+    def one_locked(path):
+        pair_block_board(path)
+        src = open(path, encoding='utf-8').read().replace(
+            '(footprint "test:PS2"\n\t\t(layer "F.Cu")',
+            '(footprint "test:PS2"\n\t\t(layer "F.Cu")\n\t\t(locked yes)')
+        open(path, 'w', encoding='utf-8').write(src)
+    bpath = os.path.join(wd, 'ol.kicad_pcb')
+    ipath = os.path.join(wd, 'ol.json')
+    one_locked(bpath)
+    with open(ipath, 'w', encoding='utf-8') as f:
+        json.dump(intent_for(['BIG', 'S1', 'S2']), f)
+    ores = seeder.seed_from_intent(
+        parse_kicad_pcb(bpath), bpath, _fp5.load_intent(ipath),
+        __import__('random').Random("0"), clearance=0.2,
+        board_edge_clearance=0.5, grid_step=0.1, seed_refs={'BIG'},
+        evict_depth=2)
+    oc = (ores.get('no_pose_census') or {}).get('BIG') or {}
+    check("#699: the fixture reproduces -- one movable neighbour, one frozen",
+          oc.get('movable') == 1 and oc.get('frozen') == {'S2': 'file-locked'},
+          str(oc))
+    check("#699: no pair was censused (there is no pair to censure), and "
+          "the note says so instead of recommending --evict-depth 2 to a "
+          "run that IS at depth 2",
+          oc.get('pairs_total') == 0
+          and any('no pair to try' in n for n in ores['notes'])
+          and not any('--evict-depth 2 also tries pairs' in n
+                      for n in ores['notes']),
+          str([n for n in ores['notes'] if 'censused' in n]))
+    check("#699: and the note names the frozen neighbour too, since "
+          "unfreezing it is the reader's cheapest move",
+          any('not this rung' in n and 'S2 (file-locked)' in n
+              for n in ores['notes']),
+          str([n for n in ores['notes'] if 'censused' in n]))
+
+# --------------------------------------------------------------------------
+# #699: `immovable` may be a plain set, the form the docstring still offers
+# --------------------------------------------------------------------------
+with tempfile.TemporaryDirectory() as wd:
+    from placement import floorplan as _fp6
+    bpath = os.path.join(wd, 'st.kicad_pcb')
+    pair_block_board(bpath)
+    spcb = parse_kicad_pcb(bpath)
+    st = pose_score.make_state(spcb, bpath, clearance=0.2,
+                               board_edge_clearance=0.5, grid_step=0.1)
+    sinfo = {}
+    got = seeder._evict_candidates(st, 'BIG', 8.0, 7.0, {'S1', 'S2'},
+                                   {'S2'}, info=sinfo)
+    check("#699: a plain-set `immovable` still filters, and the frozen ref "
+          "is reported with a generic source rather than crashing",
+          got == ['S1'] and sinfo['frozen'] == {'S2': 'immovable'},
+          f"{got} {sinfo}")
 
 # --------------------------------------------------------------------------
 # #699: a --lock'd part is not this rung's to evict either. The seeder builds

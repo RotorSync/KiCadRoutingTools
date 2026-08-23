@@ -94,17 +94,17 @@ Examples:
                         "are put back and the revert is recorded. 2 also "
                         "censuses PAIRS when no single lift frees a pose, "
                         "and trades the best pair under the same rule -- at "
-                        "most 15 pairs drawn from the nearest 6 candidates, "
-                        "so it costs nothing on a part a single lift already "
+                        "most 16 of the pairs its 8 candidates form, so it "
+                        "costs nothing on a part a single lift already "
                         "solves. APPLIES TO --reseat TOO, and there it "
                         "relaxes that pass's contract: --reseat normally "
                         "holds every part outside its scope fixed, and a "
                         "depth >= 1 lets it trade one out. Those parts are "
                         "named in the JSON's `evicted` and in a NOTE, and "
                         "the pass additionally refuses any trade that raised "
-                        "the board's stack count or overlap area. Locked "
-                        "parts (including --lock) and "
-                        "declared edge connectors are never evicted; a "
+                        "the board's stack count or overlap area. Parts "
+                        "locked in the file or by the intent's must_lock, "
+                        "and declared edge connectors, are never evicted; a "
                         "blocker's own blocker is not chased, at either "
                         "depth, and there is one trade per part. Only fires "
                         "on a part that was going to be reported unseated. "
@@ -243,8 +243,15 @@ Examples:
                 evict_depth=args.evict_depth)
             for note in reseat['notes']:
                 print(f"  NOTE: {note}")
+            # Over the SCOPE only: the line prints it as "{n} re-seated
+            # (max X mm)", and `n` deliberately excludes the parts the
+            # eviction rung moved, so measuring over both mixes the two
+            # counts the engine went to the trouble of separating.
+            _scope = set(reseat['scope'])
             _rmax = 0.0
             for mv in reseat['moves']:
+                if mv['reference'] not in _scope:
+                    continue
                 fp = cur_pcb.footprints.get(mv['reference'])
                 if fp is not None:
                     _rmax = max(_rmax, _math.hypot(mv['new_x'] - fp.x,
