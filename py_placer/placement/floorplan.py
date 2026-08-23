@@ -81,13 +81,81 @@ DEFAULT_ENVELOPE_TOLERANCE_MM = 0.5
 #: which already knows this failure mode for one part class.
 EDGE_BAND_SANITY_MM = 5.0
 
+#: What this build can ACT on, as distinct from what it can parse (#710).
+#: `schema` is the format number and is matched exactly; bumping it invalidates
+#: every existing intent file at once, which is far too blunt for "this build
+#: learned a new field". `READER_VERSION` is the field-vocabulary number, and an
+#: intent whose claim would be MEANINGLESS to an older build says so by setting
+#: `min_reader` to the version that introduced the field.
+#:
+#: Bump this whenever the loader learns a declarable field that changes a
+#: verdict, and say in docs/floorplan-intent.md which field arrived. Do NOT
+#: bump it for a field nothing grades.
+READER_VERSION = 1
+
 _TOP_LEVEL_KEYS = {
     'schema', 'kind', 'board', 'units', 'envelope', 'defaults', 'blocks',
     'keepouts', 'edge_connectors', 'decaps', 'must_lock', 'legality_budget',
-    'health', 'severity', 'context', 'overlap_waivers',
+    'health', 'severity', 'context', 'overlap_waivers', 'min_reader',
 }
 _BLOCK_KEYS = {'name', 'group', 'refs', 'zone', 'side', 'exclusive',
-               'tolerance_mm', 'note'}
+               'tolerance_mm', 'note', 'context'}
+
+# The principle `_BLOCK_KEYS` already encodes, applied one level down (#710).
+# Before this the loader was strict at exactly two levels -- top-level and
+# `blocks[]` -- and permissive everywhere else, so `{"ref": "J1",
+# "max_setback": 2.0}` and `{"severity": {"decap_distanc": "warn"}}` loaded
+# clean and did nothing. That is the failure `block_unresolved` exists to
+# prevent, one level down: a constraint the author thinks they set and the
+# grader never checks.
+#
+# The compatibility half matters as much. Because unknown nested keys were
+# IGNORED rather than refused, every field added below the top level was
+# automatically backward compatible AND silently inert on an older build --
+# for a constraint the worst possible pair, because the older reader answers
+# "clean" instead of "I do not understand this". Refusing makes it say so;
+# `min_reader` is the explicit, author-set form of the same guarantee.
+#
+# Every name below is either read by code or written by `emit_intent`. The
+# sets were enumerated from both directions, and the emitter's own output is
+# pinned against them by tests/test_549_floorplan_grade.py -- so a new emitted
+# key fails there, rather than as an artifact that stops loading months later.
+_ENVELOPE_KEYS = {'rect', 'tolerance_mm'}
+_KEEPOUT_KEYS = {'name', 'rect', 'circle', 'sides', 'allow', 'note',
+                 'context'}
+#: `source`, `suspect`, `suspect_reason`, `overhang_capped` and
+#: `observed_overhang_mm` are emitter-written and read by nothing today; they
+#: are accepted because `emit_intent` writes them and the round trip must
+#: survive, not because anything acts on them.
+_EDGE_CONNECTOR_KEYS = {'ref', 'edge', 'overhang_mm', 'max_setback_mm',
+                        'class', 'source', 'note', 'suspect', 'suspect_reason',
+                        'overhang_capped', 'observed_overhang_mm', 'context'}
+_OVERHANG_KEYS = {'min', 'max'}
+_DECAP_KEYS = {'max_distance_mm', 'exempt', 'search_radius_mm'}
+_DEFAULTS_KEYS = {'zone_tolerance_mm'}
+#: `zoned_blocks` is setdefault-injected into this same dict by `grade` after
+#: load, and `affinity_exempt_net_ids` is derived there from
+#: `affinity_exempt_nets` -- but only when that key is present, so an author
+#: may also set the ids directly. Both are accepted for that reason.
+_HEALTH_KEYS = {'bus_corridors', 'classes', 'zoned_blocks',
+                'affinity_exempt_nets', 'affinity_exempt_net_ids',
+                'ignore_net_ids', 'max_fanout', 'block_displacement_mm'}
+_CORRIDOR_KEYS = {'name', 'nets', 'width_mm'}
+_BUDGET_KEYS = {'overlap_area', 'oob_count', 'oob_amount'}
+_WAIVER_KEYS = {'pair', 'reason', 'context'}
+# `context` deliberately has NO key set of its own, at the top level or on an
+# entry: it is the read-only slot where a run records provenance no rule will
+# ever grade. The four objects a human AUTHORS entry-by-entry accept one --
+# _BLOCK_KEYS, _KEEPOUT_KEYS, _EDGE_CONNECTOR_KEYS, _WAIVER_KEYS -- because the
+# alternative is worse; the settings objects (envelope, defaults, decaps,
+# health, legality_budget, overhang_mm) do not, since prose about a setting
+# belongs on the claim that uses it or at the top level.
+# Refusing prose outright pushes it into a key that IS graded -- the recorded
+# runs show exactly that drift, an `edge_connectors[]` entry that grew
+# `band_basis`, `why`, `why_not_repaired` and `rejected_alternative` because
+# there was nowhere else for the reasoning to go. Folding it into `note`
+# instead would be worse still: `note` is load-bearing, grepped for the
+# substring SUSPECT by emit_intent and place_reconstruct.
 _EDGES = ('north', 'south', 'east', 'west')
 
 
@@ -138,6 +206,13 @@ class Zone:
     exclusive: bool = False
     tolerance_mm: Optional[float] = None
     note: str = ''
+    #: Free-form provenance, read by nothing (see `_BLOCK_KEYS`). Carried on
+    #: the Zone rather than dropped: `keepouts`/`edge_connectors`/
+    #: `overlap_waivers` keep their raw dict and so keep theirs, and a slot
+    #: that silently vanishes for ONE of the four is the #710 defect itself.
+    #: (Zone is frozen, so this makes it unhashable -- nothing hashes a Zone,
+    #: only iterates them.)
+    context: Dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -242,6 +317,48 @@ def _rect(value, where: str) -> Tuple[float, float, float, float]:
     return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
 
 
+def _reject_unknown(obj, allowed, where: str) -> None:
+    """Refuse an unknown key rather than dropping it (#710).
+
+    One message shape for every level, so `blocks[3]`, `severity` and
+    `health.bus_corridors[0]` all read alike. The `Known:` list is what turns
+    a typo into a fix -- `keepout` only looks wrong next to `keepouts`.
+    """
+    # str() BEFORE sorting, not at join time: a dict handed to
+    # `intent_from_dict` directly (it is public, and the place_* mains catch
+    # only ValueError) can carry a non-string key, and both `sorted` over
+    # mixed types and `join` over non-strings raise TypeError -- which would
+    # traceback past the callers instead of becoming their exit 2.
+    bad = sorted(str(k) for k in set(obj) - set(allowed))
+    if bad:
+        raise IntentError(f"{where}: unknown key(s) {', '.join(bad)}. "
+                          f"Known: {', '.join(sorted(map(str, allowed)))}")
+
+
+def _entry_context(entry, where: str) -> None:
+    """An entry's `context` is free-form, but it is still an OBJECT.
+
+    Type-checked and otherwise untouched: a list here means the author meant
+    something else, while an unknown key inside means nothing at all.
+    """
+    if 'context' in entry:
+        _obj(entry['context'], f"{where}.context")
+
+
+def _obj(value, where: str) -> Dict:
+    """An intent object, or `{}` when absent.
+
+    `raw.get(k) or {}` handed a list or a string straight on, so a schema
+    error surfaced as an AttributeError inside a rule three call frames later
+    -- or, for a key nothing reads yet, not at all.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise IntentError(f"{where}: expected an object, got {value!r}")
+    return value
+
+
 def _str_tuple(value, where: str) -> Tuple[str, ...]:
     if value is None:
         return ()
@@ -271,16 +388,33 @@ def load_intent(path: str) -> Intent:
 
 
 def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
-    unknown = sorted(set(raw) - _TOP_LEVEL_KEYS)
-    if unknown:
-        raise IntentError(
-            f"unknown top-level key(s): {', '.join(unknown)}. Known keys: "
-            f"{', '.join(sorted(_TOP_LEVEL_KEYS))}")
+    # FIRST, ahead of the unknown-key and schema checks. A build that declares
+    # a new field almost always declares a new TOP-LEVEL one, so checking the
+    # key set first means the actionable "this build is too old, upgrade"
+    # message is exactly the one an author never sees -- they get "unknown
+    # key(s) zones" and go looking for a typo that is not there.
+    #
+    # Grading such a file halfway is the same wrong answer as grading it
+    # fully, so nothing else is read until this passes.
+    min_reader = raw.get('min_reader')
+    if min_reader is not None:
+        if not isinstance(min_reader, int) or isinstance(min_reader, bool):
+            raise IntentError(
+                f"min_reader {min_reader!r}: expected an integer")
+        if min_reader > READER_VERSION:
+            raise IntentError(
+                f"min_reader {min_reader}: this build is reader "
+                f"{READER_VERSION}. The intent declares a claim this build "
+                f"would not act on, and grading it would report clean on a "
+                f"constraint that was never checked -- upgrade instead")
+
+    _reject_unknown(raw, _TOP_LEVEL_KEYS, 'top level')
 
     schema = raw.get('schema')
     if schema != SCHEMA_VERSION:
         raise IntentError(
             f"schema {schema!r}: this build reads schema {SCHEMA_VERSION}")
+
     kind = raw.get('kind')
     if kind != KIND:
         # A round sidecar or a lock-advisor dump handed in by mistake reads as
@@ -292,9 +426,8 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
     if units != 'mm':
         raise IntentError(f"units {units!r}: only 'mm' is supported")
 
-    envelope = raw.get('envelope') or {}
-    if not isinstance(envelope, dict):
-        raise IntentError("envelope: expected an object")
+    envelope = _obj(raw.get('envelope'), 'envelope')
+    _reject_unknown(envelope, _ENVELOPE_KEYS, 'envelope')
     if 'rect' in envelope and envelope['rect'] is not None:
         envelope = dict(envelope)
         envelope['rect'] = _rect(envelope['rect'], 'envelope.rect')
@@ -304,9 +437,8 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
     for i, b in enumerate(raw.get('blocks') or []):
         if not isinstance(b, dict):
             raise IntentError(f"blocks[{i}]: expected an object")
-        bad = sorted(set(b) - _BLOCK_KEYS)
-        if bad:
-            raise IntentError(f"blocks[{i}]: unknown key(s) {', '.join(bad)}")
+        _reject_unknown(b, _BLOCK_KEYS, f"blocks[{i}]")
+        _entry_context(b, f"blocks[{i}]")
         name = b.get('name') or f"block{i}"
         if name in seen_names:
             raise IntentError(f"blocks[{i}]: duplicate block name {name!r}")
@@ -325,6 +457,7 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
             exclusive=bool(b.get('exclusive', False)),
             tolerance_mm=b.get('tolerance_mm'),
             note=b.get('note', '') or '',
+            context=b.get('context') or {},
         ))
         if not blocks[-1].refs and not blocks[-1].group:
             raise IntentError(
@@ -336,6 +469,8 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
     for i, k in enumerate(raw.get('keepouts') or []):
         if not isinstance(k, dict):
             raise IntentError(f"keepouts[{i}]: expected an object")
+        _reject_unknown(k, _KEEPOUT_KEYS, f"keepouts[{i}]")
+        _entry_context(k, f"keepouts[{i}]")
         k = dict(k)
         k.setdefault('name', f"keepout{i}")
         if 'rect' in k and k['rect'] is not None:
@@ -356,7 +491,15 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
 
     conns = []
     for i, c in enumerate(raw.get('edge_connectors') or []):
-        if not isinstance(c, dict) or not c.get('ref'):
+        if not isinstance(c, dict):
+            raise IntentError(f"edge_connectors[{i}]: expected an object with "
+                              f"a `ref`")
+        # Unknown keys BEFORE the `ref` check: a typo'd `reff` should be told
+        # it is unknown, not reported as a missing `ref` while the author
+        # stares at the key they did write.
+        _reject_unknown(c, _EDGE_CONNECTOR_KEYS, f"edge_connectors[{i}]")
+        _entry_context(c, f"edge_connectors[{i}]")
+        if not c.get('ref'):
             raise IntentError(f"edge_connectors[{i}]: expected an object with "
                               f"a `ref`")
         c = dict(c)
@@ -366,20 +509,25 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
                 f"edge_connectors[{i}] ({c['ref']}): edge {edge!r}, expected "
                 f"one of {', '.join(_EDGES)}")
         oh = c.get('overhang_mm')
-        if oh is not None and not isinstance(oh, dict):
-            raise IntentError(f"edge_connectors[{i}] ({c['ref']}): "
-                              f"overhang_mm expects {{'min': .., 'max': ..}}")
+        if oh is not None:
+            if not isinstance(oh, dict):
+                raise IntentError(f"edge_connectors[{i}] ({c['ref']}): "
+                                  f"overhang_mm expects "
+                                  f"{{'min': .., 'max': ..}}")
+            _reject_unknown(oh, _OVERHANG_KEYS,
+                            f"edge_connectors[{i}] ({c['ref']}).overhang_mm")
         conns.append(c)
 
-    severity = raw.get('severity') or {}
-    if not isinstance(severity, dict) or any(
-            v not in (ERROR, WARN) for v in severity.values()):
+    severity = _obj(raw.get('severity'), 'severity')
+    if any(v not in (ERROR, WARN) for v in severity.values()):
         raise IntentError(
             f"severity: expected {{rule: 'error'|'warn'}}, got {severity!r}")
+    # Keys too, not only values (#710). `{"decap_distanc": "warn"}` used to
+    # load clean and leave the rule at its default -- a demotion the author
+    # believes they made and the exit code never reflects.
+    _reject_unknown(severity, _SEVERITY_KEYS, 'severity')
 
-    budget = raw.get('legality_budget') or {}
-    if not isinstance(budget, dict):
-        raise IntentError("legality_budget: expected an object")
+    budget = _obj(raw.get('legality_budget'), 'legality_budget')
     if 'oob_area' in budget:
         # Refused loudly rather than ignored, because it is the ONE legality
         # number that lies about cutouts. `out_of_board_area` measures against
@@ -392,40 +540,59 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
             "measured against the bounding-box inset, so a part sitting inside "
             "a CUTOUT scores 0.0 area and would grade clean. Use oob_count or "
             "oob_amount, which both see the real Edge.Cuts rings")
-    unknown_budget = sorted(set(budget) - {'overlap_area', 'oob_count',
-                                           'oob_amount'})
-    if unknown_budget:
-        raise IntentError(
-            f"legality_budget: unknown key(s) {', '.join(unknown_budget)}. "
-            f"Known: overlap_area, oob_count, oob_amount")
+    _reject_unknown(budget, _BUDGET_KEYS, 'legality_budget')
+
+    defaults = _obj(raw.get('defaults'), 'defaults')
+    _reject_unknown(defaults, _DEFAULTS_KEYS, 'defaults')
+
+    decaps = _obj(raw.get('decaps'), 'decaps')
+    _reject_unknown(decaps, _DECAP_KEYS, 'decaps')
+
+    health = _obj(raw.get('health'), 'health')
+    _reject_unknown(health, _HEALTH_KEYS, 'health')
+    for i, spec in enumerate(health.get('bus_corridors') or []):
+        if not isinstance(spec, dict):
+            raise IntentError(f"health.bus_corridors[{i}]: expected an object")
+        _reject_unknown(spec, _CORRIDOR_KEYS, f"health.bus_corridors[{i}]")
+
+    # `context` is deliberately OPEN -- the documented read-only slot, where a
+    # run records provenance no rule will ever grade (`emit_intent` writes
+    # `cutouts`, `file_locked`, `budget_withheld`; run artifacts add their own
+    # prose). Type-checked so a list cannot reach `.get('budget_withheld')`,
+    # but its KEYS are the author's business: refusing them would only push
+    # provenance into a key that IS graded, which is the worse failure.
+    context = _obj(raw.get('context'), 'context')
 
     waivers = raw.get('overlap_waivers') or []
     if not isinstance(waivers, list):
         raise IntentError("overlap_waivers: expected a list of "
                           "{'pair': [refA, refB], 'reason': ...} objects")
-    for w in waivers:
+    for i, w in enumerate(waivers):
         if (not isinstance(w, dict) or not isinstance(w.get('pair'), list)
                 or len(w['pair']) != 2):
             raise IntentError(
                 "overlap_waivers: each entry needs 'pair': [refA, refB] "
                 "(and should carry a 'reason')")
+        _reject_unknown(w, _WAIVER_KEYS, f"overlap_waivers[{i}]")
+        _entry_context(w, f"overlap_waivers[{i}]")
 
     return Intent(
         schema=schema, kind=kind, board=raw.get('board', '') or '',
         units=units, envelope=envelope,
-        defaults=raw.get('defaults') or {},
+        defaults=defaults,
         blocks=tuple(blocks), keepouts=tuple(keepouts),
         edge_connectors=tuple(conns),
-        decaps=raw.get('decaps') or {},
+        decaps=decaps,
         must_lock=_str_tuple(raw.get('must_lock'), 'must_lock'),
-        legality_budget=raw.get('legality_budget') or {},
-        health=raw.get('health') or {},
+        legality_budget=budget,
+        health=health,
         severity={str(k): str(v) for k, v in severity.items()},
         source_path=source_path,
         overlap_waivers=tuple(waivers),
         budget_withheld={
             str(k): str(v) for k, v in
-            ((raw.get('context') or {}).get('budget_withheld') or {}).items()},
+            _obj(context.get('budget_withheld'),
+                 'context.budget_withheld').items()},
     )
 
 
@@ -1042,6 +1209,19 @@ RULES = (
     ('must_lock', rule_must_lock),
     ('legality', rule_legality),
 )
+
+#: Rules whose violations are raised OUTSIDE the `RULES` loop, and so have no
+#: rule function to be enumerated from: the two self-contradiction findings in
+#: `validate_intent` and the unresolved-block finding in `resolve_blocks`.
+#: Kept as a named set rather than folded into `_SEVERITY_KEYS` by hand, so the
+#: next reader can see which names are the exception and why.
+_NON_RULE_SEVERITIES = frozenset({
+    'intent_zone_outside_envelope', 'intent_zone_overlap', 'block_unresolved'})
+
+#: Every rule name an intent may set a severity for. Derived from `RULES`, so a
+#: new rule is settable the moment it is registered -- a hand-listed set would
+#: silently refuse the newest rule's own name.
+_SEVERITY_KEYS = frozenset(name for name, _ in RULES) | _NON_RULE_SEVERITIES
 
 # Why a rule did not run. Reported so that "0 violations" and "0 rules ran"
 # cannot look the same to a reader or to a machine.
