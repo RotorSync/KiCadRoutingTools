@@ -145,7 +145,7 @@ def main():
 
     g = grade_body_overlap(pcb, clearance, intent_waivers=waivers,
                            pcb_file=args.board)
-    leg = grade_pad_legality(pcb, clearance, worst_n=0)
+    leg = grade_pad_legality(pcb, clearance, worst_n=0, pcb_file=args.board)
 
     # COINCIDENT ORIGINS (run-19, measured twice): SW17+SW34+REF_PUCK_R all at
     # one point graded `buildable (blocking 0)` -- the pair currency counts pad

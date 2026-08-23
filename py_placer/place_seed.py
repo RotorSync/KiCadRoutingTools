@@ -319,7 +319,8 @@ Examples:
             copy_siblings(cur, args.output_file)
             from placement.legality import grade_pad_legality
             pcb_out = parse_kicad_pcb(args.output_file)
-            pads_after = grade_pad_legality(pcb_out, args.clearance)
+            pads_after = grade_pad_legality(pcb_out, args.clearance,
+                                            pcb_file=args.output_file)
             graded = floorplan.grade(intent, pcb_out, args.output_file,
                                      group_sources=sources,
                                      clearance=args.clearance,

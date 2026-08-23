@@ -1627,6 +1627,14 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
     except Exception:                                       # noqa: BLE001
         witnesses = set()
 
+    def _marker_or_container(r):
+        """`reconstruct._body_exempt_refs`, resolved lazily and cached there."""
+        try:
+            from placement import reconstruct as _recon
+            return r in _recon._body_exempt_refs(state)
+        except Exception:                                       # noqa: BLE001
+            return r in (getattr(state, 'container_refs', ()) or ())
+
     def _mover_key(r):
         """Which member of a conflicting pair should move.
 
@@ -1637,10 +1645,28 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
         centre off the outline, which a shipped board cannot have -- is KNOWN
         to be misplaced, so it sorts first whatever its size.
 
-        On a board with no witnesses this changes nothing, and that is every
-        healthy board in the corpus: measured zero witnesses on all 33.
+        A MARKER (fiducial / mount hole / test point) or a board-sized
+        CONTAINER sorts LAST, below pin count. Pin count alone points the
+        repair straight at the fiducial: a keep-clear conflict is
+        characteristically a 1-pad fiducial against a many-pad connector, so
+        the cheapest-looking mover is the one part whose position is a
+        mechanical fact. This is the same set, and the same argument,
+        `reconstruct._body_exempt_refs` already makes for the body channel --
+        "a displaced fiducial could never come home under a connector". It
+        became reachable when #697 taught the pad census to see keep-clear
+        overrides at all; before that these pairs were never counted.
+
+        The witness term still outranks it, so a marker that IS known to be
+        misplaced keeps moving first. A marker that is the only unlocked member
+        of a pair still moves -- this orders candidates, it does not veto one.
+
+        On a board with no witnesses and no markers this changes nothing, and
+        that is every healthy board in the corpus: measured zero witnesses on
+        all 33.
         """
-        return (0 if r in witnesses else 1, state.parts[r].pin_count, r)
+        return (0 if r in witnesses else 1,
+                1 if _marker_or_container(r) else 0,
+                state.parts[r].pin_count, r)
 
     graded = None
     if intent is not None:
@@ -1656,9 +1682,16 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
     # worst_n=0: the FULL pair census (run-4 F5). The default cap of 10
     # bounded one repair pass at 10 pair-movers on a 20-pair board -- the
     # summary said 20 conflicts while only 10 got charged.
-    pads = _leg.grade_pad_legality(pcb_data, clearance, worst_n=0)
+    pads = _leg.grade_pad_legality(pcb_data, clearance, worst_n=0,
+                                   pcb_file=pcb_file)
     print(f"  Repair census: {pads['pad_conflicts']} conflict pair(s), "
           f"all listed")
+    # #697: a pair can be graded ABOVE `clearance` (a pad keep-clear override, a
+    # net class, a .kicad_dru rule). Say so, or the census reports a conflict at
+    # a gap the announced clearance says is fine.
+    _rq = _leg.format_required_clause(pads)
+    if _rq:
+        print(f"    above the {clearance}mm floor: {_rq}")
     for (ra, rb, mm) in pads['worst']:
         free = [r for r in (ra, rb)
                 if r in state.parts and not state.parts[r].locked]

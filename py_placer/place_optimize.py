@@ -206,7 +206,8 @@ Examples:
                                     format_oob_clause as _oob_clause)
     legality_before = None
     if not args.courtyard_only:
-        legality_before = grade_pad_legality(pcb_data, args.clearance)
+        legality_before = grade_pad_legality(pcb_data, args.clearance,
+                                             pcb_file=args.input_file)
         print(f"Pad legality before: {legality_before['pad_conflicts']} "
               f"conflict pair(s), {legality_before['hole_conflicts']} hole "
               f"conflict(s), {legality_before['oob_pad_count']} part(s) with "
@@ -294,7 +295,8 @@ Examples:
     # means a gate has a hole and is worth a bug report.
     if legality_before is not None:
         legality_after = grade_pad_legality(parse_kicad_pcb(args.output_file),
-                                            args.clearance)
+                                            args.clearance,
+                                            pcb_file=args.output_file)
         print(f"Pad legality after: {legality_after['pad_conflicts']} "
               f"conflict pair(s), {legality_after['hole_conflicts']} hole "
               f"conflict(s), {legality_after['oob_pad_count']} part(s) with "

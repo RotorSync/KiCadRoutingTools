@@ -64,6 +64,52 @@ from routing_constants import SOFT_JOINT_MIN_GAP as _SOFT_JOINT_MIN_GAP
 from connectivity import COINCIDENCE_TOL
 
 
+def pad_copper_layers(pad, board_copper) -> set:
+    """The set of real copper layers a pad's copper occupies.
+
+    KiCad writes two wildcards a pad's `layers` list can carry: ``*.Cu`` (every
+    copper layer -- a through-hole barrel) and ``F&B.Cu`` (front and back only).
+    ``expand_pad_layers`` handles the first but passes ``F&B.Cu`` through
+    verbatim, because it only tests ``endswith('.Cu')`` -- so a consumer that
+    scopes a per-layer rule through it silently mis-scopes every ``F&B.Cu`` pad.
+    This is the one expansion the clearance paths use; #697 lifted it out of
+    ``run_drc`` so the PLACEMENT side (placement/legality.py) resolves layer
+    scope from the same function rather than a hand-mirrored copy.
+    """
+    out = set()
+    for l in (getattr(pad, 'layers', None) or []):
+        if l in ('*.Cu', 'F&B.Cu'):
+            out |= set(board_copper) if l == '*.Cu' else {'F.Cu', 'B.Cu'}
+        elif str(l).endswith('.Cu'):
+            out.add(l)
+    return out
+
+
+def pads_shared_layer_clearance(eff: float, layer_rules, layers_a, layers_b=None):
+    """KiCad's per-layer (.kicad_dru) clearance for two items that meet on their
+    SHARED copper layers, with REPLACE semantics (#498).
+
+    A custom rule REPLACES the net/class-resolved value on its layer rather than
+    raising it, so: every shared layer ruled -> max(rule values); only some
+    ruled -> max(eff, rule values); none ruled -> eff unchanged. TH geometry is
+    identical on every layer, so the max over shared layers is exact.
+
+    Returns `eff` untouched when there are no rules -- the strict no-op that
+    makes this free for boards without a .kicad_dru (i.e. almost all of them).
+    """
+    if not layer_rules:
+        return eff
+    shared = set(layers_a)
+    if layers_b is not None:
+        shared &= set(layers_b)
+    vals = [layer_rules[l] for l in shared if l in layer_rules]
+    if not vals:
+        return eff
+    if all(l in layer_rules for l in shared):
+        return max(vals)        # every shared layer ruled: rules replace
+    return max([eff] + vals)
+
+
 def _expand_cu(pad_layers: List[str], routing_layers: List[str]) -> List[str]:
     """Memoized expand_pad_layers for the duration of one run_drc call."""
     global _EXPAND_ROUTING
@@ -1978,29 +2024,17 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         return max([eff] + list(_lcl.values())) if _lcl else eff
 
     def _pad_copper(pad):
-        out = set()
-        for l in (pad.layers or []):
-            if l in ('*.Cu', 'F&B.Cu'):
-                out |= set(_board_copper) if l == '*.Cu' else {'F.Cu', 'B.Cu'}
-            elif l.endswith('.Cu'):
-                out.add(l)
-        return out
+        return pad_copper_layers(pad, _board_copper)
 
     def _pads_cl(eff: float, pad, other_pad=None) -> float:
         # Pad-vs-via / pad-vs-pad meet on their SHARED copper layers; TH
         # geometry is identical on every layer, so the max over shared layers
-        # is the exact requirement.
-        if not _lcl:
-            return eff
-        shared = _pad_copper(pad)
-        if other_pad is not None:
-            shared &= _pad_copper(other_pad)
-        vals = [_lcl[l] for l in shared if l in _lcl]
-        if not vals:
-            return eff
-        if len([l for l in shared if l not in _lcl]) == 0:
-            return max(vals)  # every shared layer ruled: rules replace
-        return max([eff] + vals)
+        # is the exact requirement. The body lives at module level
+        # (pads_shared_layer_clearance) so placement/legality.py resolves the
+        # same rule rather than a hand-mirrored copy -- #697.
+        return pads_shared_layer_clearance(
+            eff, _lcl, _pad_copper(pad),
+            _pad_copper(other_pad) if other_pad is not None else None)
 
     def _pair_cl(net_a: int, net_b: int, layer: str = None) -> float:
         base = clearance if not _ncl_by_id else \
