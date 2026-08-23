@@ -213,24 +213,36 @@ every board.
 
 What the independent grade *says* has since reversed on ulx3s, and the reversal
 went unnoticed because the numbers lived in prose rather than in a file anything
-re-ran (#694). Measured at the commit that recorded them (`82dbf662`,
-2026-08-03) and at HEAD:
+re-ran (#694). Re-measured with the same probe at the commit that recorded the
+row and at the current tip:
 
 | ulx3s | crossings | hpwl | `bus_foreign_crossings` (re-derived) | intent errors |
 |---|---|---|---|---|
-| as recorded, `82dbf662` | 2417 → 2390 | 7512.72 → **7634.27** | 62 → **63** | 15 → 13 |
-| HEAD | 2477 → 2407 | 7437.99 → 7416.23 | 62 → **55** | 14 → **17** |
+| re-measured at `82dbf662` | 2417 → 2390 | 7512.72 → **7634.27** | 62 → **63** | 15 → 13 |
+| re-measured at `81a3c193` | 2477 → 2407 | 7437.99 → 7416.23 | 62 → **55** | 14 → **17** |
 
-**The cause is the hard pad+drill legality layer** (`quench(pad_legality=...)`,
-default on, introduced in `be97da7e` — which is *not* an ancestor of the commit
-that recorded the row). Force it off at HEAD and ulx3s returns to the recorded
-direction on every signal: `bus_foreign_crossings` 62 → 63, hpwl 7437.99 →
-7548.02, intent errors 14 → 12. Every OFF-arm number is identical with the layer
-on or off, so it is not moving the baseline placement — it is redirecting the
-corridor-priced descent into different poses. On orangecrab and coldfire the
-same toggle changes nothing at all, so this is a ulx3s-specific interaction,
-not a global one. (The `corridor-orangecrab` row used to blame the same layer
-for its own flip; measured at HEAD that is no longer true either.)
+(The first row is a re-measurement, not a transcript: the recorded `why` gave
+hpwl as "7512 → 7634" and never recorded intent errors at all.)
+
+**At the current tip the direction is decided by the hard pad+drill legality
+layer** (`quench(pad_legality=...)`, default on, introduced in `be97da7e` —
+which is *not* an ancestor of the commit that recorded the row). Force it off
+and ulx3s goes back the recorded way on every signal: `bus_foreign_crossings`
+62 → 63, hpwl 7437.99 → 7548.02, intent errors 14 → 12, with the OFF arm
+byte-identical either way — so the layer is not moving the baseline placement,
+it is redirecting the corridor-priced descent. On orangecrab and coldfire the
+same toggle leaves both written boards byte-identical, so this is a
+ulx3s-specific interaction, not a global one.
+
+**That is a sufficient cause TODAY, not the historical one.** The OFF arm also
+moved between the two commits (crossings 2417 → 2477, hpwl 7512.72 → 7437.99),
+so other changes moved the baseline placement too, and disabling the layer
+restores the direction but not the values. The historical attribution cannot be
+settled by this method at all: `corridor_weight` does not exist on the branch
+that introduced the layer, so the two cannot be measured together at that point.
+The `corridor-orangecrab` row blamed the same layer for its own earlier flip;
+that claim is likewise unestablished — the layer is simply inert on that board
+now, which says nothing about what the code looked like then.
 
 **The mechanism argument still stands:** the optimizer minimises the cut against
 corridors frozen at construction, but the corridor is *defined by the pads of
@@ -243,17 +255,20 @@ term is caught between two necessities. What the re-measurement changes is the
 **The term remains NOT adopted, and now for a stated reason.** At HEAD all three
 boards improve the signal the term exists to improve, and both guards improve on
 all three. ulx3s still marks REGRESS, because the ON arm raises
-`zone_containment` from 4 to 7 — three more members whose courtyard leaves the
-block zone the emitted intent recorded, and the only error rule that moves. So the
+`zone_containment` from 4 to 7 — the only error rule that moves. It is a net +3,
+not three extra offenders: six members start violating (`C35 C63 C65 C68 C71
+C72`) and three stop (`C39 C43 C69`), which is a rearrangement that costs
+containment, not a local slip. So the
 term fails the harness's own rule — improve on ≥ N−1 boards **and** regress on
 none — by buying its signal with containment.
 
-**The numbers above are the only ones this page states, and only because they
-are the before/after of a finding.** The live measurements live in
+**Those are the only A/B measurements this section states, and only because
+they are the before/after of the finding itself — each labelled with the commit
+it was measured at.** The live numbers are in
 `tests/placement_ab_baseline.json`, which `tests/test_placement_ab.py`
 re-measures and compares on every run, reporting a reversed direction
 (`INVERTED`) apart from a moved value (`DRIFT`). This section used to carry a
-three-row table of numbers that had every one gone stale, next to a `--help`
+three-row table in which 15 of 18 numbers had gone stale, next to a `--help`
 text that had gone stale differently.
 
 Worth keeping from run 3: **a term that helps on one board of three is not a

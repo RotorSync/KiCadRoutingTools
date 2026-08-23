@@ -243,26 +243,36 @@ easy to get wrong:
   regress on none), never a per-board absolute. Neutral boards are printed, not
   dropped. This is **enforced in `gate()`**, not just stated here (#694): the
   old rule counted trial *rows*, so one improving row on one board passed, and
-  `--row` made that the convenient path. At N=3 a term with no real effect
-  still passes 1 run in 8 — the harness prints that floor.
+  `--row` made that the convenient path. The refusal applies to rows **on
+  trial**, and every row in the table today is pinned — so a real run does not
+  reach it and `--self-test` does. A term whose per-board direction is a coin
+  flip passes the rule 1 run in 2^N (1 in 8 at N=3), which the run prints when
+  a term is on trial.
 - **Keep the row that disagrees.** A term that helps on one board of three is
   not a term, and deleting the dissenting row is how that becomes folklore.
 - **A rejected term keeps its rows**, marked `rejected` with its measured
   `expect`, so it stays a change detector instead of a permanent red mark that
   someone eventually deletes along with the finding.
 - **Numbers live in `tests/placement_ab_baseline.json`, never in a `why`
-  string.** Every run re-measures and compares it, and reports a reversed
-  direction (`INVERTED`) apart from a moved value (`DRIFT`). A `why` records the
-  MECHANISM only. This exists because the `corridor-ulx3s` row sat rejected on a
-  recorded claim that had fully inverted — 62 → 63 recorded, 62 → 55 measured
-  — while the gate printed PASS, because it compared only the *sign* of one
-  number and that sign was propped up by a criterion the prose never named
-  (#694). **A placement-engine change that moves these numbers re-records the
-  baseline (`--write-baseline`) in the same commit**, after reading the table;
-  `--baseline ""` skips the comparison. `--self-test` runs the gate and
-  comparator logic in milliseconds and runs at the top of every invocation.
+  string.** Every run re-measures and compares it per key and per arm, reporting
+  a reversed direction (`INVERTED`) apart from a moved value (`DRIFT`), a
+  baseline row `ROWS` no longer declares (`ORPHAN`), and a baseline that is not
+  shaped like one (`MALFORMED`). A `why` records the MECHANISM only. This exists
+  because `corridor-ulx3s` sat rejected on a recorded claim whose signal had
+  reversed while the gate printed PASS (#694) — and the reason is worth getting
+  right, because the obvious reading is wrong: **the gate never compared the
+  signal.** `_verdict` collapses the signal, the guards and intent errors into
+  ONE mark, and only that mark is checked against `expect`, so the reversal was
+  MASKED by a different criterion turning the mark `regress` for its own
+  reasons. An aggregate verdict cannot say which of its inputs moved.
+  **A placement-engine change that moves these numbers re-records the baseline
+  (`--write-baseline`) in the same commit**, after reading the table; a partial
+  run refuses to write one, and a missing baseline FAILs rather than passing.
+  `--baseline ""` is the deliberate way to run without the comparison, and
+  `--self-test` runs the gate and comparator logic in milliseconds at the top of
+  every invocation.
 - **A mark resting on intent errors names the rules that moved**
-  (`intent errors 14 -> 17 (zone_containment 4 -> 7)`). An unattributed error
+  (`intent errors A -> B (zone_containment X -> Y)`). An unattributed error
   count is what let #694's inverted row keep reading as an intact finding.
 
 Two traps measured the hard way: the first run of that harness reported the
